@@ -20,7 +20,7 @@
 
 <p align="center">
     <a href="https://www.youtube.com/@mediar_ai" target="_blank">
-        <img src="https://img.shields.io/endpoint?style=for-the-badge&url=https%3A%2F%2Fyoutube-channel-badge.ngoldack.vercel.app%2Fapi%2Fsubscriber" alt="Subs">
+       <img alt="YouTube Channel Subscribers" src="https://img.shields.io/youtube/channel/subscribers/UCwjkpAsb70_mENKvy7hT5bw">
     </a>
 </p>
 
@@ -29,7 +29,13 @@
     <a href="https://discord.gg/dU9EBuw7Uq">
         <img src="https://img.shields.io/discord/823813159592001537?color=5865F2&logo=discord&logoColor=white&style=flat-square" alt="Join us on Discord">
     </a>
-        <a href="https://twitter.com/screen_pipe"><img alt="X account" src="https://img.shields.io/twitter/url/https/twitter.com/diffuserslib.svg?style=social&label=Follow%20%40screen_pipe"></a>
+   <a href="https://twitter.com/screen_pipe"><img alt="X account" src="https://img.shields.io/twitter/url/https/twitter.com/diffuserslib.svg?style=social&label=Follow%20%40screen_pipe"></a>
+   <a href="https://console.algora.io/org/mediar-ai/bounties?status=completed">
+       <img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fconsole.algora.io%2Fapi%2Fshields%2Fmediar-ai%2Fbounties%3Fstatus%3Dcompleted" alt="Rewarded Bounties">
+   </a>
+   <a href="https://console.algora.io/org/mediar-ai/bounties?status=open">
+       <img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fconsole.algora.io%2Fapi%2Fshields%2Fmediar-ai%2Fbounties%3Fstatus%3Dopen" alt="Open Bounties">
+   </a>
 </p>
 
 <p align="center">
@@ -48,6 +54,7 @@
 ---
 
 *Latest News* 🔥
+- [2024/09] [screenpipe is top github repo & on hackernews!](https://x.com/louis030195/status/1840859691754344483)
 - [2024/09] 70 users run screenpipe 24/7!
 - [2024/09] Released a v0 of our [documentation](https://docs.screenpi.pe/)
 - [2024/08] Anyone can now [create, share, install pipes](https://youtu.be/iCqHgZgQHyA?si=DjKJir7HfZoQKItK) (plugins) from the app interface based on a github repo/dir
@@ -98,9 +105,16 @@ screenpipe has a plugin system called "pipe" which lets you run code in a sandbo
 
 ## star history
 
-![GitHub Star History (3)](https://github.com/user-attachments/assets/6bb3f559-5016-4e1c-a91e-563ce89cd855)
+![GitHub Star History (5)](https://github.com/user-attachments/assets/fd8968fb-e59c-4d81-a42d-059c94ce9c71)
 
 
 ## Contributing
 
 Contributions are welcome! If you'd like to contribute, please read [CONTRIBUTING.md](CONTRIBUTING.md).
+
+   <a href="https://console.algora.io/org/mediar-ai/bounties?status=completed">
+       <img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fconsole.algora.io%2Fapi%2Fshields%2Fmediar-ai%2Fbounties%3Fstatus%3Dcompleted" alt="Rewarded Bounties">
+   </a>
+   <a href="https://console.algora.io/org/mediar-ai/bounties?status=open">
+       <img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fconsole.algora.io%2Fapi%2Fshields%2Fmediar-ai%2Fbounties%3Fstatus%3Dopen" alt="Open Bounties">
+   </a>
