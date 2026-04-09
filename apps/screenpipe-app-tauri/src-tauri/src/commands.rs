@@ -1096,9 +1096,10 @@ pub async fn show_shortcut_reminder(
         }
     };
 
-    // If window exists, reposition to current screen and show
+    // If window exists, resize, reposition to current screen, and show
     if let Some(window) = app_handle.get_webview_window(label) {
-        info!("shortcut-reminder window exists, repositioning and showing");
+        info!("shortcut-reminder window exists, resizing/repositioning and showing");
+        let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize::new(window_width, window_height)));
         let _ = window.set_position(tauri::Position::Logical(tauri::LogicalPosition::new(x, y)));
         let _ = app_handle.emit_to(label, "shortcut-reminder-update", &shortcut);
         let _ = window.show();
