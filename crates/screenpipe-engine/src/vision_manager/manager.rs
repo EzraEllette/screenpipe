@@ -196,6 +196,17 @@ impl VisionManager {
             }
         }
 
+        // Aborting capture tasks does NOT release sck_rs's global SCStream handles.
+        // Explicitly tear them down so macOS sees no active ScreenCaptureKit usage.
+        #[cfg(target_os = "macos")]
+        {
+            screenpipe_screen::stream_invalidation::invalidate_streams();
+            // MonitorStream::drop spawns a detached thread to call stream.stop().
+            // Give those threads time to complete so the OS tears down the SCK session
+            // and the purple recording dot disappears.
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+
         let mut status = self.status.write().await;
         *status = VisionManagerStatus::Stopped;
 
@@ -338,8 +349,17 @@ impl VisionManager {
             // Abort the task
             handle.abort();
 
-            // Wait for it to finish
-            let _ = handle.await;
+            // Wait for it to finish with a timeout — if the capture task is stuck
+            // in a spawn_blocking AX tree walk, cancellation can be delayed.
+            match tokio::time::timeout(std::time::Duration::from_secs(3), handle).await {
+                Ok(_) => {}
+                Err(_) => {
+                    warn!(
+                        "monitor {} capture task did not finish within 3s after abort, moving on",
+                        monitor_id
+                    );
+                }
+            }
 
             Ok(())
         } else {
