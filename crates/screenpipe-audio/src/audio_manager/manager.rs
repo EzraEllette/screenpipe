@@ -95,6 +95,9 @@ pub struct AudioManager {
     on_transcription_insert: Option<crate::transcription::AudioInsertCallback>,
     /// Unified transcription engine. Set after model loading in start_audio_receiver_handler.
     engine: Arc<RwLock<Option<TranscriptionEngine>>>,
+    /// Output devices temporarily stopped due to DRM content detection.
+    /// Stored so they can be restarted when DRM clears.
+    drm_stopped_devices: Arc<RwLock<Vec<AudioDevice>>>,
 }
 
 /// Result of checking / restarting the two central handler tasks.
@@ -155,6 +158,7 @@ impl AudioManager {
             transcription_paused: Arc::new(AtomicBool::new(false)),
             on_transcription_insert: None,
             engine: Arc::new(RwLock::new(None)),
+            drm_stopped_devices: Arc::new(RwLock::new(Vec::new())),
         };
 
         Ok(manager)
@@ -332,6 +336,18 @@ impl AudioManager {
     }
 
     pub async fn start_device(&self, device: &AudioDevice) -> Result<()> {
+        // Don't restart devices that are paused due to DRM content detection.
+        // The monitor watcher will call start_output_devices() when DRM clears.
+        if self
+            .drm_stopped_devices
+            .read()
+            .await
+            .iter()
+            .any(|d| d == device)
+        {
+            return Ok(());
+        }
+
         if let Err(e) = self.device_manager.start_device(device).await {
             let err_str = e.to_string();
 
@@ -768,6 +784,69 @@ impl AudioManager {
 
     pub async fn enabled_devices(&self) -> HashSet<String> {
         self.options.read().await.enabled_devices.clone()
+    }
+
+    /// Stop all SCK-based (Output) audio devices for DRM pause.
+    /// Input (microphone) devices are left running. Unlike `stop_device()`,
+    /// this does NOT remove devices from `enabled_devices` since DRM pause
+    /// is temporary.
+    pub async fn stop_output_devices(&self) -> Result<()> {
+        use crate::core::device::DeviceType;
+
+        let output_devices: Vec<AudioDevice> = self
+            .current_devices()
+            .into_iter()
+            .filter(|d| d.device_type == DeviceType::Output)
+            .collect();
+
+        if output_devices.is_empty() {
+            return Ok(());
+        }
+
+        info!(
+            "DRM: stopping {} output (SCK) audio device(s)",
+            output_devices.len()
+        );
+
+        for device in &output_devices {
+            // Stop the underlying stream
+            if let Err(e) = self.device_manager.stop_device(device).await {
+                warn!("DRM: failed to stop audio device {}: {:?}", device, e);
+            }
+
+            // Abort the recording task
+            if let Some(pair) = self.recording_handles.get(device) {
+                pair.value().lock().await.abort();
+            }
+            self.recording_handles.remove(device);
+        }
+
+        // Store stopped devices for later restart
+        *self.drm_stopped_devices.write().await = output_devices;
+
+        Ok(())
+    }
+
+    /// Restart SCK-based (Output) audio devices after DRM clears.
+    pub async fn start_output_devices(&self) -> Result<()> {
+        let devices = std::mem::take(&mut *self.drm_stopped_devices.write().await);
+
+        if devices.is_empty() {
+            return Ok(());
+        }
+
+        info!(
+            "DRM: restarting {} output (SCK) audio device(s)",
+            devices.len()
+        );
+
+        for device in &devices {
+            if let Err(e) = self.start_device(device).await {
+                warn!("DRM: failed to restart audio device {}: {:?}", device, e);
+            }
+        }
+
+        Ok(())
     }
 
     /// Returns a reference to the meeting detector, if batch mode is active.

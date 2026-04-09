@@ -327,7 +327,8 @@ pub async fn start_embedded_server(
             info!("VisionManager started successfully");
 
             // Start MonitorWatcher for dynamic detection
-            if let Err(e) = start_monitor_watcher(vm_clone.clone()).await {
+            // Audio DRM pause is handled by the Tauri health monitor (shortcut-stop/start-recording)
+            if let Err(e) = start_monitor_watcher(vm_clone.clone(), None).await {
                 error!("Failed to start monitor watcher: {:?}", e);
             }
             info!("Monitor watcher started - will detect connect/disconnect");
@@ -347,10 +348,19 @@ pub async fn start_embedded_server(
     // Start audio recording
     if !config.disable_audio {
         let audio_manager_clone = audio_manager.clone();
+        let drm_pause = config.pause_on_drm_content;
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(1)).await;
             if let Err(e) = audio_manager_clone.start().await {
                 error!("Failed to start audio manager: {}", e);
+            }
+            // If DRM content was already focused at launch, the DRM callback
+            // fired before audio was ready. Stop the output device now so we
+            // don't hold an SCK session while DRM is active.
+            if drm_pause && screenpipe_engine::drm_detector::drm_content_paused() {
+                if let Err(e) = audio_manager_clone.stop_output_devices().await {
+                    warn!("failed to stop SCK audio after late DRM detection: {:?}", e);
+                }
             }
         });
     }
