@@ -339,6 +339,10 @@ pub struct RecordArgs {
     /// Override the machine ID for this device
     #[arg(long)]
     pub sync_machine_id: Option<String>,
+
+    /// Pause screen and audio capture when DRM content (Netflix, Disney+, etc.) is detected
+    #[arg(long, default_value_t = false)]
+    pub pause_on_drm_content: bool,
 }
 
 impl RecordArgs {
@@ -402,6 +406,7 @@ impl RecordArgs {
             video_quality: self.video_quality.clone(),
             analytics_enabled: !self.disable_telemetry,
             ignore_incognito_windows: true,
+            pause_on_drm_content: self.pause_on_drm_content,
             ..screenpipe_config::RecordingSettings::default()
         }
     }
