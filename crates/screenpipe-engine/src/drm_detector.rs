@@ -853,4 +853,77 @@ mod tests {
 
         DRM_CONTENT_PAUSED.store(false, Ordering::SeqCst);
     }
+
+    // ── check_and_update_drm_state tests ─────────────────────────
+
+    #[test]
+    fn test_check_and_update_drm_state_sets_flag_on_drm_app() {
+        DRM_CONTENT_PAUSED.store(false, Ordering::SeqCst);
+        let result = check_and_update_drm_state(true, Some("Netflix"), None);
+        assert!(result, "should return true for DRM app");
+        assert!(drm_content_paused(), "global flag should be set");
+        DRM_CONTENT_PAUSED.store(false, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn test_check_and_update_drm_state_sets_flag_on_drm_url() {
+        DRM_CONTENT_PAUSED.store(false, Ordering::SeqCst);
+        let result =
+            check_and_update_drm_state(true, Some("Chrome"), Some("https://netflix.com/watch"));
+        assert!(result, "should return true for DRM URL");
+        assert!(drm_content_paused(), "global flag should be set");
+        DRM_CONTENT_PAUSED.store(false, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn test_check_and_update_drm_state_clears_flag_on_non_drm() {
+        DRM_CONTENT_PAUSED.store(true, Ordering::SeqCst);
+        let result =
+            check_and_update_drm_state(true, Some("Finder"), Some("https://google.com"));
+        assert!(!result, "should return false for non-DRM content");
+        assert!(
+            !drm_content_paused(),
+            "global flag should be cleared"
+        );
+        DRM_CONTENT_PAUSED.store(false, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn test_check_and_update_drm_state_noop_when_disabled() {
+        DRM_CONTENT_PAUSED.store(false, Ordering::SeqCst);
+        let result = check_and_update_drm_state(false, Some("Netflix"), None);
+        assert!(!result, "should return false when feature is disabled");
+        assert!(
+            !drm_content_paused(),
+            "global flag should stay false when disabled"
+        );
+    }
+
+    #[test]
+    fn test_check_and_update_drm_state_clears_flag_when_disabled() {
+        // If the flag was somehow set and the feature is disabled, it should clear
+        DRM_CONTENT_PAUSED.store(true, Ordering::SeqCst);
+        let result = check_and_update_drm_state(false, Some("Netflix"), None);
+        assert!(!result);
+        assert!(
+            !drm_content_paused(),
+            "disabling the feature should clear any existing DRM pause"
+        );
+    }
+
+    #[test]
+    fn test_check_and_update_drm_state_none_app_preserves_current() {
+        // When app_name is None (empty string), check_and_update_drm_state
+        // preserves the current flag rather than clearing it (unknown = keep state).
+        DRM_CONTENT_PAUSED.store(false, Ordering::SeqCst);
+        let result = check_and_update_drm_state(true, None, None);
+        // With flag=false and no DRM info, it returns false (current state)
+        assert!(!result, "should return false when flag was false and app unknown");
+
+        DRM_CONTENT_PAUSED.store(true, Ordering::SeqCst);
+        let result = check_and_update_drm_state(true, None, None);
+        // With flag=true and no DRM info, it preserves true (unknown = keep)
+        assert!(result, "should return true when flag was true and app unknown");
+        DRM_CONTENT_PAUSED.store(false, Ordering::SeqCst);
+    }
 }

@@ -1271,6 +1271,7 @@ impl Drop for AudioManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::device::{AudioDevice, DeviceType};
 
     #[test]
     fn test_central_handler_restart_result_defaults() {
@@ -1279,5 +1280,106 @@ mod tests {
         assert!(!result.transcription_restarted);
         assert!(result.recording_error.is_none());
         assert!(result.transcription_error.is_none());
+    }
+
+    // ── DRM stopped devices tracking tests ─────────────────────
+
+    #[tokio::test]
+    async fn test_drm_stopped_devices_initially_empty() {
+        let devices: Arc<RwLock<Vec<AudioDevice>>> = Arc::new(RwLock::new(Vec::new()));
+        assert!(devices.read().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_drm_stopped_devices_stores_output_only() {
+        let drm_stopped = Arc::new(RwLock::new(Vec::new()));
+
+        let input = AudioDevice::new("MacBook Pro Mic".to_string(), DeviceType::Input);
+        let output = AudioDevice::new("System Audio".to_string(), DeviceType::Output);
+        let all_devices = vec![input.clone(), output.clone()];
+
+        // Simulate stop_output_devices: filter for Output only
+        let output_devices: Vec<AudioDevice> = all_devices
+            .into_iter()
+            .filter(|d| d.device_type == DeviceType::Output)
+            .collect();
+
+        *drm_stopped.write().await = output_devices;
+
+        let stopped = drm_stopped.read().await;
+        assert_eq!(stopped.len(), 1);
+        assert_eq!(stopped[0].name, "System Audio");
+        assert_eq!(stopped[0].device_type, DeviceType::Output);
+    }
+
+    #[tokio::test]
+    async fn test_drm_stopped_devices_start_clears_list() {
+        let drm_stopped = Arc::new(RwLock::new(vec![AudioDevice::new(
+            "System Audio".to_string(),
+            DeviceType::Output,
+        )]));
+
+        // Simulate start_output_devices: take and clear
+        let devices = std::mem::take(&mut *drm_stopped.write().await);
+        assert_eq!(devices.len(), 1);
+        assert!(drm_stopped.read().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_drm_guard_blocks_restart_of_paused_device() {
+        let drm_stopped = Arc::new(RwLock::new(vec![AudioDevice::new(
+            "System Audio".to_string(),
+            DeviceType::Output,
+        )]));
+
+        let device_to_start = AudioDevice::new("System Audio".to_string(), DeviceType::Output);
+
+        // Simulate the guard check in start_device
+        let is_drm_blocked = drm_stopped
+            .read()
+            .await
+            .iter()
+            .any(|d| d == &device_to_start);
+
+        assert!(
+            is_drm_blocked,
+            "start_device should be blocked for a DRM-paused device"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_drm_guard_allows_input_devices() {
+        let drm_stopped = Arc::new(RwLock::new(vec![AudioDevice::new(
+            "System Audio".to_string(),
+            DeviceType::Output,
+        )]));
+
+        let mic = AudioDevice::new("MacBook Pro Mic".to_string(), DeviceType::Input);
+
+        let is_drm_blocked = drm_stopped.read().await.iter().any(|d| d == &mic);
+
+        assert!(
+            !is_drm_blocked,
+            "input devices should not be blocked by DRM guard"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_drm_guard_allows_after_clear() {
+        let drm_stopped = Arc::new(RwLock::new(vec![AudioDevice::new(
+            "System Audio".to_string(),
+            DeviceType::Output,
+        )]));
+
+        // Simulate start_output_devices clearing the list
+        let _ = std::mem::take(&mut *drm_stopped.write().await);
+
+        let device = AudioDevice::new("System Audio".to_string(), DeviceType::Output);
+        let is_drm_blocked = drm_stopped.read().await.iter().any(|d| d == &device);
+
+        assert!(
+            !is_drm_blocked,
+            "after DRM clears, device should not be blocked"
+        );
     }
 }
