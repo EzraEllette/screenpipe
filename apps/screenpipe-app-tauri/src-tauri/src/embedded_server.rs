@@ -315,6 +315,11 @@ pub async fn start_embedded_server(
 
         let vm_clone = vision_manager.clone();
         let shutdown_rx = shutdown_tx_clone.subscribe();
+        let audio_manager_for_drm = if !config.disable_audio {
+            Some((*audio_manager).clone())
+        } else {
+            None
+        };
 
         tokio::spawn(async move {
             let mut shutdown_rx = shutdown_rx;
@@ -326,9 +331,8 @@ pub async fn start_embedded_server(
             }
             info!("VisionManager started successfully");
 
-            // Start MonitorWatcher for dynamic detection
-            // Audio DRM pause is handled by the Tauri health monitor (shortcut-stop/start-recording)
-            if let Err(e) = start_monitor_watcher(vm_clone.clone(), None).await {
+            // Start MonitorWatcher for dynamic detection (with audio DRM pause support)
+            if let Err(e) = start_monitor_watcher(vm_clone.clone(), audio_manager_for_drm).await {
                 error!("Failed to start monitor watcher: {:?}", e);
             }
             info!("Monitor watcher started - will detect connect/disconnect");
