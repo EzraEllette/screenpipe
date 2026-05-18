@@ -5502,10 +5502,7 @@ impl DatabaseManager {
                 "DELETE FROM speaker_embeddings WHERE speaker_id = ?",
                 "speaker embeddings",
             ),
-            (
-                "DELETE FROM speakers WHERE id = ?",
-                "speaker",
-            ),
+            ("DELETE FROM speakers WHERE id = ?", "speaker"),
         ];
 
         for (query, operation) in operations {
@@ -5527,7 +5524,10 @@ impl DatabaseManager {
             .execute(&mut **tx.conn())
             .await
             {
-                error!("Failed to delete audio chunk {} for speaker {}: {}", chunk_id, id, e);
+                error!(
+                    "Failed to delete audio chunk {} for speaker {}: {}",
+                    chunk_id, id, e
+                );
                 return Err(e);
             }
         }

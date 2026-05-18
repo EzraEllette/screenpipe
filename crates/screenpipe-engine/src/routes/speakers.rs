@@ -224,7 +224,11 @@ pub(crate) async fn delete_speaker_handler(
         if audio_chunk.start_time.is_some() && audio_chunk.end_time.is_some() {
             if let Err(e) = std::fs::remove_file(&audio_chunk.file_path) {
                 if e.kind() != std::io::ErrorKind::NotFound {
-                    tracing::warn!("failed to remove audio chunk file {}: {}", audio_chunk.file_path, e);
+                    tracing::warn!(
+                        "failed to remove audio chunk file {}: {}",
+                        audio_chunk.file_path,
+                        e
+                    );
                 }
             }
         }
