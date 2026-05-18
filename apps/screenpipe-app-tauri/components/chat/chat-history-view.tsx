@@ -9,7 +9,6 @@ import { Archive, CheckSquare, Loader2, MessageSquare, MoreVertical, Pin, Plus, 
 import { cn } from "@/lib/utils";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { toast } from "@/components/ui/use-toast";
@@ -40,6 +39,13 @@ import { useChatStore } from "@/lib/stores/chat-store";
 
 type HistoryTab = "active" | "archived" | "all";
 
+const HISTORY_PAGE_SIZE = 30;
+const TABS: ReadonlyArray<{ value: HistoryTab; label: string }> = [
+  { value: "active", label: "active" },
+  { value: "archived", label: "archived" },
+  { value: "all", label: "all" },
+];
+
 export function ChatHistoryView({
   onBack,
   onNewChat,
@@ -56,6 +62,8 @@ export function ChatHistoryView({
   const [query, setQuery] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [hasMore, setHasMore] = useState(false);
   const [conversations, setConversations] = useState<ConversationMeta[]>([]);
   const [deleteIds, setDeleteIds] = useState<string[]>([]);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
@@ -66,43 +74,88 @@ export function ChatHistoryView({
   const [rowPendingIds, setRowPendingIds] = useState<Set<string>>(() => new Set());
   const searchWrapRef = React.useRef<HTMLDivElement | null>(null);
   const searchInputRef = React.useRef<HTMLInputElement | null>(null);
-
-  const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      if (!migratedRef.current) {
-        migratedRef.current = true;
-        try {
-          await migrateFromStoreBin();
-        } catch {
-          // best-effort: continue with whatever is on disk
-        }
-      }
-      const includeHidden = tab === "archived" || tab === "all";
-      const q = query.trim();
-      const options = { includeHidden, kind: "all" as const };
-      // For search, request an "unlimited" set so View All reflects the full source.
-      // `normalizeLimit` treats non-finite values as undefined (no limit).
-      const metas = q
-        ? await searchConversations(q, { ...options, limit: Number.POSITIVE_INFINITY })
-        : await listConversations(options);
-      const filtered =
-        tab === "archived"
-          ? metas.filter((m) => m.hidden)
-          : tab === "active"
-            ? metas.filter((m) => !m.hidden)
-            : metas;
-      setConversations(filtered);
-    } catch {
-      setConversations([]);
-    } finally {
-      setLoading(false);
-    }
-  }, [query, tab]);
+  const scrollContainerRef = React.useRef<HTMLDivElement | null>(null);
+  const sentinelRef = React.useRef<HTMLDivElement | null>(null);
+  const conversationsRef = React.useRef<ConversationMeta[]>([]);
+  // Increment to invalidate in-flight loads from a previous tab/query.
+  const loadTokenRef = React.useRef(0);
 
   useEffect(() => {
-    void load();
-  }, [load]);
+    conversationsRef.current = conversations;
+  }, [conversations]);
+
+  const load = useCallback(
+    async (mode: "reset" | "append" = "reset") => {
+      const token = ++loadTokenRef.current;
+      if (mode === "reset") {
+        setLoading(true);
+      } else {
+        setLoadingMore(true);
+      }
+      try {
+        if (!migratedRef.current) {
+          migratedRef.current = true;
+          try {
+            await migrateFromStoreBin();
+          } catch {
+            // best-effort: continue with whatever is on disk
+          }
+        }
+        const includeHidden = tab === "archived" || tab === "all";
+        const hiddenOnly = tab === "archived";
+        const q = query.trim();
+        const offset = mode === "reset" ? 0 : conversationsRef.current.length;
+        const options = {
+          includeHidden,
+          hiddenOnly,
+          kind: "all" as const,
+          limit: HISTORY_PAGE_SIZE,
+          offset,
+        };
+        const metas = q
+          ? await searchConversations(q, options)
+          : await listConversations(options);
+        if (token !== loadTokenRef.current) return; // superseded
+        setConversations((prev) => (mode === "reset" ? metas : [...prev, ...metas]));
+        setHasMore(metas.length === HISTORY_PAGE_SIZE);
+      } catch {
+        if (token !== loadTokenRef.current) return;
+        if (mode === "reset") setConversations([]);
+        setHasMore(false);
+      } finally {
+        if (token === loadTokenRef.current) {
+          setLoading(false);
+          setLoadingMore(false);
+        }
+      }
+    },
+    [query, tab]
+  );
+
+  useEffect(() => {
+    void load("reset");
+    // Reset scroll to top on tab/query change so pagination feels coherent.
+    scrollContainerRef.current?.scrollTo({ top: 0 });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, query]);
+
+  useEffect(() => {
+    const sentinel = sentinelRef.current;
+    const container = scrollContainerRef.current;
+    if (!sentinel || !container) return;
+    if (!hasMore) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const entry = entries[0];
+        if (!entry?.isIntersecting) return;
+        if (loading || loadingMore) return;
+        void load("append");
+      },
+      { root: container, rootMargin: "300px 0px" }
+    );
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [hasMore, loading, loadingMore, load]);
 
   useEffect(() => {
     if (!searchOpen) return;
@@ -535,19 +588,44 @@ export function ChatHistoryView({
             </Button>
           </div>
 
-          <div className="mt-5">
-            <Tabs value={tab} onValueChange={(v) => setTab(v as HistoryTab)}>
-              <TabsList>
-                <TabsTrigger value="active">Active</TabsTrigger>
-                <TabsTrigger value="archived">Archived</TabsTrigger>
-                <TabsTrigger value="all">All</TabsTrigger>
-              </TabsList>
-            </Tabs>
+          <div
+            className="mt-6 flex items-center gap-6 border-b border-border/60"
+            role="tablist"
+            aria-label="Chat filter"
+          >
+            {TABS.map((t) => {
+              const active = tab === t.value;
+              return (
+                <button
+                  key={t.value}
+                  type="button"
+                  role="tab"
+                  aria-selected={active}
+                  onClick={() => setTab(t.value)}
+                  className={cn(
+                    "relative -mb-px py-2 text-sm tracking-wide transition-colors duration-150",
+                    "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-foreground focus-visible:ring-offset-2 focus-visible:ring-offset-background",
+                    active
+                      ? "text-foreground"
+                      : "text-muted-foreground hover:text-foreground"
+                  )}
+                >
+                  <span className="lowercase">{t.label}</span>
+                  <span
+                    aria-hidden
+                    className={cn(
+                      "absolute left-0 right-0 -bottom-px h-px transition-colors duration-150",
+                      active ? "bg-foreground" : "bg-transparent"
+                    )}
+                  />
+                </button>
+              );
+            })}
           </div>
         </div>
       </div>
 
-      <div className="flex-1 min-h-0 overflow-y-auto">
+      <div ref={scrollContainerRef} className="flex-1 min-h-0 overflow-y-auto">
         <div className="px-8 py-6 max-w-5xl">
         {showBulkBar && (
           <TooltipProvider>
@@ -758,6 +836,18 @@ export function ChatHistoryView({
             {list.map((c) => (
               <Row key={c.id} conv={c} />
             ))}
+            <div ref={sentinelRef} aria-hidden className="h-px w-full" />
+            {loadingMore && (
+              <div className="flex items-center justify-center py-4 text-xs text-muted-foreground">
+                <Loader2 className="h-3.5 w-3.5 animate-spin mr-2" aria-hidden />
+                <span>loading more…</span>
+              </div>
+            )}
+            {!hasMore && !loadingMore && list.length >= HISTORY_PAGE_SIZE && (
+              <div className="py-6 text-center text-[11px] tracking-wide text-muted-foreground/60 lowercase">
+                end of list
+              </div>
+            )}
           </div>
         )}
         </div>
