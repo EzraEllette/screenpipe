@@ -1124,23 +1124,14 @@ function HomeContent() {
                         {section.icon}
                       </div>
                       {!sidebarCollapsed && <span className={cn("text-xs truncate", section.id === "pipes" && runningPipeCount > 0 && "flex-1", isActive && isTranslucent ? "font-semibold vibrant-sidebar-fg" : "font-medium")}>{section.label}</span>}
-                      {section.id === "pipes" && runningPipeCount > 0 && (
-                        sidebarCollapsed ? (
-                          <PipeActivityIndicator
-                            kind="running"
-                            iconOnly
-                            className="pointer-events-none absolute right-1 top-1 scale-[0.72]"
-                            ariaLabel={`${runningPipeCount} running pipe${runningPipeCount === 1 ? "" : "s"}`}
-                          />
-                        ) : (
-                          <PipeActivityIndicator
-                            kind="running"
-                            label={runningPipeCount}
-                            className="ml-auto shrink-0"
-                            labelClassName="text-muted-foreground/60"
-                            ariaLabel={`${runningPipeCount} running pipe${runningPipeCount === 1 ? "" : "s"}`}
-                          />
-                        )
+                      {section.id === "pipes" && runningPipeCount > 0 && !sidebarCollapsed && (
+                        <PipeActivityIndicator
+                          kind="running"
+                          label={runningPipeCount}
+                          className="ml-auto shrink-0"
+                          labelClassName="text-muted-foreground/60"
+                          ariaLabel={`${runningPipeCount} running pipe${runningPipeCount === 1 ? "" : "s"}`}
+                        />
                       )}
                     </button>
                   );
