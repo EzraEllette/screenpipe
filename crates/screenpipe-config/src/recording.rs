@@ -62,13 +62,13 @@ pub struct RecordingSettings {
     #[serde(rename = "transcriptionMode")]
     pub transcription_mode: String,
 
-    /// Stream live notes only while a meeting is active. This is separate
-    /// from 24/7 background transcription: the recorder still writes durable
-    /// chunks, while this powers the low-latency meeting note UI.
+    /// Stream live notes only for manually-started live meetings. This is
+    /// separate from 24/7 background transcription: the recorder still writes
+    /// durable chunks, while this powers the low-latency meeting note UI.
     #[serde(rename = "meetingLiveTranscriptionEnabled")]
     pub meeting_live_transcription_enabled: bool,
 
-    /// Provider for meeting-only live notes. Defaults to the selected audio
+    /// Provider for manually-started live notes. Defaults to the selected audio
     /// transcription engine so local/custom engines work without Cloud.
     #[serde(rename = "meetingLiveTranscriptionProvider")]
     pub meeting_live_transcription_provider: String,

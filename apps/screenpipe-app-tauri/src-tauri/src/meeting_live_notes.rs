@@ -172,7 +172,7 @@ pub fn start(app: AppHandle) {
                 continue;
             }
 
-            let url = format!("screenpipe://meeting/{meeting_id}?live=1");
+            let url = format!("screenpipe://meeting/{meeting_id}?live=0");
             let mut calendar_match = {
                 let events = calendar_events.read().await;
                 find_calendar_match(&events, &event.data)
@@ -220,7 +220,7 @@ pub fn start(app: AppHandle) {
                 actions.push(json!({
                     "id": "open-live-notes",
                     "action": "open-live-notes",
-                    "label": "open live notes",
+                    "label": "open note",
                     "type": "deeplink",
                     "url": url.clone(),
                     "primary": true,
@@ -235,7 +235,7 @@ pub fn start(app: AppHandle) {
 
             client::send_typed_with_actions(
                 "meeting detected",
-                format!("screenpipe is capturing notes for {title}"),
+                format!("screenpipe is saving this meeting for transcription: {title}"),
                 "meeting",
                 Some(30_000),
                 actions,
