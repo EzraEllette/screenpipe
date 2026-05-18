@@ -3345,7 +3345,13 @@ export function StandaloneChat({
     return () => {
       unlisten.then((fn) => fn());
     };
-  }, [piInfo]);
+    // Register once. The handler only touches refs and stable setters, so it
+    // doesn't need to re-subscribe on piInfo changes — and re-subscribing
+    // creates a teardown/attach gap where an in-flight chat-prefill event can
+    // be lost (e.g. meeting-notes Summarize → page reload → 120ms emit), which
+    // leaves isPreparingPrefill stuck true and the chat blank.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Listen for chat-load-conversation events. Sources:
   //   - timeline (clicking a previous chat in the timeline view)
