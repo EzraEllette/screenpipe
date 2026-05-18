@@ -71,6 +71,7 @@ import {
 } from "@/components/ui/tooltip";
 
 type MainSection = "home" | "timeline" | "memories" | "pipes" | "connections" | "meetings" | "help";
+type ConnectionFocusRequest = { id: string | null; requestId: number };
 
 // All valid URL sections for the home page
 const ALL_SECTIONS = [
@@ -102,6 +103,7 @@ function HomeContent() {
     },
     serialize: (value) => value,
   });
+  const [connectionFocusRequest, setConnectionFocusRequest] = useState<ConnectionFocusRequest | null>(null);
 
   const { settings } = useSettings();
   const { isTranslucent } = useSidebarContext();
@@ -691,6 +693,10 @@ function HomeContent() {
       const section = detail?.section ?? "general";
       // connections is a top-level main-sidebar section now, not in settings
       if (section === "connections") {
+        setConnectionFocusRequest({
+          id: typeof detail?.connectionId === "string" ? detail.connectionId : null,
+          requestId: Date.now(),
+        });
         setActiveSection("connections");
         return;
       }
@@ -722,7 +728,12 @@ function HomeContent() {
       case "pipes":
         return <PipeStoreView />;
       case "connections":
-        return <ConnectionsSection />;
+        return (
+          <ConnectionsSection
+            focusConnectionId={connectionFocusRequest?.id ?? null}
+            focusRequestId={connectionFocusRequest?.requestId ?? 0}
+          />
+        );
       case "meetings":
         return (
           <MeetingNotesSection
