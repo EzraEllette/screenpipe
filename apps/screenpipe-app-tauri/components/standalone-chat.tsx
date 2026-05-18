@@ -7024,7 +7024,7 @@ export function StandaloneChat({
             executionId={activePipeExecution.executionId}
           />
         )}
-        {messages.length === 0 && !isPreparingPrefill && disabledReason && (!hasPresets || !hasValidModel || needsLogin) && (
+        {messages.length === 0 && !isPreparingPrefill && !activePipeExecution && !isLoading && !isStreaming && disabledReason && (!hasPresets || !hasValidModel || needsLogin) && (
           <div className="relative flex flex-col items-center justify-center py-12 space-y-4">
             <div className="relative p-6 rounded-2xl border bg-muted/50 border-border/50">
               {needsLogin ? (
@@ -7065,7 +7065,7 @@ export function StandaloneChat({
             )}
           </div>
         )}
-        {messages.length === 0 && !isPreparingPrefill && hasPresets && hasValidModel && (
+        {messages.length === 0 && !isPreparingPrefill && !activePipeExecution && !isLoading && !isStreaming && hasPresets && hasValidModel && (
           <SummaryCards
             onSendMessage={sendMessage}
             onOpenConnection={openConnectionSetup}
