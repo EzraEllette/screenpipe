@@ -5,6 +5,7 @@
 pub mod audio;
 pub mod auth;
 pub mod backup;
+mod browser;
 pub mod connection;
 pub mod db;
 pub mod install;
@@ -14,6 +15,7 @@ pub mod pipe;
 pub mod presets;
 pub mod status;
 mod store_file;
+pub mod survey;
 pub mod sync;
 pub mod vault;
 pub mod vision;
@@ -241,6 +243,9 @@ pub enum Command {
 
     /// Show current auth status
     Whoami,
+
+    /// Open the screenpipe survey in your browser
+    Survey,
 
     /// Check system readiness (permissions, ffmpeg, etc.)
     Doctor,
@@ -1474,6 +1479,15 @@ mod tests {
                 );
             }
             _ => panic!("expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_survey_command_parses() {
+        let cli = Cli::try_parse_from(["screenpipe", "survey"]).unwrap();
+        match cli.command {
+            Command::Survey => {}
+            _ => panic!("expected Survey command"),
         }
     }
 
