@@ -2125,10 +2125,12 @@ function ToolCallGroup({
 // Renders message content with interleaved text and tool call blocks
 function MessageContent({
   message,
+  deferSourceFooter = false,
   onImageClick,
   onRetry,
 }: {
   message: Message;
+  deferSourceFooter?: boolean;
   onImageClick?: (images: string[], index: number) => void;
   onRetry?: (prompt: string) => void;
 }) {
@@ -2136,7 +2138,7 @@ function MessageContent({
   const { settings } = useSettings();
   const hideThinkingBlocks = settings?.hideThinkingBlocks ?? true;
   const sourceCitations = isUser ? [] : sourceCitationsFromMessage(message);
-  const sourceFooter = sourceCitations.length > 0 ? (
+  const sourceFooter = !deferSourceFooter && sourceCitations.length > 0 ? (
     <SourceCitationFooter citations={sourceCitations} />
   ) : null;
 
@@ -3489,6 +3491,10 @@ export function StandaloneChat({
     const sess = s.sessions[conversationId];
     if (!sess || sess.kind === "pipe-watch") return undefined;
     return !!sess.isLoading;
+  });
+  const currentStreamingMessageId = useChatStore((s) => {
+    if (!conversationId) return null;
+    return s.sessions[conversationId]?.streamingMessageId ?? null;
   });
   useEffect(() => {
     if (storeChatIsStreaming === false) setIsStreaming(false);
@@ -6385,6 +6391,11 @@ export function StandaloneChat({
     );
   };
 
+  const activeSourceFooterMessageId =
+    isLoading || isStreaming
+      ? piMessageIdRef.current ?? currentStreamingMessageId ?? null
+      : null;
+
   return (
     <div className={cn("flex flex-col bg-background", className ?? "h-screen")} data-testid="section-home">
       {/* Header - draggable only in standalone mode */}
@@ -6829,6 +6840,7 @@ export function StandaloneChat({
                 ) : (
                   <MessageContent
                     message={message}
+                    deferSourceFooter={message.id === activeSourceFooterMessageId}
                     onImageClick={(images, index) => setImageViewer({ images, index })}
                     onRetry={(prompt) => sendMessage(prompt)}
                   />
