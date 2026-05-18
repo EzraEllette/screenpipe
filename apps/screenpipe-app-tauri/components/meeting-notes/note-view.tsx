@@ -578,7 +578,10 @@ export function NoteView({
     const link = calendarEventMeetingLink(event);
     if (!link || dismissedJoinUrl === link.url) return null;
     if (hasJoinedMeetingLink(link, meeting, meetingCtx)) return null;
-    return link;
+    const meetingTitle = meeting.title?.trim() ?? "";
+    const eventTitle = event?.title?.trim() ?? "";
+    const mapped = !!meetingTitle && !!eventTitle && meetingTitle === eventTitle;
+    return { link, mapped };
   }, [
     calendarEvents,
     dismissedJoinUrl,
@@ -784,9 +787,10 @@ export function NoteView({
           )}
           {isLive && joinSuggestion && (
             <JoinMeetingSuggestion
-              link={joinSuggestion}
-              onJoin={() => void handleJoinMeeting(joinSuggestion)}
-              onDismiss={() => setDismissedJoinUrl(joinSuggestion.url)}
+              link={joinSuggestion.link}
+              mapped={joinSuggestion.mapped}
+              onJoin={() => void handleJoinMeeting(joinSuggestion.link)}
+              onDismiss={() => setDismissedJoinUrl(joinSuggestion.link.url)}
             />
           )}
           <TranscriptPanel
@@ -1094,13 +1098,16 @@ function AudioHealthButton({
 
 function JoinMeetingSuggestion({
   link,
+  mapped,
   onJoin,
   onDismiss,
 }: {
   link: CalendarMeetingLink;
+  mapped: boolean;
   onJoin: () => void;
   onDismiss: () => void;
 }) {
+  const label = mapped ? link.label : "nearby calendar event — join the call?";
   return (
     <div className="mb-3 flex justify-center">
       <div className="inline-flex max-w-full items-center gap-1 rounded-full border border-border bg-muted px-1 py-1 shadow-sm">
@@ -1111,7 +1118,7 @@ function JoinMeetingSuggestion({
           title={link.url}
         >
           <Video className="h-4 w-4 shrink-0" />
-          <span className="truncate">{link.label}</span>
+          <span className="truncate">{label}</span>
         </button>
         <button
           type="button"
