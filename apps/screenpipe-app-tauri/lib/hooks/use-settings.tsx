@@ -411,6 +411,24 @@ export function makeDefaultPresets(isPro: boolean): AIPreset[] {
 // ensureDefaultPreset() re-seeds with pro status once settings.user is loaded.
 const DEFAULT_CLOUD_PRESET: AIPreset = makeDefaultPresets(false)[0];
 
+const isLoggedInProUser = (user: User | null | undefined) =>
+	user?.cloud_subscribed === true && Boolean(user.token || user.id);
+
+const applyProCloudAudioDefaults = (settings: Settings): Settings => {
+	if (!isLoggedInProUser(settings.user)) return settings;
+	if ((settings as any)._proCloudAudioDefaultsAppliedV2) return settings;
+
+	const oldCloudEngineMigrationAlreadyRan = (settings as any)._cloudEngineApplied === true;
+	if (!oldCloudEngineMigrationAlreadyRan) {
+		settings.audioTranscriptionEngine = "screenpipe-cloud";
+	}
+	settings.meetingLiveTranscriptionEnabled = true;
+	settings.meetingLiveTranscriptionProvider = "screenpipe-cloud";
+	(settings as any)._proCloudAudioDefaultsAppliedV2 = true;
+
+	return settings;
+};
+
 let DEFAULT_SETTINGS: Settings = {
 			aiPresets: makeDefaultPresets(false) as any,
 			deviceId: crypto.randomUUID(),
@@ -730,16 +748,11 @@ function createSettingsStore() {
 			needsUpdate = true;
 		}
 
-		// Post-migration: if user is a paid subscriber but still on a local engine
-		// (because migration ran before login), switch to cloud once.
-		// _cloudEngineApplied prevents overriding if user manually switches back later.
-		if (
-			settings.user?.cloud_subscribed &&
-			settings.audioTranscriptionEngine !== "screenpipe-cloud" &&
-			!(settings as any)._cloudEngineApplied
-		) {
-			settings.audioTranscriptionEngine = "screenpipe-cloud";
-			(settings as any)._cloudEngineApplied = true;
+		// Post-migration: when a logged-in Pro user is first confirmed, default
+		// both background and live transcription to Screenpipe Cloud. The marker
+		// prevents future user refreshes from overriding a manual engine choice.
+		if (isLoggedInProUser(settings.user) && !(settings as any)._proCloudAudioDefaultsAppliedV2) {
+			applyProCloudAudioDefaults(settings);
 			needsUpdate = true;
 		}
 
@@ -786,7 +799,10 @@ function createSettingsStore() {
 	const set = async (value: Partial<Settings>) => {
 		const store = await getStore();
 		const current = await get();
-		const newSettings = { ...current, ...value };
+		let newSettings = { ...current, ...value } as Settings;
+		if ("user" in value) {
+			newSettings = applyProCloudAudioDefaults(newSettings);
+		}
 		await store.set("settings", newSettings);
 		await saveAndEncrypt(store);
 	};
