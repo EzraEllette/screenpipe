@@ -7521,7 +7521,11 @@ export function StandaloneChat({
                   className="inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono bg-muted/20 hover:bg-foreground hover:text-background border border-border/20 hover:border-foreground text-muted-foreground transition-all duration-150 cursor-pointer max-w-[280px]"
                   title={s.preview ? `${s.text} — ${s.preview}` : s.text}
                 >
-                  {s.connectionIcon && <ConnectionToolIcon name={s.connectionIcon} />}
+                  {s.connectionIcon ? (
+                    <ConnectionToolIcon name={s.connectionIcon} />
+                  ) : (
+                    <Sparkles className="w-3 h-3 shrink-0 text-muted-foreground/70" strokeWidth={1.5} aria-hidden />
+                  )}
                   <span className="truncate">{s.text}</span>
                 </button>
               ))}
@@ -7563,7 +7567,11 @@ export function StandaloneChat({
                         className="text-left px-2 py-1.5 text-[11px] font-mono rounded-sm hover:bg-muted text-muted-foreground hover:text-foreground transition-colors flex items-start gap-1.5"
                         title={s.preview ? `${s.text} — ${s.preview}` : s.text}
                       >
-                        {s.connectionIcon && <ConnectionToolIcon name={s.connectionIcon} />}
+                        {s.connectionIcon ? (
+                          <ConnectionToolIcon name={s.connectionIcon} />
+                        ) : (
+                          <Sparkles className="w-3 h-3 mt-0.5 shrink-0 text-muted-foreground/70" strokeWidth={1.5} aria-hidden />
+                        )}
                         <span className="line-clamp-2">{s.text}</span>
                       </button>
                     ))}
