@@ -271,6 +271,10 @@ export type Settings = SettingsStore & {
 		displayChanges?: boolean;
 		/** Live-note prompt when a meeting is detected. Default true. */
 		meetingLiveNotes?: boolean;
+		/** OS notification when a meeting starts but no audio frames arrive within 60s. Default true. */
+		audioCaptureStalled?: boolean;
+		/** In-app /notify when audio is captured but no live transcript arrives within 60s. Default true. */
+		liveTranscriptStalled?: boolean;
 		mutedPipes: string[];
 	};
 	/** Remote devices to monitor pipes on (LAN addresses) */
