@@ -1661,6 +1661,11 @@ experimentalCoreaudioSystemAudio?: boolean;
  */
 windowsInputAecEnabled?: boolean; 
 /**
+ * Experimental: request Apple VoiceProcessingIO (AEC) on the default macOS microphone.
+ * Ignored on non-macOS platforms. Only the system default input uses VPIO; other devices use HAL.
+ */
+macosInputVpioEnabled?: boolean; 
+/**
  * Duration of each audio chunk in seconds before transcription.
  * Stored as i32 to match existing store.bin schema (cast to u64 by engine).
  */
