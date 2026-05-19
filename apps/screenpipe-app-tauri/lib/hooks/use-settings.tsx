@@ -411,12 +411,22 @@ export function makeDefaultPresets(isPro: boolean): AIPreset[] {
 // ensureDefaultPreset() re-seeds with pro status once settings.user is loaded.
 const DEFAULT_CLOUD_PRESET: AIPreset = makeDefaultPresets(false)[0];
 
+const DEFAULT_AUDIO_ENGINE = "whisper-large-v3-turbo-quantized";
+
 const isLoggedInProUser = (user: User | null | undefined) =>
 	user?.cloud_subscribed === true && Boolean(user.token || user.id);
 
 const applyProCloudAudioDefaults = (settings: Settings): Settings => {
 	if (!isLoggedInProUser(settings.user)) return settings;
 	if ((settings as any)._proCloudAudioDefaultsAppliedV2) return settings;
+
+	// If the user picked a non-default, non-cloud engine, they've configured audio
+	// themselves — don't flip live-meeting on or rewrite the provider behind their back.
+	// V2 marker is intentionally left unset so a later switch back to default re-evaluates.
+	const userChoseCustomEngine =
+		settings.audioTranscriptionEngine !== DEFAULT_AUDIO_ENGINE &&
+		settings.audioTranscriptionEngine !== "screenpipe-cloud";
+	if (userChoseCustomEngine) return settings;
 
 	const oldCloudEngineMigrationAlreadyRan = (settings as any)._cloudEngineApplied === true;
 	if (!oldCloudEngineMigrationAlreadyRan) {
@@ -801,6 +811,11 @@ function createSettingsStore() {
 		const current = await get();
 		let newSettings = { ...current, ...value } as Settings;
 		if ("user" in value) {
+			// On logout / Pro→non-Pro transition, clear the V2 marker so a future
+			// Pro login re-evaluates cloud defaults (handles account switching).
+			if (!isLoggedInProUser(newSettings.user)) {
+				delete (newSettings as any)._proCloudAudioDefaultsAppliedV2;
+			}
 			newSettings = applyProCloudAudioDefaults(newSettings);
 		}
 		await store.set("settings", newSettings);
