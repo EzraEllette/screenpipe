@@ -1484,8 +1484,14 @@ impl DatabaseManager {
             }
             let text_length = trimmed.len() as i64;
 
+            // INSERT OR IGNORE: diarization can produce multiple segments with the same
+            // trimmed text on the same chunk (e.g. "yeah" from speakers A and B). The
+            // UNIQUE index idx_audio_transcription_chunk_text would otherwise fail the
+            // whole TX with SQLite 2067, the reconciliation retries forever, and the
+            // pool saturates. Per-speaker timing/identity is preserved in
+            // diarization_segments — losing a duplicate text row here is harmless.
             sqlx::query(
-                "INSERT INTO audio_transcriptions (audio_chunk_id, transcription, text_length, offset_index, timestamp, transcription_engine, device, is_input_device, start_time, end_time, speaker_id)
+                "INSERT OR IGNORE INTO audio_transcriptions (audio_chunk_id, transcription, text_length, offset_index, timestamp, transcription_engine, device, is_input_device, start_time, end_time, speaker_id)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             )
             .bind(audio_chunk_id)
