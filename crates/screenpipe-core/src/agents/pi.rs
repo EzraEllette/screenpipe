@@ -259,17 +259,20 @@ impl PiExecutor {
             .map(|s| !s.is_empty())
             .unwrap_or(false);
 
-        // The skill needs the cloud session JWT (auth.json) to talk to
-        // screenpi.pe — no token means no session, means no admin.
-        let auth_path = home.join(".screenpipe").join("auth.json");
-        let cloud_signed_in = std::fs::read_to_string(&auth_path)
-            .ok()
-            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-            .and_then(|v| v.get("token").and_then(|t| t.as_str()).map(String::from))
+        // The skill needs an enterprise API token (sk_ent_…, format
+        // accepted by `withApiAuth` on the v1 endpoints). Admins mint
+        // one on screenpi.pe/enterprise?tab=tokens and paste it into
+        // enterprise.json. We previously tried using the cloud session
+        // token from auth.json but that's an `sp-…` value the v1 auth
+        // layer doesn't validate; the team-token path is the one that
+        // currently works end-to-end.
+        let team_token_present = parsed
+            .get("team_api_token")
+            .and_then(|v| v.as_str())
             .map(|s| !s.is_empty())
             .unwrap_or(false);
 
-        is_admin && license_active && license_key_present && cloud_signed_in
+        is_admin && license_active && license_key_present && team_token_present
     }
 
     /// Ensure screenpipe skills exist in `project_dir/.pi/skills/`.

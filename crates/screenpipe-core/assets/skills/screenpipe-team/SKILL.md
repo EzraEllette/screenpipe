@@ -9,23 +9,25 @@ Query the customer's team telemetry. Data lives in the customer's own Azure Blob
 
 ## Auth
 
-Two pieces, both already on disk — no separate token to paste:
-
-- **Cloud session JWT** from `~/.screenpipe/auth.json` (`.token`) — the same signed-in identity that powers cloud transcription and the chat proxy. The server validates this via Clerk; only admins of the license get past the check, non-admins get 403.
-- **License key** from `~/.screenpipe/enterprise.json` (`.license_key`) — tells the server which org the admin wants to query (one user can admin multiple).
-
-Pull both once per session into shell vars so you don't `jq` the files on every call:
+The skill uses an **enterprise API token** (format `sk_ent_…`) which the admin mints once on `https://screenpi.pe/enterprise?tab=tokens` with the `read:devices`, `read:search`, and `read:records` scopes. It's stored in `~/.screenpipe/enterprise.json` under the `team_api_token` key.
 
 ```bash
-CLOUD_TOKEN=$(jq -r .token ~/.screenpipe/auth.json)
-LICENSE_KEY=$(jq -r .license_key ~/.screenpipe/enterprise.json)
+TEAM_TOKEN=$(jq -r .team_api_token ~/.screenpipe/enterprise.json)
 SP_URL="https://screenpi.pe/api/enterprise/v1"
-AUTH_HEADERS=(-H "Authorization: Bearer $CLOUD_TOKEN" -H "X-License-Key: $LICENSE_KEY")
+AUTH_HEADERS=(-H "Authorization: Bearer $TEAM_TOKEN")
 ```
 
-If either is empty / null, tell the user: "I need you to be signed in to screenpipe cloud AND have an active enterprise license. Open the app's enterprise settings to check." Don't proceed.
+If `team_api_token` is null or empty, tell the user verbatim:
 
-If the server returns 403 ("not an admin of this license"): tell the user "you're not listed as an admin on this license — ask whoever owns the license to add your email under enterprise → members".
+> I need an enterprise API token to query team data. Open
+> https://screenpi.pe/enterprise?tab=tokens, create a token with the
+> `read:devices`, `read:search`, `read:records` scopes, then either
+> paste it into Settings → Enterprise → Team API token in the desktop
+> app, or add it to `~/.screenpipe/enterprise.json` as `"team_api_token": "sk_ent_…"`.
+
+Then stop. Don't try to call the endpoints — they'll 401.
+
+If the server returns 401 the token is invalid or revoked; tell the user to mint a new one. If it returns 403, the token is missing the required scope — same dashboard, regenerate with the right scopes.
 
 ## Context window protection
 
