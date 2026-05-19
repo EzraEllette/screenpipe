@@ -178,6 +178,8 @@ export type Settings = SettingsStore & {
 	meetingLiveTranscriptionEnabled?: boolean;
 	/** Provider for manually-started live notes. Defaults to the selected transcription engine. */
 	meetingLiveTranscriptionProvider?: "selected-engine" | "screenpipe-cloud" | "disabled" | "openai-realtime" | "deepgram-live";
+	/** When true, the user's typed text (and edited files) captured during a meeting is auto-appended to the meeting note when the meeting stops. Default true. */
+	appendTypedTextToMeetingNote?: boolean;
 	/** User's name for speaker identification — input device audio will be labeled with this name */
 	userName?: string;
 	/** When true, screen capture continues but OCR text extraction is skipped (saves CPU) */
@@ -416,6 +418,7 @@ let DEFAULT_SETTINGS: Settings = {
 			audioTranscriptionEngine: "whisper-large-v3-turbo-quantized",
 			meetingLiveTranscriptionEnabled: true,
 			meetingLiveTranscriptionProvider: "selected-engine",
+			appendTypedTextToMeetingNote: true,
 			ocrEngine: "default",
 			monitorIds: ["default"],
 			audioDevices: ["default"],
@@ -595,6 +598,10 @@ function createSettingsStore() {
 		}
 		if (!settings.meetingLiveTranscriptionProvider) {
 			settings.meetingLiveTranscriptionProvider = "selected-engine";
+			needsUpdate = true;
+		}
+		if (settings.appendTypedTextToMeetingNote === undefined) {
+			settings.appendTypedTextToMeetingNote = true;
 			needsUpdate = true;
 		}
 
