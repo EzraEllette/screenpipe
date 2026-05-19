@@ -93,6 +93,13 @@ impl EnterpriseSyncConfig {
     /// Build config from env vars + the OS device id. Returns `None` when
     /// required env (`SCREENPIPE_ENTERPRISE_LICENSE_KEY`) is missing — caller
     /// should silently skip sync in that case.
+    ///
+    /// `upload_mode` is initialized to `HostedIngest` as a safe default. The
+    /// caller should run [`Self::resolve_upload_mode`] once the async runtime
+    /// is up to upgrade to `DirectReadable` / `DirectEncrypted` based on the
+    /// customer's storage binding in the control plane. This replaces the
+    /// old "set `SCREENPIPE_ENTERPRISE_UPLOAD_MODE` on every device" UX —
+    /// the dashboard binding is now the single source of truth.
     pub fn from_env(
         app_data_dir: PathBuf,
         device_id: String,
@@ -105,7 +112,21 @@ impl EnterpriseSyncConfig {
             .ok()
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| DEFAULT_INGEST_URL.to_string());
-        let upload_mode = EnterpriseUploadMode::from_env(&ingest_url)?;
+        // Honor an explicit env override at boot for MDM / dev / test flows.
+        // Fail-closed semantics: if the operator explicitly set a mode and
+        // it can't be honored (invalid keys etc.), refuse to start sync — a
+        // silent fallback to plaintext could leak data. When no override is
+        // set we start in HostedIngest and let `resolve_upload_mode` ask
+        // the control plane what this license is actually configured for.
+        let explicit_mode = std::env::var("SCREENPIPE_ENTERPRISE_UPLOAD_MODE")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty() && s != "auto");
+        let upload_mode = if explicit_mode.is_some() {
+            EnterpriseUploadMode::from_env(&ingest_url)?
+        } else {
+            EnterpriseUploadMode::HostedIngest
+        };
         let cursor_path = app_data_dir.join(CURSOR_FILENAME);
         Some(Self {
             license_key,
@@ -115,6 +136,19 @@ impl EnterpriseSyncConfig {
             cursor_path,
             upload_mode,
         })
+    }
+
+    /// Ask the control plane which upload mode this license should run in,
+    /// and update `self.upload_mode` accordingly. Safe to call before every
+    /// sync run — if the lookup fails, the existing mode is preserved.
+    ///
+    /// This is what makes the "install enterprise build → enter license key
+    /// → uploads start" flow possible without any env-var setup on the
+    /// customer's machine.
+    pub async fn resolve_upload_mode(&mut self) {
+        let resolved =
+            EnterpriseUploadMode::resolve(&self.license_key, &self.ingest_url).await;
+        self.upload_mode = resolved;
     }
 }
 
@@ -334,6 +368,8 @@ pub enum EnterpriseSyncError {
     IngestAuthRejected,
     #[error("ingest server error: status {0}")]
     IngestServerError(u16),
+    #[error("control-plane network error: {0}")]
+    Network(String),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 }

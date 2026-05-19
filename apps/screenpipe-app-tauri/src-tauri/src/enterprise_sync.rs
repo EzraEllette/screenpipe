@@ -410,6 +410,19 @@ mod imp {
             // Small startup delay so the local screenpipe server is up before
             // we hammer it. Mirrors calendar publisher's `sleep(10)`.
             tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+
+            // Ask the control plane what upload mode this license should run
+            // in. Replaces the old "set SCREENPIPE_ENTERPRISE_UPLOAD_MODE on
+            // every customer machine" UX — the dashboard binding is now the
+            // single source of truth, so a fresh enterprise install just
+            // needs the license key and uploads start automatically.
+            let mut cfg = cfg;
+            cfg.resolve_upload_mode().await;
+            info!(
+                "enterprise sync: resolved upload mode = {:?}",
+                std::mem::discriminant(&cfg.upload_mode)
+            );
+
             ee_sync::run(cfg, local, rx).await;
         });
 
