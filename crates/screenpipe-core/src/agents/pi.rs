@@ -220,15 +220,23 @@ impl PiExecutor {
     }
 
     /// True when `~/.screenpipe/enterprise.json` declares this user as an
-    /// active admin. Conservative: any I/O or parse error means "no" so we
-    /// fail closed — we'd rather under-install the skill than show team
-    /// affordances to someone who shouldn't see them.
+    /// active admin AND the user is signed into screenpipe cloud (the
+    /// Clerk JWT at `~/.screenpipe/auth.json` is what authenticates the
+    /// skill's HTTP calls to `screenpi.pe/api/enterprise/v1`).
+    ///
+    /// Conservative: any I/O or parse error means "no" so we fail closed —
+    /// we'd rather under-install the skill than show team affordances to
+    /// someone who shouldn't see them. Even if the skill DID get installed
+    /// to a non-admin, the server-side `authorizeApiRequest` re-checks
+    /// admin status on every call and returns 403, so this client-side
+    /// check is defense-in-depth, not the security boundary.
     fn is_enterprise_admin() -> bool {
-        let path = match dirs::home_dir() {
-            Some(h) => h.join(".screenpipe").join("enterprise.json"),
+        let home = match dirs::home_dir() {
+            Some(h) => h,
             None => return false,
         };
-        let raw = match std::fs::read_to_string(&path) {
+        let ent_path = home.join(".screenpipe").join("enterprise.json");
+        let raw = match std::fs::read_to_string(&ent_path) {
             Ok(s) => s,
             Err(_) => return false,
         };
@@ -237,20 +245,31 @@ impl PiExecutor {
             Err(_) => return false,
         };
         let is_admin = parsed.get("is_admin").and_then(|v| v.as_bool()).unwrap_or(false);
-        // license_active defaults to true if the field is absent, so older
-        // enterprise.json files (which only carry license_key) don't lose
-        // skill access. The website-side claim flow can start writing
-        // `license_active: false` explicitly when a license lapses.
+        // license_active defaults to true if the field is absent so older
+        // enterprise.json files don't lose skill access on upgrade. The
+        // website-side claim flow writes `license_active: false` when a
+        // license lapses.
         let license_active = parsed
             .get("license_active")
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
-        let token_present = parsed
-            .get("team_api_token")
+        let license_key_present = parsed
+            .get("license_key")
             .and_then(|v| v.as_str())
             .map(|s| !s.is_empty())
             .unwrap_or(false);
-        is_admin && license_active && token_present
+
+        // The skill needs the cloud session JWT (auth.json) to talk to
+        // screenpi.pe — no token means no session, means no admin.
+        let auth_path = home.join(".screenpipe").join("auth.json");
+        let cloud_signed_in = std::fs::read_to_string(&auth_path)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+            .and_then(|v| v.get("token").and_then(|t| t.as_str()).map(String::from))
+            .map(|s| !s.is_empty())
+            .unwrap_or(false);
+
+        is_admin && license_active && license_key_present && cloud_signed_in
     }
 
     /// Ensure screenpipe skills exist in `project_dir/.pi/skills/`.

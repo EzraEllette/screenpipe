@@ -215,17 +215,33 @@ export function useEnterprisePolicy() {
 
   const fetchPolicy = useCallback(async (licenseKey: string): Promise<FetchResult> => {
     try {
-      // Include device ID for pipe targeting
+      // Include device ID for pipe targeting + cloud session JWT so the
+      // server can tell us whether the signed-in user is an admin of this
+      // license. The admin bit gates installation of the screenpipe-team
+      // skill in the desktop pi-agent — see `Pi::is_enterprise_admin`.
       let deviceId = "unknown";
+      let cloudToken: string | null = null;
       try {
         const store = await getStore();
         const settings = (await store.get<Record<string, unknown>>("settings")) || {};
         deviceId = (settings.deviceId as string) || "unknown";
+        const user = settings.user as Record<string, unknown> | undefined;
+        const token = user?.token;
+        if (typeof token === "string" && token.length > 0) {
+          cloudToken = token;
+        }
       } catch {}
 
+      const headers: Record<string, string> = {
+        "X-License-Key": licenseKey,
+        "X-Device-Id": deviceId,
+      };
+      if (cloudToken) {
+        headers["Authorization"] = `Bearer ${cloudToken}`;
+      }
       const res = await tauriFetch("https://screenpi.pe/api/enterprise/policy", {
         method: "GET",
-        headers: { "X-License-Key": licenseKey, "X-Device-Id": deviceId },
+        headers,
       });
       if (res.status === 401 || res.status === 402) {
         console.error(`[enterprise] policy fetch: key rejected (${res.status})`);
@@ -285,6 +301,25 @@ export function useEnterprisePolicy() {
         await commands.setEnterprisePolicy(result.hiddenSections);
       } catch (e) {
         console.warn("[enterprise] failed to push policy to Rust:", e);
+      }
+
+      // Persist admin status into ~/.screenpipe/enterprise.json so the
+      // pi-agent can decide whether to install the screenpipe-team skill
+      // on its next boot. Only meaningful when we sent a cloud token in
+      // the request — without one, the server has no way to identify the
+      // user, so `data.isAdmin` is always false (don't accidentally wipe
+      // an existing admin marker just because the user was signed-out at
+      // policy-fetch time).
+      if (cloudToken) {
+        try {
+          await commands.saveEnterpriseTeamConfig({
+            isAdmin: Boolean(data.isAdmin),
+            licenseActive: true,
+            teamApiToken: null,
+          });
+        } catch (e) {
+          console.warn("[enterprise] failed to persist team config:", e);
+        }
       }
       return { ok: true, policy: result };
     } catch (e) {

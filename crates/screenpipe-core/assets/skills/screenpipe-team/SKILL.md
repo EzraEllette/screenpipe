@@ -9,14 +9,23 @@ Query the customer's team telemetry. Data lives in the customer's own Azure Blob
 
 ## Auth
 
-All requests use the enterprise API token stored in `~/.screenpipe/enterprise.json` under the `team_api_token` key. Pull it once per session into a shell variable so you don't `jq` the file on every call:
+Two pieces, both already on disk — no separate token to paste:
+
+- **Cloud session JWT** from `~/.screenpipe/auth.json` (`.token`) — the same signed-in identity that powers cloud transcription and the chat proxy. The server validates this via Clerk; only admins of the license get past the check, non-admins get 403.
+- **License key** from `~/.screenpipe/enterprise.json` (`.license_key`) — tells the server which org the admin wants to query (one user can admin multiple).
+
+Pull both once per session into shell vars so you don't `jq` the files on every call:
 
 ```bash
-TEAM_TOKEN=$(jq -r .team_api_token ~/.screenpipe/enterprise.json)
+CLOUD_TOKEN=$(jq -r .token ~/.screenpipe/auth.json)
+LICENSE_KEY=$(jq -r .license_key ~/.screenpipe/enterprise.json)
 SP_URL="https://screenpi.pe/api/enterprise/v1"
+AUTH_HEADERS=(-H "Authorization: Bearer $CLOUD_TOKEN" -H "X-License-Key: $LICENSE_KEY")
 ```
 
-If `team_api_token` is null or missing, tell the user: "I need an enterprise API token with the `read:devices`, `read:search`, `read:records` scopes. Generate one at https://screenpi.pe/enterprise?tab=tokens and paste it into Settings → Enterprise → Team API token." Don't proceed.
+If either is empty / null, tell the user: "I need you to be signed in to screenpipe cloud AND have an active enterprise license. Open the app's enterprise settings to check." Don't proceed.
+
+If the server returns 403 ("not an admin of this license"): tell the user "you're not listed as an admin on this license — ask whoever owns the license to add your email under enterprise → members".
 
 ## Context window protection
 
@@ -44,7 +53,7 @@ Default `since_hours_ago` to 24 unless the user implies otherwise. Max 720 (30d)
 ## 1. List devices
 
 ```bash
-curl -s -H "Authorization: Bearer $TEAM_TOKEN" "$SP_URL/devices" -o /tmp/sp_team_devices.json
+curl -s "${AUTH_HEADERS[@]}" "$SP_URL/devices" -o /tmp/sp_team_devices.json
 jq '.devices[] | {device_id, label, platform, last_seen}' /tmp/sp_team_devices.json
 ```
 
@@ -59,7 +68,7 @@ When the user names a person ("what's john doing"), match against `label`. If mu
 ## 2. Search
 
 ```bash
-curl -s -H "Authorization: Bearer $TEAM_TOKEN" \
+curl -s "${AUTH_HEADERS[@]}" \
   "$SP_URL/search?q=atlas&since_hours_ago=24&limit=20" -o /tmp/sp_team_search.json
 jq '.results[] | {t, device, app, window, snippet: (.text // .transcription // "")[0:160]}' /tmp/sp_team_search.json
 ```
@@ -80,7 +89,7 @@ Response includes `truncated: true` if the byte budget was hit before the full w
 ## 3. Records (chronological)
 
 ```bash
-curl -s -H "Authorization: Bearer $TEAM_TOKEN" \
+curl -s "${AUTH_HEADERS[@]}" \
   "$SP_URL/records?device_id=DEVICE&since_hours_ago=4&kind=frame&limit=100" \
   -o /tmp/sp_team_records.json
 jq '.records[] | {t, app, window, text: (.text // "")[0:120]}' /tmp/sp_team_records.json

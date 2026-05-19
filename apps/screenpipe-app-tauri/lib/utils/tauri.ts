@@ -304,6 +304,21 @@ async saveEnterpriseLicenseKey(licenseKey: string) : Promise<Result<null, string
 }
 },
 /**
+ * Persist enterprise admin status + team API token (each independently
+ * optional) into `~/.screenpipe/enterprise.json`. Mirrors the Rust
+ * `save_enterprise_team_config` command. Specta will regenerate this
+ * binding on the next Tauri build — the hand-written stub here keeps
+ * TypeScript happy in the meantime.
+ */
+async saveEnterpriseTeamConfig(args: { isAdmin?: boolean | null; licenseActive?: boolean | null; teamApiToken?: string | null }) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("save_enterprise_team_config", args) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Called by the frontend after fetching the enterprise policy.
  */
 async setEnterprisePolicy(hiddenSections: string[]) : Promise<void> {
