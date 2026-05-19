@@ -259,27 +259,21 @@ impl PiExecutor {
             .map(|s| !s.is_empty())
             .unwrap_or(false);
 
-        // The skill authenticates v1 calls with the long-lasting Clerk
-        // JWT minted on screenpipe-cloud sign-in (cli-login.tsx →
-        // getToken({ template: "long-lasting" })), persisted to
-        // auth.json by the desktop's auth flow. Older installs may
-        // have a stale `sp-…` API key in this slot from a prior auth
-        // scheme — those will 401 against v1; the user has to sign
-        // out + sign back in to mint a fresh JWT.
-        //
-        // We only gate skill install on token PRESENCE here, not
-        // format — the validation happens server-side. The skill's own
-        // bash blocks notice the 401 and surface a clear "re-sign-in"
-        // message to the user.
-        let auth_path = home.join(".screenpipe").join("auth.json");
-        let cloud_signed_in = std::fs::read_to_string(&auth_path)
-            .ok()
-            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-            .and_then(|v| v.get("token").and_then(|t| t.as_str()).map(String::from))
+        // The skill authenticates v1/* calls with a dedicated admin API
+        // token (sk_ent_…) the admin mints once at
+        // screenpi.pe/enterprise?tab=tokens and pastes into Settings →
+        // Enterprise → Admin API token. Stored on disk under
+        // `team_api_token`. This is intentionally separate from the
+        // license_key: any employee has the license_key (deployed by
+        // IT) but only admins should be able to query teammates'
+        // telemetry, so a per-admin revocable token gates the skill.
+        let team_token_present = parsed
+            .get("team_api_token")
+            .and_then(|v| v.as_str())
             .map(|s| !s.is_empty())
             .unwrap_or(false);
 
-        is_admin && license_active && license_key_present && cloud_signed_in
+        is_admin && license_active && license_key_present && team_token_present
     }
 
     /// Ensure screenpipe skills exist in `project_dir/.pi/skills/`.

@@ -342,6 +342,15 @@ async getCloudToken() : Promise<string | null> {
     return await TAURI_INVOKE("get_cloud_token");
 },
 /**
+ * Read the enterprise admin API token from
+ * `~/.screenpipe/enterprise.json.team_api_token`. Returns null when
+ * missing/empty. Used by Settings → Admin API token to render
+ * "configured" state. Hand-written stub; specta regenerates on rebuild.
+ */
+async getEnterpriseTeamApiToken() : Promise<string | null> {
+    return await TAURI_INVOKE("get_enterprise_team_api_token");
+},
+/**
  * Called by the frontend after fetching the enterprise policy.
  */
 async setEnterprisePolicy(hiddenSections: string[]) : Promise<void> {

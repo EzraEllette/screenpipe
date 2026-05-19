@@ -662,6 +662,28 @@ pub fn save_enterprise_license_key(license_key: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Read the enterprise admin API token (`team_api_token`) from
+/// `~/.screenpipe/enterprise.json`. Returns None when the file is
+/// missing, malformed, or the field is empty.
+///
+/// Used by the Settings → Enterprise → Admin API token card to render
+/// "configured" state without round-tripping the plaintext value through
+/// the React state. The token itself is treated as a secret: the
+/// frontend only learns "yes there's a value" via this getter, never
+/// gets the value back.
+#[tauri::command]
+#[specta::specta]
+pub fn get_enterprise_team_api_token() -> Option<String> {
+    let path = screenpipe_core::paths::default_screenpipe_data_dir().join("enterprise.json");
+    let raw = std::fs::read_to_string(&path).ok()?;
+    let parsed: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    parsed
+        .get("team_api_token")
+        .and_then(|t| t.as_str())
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+}
+
 /// Read the user's screenpipe cloud session JWT from `~/.screenpipe/
 /// auth.json`. Returns None when the file is missing, malformed, or the
 /// token field is empty.

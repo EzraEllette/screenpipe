@@ -9,26 +9,29 @@ Query the customer's team telemetry. Data lives in the customer's own Azure Blob
 
 ## Auth
 
-Two pieces, both already on disk after the admin signs in to screenpipe cloud — no separate token to mint or paste:
+The skill authenticates with an **enterprise admin API token** the admin minted once on `https://screenpi.pe/enterprise?tab=tokens` (with scopes `read:devices`, `read:search`, `read:records`) and pasted into Settings → Enterprise → Admin API token. The desktop stored it in `~/.screenpipe/enterprise.json` under `team_api_token`.
 
-- **Cloud session JWT** from `~/.screenpipe/auth.json` (`.token`). This is a long-lasting Clerk JWT minted by the screenpipe-cloud sign-in flow (`getToken({template:"long-lasting"})`); the v1 endpoints validate it via Clerk and check the user's email against the license's `admin_emails`.
-- **License key** from `~/.screenpipe/enterprise.json` (`.license_key`). Tells the server which org the admin wants to query (one user can admin multiple licenses).
+License-key + token are intentionally separate concerns:
+- `license_key` proves *which org* this machine belongs to (deployed by IT, same on every employee's device).
+- `team_api_token` proves *this user is an admin of that org* and grants the read scopes. Employees who don't have it can't query team data even though they have the same license_key.
 
 ```bash
-CLOUD_TOKEN=$(jq -r .token ~/.screenpipe/auth.json)
-LICENSE_KEY=$(jq -r .license_key ~/.screenpipe/enterprise.json)
+TEAM_TOKEN=$(jq -r .team_api_token ~/.screenpipe/enterprise.json)
 SP_URL="https://screenpi.pe/api/enterprise/v1"
-AUTH_HEADERS=(-H "Authorization: Bearer $CLOUD_TOKEN" -H "X-License-Key: $LICENSE_KEY")
+AUTH_HEADERS=(-H "Authorization: Bearer $TEAM_TOKEN")
 ```
 
-If `CLOUD_TOKEN` doesn't start with `eyJ` (real Clerk JWT prefix — anything shorter like `sp-…` is leftover from an older auth scheme) OR if the v1 endpoints return **401 invalid bearer token**: tell the user verbatim:
+If `TEAM_TOKEN` is empty / null, tell the user verbatim:
 
-> Your screenpipe cloud session looks stale (auth.json doesn't have a
-> current Clerk JWT). Sign out and sign back into screenpipe cloud
-> from the desktop app — that re-mints a long-lasting token, and the
-> team skill works automatically afterward.
+> I need an admin API token to query team data. Open
+> https://screenpi.pe/enterprise?tab=tokens, create one with the
+> `read:devices`, `read:search`, `read:records` scopes, then paste it
+> into Settings → Enterprise → Admin API token. Token can be rotated
+> or revoked any time from the same page.
 
-If the server returns **403** ("not an admin of this license"): tell the user "you're not listed as an admin on this license — ask whoever owns the license to add your email under enterprise → members".
+Then stop. Don't try to call the endpoints.
+
+If the server returns **401** the token is invalid, expired, or revoked — tell the user to mint a new one. **403** means the token is missing a required scope — same dashboard, regenerate with the right scopes.
 
 ## Context window protection
 

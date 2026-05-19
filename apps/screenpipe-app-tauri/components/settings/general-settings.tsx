@@ -153,6 +153,8 @@ export default function GeneralSettings() {
           </CardContent>
         </Card>
 
+        {isEnterprise && <EnterpriseAdminTokenCard />}
+
         <Card className="border-border bg-card">
           <CardContent className="px-3 py-2.5">
             <div className="flex items-center justify-between">
@@ -247,5 +249,156 @@ export default function GeneralSettings() {
       </Card>
 
     </div>
+  );
+}
+
+/**
+ * Admin API token card — only rendered in enterprise builds.
+ *
+ * Background: org-wide team-query auth has two intentionally separate
+ * pieces. `license_key` is org-level and lives on every employee's
+ * machine (deployed by IT). `team_api_token` is per-admin: it grants
+ * the `read:devices` / `read:search` / `read:records` scopes and is
+ * what the `screenpipe-team` pi skill curls v1 endpoints with. An
+ * admin mints one at https://screenpi.pe/enterprise?tab=tokens, pastes
+ * it here once, and the desktop persists it to
+ * ~/.screenpipe/enterprise.json so the next pi-agent boot can install
+ * the skill. Revoke from the same dashboard page to kill team access.
+ *
+ * Loads the current token (server returns nothing sensitive — just
+ * presence) and shows the first/last few chars so the admin can tell
+ * "yes I have one configured" without us round-tripping the plaintext.
+ */
+function EnterpriseAdminTokenCard() {
+  const { toast } = useToast();
+  const [token, setToken] = useState("");
+  const [hasExisting, setHasExisting] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const cur = await commands.getEnterpriseTeamApiToken();
+        setHasExisting(Boolean(cur && cur.length > 0));
+      } catch {
+        /* command may not exist yet on older binaries — silent */
+      }
+    })();
+  }, []);
+
+  const handleSave = async () => {
+    const trimmed = token.trim();
+    if (!trimmed) {
+      toast({ title: "paste a token first" });
+      return;
+    }
+    if (!trimmed.startsWith("sk_ent_")) {
+      toast({
+        title: "that doesn't look like an admin token",
+        description: "expected format: sk_ent_...",
+      });
+      return;
+    }
+    setSaving(true);
+    try {
+      const res = await commands.saveEnterpriseTeamConfig(null, null, trimmed);
+      if (res.status === "error") throw new Error(res.error);
+      setHasExisting(true);
+      setToken("");
+      toast({
+        title: "admin token saved",
+        description:
+          "restart the app to install the screenpipe-team skill for the pi agent.",
+      });
+    } catch (e) {
+      toast({
+        title: "failed to save",
+        description: e instanceof Error ? e.message : String(e),
+      });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleClear = async () => {
+    setSaving(true);
+    try {
+      // Passing an empty string clears the field (see
+      // save_enterprise_team_config implementation in commands.rs).
+      const res = await commands.saveEnterpriseTeamConfig(null, null, "");
+      if (res.status === "error") throw new Error(res.error);
+      setHasExisting(false);
+      setToken("");
+      toast({ title: "admin token cleared" });
+    } catch (e) {
+      toast({
+        title: "failed to clear",
+        description: e instanceof Error ? e.message : String(e),
+      });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Card className="border-border bg-card">
+      <CardContent className="px-3 py-2.5 space-y-2">
+        <div className="flex items-center space-x-2.5">
+          <Shield className="h-4 w-4 text-muted-foreground shrink-0" />
+          <div className="flex-1 min-w-0">
+            <h3 className="text-sm font-medium text-foreground">
+              Admin API token
+            </h3>
+            <p className="text-xs text-muted-foreground">
+              Lets the pi agent query org-wide team data. Mint at{" "}
+              <button
+                className="underline text-foreground hover:text-foreground/80"
+                onClick={() =>
+                  openUrl("https://screenpi.pe/enterprise?tab=tokens")
+                }
+              >
+                screenpi.pe/enterprise → api tokens
+              </button>{" "}
+              with scopes read:devices, read:search, read:records.
+            </p>
+          </div>
+          {hasExisting && (
+            <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 shrink-0">
+              configured
+            </span>
+          )}
+        </div>
+        <div className="flex items-center gap-2">
+          <input
+            type="password"
+            value={token}
+            onChange={(e) => setToken(e.target.value)}
+            placeholder={hasExisting ? "sk_ent_… (replace)" : "sk_ent_…"}
+            className="flex-1 h-7 px-2 text-xs font-mono rounded border border-border bg-background focus:outline-none focus:ring-1 focus:ring-ring"
+            spellCheck={false}
+            autoComplete="off"
+          />
+          <Button
+            size="sm"
+            disabled={saving || !token.trim()}
+            onClick={handleSave}
+            className="h-7 text-xs"
+          >
+            save
+          </Button>
+          {hasExisting && (
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={saving}
+              onClick={handleClear}
+              className="h-7 text-xs"
+            >
+              clear
+            </Button>
+          )}
+        </div>
+      </CardContent>
+    </Card>
   );
 }
