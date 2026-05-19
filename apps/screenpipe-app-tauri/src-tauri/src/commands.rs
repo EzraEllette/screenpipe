@@ -662,6 +662,30 @@ pub fn save_enterprise_license_key(license_key: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Read the user's screenpipe cloud session JWT from `~/.screenpipe/
+/// auth.json`. Returns None when the file is missing, malformed, or the
+/// token field is empty.
+///
+/// The settings store (`store.bin → user.token`) is the canonical
+/// runtime cache for this token but is only populated after a fresh
+/// in-app sign-in. `auth.json` is the durable on-disk copy written by
+/// the pi-agent configuration flow — it survives store resets and dev-
+/// mode launches where the in-memory user object hasn't been hydrated
+/// yet. Used by the enterprise-policy hook to send the Bearer header
+/// even when the in-app user object is still null.
+#[tauri::command]
+#[specta::specta]
+pub fn get_cloud_token() -> Option<String> {
+    let path = screenpipe_core::paths::default_screenpipe_data_dir().join("auth.json");
+    let raw = std::fs::read_to_string(&path).ok()?;
+    let parsed: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    parsed
+        .get("token")
+        .and_then(|t| t.as_str())
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+}
+
 /// Persist the user's enterprise admin status + team API token so the
 /// pi-agent's `screenpipe-team` skill knows whether to install itself.
 ///

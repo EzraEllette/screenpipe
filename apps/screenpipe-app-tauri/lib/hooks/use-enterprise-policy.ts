@@ -232,6 +232,21 @@ export function useEnterprisePolicy() {
         }
       } catch {}
 
+      // Fallback: read directly from ~/.screenpipe/auth.json when the
+      // in-memory store hasn't been hydrated yet (dev launches before
+      // sign-in completes, or store resets). auth.json is the durable
+      // on-disk copy maintained by the pi-agent configuration flow.
+      if (!cloudToken) {
+        try {
+          const fallback = await commands.getCloudToken();
+          if (typeof fallback === "string" && fallback.length > 0) {
+            cloudToken = fallback;
+          }
+        } catch (e) {
+          console.warn("[enterprise] get_cloud_token failed:", e);
+        }
+      }
+
       const headers: Record<string, string> = {
         "X-License-Key": licenseKey,
         "X-Device-Id": deviceId,
@@ -312,14 +327,18 @@ export function useEnterprisePolicy() {
       // policy-fetch time).
       if (cloudToken) {
         try {
-          await commands.saveEnterpriseTeamConfig({
-            isAdmin: Boolean(data.isAdmin),
-            licenseActive: true,
-            teamApiToken: null,
-          });
+          const adminFlag = Boolean(data.isAdmin);
+          console.log(
+            `[enterprise] persisting team config: is_admin=${adminFlag} (raw response.isAdmin=${data.isAdmin})`
+          );
+          await commands.saveEnterpriseTeamConfig(adminFlag, true, null);
         } catch (e) {
           console.warn("[enterprise] failed to persist team config:", e);
         }
+      } else {
+        console.warn(
+          "[enterprise] no cloud token available — skipping team-config persist (sign in to screenpipe cloud to enable team queries)"
+        );
       }
       return { ok: true, policy: result };
     } catch (e) {
