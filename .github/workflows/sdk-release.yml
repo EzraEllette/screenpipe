@@ -159,10 +159,7 @@ jobs:
           path: ee/sdk
           merge-multiple: true
       - name: Create platform npm dirs
-        run: |
-          for triple in x86_64-apple-darwin aarch64-apple-darwin x86_64-pc-windows-msvc aarch64-pc-windows-msvc; do
-            bun x napi create-npm-dir -t "$triple"
-          done
+        run: bun x napi create-npm-dir -t .
       - name: Prepare npm packages
         run: bun run prepublishOnly
       - name: Inspect package contents
