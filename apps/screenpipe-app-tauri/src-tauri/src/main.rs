@@ -1757,6 +1757,17 @@ async fn main() {
                             // boot the server + HTTP API + DB without TCC.
                             if !disable_vision && !permissions_check.screen_recording.permitted() {
                                 warn!("Screen recording permission not granted: {:?}. Server will not start.", permissions_check.screen_recording);
+                                // Flip the recording state to a terminal Error
+                                // value so the tray stops showing "Starting…"
+                                // forever. Without this the user sees a
+                                // perpetual spinner with no signal that
+                                // anything is wrong; clearing only `is_starting`
+                                // leaves RECORDING_INFO at its default Starting
+                                // value and the health poll has no
+                                // ever_connected signal to recover from.
+                                crate::health::set_recording_status(
+                                    crate::health::RecordingStatus::Error,
+                                );
                                 is_starting_clone.store(false, std::sync::atomic::Ordering::SeqCst);
                                 return;
                             }
