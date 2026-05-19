@@ -142,13 +142,22 @@ export function MeetingNotesSection({
     };
   }, [fetchPage]);
 
-  // Refetch on visibility change — picks up changes made elsewhere
+  // Refetch on visibility change — picks up changes made elsewhere.
+  // Skip the meetings list refetch when the user is inside a note: a Mac
+  // workspace swipe fires visibilitychange, and any churn on `meeting.note`
+  // (even a byte-identical reload) round-trips through the editor's
+  // setContent, which re-parses the markdown and visually tightens loose
+  // lists and paragraph spacing.
+  const selectedIdRef = useRef(selectedId);
+  useEffect(() => {
+    selectedIdRef.current = selectedId;
+  }, [selectedId]);
   useEffect(() => {
     const handler = () => {
-      if (document.visibilityState === "visible") {
-        void fetchPage(0, false);
-        void refreshUpcoming();
-      }
+      if (document.visibilityState !== "visible") return;
+      void refreshUpcoming();
+      if (selectedIdRef.current !== null) return;
+      void fetchPage(0, false);
     };
     document.addEventListener("visibilitychange", handler);
     return () => document.removeEventListener("visibilitychange", handler);

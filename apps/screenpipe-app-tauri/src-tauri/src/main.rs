@@ -55,6 +55,7 @@ mod livetext;
 #[cfg(target_os = "macos")]
 mod livetext_ffi;
 mod meeting_live_notes;
+mod meeting_stall_notifications;
 mod oauth;
 mod owned_browser;
 // Cross-platform shape: macOS reads Arc/Chrome/Brave/Edge cookies and
@@ -1935,6 +1936,7 @@ async fn main() {
 
             crate::monitor_events::start(app_handle.clone());
             crate::meeting_live_notes::start(app_handle.clone());
+            crate::meeting_stall_notifications::start(app_handle.clone());
 
             #[cfg(target_os = "macos")]
             crate::window::reset_to_regular_and_refresh_tray(&app_handle);
