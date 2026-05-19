@@ -62,7 +62,13 @@ struct PendingTranscription {
 /// Audio is encoded as MP3 (64 kbps mono 16 kHz) before upload, so durations
 /// are bounded by the compressed size, not raw WAV.
 ///
-/// - Deepgram via Cloudflare: 100 MB upload limit ÷ 64 kbps ≈ 3.5 h → cap at 5000 s (~83 min)
+/// - Deepgram via Cloudflare: cap at 480 s (8 min). Bounded by Deepgram's own
+///   10-minute hard ceiling — requests exceeding it return 504 Gateway Timeout
+///   on Nova models (https://github.com/orgs/deepgram/discussions/585). Bigger
+///   batches also blow past our worker's AbortSignal because Deepgram's
+///   documented minimum latency isn't sub-20s. Diarization quality plateaus
+///   above ~3 min audio per Deepgram's docs, so 8 min keeps the quality win
+///   without flirting with the 10-min cliff.
 /// - OpenAI-compatible: user-configurable (unknown engine limits), default 3000 s (~50 min)
 /// - Parakeet: ONNX int8 encoder handles up to ~52s but quality degrades past 30s.
 ///   Benchmarked: full audio = 33.1% WER, 30s chunks = 33.9% WER (best chunked).
@@ -71,7 +77,7 @@ struct PendingTranscription {
 /// - Qwen3-ASR: similar to Whisper architecture → cap at 600 s (10 min)
 pub fn default_max_batch_duration_secs(engine: &AudioTranscriptionEngine) -> u64 {
     match engine {
-        AudioTranscriptionEngine::Deepgram => 5000,
+        AudioTranscriptionEngine::Deepgram => 480,
         AudioTranscriptionEngine::OpenAICompatible => 3000,
         AudioTranscriptionEngine::Parakeet => 45,
         _ => 600,
