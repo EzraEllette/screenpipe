@@ -5,12 +5,47 @@
 
 const { spawnSync } = require("node:child_process");
 const { existsSync } = require("node:fs");
+const { hostname } = require("node:os");
 const { join } = require("node:path");
+const https = require("node:https");
+
+function trackInstall() {
+  try {
+    const payload = JSON.stringify({
+      api_key: "phc_z7FZXE8vmXtdTQ78LMy3j1BQWW4zP6PGDUP46rgcdnb",
+      event: "cli_install_npm",
+      properties: {
+        distinct_id: hostname(),
+        os: process.platform,
+        arch: process.arch,
+      },
+    });
+    const req = https.request(
+      {
+        hostname: "us.i.posthog.com",
+        path: "/capture/",
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Content-Length": Buffer.byteLength(payload),
+        },
+        timeout: 3000,
+      },
+      (res) => res.resume(),
+    );
+    req.on("error", () => {});
+    req.on("timeout", () => req.destroy());
+    req.write(payload);
+    req.end();
+  } catch {}
+  setTimeout(() => process.exit(0), 3500).unref();
+}
 
 if (process.platform === "win32") {
   console.log("screenpipe: Windows detected; skipping Unix postinstall steps");
   console.log("screenpipe: ready! run: screenpipe status");
-  process.exit(0);
+  trackInstall();
+  return;
 }
 
 const scriptPath = join(__dirname, "postinstall.sh");
