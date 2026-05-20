@@ -188,6 +188,14 @@ pub struct AudioPipelineHealthInfo {
     pub meeting_app: Option<String>,
 }
 
+/// Hard ceiling on /health response time. The endpoint is on the path of
+/// the desktop tray, the meeting bar, the device watcher, and user-written
+/// launchd watchdogs — none of which expect it to stall. If
+/// `health_check_inner` blows past this budget, we'd rather serve a slightly
+/// stale cached snapshot than hang the caller (or, worse, get the whole CLI
+/// killed by a watchdog).
+const HEALTH_RESPONSE_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
+
 #[oasgen]
 pub async fn health_check(State(state): State<Arc<AppState>>) -> JsonResponse<HealthCheckResponse> {
     let now_ts = std::time::SystemTime::now()
@@ -207,7 +215,25 @@ pub async fn health_check(State(state): State<Arc<AppState>>) -> JsonResponse<He
         }
     }
 
-    let response = health_check_inner(&state).await;
+    let response = match tokio::time::timeout(HEALTH_RESPONSE_BUDGET, health_check_inner(&state))
+        .await
+    {
+        Ok(r) => r,
+        Err(_) => {
+            // Inner computation exceeded the budget. Serve the last cached
+            // snapshot (even if past TTL) so callers see continuity. If no
+            // snapshot exists yet, return a minimal "degraded" response —
+            // never block forever.
+            warn!(
+                "health_check: inner computation exceeded {:?} budget — serving last cached snapshot",
+                HEALTH_RESPONSE_BUDGET
+            );
+            let cached = HEALTH_CACHE.read().await.1.clone();
+            // Don't refresh the cache timestamp here — the next caller
+            // should re-attempt rather than amortize the stale entry.
+            return JsonResponse(cached.unwrap_or_else(degraded_response));
+        }
+    };
 
     // Cache the result
     {
@@ -216,6 +242,35 @@ pub async fn health_check(State(state): State<Arc<AppState>>) -> JsonResponse<He
     }
 
     JsonResponse(response)
+}
+
+/// Minimal response served when `/health` times out before any cached
+/// snapshot is available (cold start + slow inner). Status 503 so callers
+/// can tell this apart from a normal response.
+fn degraded_response() -> HealthCheckResponse {
+    HealthCheckResponse {
+        status: "degraded".to_string(),
+        status_code: 503,
+        last_frame_timestamp: None,
+        last_audio_timestamp: None,
+        frame_status: "unknown".to_string(),
+        audio_status: "unknown".to_string(),
+        message: "health check timed out before producing a snapshot".to_string(),
+        verbose_instructions: None,
+        device_status_details: None,
+        monitors: None,
+        pipeline: None,
+        audio_pipeline: None,
+        accessibility: None,
+        ui_recorder: None,
+        pool_stats: None,
+        vision_db_write_stalled: false,
+        audio_db_write_stalled: false,
+        drm_content_paused: false,
+        schedule_paused: false,
+        hostname: None,
+        version: None,
+    }
 }
 
 async fn get_audio_reconciliation_backlog(
@@ -751,18 +806,34 @@ async fn health_check_inner(state: &Arc<AppState>) -> HealthCheckResponse {
                 .load(Ordering::Relaxed);
 
             // Query meeting detector state — timeout the RwLock read so it
-            // can't stall the health check if writes are contended.
-            let (meeting_detected, meeting_app) =
-                if let Some(detector) = state.audio_manager.meeting_detector().await {
+            // can't stall the health check if writes are contended. The
+            // comment used to say "timeout this" but no timeout was wired
+            // in — unresponsive /health is exactly what users hit in the
+            // field (jeffutter on macOS, May 2026), enough that they
+            // wrote launchd watchdogs to kill the CLI when /health stops
+            // answering. Any future await added here must stay bounded.
+            let (meeting_detected, meeting_app) = match tokio::time::timeout(
+                std::time::Duration::from_millis(500),
+                state.audio_manager.meeting_detector(),
+            )
+            .await
+            {
+                Ok(Some(detector)) => {
                     let in_meeting = detector.is_in_meeting();
                     // v2 detection reports meeting state via AtomicBool flag;
                     // the specific app name is tracked in the v2 detection loop,
                     // not exposed through MeetingDetector.
                     let app: Option<String> = None;
                     (Some(in_meeting), app)
-                } else {
+                }
+                Ok(None) => (None, None),
+                Err(_) => {
+                    warn!(
+                        "health_check: audio_manager.meeting_detector() RwLock contended >500ms, skipping meeting fields"
+                    );
                     (None, None)
-                };
+                }
+            };
 
             let device_names: Vec<String> = audio_devices.iter().map(|d| d.to_string()).collect();
             let per_device_levels = state.audio_metrics.per_device_rms_snapshot();
