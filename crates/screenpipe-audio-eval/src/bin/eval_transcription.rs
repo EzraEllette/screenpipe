@@ -142,7 +142,10 @@ mod tests {
         assert_eq!(specs.len(), 1);
         assert_eq!(specs[0].name, "tiny");
         assert_eq!(specs[0].cap, 50);
-        assert!(matches!(specs[0].engine, AudioTranscriptionEngine::WhisperTiny));
+        assert!(matches!(
+            specs[0].engine,
+            AudioTranscriptionEngine::WhisperTiny
+        ));
     }
 
     #[test]
@@ -211,7 +214,10 @@ mod tests {
     #[test]
     fn non_numeric_cap_errors() {
         let err = parse_models("tiny=lots", 50).unwrap_err().to_string();
-        assert!(err.contains("invalid cap"), "expected parse error in: {err}");
+        assert!(
+            err.contains("invalid cap"),
+            "expected parse error in: {err}"
+        );
     }
 
     #[test]
@@ -351,10 +357,7 @@ async fn run_model(
 
     let mut json = serde_json::to_value(&score)?;
     if let Some(obj) = json.as_object_mut() {
-        obj.insert(
-            "model".into(),
-            serde_json::Value::String(spec.name.clone()),
-        );
+        obj.insert("model".into(), serde_json::Value::String(spec.name.clone()));
         obj.insert(
             "wall_clock_seconds".into(),
             serde_json::Value::from(wall_clock),
@@ -371,7 +374,11 @@ async fn run_model(
 async fn main() -> Result<()> {
     let args = Args::parse();
     let specs = parse_models(&args.models, args.max_utterances)?;
-    let max_cap = specs.iter().map(|s| s.cap).max().unwrap_or(args.max_utterances);
+    let max_cap = specs
+        .iter()
+        .map(|s| s.cap)
+        .max()
+        .unwrap_or(args.max_utterances);
 
     eprintln!("loading librispeech: {}", args.librispeech_dir.display());
     let mut utterances = load_utterances(&args.librispeech_dir).context("load utterances")?;
