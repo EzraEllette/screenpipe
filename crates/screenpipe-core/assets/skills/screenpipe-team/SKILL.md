@@ -9,7 +9,7 @@ Query the customer's team telemetry. Data lives in the customer's own Azure Blob
 
 ## Auth
 
-The skill authenticates with an **enterprise admin API token** the admin minted once on `https://screenpi.pe/enterprise?tab=tokens` (with scopes `read:devices`, `read:search`, `read:records`) and pasted into Settings → Enterprise → Admin API token. The desktop stored it in `~/.screenpipe/enterprise.json` under `team_api_token`.
+The skill authenticates with an **enterprise admin API token** the admin minted once on `https://screenpi.pe/enterprise?tab=tokens` (with scopes `read:devices`, `read:search`, `read:records`) and pasted into Settings → Privacy → Admin Team API Token. The desktop stored it in `~/.screenpipe/enterprise.json` under `team_api_token`.
 
 License-key + token are intentionally separate concerns:
 - `license_key` proves *which org* this machine belongs to (deployed by IT, same on every employee's device).
@@ -26,7 +26,7 @@ If `TEAM_TOKEN` is empty / null, tell the user verbatim:
 > I need an admin API token to query team data. Open
 > https://screenpi.pe/enterprise?tab=tokens, create one with the
 > `read:devices`, `read:search`, `read:records` scopes, then paste it
-> into Settings → Enterprise → Admin API token. Token can be rotated
+> into Settings → Privacy → Admin Team API Token. Token can be rotated
 > or revoked any time from the same page.
 
 Then stop. Don't try to call the endpoints.
