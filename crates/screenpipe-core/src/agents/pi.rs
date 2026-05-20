@@ -195,7 +195,10 @@ impl PiExecutor {
     /// We re-check on every pi-agent boot, so role downgrades + license
     /// expirations wipe the skill automatically.
     pub fn ensure_screenpipe_team_skill(project_dir: &Path) -> Result<()> {
-        let skill_dir = project_dir.join(".pi").join("skills").join("screenpipe-team");
+        let skill_dir = project_dir
+            .join(".pi")
+            .join("skills")
+            .join("screenpipe-team");
         let skill_path = skill_dir.join("SKILL.md");
 
         let should_install = Self::is_enterprise_admin();
@@ -244,7 +247,10 @@ impl PiExecutor {
             Ok(v) => v,
             Err(_) => return false,
         };
-        let is_admin = parsed.get("is_admin").and_then(|v| v.as_bool()).unwrap_or(false);
+        let is_admin = parsed
+            .get("is_admin")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         // license_active defaults to true if the field is absent so older
         // enterprise.json files don't lose skill access on upgrade. The
         // website-side claim flow writes `license_active: false` when a

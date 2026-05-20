@@ -20,8 +20,8 @@ use super::{
     deepgram_live,
     events::{
         MeetingAudioFrame, MeetingAudioTap, MeetingLifecycleEvent, MeetingStreamingError,
-        MeetingStreamingSessionEnded, MeetingStreamingSessionStarted, MeetingStreamingStatusChanged,
-        MeetingTranscriptDelta, MeetingTranscriptFinal,
+        MeetingStreamingSessionEnded, MeetingStreamingSessionStarted,
+        MeetingStreamingStatusChanged, MeetingTranscriptDelta, MeetingTranscriptFinal,
     },
     openai_realtime, selected_engine, MeetingStreamingConfig, MeetingStreamingProvider,
 };
