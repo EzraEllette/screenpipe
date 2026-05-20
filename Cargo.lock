@@ -7813,6 +7813,7 @@ name = "screenpipe-audio-eval"
 version = "0.3.338"
 dependencies = [
  "anyhow",
+ "audiopipe",
  "chrono",
  "clap",
  "hound",
