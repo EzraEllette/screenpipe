@@ -311,13 +311,16 @@ async function copySystemBinary(binaryName, destination) {
 	console.log(`using system ${binaryName}: ${source} -> ${destination}`);
 }
 
-// Regression guard for 9a68ae9de — static layer.
-// Inspects each macOS sidecar with `otool -L` and rejects any dylib reference
-// outside the safe-paths whitelist. Safe = `/usr/lib/`, `/System/Library/`,
-// or `@executable_path`/`@rpath`/`@loader_path` — the only locations dyld can
-// resolve on an arbitrary user's Mac. Everything else (brew's Cellar,
-// MacPorts, /Users/...) is fragile and will SIGABRT in production.
-// Covers BOTH archs since `otool` is a static analyzer.
+// Regression guard for 9a68ae9de — static layer. Covers every macOS sidecar,
+// not just ffmpeg/ffprobe (bun + ui_monitor have the same dyld-fragility risk).
+// Two checks per binary:
+//   1. arch-mismatch: filename suffix must match the actual Mach-O arch. A
+//      mislabeled binary (e.g. x86_64 bytes shipped as `*-aarch64-apple-darwin`)
+//      crashes on the user's Mac before any code runs.
+//   2. dyld-path: every `otool -L` entry must point to `/usr/lib/`,
+//      `/System/Library/`, or `@executable_path`/`@rpath`/`@loader_path`.
+//      Anything else (brew's Cellar, MacPorts, /Users/...) is fragile and
+//      will SIGABRT in production. This is the v2.4.243 crash class.
 async function verifyMacosSidecarsSelfContained() {
 	const SAFE_PREFIXES = [
 		'/usr/lib/',
@@ -326,15 +329,23 @@ async function verifyMacosSidecarsSelfContained() {
 		'@rpath',
 		'@loader_path',
 	];
-	const sidecars = [
-		'ffmpeg-aarch64-apple-darwin',
-		'ffprobe-aarch64-apple-darwin',
-		'ffmpeg-x86_64-apple-darwin',
-		'ffprobe-x86_64-apple-darwin',
-	];
+	const sidecars = (await fs.readdir('.'))
+		.filter((n) => /-(aarch64|x86_64)-apple-darwin$/.test(n))
+		.sort();
+	if (sidecars.length === 0) return;
 	console.log('verifying macOS sidecars are self-contained...');
 	for (const bin of sidecars) {
-		if (!(await fs.exists(bin))) continue;
+		const expectedArch = bin.endsWith('-aarch64-apple-darwin') ? 'arm64' : 'x86_64';
+		const fileOut = (await $`file ${bin}`.text()).trim();
+		// `file` on a fat binary lists every slice; on a thin binary, just one.
+		// Either way the expected arch token must appear.
+		if (!new RegExp(`\\b${expectedArch}\\b`).test(fileOut)) {
+			throw new Error(
+				`sidecar ${bin} has wrong arch:\n` +
+				`  ${fileOut}\n` +
+				`filename promises ${expectedArch} — Tauri ships it under the matching target.`
+			);
+		}
 		const out = await $`otool -L ${bin}`.text();
 		for (const raw of out.split('\n')) {
 			const line = raw.trim();
@@ -350,7 +361,7 @@ async function verifyMacosSidecarsSelfContained() {
 				`see commit 9a68ae9de for context.`
 			);
 		}
-		console.log(`  ok: ${bin}`);
+		console.log(`  ok: ${bin} (${expectedArch})`);
 	}
 }
 
