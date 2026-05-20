@@ -238,9 +238,7 @@ impl AudioStream {
         windows_input_aec: bool,
         macos_input_vpio: bool,
     ) -> Result<(AudioStreamConfig, tokio::task::JoinHandle<()>)> {
-        let (cpal_audio_device, config) = get_cpal_device_and_config(device).await?;
-        let audio_config = AudioStreamConfig::from(&config);
-        let channels = config.channels();
+        let (cpal_audio_device, mut config) = get_cpal_device_and_config(device).await?;
         let is_running_weak = Arc::downgrade(is_running);
         let input_aec = windows_input_aec && device.device_type == super::device::DeviceType::Input;
         let input_vpio = macos_input_vpio
@@ -250,9 +248,33 @@ impl AudioStream {
         #[cfg(target_os = "macos")]
         {
             if macos_input_vpio && input_vpio {
+                let original_rate = config.sample_rate().0;
                 info!(
                     device = %device,
                     "screenpipe-audio: enabling VoiceProcessingIO (AEC) on default microphone"
+                );
+                config = cpal_audio_device.default_input_config().map_err(|e| {
+                    anyhow!(
+                        "could not get default input config for VoiceProcessingIO on {}: {}",
+                        device,
+                        e
+                    )
+                })?;
+                let vpio_rate = config.sample_rate().0;
+                if vpio_rate != original_rate {
+                    info!(
+                        device = %device,
+                        original_rate,
+                        vpio_rate,
+                        "screenpipe-audio: VPIO config rate differs from originally-picked config; \
+                         using hardware native rate"
+                    );
+                }
+                info!(
+                    device = %device,
+                    sample_rate = vpio_rate,
+                    channels = config.channels(),
+                    "screenpipe-audio: using default input config for VoiceProcessingIO"
                 );
             } else if macos_input_vpio && device.device_type == super::device::DeviceType::Input {
                 info!(
@@ -261,6 +283,9 @@ impl AudioStream {
                 );
             }
         }
+
+        let audio_config = AudioStreamConfig::from(&config);
+        let channels = config.channels();
 
         let thread = Self::spawn_audio_thread(
             cpal_audio_device,
@@ -361,6 +386,41 @@ impl AudioStream {
                             error!(
                                 "could not get default_input_config for {}: {} (primary: {})",
                                 device_name, e, primary_err
+                            );
+                            None
+                        }
+                    }
+                }
+                #[cfg(target_os = "macos")]
+                Err(primary_err) if macos_input_vpio => {
+                    warn!(
+                        device = %device_name,
+                        rate = config.sample_rate().0,
+                        channels = channels,
+                        format = ?config.sample_format(),
+                        "VoiceProcessingIO stream creation failed ({}); retrying with HAL (VPIO disabled)",
+                        primary_err,
+                    );
+                    let fallback_cb = create_error_callback(
+                        device_name.clone(),
+                        is_running_weak,
+                        is_disconnected,
+                        stream_control_tx,
+                    );
+                    match build_input_stream(
+                        &device,
+                        &config,
+                        channels,
+                        tx,
+                        fallback_cb,
+                        windows_input_aec,
+                        false,
+                    ) {
+                        Ok(s) => Some(s),
+                        Err(fallback_err) => {
+                            error!(
+                                "HAL fallback also failed for {} after VPIO error: {} (VPIO error: {})",
+                                device_name, fallback_err, primary_err
                             );
                             None
                         }
