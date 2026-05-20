@@ -58,6 +58,7 @@ import {
   normalizeAppTag,
   formatShortcutDisplay,
 } from "@/lib/chat-utils";
+import { sanitizeToolCallXml } from "@/lib/utils/sanitize-tool-call-xml";
 import { useAutoSuggestions, type Suggestion } from "@/lib/hooks/use-auto-suggestions";
 import { SummaryCards, type ConnectionSetupSuggestion } from "@/components/chat/summary-cards";
 import { type CustomTemplate } from "@/lib/summary-templates";
@@ -1855,6 +1856,10 @@ function AppStatsBlock({ content }: { content: string }) {
 
 // Markdown renderer for text blocks
 function MarkdownBlock({ text, isUser }: { text: string; isUser: boolean }) {
+  // Assistant messages occasionally contain raw tool-call XML the model emitted
+  // as text — rewrite it to a fenced code block so rehypeRaw doesn't collapse
+  // the unknown tags and bleed the args into the prose. See sanitize-tool-call-xml.ts.
+  const renderText = isUser ? text : sanitizeToolCallXml(text);
   return (
     <MemoizedReactMarkdown
       className={cn(
@@ -2023,7 +2028,7 @@ function MarkdownBlock({ text, isUser }: { text: string; isUser: boolean }) {
         },
       }}
     >
-      {text}
+      {renderText}
     </MemoizedReactMarkdown>
   );
 }
