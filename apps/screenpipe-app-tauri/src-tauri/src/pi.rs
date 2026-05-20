@@ -257,7 +257,7 @@ fn check_package_bin(pkg_dir: std::path::PathBuf, bin_name: &str) -> Option<Stri
     }
 }
 
-const PI_PACKAGE: &str = "@mariozechner/pi-coding-agent@0.60.0";
+const PI_PACKAGE: &str = "@mariozechner/pi-coding-agent@0.73.1";
 const SCREENPIPE_API_URL: &str = "https://api.screenpi.pe/v1";
 
 /// Pool of Pi sessions — each session_id gets its own PiManager/process.
@@ -495,11 +495,14 @@ fn seed_pi_package_json(install_dir: &std::path::Path) {
                         );
                         changed = true;
                     }
-                    // Ensure @anthropic-ai/sdk is a direct dependency (Windows bun fix)
+                    // Ensure @anthropic-ai/sdk is a direct dependency (Windows bun fix).
+                    // Pin must track @mariozechner/pi-ai's required range — mismatched
+                    // ranges leave bun unable to resolve a single version. pi-ai 0.73.1
+                    // requires ^0.91.1.
                     if !contents.contains("@anthropic-ai/sdk") {
                         let deps = obj.entry("dependencies").or_insert_with(|| json!({}));
                         if let Some(deps_obj) = deps.as_object_mut() {
-                            deps_obj.insert("@anthropic-ai/sdk".to_string(), json!("^0.73.0"));
+                            deps_obj.insert("@anthropic-ai/sdk".to_string(), json!("^0.91.1"));
                         }
                         changed = true;
                     }
@@ -516,7 +519,7 @@ fn seed_pi_package_json(install_dir: &std::path::Path) {
     }
     let pkg_json = json!({
         "dependencies": {
-            "@anthropic-ai/sdk": "^0.73.0"
+            "@anthropic-ai/sdk": "^0.91.1"
         },
         "overrides": {
             "hosted-git-info": {
@@ -552,7 +555,7 @@ fn is_local_pi_version_current(install_dir: &std::path::Path) -> bool {
         Some(v) => v,
         None => return false,
     };
-    // PI_PACKAGE is "@mariozechner/pi-coding-agent@0.60.0" — extract version after last '@'
+    // PI_PACKAGE is "@mariozechner/pi-coding-agent@<ver>" — extract version after last '@'
     let expected = PI_PACKAGE.rsplit('@').next().unwrap_or("");
     if installed != expected {
         info!(
