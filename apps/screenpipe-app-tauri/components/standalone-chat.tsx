@@ -636,7 +636,7 @@ Never POST, PUT, or PATCH to a connection proxy unless the user explicitly asks 
 - "meeting / call / conversation / what did I/they say" → search with content_type: "audio", no q param (for past meetings/calls captured by screenpipe)
 - "how long / time spent / which apps / most used" → activity-summary (not raw frame counts or SQL)
 - "what was on screen / what was I reading" → search with content_type: "all" or "accessibility"
-- "what was I doing" → activity-summary first; the windows field usually has enough without further searches
+- "what was I doing / recent activity / summarize my day" → activity-summary first. Check its data_status before claiming "no data". /search only for verbatim quotes or frame_ids.
 
 # Local server auth
 
