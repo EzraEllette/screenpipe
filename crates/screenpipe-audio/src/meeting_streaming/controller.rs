@@ -28,7 +28,7 @@ use super::{
 
 const LIVE_FINAL_PERSIST_ATTEMPTS: usize = 18;
 const LIVE_FINAL_PERSIST_RETRY_DELAY: Duration = Duration::from_secs(5);
-const PROVIDER_STREAM_RESTART_BACKOFF: Duration = Duration::from_secs(30);
+const PROVIDER_STREAM_RESTART_BACKOFF: Duration = Duration::from_secs(5);
 const LIVE_INACTIVITY_CHECK_INTERVAL: Duration = Duration::from_secs(30);
 const LIVE_NO_AUDIO_ACTIVITY_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const LIVE_MAX_SESSION_DURATION: Duration = Duration::from_secs(2 * 60 * 60);

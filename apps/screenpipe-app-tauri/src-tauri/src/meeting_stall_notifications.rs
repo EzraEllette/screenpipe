@@ -19,7 +19,6 @@
 
 use futures::StreamExt;
 use serde::Deserialize;
-use serde_json::json;
 use tauri::AppHandle;
 use tauri_plugin_notification::NotificationExt;
 use tracing::{debug, error, warn};
@@ -102,26 +101,12 @@ fn handle_transcript_stall(app: &AppHandle, event: StallEvent) {
         event.meeting_id, event.provider, elapsed
     );
 
-    let mut actions = Vec::new();
-    if let Some(meeting_id) = event.meeting_id {
-        actions.push(json!({
-            "id": "open-live-notes",
-            "action": "open-live-notes",
-            "label": "open note",
-            "type": "deeplink",
-            "url": format!("screenpipe://meeting/{meeting_id}?live=1"),
-            "primary": true,
-        }));
-    }
-
     client::send_typed_with_actions(
         "live transcript not flowing",
-        format!(
-            "audio is being captured but no transcript has arrived in {elapsed}s — the streaming provider may need a restart"
-        ),
+        format!("audio is being captured but no transcript has arrived in {elapsed}s — retrying in the background"),
         "meeting",
         Some(30_000),
-        actions,
+        Vec::new(),
     );
 }
 
