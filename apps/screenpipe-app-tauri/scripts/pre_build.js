@@ -564,50 +564,46 @@ if (platform == 'windows') {
 
 /* ########## macOS ########## */
 if (platform == 'macos') {
-	const inCI = process.env.CI === 'true' || process.env.GITHUB_ACTIONS === 'true';
-	const releaseTarget = process.env.SCREENPIPE_RELEASE_TARGET;
+	// Always use the self-contained osxexperts.net binaries. The
+	// `copySystemBinary` path that briefly lived here (b73cf7f93) ships
+	// brew's dynamically-linked ffmpeg as-is, with hardcoded
+	// `/opt/homebrew/Cellar/ffmpeg/<rev>/lib/lib*.dylib` references.
+	// CI's brew rev (`8.1_1`) is almost never the rev a user has at
+	// runtime (`8.1`, `8.1_2`, …), so dyld fails with
+	//   Library not loaded: …/Cellar/ffmpeg/8.1_1/lib/libavdevice.62.dylib
+	// and ffmpeg SIGABRTs on every invocation. osxexperts.net binaries
+	// are statically linked and have zero external deps — safe to copy
+	// into any .app.
+	if (!(await fs.exists(`ffmpeg-aarch64-apple-darwin`))) {
+		await $`wget --no-config ${config.macos.ffmpegUrlArm} -O ffmpeg-aarch64.zip`;
+		await $`unzip -o ffmpeg-aarch64.zip -d ffmpeg-aarch64`;
+		await $`cp ffmpeg-aarch64/ffmpeg ffmpeg-aarch64-apple-darwin`;
+		await $`rm ffmpeg-aarch64.zip`;
+		await $`rm -rf ffmpeg-aarch64`;
+	}
 
-	if (inCI && releaseTarget) {
-		if (!(await fs.exists(`ffmpeg-${releaseTarget}`))) {
-			await copySystemBinary('ffmpeg', `ffmpeg-${releaseTarget}`);
-		}
-		if (!(await fs.exists(`ffprobe-${releaseTarget}`))) {
-			await copySystemBinary('ffprobe', `ffprobe-${releaseTarget}`);
-		}
-	} else {
-		// Setup ffmpeg and ffprobe for both arm64 and x86_64
-		// ref: https://github.com/nathanbabcock/ffmpeg-sidecar/blob/b0ab2e1233451f219e302bf78cbbb6a5a8e85aa4/src/download.rs#L31
-		if (!(await fs.exists(`ffmpeg-aarch64-apple-darwin`))) {
-			await $`wget --no-config ${config.macos.ffmpegUrlArm} -O ffmpeg-aarch64.zip`;
-			await $`unzip -o ffmpeg-aarch64.zip -d ffmpeg-aarch64`;
-			await $`cp ffmpeg-aarch64/ffmpeg ffmpeg-aarch64-apple-darwin`;
-			await $`rm ffmpeg-aarch64.zip`;
-			await $`rm -rf ffmpeg-aarch64`;
-		}
+	if (!(await fs.exists(`ffprobe-aarch64-apple-darwin`))) {
+		await $`wget --no-config ${config.macos.ffprobeUrlArm} -O ffprobe-aarch64.zip`;
+		await $`unzip -o ffprobe-aarch64.zip -d ffprobe-aarch64`;
+		await $`cp ffprobe-aarch64/ffprobe ffprobe-aarch64-apple-darwin`;
+		await $`rm ffprobe-aarch64.zip`;
+		await $`rm -rf ffprobe-aarch64`;
+	}
 
-		if (!(await fs.exists(`ffprobe-aarch64-apple-darwin`))) {
-			await $`wget --no-config ${config.macos.ffprobeUrlArm} -O ffprobe-aarch64.zip`;
-			await $`unzip -o ffprobe-aarch64.zip -d ffprobe-aarch64`;
-			await $`cp ffprobe-aarch64/ffprobe ffprobe-aarch64-apple-darwin`;
-			await $`rm ffprobe-aarch64.zip`;
-			await $`rm -rf ffprobe-aarch64`;
-		}
+	if (!(await fs.exists(`ffmpeg-x86_64-apple-darwin`))) {
+		await $`wget --no-config ${config.macos.ffmpegUrlx86_64} -O ffmpeg-x86_64.zip`;
+		await $`unzip -o ffmpeg-x86_64.zip -d ffmpeg-x86_64`;
+		await $`cp ffmpeg-x86_64/ffmpeg ffmpeg-x86_64-apple-darwin`;
+		await $`rm ffmpeg-x86_64.zip`;
+		await $`rm -rf ffmpeg-x86_64`;
+	}
 
-		if (!(await fs.exists(`ffmpeg-x86_64-apple-darwin`))) {
-			await $`wget --no-config ${config.macos.ffmpegUrlx86_64} -O ffmpeg-x86_64.zip`;
-			await $`unzip -o ffmpeg-x86_64.zip -d ffmpeg-x86_64`;
-			await $`cp ffmpeg-x86_64/ffmpeg ffmpeg-x86_64-apple-darwin`;
-			await $`rm ffmpeg-x86_64.zip`;
-			await $`rm -rf ffmpeg-x86_64`;
-		}
-
-		if (!(await fs.exists(`ffprobe-x86_64-apple-darwin`))) {
-			await $`wget --no-config ${config.macos.ffprobeUrlx86_64} -O ffprobe-x86_64.zip`;
-			await $`unzip -o ffprobe-x86_64.zip -d ffprobe-x86_64`;
-			await $`cp ffprobe-x86_64/ffprobe ffprobe-x86_64-apple-darwin`;
-			await $`rm ffprobe-x86_64.zip`;
-			await $`rm -rf ffprobe-x86_64`;
-		}
+	if (!(await fs.exists(`ffprobe-x86_64-apple-darwin`))) {
+		await $`wget --no-config ${config.macos.ffprobeUrlx86_64} -O ffprobe-x86_64.zip`;
+		await $`unzip -o ffprobe-x86_64.zip -d ffprobe-x86_64`;
+		await $`cp ffprobe-x86_64/ffprobe ffprobe-x86_64-apple-darwin`;
+		await $`rm ffprobe-x86_64.zip`;
+		await $`rm -rf ffprobe-x86_64`;
 	}
 
   console.log('FFMPEG and FFPROBE checks completed');
