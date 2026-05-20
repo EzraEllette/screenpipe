@@ -604,34 +604,6 @@ fn find_local_pi_entrypoint() -> Option<String> {
     }
 }
 
-/// Extract the plain-text content from a pi-mono `message` JSON value (the
-/// shape that ships in `message_start`/`message_end` events). pi-mono encodes
-/// user messages as either `content: "string"` or
-/// `content: [{type: "text", text: "..."}, ...]`. We concatenate all text
-/// parts in order. Used to match an incoming user message against the queued
-/// prompt rail's preview text.
-fn extract_user_message_text(msg: &serde_json::Value) -> String {
-    let content = match msg.get("content") {
-        Some(c) => c,
-        None => return String::new(),
-    };
-    if let Some(s) = content.as_str() {
-        return s.to_string();
-    }
-    if let Some(arr) = content.as_array() {
-        let mut out = String::new();
-        for part in arr {
-            if part.get("type").and_then(|t| t.as_str()) == Some("text") {
-                if let Some(t) = part.get("text").and_then(|v| v.as_str()) {
-                    out.push_str(t);
-                }
-            }
-        }
-        return out;
-    }
-    String::new()
-}
-
 fn find_pi_executable() -> Option<String> {
     // 1. Check screenpipe-managed local install first (preferred — we control the deps)
     if let Some(js) = find_local_pi_entrypoint() {

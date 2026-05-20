@@ -73,6 +73,7 @@ const READY_EVENT: &str = "owned-browser:ready";
 /// user's real browser. The sidebar answers through the
 /// `owned_browser_resolve_session_access` command.
 const SESSION_ACCESS_REQUEST_EVENT: &str = "owned-browser:session-access-request";
+#[cfg(target_os = "windows")]
 const V20_COOKIE_BLOCK_EVENT: &str = "owned-browser:v20-cookie-blocked";
 const SESSION_ACCESS_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -129,6 +130,7 @@ struct BrowserSessionAccessRequestPayload {
     host: String,
 }
 
+#[cfg(target_os = "windows")]
 #[derive(serde::Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct V20CookieBlockPayload {
