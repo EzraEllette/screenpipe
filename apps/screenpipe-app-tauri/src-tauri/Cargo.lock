@@ -10580,7 +10580,7 @@ dependencies = [
 
 [[package]]
 name = "screenpipe-app"
-version = "2.4.241"
+version = "2.4.243"
 dependencies = [
  "aes",
  "aes-gcm",
