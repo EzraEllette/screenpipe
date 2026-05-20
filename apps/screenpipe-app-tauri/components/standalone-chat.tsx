@@ -4083,13 +4083,32 @@ export function StandaloneChat({
     }
   }, [messages, isUserScrolledUp, isLoading, isStreaming]);
 
-  const handleMessagesScroll = useCallback(() => {
+  const recomputeScrolledUp = useCallback(() => {
     const el = scrollContainerRef.current;
     if (!el) return;
-    // Consider "near bottom" if within 150px of the bottom
-    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 150;
-    setIsUserScrolledUp(!nearBottom);
+    // Consider "near bottom" if within 150px of the bottom.
+    // Also treat "nothing to scroll" (scrollHeight <= clientHeight) as at-bottom.
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    const nearBottom = distanceFromBottom < 150;
+    setIsUserScrolledUp((prev) => (prev === !nearBottom ? prev : !nearBottom));
   }, []);
+
+  const handleMessagesScroll = recomputeScrolledUp;
+
+  // Re-evaluate scroll position when content/layout changes, not just on scroll.
+  // Without this, isUserScrolledUp can stay stale after the loader disappears,
+  // content shrinks, or the container resizes — showing a phantom "new content" pill.
+  useEffect(() => {
+    recomputeScrolledUp();
+  }, [messages, isLoading, isStreaming, recomputeScrolledUp]);
+
+  useEffect(() => {
+    const el = scrollContainerRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(() => recomputeScrolledUp());
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [recomputeScrolledUp]);
 
   const scrollToBottom = useCallback(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
