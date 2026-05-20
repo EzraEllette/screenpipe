@@ -182,8 +182,6 @@ export type Settings = SettingsStore & {
 	appendTypedTextToMeetingNote?: boolean;
 	/** User's name for speaker identification — input device audio will be labeled with this name */
 	userName?: string;
-	/** When true, screen capture continues but OCR text extraction is skipped (saves CPU) */
-	disableOcr?: boolean;
 	/** Filters pushed from team — merged with local filters for recording */
 	teamFilters?: {
 		ignoredWindows: string[];
@@ -505,7 +503,6 @@ let DEFAULT_SETTINGS: Settings = {
 			searchShortcut: "Control+Super+K",
 			lockVaultShortcut: "Super+Shift+L",
 			disableVision: false,
-			disableOcr: false,
 			useAllMonitors: true,
 			showShortcutOverlay: true,
 			chatHistory: {
@@ -547,7 +544,6 @@ export function createDefaultSettingsObject(): Settings {
 		DEFAULT_SETTINGS.lockVaultShortcut = p === "windows" ? "Ctrl+Shift+L" : "Super+Shift+L";
 
 		if (p === "windows") {
-			DEFAULT_SETTINGS.disableOcr = true;
 			DEFAULT_SETTINGS.overlayMode = "window";
 		}
 
