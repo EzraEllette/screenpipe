@@ -261,7 +261,8 @@ impl UiRecorder {
             // actually wants clipboard capture; otherwise the recorder
             // emits app_switch / window_focus events only.
             if self.config.capture_clipboard {
-                let clipboard_tx = spawn_clipboard_worker_thread();
+                let clipboard_tx =
+                    spawn_clipboard_worker_thread(current_app.clone(), current_window.clone());
                 let stop_p = stop.clone();
                 let tx_p = tx.clone();
                 let config_p = self.config.clone();
@@ -334,7 +335,10 @@ pub fn request_input_monitoring() -> bool {
 /// to a single dedicated thread keeps NSPasteboard access on a stable
 /// thread (the worker hops to the main queue itself) and bounds the
 /// in-flight read count.
-fn spawn_clipboard_worker_thread() -> Sender<ClipboardRequest> {
+fn spawn_clipboard_worker_thread(
+    current_app: Arc<ArcSwap<Option<String>>>,
+    current_window: Arc<ArcSwap<Option<String>>>,
+) -> Sender<ClipboardRequest> {
     let (clipboard_tx, clipboard_rx) = bounded::<ClipboardRequest>(4);
     thread::Builder::new()
         .name("clipboard-capture".into())
@@ -364,8 +368,8 @@ fn spawn_clipboard_worker_thread() -> Sender<ClipboardRequest> {
                         operation: req.operation,
                         content,
                     },
-                    app_name: None,
-                    window_title: None,
+                    app_name: current_app.load().as_ref().clone(),
+                    window_title: current_window.load().as_ref().clone(),
                     browser_url: None,
                     element: None,
                     frame_id: None,
@@ -596,7 +600,7 @@ fn run_event_tap(
 
     // Single worker thread for clipboard capture — avoids spawning a thread per
     // Cmd+C/X and avoids blocking the event tap callback on Cmd+V.
-    let clipboard_tx = spawn_clipboard_worker_thread();
+    let clipboard_tx = spawn_clipboard_worker_thread(current_app.clone(), current_window.clone());
 
     let state = Box::leak(Box::new(TapState {
         tx,
