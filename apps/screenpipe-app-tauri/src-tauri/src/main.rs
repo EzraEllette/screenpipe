@@ -50,6 +50,7 @@ mod embedded_server;
 mod enterprise_policy;
 mod enterprise_sync;
 mod hardware;
+mod google_calendar;
 mod ics_calendar;
 mod livetext;
 #[cfg(target_os = "macos")]
@@ -2032,6 +2033,14 @@ async fn main() {
             tauri::async_runtime::spawn(async move {
                 tokio::time::sleep(tokio::time::Duration::from_secs(15)).await;
                 ics_calendar::start_ics_calendar_poller(ics_app_handle).await;
+            });
+
+            // Start Google Calendar publisher (polls /connections/google-calendar/events
+            // every 60s and pushes into the calendar_events bus). Required for the
+            // 2-3 min prewarm toast to work for users on gmail/gcal.
+            let gcal_app_handle = app_handle.clone();
+            tauri::async_runtime::spawn(async move {
+                google_calendar::start_google_calendar_publisher(gcal_app_handle).await;
             });
 
             // Enterprise telemetry sync (no-op stub on consumer builds).
