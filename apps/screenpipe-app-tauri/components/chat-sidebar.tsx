@@ -994,12 +994,16 @@ function ScheduledRow({
       <span className="truncate flex-1 text-xs">
         {pipe.title || pipe.pipeName}
       </span>
-      <PipeActivityIndicator
-        kind="running"
-        label={elapsed ?? "now"}
-        className="shrink-0"
-        ariaLabel={`running ${elapsed ?? "now"}`}
-      />
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <span className="min-w-5 shrink-0 inline-flex justify-end">
+            <LiveSignal ariaLabel={`running ${elapsed ?? "now"}`} />
+          </span>
+        </TooltipTrigger>
+        <TooltipContent side="left" sideOffset={6} className="text-[10px] px-1.5 py-0.5 lowercase">
+          {`running ${elapsed ?? "now"}`}
+        </TooltipContent>
+      </Tooltip>
     </div>
   );
 }
