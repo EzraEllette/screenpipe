@@ -35,7 +35,13 @@ jobs:
 
       - name: Publish to npm
         working-directory: packages/screenpipe-mcp
-        run: npm publish --access public || echo "npm publish failed (version may already exist) — continuing"
+        run: |
+          VER=$(node -p "require('./package.json').version")
+          if npm view "screenpipe-mcp@$VER" version >/dev/null 2>&1; then
+            echo "screenpipe-mcp@$VER already on npm — skipping publish"
+          else
+            npm publish --access public
+          fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
