@@ -170,20 +170,63 @@ pub fn tree_walker_snapshot() -> TreeWalkerSnapshot {
         .unwrap_or_default()
 }
 
+/// Coarse-grained UI-recorder state — the one-field summary the UI cares
+/// about most. Derived from the per-modality bools below; included
+/// alongside them so consumers can pick the granularity that fits.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+    oasgen::OaSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum UiRecorderMode {
+    /// Recorder isn't running. Either `configured=false`, accessibility
+    /// was denied, or `UiRecorder::start()` errored.
+    #[default]
+    Off,
+    /// Recorder is running with both Accessibility and Input Monitoring
+    /// granted — keystrokes, clicks, clipboard, app/window events all
+    /// captured.
+    Full,
+    /// Recorder is running with Accessibility only — clipboard and
+    /// app/window events flow, keystrokes and clicks do NOT. Surfaces
+    /// the most common silent-degradation case on macOS.
+    Reduced,
+}
+
 /// Point-in-time status of the UI recorder. Exposed on `/health` so users
 /// can tell whether input/clipboard capture is actually running — distinct
 /// failure modes (config off, permissions denied, recorder errored) all
 /// look the same from the DB ("ui_events stopped writing") but are very
 /// different to recover from.
+///
+/// `mode` is the at-a-glance summary; `input_tap_running` /
+/// `app_events_running` give the per-modality detail underneath it.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, oasgen::OaSchema)]
 pub struct UiRecorderStatus {
     /// Did the runtime config request UI recording?
     pub configured: bool,
     /// Did the recorder's event loop actually start? False when configured
-    /// is true but permissions were denied or `UiRecorder::start()` failed.
+    /// is true but accessibility was denied or `UiRecorder::start()` failed.
     pub running: bool,
+    /// Coarse-grained mode (off / reduced / full). Derived from
+    /// `running` + `input_tap_running` for one-shot UI reads.
+    pub mode: UiRecorderMode,
     /// Is clipboard content capture configured? Subset of `configured`.
     pub clipboard_capture: bool,
+    /// CGEventTap thread is alive — keystrokes and clicks are being
+    /// captured. False when Input Monitoring is not granted (the recorder
+    /// then runs in reduced mode with clipboard + app/window events only).
+    pub input_tap_running: bool,
+    /// NSWorkspace observer is alive — app switches and window focus
+    /// changes are being captured.
+    pub app_events_running: bool,
     /// Lifetime count of events the recorder has flushed to the DB.
     pub events_inserted: u64,
     /// Wall-clock time of the most recent successful event-batch flush.
@@ -195,13 +238,23 @@ pub struct UiRecorderStatus {
 static UI_RECORDER_CONFIGURED: AtomicBool = AtomicBool::new(false);
 static UI_RECORDER_RUNNING: AtomicBool = AtomicBool::new(false);
 static UI_RECORDER_CLIPBOARD: AtomicBool = AtomicBool::new(false);
+static UI_RECORDER_INPUT_TAP: AtomicBool = AtomicBool::new(false);
+static UI_RECORDER_APP_EVENTS: AtomicBool = AtomicBool::new(false);
 static UI_RECORDER_EVENTS_INSERTED: AtomicU64 = AtomicU64::new(0);
 static UI_RECORDER_LAST_EVENT_UNIX: AtomicU64 = AtomicU64::new(0);
 
-fn set_ui_recorder_state(configured: bool, running: bool, clipboard: bool) {
+fn set_ui_recorder_state(
+    configured: bool,
+    running: bool,
+    clipboard: bool,
+    input_tap: bool,
+    app_events: bool,
+) {
     UI_RECORDER_CONFIGURED.store(configured, Ordering::Relaxed);
     UI_RECORDER_RUNNING.store(running, Ordering::Relaxed);
     UI_RECORDER_CLIPBOARD.store(clipboard, Ordering::Relaxed);
+    UI_RECORDER_INPUT_TAP.store(input_tap, Ordering::Relaxed);
+    UI_RECORDER_APP_EVENTS.store(app_events, Ordering::Relaxed);
 }
 
 fn record_ui_event_flush(n: u64) {
@@ -219,10 +272,26 @@ fn record_ui_event_flush(n: u64) {
 /// Read the latest UI recorder status snapshot.
 pub fn ui_recorder_status_snapshot() -> UiRecorderStatus {
     let last = UI_RECORDER_LAST_EVENT_UNIX.load(Ordering::Relaxed);
+    let running = UI_RECORDER_RUNNING.load(Ordering::Relaxed);
+    let input_tap = UI_RECORDER_INPUT_TAP.load(Ordering::Relaxed);
+    // Mode derivation: running gates everything; with running=true, the
+    // event-tap flag is what distinguishes full from reduced. The clipboard
+    // poller takes over when input_tap is down, so reduced is still useful
+    // — not the same as off.
+    let mode = if !running {
+        UiRecorderMode::Off
+    } else if input_tap {
+        UiRecorderMode::Full
+    } else {
+        UiRecorderMode::Reduced
+    };
     UiRecorderStatus {
         configured: UI_RECORDER_CONFIGURED.load(Ordering::Relaxed),
-        running: UI_RECORDER_RUNNING.load(Ordering::Relaxed),
+        running,
+        mode,
         clipboard_capture: UI_RECORDER_CLIPBOARD.load(Ordering::Relaxed),
+        input_tap_running: input_tap,
+        app_events_running: UI_RECORDER_APP_EVENTS.load(Ordering::Relaxed),
         events_inserted: UI_RECORDER_EVENTS_INSERTED.load(Ordering::Relaxed),
         last_event_at: if last > 0 {
             chrono::DateTime::<chrono::Utc>::from_timestamp(last as i64, 0)
@@ -288,7 +357,7 @@ pub async fn start_ui_recording(
 ) -> Result<UiRecorderHandle> {
     if !config.enabled {
         info!("UI event capture is disabled");
-        set_ui_recorder_state(false, false, false);
+        set_ui_recorder_state(false, false, false, false, false);
         return Ok(UiRecorderHandle {
             stop_flag: Arc::new(AtomicBool::new(true)),
             task_handle: None,
@@ -299,27 +368,67 @@ pub async fn start_ui_recording(
     let ui_config = config.to_ui_config();
     let recorder = UiRecorder::new(ui_config);
 
-    // Check permissions
-    let perms = recorder.check_permissions();
+    // Permission policy:
+    // - Accessibility is a HARD requirement (used for app/window context
+    //   and AX click-target enrichment). Missing → fail entirely.
+    // - Input Monitoring is OPTIONAL. Missing → the recorder runs in
+    //   reduced mode: clipboard via NSPasteboard.changeCount polling,
+    //   app/window events via NSWorkspace, but no keystrokes or clicks.
+    let mut perms = recorder.check_permissions();
     if !perms.all_granted() {
         warn!(
-            "UI capture permissions not granted - accessibility: {}, input_monitoring: {}",
+            "UI capture permissions not fully granted - accessibility: {}, input_monitoring: {}",
             perms.accessibility, perms.input_monitoring
         );
         warn!("Requesting permissions...");
-        let perms = recorder.request_permissions();
-        if !perms.all_granted() {
-            error!("UI capture permissions denied. UI event recording will be disabled.");
-            // configured=true, running=false makes the failure mode legible:
-            // "user asked for it, but it isn't actually running."
-            set_ui_recorder_state(true, false, config.capture_clipboard_content);
-            return Ok(UiRecorderHandle {
-                stop_flag: Arc::new(AtomicBool::new(true)),
-                task_handle: None,
-                tree_walker_handle: None,
-            });
-        }
+        perms = recorder.request_permissions();
     }
+    if !perms.accessibility {
+        // The "accessibility" bit means different things per OS. macOS:
+        // TCC grant for the app. Linux: AT-SPI2 client library present.
+        // Windows: always true (no separate gate). Tailor the remediation
+        // hint accordingly so users don't go looking for a System Settings
+        // pane that doesn't exist (Linux) or an apt package that does
+        // (macOS).
+        #[cfg(target_os = "macos")]
+        let hint = "Grant Accessibility in System Settings → Privacy & Security → Accessibility, then relaunch.";
+        #[cfg(target_os = "linux")]
+        let hint =
+            "Install AT-SPI2: `sudo apt install at-spi2-core` (Debian/Ubuntu) or equivalent.";
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        let hint = "Accessibility client is unavailable on this platform.";
+        error!(
+            "Accessibility unavailable — UI event recording disabled \
+             (accessibility is required even for reduced/clipboard-only mode). {}",
+            hint
+        );
+        set_ui_recorder_state(true, false, config.capture_clipboard_content, false, false);
+        return Ok(UiRecorderHandle {
+            stop_flag: Arc::new(AtomicBool::new(true)),
+            task_handle: None,
+            tree_walker_handle: None,
+        });
+    }
+    if !perms.input_monitoring {
+        // On macOS this is a TCC gate (System Settings → Input Monitoring).
+        // On Linux it's evdev access (add user to `input` group). The
+        // platform-specific guidance keeps the log line actionable instead
+        // of mac-centric.
+        #[cfg(target_os = "macos")]
+        let hint =
+            "Grant in System Settings → Privacy & Security → Input Monitoring (then relaunch).";
+        #[cfg(target_os = "linux")]
+        let hint = "Add your user to the `input` group: `sudo usermod -aG input $USER` then log out and back in.";
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        let hint = "";
+        warn!(
+            "Input monitoring unavailable — running in reduced mode. \
+             Clipboard + app/window events will be captured; keystrokes \
+             and clicks will NOT. {}",
+            hint
+        );
+    }
+    let input_tap_running = perms.input_monitoring;
 
     info!("Starting UI event capture");
 
@@ -334,12 +443,22 @@ pub async fn start_ui_recording(
         Ok(h) => h,
         Err(e) => {
             error!("Failed to start UI recorder: {}", e);
-            set_ui_recorder_state(true, false, config.capture_clipboard_content);
+            set_ui_recorder_state(true, false, config.capture_clipboard_content, false, false);
             return Err(e);
         }
     };
 
-    set_ui_recorder_state(true, true, config.capture_clipboard_content);
+    // app_events_running mirrors the recorder being up: the app observer
+    // thread is unconditionally spawned in start_internal whenever
+    // accessibility is granted (which it is, here — we'd have bailed
+    // otherwise).
+    set_ui_recorder_state(
+        true,
+        true,
+        config.capture_clipboard_content,
+        input_tap_running,
+        true,
+    );
 
     // Spawn the event processing task
     let task_handle = tokio::spawn(async move {
@@ -483,6 +602,8 @@ pub async fn start_ui_recording(
 
         handle.stop();
         UI_RECORDER_RUNNING.store(false, Ordering::Relaxed);
+        UI_RECORDER_INPUT_TAP.store(false, Ordering::Relaxed);
+        UI_RECORDER_APP_EVENTS.store(false, Ordering::Relaxed);
         info!("UI recording session ended: {}", session_id);
     });
 
@@ -568,11 +689,15 @@ mod tests {
     fn ui_recorder_status_reflects_state_and_flush() {
         // Note: globals are process-wide, but no other test in this binary
         // touches these atomics, so this single test is race-free.
-        set_ui_recorder_state(true, true, true);
+        // Full mode: both perms granted → input_tap + app_events both up.
+        set_ui_recorder_state(true, true, true, true, true);
         let snap = ui_recorder_status_snapshot();
         assert!(snap.configured);
         assert!(snap.running);
         assert!(snap.clipboard_capture);
+        assert!(snap.input_tap_running);
+        assert!(snap.app_events_running);
+        assert_eq!(snap.mode, UiRecorderMode::Full);
 
         let before = snap.events_inserted;
         record_ui_event_flush(0); // no-op
@@ -591,13 +716,30 @@ mod tests {
             "successful flush stamps a timestamp"
         );
 
-        // disabled path: configured=false, running=false, no clipboard.
-        set_ui_recorder_state(false, false, false);
+        // Reduced mode: input monitoring missing — input_tap_running flips
+        // off, app_events_running stays up (driven by accessibility only).
+        // Mode must follow.
+        set_ui_recorder_state(true, true, true, false, true);
+        let reduced = ui_recorder_status_snapshot();
+        assert!(reduced.running && reduced.app_events_running);
+        assert!(!reduced.input_tap_running);
+        assert_eq!(reduced.mode, UiRecorderMode::Reduced);
+
+        // Disabled path: everything off → Off, regardless of bool combos.
+        set_ui_recorder_state(false, false, false, false, false);
         let off = ui_recorder_status_snapshot();
         assert!(!off.configured && !off.running && !off.clipboard_capture);
+        assert!(!off.input_tap_running && !off.app_events_running);
+        assert_eq!(off.mode, UiRecorderMode::Off);
         // Counter and timestamp persist across state transitions — they're
         // lifetime metrics, not per-session.
         assert_eq!(off.events_inserted, after.events_inserted);
+
+        // Edge case: !running + input_tap=true (shouldn't happen in
+        // practice but the derivation must not regress to Full just
+        // because a flag got out of sync).
+        set_ui_recorder_state(true, false, true, true, true);
+        assert_eq!(ui_recorder_status_snapshot().mode, UiRecorderMode::Off);
     }
 
     #[tokio::test]
