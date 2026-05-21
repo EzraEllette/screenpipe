@@ -69,13 +69,20 @@ screenpipe turns your computer into a personal AI that knows everything you've d
 or run the CLI:
 
 ```bash
-npx screenpipe@latest record
+npm i -g screenpipe
+screenpipe record
+```
+
+or
+
+```
+bunx screenpipe record
 ```
 
 then 
 
 ```bash
-claude mcp add screenpipe -- npx -y screenpipe-mcp
+claude mcp add screenpipe -- npx -y screenpipe-mcp@latest
 ```
 
 then ask claude `what did i see in the last 5 mins?` or `summarize today conversations` or `create a pipe that updates linear every time i work on task X`
