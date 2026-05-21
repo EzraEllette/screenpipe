@@ -217,7 +217,6 @@ async fn apply_update(db: &Arc<DatabaseManager>, row_id: i64, frame_id: i64) {
         }
     }
 }
-}
 
 #[cfg(test)]
 mod tests {
