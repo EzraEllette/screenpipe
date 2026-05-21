@@ -1454,44 +1454,66 @@ function RowRightSignal({
   status: string;
   age: string | null;
 }) {
-  const content = (() => {
+  const { content, label } = ((): { content: React.ReactNode; label: string | null } => {
     if (isError) {
-      return (
-        <AlertCircle
-          className="h-3 w-3 text-red-500"
-          aria-label="error"
-        />
-      );
+      return {
+        content: <AlertCircle className="h-3 w-3 text-red-500" aria-label="error" />,
+        label: "error",
+      };
     }
     if (isLive) {
-      return <LiveSignal ariaLabel={status} />;
+      const live =
+        status === "thinking" ? "thinking" :
+        status === "tool" ? "using tool" :
+        "streaming";
+      return { content: <LiveSignal ariaLabel={live} />, label: live };
     }
     if (queuedCount > 0) {
-      return <LiveSignal ariaLabel={`${queuedCount} queued`} />;
+      const q = `${queuedCount} queued`;
+      return { content: <LiveSignal ariaLabel={q} />, label: q };
     }
     if (isUnread) {
-      return (
-        <span
-          className="font-mono text-[10px] leading-none text-foreground inline-flex items-center justify-center w-2.5 h-2.5"
-          aria-label="unread"
-        >
-          █
-        </span>
-      );
+      return {
+        content: (
+          <span
+            className="font-mono text-[10px] leading-none text-foreground inline-flex items-center justify-center w-2.5 h-2.5"
+            aria-label="unread"
+          >
+            █
+          </span>
+        ),
+        label: "new",
+      };
     }
     if (age) {
-      return (
-        <span className="text-[10px] text-muted-foreground/60 tabular-nums">
-          {age}
-        </span>
-      );
+      return {
+        content: (
+          <span className="text-[10px] text-muted-foreground/60 tabular-nums">
+            {age}
+          </span>
+        ),
+        label: null,
+      };
     }
-    return null;
+    return { content: null, label: null };
   })();
 
   if (!content) return null;
 
-  return <span className="min-w-5 shrink-0 inline-flex justify-end">{content}</span>;
+  const wrapper = (
+    <span className="min-w-5 shrink-0 inline-flex justify-end">{content}</span>
+  );
+
+  if (!label) return wrapper;
+
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>{wrapper}</TooltipTrigger>
+      <TooltipContent side="left" sideOffset={6} className="text-[10px] px-1.5 py-0.5 lowercase">
+        {label}
+      </TooltipContent>
+    </Tooltip>
+  );
 }
 
 // Quadrant frames — a square fills clockwise, then empties. Sharp Unicode
