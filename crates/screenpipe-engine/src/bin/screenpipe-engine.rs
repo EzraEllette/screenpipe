@@ -939,7 +939,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Create VisionManager for event-driven capture on all monitors
-    let (handle, capture_trigger_tx) = if !config.disable_vision {
+    let (handle, capture_trigger_tx, linker_tx) = if !config.disable_vision {
         let vision_config =
             config.to_vision_manager_config(output_path_clone.to_string(), vision_metrics.clone());
         let vision_manager = Arc::new(
@@ -952,6 +952,10 @@ async fn main() -> anyhow::Result<()> {
         // the spawned task. This sender is passed to start_ui_recording so UI
         // events (clicks, app switches, clipboard) trigger captures.
         let trigger_tx = vision_manager.trigger_sender();
+        // Same idea for the frame-linker channel: shared between the
+        // recorder (sends EventPersisted after batch flush) and each
+        // capture loop (sends FrameCaptured after a successful capture).
+        let linker_tx = vision_manager.linker_sender();
 
         let vm_clone = vision_manager.clone();
         let audio_manager_for_drm = if !config.disable_audio {
@@ -985,11 +989,11 @@ async fn main() -> anyhow::Result<()> {
                 error!("Error shutting down VisionManager: {:?}", e);
             }
         });
-        (h, Some(trigger_tx))
+        (h, Some(trigger_tx), Some(linker_tx))
     } else {
         // Vision disabled — spawn a pending task so `handle` never completes
         // (otherwise the no-op future wins the tokio::select! race and shuts down the server)
-        (tokio::spawn(std::future::pending::<()>()), None)
+        (tokio::spawn(std::future::pending::<()>()), None, None)
     };
 
     let local_data_dir_clone_2 = local_data_dir_clone.clone();
@@ -1518,6 +1522,7 @@ async fn main() -> anyhow::Result<()> {
                 db.clone(),
                 ui_recorder_config,
                 capture_trigger_tx,
+                linker_tx,
                 config.ignored_windows.clone(),
             )
             .await

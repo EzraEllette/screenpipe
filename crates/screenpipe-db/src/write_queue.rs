@@ -143,6 +143,13 @@ pub(crate) enum WriteOp {
     InsertUiEventsBatch {
         events: Vec<UiEventWrite>,
     },
+    /// Update `ui_events.frame_id` for a single row. Used by the frame
+    /// linker to fill in the frame that a UI event triggered, after the
+    /// capture loop reports the resulting frame_id.
+    UpdateUiEventFrameId {
+        row_id: i64,
+        frame_id: i64,
+    },
     DeleteAudioChunksBatch {
         chunk_ids: Vec<i64>,
     },
@@ -330,13 +337,15 @@ pub enum SyncTable {
 pub(crate) enum WriteResult {
     /// An inserted row ID (i64). Used by most insert operations.
     Id(i64),
-    /// Number of rows inserted/updated by a batch operation.
-    Count(usize),
     /// For operations that return nothing meaningful.
     #[allow(dead_code)]
     Unit,
     /// Result of InsertFramesBatch: Vec of (frame_id, window_index) pairs.
     FrameBatch(Vec<(i64, usize)>),
+    /// Result of InsertUiEventsBatch: one row id per inserted event, in order.
+    /// Callers need this so frame-linker correlation ids can be paired with
+    /// the actual `ui_events.id` after batch flush.
+    Ids(Vec<i64>),
 }
 
 /// A pending write: the operation plus a channel to send the result back.
@@ -973,10 +982,23 @@ async fn execute_single_write(
         }
 
         WriteOp::InsertUiEventsBatch { events } => {
+            let mut ids = Vec::with_capacity(events.len());
             for event in events {
-                insert_ui_event_row(conn, event).await?;
+                ids.push(insert_ui_event_row(conn, event).await?);
             }
-            Ok(WriteResult::Count(events.len()))
+            Ok(WriteResult::Ids(ids))
+        }
+
+        WriteOp::UpdateUiEventFrameId { row_id, frame_id } => {
+            // FrameLinker emits UPDATEs after pairing a trigger event with
+            // the frame it caused us to capture. `frame_id IS NULL` guards
+            // against accidental clobber if a duplicate update is enqueued.
+            sqlx::query("UPDATE ui_events SET frame_id = ?1 WHERE id = ?2 AND frame_id IS NULL")
+                .bind(frame_id)
+                .bind(row_id)
+                .execute(&mut **conn)
+                .await?;
+            Ok(WriteResult::Unit)
         }
 
         WriteOp::DeleteAudioChunksBatch { chunk_ids } => {

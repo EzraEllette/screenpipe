@@ -8042,13 +8042,16 @@ LIMIT ? OFFSET ?
         }
     }
 
-    /// Insert multiple UI events via the write coalescing queue.
+    /// Insert multiple UI events via the write coalescing queue. Returns
+    /// one row id per inserted event, in the same order as `events`. The
+    /// frame linker pairs these with correlation ids assigned by the
+    /// recorder before flush.
     pub async fn insert_ui_events_batch(
         &self,
         events: &[InsertUiEvent],
-    ) -> Result<usize, sqlx::Error> {
+    ) -> Result<Vec<i64>, sqlx::Error> {
         if events.is_empty() {
-            return Ok(0);
+            return Ok(Vec::new());
         }
         use crate::write_queue::{WriteOp, WriteResult};
         let events = events.iter().map(Self::ui_event_write).collect();
@@ -8057,7 +8060,26 @@ LIMIT ? OFFSET ?
             .submit(WriteOp::InsertUiEventsBatch { events })
             .await?;
         match result {
-            WriteResult::Count(count) => Ok(count),
+            WriteResult::Ids(ids) => Ok(ids),
+            _ => unreachable!(),
+        }
+    }
+
+    /// Set `ui_events.frame_id` for a previously inserted row. Idempotent:
+    /// the `WHERE frame_id IS NULL` guard prevents overwriting an
+    /// already-linked frame if a duplicate update arrives.
+    pub async fn update_ui_event_frame_id(
+        &self,
+        row_id: i64,
+        frame_id: i64,
+    ) -> Result<(), sqlx::Error> {
+        use crate::write_queue::{WriteOp, WriteResult};
+        let result = self
+            .write_queue
+            .submit(WriteOp::UpdateUiEventFrameId { row_id, frame_id })
+            .await?;
+        match result {
+            WriteResult::Unit => Ok(()),
             _ => unreachable!(),
         }
     }
