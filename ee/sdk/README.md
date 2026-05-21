@@ -97,7 +97,28 @@ recorder stays on the zero-overhead fast path — no a11y polling is done.
 | `framesWritten()` | Return frames written since `start()`. |
 | `audioLevel()` | Return a smoothed microphone RMS level in `[0, 1]` for preflight UI. |
 | `focusedApp()` | Return best-effort focused-window metadata; requires Accessibility permission on macOS. |
+| `filterStatus()` | Return `{ paused, reason }` for the window/URL filter. Poll, or subscribe via the session wrapper's `paused`/`resumed` events. |
+| `setFilters(patch)` | Replace the active filter lists at runtime — `{ ignoredWindows?, includedWindows?, ignoredUrls? }`. Takes effect within ≤ 1 s. |
 | `requestPermissions()` | Trigger or check supported OS permissions. |
+
+### Filter events (session wrapper)
+
+`createScreenpipeSession` emits `paused` and `resumed` events whenever the
+filter verdict flips. Payload: `{ paused: boolean, reason: string | null }`
+where `reason` is one of `"ignored_window"`, `"included_window_mismatch"`,
+`"ignored_url"`, `"incognito"`, `"excluded_app"`.
+
+```ts
+session.on("paused", ({ reason }) => {
+  showBanner(`recording paused — ${reason}`);
+});
+session.on("resumed", () => {
+  hideBanner();
+});
+
+// Runtime toggle (e.g. user flips "Pause on banking" in your settings UI):
+await session.setFilters({ ignoredUrls: ["chase", "wellsfargo.com"] });
+```
 
 Audio is not muxed into the MP4 in v0.1.0.
 
