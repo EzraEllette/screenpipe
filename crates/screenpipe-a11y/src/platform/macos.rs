@@ -1376,12 +1376,16 @@ fn get_focused_element_context(config: &UiCaptureConfig) -> Option<ElementContex
 // The dead-man-switch below is kept as defense-in-depth: even with main-
 // thread dispatch, a future macOS regression or a bug in AppKit/arboard
 // could still SIGSEGV the read. SIGSEGV can't be caught in-process, so we
-// write a marker file before each read and delete it after. On startup, if
-// the marker exists, we know the previous run crashed mid-read and we
-// disable clipboard capture permanently for this install. The user can
-// re-enable by deleting `~/.screenpipe/clipboard-disabled-after-crash`.
+// write an inflight marker before each read and delete it after. On startup,
+// if the marker exists, the previous run crashed mid-read: we disable
+// clipboard capture for THIS session only and retry next launch. A
+// persistent crash will be obvious in logs (every other launch fails) and
+// addressable, rather than silently killing the feature forever.
 const CLIPBOARD_INFLIGHT_FILE: &str = "clipboard-read-inflight";
-const CLIPBOARD_DISABLED_FILE: &str = "clipboard-disabled-after-crash";
+// Legacy marker from a previous design that permanently disabled clipboard
+// capture after a single crash and required `rm` to recover. We auto-delete
+// it on startup so upgraded installs recover without manual intervention.
+const CLIPBOARD_LEGACY_DISABLED_FILE: &str = "clipboard-disabled-after-crash";
 
 static CLIPBOARD_DISABLED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
@@ -1391,26 +1395,22 @@ fn check_clipboard_crash_marker() {
     CLIPBOARD_CRASH_CHECK.call_once(|| {
         let dir = screenpipe_core::paths::default_screenpipe_data_dir();
         let inflight = dir.join(CLIPBOARD_INFLIGHT_FILE);
-        let disabled = dir.join(CLIPBOARD_DISABLED_FILE);
+        let legacy_disabled = dir.join(CLIPBOARD_LEGACY_DISABLED_FILE);
 
-        if disabled.exists() {
-            CLIPBOARD_DISABLED.store(true, std::sync::atomic::Ordering::Relaxed);
-            tracing::warn!(
-                "clipboard capture disabled — prior NSPasteboard crash detected. \
-                 delete {} to re-enable",
-                disabled.display()
+        if legacy_disabled.exists() {
+            let _ = std::fs::remove_file(&legacy_disabled);
+            tracing::info!(
+                "clipboard capture: cleared legacy permanent-disable marker; \
+                 clipboard reads will resume this session"
             );
-            // Best-effort cleanup of any stale inflight marker
-            let _ = std::fs::remove_file(&inflight);
-        } else if inflight.exists() {
-            // Previous run died mid-clipboard read — promote to permanent disable.
+        }
+
+        if inflight.exists() {
             CLIPBOARD_DISABLED.store(true, std::sync::atomic::Ordering::Relaxed);
-            let _ = std::fs::write(&disabled, "");
             let _ = std::fs::remove_file(&inflight);
             tracing::warn!(
-                "clipboard capture disabled for this session — previous run crashed \
-                 during NSPasteboard read. delete {} to re-enable",
-                disabled.display()
+                "clipboard capture disabled for this session — previous run \
+                 crashed during NSPasteboard read. will retry on next launch."
             );
         }
     });
