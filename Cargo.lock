@@ -7933,6 +7933,7 @@ dependencies = [
  "reqwest 0.13.3",
  "screenpipe-events",
  "screenpipe-secrets",
+ "screenpipe-sync",
  "screenpipe-vault",
  "serde",
  "serde_json",
@@ -7947,6 +7948,7 @@ dependencies = [
  "uuid",
  "which 6.0.3",
  "windows-sys 0.59.0",
+ "wiremock",
  "zeroize",
 ]
 
@@ -8180,7 +8182,7 @@ dependencies = [
 
 [[package]]
 name = "screenpipe-sync"
-version = "0.3.337"
+version = "0.3.339"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
