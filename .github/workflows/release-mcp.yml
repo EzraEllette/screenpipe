@@ -32,14 +32,18 @@ jobs:
             echo "::error::NPM_TOKEN secret is empty or not set"
             exit 1
           fi
-          # Write token to ~/.npmrc with shell interpolation (real value, masked in logs).
-          # Avoids setup-node's ${NODE_AUTH_TOKEN} placeholder, which has been flaky and
-          # produced silent 404s on PUT (token never reaches the registry).
-          cat > ~/.npmrc <<EOF
-          //registry.npmjs.org/:_authToken=${NPM_TOKEN}
-          registry=https://registry.npmjs.org/
-          EOF
-          # Fail fast if auth is broken — better than a confusing 404 at publish.
+          echo "NPM_TOKEN length: ${#NPM_TOKEN}"
+          echo "NPM_TOKEN prefix: ${NPM_TOKEN:0:4}***"
+          echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > ~/.npmrc
+          echo "registry=https://registry.npmjs.org/" >> ~/.npmrc
+          echo ".npmrc bytes: $(wc -c < ~/.npmrc)"
+          echo ".npmrc structure:"
+          sed -E 's/(_authToken=).+/\1<redacted>/' ~/.npmrc
+          echo "node:" && node --version
+          echo "npm:" && npm --version
+          echo "--- raw whoami HTTP ---"
+          curl -sS -w "HTTP %{http_code}\n" -H "Authorization: Bearer ${NPM_TOKEN}" https://registry.npmjs.org/-/whoami | sed 's/.*/[curl] &/'
+          echo "--- npm whoami ---"
           USER=$(npm whoami) || { echo "::error::npm whoami failed — NPM_TOKEN auth invalid"; exit 1; }
           echo "npm authed as: $USER"
 
