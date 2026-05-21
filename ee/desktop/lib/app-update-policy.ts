@@ -21,8 +21,12 @@ export interface EnterpriseInstallMetadata {
   detected_by: string[];
 }
 
+// New orgs default to consumer-like behavior: silent background download +
+// banner-driven restart. Existing orgs are pinned to "manual" via the
+// `default_existing_enterprise_orgs_to_manual_updates` migration so they
+// don't suddenly start self-updating when this gate ships.
 export const DEFAULT_ENTERPRISE_APP_UPDATE_POLICY: EnterpriseAppUpdatePolicy = {
-  mode: "auto_detect",
+  mode: "screenpipe",
   default_auto_update: false,
   allow_employee_override: true,
   channel: "enterprise",

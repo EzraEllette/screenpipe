@@ -144,7 +144,10 @@ fn enterprise_updates_managed_locally(app: &tauri::AppHandle) -> bool {
         Some("screenpipe") => false,
         Some("auto_detect") => metadata.managed,
         Some("mdm") | Some("manual") => true,
-        _ => true,
+        // Missing/unknown policy → behave like a new org with the consumer
+        // banner flow. Existing orgs are explicitly pinned to "manual" via
+        // the website migration so they hit the arm above, not this one.
+        _ => false,
     }
 }
 
