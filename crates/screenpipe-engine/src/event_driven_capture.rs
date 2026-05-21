@@ -937,9 +937,7 @@ pub async fn event_driven_capture_loop(
                             // so link them to that frame — semantically correct
                             // and prevents the correlation_ids from expiring unmatched.
                             if !correlation_ids.is_empty() {
-                                if let (Some(ref linker), Some(fid)) =
-                                    (&linker_tx, last_frame_id)
-                                {
+                                if let (Some(ref linker), Some(fid)) = (&linker_tx, last_frame_id) {
                                     let _ = linker.try_send(
                                         crate::frame_linker_actor::LinkerMessage::FrameCaptured(
                                             crate::frame_linker::FrameCaptured {

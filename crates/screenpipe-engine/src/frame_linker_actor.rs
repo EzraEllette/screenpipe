@@ -203,19 +203,20 @@ async fn apply_update(db: &Arc<DatabaseManager>, row_id: i64, frame_id: i64) {
             debug!(row_id, frame_id, "frame_linker: ui_events.frame_id updated");
         }
         Err(e) => {
-        UPDATES_FAILED.fetch_add(1, Ordering::Relaxed);
-        // A failed UPDATE is recoverable in principle (the row stays
-        // NULL) but very rare in practice — log and move on. We don't
-        // retry because the linker has no memory of dispatched updates;
-        // a retry would have to re-pair from scratch.
-        warn!(
+            UPDATES_FAILED.fetch_add(1, Ordering::Relaxed);
+            // A failed UPDATE is recoverable in principle (the row stays
+            // NULL) but very rare in practice — log and move on. We don't
+            // retry because the linker has no memory of dispatched updates;
+            // a retry would have to re-pair from scratch.
+            warn!(
                 row_id,
                 frame_id,
                 error = %e,
                 "frame_linker: UPDATE ui_events.frame_id failed"
-        );
+            );
+        }
     }
-    }
+}
 }
 
 #[cfg(test)]
