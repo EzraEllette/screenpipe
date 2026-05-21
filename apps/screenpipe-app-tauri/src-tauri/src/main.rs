@@ -64,9 +64,9 @@ mod owned_browser;
 // injects via WKHTTPCookieStore; other platforms compile to a stub
 // `cookies_for_host` that returns empty until Windows (DPAPI + AES-256-
 // GCM + WebView2) and Linux (libsecret + webkit2gtk) readers land.
+mod engine_events;
 mod monitor_events;
 mod owned_browser_cookies;
-mod permission_events;
 mod permissions;
 mod pi;
 mod pi_command_queue;
@@ -1948,7 +1948,7 @@ async fn main() {
                             let port = core.port;
                             let key = core.local_api_key.clone();
                             drop(guard);
-                            crate::permission_events::start(app_handle_clone.clone(), port, key);
+                            crate::engine_events::start(app_handle_clone.clone(), port, key);
                             return;
                         }
                     }
