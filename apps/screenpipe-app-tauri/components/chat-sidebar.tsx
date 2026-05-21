@@ -1347,7 +1347,11 @@ export function SidebarChatRow({
       </button>
 
       {canShowActions && (
-        <div className="shrink-0 relative h-5 w-5">
+        // Absolute so the menu overlays the age slot instead of reserving
+        // its own column. Without this, recents rows sit ~28px further from
+        // the right edge than scheduled rows (gap-2 + w-5) and read as
+        // misaligned even when the menu is invisible.
+        <div className="absolute right-2.5 top-1/2 -translate-y-1/2 h-5 w-5 flex items-center justify-end">
           <DropdownMenu
             open={menuOpen}
             onOpenChange={(open) => {
@@ -1360,7 +1364,7 @@ export function SidebarChatRow({
                 onPointerDown={(e) => e.stopPropagation()}
                 onClick={(e) => e.stopPropagation()}
                 className={cn(
-                  "absolute inset-0 p-0.5 rounded hover:bg-muted transition-opacity duration-150",
+                  "p-0.5 rounded hover:bg-muted transition-opacity duration-150 inline-flex items-center justify-center",
                   menuOpen
                     ? "opacity-100 visible"
                     : "opacity-0 invisible group-hover:opacity-100 group-hover:visible"
