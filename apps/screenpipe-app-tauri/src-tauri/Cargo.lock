@@ -10580,7 +10580,7 @@ dependencies = [
 
 [[package]]
 name = "screenpipe-app"
-version = "2.4.251"
+version = "2.4.249"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -10635,7 +10635,6 @@ dependencies = [
  "screenpipe-redact",
  "screenpipe-screen",
  "screenpipe-secrets",
- "screenpipe-sync",
  "screenpipe-vault",
  "security-framework",
  "sentry 0.42.0",
@@ -10836,7 +10835,6 @@ dependencies = [
  "reqwest 0.13.3",
  "screenpipe-events",
  "screenpipe-secrets",
- "screenpipe-sync",
  "screenpipe-vault",
  "serde",
  "serde_json",
@@ -11052,26 +11050,6 @@ dependencies = [
  "sqlx",
  "tokio",
  "tracing",
-]
-
-[[package]]
-name = "screenpipe-sync"
-version = "0.3.339"
-dependencies = [
- "async-trait",
- "base64 0.22.1",
- "bytes",
- "chacha20poly1305",
- "hex",
- "rand 0.8.5",
- "reqwest 0.13.3",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
- "zeroize",
 ]
 
 [[package]]
