@@ -23,7 +23,25 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "20"
-          registry-url: "https://registry.npmjs.org"
+
+      - name: Authenticate to npm
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "$NPM_TOKEN" ]; then
+            echo "::error::NPM_TOKEN secret is empty or not set"
+            exit 1
+          fi
+          # Write token to ~/.npmrc with shell interpolation (real value, masked in logs).
+          # Avoids setup-node's ${NODE_AUTH_TOKEN} placeholder, which has been flaky and
+          # produced silent 404s on PUT (token never reaches the registry).
+          cat > ~/.npmrc <<EOF
+          //registry.npmjs.org/:_authToken=${NPM_TOKEN}
+          registry=https://registry.npmjs.org/
+          EOF
+          # Fail fast if auth is broken — better than a confusing 404 at publish.
+          USER=$(npm whoami) || { echo "::error::npm whoami failed — NPM_TOKEN auth invalid"; exit 1; }
+          echo "npm authed as: $USER"
 
       - name: Install dependencies
         working-directory: packages/screenpipe-mcp
@@ -42,8 +60,6 @@ jobs:
           else
             npm publish --access public
           fi
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Sync manifest.json version from package.json
         working-directory: packages/screenpipe-mcp
