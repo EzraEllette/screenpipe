@@ -339,6 +339,8 @@ pub struct DirectUploadRecordCounts {
     pub audio: usize,
     pub ui: usize,
     pub snapshots: usize,
+    #[serde(default)]
+    pub memories: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -346,6 +348,8 @@ pub struct DirectUploadCursors {
     pub last_frame_ts: Option<String>,
     pub last_audio_ts: Option<String>,
     pub last_ui_ts: Option<String>,
+    #[serde(default)]
+    pub last_memory_ts: Option<String>,
 }
 
 impl DirectUploadCursors {
@@ -354,6 +358,7 @@ impl DirectUploadCursors {
             last_frame_ts: cursor.last_frame_ts.clone(),
             last_audio_ts: cursor.last_audio_ts.clone(),
             last_ui_ts: cursor.last_ui_ts.clone(),
+            last_memory_ts: cursor.last_memory_ts.clone(),
         }
     }
 }
@@ -731,12 +736,14 @@ mod tests {
             last_frame_ts: Some("2026-05-13T18:00:00Z".to_string()),
             last_audio_ts: None,
             last_ui_ts: None,
+            last_memory_ts: None,
         };
         let counts = DirectUploadRecordCounts {
             frames: 1,
             audio: 0,
             ui: 0,
             snapshots: 0,
+            memories: 0,
         };
 
         let batch =
@@ -811,11 +818,13 @@ mod tests {
             audio: 0,
             ui: 0,
             snapshots: 0,
+            memories: 0,
         };
         let cursors = DirectUploadCursors {
             last_frame_ts: Some("2026-05-13T18:00:00Z".to_string()),
             last_audio_ts: None,
             last_ui_ts: None,
+            last_memory_ts: None,
         };
 
         let a =
@@ -836,11 +845,13 @@ mod tests {
             audio: 0,
             ui: 0,
             snapshots: 0,
+            memories: 0,
         };
         let cursors = DirectUploadCursors {
             last_frame_ts: Some("2026-05-13T18:00:00Z".to_string()),
             last_audio_ts: None,
             last_ui_ts: None,
+            last_memory_ts: None,
         };
 
         let manifest =

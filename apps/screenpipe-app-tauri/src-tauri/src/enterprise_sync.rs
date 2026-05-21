@@ -26,8 +26,8 @@ mod imp {
     use crate::recording::local_api_context_from_app;
     use base64::Engine;
     use ee_sync::{
-        AudioRow, EnterpriseSyncConfig, EnterpriseSyncError, FrameRow, LocalApiClient, SnapshotRow,
-        UiEventRow,
+        AudioRow, EnterpriseSyncConfig, EnterpriseSyncError, FrameRow, LocalApiClient, MemoryRow,
+        SnapshotRow, UiEventRow,
     };
     use serde::Deserialize;
     use std::sync::Arc;
@@ -115,6 +115,26 @@ mod imp {
     #[derive(Debug, Deserialize)]
     struct LocalSpeaker {
         name: Option<String>,
+    }
+
+    // /memories has a different envelope from /search — it's a paginated list,
+    // not a typed-search response. Tags arrive already-parsed as a JSON array.
+    #[derive(Debug, Deserialize)]
+    struct LocalMemoriesResponse {
+        data: Vec<LocalMemoryItem>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct LocalMemoryItem {
+        id: i64,
+        content: String,
+        source: String,
+        #[serde(default)]
+        tags: Vec<String>,
+        importance: f64,
+        frame_id: Option<i64>,
+        created_at: String,
+        updated_at: String,
     }
 
     #[async_trait::async_trait]
@@ -362,6 +382,55 @@ mod imp {
                 width: w,
                 height: h,
             }))
+        }
+
+        async fn fetch_memories_since(
+            &self,
+            since_ts: Option<&str>,
+            limit: u32,
+        ) -> Result<Vec<MemoryRow>, EnterpriseSyncError> {
+            // /memories filters by created_at >= start_time; ascending order
+            // means the cursor advances monotonically. Server-side dedup is
+            // on (device_id, memory_id), so a single-row overlap per tick is
+            // acceptable (same convention as /search-backed fetches above).
+            let mut url = format!(
+                "{}/memories?limit={}&order_by=created_at&order_dir=asc",
+                self.api_url_base, limit
+            );
+            if let Some(ts) = since_ts {
+                url.push_str(&format!("&start_time={}", urlencoding::encode(ts)));
+            }
+            let resp = self
+                .auth(self.http.get(&url))
+                .send()
+                .await
+                .map_err(|e| EnterpriseSyncError::LocalApi(e.to_string()))?;
+            if !resp.status().is_success() {
+                return Err(EnterpriseSyncError::LocalApi(format!(
+                    "GET {} -> {}",
+                    url,
+                    resp.status()
+                )));
+            }
+            let body: LocalMemoriesResponse = resp
+                .json()
+                .await
+                .map_err(|e| EnterpriseSyncError::LocalApi(format!("decode: {e}")))?;
+            let out = body
+                .data
+                .into_iter()
+                .map(|m| MemoryRow {
+                    memory_id: m.id,
+                    created_at: m.created_at,
+                    updated_at: m.updated_at,
+                    content: m.content,
+                    source: m.source,
+                    tags: m.tags,
+                    importance: m.importance,
+                    frame_id: m.frame_id,
+                })
+                .collect();
+            Ok(out)
         }
     }
 
