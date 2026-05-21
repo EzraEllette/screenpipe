@@ -68,15 +68,8 @@ screenpipe turns your computer into a personal AI that knows everything you've d
 
 or run the CLI:
 
-```bash
-npm i -g screenpipe
-screenpipe record
 ```
-
-or
-
-```
-bunx screenpipe record
+npx screenpipe record
 ```
 
 then 
