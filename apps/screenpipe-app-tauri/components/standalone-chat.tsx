@@ -4088,32 +4088,31 @@ export function StandaloneChat({
     }
   }, [messages, isUserScrolledUp, isLoading, isStreaming]);
 
-  const recomputeScrolledUp = useCallback(() => {
-    const el = scrollContainerRef.current;
-    if (!el) return;
-    // Consider "near bottom" if within 150px of the bottom.
-    // Also treat "nothing to scroll" (scrollHeight <= clientHeight) as at-bottom.
-    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-    const nearBottom = distanceFromBottom < 150;
-    setIsUserScrolledUp((prev) => (prev === !nearBottom ? prev : !nearBottom));
+  // Drive isUserScrolledUp from an IntersectionObserver on the end-of-messages
+  // sentinel. This reacts automatically to scroll, content growing/shrinking
+  // (streamed tokens, loader exit, collapsible source blocks), and root resize
+  // — unlike the prior scroll/ResizeObserver setup, which missed internal
+  // content size changes and left a phantom "new content" pill on screen.
+  useEffect(() => {
+    const endEl = messagesEndRef.current;
+    const rootEl = scrollContainerRef.current;
+    if (!endEl || !rootEl || typeof IntersectionObserver === "undefined") return;
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        const scrolledUp = !entry.isIntersecting;
+        setIsUserScrolledUp((prev) => (prev === scrolledUp ? prev : scrolledUp));
+      },
+      {
+        root: rootEl,
+        // 150px buffer below the viewport — sentinel within this band of the
+        // visible area still counts as "at bottom".
+        rootMargin: "0px 0px 150px 0px",
+        threshold: 0,
+      },
+    );
+    observer.observe(endEl);
+    return () => observer.disconnect();
   }, []);
-
-  const handleMessagesScroll = recomputeScrolledUp;
-
-  // Re-evaluate scroll position when content/layout changes, not just on scroll.
-  // Without this, isUserScrolledUp can stay stale after the loader disappears,
-  // content shrinks, or the container resizes — showing a phantom "new content" pill.
-  useEffect(() => {
-    recomputeScrolledUp();
-  }, [messages, isLoading, isStreaming, recomputeScrolledUp]);
-
-  useEffect(() => {
-    const el = scrollContainerRef.current;
-    if (!el || typeof ResizeObserver === "undefined") return;
-    const ro = new ResizeObserver(() => recomputeScrolledUp());
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, [recomputeScrolledUp]);
 
   const scrollToBottom = useCallback(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -7023,7 +7022,6 @@ export function StandaloneChat({
         {/* Messages */}
         <div
           ref={scrollContainerRef}
-          onScroll={handleMessagesScroll}
           // min-w-0 lets this flex child shrink when the BrowserSidebar
           // opens. Without it, flex's default `min-width: auto` keeps the
           // chat content at content-width and the sidebar overflows past
