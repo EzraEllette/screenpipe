@@ -83,6 +83,8 @@ export interface ChatMessage {
 	id: string;
 	role: "user" | "assistant";
 	content: string;
+	intent?: "steer";
+	turnIntentId?: string;
 	timestamp: number;
 	contentBlocks?: any[];
 	sourceCitations?: SourceCitation[];
@@ -94,6 +96,8 @@ export interface ChatMessage {
 	 *  or what's sent to the model. */
 	displayContent?: string;
 	images?: any[];
+	interruptedBySteer?: boolean;
+	steeredResponse?: boolean;
 }
 
 /** What kind of session a conversation represents.
