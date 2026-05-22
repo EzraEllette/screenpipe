@@ -28,6 +28,7 @@ export function InputMonitoringPanel({
     "checking",
   );
   const [requesting, setRequesting] = useState(false);
+  const [resetting, setResetting] = useState(false);
   // True from the moment the user clicks Enable in this session until
   // they reload. macOS only applies TCC changes on next process start —
   // even if the perm flips to "granted" mid-session, the *running*
@@ -35,6 +36,12 @@ export function InputMonitoringPanel({
   // confused when "granted" lights up but `/health` still reports
   // input_tap_running=false.
   const [grantedThisSession, setGrantedThisSession] = useState(false);
+  // True when the user clicked Enable but the probe still says not granted
+  // afterwards — almost always a TCC ghost record (orphaned grant from a
+  // prior build at the same signature, hidden from System Settings). The
+  // only fix is `tccutil reset ListenEvent <bundle_id>` to clear the
+  // stale row, then re-request so macOS shows the native prompt again.
+  const [suspectedGhost, setSuspectedGhost] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -64,11 +71,31 @@ export function InputMonitoringPanel({
       const result = await commands.requestInputMonitoringPermission();
       const granted = result === "granted";
       setStatus(granted ? "granted" : "notgranted");
+      setSuspectedGhost(!granted);
       onStatusChange?.(granted);
     } catch {
       setStatus("notgranted");
     } finally {
       setRequesting(false);
+    }
+  };
+
+  const handleReset = async () => {
+    setResetting(true);
+    try {
+      await commands.resetAndRequestPermission("inputMonitoring");
+      // Re-poll after tccutil reset — the record is gone, the user now
+      // either sees the native prompt or finds the (cleared) row in
+      // System Settings ready to be flipped on.
+      const result = await commands.checkInputMonitoringPermissionCmd();
+      const granted = result === "granted";
+      setStatus(granted ? "granted" : "notgranted");
+      setSuspectedGhost(false);
+      onStatusChange?.(granted);
+    } catch {
+      // Leave suspectedGhost true so the user can retry.
+    } finally {
+      setResetting(false);
     }
   };
 
@@ -83,20 +110,37 @@ export function InputMonitoringPanel({
         and where you clicked).
       </p>
 
-      <Button
-        variant="outline"
-        size="sm"
-        onClick={handleEnable}
-        disabled={requesting || granted}
-        className="text-xs"
-      >
-        {requesting ? (
-          <Loader2 className="h-3 w-3 mr-1.5 animate-spin" />
-        ) : (
-          <ExternalLink className="h-3 w-3 mr-1.5" />
-        )}
-        {granted ? "Enabled" : "Enable Input Monitoring"}
-      </Button>
+      <div className="flex flex-wrap gap-2">
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={handleEnable}
+          disabled={requesting || resetting || granted}
+          className="text-xs"
+        >
+          {requesting ? (
+            <Loader2 className="h-3 w-3 mr-1.5 animate-spin" />
+          ) : (
+            <ExternalLink className="h-3 w-3 mr-1.5" />
+          )}
+          {granted ? "Enabled" : "Enable Input Monitoring"}
+        </Button>
+
+        {suspectedGhost && !granted ? (
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleReset}
+            disabled={resetting || requesting}
+            className="text-xs"
+          >
+            {resetting ? (
+              <Loader2 className="h-3 w-3 mr-1.5 animate-spin" />
+            ) : null}
+            Reset & try again
+          </Button>
+        ) : null}
+      </div>
 
       <p className="text-xs text-muted-foreground">
         If the prompt doesn&apos;t appear, toggle <strong>screenpipe</strong> on
@@ -104,6 +148,17 @@ export function InputMonitoringPanel({
         screenpipe after enabling — macOS only applies TCC changes on next
         process start.
       </p>
+
+      {suspectedGhost && !granted ? (
+        <div className="rounded-md border border-red-500/30 bg-red-500/5 px-3 py-2">
+          <p className="text-xs text-red-700 dark:text-red-400">
+            macOS reports permission as granted but a real CGEventTap can&apos;t
+            be created — likely a stale TCC record from a previous build.
+            Click <strong>Reset &amp; try again</strong> to clear it and
+            re-request.
+          </p>
+        </div>
+      ) : null}
 
       {grantedThisSession ? (
         <div className="rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2">
