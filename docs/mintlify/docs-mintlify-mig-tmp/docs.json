@@ -56,7 +56,7 @@
           },
           {
             "group": "resources",
-            "pages": ["troubleshooting", "faq", "contributing", "docs-maintenance", "changelog"]
+            "pages": ["troubleshooting", "permissions", "faq", "contributing", "docs-maintenance", "changelog"]
           }
         ]
       },

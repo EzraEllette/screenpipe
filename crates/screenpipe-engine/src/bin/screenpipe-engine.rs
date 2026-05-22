@@ -1019,6 +1019,16 @@ async fn main() -> anyhow::Result<()> {
         info!("API auth enabled — run `screenpipe auth token` to view your key");
     }
 
+    // Standalone CLI users miss out on the chat/timeline UI — point them at the
+    // desktop app. SCREENPIPE_ANALYTICS_ID is only set when the Tauri app spawns
+    // the engine, so its absence is a reliable "this is a bare CLI run" signal.
+    if std::env::var("SCREENPIPE_ANALYTICS_ID").is_err() {
+        eprintln!();
+        eprintln!("  tip: get the desktop app for chat, timeline, and search UI");
+        eprintln!("       → https://screenpi.pe/onboarding");
+        eprintln!();
+    }
+
     let mut server = SCServer::new(
         db_server,
         SocketAddr::new(IpAddr::V4(config.listen_address), config.port),

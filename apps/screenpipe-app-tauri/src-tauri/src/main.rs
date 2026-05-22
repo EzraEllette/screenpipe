@@ -737,6 +737,7 @@ async fn main() {
                 recording::get_boot_phase,
                 // Commands from commands.rs
                 commands::is_enterprise_build_cmd,
+                commands::get_app_identifier,
                 enterprise_install_metadata::get_enterprise_install_metadata,
                 commands::set_cloud_media_analysis_skill,
                 commands::get_enterprise_license_key,
@@ -1012,6 +1013,7 @@ async fn main() {
         .manage(sync_scheduler)
         .invoke_handler(tauri::generate_handler![
             commands::is_enterprise_build_cmd,
+            commands::get_app_identifier,
             enterprise_install_metadata::get_enterprise_install_metadata,
             updates::get_pending_update,
             updates::trigger_update_check,
