@@ -704,6 +704,23 @@ pub async fn refresh_token_instance(
 /// `stored` are preserved. Used by `refresh_token_instance` to keep
 /// `refresh_token` and identity metadata that providers don't echo on
 /// refresh.
+///
+/// Two subtleties beyond a naive overlay:
+///
+/// 1. `expires_at` / `expires_in` describe the lifetime of a *specific*
+///    access_token. When `resp` carries a new access_token, the stored
+///    lifetime fields no longer apply — they're stripped before overlay
+///    so a stale `expires_at` from the old token can't shadow the new
+///    one. Otherwise providers that omit `expires_in` on refresh (Slack
+///    V1 long-lived tokens, some webhook flows) trigger an infinite
+///    refresh loop: read sees stale expiry → refresh → write keeps stale
+///    expiry → read sees stale expiry → …
+///
+/// 2. JSON `null` in `resp` is treated as "field absent". Per RFC 6749
+///    §5.1 the refresh response MAY omit `refresh_token`; a few providers
+///    instead set it explicitly to `null`. Treating null as "field
+///    present" would erase the long-lived refresh_token we already have
+///    and self-brick the connection.
 fn merge_refresh_response(stored: &Value, resp: &Value) -> Value {
     let mut merged = stored.clone();
     let Some(merged_obj) = merged.as_object_mut() else {
@@ -711,10 +728,18 @@ fn merge_refresh_response(stored: &Value, resp: &Value) -> Value {
         // can do is take the response verbatim; matches pre-fix behavior.
         return resp.clone();
     };
-    if let Some(resp_obj) = resp.as_object() {
-        for (k, v) in resp_obj {
-            merged_obj.insert(k.clone(), v.clone());
+    if resp.get("access_token").is_some() {
+        merged_obj.remove("expires_at");
+        merged_obj.remove("expires_in");
+    }
+    let Some(resp_obj) = resp.as_object() else {
+        return merged;
+    };
+    for (k, v) in resp_obj {
+        if v.is_null() {
+            continue;
         }
+        merged_obj.insert(k.clone(), v.clone());
     }
     merged
 }
@@ -1202,6 +1227,106 @@ mod tests {
         let merged = merge_refresh_response(&stored, &resp);
         assert_eq!(merged["refresh_token"], "rotated-in");
         assert_eq!(merged["access_token"], "new");
+    }
+
+    #[test]
+    fn merge_strips_stale_expires_at_when_response_omits_expires_in() {
+        // The infinite-refresh-loop regression. If we naively overlay
+        // resp on stored, a stored expires_at (tied to the OLD
+        // access_token) survives next to the NEW access_token. When the
+        // response doesn't carry a fresh expires_in (e.g. Slack V1
+        // long-lived tokens), write_oauth_token_instance has no value to
+        // derive a new expires_at from, so the merged record ships with
+        // a stale (past) expiry. Every subsequent read returns None,
+        // triggering another refresh — forever.
+        let stored = json!({
+            "access_token": "old",
+            "refresh_token": "rt",
+            "expires_at": 100u64, // way in the past
+        });
+        let resp = json!({
+            "access_token": "new",
+            "token_type": "Bearer",
+            // intentionally no expires_in
+        });
+        let merged = merge_refresh_response(&stored, &resp);
+        assert_eq!(merged["access_token"], "new");
+        assert_eq!(merged["refresh_token"], "rt");
+        assert!(
+            merged.get("expires_at").map_or(true, Value::is_null),
+            "stale expires_at must not survive a refresh that produced a new access_token; got {:?}",
+            merged.get("expires_at"),
+        );
+    }
+
+    #[test]
+    fn merge_lets_write_layer_stamp_expires_at_from_response_expires_in() {
+        // When the response DOES carry expires_in, merge strips the
+        // stored expires_at so write_oauth_token_instance is free to
+        // derive a fresh expires_at from expires_in. Both stripped, then
+        // expires_in overlaid: write_oauth_token_instance sees expires_in
+        // and stamps expires_at = now + expires_in. We only assert on
+        // the merge step here; the stamp is exercised by the broader
+        // integration tests.
+        let stored = json!({
+            "access_token": "old",
+            "refresh_token": "rt",
+            "expires_at": 100u64,
+        });
+        let resp = json!({
+            "access_token": "new",
+            "expires_in": 3599u64,
+        });
+        let merged = merge_refresh_response(&stored, &resp);
+        assert!(
+            merged.get("expires_at").map_or(true, Value::is_null),
+            "merge should defer expires_at to write_oauth_token_instance"
+        );
+        assert_eq!(merged["expires_in"], 3599);
+    }
+
+    #[test]
+    fn merge_treats_response_nulls_as_field_absent() {
+        // RFC 6749 §5.1 lets refresh responses OMIT refresh_token. Some
+        // providers instead serialize it as explicit JSON null. A naive
+        // overlay would replace our long-lived refresh_token string with
+        // Value::Null, which next refresh would read as "no refresh_token
+        // stored" and bail. Treat null as absent.
+        let stored = json!({
+            "access_token": "old",
+            "refresh_token": "long-lived-rt",
+            "email": "louis@screenpi.pe",
+        });
+        let resp = json!({
+            "access_token": "new",
+            "expires_in": 3599,
+            "refresh_token": Value::Null,
+            "email": Value::Null,
+        });
+        let merged = merge_refresh_response(&stored, &resp);
+        assert_eq!(merged["access_token"], "new");
+        assert_eq!(merged["refresh_token"], "long-lived-rt");
+        assert_eq!(merged["email"], "louis@screenpi.pe");
+    }
+
+    #[test]
+    fn merge_preserves_stored_expires_at_when_no_new_access_token() {
+        // Pathological response shape: provider returns metadata fields
+        // (e.g. just an updated scope) without a new access_token. The
+        // stored access_token + expires_at still describe the live
+        // token, so we MUST NOT strip them.
+        let stored = json!({
+            "access_token": "current",
+            "refresh_token": "rt",
+            "expires_at": 9_999_999_999u64,
+        });
+        let resp = json!({
+            "scope": "calendar.readonly userinfo.email",
+        });
+        let merged = merge_refresh_response(&stored, &resp);
+        assert_eq!(merged["access_token"], "current");
+        assert_eq!(merged["expires_at"], 9_999_999_999u64);
+        assert_eq!(merged["scope"], "calendar.readonly userinfo.email");
     }
 
     #[test]
