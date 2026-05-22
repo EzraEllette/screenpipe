@@ -6186,12 +6186,12 @@ export function StandaloneChat({
             }
           } else {
             const providerLabel = providerConfig?.provider || "AI";
-            toast({ title: `failed to start ${providerLabel}`, description: result.status === "error" ? result.error : "Unknown error", variant: "destructive" });
+            toast({ title: `failed to start AI assistant (${providerLabel})`, description: result.status === "error" ? result.error : "Unknown error", variant: "destructive" });
             return;
           }
         } catch (e) {
           const providerLabel = providerConfig?.provider || "AI";
-          toast({ title: `failed to start ${providerLabel}`, description: String(e), variant: "destructive" });
+          toast({ title: `failed to start AI assistant (${providerLabel})`, description: String(e), variant: "destructive" });
           return;
         } finally {
           setPiStarting(false);
