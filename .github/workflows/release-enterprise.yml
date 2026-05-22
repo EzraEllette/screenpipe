@@ -228,12 +228,18 @@ jobs:
           $sigFile = "$($exe.FullName).sig"
           if (Test-Path $sigFile) {
             Remove-Item $sigFile
-            $keyFile = Join-Path $env:RUNNER_TEMP "tauri-key.txt"
-            Set-Content -Path $keyFile -Value $env:TAURI_SIGNING_PRIVATE_KEY -NoNewline
             Push-Location apps/screenpipe-app-tauri
-            # Tauri v2 CLI: --private-key auto-detects path-vs-contents.
-            # The legacy --private-key-path flag was removed in 2.x.
-            bunx tauri signer sign $exe.FullName --private-key $keyFile --password $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+            # Tauri v2 CLI reads TAURI_SIGNING_PRIVATE_KEY +
+            # TAURI_SIGNING_PRIVATE_KEY_PASSWORD from env when --private-key
+            # is not passed. We intentionally DO NOT pass --private-key here:
+            # its "path vs contents" auto-detect treats Windows absolute
+            # paths (e.g. D:\...) as base64 because `:` at offset 1 fails
+            # decoding with "Invalid symbol 58, offset 1". Relying on env
+            # vars bypasses that code path entirely. See release v2.4.30
+            # failure (run 24790392363) — same fix already in release-app.yml
+            # but was missed here, surfaced on enterprise run 26301444082.
+            bunx tauri signer sign $exe.FullName
+            if ($LASTEXITCODE -ne 0) { throw "tauri signer sign failed (exit $LASTEXITCODE) - auto-updater would be broken" }
             Pop-Location
             Write-Host "Tauri signature regenerated"
           }
