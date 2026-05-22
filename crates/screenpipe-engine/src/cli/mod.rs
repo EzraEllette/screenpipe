@@ -679,6 +679,11 @@ impl RecordArgs {
 
     /// Create UI recorder configuration from record arguments
     pub fn to_ui_recorder_config(&self) -> crate::ui_recorder::UiRecorderConfig {
+        // Mirror `--capture-on-keystroke` / `--capture-on-clipboard` into
+        // the recorder so it doesn't mint corr_ids for triggers the
+        // capture loop will drop. None = engine default (false), same as
+        // in `RecordingConfig::to_ui_recorder_config`.
+        let defaults = crate::ui_recorder::UiRecorderConfig::default();
         crate::ui_recorder::UiRecorderConfig {
             enabled: true,
             enable_tree_walker: true,
@@ -690,7 +695,13 @@ impl RecordArgs {
             // `true` for both, so opting out has to be explicit.
             capture_clipboard: !self.disable_clipboard_capture,
             capture_clipboard_content: !self.disable_clipboard_capture,
-            ..Default::default()
+            capture_on_keystroke: self
+                .capture_on_keystroke
+                .unwrap_or(defaults.capture_on_keystroke),
+            capture_on_clipboard: self
+                .capture_on_clipboard
+                .unwrap_or(defaults.capture_on_clipboard),
+            ..defaults
         }
     }
 

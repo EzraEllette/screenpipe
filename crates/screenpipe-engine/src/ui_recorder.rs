@@ -87,6 +87,19 @@ pub struct UiRecorderConfig {
     pub capture_scroll: bool,
     /// Capture element context via accessibility
     pub capture_context: bool,
+    /// Mirror of `EventDrivenCaptureConfig::capture_on_keystroke`. The
+    /// recorder reads this to skip minting a correlation_id for `Key`
+    /// events when the gate is off — otherwise every keystroke would
+    /// stash a `pending_event` in the frame linker that can only ever
+    /// TTL-evict (the capture loop drops the trigger at the same gate).
+    /// Default false to match the capture-loop default.
+    pub capture_on_keystroke: bool,
+    /// Mirror of `EventDrivenCaptureConfig::capture_on_clipboard`. Same
+    /// rationale as `capture_on_keystroke` — when the capture loop is
+    /// configured to skip Clipboard triggers, the recorder must also
+    /// skip minting the corr_id so the linker doesn't accumulate
+    /// pending_events that never pair.
+    pub capture_on_clipboard: bool,
     /// Additional apps to exclude
     pub excluded_apps: Vec<String>,
     /// Window patterns to exclude (for input event capture)
@@ -130,6 +143,8 @@ impl Default for UiRecorderConfig {
             capture_window_focus: false,
             capture_scroll: false,
             capture_context: true,
+            capture_on_keystroke: false,
+            capture_on_clipboard: false,
             excluded_apps: Vec::new(),
             excluded_windows: Vec::new(),
             ignored_windows: Vec::new(),
@@ -490,6 +505,10 @@ pub async fn start_ui_recording(
     let batch_size = config.batch_size;
     let batch_timeout = Duration::from_millis(config.batch_timeout_ms);
     let record_input_events = config.record_input_events;
+    let trigger_gates = TriggerGates {
+        capture_on_keystroke: config.capture_on_keystroke,
+        capture_on_clipboard: config.capture_on_clipboard,
+    };
 
     // Start the recording
     let handle = match recorder.start() {
@@ -549,7 +568,8 @@ pub async fn start_ui_recording(
                     // ScrollBurstTracker. See [`capture_trigger_kind`].
                     let is_scroll =
                         matches!(db_event.event_type, screenpipe_db::UiEventType::Scroll);
-                    let trigger_kind = capture_trigger_kind(&db_event, &ignored_windows);
+                    let trigger_kind =
+                        capture_trigger_kind(&db_event, &ignored_windows, trigger_gates);
                     let want_corr_id = (trigger_kind.is_some() || is_scroll)
                         && (capture_trigger_tx.is_some() || linker_tx.is_some());
                     let correlation_id = if want_corr_id {
@@ -759,15 +779,31 @@ async fn flush_batch(
     batch.clear();
 }
 
+/// Trigger-side gate values mirrored from `EventDrivenCaptureConfig`.
+/// Used by [`capture_trigger_kind`] to suppress correlation_id minting
+/// for trigger kinds the capture loop is configured to drop. Without
+/// this the recorder would stash one `pending_event` per gated trigger
+/// in the frame linker — harmless functionally (they TTL-evict) but
+/// wasted work at high keystroke/clipboard rates.
+#[derive(Debug, Clone, Copy, Default)]
+struct TriggerGates {
+    capture_on_keystroke: bool,
+    capture_on_clipboard: bool,
+}
+
 /// Decide which `CaptureTrigger` (if any) this event should fire
 /// immediately. Pure helper extracted so it's trivially testable.
 ///
 /// Returns `None` for events that don't directly trigger a capture
-/// (Move, Key, Idle) and for Scroll events — Scroll triggers are
-/// deferred until the burst ends, handled by [`ScrollBurstTracker`].
+/// (Move, Idle) and for Scroll events — Scroll triggers are deferred
+/// until the burst ends, handled by [`ScrollBurstTracker`]. Also
+/// returns `None` for Key / Clipboard when their respective gate in
+/// `gates` is off, so no correlation_id is minted for triggers the
+/// capture loop will drop at the same gate.
 fn capture_trigger_kind(
     db_event: &InsertUiEvent,
     ignored_windows: &[String],
+    gates: TriggerGates,
 ) -> Option<crate::event_driven_capture::CaptureTrigger> {
     use crate::event_driven_capture::CaptureTrigger;
     match &db_event.event_type {
@@ -796,7 +832,14 @@ fn capture_trigger_kind(
             }
         }
         screenpipe_db::UiEventType::Click => Some(CaptureTrigger::Click),
-        screenpipe_db::UiEventType::Clipboard => Some(CaptureTrigger::Clipboard),
+        // Clipboard rows are always written to the DB when clipboard
+        // capture is enabled. The frame linkage is gated separately:
+        // when `capture_on_clipboard` is off the capture loop drops the
+        // trigger, so we skip minting a corr_id here too.
+        screenpipe_db::UiEventType::Clipboard if gates.capture_on_clipboard => {
+            Some(CaptureTrigger::Clipboard)
+        }
+        screenpipe_db::UiEventType::Clipboard => None,
         // Text events are already burst-end-debounced by the a11y layer
         // (`text_timeout_ms`, default 300ms) — one row per typing burst,
         // so one TypingPause trigger per row is the correct semantic.
@@ -806,12 +849,14 @@ fn capture_trigger_kind(
         // recent Scroll's correlation_id until the burst ends, then
         // emits a single ScrollStop trigger.
         screenpipe_db::UiEventType::Scroll => None,
-        // Key events fire a KeyPress trigger. The capture loop gates
-        // on `capture_on_keystroke` — when that's false the trigger
-        // arrives but the capture is skipped and the row stays NULL.
-        // We still mint the corr id and broadcast so the gate decision
-        // lives in one place (the capture loop).
-        screenpipe_db::UiEventType::Key => Some(CaptureTrigger::KeyPress),
+        // Key events fire a KeyPress trigger only when the capture loop
+        // is configured to honor them. With the gate off we don't mint a
+        // corr_id, so the row stays NULL without leaving a doomed
+        // pending_event in the frame linker.
+        screenpipe_db::UiEventType::Key if gates.capture_on_keystroke => {
+            Some(CaptureTrigger::KeyPress)
+        }
+        screenpipe_db::UiEventType::Key => None,
         // Move/Idle never trigger.
         _ => None,
     }
@@ -929,6 +974,104 @@ mod event_batch_tests {
         assert!(b.is_empty());
         assert_eq!(b.events.len(), 0);
         assert_eq!(b.correlation_ids.len(), 0);
+    }
+}
+
+#[cfg(test)]
+mod capture_trigger_kind_tests {
+    use super::*;
+    use crate::event_driven_capture::CaptureTrigger;
+    use chrono::Utc;
+    use screenpipe_db::UiEventType;
+
+    fn evt(kind: UiEventType) -> InsertUiEvent {
+        InsertUiEvent {
+            timestamp: Utc::now(),
+            session_id: None,
+            relative_ms: 0,
+            event_type: kind,
+            x: None,
+            y: None,
+            delta_x: None,
+            delta_y: None,
+            button: None,
+            click_count: None,
+            key_code: None,
+            modifiers: None,
+            text_content: None,
+            app_name: None,
+            app_pid: None,
+            window_title: None,
+            browser_url: None,
+            element_role: None,
+            element_name: None,
+            element_value: None,
+            element_description: None,
+            element_automation_id: None,
+            element_bounds: None,
+            frame_id: None,
+        }
+    }
+
+    fn gates(keystroke: bool, clipboard: bool) -> TriggerGates {
+        TriggerGates {
+            capture_on_keystroke: keystroke,
+            capture_on_clipboard: clipboard,
+        }
+    }
+
+    #[test]
+    fn key_event_suppressed_when_keystroke_gate_off() {
+        // When `capture_on_keystroke` is false the capture loop drops
+        // the trigger at the reducer — so we must also drop it here
+        // and not mint a corr_id that would just TTL-evict in the
+        // frame linker.
+        let result = capture_trigger_kind(&evt(UiEventType::Key), &[], gates(false, true));
+        assert!(result.is_none(), "Key with gate off must not trigger");
+    }
+
+    #[test]
+    fn key_event_fires_when_keystroke_gate_on() {
+        let result = capture_trigger_kind(&evt(UiEventType::Key), &[], gates(true, true));
+        assert!(matches!(result, Some(CaptureTrigger::KeyPress)));
+    }
+
+    #[test]
+    fn clipboard_event_suppressed_when_clipboard_gate_off() {
+        let result = capture_trigger_kind(&evt(UiEventType::Clipboard), &[], gates(false, false));
+        assert!(result.is_none(), "Clipboard with gate off must not trigger");
+    }
+
+    #[test]
+    fn clipboard_event_fires_when_clipboard_gate_on() {
+        let result = capture_trigger_kind(&evt(UiEventType::Clipboard), &[], gates(false, true));
+        assert!(matches!(result, Some(CaptureTrigger::Clipboard)));
+    }
+
+    #[test]
+    fn text_event_unaffected_by_gates() {
+        // TypingPause / ScrollStop don't have a capture-loop gate, so
+        // their behavior must not change regardless of TriggerGates.
+        let off = capture_trigger_kind(&evt(UiEventType::Text), &[], gates(false, false));
+        let on = capture_trigger_kind(&evt(UiEventType::Text), &[], gates(true, true));
+        assert!(matches!(off, Some(CaptureTrigger::TypingPause)));
+        assert!(matches!(on, Some(CaptureTrigger::TypingPause)));
+    }
+
+    #[test]
+    fn scroll_event_returns_none_regardless_of_gates() {
+        // Scroll triggers are deferred to ScrollBurstTracker; the
+        // immediate-fire path returns None either way.
+        let off = capture_trigger_kind(&evt(UiEventType::Scroll), &[], gates(false, false));
+        let on = capture_trigger_kind(&evt(UiEventType::Scroll), &[], gates(true, true));
+        assert!(off.is_none());
+        assert!(on.is_none());
+    }
+
+    #[test]
+    fn move_and_idle_never_trigger() {
+        let m = capture_trigger_kind(&evt(UiEventType::Move), &[], gates(true, true));
+        assert!(m.is_none());
     }
 }
 

@@ -333,6 +333,12 @@ impl RecordingConfig {
 
     /// Build a `UiRecorderConfig` from this recording config.
     pub fn to_ui_recorder_config(&self) -> crate::ui_recorder::UiRecorderConfig {
+        // `capture_on_keystroke` / `capture_on_clipboard` are mirrored
+        // from the corresponding `EventDrivenCaptureConfig` overrides so
+        // the recorder doesn't mint correlation_ids for triggers the
+        // capture loop will drop. `None` means "engine default" — same
+        // semantics as in `to_vision_manager_config`.
+        let defaults = crate::ui_recorder::UiRecorderConfig::default();
         crate::ui_recorder::UiRecorderConfig {
             enabled: true,
             enable_tree_walker: true,
@@ -347,7 +353,13 @@ impl RecordingConfig {
             prioritize_input_latency: self.prioritize_input_latency,
             extraction_thread_priority: self.extraction_thread_priority.parse().unwrap_or_default(),
             pause_extraction_on_input_ms: self.pause_extraction_on_input_ms,
-            ..Default::default()
+            capture_on_keystroke: self
+                .capture_on_keystroke
+                .unwrap_or(defaults.capture_on_keystroke),
+            capture_on_clipboard: self
+                .capture_on_clipboard
+                .unwrap_or(defaults.capture_on_clipboard),
+            ..defaults
         }
     }
 
