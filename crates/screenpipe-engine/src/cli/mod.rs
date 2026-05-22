@@ -428,6 +428,22 @@ pub struct RecordArgs {
     #[arg(long)]
     pub min_capture_interval_ms: Option<u64>,
 
+    /// Mitsukeru fork: override `EventDrivenCaptureConfig::capture_on_keystroke`.
+    /// When true, non-printable key events (Arrow/Enter/Tab/Esc, modifier
+    /// combos like Ctrl+S) fire a paired capture so `ui_events.frame_id`
+    /// is populated for the originating row. Off by default — fast typing
+    /// can flood the pipeline even with the min-capture-interval debounce.
+    #[arg(long)]
+    pub capture_on_keystroke: Option<bool>,
+
+    /// Mitsukeru fork: override `EventDrivenCaptureConfig::capture_on_clipboard`.
+    /// When true, clipboard changes fire a paired capture so the clipboard
+    /// row's `frame_id` is linked. Off by default — adds 50-150ms of
+    /// blocking work per Ctrl+C/X/V (more with OCR fallback) which can
+    /// cause visible HID input lag on some USB devices.
+    #[arg(long)]
+    pub capture_on_clipboard: Option<bool>,
+
     /// Prioritize mouse/keyboard input latency over a11y event metadata completeness.
     /// When enabled, three opt-in optimizations are activated together:
     ///   1. mouse/keyboard hook locks switch to try_lock (contended → app_name/window=None)
@@ -724,6 +740,8 @@ impl RecordArgs {
             visual_check_interval_ms: self.visual_check_interval_ms,
             visual_change_threshold: self.visual_change_threshold,
             min_capture_interval_ms: self.min_capture_interval_ms,
+            capture_on_keystroke: self.capture_on_keystroke,
+            capture_on_clipboard: self.capture_on_clipboard,
             prioritize_input_latency: self.prioritize_input_latency,
             extraction_thread_priority: self.extraction_thread_priority.clone(),
             pause_extraction_on_input_ms: self.pause_extraction_on_input_ms,

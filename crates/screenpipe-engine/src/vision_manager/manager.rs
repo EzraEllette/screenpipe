@@ -52,6 +52,12 @@ pub struct VisionManagerConfig {
     pub visual_check_interval_ms: Option<u64>,
     pub visual_change_threshold: Option<f64>,
     pub min_capture_interval_ms: Option<u64>,
+    /// Override `EventDrivenCaptureConfig::capture_on_keystroke`.
+    /// None = engine default (false). PowerProfile does not touch this.
+    pub capture_on_keystroke: Option<bool>,
+    /// Override `EventDrivenCaptureConfig::capture_on_clipboard`.
+    /// None = engine default (false). PowerProfile does not touch this.
+    pub capture_on_clipboard: Option<bool>,
 }
 
 /// Status of the VisionManager
@@ -399,6 +405,12 @@ impl VisionManager {
         if let Some(v) = self.config.min_capture_interval_ms {
             capture_config.min_capture_interval_ms = v;
         }
+        if let Some(v) = self.config.capture_on_keystroke {
+            capture_config.capture_on_keystroke = v;
+        }
+        if let Some(v) = self.config.capture_on_clipboard {
+            capture_config.capture_on_clipboard = v;
+        }
 
         // Subscribe to the shared broadcast channel so UI events reach this monitor
         let trigger_rx = self.trigger_tx.subscribe();
@@ -565,6 +577,8 @@ mod tests {
             visual_check_interval_ms: None,
             visual_change_threshold: None,
             min_capture_interval_ms: None,
+            capture_on_keystroke: None,
+            capture_on_clipboard: None,
         };
         VisionManager::new(config, db, Handle::current())
     }

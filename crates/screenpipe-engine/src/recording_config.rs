@@ -151,6 +151,12 @@ pub struct RecordingConfig {
     pub visual_check_interval_ms: Option<u64>,
     pub visual_change_threshold: Option<f64>,
     pub min_capture_interval_ms: Option<u64>,
+    /// Override `EventDrivenCaptureConfig::capture_on_keystroke`.
+    /// None = engine default (false). See `RecordingSettings.capture_on_keystroke`.
+    pub capture_on_keystroke: Option<bool>,
+    /// Override `EventDrivenCaptureConfig::capture_on_clipboard`.
+    /// None = engine default (false). See `RecordingSettings.capture_on_clipboard`.
+    pub capture_on_clipboard: Option<bool>,
 
     /// Prioritize input latency over a11y event completeness.
     /// See `RecordingSettings.prioritize_input_latency` for details.
@@ -303,6 +309,8 @@ impl RecordingConfig {
             visual_check_interval_ms: settings.visual_check_interval_ms,
             visual_change_threshold: settings.visual_change_threshold,
             min_capture_interval_ms: settings.min_capture_interval_ms,
+            capture_on_keystroke: settings.capture_on_keystroke,
+            capture_on_clipboard: settings.capture_on_clipboard,
             prioritize_input_latency: settings.prioritize_input_latency,
             extraction_thread_priority: settings.extraction_thread_priority.clone(),
             pause_extraction_on_input_ms: settings.pause_extraction_on_input_ms,
@@ -394,6 +402,8 @@ impl RecordingConfig {
             visual_check_interval_ms: self.visual_check_interval_ms,
             visual_change_threshold: self.visual_change_threshold,
             min_capture_interval_ms: self.min_capture_interval_ms,
+            capture_on_keystroke: self.capture_on_keystroke,
+            capture_on_clipboard: self.capture_on_clipboard,
         }
     }
 }

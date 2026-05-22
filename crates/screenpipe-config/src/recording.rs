@@ -193,6 +193,24 @@ pub struct RecordingSettings {
     #[serde(rename = "minCaptureIntervalMs", default)]
     pub min_capture_interval_ms: Option<u64>,
 
+    /// Override `EventDrivenCaptureConfig::capture_on_keystroke`.
+    /// None = engine default (false). When true, non-printable key events
+    /// (Arrow / Enter / Tab / Esc, modifier combos like Ctrl+S) fire a paired
+    /// capture so `ui_events.frame_id` is populated for the originating row.
+    /// Off by default — fast typing can generate a storm of captures even
+    /// with the 200ms `min_capture_interval_ms` debounce.
+    #[serde(rename = "captureOnKeystroke", default)]
+    pub capture_on_keystroke: Option<bool>,
+
+    /// Override `EventDrivenCaptureConfig::capture_on_clipboard`.
+    /// None = engine default (false). When true, clipboard changes fire a
+    /// paired capture so `ui_events.frame_id` is populated for the
+    /// clipboard row. Off by default — adds 50-150ms of blocking work per
+    /// Ctrl+C/X/V (more with OCR fallback) which can cause visible HID lag
+    /// on some USB devices.
+    #[serde(rename = "captureOnClipboard", default)]
+    pub capture_on_clipboard: Option<bool>,
+
     /// Prioritize mouse/keyboard input latency over a11y event completeness.
     /// Opt-in master switch for the three coordinated optimizations defined on
     /// `UiCaptureConfig.prioritize_input_latency`.
@@ -464,6 +482,8 @@ impl Default for RecordingSettings {
             visual_check_interval_ms: None,
             visual_change_threshold: None,
             min_capture_interval_ms: None,
+            capture_on_keystroke: None,
+            capture_on_clipboard: None,
             prioritize_input_latency: false,
             extraction_thread_priority: default_extraction_thread_priority(),
             pause_extraction_on_input_ms: default_pause_extraction_on_input_ms(),
