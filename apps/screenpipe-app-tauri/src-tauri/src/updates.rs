@@ -446,37 +446,81 @@ impl UpdatesManager {
                 }
             }
 
-            let app_handle = self.app.clone();
-            let update_version = update.version.clone();
-            let menu_item = self.update_menu_item.clone();
-            let mut downloaded: u64 = 0;
-            let mut last_pct: u8 = 0;
-            let download_result = update
-                .download_and_install(
-                    move |chunk_len, content_len| {
-                        downloaded += chunk_len as u64;
-                        let pct = content_len
-                            .map(|total| ((downloaded as f64 / total as f64) * 100.0) as u8)
-                            .unwrap_or(0);
-                        // Only emit every 5% to avoid flooding
-                        if pct >= last_pct + 5 || pct == 100 {
-                            last_pct = pct;
-                            let progress = serde_json::json!({
-                                "version": update_version,
-                                "downloaded": downloaded,
-                                "total": content_len,
-                                "percent": pct,
-                            });
-                            let _ = app_handle.emit("update-download-progress", progress);
-                            info!("update download: {}%", pct);
+            // Retry transient download failures with exponential backoff.
+            // Auth errors (401/403) short-circuit out of the loop — see error arm.
+            let retry_delays = [
+                Duration::from_secs(30),
+                Duration::from_secs(120),
+                Duration::from_secs(300),
+            ];
+            let download_result = {
+                let mut attempt: usize = 0;
+                loop {
+                    let app_handle = self.app.clone();
+                    let update_version = update.version.clone();
+                    let menu_item = self.update_menu_item.clone();
+                    let mut downloaded: u64 = 0;
+                    let mut last_pct: u8 = 0;
+                    let result = update
+                        .download_and_install(
+                            move |chunk_len, content_len| {
+                                downloaded += chunk_len as u64;
+                                let pct = content_len
+                                    .map(|total| ((downloaded as f64 / total as f64) * 100.0) as u8)
+                                    .unwrap_or(0);
+                                // Only emit every 5% to avoid flooding
+                                if pct >= last_pct + 5 || pct == 100 {
+                                    last_pct = pct;
+                                    let progress = serde_json::json!({
+                                        "version": update_version,
+                                        "downloaded": downloaded,
+                                        "total": content_len,
+                                        "percent": pct,
+                                    });
+                                    let _ = app_handle.emit("update-download-progress", progress);
+                                    info!("update download: {}%", pct);
+                                }
+                                if let Some(ref m) = menu_item {
+                                    let _ = m.set_text(&format!("Downloading update... {}%", pct));
+                                }
+                            },
+                            || {},
+                        )
+                        .await;
+
+                    match &result {
+                        Ok(_) => break result,
+                        Err(e) => {
+                            let err_str = e.to_string();
+                            // Auth errors won't recover from a retry — bail out and let
+                            // the error arm below emit the sign-in banner.
+                            let is_auth = err_str.contains("401")
+                                || err_str.contains("403")
+                                || err_str.contains("Unauthorized")
+                                || err_str.contains("Forbidden");
+                            let next_delay = retry_delays.get(attempt).copied();
+                            if is_auth || next_delay.is_none() {
+                                break result;
+                            }
+                            let delay = next_delay.unwrap();
+                            warn!(
+                                "update download attempt {} failed: {} — retrying in {}s",
+                                attempt + 1,
+                                err_str,
+                                delay.as_secs()
+                            );
+                            if let Some(ref item) = self.update_menu_item {
+                                let _ = item.set_text(&format!(
+                                    "Update download failed — retrying in {}s",
+                                    delay.as_secs()
+                                ));
+                            }
+                            tokio::time::sleep(delay).await;
+                            attempt += 1;
                         }
-                        if let Some(ref m) = menu_item {
-                            let _ = m.set_text(&format!("Downloading update... {}%", pct));
-                        }
-                    },
-                    || {},
-                )
-                .await;
+                    }
+                }
+            };
 
             match download_result {
                 Ok(_) => {
@@ -523,6 +567,36 @@ impl UpdatesManager {
                         }
                         return Ok(false);
                     }
+                    // Generic failure (network/disk/server). Clear latched state
+                    // so the periodic loop and tray can retry without an app
+                    // restart, and tell the user what happened.
+                    warn!("update download failed after retries: {}", err_str);
+                    *self.update_available.lock().await = false;
+                    *self.pending_update.lock().await = None;
+                    if let Some(ref item) = self.update_menu_item {
+                        item.set_enabled(true)?;
+                        item.set_text("Update failed — click to retry")?;
+                    }
+                    let _ = self.app.emit(
+                        "update-failed",
+                        serde_json::json!({
+                            "version": update.version,
+                            "reason": err_str,
+                        }),
+                    );
+                    let app_notif = self.app.clone();
+                    let version_str = update.version.clone();
+                    std::thread::spawn(move || {
+                        let _ = app_notif
+                            .notification()
+                            .builder()
+                            .title("screenpipe update failed")
+                            .body(format!(
+                                "v{} couldn't download — open screenpipe to retry",
+                                version_str
+                            ))
+                            .show();
+                    });
                     return Err(e.into());
                 }
             }
@@ -778,6 +852,20 @@ pub async fn get_pending_update(
     state: tauri::State<'_, Arc<UpdatesManager>>,
 ) -> Result<Option<PendingUpdateSnapshot>, ()> {
     Ok(state.pending_update_snapshot().await)
+}
+
+/// User-initiated update check from Settings → General. Returns:
+/// - `Ok(true)`  when an update was found (banner will appear after download).
+/// - `Ok(false)` when already up to date or the build can't auto-update.
+/// - `Err(String)` when the check itself failed (network, server, etc.).
+#[tauri::command]
+pub async fn trigger_update_check(
+    state: tauri::State<'_, Arc<UpdatesManager>>,
+) -> Result<bool, String> {
+    state
+        .check_for_updates(false)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 pub fn start_update_check(
