@@ -302,6 +302,16 @@ lto = "thin"
 codegen-units = 16
 incremental = true
 
+# Maximum-speed local builds for updater e2e harness — no optimization, fastest compile.
+# Trades runtime perf and binary size for compile speed.
+[profile.release-local]
+inherits = "release"
+lto = false
+codegen-units = 16
+incremental = true
+opt-level = 1
+debug = false
+
 # Faster dev builds
 [profile.dev]
 opt-level = 0
