@@ -3893,10 +3893,25 @@ export function StandaloneChat({
         if (!mountedRef.current) return;
         handleAgentEventDataRef.current?.(envelope.event);
       });
+      // E2E seam: agent_event delivery to the panel is gated on this
+      // foreground registration completing. parallel-chat.spec.ts waits
+      // on this signal before emitting events; without it, deltas race
+      // the registration window and go to the default router, which
+      // early-returns for `store.currentId === sid`, silently dropping
+      // them. Cleared in the cleanup below so successive switches don't
+      // see a stale id.
+      if (typeof window !== "undefined") {
+        (window as any).__e2eForegroundReady = conversationId;
+      }
     })();
     return () => {
       cancelled = true;
       try { off?.(); } catch { /* ignore */ }
+      if (typeof window !== "undefined") {
+        if ((window as any).__e2eForegroundReady === conversationId) {
+          (window as any).__e2eForegroundReady = null;
+        }
+      }
     };
   }, [conversationId]);
 
