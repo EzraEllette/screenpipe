@@ -23,7 +23,7 @@ use super::{
         MeetingStreamingSessionEnded, MeetingStreamingSessionStarted,
         MeetingStreamingStatusChanged, MeetingTranscriptDelta, MeetingTranscriptFinal,
     },
-    openai_realtime, selected_engine, MeetingStreamingConfig, MeetingStreamingProvider,
+    selected_engine, MeetingStreamingConfig, MeetingStreamingProvider,
 };
 
 const LIVE_FINAL_PERSIST_ATTEMPTS: usize = 18;
@@ -529,16 +529,6 @@ fn route_frame_to_provider(
                 );
                 session.device_senders.insert(key.clone(), tx);
             }
-            MeetingStreamingProvider::OpenAiRealtime => {
-                openai_realtime::spawn_openai_realtime_stream(
-                    config.clone(),
-                    session.meeting_id,
-                    frame.device_name.clone(),
-                    frame.device_type.clone(),
-                    rx,
-                );
-                session.device_senders.insert(key.clone(), tx);
-            }
             MeetingStreamingProvider::Disabled => {
                 return;
             }
@@ -793,11 +783,6 @@ async fn readiness_error(
         MeetingStreamingProvider::ScreenpipeCloud if config.live_transcription_ready() => None,
         MeetingStreamingProvider::ScreenpipeCloud => Some(
             "Log in to ScreenPipe Cloud to enable live meeting transcription".to_string(),
-        ),
-        MeetingStreamingProvider::OpenAiRealtime if config.live_transcription_ready() => None,
-        MeetingStreamingProvider::OpenAiRealtime => Some(
-            "Direct OpenAI realtime transcription needs a developer API key; ScreenPipe Cloud does not"
-                .to_string(),
         ),
         MeetingStreamingProvider::DeepgramLive if config.live_transcription_ready() => None,
         MeetingStreamingProvider::DeepgramLive => Some(

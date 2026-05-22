@@ -185,7 +185,7 @@ export type Settings = SettingsStore & {
 	/** Live notes for manually-started meetings. Separate from background 24/7 transcription. */
 	meetingLiveTranscriptionEnabled?: boolean;
 	/** Provider for manually-started live notes. Defaults to the selected transcription engine. */
-	meetingLiveTranscriptionProvider?: "selected-engine" | "screenpipe-cloud" | "disabled" | "openai-realtime" | "deepgram-live";
+	meetingLiveTranscriptionProvider?: "selected-engine" | "screenpipe-cloud" | "disabled" | "deepgram-live";
 	/** When true, the user's typed text (and edited files) captured during a meeting is auto-appended to the meeting note when the meeting stops. Default true. */
 	appendTypedTextToMeetingNote?: boolean;
 	/** User's name for speaker identification — input device audio will be labeled with this name */

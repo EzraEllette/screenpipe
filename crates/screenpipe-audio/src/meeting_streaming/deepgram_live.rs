@@ -96,9 +96,7 @@ async fn run_stream(
             .as_deref()
             .filter(|s| !s.trim().is_empty())
             .context("direct Deepgram live meeting transcription requires a Deepgram API key")?,
-        MeetingStreamingProvider::Disabled
-        | MeetingStreamingProvider::SelectedEngine
-        | MeetingStreamingProvider::OpenAiRealtime => {
+        MeetingStreamingProvider::Disabled | MeetingStreamingProvider::SelectedEngine => {
             anyhow::bail!(
                 "provider {} is not Deepgram-live compatible",
                 config.provider.as_str()
@@ -225,9 +223,9 @@ fn auth_header(provider: &MeetingStreamingProvider, credential: &str) -> String 
     match provider {
         MeetingStreamingProvider::ScreenpipeCloud => format!("Bearer {credential}"),
         MeetingStreamingProvider::DeepgramLive => format!("Token {credential}"),
-        MeetingStreamingProvider::Disabled
-        | MeetingStreamingProvider::SelectedEngine
-        | MeetingStreamingProvider::OpenAiRealtime => String::new(),
+        MeetingStreamingProvider::Disabled | MeetingStreamingProvider::SelectedEngine => {
+            String::new()
+        }
     }
 }
 
