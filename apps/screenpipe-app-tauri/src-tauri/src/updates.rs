@@ -373,6 +373,54 @@ impl UpdatesManager {
                 });
             }
 
+            // Windows quirk: the Tauri updater's download_and_install launches
+            // the NSIS/MSI installer and calls std::process::exit(0) at the end
+            // (see tauri-plugin-updater install_inner on Windows). Unlike macOS
+            // where it just stages files in place, calling it on Windows IS the
+            // install — there's no way to "silently pre-download" without
+            // triggering the restart. When auto_update is off we must defer to
+            // the user's banner click; the frontend handler in
+            // update-banner.tsx re-checks and runs downloadAndInstall itself.
+            #[cfg(target_os = "windows")]
+            if !auto_update {
+                info!(
+                    "auto-update disabled on windows; deferring installer to user banner click (v{})",
+                    update.version
+                );
+
+                *self.update_installed.lock().await = true;
+                if let Some(snap) = self.pending_update.lock().await.as_mut() {
+                    snap.downloaded = true;
+                }
+                if let Some(ref item) = self.update_menu_item {
+                    item.set_enabled(true)?;
+                    item.set_text("Restart to update")?;
+                }
+
+                save_pre_update_version(&self.app, update.body.clone());
+
+                let update_info = serde_json::json!({
+                    "version": update.version,
+                    "body": update.body.clone().unwrap_or_default()
+                });
+                if let Err(e) = self.app.emit("update-available", update_info) {
+                    error!("Failed to emit update-available event: {}", e);
+                }
+
+                let app_notif = self.app.clone();
+                let version_str = update.version.clone();
+                std::thread::spawn(move || {
+                    let _ = app_notif
+                        .notification()
+                        .builder()
+                        .title("screenpipe update ready")
+                        .body(format!("v{} ready — restart to update", version_str))
+                        .show();
+                });
+
+                return Result::Ok(true);
+            }
+
             // Always download in the background. auto_update only controls
             // whether we restart automatically after — the banner is the user's
             // "restart now" trigger when auto_update is off.
