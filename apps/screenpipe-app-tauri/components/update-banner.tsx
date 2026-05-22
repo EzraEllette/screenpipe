@@ -28,11 +28,17 @@ interface UpdateBannerState {
   isInstalling: boolean;
   pendingUpdate: Update | null;
   authRequired: AuthRequiredInfo | null;
+  // Version the user dismissed in this session. Periodic re-checks and
+  // providers-remount hydration would otherwise re-show the same banner
+  // immediately after the user clicked X.
+  dismissedVersion: string | null;
   setIsVisible: (visible: boolean) => void;
   setUpdateInfo: (info: UpdateInfo | null) => void;
   setIsInstalling: (installing: boolean) => void;
   setPendingUpdate: (update: Update | null) => void;
   setAuthRequired: (info: AuthRequiredInfo | null) => void;
+  dismiss: (version: string) => void;
+  resetDismissed: () => void;
 }
 
 export const useUpdateBanner = create<UpdateBannerState>((set) => ({
@@ -41,11 +47,14 @@ export const useUpdateBanner = create<UpdateBannerState>((set) => ({
   isInstalling: false,
   pendingUpdate: null,
   authRequired: null,
+  dismissedVersion: null,
   setIsVisible: (visible) => set({ isVisible: visible }),
   setUpdateInfo: (info) => set({ updateInfo: info }),
   setIsInstalling: (installing) => set({ isInstalling: installing }),
   setPendingUpdate: (update) => set({ pendingUpdate: update }),
   setAuthRequired: (info) => set({ authRequired: info }),
+  dismiss: (version) => set({ isVisible: false, authRequired: null, dismissedVersion: version }),
+  resetDismissed: () => set({ dismissedVersion: null }),
 }));
 
 interface UpdateBannerProps {
@@ -56,7 +65,7 @@ interface UpdateBannerProps {
 }
 
 export function UpdateBanner({ className, compact = false, variant = "default" }: UpdateBannerProps) {
-  const { isVisible, updateInfo, isInstalling, setIsVisible, setIsInstalling, pendingUpdate, authRequired, setAuthRequired } = useUpdateBanner();
+  const { isVisible, updateInfo, isInstalling, setIsInstalling, pendingUpdate, authRequired, dismiss } = useUpdateBanner();
   const { toast } = useToast();
 
   const handleUpdate = async () => {
@@ -163,7 +172,7 @@ export function UpdateBanner({ className, compact = false, variant = "default" }
             variant="ghost"
             size="sm"
             className="h-7 w-7 p-0"
-            onClick={() => setAuthRequired(null)}
+            onClick={() => dismiss(authRequired.version)}
           >
             <X className="h-4 w-4" />
           </Button>
@@ -242,7 +251,7 @@ export function UpdateBanner({ className, compact = false, variant = "default" }
           variant="ghost"
           size="sm"
           className="h-7 w-7 p-0"
-          onClick={() => setIsVisible(false)}
+          onClick={() => dismiss(updateInfo.version)}
         >
           <X className="h-4 w-4" />
         </Button>
@@ -265,29 +274,46 @@ interface PendingUpdateSnapshot {
 // state from Rust so it can recover if the event fired before this hook
 // registered (boot-time webview race).
 export function useUpdateListener() {
-  const { setIsVisible, setUpdateInfo, setAuthRequired } = useUpdateBanner();
+  const { setIsVisible, setUpdateInfo, setAuthRequired, resetDismissed } = useUpdateBanner();
 
   useEffect(() => {
     let unlistenAvailable: (() => void) | undefined;
     let unlistenClick: (() => void) | undefined;
     let unlistenAuth: (() => void) | undefined;
 
+    // Rust re-emits update-available on every periodic check, and providers
+    // hydration runs on every remount — both would otherwise resurrect a
+    // banner the user just dismissed. Read dismissedVersion fresh inside the
+    // callback so a newer version still shows even if an older one is dismissed.
+    const showIfNotDismissed = (info: UpdateInfo) => {
+      setUpdateInfo(info);
+      if (useUpdateBanner.getState().dismissedVersion !== info.version) {
+        setIsVisible(true);
+      }
+    };
+    const showAuthIfNotDismissed = (info: AuthRequiredInfo) => {
+      if (useUpdateBanner.getState().dismissedVersion !== info.version) {
+        setAuthRequired(info);
+      }
+    };
+
     const setupListeners = async () => {
       // Download happens silently in the background. Banner only appears
       // when the download is complete and the app is ready to restart.
       unlistenAvailable = await listen<UpdateInfo>("update-available", (event) => {
-        setUpdateInfo(event.payload);
-        setIsVisible(true);
+        showIfNotDismissed(event.payload);
       });
 
-      // Listen for tray menu click
+      // Tray click is an explicit user request — clear any prior dismissal
+      // so the banner reappears even if they X'd it earlier this session.
       unlistenClick = await listen("update-now-clicked", () => {
+        resetDismissed();
         setIsVisible(true);
       });
 
       // Listen for auth-required (user needs to sign in to download update)
       unlistenAuth = await listen<AuthRequiredInfo>("update-auth-required", (event) => {
-        setAuthRequired(event.payload);
+        showAuthIfNotDismissed(event.payload);
       });
 
       // Hydrate from Rust in case the event fired before we mounted.
@@ -295,10 +321,9 @@ export function useUpdateListener() {
         const pending = await invoke<PendingUpdateSnapshot | null>("get_pending_update");
         if (pending) {
           if (pending.auth_required) {
-            setAuthRequired({ version: pending.version, message: "sign in to get the latest update" });
+            showAuthIfNotDismissed({ version: pending.version, message: "sign in to get the latest update" });
           } else if (pending.downloaded) {
-            setUpdateInfo({ version: pending.version, body: pending.body });
-            setIsVisible(true);
+            showIfNotDismissed({ version: pending.version, body: pending.body });
           }
         }
       } catch (e) {
@@ -314,5 +339,5 @@ export function useUpdateListener() {
       unlistenClick?.();
       unlistenAuth?.();
     };
-  }, [setIsVisible, setUpdateInfo, setAuthRequired]);
+  }, [setIsVisible, setUpdateInfo, setAuthRequired, resetDismissed]);
 }
