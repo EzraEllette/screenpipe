@@ -18,6 +18,19 @@ if (-not $env:ESIGNER_USERNAME -or -not $env:ESIGNER_PASSWORD) {
     exit 0
 }
 
+# Skip non-PE files. NSIS scratch invokes signCommand on temp files (.tmp,
+# .nst, etc.) that CodeSignTool can't sign — it returns
+# "Unsupported file format for signing - tmp" and burns 3 retry attempts
+# for nothing. Observed on enterprise build 26301444082 (2026-05-22).
+# Authoritative list: signable Windows PE/COFF binaries. Anything else
+# means Tauri/NSIS handed us scratch.
+$ext = [System.IO.Path]::GetExtension($FilePath).ToLowerInvariant()
+$signableExts = @('.exe', '.dll', '.sys', '.msi', '.ocx', '.scr', '.cab', '.cat')
+if (-not ($signableExts -contains $ext)) {
+    Write-Host "Skipping non-PE file (ext=$ext): $FilePath"
+    exit 0
+}
+
 if (-not $env:CODESIGNTOOL_PATH) {
     Write-Host "ERROR: CODESIGNTOOL_PATH not set"
     exit 1
