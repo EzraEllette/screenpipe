@@ -157,6 +157,9 @@ pub struct RecordingConfig {
     /// Override `EventDrivenCaptureConfig::capture_on_clipboard`.
     /// None = engine default (false). See `RecordingSettings.capture_on_clipboard`.
     pub capture_on_clipboard: Option<bool>,
+    /// Override `UiRecorderConfig::capture_scroll`.
+    /// None = engine default (false). See `RecordingSettings.capture_scroll`.
+    pub capture_scroll: Option<bool>,
 
     /// Prioritize input latency over a11y event completeness.
     /// See `RecordingSettings.prioritize_input_latency` for details.
@@ -311,6 +314,7 @@ impl RecordingConfig {
             min_capture_interval_ms: settings.min_capture_interval_ms,
             capture_on_keystroke: settings.capture_on_keystroke,
             capture_on_clipboard: settings.capture_on_clipboard,
+            capture_scroll: settings.capture_scroll,
             prioritize_input_latency: settings.prioritize_input_latency,
             extraction_thread_priority: settings.extraction_thread_priority.clone(),
             pause_extraction_on_input_ms: settings.pause_extraction_on_input_ms,
@@ -359,6 +363,7 @@ impl RecordingConfig {
             capture_on_clipboard: self
                 .capture_on_clipboard
                 .unwrap_or(defaults.capture_on_clipboard),
+            capture_scroll: self.capture_scroll.unwrap_or(defaults.capture_scroll),
             ..defaults
         }
     }

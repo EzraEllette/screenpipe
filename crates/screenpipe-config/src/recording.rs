@@ -211,6 +211,15 @@ pub struct RecordingSettings {
     #[serde(rename = "captureOnClipboard", default)]
     pub capture_on_clipboard: Option<bool>,
 
+    /// Override `UiRecorderConfig::capture_scroll`.
+    /// None = engine default (false). When true, scroll wheel events are
+    /// recorded into `ui_events` so the `ScrollBurstTracker` can fire a
+    /// `ScrollStop` trigger at burst-end and link the last scroll row to
+    /// the resulting frame. Off by default — wheel ticks fire at ~60Hz
+    /// and inflate the table fast.
+    #[serde(rename = "captureScroll", default)]
+    pub capture_scroll: Option<bool>,
+
     /// Prioritize mouse/keyboard input latency over a11y event completeness.
     /// Opt-in master switch for the three coordinated optimizations defined on
     /// `UiCaptureConfig.prioritize_input_latency`.
@@ -484,6 +493,7 @@ impl Default for RecordingSettings {
             min_capture_interval_ms: None,
             capture_on_keystroke: None,
             capture_on_clipboard: None,
+            capture_scroll: None,
             prioritize_input_latency: false,
             extraction_thread_priority: default_extraction_thread_priority(),
             pause_extraction_on_input_ms: default_pause_extraction_on_input_ms(),

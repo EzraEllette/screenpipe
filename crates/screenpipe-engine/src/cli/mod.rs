@@ -444,6 +444,15 @@ pub struct RecordArgs {
     #[arg(long)]
     pub capture_on_clipboard: Option<bool>,
 
+    /// Override `UiRecorderConfig::capture_scroll` — record scroll wheel
+    /// events into `ui_events`. Off by default because wheel ticks fire
+    /// at ~60Hz and inflate the table fast. When on, the recorder's
+    /// `ScrollBurstTracker` coalesces a wheel flick into one
+    /// `ScrollStop` trigger at burst-end so only the last row in a burst
+    /// gets `frame_id` linked.
+    #[arg(long)]
+    pub capture_scroll: Option<bool>,
+
     /// Prioritize mouse/keyboard input latency over a11y event metadata completeness.
     /// When enabled, three opt-in optimizations are activated together:
     ///   1. mouse/keyboard hook locks switch to try_lock (contended → app_name/window=None)
@@ -701,6 +710,7 @@ impl RecordArgs {
             capture_on_clipboard: self
                 .capture_on_clipboard
                 .unwrap_or(defaults.capture_on_clipboard),
+            capture_scroll: self.capture_scroll.unwrap_or(defaults.capture_scroll),
             ..defaults
         }
     }
@@ -753,6 +763,7 @@ impl RecordArgs {
             min_capture_interval_ms: self.min_capture_interval_ms,
             capture_on_keystroke: self.capture_on_keystroke,
             capture_on_clipboard: self.capture_on_clipboard,
+            capture_scroll: self.capture_scroll,
             prioritize_input_latency: self.prioritize_input_latency,
             extraction_thread_priority: self.extraction_thread_priority.clone(),
             pause_extraction_on_input_ms: self.pause_extraction_on_input_ms,
