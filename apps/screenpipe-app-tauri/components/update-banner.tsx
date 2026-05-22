@@ -251,7 +251,19 @@ export function UpdateBanner({ className, compact = false, variant = "default" }
   );
 }
 
-// Hook to listen for update events from Rust
+interface PendingUpdateSnapshot {
+  version: string;
+  body: string;
+  downloaded: boolean;
+  auth_required: boolean;
+}
+
+// Hook to listen for update events from Rust.
+// Mounted globally in app/providers.tsx so it survives route changes and
+// catches the `update-available` event regardless of which page is open
+// when the download finishes. On mount, it also pulls the current pending
+// state from Rust so it can recover if the event fired before this hook
+// registered (boot-time webview race).
 export function useUpdateListener() {
   const { setIsVisible, setUpdateInfo, setAuthRequired } = useUpdateBanner();
 
@@ -277,6 +289,22 @@ export function useUpdateListener() {
       unlistenAuth = await listen<AuthRequiredInfo>("update-auth-required", (event) => {
         setAuthRequired(event.payload);
       });
+
+      // Hydrate from Rust in case the event fired before we mounted.
+      try {
+        const pending = await invoke<PendingUpdateSnapshot | null>("get_pending_update");
+        if (pending) {
+          if (pending.auth_required) {
+            setAuthRequired({ version: pending.version, message: "sign in to get the latest update" });
+          } else if (pending.downloaded) {
+            setUpdateInfo({ version: pending.version, body: pending.body });
+            setIsVisible(true);
+          }
+        }
+      } catch (e) {
+        // Command not registered yet (older Rust side) or app not ready.
+        // Fall back to event-driven path silently.
+      }
     };
 
     setupListeners();

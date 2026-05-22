@@ -151,6 +151,19 @@ fn enterprise_updates_managed_locally(app: &tauri::AppHandle) -> bool {
     }
 }
 
+/// Snapshot of a pending update, exposed to the frontend via
+/// `get_pending_update`. The banner queries this on mount so it can hydrate
+/// state even when the `update-available` event fires before React mounts.
+#[derive(Clone, serde::Serialize)]
+pub struct PendingUpdateSnapshot {
+    pub version: String,
+    pub body: String,
+    /// True once the bundle is downloaded and the app is ready to restart.
+    pub downloaded: bool,
+    /// True when download failed with 401/403 — user must sign in.
+    pub auth_required: bool,
+}
+
 pub struct UpdatesManager {
     interval: Duration,
     update_available: Arc<Mutex<bool>>,
@@ -158,6 +171,11 @@ pub struct UpdatesManager {
     /// None for enterprise builds (no in-app update UI).
     update_menu_item: Option<MenuItem<Wry>>,
     update_installed: Arc<Mutex<bool>>,
+    /// Latest pending update info, mirrored to the frontend on demand. None
+    /// until an update is detected; populated before download, then flipped
+    /// to downloaded=true once the bundle lands. Survives webview-mount
+    /// races that would otherwise lose the `update-available` event.
+    pending_update: Arc<Mutex<Option<PendingUpdateSnapshot>>>,
     /// Prevents concurrent check_for_updates calls (boot check + periodic race)
     is_checking: AtomicBool,
 }
@@ -183,6 +201,7 @@ impl UpdatesManager {
             interval: Duration::from_secs(interval_minutes * 60),
             update_available: Arc::new(Mutex::new(false)),
             update_installed: Arc::new(Mutex::new(false)),
+            pending_update: Arc::new(Mutex::new(None)),
             app: app.clone(),
             update_menu_item,
             is_checking: AtomicBool::new(false),
@@ -289,6 +308,12 @@ impl UpdatesManager {
         }
         if let Ok(Some(update)) = check_result {
             *self.update_available.lock().await = true;
+            *self.pending_update.lock().await = Some(PendingUpdateSnapshot {
+                version: update.version.clone(),
+                body: update.body.clone().unwrap_or_default(),
+                downloaded: false,
+                auth_required: false,
+            });
 
             let auto_update = SettingsStore::get(&self.app)
                 .ok()
@@ -391,6 +416,9 @@ impl UpdatesManager {
             match download_result {
                 Ok(_) => {
                     *self.update_installed.lock().await = true;
+                    if let Some(snap) = self.pending_update.lock().await.as_mut() {
+                        snap.downloaded = true;
+                    }
                     if let Some(ref item) = self.update_menu_item {
                         item.set_enabled(true)?;
                         item.set_text("Restart to update")?;
@@ -404,6 +432,9 @@ impl UpdatesManager {
                         || err_str.contains("Forbidden")
                     {
                         warn!("update download requires authentication: {}", err_str);
+                        if let Some(snap) = self.pending_update.lock().await.as_mut() {
+                            snap.auth_required = true;
+                        }
                         let _ = self.app.emit(
                             "update-auth-required",
                             serde_json::json!({
@@ -512,6 +543,12 @@ impl UpdatesManager {
 
     pub async fn has_update_installed(&self) -> bool {
         *self.update_installed.lock().await
+    }
+
+    /// Read the current pending update snapshot, for the frontend banner to
+    /// hydrate when its listener mounts late and misses the event.
+    pub async fn pending_update_snapshot(&self) -> Option<PendingUpdateSnapshot> {
+        self.pending_update.lock().await.clone()
     }
 
     /// Show dialog explaining auto-updates are not available for source builds
@@ -664,6 +701,18 @@ fn check_whats_new(app: &tauri::AppHandle) {
             Err(e) => error!("failed to send what's-new notification: {}", e),
         }
     });
+}
+
+/// Hydrate the frontend banner state on mount. The `update-available` event
+/// is broadcast once when the download completes — if the React app isn't
+/// mounted yet (boot race) or the listener lives on a route the user hasn't
+/// visited yet, that event is lost. The banner calls this command on mount
+/// to pick up state it may have missed.
+#[tauri::command]
+pub async fn get_pending_update(
+    state: tauri::State<'_, Arc<UpdatesManager>>,
+) -> Result<Option<PendingUpdateSnapshot>, ()> {
+    Ok(state.pending_update_snapshot().await)
 }
 
 pub fn start_update_check(

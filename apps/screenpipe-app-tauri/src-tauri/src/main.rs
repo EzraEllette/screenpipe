@@ -1013,6 +1013,7 @@ async fn main() {
         .invoke_handler(tauri::generate_handler![
             commands::is_enterprise_build_cmd,
             enterprise_install_metadata::get_enterprise_install_metadata,
+            updates::get_pending_update,
             commands::get_local_api_config,
             commands::regenerate_api_auth_key,
             commands::set_api_auth_key,
