@@ -723,9 +723,12 @@ function mergeMeetingAudioChunks(
   const out: MeetingAudioChunk[] = [];
 
   for (const chunk of merged) {
+    // /search returns DeviceType as "Input"/"Output" (PascalCase enum), while
+    // /meetings/:id/transcript returns the raw DB column "input"/"output".
+    // Lowercase both so the same chunk pulled from both endpoints collapses.
     const key = [
       Math.round(timestampMs(chunk.timestamp) / 1000),
-      chunk.deviceType,
+      chunk.deviceType.toLowerCase(),
       chunk.speakerName,
       chunk.transcription.replace(/\s+/g, " ").trim().toLowerCase(),
     ].join("|");
