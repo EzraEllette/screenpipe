@@ -32,7 +32,8 @@ use std::time::Duration;
 use anyhow::Result;
 use screenpipe_connect::connections::{load_connection, SavedConnection};
 use screenpipe_core::memories::external_sync::{
-    render_block_body, write_atomic, Destination, MemoryEntry, SyncOutcome,
+    render_block_body, render_digest, write_atomic, write_atomic_full, Destination, MemoryEntry,
+    SyncOutcome,
 };
 use screenpipe_db::DatabaseManager;
 use screenpipe_secrets::SecretStore;
@@ -310,23 +311,37 @@ fn apply(
     let home = resolver(credentials)?;
     let target = dest.target_path(&home);
 
-    let body = render_block_body(entries, dest);
-    let changed = write_atomic(&target, &body)
+    // Outer file (CLAUDE.md / AGENTS.md) gets the marker-spliced block.
+    // For destinations with a sidecar that's just an `@import` reference;
+    // for the others it's the full digest inline.
+    let block_body = render_block_body(entries, dest);
+    let outer_changed = write_atomic(&target, &block_body)
         .map_err(|e| anyhow::anyhow!("write {}: {}", target.display(), e))?;
 
-    if changed {
+    // Sidecar file (when supported) holds the full digest. It's fully
+    // screenpipe-owned — no hand-edited content to preserve — so we
+    // rewrite it whole.
+    let sidecar_changed = if let Some(sidecar) = dest.sidecar_path(&home) {
+        let sidecar_body = render_digest(entries, dest);
+        write_atomic_full(&sidecar, &sidecar_body)
+            .map_err(|e| anyhow::anyhow!("write {}: {}", sidecar.display(), e))?
+    } else {
+        false
+    };
+
+    let entries_used = entries
+        .len()
+        .min(screenpipe_core::memories::external_sync::MAX_ENTRIES_PER_DIGEST);
+
+    if outer_changed || sidecar_changed {
         Ok(SyncOutcome::Wrote {
             path: target,
-            entries: entries
-                .len()
-                .min(screenpipe_core::memories::external_sync::MAX_ENTRIES_PER_DIGEST),
+            entries: entries_used,
         })
     } else {
         Ok(SyncOutcome::Unchanged {
             path: target,
-            entries: entries
-                .len()
-                .min(screenpipe_core::memories::external_sync::MAX_ENTRIES_PER_DIGEST),
+            entries: entries_used,
         })
     }
 }
@@ -422,10 +437,33 @@ mod tests {
             SyncOutcome::Wrote { path, entries: n } => {
                 assert_eq!(n, 1);
                 assert!(path.ends_with("CLAUDE.md"));
-                let body = std::fs::read_to_string(&path).unwrap();
-                assert!(body.contains("user prefers bun over npm"));
-                assert!(body.contains(&marker_start()));
-                assert!(body.contains(&marker_end()));
+
+                // Outer CLAUDE.md must be the slim marker block + @import,
+                // not the memory body itself. This is the whole point of
+                // the sidecar split.
+                let outer = std::fs::read_to_string(&path).unwrap();
+                assert!(outer.contains(&marker_start()));
+                assert!(outer.contains(&marker_end()));
+                assert!(
+                    outer.contains("@screenpipe-memories.md"),
+                    "outer file missing @import reference:\n{}",
+                    outer
+                );
+                assert!(
+                    !outer.contains("user prefers bun over npm"),
+                    "memory body leaked into outer file:\n{}",
+                    outer
+                );
+
+                // Sidecar lives alongside CLAUDE.md and holds the digest.
+                let sidecar = dir.path().join("screenpipe-memories.md");
+                assert!(sidecar.exists(), "sidecar file was not created");
+                let sidecar_body = std::fs::read_to_string(&sidecar).unwrap();
+                assert!(
+                    sidecar_body.contains("user prefers bun over npm"),
+                    "sidecar missing memory body:\n{}",
+                    sidecar_body
+                );
             }
             other => panic!("expected Wrote, got {:?}", other),
         }
@@ -454,6 +492,9 @@ mod tests {
 
     #[test]
     fn apply_reports_change_when_entries_shift() {
+        // For Claude Code the outer CLAUDE.md @import line is identical
+        // regardless of entry count — but the sidecar body changes when
+        // entries do, so the overall `apply` must still report a write.
         let dir = tempfile::tempdir().unwrap();
         let creds = serde_json::Map::new();
         let resolver = {
@@ -478,6 +519,11 @@ mod tests {
             SyncOutcome::Wrote { entries: n, .. } => assert_eq!(n, 2),
             other => panic!("expected Wrote on second apply, got {:?}", other),
         }
+
+        // Sidecar must reflect the new entry set.
+        let sidecar = std::fs::read_to_string(dir.path().join("screenpipe-memories.md")).unwrap();
+        assert!(sidecar.contains("fact A"));
+        assert!(sidecar.contains("fact B"));
     }
 
     #[test]
@@ -596,9 +642,15 @@ mod tests {
             Ok(SyncOutcome::Wrote { path, entries: n }) => {
                 assert_eq!(n, 2);
                 assert_eq!(path, target_dir.join("CLAUDE.md"));
-                let body = std::fs::read_to_string(&path).unwrap();
-                assert!(body.contains("first fact"));
-                assert!(body.contains("second fact"));
+                // Outer CLAUDE.md only carries the import directive.
+                let outer = std::fs::read_to_string(&path).unwrap();
+                assert!(outer.contains("@screenpipe-memories.md"));
+                assert!(!outer.contains("first fact"));
+                // The memory bodies land in the sidecar.
+                let sidecar =
+                    std::fs::read_to_string(target_dir.join("screenpipe-memories.md")).unwrap();
+                assert!(sidecar.contains("first fact"));
+                assert!(sidecar.contains("second fact"));
             }
             other => panic!("expected Wrote, got {:?}", other),
         }

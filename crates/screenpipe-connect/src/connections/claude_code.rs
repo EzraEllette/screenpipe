@@ -13,7 +13,7 @@ static DEF: IntegrationDef = IntegrationDef {
     name: "Claude Code",
     icon: "claude",
     category: Category::Productivity,
-    description: "Continuously sync screenpipe memories into Claude Code's user-level CLAUDE.md so Claude has long-term context across every session. The sync writes a marker block (\"<!-- screenpipe-memories:start -->\") that screenpipe owns and rewrites idempotently — anything outside the block stays untouched. Leave home_path empty to use the default (~/.claude). For per-project memory, point home_path at a specific project's directory containing CLAUDE.md.",
+    description: "Continuously sync screenpipe memories into Claude Code so it has long-term context across every session. CLAUDE.md gets a tiny screenpipe-owned marker block that `@`-imports a sibling `screenpipe-memories.md` sidecar — the sidecar holds the full digest and is rewritten end-to-end on each sync, while CLAUDE.md stays small and hand-editable outside the marker block. Leave home_path empty to use the default (~/.claude). For per-project memory, point home_path at a specific project's directory containing CLAUDE.md.",
     fields: &[FieldDef {
         key: "home_path",
         label: "Claude home directory (optional)",
