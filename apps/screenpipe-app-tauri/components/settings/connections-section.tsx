@@ -40,6 +40,7 @@ import { BrowserUrlCard } from "./browser-url-card";
 import { UserBrowserCard } from "./user-browser-card";
 import { VoiceMemosCard } from "./voice-memos-card";
 import { InputMonitoringPanel } from "./input-monitoring-card";
+import { CustomMcpCard } from "./custom-mcp-card";
 import posthog from "posthog-js";
 
 // ---------------------------------------------------------------------------
@@ -358,6 +359,14 @@ export function IntegrationIcon({
       </svg>
     ),
     "voice-memos": <img src="/images/voice-memos.svg" alt="Voice Memos" className="w-5 h-5 rounded" />,
+    "custom-mcp": (
+      <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+        <path d="M9 2v6" />
+        <path d="M15 2v6" />
+        <path d="M12 17.5 7.5 13a3.07 3.07 0 0 1 0-4.33L8 8h8l.5.67a3.07 3.07 0 0 1 0 4.33L12 17.5Z" />
+        <path d="M12 22v-4.5" />
+      </svg>
+    ),
     microsoft365: (
       <svg viewBox="0 0 24 24" className="w-5 h-5">
         <path fill="#F25022" d="M1 1h10v10H1z"/>
@@ -2237,6 +2246,7 @@ export function ConnectionsSection({ focusConnectionId, focusRequestId = 0 }: Co
   const [chatgptConnected, setChatgptConnected] = useState(false);
   const [browserUrlConnected, setBrowserUrlConnected] = useState(false);
   const [googleCalendarConnected, setGoogleCalendarConnected] = useState(false);
+  const [customMcpConnected, setCustomMcpConnected] = useState(false);
   const [inputMonitoringGranted, setInputMonitoringGranted] = useState(false);
 
   const refreshStatus = useCallback(() => {
@@ -2254,6 +2264,12 @@ export function ConnectionsSection({ focusConnectionId, focusRequestId = 0 }: Co
     commands.oauthStatus("google-calendar", null).then(res => {
       setGoogleCalendarConnected(res.status === "ok" && res.data.connected);
     }).catch(() => {});
+    localFetch("/mcp-servers").then(async r => {
+      if (!r.ok) { setCustomMcpConnected(false); return; }
+      const body = await r.json();
+      const list = (body?.data ?? []) as { enabled: boolean }[];
+      setCustomMcpConnected(list.some(s => s.enabled));
+    }).catch(() => setCustomMcpConnected(false));
     if (typeof window !== "undefined" && platform() === "macos") {
       commands.getBrowsersAutomationStatus().then(statuses => {
         setBrowserUrlConnected(
@@ -2341,6 +2357,7 @@ export function ConnectionsSection({ focusConnectionId, focusRequestId = 0 }: Co
       { id: "notion", name: "Notion", icon: "notion", connected: false },
       { id: "linear", name: "Linear", icon: "linear", connected: false },
       { id: "perplexity", name: "Perplexity", icon: "perplexity", connected: false },
+      { id: "custom-mcp", name: "Custom MCP", icon: "custom-mcp", connected: false },
     ];
     // Merge API tiles, skipping duplicates already in hardcoded.
     // owned-default is hidden from settings — the agent drives it via the
@@ -2364,11 +2381,14 @@ export function ConnectionsSection({ focusConnectionId, focusRequestId = 0 }: Co
     // in sync immediately after connect/disconnect without waiting for cache expiry.
     const googleCalTile = hardcoded.find(h => h.id === "google-calendar");
     if (googleCalTile) googleCalTile.connected = googleCalendarConnected;
+    // Custom MCP tile shows the dot when any user-registered MCP server is enabled.
+    const customMcpTile = hardcoded.find(h => h.id === "custom-mcp");
+    if (customMcpTile) customMcpTile.connected = customMcpConnected;
     return [...hardcoded, ...apiTiles].map((tile) => ({
       ...tile,
       category: tile.category ?? CONNECTION_CATEGORY_BY_ID[tile.id] ?? "Other",
     }));
-  }, [os, claudeInstalled, cursorInstalled, codexInstalled, chatgptConnected, browserUrlConnected, integrations, googleCalendarConnected, inputMonitoringGranted]);
+  }, [os, claudeInstalled, cursorInstalled, codexInstalled, chatgptConnected, browserUrlConnected, integrations, googleCalendarConnected, customMcpConnected, inputMonitoringGranted]);
 
   const categoryOptions = useMemo(() => {
     const categories = Array.from(
@@ -2446,6 +2466,7 @@ export function ConnectionsSection({ focusConnectionId, focusRequestId = 0 }: Co
       case "whatsapp": return <WhatsAppPanel />;
       case "anythingllm": return <AnythingLLMPanel />;
       case "hermes": return <HermesCard />;
+      case "custom-mcp": return <CustomMcpCard />;
       case "ollama": return <OllamaPanel />;
       case "lmstudio": return <LMStudioPanel />;
       case "msty": return <MstyPanel />;
