@@ -20,6 +20,7 @@
 
 mod audio_device;
 mod permission;
+mod power;
 
 use std::time::Duration;
 
@@ -119,6 +120,7 @@ fn dispatch(app: &AppHandle, text: &str) {
         "audio_device_fallback_engaged" | "audio_device_fallback_cleared" => {
             audio_device::handle(app, name, &data)
         }
+        "power_profile_changed" => power::handle(app, name, &data),
         _ => { /* unrelated event — ignore */ }
     }
 }

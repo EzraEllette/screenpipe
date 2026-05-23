@@ -37,6 +37,25 @@ pub enum ProfileName {
     FullPause,
 }
 
+impl ProfileName {
+    /// Rank from least to most aggressive power saving.
+    /// Used to detect downgrades (transitions toward heavier throttling).
+    pub fn tier_rank(self) -> u8 {
+        match self {
+            ProfileName::Performance => 0,
+            ProfileName::Balanced => 1,
+            ProfileName::Saver => 2,
+            ProfileName::AudioPaused => 3,
+            ProfileName::FullPause => 4,
+        }
+    }
+
+    /// True if `self` is a more aggressive power-saving tier than `other`.
+    pub fn is_downgrade_from(self, other: ProfileName) -> bool {
+        self.tier_rank() > other.tier_rank()
+    }
+}
+
 /// Tunable parameters that subsystems read from the active power profile.
 ///
 /// Subsystems hold a `tokio::sync::watch::Receiver<PowerProfile>` and check

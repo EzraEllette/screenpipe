@@ -10,6 +10,7 @@
 
 use super::monitor::{poll_power_state, PowerState, POLL_INTERVAL};
 use super::profile::{PowerMode, PowerProfile, ProfileName};
+use screenpipe_events::{send_event, PowerProfileChangedEvent, POWER_PROFILE_CHANGED_EVENT};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::{watch, RwLock};
@@ -150,6 +151,20 @@ pub fn start_power_manager_with_pref(initial_pref: PowerMode) -> Arc<PowerManage
                     power_state.on_ac,
                     power_state.battery_pct,
                     power_state.thermal_state
+                );
+
+                // Publish on the events bus so subscribers (notification
+                // dispatcher, WebSocket /ws/events consumers) can react to
+                // tier transitions. `is_downgrade` lets subscribers filter
+                // to only the throttling direction.
+                let _ = send_event(
+                    POWER_PROFILE_CHANGED_EVENT,
+                    PowerProfileChangedEvent {
+                        from: Some(format!("{:?}", current_name)),
+                        to: format!("{:?}", new_profile.name),
+                        battery_pct: power_state.battery_pct,
+                        is_downgrade: new_profile.name.is_downgrade_from(current_name),
+                    },
                 );
             } else {
                 debug!(
