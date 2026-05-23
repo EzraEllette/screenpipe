@@ -10,11 +10,11 @@
 
 use crate::hot_frame_cache::{HotFrame, HotFrameCache};
 use crate::power::PowerProfile;
-use screenpipe_capture::paired_capture::{paired_capture, CaptureContext, PairedCaptureResult};
 use anyhow::Result;
 use chrono::Utc;
 use screenpipe_a11y::tree::TreeWalkerConfig;
 use screenpipe_a11y::ActivityFeed;
+use screenpipe_capture::paired_capture::{paired_capture, CaptureContext, PairedCaptureResult};
 use screenpipe_db::DatabaseManager;
 use screenpipe_screen::capture_screenshot_by_window::{get_excluded_sck_window_ids, WindowFilters};
 use screenpipe_screen::frame_comparison::{FrameComparer, FrameComparisonConfig};

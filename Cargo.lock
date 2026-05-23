@@ -8067,7 +8067,6 @@ version = "0.3.343"
 dependencies = [
  "anyhow",
  "audiopipe",
- "base64 0.22.1",
  "bytemuck",
  "bytes",
  "chrono",
