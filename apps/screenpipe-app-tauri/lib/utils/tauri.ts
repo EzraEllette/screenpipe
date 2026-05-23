@@ -1162,6 +1162,14 @@ async chatgptOauthGetToken() : Promise<Result<string, string>> {
     else return { status: "error", error: e  as any };
 }
 },
+async chatgptOauthCheckToken() : Promise<Result<boolean, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("chatgpt_oauth_check_token") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async chatgptOauthLogout() : Promise<Result<boolean, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("chatgpt_oauth_logout") };

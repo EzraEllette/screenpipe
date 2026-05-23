@@ -16,6 +16,7 @@ import { Download, ExternalLink, Check, Loader2, Copy, Terminal, Lock, LogIn, Lo
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { commands } from "@/lib/utils/tauri";
 import { useSettings } from "@/lib/hooks/use-settings";
+import { useToast } from "@/components/ui/use-toast";
 import { ensureChatGptPreset } from "@/lib/utils/chatgpt-preset";
 import { notifyConnectionsUpdated } from "@/lib/connections-events";
 import { CONNECTION_CATEGORY_BY_ID } from "@/lib/constants/connections";
@@ -1400,10 +1401,11 @@ function ChatGptPanel() {
   // "loading"   — login or logout in progress
   // "logged_in" — logged in with a valid, usable token
   // "expired"   — logged in but token is expired and could not be auto-refreshed
-  const [status, setStatus] = useState
+  const [status, setStatus] = useState<
     "idle" | "checking" | "loading" | "logged_in" | "expired"
   >("idle");
   const { settings, updateSettings } = useSettings();
+  const { toast } = useToast();
 
   useEffect(() => {
     const check = async () => {
