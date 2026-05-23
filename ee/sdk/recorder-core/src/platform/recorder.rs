@@ -80,7 +80,7 @@ const EVENT_CHANNEL_CAPACITY: usize = 256;
 const SNAPSHOT_JPEG_QUALITY: u8 = 70;
 const SNAPSHOT_MAX_WIDTH: u32 = 1280;
 
-pub struct RecorderImpl {
+pub struct Recorder {
     options: RecorderOptions,
     filter: Arc<FilterState>,
     stop_flag: Arc<AtomicBool>,
@@ -100,6 +100,35 @@ pub struct RecorderImpl {
     /// stop()/start() cycles' lifetimes within one Recorder instance.
     paired_recording: Option<RecordingHandle>,
     paired_bridge_thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for Recorder {
+    /// Best-effort shutdown if the host drops the [`Recorder`] without
+    /// calling [`Recorder::stop`] first (e.g. on Tauri app exit when the
+    /// managed state is torn down). We:
+    ///
+    /// 1. Set `stop_flag` so every spawned task observes shutdown on its
+    ///    next loop iteration.
+    /// 2. Synchronously stop the platform [`RecordingHandle`] — that joins
+    ///    the OS UI-hook threads (the only ones that wouldn't otherwise
+    ///    notice the tokio runtime tearing down).
+    ///
+    /// We intentionally do NOT block on the tokio task handles or the
+    /// bridge thread: `Drop` may run in a runtime that's already shutting
+    /// down, and a blocking join can deadlock. Tokio detaches `JoinHandle`s
+    /// on drop and the tasks observe `stop_flag` shortly after; the
+    /// bridge `std::thread` ditto. Worst case is a few hundred ms of
+    /// trailing capture work after the recorder vanishes — better than
+    /// an indefinite hang on shutdown.
+    ///
+    /// Callers that want a clean MP4 trailer + flushed DB should still
+    /// `await recorder.stop()` explicitly.
+    fn drop(&mut self) {
+        self.stop_flag.store(true, Ordering::SeqCst);
+        if let Some(rh) = self.paired_recording.take() {
+            rh.stop();
+        }
+    }
 }
 
 /// Cached state shared between the focus-watcher task and the capture loop.
@@ -128,7 +157,7 @@ impl FilterConfig {
     }
 }
 
-impl RecorderImpl {
+impl Recorder {
     pub fn new(options: RecorderOptions) -> Result<Self> {
         let filter = build_filter_state(&options);
         Ok(Self {
