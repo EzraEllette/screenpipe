@@ -2,9 +2,19 @@ name: Test CLI npm e2e
 
 on:
   pull_request:
+    paths:
+      - "packages/cli/**"
+      - ".github/workflows/test-cli-npm-e2e.yml"
   push:
     branches:
       - main
+    paths:
+      - "packages/cli/**"
+      - ".github/workflows/test-cli-npm-e2e.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   npm-e2e:
