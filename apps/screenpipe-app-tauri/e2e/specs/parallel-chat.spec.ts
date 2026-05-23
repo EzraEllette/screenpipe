@@ -95,9 +95,12 @@ async function switchToSession(id: string): Promise<void> {
     },
   );
   // Settle pause for framer-motion exit animations on the outgoing
-  // session's messages (200ms exit + buffer). Without this the next read
-  // can see the previous session's bubbles mid-fade.
-  await browser.pause(t(400));
+  // session's messages. 400ms (200ms exit + 200ms buffer) was enough on
+  // the old hosted-macOS runner image, but the 20260520+ image bumped
+  // WKWebView to a build where animation frame pacing is noticeably
+  // slower under load, leaving bubbles mid-fade past the 400ms mark.
+  // 1200ms keeps us well clear of that without making the test glacial.
+  await browser.pause(t(1200));
 }
 
 /** Seed a user message into a session via the e2e hook the chat panel
@@ -302,7 +305,10 @@ describe('Parallel chat — Louis repro', function () {
     });
 
     await browser.waitUntil(hasLiveMarkdownElements, {
-      timeout: t(5_000),
+      // Bumped 5s → 10s for the slower WKWebView build on macos-26 image
+      // 20260520+; old image landed the first paint in ~1s, new image
+      // crossed 5s under load.
+      timeout: t(10_000),
       interval: 100,
       timeoutMsg: 'streaming assistant markdown did not render before agent_end',
     });
