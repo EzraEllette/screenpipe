@@ -3069,6 +3069,8 @@ export function StandaloneChat({
   const [renameValue, setRenameValue] = useState("");
   const [deletingConvId, setDeletingConvId] = useState<string | null>(null);
   const [activePreset, setActivePreset] = useState<AIPreset | undefined>();
+  const pendingPresetRef = useRef<AIPreset | null>(null);
+  const isStreamingRef = useRef(false);
   const [showMentionDropdown, setShowMentionDropdown] = useState(false);
   const [isComposing, setIsComposing] = useState(false);
   const [mentionFilter, setMentionFilter] = useState("");
@@ -3994,6 +3996,10 @@ export function StandaloneChat({
     if (storeChatIsLoading === false) setIsLoading(false);
   }, [storeChatIsStreaming, storeChatIsLoading]);
 
+  useEffect(() => {
+    isStreamingRef.current = isStreaming;
+  }, [isStreaming]);
+
   // Keep the pipe-context banner in sync with the current session.
   // When the panel switches AWAY from a pipe-watch session (user
   // clicks a chat), `activePipeExecution` would otherwise stay set
@@ -4581,6 +4587,12 @@ export function StandaloneChat({
   //
   // Called directly from the AIPresetsSelector onPresetSaved callback.
   const handlePiRestart = useCallback((preset: AIPreset) => {
+    if (isStreamingRef.current) {
+      pendingPresetRef.current = preset;
+      toast({ title: "model will switch after this response finishes" });
+      return;
+    }
+
     const providerConfig = buildProviderConfig(preset);
     if (!providerConfig) return;
 
@@ -4650,6 +4662,14 @@ export function StandaloneChat({
     });
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [settings.user?.token, setRunningConfigFromProviderConfig, restartCurrentPiSession]);
+
+  useEffect(() => {
+    if (!isStreaming && pendingPresetRef.current) {
+      const preset = pendingPresetRef.current;
+      pendingPresetRef.current = null;
+      handlePiRestart(preset);
+    }
+  }, [isStreaming, handlePiRestart]);
 
   // Listen for Pi / pipe events.
   //
