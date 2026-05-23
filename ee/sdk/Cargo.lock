@@ -6876,7 +6876,7 @@ dependencies = [
 
 [[package]]
 name = "screenpipe-sdk"
-version = "0.3.0"
+version = "0.4.1"
 dependencies = [
  "napi",
  "napi-build",
