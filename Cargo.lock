@@ -8063,7 +8063,7 @@ dependencies = [
 
 [[package]]
 name = "screenpipe-audio"
-version = "0.3.343"
+version = "0.3.344"
 dependencies = [
  "anyhow",
  "audiopipe",
@@ -8125,7 +8125,7 @@ dependencies = [
 
 [[package]]
 name = "screenpipe-audio-eval"
-version = "0.3.343"
+version = "0.3.344"
 dependencies = [
  "anyhow",
  "audiopipe",
@@ -8163,7 +8163,7 @@ dependencies = [
 
 [[package]]
 name = "screenpipe-config"
-version = "0.3.343"
+version = "0.3.344"
 dependencies = [
  "dirs 6.0.0",
  "serde",
@@ -8176,7 +8176,7 @@ dependencies = [
 
 [[package]]
 name = "screenpipe-connect"
-version = "0.3.343"
+version = "0.3.344"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -8210,7 +8210,7 @@ dependencies = [
 
 [[package]]
 name = "screenpipe-core"
-version = "0.3.343"
+version = "0.3.344"
 dependencies = [
  "accessibility",
  "accessibility-sys",
@@ -8261,7 +8261,7 @@ dependencies = [
 
 [[package]]
 name = "screenpipe-db"
-version = "0.3.343"
+version = "0.3.344"
 dependencies = [
  "anyhow",
  "chrono",
@@ -8287,7 +8287,7 @@ dependencies = [
 
 [[package]]
 name = "screenpipe-engine"
-version = "0.3.343"
+version = "0.3.344"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -8363,7 +8363,7 @@ dependencies = [
 
 [[package]]
 name = "screenpipe-events"
-version = "0.3.343"
+version = "0.3.344"
 dependencies = [
  "anyhow",
  "chrono",
@@ -8381,7 +8381,7 @@ dependencies = [
 
 [[package]]
 name = "screenpipe-meeting-eval"
-version = "0.3.343"
+version = "0.3.344"
 dependencies = [
  "anyhow",
  "clap",
@@ -8393,7 +8393,7 @@ dependencies = [
 
 [[package]]
 name = "screenpipe-redact"
-version = "0.3.343"
+version = "0.3.344"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -8421,7 +8421,7 @@ dependencies = [
 
 [[package]]
 name = "screenpipe-rfdetr-mlx"
-version = "0.3.343"
+version = "0.3.344"
 dependencies = [
  "image",
  "mlx-rs",
@@ -8432,7 +8432,7 @@ dependencies = [
 
 [[package]]
 name = "screenpipe-screen"
-version = "0.3.343"
+version = "0.3.344"
 dependencies = [
  "accessibility-sys",
  "anyhow",
@@ -8490,7 +8490,7 @@ dependencies = [
 
 [[package]]
 name = "screenpipe-sync"
-version = "0.3.343"
+version = "0.3.344"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -8512,7 +8512,7 @@ dependencies = [
 
 [[package]]
 name = "screenpipe-team-memory"
-version = "0.3.343"
+version = "0.3.344"
 dependencies = [
  "serde",
  "serde_yaml",
@@ -8521,7 +8521,7 @@ dependencies = [
 
 [[package]]
 name = "screenpipe-vault"
-version = "0.3.343"
+version = "0.3.344"
 dependencies = [
  "argon2",
  "chacha20poly1305",
