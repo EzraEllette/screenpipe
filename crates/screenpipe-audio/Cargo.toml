@@ -17,12 +17,9 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 oasgen = { workspace = true }
 
-# Cross-platform audio capture.
-# Use the divanshu-go Windows AEC fork so Windows microphone AEC can be
-# wired through screenpipe's capture path. Cargo.lock pins the resolved
-# commit; update the cpal guard in .github/workflows/ci.yml whenever this
-# dependency is intentionally advanced.
-cpal = { git = "https://github.com/divanshu-go/cpal.git", branch = "windows-aec" }
+# Cross-platform audio capture. Tracks screenpipe/cpal main, which carries
+# the Windows WASAPI AEC and macOS VoiceProcessingIO patches.
+cpal = { git = "https://github.com/screenpipe/cpal.git", branch = "main" }
 
 # Wav encoding
 hound = "3.5"
