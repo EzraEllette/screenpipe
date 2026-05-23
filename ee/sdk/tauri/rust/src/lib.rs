@@ -269,6 +269,8 @@ pub struct StartOptions {
     pub output_dir: Option<String>,
     pub filename: Option<String>,
     pub filename_prefix: Option<String>,
+    /// Single-monitor MP4 fallback. Kept for backward compat; new code
+    /// should prefer `mp4_monitors` (omit for the multi-monitor default).
     pub monitor_id: Option<u32>,
     pub microphone: Option<bool>,
     pub system_audio: Option<bool>,
@@ -278,6 +280,57 @@ pub struct StartOptions {
     pub included_windows: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ignored_urls: Option<Vec<String>>,
+    /// Opt into the engine's paired-capture pipeline. Writes a SQLite at
+    /// `{dataDir}/db.sqlite` with one row per typed UI event / visual
+    /// change / idle tick. Same schema the screenpipe CLI writes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_dir: Option<String>,
+    /// Per-display MP4 monitor selection. `None` (default) records every
+    /// attached monitor; an explicit list pins to that subset; an empty
+    /// list disables MP4 entirely while letting paired capture run.
+    /// `output` becomes a template — supports `{monitor_id}` or auto-
+    /// suffix `-monitor-{id}` before the extension.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mp4_monitors: Option<Vec<u32>>,
+    /// Per-display paired-capture selection. Same semantics as
+    /// `mp4_monitors` but for the DB-row pipeline. `None` (default) =
+    /// every monitor. Only meaningful when `data_dir` is set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub paired_monitors: Option<Vec<u32>>,
+    /// Per-event-type toggles passed through to the platform UI hooks.
+    /// Each `None` field falls back to the SDK's underlying
+    /// `UiCaptureConfig::default()`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ui_capture: Option<UiCaptureOptions>,
+}
+
+/// Mirrors `screenpipe_a11y::config::UiCaptureConfig` for the bits that
+/// drive paired-capture triggers. See the SDK's `UiCaptureOptions` for
+/// per-field defaults and trigger implications. Forwarded as-is to the
+/// JS bridge; the napi binding handles the merge with library defaults.
+#[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UiCaptureOptions {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capture_clicks: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capture_text: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capture_keystrokes: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capture_app_switch: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capture_window_focus: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capture_scroll: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capture_clipboard: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capture_clipboard_content: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capture_context: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capture_mouse_move: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
