@@ -320,6 +320,7 @@ pub async fn event_driven_capture_loop(
     let mut visual_check_enabled = config.visual_check_interval_ms > 0;
     let mut visual_check_interval = Duration::from_millis(config.visual_check_interval_ms);
     let mut visual_change_threshold = config.visual_change_threshold;
+    let mut screenshot_disabled = false;
 
     let mut state = EventDrivenCapture::new(config);
     let mut power_profile_rx = power_profile_rx;
@@ -398,6 +399,7 @@ pub async fn event_driven_capture_loop(
             last_db_write,
             None, // first capture — no elements ref
             &mut walk_budget,
+            false, // screenshot enabled on startup
         )
         .await
         {
@@ -557,6 +559,15 @@ pub async fn event_driven_capture_loop(
             continue;
         }
 
+        // Skip all capture when battery is critically low (FullPause profile).
+        // The server stays up so search/timeline queries still work on existing data.
+        if let Some(ref rx) = power_profile_rx {
+            if rx.borrow().capture_paused {
+                tokio::time::sleep(poll_interval).await;
+                continue;
+            }
+        }
+
         // After unlock or wake, invalidate persistent SCStream handles so
         // the next capture picks up fresh frames instead of stale ones.
         // Use spawn_blocking to avoid blocking the tokio thread — the
@@ -608,6 +619,13 @@ pub async fn event_driven_capture_loop(
                 visual_check_interval = Duration::from_millis(profile.visual_check_interval_ms);
                 visual_change_threshold = profile.visual_change_threshold;
                 visual_check_enabled = profile.visual_check_interval_ms > 0;
+                screenshot_disabled = profile.screenshot_disabled;
+                if profile.screenshot_disabled {
+                    info!(
+                        "power profile {:?}: screenshots disabled for monitor {} — a11y walk continues",
+                        profile.name, monitor_id
+                    );
+                }
             }
         }
 
@@ -839,6 +857,7 @@ pub async fn event_driven_capture_loop(
                         last_db_write,
                         elements_ref,
                         &mut walk_budget,
+                        screenshot_disabled,
                     ),
                 )
                 .await;
@@ -1191,6 +1210,7 @@ async fn do_capture(
     last_db_write: Instant,
     elements_ref_frame_id: Option<i64>,
     walk_budget: &mut screenpipe_a11y::budget::AppWalkBudget,
+    screenshot_disabled: bool,
 ) -> Result<CaptureOutput> {
     let captured_at = Utc::now();
 
@@ -1496,6 +1516,7 @@ async fn do_capture(
         use_pii_removal: params.use_pii_removal,
         languages: params.languages.to_vec(),
         elements_ref_frame_id,
+        screenshot_disabled,
     };
 
     let result = paired_capture(&ctx, tree_snapshot.as_ref()).await?;
