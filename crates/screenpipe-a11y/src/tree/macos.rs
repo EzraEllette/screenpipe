@@ -816,7 +816,15 @@ fn vscode_terminal_window_name(ax_app: &ax::UiElement) -> Option<String> {
                     return Some(name);
                 }
                 // Fallback: scan ancestors above the AXList for a name.
+                // Gate on the AXList's own depth from AXWebArea (= steps - list_idx).
+                // Terminal AXLists sit at wa+28; editor/sidebar lists are ≤15.
+                // Checking the focused-element depth (steps >= 20) alone is not enough —
+                // editor elements can also be >20 hops deep while having shallow AXLists.
                 if let Some(list_idx) = axlist_idx {
+                    if steps.saturating_sub(list_idx) < 20 {
+                        // AXList is too close to AXWebArea — editor or sidebar, not terminal.
+                        return None;
+                    }
                     let search_end = (list_idx + 12).min(steps);
                     for k in (list_idx + 1)..search_end {
                         let elem: &ax::UiElement =
