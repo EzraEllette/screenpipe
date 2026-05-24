@@ -13,6 +13,7 @@ pub mod login;
 pub mod mcp;
 pub mod pipe;
 pub mod presets;
+pub mod search;
 pub mod status;
 mod store_file;
 pub mod survey;
@@ -182,6 +183,11 @@ pub enum Command {
         #[arg(short = 'p', long, default_value_t = 3030)]
         port: u16,
     },
+
+    /// Search screen + audio history directly from the local SQLite DB
+    /// (no daemon required — opens `~/.screenpipe/db.sqlite` read-side
+    /// via WAL while sp may be writing).
+    Search(SearchArgs),
 
     /// Manage pipes (scheduled agents on screen data)
     Pipe {
@@ -1384,6 +1390,102 @@ pub enum BackupCommand {
 pub enum AuthCommand {
     /// Print the current local API authentication token
     Token,
+}
+
+// =============================================================================
+// Search args
+// =============================================================================
+
+/// Mirrors the HTTP `/search` query string so terminal use, jq filters, and
+/// pipe scripts share the same vocabulary. Output is the same `ContentItem`
+/// shape the API returns — `screenpipe search` and `curl /search` are
+/// interchangeable for downstream consumers.
+#[derive(Parser, Clone, Debug)]
+pub struct SearchArgs {
+    /// Search query (omit for a time-only browse — pair with `--start`).
+    #[arg(value_name = "QUERY")]
+    pub q: Option<String>,
+
+    /// Content kind: all | ocr | audio | accessibility | input | memory
+    #[arg(long, default_value = "all")]
+    pub content_type: String,
+
+    /// Max results returned (default 10 to protect terminals).
+    #[arg(short = 'n', long, default_value_t = 10)]
+    pub limit: u32,
+
+    /// Pagination offset.
+    #[arg(long, default_value_t = 0)]
+    pub offset: u32,
+
+    /// Start of the time window. Accepts ISO 8601 (`2026-01-15T10:00:00Z`)
+    /// or relative (`30m ago`, `2h ago`, `7d ago`, `now`).
+    #[arg(long)]
+    pub start: Option<String>,
+
+    /// End of the time window. Same accepted formats as `--start`. Defaults
+    /// to now if `--start` is set.
+    #[arg(long)]
+    pub end: Option<String>,
+
+    /// Filter by app name (case-insensitive substring).
+    #[arg(long)]
+    pub app: Option<String>,
+
+    /// Filter by window title (case-insensitive substring).
+    #[arg(long)]
+    pub window: Option<String>,
+
+    /// Filter by browser URL substring.
+    #[arg(long)]
+    pub browser_url: Option<String>,
+
+    /// Filter by frame_name substring.
+    #[arg(long)]
+    pub frame_name: Option<String>,
+
+    /// Filter by speaker name (audio rows, case-insensitive partial match).
+    #[arg(long)]
+    pub speaker: Option<String>,
+
+    /// Restrict to focused-window rows only.
+    #[arg(long)]
+    pub focused: bool,
+
+    /// Restrict accessibility hits to text visually present on the captured
+    /// frame (drops off-screen scrollback). Only meaningful for content_type
+    /// = `accessibility` or `all`.
+    #[arg(long)]
+    pub on_screen: bool,
+
+    /// Filter results by device name (e.g. "MacBook Pro").
+    #[arg(long)]
+    pub device_name: Option<String>,
+
+    /// Filter results by machine identifier (sync UUID).
+    #[arg(long)]
+    pub machine_id: Option<String>,
+
+    /// Drop rows whose text is shorter than this many chars.
+    #[arg(long)]
+    pub min_length: Option<usize>,
+
+    /// Drop rows whose text is longer than this many chars.
+    #[arg(long)]
+    pub max_length: Option<usize>,
+
+    /// Middle-truncate each result's text to this many chars before printing.
+    #[arg(long)]
+    pub max_content_length: Option<usize>,
+
+    /// Data directory. Default `$HOME/.screenpipe`.
+    #[arg(long, value_hint = ValueHint::DirPath)]
+    pub data_dir: Option<String>,
+
+    /// Emit JSON-lines (one ContentItem per line) instead of human text.
+    /// The schema matches `GET /search` exactly.
+    #[arg(long)]
+    pub json: bool,
 }
 
 // =============================================================================
