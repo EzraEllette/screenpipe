@@ -913,21 +913,27 @@ fn parse_vscode_terminal_name(val: &str) -> Option<String> {
 
 /// Match a bare xterm.js description that lacks the "Terminal N, " prefix.
 /// Seen in Antigravity IDE and other forks where the description is just the
-/// shell / session name, optionally followed by the accessibility hint.
+/// shell / session name followed by the xterm.js accessibility hint.
 /// e.g. "zsh Use ⌥F1 for terminal accessibility help" → "Terminal - zsh"
-///      "2.1.150" → "Terminal - 2.1.150"
 ///
-/// Conservative: only matches short strings with no spaces after hint stripping,
-/// to avoid treating arbitrary UI labels as terminal session names.
+/// REQUIRES the accessibility hint to be present in the raw string — this is
+/// the key signal that this is an xterm.js description and not an arbitrary
+/// UI label (file tab name, button description, etc.). Without the hint, a
+/// bare "macos.rs" or any other short string would incorrectly match.
 fn parse_xterm_bare_desc(val: &str) -> Option<String> {
-    let stripped = strip_xterm_ax_hint(val.trim());
-    // Reject empty, multi-word strings, and the bare word "Terminal" (which
-    // would produce the nonsensical "Terminal - Terminal").
+    let raw = val.trim();
+    // The hint marker is the only reliable discriminator from generic UI descriptions.
+    let has_hint = raw.contains(" Use \u{2325}")  // ⌥
+        || raw.contains(" Use \u{2318}")           // ⌘
+        || raw.contains(" Use ^");
+    if !has_hint {
+        return None;
+    }
+    let stripped = strip_xterm_ax_hint(raw);
     if stripped.is_empty() || stripped.contains(' ') || stripped == "Terminal" {
         return None;
     }
-    // Must look like a process/session name: short, no quotes.
-    if stripped.len() <= 40 && !stripped.contains('"') && !stripped.contains('\'') {
+    if stripped.len() <= 40 {
         Some(format!("Terminal - {stripped}"))
     } else {
         None
