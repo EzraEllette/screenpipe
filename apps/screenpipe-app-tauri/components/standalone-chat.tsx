@@ -3764,12 +3764,11 @@ export function StandaloneChat({
   }, [conversationId]);
 
   // E2E hook: expose a function to seed a user message into a session.
-  // Required by parallel-chat.spec.ts because `ensureAssistantPlaceholder`
-  // (added 2026-04-29 in e1f55023d) only creates an assistant bubble when
+  // Required by chat-streaming-performance.spec.ts because
+  // `ensureAssistantPlaceholder` only creates an assistant bubble when
   // the last message in LOCAL React state is `role: "user"`. Without a
   // way to inject a user message, the test's pure pi_event-faking path
-  // can't materialize any assistant DOM and CI has been red on every PR
-  // since.
+  // can't materialize any assistant DOM.
   //
   // Three places get updated:
   //   1. Local React state (`setMessages`) — what `ensureAssistantPlaceholder`
@@ -3902,9 +3901,9 @@ export function StandaloneChat({
         handleAgentEventDataRef.current?.(envelope.event);
       });
       // E2E seam: agent_event delivery to the panel is gated on this
-      // foreground registration completing. parallel-chat.spec.ts waits
-      // on this signal before emitting events; without it, deltas race
-      // the registration window and go to the default router, which
+      // foreground registration completing. Tests can wait on this
+      // signal before emitting events; without it, deltas race the
+      // registration window and go to the default router, which
       // early-returns for `store.currentId === sid`, silently dropping
       // them. Cleared in the cleanup below so successive switches don't
       // see a stale id.
