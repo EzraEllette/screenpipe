@@ -783,14 +783,16 @@ fn vscode_terminal_window_name(ax_app: &ax::UiElement) -> Option<String> {
                 .ok()
                 .filter(|p| p.get_type_id() == ax::UiElement::type_id())
         };
-        // Scan desc/title on every ancestor for "Terminal N" pattern.
-        // The xterm.js container has this on the element that parents both the
-        // output AXList and the input AXTextField.
+        // Scan desc/title on every ancestor for a terminal name.
+        // Try the "Terminal N, session" format first, then the bare session-name
+        // format used by some forks (e.g. Antigravity: "zsh Use ⌥F1 …").
         if desc_terminal_name.is_none() {
             let elem: &ax::UiElement = unsafe { std::mem::transmute(&*cur) };
             for attr in [ax::attr::desc(), ax::attr::title()] {
                 if let Some(val) = get_string_attr(elem, attr) {
-                    if let Some(name) = parse_vscode_terminal_name(&val) {
+                    if let Some(name) = parse_vscode_terminal_name(&val)
+                        .or_else(|| parse_xterm_bare_desc(&val))
+                    {
                         desc_terminal_name = Some(name);
                         break;
                     }
@@ -813,7 +815,7 @@ fn vscode_terminal_window_name(ax_app: &ax::UiElement) -> Option<String> {
                 if let Some(name) = desc_terminal_name {
                     return Some(name);
                 }
-                // Fallback: name found by scanning above the AXList.
+                // Fallback: scan ancestors above the AXList for a name.
                 if let Some(list_idx) = axlist_idx {
                     let search_end = (list_idx + 12).min(steps);
                     for k in (list_idx + 1)..search_end {
@@ -821,7 +823,9 @@ fn vscode_terminal_window_name(ax_app: &ax::UiElement) -> Option<String> {
                             unsafe { std::mem::transmute(&*ancestors[k]) };
                         for attr in [ax::attr::desc(), ax::attr::title()] {
                             if let Some(val) = get_string_attr(elem, attr) {
-                                if let Some(name) = parse_vscode_terminal_name(&val) {
+                                if let Some(name) = parse_vscode_terminal_name(&val)
+                                    .or_else(|| parse_xterm_bare_desc(&val))
+                                {
                                     return Some(name);
                                 }
                             }
@@ -845,15 +849,34 @@ fn vscode_terminal_window_name(ax_app: &ax::UiElement) -> Option<String> {
     None
 }
 
+/// Strip the xterm.js accessibility hint appended to many AX descriptions.
+/// e.g. "zsh Use ⌥F1 for terminal accessibility help" → "zsh"
+/// The hint always begins with " Use " followed by a modifier-key symbol.
+fn strip_xterm_ax_hint(s: &str) -> &str {
+    // ⌥ = U+2325, ⌘ = U+2318
+    let hint_start = s
+        .find(" Use \u{2325}")
+        .or_else(|| s.find(" Use \u{2318}"))
+        .or_else(|| s.find(" Use ^"));
+    match hint_start {
+        Some(idx) => s[..idx].trim(),
+        None => s,
+    }
+}
+
 /// Extract the terminal label from an xterm.js AX attribute string.
 ///
-/// The xterm.js container's `AXDescription` has the form:
-///   "Terminal {index}, {session_name} …"  e.g. "Terminal 4, 2.1.150"
+/// Two description formats are found in the wild:
 ///
-/// When a session name is present we return `"Terminal - {session_name}"` so
-/// the stored window name reflects what the user actually named the terminal
-/// (branch name, directory, custom label, etc.) rather than a raw index.
-/// Falls back to `"Terminal {index}"` when no session name is available.
+///   (a) VS Code / Cursor:  "Terminal {index}, {session_name}"
+///       e.g. "Terminal 4, 2.1.150" or "Terminal 2, zsh Use ⌥F1 …"
+///       → returns "Terminal - {session_name}" (hint stripped)
+///
+///   (b) Antigravity / some forks: bare "{session_name}" or "{shell} Use ⌥…"
+///       e.g. "zsh Use ⌥F1 for terminal accessibility help"
+///       → handled by `parse_xterm_bare_desc`, not this function.
+///
+/// Falls back to `"Terminal {index}"` when no session name is present.
 fn parse_vscode_terminal_name(val: &str) -> Option<String> {
     let rest = val.trim().strip_prefix("Terminal ")?;
     // Read the numeric index (must have at least one digit).
@@ -867,24 +890,47 @@ fn parse_vscode_terminal_name(val: &str) -> Option<String> {
     let after = &rest[num_end..];
 
     if after.is_empty() || after == " " {
-        // Plain "Terminal N" — no session name.
         return Some(format!("Terminal {index}"));
     }
 
-    // "Terminal N, session_name" — extract session name after the comma.
-    let session = if let Some(s) = after.strip_prefix(", ") {
+    // "Terminal N, session_name …" — extract session name after the comma.
+    let session_raw = if let Some(s) = after.strip_prefix(", ") {
         s.trim()
     } else if let Some(s) = after.strip_prefix(',') {
         s.trim()
     } else {
-        // Unexpected suffix (not a comma) — not a terminal label.
         return None;
     };
 
+    // Strip accessibility hint before using as label.
+    let session = strip_xterm_ax_hint(session_raw);
     if session.is_empty() {
         Some(format!("Terminal {index}"))
     } else {
         Some(format!("Terminal - {session}"))
+    }
+}
+
+/// Match a bare xterm.js description that lacks the "Terminal N, " prefix.
+/// Seen in Antigravity IDE and other forks where the description is just the
+/// shell / session name, optionally followed by the accessibility hint.
+/// e.g. "zsh Use ⌥F1 for terminal accessibility help" → "Terminal - zsh"
+///      "2.1.150" → "Terminal - 2.1.150"
+///
+/// Conservative: only matches short strings with no spaces after hint stripping,
+/// to avoid treating arbitrary UI labels as terminal session names.
+fn parse_xterm_bare_desc(val: &str) -> Option<String> {
+    let stripped = strip_xterm_ax_hint(val.trim());
+    // Reject empty, multi-word strings, and the bare word "Terminal" (which
+    // would produce the nonsensical "Terminal - Terminal").
+    if stripped.is_empty() || stripped.contains(' ') || stripped == "Terminal" {
+        return None;
+    }
+    // Must look like a process/session name: short, no quotes.
+    if stripped.len() <= 40 && !stripped.contains('"') && !stripped.contains('\'') {
+        Some(format!("Terminal - {stripped}"))
+    } else {
+        None
     }
 }
 
