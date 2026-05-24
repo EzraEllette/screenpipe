@@ -27,7 +27,7 @@ import { toast } from "@/components/ui/use-toast";
 import { motion, AnimatePresence } from "framer-motion";
 import { PipeAIIconLarge } from "@/components/pipe-ai-icon";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { MemoizedReactMarkdown } from "@/components/markdown";
+import { MemoizedReactMarkdown, chatUrlTransform } from "@/components/markdown";
 import { VideoComponent } from "@/components/rewind/video";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { AIPresetsSelector } from "@/components/rewind/ai-presets-selector";
@@ -1905,6 +1905,7 @@ function MarkdownBlock({ text, isUser }: { text: string; isUser: boolean }) {
           : "dark:prose-invert"
       )}
       remarkPlugins={[remarkGfm]}
+      urlTransform={chatUrlTransform}
       rehypePlugins={[rehypeRaw]}
       components={{
         p({ children }) {

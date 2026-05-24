@@ -15,7 +15,7 @@ import { invoke } from "@tauri-apps/api/core";
 // chunks fetched on demand.
 import { PrismAsyncLight as SyntaxHighlighter } from "react-syntax-highlighter";
 import { coldarkDark, coldarkCold } from "react-syntax-highlighter/dist/cjs/styles/prism";
-import { MemoizedReactMarkdown } from "@/components/markdown";
+import { MemoizedReactMarkdown, viewerUrlTransform } from "@/components/markdown";
 import remarkGfm from "remark-gfm";
 import { useIsFullscreen } from "@/lib/hooks/use-is-fullscreen";
 
@@ -432,6 +432,7 @@ export default function ViewerPage() {
           >
             <MemoizedReactMarkdown
               remarkPlugins={[remarkGfm]}
+              urlTransform={viewerUrlTransform}
               components={{
                 a: ({ href, children, ...props }) => (
                   <a

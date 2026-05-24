@@ -9,6 +9,7 @@ import { listen, emit } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import posthog from "posthog-js";
 import ReactMarkdown from "react-markdown";
+import { notificationUrlTransform } from "@/components/markdown";
 import { showChatWithPrefill } from "@/lib/chat-utils";
 import localforage from "localforage";
 import { localFetch } from "@/lib/api";
@@ -569,6 +570,7 @@ export default function NotificationPanelPage() {
             }}
           >
             <ReactMarkdown
+              urlTransform={notificationUrlTransform}
               components={{
                 a: ({ href, children }) => {
                   // Viewer deeplinks get a sibling ↗ button so the user can
