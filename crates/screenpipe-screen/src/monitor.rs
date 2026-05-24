@@ -58,6 +58,15 @@ use sck_rs::Monitor as SckMonitor;
 // xcap is used on non-macOS platforms, and as fallback on older macOS
 use xcap::Monitor as XcapMonitor;
 
+/// Maximum capture width handed to the macOS SCK stream. The GPU downscales
+/// to fit before `replayd` delivers the framebuffer, so WindowServer
+/// composites a smaller surface. 1280 keeps OCR text legible while saving
+/// substantial WindowServer CPU on HiDPI / large displays (measured ~50%
+/// reduction on a 1512px display capped to 768px; bigger ratios → bigger
+/// savings). No-op when the monitor's native width is at or below this cap.
+#[cfg(target_os = "macos")]
+const SCK_CAPTURE_MAX_WIDTH: u32 = 1280;
+
 #[derive(Clone)]
 pub struct SafeMonitor {
     monitor_id: u32,
@@ -257,8 +266,14 @@ impl SafeMonitor {
                         return Err("Invalid monitor dimensions".to_string());
                     }
 
+                    // Cap capture width — GPU downscales before replayd hands the
+                    // frame back, so WindowServer composites a smaller surface.
+                    // Measured ~50% WindowServer CPU reduction at 768px on a
+                    // 1512px display; bigger wins on HiDPI. 1280 keeps OCR-quality
+                    // text legible while still moving the needle on most modern
+                    // displays. No-op when native_width <= cap.
                     monitor
-                        .capture_image()
+                        .capture_image_scaled(SCK_CAPTURE_MAX_WIDTH)
                         .map_err(|e| format!("{}", e))
                         .map(DynamicImage::ImageRgba8)
                 } else {
@@ -328,7 +343,7 @@ impl SafeMonitor {
                     }
 
                     monitor
-                        .capture_image_excluding(&ids)
+                        .capture_image_scaled_excluding(SCK_CAPTURE_MAX_WIDTH, &ids)
                         .map_err(|e| format!("{}", e))
                         .map(DynamicImage::ImageRgba8)
                 } else {
