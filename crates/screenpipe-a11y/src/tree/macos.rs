@@ -845,21 +845,46 @@ fn vscode_terminal_window_name(ax_app: &ax::UiElement) -> Option<String> {
     None
 }
 
-/// Extract "Terminal N" from an AX attribute string.
-/// Matches the xterm.js description "Terminal 4, 2.1.150 …" and plain labels.
+/// Extract the terminal label from an xterm.js AX attribute string.
+///
+/// The xterm.js container's `AXDescription` has the form:
+///   "Terminal {index}, {session_name} …"  e.g. "Terminal 4, 2.1.150"
+///
+/// When a session name is present we return `"Terminal - {session_name}"` so
+/// the stored window name reflects what the user actually named the terminal
+/// (branch name, directory, custom label, etc.) rather than a raw index.
+/// Falls back to `"Terminal {index}"` when no session name is available.
 fn parse_vscode_terminal_name(val: &str) -> Option<String> {
     let rest = val.trim().strip_prefix("Terminal ")?;
+    // Read the numeric index (must have at least one digit).
     let num_end = rest
         .find(|c: char| !c.is_ascii_digit())
         .unwrap_or(rest.len());
     if num_end == 0 {
         return None;
     }
+    let index = &rest[..num_end];
     let after = &rest[num_end..];
-    if after.is_empty() || after.starts_with(',') || after.starts_with(' ') {
-        Some(format!("Terminal {}", &rest[..num_end]))
+
+    if after.is_empty() || after == " " {
+        // Plain "Terminal N" — no session name.
+        return Some(format!("Terminal {index}"));
+    }
+
+    // "Terminal N, session_name" — extract session name after the comma.
+    let session = if let Some(s) = after.strip_prefix(", ") {
+        s.trim()
+    } else if let Some(s) = after.strip_prefix(',') {
+        s.trim()
     } else {
-        None
+        // Unexpected suffix (not a comma) — not a terminal label.
+        return None;
+    };
+
+    if session.is_empty() {
+        Some(format!("Terminal {index}"))
+    } else {
+        Some(format!("Terminal - {session}"))
     }
 }
 
