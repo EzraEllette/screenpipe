@@ -27,7 +27,7 @@
     "ocr",
     "audio-transcription"
   ],
-  "author": "Mediar AI",
+  "author": "Screenpipe",
   "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.1",
