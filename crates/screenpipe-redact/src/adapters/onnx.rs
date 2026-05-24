@@ -112,16 +112,25 @@ impl OnnxConfig {
         "https://huggingface.co/screenpipe/pii-redactor/resolve/main/v45_phase3_onnx";
 
     /// Files to download from the HF repo on first run. Each is
-    /// (filename, expected sha256). The SHA values are placeholders
-    /// — bump after first upload via:
+    /// (filename, expected sha256). Recompute via
     ///   shasum -a 256 model_quantized.onnx tokenizer.json config.json
+    /// when bumping the model (and bump [`ONNX_REDACTOR_VERSION`]).
     pub const FILES: &'static [(&'static str, &'static str)] = &[
         // INT8-quantized model. ~278 MB.
-        ("model_quantized.onnx", "REPLACE_AFTER_HF_UPLOAD_QUANTIZED"),
+        (
+            "model_quantized.onnx",
+            "77bb202c542bcd3f835992cde3cafb3df868a8a6fc14ca9d1b028452be6b5787",
+        ),
         // SentencePiece tokenizer (HF fast format). ~17 MB.
-        ("tokenizer.json", "REPLACE_AFTER_HF_UPLOAD_TOKENIZER"),
+        (
+            "tokenizer.json",
+            "14c7e8bf7d9b58ca061fcda93bc8d0eedd1a51ffc3af01a1ba1ef54e2154887e",
+        ),
         // id2label + model config. ~2 KB.
-        ("config.json", "REPLACE_AFTER_HF_UPLOAD_CONFIG"),
+        (
+            "config.json",
+            "e9a8a3dda702b9efa2b9b5960567a560bf410e92e619184081dd3c9e9990b35d",
+        ),
     ];
 
     /// Download the model + tokenizer + config from HuggingFace into

@@ -19,8 +19,9 @@ use screenpipe_redact::Redactor;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cfg = OnnxConfig::default();
     println!("loading model from {}", cfg.model_dir.display());
+    println!("(will download from HuggingFace on first run)");
 
-    let redactor = OnnxRedactor::load(cfg)?;
+    let redactor = OnnxRedactor::load_or_download(cfg).await?;
     println!("model loaded.\n");
 
     let inputs = [
