@@ -3851,6 +3851,15 @@ export function StandaloneChat({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [openConversationLocally]);
 
+  // Cmd+N / Ctrl+N from home/page emits this so the user can immediately type
+  // after a new chat is created without having to click into the textarea.
+  useEffect(() => {
+    const unlisten = listen("chat-focus-input", () => {
+      inputRef.current?.focus();
+    });
+    return () => { unlisten.then((fn) => fn()); };
+  }, []);
+
   // Tell the sidebar which session is current whenever the chat panel
   // assigns or resumes a session id. Without this the sidebar wouldn't
   // know about session changes initiated inside the chat (in-panel "new",

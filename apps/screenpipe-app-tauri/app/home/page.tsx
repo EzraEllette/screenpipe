@@ -411,6 +411,10 @@ function HomeContent() {
         e.preventDefault();
         setActiveSection("home");
         startNewChat();
+        // Focus the chat input. When standalone-chat is already mounted (home→home)
+        // it catches this; when mounting fresh from another section, its on-mount
+        // auto-focus handles it instead.
+        void emit("chat-focus-input", {});
       }
     };
     window.addEventListener("keydown", handler);
