@@ -56,10 +56,14 @@ const VSCODE_LIKE_APPS: &[&str] = &[
 ];
 
 /// True when the app is a VS Code fork using Electron + xterm.js.
-/// False positives are safe — at worst we walk slightly deeper and run a
-/// terminal-detection function that returns `None` immediately.
+///
+/// Uses a word-boundary check (exact match or "name " prefix) so that
+/// "xcode" does not false-positive on the "code" entry.
 fn is_vscode_like(app_lower: &str) -> bool {
-    VSCODE_LIKE_APPS.iter().any(|name| app_lower.contains(name))
+    VSCODE_LIKE_APPS.iter().any(|&name| {
+        app_lower == name
+            || (app_lower.starts_with(name) && app_lower[name.len()..].starts_with(' '))
+    })
 }
 
 /// Extract an absolute file path for the focused window.
@@ -457,12 +461,13 @@ impl MacosTreeWalker {
             state.max_depth = state.max_depth.max(40);
             state.walk_timeout =
                 state.walk_timeout.max(std::time::Duration::from_millis(500));
-            if let Some(name) = vscode_terminal_window_name(&ax_app) {
+            let mode = if let Some(name) = vscode_terminal_window_name(&ax_app) {
                 window_name = name;
-                state.vscode_mode = VsCodeMode::Terminal;
+                VsCodeMode::Terminal
             } else {
-                state.vscode_mode = VsCodeMode::Editor;
-            }
+                VsCodeMode::Editor
+            };
+            state.app = AppState::VsCode { mode, webarea_depth: None, in_terminal_subtree: false };
         }
 
         if let Some((wx, wy, ww, wh)) = get_element_frame(window) {
@@ -557,15 +562,34 @@ impl MacosTreeWalker {
     }
 }
 
-/// VS Code content isolation mode set once per frame, before `walk_element`.
+/// Content isolation mode for VS Code's integrated terminal.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum VsCodeMode {
-    /// Not VS Code — no filtering applied.
-    None,
     /// Terminal panel focused: emit only text inside deep `AXList` subtrees.
     Terminal,
     /// Editor/file focused: prune deep `AXList` subtrees (terminal rows) early.
     Editor,
+}
+
+/// Per-app state threaded through the walk.
+///
+/// Keeping app-specific fields inside their own enum variant means `WalkState`
+/// stays clean and the hot path only pays for branching on VS Code frames —
+/// the `AppState::None` arm is a single discriminant check that the compiler
+/// folds away for every non-matching app.
+#[derive(Clone, Copy)]
+enum AppState {
+    /// Not a recognised Electron IDE — no per-app filtering.
+    None,
+    /// VS Code or fork: owns all three isolation bookkeeping values.
+    VsCode {
+        mode: VsCodeMode,
+        /// Depth at which `AXWebArea` was first seen; `None` until visited.
+        webarea_depth: Option<usize>,
+        /// `true` while the walk is inside the deep terminal `AXList`.
+        /// Saved and restored around each such subtree.
+        in_terminal_subtree: bool,
+    },
 }
 
 /// Mutable state passed through the recursive walk.
@@ -581,14 +605,8 @@ struct WalkState {
     truncated: bool,
     truncation_reason: super::TruncationReason,
     max_depth_reached: usize,
-    /// VS Code content isolation. Set once before the walk; zero overhead for non-VS Code apps.
-    vscode_mode: VsCodeMode,
-    /// Depth at which `AXWebArea` was first seen (VS Code's Electron workbench root).
-    /// `None` until the walker visits that node; used to compute depth-from-webarea.
-    webarea_depth: Option<usize>,
-    /// `true` while the recursive walk is inside a deep `AXList` (terminal output rows).
-    /// Saved and restored around each such subtree so sibling subtrees are unaffected.
-    in_terminal_subtree: bool,
+    /// Per-app walk state. `AppState::None` for every non-VS Code app — no overhead.
+    app: AppState,
     /// Window origin and size in screen points (fallback for normalizing element bounds).
     window_x: f64,
     window_y: f64,
@@ -638,9 +656,7 @@ impl WalkState {
             truncated: false,
             truncation_reason: super::TruncationReason::None,
             max_depth_reached: 0,
-            vscode_mode: VsCodeMode::None,
-            webarea_depth: None,
-            in_terminal_subtree: false,
+            app: AppState::None,
             window_x: 0.0,
             window_y: 0.0,
             window_w: 0.0,
@@ -979,38 +995,41 @@ fn walk_element(elem: &ax::UiElement, depth: usize, state: &mut WalkState) {
         return;
     }
 
-    // VS Code content isolation — runs only for VS Code frames (vscode_mode != None).
+    // VS Code content isolation — all VS Code logic is gated behind AppState::VsCode.
+    // Zero cost for every non-matching app: the None arm is a single discriminant check.
     //
-    // AXWebArea is the root of the entire Electron workbench. We record its depth
-    // once so we can measure "depth from AXWebArea" for everything below it.
+    // AXWebArea is the root of the Electron workbench; we record its depth once.
+    // AXList nodes ≥ 20 hops below AXWebArea are terminal output rows (sidebar
+    // AXLists are ≤ 12 hops below — the threshold cleanly separates them).
     //
-    // AXList nodes ≥ 20 steps below AXWebArea are terminal output rows.
-    // Sidebar file-tree AXLists are ≤ 12 steps below AXWebArea and are not affected.
-    //
-    //  • Editor mode: prune deep AXLists entirely (early return — avoids walking
-    //    37 levels of xterm.js just to discard it).
-    //  • Terminal mode: mark entry into the deep AXList so only its text is emitted.
-    let is_vscode_terminal_list = if state.vscode_mode != VsCodeMode::None {
-        if role_str == "AXWebArea" && state.webarea_depth.is_none() {
-            state.webarea_depth = Some(depth);
+    //  • Editor mode: prune the deep AXList entirely — early return, no children walked.
+    //  • Terminal mode: mark entry into the AXList so only its descendants emit text.
+    if role_str == "AXWebArea" {
+        if let AppState::VsCode { webarea_depth, .. } = &mut state.app {
+            webarea_depth.get_or_insert(depth);
         }
-        role_str == "AXList"
-            && state
-                .webarea_depth
-                .map_or(false, |wd| depth >= wd + 20)
-    } else {
-        false
+    }
+    let is_vscode_terminal_list = match state.app {
+        AppState::VsCode { webarea_depth: Some(wd), .. } => {
+            role_str == "AXList" && depth >= wd + 20
+        }
+        _ => false,
     };
-
-    if is_vscode_terminal_list && state.vscode_mode == VsCodeMode::Editor {
-        // Prune the entire terminal subtree — no children walked, no text emitted.
-        return;
+    if is_vscode_terminal_list {
+        if matches!(state.app, AppState::VsCode { mode: VsCodeMode::Editor, .. }) {
+            return; // prune entire terminal subtree — no children walked, no text emitted
+        }
     }
 
     // Extract text from this element.
-    // In VS Code terminal mode, suppress text that is outside the terminal AXList.
+    // In VS Code terminal mode, suppress text outside the terminal AXList subtree.
     if should_extract_text(&role_str) {
-        let emit = state.vscode_mode != VsCodeMode::Terminal || state.in_terminal_subtree;
+        let emit = match state.app {
+            AppState::VsCode { mode: VsCodeMode::Terminal, in_terminal_subtree, .. } => {
+                in_terminal_subtree
+            }
+            _ => true,
+        };
         if emit {
             extract_text(elem, &role_str, depth, state);
         }
@@ -1071,9 +1090,12 @@ fn walk_element(elem: &ax::UiElement, depth: usize, state: &mut WalkState) {
     // sibling subtrees (sidebar, editor) are unaffected.
     let children = elem.children();
     if let Ok(children) = children {
-        let prev_in_terminal = state.in_terminal_subtree;
+        let prev_in_terminal =
+            matches!(state.app, AppState::VsCode { in_terminal_subtree: true, .. });
         if is_vscode_terminal_list {
-            state.in_terminal_subtree = true;
+            if let AppState::VsCode { in_terminal_subtree, .. } = &mut state.app {
+                *in_terminal_subtree = true;
+            }
         }
         for i in 0..children.len() {
             if state.should_stop() {
@@ -1081,7 +1103,9 @@ fn walk_element(elem: &ax::UiElement, depth: usize, state: &mut WalkState) {
             }
             walk_element(&children[i], next_depth, state);
         }
-        state.in_terminal_subtree = prev_in_terminal;
+        if let AppState::VsCode { in_terminal_subtree, .. } = &mut state.app {
+            *in_terminal_subtree = prev_in_terminal;
+        }
     }
 }
 
@@ -1586,5 +1610,138 @@ mod tests {
         let _ = walker.walk_focused_window();
         // Should complete reasonably quickly (< 5s even with IPC delays)
         assert!(start.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    // ── VS Code terminal helper unit tests ──────────────────────────────────
+
+    #[test]
+    fn test_is_vscode_like_matches_known_apps() {
+        assert!(is_vscode_like("code"));
+        assert!(is_vscode_like("cursor"));
+        assert!(is_vscode_like("windsurf"));
+        assert!(is_vscode_like("vscodium"));
+        assert!(is_vscode_like("positron"));
+        assert!(is_vscode_like("void"));
+        assert!(is_vscode_like("aide"));
+        assert!(is_vscode_like("trae"));
+        assert!(is_vscode_like("antigravity"));
+    }
+
+    #[test]
+    fn test_is_vscode_like_no_false_positive_on_xcode() {
+        // "xcode" must NOT match the "code" entry — the whole point of the word-boundary check.
+        assert!(!is_vscode_like("xcode"));
+        // Confirm Xcode variants are also rejected.
+        assert!(!is_vscode_like("xcode.app"));
+    }
+
+    #[test]
+    fn test_is_vscode_like_rejects_unrelated_apps() {
+        assert!(!is_vscode_like("finder"));
+        assert!(!is_vscode_like("terminal"));
+        assert!(!is_vscode_like("safari"));
+        assert!(!is_vscode_like(""));
+    }
+
+    #[test]
+    fn test_is_vscode_like_allows_space_suffix() {
+        // e.g. "code helper (renderer)" — macOS sometimes appends a suffix with a space.
+        assert!(is_vscode_like("code helper"));
+    }
+
+    #[test]
+    fn test_strip_xterm_ax_hint_removes_hint() {
+        assert_eq!(
+            strip_xterm_ax_hint("zsh Use \u{2325}F1 for terminal accessibility help"),
+            "zsh"
+        );
+        assert_eq!(
+            strip_xterm_ax_hint("bash Use \u{2318}F1 for accessibility"),
+            "bash"
+        );
+        assert_eq!(strip_xterm_ax_hint("fish Use ^F1 help"), "fish");
+    }
+
+    #[test]
+    fn test_strip_xterm_ax_hint_passthrough_when_no_hint() {
+        assert_eq!(strip_xterm_ax_hint("zsh"), "zsh");
+        assert_eq!(strip_xterm_ax_hint(""), "");
+        assert_eq!(strip_xterm_ax_hint("my-session"), "my-session");
+    }
+
+    #[test]
+    fn test_parse_vscode_terminal_name_numbered_with_session() {
+        // Standard VS Code / Cursor format: "Terminal N, session"
+        assert_eq!(
+            parse_vscode_terminal_name("Terminal 4, 2.1.150"),
+            Some("Terminal - 2.1.150".to_owned())
+        );
+        assert_eq!(
+            parse_vscode_terminal_name("Terminal 1, zsh"),
+            Some("Terminal - zsh".to_owned())
+        );
+    }
+
+    #[test]
+    fn test_parse_vscode_terminal_name_strips_hint() {
+        // Session name has accessibility hint appended — must strip it.
+        assert_eq!(
+            parse_vscode_terminal_name(
+                "Terminal 2, zsh Use \u{2325}F1 for terminal accessibility help"
+            ),
+            Some("Terminal - zsh".to_owned())
+        );
+    }
+
+    #[test]
+    fn test_parse_vscode_terminal_name_fallback_no_session() {
+        // "Terminal N" with no comma → fall back to "Terminal N".
+        assert_eq!(
+            parse_vscode_terminal_name("Terminal 3"),
+            Some("Terminal 3".to_owned())
+        );
+    }
+
+    #[test]
+    fn test_parse_vscode_terminal_name_rejects_non_terminal() {
+        // Doesn't start with "Terminal " → None.
+        assert_eq!(parse_vscode_terminal_name("Editor pane"), None);
+        assert_eq!(parse_vscode_terminal_name(""), None);
+        // No digit after "Terminal " → None.
+        assert_eq!(parse_vscode_terminal_name("Terminal "), None);
+    }
+
+    #[test]
+    fn test_parse_xterm_bare_desc_with_hint() {
+        // Bare shell name + xterm.js hint.
+        assert_eq!(
+            parse_xterm_bare_desc("zsh Use \u{2325}F1 for terminal accessibility help"),
+            Some("Terminal - zsh".to_owned())
+        );
+        assert_eq!(
+            parse_xterm_bare_desc("bash Use \u{2318}F1 for terminal accessibility help"),
+            Some("Terminal - bash".to_owned())
+        );
+        assert_eq!(
+            parse_xterm_bare_desc("fish Use ^F1 for terminal accessibility help"),
+            Some("Terminal - fish".to_owned())
+        );
+    }
+
+    #[test]
+    fn test_parse_xterm_bare_desc_rejects_without_hint() {
+        // No accessibility hint → must return None (avoids matching arbitrary UI labels).
+        assert_eq!(parse_xterm_bare_desc("zsh"), None);
+        assert_eq!(parse_xterm_bare_desc("macos.rs"), None);
+        assert_eq!(parse_xterm_bare_desc(""), None);
+    }
+
+    #[test]
+    fn test_parse_xterm_bare_desc_rejects_multiword_session() {
+        // Session name with a space (e.g. "my session") → None (only bare single-token names).
+        assert_eq!(
+            parse_xterm_bare_desc("my session Use \u{2325}F1 help"),
+            None
+        );
     }
 }
