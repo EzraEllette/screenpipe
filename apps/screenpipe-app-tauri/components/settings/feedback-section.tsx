@@ -123,6 +123,7 @@ export function FeedbackSection() {
               </div>
             </div>
             <button
+              data-testid="help-discord-link"
               onClick={() => open("https://discord.com/invite/screenpipe")}
               className="text-xs text-muted-foreground hover:text-foreground transition-colors duration-150"
             >
