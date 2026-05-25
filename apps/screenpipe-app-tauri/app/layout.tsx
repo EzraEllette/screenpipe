@@ -347,8 +347,15 @@ export default function RootLayout({
           }}
         />
       </head>
-      <Providers>
-        <body className={`${inter.className} scrollbar-hide ${isSearch ? "bg-transparent" : ""}`}>
+      <body className={`${inter.className} scrollbar-hide ${isSearch ? "bg-transparent" : ""}`}>
+        {/* Providers sits INSIDE <body> so the body element is present in
+            both the static export and the first client render. With Providers
+            wrapping <body>, gating Providers' children on a post-mount flag
+            (see app/providers.tsx) would also blank the body — the resulting
+            shape mismatch with the prerendered HTML is exactly what triggered
+            React #419 (hydration recovery) → #185 (infinite loop during
+            recovery render) on every first launch after auto-update. */}
+        <Providers>
           {!isOverlay && <DeeplinkHandler />}
           {!isOverlay && <ShortcutTracker />}
           {!isOverlay && <PipeInstallDialog />}
@@ -360,8 +367,8 @@ export default function RootLayout({
           {/* {!isOverlay && <VaultLockDialog />} */}
           {children}
           {!isOverlay && <Toaster />}
-        </body>
-      </Providers>
+        </Providers>
+      </body>
     </html>
   );
 }
