@@ -1322,14 +1322,6 @@ fn process_foreground_change(state: &mut AppObserverState) {
         // Resolve the logical app name (handles WebView2 and shell-hosted Edge).
         let app_name = get_effective_app_name(hwnd, pid);
 
-        debug!(
-            app = %app_name,
-            pid,
-            title = ?title,
-            ignored_windows = ?state.config.ignored_windows,
-            "a11y: foreground change — evaluating app"
-        );
-
         // Update shared state before exclusions so input hooks do not keep
         // attributing keystrokes/clicks to the previously focused app.
         *state.current_app.lock() = Some(app_name.clone());
@@ -1340,14 +1332,14 @@ fn process_foreground_change(state: &mut AppObserverState) {
             .config
             .should_capture_target(&app_name, title.as_deref())
         {
-            debug!(app = %app_name, title = ?title, "a11y: foreground change — excluded by capture config");
+            debug!(app = %app_name, pid, title = ?title, "a11y: foreground change excluded");
             *state.focused_element.lock() = None;
             state.last_hwnd = hwnd_val;
             state.last_title = title;
             return;
         }
 
-        debug!(app = %app_name, pid, title = ?title, "a11y: foreground change — capturing");
+        debug!(app = %app_name, pid, title = ?title, "a11y: foreground change captured");
 
         // Get focused element context from UIA thread
         let element = if state.config.capture_context {
@@ -1581,6 +1573,28 @@ const SHELL_HOST_PROCESSES: &[&str] = &[
     "runtimebroker.exe",
 ];
 
+/// Pure decision logic for resolving the effective app name from a raw process name
+/// + window class. Extracted from [`get_effective_app_name`] so it can be unit-tested
+/// without Windows API calls. See [`get_effective_app_name`] for the *why*.
+pub(crate) fn normalize_app_name(raw_process: &str, window_class: &str) -> String {
+    let lower = raw_process.to_ascii_lowercase();
+
+    // Edge's WebView2 runtime sub-process — fold into msedge.exe.
+    if lower == "msedgewebview2.exe" {
+        return "msedge.exe".to_string();
+    }
+
+    // Shell-host processes (explorer.exe, ApplicationFrameHost.exe, etc.) hosting
+    // Chromium content (Widgets, Search, re-parented WebView2 v117+) — attribute to Edge.
+    let is_shell_host = SHELL_HOST_PROCESSES.iter().any(|h| lower.as_str() == *h);
+    let is_chromium = window_class == "Chrome_WidgetWin_1" || window_class == "Chrome_WidgetWin_0";
+    if is_shell_host && is_chromium {
+        return "msedge.exe".to_string();
+    }
+
+    raw_process.to_string()
+}
+
 /// Resolve the logical application name for a window, accounting for two Windows-specific
 /// attribution quirks that cause Edge content to appear under a different process name:
 ///
@@ -1596,9 +1610,7 @@ const SHELL_HOST_PROCESSES: &[&str] = &[
 ///    (`Chrome_WidgetWin_1`) lets us detect this and return `"msedge.exe"` instead,
 ///    so user exclusions for Edge correctly suppress these windows.
 pub(crate) fn get_effective_app_name(hwnd: HWND, pid: u32) -> String {
-    let name = get_process_name(pid).unwrap_or_else(|| "Unknown".to_string());
-
-    // Read the window class for diagnostic logging regardless of process.
+    let raw = get_process_name(pid).unwrap_or_else(|| "Unknown".to_string());
     let window_class = unsafe {
         let mut buf = [0u16; 128];
         let len = GetClassNameW(hwnd, &mut buf);
@@ -1609,42 +1621,17 @@ pub(crate) fn get_effective_app_name(hwnd: HWND, pid: u32) -> String {
         }
     };
 
-    debug!(
-        hwnd = ?hwnd.0,
-        pid,
-        raw_process = %name,
-        window_class = %window_class,
-        "a11y: resolving effective app name"
-    );
-
-    // Map WebView2 sub-process to Edge so msedge.exe exclusions cover it.
-    if name.to_lowercase() == "msedgewebview2.exe" {
+    let effective = normalize_app_name(&raw, &window_class);
+    if effective != raw {
         debug!(
             pid,
-            "a11y: msedgewebview2.exe -> msedge.exe (WebView2 normalisation)"
-        );
-        return "msedge.exe".to_string();
-    }
-
-    // For shell host processes check window class for Chromium content.
-    let lower = name.to_lowercase();
-    if SHELL_HOST_PROCESSES.iter().any(|h| lower.as_str() == *h) {
-        let is_chromium =
-            window_class == "Chrome_WidgetWin_1" || window_class == "Chrome_WidgetWin_0";
-        debug!(
-            pid,
-            raw_process = %name,
+            raw_process = %raw,
             window_class = %window_class,
-            is_chromium,
-            "a11y: shell-host process detected, checking for Chromium class"
+            effective = %effective,
+            "a11y: app name normalised"
         );
-        if is_chromium {
-            debug!(pid, "a11y: shell-hosted Chromium window -> msedge.exe");
-            return "msedge.exe".to_string();
-        }
     }
-
-    name
+    effective
 }
 
 fn get_process_name_uncached(pid: u32) -> Option<String> {
@@ -1693,6 +1680,57 @@ mod tests {
         let recorder = UiRecorder::with_defaults();
         let perms = recorder.check_permissions();
         assert!(perms.all_granted()); // Windows always grants
+    }
+
+    #[test]
+    fn test_normalize_app_name_webview2() {
+        // WebView2 sub-process folds into msedge.exe regardless of window class.
+        assert_eq!(normalize_app_name("msedgewebview2.exe", ""), "msedge.exe");
+        assert_eq!(
+            normalize_app_name("msedgewebview2.exe", "Chrome_WidgetWin_1"),
+            "msedge.exe"
+        );
+        // Case-insensitive.
+        assert_eq!(normalize_app_name("MsEdgeWebView2.EXE", ""), "msedge.exe");
+    }
+
+    #[test]
+    fn test_normalize_app_name_shell_hosted_chromium() {
+        // Shell-host + Chromium class → msedge.exe (covers Widgets / Search / re-parented WebView2).
+        assert_eq!(
+            normalize_app_name("explorer.exe", "Chrome_WidgetWin_1"),
+            "msedge.exe"
+        );
+        assert_eq!(
+            normalize_app_name("ApplicationFrameHost.exe", "Chrome_WidgetWin_0"),
+            "msedge.exe"
+        );
+        assert_eq!(
+            normalize_app_name("RuntimeBroker.exe", "Chrome_WidgetWin_1"),
+            "msedge.exe"
+        );
+    }
+
+    #[test]
+    fn test_normalize_app_name_passthrough() {
+        // Real explorer windows must stay as explorer.exe (not Chromium class).
+        assert_eq!(
+            normalize_app_name("explorer.exe", "CabinetWClass"),
+            "explorer.exe"
+        );
+        assert_eq!(normalize_app_name("explorer.exe", ""), "explorer.exe");
+        // Non-shell-host process with Chromium class must NOT be remapped — that would
+        // mis-classify every Chromium-based app (Slack, VS Code, Discord) as Edge.
+        assert_eq!(
+            normalize_app_name("slack.exe", "Chrome_WidgetWin_1"),
+            "slack.exe"
+        );
+        assert_eq!(
+            normalize_app_name("Code.exe", "Chrome_WidgetWin_1"),
+            "Code.exe"
+        );
+        // Plain process passthrough.
+        assert_eq!(normalize_app_name("notepad.exe", "Notepad"), "notepad.exe");
     }
 
     #[test]

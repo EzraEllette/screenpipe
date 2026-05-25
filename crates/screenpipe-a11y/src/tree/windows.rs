@@ -27,7 +27,7 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetClassNameW, GetForegroundWindow, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId,
+    GetForegroundWindow, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId,
 };
 
 /// Excluded apps — password managers and security tools (matches macOS list).
@@ -197,20 +197,8 @@ impl TreeWalkerPlatform for WindowsTreeWalker {
         // Skip transient shell-internal windows (MSCTFIME UI, Shell_TrayWnd, CiceroUIWndFrame).
         // On Windows 11 24H2+ a TSF/IME regression causes these explorer.exe-owned windows to
         // steal foreground focus for ~10-50ms on every mouse click, producing spurious frames.
-        let window_class = unsafe {
-            let mut buf = [0u16; 64];
-            let len = GetClassNameW(hwnd, &mut buf);
-            if len > 0 {
-                String::from_utf16_lossy(&buf[..len as usize])
-            } else {
-                String::new()
-            }
-        };
-        if crate::platform::windows::TRANSIENT_SHELL_WINDOW_CLASSES
-            .iter()
-            .any(|c| window_class.as_str() == *c)
-        {
-            debug!(class = %window_class, "a11y: skipped transient shell window class");
+        if crate::platform::windows::is_transient_shell_window(hwnd) {
+            debug!("a11y: skipped transient shell window class");
             return Ok(TreeWalkResult::Skipped(SkipReason::ExcludedApp));
         }
 
