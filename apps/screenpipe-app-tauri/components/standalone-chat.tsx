@@ -2327,19 +2327,15 @@ function ToolCallGroup({
         className="w-full flex items-center gap-2 py-1 text-left min-w-0 group"
       >
         {/* Status indicator */}
-        {!hideCount && (
+        {!hideCount && hasRunning && (
           <span className="flex-shrink-0 text-xs font-mono text-foreground/40">
-            {hasRunning ? (
-              <motion.span
-                className="inline-block"
-                animate={{ opacity: [1, 1, 0.3, 0.3, 1] }}
-                transition={{ duration: 1, repeat: Infinity, times: [0, 0.25, 0.25, 0.75, 0.75], ease: "linear" }}
-              >
-                [{doneCount}/{total}]
-              </motion.span>
-            ) : (
-              <span>[{total}]</span>
-            )}
+            <motion.span
+              className="inline-block"
+              animate={{ opacity: [1, 1, 0.3, 0.3, 1] }}
+              transition={{ duration: 1, repeat: Infinity, times: [0, 0.25, 0.25, 0.75, 0.75], ease: "linear" }}
+            >
+              [{doneCount}/{total}]
+            </motion.span>
           </span>
         )}
 
