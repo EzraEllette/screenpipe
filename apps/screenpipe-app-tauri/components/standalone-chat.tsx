@@ -71,6 +71,7 @@ import { usePipes } from "@/lib/hooks/use-pipes";
 import { localFetch, getApiBaseUrl } from "@/lib/api";
 import { CONNECTIONS_UPDATED_EVENT } from "@/lib/connections-events";
 import {
+  computeChatCitationPlan,
   formatSourceCitationsMarkdown,
   sourceCitationsFromMessage,
   type SourceCitation,
@@ -7411,9 +7412,24 @@ export function StandaloneChat({
     }
 
     if (m.role === "assistant") {
-      const citationsMarkdown = formatSourceCitationsMarkdown(sourceCitationsFromMessage(m));
-      if (citationsMarkdown) {
-        body = body ? `${body}\n\n${citationsMarkdown}` : citationsMarkdown;
+      // Mirror the in-app aggregation: if this message's per-message footer
+      // was folded into a turn-level aggregate, skip its Sources block here
+      // so we don't repeat the same files across every step of an agentic
+      // loop. The aggregated Sources block is appended after the last
+      // assistant of the turn instead.
+      const isDeferred = citationPlan.deferredMessageIds.has(m.id);
+      const turnAggregate = citationPlan.aggregatedAfter.get(m.id);
+      if (!isDeferred) {
+        const citationsMarkdown = formatSourceCitationsMarkdown(sourceCitationsFromMessage(m));
+        if (citationsMarkdown) {
+          body = body ? `${body}\n\n${citationsMarkdown}` : citationsMarkdown;
+        }
+      }
+      if (turnAggregate && turnAggregate.length > 0) {
+        const aggregateMarkdown = formatSourceCitationsMarkdown(turnAggregate);
+        if (aggregateMarkdown) {
+          body = body ? `${body}\n\n${aggregateMarkdown}` : aggregateMarkdown;
+        }
       }
     }
 
@@ -7732,6 +7748,21 @@ export function StandaloneChat({
     isLoading || isStreaming
       ? piMessageIdRef.current ?? currentStreamingMessageId ?? null
       : null;
+
+  // Per-turn aggregation plan. Pipe sessions (pipe-run, pipe-watch) and any
+  // chat with an agentic loop (≥2 assistant messages with citations between
+  // user turns) fold their per-message footers into one aggregated footer
+  // rendered after the last assistant of the turn. Single-step turns keep
+  // their per-message footer untouched.
+  const isPipeSessionChat =
+    currentSessionKind === "pipe-run" || currentSessionKind === "pipe-watch";
+  const citationPlan = React.useMemo(
+    () =>
+      computeChatCitationPlan(messages, {
+        forceAggregate: isPipeSessionChat,
+      }),
+    [isPipeSessionChat, messages],
+  );
 
   return (
     <div className={cn("flex flex-col bg-background", className ?? "h-screen")} data-testid="section-home">
@@ -8127,7 +8158,8 @@ export function StandaloneChat({
                 !message.content &&
                 !message.contentBlocks?.length
               );
-              return (
+              const turnAggregatedCitations = citationPlan.aggregatedAfter.get(message.id);
+              return [
             <motion.div
               key={message.id}
               initial={{ opacity: 0, y: 10 }}
@@ -8264,7 +8296,10 @@ export function StandaloneChat({
                 ) : (
                   <MessageContent
                     message={message}
-                    deferSourceFooter={message.id === activeSourceFooterMessageId}
+                    deferSourceFooter={
+                      citationPlan.deferredMessageIds.has(message.id) ||
+                      message.id === activeSourceFooterMessageId
+                    }
                     onImageClick={(images, index) => setImageViewer({ images, index })}
                     onRetry={(prompt) => sendMessage(prompt)}
                   />
@@ -8385,8 +8420,21 @@ export function StandaloneChat({
                 </>
               ) : null}
               </div>
-            </motion.div>
-              );
+            </motion.div>,
+            turnAggregatedCitations && turnAggregatedCitations.length > 0 ? (
+              <motion.div
+                key={`turn-sources-${message.id}`}
+                initial={{ opacity: 0, y: 4 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -4 }}
+                transition={{ duration: 0.15 }}
+                className="w-full"
+                data-testid="chat-turn-sources"
+              >
+                <SourceCitationFooter citations={turnAggregatedCitations} />
+              </motion.div>
+            ) : null,
+              ];
             });
           })()}
         </AnimatePresence>
