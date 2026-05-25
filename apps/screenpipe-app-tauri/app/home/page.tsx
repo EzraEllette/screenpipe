@@ -403,6 +403,19 @@ function HomeContent() {
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
   }, [toggleSidebar]);
+
+  // Cmd+N / Ctrl+N to start a new chat (matches the "New chat" sidebar button)
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "n") {
+        e.preventDefault();
+        setActiveSection("home");
+        startNewChat();
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [setActiveSection, startNewChat]);
   const overlayData = useOverlayData({
     includeDeviceLevels: false,
     includeOcrPulse: false,
