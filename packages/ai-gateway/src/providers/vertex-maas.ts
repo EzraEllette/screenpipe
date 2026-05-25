@@ -382,12 +382,24 @@ export class VertexMaasProvider implements AIProvider {
 	}
 
 	private formatMessageContent(msg: Message): { content: any; tool_calls?: any[] } {
+		// Preserve top-level OpenAI-style tool_calls regardless of content shape.
+		// The common assistant payload is { content: '', tool_calls: [...] }
+		// (string content, not array) — dropping tool_calls here breaks the
+		// next tool-response message because Vertex sees the assistant with
+		// no tool_calls and rejects the batch with "No tool calls but found
+		// tool output".
+		const topLevelToolCalls: any[] = [...((msg as any).tool_calls ?? [])];
+
 		if (!Array.isArray(msg.content)) {
-			return { content: nonEmptyText(msg.content) ?? '' };
+			const out: { content: any; tool_calls?: any[] } = {
+				content: nonEmptyText(msg.content) ?? (topLevelToolCalls.length > 0 ? null : ''),
+			};
+			if (topLevelToolCalls.length > 0) out.tool_calls = topLevelToolCalls;
+			return out;
 		}
 
 		const content: any[] = [];
-		const toolCalls: any[] = [...((msg as any).tool_calls ?? [])];
+		const toolCalls: any[] = topLevelToolCalls;
 
 		for (const part of msg.content as any[]) {
 			const type = part?.type;

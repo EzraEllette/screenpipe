@@ -239,6 +239,28 @@ describe('VertexMaasProvider.formatMessages', () => {
 		expect(result).toHaveLength(1);
 		expect(result[0]).toMatchObject({ role: 'user' });
 	});
+
+	// Without this preservation, the string-content branch of
+	// formatMessageContent silently drops the OpenAI-style tool_calls field,
+	// and Vertex 400s on the next tool-role message because the assistant
+	// payload it sees has no tool_calls to bind to.
+	it('preserves OpenAI-style tool_calls on assistant with string content', () => {
+		const result = provider.formatMessages([
+			{ role: 'user', content: 'what files?' },
+			{
+				role: 'assistant',
+				content: '',
+				tool_calls: [{ id: 'call_42', type: 'function', function: { name: 'ls', arguments: '{}' } }],
+			} as any,
+			{ role: 'tool', content: 'a.txt b.txt', tool_call_id: 'call_42' } as any,
+		]);
+		expect(result).toHaveLength(3);
+		expect(result[1]).toMatchObject({
+			role: 'assistant',
+			tool_calls: [{ id: 'call_42' }],
+		});
+		expect(result[2]).toMatchObject({ role: 'tool', tool_call_id: 'call_42' });
+	});
 });
 
 describe('promoteReasoningStream', () => {
