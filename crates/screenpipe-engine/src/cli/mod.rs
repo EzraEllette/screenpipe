@@ -16,9 +16,9 @@ pub mod presets;
 pub mod search;
 pub mod status;
 mod store_file;
-pub mod team;
 pub mod survey;
 pub mod sync;
+pub mod team;
 pub mod vault;
 pub mod vision;
 

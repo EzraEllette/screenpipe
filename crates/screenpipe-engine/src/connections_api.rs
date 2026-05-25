@@ -853,8 +853,7 @@ async fn gmail_json_or_upstream(resp: reqwest::Response) -> anyhow::Result<Value
 /// return, forwarding the upstream Gmail status when present.
 fn gmail_err(e: anyhow::Error) -> (StatusCode, Json<Value>) {
     if let Some(up) = e.downcast_ref::<GmailUpstreamError>() {
-        let status = StatusCode::from_u16(up.status.as_u16())
-            .unwrap_or(StatusCode::BAD_GATEWAY);
+        let status = StatusCode::from_u16(up.status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
         return (
             status,
             Json(json!({

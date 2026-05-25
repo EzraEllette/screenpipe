@@ -3383,7 +3383,6 @@ mod tests {
         }
     }
 
-
     // ── State machine tests ────────────────────────────────────────────
 
     fn make_scan_result(app: &str, in_call: bool, signals: usize) -> ScanResult {

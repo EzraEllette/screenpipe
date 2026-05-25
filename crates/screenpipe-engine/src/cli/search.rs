@@ -38,9 +38,8 @@ pub async fn handle_search_command(args: &SearchArgs) -> anyhow::Result<()> {
         );
     }
 
-    let content_type = parse_content_type(&args.content_type).map_err(|e| {
-        anyhow::anyhow!("invalid --content-type '{}': {}", args.content_type, e)
-    })?;
+    let content_type = parse_content_type(&args.content_type)
+        .map_err(|e| anyhow::anyhow!("invalid --content-type '{}': {}", args.content_type, e))?;
 
     let start = parse_time_opt(args.start.as_deref(), "--start")?;
     let end = parse_time_opt(args.end.as_deref(), "--end")?;

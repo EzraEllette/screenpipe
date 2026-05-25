@@ -84,10 +84,10 @@ fn read_token_from_enterprise_json() -> anyhow::Result<String> {
     if !path.exists() {
         anyhow::bail!("{TOKEN_HELP}");
     }
-    let raw = std::fs::read_to_string(&path)
-        .with_context(|| format!("reading {}", path.display()))?;
-    let parsed: Value = serde_json::from_str(&raw)
-        .with_context(|| format!("parsing {}", path.display()))?;
+    let raw =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let parsed: Value =
+        serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
     let tok = parsed
         .get("team_api_token")
         .and_then(|v| v.as_str())
@@ -112,17 +112,20 @@ async fn search(
     env: &TeamEnv,
     args: &TeamSearchArgs,
 ) -> anyhow::Result<()> {
-    let mut params: Vec<(&str, String)> = vec![
-        ("q", args.query.clone()),
-        ("limit", args.limit.to_string()),
-    ];
+    let mut params: Vec<(&str, String)> =
+        vec![("q", args.query.clone()), ("limit", args.limit.to_string())];
     if let Some(d) = &args.device_id {
         params.push(("device_id", d.clone()));
     }
     if let Some(a) = &args.app {
         params.push(("app_name", a.clone()));
     }
-    push_time_params(&mut params, args.since.as_deref(), args.start.as_deref(), args.end.as_deref())?;
+    push_time_params(
+        &mut params,
+        args.since.as_deref(),
+        args.start.as_deref(),
+        args.end.as_deref(),
+    )?;
 
     let url = format!("{}/api/enterprise/v1/search", env.base_url);
     let body = get_json(client, &env.token, &url, &params).await?;
@@ -157,7 +160,12 @@ async fn records(
         ("kind", args.kind.clone()),
         ("limit", args.limit.to_string()),
     ];
-    push_time_params(&mut params, args.since.as_deref(), args.start.as_deref(), args.end.as_deref())?;
+    push_time_params(
+        &mut params,
+        args.since.as_deref(),
+        args.start.as_deref(),
+        args.end.as_deref(),
+    )?;
 
     let url = format!("{}/api/enterprise/v1/records", env.base_url);
     let body = get_json(client, &env.token, &url, &params).await?;
@@ -178,8 +186,9 @@ fn push_time_params(
         anyhow::bail!("--since and --start are mutually exclusive");
     }
     if let Some(d) = since {
-        let dur = parse_duration(d)
-            .ok_or_else(|| anyhow::anyhow!("invalid --since '{}': expected `30m`, `4h`, `2d`, `1w`", d))?;
+        let dur = parse_duration(d).ok_or_else(|| {
+            anyhow::anyhow!("invalid --since '{}': expected `30m`, `4h`, `2d`, `1w`", d)
+        })?;
         let ts = (Utc::now() - dur).to_rfc3339();
         params.push(("since", ts));
     }
@@ -195,8 +204,12 @@ fn push_time_params(
 }
 
 fn parse_iso(s: &str) -> Result<DateTime<Utc>, String> {
-    s.parse::<DateTime<Utc>>()
-        .map_err(|_| format!("invalid ISO 8601 timestamp '{}' — expected e.g. 2026-01-15T10:00:00Z", s))
+    s.parse::<DateTime<Utc>>().map_err(|_| {
+        format!(
+            "invalid ISO 8601 timestamp '{}' — expected e.g. 2026-01-15T10:00:00Z",
+            s
+        )
+    })
 }
 
 /// Parse `30m`, `4h`, `2d`, `1w` into a `chrono::Duration`. Returns None on
@@ -242,13 +255,19 @@ async fn get_json(
 
     // Map known failure modes to actionable messages.
     let hint = match status {
-        StatusCode::UNAUTHORIZED => "token is invalid, expired, or revoked. \
-            Re-mint at https://screenpi.pe/enterprise?tab=tokens.",
-        StatusCode::FORBIDDEN => "token is missing a required scope. \
-            Re-mint with `read:devices`, `read:search`, `read:records`.",
+        StatusCode::UNAUTHORIZED => {
+            "token is invalid, expired, or revoked. \
+            Re-mint at https://screenpi.pe/enterprise?tab=tokens."
+        }
+        StatusCode::FORBIDDEN => {
+            "token is missing a required scope. \
+            Re-mint with `read:devices`, `read:search`, `read:records`."
+        }
         StatusCode::PAYMENT_REQUIRED => "team plan required for this endpoint.",
-        StatusCode::TOO_MANY_REQUESTS => "rate limited — narrow your query \
-            (`--since`, `--app`) or retry shortly.",
+        StatusCode::TOO_MANY_REQUESTS => {
+            "rate limited — narrow your query \
+            (`--since`, `--app`) or retry shortly."
+        }
         _ => "",
     };
     let server_msg = trim(&text);
