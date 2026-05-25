@@ -19,7 +19,9 @@ static DEF: IntegrationDef = IntegrationDef {
         Useful endpoints: \
         GET {spreadsheetId} — get spreadsheet metadata and sheet names. \
         GET {spreadsheetId}/values/{range} — read cell values (e.g. Sheet1!A1:Z100). \
-        POST {spreadsheetId}/values/{range}:append — append rows to a sheet.",
+        POST {spreadsheetId}/values/{range}:append — append rows to a sheet. \
+        Multi-account: when more than one Google account is connected, append `?instance=<email>` \
+        to any proxy URL to pick which one (the `?` becomes `&` if the path already has a query string).",
     fields: &[],
 };
 

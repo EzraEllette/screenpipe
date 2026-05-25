@@ -1169,14 +1169,108 @@ function classifyCurl(cmd: string): CurlPresentation | null {
     return { label: "Listed connections", connectionIconName: "connections" };
   }
   if (path.startsWith("/connections/")) {
-    const name = path.split("/")[2];
+    const segments = path.split("/").slice(2); // [name, ...sub]
+    const name = segments[0];
+    const sub = segments.slice(1).join("/");
+    const icon = name;
+
+    // --- Gmail-specific labels (the connection has custom endpoints, not a proxy) ---
+    if (name === "gmail") {
+      if (sub === "send" && method === "POST") {
+        const body = curlBodyJson(cmd);
+        const to = typeof body?.to === "string" ? body.to : null;
+        return {
+          label: to ? `Sent email to ${trunc(to, 40)}` : "Sent email via Gmail",
+          connectionIconName: icon,
+        };
+      }
+      if (sub === "messages") {
+        const q = url.searchParams.get("q");
+        return {
+          label: q ? `Searched Gmail "${trunc(q, 30)}"` : "Listed Gmail messages",
+          connectionIconName: icon,
+        };
+      }
+      if (sub.startsWith("messages/")) {
+        return { label: "Read Gmail message", connectionIconName: icon };
+      }
+      if (sub === "instances") {
+        return { label: "Listed Gmail accounts", connectionIconName: icon };
+      }
+    }
+
+    // --- Google Calendar ---
+    if (name === "google-calendar") {
+      if (sub === "events") {
+        return { label: "Listed calendar events", connectionIconName: icon };
+      }
+      if (sub === "status") {
+        return { label: "Checked calendar connection", connectionIconName: icon };
+      }
+    }
+
+    // --- Proxy endpoints (Google Docs/Sheets, Notion, etc.) ---
+    if (sub.startsWith("proxy/")) {
+      const proxyPath = sub.slice("proxy/".length);
+      // Google Docs API
+      if (proxyPath.startsWith("docs/v1/documents")) {
+        if (method === "POST" && proxyPath.endsWith(":batchUpdate")) {
+          return { label: "Edited Google Doc", connectionIconName: icon };
+        }
+        if (method === "POST") {
+          return { label: "Created Google Doc", connectionIconName: icon };
+        }
+        return { label: "Read Google Doc", connectionIconName: icon };
+      }
+      // Drive API (used by google-docs for file listing + creation)
+      if (proxyPath.startsWith("drive/v3/files")) {
+        if (proxyPath.includes("/export")) {
+          return { label: "Exported Drive file", connectionIconName: icon };
+        }
+        if (method === "POST") {
+          return { label: "Created Drive file", connectionIconName: icon };
+        }
+        return { label: "Listed Drive files", connectionIconName: icon };
+      }
+      // Drive resumable/multipart upload
+      if (proxyPath.startsWith("upload/")) {
+        return { label: "Uploaded file to Drive", connectionIconName: icon };
+      }
+      // Google Sheets API
+      if (name === "google-sheets") {
+        if (proxyPath.endsWith(":append")) {
+          return { label: "Appended to sheet", connectionIconName: icon };
+        }
+        if (proxyPath.includes("/values/")) {
+          return {
+            label: method === "GET" ? "Read sheet values" : "Updated sheet values",
+            connectionIconName: icon,
+          };
+        }
+        return { label: "Sheets request", connectionIconName: icon };
+      }
+      // Generic proxy fallback — name the action by verb, not "Configured"
+      if (method === "POST") return { label: `Posted to ${name}`, connectionIconName: icon };
+      if (method === "PATCH" || method === "PUT") {
+        return { label: `Updated via ${name}`, connectionIconName: icon };
+      }
+      return { label: `Read from ${name}`, connectionIconName: icon };
+    }
+
+    // --- Catch-all for connection root + unrecognized subpaths ---
     if (method === "DELETE") {
-      return { label: `Removed ${name} connection`, connectionIconName: name };
+      return { label: `Removed ${name} connection`, connectionIconName: icon };
     }
-    if (method === "POST" || method === "PATCH" || method === "PUT") {
-      return { label: `Configured ${name} connection`, connectionIconName: name };
+    // Root POST/PATCH/PUT on /connections/<id> is the actual "configure" action.
+    if (!sub && (method === "POST" || method === "PATCH" || method === "PUT")) {
+      return { label: `Configured ${name} connection`, connectionIconName: icon };
     }
-    return { label: `${name} connection`, connectionIconName: name };
+    // Sub-path POST/PATCH/PUT is an action, not a configuration change.
+    if (method === "POST") return { label: `Posted to ${name}`, connectionIconName: icon };
+    if (method === "PATCH" || method === "PUT") {
+      return { label: `Updated via ${name}`, connectionIconName: icon };
+    }
+    return { label: `${name} connection`, connectionIconName: icon };
   }
 
   if (path === "/pipes") {
@@ -1342,7 +1436,23 @@ function endpointFamily(path: string): string {
   if (path === "/search") return "Screen search";
   if (path === "/activity-summary") return "Activity";
   if (path === "/raw_sql") return "Database";
-  if (path.startsWith("/connections/")) return "Connection";
+  if (path.startsWith("/connections/")) {
+    // Narrow the chip to the action surface, not just "Connection", so the AI's
+    // user-visible card matches the verb in the title (Sent email → EMAIL).
+    const segments = path.split("/").slice(2);
+    const name = segments[0];
+    const sub = segments.slice(1).join("/");
+    if (name === "gmail" && sub === "send") return "Email";
+    if (name === "gmail") return "Gmail";
+    if (name === "google-calendar") return "Calendar";
+    if (name === "google-docs") return "Doc";
+    if (name === "google-sheets") return "Sheet";
+    if (name === "slack") return "Slack";
+    if (name === "notion") return "Notion";
+    if (name === "telegram") return "Telegram";
+    if (name === "discord") return "Discord";
+    return "Connection";
+  }
   if (path.startsWith("/meetings")) return "Meetings";
   if (path.startsWith("/speakers")) return "Speakers";
   if (path.startsWith("/pipes")) return "Pipes";
@@ -1361,6 +1471,29 @@ function parseToolResultJson(result: string | undefined): any | null {
 function summarizeToolResult(result: string | undefined, family: string): string | undefined {
   const json = parseToolResultJson(result);
   if (!json) return result?.trim() ? trunc(result.trim().replace(/\s+/g, " "), 120) : undefined;
+
+  // Connection-specific successes: read the actual response shape so the
+  // summary reflects what just happened ("Email sent", "Doc created") instead
+  // of the generic "JSON response returned" fallback.
+  if (family.startsWith("/connections/")) {
+    if (family === "/connections/gmail/send" && (json?.data?.id || json?.id || json?.threadId)) {
+      return "Email sent";
+    }
+    if (family.startsWith("/connections/google-docs/proxy/docs/v1/documents")) {
+      if (family.endsWith(":batchUpdate")) return "Document updated";
+      if (json?.documentId) return "Document created";
+    }
+    if (family.startsWith("/connections/google-docs/proxy/drive/v3/files") && json?.id) {
+      return json?.mimeType?.includes("spreadsheet") ? "Spreadsheet created" : "Drive file created";
+    }
+    if (family.startsWith("/connections/google-docs/proxy/upload/drive/v3/files") && json?.id) {
+      return "File uploaded";
+    }
+    if (family.endsWith(":append") && json?.updates?.updatedCells) {
+      return `Appended ${json.updates.updatedCells} cell${json.updates.updatedCells === 1 ? "" : "s"}`;
+    }
+    if (typeof json?.error === "string") return trunc(json.error, 120);
+  }
 
   const noun = family === "/memories" ? "memories"
     : family === "/search" ? "results"

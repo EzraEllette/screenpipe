@@ -786,19 +786,24 @@ async fn gmail_send_inner(
     gmail_json_or_upstream(resp).await
 }
 
-/// Retrieve a valid Gmail OAuth token or return an error.
+/// Retrieve a valid Gmail OAuth token or return an error. Distinguishes
+/// "not connected" from "ambiguous, multiple accounts connected" so the
+/// caller (AI tool, pipe, user) gets actionable context instead of an
+/// always-wrong "reconnect Gmail" string.
 async fn gmail_token(
     client: &reqwest::Client,
     instance: Option<&str>,
     secret_store: &Option<Arc<SecretStore>>,
 ) -> anyhow::Result<String> {
-    oauth_store::get_valid_token_instance(secret_store.as_deref(), client, "gmail", instance)
-        .await
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "Gmail not connected — use 'Connect with Gmail' in Settings > Connections"
-            )
-        })
+    let store = secret_store.as_deref();
+    if let Some(token) =
+        oauth_store::get_valid_token_instance(store, client, "gmail", instance).await
+    {
+        return Ok(token);
+    }
+    Err(anyhow::anyhow!(
+        oauth_store::describe_oauth_error(store, "gmail", "Gmail", instance).await
+    ))
 }
 
 /// GET /connections/gmail/instances — list all connected Gmail accounts.
@@ -979,24 +984,23 @@ pub struct GoogleCalendarInstanceQuery {
     pub instance: Option<String>,
 }
 
-/// Retrieve a valid Google Calendar OAuth token or return an error.
+/// Retrieve a valid Google Calendar OAuth token or return an error. See
+/// [`gmail_token`] for why "not connected" is split into distinct cases.
 async fn gcal_token(
     client: &reqwest::Client,
     instance: Option<&str>,
     secret_store: &Option<Arc<SecretStore>>,
 ) -> anyhow::Result<String> {
-    oauth_store::get_valid_token_instance(
-        secret_store.as_deref(),
-        client,
-        "google-calendar",
-        instance,
-    )
-    .await
-    .ok_or_else(|| {
-        anyhow::anyhow!(
-            "Google Calendar not connected — use 'Connect Google Calendar' in Settings > Connections"
-        )
-    })
+    let store = secret_store.as_deref();
+    if let Some(token) =
+        oauth_store::get_valid_token_instance(store, client, "google-calendar", instance).await
+    {
+        return Ok(token);
+    }
+    Err(anyhow::anyhow!(
+        oauth_store::describe_oauth_error(store, "google-calendar", "Google Calendar", instance)
+            .await
+    ))
 }
 
 /// GET /connections/google-calendar/status — check connection + email.
@@ -1055,7 +1059,14 @@ async fn gcal_events(
         Ok(events) => (StatusCode::OK, Json(json!(events))),
         Err(e) => {
             let message = e.to_string();
-            let status = if message.contains("Google Calendar not connected") {
+            // Recognize every variant of the OAuth-failure message from
+            // `describe_oauth_error` (not-connected, single-instance broken,
+            // multi-instance ambiguous, explicit-instance broken) and surface
+            // them as 401 so callers can distinguish auth from upstream 5xx.
+            let is_oauth_failure = message.contains("Google Calendar not connected")
+                || message.contains("Google Calendar account")
+                || message.contains("multiple Google Calendar accounts connected");
+            let status = if is_oauth_failure {
                 StatusCode::UNAUTHORIZED
             } else {
                 StatusCode::INTERNAL_SERVER_ERROR
@@ -1561,11 +1572,33 @@ async fn connection_proxy(
             id,
             instance_ref
         );
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({ "error": format!("connection '{}' has no stored credentials — connect it first in Settings", id) })),
+        // For OAuth-style integrations (Google Docs/Sheets, etc.) the
+        // generic "no stored credentials" message is wrong when the real
+        // problem is multi-account ambiguity — the user *is* connected,
+        // they just need to pick which account. `describe_oauth_error`
+        // produces the actionable string from the actual instance list.
+        let has_oauth_state = !screenpipe_connect::oauth::list_oauth_instances(
+            state.secret_store.as_deref(),
+            &id,
         )
-            .into_response();
+        .await
+        .is_empty();
+        let error = if has_oauth_state {
+            let display_name = mgr.find_def(&id).map(|d| d.name).unwrap_or(id.as_str());
+            screenpipe_connect::oauth::describe_oauth_error(
+                state.secret_store.as_deref(),
+                &id,
+                display_name,
+                instance_ref,
+            )
+            .await
+        } else {
+            format!(
+                "connection '{}' has no stored credentials — connect it first in Settings",
+                id
+            )
+        };
+        return (StatusCode::UNAUTHORIZED, Json(json!({ "error": error }))).into_response();
     }
 
     // Resolve dynamic base_url
