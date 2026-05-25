@@ -1577,12 +1577,10 @@ async fn connection_proxy(
         // problem is multi-account ambiguity — the user *is* connected,
         // they just need to pick which account. `describe_oauth_error`
         // produces the actionable string from the actual instance list.
-        let has_oauth_state = !screenpipe_connect::oauth::list_oauth_instances(
-            state.secret_store.as_deref(),
-            &id,
-        )
-        .await
-        .is_empty();
+        let has_oauth_state =
+            !screenpipe_connect::oauth::list_oauth_instances(state.secret_store.as_deref(), &id)
+                .await
+                .is_empty();
         let error = if has_oauth_state {
             let display_name = mgr.find_def(&id).map(|d| d.name).unwrap_or(id.as_str());
             screenpipe_connect::oauth::describe_oauth_error(
