@@ -44,9 +44,15 @@ describe("Help section: Discord community link", function () {
 
     // The neighbouring label ("Discord") lives in the same card. We assert
     // it's textually adjacent so the testid can't drift onto an unrelated
-    // button (defensive against future copy-paste).
-    const card = await discordButton.parentElement().parentElement();
-    const cardText = (await card.getText()).toLowerCase();
+    // button (defensive against future copy-paste). Done via `closest` in
+    // the page context rather than `parentElement()` chaining — wdio's
+    // ChainablePromiseElement returns a fresh promise each call and
+    // `await foo.parentElement().parentElement()` resolves only the inner
+    // one (the bug that red-mained 26421049533).
+    const cardText = ((await browser.execute(() => {
+      const btn = document.querySelector('[data-testid="help-discord-link"]');
+      return btn?.closest("div.bg-card")?.textContent ?? "";
+    })) as string).toLowerCase();
     expect(cardText).toContain("discord");
     expect(cardText).toContain("community");
 
