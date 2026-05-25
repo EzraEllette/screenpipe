@@ -229,6 +229,18 @@ pub fn is_app_ui_hidden() -> bool {
         .unwrap_or(false)
 }
 
+/// Serializes any test that mutates `SYNC_STREAMS`. Cargo runs tests in
+/// parallel within a binary by default, and the static here is shared with the
+/// `enterprise_sync::run_one_sync` test mod — two tests racing on a global
+/// will flake. Acquire this guard for the full duration of the test, including
+/// any reset-to-defaults at the end.
+#[cfg(test)]
+pub(crate) fn sync_streams_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    use std::sync::Mutex;
+    static LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -267,6 +279,7 @@ mod tests {
     fn set_sync_streams_round_trips() {
         // Touches the global static; reset to defaults after to avoid
         // poisoning sibling tests that read current_sync_streams.
+        let _guard = sync_streams_test_lock();
         set_sync_streams(false, true, false, true, false);
         let s = current_sync_streams();
         assert!(!s.frames);

@@ -282,7 +282,7 @@ fn emit_meeting_note_route_with_retries(app: &tauri::AppHandle, deeplink_url: &s
 
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
-    use super::parse_meeting_deeplink;
+    use super::{fallback_local_api_config, parse_meeting_deeplink};
 
     #[test]
     fn parses_meeting_deeplink_path_id() {
@@ -307,6 +307,35 @@ mod tests {
             None
         );
         assert_eq!(parse_meeting_deeplink("screenpipe://settings"), None);
+    }
+
+    // Regression for b7dc02415: `get_local_api_config` returned {key: null}
+    // during the cold-spawn window between webview load and `spawn_screenpipe`
+    // populating `RecordingState.server`. The privacy panel's `loadLiveApiKey`
+    // runs once on mount and latches, so the input stayed empty until the user
+    // closed and reopened Settings. Fix: fall back to the process-global cache
+    // (`resolved_api_auth_key`) seeded at app start whenever apiAuth is on.
+    //
+    // The integration with `RecordingState` needs a tauri::AppHandle to
+    // exercise end-to-end, so these tests cover the contract of the pure
+    // fallback shape — the part that actually broke. Seeding the static and
+    // reading it back is covered by store.rs tests / the manual repro:
+    // open Settings → Privacy with recording paused; key field must populate.
+
+    #[test]
+    fn fallback_emits_seeded_key_with_auth_enabled() {
+        let v = fallback_local_api_config(Some("sp-cold-spawn-test".to_string()));
+        assert_eq!(v["key"].as_str(), Some("sp-cold-spawn-test"));
+        assert_eq!(v["port"], 3030);
+        assert_eq!(v["auth_enabled"], true);
+    }
+
+    #[test]
+    fn fallback_emits_null_key_with_auth_disabled_when_unseeded() {
+        let v = fallback_local_api_config(None);
+        assert!(v["key"].is_null());
+        assert_eq!(v["port"], 3030);
+        assert_eq!(v["auth_enabled"], false);
     }
 }
 
@@ -477,10 +506,17 @@ pub async fn get_local_api_config(app_handle: tauri::AppHandle) -> serde_json::V
     // the privacy panel's API-key input stays empty until the user closes
     // and reopens Settings, even though the resolver already minted a key
     // that the spawning server will adopt verbatim.
-    let cached = crate::store::resolved_api_auth_key();
-    let auth_enabled = cached.is_some();
+    fallback_local_api_config(crate::store::resolved_api_auth_key())
+}
+
+/// Pure JSON shape used by the cold-spawn fallback. Extracted so the contract
+/// is covered by a unit test without needing a tauri::AppHandle. Port is the
+/// well-known default because the server hasn't bound yet — the UI will refresh
+/// once the server registers itself in `RecordingState`.
+fn fallback_local_api_config(cached_key: Option<String>) -> serde_json::Value {
+    let auth_enabled = cached_key.is_some();
     serde_json::json!({
-        "key": cached,
+        "key": cached_key,
         "port": 3030,
         "auth_enabled": auth_enabled,
     })

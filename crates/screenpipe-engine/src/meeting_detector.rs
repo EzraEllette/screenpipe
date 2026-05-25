@@ -3383,6 +3383,54 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_generic_profile_url_patterns_are_path_qualified_for_known_lookalikes() {
+        // Any URL pattern that is just `<service>.com` for a service that
+        // also runs a marketing/dashboard site at the same host will trip
+        // the same class of false positive that hit cal.com (regression in
+        // f9cdb1bb7). Lock in the path-qualified shape for services we've
+        // already narrowed — re-broadening them in the patterns list should
+        // require updating this test, which is the whole point.
+        let profile = generic_profile();
+        let patterns = profile.app_identifiers.browser_url_patterns;
+
+        let must_be_path_qualified = ["cal.com", "dialpad.com"];
+        for host in must_be_path_qualified {
+            let bare_present = patterns.iter().any(|p| *p == host);
+            assert!(
+                !bare_present,
+                "url pattern {host:?} must be path-qualified (e.g. {host}/<call-route>), \
+                 not a bare host — otherwise dashboard/marketing URLs match"
+            );
+        }
+    }
+
+    #[test]
+    fn test_generic_profile_rejects_marketing_lookalikes_for_narrowed_hosts() {
+        // Concrete URL regression set for hosts we've already narrowed. If
+        // any of these match, we've silently re-broadened the pattern and
+        // the cal.com-class bug is back. Add hosts here as we narrow them.
+        let profile = generic_profile();
+        let patterns = profile.app_identifiers.browser_url_patterns;
+        for url in [
+            // cal.com marketing/dashboard — only /video is a call.
+            "https://cal.com/",
+            "https://cal.com/blog/how-to-schedule-meetings",
+            "https://cal.com/signup",
+            "https://app.cal.com/settings/billing",
+            // dialpad — only /meetings is a call route.
+            "https://www.dialpad.com/",
+            "https://www.dialpad.com/pricing",
+            "https://dialpad.com/blog",
+        ] {
+            assert!(
+                !url_matches_any_pattern(url, patterns),
+                "marketing/dashboard URL {url:?} should NOT match a meeting profile \
+                 (regression of the cal.com false-positive class)"
+            );
+        }
+    }
+
     // ── State machine tests ────────────────────────────────────────────
 
     fn make_scan_result(app: &str, in_call: bool, signals: usize) -> ScanResult {
