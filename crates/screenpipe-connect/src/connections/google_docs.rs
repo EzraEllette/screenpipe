@@ -27,7 +27,10 @@ static OAUTH: OAuthConfig = OAuthConfig {
              https://www.googleapis.com/auth/userinfo.email",
         ),
         ("access_type", "offline"),
-        ("prompt", "consent"),
+        // select_account so the second connect shows Google's account picker
+        // instead of silently consenting under the already-signed-in account —
+        // otherwise the multi-account UI can never reach a different account.
+        ("prompt", "consent select_account"),
     ],
     redirect_uri_override: None,
 };
