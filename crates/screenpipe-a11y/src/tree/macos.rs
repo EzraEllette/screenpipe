@@ -465,7 +465,11 @@ impl MacosTreeWalker {
             } else {
                 VsCodeMode::Editor
             };
-            state.app = AppState::VsCode { mode, inside_webarea: false, in_terminal_subtree: false };
+            state.app = AppState::VsCode {
+                mode,
+                inside_webarea: false,
+                in_terminal_subtree: false,
+            };
         }
 
         if let Some((wx, wy, ww, wh)) = get_element_frame(window) {
@@ -605,7 +609,10 @@ enum AppState {
 fn is_vscode_terminal_list_role(role_str: &str, depth: usize, app: &AppState) -> bool {
     matches!(
         app,
-        AppState::VsCode { inside_webarea: true, .. }
+        AppState::VsCode {
+            inside_webarea: true,
+            ..
+        }
     ) && role_str == "AXList"
         && depth >= 20
 }
@@ -826,8 +833,8 @@ fn vscode_terminal_window_name(ax_app: &ax::UiElement) -> Option<String> {
             let elem: &ax::UiElement = unsafe { std::mem::transmute(&*cur) };
             for attr in [ax::attr::desc(), ax::attr::title()] {
                 if let Some(val) = get_string_attr(elem, attr) {
-                    if let Some(name) = parse_vscode_terminal_name(&val)
-                        .or_else(|| parse_xterm_bare_desc(&val))
+                    if let Some(name) =
+                        parse_vscode_terminal_name(&val).or_else(|| parse_xterm_bare_desc(&val))
                     {
                         desc_terminal_name = Some(name);
                         break;
@@ -863,8 +870,7 @@ fn vscode_terminal_window_name(ax_app: &ax::UiElement) -> Option<String> {
                     }
                     let search_end = (list_idx + 12).min(steps);
                     for k in (list_idx + 1)..search_end {
-                        let elem: &ax::UiElement =
-                            unsafe { std::mem::transmute(&*ancestors[k]) };
+                        let elem: &ax::UiElement = unsafe { std::mem::transmute(&*ancestors[k]) };
                         for attr in [ax::attr::desc(), ax::attr::title()] {
                             if let Some(val) = get_string_attr(elem, attr) {
                                 if let Some(name) = parse_vscode_terminal_name(&val)
@@ -1032,7 +1038,13 @@ fn walk_element(elem: &ax::UiElement, depth: usize, state: &mut WalkState) {
     }
     let is_vscode_terminal_list = is_vscode_terminal_list_role(&role_str, depth, &state.app);
     if is_vscode_terminal_list {
-        if matches!(state.app, AppState::VsCode { mode: VsCodeMode::Editor, .. }) {
+        if matches!(
+            state.app,
+            AppState::VsCode {
+                mode: VsCodeMode::Editor,
+                ..
+            }
+        ) {
             return; // prune entire terminal subtree — no children walked, no text emitted
         }
     }
@@ -1041,9 +1053,11 @@ fn walk_element(elem: &ax::UiElement, depth: usize, state: &mut WalkState) {
     // In VS Code terminal mode, suppress text outside the terminal AXList subtree.
     if should_extract_text(&role_str) {
         let emit = match state.app {
-            AppState::VsCode { mode: VsCodeMode::Terminal, in_terminal_subtree, .. } => {
-                in_terminal_subtree
-            }
+            AppState::VsCode {
+                mode: VsCodeMode::Terminal,
+                in_terminal_subtree,
+                ..
+            } => in_terminal_subtree,
             _ => true,
         };
         if emit {
@@ -1106,10 +1120,19 @@ fn walk_element(elem: &ax::UiElement, depth: usize, state: &mut WalkState) {
     // sibling subtrees (sidebar, editor) are unaffected.
     let children = elem.children();
     if let Ok(children) = children {
-        let prev_in_terminal =
-            matches!(state.app, AppState::VsCode { in_terminal_subtree: true, .. });
+        let prev_in_terminal = matches!(
+            state.app,
+            AppState::VsCode {
+                in_terminal_subtree: true,
+                ..
+            }
+        );
         if is_vscode_terminal_list {
-            if let AppState::VsCode { in_terminal_subtree, .. } = &mut state.app {
+            if let AppState::VsCode {
+                in_terminal_subtree,
+                ..
+            } = &mut state.app
+            {
                 *in_terminal_subtree = true;
             }
         }
@@ -1119,7 +1142,11 @@ fn walk_element(elem: &ax::UiElement, depth: usize, state: &mut WalkState) {
             }
             walk_element(&children[i], next_depth, state);
         }
-        if let AppState::VsCode { in_terminal_subtree, .. } = &mut state.app {
+        if let AppState::VsCode {
+            in_terminal_subtree,
+            ..
+        } = &mut state.app
+        {
             *in_terminal_subtree = prev_in_terminal;
         }
     }
