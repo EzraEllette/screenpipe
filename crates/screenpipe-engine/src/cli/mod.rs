@@ -1338,7 +1338,12 @@ pub enum VaultCommand {
     /// Set up vault encryption (first-time password setup)
     Setup {},
     /// Lock the vault (encrypt all data, stop recording)
-    Lock {},
+    Lock {
+        /// Port of the running screenpipe daemon (used to delegate lock if
+        /// reachable). Falls back to direct file-level lock if unreachable.
+        #[arg(short = 'p', long, default_value_t = 3030)]
+        port: u16,
+    },
     /// Unlock the vault (decrypt data, resume recording)
     Unlock {},
 }
