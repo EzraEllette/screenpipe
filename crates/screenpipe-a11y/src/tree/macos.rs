@@ -459,15 +459,13 @@ impl MacosTreeWalker {
         //      rows are ~30 hops deep; sidebar file-tree AXLists are ≤12 hops).
         if is_vscode_like(&app_lower) {
             state.max_depth = state.max_depth.max(40);
-            state.walk_timeout =
-                state.walk_timeout.max(std::time::Duration::from_millis(500));
             let mode = if let Some(name) = vscode_terminal_window_name(&ax_app) {
                 window_name = name;
                 VsCodeMode::Terminal
             } else {
                 VsCodeMode::Editor
             };
-            state.app = AppState::VsCode { mode, webarea_depth: None, in_terminal_subtree: false };
+            state.app = AppState::VsCode { mode, inside_webarea: false, in_terminal_subtree: false };
         }
 
         if let Some((wx, wy, ww, wh)) = get_element_frame(window) {
@@ -584,12 +582,32 @@ enum AppState {
     /// VS Code or fork: owns all three isolation bookkeeping values.
     VsCode {
         mode: VsCodeMode,
-        /// Depth at which `AXWebArea` was first seen; `None` until visited.
-        webarea_depth: Option<usize>,
+        /// `true` once the walk has entered the Electron AXWebArea.
+        ///
+        /// Inside the web area, `depth` is post-reset (relative to AXWebArea)
+        /// because [`walk_element`] passes `next_depth = 0` to its children —
+        /// so a simple `depth >= 20` check on AXList is enough to identify
+        /// terminal output rows once this flag is set.
+        inside_webarea: bool,
         /// `true` while the walk is inside the deep terminal `AXList`.
         /// Saved and restored around each such subtree.
         in_terminal_subtree: bool,
     },
+}
+
+/// Decide whether the current element is a deep AXList inside the VS Code
+/// terminal subtree. Pure helper — testable without a live AX session.
+///
+/// `depth` is the post-reset depth (relative to AXWebArea, since [`walk_element`]
+/// resets the counter to 0 when entering AXWebArea). Sidebar/editor AXLists sit
+/// at ≤ 15 hops below AXWebArea; terminal output rows at ≥ 27 hops — so 20 is
+/// a safe threshold that cleanly separates them.
+fn is_vscode_terminal_list_role(role_str: &str, depth: usize, app: &AppState) -> bool {
+    matches!(
+        app,
+        AppState::VsCode { inside_webarea: true, .. }
+    ) && role_str == "AXList"
+        && depth >= 20
 }
 
 /// Mutable state passed through the recursive walk.
@@ -799,9 +817,11 @@ fn vscode_terminal_window_name(ax_app: &ax::UiElement) -> Option<String> {
                 .ok()
                 .filter(|p| p.get_type_id() == ax::UiElement::type_id())
         };
-        // Scan desc/title on every ancestor for a terminal name.
-        // Try the "Terminal N, session" format first, then the bare session-name
-        // format used by some forks (e.g. Antigravity: "zsh Use ⌥F1 …").
+        // Scan desc/title on every ancestor for a terminal name — but only until
+        // we've found one. Each scan is 2 IPC calls into the target process, so
+        // skipping the lookup on remaining ancestors after a hit saves real work.
+        // Try "Terminal N, session" first, then the bare session-name format used
+        // by some forks (e.g. Antigravity: "zsh Use ⌥F1 …").
         if desc_terminal_name.is_none() {
             let elem: &ax::UiElement = unsafe { std::mem::transmute(&*cur) };
             for attr in [ax::attr::desc(), ax::attr::title()] {
@@ -998,23 +1018,19 @@ fn walk_element(elem: &ax::UiElement, depth: usize, state: &mut WalkState) {
     // VS Code content isolation — all VS Code logic is gated behind AppState::VsCode.
     // Zero cost for every non-matching app: the None arm is a single discriminant check.
     //
-    // AXWebArea is the root of the Electron workbench; we record its depth once.
-    // AXList nodes ≥ 20 hops below AXWebArea are terminal output rows (sidebar
-    // AXLists are ≤ 12 hops below — the threshold cleanly separates them).
+    // AXWebArea is the root of the Electron workbench. Once we've entered it,
+    // `depth` is already post-reset (children of AXWebArea start at depth 0 —
+    // see the `next_depth` block below). AXList nodes ≥ 20 hops past that point
+    // are terminal output rows; sidebar/editor AXLists sit at ≤ 15 hops.
     //
     //  • Editor mode: prune the deep AXList entirely — early return, no children walked.
     //  • Terminal mode: mark entry into the AXList so only its descendants emit text.
     if role_str == "AXWebArea" {
-        if let AppState::VsCode { webarea_depth, .. } = &mut state.app {
-            webarea_depth.get_or_insert(depth);
+        if let AppState::VsCode { inside_webarea, .. } = &mut state.app {
+            *inside_webarea = true;
         }
     }
-    let is_vscode_terminal_list = match state.app {
-        AppState::VsCode { webarea_depth: Some(wd), .. } => {
-            role_str == "AXList" && depth >= wd + 20
-        }
-        _ => false,
-    };
+    let is_vscode_terminal_list = is_vscode_terminal_list_role(&role_str, depth, &state.app);
     if is_vscode_terminal_list {
         if matches!(state.app, AppState::VsCode { mode: VsCodeMode::Editor, .. }) {
             return; // prune entire terminal subtree — no children walked, no text emitted
@@ -1743,5 +1759,80 @@ mod tests {
             parse_xterm_bare_desc("my session Use \u{2325}F1 help"),
             None
         );
+    }
+
+    #[test]
+    fn test_parse_xterm_bare_desc_rejects_literal_terminal() {
+        // Bare token equals "Terminal" → reject. The numbered "Terminal N, …" form
+        // is handled by parse_vscode_terminal_name; this path should not double-match.
+        assert_eq!(
+            parse_xterm_bare_desc("Terminal Use \u{2325}F1 for terminal accessibility help"),
+            None
+        );
+    }
+
+    // ── VS Code terminal-list gating tests ──────────────────────────────────
+    //
+    // These tests pin the post-reset coordinate contract: `depth` inside an
+    // AXWebArea is already relative to the web area (because walk_element
+    // resets `next_depth` to 0 on AXWebArea), so `is_vscode_terminal_list_role`
+    // checks `depth >= 20` directly — not `depth >= wd + 20`.
+
+    #[test]
+    fn test_terminal_list_gating_no_app_state() {
+        // AppState::None never matches, regardless of role/depth.
+        assert!(!is_vscode_terminal_list_role("AXList", 30, &AppState::None));
+        assert!(!is_vscode_terminal_list_role("AXList", 0, &AppState::None));
+    }
+
+    #[test]
+    fn test_terminal_list_gating_before_webarea() {
+        // Inside VsCode but before AXWebArea was visited → no terminal list yet.
+        let app = AppState::VsCode {
+            mode: VsCodeMode::Editor,
+            inside_webarea: false,
+            in_terminal_subtree: false,
+        };
+        assert!(!is_vscode_terminal_list_role("AXList", 30, &app));
+    }
+
+    #[test]
+    fn test_terminal_list_gating_inside_webarea_deep_axlist() {
+        // Inside AXWebArea, depth >= 20, role == AXList → terminal output row.
+        // This is the post-reset depth (children of AXWebArea start at 0).
+        let app = AppState::VsCode {
+            mode: VsCodeMode::Terminal,
+            inside_webarea: true,
+            in_terminal_subtree: false,
+        };
+        assert!(is_vscode_terminal_list_role("AXList", 20, &app));
+        assert!(is_vscode_terminal_list_role("AXList", 27, &app));
+    }
+
+    #[test]
+    fn test_terminal_list_gating_inside_webarea_shallow_axlist() {
+        // Inside AXWebArea but depth < 20 → sidebar/editor list, not terminal.
+        // Sidebar AXLists sit at depth ≤ 11 in this frame.
+        let app = AppState::VsCode {
+            mode: VsCodeMode::Editor,
+            inside_webarea: true,
+            in_terminal_subtree: false,
+        };
+        assert!(!is_vscode_terminal_list_role("AXList", 11, &app));
+        assert!(!is_vscode_terminal_list_role("AXList", 15, &app));
+        assert!(!is_vscode_terminal_list_role("AXList", 19, &app));
+    }
+
+    #[test]
+    fn test_terminal_list_gating_wrong_role() {
+        // Only AXList qualifies — AXGroup/AXStaticText at the same depth don't.
+        let app = AppState::VsCode {
+            mode: VsCodeMode::Terminal,
+            inside_webarea: true,
+            in_terminal_subtree: false,
+        };
+        assert!(!is_vscode_terminal_list_role("AXGroup", 30, &app));
+        assert!(!is_vscode_terminal_list_role("AXStaticText", 30, &app));
+        assert!(!is_vscode_terminal_list_role("AXWebArea", 30, &app));
     }
 }
