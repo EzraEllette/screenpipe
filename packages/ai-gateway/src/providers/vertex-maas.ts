@@ -350,7 +350,13 @@ export class VertexMaasProvider implements AIProvider {
 		};
 		const isOrphanToolMessage = (msg: Message): boolean => {
 			if (msg.role === 'tool') {
-				return !!msg.tool_call_id && !knownToolCallIds.has(msg.tool_call_id);
+				// Missing OR unknown tool_call_id — Vertex 400s either way with
+				// "No tool calls but found tool output". The previous guard
+				// (`!!msg.tool_call_id && ...`) kept tool-role messages whose
+				// id was simply absent, which the output mapper below then
+				// stripped via conditional spread — Vertex saw a bare role:'tool'
+				// and rejected the whole batch.
+				return !msg.tool_call_id || !knownToolCallIds.has(msg.tool_call_id);
 			}
 			if (Array.isArray(msg.content)) {
 				const hasToolResult = (msg.content as any[]).some((p) => p?.type === 'tool_result');

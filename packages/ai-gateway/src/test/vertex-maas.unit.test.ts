@@ -213,6 +213,32 @@ describe('VertexMaasProvider.formatMessages', () => {
 		expect(result).toHaveLength(1);
 		expect(result[0]).toMatchObject({ role: 'user' });
 	});
+
+	it('drops tool messages with missing tool_call_id (would otherwise reach Vertex bare)', () => {
+		// Output mapper strips tool_call_id when falsy via conditional spread,
+		// so a kept tool message with no id reaches Vertex as { role: 'tool' }
+		// alone and trips 400 "No tool calls but found tool output".
+		const result = provider.formatMessages([
+			{ role: 'user', content: 'list files' },
+			{
+				role: 'assistant',
+				content: '',
+				tool_calls: [{ id: 'call_42', type: 'function', function: { name: 'ls', arguments: '{}' } }],
+			} as any,
+			{ role: 'tool', content: 'orphan output, no id' } as any,
+		]);
+		expect(result).toHaveLength(2);
+		expect(result.map((m: any) => m.role)).toEqual(['user', 'assistant']);
+	});
+
+	it('drops tool messages with empty-string tool_call_id', () => {
+		const result = provider.formatMessages([
+			{ role: 'user', content: 'hi' },
+			{ role: 'tool', content: 'empty id', tool_call_id: '' } as any,
+		]);
+		expect(result).toHaveLength(1);
+		expect(result[0]).toMatchObject({ role: 'user' });
+	});
 });
 
 describe('promoteReasoningStream', () => {
