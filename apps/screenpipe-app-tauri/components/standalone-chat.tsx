@@ -32,8 +32,6 @@ import {
   chatUrlTransform,
   openScreenpipeViewerLink,
 } from "@/components/markdown";
-import { VideoComponent } from "@/components/rewind/video";
-import { convertFileSrc } from "@tauri-apps/api/core";
 import { AIPresetsSelector } from "@/components/rewind/ai-presets-selector";
 import { AIPreset, PiQueuedPrompt } from "@/lib/utils/tauri";
 import remarkGfm from "remark-gfm";
@@ -660,8 +658,9 @@ The local screenpipe server (localhost:3030) requires a bearer token, exposed as
 
 # Showing media
 
-- Markdown only: \`![description](/path/to/file.mp4)\` or \`![description](/path/to/image.jpg)\`
-- Use the exact file_path / audio_file_path from results. Never construct or guess paths.
+- Markdown only: use \`![description](</absolute/path/to/file.mp4>)\` or \`![description](</absolute/path/to/image.jpg>)\`.
+- Always wrap local file paths in angle brackets because screenpipe paths often contain spaces or parentheses.
+- Use the exact file_path / audio_file_path from results inside the angle brackets. Never construct or guess paths.
 - Verify the file exists (\`ls\` / \`Test-Path\`) before showing it. If missing, retry the search instead of rendering a broken player.
 
 # Deep links — sparingly
@@ -1945,11 +1944,6 @@ function MarkdownBlock({ text, isUser }: { text: string; isUser: boolean }) {
           );
         },
         a({ href, children, ...props }) {
-          const isMediaLink = href?.toLowerCase().match(/\.(mp4|mp3|wav|webm)$/);
-          if (isMediaLink && href) {
-            return <VideoComponent filePath={href} className="my-2" />;
-          }
-
           if (
             href?.startsWith("screenpipe://timeline") ||
             href?.startsWith("screenpipe://frame") ||
@@ -2002,39 +1996,6 @@ function MarkdownBlock({ text, isUser }: { text: string; isUser: boolean }) {
             </a>
           );
         },
-        img({ src, alt, ...props }) {
-          if (!src) return null;
-          if (src.toLowerCase().endsWith(".mp4")) {
-            return <VideoComponent filePath={src} className="my-2" />;
-          }
-          // try asset protocol for local paths, fall back to http serve
-          let imgSrc = src;
-          if (src.startsWith("/")) {
-            try {
-              imgSrc = convertFileSrc(src);
-            } catch {
-              imgSrc = `${getApiBaseUrl()}/experimental/frames/from-file?path=${encodeURIComponent(src)}`;
-            }
-          }
-          return (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img
-              src={imgSrc}
-              alt={alt || ""}
-              className="max-w-full h-auto rounded-md my-2 border border-border"
-              loading="lazy"
-              onError={(e) => {
-                // fallback: if asset protocol fails, try convertFileSrc or raw path
-                const target = e.currentTarget;
-                if (src.startsWith("/") && !target.dataset.retried) {
-                  target.dataset.retried = "1";
-                  target.src = convertFileSrc(src);
-                }
-              }}
-              {...props}
-            />
-          );
-        },
         pre({ children, ...props }) {
           return (
             <pre className="overflow-x-auto rounded-lg bg-neutral-900 dark:bg-neutral-950 p-3 my-2 text-xs max-w-full not-prose" {...props}>
@@ -2044,7 +2005,6 @@ function MarkdownBlock({ text, isUser }: { text: string; isUser: boolean }) {
         },
         code({ className, children, ...props }) {
           const content = String(children).replace(/\n$/, "");
-          const isMedia = content.trim().toLowerCase().match(/\.(mp4|mp3|wav|webm)$/);
           const match = /language-(\w+)/.exec(className || "");
           const language = match?.[1] || "";
           const isCodeBlock = className?.includes("language-");
@@ -2055,10 +2015,6 @@ function MarkdownBlock({ text, isUser }: { text: string; isUser: boolean }) {
 
           if (language === "app-stats") {
             return <AppStatsBlock content={content} />;
-          }
-
-          if (isMedia) {
-            return <VideoComponent filePath={content.trim()} className="my-2" />;
           }
 
           if (isCodeBlock) {
@@ -3095,6 +3051,8 @@ export function StandaloneChat({
   const abortControllerRef = useRef<AbortController | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const stickToBottomRef = useRef(true);
+  const autoScrollFrameRef = useRef<number | null>(null);
   // Tracks the input section's width so we can collapse the auto-suggestion
   // chips into a popover when the chat column is narrow (e.g. when the
   // BrowserSidebar opens and squeezes the chat). Updated by a ResizeObserver
@@ -4396,53 +4354,89 @@ export function StandaloneChat({
     return () => window.removeEventListener("keydown", handleEscape);
   }, [showMentionDropdown, isLoading, isStreaming]);
 
-  // Smart auto-scroll: only scroll to bottom if user is near the bottom.
-  // If user scrolled up to read, don't interrupt them.
-  useEffect(() => {
-    if (!isUserScrolledUp) {
-      if (isStreaming || isLoading) {
-        const container = scrollContainerRef.current;
-        if (container) {
-          container.scrollTop = container.scrollHeight;
-        } else {
-          messagesEndRef.current?.scrollIntoView({ behavior: "auto" });
-        }
-        return;
-      }
-      messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-    }
-  }, [messages, isUserScrolledUp, isLoading, isStreaming]);
+  const isNearScrollBottom = useCallback((container: HTMLDivElement) => {
+    return container.scrollHeight - container.scrollTop - container.clientHeight <= 150;
+  }, []);
 
-  // Drive isUserScrolledUp from an IntersectionObserver on the end-of-messages
-  // sentinel. This reacts automatically to scroll, content growing/shrinking
-  // (streamed tokens, loader exit, collapsible source blocks), and root resize
-  // — unlike the prior scroll/ResizeObserver setup, which missed internal
-  // content size changes and left a phantom "new content" pill on screen.
+  const scrollMessagesToBottom = useCallback((behavior: ScrollBehavior = "auto") => {
+    const container = scrollContainerRef.current;
+    if (container) {
+      container.scrollTo({ top: container.scrollHeight, behavior });
+    } else {
+      messagesEndRef.current?.scrollIntoView({ behavior });
+    }
+  }, []);
+
+  const scheduleScrollToBottom = useCallback((behavior: ScrollBehavior = "auto") => {
+    if (autoScrollFrameRef.current != null) {
+      cancelAnimationFrame(autoScrollFrameRef.current);
+    }
+
+    scrollMessagesToBottom(behavior);
+    autoScrollFrameRef.current = requestAnimationFrame(() => {
+      scrollMessagesToBottom("auto");
+      autoScrollFrameRef.current = requestAnimationFrame(() => {
+        scrollMessagesToBottom("auto");
+        autoScrollFrameRef.current = null;
+      });
+    });
+  }, [scrollMessagesToBottom]);
+
+  const handleMessagesScroll = useCallback(() => {
+    const container = scrollContainerRef.current;
+    if (!container) return;
+
+    const nearBottom = isNearScrollBottom(container);
+    stickToBottomRef.current = nearBottom;
+    setIsUserScrolledUp((prev) => (prev === !nearBottom ? prev : !nearBottom));
+  }, [isNearScrollBottom]);
+
+  // Loading a saved conversation should land at the newest message. Keep the
+  // panel pinned while markdown media loads and changes the message height.
   useEffect(() => {
-    const endEl = messagesEndRef.current;
-    const rootEl = scrollContainerRef.current;
-    if (!endEl || !rootEl || typeof IntersectionObserver === "undefined") return;
-    const observer = new IntersectionObserver(
-      ([entry]) => {
-        const scrolledUp = !entry.isIntersecting;
-        setIsUserScrolledUp((prev) => (prev === scrolledUp ? prev : scrolledUp));
-      },
-      {
-        root: rootEl,
-        // 150px buffer below the viewport — sentinel within this band of the
-        // visible area still counts as "at bottom".
-        rootMargin: "0px 0px 150px 0px",
-        threshold: 0,
-      },
-    );
-    observer.observe(endEl);
+    stickToBottomRef.current = true;
+    setIsUserScrolledUp(false);
+    scheduleScrollToBottom("auto");
+  }, [conversationId, scheduleScrollToBottom]);
+
+  // Smart auto-scroll: only follow new content while the user remains near the
+  // bottom. Once they scroll upward, leave the viewport alone.
+  useEffect(() => {
+    if (stickToBottomRef.current) {
+      scheduleScrollToBottom("auto");
+    }
+  }, [messages, isLoading, isStreaming, scheduleScrollToBottom]);
+
+  // Media players and collapsible sections can change height after the message
+  // array is already stable. ResizeObserver keeps old chats pinned through
+  // those late layout changes without treating them as a user scroll.
+  useEffect(() => {
+    const container = scrollContainerRef.current;
+    const content = container?.firstElementChild;
+    if (!container || !content || typeof ResizeObserver === "undefined") return;
+
+    const observer = new ResizeObserver(() => {
+      if (stickToBottomRef.current) {
+        scheduleScrollToBottom("auto");
+      }
+    });
+    observer.observe(content);
     return () => observer.disconnect();
+  }, [scheduleScrollToBottom]);
+
+  useEffect(() => {
+    return () => {
+      if (autoScrollFrameRef.current != null) {
+        cancelAnimationFrame(autoScrollFrameRef.current);
+      }
+    };
   }, []);
 
   const scrollToBottom = useCallback(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    stickToBottomRef.current = true;
+    scheduleScrollToBottom("smooth");
     setIsUserScrolledUp(false);
-  }, []);
+  }, [scheduleScrollToBottom]);
 
   // Preload recent speakers when filter popover opens
   useEffect(() => {
@@ -7836,6 +7830,7 @@ export function StandaloneChat({
           // the right edge of the window — the native webview faithfully
           // follows the placeholder rect off-screen.
           className="relative flex-1 min-w-0 overflow-y-auto overflow-x-hidden"
+          onScroll={handleMessagesScroll}
           onContextMenu={(e) => {
             if (messages.length === 0) return;
             e.preventDefault();
