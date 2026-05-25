@@ -71,6 +71,7 @@ import { usePipes } from "@/lib/hooks/use-pipes";
 import { localFetch, getApiBaseUrl } from "@/lib/api";
 import { CONNECTIONS_UPDATED_EVENT } from "@/lib/connections-events";
 import {
+  aggregateSourceCitations,
   formatSourceCitationsMarkdown,
   sourceCitationsFromMessage,
   type SourceCitation,
@@ -7608,6 +7609,17 @@ export function StandaloneChat({
       ? piMessageIdRef.current ?? currentStreamingMessageId ?? null
       : null;
 
+  // Pipe sessions (pipe-run, pipe-watch) are one agentic loop, not a back-and-
+  // forth conversation. Per-message footers spam the same file across every
+  // step. Defer every message's footer and render a single aggregated footer
+  // at the bottom of the transcript instead.
+  const isPipeSessionChat =
+    currentSessionKind === "pipe-run" || currentSessionKind === "pipe-watch";
+  const aggregatedPipeCitations = React.useMemo(
+    () => (isPipeSessionChat ? aggregateSourceCitations(messages) : []),
+    [isPipeSessionChat, messages],
+  );
+
   return (
     <div className={cn("flex flex-col bg-background", className ?? "h-screen")} data-testid="section-home">
       {/* Header - draggable only in standalone mode */}
@@ -8138,7 +8150,9 @@ export function StandaloneChat({
                 ) : (
                   <MessageContent
                     message={message}
-                    deferSourceFooter={message.id === activeSourceFooterMessageId}
+                    deferSourceFooter={
+                      isPipeSessionChat || message.id === activeSourceFooterMessageId
+                    }
                     onImageClick={(images, index) => setImageViewer({ images, index })}
                     onRetry={(prompt) => sendMessage(prompt)}
                   />
@@ -8264,6 +8278,11 @@ export function StandaloneChat({
             });
           })()}
         </AnimatePresence>
+        {isPipeSessionChat && aggregatedPipeCitations.length > 0 && (
+          <div className="mt-2 w-full">
+            <SourceCitationFooter citations={aggregatedPipeCitations} />
+          </div>
+        )}
         <AnimatePresence>
           {isLoading && (() => {
             // Derive loader phase from the last assistant message's content blocks

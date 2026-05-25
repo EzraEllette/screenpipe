@@ -42,6 +42,17 @@ export function sourceCitationsFromMessage(message: MessageLike): SourceCitation
   return sourceCitationsFromContentBlocks(message.contentBlocks);
 }
 
+// Aggregate citations across a sequence of messages, deduped. Used for
+// pipe-run chats where the whole transcript is one agentic loop and showing
+// per-message footers spams the same file across every step.
+export function aggregateSourceCitations(messages: readonly MessageLike[]): SourceCitation[] {
+  const all: SourceCitation[] = [];
+  for (const message of messages) {
+    all.push(...sourceCitationsFromMessage(message));
+  }
+  return dedupeCitations(all);
+}
+
 export function sourceCitationsFromContentBlocks(contentBlocks: unknown): SourceCitation[] {
   if (!Array.isArray(contentBlocks)) return [];
 
@@ -308,6 +319,17 @@ function fileCitation(path: string, verb: string): SourceCitation {
   };
 }
 
+// Tokens that look path-like by accident (basename of a bare word, JS keywords
+// leaking out of heredocs) but aren't real files. Guards against rendering
+// "Local file: null" / "Local file: undefined" footers.
+function isUsablePath(path: string): boolean {
+  const trimmed = path.trim();
+  if (!trimmed) return false;
+  const base = basename(trimmed);
+  if (!base) return false;
+  return base !== "null" && base !== "undefined" && base !== "true" && base !== "false";
+}
+
 function fileKind(path: string): SourceCitationKind {
   if (path.includes("/.codex/memories/") || /(^|\/)MEMORY\.md$/.test(path)) {
     return "memory";
@@ -430,8 +452,9 @@ function dedupeLinks(links: Array<{ title?: string; url: string }>): Array<{ tit
 
 function extractFilePathsFromCommand(command: string): string[] {
   const paths = new Set<string>();
+  const stripped = stripHeredocs(command);
   const readCommand = /\b(cat|less|more|head|tail|sed|awk|jq|wc|stat)\b([^|;&`]*)/g;
-  for (const match of command.matchAll(readCommand)) {
+  for (const match of stripped.matchAll(readCommand)) {
     const tool = match[1] ?? "";
     const tokens = shellWords(match[2] ?? "");
     let sawOperand = false;
@@ -444,10 +467,41 @@ function extractFilePathsFromCommand(command: string): string[] {
       }
 
       sawOperand = true;
-      if (isPathLike(token)) paths.add(token);
+      if (isPathLike(token) && isUsablePath(token)) paths.add(token);
     }
   }
   return Array.from(paths).slice(0, 4);
+}
+
+// Remove heredoc bodies (`<< 'EOF' ... EOF`, `<<EOF ... EOF`, etc.) so the
+// embedded program source isn't tokenized as filesystem paths. Common pattern:
+// `cat > /tmp/x.ts << 'SCRIPT_EOF'\n...JS source...\nSCRIPT_EOF\nbun run /tmp/x.ts`
+// — without this, every quoted string literal inside the JS that contains a
+// "/" or ".ext" leaks into the source citation footer.
+function stripHeredocs(command: string): string {
+  const heredocStart = /<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1/g;
+  let result = "";
+  let cursor = 0;
+  let match: RegExpExecArray | null;
+  while ((match = heredocStart.exec(command)) !== null) {
+    const startIdx = match.index;
+    const tag = match[2];
+    if (!tag) continue;
+    const afterTag = heredocStart.lastIndex;
+    // Find the line where the body begins (skip to the end of the start line).
+    const bodyStart = command.indexOf("\n", afterTag);
+    if (bodyStart === -1) break;
+    const closeRegex = new RegExp(`\\n\\s*${tag}\\s*(?:\\n|$)`);
+    const tail = command.slice(bodyStart);
+    const closeMatch = closeRegex.exec(tail);
+    if (!closeMatch) break;
+    const endIdx = bodyStart + closeMatch.index + closeMatch[0].length;
+    result += command.slice(cursor, startIdx);
+    cursor = endIdx;
+    heredocStart.lastIndex = endIdx;
+  }
+  result += command.slice(cursor);
+  return result;
 }
 
 function shellWords(value: string): string[] {

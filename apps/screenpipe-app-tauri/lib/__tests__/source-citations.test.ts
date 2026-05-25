@@ -4,6 +4,7 @@
 
 import { describe, expect, it } from "vitest";
 import {
+  aggregateSourceCitations,
   formatSourceCitationsMarkdown,
   sourceCitationsFromMessage,
 } from "../source-citations";
@@ -333,6 +334,84 @@ describe("source citations", () => {
     });
 
     expect(citations).toEqual([]);
+  });
+
+  it("does not leak file paths from heredoc script bodies", () => {
+    // Common pipe pattern: write a script via heredoc then run it. Without
+    // stripping the heredoc body, every quoted "/Users/..." string literal
+    // and `process.platform`-style token inside the embedded source gets
+    // tokenized as a path and pollutes the footer.
+    const citations = sourceCitationsFromMessage({
+      contentBlocks: [
+        {
+          type: "tool",
+          toolCall: {
+            toolName: "bash",
+            args: {
+              command:
+                "cat > /tmp/sync.ts << 'SCRIPT_EOF'\n" +
+                'const IMESSAGE_DB = "/Users/me/Library/Messages/chat.db";\n' +
+                'const HINT = ".clawdbot/credentials/telegram-pairing.json";\n' +
+                'if (process.platform !== "darwin") return null;\n' +
+                "SCRIPT_EOF\n" +
+                "bun run /tmp/sync.ts",
+            },
+            result: "Done\n",
+            isRunning: false,
+          },
+        },
+      ],
+    });
+
+    const titles = citations.map((c) => c.title);
+    expect(titles).toContain("Local file: sync.ts");
+    expect(titles).not.toContain("Local file: chat.db");
+    expect(titles).not.toContain("Local file: telegram-pairing.json");
+    expect(titles).not.toContain("Local file: null");
+    expect(titles).not.toContain("Local file: undefined");
+  });
+
+  it("aggregates citations across pipe-run messages and dedupes repeats", () => {
+    // Real pipe-run pattern from chat-memory-sync_2341.json: the agent reads
+    // the same state file across multiple debug steps. Per-message footers
+    // would render N "Read: state.json" rows; the aggregator emits one.
+    const readState = {
+      contentBlocks: [
+        {
+          type: "tool",
+          toolCall: {
+            toolName: "read",
+            args: { path: "/Users/me/.screenpipe/pipes/sync/state.json" },
+            result: "{}",
+            isRunning: false,
+          },
+        },
+      ],
+    };
+    const writeScript = {
+      contentBlocks: [
+        {
+          type: "tool",
+          toolCall: {
+            toolName: "write",
+            args: { path: "/tmp/sync.ts" },
+            result: "ok",
+            isRunning: false,
+          },
+        },
+      ],
+    };
+
+    const aggregated = aggregateSourceCitations([
+      readState,
+      writeScript,
+      readState, // repeated step in the agentic loop
+    ]);
+
+    expect(aggregated.map((c) => c.title)).toEqual([
+      "Read: state.json",
+      "Wrote: sync.ts",
+    ]);
   });
 
   it("formats citations for chat markdown exports", () => {
