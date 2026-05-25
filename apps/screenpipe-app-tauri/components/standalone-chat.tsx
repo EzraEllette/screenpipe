@@ -4439,14 +4439,28 @@ export function StandaloneChat({
     if (!isSettingsLoaded) return;
     // Don't overwrite pipe-specific preset when watching a pipe execution
     if (activePipeExecution) return;
-    const defaultPreset = settings.aiPresets?.find((p) => p.defaultPreset);
-    const next = defaultPreset || settings.aiPresets?.[0];
-    // Only update if the preset actually changed (avoid triggering downstream restart)
+    const presets = settings.aiPresets ?? [];
+    const fallback = presets.find((p) => p.defaultPreset) ?? presets[0];
     setActivePreset((prev) => {
-      if (prev && next && prev.provider === next.provider && prev.model === next.model) {
-        return prev; // same reference → no re-render → no restart
+      // First load — pick the default.
+      if (!prev) return fallback;
+      // User's selection still exists. Re-bind to the latest object so edits
+      // in the Settings tab flow through, but keep the same id (don't snap
+      // back to the default just because settings got rewritten by an
+      // unrelated update — loadUser, team sync, device discovery, etc).
+      const stillThere = presets.find((p) => p.id === prev.id);
+      if (stillThere) {
+        return stillThere.provider === prev.provider &&
+          stillThere.model === prev.model &&
+          stillThere.url === prev.url &&
+          (stillThere as any).apiKey === (prev as any).apiKey &&
+          (stillThere as any).maxTokens === (prev as any).maxTokens &&
+          stillThere.prompt === prev.prompt
+          ? prev
+          : stillThere;
       }
-      return next;
+      // Preset was deleted — fall back to default.
+      return fallback;
     });
   }, [settings.aiPresets, isSettingsLoaded]);
 
