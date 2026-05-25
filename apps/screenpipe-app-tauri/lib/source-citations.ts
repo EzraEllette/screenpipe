@@ -53,6 +53,73 @@ export function aggregateSourceCitations(messages: readonly MessageLike[]): Sour
   return dedupeCitations(all);
 }
 
+export interface ChatCitationPlan {
+  // Messages whose own per-message footer should be hidden because their
+  // citations have been folded into a turn-level aggregate below.
+  deferredMessageIds: Set<string>;
+  // After this message renders, render an aggregated footer with these
+  // citations. Keyed by message id (the last assistant of the turn group).
+  aggregatedAfter: Map<string, SourceCitation[]>;
+}
+
+interface PlanMessageLike extends MessageLike {
+  id?: unknown;
+  role?: unknown;
+}
+
+interface ChatCitationPlanOptions {
+  // Always aggregate even if a turn has only one citation-bearing assistant
+  // message. Used for pipe sessions where the visual treatment should be
+  // consistent across every transcript.
+  forceAggregate?: boolean;
+  // Aggregate when a turn group has ≥ this many assistant messages bearing
+  // citations. Defaults to 2 — leaves single-tool-call turns alone.
+  minAssistantsForAggregation?: number;
+}
+
+// Walk a message list and produce an aggregation plan. A "turn" is one user
+// message plus the assistant messages that follow until the next user
+// message (or end of chat). Within each turn, if multiple assistant messages
+// carry citations, fold them into a single footer rendered after the last
+// assistant of that turn — that's the agentic-loop pattern (Pi looping
+// debug→fix→re-run, pipe-runs, multi-step research).
+export function computeChatCitationPlan(
+  messages: readonly PlanMessageLike[],
+  options: ChatCitationPlanOptions = {},
+): ChatCitationPlan {
+  const minAssistants = options.minAssistantsForAggregation ?? 2;
+  const force = options.forceAggregate ?? false;
+  const deferredMessageIds = new Set<string>();
+  const aggregatedAfter = new Map<string, SourceCitation[]>();
+
+  let turn: PlanMessageLike[] = [];
+  const flush = () => {
+    if (turn.length === 0) return;
+    const assistantsWithCitations = turn.filter(
+      (m) => m.role === "assistant" && sourceCitationsFromMessage(m).length > 0,
+    );
+    const lastAssistant = [...turn].reverse().find((m) => m.role === "assistant");
+    const shouldAggregate = force
+      ? assistantsWithCitations.length >= 1
+      : assistantsWithCitations.length >= minAssistants;
+    if (shouldAggregate && lastAssistant && typeof lastAssistant.id === "string") {
+      for (const m of assistantsWithCitations) {
+        if (typeof m.id === "string") deferredMessageIds.add(m.id);
+      }
+      aggregatedAfter.set(lastAssistant.id, aggregateSourceCitations(turn));
+    }
+    turn = [];
+  };
+
+  for (const message of messages) {
+    if (message.role === "user") flush();
+    turn.push(message);
+  }
+  flush();
+
+  return { deferredMessageIds, aggregatedAfter };
+}
+
 export function sourceCitationsFromContentBlocks(contentBlocks: unknown): SourceCitation[] {
   if (!Array.isArray(contentBlocks)) return [];
 
