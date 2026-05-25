@@ -62,6 +62,8 @@ import {
   normalizeAppTag,
   formatShortcutDisplay,
   isConversationHistorySyncPrompt,
+  type ChatLoadConversationPayload,
+  shouldHandleChatLoadConversationForWindow,
 } from "@/lib/chat-utils";
 import { sanitizeToolCallXml } from "@/lib/utils/sanitize-tool-call-xml";
 import { useAutoSuggestions, type Suggestion } from "@/lib/hooks/use-auto-suggestions";
@@ -3703,63 +3705,58 @@ export function StandaloneChat({
   loadConversationRef.current = loadConversation;
   startNewConversationRef.current = startNewConversation;
 
-  useEffect(() => {
-    const unlisten = listen<{ conversationId: string }>("chat-load-conversation", async (event) => {
-      const { conversationId: convId } = event.payload;
-      const { loadConversationFile } = await import("@/lib/chat-storage");
-      const { useChatStore } = await import("@/lib/stores/chat-store");
+  const openConversationLocally = useCallback(async (convId: string) => {
+    const { loadConversationFile } = await import("@/lib/chat-storage");
+    const { useChatStore } = await import("@/lib/stores/chat-store");
 
-      // 0) Already on this conversation — skip the snapshot+swap. The
-      //    page-level listener handles navigation back to home; we
-      //    just make sure currentId reflects the panel so the sidebar
-      //    re-highlights the row. Without this short-circuit, clicking
-      //    the already-loaded chat from a non-home section would
-      //    snapshot+reset+rehydrate the same id and briefly blank the
-      //    panel.
-      if (convId === piSessionIdRef.current) {
-        useChatStore.getState().actions.setCurrent(convId);
-        emit("chat-current-session", { id: convId });
-        return;
-      }
-
-      // 1) Disk first — saved conversations are the canonical source.
-      const conv = await loadConversationFile(convId);
-      if (conv) {
-        loadConversationRef.current(conv);
-        return;
-      }
-
-      // 2) Store fallback — the conversation may exist only in memory
-      //    because it was started in this session and hasn't completed
-      //    a turn yet (no agent_end → no save). Without this branch,
-      //    clicking back to a chat that's been streaming in the
-      //    background would fall through to startNewConversation and
-      //    silently WIPE the in-memory state.
-      const session = useChatStore.getState().sessions[convId];
-      if (session?.messages && session.messages.length > 0) {
-        // Stub conversation — loadConversation prefers store messages
-        // over the conv arg whenever the store has them, so the empty
-        // messages array here is just a satisfaction of the type.
-        loadConversationRef.current({
-          id: convId,
-          title: session.title || "untitled",
-          messages: [],
-          createdAt: Date.now(),
-          updatedAt: session.updatedAt,
-        });
-        return;
-      }
-
-      // 3) Truly new id (sidebar's "+ new chat" path) — adopt the
-      //    requested id so sidebar + chat (and the chat-store's
-      //    currentId) all agree from message 0.
-      await startNewConversationRef.current(convId);
-      // Mirror the new id back to the sidebar so its currentId matches.
+    // Already on this conversation — keep the store/sidebar in sync without
+    // forcing a redundant snapshot+swap.
+    if (convId === piSessionIdRef.current) {
+      useChatStore.getState().actions.setCurrent(convId);
       emit("chat-current-session", { id: convId });
+      return;
+    }
+
+    const conv = await loadConversationFile(convId);
+    if (conv) {
+      loadConversationRef.current(conv);
+      return;
+    }
+
+    const session = useChatStore.getState().sessions[convId];
+    if (session?.messages && session.messages.length > 0) {
+      // `loadConversation` will prefer the store's live message list for this
+      // id, but the metadata here should still mirror the session as closely
+      // as possible so this fallback stays behaviorally aligned with disk loads.
+      loadConversationRef.current({
+        id: convId,
+        title: session.title || "untitled",
+        messages: [],
+        createdAt: session.createdAt,
+        updatedAt: session.updatedAt,
+      });
+      return;
+    }
+
+    await startNewConversationRef.current(convId);
+    emit("chat-current-session", { id: convId });
+  }, []);
+
+  useEffect(() => {
+    const unlisten = listen<ChatLoadConversationPayload>("chat-load-conversation", async (event) => {
+      const { conversationId: convId, targetWindow } = event.payload;
+      const windowLabel = getCurrentWindow().label;
+      if (!shouldHandleChatLoadConversationForWindow(
+        { conversationId: convId, targetWindow },
+        windowLabel === "chat" ? "chat" : "home",
+      )) {
+        return;
+      }
+      await openConversationLocally(convId);
     });
     return () => { unlisten.then((fn) => fn()); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [openConversationLocally]);
 
   // Tell the sidebar which session is current whenever the chat panel
   // assigns or resumes a session id. Without this the sidebar wouldn't
