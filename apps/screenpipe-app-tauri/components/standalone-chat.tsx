@@ -8771,13 +8771,20 @@ export function StandaloneChat({
                 showModelOnly
                 containerClassName="w-[180px] max-w-[42vw] min-w-[120px] shrink-0 gap-0"
                 triggerClassName="h-8 border-0 bg-transparent px-1.5 text-xs text-muted-foreground shadow-none hover:bg-muted/50 hover:text-foreground"
-                onPresetChange={setActivePreset}
                 onPresetSaved={handlePiRestart}
-                controlledPresetId={activePipeExecution ? activePreset?.id : undefined}
-                onControlledSelect={activePipeExecution ? (id) => {
+                controlledPresetId={
+                  activePreset?.id ??
+                  settings.aiPresets?.find((p) => p.defaultPreset)?.id ??
+                  settings.aiPresets?.[0]?.id ??
+                  null
+                }
+                onControlledSelect={(id) => {
+                  if (!id) return;
                   const match = settings.aiPresets?.find((p) => p.id === id);
-                  if (match) setActivePreset(match);
-                } : undefined}
+                  if (!match) return;
+                  setActivePreset(match);
+                  if (!activePipeExecution) handlePiRestart(match);
+                }}
               />
               {(() => {
                 const hasInput = input.trim().length > 0 || pastedImages.length > 0;

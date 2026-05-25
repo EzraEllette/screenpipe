@@ -1132,17 +1132,18 @@ export const AIPresetsSelector = ({
         const nextIndex = (currentIndex + 1) % aiPresets.length;
         const nextPreset = aiPresets[nextIndex];
 
-        // Set the next preset as default
-        const updatedPresets = aiPresets.map((p) => ({
-          ...p,
-          defaultPreset: p.id === nextPreset.id,
-        }));
-
-        updateSettings({
-          aiPresets: updatedPresets,
-        });
-
-        onPresetSaved?.(nextPreset);
+        if (isControlled) {
+          // Controlled (e.g. chat composer): cycle the host's local selection
+          // without rewriting the user's default preset in settings.
+          onControlledSelect?.(nextPreset.id);
+        } else {
+          const updatedPresets = aiPresets.map((p) => ({
+            ...p,
+            defaultPreset: p.id === nextPreset.id,
+          }));
+          updateSettings({ aiPresets: updatedPresets });
+          onPresetSaved?.(nextPreset);
+        }
 
         toast.success("Preset changed", {
           description: `Switched to ${nextPreset.id} (${nextPreset.model})`,
@@ -1152,7 +1153,7 @@ export const AIPresetsSelector = ({
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [aiPresets, selectedPreset, updateSettings, shortcutKey, onPresetSaved]);
+  }, [aiPresets, selectedPreset, updateSettings, shortcutKey, onPresetSaved, isControlled, onControlledSelect]);
 
   const handleSavePreset = (preset: Partial<AIPreset>) => {
     if (!canManageEmployeePresets) {
