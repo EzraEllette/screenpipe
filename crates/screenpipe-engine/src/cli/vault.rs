@@ -41,7 +41,8 @@ pub async fn handle_vault_command(command: &VaultCommand) -> anyhow::Result<()> 
         }
 
         VaultCommand::Lock { .. } => {
-            let _progress_rx = vault.lock().await?;
+            let password = read_password("vault password: ")?;
+            let _progress_rx = vault.lock(&password).await?;
             // Wait for encryption to complete
             loop {
                 let state = vault.state().await;

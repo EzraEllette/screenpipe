@@ -119,7 +119,7 @@ impl VaultManager {
     ///
     /// The caller MUST stop recording and close the DB pool BEFORE calling this.
     /// Returns a progress receiver for UI display.
-    pub async fn lock(&self) -> VaultResult<watch::Receiver<MigrationProgress>> {
+    pub async fn lock(&self, password: &str) -> VaultResult<watch::Receiver<MigrationProgress>> {
         let state = self.state.read().await.clone();
         match state {
             VaultState::None => return Err(VaultError::NotSetUp),
@@ -130,15 +130,30 @@ impl VaultManager {
             VaultState::Unlocked => {}
         }
 
-        // Take the key out of the lock — this zeroizes it from the shared state immediately
+        // Derive master key from password (handles the case where the key isn't
+        // already in memory, e.g. separate CLI invocation)
         let key = {
             let mut guard = self.master_key.write().await;
-            guard
-                .take()
-                .ok_or(VaultError::Other("master key not in memory".into()))?
+            match guard.take() {
+                Some(k) => k,
+                None => {
+                    let meta_path = self.screenpipe_dir.join("vault.meta");
+                    let meta_json = std::fs::read_to_string(&meta_path)?;
+                    let meta: VaultMeta = serde_json::from_str(&meta_json)
+                        .map_err(|e| VaultError::Other(format!("corrupt vault.meta: {}", e)))?;
+                    let password_key = crypto::derive_key(password, &meta.salt)?;
+                    let master_key_bytes =
+                        crypto::decrypt_small(&meta.encrypted_master_key, &password_key)
+                            .map_err(|_| VaultError::WrongPassword)?;
+                    if master_key_bytes.len() != KEY_SIZE {
+                        return Err(VaultError::Crypto("invalid master key length".into()));
+                    }
+                    let mut mk = Zeroizing::new([0u8; KEY_SIZE]);
+                    mk.copy_from_slice(&master_key_bytes);
+                    mk
+                }
+            }
         };
-        // Copy key bytes for the encryption task. The Zeroizing wrapper on `key`
-        // will zeroize its copy when dropped at the end of this scope.
         let key_bytes: [u8; KEY_SIZE] = *key;
 
         let (progress_tx, progress_rx) = watch::channel(MigrationProgress {
@@ -315,7 +330,7 @@ mod tests {
         assert!(vault.master_key().await.is_some());
 
         // Lock
-        let _rx = vault.lock().await.unwrap();
+        let _rx = vault.lock("test-password").await.unwrap();
         // Wait for lock to complete
         loop {
             if vault.state().await == VaultState::Locked {
@@ -369,7 +384,7 @@ mod tests {
         let vault = VaultManager::new(dir.path().to_path_buf());
         vault.setup("pw").await.unwrap();
 
-        let _rx = vault.lock().await.unwrap();
+        let _rx = vault.lock("pw").await.unwrap();
         loop {
             if vault.state().await == VaultState::Locked {
                 break;
@@ -378,13 +393,13 @@ mod tests {
         }
 
         // Double lock should error
-        assert!(matches!(vault.lock().await, Err(VaultError::AlreadyLocked)));
+        assert!(matches!(vault.lock("pw").await, Err(VaultError::AlreadyLocked)));
     }
 
     #[tokio::test]
     async fn test_lock_without_setup_errors() {
         let dir = tempfile::tempdir().unwrap();
         let vault = VaultManager::new(dir.path().to_path_buf());
-        assert!(matches!(vault.lock().await, Err(VaultError::NotSetUp)));
+        assert!(matches!(vault.lock("pw").await, Err(VaultError::NotSetUp)));
     }
 }
