@@ -77,6 +77,31 @@ pub struct LinkUpdate {
     pub frame_id: i64,
 }
 
+/// Why a triggering event will never get a frame. Reported by the
+/// capture loop at the moment it decides to drop a trigger, so the
+/// linker can release the pending entry immediately instead of waiting
+/// 60s for TTL and emitting a misleading "frame never arrived" WARN.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DropReason {
+    /// The focused window was DRM-protected at trigger time.
+    Drm,
+    /// The capture loop was in a pause state (locked screen, power
+    /// saver, schedule pause). Triggers received while paused are
+    /// drained and reported with this reason.
+    Paused,
+    /// `broadcast::Receiver::recv` returned `Lagged(n)` — the ring
+    /// buffer overflowed and N messages were dropped before reaching
+    /// us. We don't know which correlation_ids; this reason is reported
+    /// with an empty list, purely for metrics visibility.
+    Lagged,
+    /// `do_capture` returned an error (SCK failure, monitor disconnect,
+    /// etc.). Triggers that drained alongside the failing capture have
+    /// no frame to point at.
+    CaptureError,
+    /// Any other deterministic skip not yet enumerated.
+    Other,
+}
+
 /// Configuration. Both knobs derive from existing recorder/capture
 /// timeouts; pick values that comfortably exceed the worst-case round
 /// trip from "trigger sent" → "frame captured + row flushed."
@@ -192,6 +217,31 @@ impl FrameLinker {
             });
         }
         updates
+    }
+
+    /// Called by the capture loop when it decides to drop a set of
+    /// triggers (DRM gate, pause state, capture error, etc.). Removes
+    /// the matching pending events without emitting an UPDATE and
+    /// returns how many were actually pending. Idempotent: unknown
+    /// correlation_ids are ignored. Empty input is valid (used by the
+    /// Lagged path which only carries a count, not the ids).
+    pub fn on_trigger_dropped(&mut self, correlation_ids: &[CorrelationId]) -> usize {
+        let mut removed = 0;
+        for corr_id in correlation_ids {
+            if self.pending_events.remove(corr_id).is_some() {
+                removed += 1;
+            }
+            // Also clear from any pending_frame's unmatched list — a
+            // trigger that's been dropped will never get a row, so
+            // future event_persisted calls for this corr_id won't
+            // happen. Without this, a half-paired frame could sit in
+            // pending_frames waiting for a row that's dead.
+            for pf in self.pending_frames.iter_mut() {
+                pf.unmatched.retain(|c| c != corr_id);
+            }
+        }
+        self.compact_pending_frames();
+        removed
     }
 
     /// Drop half-paired entries older than `ttl`. Call periodically
@@ -617,6 +667,105 @@ mod tests {
         assert!(updates.is_empty());
         // Both sides remain pending — neither has been matched.
         assert_eq!(linker.pending_len(), (1, 1));
+    }
+
+    #[test]
+    fn trigger_dropped_removes_pending_event() {
+        let mut linker = FrameLinker::new(cfg());
+        let t0 = Instant::now();
+
+        linker.on_event_persisted(
+            EventPersisted {
+                correlation_id: 1,
+                row_id: 100,
+            },
+            t0,
+        );
+        assert_eq!(linker.pending_len(), (1, 0));
+
+        let removed = linker.on_trigger_dropped(&[1]);
+        assert_eq!(removed, 1);
+        assert_eq!(linker.pending_len(), (0, 0));
+
+        // A late frame for the dropped corr id is a no-op (the row was
+        // never going to be linked anyway).
+        let updates = linker.on_frame_captured(
+            FrameCaptured {
+                frame_id: 999,
+                correlation_ids: vec![1],
+            },
+            t0,
+        );
+        assert!(updates.is_empty());
+    }
+
+    #[test]
+    fn trigger_dropped_unknown_id_is_noop() {
+        let mut linker = FrameLinker::new(cfg());
+        let removed = linker.on_trigger_dropped(&[42]);
+        assert_eq!(removed, 0);
+        assert_eq!(linker.pending_len(), (0, 0));
+    }
+
+    #[test]
+    fn trigger_dropped_clears_unmatched_from_pending_frame() {
+        let mut linker = FrameLinker::new(cfg());
+        let t0 = Instant::now();
+
+        // Frame arrives first with 3 unmatched ids.
+        linker.on_frame_captured(
+            FrameCaptured {
+                frame_id: 999,
+                correlation_ids: vec![1, 2, 3],
+            },
+            t0,
+        );
+        assert_eq!(linker.pending_len(), (0, 1));
+
+        // Drop corr ids 2 and 3 — the frame should now only wait on 1.
+        let removed = linker.on_trigger_dropped(&[2, 3]);
+        assert_eq!(
+            removed, 0,
+            "no events were pending; only frame-side unmatched cleared"
+        );
+        // Pending frame still alive (unmatched=[1]).
+        assert_eq!(linker.pending_len(), (0, 1));
+
+        // Event 1 lands → pair, frame entry compacts away.
+        let u = linker.on_event_persisted(
+            EventPersisted {
+                correlation_id: 1,
+                row_id: 100,
+            },
+            t0,
+        );
+        assert_eq!(
+            u,
+            Some(LinkUpdate {
+                row_id: 100,
+                frame_id: 999
+            })
+        );
+        assert_eq!(linker.pending_len(), (0, 0));
+    }
+
+    #[test]
+    fn trigger_dropped_compacts_fully_cleared_frame() {
+        let mut linker = FrameLinker::new(cfg());
+        let t0 = Instant::now();
+
+        linker.on_frame_captured(
+            FrameCaptured {
+                frame_id: 999,
+                correlation_ids: vec![1, 2],
+            },
+            t0,
+        );
+        assert_eq!(linker.pending_len(), (0, 1));
+
+        // Both unmatched ids dropped → frame entry should be compacted away.
+        linker.on_trigger_dropped(&[1, 2]);
+        assert_eq!(linker.pending_len(), (0, 0));
     }
 
     #[test]
