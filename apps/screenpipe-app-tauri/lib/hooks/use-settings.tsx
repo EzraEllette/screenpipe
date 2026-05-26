@@ -545,6 +545,7 @@ let DEFAULT_SETTINGS: Settings = {
 			localRetentionEnabled: false,
 			localRetentionDays: 14,
 			localRetentionMode: "media",
+			encryptStore: true,
 		};
 
 export function createDefaultSettingsObject(): Settings {
