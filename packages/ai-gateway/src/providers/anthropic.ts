@@ -263,6 +263,9 @@ export class AnthropicProvider implements AIProvider {
 					// Send error as SSE event so the client can parse it instead of a broken stream
 					const errorMessage = error?.message || 'Unknown streaming error';
 					const errorStatus = error?.status || 500;
+					// Visibility: surface upstream Anthropic streaming failures to Workers Logs.
+					// Without this, in-stream errors hide behind HTTP 200 and look like success.
+					console.warn(`[anthropic-stream-error] status=${errorStatus} type=${error?.error?.type || error?.name || 'unknown'} msg=${String(errorMessage).slice(0, 500)}`);
 					try {
 						controller.enqueue(
 							new TextEncoder().encode(
