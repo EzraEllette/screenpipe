@@ -157,7 +157,7 @@ pub struct RecordingState {
     /// `PiExecutor` is constructed with `with_shared_user_token(this)`, so
     /// one update propagates to all three readers (cloud_proxy.rs, the
     /// pi-agent's models.json apiKey, and any future Tauri-side consumer).
-    pub cloud_token: Arc<tokio::sync::RwLock<Option<String>>>,
+    pub cloud_token: Arc<arc_swap::ArcSwap<Option<String>>>,
 }
 
 // ---------------------------------------------------------------------------

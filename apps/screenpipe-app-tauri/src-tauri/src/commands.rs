@@ -779,7 +779,7 @@ pub fn get_cloud_token() -> Option<String> {
 /// app from the tray."
 ///
 /// Both the local `/v1/chat/completions` proxy and the pi-agent's
-/// `models.json` apiKey share the same `Arc<RwLock<Option<String>>>`,
+/// `models.json` apiKey share the same `Arc<ArcSwap<Option<String>>>`,
 /// so one write here updates both readers on the next pipe run.
 #[tauri::command]
 #[specta::specta]
@@ -788,8 +788,7 @@ pub async fn set_cloud_token(
     state: tauri::State<'_, crate::recording::RecordingState>,
 ) -> Result<(), String> {
     let normalized = token.filter(|t| !t.is_empty());
-    let mut guard = state.cloud_token.write().await;
-    *guard = normalized;
+    state.cloud_token.store(std::sync::Arc::new(normalized));
     Ok(())
 }
 

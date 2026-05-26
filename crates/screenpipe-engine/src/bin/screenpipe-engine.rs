@@ -1061,7 +1061,7 @@ async fn main() -> anyhow::Result<()> {
     // SCServer::cloud_token_handle after spawn.
     if let Ok(t) = std::env::var("SCREENPIPE_API_KEY") {
         if !t.is_empty() {
-            let _ = server.cloud_token.try_write().map(|mut g| *g = Some(t));
+            server.cloud_token.store(std::sync::Arc::new(Some(t)));
         }
     }
 

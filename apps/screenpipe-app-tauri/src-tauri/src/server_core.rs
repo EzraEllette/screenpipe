@@ -69,7 +69,7 @@ impl ServerCore {
         // Server + PiExecutor pair. Pre-existing per-Server cloud_token is
         // replaced with this Arc so all three observers (cloud_proxy.rs,
         // PiExecutor, the Tauri command writer) share one storage cell.
-        cloud_token_handle: std::sync::Arc<tokio::sync::RwLock<Option<String>>>,
+        cloud_token_handle: std::sync::Arc<arc_swap::ArcSwap<Option<String>>>,
     ) -> Result<Self, String> {
         info!("Starting server core on port {}", config.port);
         crate::health::set_boot_phase("starting", Some("starting server"));
@@ -335,9 +335,9 @@ impl ServerCore {
         // stale `config.user_id` snapshot.
         if let Some(ref t) = config.user_id {
             if !t.is_empty() {
-                let mut g = cloud_token_handle.write().await;
-                if g.is_none() {
-                    *g = Some(t.clone());
+                let existing = cloud_token_handle.load();
+                if existing.is_none() {
+                    cloud_token_handle.store(std::sync::Arc::new(Some(t.clone())));
                 }
             }
         }
