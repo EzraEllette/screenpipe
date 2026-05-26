@@ -17,8 +17,7 @@ use screenpipe_audio::core::device::{
     get_cpal_device_and_config, AudioDevice, DeviceType, MACOS_OUTPUT_AUDIO_DEVICE_NAME,
 };
 use screenpipe_audio::{
-    core::device::resolve_audio_devices_for_capture,
-    meeting_detector::MeetingDetector,
+    core::device::resolve_audio_devices_for_capture, meeting_detector::MeetingDetector,
 };
 use screenpipe_core::agents::AgentExecutor;
 use screenpipe_core::find_ffmpeg_path;
@@ -736,11 +735,8 @@ async fn main() -> anyhow::Result<()> {
     let audio_devices = if config.disable_audio {
         Vec::new()
     } else {
-        resolve_audio_devices_for_capture(
-            &config.audio_devices,
-            config.use_system_default_audio,
-        )
-        .await
+        resolve_audio_devices_for_capture(&config.audio_devices, config.use_system_default_audio)
+            .await
     };
 
     if !config.disable_audio && audio_devices.is_empty() {

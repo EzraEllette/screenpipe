@@ -748,8 +748,11 @@ pub async fn start_device_monitor(
                     {
                         let current_enabled = audio_manager.enabled_devices().await;
                         let user_disabled = audio_manager.user_disabled_devices().await;
-                        let has_input =
-                            is_device_type_running(&device_manager, &current_enabled, DeviceType::Input);
+                        let has_input = is_device_type_running(
+                            &device_manager,
+                            &current_enabled,
+                            DeviceType::Input,
+                        );
                         // Don't try to recover if user explicitly disabled all inputs
                         let all_inputs_user_disabled = !has_input && {
                             match default_input_device() {
