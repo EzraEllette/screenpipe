@@ -114,9 +114,7 @@ fn report_triggers_dropped(
     reason: crate::frame_linker::DropReason,
 ) {
     let Some(linker) = linker_tx else { return };
-    if correlation_ids.is_empty()
-        && !matches!(reason, crate::frame_linker::DropReason::Lagged)
-    {
+    if correlation_ids.is_empty() && !matches!(reason, crate::frame_linker::DropReason::Lagged) {
         // Nothing to report unless we're tracking the lag counter.
         return;
     }
@@ -129,7 +127,9 @@ fn report_triggers_dropped(
 /// Drain whatever's currently in the broadcast receiver into a
 /// `Vec<CorrelationId>`. Used by pause / cold-monitor branches that
 /// must let the linker know these triggers will never produce a frame.
-fn drain_pending_corr_ids(trigger_rx: &mut TriggerReceiver) -> Vec<crate::frame_linker::CorrelationId> {
+fn drain_pending_corr_ids(
+    trigger_rx: &mut TriggerReceiver,
+) -> Vec<crate::frame_linker::CorrelationId> {
     let mut out = Vec::new();
     loop {
         match trigger_rx.try_recv() {
