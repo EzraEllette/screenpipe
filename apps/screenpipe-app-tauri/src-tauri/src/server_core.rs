@@ -12,9 +12,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use screenpipe_audio::core::device::{
-    default_input_device, default_output_device, parse_audio_device,
-};
+use screenpipe_audio::core::device::resolve_audio_devices_for_capture;
 use screenpipe_audio::core::engine::AudioTranscriptionEngine;
 use screenpipe_audio::transcription::stt::{
     OpenAICompatibleConfig, DEFAULT_OPENAI_COMPATIBLE_ENDPOINT, DEFAULT_OPENAI_COMPATIBLE_MODEL,
@@ -191,25 +189,17 @@ impl ServerCore {
         info!("Database initialized at {}", db_path);
 
         // --- Audio devices + manager (built but NOT started) ---
-        let mut audio_devices = Vec::new();
-        if !config.disable_audio {
-            if config.audio_devices.is_empty() {
-                if let Ok(input) = default_input_device() {
-                    audio_devices.push(input.to_string());
-                }
-                if let Ok(output) = default_output_device().await {
-                    audio_devices.push(output.to_string());
-                }
-            } else {
-                for d in &config.audio_devices {
-                    if let Ok(device) = parse_audio_device(d) {
-                        audio_devices.push(device.to_string());
-                    }
-                }
-            }
-            if audio_devices.is_empty() {
-                warn!("No audio devices available");
-            }
+        let audio_devices = if config.disable_audio {
+            Vec::new()
+        } else {
+            resolve_audio_devices_for_capture(
+                &config.audio_devices,
+                config.use_system_default_audio,
+            )
+            .await
+        };
+        if !config.disable_audio && audio_devices.is_empty() {
+            warn!("No audio devices available");
         }
 
         let openai_compatible_config =

@@ -17,7 +17,7 @@ use screenpipe_audio::core::device::{
     get_cpal_device_and_config, AudioDevice, DeviceType, MACOS_OUTPUT_AUDIO_DEVICE_NAME,
 };
 use screenpipe_audio::{
-    core::device::{default_input_device, default_output_device, parse_audio_device},
+    core::device::resolve_audio_devices_for_capture,
     meeting_detector::MeetingDetector,
 };
 use screenpipe_core::agents::AgentExecutor;
@@ -733,33 +733,18 @@ async fn main() -> anyhow::Result<()> {
         list_monitors().await
     };
 
-    let mut audio_devices = Vec::new();
+    let audio_devices = if config.disable_audio {
+        Vec::new()
+    } else {
+        resolve_audio_devices_for_capture(
+            &config.audio_devices,
+            config.use_system_default_audio,
+        )
+        .await
+    };
 
-    if !config.disable_audio {
-        if config.audio_devices.is_empty()
-            || config.use_system_default_audio
-            || config.audio_devices == vec!["default".to_string()]
-        {
-            // Use default devices
-            if let Ok(input_device) = default_input_device() {
-                audio_devices.push(input_device.to_string());
-            }
-            if let Ok(output_device) = default_output_device().await {
-                audio_devices.push(output_device.to_string());
-            }
-        } else {
-            // Use specified devices
-            for d in &config.audio_devices {
-                match parse_audio_device(d) {
-                    Ok(device) => audio_devices.push(device.to_string()),
-                    Err(e) => warn!("skipping unparseable audio device '{}': {}", d, e),
-                }
-            }
-        }
-
-        if audio_devices.is_empty() {
-            warn!("no audio devices available.");
-        }
+    if !config.disable_audio && audio_devices.is_empty() {
+        warn!("no audio devices available.");
     }
 
     let audio_devices_clone = audio_devices.clone();
