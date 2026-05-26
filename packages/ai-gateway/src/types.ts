@@ -187,9 +187,6 @@ export interface Env {
 	LIMIT_SUBSCRIBED_DAILY?: string;
 	LIMIT_SUBSCRIBED_RPM?: string;
 	LIMIT_IP_DAILY?: string;
-	// Temporary abuse-investigation: if set, log raw request body + headers
-	// when authResult.userId matches. Never log the user_id itself.
-	DEBUG_USER_ID?: string;
 }
 
 // User tier for rate limiting and model access

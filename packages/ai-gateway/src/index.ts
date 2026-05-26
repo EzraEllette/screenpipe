@@ -98,26 +98,6 @@ async function handleRequest(request: Request, env: Env, ctx: ExecutionContext):
 				})));
 			}
 
-			// Temp abuse-investigation logger: when DEBUG_USER_ID matches the caller,
-			// dump request body + headers + CF metadata to Workers Logs. The user_id
-			// is NEVER printed — chunks are tagged with a random id only.
-			if (env.DEBUG_USER_ID && authResult.userId === env.DEBUG_USER_ID) {
-				const cf = (request as any).cf || {};
-				const payload = JSON.stringify({
-					ts: new Date().toISOString(),
-					ip: request.headers.get('cf-connecting-ip'),
-					ua: request.headers.get('user-agent'),
-					cf: { country: cf.country, colo: cf.colo, asn: cf.asOrganization, city: cf.city },
-					body,
-				});
-				const tag = crypto.randomUUID().slice(0, 8);
-				const CHUNK = 20000;
-				const total = Math.ceil(payload.length / CHUNK) || 1;
-				for (let i = 0, p = 1; i < payload.length; i += CHUNK, p++) {
-					console.log(`[ABUSE-DEBUG ${tag} ${p}/${total}] ${payload.slice(i, i + CHUNK)}`);
-				}
-			}
-
 			// Check if model is allowed for this tier
 			if (!isModelAllowed(body.model, authResult.tier, env)) {
 				const allowedModels = getTierConfig(env)[authResult.tier].allowedModels;
