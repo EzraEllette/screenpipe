@@ -197,18 +197,23 @@ pub fn spawn_frame_linker(
                             }
                         }
                         Some(LinkerMessage::TriggerDropped { correlation_ids, reason }) => {
+                            // Count-only by design. The trigger broadcast fans
+                            // out to N monitor capture loops; any per-monitor
+                            // drop site (Cold state, capture-error, debounce
+                            // without `last_frame_id`) reports the same
+                            // corr_id another monitor may still be in the
+                            // middle of capturing for. If we mutated state
+                            // here we'd race-cancel valid pairings. TTL
+                            // eviction (60s) handles the genuinely orphaned
+                            // ones; the per-reason counter surfaced in the
+                            // periodic WARN gives the diagnostic visibility
+                            // that motivated this message in the first place.
                             let n_corr = correlation_ids.len();
-                            // Bump the per-reason counter regardless of whether
-                            // the corr_ids were pending — for `Lagged` the
-                            // capture side can't recover the ids, only the
-                            // count, and we still want visibility.
                             let bump = if n_corr == 0 { 1 } else { n_corr as u64 };
                             drop_reason_counter(reason).fetch_add(bump, Ordering::Relaxed);
-                            let removed = linker.on_trigger_dropped(&correlation_ids);
                             debug!(
                                 ?reason,
                                 n_corr,
-                                removed,
                                 "frame_linker: trigger(s) dropped by capture loop"
                             );
                         }
