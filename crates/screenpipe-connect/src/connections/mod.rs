@@ -52,6 +52,7 @@ pub mod pocket;
 pub mod posthog;
 pub mod pushover;
 pub mod quickbooks;
+pub mod readwise;
 pub mod resend;
 pub mod salesforce;
 pub mod sentry;
@@ -131,6 +132,8 @@ pub struct ProxyConfig {
 pub enum ProxyAuth {
     /// Send as `Authorization: Bearer <token>`. Token comes from OAuth or credential field.
     Bearer { credential_key: &'static str },
+    /// Send as `Authorization: Token <token>`.
+    Token { credential_key: &'static str },
     /// Send as a custom header (e.g. `X-API-Key: <value>`).
     Header {
         name: &'static str,
@@ -307,6 +310,7 @@ pub fn all_integrations() -> Vec<Box<dyn Integration>> {
         Box::new(google_docs::GoogleDocs),
         Box::new(google_sheets::GoogleSheets),
         Box::new(quickbooks::QuickBooks),
+        Box::new(readwise::Readwise),
         Box::new(loops::Loops),
         Box::new(resend::Resend),
         Box::new(supabase::Supabase),
