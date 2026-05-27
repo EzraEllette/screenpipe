@@ -119,6 +119,10 @@ impl VaultManager {
     ///
     /// The caller MUST stop recording and close the DB pool BEFORE calling this.
     /// Returns a progress receiver for UI display.
+    ///
+    /// `password` is only consulted when the master key is not already in
+    /// memory (e.g. lock invoked from a separate CLI process). If the key is
+    /// loaded, the password argument is ignored.
     pub async fn lock(&self, password: &str) -> VaultResult<watch::Receiver<MigrationProgress>> {
         let state = self.state.read().await.clone();
         match state {
@@ -401,5 +405,51 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let vault = VaultManager::new(dir.path().to_path_buf());
         assert!(matches!(vault.lock("pw").await, Err(VaultError::NotSetUp)));
+    }
+
+    // Regression test for the bug fixed in PR #3585: `vault lock` failed with
+    // "master key not in memory" when invoked as a separate CLI process,
+    // because that process built a fresh VaultManager with no key loaded.
+    // Pre-fix this scenario errored out; post-fix it derives the key from the
+    // supplied password.
+    #[tokio::test]
+    async fn test_lock_derives_key_from_password() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = dir.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::write(data_dir.join("test.jpg"), b"fake jpeg data").unwrap();
+        std::fs::write(dir.path().join("db.sqlite"), b"fake sqlite data").unwrap();
+
+        // First manager: set up the vault, then drop it so the in-memory key
+        // is gone.
+        let vault = VaultManager::new(dir.path().to_path_buf());
+        vault.setup("correct-password").await.unwrap();
+        drop(vault);
+
+        // Second manager: simulates a separate CLI invocation. vault.meta
+        // exists, no sentinel, db.sqlite is not encrypted -> state is Unlocked
+        // but master_key is None. This is the exact pre-fix failure mode.
+        let vault = VaultManager::new(dir.path().to_path_buf());
+        assert_eq!(vault.state().await, VaultState::Unlocked);
+        assert!(vault.master_key().await.is_none());
+
+        // Wrong password -> WrongPassword, state unchanged.
+        assert!(matches!(
+            vault.lock("wrong-password").await,
+            Err(VaultError::WrongPassword)
+        ));
+        assert_eq!(vault.state().await, VaultState::Unlocked);
+
+        // Correct password -> lock succeeds.
+        let _rx = vault.lock("correct-password").await.unwrap();
+        loop {
+            if vault.state().await == VaultState::Locked {
+                break;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        }
+        assert!(dir.path().join(".vault_locked").exists());
+        assert!(crypto::is_encrypted_file(&dir.path().join("db.sqlite")).unwrap());
+        assert!(crypto::is_encrypted_file(&data_dir.join("test.jpg")).unwrap());
     }
 }
