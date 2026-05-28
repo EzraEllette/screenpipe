@@ -244,14 +244,36 @@ jobs:
             exit 1
           fi
 
+          # Publish each platform tarball. Tolerate "already published"
+          # so we can recover from a partially-failed prior run without
+          # bumping the version (the 0.4.2 attempt published 4/4
+          # platforms then died on the main package — re-dispatching
+          # should fast-forward over those without burning a version).
           while IFS= read -r -d '' package_dir; do
             if [[ -f "$package_dir/package.json" ]]; then
               echo "Publishing $package_dir"
-              (cd "$package_dir" && npm publish --access public --tag "$NPM_TAG" --provenance)
+              if ! (cd "$package_dir" && npm publish --access public --tag "$NPM_TAG" --provenance --ignore-scripts 2>&1); then
+                # 403 "cannot publish over previously published version"
+                # is the only error we treat as benign. Check it
+                # explicitly so a real auth/network error still fails.
+                pv=$(node -p "require('./$package_dir/package.json').version")
+                pn=$(node -p "require('./$package_dir/package.json').name")
+                published=$(npm view "${pn}@${pv}" version 2>/dev/null || true)
+                if [[ "$published" == "$pv" ]]; then
+                  echo "::notice::${pn}@${pv} already published, skipping"
+                else
+                  echo "::error::Publish of $package_dir failed and version not on registry"
+                  exit 1
+                fi
+              fi
             fi
           done < <(find npm -mindepth 1 -maxdepth 1 -type d -print0 | sort -z)
 
-          npm publish --access public --tag "$NPM_TAG" --provenance
+          # `--ignore-scripts` keeps npm from auto-running our
+          # `prepublishOnly` hook, which is `napi prepublish -t npm`
+          # (no flags) and would try to re-publish the already-published
+          # platform packages. We've done all the prep explicitly above.
+          npm publish --access public --tag "$NPM_TAG" --provenance --ignore-scripts
 
   swift-mirror:
     # SPM cannot consume `ee/sdk/Package.swift` from a subdirectory of a
