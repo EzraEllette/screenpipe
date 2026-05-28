@@ -310,6 +310,19 @@ export type Settings = SettingsStore & {
 	}>;
 	apiAuth?: boolean;
 	apiKey?: string;
+	/** Default behavior when a meeting is detected.
+	 * - `"ask"` (default): the existing meeting-start notification grows
+	 *   a "+ HD" action. Click → starts a meeting-bound session that
+	 *   auto-stops when the call ends.
+	 * - `"always"`: every detected meeting auto-starts a session.
+	 * - `"never"`: no auto-action; only the manual tray timer can start
+	 *   one.
+	 * Indefinite manual mode does not exist — every session is bound to
+	 * either a meeting or a timer, both with hard-cap safety nets. */
+	hdRecordingDefault?: "ask" | "always" | "never";
+	/** Capture debounce (ms) installed while an HD session is active.
+	 * Default 100 ≈ 10 fps. Clamped to >= 33 ms (30 fps ceiling). */
+	hdRecordingIntervalMs?: number;
 	/**
 	 * When true the backend binds the HTTP API to 0.0.0.0 instead of 127.0.0.1
 	 * so other devices on the LAN can reach it. api_auth is force-enabled
@@ -551,6 +564,8 @@ let DEFAULT_SETTINGS: Settings = {
 			localRetentionDays: 14,
 			localRetentionMode: "media",
 			encryptStore: true,
+			hdRecordingDefault: "ask",
+			hdRecordingIntervalMs: 100,
 		};
 
 export function createDefaultSettingsObject(): Settings {
