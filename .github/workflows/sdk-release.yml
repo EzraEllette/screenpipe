@@ -63,9 +63,20 @@ jobs:
               throw new Error(`${name} optional dependency is ${depVersion}, expected ${version}`);
             }
           }
-          const cargo = fs.readFileSync("Cargo.toml", "utf8");
-          if (!cargo.includes(`version = "${version}"`)) {
-            throw new Error(`Cargo.toml does not contain version = "${version}"`);
+          // All three Rust manifests in the SDK workspace must move
+          // together. recorder-core got missed during the 0.4.x bumps
+          // and silently sat at 0.3.0 — caught only because someone
+          // grepped versions by hand. Validate every workspace member.
+          const cargoManifests = [
+            "Cargo.toml",
+            "recorder-core/Cargo.toml",
+            "tauri/rust/Cargo.toml",
+          ];
+          for (const path of cargoManifests) {
+            const cargo = fs.readFileSync(path, "utf8");
+            if (!cargo.includes(`version = "${version}"`)) {
+              throw new Error(`${path} does not contain version = "${version}"`);
+            }
           }
           NODE
       - id: mode
