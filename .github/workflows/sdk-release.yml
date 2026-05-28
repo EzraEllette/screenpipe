@@ -210,8 +210,16 @@ jobs:
               exit 1
             fi
           done
+      # `napi prepublish` updates the main package.json so each
+      # optionalDependency line matches the current version. By default
+      # it ALSO publishes every platform tarball to npm AND creates a
+      # GitHub Release with the binaries attached — both of those steps
+      # need credentials and one of them creates side-effects we don't
+      # want (we publish from our own loop below and don't want random
+      # bot-authored GH releases). `--dry-run --skip-gh-release` keeps
+      # only the metadata update.
       - name: Prepare npm packages
-        run: bun run prepublishOnly
+        run: bun x napi prepublish -t npm --dry-run --skip-gh-release
       - name: Inspect package contents
         run: |
           npm pack --dry-run --ignore-scripts
