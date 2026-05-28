@@ -171,10 +171,55 @@ jobs:
           merge-multiple: true
       - name: Create platform npm dirs
         run: bun x napi create-npm-dir -t .
+      # Move each `screenpipe-sdk.<triple>.node` into the matching
+      # `npm/<triple>/` subdir. Without this step the platform packages
+      # publish as empty stubs (README + package.json, no binary) and
+      # `require('@screenpipe/sdk-darwin-arm64')` fails with
+      # "Cannot find module ... .node". This is what bit every release
+      # 0.1.0 → 0.4.1 — `napi prepublish` only updates the main
+      # package.json's optionalDependencies, it does NOT distribute the
+      # built binaries, and `napi artifacts` only works with the napi-rs
+      # GitHub Actions artifact naming convention which we don't use.
+      - name: Distribute native bindings into platform npm dirs
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          moved=0
+          for nodefile in screenpipe-sdk.*.node; do
+            triple="${nodefile#screenpipe-sdk.}"
+            triple="${triple%.node}"
+            target_dir="npm/${triple}"
+            if [[ ! -d "$target_dir" ]]; then
+              echo "::error::No npm dir for triple '$triple' (file $nodefile)"
+              exit 1
+            fi
+            mv "$nodefile" "$target_dir/"
+            moved=$((moved + 1))
+            echo "Moved $nodefile → $target_dir/"
+          done
+          if [[ $moved -eq 0 ]]; then
+            echo "::error::No screenpipe-sdk.*.node files found — build artifact download likely failed"
+            exit 1
+          fi
+          # Each platform dir must now contain exactly its one .node.
+          for d in npm/*/; do
+            triple="$(basename "$d")"
+            expected="screenpipe-sdk.${triple}.node"
+            if [[ ! -f "$d$expected" ]]; then
+              echo "::error::Missing $d$expected after distribute"
+              exit 1
+            fi
+          done
       - name: Prepare npm packages
         run: bun run prepublishOnly
       - name: Inspect package contents
-        run: npm pack --dry-run --ignore-scripts
+        run: |
+          npm pack --dry-run --ignore-scripts
+          echo "--- platform tarballs ---"
+          for d in npm/*/; do
+            echo "## $d"
+            (cd "$d" && npm pack --dry-run --ignore-scripts 2>&1 | tail -20)
+          done
       - name: Publish npm packages
         if: needs.validate.outputs.publish_npm == 'true'
         env:
