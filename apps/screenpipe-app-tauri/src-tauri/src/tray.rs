@@ -716,10 +716,10 @@ fn create_dynamic_menu(
         // or timer expiry). Hits /capture/hd/{start,stop} so changes take
         // effect on the next capture tick.
         let hd = get_high_fps_status();
-        let fps_label = if hd.interval_ms > 0 {
-            format!(" — ~{} fps", 1000 / hd.interval_ms)
+        let fps = if hd.interval_ms > 0 {
+            Some(1000 / hd.interval_ms)
         } else {
-            String::new()
+            None
         };
         if hd.active {
             // Format remaining time succinctly: 1h 23m / 47m / 12s.
@@ -729,12 +729,10 @@ fn create_dynamic_menu(
                 "prewarm_pending" => "awaiting call",
                 _ => "left",
             };
-            let label = format!(
-                "Stop HD recording ({}, {} {})",
-                fps_label.trim_start_matches(" — "),
-                remaining,
-                why,
-            );
+            let label = match fps {
+                Some(f) => format!("Stop HD recording (~{} fps, {} {})", f, remaining, why),
+                None => format!("Stop HD recording ({} {})", remaining, why),
+            };
             menu_builder = menu_builder.item(
                 &MenuItemBuilder::with_id("stop_hd_recording", label).build(app)?,
             );
@@ -747,7 +745,7 @@ fn create_dynamic_menu(
         } else {
             // Idle: offer timer-bound sessions only. The meeting-bound path
             // is reached via the meeting-start notification's "+ HD" action.
-            let submenu = SubmenuBuilder::new(app, format!("Record HD for…{}", fps_label))
+            let submenu = SubmenuBuilder::new(app, "Record HD")
                 .item(&MenuItemBuilder::with_id("hd_timer_15", "15 minutes").build(app)?)
                 .item(&MenuItemBuilder::with_id("hd_timer_30", "30 minutes").build(app)?)
                 .item(&MenuItemBuilder::with_id("hd_timer_60", "1 hour").build(app)?)
