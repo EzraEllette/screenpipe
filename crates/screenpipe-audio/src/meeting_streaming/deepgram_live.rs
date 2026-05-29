@@ -215,9 +215,18 @@ fn configure_live_query(url: &mut Url, config: &MeetingStreamingConfig) {
     query.append_pair("utterance_end_ms", "1500");
     query.append_pair("vad_events", "true");
     query.append_pair("diarize", "true");
-    if let Some(language) = config.language.as_deref().filter(|s| !s.trim().is_empty()) {
-        query.append_pair("language", language);
-    }
+    // Deepgram's streaming API has no detect_language (that is batch-only), and
+    // with no language param it defaults to english — the reason live meeting
+    // transcription only ever produced english (issue #3550). `language=multi`
+    // is nova-3's code-switching mode and is the streaming equivalent of
+    // auto-detection: it handles non-english and mixed-language speech.
+    let language = config
+        .language
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("multi");
+    query.append_pair("language", language);
 }
 
 fn auth_header(provider: &MeetingStreamingProvider, credential: &str) -> String {
@@ -431,5 +440,46 @@ fn device_type_label(device_type: &DeviceType) -> &'static str {
     match device_type {
         DeviceType::Input => "input",
         DeviceType::Output => "output",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn live_query(language: Option<&str>) -> String {
+        let config = MeetingStreamingConfig {
+            enabled: true,
+            provider: MeetingStreamingProvider::DeepgramLive,
+            auth_token: None,
+            api_key: Some("test-key".to_string()),
+            endpoint: "wss://api.deepgram.com/v1/listen".to_string(),
+            model: Some("nova-3".to_string()),
+            language: language.map(str::to_string),
+            local_speaker_name: None,
+            persist_finals: true,
+        };
+        let mut url = Url::parse(&config.endpoint).unwrap();
+        configure_live_query(&mut url, &config);
+        url.query().unwrap_or_default().to_string()
+    }
+
+    #[test]
+    fn unset_language_uses_multilingual_streaming() {
+        let q = live_query(None);
+        assert!(q.contains("language=multi"), "got: {q}");
+    }
+
+    #[test]
+    fn blank_language_uses_multilingual_streaming() {
+        let q = live_query(Some("   "));
+        assert!(q.contains("language=multi"), "got: {q}");
+    }
+
+    #[test]
+    fn explicit_language_is_forced() {
+        let q = live_query(Some("es"));
+        assert!(q.contains("language=es"), "got: {q}");
+        assert!(!q.contains("language=multi"), "got: {q}");
     }
 }
