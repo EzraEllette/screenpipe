@@ -11,8 +11,16 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { commands } from "@/lib/utils/tauri";
 import { useChatStore } from "@/lib/stores/chat-store";
 
-export function isConversationHistorySyncPrompt(value?: string | null): boolean {
+export function isConversationHistorySyncPrompt(value?: string | null): value is string {
   return typeof value === "string" && value.startsWith("<conversation_history>");
+}
+
+export function extractConversationHistorySyncUserText(value?: string | null): string | null {
+  if (!isConversationHistorySyncPrompt(value)) return null;
+  const closingTag = "</conversation_history>";
+  const closingTagIndex = value.indexOf(closingTag);
+  if (closingTagIndex === -1) return "";
+  return value.slice(closingTagIndex + closingTag.length).replace(/^\s+/, "");
 }
 
 // ============================================================================
