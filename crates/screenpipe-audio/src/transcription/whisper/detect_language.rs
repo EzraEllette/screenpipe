@@ -65,7 +65,10 @@ mod tests {
         // even if the probability vector says otherwise.
         let mut probs = zeroed_probs();
         set(&mut probs, "en", 1.0);
-        assert_eq!(detect_language(probs, vec![Language::Portuguese]), Some("pt"));
+        assert_eq!(
+            detect_language(probs, vec![Language::Portuguese]),
+            Some("pt")
+        );
     }
 
     #[test]

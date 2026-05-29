@@ -542,7 +542,10 @@ mod tests {
     fn multiple_languages_mean_multilingual() {
         // Deepgram streaming has no per-stream allow-list, so 2+ picks fall
         // back to multilingual rather than arbitrarily forcing the first.
-        assert_eq!(single_language_code(&langs(&["spanish", "portuguese"])), None);
+        assert_eq!(
+            single_language_code(&langs(&["spanish", "portuguese"])),
+            None
+        );
     }
 
     #[test]
