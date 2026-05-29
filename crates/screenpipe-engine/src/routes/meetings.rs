@@ -695,7 +695,7 @@ pub(crate) async fn export_handler(
     let server_error = |e: anyhow::Error| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            JsonResponse(json!({ "error": e.to_string() })),
+            JsonResponse(json!({ "error": format!("{e:#}") })),
         )
     };
 

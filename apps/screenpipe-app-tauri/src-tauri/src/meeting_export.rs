@@ -59,7 +59,7 @@ pub async fn export_recording(
     let summary = match (meeting_id, start.is_some() || end.is_some()) {
         (Some(id), _) => export_meeting_to_mp4(&db, id, &output)
             .await
-            .map_err(|e| e.to_string())?,
+            .map_err(|e| format!("{e:#}"))?,
         (None, true) => {
             let start_raw = start
                 .as_deref()
@@ -71,7 +71,7 @@ pub async fn export_recording(
             };
             export_range_to_mp4(&db, start, end, &output)
                 .await
-                .map_err(|e| e.to_string())?
+                .map_err(|e| format!("{e:#}"))?
         }
         (None, false) => {
             return Err("provide either meeting_id or start/end".to_string());

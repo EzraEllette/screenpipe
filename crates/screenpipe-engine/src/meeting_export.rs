@@ -69,7 +69,7 @@ pub async fn resolve_meeting_window(
     let meeting = db
         .get_meeting_by_id(meeting_id)
         .await
-        .with_context(|| format!("meeting {meeting_id} not found"))?;
+        .with_context(|| format!("failed to load meeting {meeting_id}"))?;
     let start = parse_ts(&meeting.meeting_start)
         .with_context(|| format!("bad meeting_start: {}", meeting.meeting_start))?;
     let end = match meeting.meeting_end.as_deref() {
@@ -128,7 +128,9 @@ pub async fn export_range_to_mp4(
         .await
         .context("failed to query frames")?;
     if frames.is_empty() {
-        return Err(anyhow!("no frames found in {start} .. {end}"));
+        return Err(anyhow!(
+            "no screen frames indexed for this range ({start} .. {end}) — the recording may be missing from the database or not yet indexed"
+        ));
     }
     if frames.len() > MAX_EXPORT_FRAMES {
         return Err(anyhow!(
