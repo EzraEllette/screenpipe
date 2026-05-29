@@ -585,7 +585,24 @@ function buildRateLimitMessage(errorStr: string): string {
     : "Rate limited — try again in a moment or switch to a different model.";
 }
 
-/** Extract the gateway-reported tier from an error string, if present. */
+/** How many times a single turn auto-retries on a 429 before giving up. */
+const PI_MAX_RATE_LIMIT_RETRIES = 3;
+
+/**
+ * Seconds to wait before retrying a rate-limited (429) request. Prefers the
+ * gateway's structured `reset_in` hint, falls back to the "wait N seconds"
+ * prose, then a safe default. Clamped to [1, 60].
+ */
+function parseRateLimitWaitSeconds(errorStr: string): number {
+  const DEFAULT_WAIT = 10;
+  const resetMatch = errorStr.match(/"reset_in"\s*:\s*(\d+)/i);
+  const waitMatch = errorStr.match(/wait (\d+) seconds/i);
+  const raw = resetMatch?.[1] ?? waitMatch?.[1];
+  const secs = raw ? parseInt(raw, 10) : DEFAULT_WAIT;
+  if (!Number.isFinite(secs) || secs <= 0) return DEFAULT_WAIT;
+  return Math.min(Math.max(secs, 1), 60);
+}
+
 // Helper to get timezone offset string (e.g., "+1" or "-5")
 function getTimezoneOffsetString(): string {
   const offsetMinutes = new Date().getTimezoneOffset();
@@ -3249,6 +3266,8 @@ export function StandaloneChat({
   const sendDispatchInFlightRef = useRef(false);
   const forceQueueModeRef = useRef(false);
   const piFirstCallRetried = useRef(false);
+  // Per-turn 429 auto-retry budget; reset on each new user send + on success.
+  const piRateLimitRetries = useRef(0);
   const sessionActivityLastEmitAtRef = useRef<Record<string, number>>({});
   const sessionActivityLastSigRef = useRef<Record<string, string>>({});
   const piStoppedIntentionallyRef = useRef(false);
@@ -5546,6 +5565,7 @@ export function StandaloneChat({
             piThinkingStartRef.current = null;
             followUpFiredRef.current = false;
             forceQueueModeRef.current = false;
+            piRateLimitRetries.current = 0;
             setIsLoading(false);
             setIsStreaming(false);
             emitSessionActivity({ status: "idle" });
@@ -5570,6 +5590,46 @@ export function StandaloneChat({
                 commands.piPrompt(piSessionIdRef.current, lastUserMsg.content, null, null).catch(() => {});
               }
             }
+            return;
+          }
+          // Rate-limit (429) auto-retry — honor the gateway's reset_in hint and
+          // re-send the same prompt. The cloud LLM gateway caps free/logged-in
+          // tiers at a few dozen requests/minute; a single agentic run can trip
+          // it, after which a short wait clears the budget. Without this the turn
+          // dies silently (e.g. pipe creation stalls mid-skill).
+          if (
+            classifyQuotaError(errorStr) === "rate" &&
+            piRateLimitRetries.current < PI_MAX_RATE_LIMIT_RETRIES &&
+            piSessionIdRef.current &&
+            lastUserMessageRef.current
+          ) {
+            piRateLimitRetries.current += 1;
+            const attempt = piRateLimitRetries.current;
+            const waitSecs = parseRateLimitWaitSeconds(errorStr);
+            const retrySession = piSessionIdRef.current;
+            const retryPrompt = lastUserMessageRef.current;
+            console.warn(`[Pi] rate limited, auto-retry ${attempt}/${PI_MAX_RATE_LIMIT_RETRIES} in ${waitSecs}s:`, errorStr);
+            // Reset the in-flight buffers so the retried turn renders cleanly into
+            // the same bubble instead of appending onto any pre-429 partial output.
+            piStreamingTextRef.current = "";
+            piContentBlocksRef.current = [];
+            const retryTurnId = piMessageIdRef.current;
+            if (retryTurnId) {
+              setMessages((prev) =>
+                prev.map((m) => m.id === retryTurnId
+                  ? { ...m, content: `Rate limited — retrying in ${waitSecs}s… (attempt ${attempt}/${PI_MAX_RATE_LIMIT_RETRIES})`, contentBlocks: [] }
+                  : m)
+              );
+            }
+            setTimeout(() => {
+              // Guard the delayed re-send: bail if the user unmounted, switched
+              // sessions, or started a new turn during the wait, so we never
+              // inject a stale prompt into the wrong place.
+              if (!mountedRef.current) return;
+              if (piSessionIdRef.current !== retrySession) return;
+              if (piMessageIdRef.current && piMessageIdRef.current !== retryTurnId) return;
+              commands.piPrompt(retrySession, retryPrompt, null, null).catch(() => {});
+            }, waitSecs * 1000);
             return;
           }
           if (piMessageIdRef.current) {
@@ -6429,6 +6489,7 @@ export function StandaloneChat({
     // Clear follow-ups for new message
     setFollowUpSuggestions([]);
     followUpFiredRef.current = false;
+    piRateLimitRetries.current = 0;
     if (followUpAbortRef.current) {
       followUpAbortRef.current.abort();
       followUpAbortRef.current = null;
@@ -7210,6 +7271,7 @@ export function StandaloneChat({
 
     setFollowUpSuggestions([]);
     followUpFiredRef.current = false;
+    piRateLimitRetries.current = 0;
     if (followUpAbortRef.current) {
       followUpAbortRef.current.abort();
       followUpAbortRef.current = null;
