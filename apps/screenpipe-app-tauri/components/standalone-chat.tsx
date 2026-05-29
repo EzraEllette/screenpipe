@@ -46,6 +46,7 @@ import { commands } from "@/lib/utils/tauri";
 import { emit } from "@tauri-apps/api/event";
 import { useChatConversations } from "@/components/hooks/use-chat-conversations";
 import { useChatStore } from "@/lib/stores/chat-store";
+import { useFeedbackStore } from "@/lib/stores/feedback-store";
 import { statusForEvent } from "@/lib/stores/pi-event-router";
 import { stripPromptPlumbing } from "@/lib/utils/chat-title";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -2442,9 +2443,18 @@ function MessageContent({
     <SourceCitationFooter citations={sourceCitations} />
   ) : null;
 
+  const openFeedback = useFeedbackStore((s) => s.openFeedback);
+  const isErrorMessage = !isUser && (
+    !!message.retryPrompt ||
+    message.content.startsWith("Error:") ||
+    message.content.includes("Something went wrong") ||
+    message.content.includes("crashed") ||
+    message.content.includes("failed after retries")
+  );
+
   // Retry CTA — shown at the bottom of error messages that have a retryPrompt
   const retryCta = !isUser && message.retryPrompt ? (
-    <div className="mt-3 pt-3 border-t border-border/40 flex items-center gap-3">
+    <div className="mt-3 pt-3 border-t border-border/40 flex items-center gap-3 flex-wrap">
       <button
         type="button"
         onClick={() => onRetry?.(message.retryPrompt!)}
@@ -2454,6 +2464,24 @@ function MessageContent({
         Try again
       </button>
       <span className="text-xs text-muted-foreground">or edit your message above</span>
+      <button
+        type="button"
+        onClick={() => openFeedback(`AI error in chat: ${message.content.slice(0, 300)}`)}
+        className="ml-auto flex items-center gap-1 text-xs text-muted-foreground/60 hover:text-muted-foreground transition-colors"
+      >
+        report issue
+      </button>
+    </div>
+  ) : isErrorMessage ? (
+    <div className="mt-2 flex items-center gap-1.5">
+      <span className="text-xs text-destructive/60">still happening?</span>
+      <button
+        type="button"
+        onClick={() => openFeedback(`AI error in chat: ${message.content.slice(0, 300)}`)}
+        className="text-xs text-muted-foreground hover:text-foreground transition-colors underline underline-offset-2"
+      >
+        report issue
+      </button>
     </div>
   ) : null;
 
@@ -2538,10 +2566,15 @@ function MessageContent({
       </div>
     );
   }
+  // Strip raw "Error:" prefix that leaks from backend — show only the human part
+  const displayText = !isUser && message.content.startsWith("Error: ")
+    ? message.content.slice("Error: ".length)
+    : message.content;
+
   return (
     <div className="space-y-2">
       {imageThumbs}
-      <MarkdownBlock text={message.content} isUser={isUser} />
+      <MarkdownBlock text={displayText} isUser={isUser} />
       {sourceFooter}
       {retryCta}
     </div>
@@ -5446,7 +5479,7 @@ export function StandaloneChat({
               }
             }
 
-            // Surface credits_exhausted / rate limit errors from agent_end
+            // Surface credits_exhausted / rate limit / connection errors from agent_end
             if (agentEndError && !content) {
               const errStr = agentEndError;
               const quotaErrorType = classifyQuotaError(errStr);
@@ -5456,9 +5489,11 @@ export function StandaloneChat({
                     } catch {}
                                   content = buildDailyLimitMessage(errStr);
               } else if (quotaErrorType === "rate") {
-                  content = buildRateLimitMessage(errStr);
+                content = buildRateLimitMessage(errStr);
+              } else if (errStr.includes("model_not_allowed")) {
+                content = "This model requires an upgrade.";
               } else {
-                content = `Error: ${errStr}`;
+                content = errStr;
               }
             }
 
@@ -6778,7 +6813,7 @@ export function StandaloneChat({
         } else if (rawError.includes("Broken pipe") || rawError.includes("not running") || rawError.includes("has died") || rawError.includes("Pi not initialized")) {
           const provider = activePreset?.provider;
           errorMsg = provider === "native-ollama"
-            ? "Ollama is not running. Start it with: `ollama serve`"
+            ? "Ollama isn't running. Start it with: `ollama serve`"
             : "AI agent crashed — restarting automatically...";
           retryPrompt = userMessage;
         } else if (rawError.includes("not found")) {
