@@ -32,6 +32,7 @@ import {
   Mic,
   Monitor,
   Volume2,
+  VolumeX,
   Headphones,
   AppWindowMac,
   EyeOff,
@@ -1698,7 +1699,98 @@ export function RecordingSettings() {
       .catch(() => setCoreaudioTapAvailable(false));
   }, []);
 
+  type ExcludedApp = {
+    bundleId: string;
+    name: string | null;
+    icon: string | null;
+  };
+
+  // Per-app exclusions for the CoreAudio Process Tap. The list is owned by
+  // the audio engine (file at ~/.screenpipe/audio-exclusions.json); we just
+  // read/write it through Tauri commands. Hot-reload happens engine-side
+  // on the existing 500ms tap-rebuild loop, so a write here propagates in
+  // ~1 tick subject to the 60s REBUILD_COOLDOWN.
+  const [audioExclusions, setAudioExclusions] = useState<ExcludedApp[]>([]);
+  const [pendingAudioExclusions, setPendingAudioExclusions] = useState<ExcludedApp[] | null>(null);
+  const [selectedBundleId, setSelectedBundleId] = useState<string | null>(null);
+  const effectiveAudioExclusions = pendingAudioExclusions ?? audioExclusions;
+
   const { toast } = useToast();
+
+  const reloadAudioExclusions = useCallback(async () => {
+    try {
+      const apps = await invoke<ExcludedApp[]>("read_audio_exclusions");
+      setAudioExclusions(apps);
+    } catch (e) {
+      console.error("read_audio_exclusions failed", e);
+      toast({
+        title: "Couldn't load audio exclusions",
+        description: String(e),
+        variant: "destructive",
+      });
+    }
+  }, [toast]);
+
+  useEffect(() => {
+    if (!coreaudioTapAvailable) return;
+    reloadAudioExclusions();
+  }, [coreaudioTapAvailable, reloadAudioExclusions]);
+
+  const addAudioExclusion = useCallback(
+    (app: ExcludedApp) => {
+      const current = pendingAudioExclusions ?? audioExclusions;
+      if (!app.bundleId || current.some((a) => a.bundleId === app.bundleId)) return;
+      setPendingAudioExclusions([...current, app]);
+      setHasUnsavedChanges(true);
+    },
+    [pendingAudioExclusions, audioExclusions]
+  );
+
+  const removeAudioExclusion = useCallback(
+    (bundleId: string) => {
+      const current = pendingAudioExclusions ?? audioExclusions;
+      setPendingAudioExclusions(current.filter((a) => a.bundleId !== bundleId));
+      setSelectedBundleId((curr) => (curr === bundleId ? null : curr));
+      setHasUnsavedChanges(true);
+    },
+    [pendingAudioExclusions, audioExclusions]
+  );
+
+  const pickAppToExclude = useCallback(async () => {
+    const picked = await open({
+      filters: [{ name: "Application", extensions: ["app"] }],
+      defaultPath: "/Applications",
+      multiple: false,
+      directory: false,
+    });
+    if (!picked || typeof picked !== "string") return;
+    try {
+      const meta = await invoke<ExcludedApp>("read_app_bundle_metadata", { path: picked });
+      addAudioExclusion(meta);
+    } catch (e) {
+      toast({
+        title: "Couldn't read app bundle",
+        description: String(e),
+        variant: "destructive",
+      });
+    }
+  }, [addAudioExclusion, toast]);
+
+  useEffect(() => {
+    if (!selectedBundleId) return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === "Delete" || e.key === "Backspace") {
+        e.preventDefault();
+        removeAudioExclusion(selectedBundleId);
+        setSelectedBundleId(null);
+      } else if (e.key === "Escape") {
+        setSelectedBundleId(null);
+      }
+    };
+    document.addEventListener("keydown", handler);
+    return () => document.removeEventListener("keydown", handler);
+  }, [selectedBundleId, removeAudioExclusion]);
+
   const [isUpdating, setIsUpdating] = useState(false);
   const { health } = useHealthCheck();
   const isDisabled = health?.status_code === 500;
@@ -2027,6 +2119,16 @@ export function RecordingSettings() {
           Sentry.init({
             ...defaultOptions,
           });
+        }
+      }
+
+      if (pendingAudioExclusions !== null) {
+        try {
+          await invoke("write_audio_exclusions", { apps: pendingAudioExclusions });
+          setAudioExclusions(pendingAudioExclusions);
+          setPendingAudioExclusions(null);
+        } catch (e) {
+          throw new Error(`Failed to save audio exclusions: ${e}`);
         }
       }
 
@@ -3241,6 +3343,88 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
                 checked={!settings.disableMeetingDetector}
                 onCheckedChange={(checked) => handleSettingsChange({ disableMeetingDetector: !checked }, true)}
               />
+            </div>
+          </CardContent>
+        </Card>
+        )}
+
+        {/* Per-app exclusion list for the CoreAudio Process Tap. Only
+            meaningful when the tap is the active backend. */}
+        {!settings.disableAudio && coreaudioTapAvailable && settings.experimentalCoreaudioSystemAudio && (
+        <Card className="border-border bg-card">
+          <CardContent className="px-3 py-2.5 space-y-2">
+            <div className="flex items-center space-x-2.5">
+              <VolumeX className="h-4 w-4 text-muted-foreground shrink-0" />
+              <div>
+                <h3 className="text-sm font-medium text-foreground">
+                  Exclude apps from system audio
+                </h3>
+                <p className="text-xs text-muted-foreground">
+                  Audio from these apps will be filtered out of system-audio capture.
+                </p>
+              </div>
+            </div>
+            <div
+              className="flex flex-wrap gap-1.5 pl-6"
+              onClick={() => setSelectedBundleId(null)}
+            >
+              {effectiveAudioExclusions.map((app) => (
+                <Badge
+                  key={app.bundleId}
+                  variant={selectedBundleId === app.bundleId ? "default" : "secondary"}
+                  className="gap-1.5 pr-1 cursor-pointer"
+                  role="button"
+                  tabIndex={0}
+                  aria-pressed={selectedBundleId === app.bundleId}
+                  title={app.bundleId}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setSelectedBundleId(
+                      selectedBundleId === app.bundleId ? null : app.bundleId
+                    );
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      setSelectedBundleId(
+                        selectedBundleId === app.bundleId ? null : app.bundleId
+                      );
+                    }
+                  }}
+                >
+                  {app.icon && (
+                    <img src={app.icon} alt="" className="h-4 w-4 rounded-sm" />
+                  )}
+                  <span className="text-xs">{app.name ?? app.bundleId}</span>
+                  <button
+                    type="button"
+                    className="inline-flex rounded-sm focus:outline-none focus:ring-1 focus:ring-ring"
+                    aria-label={`Remove ${app.name ?? app.bundleId} from audio exclusions`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      removeAudioExclusion(app.bundleId);
+                    }}
+                  >
+                    <XCircle className="h-3 w-3" />
+                  </button>
+                </Badge>
+              ))}
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-6 text-xs"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  pickAppToExclude();
+                }}
+              >
+                + add app
+              </Button>
+              {effectiveAudioExclusions.length === 0 && (
+                <span className="text-xs text-muted-foreground italic self-center">
+                  No apps excluded. All system audio is captured.
+                </span>
+              )}
             </div>
           </CardContent>
         </Card>
