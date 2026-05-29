@@ -686,8 +686,12 @@ pub(crate) async fn export_handler(
     State(state): State<Arc<AppState>>,
     axum::Json(body): axum::Json<ExportRequest>,
 ) -> Result<JsonResponse<ExportResponse>, (StatusCode, JsonResponse<Value>)> {
-    let bad_request =
-        |msg: String| (StatusCode::BAD_REQUEST, JsonResponse(json!({ "error": msg })));
+    let bad_request = |msg: String| {
+        (
+            StatusCode::BAD_REQUEST,
+            JsonResponse(json!({ "error": msg })),
+        )
+    };
     let server_error = |e: anyhow::Error| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -703,10 +707,10 @@ pub(crate) async fn export_handler(
         .filter(|p| !p.is_empty())
         .map(std::path::PathBuf::from);
     let default_output = |stem: String| {
-        state.screenpipe_dir.join("exports").join(format!(
-            "{stem}_{}.mp4",
-            Utc::now().format("%Y%m%d_%H%M%S")
-        ))
+        state
+            .screenpipe_dir
+            .join("exports")
+            .join(format!("{stem}_{}.mp4", Utc::now().format("%Y%m%d_%H%M%S")))
     };
 
     // meeting_id XOR start/end, same contract as the `screenpipe export` CLI.

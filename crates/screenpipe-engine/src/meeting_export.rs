@@ -179,7 +179,10 @@ pub async fn export_range_to_mp4(
         let out = frames_dir.join(format!("s_{i:06}.png"));
         match extract_snapshot_frame(&ffmpeg_path, file_path, target_w, target_h, &out).await {
             Ok(()) => frame_out[i] = Some(out),
-            Err(e) => warn!("skipping snapshot frame {} ({}): {}", frame_id, file_path, e),
+            Err(e) => warn!(
+                "skipping snapshot frame {} ({}): {}",
+                frame_id, file_path, e
+            ),
         }
     }
 
@@ -200,11 +203,19 @@ pub async fn export_range_to_mp4(
             extract_chunk_frames_batch(&ffmpeg_path, file_path, &offs, target_w, target_h, &pattern)
                 .await
         {
-            warn!("skipping chunk {} ({} frames): {}", file_path, offs.len(), e);
+            warn!(
+                "skipping chunk {} ({} frames): {}",
+                file_path,
+                offs.len(),
+                e
+            );
             continue;
         }
-        let pos_of_off: HashMap<i64, usize> =
-            offs.iter().enumerate().map(|(p, off)| (*off, p + 1)).collect();
+        let pos_of_off: HashMap<i64, usize> = offs
+            .iter()
+            .enumerate()
+            .map(|(p, off)| (*off, p + 1))
+            .collect();
         for &i in idxs {
             if let Some(&p) = pos_of_off.get(&frames[i].2) {
                 let f = frames_dir.join(format!("c{gid}_{p:05}.png"));
@@ -553,8 +564,20 @@ async fn run_mux(
     if audio.is_empty() {
         // No audio in range — emit a silent video.
         cmd.args([
-            "-map", "0:v:0", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "veryfast",
-            "-crf", "23", "-vsync", "vfr", "-movflags", "+faststart",
+            "-map",
+            "0:v:0",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "23",
+            "-vsync",
+            "vfr",
+            "-movflags",
+            "+faststart",
         ]);
         cmd.arg(output_path);
         return run_checked(cmd, "mux (silent)").await;
@@ -587,9 +610,28 @@ async fn run_mux(
 
     cmd.arg("-filter_complex").arg(&graph);
     cmd.args([
-        "-map", "0:v:0", "-map", "[aout]", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset",
-        "veryfast", "-crf", "23", "-vsync", "vfr", "-c:a", "aac", "-b:a", "160k", "-ar", "48000",
-        "-movflags", "+faststart",
+        "-map",
+        "0:v:0",
+        "-map",
+        "[aout]",
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "23",
+        "-vsync",
+        "vfr",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "160k",
+        "-ar",
+        "48000",
+        "-movflags",
+        "+faststart",
     ]);
     cmd.arg(output_path);
     run_checked(cmd, "mux").await
@@ -694,9 +736,18 @@ mod tests {
         let origin = parse_ts("2026-05-28T18:00:00Z").unwrap();
         // first frame 5s after origin (leading audio gap), then +2s, +3s
         let f = vec![
-            (PathBuf::from("/tmp/a.png"), parse_ts("2026-05-28T18:00:05Z").unwrap()),
-            (PathBuf::from("/tmp/b.png"), parse_ts("2026-05-28T18:00:07Z").unwrap()),
-            (PathBuf::from("/tmp/c.png"), parse_ts("2026-05-28T18:00:10Z").unwrap()),
+            (
+                PathBuf::from("/tmp/a.png"),
+                parse_ts("2026-05-28T18:00:05Z").unwrap(),
+            ),
+            (
+                PathBuf::from("/tmp/b.png"),
+                parse_ts("2026-05-28T18:00:07Z").unwrap(),
+            ),
+            (
+                PathBuf::from("/tmp/c.png"),
+                parse_ts("2026-05-28T18:00:10Z").unwrap(),
+            ),
         ];
         let body = build_concat_list(&f, origin, 15.0).unwrap();
         let durations: Vec<f64> = body
@@ -720,8 +771,14 @@ mod tests {
         let origin = parse_ts("2026-05-28T18:00:00Z").unwrap();
         // two frames with identical timestamps would yield a 0s middle duration
         let f = vec![
-            (PathBuf::from("/tmp/a.png"), parse_ts("2026-05-28T18:00:00Z").unwrap()),
-            (PathBuf::from("/tmp/b.png"), parse_ts("2026-05-28T18:00:00Z").unwrap()),
+            (
+                PathBuf::from("/tmp/a.png"),
+                parse_ts("2026-05-28T18:00:00Z").unwrap(),
+            ),
+            (
+                PathBuf::from("/tmp/b.png"),
+                parse_ts("2026-05-28T18:00:00Z").unwrap(),
+            ),
         ];
         let body = build_concat_list(&f, origin, 4.0).unwrap();
         let durations: Vec<f64> = body

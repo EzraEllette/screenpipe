@@ -39,9 +39,7 @@ pub async fn handle_export_command(args: &ExportArgs) -> anyhow::Result<()> {
             let start =
                 parse_flexible_datetime(start_raw).map_err(|e| anyhow::anyhow!("--start: {e}"))?;
             let end = match args.end.as_deref() {
-                Some(s) => {
-                    parse_flexible_datetime(s).map_err(|e| anyhow::anyhow!("--end: {e}"))?
-                }
+                Some(s) => parse_flexible_datetime(s).map_err(|e| anyhow::anyhow!("--end: {e}"))?,
                 None => Utc::now(),
             };
             Mode::Range(start, end)
