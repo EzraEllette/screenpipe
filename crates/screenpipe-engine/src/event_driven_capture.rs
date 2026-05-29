@@ -515,6 +515,13 @@ pub async fn event_driven_capture_loop(
     // then suppress until success. Prevents monitor disconnect from flooding
     // Sentry with 100k+ identical events.
     let mut consecutive_capture_errors: u32 = 0;
+    // Whether an HD (high-FPS) session is currently active. Refreshed each
+    // tick from the controller snapshot below. When true, content dedup is
+    // bypassed (see `dedup_applies`) so dense replay captures every change at
+    // the HD interval even when the accessibility-tree hash is unchanged —
+    // the video / slide-flip / demo-replay case the AX-text dedup otherwise
+    // suppresses. Stays false when no controller is wired.
+    let mut hd_active = false;
 
     let capture_params = CaptureParams {
         db: &db,
@@ -550,6 +557,7 @@ pub async fn event_driven_capture_loop(
             None, // first capture — no elements ref
             &mut walk_budget,
             false, // screenshot enabled on startup
+            false, // hd not active at startup (Manual is dedup-exempt anyway)
         )
         .await
         {
@@ -853,6 +861,9 @@ pub async fn event_driven_capture_loop(
         // because the controller flipped between two separate atomic loads.
         if let Some(controller) = high_fps_controller.as_ref() {
             let snap = controller.snapshot();
+            // Source of truth for dedup-bypass this tick. Read from the same
+            // snapshot as the interval install so the two can't disagree.
+            hd_active = snap.active;
             if let Some(new_ms) = high_fps.on_controller_state(
                 snap.effective_interval_ms(),
                 state.config.min_capture_interval_ms,
@@ -1119,6 +1130,7 @@ pub async fn event_driven_capture_loop(
                         elements_ref,
                         &mut walk_budget,
                         screenshot_disabled,
+                        hd_active,
                     ),
                 )
                 .await;
@@ -1497,12 +1509,34 @@ fn terminal_ocr_throttled(app_name: &str) -> bool {
     }
 }
 
+/// Decide whether content dedup applies to this capture attempt.
+///
+/// Dedup skips a capture when the accessibility-tree hash matches the previous
+/// frame. It is suppressed in three cases:
+/// - `hd_active`: an HD (high-FPS) session is running. HD exists to produce
+///   dense replay (video, slide flips, demos), and that content frequently
+///   moves pixels while leaving the AX-tree text unchanged — exactly what the
+///   hash dedup would otherwise drop. While HD is on we capture every change
+///   at the HD interval and let the visual-change trigger + `min_capture_
+///   interval_ms` debounce be the only rate limiters.
+/// - `Idle`/`Manual` triggers: fallback captures that must always write so the
+///   timeline is never completely empty.
+/// - the 30s time-floor has elapsed: forces a write even if the hash matches.
+fn dedup_applies(trigger: &CaptureTrigger, hd_active: bool, since_last_db_write: Duration) -> bool {
+    !hd_active
+        && !matches!(trigger, CaptureTrigger::Idle | CaptureTrigger::Manual)
+        && since_last_db_write < Duration::from_secs(30)
+}
+
 /// Perform a single event-driven capture.
 ///
 /// When `previous_content_hash` is `Some` and matches the current accessibility
 /// tree hash, the capture is skipped (content dedup). The returned
 /// `CaptureOutput.result` will be `None` in that case — the caller should still
 /// update the frame comparer with the image but skip DB/metrics work.
+///
+/// `hd_active` bypasses content dedup entirely for this capture — see
+/// [`dedup_applies`].
 async fn do_capture(
     params: &CaptureParams<'_>,
     trigger: &CaptureTrigger,
@@ -1511,6 +1545,7 @@ async fn do_capture(
     elements_ref_frame_id: Option<i64>,
     walk_budget: &mut screenpipe_a11y::budget::AppWalkBudget,
     screenshot_disabled: bool,
+    hd_active: bool,
 ) -> Result<CaptureOutput> {
     let captured_at = Utc::now();
 
@@ -1685,11 +1720,9 @@ async fn do_capture(
     }
 
     // Content dedup: skip capture if accessibility text hasn't changed.
-    // Never dedup Idle/Manual triggers — these are fallback captures that must
-    // always write so the timeline is never completely empty.
-    // Also force a write every 30s even if hash matches (time-based floor).
-    let dedup_eligible = !matches!(trigger, CaptureTrigger::Idle | CaptureTrigger::Manual)
-        && last_db_write.elapsed() < Duration::from_secs(30);
+    // Never dedup Idle/Manual triggers, bypass entirely during HD sessions, and
+    // force a write every 30s even if the hash matches — see `dedup_applies`.
+    let dedup_eligible = dedup_applies(trigger, hd_active, last_db_write.elapsed());
     if dedup_eligible {
         if let Some(ref snap) = tree_snapshot {
             if !snap.text_content.is_empty() {
@@ -1969,6 +2002,29 @@ mod tests {
         assert_eq!(CaptureTrigger::VisualChange.as_str(), "visual_change");
         assert_eq!(CaptureTrigger::Idle.as_str(), "idle");
         assert_eq!(CaptureTrigger::Manual.as_str(), "manual");
+    }
+
+    #[test]
+    fn test_dedup_applies() {
+        let recent = Duration::from_secs(5);
+        let stale = Duration::from_secs(31);
+
+        // Baseline: a change-driven trigger within the 30s floor → dedup applies.
+        assert!(dedup_applies(&CaptureTrigger::VisualChange, false, recent));
+        assert!(dedup_applies(&CaptureTrigger::Click, false, recent));
+
+        // HD active → dedup is bypassed even for an otherwise-eligible trigger.
+        // This is the fix: video/demo replay moves pixels but not AX text, so
+        // the hash would dedup it away without this bypass.
+        assert!(!dedup_applies(&CaptureTrigger::VisualChange, true, recent));
+        assert!(!dedup_applies(&CaptureTrigger::Click, true, recent));
+
+        // Idle/Manual are always dedup-exempt (timeline floor), HD or not.
+        assert!(!dedup_applies(&CaptureTrigger::Idle, false, recent));
+        assert!(!dedup_applies(&CaptureTrigger::Manual, false, recent));
+
+        // 30s time-floor: once it elapses, write through regardless.
+        assert!(!dedup_applies(&CaptureTrigger::VisualChange, false, stale));
     }
 
     #[test]
