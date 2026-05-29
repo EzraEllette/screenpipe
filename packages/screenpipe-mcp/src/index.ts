@@ -1720,7 +1720,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           };
         }
         const response = await callAPI(`/meetings/${meetingId}`, {
-          method: "PATCH",
+          method: "PUT",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(body),
         });
