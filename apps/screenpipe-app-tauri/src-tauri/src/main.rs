@@ -57,6 +57,7 @@ mod ics_calendar;
 mod livetext;
 #[cfg(target_os = "macos")]
 mod livetext_ffi;
+mod meeting_export;
 mod meeting_live_notes;
 mod meeting_stall_notifications;
 mod oauth;
@@ -1146,6 +1147,9 @@ async fn main() {
             // Window-specific shortcut commands (dynamic registration)
             commands::register_window_shortcuts,
             commands::unregister_window_shortcuts,
+            // Meeting / range export to MP4 (engine core, in-process — the
+            // `screenpipe export` CLI's in-app twin)
+            meeting_export::export_recording,
             // Frame quick actions: copy frame image to clipboard
             commands::copy_frame_to_clipboard,
             commands::copy_deeplink_to_clipboard,
