@@ -1380,6 +1380,9 @@ function Section({
         className={cn(
           // Light header row — avoid the "boxed section" look.
           "group/section shrink-0 px-2.5 py-1 flex items-center gap-1 rounded-sm text-left",
+          // Suppress the default macOS blue focus ring — it bleeds into the
+          // adjacent animated grid during collapse and leaves a cyan stripe.
+          "focus:outline-none",
           tone === "subtle" ? "hover:bg-muted/10" : "hover:bg-muted/15"
         )}
         aria-expanded={!collapsed}
@@ -1435,7 +1438,10 @@ function Section({
       </button>
       <div
         className={cn(
-          "grid transition-[grid-template-rows] duration-200 ease-in-out",
+          // overflow-hidden here ensures paint stays within the animated
+          // boundary and prevents the focus-ring bleed that caused the
+          // left-edge cyan stripe artifact during collapse/expand.
+          "grid overflow-hidden transition-[grid-template-rows] duration-200 ease-in-out",
           collapsed ? "grid-rows-[0fr]" : "grid-rows-[1fr]"
         )}
       >
@@ -1554,7 +1560,7 @@ export function SidebarChatRow({
           <span
             className={cn(
               "absolute inset-y-0 right-0 flex items-center justify-end transition-opacity duration-150",
-              canSwapAgeForMenu && "group-hover:opacity-0",
+              canShowActions && "group-hover:opacity-0",
               menuOpen && "opacity-0"
             )}
           >
