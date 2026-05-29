@@ -60,6 +60,7 @@ import {
 } from "@/lib/utils/meeting-format";
 import {
   buildEnrichedSummarizePrompt,
+  buildMeetingSummarizeDisplayLabel,
   buildMeetingMarkdown,
   fetchMeetingAudio,
   fetchMeetingContext,
@@ -470,6 +471,7 @@ export function NoteView({
           transcript,
           directiveOverride,
         }),
+        displayLabel: buildMeetingSummarizeDisplayLabel(fresh),
         autoSend: true,
         source: "meeting-summarize",
         useHomeChat: true,
