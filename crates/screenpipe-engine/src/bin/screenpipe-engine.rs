@@ -1713,11 +1713,11 @@ async fn main() -> anyhow::Result<()> {
             adapters::{
                 onnx::{OnnxConfig, OnnxRedactor},
                 opf::{OpfAdapter, OpfConfig},
-                tinfoil::TinfoilRedactor,
+                tinfoil::{TinfoilConfig, TinfoilRedactor},
             },
             pipeline::{Pipeline, PipelineConfig},
             worker::{Worker, WorkerConfig, ALL_TARGET_TABLES},
-            Redactor,
+            Redactor, TextRedactionPolicy,
         };
         use std::sync::Arc;
 
@@ -1741,7 +1741,13 @@ async fn main() -> anyhow::Result<()> {
         //   4. Regex-only otherwise (still destructive — overwrites
         //      regex-redacted text into the source columns).
         let pool = db.pool.clone();
+        let labels = config.pii_redaction_labels.clone();
         tokio::spawn(async move {
+            // Per-label allow-list from the `piiRedactionLabels` setting
+            // (default ["secret"]). Local adapters filter client-side via
+            // this policy; the env-gated tinfoil fallback forwards the
+            // raw labels so the enclave filters server-side.
+            let policy = TextRedactionPolicy::from_labels(&labels);
             info!(
                 "fetching v45 phase 3 ONNX text redactor (~278 MB INT8 on first run, \
                  cached at ~/.screenpipe/models/v45_phase3_onnx/)"
@@ -1753,7 +1759,13 @@ async fn main() -> anyhow::Result<()> {
                          desktop app + Tinfoil container, sub-10 ms p50 on CPU"
                     );
                     let ai: Arc<dyn Redactor> = Arc::new(adapter);
-                    Pipeline::regex_then_ai(ai, PipelineConfig::default())
+                    Pipeline::regex_then_ai(
+                        ai,
+                        PipelineConfig {
+                            policy: policy.clone(),
+                            ..Default::default()
+                        },
+                    )
                 }
                 Err(onnx_err) => {
                     tracing::warn!(
@@ -1776,7 +1788,13 @@ async fn main() -> anyhow::Result<()> {
                             let adapter = Arc::new(adapter);
                             let _unloader = Arc::clone(&adapter).spawn_idle_unloader();
                             let ai: Arc<dyn Redactor> = adapter;
-                            Pipeline::regex_then_ai(ai, PipelineConfig::default())
+                            Pipeline::regex_then_ai(
+                                ai,
+                                PipelineConfig {
+                                    policy: policy.clone(),
+                                    ..Default::default()
+                                },
+                            )
                         }
                         Err(e) => {
                             if std::env::var("TINFOIL_API_KEY").is_ok()
@@ -1786,15 +1804,26 @@ async fn main() -> anyhow::Result<()> {
                                     "text-PII AI step: tinfoil enclave (local adapters \
                                      unavailable: opf-rs={e})"
                                 );
-                                let ai: Arc<dyn Redactor> = Arc::new(TinfoilRedactor::from_env());
-                                Pipeline::regex_then_ai(ai, PipelineConfig::default())
+                                let ai: Arc<dyn Redactor> = Arc::new(TinfoilRedactor::new(
+                                    TinfoilConfig {
+                                        labels: labels.clone(),
+                                        ..Default::default()
+                                    },
+                                ));
+                                Pipeline::regex_then_ai(
+                                    ai,
+                                    PipelineConfig {
+                                        policy: policy.clone(),
+                                        ..Default::default()
+                                    },
+                                )
                             } else {
                                 tracing::warn!(
                                     "text-PII AI step disabled — both v45 ONNX and opf-rs \
                                      unavailable ({e}), and no TINFOIL_* env vars set. Worker \
                                      will run regex-only."
                                 );
-                                Pipeline::regex_only()
+                                Pipeline::regex_only_with_policy(policy.clone())
                             }
                         }
                     }
@@ -1829,7 +1858,7 @@ async fn main() -> anyhow::Result<()> {
     if config.async_image_pii_redaction {
         use screenpipe_redact::adapters::rfdetr::{RfdetrConfig, RfdetrRedactor};
         use screenpipe_redact::image::worker::{ImageWorker, ImageWorkerConfig};
-        use screenpipe_redact::ImageRedactor;
+        use screenpipe_redact::{ImageRedactionPolicy, ImageRedactor};
         use std::sync::Arc;
 
         // Prefer the MLX runtime on Mac when the safetensors weights
@@ -1894,7 +1923,10 @@ async fn main() -> anyhow::Result<()> {
             info!(
                 "starting async image-PII reconciliation worker (destructive overwrite of source JPGs)"
             );
-            let cfg = ImageWorkerConfig::default();
+            let cfg = ImageWorkerConfig {
+                policy: ImageRedactionPolicy::from_labels(&config.pii_redaction_labels),
+                ..Default::default()
+            };
             let _img_handle = ImageWorker::new(db.pool.clone(), detector, cfg).spawn();
         }
     }

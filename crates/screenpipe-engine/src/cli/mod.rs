@@ -432,6 +432,13 @@ pub struct RecordArgs {
     #[arg(long, default_value = "local")]
     pub pii_backend: String,
 
+    /// Which PII classes the AI redaction workers rewrite when enabled.
+    /// Comma-separated canonical labels: secret, person, email, phone,
+    /// address, sensitive, url, company, repo, handle, channel, id,
+    /// date. `secret` is always included regardless. Default: secret.
+    #[arg(long, value_delimiter = ',', default_value = "secret")]
+    pub pii_redaction_labels: Vec<String>,
+
     /// Filter music-dominant audio before transcription (reduces Spotify/YouTube music noise)
     #[arg(long, default_value_t = false)]
     pub filter_music: bool,
@@ -647,6 +654,7 @@ pub struct RecordArgSources {
     pub async_pii_redaction: bool,
     pub async_image_pii_redaction: bool,
     pub pii_backend: bool,
+    pub pii_redaction_labels: bool,
     pub filter_music: bool,
     pub disable_vision: bool,
     pub ignored_windows: bool,
@@ -691,6 +699,7 @@ impl RecordArgSources {
             async_pii_redaction: from_command_line(record, "async_pii_redaction"),
             async_image_pii_redaction: from_command_line(record, "async_image_pii_redaction"),
             pii_backend: from_command_line(record, "pii_backend"),
+            pii_redaction_labels: from_command_line(record, "pii_redaction_labels"),
             filter_music: from_command_line(record, "filter_music"),
             disable_vision: from_command_line(record, "disable_vision"),
             ignored_windows: from_command_line(record, "ignored_windows"),
@@ -727,6 +736,7 @@ impl RecordArgSources {
             || self.async_pii_redaction
             || self.async_image_pii_redaction
             || self.pii_backend
+            || self.pii_redaction_labels
             || self.filter_music
             || self.disable_vision
             || self.ignored_windows
@@ -807,6 +817,7 @@ impl RecordArgs {
             async_pii_redaction: self.async_pii_redaction,
             async_image_pii_redaction: self.async_image_pii_redaction,
             pii_backend: self.pii_backend.clone(),
+            pii_redaction_labels: self.pii_redaction_labels.clone(),
             filter_music: self.filter_music,
             audio_transcription_engine: engine_str.to_string(),
             transcription_mode: mode_str.to_string(),
@@ -1048,6 +1059,9 @@ impl RecordArgs {
         }
         if sources.pii_backend {
             settings.pii_backend = self.pii_backend.clone();
+        }
+        if sources.pii_redaction_labels {
+            settings.pii_redaction_labels = self.pii_redaction_labels.clone();
         }
         if sources.filter_music {
             settings.filter_music = self.filter_music;

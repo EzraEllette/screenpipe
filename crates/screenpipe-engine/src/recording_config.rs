@@ -46,6 +46,12 @@ pub struct RecordingConfig {
     /// One toggle covers both modalities; the user-facing UI is a
     /// single radio under the AI PII removal switch.
     pub pii_backend: String,
+    /// Which PII classes the AI redaction workers rewrite. Canonical
+    /// snake_case `SpanLabel` names; defaults to `["secret"]`, with
+    /// `secret` always included. Mirrors the `piiRedactionLabels`
+    /// setting; consumed when building the text + image worker
+    /// policies.
+    pub pii_redaction_labels: Vec<String>,
     /// Filter music-dominant audio before transcription using spectral analysis
     pub filter_music: bool,
 
@@ -227,6 +233,7 @@ impl RecordingConfig {
             async_pii_redaction: settings.async_pii_redaction,
             async_image_pii_redaction: settings.async_image_pii_redaction,
             pii_backend: settings.pii_backend.clone(),
+            pii_redaction_labels: settings.pii_redaction_labels.clone(),
             filter_music: settings.filter_music,
             enable_workflow_events: settings.enable_workflow_events,
             audio_transcription_engine: engine_str

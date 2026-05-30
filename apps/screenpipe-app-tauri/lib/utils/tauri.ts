@@ -2178,6 +2178,19 @@ asyncImagePiiRedaction?: boolean;
  */
 piiBackend?: string;
 /**
+ * Which PII classes the AI redaction workers actually rewrite
+ * when `asyncPiiRedaction` / `asyncImagePiiRedaction` are on.
+ * Canonical snake_case `SpanLabel` names (e.g.
+ * `["secret", "email", "person"]`). The models detect every
+ * class but only these are removed — the rest is *value* (a
+ * searchable timeline). Defaults to `["secret"]`, the safety
+ * baseline; `secret` is always treated as included regardless of
+ * what's stored (see screenpipe-redact `parse_allow_list`). The
+ * Settings UI surfaces a curated subset (Names, Emails, Phones,
+ * Addresses, Sensitive) as opt-in checkboxes.
+ */
+piiRedactionLabels?: string[];
+/**
  * Screenpipe cloud user ID. Empty string means not logged in.
  * Kept as String (not Option) to match existing store.bin schema.
  */

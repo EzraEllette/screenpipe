@@ -616,6 +616,14 @@ impl ServerCore {
         let backend = config.pii_backend.as_str();
         let use_tinfoil = matches!(backend, "tinfoil" | "cloud" | "enclave");
 
+        // User-selected redaction classes (the `piiRedactionLabels`
+        // setting, default ["secret"]). Local adapters return spans and
+        // we filter client-side via the text/image policies built from
+        // this list; the tinfoil adapters forward the raw list so the
+        // enclave filters server-side. `secret` is always included
+        // regardless (see screenpipe_redact::parse_allow_list).
+        let pii_labels = config.pii_redaction_labels.clone();
+
         // Cloud Clerk JWT — same token used for the cloud transcription
         // bearer (see line 96). Tinfoil's enclave is on the screenpipe
         // cloud auth boundary, so the user's signed-in token is what
@@ -638,6 +646,7 @@ impl ServerCore {
             use screenpipe_redact::pipeline::{Pipeline, PipelineConfig};
             use screenpipe_redact::worker::{Worker, WorkerConfig, ALL_TARGET_TABLES};
             use screenpipe_redact::Redactor;
+            use screenpipe_redact::TextRedactionPolicy;
 
             // Backend selection for the text "AI" step:
             //   - "local"   → on-device candle OPF v3 (opf-rs). First
@@ -660,9 +669,16 @@ impl ServerCore {
                 );
                 let ai: Arc<dyn Redactor> = Arc::new(TinfoilRedactor::new(TinfoilConfig {
                     api_key: tinfoil_api_key.clone(),
+                    labels: pii_labels.clone(),
                     ..Default::default()
                 }));
-                let pipeline = Pipeline::regex_then_ai(ai, PipelineConfig::default());
+                let pipeline = Pipeline::regex_then_ai(
+                    ai,
+                    PipelineConfig {
+                        policy: TextRedactionPolicy::from_labels(&pii_labels),
+                        ..Default::default()
+                    },
+                );
                 let pipeline_arc = Arc::new(pipeline) as Arc<dyn Redactor>;
                 let cfg = WorkerConfig {
                     tables: ALL_TARGET_TABLES.to_vec(),
@@ -677,7 +693,9 @@ impl ServerCore {
                 // task once the model is ready.
                 let pool = db.pool.clone();
                 let shutdown = redact_shutdown.clone();
+                let labels = pii_labels.clone();
                 tokio::spawn(async move {
+                    let policy = TextRedactionPolicy::from_labels(&labels);
                     // Prefer v45 phase 3 ONNX (~278 MB INT8, HIPAA 90.2%,
                     // sub-10 ms p50, gets CoreML on macOS / DirectML on
                     // Windows / CPU on Linux via the redact-onnx-* CI
@@ -697,7 +715,13 @@ impl ServerCore {
                                  v45_phase3_onnx)"
                             );
                             let ai: Arc<dyn Redactor> = Arc::new(adapter);
-                            Pipeline::regex_then_ai(ai, PipelineConfig::default())
+                            Pipeline::regex_then_ai(
+                                ai,
+                                PipelineConfig {
+                                    policy: policy.clone(),
+                                    ..Default::default()
+                                },
+                            )
                         }
                         Err(onnx_err) => {
                             warn!(
@@ -711,7 +735,13 @@ impl ServerCore {
                                          (backend=local, opf-rs fallback)"
                                     );
                                     let ai: Arc<dyn Redactor> = Arc::new(adapter);
-                                    Pipeline::regex_then_ai(ai, PipelineConfig::default())
+                                    Pipeline::regex_then_ai(
+                                        ai,
+                                        PipelineConfig {
+                                            policy: policy.clone(),
+                                            ..Default::default()
+                                        },
+                                    )
                                 }
                                 Err(e) => {
                                     warn!(
@@ -720,7 +750,7 @@ impl ServerCore {
                                          to 'tinfoil' in Settings → Privacy → AI PII removal \
                                          to use the cloud enclave instead."
                                     );
-                                    Pipeline::regex_only()
+                                    Pipeline::regex_only_with_policy(policy.clone())
                                 }
                             }
                         }
@@ -741,6 +771,7 @@ impl ServerCore {
                 TinfoilImageConfig, TinfoilImageRedactor,
             };
             use screenpipe_redact::image::worker::{ImageWorker, ImageWorkerConfig};
+            use screenpipe_redact::ImageRedactionPolicy;
             use screenpipe_redact::ImageRedactor;
 
             let pool = db.pool.clone();
@@ -752,23 +783,38 @@ impl ServerCore {
                 let detector =
                     Arc::new(TinfoilImageRedactor::new(TinfoilImageConfig {
                         api_key: tinfoil_api_key.clone(),
+                        labels: pii_labels.clone(),
                         ..Default::default()
                     })) as Arc<dyn ImageRedactor>;
-                let _ = ImageWorker::new(pool, detector, ImageWorkerConfig::default())
-                    .spawn_with_shutdown(redact_shutdown.clone());
+                let _ = ImageWorker::new(
+                    pool,
+                    detector,
+                    ImageWorkerConfig {
+                        policy: ImageRedactionPolicy::from_labels(&pii_labels),
+                        ..Default::default()
+                    },
+                )
+                .spawn_with_shutdown(redact_shutdown.clone());
             } else {
                 // Local mode: rfdetr_v8 ONNX. First-run downloads
                 // ~108 MB from huggingface.co/screenpipe/pii-image-redactor
                 // and verifies SHA-256 before landing in ~/.screenpipe/models/.
                 let shutdown = redact_shutdown.clone();
+                let labels = pii_labels.clone();
                 tokio::spawn(async move {
                     match RfdetrRedactor::load_or_download(RfdetrConfig::default()).await {
                         Ok(detector) => {
                             info!("starting async image-PII worker (backend=local)");
                             let detector_arc = Arc::new(detector) as Arc<dyn ImageRedactor>;
-                            let _ =
-                                ImageWorker::new(pool, detector_arc, ImageWorkerConfig::default())
-                                    .spawn_with_shutdown(shutdown);
+                            let _ = ImageWorker::new(
+                                pool,
+                                detector_arc,
+                                ImageWorkerConfig {
+                                    policy: ImageRedactionPolicy::from_labels(&labels),
+                                    ..Default::default()
+                                },
+                            )
+                            .spawn_with_shutdown(shutdown);
                         }
                         Err(e) => {
                             warn!(

@@ -362,6 +362,19 @@ pub struct RecordingSettings {
     #[serde(rename = "piiBackend", default = "default_pii_backend")]
     pub pii_backend: String,
 
+    /// Which PII classes the AI redaction workers actually rewrite
+    /// when `asyncPiiRedaction` / `asyncImagePiiRedaction` are on.
+    /// Canonical snake_case `SpanLabel` names (e.g.
+    /// `["secret", "email", "person"]`). The models detect every
+    /// class but only these are removed — the rest is *value* (a
+    /// searchable timeline). Defaults to `["secret"]`, the safety
+    /// baseline; `secret` is always treated as included regardless of
+    /// what's stored (see screenpipe-redact `parse_allow_list`). The
+    /// Settings UI surfaces a curated subset (Names, Emails, Phones,
+    /// Addresses, Sensitive) as opt-in checkboxes.
+    #[serde(rename = "piiRedactionLabels", default = "default_pii_redaction_labels")]
+    pub pii_redaction_labels: Vec<String>,
+
     // ── Cloud / Auth ───────────────────────────────────────────────────
     /// Screenpipe cloud user ID. Empty string means not logged in.
     /// Kept as String (not Option) to match existing store.bin schema.
@@ -541,6 +554,7 @@ impl Default for RecordingSettings {
             async_pii_redaction: false,
             async_image_pii_redaction: false,
             pii_backend: default_pii_backend(),
+            pii_redaction_labels: default_pii_redaction_labels(),
             user_id: String::new(),
             user_name: None,
             openai_compatible_endpoint: None,
@@ -593,6 +607,12 @@ fn default_pause_extraction_on_input_ms() -> u64 {
 
 fn default_pii_backend() -> String {
     "local".to_string()
+}
+
+/// Default redaction allow-list: secrets only. The safety baseline —
+/// credentials are the one class where a miss is genuinely dangerous.
+fn default_pii_redaction_labels() -> Vec<String> {
+    vec!["secret".to_string()]
 }
 
 fn default_hd_recording_default() -> String {
