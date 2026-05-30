@@ -6417,6 +6417,18 @@ export function StandaloneChat({
       queuedPrompt = `<conversation_history>\n${historyLines}\n</conversation_history>\n\n${userMessage}`;
     }
 
+    // E2E test hook — capture queued prompts for context-loss assertions
+    {
+      const g = window as any;
+      if (Array.isArray(g.__e2ePiPromptCaptures)) {
+        g.__e2ePiPromptCaptures.push({
+          sessionId: piSessionIdRef.current,
+          message: queuedPrompt,
+          at: Date.now(),
+        });
+      }
+    }
+
     try {
       const result = await commands.piQueuePrompt(
         piSessionIdRef.current,
@@ -6779,6 +6791,18 @@ export function StandaloneChat({
         promptMessage = `<conversation_history>\n${historyLines}\n</conversation_history>\n\n${userMessage}`;
       }
       piSessionSyncedRef.current = true;
+
+      // E2E test hook — write to __e2ePiPromptCaptures when the recorder is installed
+      {
+        const g = window as any;
+        if (Array.isArray(g.__e2ePiPromptCaptures)) {
+          g.__e2ePiPromptCaptures.push({
+            sessionId: piSessionIdRef.current,
+            message: promptMessage,
+            at: Date.now(),
+          });
+        }
+      }
 
       // Send prompt — abort/new_session now await completion, so no retry needed
       let result = await commands.piPrompt(
