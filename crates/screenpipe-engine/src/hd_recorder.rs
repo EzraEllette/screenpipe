@@ -402,7 +402,10 @@ mod macos {
         let rgb = image::DynamicImage::ImageRgba8(frame).to_rgb8();
         let mut buf = Vec::new();
         image::DynamicImage::ImageRgb8(rgb)
-            .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Jpeg)
+            .write_to(
+                &mut std::io::Cursor::new(&mut buf),
+                image::ImageFormat::Jpeg,
+            )
             .context("jpeg encode")?;
         Ok(buf)
     }
