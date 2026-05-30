@@ -327,11 +327,8 @@ async fn reconfigure_audio_manager(
     let audio_devices = if config.disable_audio {
         Vec::new()
     } else {
-        resolve_audio_devices_for_capture(
-            &config.audio_devices,
-            config.use_system_default_audio,
-        )
-        .await
+        resolve_audio_devices_for_capture(&config.audio_devices, config.use_system_default_audio)
+            .await
     };
 
     let mut audio_manager_builder = config

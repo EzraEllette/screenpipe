@@ -221,9 +221,7 @@ pub fn get_high_fps_status() -> HighFpsCacheEntry {
 }
 
 pub fn set_high_fps_status(entry: HighFpsCacheEntry) {
-    let mut guard = HIGH_FPS_STATUS
-        .write()
-        .unwrap_or_else(|e| e.into_inner());
+    let mut guard = HIGH_FPS_STATUS.write().unwrap_or_else(|e| e.into_inner());
     *guard = entry;
 }
 
