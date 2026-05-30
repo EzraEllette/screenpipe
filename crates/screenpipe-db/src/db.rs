@@ -2391,6 +2391,35 @@ impl DatabaseManager {
         Ok(id)
     }
 
+    /// Insert a timeline index frame that points into an existing HD video
+    /// chunk. Unlike [`insert_frame`], `video_chunk_id` and `offset_index` are
+    /// explicit (no racy "latest chunk for device" lookup) and no OCR / app
+    /// metadata is attached — the HD recorder writes these as sparse scrub
+    /// markers into a chunk it owns. `snapshot_path` stays NULL so the timeline
+    /// and export resolve the image from `video_chunks.file_path` at
+    /// `offset_index` (the frame's 0-based decode position in the .mp4).
+    pub async fn insert_hd_index_frame(
+        &self,
+        video_chunk_id: i64,
+        offset_index: i64,
+        timestamp: DateTime<Utc>,
+        device_name: &str,
+    ) -> Result<i64, sqlx::Error> {
+        let mut tx = self.begin_immediate_with_retry().await?;
+        let id = sqlx::query(
+            "INSERT INTO frames (video_chunk_id, offset_index, timestamp, focused, device_name) VALUES (?1, ?2, ?3, 1, ?4)",
+        )
+        .bind(video_chunk_id)
+        .bind(offset_index)
+        .bind(timestamp)
+        .bind(device_name)
+        .execute(&mut **tx.conn())
+        .await?
+        .last_insert_rowid();
+        tx.commit().await?;
+        Ok(id)
+    }
+
     /// Insert a snapshot frame (event-driven capture).
     ///
     /// Unlike `insert_frame`, this does NOT require a video_chunk.

@@ -13,6 +13,8 @@ pub mod monitor;
 #[cfg(target_os = "windows")]
 pub mod wgc_capture;
 pub use monitor::MonitorListError;
+#[cfg(target_os = "macos")]
+pub use monitor::HdCapture;
 pub mod metrics;
 pub mod ocr_cache;
 pub mod tesseract;

@@ -77,6 +77,10 @@ pub struct VisionManager {
     status: Arc<RwLock<VisionManagerStatus>>,
     /// Map of monitor_id -> JoinHandle
     recording_tasks: Arc<DashMap<u32, JoinHandle<()>>>,
+    /// Map of monitor_id -> high-fps HD recorder JoinHandle. Spawned alongside
+    /// each capture loop; idles until an HD session is active. Aborted in
+    /// `stop_monitor` (ffmpeg self-finalizes on stdin EOF).
+    hd_recording_tasks: Arc<DashMap<u32, JoinHandle<()>>>,
     /// Broadcast sender for capture triggers — shared with UI recorder.
     /// Each monitor subscribes via `trigger_tx.subscribe()`.
     trigger_tx: TriggerSender,
@@ -149,6 +153,7 @@ impl VisionManager {
             vision_handle,
             status: Arc::new(RwLock::new(VisionManagerStatus::Stopped)),
             recording_tasks: Arc::new(DashMap::new()),
+            hd_recording_tasks: Arc::new(DashMap::new()),
             trigger_tx,
             linker_tx,
             linker_stop,
@@ -496,6 +501,29 @@ impl VisionManager {
         let linker_tx = Some(self.linker_tx.clone());
         let high_fps_controller = self.high_fps_controller.clone();
 
+        // Spawn the decoupled high-fps HD recorder alongside this monitor's
+        // capture loop. It idles until an HD session is active, then records a
+        // CFR H.264 chunk with NO OCR (the event loop above keeps indexing
+        // sparsely). Shares the same Arc<SafeMonitor> + HighFpsController; runs
+        // on its own task, aborted in `stop_monitor`.
+        {
+            let hd_config = crate::hd_recorder::HdRecorderConfig {
+                ignored_windows: self.config.ignored_windows.clone(),
+                included_windows: self.config.included_windows.clone(),
+            };
+            let hd_handle = self.vision_handle.spawn(crate::hd_recorder::hd_recorder_loop(
+                self.db.clone(),
+                monitor.clone(),
+                monitor_id,
+                device_name.clone(),
+                std::path::PathBuf::from(format!("{}/data", output_path)),
+                hd_config,
+                Arc::new(AtomicBool::new(false)),
+                high_fps_controller.clone(),
+            ));
+            self.hd_recording_tasks.insert(monitor_id, hd_handle);
+        }
+
         info!(
             "Starting event-driven capture for monitor {} (device: {})",
             monitor_id, device_name
@@ -540,6 +568,11 @@ impl VisionManager {
 
     /// Stop recording on a specific monitor
     pub async fn stop_monitor(&self, monitor_id: u32) -> Result<()> {
+        // Stop the HD recorder first. Aborting drops its ffmpeg stdin, which
+        // sends EOF so ffmpeg finalizes the .mp4 (moov atom) on its own.
+        if let Some((_, hd_handle)) = self.hd_recording_tasks.remove(&monitor_id) {
+            hd_handle.abort();
+        }
         if let Some((_, handle)) = self.recording_tasks.remove(&monitor_id) {
             info!("Stopping vision recording for monitor {}", monitor_id);
 
