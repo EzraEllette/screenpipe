@@ -511,16 +511,18 @@ impl VisionManager {
                 ignored_windows: self.config.ignored_windows.clone(),
                 included_windows: self.config.included_windows.clone(),
             };
-            let hd_handle = self.vision_handle.spawn(crate::hd_recorder::hd_recorder_loop(
-                self.db.clone(),
-                monitor.clone(),
-                monitor_id,
-                device_name.clone(),
-                std::path::PathBuf::from(format!("{}/data", output_path)),
-                hd_config,
-                Arc::new(AtomicBool::new(false)),
-                high_fps_controller.clone(),
-            ));
+            let hd_handle = self
+                .vision_handle
+                .spawn(crate::hd_recorder::hd_recorder_loop(
+                    self.db.clone(),
+                    monitor.clone(),
+                    monitor_id,
+                    device_name.clone(),
+                    std::path::PathBuf::from(format!("{}/data", output_path)),
+                    hd_config,
+                    Arc::new(AtomicBool::new(false)),
+                    high_fps_controller.clone(),
+                ));
             self.hd_recording_tasks.insert(monitor_id, hd_handle);
         }
 

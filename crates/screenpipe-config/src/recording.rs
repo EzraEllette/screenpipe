@@ -372,7 +372,10 @@ pub struct RecordingSettings {
     /// what's stored (see screenpipe-redact `parse_allow_list`). The
     /// Settings UI surfaces a curated subset (Names, Emails, Phones,
     /// Addresses, Sensitive) as opt-in checkboxes.
-    #[serde(rename = "piiRedactionLabels", default = "default_pii_redaction_labels")]
+    #[serde(
+        rename = "piiRedactionLabels",
+        default = "default_pii_redaction_labels"
+    )]
     pub pii_redaction_labels: Vec<String>,
 
     // ── Cloud / Auth ───────────────────────────────────────────────────

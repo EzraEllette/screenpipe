@@ -183,7 +183,10 @@ mod tests {
         assert_eq!(SpanLabel::from_wire("person"), Some(SpanLabel::Person));
         assert_eq!(SpanLabel::from_wire("  Email "), Some(SpanLabel::Email));
         assert_eq!(SpanLabel::from_wire("SECRET"), Some(SpanLabel::Secret));
-        assert_eq!(SpanLabel::from_wire("sensitive"), Some(SpanLabel::Sensitive));
+        assert_eq!(
+            SpanLabel::from_wire("sensitive"),
+            Some(SpanLabel::Sensitive)
+        );
         assert_eq!(SpanLabel::from_wire("nonsense"), None);
         assert_eq!(SpanLabel::from_wire(""), None);
     }

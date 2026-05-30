@@ -16,7 +16,7 @@
 //!   cargo bench -p screenpipe-engine --bench hot_frame_cache
 
 use chrono::{Duration, Utc};
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use screenpipe_engine::hot_frame_cache::{HotAudio, HotFrame, HotFrameCache};
 
 // ---------------------------------------------------------------------------
@@ -30,8 +30,14 @@ fn make_frame(id: i64) -> HotFrame {
         device_name: "monitor_0".into(),
         app_name: "Google Chrome".into(),
         window_name: "screenpipe — Memory Optimization - Google Chrome".into(),
-        ocr_text_preview: "The quick brown fox jumps over the lazy dog. ".repeat(4).into(),
-        snapshot_path: format!("/Users/user/Library/Application Support/screenpipe/data/monitor_0_{}.jpg", id).into(),
+        ocr_text_preview: "The quick brown fox jumps over the lazy dog. "
+            .repeat(4)
+            .into(),
+        snapshot_path: format!(
+            "/Users/user/Library/Application Support/screenpipe/data/monitor_0_{}.jpg",
+            id
+        )
+        .into(),
         browser_url: Some("https://github.com/mediar-ai/screenpipe".into()),
         capture_trigger: "app_switch".into(),
         offset_index: id * 30,
@@ -72,9 +78,7 @@ fn rt() -> tokio::runtime::Runtime {
 
 fn bench_hotframe_clone(c: &mut Criterion) {
     let frame = make_frame(1);
-    c.bench_function("HotFrame::clone", |b| {
-        b.iter(|| black_box(frame.clone()))
-    });
+    c.bench_function("HotFrame::clone", |b| b.iter(|| black_box(frame.clone())));
 }
 
 // ---------------------------------------------------------------------------
@@ -119,9 +123,7 @@ fn bench_get_frames_in_range(c: &mut Criterion) {
         let end = base + Duration::hours(8);
 
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
-            b.iter(|| {
-                rt.block_on(cache.get_frames_in_range(black_box(start), black_box(end)))
-            });
+            b.iter(|| rt.block_on(cache.get_frames_in_range(black_box(start), black_box(end))));
         });
     }
     group.finish();
@@ -165,9 +167,7 @@ fn bench_find_audio_near(c: &mut Criterion) {
     });
 
     c.bench_function("HotFrameCache::find_audio_near", |b| {
-        b.iter(|| {
-            rt.block_on(cache.find_audio_near(black_box(base_ts)))
-        });
+        b.iter(|| rt.block_on(cache.find_audio_near(black_box(base_ts))));
     });
 }
 

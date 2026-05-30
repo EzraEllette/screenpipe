@@ -1804,12 +1804,11 @@ async fn main() -> anyhow::Result<()> {
                                     "text-PII AI step: tinfoil enclave (local adapters \
                                      unavailable: opf-rs={e})"
                                 );
-                                let ai: Arc<dyn Redactor> = Arc::new(TinfoilRedactor::new(
-                                    TinfoilConfig {
+                                let ai: Arc<dyn Redactor> =
+                                    Arc::new(TinfoilRedactor::new(TinfoilConfig {
                                         labels: labels.clone(),
                                         ..Default::default()
-                                    },
-                                ));
+                                    }));
                                 Pipeline::regex_then_ai(
                                     ai,
                                     PipelineConfig {

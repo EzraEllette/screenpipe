@@ -253,13 +253,12 @@ mod macos {
                 break;
             }
             // Timeout so we re-check the end conditions even if frames stall.
-            let frame = match tokio::time::timeout(Duration::from_millis(500), hd.frames.recv())
-                .await
-            {
-                Ok(Some(f)) => f,
-                Ok(None) => break, // stream closed
-                Err(_) => continue,
-            };
+            let frame =
+                match tokio::time::timeout(Duration::from_millis(500), hd.frames.recv()).await {
+                    Ok(Some(f)) => f,
+                    Ok(None) => break, // stream closed
+                    Err(_) => continue,
+                };
 
             let jpeg = encode_jpeg(frame)?;
             if let Err(e) = stdin.write_all(&jpeg).await {
@@ -349,7 +348,10 @@ mod macos {
         let rgb = image::DynamicImage::ImageRgba8(frame).to_rgb8();
         let mut buf = Vec::new();
         image::DynamicImage::ImageRgb8(rgb)
-            .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Jpeg)
+            .write_to(
+                &mut std::io::Cursor::new(&mut buf),
+                image::ImageFormat::Jpeg,
+            )
             .context("jpeg encode")?;
         Ok(buf)
     }

@@ -235,7 +235,12 @@ impl HotFrameCache {
                             device_name: Arc::from(ocr_entry.device_name.as_str()),
                             app_name: Arc::from(ocr_entry.app_name.as_str()),
                             window_name: Arc::from(ocr_entry.window_name.as_str()),
-                            ocr_text_preview: ocr_entry.text.chars().take(200).collect::<String>().into(),
+                            ocr_text_preview: ocr_entry
+                                .text
+                                .chars()
+                                .take(200)
+                                .collect::<String>()
+                                .into(),
                             snapshot_path: Arc::from(ocr_entry.video_file_path.as_str()),
                             browser_url: ocr_entry.browser_url.as_deref().map(Arc::from),
                             capture_trigger: Arc::from(""),

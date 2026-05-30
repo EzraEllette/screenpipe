@@ -14,7 +14,7 @@
 //!   cargo bench -p screenpipe-engine --bench alloc_counter
 
 use chrono::Utc;
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use screenpipe_engine::hot_frame_cache::{HotAudio, HotFrame};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -77,11 +77,14 @@ fn make_frame(id: i64) -> HotFrame {
         device_name: "monitor_0".into(),
         app_name: "Google Chrome".into(),
         window_name: "screenpipe — Memory Optimization - Google Chrome".into(),
-        ocr_text_preview: "The quick brown fox jumps over the lazy dog. ".repeat(4).into(),
+        ocr_text_preview: "The quick brown fox jumps over the lazy dog. "
+            .repeat(4)
+            .into(),
         snapshot_path: format!(
             "/Users/user/Library/Application Support/screenpipe/data/monitor_0_{}.jpg",
             id
-        ).into(),
+        )
+        .into(),
         browser_url: Some("https://github.com/mediar-ai/screenpipe".into()),
         capture_trigger: "app_switch".into(),
         offset_index: id * 30,
