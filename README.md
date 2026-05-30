@@ -8,9 +8,17 @@
 <h1 align="center">[ screenpipe | YC S26 ]</h1>
 
 
-<p align="center">Give AI the ability to live your experience.</p>
+
+
+<p align="center">AI that knows what you've seen, said, or heard.</p>
 <p align="center">Records everything you do, say, hear 24/7, local, private, secure</p>
 
+
+
+
+<p align="center">
+<a align="center" href="https://trendshift.io/repositories/20386" target="_blank"><img align="center" src="https://trendshift.io/api/badge/repositories/20386" alt="screenpipe%2Fscreenpipe | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
+</p>
 
 <p align="center">
   <a href="https://screenpi.pe/onboarding" target="_blank">
