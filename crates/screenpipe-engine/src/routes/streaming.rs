@@ -529,16 +529,16 @@ async fn handle_stream_frames_socket(
                             let response = StreamTimeSeriesResponse {
                                 timestamp: hot_frame.timestamp,
                                 devices: vec![DeviceFrameResponse {
-                                    device_id: hot_frame.device_name.clone(),
+                                    device_id: hot_frame.device_name.to_string(),
                                     frame_id: hot_frame.frame_id,
                                     offset_index: hot_frame.offset_index,
                                     fps: hot_frame.fps,
                                     metadata: DeviceMetadata {
-                                        file_path: hot_frame.snapshot_path.clone(),
-                                        app_name: hot_frame.app_name.clone(),
-                                        window_name: hot_frame.window_name.clone(),
-                                        ocr_text: hot_frame.ocr_text_preview.clone(),
-                                        browser_url: hot_frame.browser_url.clone(),
+                                        file_path: hot_frame.snapshot_path.to_string(),
+                                        app_name: hot_frame.app_name.to_string(),
+                                        window_name: hot_frame.window_name.to_string(),
+                                        ocr_text: hot_frame.ocr_text_preview.to_string(),
+                                        browser_url: hot_frame.browser_url.as_deref().map(String::from),
                                     },
                                     audio: audio_entries
                                         .into_iter()
@@ -554,7 +554,7 @@ async fn handle_stream_frames_socket(
                                             speaker_name: a.speaker_name,
                                         })
                                         .collect(),
-                                    machine_id: hot_frame.machine_id.clone(),
+                                    machine_id: hot_frame.machine_id.as_deref().map(String::from),
                                 }],
                             };
 

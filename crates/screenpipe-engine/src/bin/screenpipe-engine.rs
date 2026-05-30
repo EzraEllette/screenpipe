@@ -893,10 +893,10 @@ async fn main() -> anyhow::Result<()> {
                         .push_audio(HotAudio {
                             audio_chunk_id: info.audio_chunk_id,
                             timestamp: ts,
-                            transcription: info.transcription,
-                            device_name: info.device_name,
+                            transcription: info.transcription.into(),
+                            device_name: info.device_name.into(),
                             is_input: info.is_input,
-                            audio_file_path: info.audio_file_path,
+                            audio_file_path: info.audio_file_path.into(),
                             duration_secs: info.duration_secs,
                             start_time: info.start_time,
                             end_time: info.end_time,

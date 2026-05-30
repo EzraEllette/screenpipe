@@ -1368,19 +1368,20 @@ async fn push_to_hot_cache(
     let hot = HotFrame {
         frame_id: result.frame_id,
         timestamp: result.captured_at,
-        device_name: device_name.to_string(),
-        app_name: result.app_name.clone().unwrap_or_default(),
-        window_name: result.window_name.clone().unwrap_or_default(),
+        device_name: device_name.into(),
+        app_name: result.app_name.as_deref().unwrap_or("").into(),
+        window_name: result.window_name.as_deref().unwrap_or("").into(),
         ocr_text_preview: result
             .accessibility_text
             .as_deref()
             .unwrap_or("")
             .chars()
             .take(200)
-            .collect(),
-        snapshot_path: result.snapshot_path.clone(),
-        browser_url: result.browser_url.clone(),
-        capture_trigger: trigger.as_str().to_string(),
+            .collect::<String>()
+            .into(),
+        snapshot_path: result.snapshot_path.as_str().into(),
+        browser_url: result.browser_url.as_deref().map(Arc::from),
+        capture_trigger: trigger.as_str().into(),
         offset_index: 0,
         fps: 0.033,
         machine_id: None,
