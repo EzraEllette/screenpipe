@@ -7,8 +7,9 @@
  *
  * The default CI lane uses `onboarding,no-recording` so the app UI can be
  * tested without depending on host capture devices. This spec is for the
- * targeted Windows recording lane: it runs with `SCREENPIPE_E2E_SEED=onboarding`
- * and verifies the real core loop when the runner exposes usable capture:
+ * targeted Windows recording lane: it runs with
+ * `SCREENPIPE_E2E_SEED=onboarding,no-audio` in CI and verifies the real core
+ * vision loop when the runner exposes usable capture:
  *
  *   foreground pixels -> OCR/indexing -> search API -> Timeline UI
  *

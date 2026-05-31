@@ -213,7 +213,7 @@ jobs:
       working-directory: ./apps/screenpipe-app-tauri
       env:
         RECORD_VIDEO: "true"
-        SCREENPIPE_E2E_SEED: "onboarding"
+        SCREENPIPE_E2E_SEED: "onboarding,no-audio"
       run: |
         bun run wdio run e2e/wdio.conf.ts --spec e2e/specs/windows-core-recording.spec.ts
 
