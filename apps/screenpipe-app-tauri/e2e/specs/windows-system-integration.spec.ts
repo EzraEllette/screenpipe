@@ -12,7 +12,7 @@
 
 import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, statSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { E2E_DATA_DIR, getAppPath, getAppPid, WEBDRIVER_PORT } from "../helpers/app-launcher.js";
 import { authHeaders, fetchJson, getLocalApiConfig, waitForLocalApi } from "../helpers/api-utils.js";
 import { saveScreenshot } from "../helpers/screenshot-utils.js";
@@ -62,12 +62,23 @@ type TimeoutFetchResult = {
   error?: string;
 };
 
+type WindowsCrashEvent = {
+  timeCreated: string;
+  providerName: string;
+  id: number;
+  message: string;
+};
+
 function ps(command: string, timeout = 15_000): string {
   return execFileSync(
     "powershell.exe",
     ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
     { encoding: "utf8", timeout },
   ).trim();
+}
+
+function psSingleQuoted(value: string): string {
+  return value.replace(/'/g, "''");
 }
 
 async function fetchStatusWithTimeout(
@@ -132,8 +143,10 @@ describe("Windows system integration", function () {
   this.timeout(180_000);
 
   let api: LocalApi | null = null;
+  let suiteStartedAtIso = new Date().toISOString();
 
   before(async function () {
+    suiteStartedAtIso = new Date(Date.now() - 5_000).toISOString();
     await waitForAppReady();
     if (!isWindows) return;
 
@@ -459,6 +472,62 @@ $uniqueNames = @($names | Sort-Object -Unique)
       );
       await browser.switchToWindow("home");
       expect(await pageIsAlive()).toBe(true);
+    }
+
+    const health = await fetchJson(apiUrl(api, "/health"));
+    expect(health.ok).toBe(true);
+    expect(await pageIsAlive()).toBe(true);
+  });
+
+  it("does not emit Windows crash reports for the app during the suite", async function () {
+    if (!isWindows || !api) this.skip();
+
+    const appPath = getAppPath();
+    const appExe = basename(appPath);
+    const json = ps(
+      `
+$since = [datetime]::Parse('${psSingleQuoted(suiteStartedAtIso)}')
+$appExe = '${psSingleQuoted(appExe)}'
+$appPath = '${psSingleQuoted(appPath)}'
+$hits = @(
+  Get-WinEvent -FilterHashtable @{ LogName = 'Application'; StartTime = $since } -ErrorAction SilentlyContinue |
+    Where-Object {
+      ($_.ProviderName -in @('Application Error', 'Windows Error Reporting')) -and
+      (
+        ([string]$_.Message -like "*$appExe*") -or
+        ([string]$_.Message -like "*$appPath*") -or
+        ([string]$_.Message -like '*screenpipe*')
+      )
+    } |
+    Select-Object -First 5 |
+    ForEach-Object {
+      [PSCustomObject]@{
+        timeCreated = $_.TimeCreated.ToString('o')
+        providerName = $_.ProviderName
+        id = $_.Id
+        message = [string]$_.Message
+      }
+    }
+)
+if (-not $hits) {
+  Write-Output "[]"
+} else {
+  @($hits) | ConvertTo-Json -Compress
+}
+`,
+      20_000,
+    );
+    const parsed = JSON.parse(json) as WindowsCrashEvent | WindowsCrashEvent[];
+    const events = Array.isArray(parsed) ? parsed : [parsed];
+
+    if (events.length > 0) {
+      const summary = events
+        .map(
+          (event) =>
+            `${event.timeCreated} ${event.providerName}(${event.id}): ${event.message.replace(/\s+/g, " ").slice(0, 240)}`,
+        )
+        .join("\n");
+      throw new Error(`Windows logged app crash events during E2E:\n${summary}`);
     }
 
     const health = await fetchJson(apiUrl(api, "/health"));
