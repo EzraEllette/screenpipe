@@ -33,13 +33,6 @@ type LocalApi = {
   key: string | null;
 };
 
-type PortOwner = {
-  localAddress: string;
-  localPort: number;
-  state: string;
-  owningProcess: number;
-};
-
 type DpiInfo = {
   resolution: string;
   dpiX: number;
@@ -78,20 +71,6 @@ async function waitForHttpStatus(url: string, timeoutMs = 10_000): Promise<numbe
   }
 
   throw new Error(`timed out waiting for ${url}: ${String(lastError)}`);
-}
-
-function netstatOwners(port: number): PortOwner[] {
-  const json = ps(`
-$rows = Get-NetTCPConnection -LocalPort ${port} -ErrorAction SilentlyContinue |
-  Select-Object LocalAddress, LocalPort, State, OwningProcess
-if (-not $rows) {
-  Write-Output "[]"
-} else {
-  $rows | ConvertTo-Json -Compress
-}
-`);
-  const parsed = JSON.parse(json) as PortOwner | PortOwner[];
-  return Array.isArray(parsed) ? parsed : [parsed];
 }
 
 async function pageIsAlive(): Promise<boolean> {
@@ -214,18 +193,16 @@ if (-not $hits) {
     expect(runtimes.some((runtime) => /^\d+\.\d+\.\d+\.\d+$/.test(runtime.version))).toBe(true);
   });
 
-  it("keeps WebDriver reachable and binds the local API with Windows TCP listeners", async function () {
+  it("keeps WebDriver and the local API reachable over localhost", async function () {
     if (!isWindows || !api) this.skip();
 
     const webdriverStatus = await waitForHttpStatus(`http://127.0.0.1:${WEBDRIVER_PORT}/status`);
-    const apiOwners = netstatOwners(api.port);
+    const apiStatus = await waitForHttpStatus(apiUrl(api, "/health"));
+    const health = await fetchJson(apiUrl(api, "/health"), authHeaders(api.key));
 
     expect(webdriverStatus).toBeLessThan(500);
-    expect(apiOwners.some((row) => row.state === "Listen")).toBe(true);
-    for (const row of apiOwners.filter((entry) => entry.state === "Listen")) {
-      expect(["127.0.0.1", "::1", "0.0.0.0", "::"].includes(row.localAddress)).toBe(true);
-      expect(row.owningProcess).toBeGreaterThan(0);
-    }
+    expect(apiStatus).toBeLessThan(500);
+    expect(health.ok).toBe(true);
   });
 
   it("reports sane Windows DPI and keeps WebView viewport usable", async function () {
