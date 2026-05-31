@@ -17,7 +17,7 @@ import { E2E_DATA_DIR, getAppPath, getAppPid, WEBDRIVER_PORT } from "../helpers/
 import { authHeaders, fetchJson, getLocalApiConfig, waitForLocalApi } from "../helpers/api-utils.js";
 import { saveScreenshot } from "../helpers/screenshot-utils.js";
 import { openHomeWindow, waitForAppReady, t } from "../helpers/test-utils.js";
-import { showWindow, waitForWindowUrl } from "../helpers/tauri.js";
+import { closeWindow, showWindow, waitForWindowHandle, waitForWindowUrl } from "../helpers/tauri.js";
 
 const isWindows = process.platform === "win32";
 
@@ -459,6 +459,51 @@ $uniqueNames = @($names | Sort-Object -Unique)
 
     const screenshot = await saveScreenshot("windows-system-routing");
     expect(existsSync(screenshot)).toBe(true);
+  });
+
+  it("keeps the backend alive across Windows Home close and reopen", async function () {
+    if (!isWindows || !api) this.skip();
+
+    await openHomeWindow();
+    await showWindow({ Search: { query: null } });
+    await waitForWindowHandle("search", t(10_000));
+    await browser.switchToWindow("search");
+    const searchInput = await $('input[placeholder*="search memory"]');
+    await searchInput.waitForExist({ timeout: t(15_000) });
+
+    const handlesBeforeClose = await browser.getWindowHandles();
+    expect(handlesBeforeClose.filter((handle) => handle === "home")).toHaveLength(1);
+
+    try {
+      await closeWindow({ Home: { page: null } });
+      await browser.pause(t(750));
+
+      const handlesAfterClose = await browser.getWindowHandles();
+      expect(handlesAfterClose.filter((handle) => handle === "home")).toHaveLength(1);
+
+      const healthWhileClosed = await fetchJson(apiUrl(api, "/health"));
+      expect(healthWhileClosed.ok).toBe(true);
+
+      await showWindow({ Home: { page: "home" } });
+      await waitForWindowHandle("home", t(10_000));
+      await browser.switchToWindow("home");
+      await waitForWindowUrl("/home", undefined, t(12_000));
+      expect(await pageIsAlive()).toBe(true);
+
+      const handlesAfterReopen = await browser.getWindowHandles();
+      expect(handlesAfterReopen.filter((handle) => handle === "home")).toHaveLength(1);
+
+      const healthAfterReopen = await fetchJson(apiUrl(api, "/health"));
+      expect(healthAfterReopen.ok).toBe(true);
+    } finally {
+      if ((await browser.getWindowHandles()).includes("home")) {
+        await browser.switchToWindow("home").catch(() => {});
+      }
+      await closeWindow({ Search: { query: null } }).catch(() => {});
+      if ((await browser.getWindowHandles()).includes("home")) {
+        await browser.switchToWindow("home").catch(() => {});
+      }
+    }
   });
 
   it("keeps the WebView responsive after native Windows focus churn", async function () {
