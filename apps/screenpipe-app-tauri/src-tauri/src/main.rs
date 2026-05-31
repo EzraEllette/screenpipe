@@ -107,6 +107,9 @@ pub use recording::stop_screenpipe;
 pub use server::spawn_server;
 // Removed: pub use store::get_profiles_store; // Profile functionality has been removed
 
+pub use enterprise_install_metadata::get_enterprise_install_metadata;
+pub use enterprise_policy::set_enterprise_policy;
+pub use enterprise_policy::set_sync_streams;
 pub use permissions::do_permissions_check;
 pub use permissions::open_permission_settings;
 pub use permissions::request_permission;
