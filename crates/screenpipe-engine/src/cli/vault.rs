@@ -41,33 +41,24 @@ pub async fn handle_vault_command(command: &VaultCommand) -> anyhow::Result<()> 
         }
 
         VaultCommand::Lock { port } => {
-            let password = read_password("vault password: ")?;
-
-            // If the daemon is running, ask IT to lock — that way the
-            // daemon (which owns the DB pool and recording loop) handles
-            // shutdown cleanly. Fall back to direct file-level lock if
-            // the daemon is unreachable so locking remains guaranteed.
+            // Locking encrypts db.sqlite (+ WAL/SHM) and every file under data/
+            // in place. A running daemon still holds the DB pool open and keeps
+            // writing frames/audio, so encrypting underneath it silently drops
+            // those writes and can corrupt in-flight media. Nothing here can stop
+            // the daemon's capture loop and close its pool cleanly today, so
+            // refuse to lock while a daemon is detected rather than risk the DB.
+            // (unlock is symmetric — it assumes the server is not running.)
             if daemon_running(*port).await {
-                match try_lock_via_daemon(*port, &password).await {
-                    Ok(()) => {
-                        println!("vault locked — data encrypted (via running daemon)");
-                        return Ok(());
-                    }
-                    Err(LockViaDaemonError::WrongPassword) => {
-                        anyhow::bail!("wrong password");
-                    }
-                    Err(e) => {
-                        eprintln!(
-                            "warning: daemon on port {} unreachable for lock ({}). \
-                             falling back to direct lock — stop screenpipe first \
-                             if you want a clean shutdown.",
-                            port, e
-                        );
-                    }
-                }
+                anyhow::bail!(
+                    "screenpipe is running on port {port} — stop it first (quit the app, \
+                     or kill the `screenpipe` process), then run `screenpipe vault lock` \
+                     again. pass --port if the daemon listens on a non-default port."
+                );
             }
 
+            let password = read_password("vault password: ")?;
             let _progress_rx = vault.lock(&password).await?;
+            // Wait for encryption to complete
             loop {
                 let state = vault.state().await;
                 match state {
@@ -113,49 +104,12 @@ fn read_password(prompt: &str) -> anyhow::Result<String> {
     Ok(password)
 }
 
+/// True if something is listening on `127.0.0.1:<port>` — used to detect a
+/// running screenpipe daemon so we refuse to lock the vault underneath it.
+/// Fails closed: a port squatter reads as "running" and blocks the lock, which
+/// is the safe direction for a destructive in-place encryption.
 async fn daemon_running(port: u16) -> bool {
     tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
         .await
         .is_ok()
-}
-
-enum LockViaDaemonError {
-    WrongPassword,
-    NoApiKey,
-    Http(String),
-}
-
-impl std::fmt::Display for LockViaDaemonError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            LockViaDaemonError::WrongPassword => write!(f, "wrong password"),
-            LockViaDaemonError::NoApiKey => write!(f, "no API key available"),
-            LockViaDaemonError::Http(e) => write!(f, "{}", e),
-        }
-    }
-}
-
-async fn try_lock_via_daemon(port: u16, password: &str) -> Result<(), LockViaDaemonError> {
-    let api_key = crate::auth_key::find_api_auth_key()
-        .await
-        .ok_or(LockViaDaemonError::NoApiKey)?;
-
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .map_err(|e| LockViaDaemonError::Http(e.to_string()))?;
-
-    let resp = client
-        .post(format!("http://127.0.0.1:{}/vault/lock", port))
-        .header("Authorization", format!("Bearer {}", api_key))
-        .json(&json!({ "password": password }))
-        .send()
-        .await
-        .map_err(|e| LockViaDaemonError::Http(e.to_string()))?;
-
-    match resp.status().as_u16() {
-        200 => Ok(()),
-        403 => Err(LockViaDaemonError::WrongPassword),
-        other => Err(LockViaDaemonError::Http(format!("HTTP {}", other))),
-    }
 }

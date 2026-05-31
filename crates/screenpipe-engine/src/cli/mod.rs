@@ -1337,10 +1337,11 @@ pub enum VaultCommand {
     Status {},
     /// Set up vault encryption (first-time password setup)
     Setup {},
-    /// Lock the vault (encrypt all data, stop recording)
+    /// Lock the vault (encrypt all data; stop screenpipe first)
     Lock {
-        /// Port of the running screenpipe daemon (used to delegate lock if
-        /// reachable). Falls back to direct file-level lock if unreachable.
+        /// Port screenpipe listens on. `vault lock` refuses to run while a
+        /// daemon is detected here — locking encrypts the DB in place and would
+        /// corrupt it underneath a live daemon, so stop screenpipe first.
         #[arg(short = 'p', long, default_value_t = 3030)]
         port: u16,
     },
