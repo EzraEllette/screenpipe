@@ -56,12 +56,40 @@ type HealthBody = {
   audio_status?: string;
 };
 
+type TimeoutFetchResult = {
+  ok: boolean;
+  status: number;
+  error?: string;
+};
+
 function ps(command: string, timeout = 15_000): string {
   return execFileSync(
     "powershell.exe",
     ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
     { encoding: "utf8", timeout },
   ).trim();
+}
+
+async function fetchStatusWithTimeout(
+  url: string,
+  timeoutMs = t(3_000),
+): Promise<TimeoutFetchResult> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const res = await fetch(url, { signal: controller.signal });
+    await res.arrayBuffer().catch(() => undefined);
+    return { ok: res.ok, status: res.status };
+  } catch (error) {
+    return {
+      ok: false,
+      status: 0,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 function apiUrl(api: LocalApi, path: string): string {
@@ -215,6 +243,42 @@ if (-not $hits) {
     expect(webdriverStatus).toBeLessThan(500);
     expect(apiStatus).toBeLessThan(500);
     expect(health.ok).toBe(true);
+  });
+
+  it("keeps the local API bound to loopback when LAN access is off", async function () {
+    if (!isWindows || !api) this.skip();
+
+    const json = ps(`
+$addresses = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+  Where-Object {
+    $_.IPAddress -notmatch '^127\\.' -and
+    $_.IPAddress -notmatch '^169\\.254\\.' -and
+    $_.AddressState -eq 'Preferred'
+  } |
+  Select-Object -ExpandProperty IPAddress -Unique
+if (-not $addresses) {
+  Write-Output "[]"
+} else {
+  @($addresses) | ConvertTo-Json -Compress
+}
+`);
+    const parsed = JSON.parse(json) as string | string[];
+    const addresses = Array.isArray(parsed) ? parsed : [parsed].filter(Boolean);
+    if (addresses.length === 0) this.skip();
+
+    const loopback = await fetchStatusWithTimeout(apiUrl(api, "/health"));
+    expect(loopback.ok).toBe(true);
+    expect(loopback.status).toBeLessThan(500);
+
+    for (const address of addresses.slice(0, 2)) {
+      const status = await fetchStatusWithTimeout(`http://${address}:${api.port}/health`);
+      if (status.status > 0) {
+        throw new Error(
+          `Local API unexpectedly answered on non-loopback Windows address ${address}:${api.port} with status ${status.status}`,
+        );
+      }
+      expect(status.ok).toBe(false);
+    }
   });
 
   it("reports sane Windows DPI and keeps WebView viewport usable", async function () {
