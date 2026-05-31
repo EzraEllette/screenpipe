@@ -44,6 +44,18 @@ type WebView2Info = {
   version: string;
 };
 
+type WindowsAudioInfo = {
+  audioService: string;
+  endpointBuilderService: string;
+  audioPnPDeviceCount: number;
+  screamDevicePresent: boolean;
+};
+
+type HealthBody = {
+  status?: string;
+  audio_status?: string;
+};
+
 function ps(command: string, timeout = 15_000): string {
   return execFileSync(
     "powershell.exe",
@@ -282,6 +294,53 @@ if ($hits) { Write-Output "BLOCKED:$($hits.Count)" } else { Write-Output "CLEAR"
 
     if (result === "UNAVAILABLE") this.skip();
     expect(result).toBe("CLEAR");
+  });
+
+  it("keeps Windows audio services and the device-status API healthy", async function () {
+    if (!isWindows || !api) this.skip();
+
+    const json = ps(`
+$names = New-Object System.Collections.Generic.List[string]
+Get-CimInstance Win32_SoundDevice -ErrorAction SilentlyContinue | ForEach-Object {
+  if ($_.Name) { [void]$names.Add([string]$_.Name) }
+}
+if (Get-Command Get-PnpDevice -ErrorAction SilentlyContinue) {
+  Get-PnpDevice -Class MEDIA -ErrorAction SilentlyContinue | ForEach-Object {
+    if ($_.FriendlyName) { [void]$names.Add([string]$_.FriendlyName) }
+  }
+}
+$audioService = Get-Service -Name Audiosrv -ErrorAction SilentlyContinue
+$endpointBuilder = Get-Service -Name AudioEndpointBuilder -ErrorAction SilentlyContinue
+$uniqueNames = @($names | Sort-Object -Unique)
+[PSCustomObject]@{
+  audioService = [string]$audioService.Status
+  endpointBuilderService = [string]$endpointBuilder.Status
+  audioPnPDeviceCount = $uniqueNames.Count
+  screamDevicePresent = @($uniqueNames | Where-Object { $_ -match 'Scream' }).Count -gt 0
+} | ConvertTo-Json -Compress
+`);
+    const audio = JSON.parse(json) as WindowsAudioInfo;
+
+    expect(audio.audioService).toBe("Running");
+    expect(audio.endpointBuilderService).toBe("Running");
+    expect(audio.audioPnPDeviceCount).toBeGreaterThan(0);
+    if (process.env.GITHUB_ACTIONS === "true") {
+      expect(audio.screamDevicePresent).toBe(true);
+    }
+
+    const [health, deviceStatus] = await Promise.all([
+      fetchJson(apiUrl(api, "/health")),
+      fetchJson(apiUrl(api, "/audio/device/status")),
+    ]);
+    const healthBody = health.body as HealthBody;
+
+    expect(health.ok).toBe(true);
+    expect(typeof healthBody.audio_status).toBe("string");
+    expect(deviceStatus.status).toBeGreaterThan(0);
+    expect(deviceStatus.status).toBeLessThan(500);
+    if (deviceStatus.ok) {
+      expect(typeof deviceStatus.body).toBe("object");
+    }
   });
 
   it("handles concurrent Windows health/search/vision requests without deadlock", async function () {

@@ -160,7 +160,7 @@ Saves to `e2e/videos/`.
 | `home-window.spec.ts` | Opens Home window; clicks through Home, Pipes, Timeline, Help, Settings nav items |
 | `timeline.spec.ts` | Navigates to Timeline; seeds a capture event; verifies at least one frame renders |
 | `windows-core-recording.spec.ts` | Windows opt-in. Enables real recording and requires API auth, health/load, audio, vision, and search endpoints to stay responsive. When the runner exposes usable desktop frames, it also shows a foreground marker window and verifies OCR indexing/query search plus Timeline frame metadata; hosted runners without frames self-skip those capture-dependent assertions. |
-| `windows-system-integration.spec.ts` | Windows-only. Verifies isolated data dir, native DLL/WebView2 runtime, display/DPI topology, TCP listeners, process health, Defender visibility, concurrent local API load, focus churn, and rapid Home-window routing |
+| `windows-system-integration.spec.ts` | Windows-only. Verifies isolated data dir, native DLL/WebView2 runtime, display/DPI topology, TCP listeners, process health, Defender visibility, audio service/device health, concurrent local API load, focus churn, and rapid Home-window routing |
 | `hd-recording-pipeline.spec.ts` | macOS opt-in. Starts an HD timer session via `/capture/hd/start`; asserts the controller goes active, a non-empty `hd_*.mp4` chunk is written, and OCR keeps indexing during HD (high-fps + indexing decouple, #3699/#3707) |
 | `settings-sections.spec.ts` | Navigates General → Recording → AI → Speakers settings; verifies content and no crash |
 | `audio-fallback.spec.ts` | macOS opt-in spec for the Screenpipe Cloud → local Whisper fallback alert and `/notify` history |
