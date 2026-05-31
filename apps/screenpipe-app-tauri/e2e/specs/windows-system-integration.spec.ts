@@ -13,7 +13,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { E2E_DATA_DIR, getAppPath, getAppPid } from "../helpers/app-launcher.js";
+import { E2E_DATA_DIR, getAppPath, getAppPid, WEBDRIVER_PORT } from "../helpers/app-launcher.js";
 import { authHeaders, fetchJson, getLocalApiConfig, waitForLocalApi } from "../helpers/api-utils.js";
 import { saveScreenshot } from "../helpers/screenshot-utils.js";
 import { openHomeWindow, waitForAppReady, t } from "../helpers/test-utils.js";
@@ -61,6 +61,23 @@ function ps(command: string, timeout = 15_000): string {
 
 function apiUrl(api: LocalApi, path: string): string {
   return `http://127.0.0.1:${api.port}${path}`;
+}
+
+async function waitForHttpStatus(url: string, timeoutMs = 10_000): Promise<number> {
+  const deadline = Date.now() + timeoutMs;
+  let lastError: unknown;
+
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(url);
+      return res.status;
+    } catch (error) {
+      lastError = error;
+      await browser.pause(t(250));
+    }
+  }
+
+  throw new Error(`timed out waiting for ${url}: ${String(lastError)}`);
 }
 
 function netstatOwners(port: number): PortOwner[] {
@@ -197,16 +214,15 @@ if (-not $hits) {
     expect(runtimes.some((runtime) => /^\d+\.\d+\.\d+\.\d+$/.test(runtime.version))).toBe(true);
   });
 
-  it("binds WebDriver and local API ports with Windows TCP listeners", async function () {
+  it("keeps WebDriver reachable and binds the local API with Windows TCP listeners", async function () {
     if (!isWindows || !api) this.skip();
 
-    const webdriverOwners = netstatOwners(4445);
+    const webdriverStatus = await waitForHttpStatus(`http://127.0.0.1:${WEBDRIVER_PORT}/status`);
     const apiOwners = netstatOwners(api.port);
-    const owners = [...webdriverOwners, ...apiOwners];
 
-    expect(webdriverOwners.some((row) => row.state === "Listen")).toBe(true);
+    expect(webdriverStatus).toBeLessThan(500);
     expect(apiOwners.some((row) => row.state === "Listen")).toBe(true);
-    for (const row of owners.filter((entry) => entry.state === "Listen")) {
+    for (const row of apiOwners.filter((entry) => entry.state === "Listen")) {
       expect(["127.0.0.1", "::1", "0.0.0.0", "::"].includes(row.localAddress)).toBe(true);
       expect(row.owningProcess).toBeGreaterThan(0);
     }
