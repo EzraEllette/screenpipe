@@ -603,28 +603,33 @@ describe("Windows user journey", function () {
       const item = await $(itemSelector);
       await item.waitForDisplayed({ timeout: t(20_000) });
 
-      // The bell list re-renders on its 5s history poll and on the
-      // mark-all-read/loadHistory pass that fires when the popover opens. On the
-      // slower Windows runner a single click can land mid-re-render and get
-      // swallowed (mac/linux are fast enough to dodge it), leaving the row
-      // collapsed. Re-click the row — and reopen the popover if it closed —
-      // until the expanded panel actually renders. We only click while the
-      // expanded panel is absent, so this never toggles an already-open row shut.
+      // Expand the row to reveal the full body. webdriver's .click() targets the
+      // element's geometric center, which on the Windows/msedge runner does not
+      // reliably land on the row's clickable handler (the onClick lives on an
+      // inner div and the row re-renders on the 5s history poll + mark-all-read
+      // pass) — repeated geometric clicks left the row collapsed. Dispatch the
+      // click in-page on the row's clickable child so React's onClick fires
+      // regardless of layout, reopening the popover if it closed. We only click
+      // while the expanded panel is absent (existence, not visibility), so this
+      // never toggles an already-open row shut.
       await browser.waitUntil(
         async () => {
-          const expandedNow = await $(expandedSelector);
-          if (await expandedNow.isDisplayed().catch(() => false)) return true;
+          if (await $(expandedSelector).isExisting().catch(() => false)) return true;
 
-          const row = await $(itemSelector);
-          if (await row.isDisplayed().catch(() => false)) {
-            await row.click().catch(() => {});
-            return false;
-          }
+          const clicked = (await browser.execute((selector: string) => {
+            const row = document.querySelector(selector);
+            const clickable = row?.firstElementChild as HTMLElement | null;
+            if (!clickable) return false;
+            clickable.click();
+            return true;
+          }, itemSelector)) as boolean;
 
-          // Popover collapsed without expanding — reopen it and retry.
-          const trigger = await $(bellSelector);
-          if (await trigger.isDisplayed().catch(() => false)) {
-            await trigger.click().catch(() => {});
+          if (!clicked) {
+            // Popover collapsed without expanding — reopen it and retry.
+            const trigger = await $(bellSelector);
+            if (await trigger.isDisplayed().catch(() => false)) {
+              await trigger.click().catch(() => {});
+            }
           }
           return false;
         },
