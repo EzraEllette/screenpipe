@@ -245,4 +245,59 @@ describe("Windows user journey", function () {
       }
     }
   });
+
+  it("opens Storage settings and previews local retention before cancelling", async function () {
+    if (!isWindows) this.skip();
+
+    await openHomeWindow();
+
+    const settingsNav = await $('[data-testid="nav-settings"]');
+    await settingsNav.waitForDisplayed({ timeout: t(15_000) });
+    await settingsNav.click();
+
+    const storageNav = await $('[data-testid="settings-nav-storage"]');
+    await storageNav.waitForDisplayed({ timeout: t(15_000) });
+    await storageNav.click();
+
+    await waitForBodyText(
+      (bodyText) =>
+        bodyText.includes("local disk, cloud archive, and sync") &&
+        bodyText.includes("auto-delete old data") &&
+        bodyText.includes("video + audio only"),
+      "Storage settings did not show the local retention controls",
+    );
+
+    const mediaRetentionMode = await $('[data-testid="retention-mode-media"]');
+    await mediaRetentionMode.waitForExist({ timeout: t(20_000) });
+    await mediaRetentionMode.scrollIntoView();
+    await mediaRetentionMode.click();
+
+    const confirmation = await $('[data-testid="retention-mode-confirm-dialog"]');
+    await confirmation.waitForDisplayed({ timeout: t(20_000) });
+
+    await waitForBodyText(
+      (bodyText) =>
+        bodyText.includes("enable media eviction?") &&
+        bodyText.includes("screenpipe will delete video and audio files") &&
+        bodyText.includes("transcripts, ocr text") &&
+        bodyText.includes("enable eviction"),
+      "Retention confirmation dialog did not explain the media eviction safety tradeoff",
+    );
+
+    const cancel = await $('[data-testid="retention-mode-cancel"]');
+    await cancel.waitForDisplayed({ timeout: t(10_000) });
+    await cancel.click();
+
+    await browser.waitUntil(
+      async () => !(await $('[data-testid="retention-mode-confirm-dialog"]').isExisting().catch(() => false)),
+      {
+        timeout: t(10_000),
+        interval: 250,
+        timeoutMsg: "Retention confirmation dialog stayed open after cancel",
+      },
+    );
+
+    const retentionScreenshot = await saveScreenshot("windows-user-journey-storage-retention");
+    expect(existsSync(retentionScreenshot)).toBe(true);
+  });
 });
