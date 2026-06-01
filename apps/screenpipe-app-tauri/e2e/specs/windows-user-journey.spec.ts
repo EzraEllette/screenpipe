@@ -592,15 +592,50 @@ describe("Windows user journey", function () {
         await browser.switchToWindow("home").catch(() => {});
       }
 
-      const bell = await $('[data-testid="notification-bell-trigger"]');
+      const bellSelector = '[data-testid="notification-bell-trigger"]';
+      const itemSelector = `[data-testid="notification-bell-item-${notificationId}"]`;
+      const expandedSelector = `[data-testid="notification-bell-expanded-${notificationId}"]`;
+
+      const bell = await $(bellSelector);
       await bell.waitForDisplayed({ timeout: t(20_000) });
       await bell.click();
 
-      const item = await $(`[data-testid="notification-bell-item-${notificationId}"]`);
+      const item = await $(itemSelector);
       await item.waitForDisplayed({ timeout: t(20_000) });
-      await item.click();
 
-      const expanded = await $(`[data-testid="notification-bell-expanded-${notificationId}"]`);
+      // The bell list re-renders on its 5s history poll and on the
+      // mark-all-read/loadHistory pass that fires when the popover opens. On the
+      // slower Windows runner a single click can land mid-re-render and get
+      // swallowed (mac/linux are fast enough to dodge it), leaving the row
+      // collapsed. Re-click the row — and reopen the popover if it closed —
+      // until the expanded panel actually renders. We only click while the
+      // expanded panel is absent, so this never toggles an already-open row shut.
+      await browser.waitUntil(
+        async () => {
+          const expandedNow = await $(expandedSelector);
+          if (await expandedNow.isDisplayed().catch(() => false)) return true;
+
+          const row = await $(itemSelector);
+          if (await row.isDisplayed().catch(() => false)) {
+            await row.click().catch(() => {});
+            return false;
+          }
+
+          // Popover collapsed without expanding — reopen it and retry.
+          const trigger = await $(bellSelector);
+          if (await trigger.isDisplayed().catch(() => false)) {
+            await trigger.click().catch(() => {});
+          }
+          return false;
+        },
+        {
+          timeout: t(30_000),
+          interval: 500,
+          timeoutMsg: `Notification row ${notificationId} never expanded after clicking the bell item`,
+        },
+      );
+
+      const expanded = await $(expandedSelector);
       await expanded.waitForDisplayed({ timeout: t(10_000) });
       const expandedText = (await expanded.getText()).toLowerCase();
       expect(expandedText).toContain(notificationBody.toLowerCase());
