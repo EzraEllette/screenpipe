@@ -2270,6 +2270,13 @@ vocabularyWords?: VocabEntry[];
  */
 disableVision: boolean;
 /**
+ * Disable the timeline / rewind feature. When true, the engine skips
+ * timeline-only work: warming the hot frame cache from the DB at startup
+ * and buffering captured frames/audio into the in-memory hot cache that
+ * only the timeline streaming endpoint reads.
+ */
+disableTimeline?: boolean;
+/**
  * Specific monitor IDs to capture.
  */
 monitorIds: string[];
