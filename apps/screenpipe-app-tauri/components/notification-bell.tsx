@@ -224,11 +224,14 @@ export function NotificationBell() {
               return (
                 <div
                   key={entry.id}
-                  data-testid={`notification-bell-item-${entry.id}`}
                   data-notification-id={entry.id}
                   className="border-b border-border/50 last:border-0"
                 >
                   <div
+                    data-testid={`notification-bell-item-${entry.id}`}
+                    role="button"
+                    tabIndex={0}
+                    aria-expanded={isExpanded}
                     className="group/notif px-3 py-2 hover:bg-muted/30 cursor-pointer"
                     onClick={() => {
                       const willExpand = !isExpanded;
@@ -240,6 +243,12 @@ export function NotificationBell() {
                           title: entry.title,
                         });
                       }
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key !== "Enter" && e.key !== " ") return;
+                      e.preventDefault();
+                      const willExpand = !isExpanded;
+                      setExpandedId(willExpand ? entry.id : null);
                     }}
                   >
                     <div className="flex items-start justify-between gap-2">
