@@ -488,10 +488,13 @@ export function PrivacySection() {
     always?: boolean;
   }[] = [
     { value: "secret", label: "Secrets", desc: "passwords, API keys, tokens", always: true },
+    { value: "id", label: "IDs", desc: "SSNs, credit cards, account & license numbers" },
     { value: "person", label: "Names", desc: "people's names" },
     { value: "email", label: "Emails", desc: "email addresses" },
     { value: "phone", label: "Phone numbers", desc: "phone numbers" },
     { value: "address", label: "Addresses", desc: "postal addresses" },
+    { value: "url", label: "URLs", desc: "links carrying tokens or session IDs" },
+    { value: "date", label: "Dates", desc: "dates of birth, timestamps" },
     { value: "sensitive", label: "Sensitive info", desc: "health, financial, identity context" },
   ];
 
