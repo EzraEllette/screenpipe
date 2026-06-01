@@ -368,9 +368,9 @@ mod runtime {
             // overlapping window over the full token sequence in `infer`,
             // so the tokenizer must hand us *every* token — otherwise PII
             // past the cutoff is dropped before we ever see it.
-            tokenizer.with_truncation(None).map_err(|e| {
-                RedactError::Runtime(format!("disable tokenizer truncation: {e}"))
-            })?;
+            tokenizer
+                .with_truncation(None)
+                .map_err(|e| RedactError::Runtime(format!("disable tokenizer truncation: {e}")))?;
 
             let session = build_session(&model_path)?;
 
@@ -794,12 +794,32 @@ mod runtime {
             let text = "aaaa SECRETVALUE bbbb KEY";
             let mut spans = vec![
                 // window B (out of order): the duplicate secret
-                RedactedSpan { start: 5, end: 16, label: SpanLabel::Secret, text: "SECRETVALUE".into() },
+                RedactedSpan {
+                    start: 5,
+                    end: 16,
+                    label: SpanLabel::Secret,
+                    text: "SECRETVALUE".into(),
+                },
                 // window A: same secret, plus a split half of "KEY"
-                RedactedSpan { start: 5, end: 11, label: SpanLabel::Secret, text: "SECRET".into() },
-                RedactedSpan { start: 22, end: 24, label: SpanLabel::Secret, text: "KE".into() },
+                RedactedSpan {
+                    start: 5,
+                    end: 11,
+                    label: SpanLabel::Secret,
+                    text: "SECRET".into(),
+                },
+                RedactedSpan {
+                    start: 22,
+                    end: 24,
+                    label: SpanLabel::Secret,
+                    text: "KE".into(),
+                },
                 // window B: the other half of "KEY", overlapping
-                RedactedSpan { start: 23, end: 25, label: SpanLabel::Secret, text: "EY".into() },
+                RedactedSpan {
+                    start: 23,
+                    end: 25,
+                    label: SpanLabel::Secret,
+                    text: "EY".into(),
+                },
             ];
             merge_spans(&mut spans, text);
             assert_eq!(spans.len(), 2, "duplicate + split spans must merge");
