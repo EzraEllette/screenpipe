@@ -603,36 +603,36 @@ describe("Windows user journey", function () {
       const item = await $(itemSelector);
       await item.waitForDisplayed({ timeout: t(20_000) });
 
-      // Expand the row to reveal the full body. webdriver's .click() targets the
-      // element's geometric center, which on the Windows/msedge runner does not
-      // reliably land on the row's clickable handler (the onClick lives on an
-      // inner div and the row re-renders on the 5s history poll + mark-all-read
-      // pass) — repeated geometric clicks left the row collapsed. Dispatch the
-      // click in-page on the row's clickable child so React's onClick fires
-      // regardless of layout, reopening the popover if it closed. We only click
-      // while the expanded panel is absent (existence, not visibility), so this
-      // never toggles an already-open row shut.
+      // Expand the row to reveal the full body. The row's onClick lives on an
+      // inner div and *toggles* expand/collapse, so the click must never fire on
+      // an already-open row. The earlier version split the "is it expanded?"
+      // check and the click across two WebDriver round-trips; the 5s history
+      // poll + mark-all-read pass re-render the list between those two calls, so
+      // the unconditional toggle-click could land on a row that had just
+      // expanded and collapse it again — livelocking until the 30s timeout (it
+      // failed on both the initial attempt and the retry in CI). Do the check
+      // and the click atomically in a single in-page step: within one
+      // synchronous execution React's committed DOM is consistent, so we only
+      // click the clickable child while the expanded panel is absent and can
+      // never toggle an open row shut. If the popover has closed (row gone),
+      // click the bell to reopen it; the row remounts on the next tick.
       await browser.waitUntil(
-        async () => {
-          if (await $(expandedSelector).isExisting().catch(() => false)) return true;
-
-          const clicked = (await browser.execute((selector: string) => {
-            const row = document.querySelector(selector);
-            const clickable = row?.firstElementChild as HTMLElement | null;
-            if (!clickable) return false;
-            clickable.click();
-            return true;
-          }, itemSelector)) as boolean;
-
-          if (!clicked) {
-            // Popover collapsed without expanding — reopen it and retry.
-            const trigger = await $(bellSelector);
-            if (await trigger.isDisplayed().catch(() => false)) {
-              await trigger.click().catch(() => {});
-            }
-          }
-          return false;
-        },
+        async () =>
+          (await browser.execute(
+            (itemSel: string, expandedSel: string, bellSel: string) => {
+              if (document.querySelector(expandedSel)) return true;
+              const row = document.querySelector(itemSel);
+              if (!row) {
+                (document.querySelector(bellSel) as HTMLElement | null)?.click();
+                return false;
+              }
+              (row.firstElementChild as HTMLElement | null)?.click();
+              return false;
+            },
+            itemSelector,
+            expandedSelector,
+            bellSelector,
+          )) as boolean,
         {
           timeout: t(30_000),
           interval: 500,
