@@ -18,6 +18,7 @@ import {
 } from "@/components/ui/popover";
 import { useRouter } from "next/navigation";
 import { showChatWithPrefill } from "@/lib/chat-utils";
+import { localFetch } from "@/lib/api";
 
 interface NotificationEntry {
   id: string;
@@ -28,8 +29,6 @@ interface NotificationEntry {
   timestamp: string;
   read: boolean;
 }
-
-const API_BASE = "http://localhost:11435";
 
 async function openNotificationLink(href: string) {
   const raw = href.trim();
@@ -82,7 +81,7 @@ export function NotificationBell() {
 
   const loadHistory = useCallback(async () => {
     try {
-      const res = await fetch(`${API_BASE}/notifications`);
+      const res = await localFetch("/notifications");
       if (res.ok) {
         const entries: NotificationEntry[] = await res.json();
         setHistory(entries);
@@ -103,7 +102,7 @@ export function NotificationBell() {
   const markAllRead = async () => {
     setHistory((prev) => prev.map((n) => ({ ...n, read: true })));
     try {
-      await fetch(`${API_BASE}/notifications`, { method: "POST" });
+      await localFetch("/notifications", { method: "POST" });
     } catch {}
   };
 
@@ -111,7 +110,7 @@ export function NotificationBell() {
     posthog.capture("notification_bell_clear_all", { count: history.length });
     setHistory([]);
     try {
-      await fetch(`${API_BASE}/notifications`, { method: "DELETE" });
+      await localFetch("/notifications", { method: "DELETE" });
     } catch {}
   };
 
@@ -124,7 +123,7 @@ export function NotificationBell() {
     setHistory((prev) => prev.filter((n) => n.id !== id));
     if (expandedId === id) setExpandedId(null);
     try {
-      await fetch(`${API_BASE}/notifications/${encodeURIComponent(id)}`, { method: "DELETE" });
+      await localFetch(`/notifications/${encodeURIComponent(id)}`, { method: "DELETE" });
     } catch {}
   };
 
@@ -153,7 +152,11 @@ export function NotificationBell() {
       }}
     >
       <PopoverTrigger asChild>
-        <button className="relative p-1.5 rounded-md hover:bg-muted/60 transition-colors">
+        <button
+          aria-label="notifications"
+          data-testid="notification-bell-trigger"
+          className="relative p-1.5 rounded-md hover:bg-muted/60 transition-colors"
+        >
           <Bell className="h-3.5 w-3.5 text-muted-foreground" />
           {unreadCount > 0 && (
             <span className="absolute -top-0.5 -right-0.5 min-w-[14px] h-[14px] flex items-center justify-center rounded-full bg-foreground text-background text-[9px] font-medium px-1">
@@ -163,6 +166,7 @@ export function NotificationBell() {
         </button>
       </PopoverTrigger>
       <PopoverContent
+        data-testid="notification-bell-popover"
         className="w-[320px] p-0 border-border"
         align="end"
         sideOffset={4}
@@ -174,6 +178,7 @@ export function NotificationBell() {
           </span>
           {history.length > 0 && (
             <button
+              data-testid="notification-bell-clear-all"
               onClick={clearAll}
               className="text-[10px] text-muted-foreground hover:text-foreground transition-colors"
             >
@@ -185,7 +190,10 @@ export function NotificationBell() {
         {/* List */}
         <div className="max-h-[360px] overflow-y-auto">
           {history.length === 0 ? (
-            <div className="px-3 py-6 text-center text-xs text-muted-foreground">
+            <div
+              data-testid="notification-bell-empty"
+              className="px-3 py-6 text-center text-xs text-muted-foreground"
+            >
               no notifications yet
             </div>
           ) : (
@@ -194,6 +202,8 @@ export function NotificationBell() {
               return (
                 <div
                   key={entry.id}
+                  data-testid={`notification-bell-item-${entry.id}`}
+                  data-notification-id={entry.id}
                   className="border-b border-border/50 last:border-0"
                 >
                   <div
@@ -261,6 +271,7 @@ export function NotificationBell() {
                           {formatTime(entry.timestamp)}
                         </span>
                         <button
+                          data-testid={`notification-bell-dismiss-${entry.id}`}
                           onClick={(e) => {
                             e.stopPropagation();
                             dismissOne(entry.id);
@@ -274,7 +285,10 @@ export function NotificationBell() {
                     </div>
                   </div>
                   {isExpanded && (
-                    <div className="px-3 pb-2 pl-7">
+                    <div
+                      data-testid={`notification-bell-expanded-${entry.id}`}
+                      className="px-3 pb-2 pl-7"
+                    >
                       {entry.body && (
                         <div className="text-[10px] text-muted-foreground leading-relaxed mb-2 [&_p]:mb-1 [&_p:last-child]:mb-0 [&_strong]:text-foreground [&_code]:bg-muted [&_code]:px-1 [&_code]:text-[9px] [&_ul]:pl-4 [&_ul]:my-0.5 [&_li]:my-0">
                           <ReactMarkdown
@@ -309,6 +323,7 @@ export function NotificationBell() {
                         </span>
                       )}
                       <button
+                        data-testid={`notification-bell-ask-ai-${entry.id}`}
                         onClick={(e) => {
                           e.stopPropagation();
                           posthog.capture("notification_bell_ask_ai", {
@@ -341,6 +356,7 @@ export function NotificationBell() {
         {/* Footer */}
         <div className="px-3 py-1.5 border-t border-border">
           <button
+            data-testid="notification-bell-manage-settings"
             onClick={() => {
               setOpen(false);
               router.push("/settings?section=notifications");

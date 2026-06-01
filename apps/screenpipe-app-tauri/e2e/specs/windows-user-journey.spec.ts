@@ -19,6 +19,63 @@ const isWindows = process.platform === "win32";
 const SEARCH_QUERY = "screenpipe windows ux journey";
 const SEARCH_INPUT_SELECTOR = 'input[placeholder*="search memory"]';
 
+interface LocalApiConfig {
+  key: string | null;
+  port: number;
+  auth_enabled: boolean;
+}
+
+async function localApiRequest(
+  path: string,
+  options: { method?: string; headers?: Record<string, string>; body?: string } = {},
+): Promise<{ ok: boolean; status: number; text: string }> {
+  const config = await invokeOrThrow<LocalApiConfig>("get_local_api_config");
+  const headers = { ...(options.headers ?? {}) };
+  if (config.auth_enabled && config.key && !headers.Authorization) {
+    headers.Authorization = `Bearer ${config.key}`;
+  }
+
+  return (await browser.executeAsync(
+    (
+      url: string,
+      request: { method?: string; headers?: Record<string, string>; body?: string },
+      done: (r: { ok: boolean; status: number; text: string }) => void,
+    ) => {
+      void fetch(url, request)
+        .then(async (response) =>
+          done({ ok: response.ok, status: response.status, text: await response.text() }),
+        )
+        .catch((error) =>
+          done({
+            ok: false,
+            status: 0,
+            text: error instanceof Error ? error.message : String(error),
+          }),
+        );
+    },
+    `http://127.0.0.1:${config.port}${path}`,
+    { ...options, headers },
+  )) as { ok: boolean; status: number; text: string };
+}
+
+async function postNotification(id: string, title: string, body: string): Promise<void> {
+  const response = await localApiRequest("/notify", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      id,
+      title,
+      body,
+      type: "pipe",
+      autoDismissMs: 2_000,
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`/notify failed: ${response.status} ${response.text}`);
+  }
+}
+
 async function clickFirstDisplayed(selector: string, timeoutMs = t(15_000)): Promise<void> {
   const deadline = Date.now() + timeoutMs;
 
@@ -149,6 +206,8 @@ async function switchIsChecked(selector: string): Promise<boolean> {
 
 async function setSwitchChecked(selector: string, checked: boolean): Promise<void> {
   const toggle = await $(selector);
+  await toggle.waitForExist({ timeout: t(15_000) });
+  await toggle.scrollIntoView();
   await toggle.waitForDisplayed({ timeout: t(15_000) });
 
   if ((await switchIsChecked(selector)) !== checked) {
@@ -224,6 +283,20 @@ async function expectShortcutReminderVisible(expected: boolean, timeoutMs = t(15
       timeout: timeoutMs,
       interval: 250,
       timeoutMsg: `Expected e2e_shortcut_reminder_visible=${expected}`,
+    },
+  );
+}
+
+async function expectCurrentSettingsSection(section: string, timeoutMs = t(15_000)): Promise<void> {
+  await browser.waitUntil(
+    async () => {
+      const url = new URL(await browser.getUrl());
+      return url.pathname === "/settings" && url.searchParams.get("section") === section;
+    },
+    {
+      timeout: timeoutMs,
+      interval: 250,
+      timeoutMsg: `Settings URL did not become /settings?section=${section}`,
     },
   );
 }
@@ -509,6 +582,69 @@ describe("Windows user journey", function () {
       if (!initiallyChecked) {
         await expectShortcutReminderVisible(false, t(10_000)).catch(() => {});
       }
+    }
+  });
+
+  it("opens a notification from the bell and manages notification preferences", async function () {
+    if (!isWindows) this.skip();
+
+    await openHomeWindow();
+
+    const notificationId = `windows-e2e-bell-${Date.now()}`;
+    const notificationTitle = "Windows UX notification";
+    const notificationBody = "Notification body visible from the bell history.";
+    const displayChangesSelector = '[data-testid="notification-pref-display-changes"]';
+    let initialDisplayChanges: boolean | null = null;
+
+    try {
+      await postNotification(notificationId, notificationTitle, notificationBody);
+      if ((await browser.getWindowHandles()).includes("home")) {
+        await browser.switchToWindow("home").catch(() => {});
+      }
+
+      const bell = await $('[data-testid="notification-bell-trigger"]');
+      await bell.waitForDisplayed({ timeout: t(20_000) });
+      await bell.click();
+
+      const item = await $(`[data-testid="notification-bell-item-${notificationId}"]`);
+      await item.waitForDisplayed({ timeout: t(20_000) });
+      await item.click();
+
+      const expanded = await $(`[data-testid="notification-bell-expanded-${notificationId}"]`);
+      await expanded.waitForDisplayed({ timeout: t(10_000) });
+      const expandedText = (await expanded.getText()).toLowerCase();
+      expect(expandedText).toContain(notificationBody.toLowerCase());
+
+      const bellScreenshot = await saveScreenshot("windows-user-journey-notification-bell");
+      expect(existsSync(bellScreenshot)).toBe(true);
+
+      const manageSettings = await $('[data-testid="notification-bell-manage-settings"]');
+      await manageSettings.waitForDisplayed({ timeout: t(10_000) });
+      await manageSettings.click();
+
+      await expectCurrentSettingsSection("notifications", t(20_000));
+      await waitForBodyText(
+        (bodyText) =>
+          bodyText.includes("control which notifications screenpipe sends you") &&
+          bodyText.includes("display changes") &&
+          bodyText.includes("meeting live notes"),
+        "Notification settings did not open from the bell footer",
+      );
+
+      initialDisplayChanges = await switchIsChecked(displayChangesSelector);
+      await setSwitchChecked(displayChangesSelector, !initialDisplayChanges);
+      expect(await switchIsChecked(displayChangesSelector)).toBe(!initialDisplayChanges);
+      await setSwitchChecked(displayChangesSelector, initialDisplayChanges);
+
+      const settingsScreenshot = await saveScreenshot("windows-user-journey-notification-settings");
+      expect(existsSync(settingsScreenshot)).toBe(true);
+    } finally {
+      if (initialDisplayChanges !== null) {
+        await setSwitchChecked(displayChangesSelector, initialDisplayChanges).catch(() => {});
+      }
+      await localApiRequest(`/notifications/${encodeURIComponent(notificationId)}`, {
+        method: "DELETE",
+      }).catch(() => {});
     }
   });
 
