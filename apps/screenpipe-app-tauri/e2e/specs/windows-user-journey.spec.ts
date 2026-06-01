@@ -20,6 +20,8 @@ const SEARCH_QUERY = "screenpipe windows ux journey";
 const SEARCH_INPUT_SELECTOR = 'input[placeholder*="search memory"]';
 const APP_SERVER_PORT = Number(process.env.SCREENPIPE_FOCUS_PORT ?? "11436");
 const APP_SERVER_BASE_URL = `http://127.0.0.1:${APP_SERVER_PORT}`;
+const MAIN_WINDOW_LABELS = ["main", "main-window"] as const;
+type MainWindowLabel = (typeof MAIN_WINDOW_LABELS)[number];
 
 async function appServerRequest(
   path: string,
@@ -301,6 +303,20 @@ async function expectChatComposerAcceptsTyping(message: string): Promise<void> {
   await composer.click();
   await composer.setValue(message);
   expect(await composer.getValue()).toContain(message);
+}
+
+async function waitForAnyMainWindowHandle(timeoutMs = t(20_000)): Promise<MainWindowLabel> {
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    const handles = await browser.getWindowHandles();
+    for (const label of MAIN_WINDOW_LABELS) {
+      if (handles.includes(label)) return label;
+    }
+    await browser.pause(t(250));
+  }
+
+  throw new Error(`Main window handle did not appear (${MAIN_WINDOW_LABELS.join(", ")})`);
 }
 
 async function expectCurrentSettingsSection(section: string, timeoutMs = t(15_000)): Promise<void> {
@@ -623,6 +639,23 @@ describe("Windows user journey", function () {
       if ((await browser.getWindowHandles()).includes("home")) {
         await browser.switchToWindow("home").catch(() => {});
         await closeWindow("Chat").catch(() => {});
+      }
+
+      await browser.switchToWindow("shortcut-reminder");
+      const openTimelineButton = await $('button[title="Open timeline"]');
+      await openTimelineButton.waitForDisplayed({ timeout: t(10_000) });
+      await openTimelineButton.click();
+
+      const mainWindowLabel = await waitForAnyMainWindowHandle(t(20_000));
+      await browser.switchToWindow(mainWindowLabel);
+      await waitForWindowUrl("/overlay", undefined, t(20_000));
+
+      const timelineFromReminderScreenshot = await saveScreenshot("windows-user-journey-shortcut-reminder-timeline");
+      expect(existsSync(timelineFromReminderScreenshot)).toBe(true);
+
+      if ((await browser.getWindowHandles()).includes("home")) {
+        await browser.switchToWindow("home").catch(() => {});
+        await closeWindow("Main").catch(() => {});
       }
 
       await browser.switchToWindow("shortcut-reminder");
