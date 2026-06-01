@@ -203,6 +203,15 @@ async function stopMeetingIfVisible(): Promise<void> {
   }
 }
 
+async function shortcutRecorderForTitle(title: string) {
+  const row = await $(`//h4[normalize-space(.)="${title}"]/ancestor::div[contains(@class, "justify-between")][1]`);
+  await row.waitForDisplayed({ timeout: t(15_000) });
+
+  const recorder = await row.$('.//button[not(@role="switch")]');
+  await recorder.waitForDisplayed({ timeout: t(10_000) });
+  return recorder;
+}
+
 describe("Windows user journey", function () {
   this.timeout(180_000);
 
@@ -350,6 +359,60 @@ describe("Windows user journey", function () {
     } finally {
       await stopMeetingIfVisible().catch(() => {});
     }
+  });
+
+  it("opens Shortcuts settings and cancels editing the open-search hotkey", async function () {
+    if (!isWindows) this.skip();
+
+    await openHomeWindow();
+
+    const settingsNav = await $('[data-testid="nav-settings"]');
+    await settingsNav.waitForDisplayed({ timeout: t(15_000) });
+    await settingsNav.click();
+
+    const shortcutsNav = await $('[data-testid="settings-nav-shortcuts"]');
+    await shortcutsNav.waitForDisplayed({ timeout: t(15_000) });
+    await shortcutsNav.click();
+
+    await waitForBodyText(
+      (bodyText) =>
+        bodyText.includes("keyboard shortcuts and hotkeys") &&
+        bodyText.includes("open search") &&
+        bodyText.includes("open search when overlay is visible"),
+      "Shortcuts settings did not show the open-search hotkey row",
+    );
+
+    const recorder = await shortcutRecorderForTitle("open search");
+    const initialShortcutLabel = (await recorder.getText()).replace(/\s+/g, " ").trim();
+
+    await recorder.scrollIntoView();
+    await recorder.click();
+
+    await waitForBodyText(
+      (bodyText) => bodyText.includes("press keys..."),
+      "Shortcut recorder did not enter the visible key-capture state",
+    );
+
+    const recordingScreenshot = await saveScreenshot("windows-user-journey-shortcut-recording");
+    expect(existsSync(recordingScreenshot)).toBe(true);
+
+    await browser.keys(["Escape"]);
+
+    await browser.waitUntil(
+      async () => !(await getBodyTextLower()).includes("press keys..."),
+      {
+        timeout: t(10_000),
+        interval: 250,
+        timeoutMsg: "Shortcut recorder stayed in key-capture state after Escape",
+      },
+    );
+
+    const restoredRecorder = await shortcutRecorderForTitle("open search");
+    const restoredShortcutLabel = (await restoredRecorder.getText()).replace(/\s+/g, " ").trim();
+    expect(restoredShortcutLabel).toBe(initialShortcutLabel);
+
+    const shortcutsScreenshot = await saveScreenshot("windows-user-journey-shortcuts");
+    expect(existsSync(shortcutsScreenshot)).toBe(true);
   });
 
   it("opens Storage settings and previews local retention before cancelling", async function () {
