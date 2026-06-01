@@ -13,7 +13,7 @@
 import { existsSync } from "node:fs";
 import { saveScreenshot } from "../helpers/screenshot-utils.js";
 import { openHomeWindow, waitForAppReady, t } from "../helpers/test-utils.js";
-import { closeWindow, invokeOrThrow, waitForWindowHandle } from "../helpers/tauri.js";
+import { closeWindow, invokeOrThrow, waitForWindowHandle, waitForWindowUrl } from "../helpers/tauri.js";
 
 const isWindows = process.platform === "win32";
 const SEARCH_QUERY = "screenpipe windows ux journey";
@@ -293,6 +293,14 @@ async function waitForSearchInputFocus(timeoutMs = t(15_000)): Promise<void> {
       timeoutMsg: "Search input did not receive focus after opening from the shortcut reminder",
     },
   );
+}
+
+async function expectChatComposerAcceptsTyping(message: string): Promise<void> {
+  const composer = await $("form textarea");
+  await composer.waitForDisplayed({ timeout: t(20_000) });
+  await composer.click();
+  await composer.setValue(message);
+  expect(await composer.getValue()).toContain(message);
 }
 
 async function expectCurrentSettingsSection(section: string, timeoutMs = t(15_000)): Promise<void> {
@@ -597,6 +605,24 @@ describe("Windows user journey", function () {
       if ((await browser.getWindowHandles()).includes("home")) {
         await browser.switchToWindow("home").catch(() => {});
         await closeWindow({ Search: { query: null } }).catch(() => {});
+      }
+
+      await browser.switchToWindow("shortcut-reminder");
+      const openChatButton = await $('button[title="Open chat"]');
+      await openChatButton.waitForDisplayed({ timeout: t(10_000) });
+      await openChatButton.click();
+
+      await waitForWindowHandle("chat", t(20_000));
+      await browser.switchToWindow("chat");
+      await waitForWindowUrl("/chat", undefined, t(20_000));
+      await expectChatComposerAcceptsTyping(`shortcut reminder chat ${Date.now()}`);
+
+      const chatFromReminderScreenshot = await saveScreenshot("windows-user-journey-shortcut-reminder-chat");
+      expect(existsSync(chatFromReminderScreenshot)).toBe(true);
+
+      if ((await browser.getWindowHandles()).includes("home")) {
+        await browser.switchToWindow("home").catch(() => {});
+        await closeWindow("Chat").catch(() => {});
       }
 
       await browser.switchToWindow("shortcut-reminder");
