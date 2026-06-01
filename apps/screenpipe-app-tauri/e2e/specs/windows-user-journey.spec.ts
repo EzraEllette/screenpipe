@@ -277,6 +277,24 @@ async function expectShortcutReminderVisible(expected: boolean, timeoutMs = t(15
   );
 }
 
+async function waitForSearchInputFocus(timeoutMs = t(15_000)): Promise<void> {
+  const searchInput = await $(SEARCH_INPUT_SELECTOR);
+  await searchInput.waitForDisplayed({ timeout: timeoutMs });
+
+  await browser.waitUntil(
+    async () =>
+      (await browser.execute(() => {
+        const active = document.activeElement;
+        return active instanceof HTMLInputElement && active.placeholder.toLowerCase().includes("search memory");
+      })) as boolean,
+    {
+      timeout: timeoutMs,
+      interval: 250,
+      timeoutMsg: "Search input did not receive focus after opening from the shortcut reminder",
+    },
+  );
+}
+
 async function expectCurrentSettingsSection(section: string, timeoutMs = t(15_000)): Promise<void> {
   await browser.waitUntil(
     async () => {
@@ -564,6 +582,38 @@ describe("Windows user journey", function () {
 
       const reminderScreenshot = await saveScreenshot("windows-user-journey-shortcut-reminder");
       expect(existsSync(reminderScreenshot)).toBe(true);
+
+      const openSearchButton = await $('button[title="Open search"]');
+      await openSearchButton.waitForDisplayed({ timeout: t(10_000) });
+      await openSearchButton.click();
+
+      await waitForWindowHandle("search", t(20_000));
+      await browser.switchToWindow("search");
+      await waitForSearchInputFocus(t(20_000));
+
+      const searchFromReminderScreenshot = await saveScreenshot("windows-user-journey-shortcut-reminder-search");
+      expect(existsSync(searchFromReminderScreenshot)).toBe(true);
+
+      if ((await browser.getWindowHandles()).includes("home")) {
+        await browser.switchToWindow("home").catch(() => {});
+        await closeWindow({ Search: { query: null } }).catch(() => {});
+      }
+
+      await browser.switchToWindow("shortcut-reminder");
+      const hideReminderButton = await $('button[title="Hide shortcut reminder"]');
+      await hideReminderButton.waitForDisplayed({ timeout: t(10_000) });
+      await hideReminderButton.click();
+
+      await expectShortcutReminderVisible(false, t(20_000));
+      await browser.switchToWindow("home");
+      await browser.waitUntil(
+        async () => !(await switchIsChecked(shortcutReminderSelector)),
+        {
+          timeout: t(15_000),
+          interval: 250,
+          timeoutMsg: "Display settings did not reflect hiding the shortcut reminder from the overlay",
+        },
+      );
     } finally {
       if ((await browser.getWindowHandles()).includes("home")) {
         await browser.switchToWindow("home").catch(() => {});
