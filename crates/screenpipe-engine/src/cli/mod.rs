@@ -415,10 +415,10 @@ pub struct RecordArgs {
     pub async_pii_redaction: bool,
 
     /// Enable the async IMAGE-PII reconciliation worker. Independent
-    /// of `--async-pii-redaction` (text). Runs the rfdetr_v8 detector
+    /// of `--async-pii-redaction` (text). Runs the rfdetr_v11 detector
     /// over each captured frame, blacks out detected PII regions in
     /// the JPG (atomic overwrite of the source file). Requires
-    /// `rfdetr_v8.onnx` at `~/.screenpipe/models/` and the binary
+    /// `rfdetr_v11.onnx` at `~/.screenpipe/models/` and the binary
     /// built with one of the `onnx-*` cargo features. Off by default.
     #[arg(long, default_value_t = false)]
     pub async_image_pii_redaction: bool,
