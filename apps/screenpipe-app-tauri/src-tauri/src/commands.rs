@@ -1018,6 +1018,23 @@ pub fn e2e_main_overlay_visible(app_handle: tauri::AppHandle) -> bool {
     }
 }
 
+/// E2E helper: report whether the shortcut reminder overlay is visibly shown.
+///
+/// The reminder window is hidden rather than destroyed, so WebDriver can keep a
+/// stale handle after users disable it from Settings > Display.
+#[tauri::command]
+#[specta::specta]
+pub fn e2e_shortcut_reminder_visible(app_handle: tauri::AppHandle) -> bool {
+    if !cfg!(feature = "e2e") {
+        return false;
+    }
+
+    app_handle
+        .get_webview_window("shortcut-reminder")
+        .and_then(|window| window.is_visible().ok())
+        .unwrap_or(false)
+}
+
 #[derive(serde::Serialize, specta::Type)]
 pub struct E2eAgentStreamResult {
     pub emitted_deltas: u32,

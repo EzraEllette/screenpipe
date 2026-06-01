@@ -13,7 +13,7 @@
 import { existsSync } from "node:fs";
 import { saveScreenshot } from "../helpers/screenshot-utils.js";
 import { openHomeWindow, waitForAppReady, t } from "../helpers/test-utils.js";
-import { closeWindow, waitForWindowHandle } from "../helpers/tauri.js";
+import { closeWindow, invokeOrThrow, waitForWindowHandle } from "../helpers/tauri.js";
 
 const isWindows = process.platform === "win32";
 const SEARCH_QUERY = "screenpipe windows ux journey";
@@ -210,6 +210,22 @@ async function shortcutRecorderForTitle(title: string) {
   const recorder = await row.$('.//button[not(@role="switch")]');
   await recorder.waitForDisplayed({ timeout: t(10_000) });
   return recorder;
+}
+
+async function expectShortcutReminderVisible(expected: boolean, timeoutMs = t(15_000)): Promise<void> {
+  await browser.waitUntil(
+    async () => {
+      if ((await browser.getWindowHandles()).includes("home")) {
+        await browser.switchToWindow("home").catch(() => {});
+      }
+      return (await invokeOrThrow<boolean>("e2e_shortcut_reminder_visible")) === expected;
+    },
+    {
+      timeout: timeoutMs,
+      interval: 250,
+      timeoutMsg: `Expected e2e_shortcut_reminder_visible=${expected}`,
+    },
+  );
 }
 
 describe("Windows user journey", function () {
@@ -413,6 +429,87 @@ describe("Windows user journey", function () {
 
     const shortcutsScreenshot = await saveScreenshot("windows-user-journey-shortcuts");
     expect(existsSync(shortcutsScreenshot)).toBe(true);
+  });
+
+  it("shows and hides the shortcut reminder overlay from Display settings", async function () {
+    if (!isWindows) this.skip();
+
+    await openHomeWindow();
+
+    const settingsNav = await $('[data-testid="nav-settings"]');
+    await settingsNav.waitForDisplayed({ timeout: t(15_000) });
+    await settingsNav.click();
+
+    const displayNav = await $('[data-testid="settings-nav-display"]');
+    await displayNav.waitForDisplayed({ timeout: t(15_000) });
+    await displayNav.click();
+
+    await waitForBodyText(
+      (bodyText) =>
+        bodyText.includes("theme, windows, and overlay appearance") &&
+        bodyText.includes("show shortcut reminder") &&
+        bodyText.includes("overlay showing the screenpipe shortcut"),
+      "Display settings did not show the shortcut reminder controls",
+    );
+
+    const shortcutReminderSelector = "#shortcut-overlay";
+    const initiallyChecked = await switchIsChecked(shortcutReminderSelector);
+
+    try {
+      await setSwitchChecked(shortcutReminderSelector, false);
+      await expectShortcutReminderVisible(false, t(20_000));
+      await waitForBodyText(
+        (bodyText) => !bodyText.includes("overlay size"),
+        "Shortcut reminder size controls stayed visible after disabling the reminder",
+      );
+
+      await setSwitchChecked(shortcutReminderSelector, true);
+      await expectShortcutReminderVisible(true, t(20_000));
+      await waitForWindowHandle("shortcut-reminder", t(20_000));
+
+      await browser.switchToWindow("shortcut-reminder");
+      await browser.waitUntil(
+        async () => {
+          const state = (await browser.execute(() => ({
+            path: window.location.pathname,
+            hasTimelineButton: !!document.querySelector('button[title="Open timeline"]'),
+            hasChatButton: !!document.querySelector('button[title="Open chat"]'),
+            hasSearchButton: !!document.querySelector('button[title="Open search"]'),
+            hasHideButton: !!document.querySelector('button[title="Hide shortcut reminder"]'),
+          }))) as {
+            path: string;
+            hasTimelineButton: boolean;
+            hasChatButton: boolean;
+            hasSearchButton: boolean;
+            hasHideButton: boolean;
+          };
+
+          return (
+            state.path === "/shortcut-reminder" &&
+            state.hasTimelineButton &&
+            state.hasChatButton &&
+            state.hasSearchButton &&
+            state.hasHideButton
+          );
+        },
+        {
+          timeout: t(15_000),
+          interval: 250,
+          timeoutMsg: "Shortcut reminder window did not render its visible shortcut controls",
+        },
+      );
+
+      const reminderScreenshot = await saveScreenshot("windows-user-journey-shortcut-reminder");
+      expect(existsSync(reminderScreenshot)).toBe(true);
+    } finally {
+      if ((await browser.getWindowHandles()).includes("home")) {
+        await browser.switchToWindow("home").catch(() => {});
+      }
+      await setSwitchChecked(shortcutReminderSelector, initiallyChecked).catch(() => {});
+      if (!initiallyChecked) {
+        await expectShortcutReminderVisible(false, t(10_000)).catch(() => {});
+      }
+    }
   });
 
   it("opens Storage settings and previews local retention before cancelling", async function () {
