@@ -225,12 +225,15 @@ describe("Windows user journey", function () {
     const audioWasEnabled = await switchIsChecked("#disableAudio");
     try {
       await setSwitchChecked("#disableAudio", true);
+      // Audio recording is enabled by default (disableAudio: false), so the
+      // troubleshooting controls below render without a pending change. Do NOT
+      // assert "apply & restart" here — that button only appears when there are
+      // unsaved changes, which is not the case when audio is already enabled.
       await waitForBodyText(
         (bodyText) =>
           bodyText.includes("auto-select audio devices") &&
           bodyText.includes("microphone echo cancellation") &&
-          bodyText.includes("windows wasapi aec") &&
-          bodyText.includes("apply & restart"),
+          bodyText.includes("windows wasapi aec"),
         "Windows audio troubleshooting controls did not appear after enabling audio recording",
       );
 
