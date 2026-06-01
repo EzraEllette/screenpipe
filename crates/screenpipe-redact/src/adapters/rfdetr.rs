@@ -418,8 +418,12 @@ mod imp {
         // the last dim, fall back to None if it isn't a static int.
         let shape = &session.inputs.first()?.input_type;
         let s = format!("{shape:?}");
-        // Cheap parse: look for "320" or "384" suffix in the shape.
-        [320u32, 384]
+        // Cheap parse: look for a known square size in the shape.
+        // Keep this in sync with every shipped model: v8=320, v9=384,
+        // v11=512. Omitting the current model's size makes detection
+        // fall back to 384 and feed a wrong-sized tensor → ort "invalid
+        // dimensions for input" on every frame (silent redaction outage).
+        [320u32, 384, 512]
             .into_iter()
             .find(|cand| s.contains(&cand.to_string()))
     }
