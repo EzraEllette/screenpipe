@@ -361,7 +361,7 @@ async e2eMainOverlayVisible() : Promise<boolean> {
  * E2E-only probe: whether the owned-browser native webview is currently shown.
  * Mirrors `e2e_main_overlay_visible` — internal visibility state stays hidden
  * in production binaries and is only exposed under the `e2e` feature. Used by
- * `owned-browser-background-nav.spec.ts` to assert a background agent/pipe
+ * `zz-owned-browser-background-nav.spec.ts` to assert a background agent/pipe
  * navigation does not reveal the browser over a non-chat view.
  */
 async e2eOwnedBrowserVisible() : Promise<boolean> {
