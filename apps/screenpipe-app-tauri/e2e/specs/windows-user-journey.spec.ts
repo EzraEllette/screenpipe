@@ -744,6 +744,37 @@ describe("Windows user journey", function () {
 
       const settingsScreenshot = await saveScreenshot("windows-user-journey-notification-settings");
       expect(existsSync(settingsScreenshot)).toBe(true);
+
+      const backToApp = await $('//button[.//span[normalize-space(.)="Back to app"]]');
+      await backToApp.waitForDisplayed({ timeout: t(10_000) });
+      await backToApp.click();
+
+      const homeSection = await $('[data-testid="section-home"]');
+      await homeSection.waitForExist({ timeout: t(20_000) });
+
+      const reopenedBell = await $(bellSelector);
+      await reopenedBell.waitForDisplayed({ timeout: t(20_000) });
+      await reopenedBell.click();
+
+      const reopenedItem = await $(itemSelector);
+      await reopenedItem.waitForDisplayed({ timeout: t(20_000) });
+      await reopenedItem.moveTo();
+
+      const dismissButton = await $(`[data-testid="notification-bell-dismiss-${notificationId}"]`);
+      await dismissButton.waitForDisplayed({ timeout: t(10_000) });
+      await dismissButton.click();
+
+      await browser.waitUntil(
+        async () => !(await $(itemSelector).isExisting().catch(() => false)),
+        {
+          timeout: t(10_000),
+          interval: 250,
+          timeoutMsg: "Notification bell row stayed visible after clicking dismiss",
+        },
+      );
+
+      const dismissedScreenshot = await saveScreenshot("windows-user-journey-notification-dismissed");
+      expect(existsSync(dismissedScreenshot)).toBe(true);
     } finally {
       if (initialDisplayChanges !== null) {
         await setSwitchChecked(displayChangesSelector, initialDisplayChanges).catch(() => {});
