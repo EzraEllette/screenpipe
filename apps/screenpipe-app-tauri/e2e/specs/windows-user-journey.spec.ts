@@ -36,6 +36,29 @@ async function clickFirstDisplayed(selector: string, timeoutMs = t(15_000)): Pro
   throw new Error(`No displayed element found for ${selector}`);
 }
 
+async function clickFirstButtonWithText(text: string, timeoutMs = t(15_000)): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  const expected = text.toLowerCase();
+
+  while (Date.now() < deadline) {
+    const buttons = await $$("button");
+    for (const button of buttons) {
+      if (!(await button.isDisplayed().catch(() => false))) continue;
+
+      const label = (await button.getText().catch(() => "")).trim().toLowerCase();
+      if (label !== expected) continue;
+
+      await button.scrollIntoView();
+      await button.waitForEnabled({ timeout: t(5_000) });
+      await button.click();
+      return;
+    }
+    await browser.pause(t(250));
+  }
+
+  throw new Error(`No displayed button found with text "${text}"`);
+}
+
 async function waitForSearchResultsSurface(): Promise<void> {
   await browser.waitUntil(
     async () => {
@@ -166,6 +189,20 @@ async function setDataStateSwitchChecked(selector: string, checked: boolean): Pr
   );
 }
 
+async function stopMeetingIfVisible(): Promise<void> {
+  const buttons = await $$("button");
+  for (const button of buttons) {
+    if (!(await button.isDisplayed().catch(() => false))) continue;
+
+    const label = (await button.getText().catch(() => "")).trim().toLowerCase();
+    if (label !== "stop") continue;
+
+    await button.scrollIntoView();
+    await button.click();
+    return;
+  }
+}
+
 describe("Windows user journey", function () {
   this.timeout(180_000);
 
@@ -267,6 +304,51 @@ describe("Windows user journey", function () {
       if (!audioWasEnabled) {
         await setSwitchChecked("#disableAudio", false).catch(() => {});
       }
+    }
+  });
+
+  it("starts and stops a manual meeting note from the visible Meetings UI", async function () {
+    if (!isWindows) this.skip();
+
+    await openHomeWindow();
+
+    const meetingsNav = await $('[data-testid="nav-meetings"]');
+    await meetingsNav.waitForDisplayed({ timeout: t(15_000) });
+    await meetingsNav.click();
+
+    await waitForBodyText(
+      (bodyText) =>
+        bodyText.includes("new meeting") ||
+        bodyText.includes("no meetings yet") ||
+        bodyText.includes("no past meetings yet"),
+      "Meetings section did not show a startable meeting state",
+    );
+
+    try {
+      await clickFirstButtonWithText("new meeting", t(20_000));
+
+      await waitForBodyText(
+        (bodyText) =>
+          bodyText.includes("recording") &&
+          bodyText.includes("ongoing") &&
+          bodyText.includes("always get consent"),
+        "Manual meeting did not enter the visible live recording note state",
+      );
+
+      const liveMeetingScreenshot = await saveScreenshot("windows-user-journey-meeting-live");
+      expect(existsSync(liveMeetingScreenshot)).toBe(true);
+
+      await clickFirstButtonWithText("stop", t(15_000));
+
+      await waitForBodyText(
+        (bodyText) => bodyText.includes("meeting saved"),
+        "Manual meeting did not transition to the saved state after stop",
+      );
+
+      const savedMeetingScreenshot = await saveScreenshot("windows-user-journey-meeting-saved");
+      expect(existsSync(savedMeetingScreenshot)).toBe(true);
+    } finally {
+      await stopMeetingIfVisible().catch(() => {});
     }
   });
 
