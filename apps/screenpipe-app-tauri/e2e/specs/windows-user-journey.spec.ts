@@ -142,6 +142,30 @@ async function setSwitchChecked(selector: string, checked: boolean): Promise<voi
   );
 }
 
+async function isDataStateSwitchChecked(selector: string): Promise<boolean> {
+  const toggle = await $(selector);
+  await toggle.waitForExist({ timeout: t(15_000) });
+  return (await toggle.getAttribute("data-state")) === "checked";
+}
+
+async function setDataStateSwitchChecked(selector: string, checked: boolean): Promise<void> {
+  const toggle = await $(selector);
+  await toggle.waitForDisplayed({ timeout: t(15_000) });
+
+  if ((await isDataStateSwitchChecked(selector)) !== checked) {
+    await toggle.click();
+  }
+
+  await browser.waitUntil(
+    async () => (await isDataStateSwitchChecked(selector)) === checked,
+    {
+      timeout: t(10_000),
+      interval: 250,
+      timeoutMsg: `${selector} did not become ${checked ? "checked" : "unchecked"}`,
+    },
+  );
+}
+
 describe("Windows user journey", function () {
   this.timeout(180_000);
 
@@ -299,5 +323,54 @@ describe("Windows user journey", function () {
 
     const retentionScreenshot = await saveScreenshot("windows-user-journey-storage-retention");
     expect(existsSync(retentionScreenshot)).toBe(true);
+  });
+
+  it("previews Privacy API auth restart requirements without applying them", async function () {
+    if (!isWindows) this.skip();
+
+    await openHomeWindow();
+
+    const settingsNav = await $('[data-testid="nav-settings"]');
+    await settingsNav.waitForDisplayed({ timeout: t(15_000) });
+    await settingsNav.click();
+
+    const privacyNav = await $('[data-testid="settings-nav-privacy"]');
+    await privacyNav.waitForDisplayed({ timeout: t(15_000) });
+    await privacyNav.click();
+
+    await waitForBodyText(
+      (bodyText) =>
+        bodyText.includes("require api authentication") &&
+        bodyText.includes("all api requests require a valid token"),
+      "Privacy settings did not show the API authentication controls",
+    );
+
+    const apiAuthSwitchSelector = '[data-testid="privacy-api-auth-switch"]';
+    const apiAuthSwitch = await $(apiAuthSwitchSelector);
+    await apiAuthSwitch.waitForDisplayed({ timeout: t(20_000) });
+    if (!(await apiAuthSwitch.isEnabled())) {
+      this.skip();
+    }
+
+    const initiallyChecked = await isDataStateSwitchChecked(apiAuthSwitchSelector);
+    try {
+      await setDataStateSwitchChecked(apiAuthSwitchSelector, !initiallyChecked);
+
+      const applyRestart = await $('[data-testid="privacy-apply-restart"]');
+      await applyRestart.waitForDisplayed({ timeout: t(10_000) });
+
+      await waitForBodyText(
+        (bodyText) =>
+          bodyText.includes("apply & restart") &&
+          bodyText.includes("auth changes to take effect") &&
+          bodyText.includes("existing browser connections"),
+        "Privacy API auth toggle did not explain the restart requirement",
+      );
+
+      const privacyScreenshot = await saveScreenshot("windows-user-journey-privacy-api-auth-restart");
+      expect(existsSync(privacyScreenshot)).toBe(true);
+    } finally {
+      await setDataStateSwitchChecked(apiAuthSwitchSelector, initiallyChecked).catch(() => {});
+    }
   });
 });
