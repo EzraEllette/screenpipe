@@ -18,23 +18,13 @@ import { closeWindow, invokeOrThrow, waitForWindowHandle } from "../helpers/taur
 const isWindows = process.platform === "win32";
 const SEARCH_QUERY = "screenpipe windows ux journey";
 const SEARCH_INPUT_SELECTOR = 'input[placeholder*="search memory"]';
+const APP_SERVER_PORT = Number(process.env.SCREENPIPE_FOCUS_PORT ?? "11436");
+const APP_SERVER_BASE_URL = `http://127.0.0.1:${APP_SERVER_PORT}`;
 
-interface LocalApiConfig {
-  key: string | null;
-  port: number;
-  auth_enabled: boolean;
-}
-
-async function localApiRequest(
+async function appServerRequest(
   path: string,
   options: { method?: string; headers?: Record<string, string>; body?: string } = {},
 ): Promise<{ ok: boolean; status: number; text: string }> {
-  const config = await invokeOrThrow<LocalApiConfig>("get_local_api_config");
-  const headers = { ...(options.headers ?? {}) };
-  if (config.auth_enabled && config.key && !headers.Authorization) {
-    headers.Authorization = `Bearer ${config.key}`;
-  }
-
   return (await browser.executeAsync(
     (
       url: string,
@@ -53,13 +43,13 @@ async function localApiRequest(
           }),
         );
     },
-    `http://127.0.0.1:${config.port}${path}`,
-    { ...options, headers },
+    `${APP_SERVER_BASE_URL}${path}`,
+    options,
   )) as { ok: boolean; status: number; text: string };
 }
 
 async function postNotification(id: string, title: string, body: string): Promise<void> {
-  const response = await localApiRequest("/notify", {
+  const response = await appServerRequest("/notify", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -642,7 +632,7 @@ describe("Windows user journey", function () {
       if (initialDisplayChanges !== null) {
         await setSwitchChecked(displayChangesSelector, initialDisplayChanges).catch(() => {});
       }
-      await localApiRequest(`/notifications/${encodeURIComponent(notificationId)}`, {
+      await appServerRequest(`/notifications/${encodeURIComponent(notificationId)}`, {
         method: "DELETE",
       }).catch(() => {});
     }

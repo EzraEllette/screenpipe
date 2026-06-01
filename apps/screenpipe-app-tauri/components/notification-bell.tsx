@@ -18,7 +18,7 @@ import {
 } from "@/components/ui/popover";
 import { useRouter } from "next/navigation";
 import { showChatWithPrefill } from "@/lib/chat-utils";
-import { localFetch } from "@/lib/api";
+import { invoke } from "@tauri-apps/api/core";
 
 interface NotificationEntry {
   id: string;
@@ -28,6 +28,27 @@ interface NotificationEntry {
   pipe_name?: string;
   timestamp: string;
   read: boolean;
+}
+
+interface AppServerConfig {
+  port: number;
+}
+
+let appServerBaseUrl: Promise<string> | null = null;
+
+async function getAppServerBaseUrl(): Promise<string> {
+  appServerBaseUrl ??= invoke<AppServerConfig>("get_app_server_config")
+    .then((config) => `http://localhost:${config.port || 11435}`)
+    .catch(() => "http://localhost:11435");
+  return appServerBaseUrl;
+}
+
+async function notificationFetch(
+  path: string,
+  init?: RequestInit,
+): Promise<Response> {
+  const baseUrl = await getAppServerBaseUrl();
+  return fetch(`${baseUrl}${path.startsWith("/") ? path : `/${path}`}`, init);
 }
 
 async function openNotificationLink(href: string) {
@@ -81,7 +102,7 @@ export function NotificationBell() {
 
   const loadHistory = useCallback(async () => {
     try {
-      const res = await localFetch("/notifications");
+      const res = await notificationFetch("/notifications");
       if (res.ok) {
         const entries: NotificationEntry[] = await res.json();
         setHistory(entries);
@@ -102,7 +123,7 @@ export function NotificationBell() {
   const markAllRead = async () => {
     setHistory((prev) => prev.map((n) => ({ ...n, read: true })));
     try {
-      await localFetch("/notifications", { method: "POST" });
+      await notificationFetch("/notifications", { method: "POST" });
     } catch {}
   };
 
@@ -110,7 +131,7 @@ export function NotificationBell() {
     posthog.capture("notification_bell_clear_all", { count: history.length });
     setHistory([]);
     try {
-      await localFetch("/notifications", { method: "DELETE" });
+      await notificationFetch("/notifications", { method: "DELETE" });
     } catch {}
   };
 
@@ -123,7 +144,7 @@ export function NotificationBell() {
     setHistory((prev) => prev.filter((n) => n.id !== id));
     if (expandedId === id) setExpandedId(null);
     try {
-      await localFetch(`/notifications/${encodeURIComponent(id)}`, { method: "DELETE" });
+      await notificationFetch(`/notifications/${encodeURIComponent(id)}`, { method: "DELETE" });
     } catch {}
   };
 
@@ -143,6 +164,7 @@ export function NotificationBell() {
       onOpenChange={(o) => {
         setOpen(o);
         if (o) {
+          void loadHistory();
           posthog.capture("notification_bell_opened", {
             unread_count: unreadCount,
             total_count: history.length,

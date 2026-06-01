@@ -57,6 +57,9 @@ controller is unavailable, so it never fails the default CI lane.
 ```
 
 Uses `.e2e/` as isolated data dir; real data is never touched.
+The E2E launcher also moves the app-local focus/notification server to
+`SCREENPIPE_FOCUS_PORT` (default `11436`) so tests can exercise `/notify` and
+`/notifications` without colliding with a developer's production app on 11435.
 
 ## Running locally on Windows
 
