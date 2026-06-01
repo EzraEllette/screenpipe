@@ -1193,6 +1193,15 @@ impl SettingsStore {
                 }
             });
         }
+        // E2E/dev escape hatch: bind the local server to a non-default port so a
+        // throwaway instance can run alongside another screenpipe already on
+        // :3030 instead of piggy-backing on it.
+        if let Some(p) = std::env::var("SCREENPIPE_PORT")
+            .ok()
+            .and_then(|v| v.parse::<u16>().ok())
+        {
+            config.port = p;
+        }
         config
     }
 
