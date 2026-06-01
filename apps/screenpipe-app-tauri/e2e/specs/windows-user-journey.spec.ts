@@ -98,6 +98,50 @@ async function expectTimelineShell(): Promise<void> {
   );
 }
 
+async function getBodyTextLower(): Promise<string> {
+  return ((await browser.execute(() => document.body.innerText || "")) as string).toLowerCase();
+}
+
+async function waitForBodyText(
+  predicate: (bodyText: string) => boolean,
+  timeoutMsg: string,
+): Promise<void> {
+  await browser.waitUntil(
+    async () => predicate(await getBodyTextLower()),
+    {
+      timeout: t(20_000),
+      interval: 500,
+      timeoutMsg,
+    },
+  );
+}
+
+async function switchIsChecked(selector: string): Promise<boolean> {
+  return (await browser.execute(
+    (switchSelector: string) =>
+      document.querySelector(switchSelector)?.getAttribute("aria-checked") === "true",
+    selector,
+  )) as boolean;
+}
+
+async function setSwitchChecked(selector: string, checked: boolean): Promise<void> {
+  const toggle = await $(selector);
+  await toggle.waitForDisplayed({ timeout: t(15_000) });
+
+  if ((await switchIsChecked(selector)) !== checked) {
+    await toggle.click();
+  }
+
+  await browser.waitUntil(
+    async () => (await switchIsChecked(selector)) === checked,
+    {
+      timeout: t(10_000),
+      interval: 250,
+      timeoutMsg: `${selector} did not become ${checked ? "checked" : "unchecked"}`,
+    },
+  );
+}
+
 describe("Windows user journey", function () {
   this.timeout(180_000);
 
@@ -155,5 +199,47 @@ describe("Windows user journey", function () {
 
     const restoredHomeSection = await $('[data-testid="section-home"]');
     await restoredHomeSection.waitForExist({ timeout: t(20_000) });
+  });
+
+  it("opens Recording settings and reveals Windows audio troubleshooting controls", async function () {
+    if (!isWindows) this.skip();
+
+    await openHomeWindow();
+
+    const settingsNav = await $('[data-testid="nav-settings"]');
+    await settingsNav.waitForDisplayed({ timeout: t(15_000) });
+    await settingsNav.click();
+
+    const recordingNav = await $('[data-testid="settings-nav-recording"]');
+    await recordingNav.waitForDisplayed({ timeout: t(15_000) });
+    await recordingNav.click();
+
+    await waitForBodyText(
+      (bodyText) =>
+        bodyText.includes("screen and audio recording preferences") &&
+        bodyText.includes("audio recording") &&
+        bodyText.includes("screen recording"),
+      "Recording settings did not show the core audio/screen controls",
+    );
+
+    const audioWasEnabled = await switchIsChecked("#disableAudio");
+    try {
+      await setSwitchChecked("#disableAudio", true);
+      await waitForBodyText(
+        (bodyText) =>
+          bodyText.includes("auto-select audio devices") &&
+          bodyText.includes("microphone echo cancellation") &&
+          bodyText.includes("windows wasapi aec") &&
+          bodyText.includes("apply & restart"),
+        "Windows audio troubleshooting controls did not appear after enabling audio recording",
+      );
+
+      const recordingScreenshot = await saveScreenshot("windows-user-journey-recording-settings");
+      expect(existsSync(recordingScreenshot)).toBe(true);
+    } finally {
+      if (!audioWasEnabled) {
+        await setSwitchChecked("#disableAudio", false).catch(() => {});
+      }
+    }
   });
 });
