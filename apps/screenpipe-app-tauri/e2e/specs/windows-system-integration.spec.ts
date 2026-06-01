@@ -180,9 +180,9 @@ Add-Type -AssemblyName System.Windows.Forms
       expect(screen.height).toBeGreaterThan(0);
     }
 
-    const vision = await fetchJson(apiUrl(api, "/vision/status"), authHeaders(api.key));
-    expect(vision.status).toBeGreaterThan(0);
-    expect(vision.status).toBeLessThan(500);
+    const visionStatus = await fetchJson(apiUrl(api, "/vision/status"), authHeaders(api.key));
+    expect(visionStatus.status).toBeGreaterThan(0);
+    expect(visionStatus.status).toBeLessThan(500);
   });
 
   it("runs against the isolated E2E data directory instead of user app data", async function () {
