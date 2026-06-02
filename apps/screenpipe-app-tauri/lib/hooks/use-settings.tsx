@@ -349,6 +349,11 @@ export type Settings = SettingsStore & {
 	 */
 	listenOnLan?: boolean;
 	encryptStore?: boolean;
+	/** Global blanket permission: allow screenpipe to copy browser cookies
+	 *  into the owned browser so the agent can browse sites the user is
+	 *  logged into. When true, the session-access prompt card never appears.
+	 *  Revocable from Settings → Browser URL Capture. */
+	browserCookieAccessGranted?: boolean;
 }
 
 export function getEffectiveFilters(settings: Settings) {
@@ -582,6 +587,7 @@ let DEFAULT_SETTINGS: Settings = {
 			localRetentionDays: 14,
 			localRetentionMode: "media",
 			encryptStore: true,
+			browserCookieAccessGranted: false,
 			hdRecordingDefault: "ask",
 			hdRecordingIntervalMs: 100,
 		};
@@ -949,6 +955,14 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 					port: loadedSettings.port ?? 3030,
 					authEnabled: loadedSettings.apiAuth ?? true,
 				});
+
+				// Hydrate Rust's owned-browser runtime cache from persisted settings.
+				// This prevents the cookie-access prompt from reappearing after restart.
+				await commands
+					.setBrowserCookieAccessGranted(
+						loadedSettings.browserCookieAccessGranted === true,
+					)
+					.catch(() => {});
 			} catch (error) {
 				console.error("Failed to load settings:", error);
 				setLoadingError(error instanceof Error ? error.message : "Unknown error");

@@ -26,17 +26,20 @@
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { commands } from "@/lib/utils/tauri";
+import { LogicalPosition } from "@tauri-apps/api/dpi";
 import { listen } from "@tauri-apps/api/event";
+import { Menu } from "@tauri-apps/api/menu";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { platform as getPlatform } from "@tauri-apps/plugin-os";
-import { ExternalLink, KeyRound, Loader2, RotateCw, PanelRightClose, PanelRightOpen } from "lucide-react";
+import { Cookie, ExternalLink, KeyRound, Loader2, RotateCw, PanelRightClose, PanelRightOpen } from "lucide-react";
 import {
   loadConversationFile,
   updateConversationFlags,
 } from "@/lib/chat-storage";
 import { Button } from "@/components/ui/button";
 import { localFetch } from "@/lib/api";
+import { useSettings } from "@/lib/hooks/use-settings";
 
 const NAVIGATE_EVENT = "owned-browser:navigate";
 const SESSION_ACCESS_REQUEST_EVENT = "owned-browser:session-access-request";
@@ -57,12 +60,15 @@ interface SessionAccessEvent {
   requestId?: string;
   url: string;
   host: string;
+  already_granted?: boolean;
+  alreadyGranted?: boolean;
 }
 
 interface ActiveSessionAccessRequest {
   requestId: string;
   url: string;
   host: string;
+  alreadyGranted: boolean;
 }
 
 interface V20CookieBlockEvent {
@@ -102,6 +108,7 @@ function clampWidth(want: number, available: number): number {
 }
 
 export function BrowserSidebar({ conversationId }: BrowserSidebarProps) {
+  const { settings, updateSettings } = useSettings();
   const [visible, setVisible] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
   const [currentUrl, setCurrentUrl] = useState<string | null>(null);
@@ -300,6 +307,8 @@ export function BrowserSidebar({ conversationId }: BrowserSidebarProps) {
           requestId,
           url: payload.url,
           host: payload.host,
+          alreadyGranted:
+            payload.alreadyGranted ?? payload.already_granted ?? false,
         };
         setSessionAccessRequest(request);
         setSessionAccessAnswer(null);
@@ -585,6 +594,90 @@ export function BrowserSidebar({ conversationId }: BrowserSidebarProps) {
     }
   }, [currentUrl]);
 
+  const setCookieAccessGranted = useCallback(
+    async (granted: boolean) => {
+      await commands.setBrowserCookieAccessGranted(granted);
+      await updateSettings({ browserCookieAccessGranted: granted });
+    },
+    [updateSettings],
+  );
+
+  const retryWithCookies = useCallback(async () => {
+    if (!currentUrl) return;
+    await commands.confirmBrowserCookieAccessForSession();
+    setLoading(true);
+    await commands.ownedBrowserNavigate(currentUrl).catch((e) => {
+      console.error("retry cookie navigation failed", e);
+    });
+  }, [currentUrl]);
+
+  const openCookieMenu = useCallback(
+    async (event: React.MouseEvent<HTMLButtonElement>) => {
+      try {
+        const granted = settings.browserCookieAccessGranted === true;
+        const buttonRect = event.currentTarget.getBoundingClientRect();
+        const win = getCurrentWindow();
+        const menu = await Menu.new({
+          items: [
+          {
+            id: "browser-cookie-status",
+            text: granted
+              ? "Browser sessions: enabled"
+              : "Browser sessions: ask before use",
+            enabled: false,
+          },
+          {
+            id: "browser-cookie-explain",
+            text: "Uses cookies only, never passwords",
+            enabled: false,
+          },
+          {
+            id: granted
+              ? "browser-cookie-revoke"
+              : "browser-cookie-enable",
+            text: granted
+              ? "Ask again before using cookies"
+              : currentUrl
+                ? "Enable and retry current page"
+                : "Enable browser sessions",
+            action: () => {
+              if (granted) {
+                void setCookieAccessGranted(false);
+                return;
+              }
+              void (async () => {
+                await setCookieAccessGranted(true);
+                await commands.confirmBrowserCookieAccessForSession();
+                if (currentUrl) await retryWithCookies();
+              })();
+            },
+          },
+          {
+            id: "browser-cookie-retry",
+            text: "Retry current page with cookies",
+            enabled: Boolean(currentUrl),
+            action: () => {
+              void retryWithCookies();
+            },
+          },
+          ],
+        });
+        await menu.popup(
+          new LogicalPosition(buttonRect.left, buttonRect.bottom + 4),
+          win,
+        );
+      } catch (e) {
+        console.error("owned-browser cookie menu failed", e);
+      }
+    },
+    [
+      currentUrl,
+      retryWithCookies,
+      setCookieAccessGranted,
+      settings.browserCookieAccessGranted,
+    ],
+  );
+
   const collapse = useCallback(() => {
     setCollapsed(true);
     setLoading(false);
@@ -603,10 +696,18 @@ export function BrowserSidebar({ conversationId }: BrowserSidebarProps) {
       if (!request || sessionAccessAnswer) return;
       setSessionAccessAnswer(allow ? "allow" : "deny");
       try {
+        if (allow) {
+          await commands.setBrowserCookieAccessGranted(true);
+        }
         await commands.ownedBrowserResolveSessionAccess(
           request.requestId,
           allow,
         );
+        if (allow) {
+          await updateSettings({ browserCookieAccessGranted: true }).catch((e) => {
+            console.error("persist browserCookieAccessGranted failed", e);
+          });
+        }
         setSessionAccessRequest((current) =>
           current?.requestId === request.requestId ? null : current,
         );
@@ -621,7 +722,7 @@ export function BrowserSidebar({ conversationId }: BrowserSidebarProps) {
         setSessionAccessAnswer(null);
       }
     },
-    [sessionAccessRequest, sessionAccessAnswer],
+    [sessionAccessRequest, sessionAccessAnswer, updateSettings],
   );
 
   // ---------------------------------------------------------------------------
@@ -668,6 +769,15 @@ export function BrowserSidebar({ conversationId }: BrowserSidebarProps) {
                 </div>
               )}
             </div>
+            {isMac && (
+              <button
+                onClick={openCookieMenu}
+                title="Browser session cookies"
+                className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground"
+              >
+                <Cookie className="h-3.5 w-3.5" />
+              </button>
+            )}
             <button
               onClick={reload}
               title="Reload"
@@ -709,7 +819,9 @@ export function BrowserSidebar({ conversationId }: BrowserSidebarProps) {
                     </div>
                     <div className="min-w-0">
                       <div className="text-sm font-medium text-foreground">
-                        Use your browser login?
+                        {sessionAccessRequest.alreadyGranted
+                          ? "macOS may ask for access"
+                          : "Use your browser login?"}
                       </div>
                       <div className="mt-1 break-all text-xs text-muted-foreground">
                         {sessionAccessRequest.host}
@@ -717,11 +829,11 @@ export function BrowserSidebar({ conversationId }: BrowserSidebarProps) {
                     </div>
                   </div>
                   <p className="text-xs leading-5 text-muted-foreground">
-                    ScreenPipe Browser can copy matching session cookies from
-                    your browser so the agent opens this site already signed
-                    in. It does not read saved passwords.
+                    {sessionAccessRequest.alreadyGranted
+                      ? "Screenpipe is about to copy browser session cookies. macOS may ask for browser Safe Storage access next."
+                      : "ScreenPipe can use your browser sessions so the agent opens sites already signed in. This applies to all sites. It does not read saved passwords."}
                   </p>
-                  {isMac && (
+                  {isMac && !sessionAccessRequest.alreadyGranted && (
                     <p className="mt-2 text-xs leading-5 text-muted-foreground">
                       If you allow it, macOS may ask for access to browser safe
                       storage next.
@@ -736,7 +848,9 @@ export function BrowserSidebar({ conversationId }: BrowserSidebarProps) {
                     >
                       {sessionAccessAnswer === "allow"
                         ? isMac ? "Waiting for macOS…" : "Applying…"
-                        : "Use browser session"}
+                        : sessionAccessRequest.alreadyGranted
+                          ? "Continue"
+                          : "Use browser session"}
                     </Button>
                     <Button
                       size="sm"
