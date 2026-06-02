@@ -154,6 +154,9 @@ static SESSION_ACCESS_PENDING: OnceLock<
 /// this AtomicBool is the runtime cache so every navigate avoids
 /// an async store read. Set via `set_browser_cookie_access_granted`.
 static GLOBAL_SESSION_ACCESS_GRANTED: AtomicBool = AtomicBool::new(false);
+/// User explicitly disabled browser cookie access. When true, do not prompt
+/// and do not read cookies. User can re-enable from the cookie menu.
+static GLOBAL_SESSION_ACCESS_DISABLED: AtomicBool = AtomicBool::new(false);
 /// Guards against showing duplicate prompt cards when multiple
 /// navigations fire before the user answers the first one.
 static SESSION_ACCESS_PROMPT_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
@@ -204,12 +207,32 @@ pub async fn owned_browser_resolve_session_access(
 #[tauri::command]
 pub async fn set_browser_cookie_access_granted(granted: bool) -> Result<(), String> {
     GLOBAL_SESSION_ACCESS_GRANTED.store(granted, Ordering::SeqCst);
-    if !granted {
+    if granted {
+        GLOBAL_SESSION_ACCESS_DISABLED.store(false, Ordering::SeqCst);
+    } else {
         SESSION_ACCESS_PRIMED_THIS_RUN.store(false, Ordering::SeqCst);
     }
     info!(
         granted,
         "owned-browser: global cookie access permission updated"
+    );
+    Ok(())
+}
+
+/// Hydrate/update the complete browser cookie access state. `granted=false`
+/// with `disabled=false` means first-run unknown: prompt once if cookies exist.
+#[specta::specta]
+#[tauri::command]
+pub async fn set_browser_cookie_access_state(granted: bool, disabled: bool) -> Result<(), String> {
+    GLOBAL_SESSION_ACCESS_GRANTED.store(granted, Ordering::SeqCst);
+    GLOBAL_SESSION_ACCESS_DISABLED.store(disabled && !granted, Ordering::SeqCst);
+    if !granted {
+        SESSION_ACCESS_PRIMED_THIS_RUN.store(false, Ordering::SeqCst);
+    }
+    info!(
+        granted,
+        disabled,
+        "owned-browser: global cookie access state updated"
     );
     Ok(())
 }
@@ -1238,6 +1261,14 @@ async fn browser_session_decision_for_url(
         return BrowserSessionDecision::ContinueLoggedOut;
     }
 
+    if GLOBAL_SESSION_ACCESS_DISABLED.load(Ordering::SeqCst) {
+        info!(
+            host = host_key.as_str(),
+            "owned-browser cookies: disabled by user — navigating without real-browser session"
+        );
+        return BrowserSessionDecision::ContinueLoggedOut;
+    }
+
     let already_granted = GLOBAL_SESSION_ACCESS_GRANTED.load(Ordering::SeqCst);
 
     // On Windows there is no OS-level permission dialog (unlike macOS Keychain),
@@ -1252,8 +1283,14 @@ async fn browser_session_decision_for_url(
     // Keychain prompt, so require an in-app confirmation once per process
     // before reading Keychain.
     #[cfg(target_os = "macos")]
-    if already_granted && SESSION_ACCESS_PRIMED_THIS_RUN.load(Ordering::SeqCst) {
-        return BrowserSessionDecision::UseBrowserSession;
+    if already_granted {
+        if SESSION_ACCESS_PRIMED_THIS_RUN.load(Ordering::SeqCst) {
+            return BrowserSessionDecision::UseBrowserSession;
+        }
+        if !crate::owned_browser_cookies::safe_storage_likely_prompts_for_host(&host_key).await {
+            SESSION_ACCESS_PRIMED_THIS_RUN.store(true, Ordering::SeqCst);
+            return BrowserSessionDecision::UseBrowserSession;
+        }
     }
 
     // If a prompt is already on screen (concurrent navigations), wait for it
@@ -1261,10 +1298,15 @@ async fn browser_session_decision_for_url(
     // atomic so two parallel navigations can't both show cards.
     loop {
         #[cfg(target_os = "macos")]
-        if GLOBAL_SESSION_ACCESS_GRANTED.load(Ordering::SeqCst)
-            && SESSION_ACCESS_PRIMED_THIS_RUN.load(Ordering::SeqCst)
-        {
-            return BrowserSessionDecision::UseBrowserSession;
+        if GLOBAL_SESSION_ACCESS_GRANTED.load(Ordering::SeqCst) {
+            if SESSION_ACCESS_PRIMED_THIS_RUN.load(Ordering::SeqCst) {
+                return BrowserSessionDecision::UseBrowserSession;
+            }
+            if !crate::owned_browser_cookies::safe_storage_likely_prompts_for_host(&host_key).await
+            {
+                SESSION_ACCESS_PRIMED_THIS_RUN.store(true, Ordering::SeqCst);
+                return BrowserSessionDecision::UseBrowserSession;
+            }
         }
         if SESSION_ACCESS_PROMPT_IN_FLIGHT
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -1275,10 +1317,16 @@ async fn browser_session_decision_for_url(
         let wait_deadline = Instant::now() + SESSION_ACCESS_TIMEOUT;
         while SESSION_ACCESS_PROMPT_IN_FLIGHT.load(Ordering::SeqCst) {
             #[cfg(target_os = "macos")]
-            if GLOBAL_SESSION_ACCESS_GRANTED.load(Ordering::SeqCst)
-                && SESSION_ACCESS_PRIMED_THIS_RUN.load(Ordering::SeqCst)
-            {
-                return BrowserSessionDecision::UseBrowserSession;
+            if GLOBAL_SESSION_ACCESS_GRANTED.load(Ordering::SeqCst) {
+                if SESSION_ACCESS_PRIMED_THIS_RUN.load(Ordering::SeqCst) {
+                    return BrowserSessionDecision::UseBrowserSession;
+                }
+                if !crate::owned_browser_cookies::safe_storage_likely_prompts_for_host(&host_key)
+                    .await
+                {
+                    SESSION_ACCESS_PRIMED_THIS_RUN.store(true, Ordering::SeqCst);
+                    return BrowserSessionDecision::UseBrowserSession;
+                }
             }
             if Instant::now() >= wait_deadline {
                 warn!(
@@ -1336,7 +1384,13 @@ async fn browser_session_decision_for_url(
         // Set the global runtime flag — frontend is responsible for
         // persisting to the store and calling set_browser_cookie_access_granted.
         GLOBAL_SESSION_ACCESS_GRANTED.store(true, Ordering::SeqCst);
+        GLOBAL_SESSION_ACCESS_DISABLED.store(false, Ordering::SeqCst);
         SESSION_ACCESS_PRIMED_THIS_RUN.store(true, Ordering::SeqCst);
+    } else {
+        // First-time "Continue logged out" is a real preference: don't keep
+        // prompting. User can enable cookies later from the cookie menu.
+        GLOBAL_SESSION_ACCESS_GRANTED.store(false, Ordering::SeqCst);
+        GLOBAL_SESSION_ACCESS_DISABLED.store(true, Ordering::SeqCst);
     }
     decision
 }

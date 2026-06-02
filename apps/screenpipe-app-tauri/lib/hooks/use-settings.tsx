@@ -351,8 +351,8 @@ export type Settings = SettingsStore & {
 	encryptStore?: boolean;
 	/** Global blanket permission: allow screenpipe to copy browser cookies
 	 *  into the owned browser so the agent can browse sites the user is
-	 *  logged into. When true, the session-access prompt card never appears.
-	 *  Revocable from Settings → Browser URL Capture. */
+	 *  logged into. Revocable from the owned-browser cookie menu.
+	 *  Undefined = not decided yet, false = disabled, true = enabled. */
 	browserCookieAccessGranted?: boolean;
 }
 
@@ -587,7 +587,6 @@ let DEFAULT_SETTINGS: Settings = {
 			localRetentionDays: 14,
 			localRetentionMode: "media",
 			encryptStore: true,
-			browserCookieAccessGranted: false,
 			hdRecordingDefault: "ask",
 			hdRecordingIntervalMs: 100,
 		};
@@ -959,8 +958,9 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 				// Hydrate Rust's owned-browser runtime cache from persisted settings.
 				// This prevents the cookie-access prompt from reappearing after restart.
 				await commands
-					.setBrowserCookieAccessGranted(
+					.setBrowserCookieAccessState(
 						loadedSettings.browserCookieAccessGranted === true,
+						loadedSettings.browserCookieAccessGranted === false,
 					)
 					.catch(() => {});
 			} catch (error) {

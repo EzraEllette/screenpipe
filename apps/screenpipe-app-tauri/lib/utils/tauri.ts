@@ -1623,6 +1623,18 @@ async setBrowserCookieAccessGranted(granted: boolean) : Promise<Result<null, str
 }
 },
 /**
+ * Hydrate/update the complete browser cookie access state. `granted=false`
+ * with `disabled=false` means first-run unknown: prompt once if cookies exist.
+ */
+async setBrowserCookieAccessState(granted: boolean, disabled: boolean) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_browser_cookie_access_state", { granted, disabled }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Toggle the "Cloud audio + video + image analysis" capability
  * in the screenpipe-api skill that Pi installs on every run.
  *

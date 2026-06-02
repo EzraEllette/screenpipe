@@ -596,7 +596,7 @@ export function BrowserSidebar({ conversationId }: BrowserSidebarProps) {
 
   const setCookieAccessGranted = useCallback(
     async (granted: boolean) => {
-      await commands.setBrowserCookieAccessGranted(granted);
+      await commands.setBrowserCookieAccessState(granted, !granted);
       await updateSettings({ browserCookieAccessGranted: granted });
     },
     [updateSettings],
@@ -611,6 +611,12 @@ export function BrowserSidebar({ conversationId }: BrowserSidebarProps) {
     });
   }, [currentUrl]);
 
+  const enableAndRetryWithCookies = useCallback(async () => {
+    await setCookieAccessGranted(true);
+    await commands.confirmBrowserCookieAccessForSession();
+    if (currentUrl) await retryWithCookies();
+  }, [currentUrl, retryWithCookies, setCookieAccessGranted]);
+
   const openCookieMenu = useCallback(
     async (event: React.MouseEvent<HTMLButtonElement>) => {
       try {
@@ -619,47 +625,26 @@ export function BrowserSidebar({ conversationId }: BrowserSidebarProps) {
         const win = getCurrentWindow();
         const menu = await Menu.new({
           items: [
-          {
-            id: "browser-cookie-status",
-            text: granted
-              ? "Browser sessions: enabled"
-              : "Browser sessions: ask before use",
-            enabled: false,
-          },
-          {
-            id: "browser-cookie-explain",
-            text: "Uses cookies only, never passwords",
-            enabled: false,
-          },
-          {
-            id: granted
-              ? "browser-cookie-revoke"
-              : "browser-cookie-enable",
-            text: granted
-              ? "Ask again before using cookies"
-              : currentUrl
-                ? "Enable and retry current page"
-                : "Enable browser sessions",
-            action: () => {
-              if (granted) {
-                void setCookieAccessGranted(false);
-                return;
-              }
-              void (async () => {
-                await setCookieAccessGranted(true);
-                await commands.confirmBrowserCookieAccessForSession();
-                if (currentUrl) await retryWithCookies();
-              })();
+            {
+              id: "browser-cookie-toggle",
+              text: "Use browser login",
+              checked: granted,
+              action: () => {
+                if (granted) {
+                  void setCookieAccessGranted(false);
+                } else {
+                  void enableAndRetryWithCookies();
+                }
+              },
             },
-          },
-          {
-            id: "browser-cookie-retry",
-            text: "Retry current page with cookies",
-            enabled: Boolean(currentUrl),
-            action: () => {
-              void retryWithCookies();
+            {
+              id: "browser-cookie-retry",
+              text: "Retry page",
+              enabled: Boolean(currentUrl),
+              action: () => {
+                void retryWithCookies();
+              },
             },
-          },
           ],
         });
         await menu.popup(
@@ -672,6 +657,7 @@ export function BrowserSidebar({ conversationId }: BrowserSidebarProps) {
     },
     [
       currentUrl,
+      enableAndRetryWithCookies,
       retryWithCookies,
       setCookieAccessGranted,
       settings.browserCookieAccessGranted,
@@ -696,18 +682,14 @@ export function BrowserSidebar({ conversationId }: BrowserSidebarProps) {
       if (!request || sessionAccessAnswer) return;
       setSessionAccessAnswer(allow ? "allow" : "deny");
       try {
-        if (allow) {
-          await commands.setBrowserCookieAccessGranted(true);
-        }
+        await commands.setBrowserCookieAccessState(allow, !allow);
         await commands.ownedBrowserResolveSessionAccess(
           request.requestId,
           allow,
         );
-        if (allow) {
-          await updateSettings({ browserCookieAccessGranted: true }).catch((e) => {
-            console.error("persist browserCookieAccessGranted failed", e);
-          });
-        }
+        await updateSettings({ browserCookieAccessGranted: allow }).catch((e) => {
+          console.error("persist browserCookieAccessGranted failed", e);
+        });
         setSessionAccessRequest((current) =>
           current?.requestId === request.requestId ? null : current,
         );
