@@ -607,8 +607,17 @@ pub(crate) async fn start_meeting_handler(
                 // UNIQUE constraint failure. Map it to 409 Conflict so the
                 // client knows to refresh status and retry, instead of
                 // surfacing a generic 500.
+                //
+                // SQLite reports an expression-index violation by the index
+                // name, not a column: `UNIQUE constraint failed: index
+                // 'idx_meetings_single_open'`. Match on the index name so this
+                // keeps working if columns change — `meetings.meeting_end`
+                // would never match (NULLs are distinct, which is why the
+                // index is on the constant expression `(1)` in the first place).
                 let msg = e.to_string();
-                if msg.contains("UNIQUE constraint failed") && msg.contains("meetings") {
+                if msg.contains("UNIQUE constraint failed")
+                    && msg.contains("idx_meetings_single_open")
+                {
                     (
                         StatusCode::CONFLICT,
                         JsonResponse(json!({

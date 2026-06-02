@@ -20,7 +20,10 @@
 --   2. Creates a partial unique index that makes a second open row
 --      impossible going forward. Any future regression in the detector,
 --      the API handler, or a pipe will surface as `UNIQUE constraint
---      failed: meetings.meeting_end` instead of a silent UI duplicate.
+--      failed: index 'idx_meetings_single_open'` instead of a silent UI
+--      duplicate. Note SQLite names the *index* (not a column) in the error
+--      for an expression index like this one — code that maps the failure to
+--      409 must match on the index name, not `meetings.meeting_end`.
 
 UPDATE meetings
 SET meeting_end = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
