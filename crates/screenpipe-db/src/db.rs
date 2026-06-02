@@ -286,6 +286,12 @@ impl DatabaseManager {
             ));
         }
 
+        // Ensure the data dir exists before opening the file — a missing parent
+        // dir makes SQLite fail with "unable to open database file"
+        // (SQLITE_CANTOPEN, code 14) at create_database/connect. Shared with the
+        // write_queue's runtime recovery (see ensure_db_parent_dir).
+        crate::write_queue::ensure_db_parent_dir(database_path, true);
+
         // Create the database if it doesn't exist
         if !sqlx::Sqlite::database_exists(&connection_string).await? {
             sqlx::Sqlite::create_database(&connection_string).await?;
@@ -347,8 +353,11 @@ impl DatabaseManager {
             .await?;
 
         let write_semaphore = Arc::new(Semaphore::new(1));
-        let write_queue =
-            crate::write_queue::spawn_write_drain(write_pool.clone(), Arc::clone(&write_semaphore));
+        let write_queue = crate::write_queue::spawn_write_drain(
+            write_pool.clone(),
+            Arc::clone(&write_semaphore),
+            Arc::from(database_path),
+        );
         let db_manager = DatabaseManager {
             pool: read_pool,
             write_pool,
