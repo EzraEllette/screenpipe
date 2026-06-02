@@ -111,7 +111,22 @@ export function DisplaySection() {
                 id="disableTimeline"
                 checked={settings?.disableTimeline ?? false}
                 onCheckedChange={async (checked) => {
-                  handleSettingsChange({ disableTimeline: checked });
+                  // Persist first (awaited) so the backend reads the new value on
+                  // restart and the shortcut-reminder guard sees it immediately.
+                  await updateSettings({ disableTimeline: checked });
+                  // The screenpipe shortcut only opens the timeline, so its
+                  // reminder overlay is meaningless once the timeline is off —
+                  // tear it down on disable, restore it on re-enable.
+                  try {
+                    if (checked) {
+                      await commands.hideShortcutReminder();
+                    } else if (settings?.showShortcutOverlay) {
+                      await commands.showShortcutReminder(settings.showScreenpipeShortcut);
+                    }
+                  } catch {}
+                  // disableTimeline gates timeline-only backend work (hot-cache
+                  // warm-up + frame/audio buffering) wired at server startup, so
+                  // it needs a full screenpipe restart to take effect.
                   try {
                     await commands.stopScreenpipe();
                     await new Promise((r) => setTimeout(r, 500));
@@ -283,6 +298,10 @@ export function DisplaySection() {
           </Card>
         )}
 
+        {/* Shortcut reminder advertises the screenpipe shortcut, which only
+            opens the timeline — hide the whole section when the timeline is off. */}
+        {!(settings?.disableTimeline ?? false) && (
+        <>
         <Card className="border-border bg-card">
           <CardContent className="px-3 py-2.5">
             <div className="flex items-center justify-between">
@@ -356,6 +375,8 @@ export function DisplaySection() {
               </div>
             </CardContent>
           </Card>
+        )}
+        </>
         )}
 
       </div>
