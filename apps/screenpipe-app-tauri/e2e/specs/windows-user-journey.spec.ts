@@ -792,6 +792,7 @@ describe("Windows user journey", function () {
       const reopenedItem = await $(itemSelector);
       await reopenedItem.waitForDisplayed({ timeout: t(20_000) });
       await reopenedItem.moveTo();
+      await reopenedItem.click();
 
       const dismissButton = await $(`[data-testid="notification-bell-dismiss-${notificationId}"]`);
       await dismissButton.waitForDisplayed({ timeout: t(10_000) });

@@ -307,7 +307,7 @@ export function NotificationBell() {
                             e.stopPropagation();
                             dismissOne(entry.id);
                           }}
-                          className="p-0.5 rounded hover:bg-muted/60 opacity-0 group-hover/notif:opacity-100 transition-opacity"
+                          className="p-0.5 rounded hover:bg-muted/60 opacity-0 group-hover/notif:opacity-100 group-focus/notif:opacity-100 group-focus-within/notif:opacity-100 focus:opacity-100 transition-opacity"
                           title="dismiss"
                         >
                           <X className="w-3 h-3 text-muted-foreground/50 hover:text-foreground" />
