@@ -1190,17 +1190,24 @@ impl DatabaseManager {
         })
     }
 
-    /// Returns true if there are audio transcriptions from output devices
-    /// within the given number of seconds. Used by meeting detection to keep
-    /// browser-based meetings alive when the user switches tabs but audio is
-    /// still flowing (i.e. the meeting is still going).
+    /// Returns true if output audio was recently captured. Used by meeting
+    /// detection to keep meetings alive when controls disappear but call audio
+    /// still flows.
+    ///
+    /// Important: batch mode defers `audio_transcriptions` while the meeting is
+    /// active, so this must also inspect durable `audio_chunks` file paths.
     pub async fn has_recent_output_audio(&self, within_secs: i64) -> Result<bool, sqlx::Error> {
-        // EXISTS short-circuits on the first matching row instead of scanning
-        // every transcription in the window like COUNT(*) would.
+        // EXISTS short-circuits on the first matching row. Match both old
+        // transcribed output rows and fresh persisted chunks that have not been
+        // transcribed yet (batch/live meeting path).
         let exists = sqlx::query_scalar::<_, i64>(
             "SELECT EXISTS(
                  SELECT 1 FROM audio_transcriptions
                  WHERE is_input_device = 0
+                   AND timestamp >= strftime('%Y-%m-%dT%H:%M:%S+00:00', 'now', ?1)
+                 UNION ALL
+                 SELECT 1 FROM audio_chunks
+                 WHERE lower(file_path) LIKE '%(output)%'
                    AND timestamp >= strftime('%Y-%m-%dT%H:%M:%S+00:00', 'now', ?1)
              )",
         )
