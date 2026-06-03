@@ -8975,6 +8975,8 @@ LIMIT ? OFFSET ?
                   SELECT 1 FROM meeting_transcript_segments mts
                   WHERE mts.meeting_id = ?2
                     AND ABS(julianday(mts.captured_at) - julianday(audio_chunks.timestamp)) <= ?3
+                    AND instr(audio_chunks.file_path, mts.device_name) > 0
+                    AND instr(lower(audio_chunks.file_path), '(' || lower(mts.device_type) || ')') > 0
               )
             "#,
         )
@@ -9180,9 +9182,21 @@ LIMIT ? OFFSET ?
                   -- archival via reconciliation), but consumers should see one copy.
                   -- The window is half a typical chunk; gaps in live coverage stay
                   -- visible because their background rows won't have a nearby live row.
+                  --
+                  -- The match MUST be scoped to the same direction (input vs
+                  -- output). Input and output are independent captures: when the
+                  -- user is the primary speaker their input live segments are
+                  -- dense, and a direction-agnostic window would suppress every
+                  -- backfilled *output* (other participants') row that merely
+                  -- happens to fall within 15s of the user talking — silently
+                  -- dropping the audience from the transcript.
                   AND NOT EXISTS (
                       SELECT 1 FROM meeting_transcript_segments mts
                       WHERE mts.meeting_id = mw.meeting_id
+                        AND mts.device_type = CASE
+                              WHEN COALESCE(at.is_input_device, 1) THEN 'input'
+                              ELSE 'output'
+                            END
                         AND ABS(julianday(mts.captured_at) - julianday(at.timestamp))
                             <= (15.0 / 86400.0)
                   )
