@@ -89,6 +89,10 @@ pub struct RecordingConfig {
     /// the box — passwords / api keys / private keys frequently flow
     /// through the clipboard.
     pub disable_clipboard_capture: bool,
+    /// Skip keyboard / typed-text capture in the UI recorder
+    /// (`UiCaptureConfig::capture_text`). The a11y tree + OCR still capture
+    /// on-screen text. See `RecordingSettings.disable_keyboard_capture`.
+    pub disable_keyboard_capture: bool,
     pub languages: Vec<Language>,
 
     // Cloud/auth
@@ -272,6 +276,7 @@ impl RecordingConfig {
             ignore_incognito_windows: settings.ignore_incognito_windows,
             pause_on_drm_content: settings.pause_on_drm_content,
             disable_clipboard_capture: settings.disable_clipboard_capture,
+            disable_keyboard_capture: settings.disable_keyboard_capture,
             languages: settings
                 .languages
                 .iter()
@@ -376,6 +381,10 @@ impl RecordingConfig {
             included_windows: self.included_windows.clone(),
             capture_clipboard: !self.disable_clipboard_capture,
             capture_clipboard_content: !self.disable_clipboard_capture,
+            // Keyboard / typed-text capture. Off when disabled — the a11y
+            // tree + OCR still capture on-screen text, this only drops the
+            // raw keystroke stream.
+            capture_text: !self.disable_keyboard_capture,
             // Input-latency tuning. `extraction_thread_priority` is parsed from its
             // string form; an unrecognized value falls back to the enum default.
             prioritize_input_latency: self.prioritize_input_latency,
