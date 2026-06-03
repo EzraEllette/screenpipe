@@ -483,6 +483,21 @@
       "notes": "Window filtering, empty-window regressions, retry policy, URL timing, monitor cache, OCR cache, snapshots, and image comparison."
     },
     {
+      "id": "screen-capture-ocr-contract",
+      "label": "Screen capture to OCR result contract",
+      "crate": "screenpipe-screen",
+      "files": [
+        "src/core.rs"
+      ],
+      "platforms": ["windows", "macos", "linux"],
+      "layers": ["vision-capture", "ocr"],
+      "flows": ["capture-ocr-pipeline"],
+      "criticality": "high",
+      "confidence": "partial",
+      "kind": "unit",
+      "notes": "Cross-platform cached-OCR unit coverage for RawCaptureResult to CaptureResult metadata, browser URL, focus state, and window-to-screen OCR coordinate transformation."
+    },
+    {
       "id": "screen-macos-ocr",
       "label": "macOS native OCR",
       "crate": "screenpipe-screen",
