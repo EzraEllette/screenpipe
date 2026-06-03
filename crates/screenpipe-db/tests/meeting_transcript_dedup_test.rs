@@ -128,7 +128,10 @@ mod tests {
         .await
         .unwrap();
 
-        let segments = db.list_meeting_transcript_segments(meeting_id).await.unwrap();
+        let segments = db
+            .list_meeting_transcript_segments(meeting_id)
+            .await
+            .unwrap();
 
         let has_audience = segments
             .iter()

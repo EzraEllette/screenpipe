@@ -69,7 +69,10 @@ mod tests {
              VALUES (?1, 'deepgram', ?2, ?3, ?4, 'hello', ?5)",
         )
         .bind(meeting_id)
-        .bind(format!("item-{}-{}-{}", meeting_id, device_name, captured_at))
+        .bind(format!(
+            "item-{}-{}-{}",
+            meeting_id, device_name, captured_at
+        ))
         .bind(device_name)
         .bind(device_type)
         .bind(captured_at)
