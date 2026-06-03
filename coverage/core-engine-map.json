@@ -168,7 +168,6 @@
         "src/routes/streaming.rs",
         "src/routes/time.rs",
         "src/routes/timezone.rs",
-        "tests/endpoint_test.rs",
         "tests/tags_test.rs",
         "tests/transcribe_test.rs",
         "tests/websockets_test.rs"
@@ -180,6 +179,21 @@
       "confidence": "partial",
       "kind": "mixed",
       "notes": "Route/unit coverage for search, health, streaming, meetings, time/timezone, and transcription. Legacy endpoint/websocket tests require local data and remain ignored."
+    },
+    {
+      "id": "engine-local-api-search-integration",
+      "label": "Engine local API search route over indexed DB data",
+      "crate": "screenpipe-engine",
+      "files": [
+        "tests/endpoint_test.rs"
+      ],
+      "platforms": ["windows", "macos", "linux"],
+      "layers": ["local-api", "db-search"],
+      "flows": ["local-api-search"],
+      "criticality": "high",
+      "confidence": "strong",
+      "kind": "integration",
+      "notes": "Active /search route test builds an audio-disabled router, seeds captured-screen-shaped OCR data into an in-memory DB, and asserts the HTTP response and pagination."
     },
     {
       "id": "engine-focus-os",
