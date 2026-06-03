@@ -1084,6 +1084,19 @@ impl RecordArgs {
         if sources.disable_vision {
             settings.disable_vision = self.disable_vision;
         }
+        // An explicit --monitor-id or --use-all-monitors means the user wants
+        // vision on, so it clears a persisted disable_vision:true (the #3648
+        // analog for screen capture: otherwise the monitor is set but vision
+        // stays off). An explicit --disable-vision on the same command still
+        // wins, which the guard preserves.
+        if (sources.monitor_id || sources.use_all_monitors) && !sources.disable_vision {
+            if settings.disable_vision {
+                tracing::warn!(
+                    "vision was disabled in the persisted store; an explicit monitor flag re-enabled it"
+                );
+            }
+            settings.disable_vision = false;
+        }
         if sources.ignored_windows {
             settings.ignored_windows = self.ignored_windows.clone();
         }
@@ -2064,6 +2077,88 @@ mod tests {
         assert!(
             settings.disable_audio,
             "absent audio flags must not flip a persisted disable_audio"
+        );
+    }
+
+    #[test]
+    fn test_monitor_id_flag_enables_vision_over_persisted_disable() {
+        // #3648 analog for vision: passing --monitor-id must override a
+        // persisted disable_vision:true, otherwise the monitor is set but
+        // screen capture stays off.
+        let args = ["screenpipe", "record", "--monitor-id", "5"];
+        let cli = Cli::try_parse_from(args).unwrap();
+        let sources = record_sources(args);
+        let mut settings = screenpipe_config::RecordingSettings {
+            disable_vision: true,
+            ..Default::default()
+        };
+
+        match cli.command {
+            Command::Record(args) => {
+                args.apply_explicit_overrides(&mut settings, &sources);
+            }
+            _ => panic!("expected Record command"),
+        }
+
+        assert!(
+            !settings.disable_vision,
+            "an explicit --monitor-id must re-enable vision"
+        );
+        assert_eq!(settings.monitor_ids, vec!["5".to_string()]);
+        assert!(!settings.use_all_monitors);
+    }
+
+    #[test]
+    fn test_explicit_disable_vision_wins_over_monitor_id() {
+        // An explicit --disable-vision on the same invocation still wins.
+        let args = [
+            "screenpipe",
+            "record",
+            "--monitor-id",
+            "5",
+            "--disable-vision",
+        ];
+        let cli = Cli::try_parse_from(args).unwrap();
+        let sources = record_sources(args);
+        let mut settings = screenpipe_config::RecordingSettings {
+            disable_vision: false,
+            ..Default::default()
+        };
+
+        match cli.command {
+            Command::Record(args) => {
+                args.apply_explicit_overrides(&mut settings, &sources);
+            }
+            _ => panic!("expected Record command"),
+        }
+
+        assert!(
+            settings.disable_vision,
+            "explicit --disable-vision must override the implicit enable"
+        );
+    }
+
+    #[test]
+    fn test_no_vision_flags_preserve_persisted_disable_vision() {
+        // Without any monitor flag, a persisted disable_vision:true is untouched.
+        let args = ["screenpipe", "record", "--port", "4040"];
+        let cli = Cli::try_parse_from(args).unwrap();
+        let sources = record_sources(args);
+        let mut settings = screenpipe_config::RecordingSettings {
+            disable_vision: true,
+            ..Default::default()
+        };
+
+        match cli.command {
+            Command::Record(args) => {
+                args.apply_explicit_overrides(&mut settings, &sources);
+            }
+            _ => panic!("expected Record command"),
+        }
+
+        assert!(
+            settings.disable_vision,
+            "absent vision flags must not flip a persisted disable_vision"
         );
     }
 }
