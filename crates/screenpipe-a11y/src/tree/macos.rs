@@ -373,7 +373,7 @@ impl MacosTreeWalker {
         // we poke it), so we only re-assert it once per TTL per pid. Chromium
         // latches the mode so one poke is plenty; if the renderer ever drops
         // the mode we recover on the next TTL window.
-        if self.enhanced_mode_cache.should_enable(pid) {
+        if self.enhanced_mode_cache.should_enable_once(pid) {
             let eui_attr_name = cf::String::from_str("AXEnhancedUserInterface");
             let eui_attr = ax::Attr::with_string(&eui_attr_name);
             let _ = ax_app.set_attr(eui_attr, cf::Boolean::value_true());
