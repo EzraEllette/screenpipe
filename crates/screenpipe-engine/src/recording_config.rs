@@ -179,7 +179,7 @@ pub struct RecordingConfig {
     /// `disable_keyboard_capture`.
     pub capture_on_keystroke: Option<bool>,
     /// Override `EventDrivenCaptureConfig::capture_on_clipboard`.
-    /// None = engine default (false). See `RecordingSettings.capture_on_clipboard`.
+    /// None = engine default (true). See `RecordingSettings.capture_on_clipboard`.
     pub capture_on_clipboard: Option<bool>,
     /// Override `UiRecorderConfig::capture_scroll`.
     /// None = engine default (false). See `RecordingSettings.capture_scroll`.

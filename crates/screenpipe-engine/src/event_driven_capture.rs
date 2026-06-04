@@ -239,14 +239,11 @@ pub struct EventDrivenCaptureConfig {
     /// Whether to capture on clicks.
     pub capture_on_click: bool,
     /// Whether to capture on key events when the a11y layer has
-    /// `capture_keystrokes=true`. Recording sessions force this on; the
-    /// lower-level default stays conservative for library callers.
+    /// `capture_keystrokes=true`. Raw key/text DB persistence is
+    /// controlled separately by the recorder.
     pub capture_on_keystroke: bool,
-    /// Whether to capture on clipboard changes. **Off by default**:
-    /// taking a full paired capture (screenshot + tree walk + OCR) on
-    /// every Ctrl+C/X/V costs 250-800ms of blocking work and can cause
-    /// visible input lag on USB HID devices. Clipboard row persistence
-    /// is controlled separately by the UI recorder.
+    /// Whether to capture on clipboard changes. Clipboard row/content
+    /// persistence is controlled separately by the UI recorder.
     pub capture_on_clipboard: bool,
     /// Interval (ms) between visual-change checks (screenshot + frame diff).
     /// Set to 0 to disable visual change detection.
@@ -262,8 +259,8 @@ impl Default for EventDrivenCaptureConfig {
             idle_capture_interval_ms: 30_000, // 30 seconds
             jpeg_quality: 80,
             capture_on_click: true,
-            capture_on_keystroke: false,
-            capture_on_clipboard: false,
+            capture_on_keystroke: true,
+            capture_on_clipboard: true,
             visual_check_interval_ms: 3_000, // check every 3 seconds
             visual_change_threshold: 0.05,   // ~5% difference triggers capture
         }
@@ -1173,7 +1170,17 @@ pub async fn event_driven_capture_loop(
                 last_elements_cache.remove(&device_name);
             }
 
-            if state.can_capture() {
+            let can_capture = state.can_capture();
+            let debounce_exempt = is_workflow_checkpoint_trigger(&trigger);
+            if can_capture || debounce_exempt {
+                if !can_capture && debounce_exempt {
+                    debug!(
+                        "event capture bypassing debounce (trigger={}, monitor={})",
+                        trigger.as_str(),
+                        monitor_id
+                    );
+                }
+
                 // Pre-capture DRM gate: check BEFORE any SCK call.
                 // Uses AX APIs only — prevents even a single leaked frame.
                 {
@@ -1630,13 +1637,28 @@ fn terminal_ocr_throttled(app_name: &str) -> bool {
 ///   hash dedup would otherwise drop. While HD is on we capture every change
 ///   at the HD interval and let the visual-change trigger + `min_capture_
 ///   interval_ms` debounce be the only rate limiters.
-/// - `Idle`/`Manual` triggers: fallback captures that must always write so the
-///   timeline is never completely empty.
+/// - semantic workflow-boundary triggers: focus changes, typing/scroll stops,
+///   clipboard actions, and shortcut keypresses must leave a durable checkpoint
+///   even when visible text is unchanged.
 /// - the 30s time-floor has elapsed: forces a write even if the hash matches.
 fn dedup_applies(trigger: &CaptureTrigger, hd_active: bool, since_last_db_write: Duration) -> bool {
     !hd_active
-        && !matches!(trigger, CaptureTrigger::Idle | CaptureTrigger::Manual)
+        && !is_workflow_checkpoint_trigger(trigger)
         && since_last_db_write < Duration::from_secs(30)
+}
+
+fn is_workflow_checkpoint_trigger(trigger: &CaptureTrigger) -> bool {
+    matches!(
+        trigger,
+        CaptureTrigger::AppSwitch { .. }
+            | CaptureTrigger::WindowFocus { .. }
+            | CaptureTrigger::TypingPause
+            | CaptureTrigger::ScrollStop
+            | CaptureTrigger::KeyPress
+            | CaptureTrigger::Clipboard
+            | CaptureTrigger::Idle
+            | CaptureTrigger::Manual
+    )
 }
 
 /// Perform a single event-driven capture.
@@ -2110,10 +2132,49 @@ mod tests {
             "app_switch"
         );
         assert_eq!(CaptureTrigger::Click { x: 10, y: 20 }.as_str(), "click");
+        assert_eq!(
+            CaptureTrigger::WindowFocus {
+                window_name: "Inbox".to_string(),
+                target: None,
+            }
+            .as_str(),
+            "window_focus"
+        );
         assert_eq!(CaptureTrigger::TypingPause.as_str(), "typing_pause");
+        assert_eq!(CaptureTrigger::ScrollStop.as_str(), "scroll_stop");
+        assert_eq!(CaptureTrigger::KeyPress.as_str(), "key_press");
+        assert_eq!(CaptureTrigger::Clipboard.as_str(), "clipboard");
         assert_eq!(CaptureTrigger::VisualChange.as_str(), "visual_change");
         assert_eq!(CaptureTrigger::Idle.as_str(), "idle");
         assert_eq!(CaptureTrigger::Manual.as_str(), "manual");
+    }
+
+    #[test]
+    fn workflow_checkpoint_trigger_classification() {
+        assert!(is_workflow_checkpoint_trigger(&CaptureTrigger::AppSwitch {
+            app_name: "Code".into(),
+            target: None,
+        }));
+        assert!(is_workflow_checkpoint_trigger(
+            &CaptureTrigger::WindowFocus {
+                window_name: "main.rs".into(),
+                target: None,
+            }
+        ));
+        assert!(is_workflow_checkpoint_trigger(&CaptureTrigger::TypingPause));
+        assert!(is_workflow_checkpoint_trigger(&CaptureTrigger::ScrollStop));
+        assert!(is_workflow_checkpoint_trigger(&CaptureTrigger::KeyPress));
+        assert!(is_workflow_checkpoint_trigger(&CaptureTrigger::Clipboard));
+        assert!(is_workflow_checkpoint_trigger(&CaptureTrigger::Idle));
+        assert!(is_workflow_checkpoint_trigger(&CaptureTrigger::Manual));
+
+        assert!(!is_workflow_checkpoint_trigger(&CaptureTrigger::Click {
+            x: 10,
+            y: 20,
+        }));
+        assert!(!is_workflow_checkpoint_trigger(
+            &CaptureTrigger::VisualChange
+        ));
     }
 
     #[test]
@@ -2128,6 +2189,26 @@ mod tests {
             false,
             recent
         ));
+        assert!(!dedup_applies(
+            &CaptureTrigger::AppSwitch {
+                app_name: "Code".into(),
+                target: None,
+            },
+            false,
+            recent
+        ));
+        assert!(!dedup_applies(
+            &CaptureTrigger::WindowFocus {
+                window_name: "main.rs".into(),
+                target: None,
+            },
+            false,
+            recent
+        ));
+        assert!(!dedup_applies(&CaptureTrigger::TypingPause, false, recent));
+        assert!(!dedup_applies(&CaptureTrigger::ScrollStop, false, recent));
+        assert!(!dedup_applies(&CaptureTrigger::KeyPress, false, recent));
+        assert!(!dedup_applies(&CaptureTrigger::Clipboard, false, recent));
 
         // HD active → dedup is bypassed even for an otherwise-eligible trigger.
         // This is the fix: video/demo replay moves pixels but not AX text, so
@@ -2145,6 +2226,13 @@ mod tests {
 
         // 30s time-floor: once it elapses, write through regardless.
         assert!(!dedup_applies(&CaptureTrigger::VisualChange, false, stale));
+    }
+
+    #[test]
+    fn default_config_captures_key_and_clipboard_triggers() {
+        let config = EventDrivenCaptureConfig::default();
+        assert!(config.capture_on_keystroke);
+        assert!(config.capture_on_clipboard);
     }
 
     #[test]
@@ -2337,14 +2425,8 @@ mod tests {
         assert_eq!(config.idle_capture_interval_ms, 30_000);
         assert_eq!(config.jpeg_quality, 80);
         assert!(config.capture_on_click);
-        assert!(
-            !config.capture_on_clipboard,
-            "off by default — HID latency trade-off; opt in for frame_id linkage"
-        );
-        assert!(
-            !config.capture_on_keystroke,
-            "off by default — capture-per-keystroke would be a storm during typing"
-        );
+        assert!(config.capture_on_clipboard);
+        assert!(config.capture_on_keystroke);
         assert_eq!(config.visual_check_interval_ms, 3_000);
         assert!((config.visual_change_threshold - 0.05).abs() < f64::EPSILON);
     }

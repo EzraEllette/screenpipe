@@ -144,11 +144,11 @@ impl Default for UiRecorderConfig {
             capture_clipboard: true,
             capture_clipboard_content: true,
             capture_app_switch: true,
-            capture_window_focus: false,
+            capture_window_focus: true,
             capture_scroll: false,
             capture_context: true,
-            capture_on_keystroke: false,
-            capture_on_clipboard: false,
+            capture_on_keystroke: true,
+            capture_on_clipboard: true,
             excluded_apps: Vec::new(),
             excluded_windows: Vec::new(),
             ignored_windows: Vec::new(),
@@ -176,10 +176,15 @@ impl UiRecorderConfig {
         config.capture_mouse_move = self.capture_mouse_move;
         config.capture_text = self.capture_text;
         config.capture_keystrokes = self.capture_keystrokes;
-        config.capture_clipboard = self.capture_clipboard;
-        config.capture_clipboard_content = self.capture_clipboard_content;
+        // Clipboard detection is needed for trigger-only captures even when
+        // clipboard event storage/content is disabled for privacy.
+        config.capture_clipboard = self.capture_clipboard || self.capture_on_clipboard;
+        config.capture_clipboard_content = self.capture_clipboard && self.capture_clipboard_content;
         config.capture_app_switch = self.capture_app_switch;
-        config.capture_window_focus = self.capture_window_focus;
+        // Window focus changes are workflow boundaries. Keep them enabled
+        // for both CLI and desktop-app runs even if an older caller carries
+        // a false value in UiRecorderConfig.
+        config.capture_window_focus = true;
         config.capture_scroll = self.capture_scroll;
         config.capture_context = self.capture_context;
         config.prioritize_input_latency = self.prioritize_input_latency;
@@ -927,10 +932,9 @@ fn capture_trigger_kind(
         // recent Scroll's correlation_id until the burst ends, then
         // emits a single ScrollStop trigger.
         screenpipe_db::UiEventType::Scroll => None,
-        // Key events fire a KeyPress trigger only when the capture loop
-        // is configured to honor them. With the gate off we don't mint a
-        // corr_id, so the row stays NULL without leaving a doomed
-        // pending_event in the frame linker.
+        // Key events fire a KeyPress trigger when the capture loop is
+        // configured to honor them. The caller may send this as trigger-only
+        // if privacy settings suppress storing the key row.
         screenpipe_db::UiEventType::Key if gates.capture_on_keystroke => {
             Some(CaptureTrigger::KeyPress)
         }
@@ -1159,6 +1163,17 @@ mod capture_trigger_kind_tests {
     }
 
     #[test]
+    fn key_event_can_trigger_without_being_stored() {
+        let event = evt(UiEventType::Key);
+
+        assert!(!should_record_input_event(&event, false, true));
+        assert!(matches!(
+            capture_trigger_kind(&event, &[], gates(true, true)),
+            Some(CaptureTrigger::KeyPress)
+        ));
+    }
+
+    #[test]
     fn clipboard_event_suppressed_when_clipboard_gate_off() {
         let result = capture_trigger_kind(&evt(UiEventType::Clipboard), &[], gates(false, false));
         assert!(result.is_none(), "Clipboard with gate off must not trigger");
@@ -1186,6 +1201,17 @@ mod capture_trigger_kind_tests {
     fn clipboard_event_fires_when_clipboard_gate_on() {
         let result = capture_trigger_kind(&evt(UiEventType::Clipboard), &[], gates(false, true));
         assert!(matches!(result, Some(CaptureTrigger::Clipboard)));
+    }
+
+    #[test]
+    fn clipboard_event_can_trigger_without_being_stored() {
+        let event = evt(UiEventType::Clipboard);
+
+        assert!(!should_record_input_event(&event, true, false));
+        assert!(matches!(
+            capture_trigger_kind(&event, &[], gates(true, true)),
+            Some(CaptureTrigger::Clipboard)
+        ));
     }
 
     #[test]
@@ -1294,6 +1320,28 @@ mod scroll_burst_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn window_focus_capture_is_always_enabled() {
+        assert!(UiRecorderConfig::default().capture_window_focus);
+
+        let mut config = UiRecorderConfig::default();
+        config.capture_window_focus = false;
+        assert!(config.to_ui_config().capture_window_focus);
+    }
+
+    #[test]
+    fn clipboard_trigger_detection_does_not_require_clipboard_storage() {
+        let mut config = UiRecorderConfig::default();
+        config.capture_clipboard = false;
+        config.capture_clipboard_content = true;
+        config.capture_on_clipboard = true;
+
+        let ui_config = config.to_ui_config();
+
+        assert!(ui_config.capture_clipboard);
+        assert!(!ui_config.capture_clipboard_content);
+    }
 
     #[test]
     fn test_stop_flag_sets_on_stop() {
