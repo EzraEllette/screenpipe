@@ -58,11 +58,9 @@ pub enum CaptureTrigger {
     TypingPause,
     /// User stopped scrolling
     ScrollStop,
-    /// A non-printable key was pressed (Arrow / Enter / Tab / Esc, or
-    /// modifier combo like Ctrl+S) while `capture_keystrokes=true`.
-    /// Only fires when `capture_on_keystroke=true` — off by default
-    /// to avoid the capture-per-keystroke storm that would otherwise
-    /// happen during heavy keyboard use.
+    /// A keyboard event was observed while key-event listening is enabled.
+    /// Raw key/text DB persistence is controlled separately by the recorder.
+    /// Only fires when `capture_on_keystroke=true`.
     KeyPress,
     /// Clipboard content changed
     Clipboard,
@@ -219,18 +217,15 @@ pub struct EventDrivenCaptureConfig {
     pub jpeg_quality: u8,
     /// Whether to capture on clicks.
     pub capture_on_click: bool,
-    /// Whether to capture on non-printable keypresses when the a11y
-    /// layer has `capture_keystrokes=true`. Off by default — turning
-    /// this on can fire dozens of captures during a fast typing burst.
+    /// Whether to capture on key events when the a11y layer has
+    /// `capture_keystrokes=true`. Recording sessions force this on; the
+    /// lower-level default stays conservative for library callers.
     pub capture_on_keystroke: bool,
     /// Whether to capture on clipboard changes. **Off by default**:
     /// taking a full paired capture (screenshot + tree walk + OCR) on
-    /// every Ctrl+C/X/V costs 250–800ms of blocking work and tends to
-    /// saturate the thread pool, causing visible input lag on USB HID
-    /// devices. The clipboard text is already stored in `ui_events`
-    /// via the input event batch — only the frame would be missing.
-    /// When this is false, Clipboard rows leave `frame_id` as NULL.
-    /// Flip to true to opt into linkage and accept the latency.
+    /// every Ctrl+C/X/V costs 250-800ms of blocking work and can cause
+    /// visible input lag on USB HID devices. Clipboard row persistence
+    /// is controlled separately by the UI recorder.
     pub capture_on_clipboard: bool,
     /// Interval (ms) between visual-change checks (screenshot + frame diff).
     /// Set to 0 to disable visual change detection.
