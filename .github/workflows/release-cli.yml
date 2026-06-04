@@ -641,14 +641,15 @@ jobs:
             @screenpipe/cli-darwin-x64 \
             @screenpipe/cli-linux-x64 \
             @screenpipe/cli-win32-x64; do
-            url=$(npm view "$pkg@${{ env.VERSION }}" dist.tarball)
-            if [[ -z "$url" ]]; then
-              echo "::error::$pkg@${{ env.VERSION }} has no dist tarball"
-              exit 1
-            fi
-
             ok=false
             for attempt in $(seq 1 30); do
+              url=$(npm view "$pkg@${{ env.VERSION }}" dist.tarball 2>/dev/null || true)
+              if [[ -z "$url" ]]; then
+                echo "::warning::$pkg@${{ env.VERSION }} metadata is not visible yet (attempt $attempt/30)"
+                sleep 10
+                continue
+              fi
+
               status=$(curl -sS -o /dev/null -w "%{http_code}" -L -I "$url" || true)
               if [[ "$status" == "200" ]]; then
                 echo "::notice::$pkg@${{ env.VERSION }} tarball is fetchable"
