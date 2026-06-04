@@ -1007,6 +1007,19 @@ async openWindowsShellTarget(target: string) : Promise<Result<null, string>> {
 }
 },
 /**
+ * Clear all browsing data for the owned-browser webview: cookies, injected
+ * cookies, site storage, and cache. This resets the current shared owned
+ * browser slate; per-chat isolation belongs to the follow-up PR.
+ */
+async ownedBrowserClearBrowsingData() : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("owned_browser_clear_browsing_data") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Hide the embedded webview without destroying it. Equivalent to calling
  * `set_bounds` with zero dimensions, but more explicit at the call site.
  */

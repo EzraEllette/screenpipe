@@ -1051,6 +1051,24 @@ pub async fn owned_browser_hide(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Clear all browsing data for the owned-browser webview: cookies, injected
+/// cookies, site storage, and cache. This resets the current shared owned
+/// browser slate; per-chat isolation belongs to the follow-up PR.
+#[specta::specta]
+#[tauri::command]
+pub async fn owned_browser_clear_browsing_data(app: AppHandle) -> Result<(), String> {
+    let _ = app;
+    let state = browser_state();
+    let Some(active) = state.active().await else {
+        return Err("owned-browser child webview not attached".to_string());
+    };
+    active
+        .clear_all_browsing_data()
+        .map_err(|e| format!("owned-browser clear browsing data failed: {e}"))?;
+    info!("owned-browser: cleared browsing data");
+    Ok(())
+}
+
 /// E2E-only probe: whether the owned-browser native webview is currently shown.
 /// Mirrors `e2e_main_overlay_visible` — internal visibility state stays hidden
 /// in production binaries and is only exposed under the `e2e` feature. Used by
