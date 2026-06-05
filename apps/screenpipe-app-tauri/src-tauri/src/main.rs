@@ -818,7 +818,8 @@ async fn main() {
                         // we fall back to the historical minimize() behavior so the
                         // user never loses access to the window. set_skip_taskbar /
                         // hide failures also fall back to minimize() for the same
-                        // reason — see plan.md "lost-window risk".
+                        // reason, so the user is never left with a lost (hidden,
+                        // off-taskbar) window.
                         let minimize_to_tray = crate::store::SettingsStore::get(
                             window.app_handle(),
                         )
