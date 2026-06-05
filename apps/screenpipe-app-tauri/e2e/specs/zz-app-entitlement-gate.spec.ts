@@ -13,11 +13,46 @@
 //   2. clearing the flag restores access and the app comes back.
 //
 // Named `zz-` so it runs late and never leaves the gate forced on for another
-// spec in the shared session; `after` also clears the flag defensively.
+// spec in the shared session; `after` clears the flag defensively AND restarts
+// the engine, which the gate stops while it is forced on (see
+// restartEngineForTrailingSpecs below).
 
 import { openHomeWindow, waitForAppReady, t } from '../helpers/test-utils.js';
+import { invoke } from '../helpers/tauri.js';
+import { getLocalApiConfig, waitForLocalApi } from '../helpers/api-utils.js';
 
 const FORCE_KEY = 'screenpipe_e2e_force_billing_gate';
+
+/** Forcing the gate on drives the entitlement gate to stop the engine
+ *  (components/app-entitlement-gate.tsx calls stopScreenpipe for an unentitled
+ *  session). Clearing the flag restores the dev bypass but does NOT restart the
+ *  engine: the resume effect only fires on an isEntitled false->true transition,
+ *  not a devBypass one (in production devBypass is a constant env var, so this
+ *  toggle only happens in e2e). Bring the sidecar back up here so trailing specs
+ *  in the shared session (e.g. the owned-browser navigation spec) find a live
+ *  local API instead of a refused connection. */
+async function restartEngineForTrailingSpecs(): Promise<void> {
+  await openHomeWindow().catch(() => {});
+  let port = 3030;
+  try {
+    ({ port } = await getLocalApiConfig());
+  } catch {
+    // fall back to the default port if the IPC bridge is briefly unavailable
+  }
+  // Retry across the restart cooldown (RESTART_COOLDOWN_SECS = 30s): an immediate
+  // spawn after a stop can be deferred, so re-kick and re-wait a few times.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    await invoke('spawn_screenpipe', { overrideArgs: null }).catch(() => {});
+    try {
+      await waitForLocalApi(port);
+      return;
+    } catch {
+      // engine still coming up; loop and try again
+    }
+  }
+  // eslint-disable-next-line no-console
+  console.warn('[entitlement-gate] engine did not recover after gate test');
+}
 
 async function setForceGate(on: boolean): Promise<void> {
   await browser.execute(
@@ -57,6 +92,10 @@ describe('App entitlement gate', () => {
         // ignore
       }
     }, FORCE_KEY);
+
+    // The gate stopped the engine while it was forced on; restart it so the
+    // next spec in the shared session has a reachable local API.
+    await restartEngineForTrailingSpecs();
   });
 
   it('blocks an unentitled session and restores access when cleared', async () => {
