@@ -5300,7 +5300,11 @@ mod tests {
         let cron = parse_human_schedule("every monday at 6pm").expect("should parse");
         let from = chrono::Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 0).unwrap();
         let next = cron.after(&from).next().unwrap();
-        assert_eq!(next.hour(), 18, "6pm must encode local hour 18, not a shifted hour");
+        assert_eq!(
+            next.hour(),
+            18,
+            "6pm must encode local hour 18, not a shifted hour"
+        );
     }
 
     #[test]
