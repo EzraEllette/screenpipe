@@ -10904,7 +10904,7 @@ dependencies = [
 
 [[package]]
 name = "screenpipe-app"
-version = "2.5.11"
+version = "2.5.12"
 dependencies = [
  "aes 0.8.4",
  "aes-gcm 0.10.3",
