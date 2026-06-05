@@ -262,13 +262,13 @@ impl UiRecorder {
             // actually wants clipboard capture; otherwise the recorder
             // emits app_switch / window_focus events only.
             if self.config.capture_clipboard {
-                let clipboard_tx =
-                    spawn_clipboard_worker_thread(current_app.clone(), current_window.clone());
                 let stop_p = stop.clone();
                 let tx_p = tx.clone();
                 let config_p = self.config.clone();
+                let app_p = current_app.clone();
+                let window_p = current_window.clone();
                 threads.push(thread::spawn(move || {
-                    run_clipboard_poller(stop_p, clipboard_tx, tx_p, config_p, start_time);
+                    run_clipboard_poller(stop_p, tx_p, config_p, start_time, app_p, window_p);
                 }));
             }
         }
@@ -406,25 +406,40 @@ fn spawn_clipboard_worker_thread(
                 } else {
                     None
                 };
-                let event = UiEvent {
-                    id: None,
-                    timestamp: Utc::now(),
-                    relative_ms: req.start.elapsed().as_millis() as u64,
-                    data: EventData::Clipboard {
-                        operation: req.operation,
-                        content,
-                    },
-                    app_name: current_app.load().as_ref().clone(),
-                    window_title: current_window.load().as_ref().clone(),
-                    browser_url: None,
-                    element: None,
-                    frame_id: None,
-                };
-                let _ = req.tx.try_send(event);
+                let event = clipboard_event(
+                    req.operation,
+                    content,
+                    req.start,
+                    &current_app,
+                    &current_window,
+                );
+                if let Err(err) = req.tx.try_send(event) {
+                    debug!(?err, "clipboard worker dropped event");
+                }
             }
         })
         .ok();
     clipboard_tx
+}
+
+fn clipboard_event(
+    operation: char,
+    content: Option<String>,
+    start: Instant,
+    current_app: &Arc<ArcSwap<Option<String>>>,
+    current_window: &Arc<ArcSwap<Option<String>>>,
+) -> UiEvent {
+    UiEvent {
+        id: None,
+        timestamp: Utc::now(),
+        relative_ms: start.elapsed().as_millis() as u64,
+        data: EventData::Clipboard { operation, content },
+        app_name: current_app.load().as_ref().clone(),
+        window_title: current_window.load().as_ref().clone(),
+        browser_url: None,
+        element: None,
+        frame_id: None,
+    }
 }
 
 /// Poll interval for the clipboard fallback. 750ms balances detection
@@ -458,10 +473,11 @@ const CLIPBOARD_OP_POLLED: char = 'p';
 /// is a semantic checkpoint even if the bytes are identical.
 fn run_clipboard_poller(
     stop: Arc<AtomicBool>,
-    clipboard_tx: Sender<ClipboardRequest>,
     tx: Sender<UiEvent>,
     config: UiCaptureConfig,
     start: Instant,
+    current_app: Arc<ArcSwap<Option<String>>>,
+    current_window: Arc<ArcSwap<Option<String>>>,
 ) {
     // Seed with the current pasteboard generation so we don't fire an event for
     // pre-existing content copied before launching the recorder.
@@ -500,14 +516,31 @@ fn run_clipboard_poller(
 
         last_seen = Some(current);
         debug!("clipboard change-count poller detected a pasteboard mutation");
-        let _ = clipboard_tx.try_send(ClipboardRequest {
-            operation: CLIPBOARD_OP_POLLED,
-            delay_ms: 0,
-            capture_content: config.capture_clipboard_content,
-            apply_pii: config.apply_pii_removal,
+        let content = if config.capture_clipboard_content {
+            let _pool = cidre::objc::AutoreleasePoolPage::push();
+            get_clipboard().map(|s| {
+                let truncated = truncate(&s, 1000);
+                if config.apply_pii_removal {
+                    remove_pii(&truncated)
+                } else {
+                    truncated
+                }
+            })
+        } else {
+            None
+        };
+        let event = clipboard_event(
+            CLIPBOARD_OP_POLLED,
+            content,
             start,
-            tx: tx.clone(),
-        });
+            &current_app,
+            &current_window,
+        );
+        if let Err(err) = tx.try_send(event) {
+            debug!(?err, "clipboard poller dropped event");
+        } else {
+            debug!("clipboard poller emitted event");
+        }
     }
 }
 
@@ -664,16 +697,18 @@ fn run_event_tap(
         let poller_stop = stop.clone();
         let poller_tx = tx.clone();
         let poller_config = config.clone();
-        let poller_clipboard_tx = clipboard_tx.clone();
+        let poller_app = current_app.clone();
+        let poller_window = current_window.clone();
         thread::Builder::new()
             .name("clipboard-poller".into())
             .spawn(move || {
                 run_clipboard_poller(
                     poller_stop,
-                    poller_clipboard_tx,
                     poller_tx,
                     poller_config,
                     start,
+                    poller_app,
+                    poller_window,
                 );
             })
             .ok();

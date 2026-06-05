@@ -156,18 +156,19 @@ fn drain_pending_corr_ids(
 
 /// Reduce a batch of drained triggers to (kind, correlation_ids).
 ///
-/// - `kind` is the most recent non-skipped trigger (most recent context
-///   wins for capture).
+/// - `kind` is the most recent workflow checkpoint trigger, if present.
+///   Otherwise it is the most recent non-skipped trigger. This keeps
+///   clipboard/key/focus checkpoints from being swallowed by trailing click or
+///   visual noise in the same drain.
 /// - `correlation_ids` accumulates every non-skipped corr id, so when
 ///   the capture lands every triggering event row gets linked.
-/// - Skipped kinds (Clipboard/KeyPress under their off gates) drop
-///   both their corr id and their kind from consideration. This
-///   matters for mixed-kind drains: a tail Clipboard with the gate
-///   off must NOT clear the corr ids of valid earlier triggers.
+/// - The legacy skip booleans are ignored for key/clipboard privacy: those
+///   events may be trigger-only, but their workflow checkpoints should still
+///   land even when DB row/content storage is disabled.
 fn reduce_drained_triggers<I>(
     msgs: I,
-    skip_clipboard: bool,
-    skip_keypress: bool,
+    _skip_clipboard: bool,
+    _skip_keypress: bool,
 ) -> (
     Option<CaptureTrigger>,
     Vec<crate::frame_linker::CorrelationId>,
@@ -178,20 +179,24 @@ where
     let mut trigger: Option<CaptureTrigger> = None;
     let mut correlation_ids = Vec::new();
     for msg in msgs {
-        let should_skip = match &msg.trigger {
-            CaptureTrigger::Clipboard => skip_clipboard,
-            CaptureTrigger::KeyPress => skip_keypress,
-            _ => false,
-        };
-        if should_skip {
-            continue;
-        }
         if let Some(corr) = msg.correlation_id {
             correlation_ids.push(corr);
         }
-        trigger = Some(msg.trigger);
+        let candidate_priority = trigger_reduce_priority(&msg.trigger);
+        let current_priority = trigger.as_ref().map(trigger_reduce_priority).unwrap_or(0);
+        if trigger.is_none() || candidate_priority >= current_priority {
+            trigger = Some(msg.trigger);
+        }
     }
     (trigger, correlation_ids)
+}
+
+fn trigger_reduce_priority(trigger: &CaptureTrigger) -> u8 {
+    if is_workflow_checkpoint_trigger(trigger) {
+        2
+    } else {
+        1
+    }
 }
 
 impl CaptureTrigger {
@@ -1661,6 +1666,19 @@ fn is_workflow_checkpoint_trigger(trigger: &CaptureTrigger) -> bool {
     )
 }
 
+fn bypasses_capture_throttles(trigger: &CaptureTrigger) -> bool {
+    matches!(
+        trigger,
+        CaptureTrigger::AppSwitch { .. }
+            | CaptureTrigger::WindowFocus { .. }
+            | CaptureTrigger::TypingPause
+            | CaptureTrigger::ScrollStop
+            | CaptureTrigger::KeyPress
+            | CaptureTrigger::Clipboard
+            | CaptureTrigger::Manual
+    )
+}
+
 /// Perform a single event-driven capture.
 ///
 /// When `previous_content_hash` is `Some` and matches the current accessibility
@@ -1681,6 +1699,7 @@ async fn do_capture(
     hd_active: bool,
 ) -> Result<CaptureOutput> {
     let captured_at = Utc::now();
+    let bypass_capture_throttles = bypasses_capture_throttles(trigger);
 
     // Resolve ignored windows to SCK window IDs so ScreenCaptureKit
     // excludes them from the capture buffer (zero overhead, pixel-perfect).
@@ -1748,22 +1767,30 @@ async fn do_capture(
     // every few seconds in an active terminal, so cap to 1 capture per 30s per app.
     if let Some(ref app) = trigger_app {
         if terminal_ocr_throttled(app) {
-            debug!(
-                "terminal OCR throttle: skipping {} capture (within 30s of previous)",
-                app
-            );
-            return Ok(CaptureOutput {
-                result: None,
-                image,
-                elements_deduped: false,
-            });
+            if bypass_capture_throttles {
+                debug!(
+                    "terminal OCR throttle: allowing checkpoint {} capture for {}",
+                    trigger.as_str(),
+                    app
+                );
+            } else {
+                debug!(
+                    "terminal OCR throttle: skipping {} capture (within 30s of previous)",
+                    app
+                );
+                return Ok(CaptureOutput {
+                    result: None,
+                    image,
+                    elements_deduped: false,
+                });
+            }
         }
     }
 
     use screenpipe_a11y::tree::TreeWalkResult;
     if let Some(ref app) = trigger_app {
         let decision = walk_budget.should_walk(app);
-        if !decision.walk {
+        if !decision.walk && !bypass_capture_throttles {
             debug!(
                 "walk budget: throttling tree walk for {} (tier={:?}) — skipping capture",
                 app, decision.tier
@@ -1778,6 +1805,13 @@ async fn do_capture(
                 image,
                 elements_deduped: false,
             });
+        } else if !decision.walk {
+            debug!(
+                "walk budget: allowing checkpoint {} capture for {} despite tier={:?}",
+                trigger.as_str(),
+                app,
+                decision.tier
+            );
         }
         config.max_nodes_override = Some(decision.max_nodes);
         config.walk_timeout_override = Some(decision.timeout);
@@ -2229,6 +2263,30 @@ mod tests {
     }
 
     #[test]
+    fn capture_throttle_bypass_classification() {
+        assert!(bypasses_capture_throttles(&CaptureTrigger::AppSwitch {
+            app_name: "Code".into(),
+            target: None,
+        }));
+        assert!(bypasses_capture_throttles(&CaptureTrigger::WindowFocus {
+            window_name: "main.rs".into(),
+            target: None,
+        }));
+        assert!(bypasses_capture_throttles(&CaptureTrigger::TypingPause));
+        assert!(bypasses_capture_throttles(&CaptureTrigger::ScrollStop));
+        assert!(bypasses_capture_throttles(&CaptureTrigger::KeyPress));
+        assert!(bypasses_capture_throttles(&CaptureTrigger::Clipboard));
+        assert!(bypasses_capture_throttles(&CaptureTrigger::Manual));
+
+        assert!(!bypasses_capture_throttles(&CaptureTrigger::Click {
+            x: 10,
+            y: 20,
+        }));
+        assert!(!bypasses_capture_throttles(&CaptureTrigger::VisualChange));
+        assert!(!bypasses_capture_throttles(&CaptureTrigger::Idle));
+    }
+
+    #[test]
     fn default_config_captures_key_and_clipboard_triggers() {
         let config = EventDrivenCaptureConfig::default();
         assert!(config.capture_on_keystroke);
@@ -2329,7 +2387,7 @@ mod tests {
     }
 
     #[test]
-    fn reduce_drained_picks_last_kind_and_collects_corr_ids() {
+    fn reduce_drained_picks_latest_checkpoint_and_collects_corr_ids() {
         let drained = vec![
             CaptureTriggerMsg::with_correlation(CaptureTrigger::Click { x: 10, y: 20 }, 1),
             CaptureTriggerMsg::with_correlation(
@@ -2348,16 +2406,43 @@ mod tests {
             ),
         ];
         let (trigger, corrs) = reduce_drained_triggers(drained, false, false);
-        // Last kind wins.
+        // Last workflow checkpoint wins.
         assert!(matches!(trigger, Some(CaptureTrigger::WindowFocus { .. })));
         // All three corr ids accumulate.
         assert_eq!(corrs, vec![1, 2, 3]);
     }
 
     #[test]
-    fn reduce_drained_skipped_clipboard_does_not_clear_earlier_corr_ids() {
-        // The exact regression: a Clipboard tail with the gate OFF used
-        // to clear valid Click corr_ids that drained alongside it.
+    fn reduce_drained_keeps_checkpoint_over_trailing_click() {
+        let drained = vec![
+            CaptureTriggerMsg::with_correlation(CaptureTrigger::Clipboard, 1),
+            CaptureTriggerMsg::with_correlation(CaptureTrigger::Click { x: 10, y: 20 }, 2),
+        ];
+        let (trigger, corrs) = reduce_drained_triggers(drained, false, false);
+        assert_eq!(trigger, Some(CaptureTrigger::Clipboard));
+        assert_eq!(corrs, vec![1, 2]);
+    }
+
+    #[test]
+    fn reduce_drained_latest_checkpoint_wins_among_checkpoints() {
+        let drained = vec![
+            CaptureTriggerMsg::with_correlation(CaptureTrigger::Clipboard, 1),
+            CaptureTriggerMsg::with_correlation(
+                CaptureTrigger::WindowFocus {
+                    window_name: "main.rs".into(),
+                    target: None,
+                },
+                2,
+            ),
+            CaptureTriggerMsg::with_correlation(CaptureTrigger::KeyPress, 3),
+        ];
+        let (trigger, corrs) = reduce_drained_triggers(drained, false, false);
+        assert_eq!(trigger, Some(CaptureTrigger::KeyPress));
+        assert_eq!(corrs, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn reduce_drained_clipboard_checkpoint_wins_even_when_legacy_gate_off() {
         let drained = vec![
             CaptureTriggerMsg::with_correlation(CaptureTrigger::Click { x: 10, y: 20 }, 10),
             CaptureTriggerMsg::with_correlation(CaptureTrigger::Click { x: 11, y: 21 }, 11),
@@ -2365,33 +2450,31 @@ mod tests {
         ];
         let (trigger, corrs) =
             reduce_drained_triggers(drained, /*skip_clipboard*/ true, false);
-        // Clipboard dropped from kind decision — most recent non-skipped wins.
-        assert_eq!(trigger, Some(CaptureTrigger::Click { x: 11, y: 21 }));
-        // Only the two valid Click corr ids survive.
-        assert_eq!(corrs, vec![10, 11]);
+        assert_eq!(trigger, Some(CaptureTrigger::Clipboard));
+        assert_eq!(corrs, vec![10, 11, 12]);
     }
 
     #[test]
-    fn reduce_drained_skipped_keypress_filters_in_mixed_drain() {
+    fn reduce_drained_keypress_checkpoint_wins_even_when_legacy_gate_off() {
         let drained = vec![
             CaptureTriggerMsg::with_correlation(CaptureTrigger::KeyPress, 20),
             CaptureTriggerMsg::with_correlation(CaptureTrigger::Click { x: 10, y: 20 }, 21),
             CaptureTriggerMsg::with_correlation(CaptureTrigger::KeyPress, 22),
         ];
         let (trigger, corrs) = reduce_drained_triggers(drained, false, /*skip_keypress*/ true);
-        assert_eq!(trigger, Some(CaptureTrigger::Click { x: 10, y: 20 }));
-        assert_eq!(corrs, vec![21]);
+        assert_eq!(trigger, Some(CaptureTrigger::KeyPress));
+        assert_eq!(corrs, vec![20, 21, 22]);
     }
 
     #[test]
-    fn reduce_drained_all_skipped_returns_none() {
+    fn reduce_drained_legacy_gates_do_not_skip_key_or_clipboard() {
         let drained = vec![
             CaptureTriggerMsg::with_correlation(CaptureTrigger::Clipboard, 1),
             CaptureTriggerMsg::with_correlation(CaptureTrigger::KeyPress, 2),
         ];
         let (trigger, corrs) = reduce_drained_triggers(drained, true, true);
-        assert!(trigger.is_none());
-        assert!(corrs.is_empty());
+        assert_eq!(trigger, Some(CaptureTrigger::KeyPress));
+        assert_eq!(corrs, vec![1, 2]);
     }
 
     #[test]
