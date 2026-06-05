@@ -4,52 +4,6 @@
 
 "use strict";
 
-const { createTelemetryCore } = require("../session/telemetry-core");
-
-function sdkVersion() {
-  try {
-    return require("../package.json").version || "0.0.0";
-  } catch {
-    return "0.0.0";
-  }
-}
-const SDK_VERSION = sdkVersion();
-
-// Web Crypto is present in every Tauri webview and Node 19+. Fall back to a
-// best-effort uuid for the rare environment without it.
-function webUuid() {
-  const c = typeof globalThis !== "undefined" ? globalThis.crypto : undefined;
-  if (c && typeof c.randomUUID === "function") return c.randomUUID();
-  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (ch) => {
-    const r = (Math.random() * 16) | 0;
-    const v = ch === "x" ? r : (r & 0x3) | 0x8;
-    return v.toString(16);
-  });
-}
-
-// Fire-and-forget telemetry transport for the webview. Uses `fetch`
-// (always present in a Tauri webview). Strict app CSPs may block the
-// PostHog/Sentry hosts — that fails silently here, which is the intended
-// degradation. `keepalive` lets late events flush during teardown.
-function fetchSend({ url, headers, body }) {
-  const f =
-    typeof fetch !== "undefined"
-      ? fetch
-      : typeof globalThis !== "undefined" && globalThis.fetch
-        ? globalThis.fetch
-        : null;
-  if (!f) return Promise.resolve();
-  return f(url, {
-    method: "POST",
-    headers: { "content-type": "application/json", ...headers },
-    body: JSON.stringify(body),
-    keepalive: true,
-  }).then(
-    () => {},
-    () => {},
-  );
-}
-
 const DEFAULT_TAURI_COMMANDS = Object.freeze({
   permissions: "plugin:screenpipe|screenpipe_permissions",
   start: "plugin:screenpipe|screenpipe_start",
@@ -59,6 +13,7 @@ const DEFAULT_TAURI_COMMANDS = Object.freeze({
   reveal: "plugin:screenpipe|screenpipe_reveal",
   dispose: "plugin:screenpipe|screenpipe_dispose",
   events: "plugin:screenpipe|screenpipe_events",
+  identify: "plugin:screenpipe|screenpipe_identify",
 });
 
 /**
@@ -107,44 +62,29 @@ function createScreenpipeTauriClient(options = {}) {
   const commands = mergeCommands(options.commands);
   const eventChannel = options.eventChannel || SCREENPIPE_EVENT_CHANNEL;
 
-  // Telemetry — crash reports to Sentry, usage to PostHog, tagged with
-  // `options.userId` so a specific end user shows up in screenpipe's
-  // dashboards. ON by default; `telemetry: false` disables it. The Tauri
-  // plugin runs the recorder natively, so we tap the forwarded event
-  // channel from the webview here rather than from Rust.
-  const telemetry = createTelemetryCore({
-    userId: options.userId,
-    enabled: options.telemetry !== false,
-    appName: options.appName,
-    release: options.release,
-    version: SDK_VERSION,
-    send:
-      typeof options.telemetryTransport === "function"
-        ? options.telemetryTransport
-        : fetchSend,
-    uuid: webUuid,
-  });
-
-  // Internal subscription that feeds telemetry, independent of any
-  // consumer `onEvent` calls. Set up once; torn down on dispose.
-  let telemetryUnlisten = null;
-  if (telemetry.enabled) {
-    telemetry.initialized();
+  // Telemetry runs natively in the Rust plugin — crash reports to Sentry,
+  // usage to PostHog — so there's no webview fetch and no Content-Security-
+  // Policy to trip over. When the host configures telemetry, hand the plugin
+  // the identity once on creation: `userId` tags events so a specific end
+  // user shows up in screenpipe's dashboards, and `telemetry: false` turns it
+  // off. Fire-and-forget. (With no config, the plugin still reports anonymous
+  // lifecycle/crash telemetry on its default-on setting.)
+  if (
+    options.userId !== undefined ||
+    options.appName !== undefined ||
+    options.release !== undefined ||
+    options.telemetry !== undefined
+  ) {
     Promise.resolve(
-      listen(eventChannel, (event) => {
-        const payload = event && event.payload;
-        if (payload && typeof payload === "object" && payload.event) {
-          try {
-            telemetry.track(payload.event, payload.data);
-          } catch {}
-        }
+      invoke(commands.identify, {
+        options: {
+          userId: options.userId,
+          appName: options.appName,
+          release: options.release,
+          telemetry: options.telemetry,
+        },
       }),
-    ).then(
-      (un) => {
-        if (typeof un === "function") telemetryUnlisten = un;
-      },
-      () => {},
-    );
+    ).catch(() => {});
   }
 
   return {
@@ -175,14 +115,7 @@ function createScreenpipeTauriClient(options = {}) {
     },
 
     async dispose() {
-      const result = await invoke(commands.dispose);
-      try {
-        if (typeof telemetryUnlisten === "function") telemetryUnlisten();
-      } catch {}
-      try {
-        await telemetry.flush();
-      } catch {}
-      return result;
+      return await invoke(commands.dispose);
     },
 
     /**

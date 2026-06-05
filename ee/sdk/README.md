@@ -185,17 +185,22 @@ let config = ScreenpipeClient.Configuration(
 let client = try ScreenpipeClient(configuration: config)
 ```
 
-**Tauri** (the webview wrapper taps the plugin's event channel):
+**Tauri** — reporting happens natively in the Rust plugin (no webview
+`fetch`, so no Content-Security-Policy to configure). The JS client forwards
+the identity to the plugin via `screenpipe_identify` on creation:
 
 ```ts
 const client = createScreenpipeTauriClient({ userId: currentUser.id });
 ```
 
-Tauri note: the webview sends via `fetch`. If your app sets a strict
-Content-Security-Policy, allow `connect-src` to the PostHog and Sentry hosts
-(or set `telemetry: false`); a blocking CSP silently disables telemetry. The
-native-Rust plugin itself does not emit telemetry; reporting is done from the
-webview.
+You can also set it (or a Rust-side default) when registering the plugin:
+
+```rust
+tauri::Builder::default()
+    .plugin(screenpipe_tauri::init(
+        screenpipe_tauri::ScreenpipeConfig::default().user_id("user-123"),
+    ))
+```
 
 ## Development
 
