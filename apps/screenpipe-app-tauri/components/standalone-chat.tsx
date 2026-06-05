@@ -2754,8 +2754,6 @@ export function StandaloneChat({
   const turnIntentLedgerRef = useRef<TurnIntentRecord[]>([]);
   const pendingSteerBatchRef = useRef<PendingSteerBatchItem[]>([]);
   const pendingSteerFlushInFlightRef = useRef(false);
-  const steerAbortAtBoundaryRef = useRef(false);
-  const steerAbortInFlightRef = useRef(false);
   const streamRenderTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Last error text observed anywhere in the current Pi stream — used to surface
   // quota / credits_exhausted errors when agent_end arrives with no content and
@@ -4109,6 +4107,11 @@ export function StandaloneChat({
         void Promise.resolve(steerMessage(input.trim())).finally(() => {
           steerShortcutInFlightRef.current = false;
         });
+      } else if (!input.trim() && pastedImages.length === 0 && pendingDocsRef.current.length === 0 && queuedPrompts.length > 0 && !steerShortcutInFlightRef.current) {
+        steerShortcutInFlightRef.current = true;
+        void Promise.resolve(steerQueuedPrompt(queuedPrompts[0])).finally(() => {
+          steerShortcutInFlightRef.current = false;
+        });
       }
       return;
     }
@@ -4160,12 +4163,17 @@ export function StandaloneChat({
         void Promise.resolve(steerMessage(input.trim())).finally(() => {
           steerShortcutInFlightRef.current = false;
         });
+      } else if (!input.trim() && pastedImages.length === 0 && pendingDocsRef.current.length === 0 && queuedPrompts.length > 0 && !steerShortcutInFlightRef.current) {
+        steerShortcutInFlightRef.current = true;
+        void Promise.resolve(steerQueuedPrompt(queuedPrompts[0])).finally(() => {
+          steerShortcutInFlightRef.current = false;
+        });
       }
     };
 
     window.addEventListener("keydown", handleComposerSteerShortcut, true);
     return () => window.removeEventListener("keydown", handleComposerSteerShortcut, true);
-  }, [input, isComposing, isMac, pastedImages, showMentionDropdown]);
+  }, [input, isComposing, isMac, pastedImages, showMentionDropdown, queuedPrompts]);
 
   useEffect(() => {
     // Don't resolve preset until settings are loaded from the store —
@@ -4749,7 +4757,6 @@ export function StandaloneChat({
         ) {
           const evt = data.assistantMessageEvent;
           if (evt.type === "text_delta" && evt.delta) {
-            void maybeInterruptForPendingSteer("text_delta");
             // First delta of a queued turn → create the placeholder lazily.
             if (!ensureAssistantPlaceholder()) return;
             piStreamingTextRef.current += evt.delta;
@@ -4790,7 +4797,6 @@ export function StandaloneChat({
             }
             scheduleStreamingMessageRender();
           } else if (evt.type === "thinking_end") {
-            void maybeInterruptForPendingSteer("thinking_end");
             const blocks = piContentBlocksRef.current;
             const thinkingBlock = blocks[blocks.length - 1];
             if (thinkingBlock && thinkingBlock.type === "thinking") {
@@ -4808,7 +4814,6 @@ export function StandaloneChat({
             }
           }
         } else if (data.type === "tool_execution_start") {
-          void maybeInterruptForPendingSteer("tool_execution_start");
           if (!ensureAssistantPlaceholder()) return;
           if (piMessageIdRef.current) {
             const msgId = piMessageIdRef.current;
@@ -4826,7 +4831,6 @@ export function StandaloneChat({
             );
           }
         } else if (data.type === "tool_execution_end") {
-          void maybeInterruptForPendingSteer("tool_execution_end");
           if (piMessageIdRef.current) {
             const msgId = piMessageIdRef.current;
             const toolCallId = data.toolCallId;
@@ -5262,9 +5266,7 @@ export function StandaloneChat({
             setIsLoading(false);
             setIsStreaming(false);
             emitSessionActivity({ status: "idle" });
-            if (steerAbortAtBoundaryRef.current) {
-              finishPendingSteerInterrupt();
-            } else if (pendingSteerBatchRef.current.some((item) => item.sessionId === piSessionIdRef.current)) {
+            if (pendingSteerBatchRef.current.some((item) => item.sessionId === piSessionIdRef.current)) {
               void flushPendingSteerBatch();
             }
           }
@@ -5443,8 +5445,6 @@ export function StandaloneChat({
           piStoppedIntentionallyRef.current = false;
           return;
         }
-        const shouldResumePendingSteer = steerAbortAtBoundaryRef.current &&
-          pendingSteerBatchRef.current.some((item) => item.sessionId === payload.sessionId);
         console.log("[Pi] Process terminated, pid:", terminatedPid);
         try {
           const info = await commands.piInfo(piSessionIdRef.current);
@@ -5453,21 +5453,6 @@ export function StandaloneChat({
             return;
           }
         } catch {}
-
-        if (shouldResumePendingSteer) {
-          piStreamingTextRef.current = "";
-          piMessageIdRef.current = null;
-          piContentBlocksRef.current = [];
-          piLastErrorRef.current = null;
-          piActiveStopRequestedRef.current = false;
-          piThinkingStartRef.current = null;
-          followUpFiredRef.current = false;
-          forceQueueModeRef.current = false;
-          setIsLoading(false);
-          setIsStreaming(false);
-          finishPendingSteerInterrupt();
-          return;
-        }
 
         // If a message was in flight, append error to the message so the user
         // knows the agent stopped unexpectedly (not just "completed").
@@ -6883,20 +6868,75 @@ export function StandaloneChat({
     }
   }
 
+  /**
+   * Extracts the pending steer batch for the given session, clears it from
+   * the ref, computes derived fields (prompt, preview, images), and sets
+   * the intent / display / optimistic refs needed by the message_start
+   * handler to recognise the steer echo. Returns null when there is no
+   * pending batch for the session.
+   */
+  function prepareSteerBatch(sessionId: string) {
+    const batch = pendingSteerBatchRef.current.filter(
+      (item) => item.sessionId === sessionId,
+    );
+    if (batch.length === 0) return null;
+    pendingSteerBatchRef.current = pendingSteerBatchRef.current.filter(
+      (item) => item.sessionId !== sessionId,
+    );
+
+    const latest = batch[batch.length - 1];
+    const prompt = buildSteerPrompt(batch);
+    const preview = queuedPreviewForText(latest.content);
+    const combinedImages = imageDataUrlsToPiImages(
+      batch.flatMap((item) => item.images),
+    );
+
+    // Remove earlier batch items' turn intents (only latest survives).
+    batch.slice(0, -1).forEach((item) => removeTurnIntent(item.turnIntentId));
+
+    // Set intent refs so the message_start handler recognises the
+    // steer echo and creates the assistant placeholder.
+    pendingNextPiUserIntentRef.current = "steer";
+    pendingNextPiUserDisplayRef.current = {
+      preview,
+      images: [...latest.images],
+      ...(latest.attachments?.length
+        ? { attachments: [...latest.attachments] }
+        : {}),
+      ...(latest.displayContent
+        ? { displayContent: latest.displayContent }
+        : {}),
+      optimisticUserId: latest.optimisticUserId,
+      turnIntentId: latest.turnIntentId,
+    };
+    optimisticSteerRef.current = {
+      id: latest.optimisticUserId,
+      content: prompt,
+      turnIntentId: latest.turnIntentId,
+    };
+    registerTurnIntent({
+      id: latest.turnIntentId,
+      sessionId,
+      kind: "steer",
+      content: prompt,
+      preview,
+      displayedUserId: latest.optimisticUserId,
+      createdAt: latest.createdAt,
+    });
+
+    return { batch, latest, prompt, preview, combinedImages };
+  }
+
   async function flushPendingSteerBatch() {
     const sessionId = piSessionIdRef.current;
     if (!sessionId || pendingSteerFlushInFlightRef.current) return;
 
-    const batch = pendingSteerBatchRef.current.filter((item) => item.sessionId === sessionId);
-    if (batch.length === 0) return;
-    pendingSteerBatchRef.current = pendingSteerBatchRef.current.filter((item) => item.sessionId !== sessionId);
+    const prepared = prepareSteerBatch(sessionId);
+    if (!prepared) return;
     pendingSteerFlushInFlightRef.current = true;
 
-    const latest = batch[batch.length - 1];
+    const { batch, latest, prompt, preview, combinedImages } = prepared;
     const interruptedAssistantId = batch.find((item) => item.interruptedAssistantId)?.interruptedAssistantId ?? null;
-    const prompt = buildSteerPrompt(batch);
-    const preview = queuedPreviewForText(latest.content);
-    const combinedImages = imageDataUrlsToPiImages(batch.flatMap((item) => item.images));
     const hasActiveAssistant = Boolean(piMessageIdRef.current);
 
     const labelMarkers: Message[] = batch.slice(0, -1).map((item, index) => ({
@@ -6929,31 +6969,6 @@ export function StandaloneChat({
         useChatStore.getState().actions.setMessages(sessionId, nextRowsAfterLabels as any);
       }
     }
-
-    pendingNextPiUserIntentRef.current = "steer";
-    pendingNextPiUserDisplayRef.current = {
-      preview,
-      images: [...latest.images],
-      ...(latest.attachments?.length ? { attachments: [...latest.attachments] } : {}),
-      ...(latest.displayContent ? { displayContent: latest.displayContent } : {}),
-      optimisticUserId: latest.optimisticUserId,
-      turnIntentId: latest.turnIntentId,
-    };
-    optimisticSteerRef.current = {
-      id: latest.optimisticUserId,
-      content: prompt,
-      turnIntentId: latest.turnIntentId,
-    };
-    batch.slice(0, -1).forEach((item) => removeTurnIntent(item.turnIntentId));
-    registerTurnIntent({
-      id: latest.turnIntentId,
-      sessionId,
-      kind: "steer",
-      content: prompt,
-      preview,
-      displayedUserId: latest.optimisticUserId,
-      createdAt: latest.createdAt,
-    });
 
     let precreatedSteerAssistantId: string | null = null;
     if (hasActiveAssistant) {
@@ -7063,39 +7078,6 @@ export function StandaloneChat({
       toast({ title: "failed to send steered message", description, variant: "destructive" });
     } finally {
       pendingSteerFlushInFlightRef.current = false;
-    }
-  }
-
-  function finishPendingSteerInterrupt(options?: { flush?: boolean }) {
-    steerAbortAtBoundaryRef.current = false;
-    steerAbortInFlightRef.current = false;
-    if (options?.flush !== false) {
-      void flushPendingSteerBatch();
-    }
-  }
-
-  async function maybeInterruptForPendingSteer(_reason: string) {
-    if (!steerAbortAtBoundaryRef.current) return;
-    if (steerAbortInFlightRef.current) return;
-    const sid = piSessionIdRef.current;
-    if (!sid) return;
-    const hasPending = pendingSteerBatchRef.current.some((item) => item.sessionId === sid);
-    if (!hasPending) {
-      finishPendingSteerInterrupt({ flush: false });
-      return;
-    }
-    if (!piMessageIdRef.current || (!isLoading && !isStreaming)) {
-      finishPendingSteerInterrupt();
-      return;
-    }
-
-    steerAbortInFlightRef.current = true;
-    try {
-      piActiveStopRequestedRef.current = true;
-      await commands.piAbortActive(sid);
-    } catch (e) {
-      console.warn("[steer] boundary abort failed", e);
-      steerAbortInFlightRef.current = false;
     }
   }
 
@@ -7218,14 +7200,97 @@ export function StandaloneChat({
       },
     ];
     if (hadActiveReply) {
-      // Request interruption at the next safe boundary event.
-      steerAbortAtBoundaryRef.current = true;
-      void maybeInterruptForPendingSteer("steer_message");
+      const sid = piSessionIdRef.current;
+      if (sid) {
+        const prepared = prepareSteerBatch(sid);
+        if (!prepared) return;
+        const { batch, latest, prompt, combinedImages } = prepared;
+
+        piActiveStopRequestedRef.current = true;
+        const interruptedAssistantId =
+          latest.interruptedAssistantId ?? null;
+
+        // Send steer directly — no abort needed.
+        // send_immediate sets steer_in_flight in Rust, holding the
+        // drain loop until the steer turn's agent_start fires.
+        // If piSteer fails at the IPC layer, Pi never received the
+        // steer — revert is clean. Mid-stream failures surface as
+        // agent_end / response events, not IPC errors.
+        void commands
+          .piSteer(
+            sid,
+            prompt,
+            combinedImages.length > 0 ? combinedImages : null,
+          )
+          .then((result) => {
+            if (result.status !== "ok") {
+              console.warn("[steer] piSteer returned non-ok:", result);
+              revertFailedComposerSteer(
+                batch,
+                latest,
+                interruptedAssistantId,
+                result.error ?? "steer command rejected",
+              );
+            }
+          })
+          .catch((err: unknown) => {
+            console.warn("[steer] piSteer failed, reverting", err);
+            revertFailedComposerSteer(
+              batch,
+              latest,
+              interruptedAssistantId,
+              err instanceof Error ? err.message : String(err),
+            );
+          });
+      }
       return;
     }
     if (!piMessageIdRef.current) {
       void flushPendingSteerBatch();
     }
+  }
+
+  /** Undo all side-effects of a failed composer steer. */
+  function revertFailedComposerSteer(
+    batch: typeof pendingSteerBatchRef.current,
+    latest: (typeof pendingSteerBatchRef.current)[number],
+    interruptedAssistantId: string | null,
+    errorDescription: string,
+  ) {
+    // Clear intent refs so message_start handler ignores the steer.
+    pendingNextPiUserIntentRef.current = null;
+    pendingNextPiUserDisplayRef.current = null;
+    optimisticSteerRef.current = null;
+    piActiveStopRequestedRef.current = false;
+    removeTurnIntent(latest.turnIntentId);
+
+    // Un-mark the assistant that was marked interrupted.
+    setAssistantInterruptedState(interruptedAssistantId, false);
+
+    // Remove only the optimistic steer user bubble inserted by steerMessage.
+    const optimisticId = latest.optimisticUserId;
+    setMessages((prev) =>
+      prev.filter(
+        (m) =>
+          !(
+            m.id === optimisticId &&
+            m.role === "user" &&
+            m.intent === "steer"
+          ),
+      ),
+    );
+
+    // Put the batch back so a retry or future steer can use it.
+    pendingSteerBatchRef.current = [
+      ...batch,
+      ...pendingSteerBatchRef.current,
+    ];
+
+    toast({
+      title: "failed to send steered message",
+      description: errorDescription,
+      variant: "destructive",
+    });
   }
 
   async function steerQueuedPrompt(prompt: PiQueuedPrompt) {
@@ -7249,6 +7314,7 @@ export function StandaloneChat({
       turnIntentId,
       timestamp: Date.now(),
     };
+    const interruptedAssistantBeforeSteer = piMessageIdRef.current;
     try {
       pendingNextPiUserIntentRef.current = "steer";
       pendingNextPiUserDisplayRef.current = {
@@ -7293,19 +7359,41 @@ export function StandaloneChat({
         pendingNextPiUserIntentRef.current = null;
         pendingNextPiUserDisplayRef.current = null;
         removeTurnIntent(turnIntentId);
-        setMessages((prev) => prev.filter((message) => message.turnIntentId !== turnIntentId));
+        setMessages((prev) =>
+          prev.filter(
+            (m) =>
+              !(
+                m.id === optimisticQueuedUser.id &&
+                m.role === "user" &&
+                m.intent === "steer"
+              ),
+          ),
+        );
         restoreQueuedDisplay(currentQueueSessionId, prompt.id, queuedDisplay);
-        clearCurrentAssistantInterrupted();
+        setAssistantInterruptedState(interruptedAssistantBeforeSteer, false);
         toast({ title: "failed to steer queued message", description: result.error, variant: "destructive" });
         return;
       }
       if (!result.data) {
+        // Benign race: the queued prompt already left the queue and will
+        // render via the normal message_start path. Only remove the
+        // steer-specific optimistic user bubble — do not remove or disturb
+        // any transcript state that the normal message_start path may need.
         pendingNextPiUserIntentRef.current = null;
         pendingNextPiUserDisplayRef.current = null;
         removeTurnIntent(turnIntentId);
-        setMessages((prev) => prev.filter((message) => message.turnIntentId !== turnIntentId));
+        setMessages((prev) =>
+          prev.filter(
+            (m) =>
+              !(
+                m.id === optimisticQueuedUser.id &&
+                m.role === "user" &&
+                m.intent === "steer"
+              ),
+          ),
+        );
         restoreQueuedDisplay(currentQueueSessionId, prompt.id, queuedDisplay);
-        clearCurrentAssistantInterrupted();
+        setAssistantInterruptedState(interruptedAssistantBeforeSteer, false);
         toast({
           title: "message already started",
           description: "That follow-up has moved out of the queue.",
@@ -7324,9 +7412,18 @@ export function StandaloneChat({
       pendingNextPiUserIntentRef.current = null;
       pendingNextPiUserDisplayRef.current = null;
       removeTurnIntent(turnIntentId);
-      setMessages((prev) => prev.filter((message) => message.turnIntentId !== turnIntentId));
+      setMessages((prev) =>
+        prev.filter(
+          (m) =>
+            !(
+              m.id === optimisticQueuedUser.id &&
+              m.role === "user" &&
+              m.intent === "steer"
+            ),
+        ),
+      );
       restoreQueuedDisplay(currentQueueSessionId, prompt.id, queuedDisplay);
-      clearCurrentAssistantInterrupted();
+      setAssistantInterruptedState(interruptedAssistantBeforeSteer, false);
       toast({
         title: "failed to steer queued message",
         description: e instanceof Error ? e.message : String(e),
