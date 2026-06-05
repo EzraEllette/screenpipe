@@ -36,6 +36,7 @@ use screenpipe_engine::{
         vision::handle_vision_command,
         Cli, Command, RecordArgSources,
     },
+    crash_log,
     high_fps_controller::HighFpsController,
     hot_frame_cache::HotFrameCache,
     start_meeting_watcher, start_power_manager, start_sleep_monitor, start_speaker_identification,
@@ -622,6 +623,110 @@ async fn main() -> anyhow::Result<()> {
     } else {
         None
     };
+
+    // Crash diagnostics. Integrators embed this binary as a child process
+    // inside their own wrapper (e.g. an Electron app) and, when it dies, see
+    // only the exit code — never *why*. Install a panic hook that writes the
+    // message + backtrace to last-panic.log so the parent (and we, via Sentry)
+    // can read the cause after the process exits. Installed only on the Record
+    // path (the long-running server; subcommands return earlier) and written
+    // regardless of telemetry, so analytics-disabled customers still get a
+    // local crash record. Mirrors the desktop app's hook in
+    // apps/screenpipe-app-tauri/src-tauri/src/main.rs.
+    {
+        // Write to the resolved data dir (honors --data-dir) so the crash log
+        // sits next to screenpipe.log, and an embedder running with its own
+        // --data-dir doesn't collide with the desktop app's
+        // ~/.screenpipe/last-panic.log (the app runs its engine in-process and
+        // owns that file).
+        let panic_dir = local_data_dir.clone();
+        // A relaunch right after a crash is the common case: rotate last run's
+        // log to .prev so we don't truncate the message we most need.
+        crash_log::rotate_panic_log(&panic_dir);
+
+        // Reuse the existing embedder attribution (SCREENPIPE_EMBEDDER /
+        // SCREENPIPE_CUSTOMER_ID / ...) so the local crash record is identifiable
+        // even when telemetry is off. When telemetry is on, the Sentry scope is
+        // already tagged with the same context above, so panic events inherit it
+        // and no per-event tagging is needed here.
+        let attribution = {
+            use screenpipe_engine::telemetry_context::TelemetryContext;
+            let joined = TelemetryContext::from_env()
+                .pairs()
+                .iter()
+                .map(|(k, v)| format!("{}={}", k, v))
+                .collect::<Vec<_>>()
+                .join(" ");
+            if joined.is_empty() {
+                String::new()
+            } else {
+                format!("\n{}", joined)
+            }
+        };
+
+        let default_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            // stderr first — the embedding parent usually pipes the child's
+            // stderr, and unwinding into an extern "C" frame can turn into
+            // panic_cannot_unwind → abort() and drop everything after this.
+            eprintln!("PANIC: {}", info);
+
+            let thread = std::thread::current();
+            let thread_name = thread.name().unwrap_or("<unnamed>");
+            let payload = if let Some(s) = info.payload().downcast_ref::<&str>() {
+                s.to_string()
+            } else if let Some(s) = info.payload().downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "unknown panic payload".to_string()
+            };
+            let location = info
+                .location()
+                .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+                .unwrap_or_default();
+
+            // Orderly-shutdown noise: a background task (redact workers, etc.)
+            // caught mid-poll while the tokio runtime tears down on quit. Not a
+            // crash — don't record it where it would skew crash dashboards or
+            // mislead the embedder into thinking the binary is unstable.
+            if payload.contains("Tokio 1.x context was found, but it is being shutdown") {
+                eprintln!(
+                    "(suppressed tokio shutdown-time panic on thread '{}' at {})",
+                    thread_name, location
+                );
+                return;
+            }
+
+            // force_capture ignores RUST_BACKTRACE — we always want the trace.
+            let backtrace = std::backtrace::Backtrace::force_capture();
+            let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
+            let record = format!(
+                "[{}] PANIC on thread '{}' at {}: {}{}\n\nBacktrace:\n{}",
+                timestamp, thread_name, location, payload, attribution, backtrace
+            );
+
+            eprintln!("{}", record);
+            crash_log::write_panic_log(&panic_dir, &record);
+
+            // Best-effort Sentry report. No-op when telemetry is disabled; and
+            // the CLI sample_rate (0.1) applies here, so last-panic.log is the
+            // reliable record while Sentry is the convenience copy.
+            sentry::capture_message(
+                &format!(
+                    "panic on thread '{}' at {}: {}",
+                    thread_name, location, payload
+                ),
+                sentry::Level::Fatal,
+            );
+            // Flush so the event leaves before the process dies.
+            if let Some(client) = sentry::Hub::current().client() {
+                client.flush(Some(std::time::Duration::from_secs(2)));
+            }
+
+            // Default hook last (prints the standard panic output).
+            default_hook(info);
+        }));
+    }
 
     // Only require ffmpeg when audio recording is enabled. Vision-only recording
     // should not attempt network installs (important for offline / locked-down
