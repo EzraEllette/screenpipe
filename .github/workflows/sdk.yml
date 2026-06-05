@@ -156,3 +156,27 @@ jobs:
           files=$(find __test__ -name '*.test.mjs' | sort)
           echo "running: $files"
           node --test --test-concurrency=1 $files
+
+  # Validate the Swift package surface in the monorepo so `ee/sdk` stays the
+  # single source of truth: it must build + test green here BEFORE the
+  # `swift-mirror` job in sdk-release.yml ever rsyncs it to the
+  # screenpipe/screenpipe-sdk-swift publish repo. node is needed because the
+  # transport tests spawn the bundled Node bridge as a subprocess.
+  swift:
+    name: swift build + test
+    runs-on: macos-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: ee/sdk
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Show Swift version
+        run: swift --version
+      - name: Build Swift package
+        run: swift build
+      - name: Test Swift package
+        run: swift test
