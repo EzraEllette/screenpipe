@@ -76,6 +76,7 @@ pub mod zoom;
 use crate::oauth;
 use anyhow::Result;
 use async_trait::async_trait;
+use screenpipe_core::connections::sync as core_connections_sync;
 use screenpipe_secrets::SecretStore;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -476,13 +477,19 @@ impl ConnectionManager {
             enabled: true,
             credentials: creds,
         };
-        save_connection(
+        let result = save_connection(
             self.secret_store.as_deref(),
             &self.screenpipe_dir,
             id,
             &conn,
         )
-        .await
+        .await;
+
+        if result.is_ok() {
+            core_connections_sync::clear_connection_tombstone(&self.screenpipe_dir, id);
+        }
+
+        result
     }
 
     pub async fn get_credentials(&self, id: &str) -> Result<Option<Map<String, Value>>> {
@@ -539,7 +546,12 @@ impl ConnectionManager {
     }
 
     pub async fn disconnect(&self, id: &str) -> Result<()> {
-        remove_connection(self.secret_store.as_deref(), &self.screenpipe_dir, id).await
+        let result =
+            remove_connection(self.secret_store.as_deref(), &self.screenpipe_dir, id).await;
+        if result.is_ok() {
+            core_connections_sync::record_connection_tombstone(&self.screenpipe_dir, id);
+        }
+        result
     }
 
     pub async fn test(&self, id: &str, creds: &Map<String, Value>) -> Result<String> {
@@ -562,13 +574,19 @@ impl ConnectionManager {
             enabled: true,
             credentials: creds,
         };
-        save_connection(
+        let result = save_connection(
             self.secret_store.as_deref(),
             &self.screenpipe_dir,
             &key,
             &conn,
         )
-        .await
+        .await;
+
+        if result.is_ok() {
+            core_connections_sync::clear_connection_tombstone(&self.screenpipe_dir, &key);
+        }
+
+        result
     }
 
     /// Return all saved instances for the given integration id.
@@ -587,7 +605,12 @@ impl ConnectionManager {
     /// Remove a specific instance (or the default) for the given integration.
     pub async fn disconnect_instance(&self, id: &str, instance: Option<&str>) -> Result<()> {
         let key = make_key(id, instance);
-        remove_connection(self.secret_store.as_deref(), &self.screenpipe_dir, &key).await
+        let result =
+            remove_connection(self.secret_store.as_deref(), &self.screenpipe_dir, &key).await;
+        if result.is_ok() {
+            core_connections_sync::record_connection_tombstone(&self.screenpipe_dir, &key);
+        }
+        result
     }
 
     fn find(&self, id: &str) -> Result<&dyn Integration> {

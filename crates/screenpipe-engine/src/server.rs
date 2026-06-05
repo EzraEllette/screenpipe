@@ -690,6 +690,8 @@ impl SCServer {
             .post("/sync/download", sync_api::sync_download)
             .post("/sync/pipes/push", sync_api::sync_pipes_push)
             .post("/sync/pipes/pull", sync_api::sync_pipes_pull)
+            .post("/sync/connections/push", sync_api::sync_connections_push)
+            .post("/sync/connections/pull", sync_api::sync_connections_pull)
             .post("/sync/memories/push", sync_api::sync_memories_push)
             .post("/sync/memories/pull", sync_api::sync_memories_pull)
             // Cloud Archive API routes
