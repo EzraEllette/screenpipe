@@ -802,8 +802,7 @@ async fn ensure_child_bounds(
         return Err(format!("parent window {parent:?} not found"));
     };
 
-    let mut pending_url = None;
-    let child = {
+    let (child, pending_url) = {
         let mut inner = state.inner.lock().await;
 
         if let Some(child) = inner.child.clone() {
@@ -813,8 +812,8 @@ async fn ensure_child_bounds(
                     .map_err(|e| format!("owned-browser child reparent failed: {e}"))?;
                 inner.child_parent = Some(parent.to_string());
             }
-            pending_url = inner.pending_url.take();
-            child
+            let pending_url = inner.pending_url.take();
+            (child, pending_url)
         } else {
             let blank: url::Url = "about:blank"
                 .parse()
@@ -827,11 +826,11 @@ async fn ensure_child_bounds(
                     LogicalSize::new(width, height),
                 )
                 .map_err(|e| format!("owned-browser child webview attach failed: {e}"))?;
-            pending_url = inner.pending_url.take();
+            let pending_url = inner.pending_url.take();
             inner.child = Some(child.clone());
             inner.child_parent = Some(parent.to_string());
             info!(parent, "owned-browser: child webview attached");
-            child
+            (child, pending_url)
         }
     };
 
@@ -1112,7 +1111,9 @@ async fn inject_cookies_for_url(app: &AppHandle, url: &url::Url) {
     }
 
     info!(host, "owned-browser cookies: pre-navigate inject starting");
-    let mut cookies = crate::owned_browser_cookies::cookies_for_host(host).await;
+    let cookies = crate::owned_browser_cookies::cookies_for_host(host).await;
+    #[cfg(target_os = "windows")]
+    let mut cookies = cookies;
     if cookies.is_empty() {
         #[cfg(target_os = "windows")]
         {
