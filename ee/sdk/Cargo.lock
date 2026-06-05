@@ -6836,7 +6836,7 @@ dependencies = [
 
 [[package]]
 name = "screenpipe-recorder"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "anyhow",
  "chrono",
@@ -6892,7 +6892,7 @@ dependencies = [
 
 [[package]]
 name = "screenpipe-sdk"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "napi",
  "napi-build",
@@ -6920,7 +6920,7 @@ dependencies = [
 
 [[package]]
 name = "screenpipe-tauri"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "base64 0.22.1",
  "reqwest",
