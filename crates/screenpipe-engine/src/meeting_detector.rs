@@ -601,8 +601,10 @@ pub struct ScanResult {
 /// controls (text areas, scroll areas, etc.).
 pub struct MeetingUiScanner {
     /// Maximum depth to walk in the AX tree.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     max_depth: usize,
     /// Timeout for scanning ALL windows of a single process.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     scan_timeout: Duration,
 }
 
@@ -616,15 +618,30 @@ impl MeetingUiScanner {
     /// Create a new scanner with default settings (depth=25, timeout=5s).
     pub fn new() -> Self {
         Self {
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             max_depth: 25,
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             scan_timeout: Duration::from_millis(5000),
         }
     }
 
     /// Create a scanner with custom settings.
-    pub fn with_config(max_depth: usize, scan_timeout: Duration) -> Self {
+    pub fn with_config(
+        #[cfg_attr(
+            not(any(target_os = "macos", target_os = "windows")),
+            allow(unused_variables)
+        )]
+        max_depth: usize,
+        #[cfg_attr(
+            not(any(target_os = "macos", target_os = "windows")),
+            allow(unused_variables)
+        )]
+        scan_timeout: Duration,
+    ) -> Self {
         Self {
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             max_depth,
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             scan_timeout,
         }
     }
@@ -926,6 +943,7 @@ struct PrecomputedSignal {
 /// through `walk_for_signals` so per-node AX IPC calls (each a cross-process
 /// roundtrip) are only paid for attrs at least one signal might match against.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg(any(target_os = "macos", test))]
 struct AttrNeeds {
     title: bool,
     desc: bool,
@@ -933,6 +951,8 @@ struct AttrNeeds {
 }
 
 #[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", test))]
 impl AttrNeeds {
     fn from_signals(signals: &[PrecomputedSignal]) -> Self {
         Self::from_call_signals(signals.iter().map(|ps| &ps.signal))
@@ -1146,6 +1166,7 @@ fn check_signal_match_precomputed(
 }
 
 /// Format a human-readable label for a matched signal (used in debug logging).
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 fn format_signal_match(
     signal: &CallSignal,
     role: &str,
