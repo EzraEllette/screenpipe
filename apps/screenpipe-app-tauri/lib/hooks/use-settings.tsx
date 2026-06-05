@@ -13,6 +13,7 @@ import { User } from "../utils/tauri";
 import { SettingsStore } from "../utils/tauri";
 import { installAuthInterceptor } from "../auth-guard";
 import { normalizeAppUser } from "@/lib/app-entitlement";
+import { screenpipeWebUrl } from "@/lib/web-url";
 import type { SourceCitation } from "@/lib/source-citations";
 import type {
 	EnterpriseAppUpdatePolicy,
@@ -1190,7 +1191,7 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
 	const loadUser = async (token: string, verify = false) => {
 		try {
-			const response = await fetch(`https://screenpi.pe/api/user`, {
+			const response = await fetch(screenpipeWebUrl("/api/user", "https://screenpi.pe"), {
 				method: "POST",
 				headers: {
 					"Content-Type": "application/json",

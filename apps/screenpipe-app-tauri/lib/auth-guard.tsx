@@ -10,6 +10,7 @@ import { toast } from "@/components/ui/use-toast";
 import { ToastAction } from "@/components/ui/toast";
 import posthog from "posthog-js";
 import { commands } from "@/lib/utils/tauri";
+import { screenpipeWebUrl } from "@/lib/web-url";
 
 const CHECK_INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
 const TOAST_COOLDOWN_MS = 5 * 60 * 1000;
@@ -18,11 +19,12 @@ let lastToastTime = 0;
 
 function openLogin() {
   // dynamic import to avoid SSR/test crashes from tauri plugins
+  const loginUrl = screenpipeWebUrl("/login", "https://screenpipe.com");
   import("@tauri-apps/plugin-shell").then(({ open }) => {
-    open("https://screenpipe.com/login");
+    open(loginUrl);
   }).catch(() => {
     // fallback: window.open works in tauri webview
-    window.open("https://screenpipe.com/login", "_blank");
+    window.open(loginUrl, "_blank");
   });
 }
 
