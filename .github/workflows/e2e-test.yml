@@ -104,6 +104,9 @@ jobs:
       shell: bash
 
     - name: Rust cache
+      # cache restore/save is an optimization only; a transient GHA cache
+      # service error must never fail the job (skipped build+tests, red CI)
+      continue-on-error: true
       uses: Swatinem/rust-cache@v2
       with:
         workspaces: apps/screenpipe-app-tauri/src-tauri
@@ -456,6 +459,9 @@ jobs:
         echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
 
     - name: Rust cache
+      # cache restore/save is an optimization only; a transient GHA cache
+      # service error must never fail the job (skipped build+tests, red CI)
+      continue-on-error: true
       uses: Swatinem/rust-cache@v2
       with:
         workspaces: apps/screenpipe-app-tauri/src-tauri
@@ -574,6 +580,9 @@ jobs:
         echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
 
     - name: Rust cache
+      # cache restore/save is an optimization only; a transient GHA cache
+      # service error must never fail the job (skipped build+tests, red CI)
+      continue-on-error: true
       uses: Swatinem/rust-cache@v2
       with:
         workspaces: apps/screenpipe-app-tauri/src-tauri
