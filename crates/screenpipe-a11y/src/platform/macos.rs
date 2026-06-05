@@ -20,6 +20,7 @@ use tracing::{debug, error};
 
 use cidre::cg::event::access as cg_access;
 use cidre::{ax, cf, cg, ns};
+use objc2_app_kit::NSPasteboard;
 
 /// Guard to serialize accessibility queries – concurrent calls to
 /// AXUIElementCopyElementAtPosition can corrupt AppKit's internal
@@ -427,8 +428,8 @@ fn spawn_clipboard_worker_thread(
 }
 
 /// Poll interval for the clipboard fallback. 750ms balances detection
-/// latency against wakeups; the read itself hops to the main thread via
-/// `get_clipboard()` and costs microseconds per tick.
+/// latency against wakeups; `changeCount` is cheap and does not read
+/// clipboard contents.
 const CLIPBOARD_POLL_INTERVAL_MS: u64 = 750;
 
 /// Granularity at which the poller's sleep checks the stop flag. Capping
@@ -443,20 +444,18 @@ const CLIPBOARD_STOP_CHECK_GRANULARITY_MS: u64 = 100;
 /// poller can't tell which gesture caused the change, only that one did.
 const CLIPBOARD_OP_POLLED: char = 'p';
 
-/// Polling loop that watches the clipboard contents and fires a
-/// `ClipboardRequest` whenever the text changes.
+/// Polling loop that watches the pasteboard change count and fires a
+/// `ClipboardRequest` whenever the pasteboard changes.
 ///
 /// Used as a fallback when the CGEventTap thread can't run (Input
-/// Monitoring not granted). The poller does the read itself (cheap —
-/// `get_clipboard()` hops to the main queue and reads ~microseconds) and
-/// then enqueues a request only when the content actually differs from
-/// the last seen value. The worker thread will re-read on the main queue
-/// to get the canonical value at dispatch time.
+/// Monitoring not granted) and as a belt-and-suspenders trigger while the
+/// tap is running. It intentionally checks only `changeCount`; the worker
+/// reads text later only if clipboard content storage is enabled.
 ///
 /// Behavior difference vs. the event-tap path: copying identical text
-/// twice fires only one event here (the second copy doesn't change the
-/// content). The event-tap path fires per-keystroke. For PII-audit and
-/// "what passed through the clipboard" use cases this is preferable.
+/// twice usually increments the pasteboard count and fires twice here.
+/// That is what we want for workflow capture: the user's clipboard action
+/// is a semantic checkpoint even if the bytes are identical.
 fn run_clipboard_poller(
     stop: Arc<AtomicBool>,
     clipboard_tx: Sender<ClipboardRequest>,
@@ -464,10 +463,9 @@ fn run_clipboard_poller(
     config: UiCaptureConfig,
     start: Instant,
 ) {
-    // Seed with whatever's on the clipboard at startup so we don't fire
-    // an event for pre-existing content the user copied before launching
-    // the recorder.
-    let mut last_seen: Option<String> = get_clipboard();
+    // Seed with the current pasteboard generation so we don't fire an event for
+    // pre-existing content copied before launching the recorder.
+    let mut last_seen = get_clipboard_change_count();
     while !stop.load(Ordering::Relaxed) {
         // Interruptible sleep: bounded by CLIPBOARD_STOP_CHECK_GRANULARITY_MS
         // so a stop signal mid-interval doesn't strand the thread for the
@@ -487,11 +485,21 @@ fn run_clipboard_poller(
         if stop.load(Ordering::Relaxed) {
             return;
         }
-        let current = get_clipboard();
-        if current == last_seen {
+        let Some(current) = get_clipboard_change_count() else {
+            continue;
+        };
+
+        if last_seen == Some(current) {
             continue;
         }
-        last_seen = current;
+
+        if last_seen.is_none() {
+            last_seen = Some(current);
+            continue;
+        }
+
+        last_seen = Some(current);
+        debug!("clipboard change-count poller detected a pasteboard mutation");
         let _ = clipboard_tx.try_send(ClipboardRequest {
             operation: CLIPBOARD_OP_POLLED,
             delay_ms: 0,
@@ -501,6 +509,12 @@ fn run_clipboard_poller(
             tx: tx.clone(),
         });
     }
+}
+
+fn get_clipboard_change_count() -> Option<i64> {
+    let _pool = cidre::objc::AutoreleasePoolPage::push();
+    let pasteboard = NSPasteboard::generalPasteboard();
+    Some(pasteboard.changeCount() as i64)
 }
 
 // ============================================================================
@@ -646,6 +660,24 @@ fn run_event_tap(
     // Single worker thread for clipboard capture — avoids spawning a thread per
     // Cmd+C/X and avoids blocking the event tap callback on Cmd+V.
     let clipboard_tx = spawn_clipboard_worker_thread(current_app.clone(), current_window.clone());
+    if config.capture_clipboard {
+        let poller_stop = stop.clone();
+        let poller_tx = tx.clone();
+        let poller_config = config.clone();
+        let poller_clipboard_tx = clipboard_tx.clone();
+        thread::Builder::new()
+            .name("clipboard-poller".into())
+            .spawn(move || {
+                run_clipboard_poller(
+                    poller_stop,
+                    poller_clipboard_tx,
+                    poller_tx,
+                    poller_config,
+                    start,
+                );
+            })
+            .ok();
+    }
 
     let state = Box::leak(Box::new(TapState {
         tx,
