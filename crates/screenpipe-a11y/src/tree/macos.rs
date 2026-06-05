@@ -386,7 +386,7 @@ impl MacosTreeWalker {
             let ama_attr = ax::Attr::with_string(&ama_attr_name);
 
             let focused_editability = focused_element_editability(&ax_app);
-            if enhanced_ax_mode_already_enabled(&ax_app, &eui_attr, &ama_attr) {
+            if enhanced_ax_mode_already_enabled(&ax_app, eui_attr, ama_attr) {
                 debug!(
                     "enhanced AX mode already enabled for pid={} app={}; skipping re-assert",
                     pid, app_name
@@ -890,8 +890,8 @@ fn vscode_terminal_window_name(ax_app: &ax::UiElement) -> Option<String> {
                         return None;
                     }
                     let search_end = (list_idx + 12).min(steps);
-                    for k in (list_idx + 1)..search_end {
-                        let elem: &ax::UiElement = unsafe { std::mem::transmute(&*ancestors[k]) };
+                    for ancestor in ancestors.iter().take(search_end).skip(list_idx + 1) {
+                        let elem: &ax::UiElement = unsafe { std::mem::transmute(&**ancestor) };
                         for attr in [ax::attr::desc(), ax::attr::title()] {
                             if let Some(val) = get_string_attr(elem, attr) {
                                 if let Some(name) = parse_vscode_terminal_name(&val)
@@ -1058,16 +1058,16 @@ fn walk_element(elem: &ax::UiElement, depth: usize, state: &mut WalkState) {
         }
     }
     let is_vscode_terminal_list = is_vscode_terminal_list_role(&role_str, depth, &state.app);
-    if is_vscode_terminal_list {
-        if matches!(
+    if is_vscode_terminal_list
+        && matches!(
             state.app,
             AppState::VsCode {
                 mode: VsCodeMode::Editor,
                 ..
             }
-        ) {
-            return; // prune entire terminal subtree — no children walked, no text emitted
-        }
+        )
+    {
+        return; // prune entire terminal subtree — no children walked, no text emitted
     }
 
     // Extract text from this element.
@@ -1449,7 +1449,7 @@ fn ui_element_attr(elem: &ax::UiElement, attr: &ax::Attr) -> Option<Retained<ax:
     if val.get_type_id() != ax::UiElement::type_id() {
         return None;
     }
-    Some(unsafe { std::mem::transmute(val) })
+    Some(unsafe { std::mem::transmute::<Retained<cf::Type>, Retained<ax::UiElement>>(val) })
 }
 
 fn resolve_focused_window(
@@ -1554,7 +1554,7 @@ fn focused_element_editability(app: &ax::UiElement) -> FocusEditability {
     }
     let editable_attr_name = cf::String::from_str("AXEditable");
     let editable_attr = ax::Attr::with_string(&editable_attr_name);
-    if get_bool_attr(elem, &editable_attr).unwrap_or(false) {
+    if get_bool_attr(elem, editable_attr).unwrap_or(false) {
         FocusEditability::Editable
     } else {
         FocusEditability::NotEditable

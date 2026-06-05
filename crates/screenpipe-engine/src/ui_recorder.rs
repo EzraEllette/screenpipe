@@ -1302,17 +1302,21 @@ mod tests {
     fn window_focus_capture_is_always_enabled() {
         assert!(UiRecorderConfig::default().capture_window_focus);
 
-        let mut config = UiRecorderConfig::default();
-        config.capture_window_focus = false;
+        let config = UiRecorderConfig {
+            capture_window_focus: false,
+            ..Default::default()
+        };
         assert!(config.to_ui_config().capture_window_focus);
     }
 
     #[test]
     fn clipboard_trigger_detection_does_not_require_clipboard_storage() {
-        let mut config = UiRecorderConfig::default();
-        config.capture_clipboard = false;
-        config.capture_clipboard_content = true;
-        config.capture_on_clipboard = true;
+        let config = UiRecorderConfig {
+            capture_clipboard: false,
+            capture_clipboard_content: true,
+            capture_on_clipboard: true,
+            ..Default::default()
+        };
 
         let ui_config = config.to_ui_config();
 

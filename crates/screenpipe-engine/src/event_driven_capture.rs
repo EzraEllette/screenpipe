@@ -571,7 +571,7 @@ pub async fn event_driven_capture_loop(
     let current_monitors = list_monitors().await;
     let all_monitor_bounds = current_monitors
         .iter()
-        .map(|monitor| monitor_bounds(monitor))
+        .map(monitor_bounds)
         .collect::<Vec<_>>();
     let idle_phase_delay = idle_phase_delay(
         &monitor,
@@ -1688,6 +1688,7 @@ fn bypasses_capture_throttles(trigger: &CaptureTrigger) -> bool {
 ///
 /// `hd_active` bypasses content dedup entirely for this capture — see
 /// [`dedup_applies`].
+#[allow(clippy::too_many_arguments)]
 async fn do_capture(
     params: &CaptureParams<'_>,
     trigger: &CaptureTrigger,
