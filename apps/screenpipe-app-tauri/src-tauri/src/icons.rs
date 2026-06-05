@@ -594,9 +594,8 @@ mod linux_icon_cache {
             }
 
             // If icon isn't in the map, try loading the icon path
-            if let icon_path = self.get_icon_path_from_name(app_name).await? {
-                return self.load_icon_from_path(&icon_path);
-            }
+            let icon_path = self.get_icon_path_from_name(app_name).await?;
+            return self.load_icon_from_path(&icon_path);
 
             Err(format!("Icon for App '{}' not found", app_name))
         }
@@ -607,7 +606,7 @@ mod linux_icon_cache {
             {
                 let icon_name = icon_name.to_string();
 
-                MainContext::default().invoke(clone!(@strong icon_name => move || {
+                main_context.invoke(clone!(@strong icon_name => move || {
                     let result = gtk::IconTheme::default()
                         .and_then(|icon_theme| {
                             icon_theme
@@ -702,7 +701,7 @@ mod linux_icon_cache {
 
     pub async fn get_app_icon(
         app_name: &str,
-        app_path: Option<String>,
+        _app_path: Option<String>,
     ) -> Result<Option<AppIcon>, String> {
         ICON_CACHE.get_app_icon(app_name).await
     }

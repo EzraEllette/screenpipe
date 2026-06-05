@@ -221,6 +221,7 @@ fn native_notif_action_callback_inner(json_ptr: *const std::os::raw::c_char) {
     let _ = app.emit("native-notification-action", &json);
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn is_meeting_deeplink(url: &str) -> bool {
     url.starts_with("screenpipe://meeting/") || url.starts_with("screenpipe://meeting?")
 }

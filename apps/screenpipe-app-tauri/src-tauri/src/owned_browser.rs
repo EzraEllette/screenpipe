@@ -403,7 +403,7 @@ fn child_webview_builder(
     let app_for_title = app.clone();
     let app_for_nav = app.clone();
     let app_for_page_load = app.clone();
-    let mut builder = tauri::webview::WebviewBuilder::new(label.to_string(), url)
+    let builder = tauri::webview::WebviewBuilder::new(label.to_string(), url)
         .initialization_script(BRIDGE_INIT_SCRIPT)
         .on_navigation(move |_url| {
             // Browsers do not put subframe navigations in the omnibox. Wry's
@@ -434,15 +434,13 @@ fn child_webview_builder(
         });
 
     #[cfg(target_os = "macos")]
-    {
+    let builder = builder.user_agent(
         // Some sites gate the default WKWebView UA even though the underlying
         // engine is Safari.
-        builder = builder.user_agent(
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) \
-             AppleWebKit/605.1.15 (KHTML, like Gecko) \
-             Version/17.5 Safari/605.1.15",
-        );
-    }
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) \
+         AppleWebKit/605.1.15 (KHTML, like Gecko) \
+         Version/17.5 Safari/605.1.15",
+    );
 
     builder
 }

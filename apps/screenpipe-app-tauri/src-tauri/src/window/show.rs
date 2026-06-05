@@ -718,6 +718,7 @@ impl ShowRewindWindow {
                     #[cfg(not(target_os = "macos"))]
                     let window = {
                         let app_clone = app.clone();
+                        #[cfg(target_os = "windows")]
                         let capturable = show_in_recording;
                         let builder = self
                             .window_builder_with_label(
@@ -1210,6 +1211,7 @@ impl ShowRewindWindow {
                 // Debounce focus-loss so three-finger workspace swipes don't hide mid-animation.
                 // On Linux the main window is a normal decorated window — don't auto-hide on focus loss,
                 // as that makes the window unclickable and breaks the standard desktop UX.
+                #[cfg(not(target_os = "linux"))]
                 let app_clone = app.clone();
                 let window_clone = window.clone();
                 #[cfg(not(target_os = "linux"))]
