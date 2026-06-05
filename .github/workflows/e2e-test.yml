@@ -154,6 +154,9 @@ jobs:
       uses: tauri-apps/tauri-action@v0.5.17
       env:
         OPENBLAS_PATH: ${{ github.workspace }}/apps/screenpipe-app-tauri/src-tauri/openblas
+        # Bypass the billing gate in the e2e build so the suite exercises real
+        # features; the dedicated gate spec re-enables it at runtime.
+        NEXT_PUBLIC_SCREENPIPE_E2E: "true"
       with:
         args: "--no-sign --debug --no-bundle -- --features e2e"
         projectPath: "./apps/screenpipe-app-tauri"
@@ -495,6 +498,9 @@ jobs:
       uses: tauri-apps/tauri-action@v0.5.17
       env:
         OPENBLAS_PATH: ${{ env.OPENBLAS_PATH }}
+        # Bypass the billing gate in the e2e build so the suite exercises real
+        # features; the dedicated gate spec re-enables it at runtime.
+        NEXT_PUBLIC_SCREENPIPE_E2E: "true"
       with:
         args: "--no-sign --debug --no-bundle -- --features e2e"
         projectPath: "./apps/screenpipe-app-tauri"
@@ -621,6 +627,9 @@ jobs:
       uses: tauri-apps/tauri-action@v0.5.17
       env:
         SCREENPIPE_RELEASE_TARGET: aarch64-apple-darwin
+        # Bypass the billing gate in the e2e build so the suite exercises real
+        # features; the dedicated gate spec re-enables it at runtime.
+        NEXT_PUBLIC_SCREENPIPE_E2E: "true"
       with:
         args: "--no-sign --debug --no-bundle -- --features e2e"
         projectPath: "./apps/screenpipe-app-tauri"

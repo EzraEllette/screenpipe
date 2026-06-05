@@ -12,6 +12,7 @@ import posthog from "posthog-js";
 import { User } from "../utils/tauri";
 import { SettingsStore } from "../utils/tauri";
 import { installAuthInterceptor } from "../auth-guard";
+import { normalizeAppUser } from "@/lib/app-entitlement";
 import type { SourceCitation } from "@/lib/source-citations";
 import type {
 	EnterpriseAppUpdatePolicy,
@@ -557,7 +558,10 @@ let DEFAULT_SETTINGS: Settings = {
 				website: null,
 				contact: null,
 				cloud_subscribed: null,
-				credits_balance: null
+				credits_balance: null,
+				app_entitled: null,
+				subscription_plan: null,
+				entitlement: null
 			},
 			showScreenpipeShortcut: "Control+Super+S",
 			startRecordingShortcut: "Super+Alt+U",
@@ -927,7 +931,7 @@ interface SettingsContextType {
 	resetSettings: () => Promise<void>;
 	resetSetting: <K extends keyof Settings>(key: K) => Promise<void>;
 	reloadStore: () => Promise<void>;
-	loadUser: (token: string) => Promise<void>;
+	loadUser: (token: string, verify?: boolean) => Promise<void>;
 	getDataDir: () => Promise<string>;
 	isSettingsLoaded: boolean;
 	loadingError: string | null;
@@ -1079,6 +1083,8 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 			website: settings.user?.website,
 			contact: settings.user?.contact,
 			cloud_subscribed: !!settings.user?.cloud_subscribed,
+			app_entitled: !!(settings.user as any)?.app_entitled,
+			subscription_plan: (settings.user as any)?.subscription_plan,
 			machine_analytics_id: settings.analyticsId,
 		};
 
@@ -1090,7 +1096,7 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 				posthog.identify(distinctId, baseProps);
 			});
 		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [settings.analyticsId, settings.user?.id, settings.user?.clerk_id, settings.user?.cloud_subscribed]);
+	}, [settings.analyticsId, settings.user?.id, settings.user?.clerk_id, settings.user?.cloud_subscribed, (settings.user as any)?.app_entitled, (settings.user as any)?.subscription_plan]);
 
 	// When user becomes a Pro subscriber, default to cloud transcription (one-time)
 	useEffect(() => {
@@ -1182,14 +1188,17 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 		return `${homeDirPath}/.screenpipe`;
 	};
 
-	const loadUser = async (token: string) => {
+	const loadUser = async (token: string, verify = false) => {
 		try {
 			const response = await fetch(`https://screenpi.pe/api/user`, {
 				method: "POST",
 				headers: {
 					"Content-Type": "application/json",
 				},
-				body: JSON.stringify({ token }),
+				// verify=true asks the server to consult Stripe directly (used by the
+				// entitlement gate right after purchase); normal polls omit it to keep
+				// the hot path off Stripe.
+				body: JSON.stringify({ token, ...(verify ? { verify: true } : {}) }),
 			});
 
 			if (!response.ok) {
@@ -1198,10 +1207,7 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 			}
 
 			const data = await response.json();
-			const userData = {
-				...data.user,
-				token
-			} as User;
+			const userData = normalizeAppUser(data.user, token) as User;
 
 			// if user was not logged in, send posthog event and bridge identity
 			if (!settings.user?.id) {
