@@ -2506,7 +2506,11 @@ mod tests {
 
         // A user skill in the store.
         std::fs::create_dir_all(store.join("foo")).unwrap();
-        std::fs::write(store.join("foo").join("SKILL.md"), "---\nname: foo\n---\nhi").unwrap();
+        std::fs::write(
+            store.join("foo").join("SKILL.md"),
+            "---\nname: foo\n---\nhi",
+        )
+        .unwrap();
         // A "foo" dir without SKILL.md must be ignored (not a skill).
         std::fs::create_dir_all(store.join("not-a-skill")).unwrap();
         // A baseline skill already written by screenpipe (no marker) must survive.
@@ -2517,7 +2521,10 @@ mod tests {
 
         // Mirrored with a marker.
         assert!(skills.join("foo").join("SKILL.md").exists());
-        assert!(skills.join("foo").join(PiExecutor::USER_SKILL_MARKER).exists());
+        assert!(skills
+            .join("foo")
+            .join(PiExecutor::USER_SKILL_MARKER)
+            .exists());
         // Non-skill dir not copied.
         assert!(!skills.join("not-a-skill").exists());
         // Baseline untouched.
