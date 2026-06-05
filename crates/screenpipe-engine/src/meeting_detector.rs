@@ -952,13 +952,13 @@ struct AttrNeeds {
 
 #[cfg(target_os = "macos")]
 #[cfg(any(target_os = "macos", test))]
-#[cfg(any(target_os = "macos", test))]
 impl AttrNeeds {
     fn from_signals(signals: &[PrecomputedSignal]) -> Self {
         Self::from_call_signals(signals.iter().map(|ps| &ps.signal))
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
 impl AttrNeeds {
     /// Derive needs from a sequence of `CallSignal`s. Kept generic over the
     /// iterator source so the same derivation drives both production
