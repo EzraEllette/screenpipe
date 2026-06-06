@@ -423,6 +423,16 @@ impl PiExecutor {
     /// safely remove ones the user has since deleted from the store.
     const USER_SKILL_MARKER: &'static str = ".screenpipe-managed";
 
+    /// Baseline skills screenpipe writes into every session itself
+    /// ([`Self::ensure_screenpipe_skill`] / [`Self::ensure_screenpipe_team_skill`]).
+    /// A store entry under one of these names must never be mirrored: it would
+    /// clobber the real baseline and, once stamped with
+    /// [`Self::USER_SKILL_MARKER`], be deleted by a later sync. The desktop
+    /// importer already rejects these names; this guards any folder that reaches
+    /// the store another way.
+    const BASELINE_SKILL_NAMES: [&'static str; 3] =
+        ["screenpipe-api", "screenpipe-cli", "screenpipe-team"];
+
     /// Mirror the user's imported skills from the global store
     /// (`<data_dir>/skills/<name>/`) into `project_dir/.pi/skills/` so every
     /// pipe and chat session can load them. The store is populated by the
@@ -446,7 +456,7 @@ impl PiExecutor {
 
         // Copy/refresh every store skill (a folder containing SKILL.md).
         let mut store_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
-        if let Ok(entries) = std::fs::read_dir(&store) {
+        if let Ok(entries) = std::fs::read_dir(store) {
             for entry in entries.flatten() {
                 let src = entry.path();
                 if !src.is_dir() || !src.join("SKILL.md").exists() {
@@ -456,6 +466,12 @@ impl PiExecutor {
                     Ok(k) => k,
                     Err(_) => continue,
                 };
+                // Never let a store entry shadow a baseline skill screenpipe
+                // writes itself — that would clobber it and, once marked, risk
+                // its deletion on a later sync.
+                if Self::BASELINE_SKILL_NAMES.contains(&key.as_str()) {
+                    continue;
+                }
                 let dest = dest_root.join(&key);
                 let copy = (|| -> std::io::Result<()> {
                     if dest.exists() {
@@ -2516,6 +2532,10 @@ mod tests {
         // A baseline skill already written by screenpipe (no marker) must survive.
         std::fs::create_dir_all(skills.join("screenpipe-api")).unwrap();
         std::fs::write(skills.join("screenpipe-api").join("SKILL.md"), "base").unwrap();
+        // A store entry colliding with a baseline name must be ignored, never
+        // mirrored — otherwise it would clobber the baseline above.
+        std::fs::create_dir_all(store.join("screenpipe-api")).unwrap();
+        std::fs::write(store.join("screenpipe-api").join("SKILL.md"), "evil").unwrap();
 
         PiExecutor::sync_user_skills_from(&store, &project).unwrap();
 
@@ -2527,8 +2547,16 @@ mod tests {
             .exists());
         // Non-skill dir not copied.
         assert!(!skills.join("not-a-skill").exists());
-        // Baseline untouched.
-        assert!(skills.join("screenpipe-api").join("SKILL.md").exists());
+        // Baseline untouched: original content, and never stamped as managed
+        // (so the colliding store entry can't get it deleted on a later sync).
+        assert_eq!(
+            std::fs::read_to_string(skills.join("screenpipe-api").join("SKILL.md")).unwrap(),
+            "base"
+        );
+        assert!(!skills
+            .join("screenpipe-api")
+            .join(PiExecutor::USER_SKILL_MARKER)
+            .exists());
 
         // Remove from store, sync again → our mirror is gone, baseline stays.
         std::fs::remove_dir_all(store.join("foo")).unwrap();
