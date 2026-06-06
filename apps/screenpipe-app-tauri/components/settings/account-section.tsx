@@ -49,6 +49,7 @@ function syncErrorDescription(e: unknown): string {
 export function AccountSection() {
   const { settings, updateSettings, loadUser } = useSettings();
   const { isServerDown } = useHealthCheck();
+  const [annual, setAnnual] = useState(true);
   const [pipeSyncing, setPipeSyncing] = useState(false);
   const [memoriesSyncing, setMemoriesSyncing] = useState(false);
   const [connectionsSyncing, setConnectionsSyncing] = useState(false);
@@ -110,7 +111,7 @@ export function AccountSection() {
       return;
     }
     if (!settings.user?.cloud_subscribed) {
-      posthog.capture("cloud_plan_selected", { plan: "pro" });
+      posthog.capture("cloud_plan_selected", { plan: "pro", interval: annual ? "year" : "month" });
       try {
         // New subscription checkout ($50/mo Pro). Pass the Clerk token so the
         // session pins customer_email + metadata.user_id to this account — the
@@ -122,6 +123,7 @@ export function AccountSection() {
           },
           body: JSON.stringify({
             plan: "pro",
+            interval: annual ? "year" : "month",
             token: settings.user?.token,
             returnUrl: "https://screenpipe.com/account",
             origin: "app-account-section",
@@ -503,8 +505,15 @@ export function AccountSection() {
                     <h3 className="text-lg font-semibold">Screenpipe Pro</h3>
                   </div>
                   <div className="flex items-baseline gap-2">
-                    <span className="text-2xl font-bold">$50</span>
+                    <span className="text-2xl font-bold">{annual ? "$33" : "$50"}</span>
                     <span className="text-muted-foreground text-sm">/month</span>
+                    <button
+                      type="button"
+                      onClick={() => setAnnual((a) => !a)}
+                      className="ml-1 text-[10px] font-mono text-muted-foreground underline underline-offset-2 hover:text-foreground"
+                    >
+                      {annual ? "billed annually · save $200 · pay monthly" : "switch to annual · save $200"}
+                    </button>
                   </div>
                 </div>
               </div>
@@ -586,8 +595,15 @@ export function AccountSection() {
                     <h3 className="text-lg font-semibold">Screenpipe Pro</h3>
                   </div>
                   <div className="flex items-baseline gap-2">
-                    <span className="text-2xl font-bold">$50</span>
+                    <span className="text-2xl font-bold">{annual ? "$33" : "$50"}</span>
                     <span className="text-muted-foreground text-sm">/month</span>
+                    <button
+                      type="button"
+                      onClick={() => setAnnual((a) => !a)}
+                      className="ml-1 text-[10px] font-mono text-muted-foreground underline underline-offset-2 hover:text-foreground"
+                    >
+                      {annual ? "billed annually · save $200 · pay monthly" : "switch to annual · save $200"}
+                    </button>
                   </div>
                 </div>
               </div>
