@@ -22,16 +22,22 @@ import { useSettings } from "@/lib/hooks/use-settings";
 import { commands } from "@/lib/utils/tauri";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
-// Only the primary app window drives recording control. Secondary webviews
-// (chat, viewer, etc.) still render the gate but must NOT issue spawn/stop —
-// otherwise every webview fires its own spawn on the entitled flip and they
-// race into each other (and into a reconnect teardown), wedging the recorder
-// at "Starting capture session". Matches the Rust ["main", "main-window"]
-// convention from main_label_for_mode (panel vs window overlay mode).
+// Drive the resume from exactly ONE window — the main CONTENT window — so
+// multiple webviews don't fire overlapping spawns that race each other (and a
+// reconnect teardown) and wedge the recorder at "Starting capture session".
+//
+// The content-window label differs by platform: on macOS it is "home" (the
+// "main" window there is the NSPanel overlay, which must NOT drive recording —
+// gating on "main" was why macOS never resumed after login). On Windows/Linux
+// the content window is "main-window" (window overlay mode) or "main". This
+// must match the window that actually handles the sign-in deep link, so its
+// gate observes the entitled flip.
 function isPrimaryWindow(): boolean {
   try {
     const label = getCurrentWindow().label;
-    return label === "main" || label === "main-window";
+    const ua = typeof navigator !== "undefined" ? navigator.userAgent : "";
+    if (/Mac/i.test(ua)) return label === "home";
+    return label === "main-window" || label === "main";
   } catch {
     return false;
   }
