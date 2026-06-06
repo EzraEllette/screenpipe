@@ -199,7 +199,7 @@ export function AccountSection() {
     <div className="space-y-6">
       {/* Header + login status */}
       <div className="flex items-center justify-between">
-        <p className="text-sm text-muted-foreground">
+        <p className="text-sm text-muted-foreground" data-testid="account-login-status">
           {settings.user?.token
             ? `logged in as ${settings.user.email}`
             : "not logged in"}
@@ -218,6 +218,7 @@ export function AccountSection() {
               <Button
                 variant="outline"
                 size="sm"
+                data-testid="account-logout-button"
                 onClick={async () => {
                   updateSettings({ user: null as any });
                   // Restart Pi with null token so it stops using the old
