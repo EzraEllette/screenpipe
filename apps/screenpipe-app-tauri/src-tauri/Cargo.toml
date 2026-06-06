@@ -301,7 +301,9 @@ serial_test = "3"
 # wiring lands in a follow-up. Cargo compiles it for the workspace either way.
 # thiserror: gated behind `enterprise-build` via `dep:thiserror`; cargo-machete
 # can't follow `#[path = ...]` imports into ee/desktop-rust/enterprise_sync.rs.
-ignored = ["tauri-utils", "screenpipe-redact", "thiserror", "screenpipe-sync"]
+# eventkit-rs: lib crate is imported as `eventkit` (calendar.rs, permissions.rs);
+# cargo-machete matches the package name `eventkit_rs` so it can't see the use.
+ignored = ["tauri-utils", "screenpipe-redact", "thiserror", "screenpipe-sync", "eventkit-rs"]
 
 [patch.crates-io]
 # macOS tray menus can outlive the Rust `Menu` that created them while the
