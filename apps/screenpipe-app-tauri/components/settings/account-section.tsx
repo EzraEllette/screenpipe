@@ -505,7 +505,7 @@ export function AccountSection() {
                     <h3 className="text-lg font-semibold">Screenpipe Pro</h3>
                   </div>
                   <div className="flex items-baseline gap-2">
-                    <span className="text-2xl font-bold">{annual ? "$33" : "$50"}</span>
+                    <span className="text-2xl font-bold">{annual ? "$42" : "$50"}</span>
                     <span className="text-muted-foreground text-sm">/month</span>
                     <button
                       type="button"
@@ -595,7 +595,7 @@ export function AccountSection() {
                     <h3 className="text-lg font-semibold">Screenpipe Pro</h3>
                   </div>
                   <div className="flex items-baseline gap-2">
-                    <span className="text-2xl font-bold">{annual ? "$33" : "$50"}</span>
+                    <span className="text-2xl font-bold">{annual ? "$42" : "$50"}</span>
                     <span className="text-muted-foreground text-sm">/month</span>
                     <button
                       type="button"
