@@ -137,6 +137,7 @@ screenpipe-vault = { path = "../../../crates/screenpipe-vault" }
 screenpipe-connect = { path = "../../../crates/screenpipe-connect", features = ["specta"] }
 screenpipe-secrets = { path = "../../../crates/screenpipe-secrets" }
 screenpipe-events = { path = "../../../crates/screenpipe-events" }
+eventkit-rs = { git = "https://github.com/divanshu-go/eventkit-rs", rev = "9dd52787c8435d734ed443e2d5641f45b0177cae", default-features = false, features = ["events"] }
 # Async PII reconciliation (issue #3185 / PR #3188). `onnx-coreml` is
 # the right execution-provider for Apple Silicon (image PII via
 # rfdetr_v8); `opf-text` enables the local pure-Rust candle text
