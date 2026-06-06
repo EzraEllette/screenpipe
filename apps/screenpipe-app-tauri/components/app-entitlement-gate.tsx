@@ -20,6 +20,22 @@ import {
 } from "@/lib/app-entitlement";
 import { useSettings } from "@/lib/hooks/use-settings";
 import { commands } from "@/lib/utils/tauri";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+
+// Only the primary app window drives recording control. Secondary webviews
+// (chat, viewer, etc.) still render the gate but must NOT issue spawn/stop —
+// otherwise every webview fires its own spawn on the entitled flip and they
+// race into each other (and into a reconnect teardown), wedging the recorder
+// at "Starting capture session". Matches the Rust ["main", "main-window"]
+// convention from main_label_for_mode (panel vs window overlay mode).
+function isPrimaryWindow(): boolean {
+  try {
+    const label = getCurrentWindow().label;
+    return label === "main" || label === "main-window";
+  } catch {
+    return false;
+  }
+}
 
 function EntitlementShell({
   title,
@@ -56,6 +72,7 @@ export function AppEntitlementGate({ children }: { children: React.ReactNode }) 
   const stoppedForGateRef = useRef(false);
   const autoVerifiedRef = useRef(false);
   const prevEntitledRef = useRef<boolean | null>(null);
+  const resumingRef = useRef(false);
   const user = settings.user as AppUser | null | undefined;
   const devBypass = isDevBillingBypassEnabled();
   const isEntitled = hasAppEntitlement(user);
@@ -159,15 +176,35 @@ export function AppEntitlementGate({ children }: { children: React.ReactNode }) 
   // sign-in, purchase, or a successful refresh). Native autostart only runs once
   // at launch, so without this a freshly-paid user would see the app but get no
   // recording until they restarted it.
+  //
+  // This must use the SAME recipe as the reliable settings restart
+  // (display-section / recording-settings): one owner, guarded against
+  // re-entry, and a sequenced stop -> settle -> spawn. A bare spawn() here
+  // raced a reconnect's in-flight teardown and wedged the engine at "Starting
+  // capture session" (port never rebound). See the recording-settings
+  // "Apply & Restart" path for the canonical sequence.
   useEffect(() => {
     if (!isSettingsLoaded || devBypass) return;
     const previouslyEntitled = prevEntitledRef.current;
     prevEntitledRef.current = isEntitled;
-    if (previouslyEntitled === false && isEntitled) {
-      commands.spawnScreenpipe(null).catch((err) => {
-        console.warn("failed to start screenpipe after entitlement restored:", err);
-      });
-    }
+    if (previouslyEntitled !== false || !isEntitled) return;
+    // Single owner: only the primary window restarts the engine, so secondary
+    // webviews don't fire overlapping spawns that race each other.
+    if (!isPrimaryWindow()) return;
+    // Collapse rapid re-fires into one restart in flight.
+    if (resumingRef.current) return;
+    resumingRef.current = true;
+    void (async () => {
+      try {
+        await commands.stopScreenpipe();
+        await new Promise((r) => setTimeout(r, 500));
+        await commands.spawnScreenpipe(null);
+      } catch (err) {
+        console.warn("failed to restart screenpipe after entitlement restored:", err);
+      } finally {
+        resumingRef.current = false;
+      }
+    })();
   }, [devBypass, isEntitled, isSettingsLoaded]);
 
   const devLoginBlock = isDevLoginEnabled() ? (
