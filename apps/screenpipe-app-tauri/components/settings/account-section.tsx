@@ -512,7 +512,7 @@ export function AccountSection() {
                       onClick={() => setAnnual((a) => !a)}
                       className="ml-1 text-[10px] font-mono text-muted-foreground underline underline-offset-2 hover:text-foreground"
                     >
-                      {annual ? "billed annually · save $200 · pay monthly" : "switch to annual · save $200"}
+                      {annual ? "billed annually · save $100 · pay monthly" : "switch to annual · save $100"}
                     </button>
                   </div>
                 </div>
@@ -602,7 +602,7 @@ export function AccountSection() {
                       onClick={() => setAnnual((a) => !a)}
                       className="ml-1 text-[10px] font-mono text-muted-foreground underline underline-offset-2 hover:text-foreground"
                     >
-                      {annual ? "billed annually · save $200 · pay monthly" : "switch to annual · save $200"}
+                      {annual ? "billed annually · save $100 · pay monthly" : "switch to annual · save $100"}
                     </button>
                   </div>
                 </div>
