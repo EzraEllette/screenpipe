@@ -379,3 +379,64 @@ Sync screenpipe activity to an Obsidian vault`;
     expect(reenabled).toContain("Sync screenpipe activity");
   });
 });
+
+describe("edge cases — blank lines and sibling allow blocks", () => {
+  it("detects the notify deny rule across a blank line inside the deny block", () => {
+    const content = [
+      "---",
+      "permissions:",
+      "  deny:",
+      "",
+      "    - Api(POST /notify)",
+      "---",
+      "body",
+    ].join("\n");
+    expect(isNotificationsDenied(content)).toBe(true);
+  });
+
+  it("enable: removes only the notify deny rule and keeps permissions + allow children", () => {
+    const content = [
+      "---",
+      "permissions:",
+      "  allow:",
+      "    - Api(GET /search)",
+      "  deny:",
+      "    - Api(POST /notify)",
+      "---",
+      "body",
+    ].join("\n");
+
+    const result = toggleNotificationInContent(content, true);
+
+    expect(result).toBe(
+      [
+        "---",
+        "permissions:",
+        "  allow:",
+        "    - Api(GET /search)",
+        "---",
+        "body",
+      ].join("\n"),
+    );
+    expect(isNotificationsDenied(result)).toBe(false);
+    expect(result).toContain("Api(GET /search)");
+  });
+
+  it("enable: keeps a deny block that still has a non-notify rule after removing notify", () => {
+    const content = [
+      "---",
+      "permissions:",
+      "  deny:",
+      "    - Api(POST /notify)",
+      "    - Api(POST /shell)",
+      "---",
+      "body",
+    ].join("\n");
+
+    const result = toggleNotificationInContent(content, true);
+
+    expect(result).toContain("deny:");
+    expect(result).toContain("Api(POST /shell)");
+    expect(isNotificationsDenied(result)).toBe(false);
+  });
+});

@@ -267,3 +267,64 @@ describe("tool_result handler", () => {
     expect(res.content[0].text).toContain("narrower filters");
   });
 });
+
+describe("clampMessageText — malformed history blocks fall back to head+tail", () => {
+  it("uses the generic trim when the history block is unterminated (open, no close)", () => {
+    const text = "<conversation_history>\n" + "a".repeat(500);
+    const out = clampMessageText(text, 100);
+    expect(out.length).toBeLessThanOrEqual(100);
+    expect(out).toContain("…[trimmed]");
+    expect(out).not.toContain("older history trimmed");
+  });
+
+  it("uses the generic trim when the close tag appears before the open tag", () => {
+    const text =
+      "</conversation_history> noise <conversation_history>" + "b".repeat(500);
+    const out = clampMessageText(text, 80);
+    expect(out.length).toBeLessThanOrEqual(80);
+    expect(out).toContain("…[trimmed]");
+    expect(out).not.toContain("older history trimmed");
+  });
+});
+
+describe("boundOversizedMessages — additional content shapes", () => {
+  it("clamps every oversized text block but never touches non-text blocks", () => {
+    const limit = maxMessageChars(WINDOW);
+    const image = { type: "image", data: "x".repeat(limit + 10) };
+    const messages = [
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "a".repeat(limit + 100) },
+          image,
+          { type: "text", text: "b".repeat(limit + 100) },
+        ],
+      },
+    ];
+    expect(boundOversizedMessages(messages, WINDOW)).toBe(true);
+    expect(messages[0].content[0].text.length).toBeLessThanOrEqual(limit);
+    expect(messages[0].content[2].text.length).toBeLessThanOrEqual(limit);
+    // image block left byte-for-byte alone
+    expect(messages[0].content[1]).toBe(image);
+    expect(messages[0].content[1].data.length).toBe(limit + 10);
+  });
+
+  it("ignores messages whose content is neither a string nor an array (no throw)", () => {
+    const messages = [
+      { role: "user", content: { foo: "bar" } },
+      null,
+      { role: "user" },
+    ];
+    expect(boundOversizedMessages(messages as any, WINDOW)).toBe(false);
+  });
+});
+
+describe("resolveContextWindowTokens — getContextUsage edge", () => {
+  it("ignores a zero contextWindow from getContextUsage and uses the default", () => {
+    expect(
+      resolveContextWindowTokens({
+        getContextUsage: () => ({ contextWindow: 0 }),
+      }),
+    ).toBe(128_000);
+  });
+});
