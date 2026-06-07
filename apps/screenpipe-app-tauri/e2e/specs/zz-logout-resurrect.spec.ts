@@ -45,20 +45,37 @@ import { openHomeWindow, waitForAppReady, waitForTestId, t } from "../helpers/te
 const FAKE_TOKEN = "e2e-fake-token-logout-resurrect";
 const FAKE_EMAIL = "e2e-logout@screenpipe.test";
 
-/** Emit a deep-link over the global Tauri bus (same path the chat / updater
- *  specs use). Returns once the emit promise settles. */
+/** Emit a deep-link to the HOME window only, via emitTo (not the global emit).
+ *
+ *  Why targeted, not broadcast: every window mounts the deep-link handler, and
+ *  the login handler calls loadUser(api_key) (components/deeplink-handler.tsx).
+ *  A global emit therefore fires loadUser in EVERY window. Only the home window
+ *  has our /api/user mock; the others hit the real network with the fake token,
+ *  get a 401, and the auth interceptor broadcasts "screenpipe-auth-signout",
+ *  which writes user:null into the shared settings store and clears the
+ *  freshly-logged-in home window too. On slow CI that 401 lands between our
+ *  "logged in" wait and the email assertion, so Phase A flapped to
+ *  "not logged in" (~50% failure, Windows worst, also seen on Linux).
+ *
+ *  Targeting "home" keeps every loadUser in the one mocked window — the
+ *  in-flight-loadUser resurrection race this spec guards is per-window anyway
+ *  (home fires the slow loadUser, home clicks logout, home's generation guard
+ *  must abort the late write), so coverage is unchanged. Returns once the emit
+ *  promise settles. */
 async function emitDeepLink(url: string): Promise<void> {
   const emitErr = (await browser.executeAsync(
     (payload: string, done: (v?: unknown) => void) => {
       const g = globalThis as unknown as {
-        __TAURI__?: { event?: { emit: (n: string, p: unknown) => Promise<unknown> } };
+        __TAURI__?: {
+          event?: { emitTo?: (target: string, n: string, p: unknown) => Promise<unknown> };
+        };
       };
-      const emit = g.__TAURI__?.event?.emit;
-      if (!emit) {
-        done("global __TAURI__.event.emit unavailable");
+      const emitTo = g.__TAURI__?.event?.emitTo;
+      if (!emitTo) {
+        done("global __TAURI__.event.emitTo unavailable");
         return;
       }
-      void emit("deep-link-received", payload)
+      void emitTo("home", "deep-link-received", payload)
         .then(() => done(null))
         .catch((e: unknown) => done(String(e)));
     },
@@ -184,11 +201,18 @@ describe("Logout is not resurrected by an in-flight loadUser", function () {
     // ── Phase A: log in (fast mock) so the logout button is present ──────────
     await tuneUserFetchMock(0, FAKE_EMAIL);
     await emitDeepLink(`screenpipe://login?api_key=${FAKE_TOKEN}`);
-    await browser.waitUntil(async () => (await loginStatusText()).includes("logged in as"), {
-      timeout: t(15_000),
-      interval: 250,
-      timeoutMsg: "did not log in via synthetic deep link",
-    });
+    // Poll the FULL condition (status carries the fake email), not just
+    // "logged in as", so a one-frame settle can't slip a stale status into the
+    // assertion below. Phase A is setup; the real regression assertion is in
+    // Phase B.
+    await browser.waitUntil(
+      async () => (await loginStatusText()).includes(FAKE_EMAIL.toLowerCase()),
+      {
+        timeout: t(15_000),
+        interval: 250,
+        timeoutMsg: "did not log in via synthetic deep link",
+      },
+    );
     expect(await loginStatusText()).toContain(FAKE_EMAIL.toLowerCase());
 
     // Let the post-login auto-refresh loadUser (also fast) settle before we
