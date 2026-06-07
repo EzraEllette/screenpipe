@@ -184,19 +184,9 @@ async function openAccountSettings(): Promise<void> {
 // /api/user stub that every webview sees without WebDriver window-switching,
 // or suppressing the 401→signout path for the duration of the deep-link login.
 // Re-enable once that harness exists and the spec is green across 5+ CI runs.
-// A chronically-red flake guards nothing and masks real E2E regressions, so the
-// flaky test body is skipped (not deleted) to restore E2E signal while keeping
-// the diagnosis.
-//
-// IMPORTANT: skip with a runtime this.skip() INSIDE the it (below), NOT
-// describe.skip on the suite. describe.skip also skips this suite's before/after
-// hooks — and the after hook's window.location.reload() leaves the shared app in
-// a clean home-ready state that the NEXT spec (zz-owned-browser-background-nav)
-// relies on in its own before hook. describe.skip removed that reload and made
-// zz-owned-browser-background-nav fail deterministically on Linux (before-hook
-// waitForAppReady → session death, run 27082878380). Keeping the describe +
-// hooks running and skipping only the it body preserves the reset.
-describe("Logout is not resurrected by an in-flight loadUser", function () {
+// A chronically-red flake guards nothing and masks real E2E regressions, so it
+// is skipped (not deleted) to restore E2E signal while keeping the diagnosis.
+describe.skip("Logout is not resurrected by an in-flight loadUser", function () {
   this.timeout(180_000);
 
   before(async () => {
@@ -230,13 +220,7 @@ describe("Logout is not resurrected by an in-flight loadUser", function () {
       .catch(() => {});
   });
 
-  // NOTE: async function (not arrow) so this.skip() is available. The body uses
-  // no lexical `this`, so the conversion is behavior-preserving.
-  it("stays logged out after one click even when a slow loadUser resolves afterwards", async function () {
-    // QUARANTINED: skip the flaky body but let before/after hooks run (see the
-    // block comment above the describe). Remove this line to re-enable once the
-    // multi-window deep-link login mock is fixed.
-    this.skip();
+  it("stays logged out after one click even when a slow loadUser resolves afterwards", async () => {
     // ── Phase A: log in (fast mock) so the logout button is present ──────────
     await tuneUserFetchMock(0, FAKE_EMAIL);
     await emitDeepLink(`screenpipe://login?api_key=${FAKE_TOKEN}`);
