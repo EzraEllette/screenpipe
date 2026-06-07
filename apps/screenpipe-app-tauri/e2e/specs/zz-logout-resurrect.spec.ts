@@ -163,7 +163,30 @@ async function openAccountSettings(): Promise<void> {
   await waitForTestId("account-login-status", 8_000);
 }
 
-describe("Logout is not resurrected by an in-flight loadUser", function () {
+// QUARANTINED (chronically flaky on Linux + Windows CI, ~50-100% red on main).
+//
+// Root cause confirmed from CI run 27082032663 (Linux log around the Phase A
+// failure): the synthetic deep-link login fans out to EVERY window even though
+// emitDeepLink now uses emitTo("home", ...). Each window's deep-link handler
+// runs loadUser(FAKE_TOKEN); the windows without the /api/user fetch mock hit
+// the REAL https://screenpi.pe/api/user with the fake token, get a 401, and the
+// auth interceptor broadcasts "screenpipe-auth-signout" — which clears the
+// freshly-logged-in home window. On CI that 401 lands between the Phase A
+// waitUntil(email) and the email assertion (spec ~line 216), so Phase A setup
+// flips "logged in as e2e-logout@…" → "not logged in" and the spec fails. On
+// Windows the failed spec also poisons the shared WebDriver session, cascading
+// "Failed to create a session" into zz-owned-browser-background-nav.
+//
+// Two fix attempts have NOT held: (1) forEachWindow mock install poisoned the
+// session via window-switching; (2) emitTo("home") still fans out (above).
+// The real fix needs either TRUE single-window event delivery (verify the
+// actual window labels — emitTo("home") is not scoping here) or an app-wide
+// /api/user stub that every webview sees without WebDriver window-switching,
+// or suppressing the 401→signout path for the duration of the deep-link login.
+// Re-enable once that harness exists and the spec is green across 5+ CI runs.
+// A chronically-red flake guards nothing and masks real E2E regressions, so it
+// is skipped (not deleted) to restore E2E signal while keeping the diagnosis.
+describe.skip("Logout is not resurrected by an in-flight loadUser", function () {
   this.timeout(180_000);
 
   before(async () => {
