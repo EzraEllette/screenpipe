@@ -612,6 +612,7 @@ export function IntegrationIcon({
     notion: <img src="/images/notion.svg" alt="Notion" className="w-5 h-5 dark:invert" />,
     linear: <img src="/images/linear.svg" alt="Linear" className="w-5 h-5" />,
     krisp: <img src="/images/krisp.svg" alt="Krisp" className="w-5 h-5 dark:invert" />,
+    plaud: <img src="/images/plaud.png" alt="Plaud" className="w-5 h-5 dark:invert" />,
     odoo: <img src="/images/odoo.svg" alt="Odoo" className="w-5 h-5" />,
     perplexity: <img src="/images/perplexity.svg" alt="Perplexity" className="w-5 h-5" />,
     posthog: <img src="/images/posthog.svg" alt="PostHog" className="w-5 h-5" />,
@@ -2787,27 +2788,36 @@ function ApiIntegrationPanel({ integration, onRefresh }: {
 }
 
 // ---------------------------------------------------------------------------
-// Krisp — official OAuth MCP card
+// Featured OAuth MCP cards (Krisp, Plaud)
 // ---------------------------------------------------------------------------
 //
-// Krisp exposes its meeting data (transcripts, notes, action items) through a
-// remote, OAuth-gated MCP server. Rather than make the user paste the URL into
-// the Custom MCP form, this card creates the server config and runs the OAuth
-// flow in one click. Krisp registers screenpipe as a *confidential* client
-// (client_secret_basic) — handled in screenpipe-connect's mcp_servers.rs.
+// Some providers expose their data (meeting transcripts, recordings, notes)
+// through a remote, OAuth-gated MCP server. Rather than make the user paste the
+// URL into the Custom MCP form, these cards create the server config and run the
+// OAuth flow in one click. A provider may register screenpipe as a *confidential*
+// client (client_secret_basic) during dynamic client registration; that is
+// handled generically in screenpipe-connect's mcp_servers.rs, so a new provider
+// only needs its display name + MCP URL here.
 
 const KRISP_MCP_URL = "https://mcp.krisp.ai/mcp";
+const PLAUD_MCP_URL = "https://mcp.plaud.ai/mcp";
 
-function krispMcpRandomId(): string {
+function mcpRandomId(): string {
   const bytes = new Uint8Array(8);
   crypto.getRandomValues(bytes);
   return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-function KrispPanel({
+function OAuthMcpPanel({
+  name,
+  mcpUrl,
+  description,
   onConnected,
   onDisconnected,
 }: {
+  name: string;
+  mcpUrl: string;
+  description: React.ReactNode;
   onConnected?: () => void;
   onDisconnected?: () => void;
 }) {
@@ -2826,8 +2836,8 @@ function KrispPanel({
     }
   };
 
-  // Reflect reality on open: find a Krisp MCP server created by a prior connect
-  // and read its OAuth status.
+  // Reflect reality on open: find this provider's MCP server created by a prior
+  // connect and read its OAuth status.
   const loadStatus = useCallback(async () => {
     try {
       const r = await localFetch("/mcp-servers");
@@ -2835,7 +2845,7 @@ function KrispPanel({
       const body = await r.json();
       const list = (body?.data ?? []) as { id: string; url?: string }[];
       const existing = list.find(
-        (s) => (s.url ?? "").replace(/\/+$/, "") === KRISP_MCP_URL
+        (s) => (s.url ?? "").replace(/\/+$/, "") === mcpUrl
       );
       if (!existing) {
         setServerId(null);
@@ -2851,7 +2861,7 @@ function KrispPanel({
         setConnected(!!sb?.data?.connected);
       }
     } catch {}
-  }, []);
+  }, [mcpUrl]);
 
   useEffect(() => {
     loadStatus();
@@ -2867,9 +2877,9 @@ function KrispPanel({
     cancelledRef.current = false;
     clearTimer();
     try {
-      // Reuse an existing Krisp server if present; otherwise create-on-complete
+      // Reuse an existing server if present; otherwise create-on-complete
       // (the server is persisted only when OAuth succeeds).
-      const targetId = serverId ?? krispMcpRandomId();
+      const targetId = serverId ?? mcpRandomId();
       const isNew = !serverId;
       const res = await localFetch(
         `/mcp-servers/${encodeURIComponent(targetId)}/oauth/start`,
@@ -2878,7 +2888,7 @@ function KrispPanel({
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(
             isNew
-              ? { name: "Krisp", url: KRISP_MCP_URL, headers: [], enabled: true }
+              ? { name, url: mcpUrl, headers: [], enabled: true }
               : {}
           ),
         }
@@ -2956,9 +2966,7 @@ function KrispPanel({
   return (
     <div className="p-4 space-y-3 text-sm">
       <p className="text-xs text-muted-foreground leading-relaxed">
-        Connect Krisp so your AI can search your meeting transcripts, notes, and
-        action items. Sign-in is handled by Krisp&apos;s OAuth — screenpipe never
-        sees your password.
+        {description}
       </p>
       {connected ? (
         <div className="flex items-center gap-2">
@@ -3007,7 +3015,7 @@ function KrispPanel({
           ) : (
             <LogIn className="h-3 w-3" />
           )}
-          Connect Krisp
+          Connect {name}
         </Button>
       )}
       {statusMsg && !waiting && !connected && (
@@ -3080,6 +3088,7 @@ export function ConnectionsSection({
   const [customMcpServerCount, setCustomMcpServerCount] = useState(0);
   const [customMcpEnabledCount, setCustomMcpEnabledCount] = useState(0);
   const [krispConnected, setKrispConnected] = useState(false);
+  const [plaudConnected, setPlaudConnected] = useState(false);
   const [inputMonitoringGranted, setInputMonitoringGranted] = useState(false);
   const [importedSkillsCount, setImportedSkillsCount] = useState(0);
 
@@ -3127,6 +3136,7 @@ export function ConnectionsSection({
         setCustomMcpServerCount(0);
         setCustomMcpEnabledCount(0);
         setKrispConnected(false);
+        setPlaudConnected(false);
         return;
       }
       const body = await r.json();
@@ -3136,11 +3146,13 @@ export function ConnectionsSection({
       setCustomMcpEnabledCount(enabled.length);
       setCustomMcpConnected(enabled.length > 0);
       setKrispConnected(list.some(s => s.enabled && (s.url ?? "").replace(/\/+$/, "") === KRISP_MCP_URL));
+      setPlaudConnected(list.some(s => s.enabled && (s.url ?? "").replace(/\/+$/, "") === PLAUD_MCP_URL));
     }).catch(() => {
       setCustomMcpConnected(false);
       setCustomMcpServerCount(0);
       setCustomMcpEnabledCount(0);
       setKrispConnected(false);
+      setPlaudConnected(false);
     });
     if (typeof window !== "undefined" && platform() === "macos") {
       commands.getBrowsersAutomationStatus().then(statuses => {
@@ -3245,6 +3257,7 @@ export function ConnectionsSection({
       { id: "linear", name: "Linear", icon: "linear", connected: false, detected: detectedConnectionIds.has("linear") },
       { id: "perplexity", name: "Perplexity", icon: "perplexity", connected: false, detected: detectedConnectionIds.has("perplexity") },
       { id: "krisp", name: "Krisp", icon: "krisp", connected: krispConnected, detected: detectedConnectionIds.has("krisp") },
+      { id: "plaud", name: "Plaud", icon: "plaud", connected: plaudConnected },
       { id: "custom-mcp", name: "Custom MCP", icon: "custom-mcp", connected: false, detected: customMcpServerCount > 0 },
       { id: "skills", name: "Skills", icon: "skills", connected: importedSkillsCount > 0, category: "Agent" },
     ];
@@ -3286,7 +3299,7 @@ export function ConnectionsSection({
       ...tile,
       category: tile.category ?? CONNECTION_CATEGORY_BY_ID[tile.id] ?? "Other",
     }));
-  }, [os, claudeInstalled, cursorInstalled, codexInstalled, chatgptConnected, browserUrlConnected, browserUrlDetected, integrations, appleCalendarConnected, googleCalendarConnected, googleDocsConnected, googleSheetsConnected, gmailConnected, customMcpConnected, customMcpServerCount, krispConnected, inputMonitoringGranted, importedSkillsCount, detectedConnectionIds]);
+  }, [os, claudeInstalled, cursorInstalled, codexInstalled, chatgptConnected, browserUrlConnected, browserUrlDetected, integrations, appleCalendarConnected, googleCalendarConnected, googleDocsConnected, googleSheetsConnected, gmailConnected, customMcpConnected, customMcpServerCount, krispConnected, plaudConnected, inputMonitoringGranted, importedSkillsCount, detectedConnectionIds]);
 
   const categoryOptions = useMemo(() => {
     const categories = Array.from(
@@ -3373,9 +3386,19 @@ export function ConnectionsSection({
       case "hermes": return <HermesCard />;
       case "custom-mcp": return <CustomMcpCard />;
       case "skills": return <SkillsCard onChanged={loadSkillsCount} />;
-      case "krisp": return <KrispPanel
+      case "krisp": return <OAuthMcpPanel
+        name="Krisp"
+        mcpUrl={KRISP_MCP_URL}
+        description={<>Connect Krisp so your AI can search your meeting transcripts, notes, and action items. Sign-in is handled by Krisp&apos;s OAuth, so screenpipe never sees your password.</>}
         onConnected={() => setKrispConnected(true)}
         onDisconnected={() => setKrispConnected(false)}
+      />;
+      case "plaud": return <OAuthMcpPanel
+        name="Plaud"
+        mcpUrl={PLAUD_MCP_URL}
+        description={<>Connect Plaud so your AI can search your Plaud recordings, transcripts, summaries, and notes. Sign-in is handled by Plaud&apos;s OAuth, so screenpipe never sees your password.</>}
+        onConnected={() => setPlaudConnected(true)}
+        onDisconnected={() => setPlaudConnected(false)}
       />;
       case "ollama": return <OllamaPanel />;
       case "lmstudio": return <LMStudioPanel />;
