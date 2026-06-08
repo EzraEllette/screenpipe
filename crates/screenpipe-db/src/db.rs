@@ -390,6 +390,11 @@ impl DatabaseManager {
         // Run migrations after establishing the connection
         Self::run_migrations(&db_manager.pool).await?;
 
+        // Surface corruption proactively at boot with a recovery hint,
+        // instead of only discovering it later via worker query errors
+        // (which used to spin a CPU core retrying a malformed DB).
+        db_manager.spawn_startup_integrity_check(Arc::from(database_path));
+
         Ok(db_manager)
     }
 
@@ -8453,6 +8458,54 @@ LIMIT ? OFFSET ?
                         }
                     }
                     Err(e) => warn!("wal checkpoint failed: {}", e),
+                }
+            }
+        });
+    }
+
+    /// Spawn a one-shot background `PRAGMA quick_check` shortly after startup.
+    ///
+    /// Corruption ("database disk image is malformed", SQLITE_CORRUPT)
+    /// otherwise only surfaces later, via worker query errors. We run it in
+    /// the background (not inline in `new()`) because `quick_check` still
+    /// scans every page, which would add seconds of boot latency on a
+    /// multi-GB database. On failure we log loudly with the exact recovery
+    /// command so the user can self-heal via the existing `screenpipe db
+    /// recover` path (which backs up the original before rebuilding).
+    fn spawn_startup_integrity_check(&self, database_path: Arc<str>) {
+        let pool = self.pool.clone();
+        tokio::spawn(async move {
+            // Let boot settle so the scan doesn't compete with migrations
+            // and the first capture writes for I/O.
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            // quick_check(1) stops after the first error — we only need a
+            // yes/no signal here, not the full corruption inventory.
+            match sqlx::query_scalar::<_, String>("PRAGMA quick_check(1)")
+                .fetch_one(&pool)
+                .await
+            {
+                Ok(result) if result == "ok" => {
+                    debug!("startup integrity check: ok");
+                }
+                Ok(detail) => {
+                    error!(
+                        db = %database_path,
+                        detail = %detail,
+                        "DATABASE CORRUPTION DETECTED at startup. Recording continues but \
+                         some reads/writes may fail. Quit screenpipe and run \
+                         `screenpipe db recover` to rebuild the database (it backs up the \
+                         original first)."
+                    );
+                }
+                Err(e) => {
+                    // The check itself failing usually means the file is too
+                    // damaged to even scan — still actionable.
+                    error!(
+                        db = %database_path,
+                        error = %e,
+                        "startup integrity check could not run (database may be corrupt). \
+                         If problems persist, quit screenpipe and run `screenpipe db recover`."
+                    );
                 }
             }
         });
