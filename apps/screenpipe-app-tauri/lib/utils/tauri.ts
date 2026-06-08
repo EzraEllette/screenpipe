@@ -2471,6 +2471,17 @@ disableSnapshotCompaction?: boolean;
  */
 disableMeetingDetector?: boolean;
 /**
+ * Apps / meeting services to exclude from automatic meeting detection
+ * while leaving detection on for everything else. Case-insensitive
+ * substring match against the running app's name/process AND the matched
+ * detection profile's identifiers (native names + browser URL patterns),
+ * so an entry can be what the user sees ("Discord") or a service domain
+ * ("meet.google.com"). Use when one app trips the detector spuriously
+ * (an always-open Teams, a Discord call you don't want logged) but you
+ * still want Zoom/Meet/etc. detected. Empty = detect all known apps.
+ */
+ignoredMeetingApps?: string[];
+/**
  * Override `EventDrivenCaptureConfig::idle_capture_interval_ms` (milliseconds).
  * None = follow active PowerProfile.
  */
