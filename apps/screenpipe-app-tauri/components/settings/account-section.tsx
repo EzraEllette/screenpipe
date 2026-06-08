@@ -186,7 +186,7 @@ export function AccountSection() {
     }
   };
 
-  // Auto-trigger checkout when tray "Upgrade to Pro" is clicked
+  // Auto-trigger checkout when tray "Upgrade to Business" is clicked
   const handleCheckoutRef = useRef(handleCheckout);
   handleCheckoutRef.current = handleCheckout;
   useEffect(() => {

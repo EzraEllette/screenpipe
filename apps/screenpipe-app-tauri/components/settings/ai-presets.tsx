@@ -2114,7 +2114,7 @@ useEffect(() => {
       if (presetToRemove?.provider === "screenpipe-cloud" && settings.user?.cloud_subscribed) {
         toast({
           title: "Cannot delete cloud preset",
-          description: "This preset is included with your Pro subscription",
+          description: "This preset is included with your Business subscription",
           variant: "destructive",
         });
         return;
