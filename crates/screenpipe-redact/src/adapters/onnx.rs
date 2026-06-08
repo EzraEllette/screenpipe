@@ -714,9 +714,7 @@ mod runtime {
     /// Load a vocab-prune `remap.json` if present:
     /// `{"remap": {"<old_id>": <new_row>, …}, "unk_new": <row>}`.
     /// Returns `(None, 0)` when the file is absent (full-vocab model).
-    fn load_remap(
-        path: &std::path::Path,
-    ) -> Result<(Option<HashMap<u32, u32>>, u32), RedactError> {
+    fn load_remap(path: &std::path::Path) -> Result<(Option<HashMap<u32, u32>>, u32), RedactError> {
         if !path.exists() {
             return Ok((None, 0));
         }
