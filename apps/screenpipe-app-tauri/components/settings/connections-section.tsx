@@ -623,6 +623,7 @@ export function IntegrationIcon({
     github: <img src="/images/github.png" alt="GitHub" className="w-5 h-5 rounded" />,
     jira: <img src="/images/jira.png" alt="Jira" className="w-5 h-5 rounded" />,
     granola: <img src="/images/granola.png" alt="Granola" className="w-5 h-5 rounded" />,
+    mochi: <img src="/images/mochi.png" alt="Mochi" className="w-5 h-5 rounded" />,
     hubspot: <img src="/images/hubspot.png" alt="HubSpot" className="w-5 h-5 rounded" />,
     bitrix24: <img src="/images/bitrix24.png" alt="Bitrix24" className="w-5 h-5 rounded" />,
     airtable: <img src="/images/airtable.png" alt="Airtable" className="w-5 h-5 rounded" />,

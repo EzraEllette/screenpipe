@@ -1424,6 +1424,7 @@ const STATIC_APP_ICONS: Record<string, string> = {
   resend: "/images/resend.svg",
   limitless: "/images/limitless.svg",
   granola: "/images/granola.png",
+  mochi: "/images/mochi.png",
   fireflies: "/images/fireflies.png",
   otter: "/images/otter.png",
   bee: "/images/bee.png",

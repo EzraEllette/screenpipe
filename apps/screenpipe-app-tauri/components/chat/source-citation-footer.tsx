@@ -75,6 +75,7 @@ const CONNECTION_SOURCE_ICON_PATHS: Array<[string, string]> = [
   ["logseq", "/images/logseq.png"],
   ["loops", "/images/loops.svg"],
   ["make", "/images/make.png"],
+  ["mochi", "/images/mochi.png"],
   ["monday", "/images/monday.png"],
   ["n8n", "/images/n8n.png"],
   ["notion", "/images/notion.svg"],
