@@ -1945,7 +1945,7 @@ async fn do_capture(
                 let new_hash = snap.content_hash as i64;
                 if let Some(prev) = previous_content_hash {
                     if prev == new_hash && new_hash != 0 {
-                        info!(
+                        debug!(
                             "content dedup: skipping capture for monitor {} (hash={}, trigger={})",
                             params.monitor_id,
                             new_hash,
