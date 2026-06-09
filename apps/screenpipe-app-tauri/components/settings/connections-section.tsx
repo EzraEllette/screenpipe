@@ -12,7 +12,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogClose, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { Download, ExternalLink, Check, Loader2, Copy, Terminal, Lock, LogIn, LogOut, Send, X, HelpCircle, Search, Calendar as CalendarIcon, Eye, EyeOff, FolderOpen, Plus, Keyboard, AlertCircle } from "lucide-react";
+import { Download, ExternalLink, Check, Loader2, Copy, Terminal, Lock, LogIn, LogOut, Send, X, HelpCircle, Search, Calendar as CalendarIcon, Eye, EyeOff, FolderOpen, Plus, Keyboard, AlertCircle, MessageSquare } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { commands } from "@/lib/utils/tauri";
 import { useSettings } from "@/lib/hooks/use-settings";
@@ -527,16 +527,8 @@ function CursorLogo({ className }: { className?: string }) {
 }
 
 
-export function IntegrationIcon({
-  icon,
-  className = "w-10 h-10 bg-muted rounded-xl flex items-center justify-center",
-  fallbackClassName = "h-5 w-5 text-muted-foreground",
-}: {
-  icon: string;
-  className?: string;
-  fallbackClassName?: string;
-}) {
-  const icons: Record<string, React.ReactNode> = {
+// Source of truth for integration glyphs; INTEGRATION_ICON_KEYS derives from it.
+const INTEGRATION_ICONS: Record<string, React.ReactNode> = {
     claude: <ClaudeLogo />,
     cursor: <CursorLogo className="w-5 h-5 rounded" />,
     codex: <img src="/images/codex.svg" alt="Codex" className="w-5 h-5 rounded" />,
@@ -764,10 +756,22 @@ export function IntegrationIcon({
       </svg>
     ),
     workflowy: <img src="/images/workflowy.svg" alt="Workflowy" className="w-5 h-5" />,
-  };
+};
+
+export const INTEGRATION_ICON_KEYS = new Set<string>(Object.keys(INTEGRATION_ICONS));
+
+export function IntegrationIcon({
+  icon,
+  className = "w-10 h-10 bg-muted rounded-xl flex items-center justify-center",
+  fallbackClassName = "h-5 w-5 text-muted-foreground",
+}: {
+  icon: string;
+  className?: string;
+  fallbackClassName?: string;
+}) {
   return (
     <div className={className}>
-      {icons[icon] || <Send className={fallbackClassName} />}
+      {INTEGRATION_ICONS[icon] || <Send className={fallbackClassName} />}
     </div>
   );
 }
@@ -896,17 +900,65 @@ function compareConnectionTiles(a: ConnectionTile, b: ConnectionTile): number {
 }
 
 
+// Per-connection quickstart prompts shown when "Try in Chat" is clicked.
+export const TRY_IN_CHAT_PROMPTS: Record<string, string> = {
+  gmail: "Show me important emails from the last week",
+  slack: "Summarize recent Slack discussions",
+  "google-calendar": "What's on my calendar this week?",
+  "google-docs": "Summarize my recent documents",
+  "google-sheets": "Help me analyze data from my spreadsheets",
+  obsidian: "What did I write about recently in my notes?",
+  notion: "Find recent project notes in my Notion",
+  linear: "Show my open issues and tasks",
+  claude: "What have I been working on based on my screen history?",
+  cursor: "Summarize my recent coding sessions",
+  chatgpt: "What topics did I discuss with AI recently?",
+  "apple-calendar": "What meetings do I have this week?",
+  "ics-calendar": "What events are coming up this week?",
+  granola: "Show notes from my recent meetings",
+  zoom: "Summarize my recent Zoom calls",
+  krisp: "Search my meeting transcripts for action items",
+  whatsapp: "What were the latest messages in my WhatsApp?",
+  discord: "What was discussed in my Discord servers recently?",
+  teams: "Show me recent Microsoft Teams messages",
+  jira: "What are my assigned Jira issues?",
+  asana: "What tasks do I have due soon?",
+  todoist: "What tasks do I have due today?",
+  github: "Show my recent GitHub activity",
+  "browser-url": "What websites have I been visiting today?",
+  fireflies: "Show action items from my recent meetings",
+  otter: "Search my meeting recordings",
+  "voice-memos": "What did I record in Voice Memos recently?",
+};
+
+function tryInChat(tile: ConnectionTile) {
+  const prompt = TRY_IN_CHAT_PROMPTS[tile.id] ?? `What can you tell me about my ${tile.name} data?`;
+  window.dispatchEvent(
+    new CustomEvent("try-in-chat", {
+      detail: { connectionId: tile.id, connectionName: tile.name, prompt },
+    }),
+  );
+}
+
 // Horizontal list row with description — used in the browse section
-function ListRow({ tile, selected, onClick }: {
+function ListRow({ tile, selected, onClick, onTryInChat }: {
   tile: ConnectionTile;
   selected: boolean;
   onClick: () => void;
+  onTryInChat?: () => void;
 }) {
+  // Use div instead of button to avoid nested-button DOM violations
+  // (the "Try in Chat" icon is itself a button).
   return (
-    <button
+    <div
+      role="button"
+      tabIndex={0}
       onClick={onClick}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onClick(); }
+      }}
       className={`
-        group flex w-full items-center gap-3 px-3 py-3 rounded-xl border transition-all text-left
+        group/row flex w-full items-center gap-3 px-3 py-3 rounded-xl border transition-all text-left cursor-pointer select-none
         ${selected
           ? "border-foreground bg-accent"
           : "border-transparent hover:bg-accent/50 hover:border-border"
@@ -920,16 +972,40 @@ function ListRow({ tile, selected, onClick }: {
           <p className="text-xs leading-snug text-muted-foreground truncate">{tile.description}</p>
         )}
       </div>
-      <div className="shrink-0">
+      <div className="relative h-7 w-7 shrink-0">
         {tile.connected ? (
-          <Check className="h-4 w-4 text-muted-foreground" />
+          <>
+            {/* Check mark — fades out on row hover */}
+            <div className="absolute inset-0 flex items-center justify-center transition-opacity group-hover/row:opacity-0 pointer-events-none">
+              <Check className="h-4 w-4 text-muted-foreground" />
+            </div>
+            {/* "Try in Chat" — fades in on row hover; button is valid here since parent is div */}
+            <TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    type="button"
+                    aria-label="Try in Chat"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onTryInChat?.();
+                    }}
+                    className="absolute inset-0 rounded-lg flex items-center justify-center opacity-0 group-hover/row:opacity-100 group-hover/row:bg-muted transition-all"
+                  >
+                    <MessageSquare className="h-4 w-4 text-foreground" />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent side="top">Try in Chat</TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+          </>
         ) : (
-          <div className="h-7 w-7 rounded-xl bg-muted flex items-center justify-center">
+          <div className="absolute inset-0 rounded-xl bg-muted flex items-center justify-center">
             <Plus className="h-4 w-4 text-foreground" />
           </div>
         )}
       </div>
-    </button>
+    </div>
   );
 }
 
@@ -3553,6 +3629,7 @@ export function ConnectionsSection({
                 tile={tile}
                 selected={selected === tile.id}
                 onClick={() => setSelected(selected === tile.id ? null : tile.id)}
+                onTryInChat={tile.connected ? () => tryInChat(tile) : undefined}
               />
             ))}
           </div>
@@ -3587,6 +3664,7 @@ export function ConnectionsSection({
               tile={tile}
               selected={selected === tile.id}
               onClick={() => setSelected(selected === tile.id ? null : tile.id)}
+              onTryInChat={tile.connected ? () => tryInChat(tile) : undefined}
             />
           ))}
         </div>
@@ -3604,6 +3682,7 @@ export function ConnectionsSection({
                     tile={tile}
                     selected={selected === tile.id}
                     onClick={() => setSelected(selected === tile.id ? null : tile.id)}
+                    onTryInChat={tile.connected ? () => tryInChat(tile) : undefined}
                   />
                 ))}
               </div>
