@@ -505,13 +505,18 @@ async fn show_native_for_background_eval(active: &Webview<Wry>, state: &OwnedBro
     }
 }
 
-#[async_trait]
-impl OwnedWebviewHandle for TauriOwnedHandle {
-    async fn eval(
+impl TauriOwnedHandle {
+    /// Shared body for the `eval` / `eval_with_owner` trait methods. `owner`
+    /// tags the navigation when `url` is supplied (the navigate-and-scrape
+    /// path) so a background pipe's eval-with-url doesn't reveal its page in an
+    /// unrelated chat; it is `None` for the plain `eval` entry point (snapshot,
+    /// code-only eval), which never navigates.
+    async fn eval_inner(
         &self,
         code: &str,
         url: Option<&str>,
         timeout: Duration,
+        owner: Option<&str>,
     ) -> Result<EvalResult, String> {
         // Hold the mutex for the entire eval — see eval_lock comment.
         let _guard = self.eval_lock.lock().await;
@@ -523,9 +528,13 @@ impl OwnedWebviewHandle for TauriOwnedHandle {
         };
 
         if let Some(parsed) = &target_url {
-            // eval-with-url (snapshot) navigations aren't owner-tagged — the
-            // owner travels with the dedicated navigate path below.
-            prepare_navigation(&self.app, &self.state, parsed, None).await;
+            // eval-with-url is a navigate-and-scrape: tag it with the issuing
+            // chat/pipe so the sidebar keeps a background pipe's page out of an
+            // unrelated chat, exactly like the dedicated navigate path. `owner`
+            // is `None` for the plain `eval` entry point (snapshot, code-only
+            // eval), which is fine — those don't pass a url, so this branch and
+            // its navigate event don't fire.
+            prepare_navigation(&self.app, &self.state, parsed, owner).await;
         }
 
         let active = match self.state.active().await {
@@ -679,6 +688,32 @@ impl OwnedWebviewHandle for TauriOwnedHandle {
             result: parsed.result,
             error: parsed.error,
         })
+    }
+}
+
+#[async_trait]
+impl OwnedWebviewHandle for TauriOwnedHandle {
+    async fn eval(
+        &self,
+        code: &str,
+        url: Option<&str>,
+        timeout: Duration,
+    ) -> Result<EvalResult, String> {
+        // Plain eval / snapshot — never owner-tagged (no navigation event).
+        self.eval_inner(code, url, timeout, None).await
+    }
+
+    /// Owner-aware eval — the navigate-and-scrape path a background pipe uses
+    /// to open a page and read it in one call. `owner` tags the navigation so
+    /// the sidebar keeps that page out of an unrelated chat.
+    async fn eval_with_owner(
+        &self,
+        code: &str,
+        url: Option<&str>,
+        timeout: Duration,
+        owner: Option<&str>,
+    ) -> Result<EvalResult, String> {
+        self.eval_inner(code, url, timeout, owner).await
     }
 
     /// Native fire-and-forget navigate. Bypasses the eval round-trip so
