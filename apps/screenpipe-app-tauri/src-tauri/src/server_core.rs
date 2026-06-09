@@ -602,7 +602,13 @@ impl ServerCore {
         info!("Server core started successfully");
         crate::health::set_boot_phase("ready", None);
 
-        // mDNS
+        // mDNS LAN discovery is opt-in (off by default) so the app doesn't
+        // trigger the macOS "Local Network" permission prompt unless the user
+        // wants multi-device discovery. Enable with SCREENPIPE_ENABLE_MDNS=1.
+        let mdns_enabled = std::env::var("SCREENPIPE_ENABLE_MDNS")
+            .map(|v| matches!(v.trim(), "1" | "true" | "TRUE"))
+            .unwrap_or(false);
+        screenpipe_connect::mdns::set_enabled(mdns_enabled);
         if let Err(e) = screenpipe_connect::mdns::advertise(config.port) {
             warn!("mdns advertisement failed (non-fatal): {}", e);
         }

@@ -451,6 +451,10 @@ async fn main() -> anyhow::Result<()> {
         .into_recording_config(local_data_dir.clone(), &record_arg_sources)
         .await?;
 
+    // mDNS LAN discovery is opt-in (off by default) so we don't trigger the
+    // macOS "Local Network" permission prompt unless the user wants it.
+    screenpipe_connect::mdns::set_enabled(record_args.enable_mdns);
+
     // Store the guard in a variable that lives for the entire main function
     let _log_guard = Some(setup_logging(
         &local_data_dir,

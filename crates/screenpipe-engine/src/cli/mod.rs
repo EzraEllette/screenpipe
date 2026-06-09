@@ -567,6 +567,12 @@ pub struct RecordArgs {
     #[arg(long, default_value_t = false)]
     pub enable_sync: bool,
 
+    /// Enable mDNS LAN discovery (advertise this instance + browse for peers).
+    /// Off by default: it opens a multicast socket, which triggers the macOS
+    /// "Local Network" permission prompt. Opt in for multi-device sync.
+    #[arg(long, env = "SCREENPIPE_ENABLE_MDNS", default_value_t = false)]
+    pub enable_mdns: bool,
+
     /// API token for cloud sync
     #[arg(long, env = "SCREENPIPE_SYNC_TOKEN")]
     pub sync_token: Option<String>,
