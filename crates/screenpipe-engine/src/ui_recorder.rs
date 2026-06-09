@@ -436,6 +436,7 @@ pub async fn start_ui_recording(
     capture_trigger_tx: Option<crate::event_driven_capture::TriggerSender>,
     linker_tx: Option<LinkerSender>,
     ignored_windows: Vec<String>,
+    prompt_permissions: bool,
 ) -> Result<UiRecorderHandle> {
     if !config.enabled {
         info!("UI event capture is disabled");
@@ -456,14 +457,22 @@ pub async fn start_ui_recording(
     // - Input Monitoring is OPTIONAL. Missing → the recorder runs in
     //   reduced mode: clipboard via NSPasteboard.changeCount polling,
     //   app/window events via NSWorkspace, but no keystrokes or clicks.
-    let mut perms = recorder.check_permissions();
+    //
+    // When `prompt_permissions` is true (CLI), call request_permissions() so
+    // macOS shows the accessibility and input-monitoring TCC dialogs natively.
+    // When false (Tauri app), the caller already gated on accessibility being
+    // granted; input monitoring is handled by the onboarding drag panel, so
+    // a native prompt here would bypass it.
+    let perms = if prompt_permissions {
+        recorder.request_permissions()
+    } else {
+        recorder.check_permissions()
+    };
     if !perms.all_granted() {
         warn!(
-            "UI capture permissions not fully granted - accessibility: {}, input_monitoring: {}",
+            "UI capture permissions not fully granted - accessibility: {}, input_monitoring: {}; running in reduced mode",
             perms.accessibility, perms.input_monitoring
         );
-        warn!("Requesting permissions...");
-        perms = recorder.request_permissions();
     }
     if !perms.accessibility {
         // The "accessibility" bit means different things per OS. macOS:

@@ -8827,6 +8827,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
+name = "permission-flow"
+version = "0.1.40"
+source = "git+https://github.com/divanshu-go/permission-flow?rev=8877d0a07802977356911de272435d92bed49227#8877d0a07802977356911de272435d92bed49227"
+dependencies = [
+ "swift-rs",
+]
+
+[[package]]
 name = "phf"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10905,7 +10913,7 @@ dependencies = [
 
 [[package]]
 name = "screenpipe-app"
-version = "2.5.19"
+version = "2.5.21"
 dependencies = [
  "aes 0.8.4",
  "aes-gcm 0.10.3",
@@ -10988,6 +10996,7 @@ dependencies = [
  "tauri-plugin-notification",
  "tauri-plugin-opener",
  "tauri-plugin-os",
+ "tauri-plugin-permission-flow",
  "tauri-plugin-process",
  "tauri-plugin-sentry",
  "tauri-plugin-shell",
@@ -13692,6 +13701,18 @@ dependencies = [
  "serde_json",
  "serialize-to-javascript",
  "sys-locale",
+ "tauri",
+ "tauri-plugin",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "tauri-plugin-permission-flow"
+version = "0.1.40"
+source = "git+https://github.com/divanshu-go/permission-flow?rev=8877d0a07802977356911de272435d92bed49227#8877d0a07802977356911de272435d92bed49227"
+dependencies = [
+ "permission-flow",
+ "serde",
  "tauri",
  "tauri-plugin",
  "thiserror 2.0.18",

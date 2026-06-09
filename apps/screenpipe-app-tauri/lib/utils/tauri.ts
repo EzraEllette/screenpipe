@@ -1826,6 +1826,23 @@ async setTrayHealthIcon() : Promise<void> {
 async setTrayUnhealthIcon() : Promise<void> {
     await TAURI_INVOKE("set_tray_unhealth_icon");
 },
+/**
+ * Programmatically adjust a window's always-on-top level after creation.
+ *
+ * Tauri's JS `setAlwaysOnTop` can be unreliable for macOS panel-style
+ * windows. For permission flows we need Screenpipe to stay normally
+ * always-on-top, but temporarily drop below System Settings while the user is
+ * granting permissions. On macOS this directly sets the underlying NSWindow
+ * level: floating when enabled, normal when disabled.
+ */
+async setWindowAlwaysOnTopNative(label: string, alwaysOnTop: boolean) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_window_always_on_top_native", { label, alwaysOnTop }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async setWindowSize(window: ShowRewindWindow, width: number, height: number) : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("set_window_size", { window, width, height }) };
