@@ -14,7 +14,7 @@ version = "0.4.15"
 authors = ["louis030195 <hi@louis030195.com>"]
 description = ""
 repository = "https://github.com/screenpipe/screenpipe"
-license = "MIT OR Apache-2.0"
+license-file = "LICENSE.md"
 edition = "2021"
 
 [workspace.dependencies]
