@@ -1,6 +1,6 @@
 {
     "bundle": {
-        "publisher": "Mediar, Inc.",
+        "publisher": "Screenpipe Inc.",
         "macOS": {
             "entitlements": "entitlements.plist",
             "hardenedRuntime": true,

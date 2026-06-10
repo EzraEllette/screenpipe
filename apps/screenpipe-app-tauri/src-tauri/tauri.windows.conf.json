@@ -1,6 +1,6 @@
 {
     "bundle": {
-        "publisher": "Mediar, Inc.",
+        "publisher": "Screenpipe Inc.",
         "windows": {
             "nsis": {
                 "headerImage": "assets/nsis-header.bmp",
