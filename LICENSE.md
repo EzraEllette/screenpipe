@@ -34,16 +34,13 @@ builds is governed by the Screenpipe Terms of Service at
 https://screenpi.pe/terms and by the terms of your subscription or other
 app license.
 
-For clarity: a valid, paid Screenpipe subscription or a previously
-purchased lifetime app license entitles the named user to run official
-builds, including for that user's own internal business use, on the
-devices that user personally uses. One subscription or license per
-person, covering that person's own devices. Up to four (4) individual
-licenses may be used within a single company. Five (5) or more users at
-one company require a Screenpipe Team or Enterprise plan, regardless of
-who pays for the individual licenses. Running Screenpipe on machines not
+For clarity: one subscription or lifetime license per person, covering
+that person's own devices, including that person's own work use. Up to
+four (4) individual licenses may be used within a single company; five
+(5) or more users at one company require a Screenpipe Team or Enterprise
+plan, regardless of who pays for the individual licenses. Machines not
 tied to an individual licensed user (servers, shared or unattended
-machines) requires a commercial agreement with the Licensor.
+machines) require a commercial agreement with the Licensor.
 
 ## 4. Commercial Use Requires a Paid License
 
@@ -62,25 +59,19 @@ Without a valid commercial license you may not:
   - Use the Licensed Work to build, offer, or operate a competing product
     or service.
 
-## 6. Evaluation Exception
-
-A for-profit entity may use the Licensed Work internally for evaluation for
-up to seven (7) days. Use beyond seven (7) days requires a paid commercial
-license.
-
-## 7. Ownership
+## 6. Ownership
 
 The Licensor and its licensors retain all right, title, and interest in the
 Licensed Work, including any modifications or patches you make. No rights are
 granted except those expressly stated in this license.
 
-## 8. Termination
+## 7. Termination
 
 Any use outside the terms of this license terminates your rights
 automatically. On termination you must cease all use and destroy all copies
 in your possession.
 
-## 9. Warranty Disclaimer
+## 8. Warranty Disclaimer
 
 THE LICENSED WORK IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
 OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
