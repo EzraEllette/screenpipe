@@ -785,8 +785,12 @@ mod runtime {
                         // MLProgram + ComputeUnits::All offloads to the Apple Neural
                         // Engine; measured ~3.4x faster than the legacy NeuralNetwork
                         // default (which is slower than CPU) and lower CPU/GPU power.
-                        .with_model_format(ort::execution_providers::coreml::CoreMLModelFormat::MLProgram)
-                        .with_compute_units(ort::execution_providers::coreml::CoreMLComputeUnits::All)
+                        .with_model_format(
+                            ort::execution_providers::coreml::CoreMLModelFormat::MLProgram,
+                        )
+                        .with_compute_units(
+                            ort::execution_providers::coreml::CoreMLComputeUnits::All,
+                        )
                         .with_subgraphs(true)
                         .build(),
                     ort::execution_providers::CPUExecutionProvider::default().build(),

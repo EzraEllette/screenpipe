@@ -252,8 +252,12 @@ mod imp {
                 #[cfg(feature = "onnx-coreml")]
                 let builder = builder.with_execution_providers([
                     ort::execution_providers::CoreMLExecutionProvider::default()
-                        .with_model_format(ort::execution_providers::coreml::CoreMLModelFormat::MLProgram)
-                        .with_compute_units(ort::execution_providers::coreml::CoreMLComputeUnits::All)
+                        .with_model_format(
+                            ort::execution_providers::coreml::CoreMLModelFormat::MLProgram,
+                        )
+                        .with_compute_units(
+                            ort::execution_providers::coreml::CoreMLComputeUnits::All,
+                        )
                         .with_subgraphs(true)
                         .build(),
                     ort::execution_providers::CPUExecutionProvider::default().build(),
