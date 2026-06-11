@@ -30,6 +30,7 @@ export function useArtifacts(enabled = true): UseArtifactsResult {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const refreshRef = useRef(0);
+  const lastPayloadRef = useRef<string | null>(null);
 
   const fetchArtifacts = useCallback(async () => {
     try {
@@ -37,10 +38,16 @@ export function useArtifacts(enabled = true): UseArtifactsResult {
       if (!res.ok) {
         throw new Error(`HTTP ${res.status}`);
       }
-      const json = await res.json();
-      const all: Artifact[] = json.data ?? [];
-      // Only surface artifacts whose files actually exist
-      setArtifacts(all.filter((a) => a.exists));
+      const text = await res.text();
+      // Polling: keep the same array identity when nothing changed so
+      // consumers don't re-render the whole list every 30s.
+      if (text !== lastPayloadRef.current) {
+        lastPayloadRef.current = text;
+        const json = JSON.parse(text);
+        const all: Artifact[] = json.data ?? [];
+        // Only surface artifacts whose files actually exist
+        setArtifacts(all.filter((a) => a.exists));
+      }
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));

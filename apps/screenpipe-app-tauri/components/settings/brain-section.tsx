@@ -55,6 +55,9 @@ interface MemoryListResponse {
 }
 
 const PAGE_SIZE = 20;
+// How many rows are mounted at once. The full dataset stays in memory for
+// filtering/counts; only this window hits the DOM, growing as you scroll.
+const RENDER_WINDOW = 30;
 
 // ---------------------------------------------------------------------------
 // Artifact display helpers (ported from artifacts-library.tsx)
@@ -224,6 +227,7 @@ export function BrainSection() {
   } = useArtifacts();
   const [deletedArtifactPaths, setDeletedArtifactPaths] = useState<Set<string>>(new Set());
   const [typeFilter, setTypeFilter] = useState<TypeFilter>("all");
+  const [visibleCount, setVisibleCount] = useState(RENDER_WINDOW);
 
   // expanded content rows
   const [expandedIds, setExpandedIds] = useState<Set<number>>(new Set());
@@ -380,27 +384,6 @@ export function BrainSection() {
     return () => clearInterval(id);
   }, []);
 
-  // infinite scroll via IntersectionObserver
-  useEffect(() => {
-    const sentinel = sentinelRef.current;
-    if (!sentinel) return;
-
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (
-          entries[0].isIntersecting &&
-          !loadingMoreRef.current &&
-          memories.length < total
-        ) {
-          fetchPage(memories.length, true);
-        }
-      },
-      { root: scrollRef.current, threshold: 0 },
-    );
-    observer.observe(sentinel);
-    return () => observer.disconnect();
-  }, [memories.length, total, fetchPage]);
-
   const deleteMemory = async (id: number) => {
     setDeletingId(id);
     try {
@@ -531,8 +514,15 @@ export function BrainSection() {
     }
   };
 
-  // Build the unified interleaved list
-  const unifiedItems: UnifiedItem[] = React.useMemo(() => {
+  // Merge outputs + pipe artifacts once; reused by the list and the tag pills.
+  const mergedArtifacts = React.useMemo(
+    () => mergeArtifactItems(outputs, artifacts, deletedArtifactPaths),
+    [outputs, artifacts, deletedArtifactPaths],
+  );
+
+  // Build the unified interleaved list. Filters/search run over the FULL
+  // dataset; only a window of the result is rendered (see visibleCount).
+  const { unifiedItems, artifactCount } = React.useMemo(() => {
     const items: UnifiedItem[] = [];
 
     // Add memories (unless filtered to artifacts-only)
@@ -543,10 +533,10 @@ export function BrainSection() {
     }
 
     // Add artifacts (unless filtered to memories-only or importance sort is active)
+    let artifactCount = 0;
     if (typeFilter !== "memories" && sortField !== "importance") {
-      const merged = mergeArtifactItems(outputs, artifacts, deletedArtifactPaths);
       let filtered = debouncedQuery
-        ? merged.filter((item) => {
+        ? mergedArtifacts.filter((item) => {
             const q = debouncedQuery.toLowerCase();
             return (
               artifactItemTitle(item).toLowerCase().includes(q) ||
@@ -554,10 +544,11 @@ export function BrainSection() {
               artifactItemSource(item).toLowerCase().includes(q)
             );
           })
-        : merged;
+        : mergedArtifacts;
       if (activeTag) {
         filtered = filtered.filter((item) => artifactItemSource(item) === activeTag);
       }
+      artifactCount = filtered.length;
       for (const item of filtered) {
         const date = artifactItemDate(item) ?? "";
         items.push({ kind: "artifact", data: item, sortDate: date });
@@ -566,8 +557,45 @@ export function BrainSection() {
 
     // Sort all by date descending
     items.sort((a, b) => b.sortDate.localeCompare(a.sortDate));
-    return items;
-  }, [memories, outputs, artifacts, deletedArtifactPaths, typeFilter, activeTag, sortField, debouncedQuery]);
+    return { unifiedItems: items, artifactCount };
+  }, [memories, mergedArtifacts, typeFilter, activeTag, sortField, debouncedQuery]);
+
+  // True total across the full dataset: server-side memories total (already
+  // reflects search/tag) + artifacts surviving the client-side filters.
+  const totalCount =
+    (typeFilter !== "artifacts" ? total : 0) + artifactCount;
+
+  // Collapse the render window whenever the visible dataset changes shape.
+  useEffect(() => {
+    setVisibleCount(RENDER_WINDOW);
+  }, [debouncedQuery, activeTag, typeFilter, sortField, sortDir]);
+
+  // infinite scroll via IntersectionObserver — grows the render window and
+  // pulls the next memories page when the window nears the end of what's loaded
+  useEffect(() => {
+    const sentinel = sentinelRef.current;
+    if (!sentinel) return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (!entries[0].isIntersecting) return;
+        if (visibleCount < unifiedItems.length) {
+          setVisibleCount((c) => c + RENDER_WINDOW);
+        }
+        if (
+          typeFilter !== "artifacts" &&
+          !loadingMoreRef.current &&
+          memories.length < total &&
+          visibleCount + RENDER_WINDOW >= unifiedItems.length
+        ) {
+          fetchPage(memories.length, true);
+        }
+      },
+      { root: scrollRef.current, threshold: 0 },
+    );
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [memories.length, total, fetchPage, visibleCount, unifiedItems.length, typeFilter]);
 
   // Prune selectedIds when the list changes (e.g. individual delete, filter change)
   useEffect(() => {
@@ -585,10 +613,10 @@ export function BrainSection() {
     });
   }, [unifiedItems]);
 
-  const artifactSources = React.useMemo(() => {
-    const merged = mergeArtifactItems(outputs, artifacts, deletedArtifactPaths);
-    return [...new Set(merged.map(artifactItemSource))];
-  }, [outputs, artifacts, deletedArtifactPaths]);
+  const artifactSources = React.useMemo(
+    () => [...new Set(mergedArtifacts.map(artifactItemSource))],
+    [mergedArtifacts],
+  );
 
   const combinedTags = React.useMemo(() => {
     const set = new Set([...allTags, ...artifactSources]);
@@ -813,7 +841,7 @@ export function BrainSection() {
           <Skeleton className="h-6 w-16 rounded-full" />
         ) : (
           <Badge variant="secondary" className="text-xs">
-            {unifiedItems.length} {unifiedItems.length === 1 ? "item" : "items"}
+            {totalCount.toLocaleString()} {totalCount === 1 ? "item" : "items"}
           </Badge>
         )}
 
@@ -1000,7 +1028,7 @@ export function BrainSection() {
           ref={scrollRef}
           className="space-y-1.5 flex-1 overflow-y-auto pr-1"
         >
-          {unifiedItems.map((item) => {
+          {unifiedItems.slice(0, visibleCount).map((item) => {
             if (item.kind === "artifact") {
               const artItem = item.data;
               const artPath = artifactItemPath(artItem);
