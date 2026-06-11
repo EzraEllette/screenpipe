@@ -1224,11 +1224,9 @@ async fn gcal_events_inner(
     // account" into "calendar looks disconnected everywhere". A read-only
     // merge matches what the meeting-notes UI already does client-side.
     if params.instance.is_none() {
-        let connected = oauth_store::list_connected_oauth_instances(
-            secret_store.as_deref(),
-            "google-calendar",
-        )
-        .await;
+        let connected =
+            oauth_store::list_connected_oauth_instances(secret_store.as_deref(), "google-calendar")
+                .await;
         if connected.len() > 1 {
             let mut lists = Vec::new();
             let mut first_err: Option<anyhow::Error> = None;
@@ -2847,7 +2845,11 @@ mod gcal_merge_tests {
         let a = vec![ev("", "2026-06-12"), ev("", "2026-06-12")];
         let b = vec![ev("timed", "2026-06-11T09:00:00Z")];
         let merged = merge_gcal_events(vec![a, b]);
-        assert_eq!(merged.len(), 3, "empty ids must not dedupe against each other");
+        assert_eq!(
+            merged.len(),
+            3,
+            "empty ids must not dedupe against each other"
+        );
         assert_eq!(merged[0]["id"], "timed");
     }
 
