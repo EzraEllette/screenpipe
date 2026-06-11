@@ -15,6 +15,9 @@ FROM oven/bun:1-debian
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl jq git unzip \
+    # engine runtime deps — the linux binary links graphics/audio/system libs
+    # even though capture is disabled (verified via ldd on cloud-pipes-host-1)
+    libgbm1 libwayland-client0 libxcb1 libopenblas0 libdbus-1-3 libpulse0 \
     && rm -rf /var/lib/apt/lists/*
 
 # node is needed for the npm-distributed screenpipe CLI (platform binary
