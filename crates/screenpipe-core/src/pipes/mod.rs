@@ -4967,7 +4967,12 @@ mod tests {
                 UNIX_EPOCH + Duration::from_secs(secs),
             )
         };
-        let files = vec![f("a.md", 100), f("b.md", 300), f("c.md", 200), f("d.md", 400)];
+        let files = vec![
+            f("a.md", 100),
+            f("b.md", 300),
+            f("c.md", 200),
+            f("d.md", 400),
+        ];
         let kept = select_newest_files(files, 2);
         let names: Vec<_> = kept
             .iter()
