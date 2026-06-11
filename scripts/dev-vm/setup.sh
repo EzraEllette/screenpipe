@@ -19,6 +19,7 @@ IMAGE="${IMAGE:-ghcr.io/cirruslabs/macos-tahoe-base:latest}"
 VM_CPU="${VM_CPU:-8}"
 VM_MEM="${VM_MEM:-16384}"   # MB
 VM_DISK="${VM_DISK:-80}"    # GB (sparse: only used space hits the host disk)
+VM_DISPLAY="${VM_DISPLAY:-2560x1600}"  # points (HiDPI); refit keeps it matched to the window
 SSH_KEY="$HOME/.ssh/${VM_NAME}-vm"
 SSH_OPTS=(-i "$SSH_KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -49,7 +50,7 @@ fi
 if ! tart list --quiet | grep -qx "$VM_NAME"; then
   log "cloning $IMAGE -> $VM_NAME"
   tart clone "$IMAGE" "$VM_NAME"
-  tart set "$VM_NAME" --cpu "$VM_CPU" --memory "$VM_MEM" --disk-size "$VM_DISK"
+  tart set "$VM_NAME" --cpu "$VM_CPU" --memory "$VM_MEM" --disk-size "$VM_DISK" --display "$VM_DISPLAY" --display-refit
 fi
 
 # 4. boot headless if not running (`tart ip` returns a stale lease when stopped; check the process)

@@ -97,6 +97,18 @@ cat > "$HOME/Library/LaunchAgents/pe.screenpi.devvm.claude.plist" <<'PLIST'
 PLIST
 launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/pe.screenpi.devvm.claude.plist" 2>/dev/null || true
 
+# guest display resolution (HiDPI). the tart-side --display/--display-refit config
+# defines the virtual display; the guest still boots at a small scaled mode, so we
+# pin a dense one here. override with GUEST_RES, e.g. GUEST_RES=2560x1600.
+GUEST_RES="${GUEST_RES:-1920x1200}"
+log "setting display to ${GUEST_RES} HiDPI..."
+brew install --quiet displayplacer >/dev/null 2>&1 || true
+SID=$(displayplacer list 2>/dev/null | awk '/Persistent screen id/{print $4}')
+if [ -n "$SID" ]; then
+  displayplacer "id:${SID} res:${GUEST_RES} hz:60 color_depth:7 scaling:on origin:(0,0) degree:0" \
+    || log "displayplacer could not set ${GUEST_RES}; keeping current mode"
+fi
+
 log "versions:"
 echo "  rustc:  $(rustc --version 2>/dev/null || echo missing)"
 echo "  cargo:  $(cargo --version 2>/dev/null || echo missing)"
