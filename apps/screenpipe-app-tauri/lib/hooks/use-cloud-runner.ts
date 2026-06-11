@@ -45,10 +45,12 @@ export interface CloudRunnerInfo {
 export interface OrgPipe {
   name: string;
   display_name: string;
-  schedule: string;
+  schedule: string | null;
   enabled: boolean;
   version: number;
-  updated_at: string;
+  updated_at: string | null;
+  /** "dashboard" = enterprise managed pipe, "team" = shared from the app */
+  source: "dashboard" | "team";
 }
 
 /** Which AI the runner uses. Org-managed presets from the enterprise
