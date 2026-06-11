@@ -216,9 +216,20 @@ export function CloudPipesTab({ active }: { active: boolean }) {
               ) : (
                 <>
                   <span className="text-xs text-muted-foreground flex-1">
-                    {r.has_ai_key ? "AI key configured for cloud pipes" : "no AI key — pipes that call models will fail in the cloud"}
+                    {r.has_ai_key
+                      ? "AI key set for the runner"
+                      : cloud.ai?.usable_in_cloud && cloud.ai.default_preset
+                        ? `AI: org preset "${cloud.ai.default_preset.id}" (${cloud.ai.default_preset.model}) from the dashboard`
+                        : cloud.ai?.default_preset
+                          ? `org preset "${cloud.ai.default_preset.id}" is ${cloud.ai.default_preset.provider}, the runner needs a key for it`
+                          : "no AI configured. set an org preset in the enterprise dashboard, or add a key here"}
                   </span>
-                  <Button variant="outline" size="sm" className="h-7 text-xs" onClick={() => setShowAiKeyInput(true)}>
+                  <Button
+                    variant={cloud.ai?.usable_in_cloud || r.has_ai_key ? "ghost" : "outline"}
+                    size="sm"
+                    className="h-7 text-xs"
+                    onClick={() => setShowAiKeyInput(true)}
+                  >
                     {r.has_ai_key ? "replace" : "add key"}
                   </Button>
                   {r.has_ai_key && (
