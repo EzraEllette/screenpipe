@@ -185,6 +185,7 @@ When creating new UI components:
 - [ ] UPPERCASE for buttons, lowercase for titles
 - [ ] Hover state: color inversion
 - [ ] Focus ring: 1px solid with offset
+- [ ] Always send screenshot of the new UI in PR bodies or design suggestions in ASCII, if you have access to AI image generation you can also leverage it 
 
 ---
 
