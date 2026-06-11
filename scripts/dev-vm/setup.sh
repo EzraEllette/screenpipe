@@ -52,8 +52,8 @@ if ! tart list --quiet | grep -qx "$VM_NAME"; then
   tart set "$VM_NAME" --cpu "$VM_CPU" --memory "$VM_MEM" --disk-size "$VM_DISK"
 fi
 
-# 4. boot headless if not running
-if ! tart ip "$VM_NAME" >/dev/null 2>&1; then
+# 4. boot headless if not running (`tart ip` returns a stale lease when stopped; check the process)
+if ! pgrep -f "tart run ${VM_NAME}" >/dev/null 2>&1; then
   log "booting $VM_NAME headless..."
   nohup tart run "$VM_NAME" --no-graphics >/tmp/${VM_NAME}.log 2>&1 &
 fi

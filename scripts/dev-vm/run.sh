@@ -10,7 +10,8 @@
 set -euo pipefail
 VM_NAME="${VM_NAME:-screenpipe-dev}"
 
-if tart ip "$VM_NAME" >/dev/null 2>&1; then
+# note: `tart ip` returns a stale DHCP lease even when stopped; check the process
+if pgrep -f "tart run ${VM_NAME}" >/dev/null 2>&1; then
   echo "$VM_NAME is already running (headless?). Stop it first: tart stop $VM_NAME" >&2
   exit 1
 fi
