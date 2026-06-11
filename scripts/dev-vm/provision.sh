@@ -97,15 +97,15 @@ cat > "$HOME/Library/LaunchAgents/pe.screenpi.devvm.claude.plist" <<'PLIST'
 PLIST
 launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/pe.screenpi.devvm.claude.plist" 2>/dev/null || true
 
-# guest display resolution (HiDPI). the tart-side --display/--display-refit config
-# defines the virtual display; the guest still boots at a small scaled mode, so we
-# pin a dense one here. override with GUEST_RES, e.g. GUEST_RES=2560x1600.
-GUEST_RES="${GUEST_RES:-1920x1200}"
-log "setting display to ${GUEST_RES} HiDPI..."
-brew install --quiet displayplacer >/dev/null 2>&1 || true
-SID=$(displayplacer list 2>/dev/null | awk '/Persistent screen id/{print $4}')
-if [ -n "$SID" ]; then
-  displayplacer "id:${SID} res:${GUEST_RES} hz:60 color_depth:7 scaling:on origin:(0,0) degree:0" \
+# guest display mode. With a px-sized virtual display (see setup.sh) the guest
+# boots straight into the native 1:1 mode and nothing needs pinning. Set
+# GUEST_RES (e.g. "1600x852") only to force a different mode from the list in
+# `displayplacer list`.
+if [ -n "${GUEST_RES:-}" ]; then
+  log "pinning display mode ${GUEST_RES}..."
+  brew install --quiet displayplacer >/dev/null 2>&1 || true
+  SID=$(displayplacer list 2>/dev/null | awk '/Persistent screen id/{print $4}')
+  [ -n "$SID" ] && displayplacer "id:${SID} res:${GUEST_RES} hz:60 color_depth:7 origin:(0,0) degree:0" \
     || log "displayplacer could not set ${GUEST_RES}; keeping current mode"
 fi
 

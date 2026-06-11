@@ -10,7 +10,7 @@ A scripted macOS VM (via [tart](https://tart.run), Apple Virtualization.framewor
 ./scripts/dev-vm/ssh.sh     # shell into it
 ```
 
-Defaults: `screenpipe-dev` VM, 8 CPU, 16GB RAM, 80GB sparse disk, macOS Tahoe base image, guest display 1920x1200 HiDPI (set via displayplacer; override with `GUEST_RES`), window opens maximized (`VM_WINDOW=keep` to skip) with `--display-refit` so resizing the window re-fits the guest. Other overrides: `VM_NAME`, `IMAGE`, `VM_CPU`, `VM_MEM`, `VM_DISK`, `VM_DISPLAY`.
+Defaults: `screenpipe-dev` VM, 8 CPU, 16GB RAM, 80GB sparse disk, macOS Tahoe base image. Display: `1920x1022px` virtual display (1:1 crisp in a maximized window on a 1080p host screen; set `VM_DISPLAY=2560x1440px` or similar on bigger/Retina monitors), window opens maximized (`VM_WINDOW=keep` to skip). Refit is off on purpose: `--display-refit` combined with a pinned in-guest mode makes the view render the raw framebuffer 2x-cropped. Other overrides: `VM_NAME`, `IMAGE`, `VM_CPU`, `VM_MEM`, `VM_DISK`, `GUEST_RES`.
 
 ## What gets installed in the guest
 

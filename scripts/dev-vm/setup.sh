@@ -19,7 +19,11 @@ IMAGE="${IMAGE:-ghcr.io/cirruslabs/macos-tahoe-base:latest}"
 VM_CPU="${VM_CPU:-8}"
 VM_MEM="${VM_MEM:-16384}"   # MB
 VM_DISK="${VM_DISK:-80}"    # GB (sparse: only used space hits the host disk)
-VM_DISPLAY="${VM_DISPLAY:-2560x1600}"  # points (HiDPI); refit keeps it matched to the window
+# px = guest renders 1:1 into the window (crisp on 1x monitors; default fits a
+# maximized window on a 1080p screen). On a Retina host use e.g. 2560x1440px or
+# a pt size. Do NOT combine display-refit with an in-guest pinned mode: the view
+# stops scaling and shows the framebuffer 2x-cropped.
+VM_DISPLAY="${VM_DISPLAY:-1920x1022px}"
 SSH_KEY="$HOME/.ssh/${VM_NAME}-vm"
 SSH_OPTS=(-i "$SSH_KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -50,7 +54,7 @@ fi
 if ! tart list --quiet | grep -qx "$VM_NAME"; then
   log "cloning $IMAGE -> $VM_NAME"
   tart clone "$IMAGE" "$VM_NAME"
-  tart set "$VM_NAME" --cpu "$VM_CPU" --memory "$VM_MEM" --disk-size "$VM_DISK" --display "$VM_DISPLAY" --display-refit
+  tart set "$VM_NAME" --cpu "$VM_CPU" --memory "$VM_MEM" --disk-size "$VM_DISK" --display "$VM_DISPLAY" --no-display-refit
 fi
 
 # 4. boot headless if not running (`tart ip` returns a stale lease when stopped; check the process)
