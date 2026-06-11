@@ -74,6 +74,29 @@ if [ ! -d "$HOME/Documents/screenpipe" ]; then
   git clone --depth 50 https://github.com/screenpipe/screenpipe.git "$HOME/Documents/screenpipe"
 fi
 
+# desktop defaults: minimal dock (Claude, screenpipe, Terminal) + no recents
+log "configuring dock..."
+defaults write com.apple.dock persistent-apps -array
+for app in "/Applications/Claude.app" "/Applications/screenpipe.app" "/System/Applications/Utilities/Terminal.app"; do
+  defaults write com.apple.dock persistent-apps -array-add "<dict><key>tile-data</key><dict><key>file-data</key><dict><key>_CFURLString</key><string>${app}</string><key>_CFURLStringType</key><integer>0</integer></dict></dict></dict>"
+done
+defaults write com.apple.dock show-recents -bool false
+killall Dock 2>/dev/null || true
+
+# launch Claude desktop at login (VM auto-logs-in, so this is effectively at boot)
+log "installing Claude login LaunchAgent..."
+mkdir -p "$HOME/Library/LaunchAgents"
+cat > "$HOME/Library/LaunchAgents/pe.screenpi.devvm.claude.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>pe.screenpi.devvm.claude</string>
+  <key>ProgramArguments</key><array><string>/usr/bin/open</string><string>-a</string><string>Claude</string></array>
+  <key>RunAtLoad</key><true/>
+</dict></plist>
+PLIST
+launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/pe.screenpi.devvm.claude.plist" 2>/dev/null || true
+
 log "versions:"
 echo "  rustc:  $(rustc --version 2>/dev/null || echo missing)"
 echo "  cargo:  $(cargo --version 2>/dev/null || echo missing)"
