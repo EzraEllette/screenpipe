@@ -1165,7 +1165,7 @@ impl Default for SettingsStore {
             "Recorder".to_string(),
             "vault".to_string(),
             "OBS Studio".to_string(),
-            "screenpipe".to_string(),
+            "screenpipe::".to_string(),
         ];
 
         #[cfg(target_os = "macos")]
@@ -1328,6 +1328,17 @@ impl SettingsStore {
                     "restartNotificationsDefaultedOff".to_string(),
                     Value::Bool(true),
                 );
+            }
+
+            // Migrate unscoped "screenpipe" ignore-pattern to app-scoped "screenpipe::"
+            // so browser tabs whose title contains "screenpipe" are no longer falsely
+            // excluded from SCK capture and rendered black.
+            if let Some(Value::Array(windows)) = obj.get_mut("ignoredWindows") {
+                for entry in windows.iter_mut() {
+                    if entry.as_str() == Some("screenpipe") {
+                        *entry = Value::String("screenpipe::".to_string());
+                    }
+                }
             }
 
             // Sanitize unknown provider types in aiPresets to prevent deserialization failures
