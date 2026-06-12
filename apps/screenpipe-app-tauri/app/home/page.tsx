@@ -45,7 +45,6 @@ import { ChatHistoryView } from "@/components/chat/chat-history-view";
 import { mountPiEventRouter } from "@/lib/stores/pi-event-router";
 import { mountPipeRunRecorder } from "@/lib/events/pipe-run-recorder";
 import { mountPipeWatchWriter } from "@/lib/events/pipe-watch-writer";
-import { NotificationBell } from "@/components/notification-bell";
 import { RecordingStatus, type RecordingDevice } from "@/components/recording-status";
 import Timeline from "@/components/rewind/timeline";
 import { useQueryState } from "nuqs";
@@ -905,14 +904,16 @@ function HomeContent() {
           {/* Sidebar */}
           <TooltipProvider delayDuration={0}>
           {/* Top-left chrome strip — pinned next to the macOS traffic
-              lights: sidebar toggle, search, recording-status dot and
-              notification bell. No wordmark, no header row (Claude /
-              Codex style). When the sidebar is collapsed it is hidden
-              entirely and the strip floats over the content, reduced to
-              toggle + status dot. The h-8 drag region already keeps the
-              top band free of interactive content, so nothing collides.
-              Fixed positioning anchors the strip to the viewport so it
-              isn't clipped by AppSidebar's overflow. */}
+              lights: sidebar toggle, search and recording-status dot.
+              No wordmark, no header row (Claude / Codex style). When
+              the sidebar is collapsed it is hidden entirely and the
+              strip floats over the content, reduced to toggle + status
+              dot. The h-8 drag region already keeps the top band free
+              of interactive content, so nothing collides. Fixed
+              positioning anchors the strip to the viewport so it isn't
+              clipped by AppSidebar's overflow. The notification bell
+              lives in the Pipes view header (pipe-store.tsx) since
+              notifications are pipe output. */}
           <div
             className={cn(
               // top-0.5 + items-center puts each icon's center at y≈15px,
@@ -979,7 +980,6 @@ function HomeContent() {
               onToggleMeeting={() => void toggleMeeting()}
               isTranslucent={isTranslucent}
             />
-            {!sidebarCollapsed && <NotificationBell />}
           </div>
 
           {/* Collapsed = hidden. No icon-rail fallback — the floating
