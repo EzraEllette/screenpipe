@@ -189,6 +189,36 @@ export interface CostLogEntry {
   stream: boolean;
 }
 
+/** UTC day string (YYYY-MM-DD) — same convention as usage.last_reset. */
+function utcToday(): string {
+  return new Date().toISOString().split('T')[0];
+}
+
+/**
+ * Maintain the O(1) per-device daily-cost accumulator on the usage table
+ * (migration 0006). Replaces the per-request SUM over cost_log that tipped
+ * D1 over its CPU limit at 16M+ rows (SCREENPIPE-AI-PROXY-1T/-1X/-1E) —
+ * the (device_id, timestamp) index that would have made the SUM cheap
+ * can't even build at that size (SQLITE_NOMEM).
+ *
+ * Best-effort: failure (e.g. migration not applied yet) must never block
+ * the request — getDailyUserCost falls back to the legacy SUM in that case.
+ */
+async function bumpDailyCostAccumulator(env: Env, deviceId: string, cost: number): Promise<void> {
+  const today = utcToday();
+  try {
+    await env.DB.prepare(
+      `INSERT INTO usage (device_id, last_reset, cost_day, daily_cost_usd)
+       VALUES (?1, ?2, ?2, ?3)
+       ON CONFLICT(device_id) DO UPDATE SET
+         daily_cost_usd = CASE WHEN usage.cost_day = ?2 THEN usage.daily_cost_usd + ?3 ELSE ?3 END,
+         cost_day = ?2`
+    ).bind(deviceId, today, cost).run();
+  } catch (error) {
+    console.warn('daily cost accumulator update failed:', error);
+  }
+}
+
 /**
  * Insert a cost record into the cost_log table.
  *
@@ -197,6 +227,9 @@ export interface CostLogEntry {
  * never drops cost rows.
  */
 export async function logCost(env: Env, entry: CostLogEntry): Promise<void> {
+  if (entry.device_id && entry.estimated_cost_usd > 0) {
+    await bumpDailyCostAccumulator(env, entry.device_id, entry.estimated_cost_usd);
+  }
   try {
     await env.DB.prepare(
       `INSERT INTO cost_log (device_id, user_id, tier, provider, model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, estimated_cost_usd, endpoint, stream)
@@ -303,10 +336,25 @@ export function getTierDailyCostCap(tier: string, env?: Env): number {
 
 /**
  * Get a user's estimated cost for today. Used to enforce per-user daily cost caps.
+ *
+ * Fast path: single-row read of the usage-table accumulator (migration
+ * 0006), maintained by logCost. Falls back to the legacy SUM over cost_log
+ * only while the migration hasn't been applied — that scan is what hit
+ * D1's CPU limit at scale (SCREENPIPE-AI-PROXY-1T/-1X/-1E).
  */
 export async function getDailyUserCost(env: Env, deviceId: string): Promise<number> {
+  const today = utcToday();
   try {
-    const today = new Date().toISOString().split('T')[0];
+    const row = await env.DB.prepare(
+      `SELECT CASE WHEN cost_day = ? THEN daily_cost_usd ELSE 0 END as daily_cost
+       FROM usage WHERE device_id = ?`
+    ).bind(today, deviceId).first<{ daily_cost: number }>();
+    // No usage row yet = no recorded spend today.
+    return row?.daily_cost ?? 0;
+  } catch (error) {
+    console.warn('daily cost accumulator read failed, falling back to cost_log scan:', error);
+  }
+  try {
     const result = await env.DB.prepare(
       `SELECT COALESCE(SUM(estimated_cost_usd), 0) as daily_cost
        FROM cost_log WHERE device_id = ? AND timestamp >= ?`
