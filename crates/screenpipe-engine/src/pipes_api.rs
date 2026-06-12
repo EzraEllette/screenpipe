@@ -393,4 +393,3 @@ pub async fn set_pipe_favorite(
         Err(e) => Json(json!({ "error": e.to_string() })),
     }
 }
-
