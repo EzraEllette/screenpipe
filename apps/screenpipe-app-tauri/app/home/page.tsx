@@ -857,10 +857,10 @@ function HomeContent() {
     // The first nav item doubles as "go to chat view + start a fresh
     // conversation". Each click allocates a new session id (empty
     // rows are not reused — that felt like opening an old recent).
-    { id: "home", label: "New chat", icon: <Plus className="h-3.5 w-3.5" /> },
+    { id: "home", label: "Chat", icon: <Plus className="h-3.5 w-3.5" /> },
     { id: "pipes", label: "Pipes", icon: <Workflow className="h-3.5 w-3.5" /> },
     { id: "timeline", label: "Timeline", icon: <Clock className="h-3.5 w-3.5" /> },
-    { id: "meetings", label: "Meeting notes", icon: <NotebookPen className="h-3.5 w-3.5" /> },
+    { id: "meetings", label: "Meetings", icon: <NotebookPen className="h-3.5 w-3.5" /> },
     { id: "brain", label: "Brain", icon: <Brain className="h-3.5 w-3.5" /> },
     { id: "connections", label: "Connections", icon: <Plug className="h-3.5 w-3.5" /> },
   ]
