@@ -470,8 +470,8 @@ extern "C" fn tap_io_proc(
 /// Owns all CoreAudio resources for a Process Tap capture session.
 ///
 /// Teardown order (see `Drop`): mark `stopping` → stop+destroy the device →
-/// drain in-flight callbacks → free the ctx → (`_tap` destroyed last by the
-/// compiler-generated field drop).
+/// dispatch grace + drain in-flight callbacks → free the ctx → (`_tap`
+/// destroyed last by the compiler-generated field drop).
 struct ProcessTapCapture {
     _started: Option<cidre::core_audio::hardware::StartedDevice<ca::AggregateDevice>>,
     _tap: ca::hardware_tapping::TapGuard,
@@ -480,6 +480,41 @@ struct ProcessTapCapture {
 }
 
 unsafe impl Send for ProcessTapCapture {}
+
+/// How long teardown waits for in-flight callbacks to exit before giving up
+/// and leaking the ctx instead of freeing it.
+const CALLBACK_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Pause between device stop/destroy and the active-count drain. Stop/destroy
+/// do not synchronize with a callback CoreAudio dispatched a moment earlier
+/// whose first instruction (the `active` increment) has not executed yet; such
+/// a call is invisible to the drain until it runs. Two-ish IO cycles (~10ms
+/// each at 48kHz / 512 frames) let it either count itself in or finish
+/// entirely, so a zero reading afterwards is trustworthy. Teardown runs on the
+/// dedicated rebuild thread at most about once a minute, so the stall is free.
+const CALLBACK_DISPATCH_GRACE: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// Spin-wait (bounded by `timeout`) for `active` to drop to zero. Returns the
+/// number of callbacks still marked active when it stopped waiting: 0 means
+/// fully drained, anything else means the caller must NOT free the ctx.
+fn drain_active(active: &AtomicUsize, timeout: std::time::Duration) -> usize {
+    let deadline = std::time::Instant::now() + timeout;
+    let mut spins: u64 = 0;
+    loop {
+        let in_flight = active.load(Ordering::Acquire);
+        if in_flight == 0 {
+            return 0;
+        }
+        if std::time::Instant::now() >= deadline {
+            return in_flight;
+        }
+        std::hint::spin_loop();
+        spins = spins.wrapping_add(1);
+        if spins % 1024 == 0 {
+            std::thread::yield_now();
+        }
+    }
+}
 
 impl Drop for ProcessTapCapture {
     fn drop(&mut self) {
@@ -503,40 +538,32 @@ impl Drop for ProcessTapCapture {
             std::mem::drop(started);
         }
 
-        // 3. Drain in-flight callbacks. A callback that started before the stop
-        //    completed has already dereferenced `ctx` (valid then) and bumped
-        //    `active`; wait for it to exit so we never free underneath it. This
-        //    is the fix for the IO-thread vs StopIOProc use-after-free.
+        // 3. Grace, then drain in-flight callbacks. A callback that started
+        //    before the stop completed has already dereferenced `ctx` (valid
+        //    then) and bumped `active`; wait for it to exit so we never free
+        //    underneath it. This is the fix for the IO-thread vs StopIOProc
+        //    use-after-free. The grace sleep first covers the edge where a
+        //    callback was dispatched but has not yet executed its increment,
+        //    which would otherwise read as "drained" (see
+        //    CALLBACK_DISPATCH_GRACE).
         //
-        //    Bounded: tap callbacks run for ~microseconds, so this returns
+        //    Bounded: tap callbacks run for ~microseconds, so the drain returns
         //    almost immediately. If something pathological keeps a callback
         //    "active" past the deadline we LEAK the ctx rather than free memory
         //    CoreAudio might still touch — a small one-time leak is strictly
         //    better than a segfault.
         if !self._ctx_ptr.is_null() {
+            std::thread::sleep(CALLBACK_DISPATCH_GRACE);
             let active = unsafe { &(*self._ctx_ptr).active };
-            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
-            let mut spins: u64 = 0;
-            loop {
-                let in_flight = active.load(Ordering::Acquire);
-                if in_flight == 0 {
-                    break;
-                }
-                if std::time::Instant::now() >= deadline {
-                    warn!(
-                        "Process Tap gen {} teardown: {} callback(s) still active after 500ms — \
-                         leaking ctx to avoid use-after-free",
-                        generation, in_flight
-                    );
-                    // Leak: skip the free below by nulling the pointer.
-                    self._ctx_ptr = std::ptr::null_mut();
-                    break;
-                }
-                std::hint::spin_loop();
-                spins = spins.wrapping_add(1);
-                if spins % 1024 == 0 {
-                    std::thread::yield_now();
-                }
+            let remaining = drain_active(active, CALLBACK_DRAIN_TIMEOUT);
+            if remaining > 0 {
+                warn!(
+                    "Process Tap gen {} teardown: {} callback(s) still active after {:?} — \
+                     leaking ctx to avoid use-after-free",
+                    generation, remaining, CALLBACK_DRAIN_TIMEOUT
+                );
+                // Leak: skip the free below by nulling the pointer.
+                self._ctx_ptr = std::ptr::null_mut();
             }
         }
 
@@ -918,5 +945,45 @@ mod tests {
         assert!(version.is_some(), "sw_vers should return a version");
         let (major, _, _) = version.unwrap();
         assert!(major >= 10, "macOS major version should be >= 10");
+    }
+
+    #[test]
+    fn drain_active_returns_immediately_when_idle() {
+        let active = AtomicUsize::new(0);
+        let start = std::time::Instant::now();
+        assert_eq!(
+            drain_active(&active, std::time::Duration::from_millis(500)),
+            0
+        );
+        // No callbacks in flight: must not burn anywhere near the timeout.
+        assert!(start.elapsed() < std::time::Duration::from_millis(100));
+    }
+
+    #[test]
+    fn drain_active_waits_out_an_in_flight_callback() {
+        let active = Arc::new(AtomicUsize::new(1));
+        let io_thread = {
+            let active = active.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                active.fetch_sub(1, Ordering::Release);
+            })
+        };
+        // Generous timeout: the point is that it waits, not how fast.
+        assert_eq!(drain_active(&active, std::time::Duration::from_secs(5)), 0);
+        io_thread.join().unwrap();
+    }
+
+    #[test]
+    fn drain_active_times_out_and_reports_stuck_callbacks() {
+        let active = AtomicUsize::new(2);
+        let start = std::time::Instant::now();
+        assert_eq!(
+            drain_active(&active, std::time::Duration::from_millis(50)),
+            2
+        );
+        // Timed out, so the full deadline must have elapsed and the caller
+        // (Drop) would leak the ctx instead of freeing it.
+        assert!(start.elapsed() >= std::time::Duration::from_millis(50));
     }
 }
