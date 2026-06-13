@@ -776,11 +776,19 @@ impl PiExecutor {
                 .unwrap_or_else(|| "SCREENPIPE_API_KEY".to_string());
             let api_key_value = api_key_value.as_str();
             let models = screenpipe_cloud_models(api_url, user_token).await;
+            // PiExecutor only runs pipes (PipeManager: scheduled / run-now),
+            // which are latency-tolerant, so tag every cloud LLM call as
+            // background. The gateway then serves it on the cheaper, best-effort
+            // Vertex flex tier (resolveLatencyClass). Pi merges provider
+            // `headers` into each request (see pi-coding-agent model-registry),
+            // and an old gateway simply ignores the unknown header (→ standard),
+            // so there's no deploy-order coupling.
             let screenpipe_provider = json!({
                 "baseUrl": api_url,
                 "api": "openai-completions",
                 "apiKey": api_key_value,
                 "authHeader": true,
+                "headers": { "x-screenpipe-latency": "background" },
                 "models": models
             });
 
