@@ -125,6 +125,9 @@ pub struct UiRecorderConfig {
     /// still wake event-driven capture, but clipboard payloads/operation rows
     /// are not written.
     pub record_clipboard_events: bool,
+    /// Persist mouse-click rows to DB. When false, clicks can still wake
+    /// event-driven capture, but `ui_events` click rows are not written.
+    pub record_click_events: bool,
     /// Prioritize input latency over event metadata completeness.
     /// Maps to `UiCaptureConfig.prioritize_input_latency`. See that field for details.
     pub prioritize_input_latency: bool,
@@ -163,6 +166,7 @@ impl Default for UiRecorderConfig {
             record_input_events: true,
             record_keyboard_events: true,
             record_clipboard_events: true,
+            record_click_events: true,
             prioritize_input_latency: false,
             extraction_thread_priority: ExtractionThreadPriority::BelowNormal,
             pause_extraction_on_input_ms: 150,
@@ -530,6 +534,7 @@ pub async fn start_ui_recording(
     let record_input_events = config.record_input_events;
     let record_keyboard_events = config.record_keyboard_events;
     let record_clipboard_events = config.record_clipboard_events;
+    let record_click_events = config.record_click_events;
     let trigger_gates = TriggerGates;
 
     // Start the recording
@@ -603,6 +608,7 @@ pub async fn start_ui_recording(
                             &db_event,
                             record_keyboard_events,
                             record_clipboard_events,
+                            record_click_events,
                         );
 
                     // Decide whether this event warrants a capture and, if so,
@@ -790,12 +796,14 @@ fn should_record_input_event(
     db_event: &InsertUiEvent,
     record_keyboard_events: bool,
     record_clipboard_events: bool,
+    record_click_events: bool,
 ) -> bool {
     match db_event.event_type {
         screenpipe_db::UiEventType::Key | screenpipe_db::UiEventType::Text => {
             record_keyboard_events
         }
         screenpipe_db::UiEventType::Clipboard => record_clipboard_events,
+        screenpipe_db::UiEventType::Click => record_click_events,
         _ => true,
     }
 }
@@ -1227,42 +1235,56 @@ mod capture_trigger_kind_tests {
         assert!(!should_record_input_event(
             &evt(UiEventType::Key),
             false,
+            true,
             true
         ));
         assert!(!should_record_input_event(
             &evt(UiEventType::Text),
             false,
+            true,
             true
         ));
         assert!(!should_record_input_event(
             &evt(UiEventType::Clipboard),
+            true,
+            false,
+            true
+        ));
+        assert!(!should_record_input_event(
+            &evt(UiEventType::Click),
+            true,
             true,
             false
         ));
         assert!(should_record_input_event(
             &evt(UiEventType::Key),
             true,
+            false,
             false
         ));
         assert!(should_record_input_event(
             &evt(UiEventType::Text),
             true,
+            false,
             false
         ));
         assert!(should_record_input_event(
             &evt(UiEventType::Clipboard),
             false,
-            true
+            true,
+            false
         ));
         assert!(should_record_input_event(
             &evt(UiEventType::WindowFocus),
+            false,
             false,
             false
         ));
         assert!(should_record_input_event(
             &evt(UiEventType::Click),
             false,
-            false
+            false,
+            true
         ));
     }
 
@@ -1270,7 +1292,7 @@ mod capture_trigger_kind_tests {
     fn key_event_can_trigger_without_being_stored() {
         let event = evt(UiEventType::Key);
 
-        assert!(!should_record_input_event(&event, false, true));
+        assert!(!should_record_input_event(&event, false, true, true));
         assert!(matches!(
             capture_trigger_kind(&event, &[], gates(true, true)),
             Some(CaptureTrigger::KeyPress)
@@ -1311,10 +1333,25 @@ mod capture_trigger_kind_tests {
     fn clipboard_event_can_trigger_without_being_stored() {
         let event = evt(UiEventType::Clipboard);
 
-        assert!(!should_record_input_event(&event, true, false));
+        assert!(!should_record_input_event(&event, true, false, true));
         assert!(matches!(
             capture_trigger_kind(&event, &[], gates(true, true)),
             Some(CaptureTrigger::Clipboard)
+        ));
+    }
+
+    #[test]
+    fn click_event_can_trigger_without_being_stored() {
+        // Policy/setting may disable click rows; the click must still reach
+        // the event-driven capture trigger mapper so frames keep flowing.
+        let mut event = evt(UiEventType::Click);
+        event.x = Some(10);
+        event.y = Some(20);
+
+        assert!(!should_record_input_event(&event, true, true, false));
+        assert!(matches!(
+            capture_trigger_kind(&event, &[], gates(true, true)),
+            Some(CaptureTrigger::Click { x: 10, y: 20 })
         ));
     }
 

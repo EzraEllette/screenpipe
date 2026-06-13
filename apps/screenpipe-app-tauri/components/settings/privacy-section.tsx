@@ -29,6 +29,7 @@ import {
   Copy,
   ClipboardX,
   Keyboard,
+  MousePointerClick,
   FolderTree,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -287,6 +288,12 @@ export function PrivacySection() {
   // useEnterprisePolicy.applyPiiPolicy on every policy poll).
   const { getManagedValue } = useEnterprisePolicy();
   const managedPiiBackend = getManagedValue("piiBackend");
+  // Same idea for input capture: the admin can force keyboard/click rows on
+  // or off org-wide (applied by useEnterprisePolicy.applyInputCapturePolicy).
+  // These settings are inverted ("disable…"), so ManagedSwitch — which assumes
+  // checked == managed value — doesn't fit; lock the switches manually.
+  const managedKeyboardCapture = getManagedValue("disableKeyboardCapture");
+  const managedClickCapture = getManagedValue("disableClickCapture");
 
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [isUpdating, setIsUpdating] = useState(false);
@@ -571,6 +578,12 @@ export function PrivacySection() {
     // UI is "Capture keyboard" on/off. Settings store inverts to match
     // the CLI flag name (--disable-keyboard-capture).
     handleSettingsChange({ disableKeyboardCapture: !checked }, true);
+  };
+
+  const handleClickCaptureToggle = (checked: boolean) => {
+    // UI is "Capture clicks" on/off. Settings store inverts to match
+    // the CLI flag name (--disable-click-capture).
+    handleSettingsChange({ disableClickCapture: !checked }, true);
   };
 
   const handleRecordWhileLockedToggle = (checked: boolean) => {
@@ -1013,15 +1026,53 @@ export function PrivacySection() {
                   <HelpTooltip text="when on, screenpipe records what you type (your keystrokes). off by default. the accessibility tree and OCR still capture on-screen text either way, so Rewind and Ask keep working — this only controls the raw keystroke stream, where passwords, API keys, and secrets you type would otherwise be logged." />
                 </h3>
                 <p className="text-xs text-muted-foreground">
-                  Off by default. Records the raw keystroke stream (secrets
-                  often get typed). On-screen text is still captured.
+                  {managedKeyboardCapture !== undefined
+                    ? "Managed by your organization."
+                    : "Off by default. Records the raw keystroke stream (secrets often get typed). On-screen text is still captured."}
                 </p>
               </div>
             </div>
             <Switch
               id="captureKeyboard"
-              checked={!(settings.disableKeyboardCapture ?? true)}
+              checked={
+                managedKeyboardCapture !== undefined
+                  ? managedKeyboardCapture === "false"
+                  : !(settings.disableKeyboardCapture ?? true)
+              }
+              disabled={managedKeyboardCapture !== undefined}
               onCheckedChange={handleKeyboardCaptureToggle}
+            />
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Click capture toggle */}
+      <Card>
+        <CardContent className="px-3 py-2.5">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center space-x-2.5">
+              <MousePointerClick className="h-4 w-4 text-muted-foreground shrink-0" />
+              <div>
+                <h3 className="text-sm font-medium text-foreground flex items-center gap-1.5">
+                  Capture clicks
+                  <HelpTooltip text="when on, screenpipe records mouse click events (where and what you clicked). on by default — clicks carry no text payload and power workflow analysis and task mining. turning this off only skips the click rows; clicks still trigger screen captures." />
+                </h3>
+                <p className="text-xs text-muted-foreground">
+                  {managedClickCapture !== undefined
+                    ? "Managed by your organization."
+                    : "On by default. Click events power workflow analysis; no text is recorded."}
+                </p>
+              </div>
+            </div>
+            <Switch
+              id="captureClicks"
+              checked={
+                managedClickCapture !== undefined
+                  ? managedClickCapture === "false"
+                  : !(settings.disableClickCapture ?? false)
+              }
+              disabled={managedClickCapture !== undefined}
+              onCheckedChange={handleClickCaptureToggle}
             />
           </div>
         </CardContent>

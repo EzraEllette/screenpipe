@@ -2643,6 +2643,13 @@ disableClipboardCapture?: boolean;
  */
 disableKeyboardCapture?: boolean;
 /**
+ * Skip persisting mouse-click rows in the UI recorder. Defaults to
+ * `false` (click DB capture ON — clicks carry no text payload and are
+ * the backbone of workflow/task mining). Clicks still wake event-driven
+ * capture when disabled; only the `ui_events` click rows are skipped.
+ */
+disableClickCapture?: boolean;
+/**
  * Continue recording audio when the screen is locked.
  * Default: false (audio pauses when screen is locked to save resources).
  */
