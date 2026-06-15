@@ -1266,6 +1266,7 @@ impl PiExecutor {
         line_tx: tokio::sync::mpsc::UnboundedSender<String>,
         continue_session: bool,
         pipe_system_prompt: Option<&str>,
+        mcp_server_allowlist: Option<&[String]>,
         session_owner: Option<&str>,
     ) -> Result<AgentOutput> {
         let mut cmd = build_async_command(pi_path);
@@ -1327,6 +1328,10 @@ impl PiExecutor {
         if let Some(ref key) = self.api_auth_key {
             cmd.env("SCREENPIPE_LOCAL_API_KEY", key);
             cmd.env("SCREENPIPE_API_AUTH_KEY", key); // deprecated alias
+        }
+
+        if let Some(ids) = mcp_server_allowlist {
+            cmd.env("SCREENPIPE_MCP_SERVER_ALLOWLIST", ids.join(","));
         }
 
         // Tag this run's local API calls with the owning chat/session so the
@@ -1588,6 +1593,7 @@ impl AgentExecutor for PiExecutor {
         line_tx: tokio::sync::mpsc::UnboundedSender<String>,
         continue_session: bool,
         pipe_system_prompt: Option<&str>,
+        mcp_server_allowlist: Option<&[String]>,
         session_owner: Option<&str>,
     ) -> Result<AgentOutput> {
         let resolved_provider = provider.unwrap_or("screenpipe").to_string();
@@ -1647,6 +1653,7 @@ impl AgentExecutor for PiExecutor {
                 line_tx.clone(),
                 continue_session,
                 pipe_system_prompt,
+                mcp_server_allowlist,
                 session_owner,
             )
             .await?;
@@ -1680,6 +1687,7 @@ impl AgentExecutor for PiExecutor {
                     line_tx.clone(),
                     continue_session,
                     pipe_system_prompt,
+                    mcp_server_allowlist,
                     session_owner,
                 )
                 .await?;
@@ -1728,6 +1736,7 @@ impl AgentExecutor for PiExecutor {
                     line_tx.clone(),
                     continue_session,
                     pipe_system_prompt,
+                    mcp_server_allowlist,
                     session_owner,
                 )
                 .await?;
