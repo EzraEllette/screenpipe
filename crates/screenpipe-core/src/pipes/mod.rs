@@ -35,6 +35,8 @@ use std::time::Instant;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 
+const PIPE_COMPLETED_EVENT_PREFIX: &str = "pipe_completed:";
+
 // ---------------------------------------------------------------------------
 // Config & log types
 // ---------------------------------------------------------------------------
@@ -3527,7 +3529,7 @@ impl PipeManager {
                     }
                     // pipe_completed:* — filter from all-events subscription
                     while let Some(e) = pipe_completed_rx.next().now_or_never().flatten() {
-                        if e.name.starts_with("pipe_completed:") {
+                        if is_pipe_completed_event(&e.name) {
                             pending_events.push((e.name, e.data));
                         }
                     }
@@ -3546,16 +3548,14 @@ impl PipeManager {
                                 }
 
                                 // Don't let a pipe trigger itself
-                                if *event_name == format!("pipe_completed:{}", name) {
+                                if is_pipe_completed_for_pipe(event_name, name) {
                                     continue;
                                 }
 
                                 // Circular chain detection: if pipe X was triggered by
                                 // pipe_completed:Y within the cooldown, don't let
                                 // pipe_completed:X trigger Y back.
-                                if let Some(source_pipe) =
-                                    event_name.strip_prefix("pipe_completed:")
-                                {
+                                if let Some(source_pipe) = pipe_completed_source(event_name) {
                                     let reverse_key = format!("{}→{}", name, source_pipe);
                                     if recent_chain.contains_key(&reverse_key) {
                                         debug!(
@@ -4652,6 +4652,18 @@ fn validate_one_off_freshness(schedule: &str) -> Result<()> {
     Ok(())
 }
 
+fn pipe_completed_source(event_name: &str) -> Option<&str> {
+    event_name.strip_prefix(PIPE_COMPLETED_EVENT_PREFIX)
+}
+
+fn is_pipe_completed_event(event_name: &str) -> bool {
+    pipe_completed_source(event_name).is_some()
+}
+
+fn is_pipe_completed_for_pipe(event_name: &str, pipe_name: &str) -> bool {
+    matches!(pipe_completed_source(event_name), Some(source_pipe) if source_pipe == pipe_name)
+}
+
 /// Parsed schedule — fixed interval, cron, or a single fire-once timestamp.
 pub enum ParsedSchedule {
     Interval(std::time::Duration),
@@ -5157,6 +5169,24 @@ mod tests {
         // cap larger than input keeps everything
         let files = vec![f("a.md", 100)];
         assert_eq!(select_newest_files(files, 50).len(), 1);
+    }
+
+    #[test]
+    fn pipe_completed_helpers_match_exact_pipe_event() {
+        assert!(is_pipe_completed_event("pipe_completed:daily-summary"));
+        assert_eq!(
+            pipe_completed_source("pipe_completed:daily-summary"),
+            Some("daily-summary")
+        );
+        assert!(is_pipe_completed_for_pipe(
+            "pipe_completed:daily-summary",
+            "daily-summary"
+        ));
+        assert!(!is_pipe_completed_for_pipe(
+            "pipe_completed:daily-summary",
+            "daily"
+        ));
+        assert!(!is_pipe_completed_event("workflow_event"));
     }
 
     #[test]
