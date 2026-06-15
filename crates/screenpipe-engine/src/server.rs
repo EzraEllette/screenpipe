@@ -810,15 +810,6 @@ impl SCServer {
                     .layer(axum::extract::DefaultBodyLimit::max(50 * 1024 * 1024)), // 50MB
             );
 
-        // Apple Intelligence — generic OpenAI-compatible endpoint (macOS only)
-        #[cfg(feature = "apple-intelligence")]
-        let router = router
-            .route("/ai/status", get(crate::apple_intelligence_api::ai_status))
-            .route(
-                "/ai/chat/completions",
-                axum::routing::post(crate::apple_intelligence_api::chat_completions),
-            );
-
         // Pipe API routes (if pipe manager is available)
         let router = if let Some(ref pm) = self.pipe_manager {
             let pipe_routes = Router::new()

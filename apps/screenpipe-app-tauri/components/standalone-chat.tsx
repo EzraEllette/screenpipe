@@ -176,7 +176,6 @@ const APP_SUGGESTION_LIMIT = 10;
 const TAG_SUGGESTION_LIMIT = 10;
 const STREAM_RENDER_THROTTLE_MS = 80;
 const EMPTY_QUEUED_PROMPTS: PiQueuedPrompt[] = [];
-const FOLLOW_UP_GENERATION_DELAY_MS = 10_000;
 const POST_STREAM_SIDE_EFFECT_DELAY_MS = 1_500;
 const CHAT_RAIL_CLASS = "max-w-4xl mx-auto w-full";
 
@@ -1439,7 +1438,6 @@ const STATIC_APP_ICONS: Record<string, string> = {
   airtable: "/images/airtable.png",
   apple: "/images/apple.svg",
   "apple-calendar": "/images/apple.svg",
-  "apple intelligence": "/images/apple-intelligence.png",
   screenpipe: "/images/screenpipe.png",
 };
 
@@ -3062,10 +3060,6 @@ export function StandaloneChat({
     executionId: number;
   } | null>(null);
 
-  // Follow-up suggestions state (TikTok-style)
-  const [followUpSuggestions, setFollowUpSuggestions] = useState<string[]>([]);
-  const followUpAbortRef = useRef<AbortController | null>(null);
-  const followUpFiredRef = useRef(false);
   const lastUserMessageRef = useRef<string>("");
 
   // Ref to sendMessage so useEffect callbacks can call it without stale closures
@@ -5662,20 +5656,6 @@ export function StandaloneChat({
               setTimeout(() => {
                 posthog.capture("chat_response_received", analyticsPayload);
               }, POST_STREAM_SIDE_EFFECT_DELAY_MS);
-
-              const followUpText = streamedText || content || "";
-              if (followUpText.length > 500 && !followUpFiredRef.current) {
-                const followUpTurnId = msgId;
-                const followUpSessionId = piSessionIdRef.current;
-                const userPromptForFollowUps = lastUserMessageRef.current;
-                followUpFiredRef.current = true;
-                setTimeout(() => {
-                  if (!mountedRef.current) return;
-                  if (piSessionIdRef.current !== followUpSessionId) return;
-                  if (piMessageIdRef.current && piMessageIdRef.current !== followUpTurnId) return;
-                  generateFollowUps(userPromptForFollowUps, followUpText);
-                }, FOLLOW_UP_GENERATION_DELAY_MS);
-              }
             }
           }
           if (!isPipeWatch) {
@@ -5685,7 +5665,6 @@ export function StandaloneChat({
             piLastErrorRef.current = null;
             piActiveStopRequestedRef.current = false;
             piThinkingStartRef.current = null;
-            followUpFiredRef.current = false;
             forceQueueModeRef.current = false;
             piRateLimitRetries.current = 0;
             setIsLoading(false);
@@ -6260,67 +6239,6 @@ export function StandaloneChat({
     };
   }, []);
 
-  // Generate follow-up suggestions using Apple Intelligence
-  async function generateFollowUps(userMsg: string, partialResponse: string) {
-    try {
-      // Check if Apple Intelligence is available
-      const statusResp = await localFetch("/ai/status");
-      if (!statusResp.ok) return;
-      const statusData = await statusResp.json();
-      if (!statusData.available) return;
-
-      const controller = new AbortController();
-      followUpAbortRef.current = controller;
-
-      const resp = await localFetch("/ai/chat/completions", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        signal: controller.signal,
-        body: JSON.stringify({
-          messages: [
-            {
-              role: "system",
-              content:
-                "Suggest 1-2 short follow-up questions the user might want to ask next. Respond with ONLY a JSON array of strings, nothing else.",
-            },
-            {
-              role: "user",
-              content: `User asked: ${userMsg.slice(0, 200)}\n\nAssistant responded: ${partialResponse.slice(0, 500)}`,
-            },
-          ],
-        }),
-      });
-
-      if (!resp.ok || controller.signal.aborted) return;
-
-      const data = await resp.json();
-      const content =
-        data?.choices?.[0]?.message?.content || "";
-
-      // Parse JSON array
-      let questions: string[] = [];
-      try {
-        questions = JSON.parse(content);
-      } catch {
-        // Try extracting array from wrapped text
-        const match = content.match(/\[[\s\S]*\]/);
-        if (match) {
-          try {
-            questions = JSON.parse(match[0]);
-          } catch {
-            return;
-          }
-        }
-      }
-
-      if (!controller.signal.aborted && Array.isArray(questions) && questions.length > 0) {
-        setFollowUpSuggestions(questions.filter((q: unknown) => typeof q === "string").slice(0, 2));
-      }
-    } catch {
-      // Silently fail — no UI impact
-    }
-  }
-
   // Send message using Pi agent
   /**
    * Enqueue a follow-up while another prompt is still streaming.
@@ -6655,14 +6573,7 @@ export function StandaloneChat({
     piMessageIdRef.current = assistantMessageId;
     piContentBlocksRef.current = [];
 
-    // Clear follow-ups for new message
-    setFollowUpSuggestions([]);
-    followUpFiredRef.current = false;
     piRateLimitRetries.current = 0;
-    if (followUpAbortRef.current) {
-      followUpAbortRef.current.abort();
-      followUpAbortRef.current = null;
-    }
     lastUserMessageRef.current = userMessage;
 
     let nextRowsAfterUserAppend: Message[] | null = null;
@@ -7555,13 +7466,7 @@ export function StandaloneChat({
     const shouldClearPastedImages = imageDataUrls == null && pastedImages.length > 0;
     const fallbackOriginalUserMessage = lastUserMessageRef.current;
 
-    setFollowUpSuggestions([]);
-    followUpFiredRef.current = false;
     piRateLimitRetries.current = 0;
-    if (followUpAbortRef.current) {
-      followUpAbortRef.current.abort();
-      followUpAbortRef.current = null;
-    }
     lastUserMessageRef.current = trimmed;
     const turnIntentId = `steer-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const steerAttachments = consumePendingAttachments();
@@ -9057,44 +8962,6 @@ export function StandaloneChat({
           </div>
         )}
 
-        {/* Follow-up suggestions (TikTok-style) */}
-        <AnimatePresence>
-          {!isLoading && settings?.showChatSuggestions !== false && followUpSuggestions.length > 0 && messages.length > 0 && (
-            <motion.div
-              initial={{ opacity: 0, y: 8 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: 8 }}
-              transition={{ duration: 0.2 }}
-              className="px-5 sm:px-6 pt-2 flex flex-col gap-1"
-            >
-              <div className="flex items-center justify-between gap-2">
-                <span className="text-[10px] text-muted-foreground/60 uppercase tracking-wider font-medium">follow up</span>
-                <button
-                  type="button"
-                  onClick={() => updateSettings({ showChatSuggestions: false })}
-                  title="Hide chat suggestions — re-enable in Settings → Display"
-                  aria-label="Hide chat suggestions"
-                  className="-my-1 -mr-1 p-1 text-muted-foreground/40 hover:text-foreground transition-colors shrink-0"
-                >
-                  <X className="w-3 h-3" />
-                </button>
-              </div>
-              <div className="flex flex-wrap gap-1.5">
-                {followUpSuggestions.map((q, i) => (
-                  <button
-                    key={i}
-                    type="button"
-                    onClick={() => sendMessage(q)}
-                    className="px-2.5 py-1 text-[11px] bg-primary/10 hover:bg-primary/20 rounded-full border border-primary/20 hover:border-primary/40 text-primary hover:text-primary transition-colors cursor-pointer"
-                  >
-                    {q}
-                  </button>
-                ))}
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
-
         {/* Persistent auto-suggestions above input. Inline chips when the
             input is wide enough; collapses to a single trigger button that
             opens a popover when narrow (e.g. BrowserSidebar squeezed the
@@ -9127,17 +8994,15 @@ export function StandaloneChat({
               >
                 <RefreshCw className={`w-3 h-3 ${suggestionsRefreshing ? 'animate-spin' : ''}`} strokeWidth={1.5} />
               </button>
-              {followUpSuggestions.length === 0 && (
-                <button
-                  type="button"
-                  onClick={() => updateSettings({ showChatSuggestions: false })}
-                  className="p-0.5 text-muted-foreground/30 hover:text-foreground transition-colors duration-150 cursor-pointer"
-                  title="Hide chat suggestions — re-enable in Settings → Display"
-                  aria-label="Hide chat suggestions"
-                >
-                  <X className="w-3 h-3" strokeWidth={1.5} />
-                </button>
-              )}
+              <button
+                type="button"
+                onClick={() => updateSettings({ showChatSuggestions: false })}
+                className="p-0.5 text-muted-foreground/30 hover:text-foreground transition-colors duration-150 cursor-pointer"
+                title="Hide chat suggestions — re-enable in Settings → Display"
+                aria-label="Hide chat suggestions"
+              >
+                <X className="w-3 h-3" strokeWidth={1.5} />
+              </button>
             </div>
           ) : (
             <div className="px-5 sm:px-6 pt-2 flex items-center gap-1.5">
@@ -9187,17 +9052,15 @@ export function StandaloneChat({
               >
                 <RefreshCw className={`w-3 h-3 ${suggestionsRefreshing ? 'animate-spin' : ''}`} strokeWidth={1.5} />
               </button>
-              {followUpSuggestions.length === 0 && (
-                <button
-                  type="button"
-                  onClick={() => updateSettings({ showChatSuggestions: false })}
-                  className="p-0.5 text-muted-foreground/30 hover:text-foreground transition-colors duration-150 cursor-pointer"
-                  title="Hide chat suggestions — re-enable in Settings → Display"
-                  aria-label="Hide chat suggestions"
-                >
-                  <X className="w-3 h-3" strokeWidth={1.5} />
-                </button>
-              )}
+              <button
+                type="button"
+                onClick={() => updateSettings({ showChatSuggestions: false })}
+                className="p-0.5 text-muted-foreground/30 hover:text-foreground transition-colors duration-150 cursor-pointer"
+                title="Hide chat suggestions — re-enable in Settings → Display"
+                aria-label="Hide chat suggestions"
+              >
+                <X className="w-3 h-3" strokeWidth={1.5} />
+              </button>
             </div>
           )
         )}
