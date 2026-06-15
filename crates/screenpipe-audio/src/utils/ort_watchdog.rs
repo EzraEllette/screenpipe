@@ -58,9 +58,9 @@ where
         Err(mpsc::RecvTimeoutError::Timeout) => Err(anyhow!(
             "{context}: timed out after {timeout:?} (likely an ONNX Runtime init hang on this host)"
         )),
-        Err(mpsc::RecvTimeoutError::Disconnected) => {
-            Err(anyhow!("{context}: watchdog worker exited without a result"))
-        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err(anyhow!(
+            "{context}: watchdog worker exited without a result"
+        )),
     }
 }
 
