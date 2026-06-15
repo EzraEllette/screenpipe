@@ -102,6 +102,11 @@ import {
   buildInvalidatedAuthTokenMessage,
   isInvalidatedAuthTokenError,
 } from "@/lib/chat/auth-errors";
+import {
+  buildNoResponseMessage,
+  buildProviderErrorMessage,
+  preflightChatProvider,
+} from "@/lib/chat/provider-errors";
 import { buildSystemPrompt, buildConnectionsContext } from "@/lib/chat/system-prompt";
 import {
   classifyCurl,
@@ -5354,6 +5359,16 @@ export function StandaloneChat({
                 prev.map((m) => m.id === msgId ? { ...m, content: "This model requires an upgrade." } : m)
               );
             }
+          } else {
+            const providerError = buildProviderErrorMessage(errorStr, activePreset);
+            if (providerError && piMessageIdRef.current) {
+              const msgId = piMessageIdRef.current;
+              setMessages((prev) =>
+                prev.map((m) => m.id === msgId
+                  ? { ...m, content: providerError, retryPrompt: lastUserMessageRef.current || undefined }
+                  : m)
+              );
+            }
           }
         } else if (data.type === "message_update" && data.assistantMessageEvent?.type === "error") {
           // Pi's LLM returned an error (e.g. rate limit, overloaded)
@@ -5383,17 +5398,26 @@ export function StandaloneChat({
                 );
               }
             } else if (fullError.includes("model_not_allowed")) {
-                setMessages((prev) =>
+              setMessages((prev) =>
                 prev.map((m) => m.id === msgId ? { ...m, content: "This model requires an upgrade." } : m)
               );
-            } else if (fullError.includes("already processing")) {
-              // Transient error — Pi was still busy when the prompt arrived.
-              // Don't show it; Pi will process the message once it's free.
-              console.warn("[Pi] Agent busy, waiting for it to finish:", fullError);
             } else {
-              setMessages((prev) =>
-                prev.map((m) => m.id === msgId ? { ...m, content: `Error: ${fullError || "Something went wrong"}` } : m)
-              );
+              const providerError = buildProviderErrorMessage(fullError, activePreset);
+              if (providerError) {
+                setMessages((prev) =>
+                  prev.map((m) => m.id === msgId
+                    ? { ...m, content: providerError, retryPrompt: lastUserMessageRef.current || undefined }
+                    : m)
+                );
+              } else if (fullError.includes("already processing")) {
+                // Transient error — Pi was still busy when the prompt arrived.
+                // Don't show it; Pi will process the message once it's free.
+                console.warn("[Pi] Agent busy, waiting for it to finish:", fullError);
+              } else {
+                setMessages((prev) =>
+                  prev.map((m) => m.id === msgId ? { ...m, content: `Error: ${fullError || "Something went wrong"}` } : m)
+                );
+              }
             }
           }
         } else if (data.type === "message_start" && data.message?.role === "user") {
@@ -5562,6 +5586,7 @@ export function StandaloneChat({
             const msgId = piMessageIdRef.current;
 
             const quotaErrorType = classifyQuotaError(errMsg);
+            const providerError = buildProviderErrorMessage(errMsg, activePreset);
             if (authTokenInvalidated) {
               setMessages((prev) =>
                 prev.map((m) => m.id === msgId ? { ...m, content: buildInvalidatedAuthTokenMessage() } : m)
@@ -5577,6 +5602,12 @@ export function StandaloneChat({
             } else if (quotaErrorType === "rate") {
               setMessages((prev) =>
                 prev.map((m) => m.id === msgId ? { ...m, content: buildRateLimitMessage(errMsg) } : m)
+              );
+            } else if (providerError) {
+              setMessages((prev) =>
+                prev.map((m) => m.id === msgId
+                  ? { ...m, content: providerError, retryPrompt: lastUserMessageRef.current || undefined }
+                  : m)
               );
             } else {
               setMessages((prev) =>
@@ -5645,7 +5676,7 @@ export function StandaloneChat({
               } else if (errStr.includes("model_not_allowed")) {
                 content = "This model requires an upgrade.";
               } else {
-                content = errStr;
+                content = buildProviderErrorMessage(errStr, activePreset) || errStr;
               }
             }
 
@@ -5696,15 +5727,10 @@ export function StandaloneChat({
                 } else if (lastErr && lastErrKind === "rate") {
                   content = buildRateLimitMessage(lastErr);
                 } else if (lastErr) {
-                  content = `Error: ${lastErr}`;
+                  content = buildProviderErrorMessage(lastErr, activePreset) || `Error: ${lastErr}`;
                   emptyResponseRetryPrompt = lastUserMessageRef.current || undefined;
                 } else {
-                  const provider = activePreset?.provider;
-                  if (provider === "native-ollama") {
-                    content = "No response — is Ollama running? Start it with `ollama serve` and make sure the model is pulled.";
-                  } else {
-                    content = "No response from model — try again or check your AI preset in settings.";
-                  }
+                  content = buildNoResponseMessage(activePreset);
                   emptyResponseRetryPrompt = lastUserMessageRef.current || undefined;
                 }
               }
@@ -5821,31 +5847,40 @@ export function StandaloneChat({
                 );
               }
             } else if (errorStr.includes("model_not_allowed")) {
-                setMessages((prev) =>
+              setMessages((prev) =>
                 prev.map((m) => m.id === msgId ? { ...m, content: "This model requires an upgrade." } : m)
               );
-            } else if (errorStr.includes("already processing")) {
-              console.warn("[Pi] already-processing race in response event:", errorStr);
-              setMessages((prev) =>
-                prev.map((m) => m.id === msgId ? {
-                  ...m,
-                  content: "The AI was mid-response when your message arrived.",
-                  retryPrompt: lastUserMessageRef.current || undefined,
-                } : m)
-              );
-            } else if (errorStr.includes("api_error") || errorStr.includes("Internal server error") || /\b5\d\d\b/.test(errorStr)) {
-              // Upstream API 5xx — SDK already exhausted its auto-retry attempts
-              setMessages((prev) =>
-                prev.map((m) => m.id === msgId ? {
-                  ...m,
-                  content: "Something went wrong on the server.",
-                  retryPrompt: lastUserMessageRef.current || undefined,
-                } : m)
-              );
             } else {
-              setMessages((prev) =>
-                prev.map((m) => m.id === msgId ? { ...m, content: `Error: ${errorStr}` } : m)
-              );
+              const providerError = buildProviderErrorMessage(errorStr, activePreset);
+              if (providerError) {
+                setMessages((prev) =>
+                  prev.map((m) => m.id === msgId
+                    ? { ...m, content: providerError, retryPrompt: lastUserMessageRef.current || undefined }
+                    : m)
+                );
+              } else if (errorStr.includes("already processing")) {
+                console.warn("[Pi] already-processing race in response event:", errorStr);
+                setMessages((prev) =>
+                  prev.map((m) => m.id === msgId ? {
+                    ...m,
+                    content: "The AI was mid-response when your message arrived.",
+                    retryPrompt: lastUserMessageRef.current || undefined,
+                  } : m)
+                );
+              } else if (errorStr.includes("api_error") || errorStr.includes("Internal server error") || /\b5\d\d\b/.test(errorStr)) {
+                // Upstream API 5xx — SDK already exhausted its auto-retry attempts
+                setMessages((prev) =>
+                  prev.map((m) => m.id === msgId ? {
+                    ...m,
+                    content: "Something went wrong on the server.",
+                    retryPrompt: lastUserMessageRef.current || undefined,
+                  } : m)
+                );
+              } else {
+                setMessages((prev) =>
+                  prev.map((m) => m.id === msgId ? { ...m, content: `Error: ${errorStr}` } : m)
+                );
+              }
             }
           }
           const quotaErrorType = classifyQuotaError(errorStr);
@@ -6868,6 +6903,37 @@ export function StandaloneChat({
         }
       }
 
+      const providerPreflight = await preflightChatProvider(activePreset);
+      if (!providerPreflight.ok) {
+        piStreamingTextRef.current = "";
+        piMessageIdRef.current = null;
+        piContentBlocksRef.current = [];
+        setMessages((prev) =>
+          prev.map((m) => m.id === assistantMessageId
+            ? { ...m, content: providerPreflight.message, retryPrompt: userMessage }
+            : m)
+        );
+        if (sidNow) {
+          const storeState = useChatStore.getState();
+          storeState.actions.patchMessage(sidNow, assistantMessageId, (m: any) => ({
+            ...m,
+            content: providerPreflight.message,
+            retryPrompt: userMessage,
+          }));
+          storeState.actions.setStreaming(sidNow, {
+            streamingMessageId: null,
+            streamingText: "",
+            contentBlocks: [],
+            isLoading: false,
+            isStreaming: false,
+          });
+        }
+        forceQueueModeRef.current = false;
+        setIsLoading(false);
+        setIsStreaming(false);
+        return;
+      }
+
       // Send prompt — abort/new_session now await completion, so no retry needed
       let result = await commands.piPrompt(
         piSessionIdRef.current,
@@ -6916,6 +6982,7 @@ export function StandaloneChat({
         const rawError = result.error;
         let errorMsg: string;
         let retryPrompt: string | undefined;
+        const providerError = buildProviderErrorMessage(rawError, activePreset);
 
         if (rawError.includes("already processing")) {
           errorMsg = "The AI was mid-response when your message arrived.";
@@ -6925,6 +6992,9 @@ export function StandaloneChat({
           errorMsg = provider === "native-ollama"
             ? "Ollama isn't running. Start it with: `ollama serve`"
             : "AI agent crashed — restarting automatically...";
+          retryPrompt = userMessage;
+        } else if (providerError) {
+          errorMsg = providerError;
           retryPrompt = userMessage;
         } else if (rawError.includes("not found")) {
           errorMsg = `Model "${activePreset?.model}" not found. Check your AI preset in settings.`;
@@ -6946,10 +7016,12 @@ export function StandaloneChat({
     } catch (error) {
       if (timeoutId) clearTimeout(timeoutId);
       piMessageIdRef.current = null;
+      const rawError = error instanceof Error ? error.message : "Unknown error";
+      const providerError = buildProviderErrorMessage(rawError, activePreset);
       setMessages((prev) =>
         prev.map((m) =>
           m.id === assistantMessageId
-            ? { ...m, content: `Error: ${error instanceof Error ? error.message : "Unknown error"}` }
+            ? { ...m, content: providerError || `Error: ${rawError}` }
             : m
         )
       );
