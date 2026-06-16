@@ -29,7 +29,9 @@ pub mod enhanced_mode_cache;
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
+use screenpipe_core::window_pattern::WindowPattern;
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::time::Duration;
@@ -414,6 +416,10 @@ pub struct TreeWalkerConfig {
     pub ignored_windows: Vec<String>,
     /// User-configured windows to include (whitelist — if non-empty, only these are captured).
     pub included_windows: Vec<String>,
+    /// Cached parse of `ignored_windows`, populated by `compile_patterns()`.
+    pub ignored_window_patterns: Vec<WindowPattern>,
+    /// Cached parse of `included_windows`, populated by `compile_patterns()`.
+    pub included_window_patterns: Vec<WindowPattern>,
     /// User-configured URLs to ignore (domain-level match on the focused
     /// browser tab's URL — see [`crate::url_filter::is_url_blocked`]).
     pub ignored_urls: Vec<String>,
@@ -463,6 +469,8 @@ impl Default for TreeWalkerConfig {
             element_timeout_secs: 0.2,
             ignored_windows: Vec::new(),
             included_windows: Vec::new(),
+            ignored_window_patterns: Vec::new(),
+            included_window_patterns: Vec::new(),
             ignored_urls: Vec::new(),
             monitor_x: 0.0,
             monitor_y: 0.0,
@@ -481,6 +489,30 @@ impl Default for TreeWalkerConfig {
 }
 
 impl TreeWalkerConfig {
+    /// Compile window filters once before the walker enters its hot path.
+    pub fn compile_patterns(&mut self) {
+        self.ignored_window_patterns = WindowPattern::parse_list(&self.ignored_windows);
+        self.included_window_patterns = WindowPattern::parse_list(&self.included_windows);
+    }
+
+    /// Lazily resolve parsed ignore patterns for defensive direct construction.
+    pub(crate) fn resolved_ignored(&self) -> Cow<'_, [WindowPattern]> {
+        if self.ignored_window_patterns.is_empty() && !self.ignored_windows.is_empty() {
+            Cow::Owned(WindowPattern::parse_list(&self.ignored_windows))
+        } else {
+            Cow::Borrowed(&self.ignored_window_patterns)
+        }
+    }
+
+    /// Lazily resolve parsed include patterns for defensive direct construction.
+    pub(crate) fn resolved_included(&self) -> Cow<'_, [WindowPattern]> {
+        if self.included_window_patterns.is_empty() && !self.included_windows.is_empty() {
+            Cow::Owned(WindowPattern::parse_list(&self.included_windows))
+        } else {
+            Cow::Borrowed(&self.included_window_patterns)
+        }
+    }
+
     /// Return the effective max_nodes (override if set, else default).
     pub fn effective_max_nodes(&self) -> usize {
         self.max_nodes_override.unwrap_or(self.max_nodes)
