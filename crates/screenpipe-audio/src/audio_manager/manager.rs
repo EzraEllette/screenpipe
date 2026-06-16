@@ -24,7 +24,10 @@ use whisper_rs::WhisperContext;
 
 use screenpipe_db::DatabaseManager;
 
-use super::{start_device_monitor, stop_device_monitor, AudioManagerOptions, TranscriptionMode};
+use super::{
+    start_device_monitor, stop_device_monitor, AudioCaptureMode, AudioManagerOptions,
+    TranscriptionMode,
+};
 use crate::{
     core::{
         device::{parse_audio_device, AudioDevice},
@@ -721,6 +724,7 @@ impl AudioManager {
         let audio_transcription_engine = options.transcription_engine.clone();
         let vocabulary = options.vocabulary.clone();
         let is_batch_mode = options.transcription_mode == TranscriptionMode::Batch;
+        let audio_capture_mode = options.audio_capture_mode.clone();
         let batch_max_duration_secs = options.batch_max_duration_secs;
         let filter_music = options.filter_music;
         let vad_engine = self.vad_engine.clone();
@@ -790,6 +794,26 @@ impl AudioManager {
                         crate::core::device::DeviceType::Input => rms > 0.05,
                     };
                     meeting.on_audio_activity(&audio.device.device_type, has_activity);
+                }
+
+                // Meetings-only capture: drop this chunk before it is persisted or
+                // transcribed unless a meeting / audio session is active. The detector
+                // was just fed this chunk's activity above, so a meeting that is
+                // starting still flips the session on in time. With no detector we
+                // cannot tell whether we're in a meeting, so we keep capturing rather
+                // than silently dropping everything.
+                if audio_capture_mode == AudioCaptureMode::MeetingsOnly {
+                    let in_session = meeting_detector
+                        .as_ref()
+                        .map(|m| m.is_in_audio_session())
+                        .unwrap_or(true);
+                    if !in_session {
+                        debug!(
+                            "meetings-only capture: no active meeting, dropping audio chunk from {:?}",
+                            audio.device.name
+                        );
+                        continue;
+                    }
                 }
 
                 // ALWAYS persist audio to disk immediately, before any deferral.

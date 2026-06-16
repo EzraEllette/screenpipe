@@ -2592,6 +2592,35 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
           </CardContent>
         </Card>
 
+        {/* Audio capture mode — continuous vs meetings-only */}
+        {!settings.disableAudio && (
+        <Card className="border-border bg-card">
+          <CardContent className="px-3 py-2.5">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center space-x-2.5">
+                <Mic className="h-4 w-4 text-muted-foreground shrink-0" />
+                <h3 className="text-sm font-medium text-foreground flex items-center gap-1.5">
+                  Capture audio
+                  <HelpTooltip text="“During meetings only” records and transcribes audio just while a meeting is detected — saving battery, disk, and cloud transcription cost. “Always” captures continuously, 24/7. Requires meeting detection to be on." />
+                </h3>
+              </div>
+              <Select
+                value={settings.audioCaptureMode ?? "always"}
+                onValueChange={(value) => handleSettingsChange({ audioCaptureMode: value as "always" | "meetings-only" | "disabled" }, true)}
+              >
+                <SelectTrigger className="w-[200px] h-7 text-xs">
+                  <SelectValue placeholder="Select mode" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="always">Always (continuous)</SelectItem>
+                  <SelectItem value="meetings-only">During meetings only</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          </CardContent>
+        </Card>
+        )}
+
         {/* Your Name + Train Voice — hidden when transcription is disabled */}
         {!settings.disableAudio && settings.audioTranscriptionEngine !== "disabled" && (
         <Card className="border-border bg-card">
