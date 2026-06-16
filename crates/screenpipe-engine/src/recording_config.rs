@@ -281,6 +281,17 @@ impl RecordingConfig {
                 },
                 single_language_code(&settings.languages),
                 settings.effective_user_name().map(str::to_string),
+            )
+            // Seed live-transcription keyterms from the user's custom vocabulary
+            // so live meeting notes bias toward the same names/product terms the
+            // batch path already does (measured to cut proper-noun WER sharply).
+            .with_keyterms(
+                settings
+                    .vocabulary
+                    .iter()
+                    .map(|v| v.word.clone())
+                    .filter(|w| !w.trim().is_empty())
+                    .collect(),
             ),
             audio_devices: settings.audio_devices.clone(),
             use_system_default_audio: settings.use_system_default_audio,
