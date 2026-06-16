@@ -1639,22 +1639,11 @@ fn resolve_capture_metadata(
 /// Returns `true` if this capture should be skipped (too recent).
 fn terminal_ocr_throttled(app_name: &str) -> bool {
     const INTERVAL: Duration = Duration::from_secs(30);
-    let n = app_name.to_lowercase();
-    // Mirror the app_prefers_ocr list in paired_capture.rs: terminals whose
-    // AX tree is raw buffer / window chrome and OCR is the only useful source.
-    let is_ocr_only = n.contains("wezterm")
-        || n.contains("alacritty")
-        || n.contains("kitty")
-        || n.contains("hyper")
-        || n.contains("warp");
-    // Electron editors whose AX tree is frequently empty/thin. OCR would run
-    // as a fallback on every capture otherwise — prohibitively expensive on a
-    // fullscreen Obsidian editor.
-    let is_electron_editor = n == "obsidian";
-    if !is_ocr_only && !is_electron_editor {
+    if !is_ocr_heavy_app(app_name) {
         return false;
     }
 
+    let app_key = app_name.to_lowercase();
     static LAST_CAPTURE: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
     let map = LAST_CAPTURE.get_or_init(|| Mutex::new(HashMap::new()));
     let mut guard = match map.lock() {
@@ -1663,13 +1652,40 @@ fn terminal_ocr_throttled(app_name: &str) -> bool {
         Err(_) => return false,
     };
     let now = Instant::now();
-    match guard.get(&n) {
+    match guard.get(&app_key) {
         Some(&last) if now.duration_since(last) < INTERVAL => true,
         _ => {
-            guard.insert(n, now);
+            guard.insert(app_key, now);
             false
         }
     }
+}
+
+/// Apps whose accessibility tree tends to be thin, making OCR fallback expensive.
+fn is_ocr_heavy_app(app_name: &str) -> bool {
+    contains_ascii_case_insensitive(app_name, "wezterm")
+        || contains_ascii_case_insensitive(app_name, "alacritty")
+        || contains_ascii_case_insensitive(app_name, "kitty")
+        || contains_ascii_case_insensitive(app_name, "hyper")
+        || contains_ascii_case_insensitive(app_name, "warp")
+        || app_name.eq_ignore_ascii_case("obsidian")
+}
+
+fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
+    let needle = needle.as_bytes();
+    if needle.is_empty() {
+        return true;
+    }
+    haystack
+        .as_bytes()
+        .windows(needle.len())
+        .any(|window| window.eq_ignore_ascii_case(needle))
+}
+
+fn is_lock_screen_app(app_name: &str) -> bool {
+    app_name.eq_ignore_ascii_case("loginwindow")
+        || app_name.eq_ignore_ascii_case("screensaverengine")
+        || app_name.eq_ignore_ascii_case("lockscreen")
 }
 
 /// Decide whether content dedup applies to this capture attempt.
@@ -1958,11 +1974,7 @@ async fn do_capture(
     // Also update the global SCREEN_IS_LOCKED flag so subsequent loop iterations
     // skip the screenshot entirely (saves CPU).
     if let Some(ref app) = app_name_owned {
-        let app_lower = app.to_lowercase();
-        if app_lower == "loginwindow"
-            || app_lower == "screensaverengine"
-            || app_lower == "lockscreen"
-        {
+        if is_lock_screen_app(app) {
             warn!(
                 "skipping capture: lock screen app '{}' on monitor {}",
                 app, params.monitor_id
@@ -2327,6 +2339,36 @@ mod tests {
         let config = EventDrivenCaptureConfig::default();
         assert!(config.capture_on_keystroke);
         assert!(config.capture_on_clipboard);
+    }
+
+    #[test]
+    fn ascii_contains_matches_case_insensitively() {
+        assert!(contains_ascii_case_insensitive("Warp", "warp"));
+        assert!(contains_ascii_case_insensitive(
+            "com.github.wezterm",
+            "WEZTERM"
+        ));
+        assert!(contains_ascii_case_insensitive("Alacritty", "acrit"));
+        assert!(!contains_ascii_case_insensitive(
+            "Visual Studio Code",
+            "warp"
+        ));
+    }
+
+    #[test]
+    fn ocr_heavy_app_detection_is_case_insensitive() {
+        assert!(is_ocr_heavy_app("WezTerm"));
+        assert!(is_ocr_heavy_app("com.mitchellh.ghostty.WARP"));
+        assert!(is_ocr_heavy_app("Obsidian"));
+        assert!(!is_ocr_heavy_app("Chrome"));
+    }
+
+    #[test]
+    fn lock_screen_app_detection_is_case_insensitive() {
+        assert!(is_lock_screen_app("loginwindow"));
+        assert!(is_lock_screen_app("ScreenSaverEngine"));
+        assert!(is_lock_screen_app("LOCKSCREEN"));
+        assert!(!is_lock_screen_app("Finder"));
     }
 
     #[test]
