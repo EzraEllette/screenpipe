@@ -30,6 +30,30 @@ use tokio::sync::{broadcast, watch};
 use tracing::{debug, error, info, warn};
 
 const CAPTURE_OPERATION_TIMEOUT: Duration = Duration::from_secs(15);
+const WARM_VISUAL_CHECK_INTERVAL: Duration = Duration::from_secs(5);
+const WARM_FOCUS_BACKSTOP_INTERVAL: Duration = Duration::from_secs(1);
+
+fn warm_visual_wait_duration(elapsed: Duration) -> Duration {
+    WARM_VISUAL_CHECK_INTERVAL
+        .saturating_sub(elapsed)
+        .min(WARM_FOCUS_BACKSTOP_INTERVAL)
+}
+
+async fn wait_for_warm_focus_or_timeout(
+    focus_controller: &Arc<crate::focus_aware_controller::FocusAwareController>,
+    monitor_id: u32,
+    duration: Duration,
+) {
+    if duration.is_zero() {
+        return;
+    }
+
+    let notify = focus_controller.notify_for(monitor_id);
+    tokio::select! {
+        _ = notify.notified() => {}
+        _ = tokio::time::sleep(duration) => {}
+    }
+}
 
 /// Stable configuration for a single capture invocation.
 ///
@@ -815,8 +839,10 @@ pub async fn event_driven_capture_loop(
                     // The full-rate Active path costs far more (OCR + DB +
                     // a11y tree walk) — Warm does a screenshot + 15×15 sample
                     // diff and only progresses if the diff crosses threshold.
-                    if last_warm_visual_check.elapsed() < Duration::from_secs(5) {
-                        tokio::time::sleep(Duration::from_millis(250)).await;
+                    let warm_wait = warm_visual_wait_duration(last_warm_visual_check.elapsed());
+                    if !warm_wait.is_zero() {
+                        wait_for_warm_focus_or_timeout(&focus_controller, monitor_id, warm_wait)
+                            .await;
                         continue;
                     }
                     last_warm_visual_check = Instant::now();
@@ -824,7 +850,12 @@ pub async fn event_driven_capture_loop(
                     // Without a comparer (visual_check disabled globally),
                     // we can't cheaply detect change — idle.
                     let Some(ref mut comparer) = frame_comparer else {
-                        tokio::time::sleep(Duration::from_millis(250)).await;
+                        wait_for_warm_focus_or_timeout(
+                            &focus_controller,
+                            monitor_id,
+                            warm_visual_wait_duration(Duration::ZERO),
+                        )
+                        .await;
                         continue;
                     };
 
@@ -846,13 +877,23 @@ pub async fn event_driven_capture_loop(
                                 // Fall through to normal capture path with
                                 // warm_trigger_override set.
                             } else {
-                                tokio::time::sleep(Duration::from_millis(250)).await;
+                                wait_for_warm_focus_or_timeout(
+                                    &focus_controller,
+                                    monitor_id,
+                                    warm_visual_wait_duration(Duration::ZERO),
+                                )
+                                .await;
                                 continue;
                             }
                         }
                         Err(e) => {
                             debug!("warm visual check failed on monitor {}: {}", monitor_id, e);
-                            tokio::time::sleep(Duration::from_millis(250)).await;
+                            wait_for_warm_focus_or_timeout(
+                                &focus_controller,
+                                monitor_id,
+                                warm_visual_wait_duration(Duration::ZERO),
+                            )
+                            .await;
                             continue;
                         }
                     }
@@ -2201,6 +2242,30 @@ fn is_frame_mostly_black(image: &image::DynamicImage) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn warm_visual_wait_duration_tracks_remaining_cadence_with_backstop() {
+        assert_eq!(
+            warm_visual_wait_duration(Duration::from_secs(0)),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            warm_visual_wait_duration(Duration::from_secs(2)),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            warm_visual_wait_duration(Duration::from_millis(4_750)),
+            Duration::from_millis(250)
+        );
+        assert_eq!(
+            warm_visual_wait_duration(Duration::from_secs(5)),
+            Duration::from_secs(0)
+        );
+        assert_eq!(
+            warm_visual_wait_duration(Duration::from_secs(8)),
+            Duration::from_secs(0)
+        );
+    }
 
     #[test]
     fn test_capture_trigger_as_str() {
