@@ -1133,6 +1133,17 @@ impl DatabaseManager {
         Ok(id.unwrap_or(0))
     }
 
+    /// Returns the audio_chunks row id for a given file path, or `None` if no
+    /// row exists yet. Read-only; used by the audio reconciliation sweep to
+    /// recover chunks whose initial insert was dropped under write-pool
+    /// saturation (see the pending-chunk recovery path in screenpipe-audio).
+    pub async fn find_audio_chunk_id(&self, file_path: &str) -> Result<Option<i64>, sqlx::Error> {
+        sqlx::query_scalar::<_, i64>("SELECT id FROM audio_chunks WHERE file_path = ?1")
+            .bind(file_path)
+            .fetch_optional(&self.pool)
+            .await
+    }
+
     pub async fn get_or_insert_audio_chunk(
         &self,
         file_path: &str,
