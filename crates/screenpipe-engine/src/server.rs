@@ -492,6 +492,7 @@ impl SCServer {
                                 "chunks_received": snap.chunks_received,
                                 "chunks_channel_full": snap.chunks_channel_full,
                                 "stream_timeouts": snap.stream_timeouts,
+                                "chunks_lagged": snap.chunks_lagged,
                                 "process_errors": snap.process_errors,
                                 "vad_passed": snap.vad_passed,
                                 "vad_rejected": snap.vad_rejected,

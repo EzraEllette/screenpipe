@@ -295,6 +295,10 @@ pub struct AudioPipelineHealthInfo {
     pub chunks_received: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub process_errors: Option<u64>,
+    /// Audio buffers skipped because the recorder lagged the capture channel
+    /// (silent loss). Omitted when zero.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chunks_lagged: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub audio_level_rms: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1089,6 +1093,11 @@ async fn health_check_inner(state: &Arc<AppState>) -> HealthCheckResponse {
                 // Consumer stage diagnostics
                 chunks_received: Some(audio_snap.chunks_received),
                 process_errors: Some(audio_snap.process_errors),
+                chunks_lagged: if audio_snap.chunks_lagged > 0 {
+                    Some(audio_snap.chunks_lagged)
+                } else {
+                    None
+                },
                 audio_level_rms: Some(audio_snap.audio_level_rms),
                 per_device_audio_level_rms: if per_device_levels.is_empty() {
                     None
