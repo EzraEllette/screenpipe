@@ -50,7 +50,17 @@ import {
 } from "../helpers/tauri.js";
 import { authHeaders, getLocalApiConfig } from "../helpers/api-utils.js";
 
-const canDriveOwnedBrowser = process.platform !== "linux";
+// The headless drive hosts an OFF-SCREEN background webview (owned-browser-bg-host)
+// and evals JS inside it. That needs a real window server / compositor: on GitHub's
+// hosted macOS + Windows runners (headless, virtual display) a fully off-screen
+// webview never executes JS, so `ensure_background_child` never becomes serviceable
+// and the eval returns 502 "child webview not attached". It fails 100% of CI runs
+// there yet works on a real display (where #4262 was validated), so keep the spec
+// runnable LOCALLY and skip it under CI. Linux (WebKitGTK) can't drive the owned
+// browser headlessly at all, hence the original platform guard. Making the headless
+// host CI-driveable (e.g. an on-screen-but-tiny host under the e2e feature) is a
+// follow-up on the #4262 owner.
+const canDriveOwnedBrowser = process.platform !== "linux" && !process.env.CI;
 
 const OWNED_ID = "owned-default";
 const READY_STATES = ["loading", "interactive", "complete"];
