@@ -97,6 +97,56 @@ async function postEval(
   return { status: res.status, body };
 }
 
+interface SnapshotOutcome {
+  status: number;
+  body: { tree?: string; count?: number; truncated?: boolean; title?: string; url?: string } | null;
+}
+
+/** GET /snapshot — the compact, ref-stamped page outline the agent reads. */
+async function getSnapshot(port: number, key: string | null): Promise<SnapshotOutcome> {
+  const res = await fetch(
+    `http://127.0.0.1:${port}/connections/browsers/${OWNED_ID}/snapshot`,
+    { headers: { ...authHeaders(key) } },
+  );
+  const text = await res.text().catch(() => "");
+  let body: SnapshotOutcome["body"] = null;
+  try {
+    body = text ? JSON.parse(text) : null;
+  } catch {
+    body = null;
+  }
+  return { status: res.status, body };
+}
+
+interface ActOutcome {
+  status: number;
+  body: { ok?: boolean; error?: string; ref?: string; tag?: string } | null;
+}
+
+/** POST /act — perform one deterministic action on a ref the snapshot stamped. */
+async function postAct(
+  port: number,
+  key: string | null,
+  payload: { ref: string; action: string; value?: string },
+): Promise<ActOutcome> {
+  const res = await fetch(
+    `http://127.0.0.1:${port}/connections/browsers/${OWNED_ID}/act`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json", ...authHeaders(key) },
+      body: JSON.stringify(payload),
+    },
+  );
+  const text = await res.text().catch(() => "");
+  let body: ActOutcome["body"] = null;
+  try {
+    body = text ? JSON.parse(text) : null;
+  } catch {
+    body = null;
+  }
+  return { status: res.status, body };
+}
+
 /** Read the owned browser's advertised readiness from GET /connections/browsers
  *  — the same surface the agent reads to pick a browser. */
 async function ownedBrowserReady(
@@ -194,6 +244,81 @@ describe("Owned browser — headless background drive", function () {
 
       // 7. Still advertised ready after real use.
       expect(await ownedBrowserReady(port, key)).toBe(true);
+    },
+  );
+
+  (canDriveOwnedBrowser ? it : it.skip)(
+    "snapshot stamps actionable refs and /act fills + clicks them in the real webview",
+    async () => {
+      const { port, key } = await getLocalApiConfig();
+
+      // Inject a known form into the hidden owned webview. about:blank keeps it
+      // network-free; this exercises snapshot + act against a REAL DOM with real
+      // layout, innerText, and getComputedStyle — the parts jsdom can only fake.
+      const html =
+        '<form>' +
+        '<input id="email" type="text" placeholder="Email" />' +
+        '<input id="pw" type="password" value="hunter2" />' +
+        '<button id="go" onclick="window.__sp_clicked=true">Submit Order</button>' +
+        '</form>';
+      const seed = await postEval(port, key, {
+        url: "about:blank",
+        code: `document.body.innerHTML = ${JSON.stringify(html)}; window.__sp_clicked = false; return true;`,
+      });
+      expect(seed.status).toBe(200);
+      expect(seed.body?.success).toBe(true);
+
+      // Snapshot: a compact tree with stable refs, and crucially NO password
+      // value (the leak guard) — validated against a real rendering engine.
+      const snap = await getSnapshot(port, key);
+      expect(snap.status).toBe(200);
+      const tree = String(snap.body?.tree ?? "");
+      expect((snap.body?.count ?? 0) >= 2).toBe(true);
+      expect(tree.includes("#e")).toBe(true);
+      expect(tree.includes("Submit Order")).toBe(true);
+      expect(tree.includes("hunter2")).toBe(false);
+      await expectHidden("after snapshot");
+
+      // Pull the email field's stamped ref straight off the element, then /act
+      // fill — the value must actually land in the input.
+      const emailRef = await postEval(port, key, {
+        code: "return document.getElementById('email').getAttribute('data-sp-ref');",
+      });
+      expect(/^e\d+$/.test(String(emailRef.body?.result))).toBe(true);
+
+      const fill = await postAct(port, key, {
+        ref: String(emailRef.body?.result),
+        action: "fill",
+        value: "ada@screenpi.pe",
+      });
+      expect(fill.status).toBe(200);
+      expect(fill.body?.ok).toBe(true);
+      const filled = await postEval(port, key, {
+        code: "return document.getElementById('email').value;",
+      });
+      expect(filled.body?.result).toBe("ada@screenpi.pe");
+
+      // /act click resolves the button ref and fires its handler.
+      const goRef = await postEval(port, key, {
+        code: "return document.getElementById('go').getAttribute('data-sp-ref');",
+      });
+      const click = await postAct(port, key, {
+        ref: String(goRef.body?.result),
+        action: "click",
+      });
+      expect(click.status).toBe(200);
+      expect(click.body?.ok).toBe(true);
+      const clicked = await postEval(port, key, {
+        code: "return window.__sp_clicked === true;",
+      });
+      expect(clicked.body?.result).toBe(true);
+
+      // A stale/unknown ref fails cleanly (422 + hint), never a 500.
+      const miss = await postAct(port, key, { ref: "e9999", action: "click" });
+      expect(miss.status).toBe(422);
+      expect(miss.body?.ok).toBe(false);
+
+      await expectHidden("after snapshot+act");
     },
   );
 
