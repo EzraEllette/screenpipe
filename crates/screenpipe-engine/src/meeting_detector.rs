@@ -1729,6 +1729,23 @@ fn is_browser_app(app_name: &str) -> bool {
             .any(|b| contains_case_insensitive(app_name, b))
 }
 
+/// Whether recent output audio should keep an `Ending` meeting alive.
+///
+/// `recent_output_chunk` comes from the DB (`has_recent_output_audio`), which
+/// matches *any* `(output)` audio chunk in the window — but the system-audio tap
+/// writes those continuously even while silent. On its own it therefore pins a
+/// meeting "live" forever once the call ended (controls gone, tap still running),
+/// so the meeting never auto-finalizes (it flaps Active<->Ending). We additionally
+/// require `recent_voice_activity` (RMS-gated, from the capture pipeline) so a
+/// quiet stretch lets the grace timer run out and the meeting end normally, while
+/// a genuinely audible call (tab-switched / minimized / screen-sharing) stays alive.
+fn output_audio_keeps_meeting_alive(
+    recent_output_chunk: bool,
+    recent_voice_activity: bool,
+) -> bool {
+    recent_output_chunk && recent_voice_activity
+}
+
 /// Advance the state machine based on scan results.
 ///
 /// Returns the new state plus an optional action to perform (DB insert/update).
@@ -3054,7 +3071,19 @@ pub async fn run_meeting_detection_loop(
         // native meeting apps (e.g., Zoom). Audio activity is a strong signal
         // that the user is still in the meeting even if UI controls are hidden.
         let has_output_audio = if matches!(state, MeetingState::Ending { .. }) {
-            db.has_recent_output_audio(30).await.unwrap_or(false)
+            // A recent (output) chunk alone isn't enough: the system-audio tap
+            // writes those continuously even during silence, which would keep an
+            // already-ended call "live" forever (controls gone, tap still running)
+            // and the meeting would never auto-finalize. Require RMS-gated voice
+            // activity too, so a quiet call ends on schedule but an audible one
+            // (tab-switched / minimized / screen-sharing) stays alive. No detector
+            // wired (tests / detector disabled) -> default true to preserve prior
+            // behavior.
+            let recent_output_chunk = db.has_recent_output_audio(30).await.unwrap_or(false);
+            let recent_voice_activity = detector.as_ref().map_or(true, |d| {
+                d.audio_active_within(AUDIO_GATE_WINDOW.as_millis() as u64)
+            });
+            output_audio_keeps_meeting_alive(recent_output_chunk, recent_voice_activity)
         } else {
             false
         };
@@ -3534,6 +3563,20 @@ async fn insert_new_meeting(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn output_audio_keepalive_requires_real_voice_not_just_a_chunk() {
+        // The system-audio tap writes a recent (output) chunk continuously, even
+        // during silence — that alone must NOT keep an ended call alive, or a
+        // detected meeting never auto-finalizes (flaps Active<->Ending forever).
+        assert!(!output_audio_keeps_meeting_alive(true, false));
+        // A genuinely audible call (controls hidden: tab-switch / minimize /
+        // screen-share) stays alive.
+        assert!(output_audio_keeps_meeting_alive(true, true));
+        // No recent output chunk at all -> never kept alive by this signal.
+        assert!(!output_audio_keeps_meeting_alive(false, true));
+        assert!(!output_audio_keeps_meeting_alive(false, false));
+    }
 
     // ── audio-gated scan cadence tests ─────────────────────────────────
     // These pin the CPU optimisation: with apps open but no recent audio the
