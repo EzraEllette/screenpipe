@@ -13,6 +13,8 @@ brief description of the changes in this pr.
 
 related issue: #
 
+> attach screenshots / recordings here — **never commit media into the repo.** agents/cli: `gh release upload <tag> file.png` (or `gh gist create file.png`) and paste the url. humans: just drag the file into this box — github hosts it.
+
 ## before
 
 a screen recording of the app/cli before this change

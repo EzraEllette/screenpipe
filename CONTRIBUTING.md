@@ -157,7 +157,9 @@ this section guides you through submitting an enhancement suggestion for screen 
 
 - fill in the required template
 - do not include issue numbers in the pr title
-- include screenshots and animated gifs in your pull request whenever possible.
+- include screenshots and animated gifs in your pull request whenever possible — but **never commit media files** to the repo (no screenshots, mockups, or recordings under `docs/`, `.github/`, or the repo root; they bloat git history and are never referenced by the code). host them on github and paste the url into the pr body:
+  - **agents / cli** (drag-drop is browser-only, so `gh` can't do it): `gh release upload <tag> shot.png` against a throwaway/`assets` release → link `https://github.com/screenpipe/screenpipe/releases/download/<tag>/shot.png`; or `gh gist create shot.png` and link its raw url. both render inline in markdown.
+  - **humans:** drag the file straight into the pr description — github hosts it as a `https://github.com/user-attachments/...` link.
 - follow the rust styleguides.
 - end all files with a newline.
 
