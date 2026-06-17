@@ -322,6 +322,102 @@ describe("AppEntitlementGate", () => {
     expect(gateShown).toHaveLength(1);
   });
 
+  // Fake ONLY the timer functions (leave Date real so entitlement freshness
+  // checks keep working against the wall clock).
+  const fakeTimersNoDate = () =>
+    vi.useFakeTimers({
+      toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"],
+    });
+
+  it("keeps re-verifying a still-unentitled member on a backoff instead of giving up after one check (#4161)", async () => {
+    fakeTimersNoDate();
+    try {
+      mocks.state.user = baseUser(); // signed in, not entitled → gated
+      render(<AppEntitlementGate>{protectedApp}</AppEntitlementGate>);
+
+      // First verify is immediate and uses the Stripe fallback (verify=true).
+      await vi.advanceTimersByTimeAsync(0);
+      expect(mocks.loadUser).toHaveBeenNthCalledWith(1, "tok", true);
+
+      // The old gate stopped here forever. It must keep checking so a backend
+      // grant that lands seconds later (eager/lazy enterprise upgrade, webhook)
+      // reaches the app on its own.
+      await vi.advanceTimersByTimeAsync(3_000);
+      await vi.advanceTimersByTimeAsync(6_000);
+      expect(mocks.loadUser.mock.calls.length).toBeGreaterThanOrEqual(3);
+      // Later ticks skip verify=true to spare the per-poll Stripe round-trip.
+      expect(mocks.loadUser).toHaveBeenNthCalledWith(2, "tok", false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops re-verifying the moment the member becomes entitled", async () => {
+    fakeTimersNoDate();
+    try {
+      mocks.state.user = baseUser();
+      const { rerender } = render(<AppEntitlementGate>{protectedApp}</AppEntitlementGate>);
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(3_000); // a couple of ticks
+
+      // Backend lifts the member to Pro (the eager/lazy upgrade lands).
+      mocks.state.user = baseUser({
+        app_entitled: true,
+        subscription_plan: "pro",
+        entitlement: {
+          active: true,
+          plan: "pro",
+          source: "subscription",
+          checked_at: minsAgo(1),
+          features: { app: true },
+        },
+      });
+      rerender(<AppEntitlementGate>{protectedApp}</AppEntitlementGate>);
+      await vi.advanceTimersByTimeAsync(0);
+
+      const callsWhenEntitled = mocks.loadUser.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(120_000); // 2 min later
+      expect(mocks.loadUser.mock.calls.length).toBe(callsWhenEntitled); // poll stopped
+      expect(screen.getByTestId("protected-app")).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("bounds the re-verify poll so a never-entitled session can't hammer the server", async () => {
+    fakeTimersNoDate();
+    try {
+      mocks.state.user = baseUser(); // never becomes entitled
+      render(<AppEntitlementGate>{protectedApp}</AppEntitlementGate>);
+      await vi.advanceTimersByTimeAsync(30 * 60_000); // 30 minutes
+      const total = mocks.loadUser.mock.calls.length;
+      expect(total).toBeLessThanOrEqual(12);
+      expect(total).toBeGreaterThanOrEqual(3); // but it did retry, not one-shot
+      await vi.advanceTimersByTimeAsync(30 * 60_000); // 30 more minutes
+      expect(mocks.loadUser.mock.calls.length).toBe(total); // stopped, no growth
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not background-verify when the gate is a required enterprise login (no token)", async () => {
+    fakeTimersNoDate();
+    try {
+      mocks.enterprise = {
+        isEnterprise: true,
+        hiddenSections: [],
+        needsLicenseKey: false,
+        orgName: "Acme",
+      };
+      mocks.state.user = null; // no token → enterprise-login gate, not entitlement
+      render(<AppEntitlementGate>{protectedApp}</AppEntitlementGate>);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(mocks.loadUser).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("resumes recording when access transitions to entitled", async () => {
     mocks.state.user = baseUser(); // unentitled first
     const { rerender } = render(
