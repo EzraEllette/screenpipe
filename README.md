@@ -53,6 +53,7 @@
 
 ## news
 
+- 06/10 - **we updated our license to keep screenpipe sustainable** — more funding, more shipping, better product
 - 05/29 - **we released an [alpha version of our AI PII model](https://screenpipe.github.io/screenleak/) outperforming Google, Microsoft, and OpenAI models** on computer recording data and running at 9ms on consumer device
 - 05/14 - **we joined YC S26** 
 
