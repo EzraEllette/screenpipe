@@ -95,8 +95,10 @@ const canDriveOwnedBrowser = process.platform !== "linux";
 // and disrupts the in-flight persist, so the disk write is an unreliable signal
 // — the *visible* leak is the actual reported symptom. As in the block below,
 // commands are issued from a SECOND window because attaching the child to `home`
-// destroys home's WebDriver handle. On the fixed build the foreign navigation is
-// gated, so nothing attaches and `home` survives for the block below.
+// destroys home's WebDriver handle. The foreign navigation is gated at the
+// sidebar so it never reveals; and the backend's lazy headless attach lands the
+// child on a dedicated OFF-SCREEN host window (not `home`), so `home` still
+// survives for the block below.
 const OWN_CHAT = "33333333-cccc-cccc-cccc-cccccccccccc";
 const FOREIGN_OWNER = "pipe:e2e-background-poster";
 const CHATS_DIR = join(homedir(), ".screenpipe", "chats");

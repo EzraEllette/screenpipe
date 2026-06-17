@@ -375,6 +375,23 @@ async e2eMainOverlayVisible() : Promise<boolean> {
     return await TAURI_INVOKE("e2e_main_overlay_visible");
 },
 /**
+ * E2E-only: detach and close the owned-browser child webview, resetting the
+ * singleton to its "no child attached" state. Lets
+ * `zzz-owned-browser-headless.spec.ts` establish a deterministic baseline so it
+ * can prove that a *fresh* background (headless) eval actually creates a
+ * working webview — not merely reuse one a prior spec left attached. Mirrors
+ * `e2e_owned_browser_visible`'s gating: a no-op in production binaries, only
+ * active under the `e2e` feature.
+ */
+async e2eOwnedBrowserDetach() : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("e2e_owned_browser_detach") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * E2E-only probe: whether the owned-browser native webview is currently shown.
  * Mirrors `e2e_main_overlay_visible` — internal visibility state stays hidden
  * in production binaries and is only exposed under the `e2e` feature. Used by
