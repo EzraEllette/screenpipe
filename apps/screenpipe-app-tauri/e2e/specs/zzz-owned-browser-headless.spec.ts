@@ -248,6 +248,53 @@ describe("Owned browser — headless background drive", function () {
   );
 
   (canDriveOwnedBrowser ? it : it.skip)(
+    "returns a large eval result intact — past the ~1KB document.title cap",
+    async () => {
+      const { port, key } = await getLocalApiConfig();
+
+      // Fresh headless child, sidebar never opened — the path a snapshot takes.
+      await invokeOrThrow("e2e_owned_browser_detach");
+      await browser.pause(t(400));
+      await invokeOrThrow("owned_browser_hide");
+
+      // A result far larger than the browser's ~1KB document.title cap. Before
+      // the chunked transport this truncated mid-string into invalid JSON
+      // ("parse eval result: EOF ..."); now it must round-trip byte-for-byte.
+      // Sentinels at both ends + a multi-byte char prove nothing was dropped or
+      // mangled across chunk boundaries.
+      const N = 50_000;
+      const big = await postEval(port, key, {
+        code: `return "S\\u2192" + "x".repeat(${N}) + "\\u2192E";`,
+        timeout_secs: 90,
+      });
+      expect(big.status).toBe(200);
+      expect(big.body?.success).toBe(true);
+      const text = big.body?.result as string;
+      expect(text.length).toBe(N + 4); // "S→" + N·"x" + "→E"
+      expect(text.startsWith("S→")).toBe(true);
+      expect(text.endsWith("→E")).toBe(true);
+      // The per-chunk pulls must not have popped the browser into view.
+      await expectHidden("after large eval");
+
+      // A large *structured* result (the snapshot shape) must also survive,
+      // including non-ASCII content across many chunks.
+      const M = 15_000;
+      const obj = await postEval(port, key, {
+        code: `return { tree: "\\u2192".repeat(${M}), marker: "\\u65e5\\u672c\\u8a9e", n: ${M} };`,
+        timeout_secs: 90,
+      });
+      expect(obj.status).toBe(200);
+      expect(obj.body?.success).toBe(true);
+      const r = obj.body?.result as { tree: string; marker: string; n: number };
+      expect(r.n).toBe(M);
+      expect(r.marker).toBe("日本語");
+      expect(r.tree.length).toBe(M);
+      expect([...r.tree].every((c) => c === "→")).toBe(true);
+      await expectHidden("after large structured eval");
+    },
+  );
+
+  (canDriveOwnedBrowser ? it : it.skip)(
     "snapshot stamps actionable refs and /act fills + clicks them in the real webview",
     async () => {
       const { port, key } = await getLocalApiConfig();
