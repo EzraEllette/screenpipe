@@ -32,7 +32,7 @@ use crate::{
     cache::{cache_key, RedactionCache},
     pseudonym::Pseudonymizer,
     span::TextRedactionPolicy,
-    RedactError, RedactedSpan, RedactionOutput, Redactor,
+    RedactError, RedactedSpan, RedactionMap, RedactionOutput, Redactor,
 };
 
 /// Knobs for the pipeline. All have sensible defaults.
@@ -82,6 +82,17 @@ fn apply_policy(
     }
 }
 
+/// The replacement string for one span — a stable pseudonym token when
+/// enabled (`[PERSON_1a2b3c4d5e6f]`), otherwise the static `[PERSON]`
+/// placeholder. Shared by the renderer and the [`RedactionMap`] builder
+/// so the propagated copies match `full_text` exactly.
+fn span_replacement(span: &RedactedSpan, pseudonyms: Option<&Pseudonymizer>) -> String {
+    match pseudonyms {
+        Some(p) => p.token(span.label, span.subtype.as_deref(), &span.text),
+        None => span.label.placeholder().to_string(),
+    }
+}
+
 /// Same shape as `adapters::regex::render_redacted`, kept private here
 /// to avoid widening the regex module's public surface. With a
 /// [`Pseudonymizer`] the replacement is a stable token derived from the
@@ -103,10 +114,7 @@ fn render_with_spans(
             continue;
         }
         out.push_str(&text[cursor..span.start]);
-        match pseudonyms {
-            Some(p) => out.push_str(&p.token(span.label, span.subtype.as_deref(), &span.text)),
-            None => out.push_str(span.label.placeholder()),
-        }
+        out.push_str(&span_replacement(span, pseudonyms));
         cursor = span.end;
     }
     out.push_str(&text[cursor..]);
@@ -288,6 +296,28 @@ impl Redactor for Pipeline {
         }
 
         Ok(out)
+    }
+
+    async fn redact_with_map(
+        &self,
+        text: &str,
+    ) -> Result<Option<(RedactionOutput, RedactionMap)>, RedactError> {
+        // The enclave is span-less: its detections aren't in `spans`, so a
+        // map built from this output would carry only the regex hits and
+        // under-redact the derived copies. Signal "can't propagate" so the
+        // caller redacts each copy directly. (Same carve-out as pseudonyms
+        // — see `with_pseudonyms`.)
+        if self.ai.as_ref().map(|a| a.name()) == Some("tinfoil") {
+            return Ok(None);
+        }
+        let out = self.redact(text).await?;
+        let map = RedactionMap::from_pairs(out.spans.iter().map(|s| {
+            (
+                s.text.clone(),
+                span_replacement(s, self.pseudonyms.as_deref()),
+            )
+        }));
+        Ok(Some((out, map)))
     }
 }
 

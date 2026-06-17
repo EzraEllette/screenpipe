@@ -50,6 +50,9 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"
 tempfile = { workspace = true }
 image = { workspace = true }
 tracing-subscriber = { workspace = true }
+# Integration tests implement a counting `Redactor` to assert the frame
+# full_text→accessibility propagation runs detection once (website#291).
+async-trait = { workspace = true }
 
 [[example]]
 name = "v45_phase3_smoke"
