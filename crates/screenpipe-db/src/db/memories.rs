@@ -299,7 +299,7 @@ impl DatabaseManager {
         // callers pay nothing.
         sql.push_str(&format!(
             " AND (json_array_length(?9) = 0 OR \
-             (SELECT COUNT(DISTINCT je.value) FROM json_each({tags_col}) je \
+             (SELECT COUNT(DISTINCT je.value) FROM json_each(CASE WHEN json_valid({tags_col}) THEN {tags_col} ELSE '[]' END) je \
               WHERE je.value IN (SELECT value FROM json_each(?9))) = json_array_length(?9))"
         ));
 
@@ -380,7 +380,7 @@ impl DatabaseManager {
         }
         sql.push_str(&format!(
             " AND (json_array_length(?7) = 0 OR \
-             (SELECT COUNT(DISTINCT je.value) FROM json_each({tags_col}) je \
+             (SELECT COUNT(DISTINCT je.value) FROM json_each(CASE WHEN json_valid({tags_col}) THEN {tags_col} ELSE '[]' END) je \
               WHERE je.value IN (SELECT value FROM json_each(?7))) = json_array_length(?7))"
         ));
 
@@ -400,6 +400,10 @@ impl DatabaseManager {
 
     pub async fn list_memory_tags(&self) -> Result<Vec<String>, SqlxError> {
         // Tags are stored as JSON arrays. Extract all unique tag values across all memories.
+        // Guard `json_each` against rows whose `tags` isn't valid JSON (e.g. a
+        // legacy/sync row that landed an empty string or plain text): a single
+        // malformed value makes SQLite raise "malformed JSON" and 500s the whole
+        // query. Treat non-JSON as an empty array instead. See `autocomplete_tags`.
         let rows: Vec<(String,)> = sqlx::query_as(
             "SELECT DISTINCT j.value FROM memories, json_each(CASE WHEN json_valid(memories.tags) THEN memories.tags ELSE '[]' END) j \
              WHERE j.value IS NOT NULL AND j.value != '' \
@@ -421,6 +425,12 @@ impl DatabaseManager {
         let candidate_limit = (limit + offset).clamp(1, 200);
         let search = query.trim();
 
+        // `json_each(memories.tags)` raises SQLite's "malformed JSON" runtime
+        // error if ANY single memory row carries a `tags` value that isn't a
+        // valid JSON array. Most writers serialize via serde_json, but the
+        // cloud-sync ingest path (`upsert_synced_memory`) binds the remote
+        // `tags` string verbatim, so one bad row would 500 the whole endpoint
+        // and kill tag autocomplete for everyone. Coerce non-JSON to `[]`.
         sqlx::query_as::<_, TagAutocompleteItem>(
             r#"
             WITH candidates AS (

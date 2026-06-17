@@ -181,6 +181,48 @@ async fn tag_autocomplete_query_tolerates_malformed_memory_tags() {
     assert!(tag_list.iter().any(|t| t == "shared"));
 }
 
+/// The exact-match tag filter in `list_memories` / `count_memories` runs the
+/// SAME `json_each` over `memories.tags`, but only when a `tags` filter is
+/// actually supplied (the `json_array_length(?) = 0` short-circuit skips it
+/// otherwise). A malformed row therefore 500s `GET /memories?tags=...` too —
+/// guard it the same way.
+#[tokio::test]
+async fn memory_tag_filter_tolerates_malformed_memory_tags() {
+    let db = migrated_db().await;
+
+    exec(
+        &db,
+        "INSERT INTO memories (content, tags) VALUES \
+         ('ok1', '[\"keep\"]'), \
+         ('empty', ''), \
+         ('null', NULL), \
+         ('garbage', 'not json at all'), \
+         ('ok2', '[\"keep\",\"other\"]')",
+    )
+    .await;
+
+    let tags_all = vec!["keep".to_string()];
+
+    // Must not error — both helpers `json_each` over every candidate row, so a
+    // single malformed row would raise "malformed JSON" before the guard.
+    let count = db
+        .count_memories(None, None, None, None, None, None, &tags_all)
+        .await
+        .unwrap();
+    assert_eq!(count, 2, "two memories carry the `keep` tag");
+
+    let rows = db
+        .list_memories(
+            None, None, None, None, None, None, 50, 0, None, None, &tags_all,
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 2);
+    assert!(rows
+        .iter()
+        .all(|m| m.tags.as_deref().unwrap_or("").contains("keep")));
+}
+
 #[tokio::test]
 async fn tag_autocomplete_query_survives_large_mixed_sources() {
     let db = migrated_db().await;
