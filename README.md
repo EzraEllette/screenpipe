@@ -110,7 +110,7 @@ then ask claude `what did i see in the last 5 mins?` or `summarize today convers
 - 5-10% cpu usage
 - 0.5-3gb ram
 - ~20gb storage/month
-- filters (window, app, chrome extensions, passwords, PII)
+- filters (window, app, chrome extensions, passwords, proprietary AI PII model)
 - optional encryption at rest
 - works offline
 
