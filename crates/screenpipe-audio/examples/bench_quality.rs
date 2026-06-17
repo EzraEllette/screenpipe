@@ -171,6 +171,8 @@ fn transcribe_chunked(
     let opts = audiopipe::TranscribeOptions {
         language: lang.map(|s| s.to_string()),
         word_timestamps: false,
+        keyterms: Vec::new(),
+        keyterm_boost: 0.0,
         ..Default::default()
     };
 
@@ -189,6 +191,8 @@ fn transcribe_chunked(
         let opts = audiopipe::TranscribeOptions {
             language: lang.map(|s| s.to_string()),
             word_timestamps: false,
+            keyterms: Vec::new(),
+            keyterm_boost: 0.0,
             ..Default::default()
         };
         let result = engine.transcribe_with_sample_rate(chunk, sample_rate, opts);
