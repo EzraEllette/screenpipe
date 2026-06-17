@@ -1,0 +1,276 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>screenpipe — MCP registry browser mockups</title>
+<style>
+  :root{
+    --background:#fff; --foreground:#000;
+    --card:#fff; --border:#cccccc;
+    --muted:#f5f5f5; --muted-foreground:#666666;
+    --accent:#f5f5f5; --destructive:#000;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0; padding:56px 40px 80px;
+    background:#e9e9e9;
+    font-family:-apple-system,BlinkMacSystemFont,"Inter","Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    color:var(--foreground);
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:880px;margin:0 auto;display:flex;flex-direction:column;gap:64px;}
+  .cap{font-size:13px;color:#444;margin:0 0 14px 2px;font-weight:600;letter-spacing:.01em;}
+  .cap span{color:#999;font-weight:500;}
+  .screen{background:var(--background);}
+  /* ---- generic ui ---- */
+  .card{border:1px solid var(--border);border-radius:12px;overflow:hidden;background:var(--card);}
+  .row-pad{display:flex;align-items:flex-start;padding:16px;gap:16px;}
+  .iconbox{width:40px;height:40px;border-radius:12px;background:var(--muted);display:flex;align-items:center;justify-content:center;flex:0 0 auto;}
+  .iconbox.sm{width:32px;height:32px;border-radius:8px;}
+  h3.t{font-size:14px;font-weight:600;margin:0;}
+  .pill{padding:1px 8px;font-size:11px;font-weight:500;background:#000;color:#fff;border-radius:999px;}
+  .desc{font-size:12px;color:var(--muted-foreground);line-height:1.5;margin:6px 0 12px;}
+  code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;background:var(--muted);padding:1px 4px;border-radius:4px;}
+  .hint{font-size:11px;color:var(--muted-foreground);background:rgba(245,245,245,.6);border-radius:6px;padding:8px 10px;margin-bottom:12px;line-height:1.5;}
+  .btns{display:flex;align-items:center;gap:8px;}
+  .btn{display:inline-flex;align-items:center;gap:6px;font-size:12px;height:32px;padding:0 12px;border-radius:6px;border:1px solid var(--border);background:#fff;color:#000;cursor:pointer;}
+  .btn.ghost{border-color:transparent;background:transparent;}
+  .btn.solid{background:#000;color:#fff;border-color:#000;}
+  .btn.sm{height:28px;padding:0 10px;}
+  .btn svg{width:13px;height:13px;}
+  .footbar{padding:8px 16px;background:rgba(245,245,245,.5);border-top:1px solid var(--border);display:flex;align-items:center;gap:12px;font-size:12px;color:var(--muted-foreground);}
+  /* ---- dialog ---- */
+  .dialog{border:1px solid var(--border);border-radius:10px;background:#fff;box-shadow:0 10px 40px rgba(0,0,0,.12);overflow:hidden;}
+  .dhead{display:flex;align-items:center;gap:12px;padding:16px;border-bottom:1px solid var(--border);}
+  .dhead .x{margin-left:auto;color:var(--muted-foreground);}
+  .dtitle{font-size:14px;font-weight:600;margin:0;}
+  .dsub{font-size:11px;color:var(--muted-foreground);margin:2px 0 0;}
+  .search{position:relative;margin:16px 16px 8px;}
+  .search input{width:100%;height:32px;border:1px solid var(--border);border-radius:6px;padding:0 10px 0 30px;font-size:14px;color:#000;}
+  .search input::placeholder{color:#9a9a9a;}
+  .search svg{position:absolute;left:9px;top:50%;transform:translateY(-50%);width:14px;height:14px;color:var(--muted-foreground);}
+  .list{padding:0 16px 16px;display:flex;flex-direction:column;gap:6px;}
+  .item{display:flex;align-items:flex-start;gap:12px;border:1px solid var(--border);border-radius:6px;padding:10px;}
+  .item .nm{font-size:12px;font-weight:600;}
+  .badge{padding:1px 6px;font-size:9px;font-weight:500;border:1px solid var(--border);border-radius:999px;color:var(--muted-foreground);}
+  .ns{font-size:10px;color:var(--muted-foreground);font-family:ui-monospace,Menlo,monospace;margin:2px 0 0;}
+  .it-desc{font-size:11px;color:var(--muted-foreground);line-height:1.35;margin:3px 0 0;}
+  .repo{display:inline-flex;align-items:center;gap:4px;font-size:10px;color:var(--muted-foreground);margin-top:5px;}
+  .repo svg{width:10px;height:10px;}
+  .added{display:inline-flex;align-items:center;gap:4px;font-size:10px;color:var(--muted-foreground);padding:4px 8px;}
+  .added svg{width:12px;height:12px;}
+  .loadmore{margin-top:4px;}
+  .loadmore .btn{width:100%;justify-content:center;}
+  .dfoot{padding:8px 16px;background:rgba(245,245,245,.5);border-top:1px solid var(--border);font-size:11px;color:var(--muted-foreground);}
+  /* ---- editor ---- */
+  .ebody{padding:16px;display:flex;flex-direction:column;gap:16px;}
+  .notice{display:flex;align-items:flex-start;gap:6px;font-size:11px;border:1px solid var(--border);background:rgba(245,245,245,.4);color:var(--muted-foreground);border-radius:6px;padding:10px;line-height:1.4;}
+  .notice svg{width:12px;height:12px;margin-top:1px;flex:0 0 auto;}
+  .field label{font-size:12px;display:block;margin-bottom:6px;}
+  .field input{width:100%;height:32px;border:1px solid var(--border);border-radius:6px;padding:0 10px;font-size:14px;color:#000;}
+  .field input.mono{font-family:ui-monospace,Menlo,monospace;}
+  .lbl-row{display:flex;align-items:center;justify-content:space-between;}
+  .lbl-row .tag{font-size:10px;color:var(--muted-foreground);}
+  .oauthrow{display:flex;align-items:center;gap:8px;border:1px solid var(--border);border-radius:6px;padding:8px;}
+  .adv{display:flex;align-items:center;gap:4px;font-size:12px;color:var(--muted-foreground);}
+  .adv svg{width:12px;height:12px;}
+  .chk{display:flex;align-items:center;gap:8px;font-size:12px;}
+  .chk input{width:14px;height:14px;}
+  .efoot{display:flex;align-items:center;justify-content:space-between;padding-top:4px;}
+  .ok{font-size:12px;border:1px solid #000;background:var(--accent);border-radius:6px;padding:12px;display:flex;flex-direction:column;gap:6px;}
+  .ok .hd{display:flex;align-items:center;gap:6px;font-weight:600;}
+  .ok .hd svg{width:13px;height:13px;}
+  .ok .tools{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--muted-foreground);}
+  .ok .warn{font-size:11px;color:var(--muted-foreground);}
+  .dot{width:6px;height:6px;border-radius:999px;background:#000;display:inline-block;}
+  .srvrow{display:flex;align-items:center;gap:8px;border:1px solid var(--border);border-radius:6px;padding:6px 8px;font-size:12px;}
+  .srvrow .u{color:var(--muted-foreground);font-family:ui-monospace,Menlo,monospace;font-size:10px;}
+  .srvrow .tc{margin-left:auto;font-size:10px;color:var(--muted-foreground);}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <!-- ============ SCREEN 1: ENTRY ============ -->
+  <div>
+    <p class="cap">1 · Entry point — Settings → Connections → “Custom MCP Server” <span>(new “Browse registry” button)</span></p>
+    <div class="screen" id="s1" style="max-width:560px;">
+      <div class="card">
+        <div class="row-pad">
+          <div class="iconbox">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 2v6"/><path d="M15 2v6"/><path d="M12 17.5 7.5 13a3.07 3.07 0 0 1 0-4.33L8 8h8l.5.67a3.07 3.07 0 0 1 0 4.33L12 17.5Z"/><path d="M12 22v-4.5"/></svg>
+          </div>
+          <div style="flex:1;min-width:0;">
+            <div style="display:flex;align-items:center;gap:8px;"><h3 class="t">Custom MCP Server</h3></div>
+            <p class="desc">Register MCP (Model Context Protocol) servers — browse the official registry, or add an HTTP endpoint like Brave Search, Linear, Notion, or a local stdio process like <code>uvx mcp-server-brave</code> — so pipes and chat can call their tools via <code>sp_mcp_call</code>.</p>
+            <div class="hint">No servers yet. Browse the registry to discover servers, or add one by URL like <code>https://mcp.brave.com/v1</code>.</div>
+            <div class="btns">
+              <button class="btn"><svg viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2.97 12.92A2 2 0 0 0 2 14.63v3.24a2 2 0 0 0 .97 1.71l3 1.8a2 2 0 0 0 2.06 0L12 19v-5.5l-5-3-4.03 2.42Z"/><path d="m7 16.5-4.74-2.85"/><path d="m7 16.5 5-3"/><path d="M7 16.5v5.17"/><path d="M12 13.5V19l3.97 2.38a2 2 0 0 0 2.06 0l3-1.8a2 2 0 0 0 .97-1.71v-3.24a2 2 0 0 0-.97-1.71L17 10.5l-5 3Z"/><path d="m17 16.5-5-3"/><path d="m17 16.5 4.74-2.85"/><path d="M17 16.5v5.17"/><path d="M7.97 4.42A2 2 0 0 0 7 6.13v4.37l5 3 5-3V6.13a2 2 0 0 0-.97-1.71l-3-1.8a2 2 0 0 0-2.06 0l-3 1.8Z"/><path d="M12 8 7.26 5.15"/><path d="m12 8 4.74-2.85"/><path d="M12 13.5V8"/></svg>Browse registry</button>
+              <button class="btn ghost"><svg viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M12 5v14"/></svg>Add manually</button>
+            </div>
+          </div>
+        </div>
+        <div class="footbar"><span>Supports HTTP and stdio MCP servers</span><span style="margin-left:auto;">○ disabled</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ SCREEN 2: BROWSE (RECOMMENDED, default) ============ -->
+  <div>
+    <p class="cap">2 · Browse dialog opens on <b>Recommended</b> <span>(curated vendor-official servers — before you type)</span></p>
+    <div class="screen" id="s2" style="max-width:680px;">
+      <div class="dialog">
+        <div class="dhead">
+          <div class="iconbox sm"><svg viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2.97 12.92A2 2 0 0 0 2 14.63v3.24a2 2 0 0 0 .97 1.71l3 1.8a2 2 0 0 0 2.06 0L12 19v-5.5l-5-3-4.03 2.42Z"/><path d="m7 16.5-4.74-2.85"/><path d="m7 16.5 5-3"/><path d="M7 16.5v5.17"/><path d="M12 13.5V19l3.97 2.38a2 2 0 0 0 2.06 0l3-1.8a2 2 0 0 0 .97-1.71v-3.24a2 2 0 0 0-.97-1.71L17 10.5l-5 3Z"/><path d="m17 16.5-5-3"/><path d="m17 16.5 4.74-2.85"/><path d="M17 16.5v5.17"/><path d="M7.97 4.42A2 2 0 0 0 7 6.13v4.37l5 3 5-3V6.13a2 2 0 0 0-.97-1.71l-3-1.8a2 2 0 0 0-2.06 0l-3 1.8Z"/><path d="M12 8 7.26 5.15"/><path d="m12 8 4.74-2.85"/><path d="M12 13.5V8"/></svg></div>
+          <div style="min-width:0;">
+            <p class="dtitle">Browse MCP registry</p>
+            <p class="dsub">official registry · registry.modelcontextprotocol.io</p>
+          </div>
+          <svg class="x" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+        </div>
+        <div class="search">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+          <input value="" placeholder="search servers — notion, github, postgres…" />
+        </div>
+        <div class="list">
+          <p style="font-size:10px;font-weight:500;text-transform:uppercase;letter-spacing:.05em;color:var(--muted-foreground);padding:0 2px 2px;margin:0;">Recommended</p>
+          <div class="item"><div style="flex:1;min-width:0;"><div style="display:flex;align-items:center;gap:8px;"><span class="nm">Notion</span><span class="badge">remote</span></div><p class="ns">com.notion</p><p class="it-desc">Search, read and write Notion pages and databases. OAuth sign-in.</p></div><button class="btn sm"><svg viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M12 5v14"/></svg>Add</button></div>
+          <div class="item"><div style="flex:1;min-width:0;"><div style="display:flex;align-items:center;gap:8px;"><span class="nm">Atlassian</span><span class="badge">remote</span></div><p class="ns">com.atlassian</p><p class="it-desc">Jira issues and Confluence pages across your Atlassian site. OAuth sign-in.</p></div><button class="btn sm"><svg viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M12 5v14"/></svg>Add</button></div>
+          <div class="item"><div style="flex:1;min-width:0;"><div style="display:flex;align-items:center;gap:8px;"><span class="nm">Linear</span><span class="badge">remote</span></div><p class="ns">app.linear</p><p class="it-desc">Create and manage Linear issues, projects and cycles. OAuth sign-in.</p></div><button class="btn sm"><svg viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M12 5v14"/></svg>Add</button></div>
+          <div class="item"><div style="flex:1;min-width:0;"><div style="display:flex;align-items:center;gap:8px;"><span class="nm">Monday.com</span><span class="badge">remote</span></div><p class="ns">com.monday</p><p class="it-desc">Boards, items and updates in monday.com work management. OAuth sign-in.</p></div><button class="btn sm"><svg viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M12 5v14"/></svg>Add</button></div>
+          <div class="item"><div style="flex:1;min-width:0;"><div style="display:flex;align-items:center;gap:8px;"><span class="nm">Airtable</span><span class="badge">remote</span></div><p class="ns">com.airtable</p><p class="it-desc">Read and update Airtable bases, tables and records. OAuth sign-in.</p></div><button class="btn sm"><svg viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M12 5v14"/></svg>Add</button></div>
+          <div class="item"><div style="flex:1;min-width:0;"><div style="display:flex;align-items:center;gap:8px;"><span class="nm">Stripe</span><span class="badge">remote</span></div><p class="ns">com.stripe</p><p class="it-desc">Query and manage Stripe — customers, payments, invoices, subscriptions.</p></div><button class="btn sm"><svg viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M12 5v14"/></svg>Add</button></div>
+          <div class="item"><div style="flex:1;min-width:0;"><div style="display:flex;align-items:center;gap:8px;"><span class="nm">Figma</span><span class="badge">remote</span></div><p class="ns">com.figma.mcp</p><p class="it-desc">Read Figma files, frames and design context for your designs.</p></div><button class="btn sm"><svg viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M12 5v14"/></svg>Add</button></div>
+          <p style="font-size:11px;color:var(--muted-foreground);text-align:center;padding-top:4px;margin:0;">search above to browse the full registry.</p>
+        </div>
+        <div class="dfoot">adding a server opens the editor — review its tools and auth before enabling.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ SCREEN 2b: SEARCH RESULTS ============ -->
+  <div>
+    <p class="cap">2b · Typing queries the registry live <span>(GET /mcp-servers/registry?search=notion — paginated, “added” dedupe)</span></p>
+    <div class="screen" id="s2b" style="max-width:680px;">
+      <div class="dialog">
+        <div class="dhead">
+          <div class="iconbox sm"><svg viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2.97 12.92A2 2 0 0 0 2 14.63v3.24a2 2 0 0 0 .97 1.71l3 1.8a2 2 0 0 0 2.06 0L12 19v-5.5l-5-3-4.03 2.42Z"/><path d="m7 16.5-4.74-2.85"/><path d="m7 16.5 5-3"/><path d="M7 16.5v5.17"/><path d="M12 13.5V19l3.97 2.38a2 2 0 0 0 2.06 0l3-1.8a2 2 0 0 0 .97-1.71v-3.24a2 2 0 0 0-.97-1.71L17 10.5l-5 3Z"/><path d="m17 16.5-5-3"/><path d="m17 16.5 4.74-2.85"/><path d="M17 16.5v5.17"/><path d="M7.97 4.42A2 2 0 0 0 7 6.13v4.37l5 3 5-3V6.13a2 2 0 0 0-.97-1.71l-3-1.8a2 2 0 0 0-2.06 0l-3 1.8Z"/><path d="M12 8 7.26 5.15"/><path d="m12 8 4.74-2.85"/><path d="M12 13.5V8"/></svg></div>
+          <div style="min-width:0;">
+            <p class="dtitle">Browse MCP registry</p>
+            <p class="dsub">official registry · registry.modelcontextprotocol.io</p>
+          </div>
+          <svg class="x" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+        </div>
+        <div class="search">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+          <input value="notion" />
+        </div>
+        <div class="list">
+          <div class="item">
+            <div style="flex:1;min-width:0;">
+              <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;"><span class="nm">Notion</span><span class="badge">remote</span></div>
+              <p class="ns">com.notion</p>
+              <p class="it-desc">Official Notion MCP server — search, read and write pages with OAuth sign-in.</p>
+              <span class="repo"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg>repository</span>
+            </div>
+            <span class="added"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>added</span>
+          </div>
+          <div class="item">
+            <div style="flex:1;min-width:0;">
+              <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;"><span class="nm">Smithery Notion</span><span class="badge">remote</span></div>
+              <p class="ns">ai.smithery</p>
+              <p class="it-desc">A Notion workspace is a collaborative environment where teams can organize work, manage projects, and store knowledge.</p>
+              <span class="repo"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg>repository</span>
+            </div>
+            <button class="btn sm"><svg viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M12 5v14"/></svg>Add</button>
+          </div>
+          <div class="item">
+            <div style="flex:1;min-width:0;">
+              <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;"><span class="nm">Notion</span><span class="badge">local</span></div>
+              <p class="ns">com.mcparmory</p>
+              <p class="it-desc">Create, update, and manage pages, databases, and workspace users.</p>
+              <span class="repo"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg>repository</span>
+            </div>
+            <button class="btn sm"><svg viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M12 5v14"/></svg>Add</button>
+          </div>
+          <div class="loadmore"><button class="btn">Load more</button></div>
+        </div>
+        <div class="dfoot">adding a server opens the editor — review its tools and auth before enabling.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ SCREEN 3: EDITOR PREFILLED ============ -->
+  <div>
+    <p class="cap">3 · Pick → editor opens pre-filled <span>(reuses the existing add / OAuth / test / save path)</span></p>
+    <div class="screen" id="s3" style="max-width:600px;">
+      <div class="dialog">
+        <div class="dhead"><p class="dtitle">Add MCP Server</p>
+          <svg class="x" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+        </div>
+        <div class="ebody">
+          <div class="notice"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg><span>this server needs auth — use Connect to sign in, or paste a token under manual authentication</span></div>
+          <div class="field"><label>Name</label><input value="Smithery Notion" /></div>
+          <div class="field">
+            <div class="lbl-row"><label>Server</label><span class="tag">Remote URL</span></div>
+            <input class="mono" value="https://server.smithery.ai/@smithery/notion/mcp" />
+          </div>
+          <div class="oauthrow">
+            <button class="btn sm"><svg viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><path d="m10 17 5-5-5-5"/><path d="M15 12H3"/></svg>Connect</button>
+            <span style="font-size:11px;color:var(--muted-foreground);">sign in with OAuth in the browser</span>
+          </div>
+          <div class="adv"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="transform:rotate(-90deg);"><path d="m6 9 6 6 6-6"/></svg>Manual authentication <span style="color:#000;">(1)</span></div>
+          <label class="chk"><input type="checkbox" checked /><span>Enabled — make tools available to pipes and chat</span></label>
+          <div class="efoot">
+            <button class="btn">Test connection</button>
+            <div style="display:flex;gap:8px;"><button class="btn ghost">Cancel</button><button class="btn solid">Add server</button></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ SCREEN 4: TESTED / INSTALLED ============ -->
+  <div>
+    <p class="cap">4 · Test passes → server registered <span>(tools now available to pipes &amp; chat)</span></p>
+    <div class="screen" id="s4" style="max-width:600px;">
+      <div class="dialog" style="margin-bottom:24px;">
+        <div class="dhead"><p class="dtitle">Add MCP Server</p>
+          <svg class="x" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+        </div>
+        <div class="ebody">
+          <div class="ok">
+            <div class="hd"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>Connected — 5 tools discovered</div>
+            <div class="tools">search, fetch_page, create_page, update_page, query_database</div>
+            <p class="warn">Heads up — when a pipe calls these tools they run with screenpipe’s grants. Review what each tool can do before enabling on a sensitive workspace.</p>
+          </div>
+          <div class="efoot">
+            <button class="btn">Test connection</button>
+            <div style="display:flex;gap:8px;"><button class="btn ghost">Cancel</button><button class="btn solid">Add server</button></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="row-pad">
+          <div class="iconbox"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 2v6"/><path d="M15 2v6"/><path d="M12 17.5 7.5 13a3.07 3.07 0 0 1 0-4.33L8 8h8l.5.67a3.07 3.07 0 0 1 0 4.33L12 17.5Z"/><path d="M12 22v-4.5"/></svg></div>
+          <div style="flex:1;min-width:0;">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;"><h3 class="t">Custom MCP Server</h3><span class="pill">1 server</span></div>
+            <div style="margin-bottom:12px;">
+              <div class="srvrow"><span class="dot"></span><span style="font-weight:500;">Smithery Notion</span><span class="u">server.smithery.ai/@smithery/notion/mcp</span><span class="tc">5 tools</span></div>
+            </div>
+            <div class="btns">
+              <button class="btn"><svg viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2.97 12.92A2 2 0 0 0 2 14.63v3.24a2 2 0 0 0 .97 1.71l3 1.8a2 2 0 0 0 2.06 0L12 19v-5.5l-5-3-4.03 2.42Z"/><path d="m7 16.5 5-3"/><path d="M12 13.5V19"/><path d="M12 13.5 17 10.5"/></svg>Browse registry</button>
+              <button class="btn ghost"><svg viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M12 5v14"/></svg>Add another</button>
+            </div>
+          </div>
+        </div>
+        <div class="footbar"><span>1 server available to the agent</span><span style="margin-left:auto;">● enabled</span></div>
+      </div>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>
