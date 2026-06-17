@@ -8,12 +8,17 @@ import { logModelOutcome } from '../services/model-health';
 import { isFlexEligible } from '../utils/latency';
 import { captureException } from '@sentry/cloudflare';
 
-// Auto model waterfall — open-weight Vertex MaaS picks ordered by quality
-// (free for users, low GCP burn) with a cheap Gemini safety net at the tail.
+// Auto model waterfall (INTERACTIVE) — leads with gemini-3.5-flash on the
+// STANDARD tier. Interactive flex is OFF (GEMINI_FLEX_INTERACTIVE=false) because
+// flex is best-effort latency and made user-facing chat slow; standard tier
+// gives normal low latency at higher quality than glm-5 (AA 55 vs 50). glm-5 and
+// the other free Vertex MaaS picks stay as fallbacks. Latency-tolerant traffic
+// uses AUTO_WATERFALL_BACKGROUND on the cheaper flex tier instead.
 // Exported so tests can pin that every chain entry has a MODEL_PRICING match
 // (otherwise served-model cost rows fall into the unknown-model estimate).
 export const AUTO_WATERFALL = [
-  'glm-5',            // closest Vertex match to gemini-3.5-flash (AA index 50 vs 55) at ~1/3 the output cost
+  'gemini-3.5-flash', // standard tier (interactive non-flex) — fast + higher quality than glm-5
+  'glm-5',            // free Vertex MaaS fallback
   'kimi-k2.5',
   'deepseek-v3.2',
   'glm-4.7',
@@ -451,9 +456,11 @@ export async function handleChatCompletions(
   // scopes it to Gemini attempts; a flex 429 cascades to a standard sibling.
   const flexEligible = isFlexEligible(latency, env);
 
-  // Chain selection stays keyed on latency: interactive 'auto' still leads with
-  // glm-5 (free MaaS), background swaps to the flex-first Gemini chain. Flex is
-  // applied to whichever Gemini entries the chosen chain hits, via flexEligible.
+  // Chain selection keyed on latency: interactive 'auto' leads with
+  // gemini-3.5-flash at STANDARD tier (interactive flex is off), background swaps
+  // to the flex-first Gemini chain. Flex is applied to Gemini entries only when
+  // flexEligible — background always, interactive only if GEMINI_FLEX_INTERACTIVE
+  // is left "true" (we set it "false" so interactive chat stays low-latency).
   const useBackgroundChain = latency === 'background';
 
   if (body.model === 'auto') {
