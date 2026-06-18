@@ -159,6 +159,12 @@ export interface ChatConversation {
 	 *  sidebar sort order. Persisted so that order survives app restart;
 	 *  derived from messages on first hydration if not set on disk yet. */
 	lastUserMessageAt?: number;
+	/** ms since epoch of the most recent actual message append (user or
+	 *  assistant). Drives unread detection — immune to non-content writes. */
+	lastContentAt?: number;
+	/** ms since epoch of the most recent time this chat was actually opened.
+	 *  A value of `0` means "never viewed" for persisted unread restore. */
+	lastViewedAt?: number;
 	/** Conversation type — defaults to "chat" when missing (back-compat
 	 *  with older on-disk files). See `ConversationKind`. */
 	kind?: ConversationKind;
