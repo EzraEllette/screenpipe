@@ -4520,6 +4520,10 @@ impl PipeManager {
         // obsidian-sync) are available from the pipe store instead.
         let builtins = vec![
             (
+                "automate-my-work",
+                include_str!("../../assets/pipes/automate-my-work/pipe.md"),
+            ),
+            (
                 "day-recap",
                 include_str!("../../assets/pipes/day-recap/pipe.md"),
             ),
