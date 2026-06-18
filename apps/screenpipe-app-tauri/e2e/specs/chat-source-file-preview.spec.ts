@@ -130,18 +130,23 @@ async function seedAssistantWithFileSource(
   await switchToSession(sessionId);
 }
 
-// The "N sources" footer starts collapsed; click the toggle that previews the
-// seeded file so other source footers cannot steal the click.
+// The "N sources" footer starts collapsed; click the toggle attached to the
+// seeded assistant message so other source footers cannot steal the click.
 async function expandSeededSourcesFooter(): Promise<void> {
   await browser.waitUntil(
     async () =>
       (await browser.execute(() => {
-        const button = Array.from(document.querySelectorAll("button")).find((el) => {
+        const assistantMessage = Array.from(
+          document.querySelectorAll('[data-testid="chat-message-assistant"]'),
+        ).find((el) =>
+          (el.textContent ?? "").includes("Here is what I found in the skill file"),
+        );
+        const searchRoot: ParentNode = assistantMessage ?? document;
+        const button = Array.from(searchRoot.querySelectorAll("button")).find((el) => {
           const text = el.textContent ?? "";
           return (
             el.getAttribute("aria-expanded") !== null &&
-            /\bsources?\b/i.test(text) &&
-            text.includes("e2e-preview.md")
+            /\bsources?\b/i.test(text)
           );
         });
         if (!button) return false;
