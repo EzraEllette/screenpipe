@@ -130,17 +130,20 @@ async function seedAssistantWithFileSource(
   await switchToSession(sessionId);
 }
 
-// The "N sources" footer starts collapsed; click its toggle to reveal the
-// per-source rows.
-async function expandSourcesFooter(): Promise<void> {
+// The "N sources" footer starts collapsed; click the toggle that previews the
+// seeded file so other source footers cannot steal the click.
+async function expandSeededSourcesFooter(): Promise<void> {
   await browser.waitUntil(
     async () =>
       (await browser.execute(() => {
-        const button = Array.from(document.querySelectorAll("button")).find(
-          (el) =>
+        const button = Array.from(document.querySelectorAll("button")).find((el) => {
+          const text = el.textContent ?? "";
+          return (
             el.getAttribute("aria-expanded") !== null &&
-            /\bsources?\b/i.test(el.textContent ?? ""),
-        );
+            /\bsources?\b/i.test(text) &&
+            text.includes("e2e-preview.md")
+          );
+        });
         if (!button) return false;
         if (button.getAttribute("aria-expanded") === "false") {
           (button as HTMLButtonElement).click();
@@ -150,7 +153,26 @@ async function expandSourcesFooter(): Promise<void> {
     {
       timeout: t(8_000),
       interval: 150,
-      timeoutMsg: "sources footer toggle never appeared",
+      timeoutMsg: "seeded sources footer toggle never appeared",
+    },
+  );
+}
+
+async function clickSeededFileSource(): Promise<void> {
+  await browser.waitUntil(
+    async () =>
+      (await browser.execute(() => {
+        const row = Array.from(
+          document.querySelectorAll('[data-testid="source-citation-file"]'),
+        ).find((el) => (el.textContent ?? "").includes("Read: e2e-preview.md"));
+        if (!(row instanceof HTMLButtonElement)) return false;
+        row.click();
+        return true;
+      })) as boolean,
+    {
+      timeout: t(8_000),
+      interval: 150,
+      timeoutMsg: "seeded file source row never appeared",
     },
   );
 }
@@ -184,10 +206,8 @@ describe("Chat source citations open files in the preview sidebar", function () 
     await assistant.waitForExist({ timeout: t(10_000) });
 
     // Expand the "1 source" footer and click the file card.
-    await expandSourcesFooter();
-    const fileCard = await $('[data-testid="source-citation-file"]');
-    await fileCard.waitForExist({ timeout: t(8_000) });
-    await fileCard.click();
+    await expandSeededSourcesFooter();
+    await clickSeededFileSource();
 
     // The preview sidebar opens to that file.
     const sidebar = await $('[data-testid="file-preview-sidebar"]');
