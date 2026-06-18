@@ -275,6 +275,21 @@ async function waitForOwnedBrowserNavigateReady(id: string): Promise<void> {
   );
 }
 
+async function prepareHomeConversation(conversationId: string): Promise<void> {
+  await openHomeWindow();
+  await installSessionCapture();
+  await loadChatIntoHome(conversationId);
+  await waitForActiveConversation(conversationId);
+  await waitForOwnedBrowserNavigateReady(conversationId);
+}
+
+async function openSearchCommandWindow(): Promise<void> {
+  await showWindow({ Search: { query: null } });
+  await waitForWindowHandle("search", t(10_000));
+  await browser.switchToWindow("search");
+  await browser.pause(t(800));
+}
+
 /** POST the owned-browser navigate endpoint the way a background agent/pipe
  *  does — with the `x-screenpipe-session` owner header the agent's curl shim
  *  injects. Returns the HTTP status so the caller can assert reachability. */
@@ -348,19 +363,13 @@ describe("Owned browser — per-chat navigation ownership", function () {
       // 1. Bind the home chat layer to OWN_CHAT and prove it via
       //    chat-current-session (the gate falls through on a null conversationId,
       //    so this keeps the assertion honest on the fixed build).
-      await installSessionCapture();
       writeSeedChatFile(OWN_CHAT, "(e2e) owned-browser ownership probe");
-      await loadChatIntoHome(OWN_CHAT);
-      await waitForActiveConversation(OWN_CHAT);
-      await waitForOwnedBrowserNavigateReady(OWN_CHAT);
+      await prepareHomeConversation(OWN_CHAT);
 
       // 2. Drive owned-browser commands from a SECOND window: a regression
       //    attaches the native child to `home`, destroying home's WebDriver
       //    handle, so we must not be issuing commands through it.
-      await showWindow({ Search: { query: null } });
-      await waitForWindowHandle("search", t(10_000));
-      await browser.switchToWindow("search");
-      await browser.pause(t(800));
+      await openSearchCommandWindow();
 
       // 3. Hidden baseline.
       await invokeOrThrow("owned_browser_hide");
@@ -408,16 +417,10 @@ describe("Owned browser — per-chat navigation ownership", function () {
   (canDriveOwnedBrowser ? it : it.skip)(
     "reveals the on-screen chat's own agent navigation",
     async () => {
-      await installSessionCapture();
       writeSeedChatFile(OWN_CHAT, "(e2e) owned-browser reveal probe");
-      await loadChatIntoHome(OWN_CHAT);
-      await waitForActiveConversation(OWN_CHAT);
-      await waitForOwnedBrowserNavigateReady(OWN_CHAT);
+      await prepareHomeConversation(OWN_CHAT);
 
-      await showWindow({ Search: { query: null } });
-      await waitForWindowHandle("search", t(10_000));
-      await browser.switchToWindow("search");
-      await browser.pause(t(800));
+      await openSearchCommandWindow();
 
       // Hidden baseline.
       await invokeOrThrow("owned_browser_hide");
@@ -482,7 +485,6 @@ describe("Owned browser — fast chat switching keeps pipe state out of other ch
   (canDriveOwnedBrowser ? it : it.skip)(
     "does not persist a pipe-driven browser URL into another browser chat or a plain chat during fast switching",
     async () => {
-      await installSessionCapture();
       writeSeedChatFile(
         BROWSER_CHAT_A,
         "(e2e) browser chat A",
@@ -495,9 +497,8 @@ describe("Owned browser — fast chat switching keeps pipe state out of other ch
       );
       writeSeedChatFile(PLAIN_CHAT, "(e2e) plain chat");
 
-      await loadChatIntoHome(BROWSER_CHAT_A);
-      await waitForActiveConversation(BROWSER_CHAT_A);
-      await waitForOwnedBrowserNavigateReady(BROWSER_CHAT_A);
+      await prepareHomeConversation(BROWSER_CHAT_A);
+      await openSearchCommandWindow();
       await browser.pause(t(800));
       await invokeOrThrow("owned_browser_hide");
       expect(await invokeOrThrow<boolean>("e2e_owned_browser_visible")).toBe(
@@ -506,9 +507,8 @@ describe("Owned browser — fast chat switching keeps pipe state out of other ch
 
       const { port, key } = await getLocalApiConfig();
 
-      await loadChatIntoHome(PLAIN_CHAT);
-      await waitForActiveConversation(PLAIN_CHAT);
-      await waitForOwnedBrowserNavigateReady(PLAIN_CHAT);
+      await prepareHomeConversation(PLAIN_CHAT);
+      await openSearchCommandWindow();
       const navigateStatus = await postNavigateAs(
         port,
         key,
@@ -521,23 +521,16 @@ describe("Owned browser — fast chat switching keeps pipe state out of other ch
         false,
       );
 
-      await loadChatIntoHome(BROWSER_CHAT_B);
-      await waitForActiveConversation(BROWSER_CHAT_B);
-      await waitForOwnedBrowserNavigateReady(BROWSER_CHAT_B);
-      await loadChatIntoHome(PLAIN_CHAT);
-      await waitForActiveConversation(PLAIN_CHAT);
-      await waitForOwnedBrowserNavigateReady(PLAIN_CHAT);
+      await prepareHomeConversation(BROWSER_CHAT_B);
+      await prepareHomeConversation(PLAIN_CHAT);
+      await openSearchCommandWindow();
       await postEvalWithUrlAs(port, key, FOREIGN_URL, FOREIGN_OWNER);
       await browser.pause(t(1_200));
       expect(await invokeOrThrow<boolean>("e2e_owned_browser_visible")).toBe(
         false,
       );
-      await loadChatIntoHome(BROWSER_CHAT_A);
-      await waitForActiveConversation(BROWSER_CHAT_A);
-      await waitForOwnedBrowserNavigateReady(BROWSER_CHAT_A);
-      await loadChatIntoHome(BROWSER_CHAT_B);
-      await waitForActiveConversation(BROWSER_CHAT_B);
-      await waitForOwnedBrowserNavigateReady(BROWSER_CHAT_B);
+      await prepareHomeConversation(BROWSER_CHAT_A);
+      await prepareHomeConversation(BROWSER_CHAT_B);
       await browser.pause(t(1_000));
 
       const chatA = loadChatFile(BROWSER_CHAT_A);
