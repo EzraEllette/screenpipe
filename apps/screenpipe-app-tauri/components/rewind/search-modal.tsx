@@ -1510,6 +1510,32 @@ export function SearchModal({ isOpen, onClose, onNavigateToTimestamp, embedded =
         </div>
       ) : (
         <>
+          {/* Content type filter chips — always at the top */}
+          {!isTagSearch && !isPeopleSearch && (
+            <div className="flex gap-2 mb-3">
+              {([
+                { key: "all" as ContentFilter, label: "All", icon: null },
+                { key: "screen" as ContentFilter, label: "Screen", icon: Monitor },
+                { key: "input" as ContentFilter, label: "Keyboard & Clipboard", icon: Keyboard },
+                { key: "chats" as ContentFilter, label: "Chats", icon: MessageSquare },
+              ] as const).map(({ key, label, icon: Icon }) => (
+                <button
+                  key={key}
+                  onClick={() => { setContentFilter(key); setSelectedIndex(0); setSelectedChatIndex(0); }}
+                  className={cn(
+                    "inline-flex items-center gap-1.5 px-2.5 py-1 text-xs rounded-full border transition-colors",
+                    contentFilter === key
+                      ? "bg-foreground text-background border-foreground"
+                      : "border-border text-muted-foreground hover:border-foreground/40"
+                  )}
+                >
+                  {Icon && <Icon className="w-3 h-3" />}
+                  {label}
+                </button>
+              ))}
+            </div>
+          )}
+
           {/* Empty state */}
           {showEmpty && (
             <div className="py-12 text-center text-sm text-muted-foreground">
@@ -1681,30 +1707,6 @@ export function SearchModal({ isOpen, onClose, onNavigateToTimestamp, embedded =
               </div>
             </div>
           )}
-
-          {/* Content type filter chips — always visible */}
-          <div className="flex gap-2 mb-3">
-            {([
-              { key: "all" as ContentFilter, label: "All", icon: null },
-              { key: "screen" as ContentFilter, label: "Screen", icon: Monitor },
-              { key: "input" as ContentFilter, label: "Keyboard & Clipboard", icon: Keyboard },
-              { key: "chats" as ContentFilter, label: "Chats", icon: MessageSquare },
-            ] as const).map(({ key, label, icon: Icon }) => (
-              <button
-                key={key}
-                onClick={() => { setContentFilter(key); setSelectedIndex(0); setSelectedChatIndex(0); }}
-                className={cn(
-                  "inline-flex items-center gap-1.5 px-2.5 py-1 text-xs rounded-full border transition-colors",
-                  contentFilter === key
-                    ? "bg-foreground text-background border-foreground"
-                    : "border-border text-muted-foreground hover:border-foreground/40"
-                )}
-              >
-                {Icon && <Icon className="w-3 h-3" />}
-                {label}
-              </button>
-            ))}
-          </div>
 
           {/* Inline chat section in "All" view — appears instantly (in-memory filter) while screen results load */}
           {contentFilter !== "chats" && debouncedQuery.trim().length >= 1 && filteredChats.length > 0 && !isTagSearch && !isPeopleSearch && (
