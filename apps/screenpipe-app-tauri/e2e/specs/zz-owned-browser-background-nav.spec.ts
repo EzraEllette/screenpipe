@@ -345,6 +345,29 @@ async function waitForAcceptedOwnedBrowserNavigate(
   );
 }
 
+async function waitForDroppedOwnedBrowserNavigate(
+  navigationId: string,
+): Promise<void> {
+  await browser.waitUntil(
+    async () =>
+      (await browser.execute(
+        (expectedNavigationId: string) => {
+          const last = (window as any).__e2eOwnedBrowserLastNavigate;
+          return (
+            last?.accepted === false &&
+            last?.navigationId === expectedNavigationId
+          );
+        },
+        navigationId,
+      )) as boolean,
+    {
+      timeout: t(10_000),
+      interval: 150,
+      timeoutMsg: `home browser sidebar did not drop navigation ${navigationId}`,
+    },
+  );
+}
+
 /** POST the owned-browser navigate endpoint the way a background agent/pipe
  *  does — with the `x-screenpipe-session` owner header the agent's curl shim
  *  injects. Returns the HTTP status so the caller can assert reachability. */
@@ -560,12 +583,27 @@ describe("Owned browser — fast chat switching keeps pipe state out of other ch
 
       await prepareHomeConversation(BROWSER_CHAT_B);
       await prepareHomeConversation(PLAIN_CHAT);
-      await openSearchCommandWindow();
-      await postEvalWithUrlAs(port, key, FOREIGN_URL, FOREIGN_OWNER);
-      await browser.pause(t(1_200));
-      expect(await invokeOrThrow<boolean>("e2e_owned_browser_visible")).toBe(
-        false,
-      );
+      if (canHideBackgroundDrive) {
+        await openSearchCommandWindow();
+        await postEvalWithUrlAs(port, key, FOREIGN_URL, FOREIGN_OWNER);
+        await browser.pause(t(1_200));
+        expect(await invokeOrThrow<boolean>("e2e_owned_browser_visible")).toBe(
+          false,
+        );
+      } else {
+        // Windows WebView2 cannot run hidden eval-by-url without briefly showing
+        // the owned browser. That makes the native visibility assertion
+        // destructive on the shared runner session, so cover the same ownership
+        // gate at the sidebar event boundary instead.
+        const navigationId = await emitOwnedBrowserNavigateInHome(
+          FOREIGN_URL,
+          FOREIGN_OWNER,
+        );
+        await waitForDroppedOwnedBrowserNavigate(navigationId);
+        expect(await invokeOrThrow<boolean>("e2e_owned_browser_visible")).toBe(
+          false,
+        );
+      }
       await prepareHomeConversation(BROWSER_CHAT_A);
       await prepareHomeConversation(BROWSER_CHAT_B);
       await browser.pause(t(1_000));
