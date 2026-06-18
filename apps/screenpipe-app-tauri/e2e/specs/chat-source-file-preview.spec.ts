@@ -141,14 +141,19 @@ async function expandSeededSourcesFooter(): Promise<void> {
         ).find((el) =>
           (el.textContent ?? "").includes("Here is what I found in the skill file"),
         );
-        const searchRoot: ParentNode = assistantMessage ?? document;
-        const button = Array.from(searchRoot.querySelectorAll("button")).find((el) => {
+        const sourceButtons = Array.from(document.querySelectorAll("button")).filter((el) => {
           const text = el.textContent ?? "";
-          return (
-            el.getAttribute("aria-expanded") !== null &&
-            /\bsources?\b/i.test(text)
-          );
+          return el.getAttribute("aria-expanded") !== null && /\bsources?\b/i.test(text);
         });
+        const button = assistantMessage
+          ? sourceButtons.find((el) => assistantMessage.contains(el)) ??
+            sourceButtons.find((el) =>
+              Boolean(
+                assistantMessage.compareDocumentPosition(el) &
+                Node.DOCUMENT_POSITION_FOLLOWING,
+              ),
+            )
+          : sourceButtons[0];
         if (!button) return false;
         if (button.getAttribute("aria-expanded") === "false") {
           (button as HTMLButtonElement).click();
