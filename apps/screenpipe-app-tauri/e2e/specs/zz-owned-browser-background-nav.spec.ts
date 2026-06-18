@@ -290,6 +290,61 @@ async function openSearchCommandWindow(): Promise<void> {
   await browser.pause(t(800));
 }
 
+async function emitOwnedBrowserNavigateInHome(
+  url: string,
+  owner: string,
+): Promise<string> {
+  const navigationId = `e2e-${Date.now()}`;
+  await browser.executeAsync(
+    (
+      payload: {
+        url: string;
+        owner: string;
+        navigationId: string;
+        reveal: boolean;
+      },
+      done: (v?: unknown) => void,
+    ) => {
+      (window as any).__e2eOwnedBrowserLastNavigate = null;
+      const emit = (window as any).__TAURI__?.event?.emit as
+        | ((n: string, p: unknown) => Promise<unknown>)
+        | undefined;
+      if (!emit) {
+        done();
+        return;
+      }
+      void emit("owned-browser:navigate", payload)
+        .then(() => done())
+        .catch(() => done());
+    },
+    { url, owner, navigationId, reveal: false },
+  );
+  return navigationId;
+}
+
+async function waitForAcceptedOwnedBrowserNavigate(
+  navigationId: string,
+): Promise<void> {
+  await browser.waitUntil(
+    async () =>
+      (await browser.execute(
+        (expectedNavigationId: string) => {
+          const last = (window as any).__e2eOwnedBrowserLastNavigate;
+          return (
+            last?.accepted === true &&
+            last?.navigationId === expectedNavigationId
+          );
+        },
+        navigationId,
+      )) as boolean,
+    {
+      timeout: t(10_000),
+      interval: 150,
+      timeoutMsg: `home browser sidebar did not accept navigation ${navigationId}`,
+    },
+  );
+}
+
 /** POST the owned-browser navigate endpoint the way a background agent/pipe
  *  does — with the `x-screenpipe-session` owner header the agent's curl shim
  *  injects. Returns the HTTP status so the caller can assert reachability. */
@@ -409,18 +464,16 @@ describe("Owned browser — per-chat navigation ownership", function () {
     },
   );
 
-  // Positive counterpart: the reported reveal bug. A navigation tagged with the
-  // ON-SCREEN chat's own owner MUST reveal the browser — the agent navigated but
-  // the sidebar never opened. Drives from the search window because revealing
-  // attaches the native child to `home` (which destroys home's WebDriver handle);
-  // visibility is read via the global `e2e_owned_browser_visible` probe.
+  // Positive counterpart for the ownership gate. A navigation tagged with the
+  // ON-SCREEN chat's own owner must be accepted by the home sidebar. Keep this
+  // non-destructive: a full native reveal attaches the child webview to `home`
+  // and poisons later tests that still need the home handle. The final block in
+  // this file remains the one destructive native-visibility check.
   (canDriveOwnedBrowser ? it : it.skip)(
-    "reveals the on-screen chat's own agent navigation",
+    "accepts the on-screen chat's own agent navigation",
     async () => {
       writeSeedChatFile(OWN_CHAT, "(e2e) owned-browser reveal probe");
       await prepareHomeConversation(OWN_CHAT);
-
-      await openSearchCommandWindow();
 
       // Hidden baseline.
       await invokeOrThrow("owned_browser_hide");
@@ -429,29 +482,13 @@ describe("Owned browser — per-chat navigation ownership", function () {
       );
 
       // Navigate tagged with OWN_CHAT — the agent of the chat on screen. The
-      // ownership gate must let it through and reveal the panel.
-      const { port, key } = await getLocalApiConfig();
-      const status = await postNavigateAs(port, key, OWN_URL, OWN_CHAT);
-      expect(status).toBe(200);
-
-      // Reveal is async (event → setState → ResizeObserver → set_bounds).
-      // macOS CI can deliver the Tauri event late enough that a single
-      // navigate races the sidebar listener; re-drive the same idempotent
-      // navigation while polling so the assertion targets the ownership rule,
-      // not event-listener startup timing.
-      await browser.waitUntil(
-        async () => {
-          if ((await invokeOrThrow<boolean>("e2e_owned_browser_visible")) === true) {
-            return true;
-          }
-          await postNavigateAs(port, key, OWN_URL, OWN_CHAT).catch(() => 0);
-          return (await invokeOrThrow<boolean>("e2e_owned_browser_visible")) === true;
-        },
-        {
-          timeout: t(30_000),
-          interval: 1_000,
-          timeoutMsg: "owned browser did not reveal for its own chat's navigation",
-        },
+      // ownership gate must let it through. Use reveal=false so this check does
+      // not attach the native child to `home` before the later home-dependent
+      // tests run.
+      const navigationId = await emitOwnedBrowserNavigateInHome(OWN_URL, OWN_CHAT);
+      await waitForAcceptedOwnedBrowserNavigate(navigationId);
+      expect(await invokeOrThrow<boolean>("e2e_owned_browser_visible")).toBe(
+        false,
       );
     },
   );
