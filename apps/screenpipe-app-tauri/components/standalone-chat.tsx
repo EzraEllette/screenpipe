@@ -16,14 +16,13 @@ import { pipeSessionId } from "@/lib/events/types";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger, TooltipProvider } from "@/components/ui/tooltip";
-import { useSettings, ChatMessage, ChatConversation } from "@/lib/hooks/use-settings";
+import { useSettings, ChatConversation } from "@/lib/hooks/use-settings";
 import { cn } from "@/lib/utils";
-import { Loader2, Send, Square, Settings, ExternalLink, X, ImageIcon, History, Search, Trash2, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, Plus, Copy, Check, Clock, Calendar, Paperclip, Filter, RefreshCw, GitBranch, MoreHorizontal, Pencil, Pin, Sparkles, Plug, CornerDownRight } from "lucide-react";
+import { Loader2, Send, Square, Settings, X, ImageIcon, History, Search, Trash2, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, Plus, Copy, Check, Clock, Paperclip, Filter, RefreshCw, GitBranch, MoreHorizontal, Pencil, Sparkles, CornerDownRight } from "lucide-react";
 import { SchedulePromptDialog } from "@/components/chat/schedule-prompt-dialog";
 import { PipeContextBanner } from "@/components/chat/pipe-context-banner";
 import { SourceCitationFooter } from "@/components/chat/source-citation-footer";
 import { BrowserSidebar } from "@/components/browser-sidebar";
-import { MarkdownBlock } from "@/components/chat/markdown-block";
 import { toast } from "@/components/ui/use-toast";
 import { motion, AnimatePresence } from "framer-motion";
 import { PipeAIIconLarge } from "@/components/pipe-ai-icon";
@@ -44,19 +43,6 @@ import {
   DOC_PICKER_EXTENSIONS,
   type ExtractedDoc,
 } from "@/lib/pi/extract-document";
-
-// Per-message attachment metadata. We deliberately do NOT carry the
-// extracted text here — that lives inside `content` (it's already there
-// because sendMessage folds it in for the model). The renderer reads
-// this metadata to draw an attachment card above the user
-// bubble (icon + filename + char count), keeping the bubble itself
-// clean. See the ChatMessage user-bubble render path (`attachmentsRow`).
-export type ChatAttachment = {
-  name: string;
-  ext: string;
-  charCount: number;
-  truncated: boolean;
-};
 import { commands } from "@/lib/utils/tauri";
 import { emit } from "@tauri-apps/api/event";
 import { useChatConversations } from "@/components/hooks/use-chat-conversations";
@@ -89,8 +75,8 @@ import {
   shouldHandleChatLoadConversationForWindow,
   shouldHandleChatPrefillForWindow,
 } from "@/lib/chat-utils";
-import { useAutoSuggestions, type Suggestion } from "@/lib/hooks/use-auto-suggestions";
-import { SummaryCards, type ConnectionSetupSuggestion } from "@/components/chat/summary-cards";
+import { useAutoSuggestions } from "@/lib/hooks/use-auto-suggestions";
+import { SummaryCards } from "@/components/chat/summary-cards";
 import { type CustomTemplate } from "@/lib/summary-templates";
 import {
   buildDailyLimitMessage,
@@ -109,37 +95,30 @@ import {
   preflightChatProvider,
 } from "@/lib/chat/provider-errors";
 import { buildSystemPrompt, buildConnectionsContext } from "@/lib/chat/system-prompt";
-import {
-  classifyCurl,
-  endpointFamily,
-  summarizeToolResult,
-  formatToolResult,
-  sanitizeCommand,
-  curlBodyJson,
-  curlMethod,
-  trunc,
-  sqlTables,
-  urlsInCommand,
-  isLocalScreenpipeUrl,
-  firstExternalWebTarget,
-  type WebTargetPresentation,
-} from "@/lib/chat/tool-presentation";
 import { usePipes } from "@/lib/hooks/use-pipes";
 import { localFetch, getApiBaseUrl } from "@/lib/api";
-import { CONNECTIONS_UPDATED_EVENT } from "@/lib/connections-events";
+import { connectionMentionTag } from "@/lib/chat/connection-suggestions";
 import {
-  CONNECTION_CATEGORY_BY_ID,
-  CONNECTION_HARDCODED_DESCRIPTIONS,
-  getSuggestedConnectionsForDevice,
-  normalizeConnectionCategory,
-} from "@/lib/constants/connections";
+  externalizeLargeContextIfNeeded,
+  isPastedTextDoc,
+  makePastedTextDoc,
+  pastedTextDocName,
+  PASTED_TEXT_ATTACHMENT_CHAR_THRESHOLD,
+  PASTED_TEXT_SHOW_IN_FIELD_MAX_CHARS,
+} from "@/lib/chat/large-context";
+import {
+  buildCollapsedSteerRenderItems,
+  formatWorkDuration,
+  getMessageIntentLabel,
+  isPlaceholderConversationTitle,
+  isSteeredAssistantMessage,
+} from "@/lib/chat/message-rendering";
 import {
   computeChatCitationPlan,
   formatSourceCitationsMarkdown,
   sourceCitationsFromMessage,
   type SourceCitation,
 } from "@/lib/source-citations";
-import { getFaviconUrl } from "@/components/rewind/timeline/favicon-utils";
 import { IntegrationIcon, INTEGRATION_ICON_KEYS } from "@/components/settings/connections-section";
 import {
   formatSteerShortcut,
@@ -149,35 +128,34 @@ import {
   isQueuedItemSteerShortcut,
   normalizeQueueEventPayload,
 } from "@/lib/chat-queue-controls";
+import { ImageViewerDialog, type ImageViewerState } from "@/components/chat/standalone/image-viewer-dialog";
+import { CollapsedSteerWorkRow } from "@/components/chat/standalone/collapsed-steer-work-row";
+import { ChatTitleMenu } from "@/components/chat/standalone/chat-title-menu";
+import {
+  attachmentBadge,
+  ConnectionToolIcon,
+  GridDissolveLoader,
+  MessageContent,
+  type LoaderPhase,
+} from "@/components/chat/standalone/message-content";
+import { useChatScroll } from "@/components/chat/standalone/hooks/use-chat-scroll";
+import { useChatConnections } from "@/components/chat/standalone/hooks/use-chat-connections";
+import { useChatAttachments } from "@/components/chat/standalone/hooks/use-chat-attachments";
+import { useChatMentions, type MentionSuggestion } from "@/components/chat/standalone/hooks/use-chat-mentions";
+import { usePiChatAgent } from "@/components/chat/standalone/hooks/use-pi-chat-agent";
+import type {
+  ChatAttachment,
+  ContentBlock,
+  Message,
+  OptimisticSteerPayload,
+  PendingSteerBatchItem,
+  QueuedDisplayPayload,
+  ToolCall,
+  TurnIntentRecord,
+} from "@/lib/chat/types";
 
-const MermaidDiagram = React.lazy(() =>
-  import("@/components/rewind/mermaid-diagram").then((mod) => ({
-    default: mod.MermaidDiagram,
-  }))
-);
-
-function MermaidDiagramBlock({ chart }: { chart: string }) {
-  return (
-    <React.Suspense
-      fallback={
-        <div className="my-4 text-xs text-muted-foreground">
-          rendering diagram...
-        </div>
-      }
-    >
-      <MermaidDiagram chart={chart} />
-    </React.Suspense>
-  );
-}
 // Session ID is per-conversation — set on mount (new conv) and updated on load/new.
 // Stored as a ref so event listeners always see the current value without stale closures.
-
-interface MentionSuggestion {
-  tag: string;
-  description: string;
-  category: "time" | "content" | "app" | "speaker" | "tag";
-  appName?: string;
-}
 
 const APP_SUGGESTION_LIMIT = 10;
 const TAG_SUGGESTION_LIMIT = 10;
@@ -188,394 +166,6 @@ const EMPTY_QUEUED_PROMPTS: PiQueuedPrompt[] = [];
 const POST_STREAM_SIDE_EFFECT_DELAY_MS = 1_500;
 const CHAT_RAIL_CLASS = "max-w-4xl mx-auto w-full";
 
-const CONNECTION_SUGGESTION_LIMIT = 3;
-const VISIBLE_SUGGESTION_LIMIT = 2;
-const LARGE_CONTEXT_CHAR_THRESHOLD = 160_000;
-const LARGE_CONTEXT_CHUNK_CHARS = 24_000;
-const LARGE_CONTEXT_PREVIEW_HEAD_CHARS = 3_000;
-const LARGE_CONTEXT_PREVIEW_TAIL_CHARS = 1_500;
-const LARGE_CONTEXT_PROMPT_TAG = "screenpipe-large-context";
-const PASTED_TEXT_ATTACHMENT_CHAR_THRESHOLD = 8_000;
-const PASTED_TEXT_SHOW_IN_FIELD_MAX_CHARS = 20_000;
-const PASTED_TEXT_DOC_BASE_NAME = "Pasted text";
-
-type ConnectedIntegration = {
-  id: string;
-  name: string;
-  icon?: string;
-  category?: string;
-  description?: string;
-};
-
-type ConnectionListItem = ConnectedIntegration & { connected: boolean };
-type ActivityAppItem = { name: string; count: number; app_name?: string };
-function normalizeConnectionForPlatform<T extends ConnectedIntegration>(connection: T, isWindows: boolean): T {
-  if (isWindows && connection.id === "apple-calendar") {
-    return {
-      ...connection,
-      name: "Windows Calendar",
-      icon: "windows-calendar",
-    };
-  }
-  return connection;
-}
-
-function connectionMentionTag(connection: ConnectedIntegration, isWindows: boolean) {
-  if (isWindows && connection.id === "apple-calendar") return "@windows-calendar";
-  return `@${connection.id}`;
-}
-
-type PreviewCalendarEvent = {
-  title?: string;
-  start?: string;
-  attendees?: string[];
-  isAllDay?: boolean;
-  is_all_day?: boolean;
-};
-
-const CONNECTION_READ_HINTS = [
-  "read",
-  "query",
-  "search",
-  "access",
-  "list",
-  "fetch",
-  "get ",
-  "events",
-  "notes",
-  "transcripts",
-  "tickets",
-  "issues",
-  "contacts",
-  "deals",
-  "recordings",
-];
-
-function connectionCanSupportReadSuggestion(connection: ConnectedIntegration): boolean {
-  const haystack = `${connection.id} ${connection.name} ${connection.category ?? ""} ${connection.description ?? ""}`.toLowerCase();
-  if (connection.category?.toLowerCase() === "browser") return true;
-  if (haystack.includes("calendar")) return true;
-  return CONNECTION_READ_HINTS.some((hint) => haystack.includes(hint));
-}
-
-function compactSuggestionPart(text: string, max = 48): string {
-  const clean = text.replace(/\s+/g, " ").trim();
-  if (clean.length <= max) return clean;
-  return `${clean.slice(0, max - 3).trim()}...`;
-}
-
-function personNameFromAttendee(attendee: string): string | null {
-  const raw = attendee.split("<")[0].trim() || attendee.split("@")[0].trim();
-  const local = raw.includes("@") ? raw.split("@")[0] : raw;
-  const parts = local
-    .replace(/[._-]+/g, " ")
-    .split(/\s+/)
-    .map((p) => p.trim())
-    .filter(Boolean)
-    .filter((p) => !["me", "you", "no-reply", "noreply", "calendar"].includes(p.toLowerCase()));
-  if (parts.length === 0) return null;
-  return parts
-    .slice(0, 2)
-    .map((p) => p.charAt(0).toUpperCase() + p.slice(1))
-    .join(" ");
-}
-
-function uniqueCompactList(items: string[], maxItems = 4): string[] {
-  const seen = new Set<string>();
-  const result: string[] = [];
-  for (const item of items) {
-    const key = item.toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
-    result.push(item);
-    if (result.length >= maxItems) break;
-  }
-  return result;
-}
-
-function isTomorrow(date: Date): boolean {
-  const tomorrow = new Date();
-  tomorrow.setDate(tomorrow.getDate() + 1);
-  return (
-    date.getFullYear() === tomorrow.getFullYear() &&
-    date.getMonth() === tomorrow.getMonth() &&
-    date.getDate() === tomorrow.getDate()
-  );
-}
-
-function joinNames(names: string[]): string {
-  if (names.length <= 2) return names.join(" and ");
-  return `${names.slice(0, -1).join(", ")}, and ${names[names.length - 1]}`;
-}
-
-async function fetchCalendarPreviewSuggestion(connection: ConnectedIntegration): Promise<Suggestion | null> {
-  const lower = `${connection.id} ${connection.name}`.toLowerCase();
-  const endpoint = lower.includes("google")
-    ? "/connections/google-calendar/events?hours_back=0&hours_ahead=48"
-    : "/connections/calendar/events?hours_back=0&hours_ahead=48";
-
-  try {
-    const res = await localFetch(endpoint);
-    if (!res.ok) return null;
-    const body = await res.json();
-    const rawEvents: PreviewCalendarEvent[] = Array.isArray(body) ? body : body.data ?? [];
-    const events = rawEvents
-      .filter((event) => event.start && !(event.isAllDay ?? event.is_all_day))
-      .map((event) => ({ ...event, startDate: new Date(event.start as string) }))
-      .filter((event) => Number.isFinite(event.startDate.getTime()) && event.startDate.getTime() >= Date.now() - 30 * 60 * 1000)
-      .sort((a, b) => a.startDate.getTime() - b.startDate.getTime());
-    if (events.length === 0) return null;
-
-    const tomorrowEvents = events.filter((event) => isTomorrow(event.startDate));
-    const chosen = (tomorrowEvents.length > 0 ? tomorrowEvents : events).slice(0, 3);
-    const names = uniqueCompactList(
-      chosen.flatMap((event) => (event.attendees ?? []).map(personNameFromAttendee).filter((name): name is string => Boolean(name))),
-      4
-    );
-    const titles = uniqueCompactList(
-      chosen.map((event) => event.title?.trim()).filter((title): title is string => Boolean(title && title !== "(No title)")),
-      2
-    );
-    const descriptor = names.length >= 2
-      ? `${joinNames(names)} call briefs`
-      : titles.length > 0
-        ? `${compactSuggestionPart(titles[0], 42)} brief`
-        : "meeting briefs";
-    const day = tomorrowEvents.length > 0 ? "tomorrow's" : "upcoming";
-
-    return {
-      text: `Prep ${day} ${descriptor} from ${connection.name}`,
-      preview: titles.length > 0 ? titles.join(", ") : `uses ${connection.name}`,
-      priority: 1,
-      connectionIcon: connection.icon || connection.id,
-    };
-  } catch {
-    return null;
-  }
-}
-
-function cleanEmailSubject(subject: string): string {
-  return compactSuggestionPart(
-    subject
-      .replace(/^\s*(re|fwd?):\s*/i, "")
-      .replace(/\s+/g, " ")
-      .trim(),
-    48
-  );
-}
-
-async function fetchGmailPreviewSuggestion(connection: ConnectedIntegration): Promise<Suggestion | null> {
-  try {
-    const query = encodeURIComponent("newer_than:14d (invite OR kickoff OR prep OR meeting)");
-    const listRes = await localFetch(`/connections/gmail/messages?maxResults=3&q=${query}`);
-    if (!listRes.ok) return null;
-    const listBody = await listRes.json();
-    const firstId = listBody?.data?.messages?.[0]?.id;
-    if (!firstId) return null;
-
-    const detailRes = await localFetch(`/connections/gmail/messages/${encodeURIComponent(firstId)}`);
-    if (!detailRes.ok) return null;
-    const detailBody = await detailRes.json();
-    const subject = detailBody?.data?.subject || detailBody?.data?.snippet;
-    if (!subject) return null;
-
-    return {
-      text: `Turn "${cleanEmailSubject(String(subject))}" into concrete prep notes`,
-      preview: `from ${connection.name}`,
-      priority: 2,
-      connectionIcon: connection.icon || connection.id,
-    };
-  } catch {
-    return null;
-  }
-}
-
-async function fetchConnectionPreviewSuggestions(connections: ConnectedIntegration[]): Promise<Suggestion[]> {
-  const tasks = connections.map((connection) => {
-    const lower = `${connection.id} ${connection.name}`.toLowerCase();
-    if (lower.includes("calendar")) return fetchCalendarPreviewSuggestion(connection);
-    if (lower.includes("gmail")) return fetchGmailPreviewSuggestion(connection);
-    return Promise.resolve(null);
-  });
-  const suggestions = await Promise.all(tasks);
-  return suggestions.filter((suggestion): suggestion is Suggestion => Boolean(suggestion));
-}
-
-function suggestionForConnection(connection: ConnectedIntegration): Suggestion | null {
-  if (!connectionCanSupportReadSuggestion(connection)) return null;
-
-  const id = normalizeAppKey(connection.id);
-  const name = connection.name || connection.id;
-  const lower = `${id} ${name}`.toLowerCase();
-  const base: Pick<Suggestion, "connectionIcon" | "preview" | "priority"> = {
-    connectionIcon: connection.icon || connection.id,
-    preview: `uses ${name}`,
-    priority: 2,
-  };
-
-  if (lower.includes("calendar")) {
-    return { ...base, text: `Prep upcoming meeting briefs from ${name}`, priority: 1 };
-  }
-  if (lower.includes("gmail") || lower.includes("email") || lower.includes("outlook") || lower.includes("microsoft365") || lower.includes("microsoft 365")) {
-    return { ...base, text: `Turn recent ${name} invites into concrete prep notes` };
-  }
-  if (lower.includes("docs") || lower.includes("sheets") || lower.includes("notion") || lower.includes("obsidian") || lower.includes("logseq")) {
-    return { ...base, text: `Turn recent ${name} files into a prep sheet` };
-  }
-  if (lower.includes("linear") || lower.includes("github") || lower.includes("jira") || lower.includes("trello") || lower.includes("asana") || lower.includes("clickup") || lower.includes("monday")) {
-    return { ...base, text: `Find open tasks tied to this work in ${name}` };
-  }
-  if (lower.includes("sentry")) {
-    return { ...base, text: `Find the issue driving recent ${name} events` };
-  }
-  if (lower.includes("posthog")) {
-    return { ...base, text: `Find the trend behind recent ${name} activity` };
-  }
-  if (lower.includes("hubspot") || lower.includes("salesforce") || lower.includes("intercom") || lower.includes("zendesk") || lower.includes("pipedrive")) {
-    return { ...base, text: `Prep customer call briefs from ${name}` };
-  }
-  if (lower.includes("zoom") || lower.includes("granola") || lower.includes("fireflies") || lower.includes("otter") || lower.includes("bee") || lower.includes("limitless")) {
-    return { ...base, text: `Pull recent meeting briefs from ${name}` };
-  }
-  if (connection.category?.toLowerCase() === "browser" || lower.includes("browser")) {
-    return { ...base, text: `Read the current page with ${name}` };
-  }
-  if (lower.includes("stripe") || lower.includes("quickbooks") || lower.includes("brex")) {
-    return { ...base, text: `Summarize recent ${name} data for this work` };
-  }
-
-  return { ...base, text: `Search ${name} for context on this work` };
-}
-
-function mergeConnectionSuggestions(
-  autoSuggestions: Suggestion[],
-  connections: ConnectedIntegration[],
-  previewSuggestions: Suggestion[] = [],
-  rotationSeed = 0
-): Suggestion[] {
-  const rotateVisible = (suggestions: Suggestion[]) => {
-    if (suggestions.length <= VISIBLE_SUGGESTION_LIMIT || rotationSeed <= 0) {
-      return suggestions.slice(0, VISIBLE_SUGGESTION_LIMIT);
-    }
-
-    const offset = rotationSeed % suggestions.length;
-    const rotated = [...suggestions.slice(offset), ...suggestions.slice(0, offset)];
-    return rotated.slice(0, VISIBLE_SUGGESTION_LIMIT);
-  };
-
-  const previewIcons = new Set(previewSuggestions.map((s) => s.connectionIcon).filter(Boolean));
-  const connectionSuggestions = connections
-    .filter((connection) => !previewIcons.has(connection.icon || connection.id))
-    .map(suggestionForConnection)
-    .filter((s): s is Suggestion => Boolean(s))
-    .slice(0, CONNECTION_SUGGESTION_LIMIT);
-
-  const combinedConnectionSuggestions = [...previewSuggestions, ...connectionSuggestions].slice(0, CONNECTION_SUGGESTION_LIMIT);
-  if (combinedConnectionSuggestions.length === 0) return rotateVisible(autoSuggestions);
-
-  const [first, ...rest] = autoSuggestions;
-  const merged = first
-    ? [first, ...combinedConnectionSuggestions, ...rest]
-    : combinedConnectionSuggestions;
-  const seen = new Set<string>();
-  const deduped = merged.filter((suggestion) => {
-    const key = suggestion.text.toLowerCase().replace(/\s+/g, " ").trim();
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-
-  return rotateVisible(deduped);
-}
-
-function setupDescriptionForConnection(connection: ConnectionListItem): string {
-  const lower = `${connection.id} ${connection.name} ${connection.category ?? ""}`.toLowerCase();
-  if (lower.includes("gmail") || lower.includes("email")) return "Bring email into chat";
-  if (lower.includes("slack")) return "Search team threads";
-  if (lower.includes("github")) return "Use repos and issues";
-  if (lower.includes("linear") || lower.includes("jira")) return "Track project work";
-  if (lower.includes("calendar")) return "Prep from events";
-  if (lower.includes("notion") || lower.includes("docs") || lower.includes("obsidian")) return "Search your docs";
-  if (lower.includes("browser")) return "Read current pages";
-  return connection.description ? compactSuggestionPart(connection.description, 34) : "Add more context";
-}
-
-function buildConnectionSetupSuggestions(
-  connections: ConnectionListItem[],
-  appItems: ActivityAppItem[]
-): ConnectionSetupSuggestion[] {
-  const fallbackConnectionOrder = [
-    "gmail",
-    "slack",
-    "github",
-    "github-issues",
-    "linear",
-    "google-calendar",
-    "notion",
-    "google-docs",
-    "obsidian",
-    "jira",
-    "google-sheets",
-  ];
-
-  const fallbackRank = (connection: ConnectionListItem) => {
-    const keys = [connection.id, connection.icon, connection.name]
-      .filter((key): key is string => Boolean(key))
-      .map((key) => key.toLowerCase());
-    const index = fallbackConnectionOrder.findIndex((preferred) =>
-      keys.some((key) => key === preferred || key.includes(preferred))
-    );
-    return index === -1 ? fallbackConnectionOrder.length : index;
-  };
-
-  const activityAffinity = (connection: ConnectionListItem) => {
-    const connectionText = `${connection.id} ${connection.name} ${connection.category ?? ""}`.toLowerCase();
-    const connectionParts = connectionText.split(/[\s_-]+/).filter((part) => part.length > 3);
-
-    return appItems.reduce(
-      (match, item, index) => {
-        const appText = `${item.name} ${item.app_name ?? ""}`.toLowerCase();
-        if (!appText) return match;
-
-        const isMatch =
-          appText.includes(connection.id.toLowerCase()) ||
-          appText.includes(connection.name.toLowerCase()) ||
-          connectionParts.some((part) => appText.includes(part));
-
-        if (!isMatch) return match;
-
-        return {
-          count: match.count + item.count,
-          firstSeenIndex: Math.min(match.firstSeenIndex, index),
-        };
-      },
-      { count: 0, firstSeenIndex: Number.MAX_SAFE_INTEGER }
-    );
-  };
-
-  return connections
-    .filter((connection) => !connection.connected && connection.id !== "owned-default")
-    .map((connection) => {
-      return {
-        suggestion: {
-          id: connection.id,
-          title: `Connect ${connection.name || connection.id}`,
-          description: setupDescriptionForConnection(connection),
-          icon: connection.icon || connection.id,
-        },
-        activity: activityAffinity(connection),
-        fallbackRank: fallbackRank(connection),
-      };
-    })
-    .sort((a, b) =>
-      b.activity.count - a.activity.count ||
-      a.activity.firstSeenIndex - b.activity.firstSeenIndex ||
-      a.fallbackRank - b.fallbackRank ||
-      a.suggestion.title.localeCompare(b.suggestion.title)
-    )
-    .slice(0, 2)
-    .map((entry) => entry.suggestion);
-}
 
 interface Speaker {
   id: number;
@@ -615,15 +205,6 @@ interface SearchResult {
   };
 }
 
-interface ToolCall {
-  id: string;
-  toolName: string;
-  args: Record<string, any>;
-  result?: string;
-  isError?: boolean;
-  isRunning: boolean;
-}
-
 function queuedSnapshotsEqual(a: PiQueuedPrompt[], b: PiQueuedPrompt[]): boolean {
   if (a === b) return true;
   if (a.length !== b.length) return false;
@@ -633,1675 +214,7 @@ function queuedSnapshotsEqual(a: PiQueuedPrompt[], b: PiQueuedPrompt[]): boolean
   return true;
 }
 
-type ContentBlock =
-  | { type: "text"; text: string }
-  | { type: "tool"; toolCall: ToolCall }
-  | { type: "thinking"; text: string; isThinking: boolean; durationMs?: number };
-
-interface Message {
-  id: string;
-  role: "user" | "assistant";
-  content: string; // full text for copy/history
-  displayContent?: string; // short label shown in chat (e.g. template name)
-  intent?: "steer";
-  turnIntentId?: string;
-  images?: string[]; // base64 data URLs of attached images
-  attachments?: ChatAttachment[]; // non-image files extracted to text; rendered as cards above the bubble
-  timestamp: number;
-  contentBlocks?: ContentBlock[];
-  sourceCitations?: SourceCitation[];
-  model?: string;
-  provider?: string;
-  retryPrompt?: string; // when set, renders a retry CTA on error messages
-  interruptedBySteer?: boolean;
-  steeredResponse?: boolean;
-  workDurationMs?: number; // wall-clock work duration for coalesced pipe-run assistants
-}
-
-type QueuedDisplayPayload = {
-  preview: string;
-  images: string[];
-  attachments?: ChatAttachment[];
-  displayContent?: string;
-  optimisticUserId?: string;
-  turnIntentId?: string;
-};
-
-type OptimisticSteerPayload = {
-  id: string;
-  content: string;
-  turnIntentId?: string;
-};
-
-type TurnIntentRecord = {
-  id: string;
-  sessionId: string;
-  kind: "normal" | "queued" | "steer";
-  content: string;
-  preview: string;
-  displayedUserId?: string;
-  queueId?: string;
-  createdAt: number;
-  consumedAssistantId?: string;
-};
-
-type PendingSteerBatchItem = {
-  turnIntentId: string;
-  sessionId: string;
-  content: string;
-  originalUserMessage: string;
-  interruptedAssistantId?: string;
-  images: string[];
-  attachments?: ChatAttachment[];
-  displayContent?: string;
-  optimisticUserId: string;
-  createdAt: number;
-};
-
 const TURN_INTENT_LEDGER_TTL_MS = 10 * 60 * 1000;
-
-function isPastedTextDoc(doc: Pick<ExtractedDoc, "name" | "ext">) {
-  return doc.ext === "txt" && new RegExp(`^${PASTED_TEXT_DOC_BASE_NAME}(?: \\d+)?$`).test(doc.name);
-}
-
-function pastedTextDocName(existingDocs: ExtractedDoc[]) {
-  const existingCount = existingDocs.filter(isPastedTextDoc).length;
-  return existingCount === 0
-    ? PASTED_TEXT_DOC_BASE_NAME
-    : `${PASTED_TEXT_DOC_BASE_NAME} ${existingCount + 1}`;
-}
-
-function makePastedTextDoc(text: string, name: string): ExtractedDoc {
-  return {
-    name,
-    ext: "txt",
-    text,
-    truncated: false,
-    charCount: text.length,
-  };
-}
-
-function estimateLargeContextTokens(text: string) {
-  // Claude tokenizes repeated short tokens like "x " much denser than the
-  // usual chars/4 rule. Use a conservative estimate for preflight only.
-  return Math.ceil(text.length / 2);
-}
-
-function sanitizeLargeContextFilePart(value: string) {
-  return value
-    .toLowerCase()
-    .replace(/[^a-z0-9._-]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 80) || "pasted-context";
-}
-
-function extractLargeContextTask(text: string) {
-  const trimmed = text.trim();
-  const paragraphs = trimmed
-    .split(/\n{2,}/)
-    .map((part) => part.trim())
-    .filter(Boolean);
-  const lastParagraph = paragraphs[paragraphs.length - 1] ?? "";
-  const lastParagraphTask = lastParagraph.replace(/<\/attached file>\s*$/i, "").trim();
-  if (
-    lastParagraphTask.length > 0 &&
-    lastParagraphTask.length <= 2_000 &&
-    trimmed.length - lastParagraphTask.length > LARGE_CONTEXT_CHAR_THRESHOLD
-  ) {
-    return lastParagraphTask;
-  }
-
-  const tail = trimmed.slice(-1_200).replace(/<\/attached file>\s*$/i, "").trim();
-  if (
-    tail &&
-    /\b(summarize|summarise|analyze|analyse|explain|extract|find|review|debug|fix|compare|list|what|why|how|tell|write|create|convert|translate)\b/i.test(tail)
-  ) {
-    return tail;
-  }
-
-  return "Use the attached large context to answer the user's request.";
-}
-
-function buildLargeContextPreview(text: string) {
-  if (text.length <= LARGE_CONTEXT_PREVIEW_HEAD_CHARS + LARGE_CONTEXT_PREVIEW_TAIL_CHARS) {
-    return text;
-  }
-
-  const omittedChars = text.length - LARGE_CONTEXT_PREVIEW_HEAD_CHARS - LARGE_CONTEXT_PREVIEW_TAIL_CHARS;
-  return [
-    text.slice(0, LARGE_CONTEXT_PREVIEW_HEAD_CHARS),
-    "",
-    `[... ${omittedChars} characters omitted; full input is stored on disk ...]`,
-    "",
-    text.slice(-LARGE_CONTEXT_PREVIEW_TAIL_CHARS),
-  ].join("\n");
-}
-
-async function externalizeLargeContextIfNeeded(
-  text: string,
-  sessionId: string | null,
-  taskHint?: string,
-) {
-  if (text.length <= LARGE_CONTEXT_CHAR_THRESHOLD) return null;
-
-  const task = taskHint?.trim() || extractLargeContextTask(text);
-  const createdAt = new Date().toISOString().replace(/[:.]/g, "-");
-  const sessionPart = sanitizeLargeContextFilePart(sessionId || "chat");
-  const filePart = sanitizeLargeContextFilePart(task.slice(0, 60));
-  const contextDirName = `${createdAt}-${filePart}`;
-  const fileName = "full.txt";
-  const home = await homeDir();
-  const dir = await join(home, ".screenpipe", "pi-chat", "large-context", sessionPart, contextDirName);
-  await mkdir(dir, { recursive: true });
-  const filePath = await join(dir, fileName);
-  await writeTextFile(filePath, text);
-
-  const chunksDir = await join(dir, "chunks");
-  await mkdir(chunksDir, { recursive: true });
-  const chunkCount = Math.ceil(text.length / LARGE_CONTEXT_CHUNK_CHARS);
-  const chunkDigits = Math.max(4, String(chunkCount).length);
-  const chunkPaths: string[] = [];
-  for (let i = 0; i < chunkCount; i++) {
-    const start = i * LARGE_CONTEXT_CHUNK_CHARS;
-    const end = Math.min(text.length, start + LARGE_CONTEXT_CHUNK_CHARS);
-    const chunkName = `chunk-${String(i + 1).padStart(chunkDigits, "0")}.txt`;
-    const chunkPath = await join(chunksDir, chunkName);
-    await writeTextFile(chunkPath, text.slice(start, end));
-    chunkPaths.push(chunkPath);
-  }
-
-  const estimatedTokens = estimateLargeContextTokens(text);
-  const firstChunkPath = chunkPaths[0] ?? "";
-  const lastChunkPath = chunkPaths[chunkPaths.length - 1] ?? firstChunkPath;
-  const preview = buildLargeContextPreview(text);
-  const prompt = [
-    `<${LARGE_CONTEXT_PROMPT_TAG}>`,
-    "[INPUT OFFLOADED]",
-    "The user-provided input was too large to send inline. The full input was saved to local text files and replaced with this file reference, following the same offload pattern used by agent CLIs for oversized context.",
-    `full_path: ${filePath}`,
-    `chunk_dir: ${chunksDir}`,
-    `chunk_file_format: chunk-${"1".padStart(chunkDigits, "0")}.txt through chunk-${String(chunkCount).padStart(chunkDigits, "0")}.txt`,
-    `first_chunk_path: ${firstChunkPath}`,
-    `last_chunk_path: ${lastChunkPath}`,
-    `chunk_count: ${chunkCount}`,
-    `chunk_chars: ${LARGE_CONTEXT_CHUNK_CHARS}`,
-    `characters: ${text.length}`,
-    `estimated_tokens: ${estimatedTokens}`,
-    `</${LARGE_CONTEXT_PROMPT_TAG}>`,
-    "",
-    "Inline preview:",
-    "```text",
-    preview,
-    "```",
-    "",
-    "User request:",
-    task,
-    "",
-    "Use ordinary file or shell operations on these files, not custom tools:",
-    "1. For search, use bounded grep/rg commands against full_path or chunk_dir.",
-    "2. For summaries, read chunk files one or a few at a time and combine partial summaries.",
-    "3. Do not cat or read the full_path into the conversation in one shot.",
-  ].join("\n");
-
-  return {
-    prompt,
-    displayLabel: task.length <= 240 ? task : `Large context: ${fileName}`,
-    attachment: {
-      name: "large-context.txt",
-      ext: "txt",
-      charCount: text.length,
-      truncated: false,
-    } satisfies ChatAttachment,
-  };
-}
-
-// Tool icons by name
-const TOOL_ICONS: Record<string, string> = {
-  bash: "⚡",
-  read: "📄",
-  edit: "✏️",
-  write: "📝",
-  grep: "🔍",
-  find: "🔎",
-  ls: "📁",
-};
-
-// Animation phase for the grid dissolve loader.
-type LoaderPhase = "analyzing" | "thinking" | "tool" | "streaming";
-
-// Grid dissolve loading indicator — 5x4 grid of cells with animation patterns
-// that shift based on what the model is doing. Geometric, screen-capture themed.
-function GridDissolveLoader({
-  phase = "analyzing",
-  label,
-  toolName,
-  thinkingSecs,
-}: {
-  phase?: LoaderPhase;
-  label?: string;
-  toolName?: string;
-  thinkingSecs?: number;
-}) {
-  const ROWS = 3;
-  const COLS = 5;
-  const TOTAL = ROWS * COLS;
-  const tickRef = useRef(0);
-  const [cells, setCells] = useState<boolean[]>(() =>
-    Array.from({ length: TOTAL }, () => Math.random() > 0.5)
-  );
-
-  const phaseRef = useRef(phase);
-  phaseRef.current = phase;
-
-  useEffect(() => {
-    const interval = phaseRef.current === "streaming" ? 200 : 100;
-    const id = window.setInterval(() => {
-      const p = phaseRef.current;
-      const tick = tickRef.current++;
-      setCells(() => {
-        // Screen-scan effect: a horizontal scan line sweeps top-to-bottom,
-        // lighting up cells as it passes like scanning a screen
-        const scanRow = tick % (ROWS + 1); // 0..ROWS, wraps
-        return Array.from({ length: TOTAL }, (_, i) => {
-          const row = Math.floor(i / COLS);
-          if (p === "streaming") {
-            // Minimal: only scan line visible
-            return row === scanRow % ROWS;
-          }
-          if (p === "tool") {
-            // Scan line + cells below it stay lit (filling up)
-            const fill = tick % (ROWS + 1);
-            return row <= fill || row === scanRow % ROWS;
-          }
-          // analyzing / thinking: scan line is bright, other cells flicker
-          if (row === scanRow % ROWS) return true;
-          return Math.random() > 0.6;
-        });
-      });
-    }, interval);
-    return () => window.clearInterval(id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [phase]);
-
-  const displayLabel = label ?? (
-    phase === "thinking" ? `thinking${thinkingSecs != null ? ` ${thinkingSecs}s` : ""}...` :
-    phase === "tool" ? (toolName ?? "running tool...") :
-    phase === "streaming" ? "writing..." :
-    "analyzing..."
-  );
-
-  return (
-    <div className="flex items-center gap-2">
-      <div
-        className="grid shrink-0"
-        style={{
-          gridTemplateColumns: `repeat(${COLS}, 5px)`,
-          gridTemplateRows: `repeat(${ROWS}, 5px)`,
-          gap: "1px",
-        }}
-      >
-        {cells.map((on, i) => (
-          <div
-            key={i}
-            className={cn(
-              "transition-colors duration-100",
-              on
-                ? phase === "streaming"
-                  ? "bg-foreground/40"
-                  : "bg-foreground"
-                : "bg-border/30"
-            )}
-            style={{ width: 5, height: 5 }}
-          />
-        ))}
-      </div>
-      <span className="text-[11px] font-mono text-muted-foreground tracking-wide">
-        {displayLabel}
-      </span>
-    </div>
-  );
-}
-
-// Pulls /search query params out of a curl-style bash command so the chat row
-// can show "Searched ChatGPT 'foo'" instead of the raw curl URL. Pi's pipes
-// emit these as plain bash tool calls (no MCP), with the app name encoded as
-// app_name=X in the query string — see crates/screenpipe-core/assets/pipes/.
-function extractAppFromToolCall(toolCall: ToolCall): string | undefined {
-  if (toolCall.toolName === "bash") {
-    return classifyCurl(String(toolCall.args?.command ?? ""))?.appName;
-  }
-  return undefined;
-}
-
-function extractConnectionIconFromToolCall(toolCall: ToolCall): string | undefined {
-  if (toolCall.toolName === "bash") {
-    return classifyCurl(String(toolCall.args?.command ?? ""))?.connectionIconName;
-  }
-  return undefined;
-}
-
-function extractWebTargetFromToolCall(toolCall: ToolCall): WebTargetPresentation | undefined {
-  if (toolCall.toolName === "bash") {
-    return classifyCurl(String(toolCall.args?.command ?? ""))?.webTarget;
-  }
-  return undefined;
-}
-
-// Human-friendly label for a tool call (no JSON, no raw paths)
-function friendlyToolLabel(toolCall: ToolCall): string {
-  const fileName = (p: string) => p.split("/").pop() || p;
-  switch (toolCall.toolName) {
-    case "bash": {
-      const cmd = String(toolCall.args.command ?? "");
-      const result = classifyCurl(cmd);
-      if (result) return result.label;
-      // Fallback for non-API curls / arbitrary shell — strip the auth-header
-      // boilerplate so the truncation surfaces the meaningful tail, not the
-      // 80-char "-H Authorization: Bearer $SCREENPIPE_LOCAL_API_KEY" header.
-      // Matches both the canonical and deprecated alias name.
-      const stripped = cmd
-        .replace(/^\s*curl\s+/, "curl ")
-        .replace(/\s-s\s+/g, " ")
-        .replace(/\s-H\s+['"]Authorization:\s*Bearer\s+\$?SCREENPIPE_(LOCAL_API|API_AUTH)_KEY['"]\s*/g, " ")
-        .replace(/\s-H\s+['"]Content-Type:\s*application\/json['"]\s*/g, " ")
-        .replace(/\s+/g, " ")
-        .trim();
-      const display = stripped || cmd;
-      return `Ran ${display ? `\`${display.slice(0, 60)}${display.length > 60 ? "…" : ""}\`` : "command"}`;
-    }
-    case "read":
-      return `Read ${fileName(toolCall.args.path || "")}`;
-    case "edit":
-      return `Edited ${fileName(toolCall.args.path || "")}`;
-    case "write":
-      return `Wrote ${fileName(toolCall.args.path || "")}`;
-    case "grep":
-      return `Searched for \`${toolCall.args.pattern || "pattern"}\``;
-    case "find":
-    case "ls":
-      return `Listed files`;
-    default:
-      return `${toolCall.toolName}`;
-  }
-}
-
-interface ToolDetailField {
-  label: string;
-  value: string;
-}
-
-interface BashToolDetailsPresentation {
-  title: string;
-  eyebrow: string;
-  fields: ToolDetailField[];
-  resultSummary?: string;
-  rawCommand: string;
-  rawResult?: string;
-}
-
-function bashToolDetailsPresentation(toolCall: ToolCall): BashToolDetailsPresentation | null {
-  const command = String(toolCall.args.command ?? "");
-  if (!command) return null;
-
-  const classified = classifyCurl(command);
-  const method = curlMethod(command);
-  const localUrl = urlsInCommand(command).find(isLocalScreenpipeUrl);
-  const fields: ToolDetailField[] = [];
-
-  if (!localUrl) {
-    const target = firstExternalWebTarget(command, "fetch");
-    if (!target || !classified) return null;
-    fields.push({ label: "domain", value: target.domain });
-    fields.push({ label: "method", value: method });
-    return {
-      title: classified.label,
-      eyebrow: "Web request",
-      fields,
-      resultSummary: summarizeToolResult(toolCall.result, "web"),
-      rawCommand: command,
-      rawResult: toolCall.result,
-    };
-  }
-
-  const path = localUrl.pathname.replace(/\/$/, "") || "/";
-  fields.push({ label: "endpoint", value: path });
-  fields.push({ label: "method", value: method });
-
-  const sp = localUrl.searchParams;
-  const addParam = (label: string, key: string) => {
-    const value = sp.get(key);
-    if (value) fields.push({ label, value: trunc(value, 80) });
-  };
-
-  addParam("query", "q");
-  addParam("content", "content_type");
-  addParam("app", "app_name");
-  addParam("window", "window_name");
-  addParam("limit", "limit");
-
-  const body = curlBodyJson(command);
-  if (path === "/raw_sql" && body && typeof body.query === "string") {
-    const tables = sqlTables(body.query);
-    if (tables.length > 0) fields.push({ label: "tables", value: tables.join(", ") });
-  }
-
-  if (path.startsWith("/connections/")) {
-    const connection = path.split("/")[2];
-    if (connection) fields.push({ label: "connection", value: connection });
-  }
-
-  return {
-    title: classified?.label ?? `${method} ${path}`,
-    eyebrow: endpointFamily(path),
-    fields,
-    resultSummary: summarizeToolResult(toolCall.result, path),
-    rawCommand: command,
-    rawResult: toolCall.result,
-  };
-}
-
-function BashToolDetails({ toolCall }: { toolCall: ToolCall }) {
-  const details = bashToolDetailsPresentation(toolCall);
-  if (!details) {
-    return (
-      <div className="py-1.5">
-        <ToolCodeBlock code={sanitizeCommand(String(toolCall.args.command ?? ""))} language="shell" />
-      </div>
-    );
-  }
-
-  const formattedResult = formatToolResult(details.rawResult);
-
-  return (
-    <div className="py-1.5 space-y-2">
-      <div className="rounded-md border border-border/50 bg-muted/20 px-2.5 py-2">
-        <div className="mb-1 flex min-w-0 items-center gap-1.5">
-          <span className="shrink-0 rounded border border-border/50 px-1.5 py-0.5 text-[10px] font-mono uppercase leading-none text-muted-foreground">
-            {details.eyebrow}
-          </span>
-          {details.resultSummary && (
-            <span className="min-w-0 truncate text-[11px] text-muted-foreground">
-              {details.resultSummary}
-            </span>
-          )}
-        </div>
-        <div className="text-sm font-medium text-foreground/85">{details.title}</div>
-        {details.fields.length > 0 && (
-          <div className="mt-2 flex flex-wrap gap-1">
-            {details.fields.map((field) => (
-              <span
-                key={`${field.label}:${field.value}`}
-                className="max-w-full rounded border border-border/40 bg-background/60 px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground"
-              >
-                <span className="text-muted-foreground/60">{field.label}</span>{" "}
-                <span className="text-foreground/70">{field.value}</span>
-              </span>
-            ))}
-          </div>
-        )}
-      </div>
-
-      <details className="group rounded-md border border-border/30 bg-background/40 px-2 py-1.5">
-        <summary className="cursor-pointer select-none text-[10px] font-mono uppercase tracking-wide text-muted-foreground/70 transition-colors hover:text-foreground/70">
-          technical details
-        </summary>
-        <div className="mt-2 space-y-2">
-          <ToolCodeBlock label="command" code={sanitizeCommand(details.rawCommand)} language="shell" />
-          {formattedResult && <ToolCodeBlock label="response" code={formattedResult} language="json" />}
-        </div>
-      </details>
-    </div>
-  );
-}
-
-function ToolCodeBlock({
-  code,
-  language,
-  label,
-}: {
-  code: string;
-  language: "shell" | "json";
-  label?: string;
-}) {
-  return (
-    <div className="min-w-0">
-      {label && <div className="mb-1 text-[10px] font-mono uppercase text-muted-foreground/50">{label}</div>}
-      <pre className="max-h-[220px] max-w-full overflow-auto rounded border border-border/30 bg-muted/20 p-2 text-xs leading-relaxed">
-        <code className="font-mono">
-          {language === "json" ? <HighlightedJson code={code} /> : <HighlightedShell code={code} />}
-        </code>
-      </pre>
-    </div>
-  );
-}
-
-function HighlightedShell({ code }: { code: string }) {
-  const parts = code.split(/(\s+|https?:\/\/[^\s"']+|-[A-Za-z-]+|\$[A-Z0-9_]+)/g).filter(Boolean);
-  return (
-    <>
-      {parts.map((part, index) => {
-        const className = /^https?:\/\//.test(part)
-          ? "text-cyan-700 dark:text-cyan-300"
-          : /^-[A-Za-z-]+$/.test(part)
-            ? "text-purple-700 dark:text-purple-300"
-            : /^\$[A-Z0-9_]+$/.test(part)
-              ? "text-amber-700 dark:text-amber-300"
-              : part === "curl"
-                ? "text-foreground"
-                : "text-muted-foreground";
-        return <span key={`${part}-${index}`} className={className}>{part}</span>;
-      })}
-    </>
-  );
-}
-
-function HighlightedJson({ code }: { code: string }) {
-  const parts = code.split(/("(?:\\.|[^"\\])*"\s*:|"(?:\\.|[^"\\])*"|true|false|null|-?\d+(?:\.\d+)?)/g).filter(Boolean);
-  return (
-    <>
-      {parts.map((part, index) => {
-        const className = /^".*"\s*:$/s.test(part)
-          ? "text-purple-700 dark:text-purple-300"
-          : /^"/s.test(part)
-            ? "text-emerald-700 dark:text-emerald-300"
-            : /^(true|false|null|-?\d)/.test(part)
-              ? "text-amber-700 dark:text-amber-300"
-              : "text-muted-foreground";
-        return <span key={`${part}-${index}`} className={className}>{part}</span>;
-      })}
-    </>
-  );
-}
-
-// Render friendly expanded details instead of raw JSON
-function FriendlyToolDetails({ toolCall }: { toolCall: ToolCall }) {
-  if (toolCall.toolName === "edit" && toolCall.args.old_string && toolCall.args.new_string) {
-    return (
-      <div className="py-1.5 text-xs font-mono space-y-0">
-        {String(toolCall.args.old_string).split("\n").map((line: string, i: number) => (
-          <div key={`old-${i}`} className="text-foreground/40">- {line}</div>
-        ))}
-        {String(toolCall.args.new_string).split("\n").map((line: string, i: number) => (
-          <div key={`new-${i}`} className="text-foreground/80">+ {line}</div>
-        ))}
-      </div>
-    );
-  }
-  if (toolCall.toolName === "bash" && toolCall.args.command) {
-    return <BashToolDetails toolCall={toolCall} />;
-  }
-  const entries = Object.entries(toolCall.args).filter(([k]) => k !== "path" && k !== "command");
-  if (entries.length === 0) return null;
-  return (
-    <div className="py-1.5 text-xs font-mono text-muted-foreground space-y-0">
-      {entries.map(([key, val]) => (
-        <div key={key} className="truncate">
-          <span className="text-foreground/40">{key}:</span>{" "}
-          <span className="text-foreground/70">{typeof val === "string" ? val.slice(0, 200) : JSON.stringify(val).slice(0, 200)}</span>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-// Single tool call row in the progress rail
-function ToolCallRailItem({ toolCall, isLast }: { toolCall: ToolCall; isLast: boolean }) {
-  const [expanded, setExpanded] = useState(false);
-  const label = friendlyToolLabel(toolCall);
-  const appName = extractAppFromToolCall(toolCall);
-  const connectionIconName = extractConnectionIconFromToolCall(toolCall);
-  const webTarget = extractWebTargetFromToolCall(toolCall);
-
-  return (
-    <div className="relative flex min-w-0">
-      {/* Vertical rail line */}
-      <div className="flex flex-col items-center flex-shrink-0 w-5">
-        {/* Dot */}
-        <div className="relative flex items-center justify-center w-5 h-5">
-          {connectionIconName && !toolCall.isRunning && !toolCall.isError ? (
-            <ConnectionToolIcon name={connectionIconName} />
-          ) : toolCall.isRunning ? (
-            // Pulsing hollow dot for running
-            <motion.div
-              className="w-2 h-2 border border-foreground"
-              animate={{ opacity: [1, 1, 0.3, 0.3, 1] }}
-              transition={{ duration: 1, repeat: Infinity, times: [0, 0.25, 0.25, 0.75, 0.75], ease: "linear" }}
-            />
-          ) : toolCall.isError ? (
-            // X mark for error
-            <span className="text-[10px] font-mono font-bold text-foreground leading-none">✗</span>
-          ) : (
-            // Solid dot for success
-            <motion.div
-              className="w-2 h-2 bg-foreground"
-              initial={{ scale: 0 }}
-              animate={{ scale: 1 }}
-              transition={{ duration: 0.15, ease: "easeOut" }}
-            />
-          )}
-        </div>
-        {/* Connecting line */}
-        {!isLast && (
-          <div className="w-px flex-1 bg-border" />
-        )}
-      </div>
-
-      {/* Content */}
-      <div className="flex-1 min-w-0 pb-2">
-        <button
-          onClick={() => setExpanded(!expanded)}
-          className="w-full flex items-center gap-1.5 text-left min-w-0 group py-0.5"
-        >
-          {webTarget ? (
-            <WebTargetIcon target={webTarget} sizeClass="w-3.5 h-3.5" letterClass="text-[8px]" />
-          ) : appName && !connectionIconName && (
-            <AppIcon name={appName} sizeClass="w-3.5 h-3.5" letterClass="text-[8px]" />
-          )}
-          <span className="truncate flex-1 text-xs font-mono text-foreground/70 group-hover:text-foreground transition-colors duration-150">
-            {label}
-          </span>
-          <span className="text-foreground/30 flex-shrink-0 text-[10px] font-mono group-hover:text-foreground/60 transition-colors duration-150">
-            {expanded ? "−" : "+"}
-          </span>
-        </button>
-        <AnimatePresence>
-          {expanded && (
-            <motion.div
-              initial={{ height: 0, opacity: 0 }}
-              animate={{ height: "auto", opacity: 1 }}
-              exit={{ height: 0, opacity: 0 }}
-              transition={{ duration: 0.15 }}
-              className="overflow-hidden"
-            >
-              <div className="border-l border-border ml-0 pl-3 mt-1 mb-1">
-                <FriendlyToolDetails toolCall={toolCall} />
-                {toolCall.result !== undefined && toolCall.toolName !== "bash" && (
-                  <div className="mt-1 pt-1 border-t border-border/50">
-                    <pre className={cn(
-                      "whitespace-pre-wrap break-words max-h-[300px] overflow-y-auto overflow-x-hidden max-w-full text-xs font-mono",
-                      toolCall.isError ? "text-foreground/50" : "text-foreground/60"
-                    )}>
-                      {toolCall.result}
-                    </pre>
-                  </div>
-                )}
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
-      </div>
-    </div>
-  );
-}
-
-function ThinkingBlock({ text, isThinking, durationMs, defaultExpanded = false }: { text: string; isThinking: boolean; durationMs?: number; defaultExpanded?: boolean }) {
-  const [expanded, setExpanded] = useState(defaultExpanded);
-  const [elapsed, setElapsed] = useState(0);
-  const startRef = useRef(Date.now());
-
-  useEffect(() => {
-    if (!isThinking) return;
-    const id = window.setInterval(() => setElapsed(Math.floor((Date.now() - startRef.current) / 1000)), 1000);
-    return () => window.clearInterval(id);
-  }, [isThinking]);
-
-  const seconds = isThinking ? elapsed : durationMs ? Math.round(durationMs / 1000) : 0;
-
-  return (
-    <div className="rounded-lg border border-border/30 bg-muted/20 text-xs overflow-hidden max-w-full">
-      <button
-        onClick={() => setExpanded(!expanded)}
-        className="w-full flex items-center gap-2 px-3 py-2 hover:bg-muted/40 transition-colors text-left"
-      >
-        <div className={cn("h-2 w-2 rounded-full", isThinking ? "bg-foreground/60 animate-pulse" : "bg-foreground/30")} />
-        <span className="font-mono text-muted-foreground">
-          {isThinking ? `thinking... (${seconds}s)` : `thought for ${seconds}s`}
-        </span>
-        <span className="ml-auto text-muted-foreground">{expanded ? "▾" : "▸"}</span>
-      </button>
-      {expanded && text.trim() && (
-        <div className="px-3 py-2 border-t border-border/30">
-          <div className="pl-3 border-l-2 border-border/40 text-muted-foreground font-mono whitespace-pre-wrap break-words max-h-[300px] overflow-y-auto text-[11px] leading-relaxed">
-            {text}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-// --- App stats helpers ---
-
-const APP_STAT_COLORS = [
-  "#3b82f6", "#8b5cf6", "#ec4899", "#f97316", "#14b8a6",
-  "#06b6d4", "#84cc16", "#f59e0b", "#6366f1", "#ef4444",
-];
-
-function nameToColor(name: string): string {
-  let hash = 0;
-  for (let i = 0; i < name.length; i++) {
-    hash = (hash * 31 + name.charCodeAt(i)) & 0xffffffff;
-  }
-  return APP_STAT_COLORS[Math.abs(hash) % APP_STAT_COLORS.length];
-}
-
-function formatMinutes(minutes: number): string {
-  if (minutes < 1) return "<1m";
-  if (minutes < 60) return `${Math.round(minutes)}m`;
-  const h = Math.floor(minutes / 60);
-  const m = Math.round(minutes % 60);
-  return m > 0 ? `${h}h ${m}m` : `${h}h`;
-}
-
-// Static fallback for web/SaaS apps the OS won't give us via /app-icon. Keys
-// are normalized (trim + lowercase, .app/.exe stripped). Paths point at the
-// existing assets in apps/screenpipe-app-tauri/public/images/.
-const STATIC_APP_ICONS: Record<string, string> = {
-  chatgpt: "/images/openai.png",
-  openai: "/images/openai.png",
-  claude: "/images/claude-ai.svg",
-  "claude.ai": "/images/claude-ai.svg",
-  anthropic: "/images/anthropic.png",
-  perplexity: "/images/perplexity.svg",
-  ollama: "/images/ollama.png",
-  "lm studio": "/images/lmstudio.png",
-  lmstudio: "/images/lmstudio.png",
-  msty: "/images/msty.webp",
-  anythingllm: "/images/anythingllm.png",
-  safari: "/images/safari.svg",
-  notion: "/images/notion.svg",
-  github: "/images/github.png",
-  copilot: "/images/github.png",
-  "github copilot": "/images/github.png",
-  linear: "/images/linear.svg",
-  asana: "/images/asana.svg",
-  jira: "/images/jira.png",
-  hubspot: "/images/hubspot.png",
-  monday: "/images/monday.png",
-  bitrix24: "/images/bitrix24.png",
-  financialsense: "/images/financialsense.png",
-  glean: "/images/glean.svg",
-  "google-calendar": "/images/google-calendar.svg",
-  "google calendar": "/images/google-calendar.svg",
-  "google-docs": "/images/google-docs.svg",
-  "google docs": "/images/google-docs.svg",
-  "google-sheets": "/images/google-sheets.svg",
-  "google sheets": "/images/google-sheets.svg",
-  logseq: "/images/logseq.png",
-  loops: "/images/loops.svg",
-  make: "/images/make.png",
-  n8n: "/images/n8n.png",
-  ntfy: "/images/ntfy.png",
-  pocket: "/images/pocket.png",
-  posthog: "/images/posthog.svg",
-  pushover: "/images/pushover.png",
-  quickbooks: "/images/quickbooks.svg",
-  whatsapp: "/images/whatsapp.svg",
-  resend: "/images/resend.svg",
-  limitless: "/images/limitless.svg",
-  granola: "/images/granola.png",
-  mochi: "/images/mochi.png",
-  fireflies: "/images/fireflies.png",
-  otter: "/images/otter.png",
-  bee: "/images/bee.png",
-  airtable: "/images/airtable.png",
-  apple: "/images/apple.svg",
-  "apple-calendar": "/images/apple.svg",
-  screenpipe: "/images/screenpipe.png",
-};
-
-function normalizeAppKey(name: string): string {
-  return name.trim().toLowerCase().replace(/\.app$|\.exe$/i, "");
-}
-
-function AppIcon({
-  name,
-  sizeClass = "w-5 h-5",
-  letterClass = "text-[10px]",
-}: { name: string; sizeClass?: string; letterClass?: string }) {
-  const color = nameToColor(name);
-  const [iconFailed, setIconFailed] = React.useState(false);
-  const staticPath = STATIC_APP_ICONS[normalizeAppKey(name)];
-  const iconUrl = staticPath ?? `http://localhost:11435/app-icon?name=${encodeURIComponent(name)}`;
-  return (
-    <div className={cn("rounded-sm flex-shrink-0 flex items-center justify-center overflow-hidden", sizeClass)}>
-      {iconFailed ? (
-        <span
-          className={cn("w-full h-full flex items-center justify-center font-semibold text-white rounded-sm", letterClass)}
-          style={{ backgroundColor: color }}
-        >
-          {name.charAt(0).toUpperCase()}
-        </span>
-      ) : (
-        // eslint-disable-next-line @next/next/no-img-element
-        <img
-          src={iconUrl}
-          alt={name}
-          className="w-full h-full object-contain"
-          onError={() => setIconFailed(true)}
-        />
-      )}
-    </div>
-  );
-}
-
-function WebTargetIcon({
-  target,
-  sizeClass = "w-5 h-5",
-  letterClass = "text-[10px]",
-}: { target: WebTargetPresentation; sizeClass?: string; letterClass?: string }) {
-  const color = nameToColor(target.domain);
-  const [iconFailed, setIconFailed] = React.useState(false);
-  return (
-    <div
-      className={cn("rounded-sm flex-shrink-0 flex items-center justify-center overflow-hidden bg-background", sizeClass)}
-      title={target.label}
-    >
-      {iconFailed ? (
-        <span
-          className={cn("w-full h-full flex items-center justify-center font-semibold text-white rounded-sm", letterClass)}
-          style={{ backgroundColor: color }}
-        >
-          {target.domain.charAt(0).toUpperCase()}
-        </span>
-      ) : (
-        // eslint-disable-next-line @next/next/no-img-element
-        <img
-          src={getFaviconUrl(target.domain)}
-          alt={target.domain}
-          className="w-full h-full object-contain"
-          onError={() => setIconFailed(true)}
-        />
-      )}
-    </div>
-  );
-}
-
-function ConnectionToolIcon({ name }: { name: string }) {
-  const key = normalizeAppKey(name);
-  if (key === "connections") {
-    return <Plug className="w-3.5 h-3.5 text-foreground/70" aria-label="connections" />;
-  }
-  if (key === "windows-calendar") {
-    return <Calendar className="w-3.5 h-3.5 text-muted-foreground" aria-label="Windows Calendar" />;
-  }
-  if (key === "gmail") {
-    return (
-      <svg viewBox="0 0 999.517 749.831" className="w-3.5 h-3.5" aria-label="Gmail">
-        <path fill="#4285F4" d="M68.149 749.831h159.014V363.654L0 193.282v488.4C0 719.391 30.553 749.831 68.149 749.831"/>
-        <path fill="#34A853" d="M772.354 749.831h159.014c37.709 0 68.149-30.553 68.149-68.149v-488.4L772.354 363.654"/>
-        <path fill="#FBBC04" d="M772.354 68.342v295.312l227.163-170.372V102.417c0-84.277-96.203-132.322-163.557-81.779"/>
-        <path fill="#EA4335" d="M227.163 363.654V68.342l272.595 204.447 272.595-204.447v295.312L499.758 568.1"/>
-        <path fill="#C5221F" d="M0 102.417v90.865l227.163 170.372V68.342L163.557 20.638C96.09-29.906 0 18.139 0 102.417"/>
-      </svg>
-    );
-  }
-  if (key === "microsoft365" || key === "microsoft-365" || key === "office365" || key === "outlook") {
-    return (
-      <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" aria-label="Microsoft 365">
-        <path fill="#F25022" d="M1 1h10v10H1z"/>
-        <path fill="#7FBA00" d="M13 1h10v10H13z"/>
-        <path fill="#00A4EF" d="M1 13h10v10H1z"/>
-        <path fill="#FFB900" d="M13 13h10v10H13z"/>
-      </svg>
-    );
-  }
-  if (key === "calcom" || key === "cal.com") {
-    return (
-      <svg viewBox="0 0 24 24" className="w-3.5 h-3.5 text-foreground" fill="currentColor" aria-label="Cal.com">
-        <path d="M2.408 14.488C1.035 14.488 0 13.4 0 12.058c0-1.346.982-2.443 2.408-2.443.758 0 1.282.233 1.691.765l-.66.55a1.343 1.343 0 0 0-1.03-.442c-.93 0-1.44.711-1.44 1.57 0 .86.559 1.557 1.44 1.557.413 0 .765-.147 1.043-.443l.651.573c-.391.51-.929.743-1.695.743zM6.948 10.913h.89v3.49h-.89v-.51c-.185.362-.493.604-1.083.604-.943 0-1.695-.82-1.695-1.826 0-1.007.752-1.825 1.695-1.825.585 0 .898.241 1.083.604zm.026 1.758c0-.546-.374-.998-.964-.998-.568 0-.938.457-.938.998 0 .528.37.998.938.998.586 0 .964-.456.964-.998zM8.467 9.503h.89v4.895h-.89zM9.752 13.937a.53.53 0 0 1 .542-.528c.313 0 .533.242.533.528a.527.527 0 0 1-.533.537.534.534 0 0 1-.542-.537zM14.23 13.839c-.33.403-.832.658-1.426.658a1.806 1.806 0 0 1-1.84-1.826c0-1.007.778-1.825 1.84-1.825.572 0 1.07.241 1.4.622l-.687.577c-.172-.215-.396-.376-.713-.376-.568 0-.938.456-.938.998 0 .541.37.997.938.997.343 0 .58-.179.757-.42zM14.305 12.671c0-1.007.78-1.825 1.84-1.825 1.061 0 1.84.818 1.84 1.825 0 1.007-.779 1.826-1.84 1.826-1.06-.005-1.84-.82-1.84-1.826zm2.778 0c0-.546-.37-.998-.938-.998-.568-.004-.937.452-.937.998 0 .542.37.998.937.998.568 0 .938-.456.938-.998zM24 12.269v2.13h-.89v-1.911c0-.604-.281-.864-.704-.864-.396 0-.678.197-.678.864v1.91h-.89v-1.91c0-.604-.285-.864-.704-.864-.396 0-.744.197-.744.864v1.91h-.89v-3.49h.89v.484c.185-.376.52-.564 1.035-.564.489 0 .898.241 1.123.649.224-.417.554-.65 1.153-.65.731.005 1.299.56 1.299 1.442z"/>
-      </svg>
-    );
-  }
-
-  return <AppIcon name={name} sizeClass="w-3.5 h-3.5" letterClass="text-[8px]" />;
-}
-
-function AppStatsBlock({ content }: { content: string }) {
-  const items = content
-    .trim()
-    .split("\n")
-    .map((line) => {
-      const [app, mins] = line.split("|");
-      return { app: app?.trim() ?? "", minutes: parseFloat(mins?.trim() ?? "0") };
-    })
-    .filter((item) => item.app && !isNaN(item.minutes) && item.minutes > 0);
-
-  if (items.length === 0) return null;
-
-  const maxMinutes = Math.max(...items.map((i) => i.minutes));
-
-  return (
-    <div className="space-y-2 px-3 pt-1 pb-3">
-      {items.map(({ app, minutes }) => {
-        const color = nameToColor(app);
-        const pct = maxMinutes > 0 ? (minutes / maxMinutes) * 100 : 0;
-        return (
-          <div key={app} className="flex items-center gap-2.5">
-            <AppIcon name={app} />
-            <div className="flex-1 min-w-0">
-              <div className="flex items-center justify-between mb-1">
-                <span className="text-xs text-foreground truncate">{app}</span>
-                <span className="text-xs tabular-nums text-muted-foreground ml-2 shrink-0">
-                  {formatMinutes(minutes)}
-                </span>
-              </div>
-              <div className="h-[2px] bg-border rounded-full overflow-hidden">
-                <div
-                  className="h-full rounded-full transition-all"
-                  style={{ width: `${pct}%`, backgroundColor: color, opacity: 0.6 }}
-                />
-              </div>
-            </div>
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-// Groups consecutive tool blocks into a single group for collapsible rendering
-type GroupedBlock =
-  | { type: "text"; text: string; key: number }
-  | { type: "thinking"; text: string; isThinking: boolean; durationMs?: number; key: number }
-  | { type: "tool-group"; toolCalls: ToolCall[]; key: number }
-  | { type: "work-group"; toolCalls: ToolCall[]; durationMs: number; key: number };
-
-function groupContentBlocks(blocks: ContentBlock[]): GroupedBlock[] {
-  const result: GroupedBlock[] = [];
-  let currentToolGroup: ToolCall[] = [];
-
-  for (let i = 0; i < blocks.length; i++) {
-    const block = blocks[i];
-    if (block.type === "tool") {
-      currentToolGroup.push(block.toolCall);
-    } else {
-      if (currentToolGroup.length > 0) {
-        result.push({ type: "tool-group", toolCalls: [...currentToolGroup], key: result.length });
-        currentToolGroup = [];
-      }
-      if (block.type === "text" && block.text.trim()) {
-        result.push({ type: "text", text: block.text, key: result.length });
-      } else if (block.type === "thinking") {
-        result.push({ type: "thinking", text: block.text, isThinking: block.isThinking, durationMs: block.durationMs, key: result.length });
-      }
-    }
-  }
-  if (currentToolGroup.length > 0) {
-    result.push({ type: "tool-group", toolCalls: [...currentToolGroup], key: result.length });
-  }
-  return result;
-}
-
-function collapseHiddenWorkGroups(grouped: GroupedBlock[], hideThinkingBlocks: boolean): GroupedBlock[] {
-  // Run always: collapsing consecutive tool-groups into a single
-  // "Worked for X min" rail is useful regardless of the thinking-block
-  // visibility setting. `hideThinkingBlocks` only controls whether
-  // thinking blocks get absorbed into the work-group (true) or shown
-  // as separate pills (false).
-
-  const out: GroupedBlock[] = [];
-  let pendingToolCalls: ToolCall[] = [];
-  let pendingDurationMs = 0;
-  let pendingToolGroupCount = 0;
-  let pendingKey: number | null = null;
-
-  const flushPending = () => {
-    if (pendingToolCalls.length === 0) {
-      pendingDurationMs = 0;
-      pendingToolGroupCount = 0;
-      pendingKey = null;
-      return;
-    }
-
-    const key = pendingKey ?? out.length;
-    if (pendingToolGroupCount > 1 || pendingToolCalls.length >= 3) {
-      out.push({
-        type: "work-group",
-        toolCalls: [...pendingToolCalls],
-        durationMs: pendingDurationMs,
-        key,
-      });
-    } else {
-      out.push({ type: "tool-group", toolCalls: [...pendingToolCalls], key });
-    }
-
-    pendingToolCalls = [];
-    pendingDurationMs = 0;
-    pendingToolGroupCount = 0;
-    pendingKey = null;
-  };
-
-  for (const group of grouped) {
-    if (group.type === "tool-group") {
-      pendingKey ??= group.key;
-      pendingToolCalls.push(...group.toolCalls);
-      pendingToolGroupCount++;
-      continue;
-    }
-
-    if (group.type === "thinking") {
-      if (hideThinkingBlocks) {
-        pendingDurationMs += group.durationMs ?? 0;
-        pendingKey ??= group.key;
-        continue;
-      }
-      // Show thinking pills inline — flush pending tool work first so
-      // ordering is preserved and the thinking pill renders separately.
-      flushPending();
-      out.push(group);
-      continue;
-    }
-
-    flushPending();
-    out.push(group);
-  }
-
-  flushPending();
-  return out;
-}
-
-// Build natural-language summary of completed tool calls
-function buildToolSummary(toolCalls: ToolCall[]): string {
-  const counts: Record<string, number> = {};
-  for (const tc of toolCalls) {
-    const action = tc.toolName === "bash" ? "ran" : tc.toolName === "read" ? "read" : tc.toolName === "edit" ? "edited" : tc.toolName === "write" ? "wrote" : tc.toolName === "grep" ? "searched" : tc.toolName;
-    counts[action] = (counts[action] || 0) + 1;
-  }
-  const parts = Object.entries(counts).map(([action, count]) => {
-    if (action === "read") return `read ${count} file${count > 1 ? "s" : ""}`;
-    if (action === "edited") return `edited ${count} file${count > 1 ? "s" : ""}`;
-    if (action === "wrote") return `wrote ${count} file${count > 1 ? "s" : ""}`;
-    if (action === "ran") return `ran ${count} command${count > 1 ? "s" : ""}`;
-    if (action === "searched") return `${count} search${count > 1 ? "es" : ""}`;
-    return `${count} ${action}`;
-  });
-  return parts.join(", ");
-}
-
-function formatWorkDuration(durationMs: number): string {
-  if (!durationMs || durationMs <= 0) return "Worked";
-  const seconds = Math.max(1, Math.round(durationMs / 1000));
-  if (seconds < 60) return "Worked for <1 min";
-  const minutes = Math.max(1, Math.round(seconds / 60));
-  return `Worked for ${minutes} min${minutes === 1 ? "" : "s"}`;
-}
-
-function toolCallRenderKey(toolCall: ToolCall, index: number): string {
-  return `${toolCall.id || toolCall.toolName || "tool"}:${index}`;
-}
-
-function ToolCallGroup({
-  toolCalls,
-  defaultExpanded = false,
-  summaryOverride,
-  hideCount = false,
-}: {
-  toolCalls: ToolCall[];
-  defaultExpanded?: boolean;
-  summaryOverride?: string;
-  hideCount?: boolean;
-}) {
-  const [manualExpand, setManualExpand] = useState<boolean | null>(null);
-
-  const hasRunning = toolCalls.some((tc) => tc.isRunning);
-  const hasError = toolCalls.some((tc) => tc.isError);
-  const allDone = !hasRunning;
-  const doneCount = toolCalls.filter((tc) => !tc.isRunning).length;
-  const total = toolCalls.length;
-  const summary = allDone ? (summaryOverride || buildToolSummary(toolCalls)) : "";
-
-  // Auto-expand while running, auto-collapse when done (user can override).
-  // `defaultExpanded` keeps the group open even when done — used for
-  // messages whose entire output is tool calls (typical pipe-runs)
-  // where the tool result is the whole story.
-  const isExpanded = manualExpand !== null ? manualExpand : (hasRunning || defaultExpanded);
-
-  return (
-    <div className="w-full min-w-0">
-      {/* Header bar — clickable to toggle */}
-      <button
-        onClick={() => setManualExpand(isExpanded ? false : true)}
-        className="w-full flex items-center gap-2 py-1 text-left min-w-0 group"
-      >
-        {/* Status indicator */}
-        {!hideCount && hasRunning && (
-          <span className="flex-shrink-0 text-xs font-mono text-foreground/40">
-            <motion.span
-              className="inline-block"
-              animate={{ opacity: [1, 1, 0.3, 0.3, 1] }}
-              transition={{ duration: 1, repeat: Infinity, times: [0, 0.25, 0.25, 0.75, 0.75], ease: "linear" }}
-            >
-              [{doneCount}/{total}]
-            </motion.span>
-          </span>
-        )}
-
-        {/* Summary text */}
-        <span className="truncate flex-1 text-xs font-mono text-foreground/50 group-hover:text-foreground/80 transition-colors duration-150">
-          {hasRunning
-            ? friendlyToolLabel(toolCalls.find((tc) => tc.isRunning)!)
-            : summary || `${total} steps`
-          }
-          {hasError && allDone && (
-            <span className="ml-1.5 text-foreground/30">· {toolCalls.filter(tc => tc.isError).length} failed</span>
-          )}
-        </span>
-
-        {/* Expand chevron */}
-        <span className="flex-shrink-0 text-[10px] font-mono text-foreground/30 group-hover:text-foreground/60 transition-colors duration-150">
-          {isExpanded ? "▾" : "▸"}
-        </span>
-      </button>
-
-      {/* Expanded rail view */}
-      <AnimatePresence>
-        {isExpanded && (
-          <motion.div
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: "auto", opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: 0.15 }}
-            className="overflow-hidden"
-          >
-            <div className="pl-1 pt-1">
-              {toolCalls.map((tc, i) => (
-                <motion.div
-                  key={toolCallRenderKey(tc, i)}
-                  initial={{ opacity: 0, x: -8 }}
-                  animate={{ opacity: 1, x: 0 }}
-                  transition={{ duration: 0.15, delay: i * 0.03 }}
-                >
-                  <ToolCallRailItem
-                    toolCall={tc}
-                    isLast={i === toolCalls.length - 1}
-                  />
-                </motion.div>
-              ))}
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-    </div>
-  );
-}
-
-// Renders message content with interleaved text and tool call blocks
-function MessageContent({
-  message,
-  deferSourceFooter = false,
-  onImageClick,
-  onRetry,
-  onOpenViewerPath,
-}: {
-  message: Message;
-  deferSourceFooter?: boolean;
-  onImageClick?: (images: string[], index: number) => void;
-  onRetry?: (prompt: string) => void;
-  onOpenViewerPath?: (path: string) => void;
-}) {
-  const isUser = message.role === "user";
-  const { settings } = useSettings();
-  const hideThinkingBlocks = settings?.hideThinkingBlocks ?? true;
-  const sourceCitations = isUser ? [] : sourceCitationsFromMessage(message);
-  const sourceFooter = !deferSourceFooter && sourceCitations.length > 0 ? (
-    <SourceCitationFooter citations={sourceCitations} onOpenFile={onOpenViewerPath} />
-  ) : null;
-
-  const openFeedback = useFeedbackStore((s) => s.openFeedback);
-  const isErrorMessage = !isUser && (
-    !!message.retryPrompt ||
-    message.content.startsWith("Error:") ||
-    message.content.includes("Something went wrong") ||
-    message.content.includes("crashed") ||
-    message.content.includes("failed after retries")
-  );
-
-  // Retry CTA — shown at the bottom of error messages that have a retryPrompt
-  const retryCta = !isUser && message.retryPrompt ? (
-    <div className="mt-3 pt-3 border-t border-border/40 flex items-center gap-3 flex-wrap">
-      <button
-        type="button"
-        onClick={() => onRetry?.(message.retryPrompt!)}
-        className="flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-lg bg-foreground text-background hover:bg-foreground/80 transition-colors"
-      >
-        <RefreshCw className="h-3 w-3" />
-        Try again
-      </button>
-      <span className="text-xs text-muted-foreground">or edit your message above</span>
-      <button
-        type="button"
-        onClick={() => openFeedback(`AI error in chat: ${message.content.slice(0, 300)}`)}
-        className="ml-auto flex items-center gap-1 text-xs text-muted-foreground/60 hover:text-muted-foreground transition-colors"
-      >
-        report issue
-      </button>
-    </div>
-  ) : isErrorMessage ? (
-    <div className="mt-2 flex items-center gap-1.5">
-      <span className="text-xs text-destructive/60">still happening?</span>
-      <button
-        type="button"
-        onClick={() => openFeedback(`AI error in chat: ${message.content.slice(0, 300)}`)}
-        className="text-xs text-muted-foreground hover:text-foreground transition-colors underline underline-offset-2"
-      >
-        report issue
-      </button>
-    </div>
-  ) : null;
-
-  // If we have content blocks (Pi messages with tool calls), render them in order
-  // Group consecutive tool blocks into collapsible containers
-  if (message.contentBlocks && message.contentBlocks.length > 0) {
-    const grouped = groupContentBlocks(message.contentBlocks);
-    const displayGroups = collapseHiddenWorkGroups(grouped, hideThinkingBlocks);
-    // When the message has no rendered prose (no text block — common for
-    // pipe-run executions whose entire output is thinking + tool calls),
-    // expand thinking blocks by default. Otherwise the collapsed
-    // "thought for 0s" pill is the only visible thing on the message
-    // and the chat panel reads as empty even though there's real
-    // content to see.
-    const hasText = grouped.some((g) => g.type === "text");
-    return (
-      <div className="space-y-2 min-w-0 w-full overflow-hidden">
-        {displayGroups.map((group) => {
-          if (group.type === "text") {
-            return (
-              <MarkdownBlock
-                key={`text-${group.key}`}
-                text={group.text}
-                isUser={isUser}
-                onOpenViewerPath={onOpenViewerPath}
-                renderSpecialCodeBlock={(language, content) => {
-                  if (language === "mermaid") {
-                    return <MermaidDiagramBlock chart={content} />;
-                  }
-                  if (language === "app-stats") {
-                    return <AppStatsBlock content={content} />;
-                  }
-                  return null;
-                }}
-              />
-            );
-          }
-          if (group.type === "thinking") {
-            // Settings → Display → Hide Thinking Blocks (default true). Even
-            // when shown the block starts collapsed: the "thought for Xs"
-            // pill is enough signal that the assistant did chain-of-thought
-            // work — auto-expanding (the c092166e0 behavior) drew the eye
-            // to raw reasoning instead of the response.
-            if (hideThinkingBlocks) return null;
-            return <ThinkingBlock key={`thinking-${group.key}`} text={group.text} isThinking={group.isThinking} durationMs={group.durationMs} />;
-          }
-          if (group.type === "tool-group") {
-            return <ToolCallGroup key={`tools-${group.key}`} toolCalls={group.toolCalls} defaultExpanded={!hasText} />;
-          }
-          if (group.type === "work-group") {
-            // Fall back to message-level workDurationMs when the
-            // grouping pass collected no thinking-block duration (e.g.
-            // pipe runs whose agent emits no thinking deltas — the
-            // parser captures wall-clock time on the ChatMessage).
-            const durationMs = group.durationMs > 0 ? group.durationMs : (message.workDurationMs ?? 0);
-            return (
-              <ToolCallGroup
-                key={`work-${group.key}`}
-                toolCalls={group.toolCalls}
-                defaultExpanded={!hasText}
-                summaryOverride={formatWorkDuration(durationMs)}
-                hideCount={hasText}
-              />
-            );
-          }
-          return null;
-        })}
-        {sourceFooter}
-        {retryCta}
-      </div>
-    );
-  }
-
-  // Unified attachment row — docs (PDF/DOCX/…) + image thumbnails share
-  // ONE flex container so the strip reads as a single row regardless of
-  // attachment mix. The previous design rendered docs and images as two
-  // sibling <div>s, which produced a fragmented two-row strip whenever
-  // a user attached one of each kind. Both card types are 80px tall so
-  // the row baselines line up cleanly.
-  const hasDocs = isUser && (message.attachments?.length ?? 0) > 0;
-  const hasImages = isUser && (message.images?.length ?? 0) > 0;
-  const attachmentsRow = (hasDocs || hasImages) ? (
-    <div className="flex gap-2 flex-wrap items-stretch">
-      {hasDocs && message.attachments!.map((doc, i) => {
-        const badge = attachmentBadge(doc.ext);
-        return (
-          <div
-            key={`doc-${doc.name}-${i}`}
-            title={`${doc.name} — ${doc.charCount.toLocaleString()} chars${doc.truncated ? " (truncated)" : ""}`}
-            className="flex items-center gap-2.5 h-20 max-w-[260px] rounded-xl border border-border/50 bg-muted/40 px-3 shadow-sm"
-          >
-            <div className={`shrink-0 w-11 h-11 rounded-lg flex items-center justify-center text-[10px] font-semibold tracking-tight ${badge.tint}`}>
-              {badge.label}
-            </div>
-            <div className="min-w-0 flex-1">
-              <div className="truncate text-xs font-medium text-foreground">{doc.name}</div>
-              <div className="truncate text-[10px] text-muted-foreground">
-                {doc.charCount.toLocaleString()} chars{doc.truncated ? " • truncated" : ""}
-              </div>
-            </div>
-          </div>
-        );
-      })}
-      {hasImages && message.images!.map((img, i) => (
-        <button
-          key={`img-${i}`}
-          type="button"
-          onClick={() => onImageClick?.(message.images ?? [], i)}
-          className="rounded-xl border border-border/50 shadow-sm overflow-hidden p-0 block text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-        >
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img src={img} alt={`Attached ${i + 1}`} className="h-20 w-20 min-h-20 min-w-20 object-cover cursor-pointer" />
-        </button>
-      ))}
-    </div>
-  ) : null;
-
-  // Fallback: plain text message (user messages, non-Pi assistant messages)
-  // For user messages with a display label, show the short label with expand toggle.
-  //
-  // When the message has document attachments, the "fullContent" we'd
-  // expand to contains the raw `<attached file: ...>` payload — that's
-  // a model-input artifact, not something the user wants to read. The
-  // attachment cards above already disclose what was attached, so we
-  // suppress the expansion chevron in that case (label-only bubble).
-  if (isUser && message.displayContent) {
-    const chipMatch = message.displayContent.match(/^\[chip:([^|]+)\|([^\]]+)\] ([\s\S]*)/);
-    if (chipMatch) {
-      const [, chipId, chipName, chipText] = chipMatch;
-      return (
-        <div className="space-y-2">
-          {attachmentsRow}
-          <div className="flex flex-wrap gap-x-1.5 gap-y-0.5">
-            <span className="inline-flex h-5 items-center gap-1 shrink-0 align-top">
-              <IntegrationIcon
-                icon={chipId}
-                className="w-4 h-4 flex items-center justify-center overflow-hidden shrink-0"
-                fallbackClassName="h-3 w-3 text-muted-foreground"
-              />
-              <span className="text-sm font-mono font-semibold text-foreground/80 leading-5">{chipName}</span>
-            </span>
-            <span className="text-sm leading-5 break-words min-w-0">{chipText}</span>
-          </div>
-        </div>
-      );
-    }
-    return (
-      <div className="space-y-2">
-        {attachmentsRow}
-        {hasDocs
-          ? <div className="text-sm font-medium">{message.displayContent}</div>
-          : <CollapsibleUserMessage label={message.displayContent} fullContent={message.content} />}
-      </div>
-    );
-  }
-  // Strip raw "Error:" prefix that leaks from backend — show only the human part
-  const displayText = !isUser && message.content.startsWith("Error: ")
-    ? message.content.slice("Error: ".length)
-    : message.content;
-
-  return (
-    <div className="space-y-2">
-      {attachmentsRow}
-      <MarkdownBlock
-        text={displayText}
-        isUser={isUser}
-        onOpenViewerPath={onOpenViewerPath}
-        renderSpecialCodeBlock={(language, content) => {
-          if (language === "mermaid") {
-            return <MermaidDiagramBlock chart={content} />;
-          }
-          if (language === "app-stats") {
-            return <AppStatsBlock content={content} />;
-          }
-          return null;
-        }}
-      />
-      {sourceFooter}
-      {retryCta}
-    </div>
-  );
-}
-
-// Per-extension presentation for attachment cards. Kept tiny on purpose —
-// the goal is recognition at a glance, not pixel-perfect filetype branding.
-function attachmentBadge(ext: string): { label: string; tint: string } {
-  const e = ext.toLowerCase();
-  if (e === "pdf") return { label: "PDF", tint: "bg-red-500/15 text-red-600 dark:text-red-400" };
-  if (e === "docx" || e === "doc") return { label: "DOC", tint: "bg-blue-500/15 text-blue-600 dark:text-blue-400" };
-  if (e === "xlsx" || e === "xls" || e === "csv" || e === "tsv") return { label: e.toUpperCase(), tint: "bg-green-500/15 text-green-600 dark:text-green-400" };
-  if (e === "md" || e === "markdown") return { label: "MD", tint: "bg-purple-500/15 text-purple-600 dark:text-purple-400" };
-  if (e === "json") return { label: "JSON", tint: "bg-amber-500/15 text-amber-600 dark:text-amber-400" };
-  return { label: (e || "FILE").toUpperCase().slice(0, 4), tint: "bg-muted text-muted-foreground" };
-}
-
-
-
-function getMessageIntentLabel(message: Message): string | null {
-  if (message.role === "assistant" && (message.intent === "steer" || message.steeredResponse)) {
-    return "Steered conversation";
-  }
-  return null;
-}
-
-function isPlaceholderConversationTitle(value?: string | null): boolean {
-  if (!value) return true;
-  const normalized = value.trim().toLowerCase();
-  return normalized === "" || normalized === "new chat" || normalized === "untitled";
-}
-
-function isSteeredAssistantMessage(message: Message): boolean {
-  return message.role === "assistant" && (message.intent === "steer" || message.steeredResponse === true);
-}
-
-function hasRenderableAssistantBody(message: Message): boolean {
-  if (message.role !== "assistant") return false;
-  if (message.content && message.content !== "Processing...") return true;
-  return Boolean(message.contentBlocks?.length);
-}
-
-function isNormalUserMessage(message: Message): boolean {
-  return message.role === "user" && message.intent !== "steer";
-}
-
-type ChatRenderItem =
-  | {
-      type: "message";
-      message: Message;
-      hideWhenCollapsedBy?: string;
-      hideIntentLabelWhenCollapsedBy?: string;
-      showActionsWhenExpandedBy?: string;
-    }
-  | {
-      type: "collapsed-steer-work";
-      id: string;
-      rootUser: Message;
-      hiddenAssistants: Message[];
-      segmentMessages: Message[];
-    };
-
-function buildCollapsedSteerRenderItems(
-  messages: Message[],
-  options: { canCollapseSteerWork: boolean }
-): ChatRenderItem[] {
-  const items: ChatRenderItem[] = [];
-
-  for (let i = 0; i < messages.length; i += 1) {
-    const root = messages[i];
-    if (!root || !isNormalUserMessage(root)) {
-      items.push({ type: "message", message: root });
-      continue;
-    }
-
-    let end = i + 1;
-    while (end < messages.length && !isNormalUserMessage(messages[end])) {
-      end += 1;
-    }
-
-    const segment = messages.slice(i, end);
-    const steerUsers = segment.filter((message) => message.role === "user" && message.intent === "steer");
-    if (steerUsers.length === 0 || !options.canCollapseSteerWork) {
-      items.push(...segment.map((message) => ({ type: "message" as const, message })));
-      i = end - 1;
-      continue;
-    }
-
-    const latestSteer = steerUsers[steerUsers.length - 1];
-    const latestSteerIndex = segment.findIndex((message) => message.id === latestSteer?.id);
-    const assistants = segment.filter((message) => message.role === "assistant");
-    const finalAssistant =
-      (latestSteer?.turnIntentId
-        ? [...assistants].reverse().find((message) => message.turnIntentId === latestSteer.turnIntentId && hasRenderableAssistantBody(message))
-        : undefined) ??
-      [...segment.slice(Math.max(0, latestSteerIndex + 1))]
-        .reverse()
-        .find((message) => message.role === "assistant" && hasRenderableAssistantBody(message)) ??
-      [...assistants].reverse().find(hasRenderableAssistantBody) ??
-      assistants[assistants.length - 1];
-    const hasCompletedLatestSteerResponse = Boolean(
-      finalAssistant &&
-      finalAssistant.content !== "Processing..." &&
-      hasRenderableAssistantBody(finalAssistant)
-    );
-    if (!hasCompletedLatestSteerResponse) {
-      items.push(...segment.map((message) => ({ type: "message" as const, message })));
-      i = end - 1;
-      continue;
-    }
-    const hiddenAssistantIds = new Set(
-      assistants
-        .filter((message) => message.id !== finalAssistant?.id)
-        .map((message) => message.id)
-    );
-    const hiddenAssistants = assistants.filter((message) => hiddenAssistantIds.has(message.id));
-    const collapsedWorkId = `collapsed-steer-${root.id}`;
-
-    items.push({ type: "message", message: root });
-    let collapsedWorkInserted = false;
-    const pushCollapsedWork = () => {
-      if (collapsedWorkInserted || hiddenAssistants.length === 0) return;
-      items.push({
-        type: "collapsed-steer-work",
-        id: collapsedWorkId,
-        rootUser: root,
-        hiddenAssistants,
-        segmentMessages: segment,
-      });
-      collapsedWorkInserted = true;
-    };
-
-    for (const message of segment.slice(1)) {
-      if (hiddenAssistantIds.has(message.id)) {
-        pushCollapsedWork();
-        items.push({
-          type: "message",
-          message,
-          hideWhenCollapsedBy: collapsedWorkId,
-        });
-        continue;
-      }
-      const isFinalAssistant = message.id === finalAssistant?.id;
-      items.push({
-        type: "message",
-        message,
-        hideIntentLabelWhenCollapsedBy: isFinalAssistant && hiddenAssistants.length > 0
-          ? collapsedWorkId
-          : undefined,
-        showActionsWhenExpandedBy: message.role === "user" && message.intent === "steer" && hiddenAssistants.length > 0
-          ? collapsedWorkId
-          : undefined,
-      });
-    }
-    pushCollapsedWork();
-
-    i = end - 1;
-  }
-
-  return items;
-}
-
-function collapsedSteerWorkDuration(item: Extract<ChatRenderItem, { type: "collapsed-steer-work" }>): string {
-  const timestamps = item.segmentMessages
-    .map((message) => message.timestamp)
-    .filter((timestamp) => Number.isFinite(timestamp));
-  if (timestamps.length < 2) return "Worked";
-  const durationMs = Math.max(...timestamps) - Math.min(...timestamps);
-  if (durationMs <= 0) return "Worked";
-  const seconds = Math.max(1, Math.round(durationMs / 1000));
-  if (seconds < 60) return `Worked for ${seconds}s`;
-  const minutes = Math.max(1, Math.round(seconds / 60));
-  return `Worked for ${minutes} min${minutes === 1 ? "" : "s"}`;
-}
-
-function CollapsedSteerWorkRow({
-  item,
-  expanded,
-  onToggle,
-}: {
-  item: Extract<ChatRenderItem, { type: "collapsed-steer-work" }>;
-  expanded: boolean;
-  onToggle: () => void;
-}) {
-  const label = collapsedSteerWorkDuration(item);
-
-  return (
-    <motion.div
-      key={item.id}
-      initial={{ opacity: 0, y: 10 }}
-      animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0, y: -10 }}
-      transition={{ duration: 0.2 }}
-      className="relative flex min-w-0 justify-start"
-      data-testid="chat-collapsed-steer-work"
-    >
-      <div className="group/message flex flex-col items-start w-full min-w-0">
-        <button
-          type="button"
-          onClick={onToggle}
-          className="inline-flex items-center gap-1 py-0.5 text-left text-muted-foreground/70 hover:text-muted-foreground transition-colors"
-        >
-          <span className="text-xs leading-none">{label}</span>
-          {expanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
-        </button>
-        <div className="mt-0.5 w-full border-t border-border/20" />
-      </div>
-    </motion.div>
-  );
-}
-
-function CollapsibleUserMessage({ label, fullContent }: { label: string; fullContent: string }) {
-  const [expanded, setExpanded] = useState(false);
-  return (
-    <div>
-      <div className="flex items-center gap-1.5">
-        <span className="flex-1 text-sm font-medium">{label}</span>
-        <button
-          onClick={(e) => {
-            e.stopPropagation();
-            setExpanded(!expanded);
-          }}
-          onMouseUp={(e) => e.stopPropagation()}
-          className="shrink-0 p-0.5 rounded hover:bg-muted-foreground/10 text-muted-foreground hover:text-foreground transition-colors"
-          title={expanded ? "Collapse prompt" : "Show full prompt"}
-        >
-          {expanded ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
-        </button>
-      </div>
-      {expanded && (
-        <div className="mt-2 pt-2 border-t border-border/50 text-xs text-muted-foreground whitespace-pre-wrap break-words">
-          {fullContent}
-        </div>
-      )}
-    </div>
-  );
-}
 
 /**
  * Title + actions for the current chat. Click → menu with Rename
@@ -2309,201 +222,6 @@ function CollapsibleUserMessage({ label, fullContent }: { label: string; fullCon
  * message yet) — there's no useful title and the actions are no-ops
  * for something that doesn't exist on disk.
  */
-function ChatTitleMenu({
-  conversationId,
-  messages,
-  renameConversation,
-  deleteConversation,
-  startNewConversation,
-}: {
-  conversationId: string | null;
-  messages: Message[];
-  renameConversation: (id: string, title: string) => Promise<void> | void;
-  deleteConversation: (id: string) => Promise<void> | void;
-  startNewConversation: (id?: string) => Promise<void> | void;
-}) {
-  const [open, setOpen] = useState(false);
-  const [renaming, setRenaming] = useState(false);
-  const [confirmingDelete, setConfirmingDelete] = useState(false);
-  const [draft, setDraft] = useState("");
-  const inputRef = useRef<HTMLInputElement | null>(null);
-
-  // Title source order:
-  //   1. The session's title from the chat-store (in-memory, freshest;
-  //      reflects user renames immediately).
-  //   2. The first user message, truncated. Matches the auto-derive
-  //      logic in saveConversation so what the menu shows is what
-  //      will end up on disk.
-  // Hide the menu entirely when neither source has anything — the
-  // chat is brand new and the actions don't apply yet.
-  const storeTitle = useChatStore((s) =>
-    conversationId ? s.sessions[conversationId]?.title : undefined
-  );
-  const streamingTitle = useChatStore((s) =>
-    conversationId ? s.sessions[conversationId]?.streamingTitle : undefined
-  );
-  const session = useChatStore((s) =>
-    conversationId ? s.sessions[conversationId] : undefined
-  );
-  const isPinned = session?.pinned ?? false;
-  const firstUserMsg = messages.find(
-    (m) => m.role === "user" && !isInjectedTitleSourcePrompt(m.content)
-  );
-  const derivedTitle = firstUserMsg
-    ? deriveFallbackConversationTitle(firstUserMsg)
-    : undefined;
-  const hasMessages = messages.length > 0;
-  const title =
-    streamingTitle ||
-    (storeTitle &&
-      !isPlaceholderConversationTitle(storeTitle) &&
-      !isConversationHistorySyncPrompt(storeTitle)
-        ? storeTitle
-        : derivedTitle || (hasMessages ? "untitled" : ""));
-
-  // No conversation id OR no real content → don't render. The "+ New"
-  // button on the right is enough; no point showing actions for a
-  // nothing-chat.
-  if (!conversationId || !title) return null;
-
-  const handleStartRename = () => {
-    setDraft(title);
-    setRenaming(true);
-    setOpen(false);
-    // Focus on next tick once the input is in the DOM.
-    setTimeout(() => inputRef.current?.focus(), 0);
-  };
-  const commitRename = async () => {
-    const next = draft.trim();
-    setRenaming(false);
-    if (!next || next === title) return;
-    try {
-      await renameConversation(conversationId, next);
-      // Mirror to the in-memory store so the sidebar reflects the
-      // change without waiting for the next disk hydration cycle.
-      useChatStore.getState().actions.patch(conversationId, { title: next });
-    } catch (e) {
-      console.warn("[chat] rename failed:", e);
-    }
-  };
-  const handleTogglePin = async () => {
-    setOpen(false);
-    const next = !isPinned;
-    useChatStore.getState().actions.togglePinned(conversationId);
-    try {
-      const { updateConversationFlags } = await import("@/lib/chat-storage");
-      await updateConversationFlags(conversationId, { pinned: next });
-    } catch {
-      // best-effort persistence
-    }
-  };
-  const handleDelete = async () => {
-    setOpen(false);
-    setConfirmingDelete(true);
-  };
-  const confirmDelete = async () => {
-    setConfirmingDelete(false);
-    try {
-      await deleteConversation(conversationId);
-      useChatStore.getState().actions.drop(conversationId);
-      // Land the user on a fresh chat — the panel was rendering the
-      // one we just deleted.
-      await startNewConversation();
-    } catch (e) {
-      console.warn("[chat] delete failed:", e);
-    }
-  };
-
-  if (renaming) {
-    return (
-      <input
-        ref={inputRef}
-        value={draft}
-        onChange={(e) => setDraft(e.target.value)}
-        onMouseDown={(e) => e.stopPropagation()}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") {
-            e.preventDefault();
-            void commitRename();
-          } else if (e.key === "Escape") {
-            e.preventDefault();
-            setRenaming(false);
-          }
-        }}
-        onBlur={() => void commitRename()}
-        className="relative z-10 h-7 px-2 max-w-[260px] text-xs font-medium bg-background border border-border rounded-md focus:outline-none focus:ring-1 focus:ring-foreground/30"
-      />
-    );
-  }
-
-  return (
-    <Popover open={open} onOpenChange={setOpen}>
-      <PopoverTrigger asChild>
-        <button
-          type="button"
-          onMouseDown={(e) => e.stopPropagation()}
-          onClick={(e) => {
-            e.stopPropagation();
-            setOpen((o) => !o);
-          }}
-          className="relative z-10 inline-flex items-center gap-1 max-w-[260px] h-7 px-2 rounded-md text-xs font-medium text-foreground hover:bg-muted/50 transition-colors"
-          title="Chat options"
-        >
-          <span className="truncate">{title}</span>
-          <ChevronDown className="h-3 w-3 shrink-0 text-muted-foreground/70" />
-        </button>
-      </PopoverTrigger>
-      <PopoverContent
-        className="w-44 p-1"
-        align="start"
-        side="bottom"
-        onMouseDown={(e) => e.stopPropagation()}
-      >
-        <button
-          className="w-full flex items-center gap-2 px-2 py-1.5 text-sm rounded-md hover:bg-muted text-left"
-          onClick={handleStartRename}
-        >
-          <Pencil className="h-3.5 w-3.5 shrink-0" />
-          Rename
-        </button>
-        <button
-          className="w-full flex items-center gap-2 px-2 py-1.5 text-sm rounded-md hover:bg-muted text-left"
-          onClick={() => void handleTogglePin()}
-        >
-          <Pin className="h-3.5 w-3.5 shrink-0" />
-          {isPinned ? "Unpin" : "Pin"}
-        </button>
-        <div className="my-1 border-t border-border" />
-        <button
-          className="w-full flex items-center gap-2 px-2 py-1.5 text-sm rounded-md hover:bg-muted text-destructive text-left"
-          onClick={() => void handleDelete()}
-        >
-          <Trash2 className="h-3.5 w-3.5 shrink-0" />
-          Delete
-        </button>
-      </PopoverContent>
-      <Dialog open={confirmingDelete} onOpenChange={setConfirmingDelete}>
-        <DialogContent className="sm:max-w-sm">
-          <DialogHeader>
-            <DialogTitle>delete chat</DialogTitle>
-            <p className="text-sm text-muted-foreground">
-              Delete this chat? This cannot be undone.
-            </p>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setConfirmingDelete(false)}>
-              Cancel
-            </Button>
-            <Button variant="destructive" onClick={() => void confirmDelete()}>
-              Delete
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-    </Popover>
-  );
-}
-
 export function StandaloneChat({
   className,
   hideInlineHistory,
@@ -2534,81 +252,24 @@ export function StandaloneChat({
   // Connected integrations (gmail, google-sheets, slack, etc.) surfaced in the
   // filter popover so users can mention them directly with @id — helps the
   // agent pick the right connection for a query instead of having to guess.
-  const [connections, setConnections] = useState<ConnectedIntegration[]>([]);
-  const [allConnectionItems, setAllConnectionItems] = useState<ConnectionListItem[]>([]);
-  const [connectionPreviewSuggestions, setConnectionPreviewSuggestions] = useState<Suggestion[]>([]);
   const [showConnectBanner, setShowConnectBanner] = useState(() => {
     try { return localStorage.getItem("screenpipe_connect_banner_dismissed") !== "true"; } catch { return true; }
   });
-  const [suggestionRefreshSeed, setSuggestionRefreshSeed] = useState(0);
-  const connectionSetupSuggestions = React.useMemo(
-    () => buildConnectionSetupSuggestions(allConnectionItems, appItems),
-    [allConnectionItems, appItems]
-  );
-  const suggestedConnectionTiles = React.useMemo(() => {
-    const apiById = new Map(allConnectionItems.map((connection) => [connection.id, connection]));
-    const hardcodedIds = new Set(hardcodedConnectionTiles.map((connection) => connection.id));
-    const hardcodedTiles = hardcodedConnectionTiles.map((connection) => {
-      const apiConnection = apiById.get(connection.id);
-      return {
-        ...connection,
-        icon: connection.icon || apiConnection?.icon || connection.id,
-        connected: apiConnection?.connected ?? connection.connected,
-        category: CONNECTION_CATEGORY_BY_ID[connection.id] ?? normalizeConnectionCategory(apiConnection?.category),
-        description: apiConnection?.description ?? CONNECTION_HARDCODED_DESCRIPTIONS[connection.id],
-      };
-    });
-    const apiTiles = allConnectionItems
-      .filter((connection) => !hardcodedIds.has(connection.id) && connection.id !== "owned-default")
-      .map((connection) => ({
-        ...connection,
-        icon: connection.icon || connection.id,
-        category: CONNECTION_CATEGORY_BY_ID[connection.id] ?? normalizeConnectionCategory(connection.category),
-        description: connection.description ?? CONNECTION_HARDCODED_DESCRIPTIONS[connection.id],
-      }));
-
-    return getSuggestedConnectionsForDevice([...hardcodedTiles, ...apiTiles], 8);
-  }, [allConnectionItems, hardcodedConnectionTiles]);
-  const refreshConnectionState = React.useCallback(async () => {
-    if (isPlatformLoading) return;
-    try {
-      const res = await localFetch("/connections");
-      if (!res.ok) return;
-      const json = (await res.json()) as { data?: ConnectionListItem[] };
-      const allConnections = (json.data ?? []).map((connection) =>
-        normalizeConnectionForPlatform(connection, isWindows)
-      );
-      const connectedConnections = allConnections
-        .filter((connection) => connection.connected)
-        .map((connection) => ({
-          id: connection.id,
-          name: connection.name,
-          icon: connection.icon,
-          category: connection.category,
-          description: connection.description,
-        }));
-
-      setAllConnectionItems(allConnections);
-      setConnections(connectedConnections);
-    } catch {
-      // silent — connection-aware UI simply won't surface stale data
-    }
-  }, [isPlatformLoading, isWindows]);
-  const visibleSuggestionSignature = React.useMemo(
-    () =>
-      [...autoSuggestions, ...connectionPreviewSuggestions]
-        .map((s) => `${s.text}|${s.preview ?? ""}|${s.connectionIcon ?? ""}|${s.priority ?? ""}`)
-        .join("\n"),
-    [autoSuggestions, connectionPreviewSuggestions]
-  );
-  const connectionAwareSuggestions = React.useMemo(
-    () => mergeConnectionSuggestions(autoSuggestions, connections, connectionPreviewSuggestions, suggestionRefreshSeed),
-    [autoSuggestions, connections, connectionPreviewSuggestions, suggestionRefreshSeed]
-  );
-
-  useEffect(() => {
-    setSuggestionRefreshSeed(0);
-  }, [visibleSuggestionSignature]);
+  const {
+    connectionAwareSuggestions,
+    connectionSetupSuggestions,
+    connections,
+    refreshConnectionState,
+    refreshVisibleSuggestions,
+    suggestedConnectionTiles,
+  } = useChatConnections({
+    appItems,
+    autoSuggestions,
+    hardcodedConnectionTiles,
+    isPlatformLoading,
+    isWindows,
+    refreshSuggestions,
+  });
   // Watch the input section's width so suggestion chips can collapse into
   // a popover on narrow chat columns.
   useEffect(() => {
@@ -2620,27 +281,6 @@ export function StandaloneChat({
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
-
-  useEffect(() => {
-    void refreshConnectionState();
-  }, [refreshConnectionState]);
-
-  // Re-fetch connections whenever the window becomes visible — picks up any
-  // integrations connected in Settings while the chat was open.
-  useEffect(() => {
-    const onVisible = () => {
-      if (document.visibilityState === "visible") void refreshConnectionState();
-    };
-    const onFocus = () => void refreshConnectionState();
-    document.addEventListener("visibilitychange", onVisible);
-    window.addEventListener("focus", onFocus);
-    window.addEventListener(CONNECTIONS_UPDATED_EVENT, onFocus);
-    return () => {
-      document.removeEventListener("visibilitychange", onVisible);
-      window.removeEventListener("focus", onFocus);
-      window.removeEventListener(CONNECTIONS_UPDATED_EVENT, onFocus);
-    };
-  }, [refreshConnectionState]);
 
   // Pre-fill chat input when "Try in Chat" is clicked from the connections page.
   // Always opens a new chat so the prompt never lands in an existing conversation.
@@ -2663,34 +303,6 @@ export function StandaloneChat({
     window.addEventListener("try-in-chat", handler);
     return () => window.removeEventListener("try-in-chat", handler);
   }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-    if (connections.length === 0) {
-      setConnectionPreviewSuggestions([]);
-      return () => {
-        cancelled = true;
-      };
-    }
-
-    fetchConnectionPreviewSuggestions(connections).then((suggestions) => {
-      if (!cancelled) setConnectionPreviewSuggestions(suggestions);
-    });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [connections]);
-
-  const refreshVisibleSuggestions = useCallback(() => {
-    setSuggestionRefreshSeed((seed) => seed + 1);
-    void refreshSuggestions();
-
-    if (connections.length === 0) return;
-    void fetchConnectionPreviewSuggestions(connections).then((suggestions) => {
-      setConnectionPreviewSuggestions(suggestions);
-    });
-  }, [connections, refreshSuggestions]);
 
   // Custom summary templates (persisted in settings)
   const [customTemplates, setCustomTemplates] = useState<CustomTemplate[]>([]);
@@ -2825,34 +437,49 @@ export function StandaloneChat({
   // runs with `[]` deps) can read the latest values instead of stale closures.
   const isLoadingRef = useRef(false);
   const messagesRef = useRef<Message[]>([]);
-  const [showMentionDropdown, setShowMentionDropdown] = useState(false);
-  const [isComposing, setIsComposing] = useState(false);
-  const [mentionFilter, setMentionFilter] = useState("");
-  const [mentionTrigger, setMentionTrigger] = useState<"@" | "#">("@");
-  const [selectedMentionIndex, setSelectedMentionIndex] = useState(0);
-  const [speakerSuggestions, setSpeakerSuggestions] = useState<MentionSuggestion[]>([]);
-  const [isLoadingSpeakers, setIsLoadingSpeakers] = useState(false);
-  const [tagSearchSuggestions, setTagSearchSuggestions] = useState<MentionSuggestion[]>([]);
-  const [isLoadingTagSearch, setIsLoadingTagSearch] = useState(false);
-  const [appFilterOpen, setAppFilterOpen] = useState(false);
-  const [filterSearch, setFilterSearch] = useState("");
-  const [filterTagResults, setFilterTagResults] = useState<MentionSuggestion[]>([]);
-  const [filterSpeakerResults, setFilterSpeakerResults] = useState<MentionSuggestion[]>([]);
-  const [isLoadingFilterSearch, setIsLoadingFilterSearch] = useState(false);
-  const [selectedFilterResultIndex, setSelectedFilterResultIndex] = useState(0);
-  const [recentSpeakers, setRecentSpeakers] = useState<MentionSuggestion[]>([]);
+  const {
+    showMentionDropdown,
+    setShowMentionDropdown,
+    isComposing,
+    setIsComposing,
+    mentionFilter,
+    setMentionFilter,
+    mentionTrigger,
+    setMentionTrigger,
+    selectedMentionIndex,
+    setSelectedMentionIndex,
+    speakerSuggestions,
+    setSpeakerSuggestions,
+    isLoadingSpeakers,
+    setIsLoadingSpeakers,
+    tagSearchSuggestions,
+    setTagSearchSuggestions,
+    isLoadingTagSearch,
+    setIsLoadingTagSearch,
+    appFilterOpen,
+    setAppFilterOpen,
+    filterSearch,
+    setFilterSearch,
+    filterTagResults,
+    setFilterTagResults,
+    filterSpeakerResults,
+    setFilterSpeakerResults,
+    isLoadingFilterSearch,
+    setIsLoadingFilterSearch,
+    selectedFilterResultIndex,
+    setSelectedFilterResultIndex,
+    recentSpeakers,
+    setRecentSpeakers,
+  } = useChatMentions();
   const abortControllerRef = useRef<AbortController | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
-  const stickToBottomRef = useRef(true);
-  const autoScrollFrameRef = useRef<number | null>(null);
   // Tracks the input section's width so we can collapse the auto-suggestion
   // chips into a popover when the chat column is narrow (e.g. when the
   // BrowserSidebar opens and squeezes the chat). Updated by a ResizeObserver
   // attached to the input wrapper.
   const inputSectionRef = useRef<HTMLDivElement>(null);
   const [inputSectionWidth, setInputSectionWidth] = useState(800);
-  const [isUserScrolledUp, setIsUserScrolledUp] = useState(false);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
   // Inline connection prefix: icon+name rendered as an absolute overlay on the
@@ -2869,58 +496,22 @@ export function StandaloneChat({
   // (e.g. a meeting note) that would otherwise also stage into the composer.
   const dropRootRef = useRef<HTMLDivElement>(null);
 
-  const focusMessageById = useCallback((messageId: string) => {
-    let attempts = 0;
-    const findAndFocus = () => {
-      const container = scrollContainerRef.current;
-      const target = container
-        ? Array.from(container.querySelectorAll<HTMLElement>("[data-message-id]"))
-            .find((el) => el.dataset.messageId === messageId)
-        : null;
-
-      if (target) {
-        stickToBottomRef.current = false;
-        setIsUserScrolledUp(true);
-        target.scrollIntoView({ behavior: attempts > 1 ? "smooth" : "auto", block: "center" });
-        setHighlightedMessageId(messageId);
-        window.setTimeout(() => {
-          setHighlightedMessageId((current) => (current === messageId ? null : current));
-        }, 2400);
-        return;
-      }
-
-      attempts += 1;
-      if (attempts <= 24) {
-        window.requestAnimationFrame(findAndFocus);
-      }
-    };
-
-    window.requestAnimationFrame(findAndFocus);
-  }, []);
-
   const [scheduleDialogMessage, setScheduleDialogMessage] = useState<{ prompt: string; response: string } | null>(null);
   const [prefillContext, setPrefillContext] = useState<string | null>(null);
   const [prefillSource, setPrefillSource] = useState<string>("search");
   const [prefillFrameId, setPrefillFrameId] = useState<number | null>(null);
   const [isPreparingPrefill, setIsPreparingPrefill] = useState(false);
-  const [pastedImages, setPastedImages] = useState<string[]>([]); // Base64 data URLs
-  // Mirror for the per-conversation draft snapshot — see inputValueRef.
-  const pastedImagesRef = useRef<string[]>([]);
-  useEffect(() => { pastedImagesRef.current = pastedImages; }, [pastedImages]);
-  const [attachedDocs, setAttachedDocs] = useState<ExtractedDoc[]>([]); // extracted text from non-image files
-  // ref mirror so send paths read the latest docs without widening their deps arrays
-  const attachedDocsRef = useRef<ExtractedDoc[]>([]);
-  useEffect(() => { attachedDocsRef.current = attachedDocs; }, [attachedDocs]);
-  // Docs that are currently being extracted. Rendered in the composer
-  // chip row with a spinner badge, and the send button is disabled while
-  // any are pending — otherwise a user who hits send during the gap
-  // between drop and extraction-complete sends the message without the
-  // file attached. Name/ext are known up-front (from filename) so we can
-  // show a real label, not a generic "loading…".
-  type PendingDoc = { id: string; name: string; ext: string };
-  const [pendingDocs, setPendingDocs] = useState<PendingDoc[]>([]);
-  const pendingDocsRef = useRef<PendingDoc[]>([]);
-  useEffect(() => { pendingDocsRef.current = pendingDocs; }, [pendingDocs]);
+  const {
+    pastedImages,
+    setPastedImages,
+    pastedImagesRef,
+    attachedDocs,
+    setAttachedDocs,
+    attachedDocsRef,
+    pendingDocs,
+    setPendingDocs,
+    pendingDocsRef,
+  } = useChatAttachments();
   // Single-shot stash of the attachment metadata for the NEXT user message
   // about to be created by sendPiMessage / enqueuePiMessage. sendMessage
   // populates this just before dispatching; the message-creation sites
@@ -2936,41 +527,50 @@ export function StandaloneChat({
     pendingAttachmentsRef.current = [];
     return list;
   }
-  const [imageViewer, setImageViewer] = useState<{ images: string[]; index: number } | null>(null);
+  const [imageViewer, setImageViewer] = useState<ImageViewerState>(null);
   const [isDragging, setIsDragging] = useState(false);
   const steerShortcutInFlightRef = useRef(false);
   const isEmbedded = !!className; // embedded in settings vs overlay panel
 
-  // Pi agent state
-  const [piInfo, setPiInfo] = useState<{ running: boolean; projectDir: string | null; pid: number | null } | null>(null);
-  const [piProjectDir, setPiProjectDir] = useState<string>("");
-  const [piStarting, setPiStarting] = useState(false);
-  const piStreamingTextRef = useRef<string>("");
-  const piMessageIdRef = useRef<string | null>(null);
-  const piContentBlocksRef = useRef<ContentBlock[]>([]);
-  const pendingNextPiUserIntentRef = useRef<"steer" | null>(null);
-  const pendingNextPiUserDisplayRef = useRef<QueuedDisplayPayload | null>(null);
-  const optimisticSteerRef = useRef<OptimisticSteerPayload | null>(null);
-  const turnIntentLedgerRef = useRef<TurnIntentRecord[]>([]);
-  const pendingSteerBatchRef = useRef<PendingSteerBatchItem[]>([]);
-  const pendingSteerFlushInFlightRef = useRef(false);
-  const streamRenderTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Last error text observed anywhere in the current Pi stream — used to surface
-  // quota / credits_exhausted errors when agent_end arrives with no content and
-  // no explicit stopReason=error on any message (some providers drop that flag).
-  const piLastErrorRef = useRef<string | null>(null);
-  const invalidatedAuthHandledRef = useRef(false);
-  const piStartInFlightRef = useRef(false);
-  const sendDispatchInFlightRef = useRef(false);
-  const forceQueueModeRef = useRef(false);
-  const piFirstCallRetried = useRef(false);
-  // Per-turn 429 auto-retry budget; reset on each new user send + on success.
-  const piRateLimitRetries = useRef(0);
-  const sessionActivityLastEmitAtRef = useRef<Record<string, number>>({});
-  const sessionActivityLastSigRef = useRef<Record<string, string>>({});
-  const piStoppedIntentionallyRef = useRef(false);
-  const piIntentionallyStoppedPidsRef = useRef<Set<number>>(new Set());
-  const piActiveStopRequestedRef = useRef(false);
+  const {
+    piInfo,
+    setPiInfo,
+    piProjectDir,
+    setPiProjectDir,
+    piStarting,
+    setPiStarting,
+    piStreamingTextRef,
+    piMessageIdRef,
+    piContentBlocksRef,
+    pendingNextPiUserIntentRef,
+    pendingNextPiUserDisplayRef,
+    optimisticSteerRef,
+    turnIntentLedgerRef,
+    pendingSteerBatchRef,
+    pendingSteerFlushInFlightRef,
+    streamRenderTimerRef,
+    piLastErrorRef,
+    invalidatedAuthHandledRef,
+    piStartInFlightRef,
+    sendDispatchInFlightRef,
+    forceQueueModeRef,
+    piFirstCallRetried,
+    piRateLimitRetries,
+    sessionActivityLastEmitAtRef,
+    sessionActivityLastSigRef,
+    piStoppedIntentionallyRef,
+    piIntentionallyStoppedPidsRef,
+    piActiveStopRequestedRef,
+    piPresetSwitchPromiseRef,
+    piCrashCountRef,
+    piLastCrashRef,
+    piTerminationDedupRef,
+    piThinkingStartRef,
+    piSessionSyncedRef,
+    initialSessionIdRef,
+    piSessionIdRef,
+    piRunningConfigRef,
+  } = usePiChatAgent();
 
   const normalizeTurnIntentText = (value: string) => value.replace(/\s+/g, " ").trim();
 
@@ -3076,33 +676,6 @@ export function StandaloneChat({
       record.id === id ? { ...record, consumedAssistantId: assistantId } : record
     );
   };
-  const piPresetSwitchPromiseRef = useRef<Promise<void> | null>(null);
-  const piCrashCountRef = useRef(0);
-  const piLastCrashRef = useRef(0);
-  const piTerminationDedupRef = useRef<Record<string, number>>({});
-  const piThinkingStartRef = useRef<number | null>(null);
-  const piSessionSyncedRef = useRef(false);
-  // Initial Pi session id. The chat panel's foreground bus registration
-  // is keyed by `conversationId`, and Pi emits events with
-  // `sessionId === piSessionIdRef.current`. Keep them in lockstep from
-  // mount so the panel's foreground handler receives events even on the
-  // very first message of a fresh app launch (no chat selected, no
-  // history loaded). Same invariant as `startNewConversation` /
-  // `loadConversation` — see use-chat-conversations.ts.
-  const initialSessionIdRef = useRef<string>(crypto.randomUUID());
-  const piSessionIdRef = useRef<string>(initialSessionIdRef.current);
-  // Tracks the config Pi is currently running with so `handlePiRestart` can
-  // decide between a hot-swap (`pi_set_model`) and a full respawn. Update
-  // this ref on every Pi start/restart/swap.
-  const piRunningConfigRef = useRef<{
-    provider: string;
-    model: string;
-    url: string;
-    apiKey: string | null;
-    maxTokens: number;
-    systemPrompt: string | null;
-    token: string | null;
-  } | null>(null);
 
   // Active pipe execution (when watching a running pipe)
   const [activePipeExecution, setActivePipeExecution] = useState<{
@@ -3142,6 +715,47 @@ export function StandaloneChat({
     () => queuedPromptsBySession[currentQueueSessionId] ?? EMPTY_QUEUED_PROMPTS,
     [queuedPromptsBySession, currentQueueSessionId]
   );
+  const {
+    isUserScrolledUp,
+    handleMessagesScroll,
+    markUserScrolledUp,
+    scrollToBottom,
+  } = useChatScroll({
+    conversationId,
+    messages,
+    isLoading,
+    isStreaming,
+    scrollContainerRef,
+    messagesEndRef,
+  });
+
+  const focusMessageById = useCallback((messageId: string) => {
+    let attempts = 0;
+    const findAndFocus = () => {
+      const container = scrollContainerRef.current;
+      const target = container
+        ? Array.from(container.querySelectorAll<HTMLElement>("[data-message-id]"))
+            .find((el) => el.dataset.messageId === messageId)
+        : null;
+
+      if (target) {
+        markUserScrolledUp();
+        target.scrollIntoView({ behavior: attempts > 1 ? "smooth" : "auto", block: "center" });
+        setHighlightedMessageId(messageId);
+        window.setTimeout(() => {
+          setHighlightedMessageId((current) => (current === messageId ? null : current));
+        }, 2400);
+        return;
+      }
+
+      attempts += 1;
+      if (attempts <= 24) {
+        window.requestAnimationFrame(findAndFocus);
+      }
+    };
+
+    window.requestAnimationFrame(findAndFocus);
+  }, [markUserScrolledUp]);
 
   // Clear the connection chip whenever the active conversation changes (new chat or history switch).
   useEffect(() => { setConnectionChip(null); }, [conversationId]);
@@ -4922,90 +2536,6 @@ export function StandaloneChat({
     window.addEventListener("keydown", handleEscape);
     return () => window.removeEventListener("keydown", handleEscape);
   }, [showMentionDropdown, isLoading, isStreaming]);
-
-  const isNearScrollBottom = useCallback((container: HTMLDivElement) => {
-    return container.scrollHeight - container.scrollTop - container.clientHeight <= 150;
-  }, []);
-
-  const scrollMessagesToBottom = useCallback((behavior: ScrollBehavior = "auto") => {
-    const container = scrollContainerRef.current;
-    if (container) {
-      container.scrollTo({ top: container.scrollHeight, behavior });
-    } else {
-      messagesEndRef.current?.scrollIntoView({ behavior });
-    }
-  }, []);
-
-  const scheduleScrollToBottom = useCallback((behavior: ScrollBehavior = "auto") => {
-    if (autoScrollFrameRef.current != null) {
-      cancelAnimationFrame(autoScrollFrameRef.current);
-    }
-
-    scrollMessagesToBottom(behavior);
-    autoScrollFrameRef.current = requestAnimationFrame(() => {
-      scrollMessagesToBottom("auto");
-      autoScrollFrameRef.current = requestAnimationFrame(() => {
-        scrollMessagesToBottom("auto");
-        autoScrollFrameRef.current = null;
-      });
-    });
-  }, [scrollMessagesToBottom]);
-
-  const handleMessagesScroll = useCallback(() => {
-    const container = scrollContainerRef.current;
-    if (!container) return;
-
-    const nearBottom = isNearScrollBottom(container);
-    stickToBottomRef.current = nearBottom;
-    setIsUserScrolledUp((prev) => (prev === !nearBottom ? prev : !nearBottom));
-  }, [isNearScrollBottom]);
-
-  // Loading a saved conversation should land at the newest message. Keep the
-  // panel pinned while markdown media loads and changes the message height.
-  useEffect(() => {
-    stickToBottomRef.current = true;
-    setIsUserScrolledUp(false);
-    scheduleScrollToBottom("auto");
-  }, [conversationId, scheduleScrollToBottom]);
-
-  // Smart auto-scroll: only follow new content while the user remains near the
-  // bottom. Once they scroll upward, leave the viewport alone.
-  useEffect(() => {
-    if (stickToBottomRef.current) {
-      scheduleScrollToBottom("auto");
-    }
-  }, [messages, isLoading, isStreaming, scheduleScrollToBottom]);
-
-  // Media players and collapsible sections can change height after the message
-  // array is already stable. ResizeObserver keeps old chats pinned through
-  // those late layout changes without treating them as a user scroll.
-  useEffect(() => {
-    const container = scrollContainerRef.current;
-    const content = container?.firstElementChild;
-    if (!container || !content || typeof ResizeObserver === "undefined") return;
-
-    const observer = new ResizeObserver(() => {
-      if (stickToBottomRef.current) {
-        scheduleScrollToBottom("auto");
-      }
-    });
-    observer.observe(content);
-    return () => observer.disconnect();
-  }, [scheduleScrollToBottom]);
-
-  useEffect(() => {
-    return () => {
-      if (autoScrollFrameRef.current != null) {
-        cancelAnimationFrame(autoScrollFrameRef.current);
-      }
-    };
-  }, []);
-
-  const scrollToBottom = useCallback(() => {
-    stickToBottomRef.current = true;
-    scheduleScrollToBottom("smooth");
-    setIsUserScrolledUp(false);
-  }, [scheduleScrollToBottom]);
 
   // Preload recent speakers when filter popover opens or the composer @ menu opens.
   useEffect(() => {
@@ -10138,72 +7668,7 @@ export function StandaloneChat({
           responsePreview={scheduleDialogMessage.response}
         />
       )}
-
-      {/* Full-screen image viewer (like reference): click any attached photo to open */}
-      <Dialog open={!!imageViewer} onOpenChange={(open) => !open && setImageViewer(null)}>
-        <DialogContent
-          hideCloseButton
-          className="fixed inset-0 z-50 max-w-none w-full h-full !left-0 !top-0 !translate-x-0 !translate-y-0 rounded-none border-0 bg-muted/95 p-0 flex flex-col gap-0"
-        >
-          {imageViewer && (
-            <>
-              <div className="flex items-center justify-between px-4 py-3 border-b border-border/50 shrink-0">
-                <span className="text-sm font-medium text-muted-foreground">
-                  {imageViewer.index + 1}/{imageViewer.images.length} Attached image {imageViewer.index + 1}
-                </span>
-                <button
-                  type="button"
-                  onClick={() => setImageViewer(null)}
-                  className="p-2 rounded-md hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
-                  aria-label="Close"
-                >
-                  <X className="h-5 w-5" />
-                </button>
-              </div>
-              <div className="flex-1 flex items-center justify-center min-h-0 p-4 bg-background/50">
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img
-                  src={imageViewer.images[imageViewer.index]}
-                  alt={`Attached image ${imageViewer.index + 1}`}
-                  className="max-w-full max-h-full object-contain rounded-lg"
-                />
-              </div>
-              <div className="flex items-center justify-center gap-4 py-3 border-t border-border/50 shrink-0">
-                <button
-                  type="button"
-                  onClick={() => setImageViewer((v) => v && v.index > 0 ? { ...v, index: v.index - 1 } : v)}
-                  disabled={imageViewer.index === 0}
-                  className="p-2 rounded-md hover:bg-muted disabled:opacity-40 disabled:pointer-events-none text-foreground"
-                  aria-label="Previous image"
-                >
-                  <ChevronLeft className="h-5 w-5" />
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setImageViewer((v) => v && v.index < v.images.length - 1 ? { ...v, index: v.index + 1 } : v)}
-                  disabled={imageViewer.index === imageViewer.images.length - 1}
-                  className="p-2 rounded-md hover:bg-muted disabled:opacity-40 disabled:pointer-events-none text-foreground"
-                  aria-label="Next image"
-                >
-                  <ChevronRight className="h-5 w-5" />
-                </button>
-              </div>
-              <div className="flex justify-center gap-1.5 pb-3">
-                {imageViewer.images.map((_, i) => (
-                  <div
-                    key={i}
-                    className={cn(
-                      "w-2 h-2 rounded-full transition-colors",
-                      i === imageViewer.index ? "bg-foreground" : "bg-muted-foreground/40"
-                    )}
-                    aria-hidden
-                  />
-                ))}
-              </div>
-            </>
-          )}
-        </DialogContent>
-      </Dialog>
+      <ImageViewerDialog imageViewer={imageViewer} onChange={setImageViewer} />
 
       {/* Delete chat confirmation dialog */}
       <Dialog open={!!deletingConvId} onOpenChange={(open) => !open && setDeletingConvId(null)}>

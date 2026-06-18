@@ -40,39 +40,8 @@ import {
   conversationDedupKey,
   type ConversationMeta,
 } from "@/lib/chat-storage";
-
-
-// --- Types (mirrored from standalone-chat.tsx) ---
-
-export interface ToolCall {
-  id: string;
-  toolName: string;
-  args: Record<string, any>;
-  result?: string;
-  isError?: boolean;
-  isRunning: boolean;
-}
-
-export type ContentBlock =
-  | { type: "text"; text: string }
-  | { type: "tool"; toolCall: ToolCall }
-  | { type: "thinking"; text: string; isThinking: boolean; durationMs?: number };
-
-export interface Message {
-  id: string;
-  role: "user" | "assistant";
-  content: string;
-  intent?: "steer";
-  turnIntentId?: string;
-  displayContent?: string;
-  images?: string[];
-  timestamp: number;
-  contentBlocks?: ContentBlock[];
-  model?: string;
-  provider?: string;
-  interruptedBySteer?: boolean;
-  steeredResponse?: boolean;
-}
+import type { ContentBlock, Message } from "@/lib/chat/types";
+export type { ContentBlock, Message, ToolCall } from "@/lib/chat/types";
 
 // --- Hook options ---
 
