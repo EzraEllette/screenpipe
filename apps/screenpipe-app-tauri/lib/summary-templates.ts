@@ -14,21 +14,30 @@ export interface CustomTemplate {
 }
 
 /**
- * Fallback templates used when the pipes API is unreachable
- * (app startup race, server down). Mirrors the pipe.md files.
+ * Canonical definitions for the home-screen summary cards.
+ *
+ * These are the source of truth for the home grid (see summary-cards.tsx),
+ * not just an offline fallback: the card set is curated to a small, high-signal
+ * list and rendered from these app-bundled definitions so prompt improvements
+ * reach every user on app upgrade — engine template pipes are never overwritten
+ * once they exist on disk, so editing only the bundled pipe.md would not update
+ * existing installs.
+ *
+ * Keep slugs in sync with HOME_CARD_SLUGS in summary-cards.tsx and the bundled
+ * pipe.md files in crates/screenpipe-core/assets/pipes/.
  */
 export const FALLBACK_TEMPLATES: TemplatePipe[] = [
   {
     name: "automate-my-work",
     title: "Automate My Work",
     description: "Build and turn on 3 low-risk automations tailored to your workflow",
-    icon: "\u26A1",
+    icon: "⚡",
     featured: true,
     prompt: `<role>
 You are a screenpipe automation expert. Look at the user's ACTUAL computer activity, then build and turn on 3 high-value, LOW-RISK automations ("pipes") that quietly run in the background to make them more productive. You do not just suggest — you create the pipes and enable them.
 </role>
 
-Read the screenpipe skill first so you know the API and how pipes work. Then follow every step in order. Do not skip steps.
+Read the screenpipe skill first so you know the API and how pipes work. Then follow every step in order. Do not skip steps. Use the screenpipe API (curl) and /raw_sql — never write or run code in another language.
 
 ## Step 1: Understand the user's work (read-only, max 6 API calls, last 24h)
 
@@ -101,7 +110,7 @@ These are read-only and just surface insights. To pause any of them, open Pipes 
     description: "Today's accomplishments, key moments, and unfinished work",
     icon: "\u{1F4CB}",
     featured: true,
-    prompt: `Analyze my screen and audio recordings from today (last 16 hours only). Use limit=10 per search, max 5 searches total.
+    prompt: `Analyze my screen and audio recordings from today (last 16 hours). Read the screenpipe skill first. Use limit=10 per search, max 5 searches total. Prefer /raw_sql with COUNT/GROUP BY for app usage. Use the API only — do not write or run code.
 
 Use this exact format:
 
@@ -109,203 +118,64 @@ Use this exact format:
 One sentence: what I mainly did today.
 
 ## Accomplishments
-- Top 3 things I finished, with timestamps (e.g. "2:30 PM")
-- Name specific apps, files, or projects
+- Top 3 things I finished, with timestamps (e.g. "2:30 PM"). Name specific apps, files, or projects.
 
 ## Key Moments
-- Important things I saw, said, or heard — with timestamps
+- Important things I saw, said, or heard — with timestamps.
 
 ## Unfinished Work
-- What I should continue tomorrow — name the app/file/task
+- What to continue tomorrow — name the app, file, or task.
 
 ## Patterns
-- Apps I used most, topics that came up repeatedly
+- Apps I used most and topics that recurred.
 
 Only report what you can verify from the data. End with: "**Next step:** [most important thing to continue]"`,
-  },
-  {
-    name: "standup-update",
-    title: "Standup Update",
-    description: "What you did, what's next, and any blockers",
-    icon: "\u{1F3E2}",
-    featured: true,
-    prompt: `Based on my recordings from the last 24 hours, generate a standup update. Use limit=10 per search, max 3 searches total.
-
-Use this exact format:
-
-## Yesterday
-- What I worked on (name specific projects, files, tools, PRs)
-
-## Today
-- What I will work on next (based on unfinished tasks and recent activity)
-
-## Blockers
-- Issues I hit — errors, slow builds, waiting on someone
-- If no blockers, write "None"
-
-Keep it under 150 words. Copy-paste ready for a team standup.`,
-  },
-  {
-    name: "top-of-mind",
-    title: "What's Top of Mind",
-    description: "Recurring topics and themes from your activity",
-    icon: "\u{1F4A1}",
-    featured: true,
-    prompt: `Search my screen and audio recordings from the last 8 hours. Use limit=10 per search, max 4 searches total.
-
-Use this exact format:
-
-## Recurring Topics
-- Subjects, projects, or people that appeared 3+ times. Rank by frequency.
-
-## Focus Areas
-- What I spent the most time on. Name the app and approximate duration.
-
-## Unresolved Questions
-- Things I searched for or discussed without finding an answer
-
-## Emerging Patterns
-- New topics, tools, or workflows appearing vs. my usual routine
-
-End with: "**Next step:** [most important thing to follow up on]"`,
-  },
-  {
-    name: "ai-habits",
-    title: "AI Habits",
-    description: "How you use AI tools — patterns and insights",
-    icon: "\u{1F916}",
-    featured: false,
-    prompt: `Search my recordings from the last 24 hours for AI tool usage. Use app_name filter for each tool separately: ChatGPT, Claude, Copilot, Cursor, Gemini, Perplexity. Use limit=5 per search, max 6 searches total.
-
-Use this exact format:
-
-## AI Tools Used
-- List each tool with approximate time spent (e.g. "Claude: ~45min")
-
-## What I Used Them For
-- For each tool: coding, writing, research, or brainstorming
-
-## Usage Patterns
-- Do I switch between tools? Use them in bursts or steadily?
-
-## Effectiveness
-- Which tool appeared alongside completed work vs. abandoned attempts
-
-If no AI usage is found, say so clearly. End with: "**Tip:** [one suggestion to use AI tools more effectively]"`,
-  },
-  {
-    name: "morning-brief",
-    title: "Morning Brief",
-    description: "Catch up on yesterday's unfinished work and pending items",
-    icon: "\u{1F305}",
-    featured: false,
-    prompt: `Look at my recordings from yesterday evening (last 12-18 hours). Use limit=10 per search, max 3 searches total.
-
-Use this exact format:
-
-## Where I Left Off
-- What was I working on when I stopped? Name the app, file, and task.
-
-## Unfinished Tasks
-- Anything started but not completed — list what to finish today
-
-## Important Messages
-- Key conversations or notifications I should follow up on
-
-## Today's Context
-- Meetings, deadlines, or events mentioned yesterday
-
-Be specific with app names and window titles. End with: "**Start with:** [first thing to do this morning]"`,
   },
   {
     name: "time-breakdown",
     title: "Time Breakdown",
     description: "Where your time went — by app, project, and category",
-    icon: "\u23F1",
-    featured: false,
-    prompt: `Analyze my app usage from today (last 12 hours). Use limit=10 per search, max 4 searches. Prefer /raw_sql with COUNT/GROUP BY queries.
+    icon: "⏱",
+    featured: true,
+    prompt: `Analyze my app usage from today (last 12 hours). Read the screenpipe skill first. Use limit=10 per search, max 4 searches. Prefer /raw_sql with COUNT(*) and GROUP BY app_name over the frames table — query the API only, do not write or run code.
 
 Use this exact format with durations and percentages:
 
 ## By Application
-- List each app with duration and percentage, sorted by time (e.g. "VS Code: 2h 15min (28%)")
+- Each app with duration and percentage, sorted by time (e.g. "VS Code: 2h 15min (28%)").
 
 ## By Category
-- Group into: coding, meetings, browsing, writing, communication, other
-- Show hours and percentage per category
+- Group into: coding, meetings, browsing, writing, communication, other. Show hours and % per category.
 
 ## By Project
-- Group related activities by project/topic. Name specific repos or tasks.
+- Group related activity by project/topic. Name specific repos or tasks.
 
-## Productivity Score
-- Calculate: focused_work_hours / total_hours as a percentage
-- Focused = coding + writing. Unfocused = browsing + switching.
+## Focus Score
+- focused / total as a percentage. Focused = coding + writing; unfocused = browsing + app-switching.
 
-End with: "**Suggestion:** [one specific change to improve tomorrow's productivity]"`,
+End with: "**Suggestion:** [one specific change to improve tomorrow]"`,
   },
   {
-    name: "collaboration-patterns",
-    title: "Collaboration Patterns",
-    description: "Who you interact with and how",
-    icon: "\u{1F465}",
-    featured: false,
-    prompt: `Analyze my communication patterns from the last 24 hours. Use limit=10 per search, max 4 searches. Filter by app_name for communication tools (Slack, Teams, Zoom, Discord, Mail).
+    name: "missed-todos",
+    title: "Missed To-Dos",
+    description: "Action items from the last few days you may have missed",
+    icon: "✅",
+    featured: true,
+    prompt: `Find action items and to-dos from the last 3 days that I may have missed. Read the screenpipe skill first. Use limit=10 per search, max 5 searches over the last 3 days. Query the API only — do not write or run code.
+
+Look across messages, email, meetings, docs, and issue trackers (e.g. Slack, Gmail, Notion, Linear, GitHub) for commitments and tasks — phrases like "I'll", "can you", "TODO", "follow up", "by Friday", action items, and unchecked checkboxes.
 
 Use this exact format:
 
-## People
-- Who I interacted with — from meetings, messages, emails
+## Likely Missed
+- [ ] Task — where it came from (app + person/thread) and when. Only items that still look unresolved.
 
-## Channels
-- Which apps/platforms I used for each person
+## Waiting on Me
+- [ ] Things someone asked me to do that I haven't acted on yet.
 
-## Meeting Time
-- How much time in calls vs. async communication
+## Quick Wins
+- [ ] Small tasks (<5 min) I can clear right now.
 
-## Key Discussions
-- Important topics per person/channel
-
-Focus on professional interactions. End with: "**Follow up with:** [person or thread to respond to first]"`,
-  },
-  {
-    name: "video-export",
-    title: "Export Video Clip",
-    description: "Create a video of your recent screen activity",
-    icon: "\u{1F3AC}",
-    featured: false,
-    prompt: `Export a video of my screen activity from the last 5 minutes.
-
-Use the POST /export endpoint (\`{"start": "5m ago", "end": "now"}\`) — it renders a real-time clip with synced audio whose duration matches the time range. Then show me the returned output_path as an inline code block so I can watch it.
-
-Long ranges can take a few minutes; if needed, suggest a shorter time range.`,
-  },
-  {
-    name: "meeting-summary",
-    title: "Meeting Summary",
-    description: "Summarize meeting transcript with key takeaways and action items",
-    icon: "\u{1F91D}",
-    featured: false,
-    prompt: `Summarize the meeting transcript provided in the context. Include key takeaways and action items. If the meeting is marked as ongoing, note that and summarize what's available so far.
-
-Use this exact format:
-
-## Meeting Summary
-One sentence: what this meeting was about.
-
-## Key Takeaways
-- Top 3-5 important points discussed
-- Include who said what when relevant
-
-## Action Items
-- [ ] Task — assigned to whom, deadline if mentioned
-- [ ] Task — assigned to whom
-
-## Decisions Made
-- List any decisions or agreements reached
-
-## Open Questions
-- Anything unresolved or needing follow-up
-
-Keep it concise and actionable.`,
+Rank by urgency. Only include items you can actually see in the data — never invent tasks. If you find none, say so plainly. End with: "**Do first:** [the single most important item]"`,
   },
 ];

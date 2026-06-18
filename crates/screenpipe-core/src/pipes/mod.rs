@@ -4524,6 +4524,10 @@ impl PipeManager {
                 include_str!("../../assets/pipes/automate-my-work/pipe.md"),
             ),
             (
+                "missed-todos",
+                include_str!("../../assets/pipes/missed-todos/pipe.md"),
+            ),
+            (
                 "day-recap",
                 include_str!("../../assets/pipes/day-recap/pipe.md"),
             ),
