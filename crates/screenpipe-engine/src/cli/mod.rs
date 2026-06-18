@@ -192,8 +192,8 @@ pub enum Command {
     Search(SearchArgs),
 
     /// Enterprise: query teammates' screen + audio history via
-    /// `screenpi.pe/api/enterprise/v1/*`. Admin-only — needs a
-    /// `team_api_token` minted at https://screenpi.pe/enterprise?tab=tokens.
+    /// `screenpipe.com/api/enterprise/v1/*`. Admin-only — needs a
+    /// `team_api_token` minted at https://screenpipe.com/enterprise?tab=tokens.
     Team {
         #[command(subcommand)]
         subcommand: TeamCommand,
@@ -244,7 +244,7 @@ pub enum Command {
     /// Install a bundle of pipes from a manifest URL
     Install {
         /// Manifest URL (HTTPS, JSON). Defaults to the screenpipe starter bundle.
-        #[arg(default_value = "https://screenpi.pe/start.json")]
+        #[arg(default_value = "https://screenpipe.com/start.json")]
         url: String,
         /// Allow manifests hosted outside the trusted host list
         #[arg(long, default_value_t = false)]
@@ -1770,7 +1770,7 @@ pub struct SearchArgs {
 // =============================================================================
 
 /// Mirrors the `screenpipe-team` skill 1:1 — same endpoints, same vocabulary.
-/// All three variants hit `https://screenpi.pe/api/enterprise/v1/*` directly
+/// All three variants hit `https://screenpipe.com/api/enterprise/v1/*` directly
 /// with the admin's `team_api_token` from `~/.screenpipe/enterprise.json`
 /// (or `SCREENPIPE_TEAM_API_TOKEN` env override). No daemon needed.
 #[derive(Subcommand, Debug)]
