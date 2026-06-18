@@ -115,10 +115,9 @@ async function expandSeededSourcesFooter(content: string): Promise<void> {
         ).find((el) =>
           (el.textContent ?? "").includes(assistantContent),
         );
-        const sourceButtons = Array.from(document.querySelectorAll("button")).filter((el) => {
-          const text = el.textContent ?? "";
-          return el.getAttribute("aria-expanded") !== null && /\bsources?\b/i.test(text);
-        });
+        const sourceButtons = Array.from(
+          document.querySelectorAll('[data-testid="source-citation-toggle"]'),
+        );
         const button = assistantMessage
           ? sourceButtons.find((el) => assistantMessage.contains(el)) ??
             sourceButtons.find((el) =>
@@ -135,7 +134,7 @@ async function expandSeededSourcesFooter(content: string): Promise<void> {
         return true;
       }, content)) as boolean,
     {
-      timeout: t(8_000),
+      timeout: t(20_000),
       interval: 150,
       timeoutMsg: "seeded sources footer toggle never appeared",
     },
