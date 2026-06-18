@@ -588,8 +588,8 @@ mod tests {
         assert_eq!(s.frames_corrupt_black, 2);
         assert_eq!(s.frames_corrupt_green, 1);
         assert_eq!(s.dedup_skips, 2); // corrupt skips did NOT inflate dedup
-        // residual = attempts - written - dedup - corrupt - dropped
-        //          = 10 - 5 - 2 - 3 - 0 = 0
+                                      // residual = attempts - written - dedup - corrupt - dropped
+                                      //          = 10 - 5 - 2 - 3 - 0 = 0
         assert_eq!(s.silent_loss, 0);
         assert_eq!(s.silent_loss_rate, 0.0);
     }

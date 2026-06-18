@@ -2390,11 +2390,7 @@ const CORRUPT_GRID: usize = 15;
 /// further.
 fn is_garbage_green(px: [u8; 3]) -> bool {
     let [r, g, b] = px;
-    g >= 100
-        && r <= 70
-        && b <= 70
-        && g >= r.saturating_add(60)
-        && g >= b.saturating_add(60)
+    g >= 100 && r <= 70 && b <= 70 && g >= r.saturating_add(60) && g >= b.saturating_add(60)
 }
 
 /// Result of one cheap pass over a captured frame's sample grid.
@@ -3299,7 +3295,11 @@ mod tests {
         // is anchored to the bottom, so a top-only green region never trips it.
         let mut buf = image::RgbImage::new(1920, 1080);
         for y in 0..1080 {
-            let color = if y < 324 { [0, 150, 0] } else { [120, 130, 140] };
+            let color = if y < 324 {
+                [0, 150, 0]
+            } else {
+                [120, 130, 140]
+            };
             for x in 0..1920 {
                 buf.put_pixel(x, y, image::Rgb(color));
             }
@@ -3372,7 +3372,11 @@ mod tests {
         let mut buf = image::RgbaImage::new(1280, 800);
         for y in 0..800 {
             for x in 0..1280 {
-                let c = if y >= 480 { [0, 150, 0, 255] } else { [120, 130, 140, 255] };
+                let c = if y >= 480 {
+                    [0, 150, 0, 255]
+                } else {
+                    [120, 130, 140, 255]
+                };
                 buf.put_pixel(x, y, image::Rgba(c));
             }
         }
