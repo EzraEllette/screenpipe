@@ -22,7 +22,7 @@ import { openHomeWindow, waitForAppReady, t } from "../helpers/test-utils.js";
 
 const HEADING = "E2E Preview Heading";
 const CODE_MARKER = "const e2eAnswer";
-const ASSISTANT_TEXT = "Here is what I found in the skill file.";
+const ASSISTANT_TEXT_PREFIX = "Here is what I found in the skill file";
 
 const PREVIEW_MARKDOWN = [
   `# ${HEADING}`,
@@ -39,6 +39,7 @@ const PREVIEW_MARKDOWN = [
 async function seedAssistantWithFileSource(
   sessionId: string,
   filePath: string,
+  content: string,
 ): Promise<void> {
   await browser.waitUntil(
     async () =>
@@ -84,17 +85,17 @@ async function seedAssistantWithFileSource(
     },
     sessionId,
     filePath,
-    ASSISTANT_TEXT,
+    content,
   );
 }
 
-async function waitForSeededAssistant(): Promise<void> {
+async function waitForSeededAssistant(content: string): Promise<void> {
   await browser.waitUntil(
     async () =>
       (await browser.execute((content: string) =>
         Array.from(document.querySelectorAll('[data-testid="chat-message-assistant"]'))
           .some((el) => (el.textContent ?? "").includes(content)),
-      ASSISTANT_TEXT)) as boolean,
+      content)) as boolean,
     {
       timeout: t(10_000),
       interval: 150,
@@ -105,14 +106,14 @@ async function waitForSeededAssistant(): Promise<void> {
 
 // The "N sources" footer starts collapsed; click the toggle attached to the
 // seeded assistant message so other source footers cannot steal the click.
-async function expandSeededSourcesFooter(): Promise<void> {
+async function expandSeededSourcesFooter(content: string): Promise<void> {
   await browser.waitUntil(
     async () =>
-      (await browser.execute(() => {
+      (await browser.execute((assistantContent: string) => {
         const assistantMessage = Array.from(
           document.querySelectorAll('[data-testid="chat-message-assistant"]'),
         ).find((el) =>
-          (el.textContent ?? "").includes("Here is what I found in the skill file"),
+          (el.textContent ?? "").includes(assistantContent),
         );
         const sourceButtons = Array.from(document.querySelectorAll("button")).filter((el) => {
           const text = el.textContent ?? "";
@@ -132,7 +133,7 @@ async function expandSeededSourcesFooter(): Promise<void> {
           (button as HTMLButtonElement).click();
         }
         return true;
-      })) as boolean,
+      }, content)) as boolean,
     {
       timeout: t(8_000),
       interval: 150,
@@ -184,13 +185,14 @@ describe("Chat source citations open files in the preview sidebar", function () 
 
   it("renders the file source, opens it on click, and shows rendered markdown + code", async () => {
     sessionId = randomUUID();
-    await seedAssistantWithFileSource(sessionId, mdPath);
+    const assistantText = `${ASSISTANT_TEXT_PREFIX} ${sessionId}.`;
+    await seedAssistantWithFileSource(sessionId, mdPath, assistantText);
 
     // The seeded assistant message renders.
-    await waitForSeededAssistant();
+    await waitForSeededAssistant(assistantText);
 
     // Expand the "1 source" footer and click the file card.
-    await expandSeededSourcesFooter();
+    await expandSeededSourcesFooter(assistantText);
     await clickSeededFileSource();
 
     // The preview sidebar opens to that file.

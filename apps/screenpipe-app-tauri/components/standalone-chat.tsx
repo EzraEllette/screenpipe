@@ -4016,6 +4016,20 @@ export function StandaloneChat({
         assistantMsg as any,
         (payload.content ?? "").slice(0, 60),
       );
+      const store = useChatStore.getState();
+      store.actions.setStreaming(sid, {
+        streamingText: "",
+        streamingMessageId: null,
+        contentBlocks: [],
+        isLoading: false,
+        isStreaming: false,
+      });
+      store.actions.patch(sid, { status: "idle", lastError: undefined });
+      piStreamingTextRef.current = "";
+      piMessageIdRef.current = null;
+      piContentBlocksRef.current = [];
+      setIsLoading(false);
+      setIsStreaming(false);
     };
     return () => {
       delete (window as any).__e2eSeedUserMessage;
