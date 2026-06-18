@@ -14,6 +14,7 @@ pub mod login;
 pub mod mcp;
 pub mod pipe;
 pub mod presets;
+pub mod profile;
 pub mod search;
 pub mod status;
 mod store_file;
@@ -182,6 +183,17 @@ pub enum Command {
         #[arg(long, value_hint = ValueHint::DirPath)]
         data_dir: Option<String>,
         /// Port to check for running server
+        #[arg(short = 'p', long, default_value_t = 3030)]
+        port: u16,
+    },
+
+    /// Show per-stage pipeline timing (OCR, DB write, capture FPS, audio
+    /// throughput) from the running server's /health endpoint
+    Profile {
+        /// Output format
+        #[arg(long, default_value_t = false)]
+        json: bool,
+        /// Port of the running server
         #[arg(short = 'p', long, default_value_t = 3030)]
         port: u16,
     },
@@ -2198,6 +2210,31 @@ mod tests {
         match cli.command {
             Command::Survey => {}
             _ => panic!("expected Survey command"),
+        }
+    }
+
+    #[test]
+    fn test_profile_command_parses_with_defaults() {
+        let cli = Cli::try_parse_from(["screenpipe", "profile"]).unwrap();
+        match cli.command {
+            Command::Profile { json, port } => {
+                assert!(!json);
+                assert_eq!(port, 3030);
+            }
+            _ => panic!("expected Profile command"),
+        }
+    }
+
+    #[test]
+    fn test_profile_command_parses_port_and_json() {
+        let cli =
+            Cli::try_parse_from(["screenpipe", "profile", "--port", "4040", "--json"]).unwrap();
+        match cli.command {
+            Command::Profile { json, port } => {
+                assert!(json);
+                assert_eq!(port, 4040);
+            }
+            _ => panic!("expected Profile command"),
         }
     }
 
