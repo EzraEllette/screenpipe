@@ -13,13 +13,14 @@
  * assistant message and a real on-disk markdown file; no model run involved.
  */
 
-import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { saveScreenshot } from "../helpers/screenshot-utils.js";
 import { openHomeWindow, waitForAppReady, t } from "../helpers/test-utils.js";
 
 const SESSION = "55555555-5555-5555-5555-555555555555";
+const CHATS_DIR = join(homedir(), ".screenpipe", "chats");
 const HEADING = "E2E Preview Heading";
 const CODE_MARKER = "const e2eAnswer";
 
@@ -60,21 +61,64 @@ async function emitFromWebview(eventName: string, payload: unknown): Promise<voi
 }
 
 async function switchToSession(id: string): Promise<void> {
-  await emitFromWebview("chat-load-conversation", { conversationId: id });
+  await emitFromWebview("chat-load-conversation", {
+    conversationId: id,
+    targetWindow: "home",
+  });
   await browser.pause(t(500));
 }
 
-async function waitForAssistantSeedHook(): Promise<void> {
-  await browser.waitUntil(
-    async () =>
-      (await browser.execute(
-        () => typeof (window as any).__e2eSeedAssistantMessage === "function",
-      )) as boolean,
-    {
-      timeout: t(8_000),
-      interval: 100,
-      timeoutMsg: "E2E assistant seed hook did not mount",
-    },
+function removeChatFile(id: string): void {
+  try {
+    const path = join(CHATS_DIR, `${id}.json`);
+    if (existsSync(path)) rmSync(path);
+  } catch {
+    /* ignore */
+  }
+}
+
+function writeSeedChatFile(
+  sessionId: string,
+  filePath: string,
+): void {
+  if (!existsSync(CHATS_DIR)) mkdirSync(CHATS_DIR, { recursive: true });
+  const now = Date.now();
+  writeFileSync(
+    join(CHATS_DIR, `${sessionId}.json`),
+    JSON.stringify(
+      {
+        id: sessionId,
+        title: "e2e file source preview",
+        messages: [
+          {
+            id: "e2e-user-file-preview",
+            role: "user",
+            content: "open the seeded file source",
+            timestamp: now,
+          },
+          {
+            id: "e2e-assistant-file-preview",
+            role: "assistant",
+            content: "Here is what I found in the skill file.",
+            timestamp: now + 1,
+            sourceCitations: [
+              {
+                id: "e2e-file-skill",
+                kind: "file",
+                title: "Read: e2e-preview.md",
+                subtitle: filePath,
+                path: filePath,
+              },
+            ],
+          },
+        ],
+        createdAt: now,
+        updatedAt: now,
+      },
+      null,
+      2,
+    ),
+    "utf8",
   );
 }
 
@@ -82,27 +126,8 @@ async function seedAssistantWithFileSource(
   sessionId: string,
   filePath: string,
 ): Promise<void> {
-  await browser.execute(
-    (sid: string, path: string) => {
-      const seed = (window as any).__e2eSeedAssistantMessage as
-        | ((s: string, payload: unknown) => void)
-        | undefined;
-      seed?.(sid, {
-        content: "Here is what I found in the skill file.",
-        sourceCitations: [
-          {
-            id: "e2e-file-skill",
-            kind: "file",
-            title: "Read: e2e-preview.md",
-            subtitle: path,
-            path,
-          },
-        ],
-      });
-    },
-    sessionId,
-    filePath,
-  );
+  writeSeedChatFile(sessionId, filePath);
+  await switchToSession(sessionId);
 }
 
 // The "N sources" footer starts collapsed; click its toggle to reveal the
@@ -144,8 +169,11 @@ describe("Chat source citations open files in the preview sidebar", function () 
     await openHomeWindow();
     const home = await $('[data-testid="section-home"]');
     await home.waitForExist({ timeout: t(15_000) });
-    await switchToSession(SESSION);
-    await waitForAssistantSeedHook();
+    removeChatFile(SESSION);
+  });
+
+  after(() => {
+    removeChatFile(SESSION);
   });
 
   it("renders the file source, opens it on click, and shows rendered markdown + code", async () => {
