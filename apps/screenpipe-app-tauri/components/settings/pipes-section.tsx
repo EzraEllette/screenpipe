@@ -683,6 +683,7 @@ export function cleanPipeStdout(raw: string): string {
   let textBuf = "";       // accumulates text_delta fragments
   let errorMessage: string | null = null;
   let hasTextDelta = false;
+  let hasExtractedContent = false;
 
   function flushText() {
     if (textBuf) {
@@ -740,6 +741,7 @@ export function cleanPipeStdout(raw: string): string {
             for (const block of msg.content) {
               if (block.type === "text" && block.text) {
                 parts.push(block.text);
+                hasExtractedContent = true;
               }
             }
           }
@@ -754,7 +756,7 @@ export function cleanPipeStdout(raw: string): string {
             if (msg.stopReason === "error" && msg.errorMessage) {
               errorMessage = msg.errorMessage;
             }
-            if (!hasTextDelta && msg.content) {
+            if (!hasTextDelta && !hasExtractedContent && msg.content) {
               for (const block of msg.content) {
                 if (block.type === "text" && block.text) {
                   parts.push(block.text);
