@@ -3944,6 +3944,44 @@ export function StandaloneChat({
   // never read from production code paths.
   useEffect(() => {
     if (typeof window === "undefined") return;
+    const seedE2eSessionMessage = (
+      sid: string,
+      message: any,
+      preview: string,
+    ) => {
+      const store = useChatStore.getState();
+      const existing = store.sessions[sid];
+      const existingMessages = Array.isArray(existing?.messages)
+        ? existing.messages
+        : [];
+      const nextMessages = [...existingMessages, message];
+
+      if (!existing) {
+        store.actions.upsert({
+          id: sid,
+          title: "e2e",
+          preview,
+          status: "idle",
+          messageCount: nextMessages.length,
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+          pinned: false,
+          unread: false,
+          messages: nextMessages,
+        });
+      } else {
+        store.actions.appendMessage(sid, message, preview);
+      }
+
+      store.actions.setCurrent(sid);
+      store.actions.setPanelSession(sid);
+      setMessages(nextMessages as any);
+      setConversationId(sid);
+      piSessionIdRef.current = sid;
+      piSessionSyncedRef.current = true;
+      void emit("chat-current-session", { id: sid });
+    };
+
     (window as any).__e2eSeedUserMessage = (sid: string, text: string) => {
       const id = `e2e-user-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       const userMsg = {
@@ -3953,39 +3991,7 @@ export function StandaloneChat({
         timestamp: Date.now(),
       };
 
-      // (2) Ensure the session record exists in the store so subsequent
-      // appendMessage / setStreaming / snapshotSession calls actually
-      // mutate something. upsert overwrites if existing, so we read first
-      // and merge messages by hand.
-      const store = useChatStore.getState();
-      const existing = store.sessions[sid];
-      if (!existing) {
-        store.actions.upsert({
-          id: sid,
-          title: "e2e",
-          preview: text.slice(0, 60),
-          status: "idle",
-          messageCount: 1,
-          createdAt: Date.now(),
-          updatedAt: Date.now(),
-          pinned: false,
-          unread: false,
-          messages: [userMsg as any],
-        });
-      } else {
-        store.actions.appendMessage(sid, userMsg as any);
-      }
-
-      // (1) Mirror to local React state so `ensureAssistantPlaceholder`
-      // sees the user-tail on the next text_delta. Always do this — the
-      // test only ever seeds for the about-to-stream session, which is
-      // by definition what the panel is rendering.
-      setMessages((prev) => [...prev, userMsg as any]);
-
-      // (3) Force the session ref in case the panel hasn't finished
-      // switching yet. Otherwise text_deltas with this sid would route
-      // to the wrong handler.
-      piSessionIdRef.current = sid;
+      seedE2eSessionMessage(sid, userMsg as any, text.slice(0, 60));
     };
 
     // E2E hook: seed a finished assistant message carrying source citations,
@@ -4005,27 +4011,11 @@ export function StandaloneChat({
         sourceCitations: payload.sourceCitations ?? [],
       };
 
-      const store = useChatStore.getState();
-      const existing = store.sessions[sid];
-      if (!existing) {
-        store.actions.upsert({
-          id: sid,
-          title: "e2e",
-          preview: (payload.content ?? "").slice(0, 60),
-          status: "idle",
-          messageCount: 1,
-          createdAt: Date.now(),
-          updatedAt: Date.now(),
-          pinned: false,
-          unread: false,
-          messages: [assistantMsg as any],
-        });
-      } else {
-        store.actions.appendMessage(sid, assistantMsg as any);
-      }
-
-      setMessages((prev) => [...prev, assistantMsg as any]);
-      piSessionIdRef.current = sid;
+      seedE2eSessionMessage(
+        sid,
+        assistantMsg as any,
+        (payload.content ?? "").slice(0, 60),
+      );
     };
     return () => {
       delete (window as any).__e2eSeedUserMessage;

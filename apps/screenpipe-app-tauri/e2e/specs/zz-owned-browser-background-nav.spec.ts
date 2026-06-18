@@ -196,20 +196,6 @@ async function readBrowserStateCacheUrl(
   }, `screenpipe:browser-state:${chatId}`)) as string | null;
 }
 
-async function waitForChatSeedHook(): Promise<void> {
-  await browser.waitUntil(
-    async () =>
-      (await browser.execute(
-        () => typeof (window as any).__e2eSeedUserMessage === "function",
-      )) as boolean,
-    {
-      timeout: t(10_000),
-      interval: 100,
-      timeoutMsg: "E2E chat seed hook did not mount",
-    },
-  );
-}
-
 /** Capture every `chat-current-session` the page emits so the test can prove
  *  which conversation the on-screen BrowserSidebar is actually bound to. The
  *  gate is `owner && conversationId && owner !== conversationId`, so a null
@@ -233,20 +219,6 @@ async function installSessionCapture(): Promise<void> {
       .then(() => done())
       .catch(() => done());
   });
-}
-
-async function seedChat(sessionId: string, text: string): Promise<void> {
-  await browser.execute(
-    (sid: string, msg: string) => {
-      const fn = (window as any).__e2eSeedUserMessage as (
-        s: string,
-        t: string,
-      ) => void;
-      fn(sid, msg);
-    },
-    sessionId,
-    text,
-  );
 }
 
 async function loadChatIntoHome(conversationId: string): Promise<void> {
@@ -345,7 +317,6 @@ describe("Owned browser — per-chat navigation ownership", function () {
   before(async () => {
     await waitForAppReady();
     await openHomeWindow();
-    await waitForChatSeedHook();
     removeChatFile(OWN_CHAT);
   });
 
@@ -362,8 +333,7 @@ describe("Owned browser — per-chat navigation ownership", function () {
       //    chat-current-session (the gate falls through on a null conversationId,
       //    so this keeps the assertion honest on the fixed build).
       await installSessionCapture();
-      await seedChat(OWN_CHAT, "(e2e) owned-browser ownership probe");
-      await browser.pause(t(200));
+      writeSeedChatFile(OWN_CHAT, "(e2e) owned-browser ownership probe");
       await loadChatIntoHome(OWN_CHAT);
       await waitForActiveConversation(OWN_CHAT);
 
@@ -422,8 +392,7 @@ describe("Owned browser — per-chat navigation ownership", function () {
     "reveals the on-screen chat's own agent navigation",
     async () => {
       await installSessionCapture();
-      await seedChat(OWN_CHAT, "(e2e) owned-browser reveal probe");
-      await browser.pause(t(200));
+      writeSeedChatFile(OWN_CHAT, "(e2e) owned-browser reveal probe");
       await loadChatIntoHome(OWN_CHAT);
       await waitForActiveConversation(OWN_CHAT);
 
