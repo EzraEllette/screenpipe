@@ -13,16 +13,16 @@
  * assistant message and a real on-disk markdown file; no model run involved.
  */
 
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { saveScreenshot } from "../helpers/screenshot-utils.js";
 import { openHomeWindow, waitForAppReady, t } from "../helpers/test-utils.js";
 
-const CHATS_DIR = join(homedir(), ".screenpipe", "chats");
 const HEADING = "E2E Preview Heading";
 const CODE_MARKER = "const e2eAnswer";
+const ASSISTANT_TEXT = "Here is what I found in the skill file.";
 
 const PREVIEW_MARKDOWN = [
   `# ${HEADING}`,
@@ -36,98 +36,71 @@ const PREVIEW_MARKDOWN = [
   "",
 ].join("\n");
 
-async function emitFromWebview(eventName: string, payload: unknown): Promise<void> {
-  await browser.executeAsync(
-    (name: string, p: unknown, done: (v?: unknown) => void) => {
-      const g = globalThis as unknown as {
-        __TAURI__?: { event?: { emit: (n: string, p: unknown) => Promise<unknown> } };
-        __TAURI_INTERNALS__?: { invoke: (cmd: string, args: object) => Promise<unknown> };
-      };
-      const emit = g.__TAURI__?.event?.emit;
-      if (emit) {
-        void emit(name, p).then(() => done()).catch(() => done());
-      } else if (g.__TAURI_INTERNALS__) {
-        void g.__TAURI_INTERNALS__
-          .invoke("plugin:event|emit", { event: name, payload: p })
-          .then(() => done())
-          .catch(() => done());
-      } else {
-        done();
-      }
-    },
-    eventName,
-    payload,
-  );
-}
-
-async function switchToSession(id: string): Promise<void> {
-  await emitFromWebview("chat-load-conversation", {
-    conversationId: id,
-    targetWindow: "home",
-  });
-  await browser.pause(t(500));
-}
-
-function removeChatFile(id: string): void {
-  try {
-    const path = join(CHATS_DIR, `${id}.json`);
-    if (existsSync(path)) rmSync(path);
-  } catch {
-    /* ignore */
-  }
-}
-
-function writeSeedChatFile(
-  sessionId: string,
-  filePath: string,
-): void {
-  if (!existsSync(CHATS_DIR)) mkdirSync(CHATS_DIR, { recursive: true });
-  const now = Date.now();
-  writeFileSync(
-    join(CHATS_DIR, `${sessionId}.json`),
-    JSON.stringify(
-      {
-        id: sessionId,
-        title: "e2e file source preview",
-        messages: [
-          {
-            id: "e2e-user-file-preview",
-            role: "user",
-            content: "open the seeded file source",
-            timestamp: now,
-          },
-          {
-            id: "e2e-assistant-file-preview",
-            role: "assistant",
-            content: "Here is what I found in the skill file.",
-            timestamp: now + 1,
-            sourceCitations: [
-              {
-                id: "e2e-file-skill",
-                kind: "file",
-                title: "Read: e2e-preview.md",
-                subtitle: filePath,
-                path: filePath,
-              },
-            ],
-          },
-        ],
-        createdAt: now,
-        updatedAt: now,
-      },
-      null,
-      2,
-    ),
-    "utf8",
-  );
-}
-
 async function seedAssistantWithFileSource(
   sessionId: string,
   filePath: string,
 ): Promise<void> {
-  writeSeedChatFile(sessionId, filePath);
-  await switchToSession(sessionId);
+  await browser.waitUntil(
+    async () =>
+      (await browser.execute(() => {
+        const g = window as unknown as {
+          __e2eSeedUserMessage?: unknown;
+          __e2eSeedAssistantMessage?: unknown;
+        };
+        return (
+          typeof g.__e2eSeedUserMessage === "function" &&
+          typeof g.__e2eSeedAssistantMessage === "function"
+        );
+      })) as boolean,
+    {
+      timeout: t(10_000),
+      interval: 150,
+      timeoutMsg: "chat e2e seed hooks never appeared",
+    },
+  );
+
+  await browser.execute(
+    (sid: string, path: string, content: string) => {
+      const g = window as unknown as {
+        __e2eSeedUserMessage: (sessionId: string, text: string) => void;
+        __e2eSeedAssistantMessage: (
+          sessionId: string,
+          payload: { content: string; sourceCitations: unknown[] },
+        ) => void;
+      };
+      g.__e2eSeedUserMessage(sid, "open the seeded file source");
+      g.__e2eSeedAssistantMessage(sid, {
+        content,
+        sourceCitations: [
+          {
+            id: "e2e-file-skill",
+            kind: "file",
+            title: "Read: e2e-preview.md",
+            subtitle: path,
+            path,
+          },
+        ],
+      });
+    },
+    sessionId,
+    filePath,
+    ASSISTANT_TEXT,
+  );
+}
+
+async function waitForSeededAssistant(): Promise<void> {
+  await browser.waitUntil(
+    async () =>
+      (await browser.execute((content: string) =>
+        Array.from(document.querySelectorAll('[data-testid="chat-message-assistant"]'))
+          .some((el) => (el.textContent ?? "").includes(content)),
+      ASSISTANT_TEXT)) as boolean,
+    {
+      timeout: t(10_000),
+      interval: 150,
+      timeoutMsg: "seeded assistant message never appeared",
+    },
+  );
 }
 
 // The "N sources" footer starts collapsed; click the toggle attached to the
@@ -191,11 +164,12 @@ describe("Chat source citations open files in the preview sidebar", function () 
   this.timeout(90_000);
 
   let mdPath = "";
+  let mdDir = "";
   let sessionId = "";
 
   before(async () => {
-    const dir = mkdtempSync(join(tmpdir(), "screenpipe-e2e-preview-"));
-    mdPath = join(dir, "e2e-preview.md");
+    mdDir = mkdtempSync(join(tmpdir(), "screenpipe-e2e-preview-"));
+    mdPath = join(mdDir, "e2e-preview.md");
     writeFileSync(mdPath, PREVIEW_MARKDOWN, "utf8");
 
     await waitForAppReady();
@@ -204,11 +178,8 @@ describe("Chat source citations open files in the preview sidebar", function () 
     await home.waitForExist({ timeout: t(15_000) });
   });
 
-  afterEach(() => {
-    if (sessionId) {
-      removeChatFile(sessionId);
-      sessionId = "";
-    }
+  after(() => {
+    if (mdDir) rmSync(mdDir, { recursive: true, force: true });
   });
 
   it("renders the file source, opens it on click, and shows rendered markdown + code", async () => {
@@ -216,8 +187,7 @@ describe("Chat source citations open files in the preview sidebar", function () 
     await seedAssistantWithFileSource(sessionId, mdPath);
 
     // The seeded assistant message renders.
-    const assistant = await $('[data-testid="chat-message-assistant"]');
-    await assistant.waitForExist({ timeout: t(10_000) });
+    await waitForSeededAssistant();
 
     // Expand the "1 source" footer and click the file card.
     await expandSeededSourcesFooter();
