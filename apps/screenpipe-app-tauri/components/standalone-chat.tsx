@@ -15,13 +15,11 @@ import {
 import { pipeSessionId } from "@/lib/events/types";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
-import { Tooltip, TooltipContent, TooltipTrigger, TooltipProvider } from "@/components/ui/tooltip";
 import { useSettings, ChatConversation } from "@/lib/hooks/use-settings";
 import { cn } from "@/lib/utils";
-import { Loader2, Send, Square, Settings, X, ImageIcon, History, Search, Trash2, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, Plus, Copy, Check, Clock, Paperclip, Filter, RefreshCw, GitBranch, MoreHorizontal, Pencil, Sparkles, CornerDownRight } from "lucide-react";
+import { Loader2, Send, Square, Settings, X, ImageIcon, Search, ChevronDown, Plus, Paperclip, Filter, RefreshCw, Sparkles } from "lucide-react";
 import { SchedulePromptDialog } from "@/components/chat/schedule-prompt-dialog";
 import { PipeContextBanner } from "@/components/chat/pipe-context-banner";
-import { SourceCitationFooter } from "@/components/chat/source-citation-footer";
 import { BrowserSidebar } from "@/components/browser-sidebar";
 import { toast } from "@/components/ui/use-toast";
 import { motion, AnimatePresence } from "framer-motion";
@@ -60,17 +58,14 @@ import { useChatFilePreview } from "@/lib/hooks/use-chat-file-preview";
 import { useSqlAutocomplete, useTagAutocomplete } from "@/lib/hooks/use-sql-autocomplete";
 import { homeDir, join } from "@tauri-apps/api/path";
 import { useTimelineStore } from "@/lib/hooks/use-timeline-store";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import {
   parseMentions,
   buildAppMentionSuggestions,
   buildTagMentionSuggestions,
   filterMentionSuggestions,
   normalizeAppTag,
-  formatShortcutDisplay,
   extractConversationHistorySyncUserText,
   isInjectedTitleSourcePrompt,
-  isConversationHistorySyncPrompt,
   type ChatLoadConversationPayload,
   shouldHandleChatLoadConversationForWindow,
   shouldHandleChatPrefillForWindow,
@@ -100,49 +95,57 @@ import { localFetch, getApiBaseUrl } from "@/lib/api";
 import { connectionMentionTag } from "@/lib/chat/connection-suggestions";
 import {
   externalizeLargeContextIfNeeded,
-  isPastedTextDoc,
   makePastedTextDoc,
   pastedTextDocName,
   PASTED_TEXT_ATTACHMENT_CHAR_THRESHOLD,
   PASTED_TEXT_SHOW_IN_FIELD_MAX_CHARS,
 } from "@/lib/chat/large-context";
 import {
-  buildCollapsedSteerRenderItems,
-  formatWorkDuration,
-  getMessageIntentLabel,
   isPlaceholderConversationTitle,
-  isSteeredAssistantMessage,
 } from "@/lib/chat/message-rendering";
 import {
   computeChatCitationPlan,
-  formatSourceCitationsMarkdown,
-  sourceCitationsFromMessage,
-  type SourceCitation,
 } from "@/lib/source-citations";
+import {
+  imageDataUrlsFromPiContent,
+  imageDataUrlsToPiImages,
+  normalizeImageDataUrls,
+} from "@/lib/chat/image-content";
+import {
+  queuedPreviewForText,
+  queuedSnapshotsEqual,
+} from "@/lib/chat/queued-display";
+import { withConversationHistory } from "@/lib/chat/conversation-history";
+import { formatChatAsMarkdown } from "@/lib/chat/markdown-export";
 import { IntegrationIcon, INTEGRATION_ICON_KEYS } from "@/components/settings/connections-section";
 import {
-  formatSteerShortcut,
   getComposerPrimaryAction,
   isComposerSteerShortcut,
-  isQueuedItemCancelShortcut,
-  isQueuedItemSteerShortcut,
   normalizeQueueEventPayload,
 } from "@/lib/chat-queue-controls";
 import { ImageViewerDialog, type ImageViewerState } from "@/components/chat/standalone/image-viewer-dialog";
-import { CollapsedSteerWorkRow } from "@/components/chat/standalone/collapsed-steer-work-row";
-import { ChatTitleMenu } from "@/components/chat/standalone/chat-title-menu";
+import { StandaloneChatHeader } from "@/components/chat/standalone/standalone-chat-header";
+import { InlineChatHistory } from "@/components/chat/standalone/inline-chat-history";
+import { AttachmentTray } from "@/components/chat/standalone/attachment-tray";
+import { QueuedPromptsList } from "@/components/chat/standalone/queued-prompts-list";
+import { ChatMessageList } from "@/components/chat/standalone/chat-message-list";
+import { ComposerUtilityMenu } from "@/components/chat/standalone/composer-utility-menu";
 import {
-  attachmentBadge,
   ConnectionToolIcon,
-  GridDissolveLoader,
-  MessageContent,
-  type LoaderPhase,
 } from "@/components/chat/standalone/message-content";
 import { useChatScroll } from "@/components/chat/standalone/hooks/use-chat-scroll";
 import { useChatConnections } from "@/components/chat/standalone/hooks/use-chat-connections";
 import { useChatAttachments } from "@/components/chat/standalone/hooks/use-chat-attachments";
 import { useChatMentions, type MentionSuggestion } from "@/components/chat/standalone/hooks/use-chat-mentions";
 import { usePiChatAgent } from "@/components/chat/standalone/hooks/use-pi-chat-agent";
+import { useChatQueue } from "@/components/chat/standalone/hooks/use-chat-queue";
+import { useChatTransport } from "@/components/chat/standalone/hooks/use-chat-transport";
+import { useChatPrefillEvents } from "@/components/chat/standalone/hooks/use-chat-prefill-events";
+import { useChatConversationEvents } from "@/components/chat/standalone/hooks/use-chat-conversation-events";
+import {
+  useChatPipeWatch,
+  type ActivePipeExecution,
+} from "@/components/chat/standalone/hooks/use-chat-pipe-watch";
 import type {
   ChatAttachment,
   ContentBlock,
@@ -162,7 +165,6 @@ const TAG_SUGGESTION_LIMIT = 10;
 const TAG_AUTOCOMPLETE_LIMIT = 50;
 const SPEAKER_SUGGESTION_LIMIT = 50;
 const STREAM_RENDER_THROTTLE_MS = 80;
-const EMPTY_QUEUED_PROMPTS: PiQueuedPrompt[] = [];
 const POST_STREAM_SIDE_EFFECT_DELAY_MS = 1_500;
 const CHAT_RAIL_CLASS = "max-w-4xl mx-auto w-full";
 
@@ -203,15 +205,6 @@ interface SearchResult {
     file_path?: string;
     audio_file_path?: string;
   };
-}
-
-function queuedSnapshotsEqual(a: PiQueuedPrompt[], b: PiQueuedPrompt[]): boolean {
-  if (a === b) return true;
-  if (a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i++) {
-    if (a[i].id !== b[i].id || a[i].preview !== b[i].preview) return false;
-  }
-  return true;
 }
 
 const TURN_INTENT_LEDGER_TTL_MS = 10 * 60 * 1000;
@@ -343,14 +336,6 @@ export function StandaloneChat({
   const [expandedSteerWorkIds, setExpandedSteerWorkIds] = useState<Set<string>>(() => new Set());
   const [isLoading, setIsLoading] = useState(false);
   const [isStreaming, setIsStreaming] = useState(false);
-  // Prompts the user has queued while a previous one is still streaming.
-  // Sourced from rust via the `pi-queue-changed` event — single source of
-  // truth lives in `pi_command_queue.rs`. Cleared as soon as the drain loop
-  // pulls a queued item and writes it to stdin (it's then in-flight).
-  const [queuedPromptsBySession, setQueuedPromptsBySession] = useState<Record<string, PiQueuedPrompt[]>>({});
-  const queuedDisplayBySessionRef = useRef<Record<string, Record<string, QueuedDisplayPayload>>>({});
-  const [queuedActionPromptId, setQueuedActionPromptId] = useState<string | null>(null);
-  const queuedScrollRef = useRef<HTMLDivElement | null>(null);
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null);
   const [openMessageMenuId, setOpenMessageMenuId] = useState<string | null>(null);
@@ -426,10 +411,6 @@ export function StandaloneChat({
     }
     return content.length;
   }, []);
-  const [openConvMenuId, setOpenConvMenuId] = useState<string | null>(null);
-  const [renamingConvId, setRenamingConvId] = useState<string | null>(null);
-  const [renameValue, setRenameValue] = useState("");
-  const [deletingConvId, setDeletingConvId] = useState<string | null>(null);
   const [activePreset, setActivePreset] = useState<AIPreset | undefined>();
   const pendingPresetRef = useRef<AIPreset | null>(null);
   const isStreamingRef = useRef(false);
@@ -572,6 +553,19 @@ export function StandaloneChat({
     piRunningConfigRef,
   } = usePiChatAgent();
 
+  const {
+    cancelStreamingMessageRender,
+    flushStreamingMessageRender,
+    scheduleStreamingMessageRender,
+  } = useChatTransport({
+    streamRenderTimerRef,
+    piMessageIdRef,
+    piStreamingTextRef,
+    piContentBlocksRef,
+    setMessages,
+    streamRenderThrottleMs: STREAM_RENDER_THROTTLE_MS,
+  });
+
   const normalizeTurnIntentText = (value: string) => value.replace(/\s+/g, " ").trim();
 
   useEffect(() => {
@@ -678,10 +672,7 @@ export function StandaloneChat({
   };
 
   // Active pipe execution (when watching a running pipe)
-  const [activePipeExecution, setActivePipeExecution] = useState<{
-    name: string;
-    executionId: number;
-  } | null>(null);
+  const [activePipeExecution, setActivePipeExecution] = useState<ActivePipeExecution | null>(null);
 
   const lastUserMessageRef = useRef<string>("");
 
@@ -711,10 +702,19 @@ export function StandaloneChat({
   const { filePreview, openFilePreview, closeFilePreview } =
     useChatFilePreview(conversationId);
   const currentQueueSessionId = conversationId ?? piSessionIdRef.current;
-  const queuedPrompts = useMemo(
-    () => queuedPromptsBySession[currentQueueSessionId] ?? EMPTY_QUEUED_PROMPTS,
-    [queuedPromptsBySession, currentQueueSessionId]
-  );
+  const {
+    queuedPromptsBySession,
+    setQueuedPromptsBySession,
+    queuedDisplayBySessionRef,
+    queuedActionPromptId,
+    setQueuedActionPromptId,
+    queuedScrollRef,
+    queuedPrompts,
+    restoreQueuedDisplay,
+    takeQueuedDisplayById,
+    consumeQueuedDisplayForStartedMessage,
+  } = useChatQueue(currentQueueSessionId);
+  useChatConversationEvents({ conversationId, inputRef });
   const {
     isUserScrolledUp,
     handleMessagesScroll,
@@ -809,36 +809,6 @@ export function StandaloneChat({
     }, 250);
     return () => clearTimeout(t);
   }, [conversationId, input, pastedImages, attachedDocs, pendingDocs]);
-
-  const cancelStreamingMessageRender = useCallback(() => {
-    if (streamRenderTimerRef.current) {
-      clearTimeout(streamRenderTimerRef.current);
-      streamRenderTimerRef.current = null;
-    }
-  }, []);
-
-  const renderStreamingMessageSnapshot = useCallback(() => {
-    const msgId = piMessageIdRef.current;
-    if (!msgId) return;
-    const content = piStreamingTextRef.current;
-    const contentBlocks = [...piContentBlocksRef.current];
-    setMessages((prev) =>
-      prev.map((m) => (m.id === msgId ? { ...m, content, contentBlocks } : m))
-    );
-  }, [setMessages]);
-
-  const flushStreamingMessageRender = useCallback(() => {
-    cancelStreamingMessageRender();
-    renderStreamingMessageSnapshot();
-  }, [cancelStreamingMessageRender, renderStreamingMessageSnapshot]);
-
-  const scheduleStreamingMessageRender = useCallback(() => {
-    if (streamRenderTimerRef.current) return;
-    streamRenderTimerRef.current = setTimeout(() => {
-      streamRenderTimerRef.current = null;
-      renderStreamingMessageSnapshot();
-    }, STREAM_RENDER_THROTTLE_MS);
-  }, [renderStreamingMessageSnapshot]);
 
   // Process an image file to base64
   // Resize image to max 1024px and compress as JPEG to keep base64 payload small
@@ -1291,24 +1261,7 @@ export function StandaloneChat({
   // broadcasts its claim, waits a fixed collection window to gather all claims
   // for the same normalized prompt, then independently picks the SAME winner
   // (smallest window label, then earliest ts, then nonce). Losers drop.
-  const prefillClaimsRef = useRef<Map<string, Array<{ windowLabel: string; timestamp: number; nonce: string }>>>(new Map());
-  useEffect(() => {
-    const unlisten = listen<{ dedupKey: string; windowLabel: string; timestamp: number; nonce: string }>(
-      "chat-prefill-claim",
-      (event) => {
-        const { dedupKey, windowLabel, timestamp, nonce } = event.payload || ({} as any);
-        if (!dedupKey) return;
-        const bucket = prefillClaimsRef.current.get(dedupKey) ?? [];
-        if (!bucket.some((c) => c.nonce === nonce && c.windowLabel === windowLabel)) {
-          bucket.push({ windowLabel, timestamp, nonce });
-          prefillClaimsRef.current.set(dedupKey, bucket);
-        }
-      },
-    );
-    return () => {
-      unlisten.then((fn) => fn());
-    };
-  }, []);
+  const { prefillClaimsRef } = useChatPrefillEvents();
 
   // Listen for chat-prefill events from search modal and pipe creation
   useEffect(() => {
@@ -1512,28 +1465,6 @@ export function StandaloneChat({
     return () => { unlisten.then((fn) => fn()); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [openConversationLocally, focusMessageById]);
-
-  // Cmd+N / Ctrl+N from home/page emits this so the user can immediately type
-  // after a new chat is created without having to click into the textarea.
-  useEffect(() => {
-    const unlisten = listen("chat-focus-input", () => {
-      inputRef.current?.focus();
-    });
-    return () => { unlisten.then((fn) => fn()); };
-  }, []);
-
-  // Tell the sidebar which session is current whenever the chat panel
-  // assigns or resumes a session id. Without this the sidebar wouldn't
-  // know about session changes initiated inside the chat (in-panel "new",
-  // chat-prefill auto-send, history pick from the in-panel history view).
-  // Also mirror to chat-store.panelSessionId so the home page can restore
-  // the sidebar highlight when the user navigates back from a non-chat
-  // section without us emitting an event.
-  useEffect(() => {
-    if (!conversationId) return;
-    emit("chat-current-session", { id: conversationId });
-    useChatStore.getState().actions.setPanelSession(conversationId);
-  }, [conversationId]);
 
   // E2E hook: expose a function to seed a user message into a session.
   // Required by chat-streaming-performance.spec.ts because
@@ -1899,16 +1830,11 @@ export function StandaloneChat({
   const currentSessionPipeContext = useChatStore((s) =>
     s.currentId ? s.sessions[s.currentId]?.pipeContext : undefined,
   );
-  useEffect(() => {
-    if (currentSessionKind === "pipe-watch" && currentSessionPipeContext) {
-      setActivePipeExecution({
-        name: currentSessionPipeContext.pipeName,
-        executionId: currentSessionPipeContext.executionId,
-      });
-    } else {
-      setActivePipeExecution(null);
-    }
-  }, [currentSessionKind, currentSessionPipeContext?.pipeName, currentSessionPipeContext?.executionId]);
+  useChatPipeWatch({
+    currentSessionKind,
+    currentSessionPipeContext,
+    setActivePipeExecution,
+  });
 
   // If the Pi pool evicted the session we're currently viewing, swap the
   // panel to a fresh one. The pool only evicts idle sessions (see
@@ -4138,93 +4064,6 @@ export function StandaloneChat({
    * the chat-store — same path used for any other message, just kicked off
    * after the queue drains.
    */
-  function imageDataUrlsToPiImages(images: string[]) {
-    const piImages: Array<{ type: string; mimeType: string; data: string }> = [];
-    for (const img of images) {
-      const match = img.match(/^data:(image\/[^;]+);base64,(.+)$/);
-      if (match) {
-        piImages.push({ type: "image", mimeType: match[1], data: match[2] });
-      }
-    }
-    return piImages;
-  }
-
-  function imageDataUrlsFromPiContent(content: unknown) {
-    if (!Array.isArray(content)) return [];
-    const images: string[] = [];
-    for (const part of content) {
-      if (!part || typeof part !== "object") continue;
-      const item = part as { type?: unknown; mimeType?: unknown; mime_type?: unknown; data?: unknown };
-      if (item.type !== "image" || typeof item.data !== "string") continue;
-      if (item.data.startsWith("data:image/")) {
-        images.push(item.data);
-        continue;
-      }
-      const mime = typeof item.mimeType === "string"
-        ? item.mimeType
-        : typeof item.mime_type === "string"
-          ? item.mime_type
-          : "image/png";
-      images.push(`data:${mime};base64,${item.data}`);
-    }
-    return images;
-  }
-
-  function normalizeImageDataUrls(value: unknown): string[] {
-    if (!Array.isArray(value)) return [];
-    return value
-      .filter((item): item is string =>
-        typeof item === "string" && /^data:image\/[^;]+;base64,/.test(item),
-      )
-      .slice(0, 8);
-  }
-
-  function queuedPreviewForText(text: string) {
-    return Array.from(text).slice(0, 200).join("");
-  }
-
-  function shouldKeepQueuedDisplay(payload: QueuedDisplayPayload) {
-    return payload.images.length > 0 || !!payload.displayContent || (payload.attachments?.length ?? 0) > 0;
-  }
-
-  function restoreQueuedDisplay(sessionId: string | null, promptId: string, payload: QueuedDisplayPayload | null) {
-    if (!sessionId || !payload || !shouldKeepQueuedDisplay(payload)) return;
-    queuedDisplayBySessionRef.current = {
-      ...queuedDisplayBySessionRef.current,
-      [sessionId]: {
-        ...(queuedDisplayBySessionRef.current[sessionId] ?? {}),
-        [promptId]: payload,
-      },
-    };
-  }
-
-  function takeQueuedDisplayById(sessionId: string | null, promptId: string): QueuedDisplayPayload | null {
-    if (!sessionId) return null;
-    const current = queuedDisplayBySessionRef.current[sessionId];
-    const payload = current?.[promptId] ?? null;
-    if (!payload) return null;
-    const { [promptId]: _removed, ...rest } = current;
-    queuedDisplayBySessionRef.current = {
-      ...queuedDisplayBySessionRef.current,
-      [sessionId]: rest,
-    };
-    return payload;
-  }
-
-  function payloadMatchesText(payload: QueuedDisplayPayload, text: string) {
-    const preview = queuedPreviewForText(text);
-    if (!payload.preview) return !preview;
-    return preview === payload.preview || text.startsWith(payload.preview);
-  }
-
-  function consumeQueuedDisplayForStartedMessage(sessionId: string | null, text: string): QueuedDisplayPayload | null {
-    if (!sessionId) return null;
-    const queued = queuedDisplayBySessionRef.current[sessionId] ?? {};
-    const match = Object.entries(queued).find(([, payload]) => payloadMatchesText(payload, text));
-    if (!match) return null;
-    return takeQueuedDisplayById(sessionId, match[0]);
-  }
-
   async function enqueuePiMessage(userMessage: string, displayLabel?: string, imageDataUrls?: string[]) {
     if (!piInfo?.running) {
       // No Pi running → fall back to the normal start-and-send path.
@@ -4254,34 +4093,7 @@ export function StandaloneChat({
     // was still in-flight, follow-ups routed here got the bare user
     // message, and any Pi state divergence in between manifested as
     // "chat suddenly forgot what we were talking about."
-    let queuedPrompt = userMessage;
-    if (messages.length > 0) {
-      const historyLines = messages
-        .slice(-40)
-        .map((m) => {
-          let text = m.content || "";
-          if (m.contentBlocks?.length) {
-            const blockTexts = m.contentBlocks
-              .map((b: any) => {
-                if (b.type === "text" && b.text) return b.text;
-                if (b.type === "tool" && b.toolCall) {
-                  const tc = b.toolCall;
-                  let s = `[tool: ${tc.toolName}](${JSON.stringify(tc.args)})`;
-                  if (tc.result) s += ` → ${tc.result.slice(0, 500)}`;
-                  return s;
-                }
-                return "";
-              })
-              .filter(Boolean)
-              .join("\n");
-            if (blockTexts && !text) text = blockTexts;
-            else if (blockTexts) text += "\n" + blockTexts;
-          }
-          return `${m.role}: ${text}`;
-        })
-        .join("\n");
-      queuedPrompt = `<conversation_history>\n${historyLines}\n</conversation_history>\n\n${userMessage}`;
-    }
+    const queuedPrompt = withConversationHistory(userMessage, messages);
 
     // E2E test hook — capture queued prompts for context-loss assertions
     {
@@ -4631,32 +4443,7 @@ export function StandaloneChat({
       // `piSessionSyncedRef` is kept around because other code paths
       // (preset change, reauth, the conversation-load handler) still
       // toggle it for diagnostics, but it no longer gates injection.
-      let promptMessage = userMessage;
-      if (messages.length > 0) {
-        const historyLines = messages
-          .slice(-40)
-          .map(m => {
-            let text = m.content || "";
-            // Include contentBlocks info (tool calls, results) for richer context
-            if (m.contentBlocks?.length) {
-              const blockTexts = m.contentBlocks.map((b: any) => {
-                if (b.type === "text" && b.text) return b.text;
-                if (b.type === "tool" && b.toolCall) {
-                  const tc = b.toolCall;
-                  let s = `[tool: ${tc.toolName}](${JSON.stringify(tc.args)})`;
-                  if (tc.result) s += ` → ${tc.result.slice(0, 500)}`;
-                  return s;
-                }
-                return "";
-              }).filter(Boolean).join("\n");
-              if (blockTexts && !text) text = blockTexts;
-              else if (blockTexts) text += "\n" + blockTexts;
-            }
-            return `${m.role}: ${text}`;
-          })
-          .join("\n");
-        promptMessage = `<conversation_history>\n${historyLines}\n</conversation_history>\n\n${userMessage}`;
-      }
+      const promptMessage = withConversationHistory(userMessage, messages);
       piSessionSyncedRef.current = true;
 
       // E2E test hook — write to __e2ePiPromptCaptures when the recorder is installed
@@ -5718,68 +5505,16 @@ export function StandaloneChat({
   // Keep ref in sync so useEffect callbacks can call sendMessage
   sendMessageRef.current = sendMessage;
 
-  const formatMessageAsMarkdown = (m: Message) => {
-    const role = m.role === "user" ? "**User**" : "**Assistant**";
-    const ts = new Date(m.timestamp).toLocaleString();
-    let body = m.content || "";
-
-    if (m.contentBlocks && m.contentBlocks.length > 0) {
-      const sections: string[] = [];
-      for (const block of m.contentBlocks) {
-        if (block.type === "text" && block.text) {
-          sections.push(block.text);
-        } else if (block.type === "tool") {
-          const tc = block.toolCall;
-          const argsStr = tc.args ? JSON.stringify(tc.args, null, 2) : "";
-          let section = `\n**Tool: ${tc.toolName}**\n\`\`\`json\n${argsStr}\n\`\`\``;
-          if (tc.result !== undefined) {
-            section += `\n**Result:**\n\`\`\`\n${tc.result}\n\`\`\``;
-          }
-          sections.push(section);
-        } else if (block.type === "thinking" && block.text) {
-          sections.push(`<details><summary>Thinking${block.durationMs ? ` (${(block.durationMs / 1000).toFixed(1)}s)` : ""}</summary>\n\n${block.text}\n\n</details>`);
-        }
-      }
-      if (sections.length > 0) {
-        body = sections.join("\n\n");
-      }
-    }
-
-    if (m.role === "assistant") {
-      // Mirror the in-app aggregation: if this message's per-message footer
-      // was folded into a turn-level aggregate, skip its Sources block here
-      // so we don't repeat the same files across every step of an agentic
-      // loop. The aggregated Sources block is appended after the last
-      // assistant of the turn instead.
-      const isDeferred = citationPlan.deferredMessageIds.has(m.id);
-      const turnAggregate = citationPlan.aggregatedAfter.get(m.id);
-      if (!isDeferred) {
-        const citationsMarkdown = formatSourceCitationsMarkdown(sourceCitationsFromMessage(m));
-        if (citationsMarkdown) {
-          body = body ? `${body}\n\n${citationsMarkdown}` : citationsMarkdown;
-        }
-      }
-      if (turnAggregate && turnAggregate.length > 0) {
-        const aggregateMarkdown = formatSourceCitationsMarkdown(turnAggregate);
-        if (aggregateMarkdown) {
-          body = body ? `${body}\n\n${aggregateMarkdown}` : aggregateMarkdown;
-        }
-      }
-    }
-
-    return `### ${role} — ${ts}\n\n${body}`;
-  };
-
   const copyFullChatAsMarkdown = async () => {
     if (messages.length === 0) return;
-    const md = messages.map(formatMessageAsMarkdown).join("\n\n---\n\n");
+    const md = formatChatAsMarkdown(messages, citationPlan);
     await commands.copyTextToClipboard(md);
     toast({ title: "copied full chat as markdown" });
   };
 
   const exportChatAsMarkdownFile = async () => {
     if (messages.length === 0) return;
-    const md = messages.map(formatMessageAsMarkdown).join("\n\n---\n\n");
+    const md = formatChatAsMarkdown(messages, citationPlan);
     try {
       const filePath = await saveDialog({
         filters: [{ name: "Markdown", extensions: ["md"] }],
@@ -5824,360 +5559,6 @@ export function StandaloneChat({
     setIsStreaming(false);
   };
 
-  const renderComposerUtilityMenu = () => {
-    const timeLabels: Record<string, string> = {
-      "today's activity": "today",
-      "yesterday": "yesterday",
-      "past 7 days": "last week",
-      "past hour": "last hour",
-      "this morning": "this morning",
-    };
-    const filterQuery = filterSearch.trim();
-
-    const renderFilterSearchButton = (suggestion: MentionSuggestion, resultIndex: number) => {
-      const { isActive } = getFilterSuggestionState(suggestion);
-      const isSelected = resultIndex === selectedFilterResultIndex;
-      return (
-        <button
-          key={`${suggestion.category}-${suggestion.tag}`}
-          type="button"
-          onMouseEnter={() => setSelectedFilterResultIndex(resultIndex)}
-          onClick={() => applyFilterSuggestion(suggestion)}
-          className={cn(
-            "w-full px-3 py-1.5 text-left text-xs font-mono hover:bg-muted/50 transition-colors flex items-center justify-between gap-2",
-            isSelected && "bg-muted/70",
-            isActive && "bg-muted"
-          )}
-        >
-          <span className="truncate">{suggestion.tag}</span>
-          <span className="text-[10px] text-muted-foreground truncate shrink-0 max-w-[9rem]">
-            {isActive ? "selected" : suggestion.description}
-          </span>
-        </button>
-      );
-    };
-    let filterSearchResultIndex = 0;
-
-    return (
-      <>
-        <div className="p-1 border-b border-border/50">
-          <button
-            type="button"
-            disabled={!canChat}
-            onClick={async () => {
-              setAppFilterOpen(false);
-              await handleFilePicker();
-            }}
-            className="w-full flex items-center gap-2 px-2 py-2 text-left text-sm rounded-md hover:bg-muted disabled:opacity-40 disabled:pointer-events-none transition-colors"
-          >
-            <Paperclip className="h-4 w-4 text-muted-foreground shrink-0" />
-            <span>add photos & files</span>
-          </button>
-        </div>
-
-        <div className="px-2 py-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground bg-muted/30 border-b border-border/50 flex items-center gap-1.5">
-          <Filter className="h-3 w-3" />
-          <span>filters</span>
-          {activeFilterCount > 0 && (
-            <span className="ml-auto text-foreground">{activeFilterCount}</span>
-          )}
-        </div>
-
-        <div className="sticky top-0 z-10 p-2 border-b border-border/50 bg-background">
-          <div className="relative">
-            <Search className="absolute left-2 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
-            <Input
-              value={filterSearch}
-              onChange={(event) => setFilterSearch(event.target.value)}
-              onKeyDown={(event) => {
-                event.stopPropagation();
-                if (event.key === "ArrowDown") {
-                  event.preventDefault();
-                  setSelectedFilterResultIndex((index) =>
-                    filterSearchResults.length === 0
-                      ? 0
-                      : (index + 1) % filterSearchResults.length
-                  );
-                } else if (event.key === "ArrowUp") {
-                  event.preventDefault();
-                  setSelectedFilterResultIndex((index) =>
-                    filterSearchResults.length === 0
-                      ? 0
-                      : (index - 1 + filterSearchResults.length) % filterSearchResults.length
-                  );
-                } else if (event.key === "Enter") {
-                  event.preventDefault();
-                  const selectedSuggestion = filterSearchResults[selectedFilterResultIndex];
-                  if (selectedSuggestion) applyFilterSuggestion(selectedSuggestion);
-                } else if (event.key === "Escape") {
-                  event.preventDefault();
-                  if (filterSearch) {
-                    setFilterSearch("");
-                  } else {
-                    setAppFilterOpen(false);
-                  }
-                }
-              }}
-              placeholder="search tags or speakers"
-              className="h-8 pl-7 pr-7 text-xs"
-              autoComplete="off"
-            />
-            {filterSearch && (
-              <button
-                type="button"
-                onClick={() => setFilterSearch("")}
-                className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-                aria-label="Clear filter search"
-              >
-                <X className="h-3.5 w-3.5" />
-              </button>
-            )}
-          </div>
-        </div>
-
-        {filterQuery && (
-          <>
-            <div className="px-2 py-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground bg-muted/30 border-b border-border/50 flex items-center gap-1.5">
-              <Search className="h-3 w-3" />
-              <span>matching filters</span>
-              {isLoadingFilterSearch && (
-                <Loader2 className="ml-auto h-3 w-3 animate-spin text-muted-foreground" />
-              )}
-            </div>
-            {filterSearchResults.length === 0 && !isLoadingFilterSearch ? (
-              <div className="px-3 py-2 text-[10px] text-muted-foreground">
-                no matching tags or speakers
-              </div>
-            ) : (
-              <>
-                {filterSearchGroups.map((group) => (
-                  <React.Fragment key={group.label}>
-                    <div className="px-3 py-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground/80 bg-muted/20 border-b border-border/40">
-                      {group.label}
-                    </div>
-                    {group.suggestions.map((suggestion) =>
-                      renderFilterSearchButton(suggestion, filterSearchResultIndex++)
-                    )}
-                  </React.Fragment>
-                ))}
-              </>
-            )}
-          </>
-        )}
-
-        {!filterQuery && (
-          <>
-
-        <div className="px-2 py-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground bg-muted/30 border-b border-border/50">
-          time
-        </div>
-        {STATIC_MENTION_SUGGESTIONS.filter((s) => s.category === "time").map((s) => {
-          const isActive = activeFilters.timeRanges.some((r) => r.label === timeLabels[s.description]);
-          return (
-            <button
-              key={s.tag}
-              type="button"
-              onClick={() => {
-                if (isActive) {
-                  removeFilter("time", timeLabels[s.description]);
-                } else {
-                  removeFilter("time");
-                  setTimeout(() => {
-                    setInput((prev) => `${s.tag} ${prev.trim()}`.trim() + " ");
-                  }, 0);
-                }
-                setAppFilterOpen(false);
-              }}
-              className={cn(
-                "w-full px-3 py-1.5 text-left text-xs font-mono hover:bg-muted/50 transition-colors flex items-center justify-between gap-2",
-                isActive && "bg-muted"
-              )}
-            >
-              <span>{s.tag}</span>
-              <span className="text-[10px] text-muted-foreground">{s.description}</span>
-            </button>
-          );
-        })}
-
-        <div className="px-2 py-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground bg-muted/30 border-b border-border/50 border-t">
-          content type
-        </div>
-        {STATIC_MENTION_SUGGESTIONS.filter((s) => s.category === "content").map((s) => {
-          const contentTypeMap: Record<string, string> = { screen: "screen", audio: "audio", input: "input" };
-          const tagName = s.tag.slice(1);
-          const isActive = activeFilters.contentType === (contentTypeMap[tagName] || tagName);
-          return (
-            <button
-              key={s.tag}
-              type="button"
-              onClick={() => {
-                if (isActive) {
-                  removeFilter("content");
-                } else {
-                  removeFilter("content");
-                  setTimeout(() => {
-                    setInput((prev) => `${s.tag} ${prev.trim()}`.trim() + " ");
-                  }, 0);
-                }
-                setAppFilterOpen(false);
-              }}
-              className={cn(
-                "w-full px-3 py-1.5 text-left text-xs font-mono hover:bg-muted/50 transition-colors flex items-center justify-between gap-2",
-                isActive && "bg-muted"
-              )}
-            >
-              <span>{s.tag}</span>
-              <span className="text-[10px] text-muted-foreground">{s.description}</span>
-            </button>
-          );
-        })}
-
-        <div className="px-2 py-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground bg-muted/30 border-b border-border/50 border-t">
-          apps
-        </div>
-        {appMentionSuggestions.length === 0 ? (
-          <div className="px-3 py-2 text-[10px] text-muted-foreground">
-            {appsLoading ? "loading apps..." : "no apps detected yet"}
-          </div>
-        ) : (
-          appMentionSuggestions.map((suggestion) => {
-            const isActive = activeFilters.appName === suggestion.appName;
-            return (
-              <button
-                key={`app-${suggestion.tag}`}
-                type="button"
-                onClick={() => {
-                  if (isActive) {
-                    removeFilter("app");
-                  } else {
-                    if (activeFilters.appName) removeFilter("app");
-                    setInput((prev) => `${suggestion.tag} ${prev.trim()}`.trim() + " ");
-                  }
-                  setAppFilterOpen(false);
-                }}
-                className={cn(
-                  "w-full px-3 py-1.5 text-left text-xs font-mono hover:bg-muted/50 transition-colors flex items-center justify-between gap-2",
-                  isActive && "bg-muted"
-                )}
-              >
-                <span>{suggestion.tag}</span>
-                <span className="text-[10px] text-muted-foreground truncate">{suggestion.description}</span>
-              </button>
-            );
-          })
-        )}
-
-        <div className="px-2 py-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground bg-muted/30 border-b border-border/50 border-t">
-          tags
-        </div>
-        {allTagMentionSuggestions.length === 0 ? (
-          <div className="px-3 py-2 text-[10px] text-muted-foreground">
-            {tagsLoading ? "loading tags..." : "no tags yet"}
-          </div>
-        ) : (
-          tagMentionSections.map((section) => (
-            <React.Fragment key={section.label}>
-              <div className="px-3 py-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground/80 bg-muted/20 border-b border-border/40">
-                {section.label}
-              </div>
-              {section.suggestions.map((suggestion) => {
-                const tagName = suggestion.tag.slice(1);
-                const isActive = activeFilters.tagNames.includes(tagName);
-                return (
-                  <button
-                    key={`tag-${section.label}-${suggestion.tag}`}
-                    type="button"
-                    onClick={() => {
-                      if (isActive) {
-                        removeFilter("tag", tagName);
-                      } else {
-                        setInput((prev) => `${suggestion.tag} ${prev.trim()}`.trim() + " ");
-                      }
-                      setAppFilterOpen(false);
-                    }}
-                    className={cn(
-                      "w-full px-3 py-1.5 text-left text-xs font-mono hover:bg-muted/50 transition-colors flex items-center justify-between gap-2",
-                      isActive && "bg-muted"
-                    )}
-                  >
-                    <span>{suggestion.tag}</span>
-                    <span className="text-[10px] text-muted-foreground truncate">{suggestion.description}</span>
-                  </button>
-                );
-              })}
-            </React.Fragment>
-          ))
-        )}
-
-        {connections.length > 0 && (
-          <>
-            <div className="px-2 py-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground bg-muted/30 border-b border-border/50 border-t">
-              connections
-            </div>
-            {connections.map((c) => {
-              const tag = connectionMentionTag(c, isWindows);
-              return (
-                <button
-                  key={`conn-${c.id}`}
-                  type="button"
-                  onClick={() => {
-                    setInput((prev) => `${tag} ${prev.trim()}`.trim() + " ");
-                    setAppFilterOpen(false);
-                  }}
-                  className="w-full px-3 py-1.5 text-left text-xs font-mono hover:bg-muted/50 transition-colors flex items-center justify-between gap-2"
-                >
-                  <span className="flex items-center gap-1.5 min-w-0">
-                    <ConnectionToolIcon name={c.icon || c.id} />
-                    <span className="truncate">{tag}</span>
-                  </span>
-                  <span className="text-[10px] text-muted-foreground truncate">
-                    {c.name}
-                  </span>
-                </button>
-              );
-            })}
-          </>
-        )}
-
-        {recentSpeakers.length > 0 && (
-          <>
-            <div className="px-2 py-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground bg-muted/30 border-b border-border/50 border-t">
-              speakers
-            </div>
-            {recentSpeakers.map((s) => {
-              const speakerName = s.tag.startsWith('@"') ? s.tag.slice(2, -1) : s.tag.slice(1);
-              const isActive = activeFilters.speakerName === speakerName;
-              return (
-                <button
-                  key={`speaker-${s.tag}`}
-                  type="button"
-                  onClick={() => {
-                    if (isActive) {
-                      removeFilter("speaker");
-                    } else {
-                      if (activeFilters.speakerName) removeFilter("speaker");
-                      setInput((prev) => `${s.tag} ${prev.trim()}`.trim() + " ");
-                    }
-                    setAppFilterOpen(false);
-                  }}
-                  className={cn(
-                    "w-full px-3 py-1.5 text-left text-xs font-mono hover:bg-muted/50 transition-colors flex items-center justify-between gap-2",
-                    isActive && "bg-muted"
-                  )}
-                >
-                  <span>{s.tag}</span>
-                  <span className="text-[10px] text-muted-foreground">speaker</span>
-                </button>
-              );
-            })}
-          </>
-        )}
-          </>
-        )}
-      </>
-    );
-  };
-
   const activeSourceFooterMessageId =
     isLoading || isStreaming
       ? piMessageIdRef.current ?? currentStreamingMessageId ?? null
@@ -6200,98 +5581,26 @@ export function StandaloneChat({
 
   return (
     <div ref={dropRootRef} className={cn("flex flex-col bg-background", className ?? "h-screen")} data-testid="section-home">
-      {/* Header - draggable only in standalone mode */}
-      {/* Add left padding on macOS to avoid traffic light overlap (standalone only) */}
-      <div
-        className={cn(
-          "relative flex items-center gap-3 px-4 py-3.5 border-b border-border/50 bg-gradient-to-r from-background to-muted/30",
-          !className && "cursor-grab active:cursor-grabbing",
-          (!className || (conversationId && messages.length > 0)) && "py-0.5",
-          sidebarCollapsed && conversationId && messages.length > 0 && "!pl-[58px]",
-          sidebarCollapsed && isMac && !isFullscreen && "!pl-[128px]",
-          !className && isMac && !isFullscreen && "!pl-[78px]"
-        )}
-        onMouseDown={async (e) => {
-          if (className) return; // embedded — don't drag
-          if (e.button === 0) {
-            try {
-              await getCurrentWindow().startDragging();
-            } catch {
-              // Ignore drag errors
-            }
-          }
+      <StandaloneChatHeader
+        className={className}
+        conversationId={conversationId}
+        messages={messages}
+        sidebarCollapsed={sidebarCollapsed}
+        isMac={isMac}
+        isFullscreen={isFullscreen}
+        hideInlineHistory={hideInlineHistory}
+        showHistory={showHistory}
+        settings={settings}
+        reloadStore={reloadStore}
+        setShowHistory={setShowHistory}
+        renameConversation={renameConversation}
+        deleteConversation={deleteConversation}
+        startNewConversation={startNewConversation}
+        onNewChat={async () => {
+          piStoppedIntentionallyRef.current = true;
+          await startNewConversation();
         }}
-      >
-        {/* Geometric corner accent - hidden on macOS (traffic lights) and when embedded */}
-        {!isMac && !className && (
-          <div className="absolute top-0 left-0 w-8 h-8 border-l-2 border-t-2 border-foreground/10 rounded-tl-lg" />
-        )}
-        {/* Inline history toggle. Shown in the floating overlay chat
-            (`/chat`) where there's no app sidebar. Hidden on the home
-            page where the same list is rendered in the AppSidebar. */}
-        {!hideInlineHistory && (
-          <Button
-            variant={showHistory ? "secondary" : "ghost"}
-            size="icon"
-            onMouseDown={(e) => e.stopPropagation()}
-            onClick={async (e) => {
-              e.stopPropagation();
-              if (!showHistory) {
-                await reloadStore();
-              }
-              setShowHistory(!showHistory);
-            }}
-            className="relative z-10 h-7 w-7"
-            title="Chat history"
-          >
-            <History size={14} />
-          </Button>
-        )}
-        {/* Chat title + actions menu. Sits left-aligned (after the
-            history toggle) so the New / shortcut chips can stay on
-            the right. Suppressed for empty chats (no user message
-            yet) — there's no useful title to show and rename/delete
-            are meaningless for something that doesn't exist on disk. */}
-        <ChatTitleMenu
-          conversationId={conversationId}
-          messages={messages}
-          renameConversation={renameConversation}
-          deleteConversation={deleteConversation}
-          startNewConversation={startNewConversation}
-        />
-        <div className="flex-1" />
-        {/* New-chat affordance + shortcut chip. Shown in the floating
-            overlay chat (`/chat`) where there's no AppSidebar. Hidden
-            on the home page — the AppSidebar's first nav row already
-            spawns a fresh session, so a duplicate top-right button
-            just crowds the BrowserSidebar's column. */}
-        {!hideInlineHistory && (
-          <>
-            <Button
-              variant="default"
-              size="sm"
-              onMouseDown={(e) => e.stopPropagation()}
-              onClick={async (e) => {
-                e.stopPropagation();
-                piStoppedIntentionallyRef.current = true;
-                await startNewConversation();
-                // Pi will auto-restart on the next message via the sendPiMessage flow
-              }}
-              className="relative z-10 h-7 px-3 gap-1.5 text-xs bg-foreground text-background hover:bg-background hover:text-foreground transition-colors duration-150"
-              title="New chat"
-            >
-              <Plus size={14} />
-              <span>New</span>
-            </Button>
-            {!settings.disabledShortcuts.includes("showChatShortcut") &&
-            settings.showChatShortcut ? (
-              <kbd suppressHydrationWarning className="hidden sm:inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-mono text-muted-foreground bg-muted/50 border border-border/50 rounded">
-                {formatShortcutDisplay(settings.showChatShortcut, isMac)}
-              </kbd>
-            ) : null}
-          </>
-        )}
-      </div>
+      />
 
       {/* Main content area with optional history sidebar — only used in
           the floating overlay window. Home page hides this entirely
@@ -6307,124 +5616,18 @@ export function StandaloneChat({
       <div className="flex-1 flex min-h-0" data-browser-panel-host>
       <div className="flex-1 flex flex-col min-w-0">
       <div className="flex-1 flex overflow-hidden">
-        <AnimatePresence>
-          {!hideInlineHistory && showHistory && (
-            <motion.div
-              initial={{ width: 0, opacity: 0 }}
-              animate={{ width: 280, opacity: 1 }}
-              exit={{ width: 0, opacity: 0 }}
-              transition={{ duration: 0.2 }}
-              className="border-r border-border/50 bg-muted/30 flex flex-col overflow-hidden"
-            >
-              {/* History Header */}
-              <div className="p-3 border-b border-border/50 space-y-2">
-                <div className="flex items-center justify-between">
-                  <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Chat History</span>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => setShowHistory(false)}
-                    className="h-6 w-6 p-0"
-                  >
-                    <ChevronLeft size={14} />
-                  </Button>
-                </div>
-                {/* Search */}
-                <div className="relative">
-                  <Search className="absolute left-2 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
-                  <Input
-                    placeholder="Search conversations..."
-                    value={historySearch}
-                    onChange={(e) => setHistorySearch(e.target.value)}
-                    className="h-8 pl-8 text-xs bg-background/50"
-                  />
-                </div>
-              </div>
-
-              {/* Conversations List */}
-              <div className="flex-1 overflow-y-auto p-2 space-y-3">
-                {groupedConversations.length === 0 ? (
-                  <div className="flex flex-col items-center justify-center py-8 text-center">
-                    <History className="h-8 w-8 text-muted-foreground/50 mb-2" />
-                    <p className="text-xs text-muted-foreground">
-                      {historySearch ? "No matching conversations" : "No chat history yet"}
-                    </p>
-                  </div>
-                ) : (
-                  groupedConversations.map((group) => (
-                    <div key={group.label} className="space-y-1">
-                      <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider px-2 py-1">
-                        {group.label}
-                      </p>
-                      {group.conversations.map((conv) => (
-                        <div
-                          key={conv.id}
-                          className={cn(
-                            "group flex items-center gap-2 px-2 py-2 rounded-lg cursor-pointer transition-colors",
-                            conv.id === conversationId
-                              ? "bg-foreground/10"
-                              : "hover:bg-foreground/5"
-                          )}
-                          onClick={() => loadConversation(conv)}
-                        >
-                          <div className="flex-1 min-w-0">
-                            <p className="text-xs font-medium truncate">
-                              {(isConversationHistorySyncPrompt(conv.title) ? undefined : conv.title) || "untitled"}
-                            </p>
-                            <p className="text-[10px] text-muted-foreground">
-                              {conv.messageCount} messages
-                            </p>
-                          </div>
-                          <Popover
-                            open={openConvMenuId === conv.id}
-                            onOpenChange={(open) => setOpenConvMenuId(open ? conv.id : null)}
-                          >
-                            <PopoverTrigger asChild>
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                onClick={(e) => e.stopPropagation()}
-                                className="h-6 w-6 p-0 opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-foreground"
-                              >
-                                <MoreHorizontal size={12} />
-                              </Button>
-                            </PopoverTrigger>
-                            <PopoverContent className="w-40 p-1" align="end" side="right">
-                              <button
-                                className="w-full flex items-center gap-2 px-2 py-1.5 text-sm rounded-md hover:bg-muted text-left"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  setOpenConvMenuId(null);
-                                  setRenameValue(isConversationHistorySyncPrompt(conv.title) ? "" : conv.title);
-                                  setRenamingConvId(conv.id);
-                                }}
-                              >
-                                <Pencil className="h-3.5 w-3.5 shrink-0" />
-                                Rename
-                              </button>
-                              <div className="my-1 border-t border-border" />
-                              <button
-                                className="w-full flex items-center gap-2 px-2 py-1.5 text-sm rounded-md hover:bg-muted text-destructive text-left"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  setOpenConvMenuId(null);
-                                  setDeletingConvId(conv.id);
-                                }}
-                              >
-                                <Trash2 className="h-3.5 w-3.5 shrink-0" />
-                                Delete
-                              </button>
-                            </PopoverContent>
-                          </Popover>
-                        </div>
-                      ))}
-                    </div>
-                  ))
-                )}
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
+        <InlineChatHistory
+          hideInlineHistory={hideInlineHistory}
+          showHistory={showHistory}
+          setShowHistory={setShowHistory}
+          historySearch={historySearch}
+          setHistorySearch={setHistorySearch}
+          groupedConversations={groupedConversations}
+          conversationId={conversationId}
+          loadConversation={loadConversation}
+          deleteConversation={deleteConversation}
+          renameConversation={renameConversation}
+        />
 
         {/* Messages */}
         <div
@@ -6539,399 +5742,36 @@ export function StandaloneChat({
             pipesLoading={pipesLoading}
           />
         )}
-        <AnimatePresence mode="popLayout">
-          {(() => {
-            const visibleMessages = messages.filter((m) => {
-              if (m.role !== "assistant") return true;
-              // hide placeholder "Processing..." messages (the grid dissolve loader handles this state)
-              if (m.content === "Processing..." && !m.contentBlocks?.length) return false;
-              // hide empty messages with no content blocks
-              if (!m.content && !m.contentBlocks?.length && !isSteeredAssistantMessage(m)) return false;
-              return true;
-            });
-
-            const renderItems = buildCollapsedSteerRenderItems(visibleMessages, {
-              canCollapseSteerWork: !isLoading && !isStreaming && !piMessageIdRef.current,
-            });
-
-            return renderItems.map((item) => {
-              if (item.type === "collapsed-steer-work") {
-                const expanded = expandedSteerWorkIds.has(item.id);
-                return (
-                  <CollapsedSteerWorkRow
-                    key={item.id}
-                    item={item}
-                    expanded={expanded}
-                    onToggle={() => {
-                      setExpandedSteerWorkIds((current) => {
-                        const next = new Set(current);
-                        if (next.has(item.id)) {
-                          next.delete(item.id);
-                        } else {
-                          next.add(item.id);
-                        }
-                        return next;
-                      });
-                    }}
-                  />
-                );
-              }
-
-              const message = item.message;
-              if (item.hideWhenCollapsedBy && !expandedSteerWorkIds.has(item.hideWhenCollapsedBy)) {
-                return null;
-              }
-              const messageIndex = visibleMessages.findIndex((candidate) => candidate.id === message.id);
-              const shouldSuppressIntentLabel = item.hideIntentLabelWhenCollapsedBy &&
-                !expandedSteerWorkIds.has(item.hideIntentLabelWhenCollapsedBy);
-              const intentLabel = shouldSuppressIntentLabel ? null : getMessageIntentLabel(message);
-              const isSteerUserMessage = message.role === "user" && message.intent === "steer";
-              const canEditMessage = message.role === "user" && !isSteerUserMessage && !isLoading;
-              const canShowMessageActions = !item.showActionsWhenExpandedBy ||
-                expandedSteerWorkIds.has(item.showActionsWhenExpandedBy);
-              const isActiveStreamingAssistantMessage =
-                message.role === "assistant" &&
-                (isLoading || isStreaming) &&
-                message.id === activeSourceFooterMessageId;
-              const shouldShowMessageActionBar =
-                canShowMessageActions && !isActiveStreamingAssistantMessage;
-              const nextAssistant = visibleMessages
-                .slice(messageIndex + 1)
-                .find((candidate) => candidate.role === "assistant");
-              const hideSupersededSteerBody = isSteeredAssistantMessage(message) && Boolean(
-                nextAssistant &&
-                isSteeredAssistantMessage(nextAssistant) &&
-                !message.content &&
-                !message.contentBlocks?.length
-              );
-              const turnAggregatedCitations = citationPlan.aggregatedAfter.get(message.id);
-              return [
-            <motion.div
-              key={message.id}
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -10 }}
-              transition={{ duration: 0.2 }}
-              className={cn(
-                "relative flex min-w-0 transition-[background-color,box-shadow] duration-150",
-                message.role === "user" ? "justify-end" : "justify-start",
-                message.id === highlightedMessageId && "bg-muted/30 ring-1 ring-foreground/30"
-              )}
-              data-testid={`chat-message-${message.role}`}
-              data-message-id={message.id}
-            >
-              <div
-                className={cn(
-                  "group/message flex flex-col min-w-0",
-                  message.role === "user"
-                    ? (editingMessageId === message.id ? "items-end w-full" : "items-end max-w-[82%]")
-                    : "items-start w-full"
-                )}
-              >
-              {intentLabel ? (
-                <div
-                  className={cn(
-                    "mb-1 px-1 text-[11px] font-medium uppercase tracking-[0.16em] text-muted-foreground/80",
-                    message.role === "user" ? "text-right" : "text-left"
-                  )}
-                >
-                  {intentLabel}
-                </div>
-              ) : null}
-              {hideSupersededSteerBody ? null : (
-                <div
-                onMouseDown={(e) => {
-                  if (!canEditMessage || editingMessageId === message.id) return;
-                  // Stage caret position from the click coords (still on live
-                  // DOM), but defer entering edit mode to mouseup. Letting
-                  // the user drag-select text inside their own messages
-                  // requires NOT swallowing mousedown — otherwise the
-                  // textarea replaces the rendered text mid-drag and the
-                  // selection is lost.
-                  pendingCaretRef.current = caretOffsetFromClick(e, message.content);
-                  pendingEditDownXYRef.current = { x: e.clientX, y: e.clientY };
-                }}
-                onMouseUp={(e) => {
-                  if (!canEditMessage || editingMessageId === message.id) return;
-                  const down = pendingEditDownXYRef.current;
-                  pendingEditDownXYRef.current = null;
-                  // If the mouse moved more than ~3px between down and up,
-                  // treat it as a drag-select — don't enter edit mode.
-                  if (!down) return;
-                  const moved = Math.hypot(e.clientX - down.x, e.clientY - down.y);
-                  if (moved > 3) {
-                    pendingCaretRef.current = null;
-                    return;
-                  }
-                  // Real click — enter edit mode.
-                  enterEditMode(message, pendingCaretRef.current ?? undefined);
-                }}
-                className={cn(
-                  "relative rounded-xl text-sm overflow-hidden max-w-full transition-all",
-                  message.role === "user"
-                    ? "bg-muted/60 text-foreground px-4 py-3"
-                    : "bg-background text-foreground py-1",
-                  canEditMessage && editingMessageId !== message.id && "cursor-text",
-                  // In edit mode, keep the bubble at full available width so it
-                  // doesn't shrink or look like a separate small input.
-                  editingMessageId === message.id && message.role === "user" && "w-full"
-                )}
-              >
-                {editingMessageId === message.id ? (
-                  <div className="flex flex-col gap-2 w-full min-w-0">
-                    <textarea
-                      ref={(el) => {
-                        editTextareaRef.current = el;
-                        // Synchronous focus + caret placement BEFORE the browser
-                        // paints. Using the ref callback (instead of useEffect)
-                        // guarantees the cursor lands where the user clicked on
-                        // the very first frame — no flash-of-start-of-text.
-                        if (el && pendingCaretRef.current != null) {
-                          const pos = pendingCaretRef.current;
-                          pendingCaretRef.current = null;
-                          el.focus({ preventScroll: true });
-                          try { el.setSelectionRange(pos, pos); } catch { /* ignore */ }
-                        }
-                      }}
-                      value={editDraft}
-                      onChange={(e) => setEditDraft(e.target.value)}
-                      onBlur={() => commitEditedMessage(message, editDraft)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Escape") {
-                          e.preventDefault();
-                          setEditingMessageId(null);
-                          pendingCaretRef.current = null;
-                          setEditDraft(message.content);
-                        }
-                        if (e.key === "Enter" && !e.shiftKey) {
-                          e.preventDefault();
-                          (e.currentTarget as HTMLTextAreaElement).blur();
-                        }
-                      }}
-                      rows={Math.min(10, Math.max(1, editDraft.split("\n").length))}
-                      className="block w-full min-w-0 resize-none bg-transparent text-foreground placeholder:text-muted-foreground focus:outline-none leading-relaxed"
-                    />
-                    <div className="flex items-center justify-end gap-2">
-                      <button
-                        type="button"
-                        className="text-xs px-2 py-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors"
-                        onMouseDown={(e) => e.preventDefault()}
-                        onMouseUp={(e) => e.stopPropagation()}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setEditingMessageId(null);
-                          pendingCaretRef.current = null;
-                          setEditDraft(message.content);
-                        }}
-                      >
-                        Cancel
-                      </button>
-                      <button
-                        type="button"
-                        className="text-xs px-2 py-1 rounded-md bg-foreground text-background hover:bg-foreground/90 transition-colors"
-                        onMouseDown={(e) => e.preventDefault()}
-                        onMouseUp={(e) => e.stopPropagation()}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          commitEditedMessage(message, editDraft);
-                        }}
-                      >
-                        Save
-                      </button>
-                    </div>
-                  </div>
-                ) : (
-                  <MessageContent
-                    message={message}
-                    deferSourceFooter={
-                      citationPlan.deferredMessageIds.has(message.id) ||
-                      message.id === activeSourceFooterMessageId
-                    }
-                    onImageClick={(images, index) => setImageViewer({ images, index })}
-                    onRetry={(prompt) => sendMessage(prompt)}
-                    onOpenViewerPath={openFilePreview}
-                  />
-                )}
-              </div>
-              )}
-              {!hideSupersededSteerBody && shouldShowMessageActionBar ? (
-                <>
-                {/* Action buttons - appear on hover, outside the message box */}
-                {editingMessageId !== message.id && (
-                  <div className="flex items-center gap-0.5 self-end mt-1 opacity-0 group-hover/message:opacity-100 group-focus-within/message:opacity-100 transition-all duration-200">
-                    <button
-                      onClick={async () => {
-                        await commands.copyTextToClipboard(message.content);
-                        setCopiedMessageId(message.id);
-                        setTimeout(() => setCopiedMessageId(null), 2000);
-                      }}
-                      className="p-1 rounded-md hover:bg-muted text-muted-foreground hover:text-foreground"
-                      title="Copy message"
-                    >
-                      {copiedMessageId === message.id ? (
-                        <Check className="h-3 w-3" />
-                      ) : (
-                        <Copy className="h-3 w-3" />
-                      )}
-                    </button>
-                    {canEditMessage && (
-                      <button
-                        type="button"
-                        onMouseUp={(e) => e.stopPropagation()}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          enterEditMode(message);
-                        }}
-                        className="p-1 rounded-md hover:bg-muted text-muted-foreground hover:text-foreground"
-                        title="Edit"
-                      >
-                        <Pencil className="h-3 w-3" />
-                      </button>
-                    )}
-                    {message.role === "assistant" && !isLoading && (
-                    <button
-                      onClick={() => {
-                        const msgIndex = messages.findIndex((m) => m.id === message.id);
-                        // Find the preceding user message index
-                        let userMsgIndex = -1;
-                        for (let i = msgIndex - 1; i >= 0; i--) {
-                          if (messages[i].role === "user") { userMsgIndex = i; break; }
-                        }
-                        if (userMsgIndex === -1) return;
-                        const userMsg = messages[userMsgIndex];
-                        // Remove user message and everything after it, then resend
-                        setMessages((prev) => prev.slice(0, userMsgIndex));
-                        sendMessage(userMsg.content, userMsg.displayContent);
-                      }}
-                      className="p-1 rounded-md hover:bg-muted text-muted-foreground hover:text-foreground"
-                      title="Retry"
-                    >
-                      <RefreshCw className="h-3 w-3" />
-                    </button>
-                    )}
-                    {message.role === "assistant" && (
-                    <Popover
-                      open={openMessageMenuId === message.id}
-                      onOpenChange={(open) => setOpenMessageMenuId(open ? message.id : null)}
-                    >
-                      <PopoverTrigger asChild>
-                        <button
-                          className="p-1 rounded-md hover:bg-muted text-muted-foreground hover:text-foreground"
-                          title="More options"
-                        >
-                          <MoreHorizontal className="h-3 w-3" />
-                        </button>
-                      </PopoverTrigger>
-                      <PopoverContent className="w-48 p-1" align="end" side="top">
-                        <div className="text-xs text-muted-foreground px-2 py-1 mb-1">
-                          {new Date(message.timestamp).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
-                        </div>
-                        {!message.content.includes("used all your free queries") &&
-                          !message.content.startsWith("Error") &&
-                          message.content !== "Processing..." && (
-                          <button
-                            onClick={() => {
-                              setOpenMessageMenuId(null);
-                              const msgIndex = messages.findIndex((m) => m.id === message.id);
-                              const userMsg = messages
-                                .slice(0, msgIndex)
-                                .reverse()
-                                .find((m) => m.role === "user");
-                              if (userMsg) {
-                                setScheduleDialogMessage({
-                                  prompt: userMsg.content,
-                                  response: message.content,
-                                });
-                              }
-                            }}
-                            className="w-full flex items-center gap-2 px-2 py-1.5 text-sm rounded-md hover:bg-muted text-left"
-                          >
-                            <Clock className="h-3.5 w-3.5 shrink-0" />
-                            Run on schedule
-                          </button>
-                        )}
-                        <button
-                          onClick={() => {
-                            setOpenMessageMenuId(null);
-                            branchConversation(message.id);
-                          }}
-                          className="w-full flex items-center gap-2 px-2 py-1.5 text-sm rounded-md hover:bg-muted text-left"
-                        >
-                          <GitBranch className="h-3.5 w-3.5 shrink-0" />
-                          Branch in new chat
-                        </button>
-                      </PopoverContent>
-                    </Popover>
-                    )}
-                  </div>
-                )}
-                </>
-              ) : null}
-              </div>
-            </motion.div>,
-            turnAggregatedCitations && turnAggregatedCitations.length > 0 ? (
-              <motion.div
-                key={`turn-sources-${message.id}`}
-                initial={{ opacity: 0, y: 4 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -4 }}
-                transition={{ duration: 0.15 }}
-                className="w-full"
-                data-testid="chat-turn-sources"
-              >
-                <SourceCitationFooter
-                  citations={turnAggregatedCitations}
-                  onOpenFile={openFilePreview}
-                />
-              </motion.div>
-            ) : null,
-              ];
-            });
-          })()}
-        </AnimatePresence>
-        <AnimatePresence>
-          {isLoading && (() => {
-            // Derive loader phase from the last assistant message's content blocks
-            const lastAssistant = [...messages].reverse().find(m => m.role === "assistant");
-            const blocks = lastAssistant?.contentBlocks;
-            let loaderPhase: LoaderPhase = "analyzing";
-            let toolName: string | undefined;
-            let thinkingSecs: number | undefined;
-
-            if (blocks && blocks.length > 0) {
-              const lastBlock = blocks[blocks.length - 1];
-              if (lastBlock.type === "thinking" && (lastBlock as any).isThinking) {
-                loaderPhase = "thinking";
-              } else if (lastBlock.type === "tool" && (lastBlock as any).toolCall?.isRunning) {
-                loaderPhase = "tool";
-                toolName = (lastBlock as any).toolCall?.toolName;
-              } else if (lastBlock.type === "text" && lastBlock.text) {
-                loaderPhase = "streaming";
-              }
-            }
-
-            return (
-              <motion.div
-                initial={{ opacity: 0, y: 5 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -5 }}
-                transition={{ duration: 0.15 }}
-                className={cn(
-                  "w-fit ml-auto",
-                  loaderPhase === "streaming"
-                    ? "px-2 py-1"
-                    : "px-3 py-2 border border-border/50"
-                )}
-              >
-                <GridDissolveLoader
-                  phase={loaderPhase}
-                  toolName={toolName}
-                  thinkingSecs={thinkingSecs}
-                />
-              </motion.div>
-            );
-          })()}
-        </AnimatePresence>
+        <ChatMessageList
+          messages={messages}
+          isLoading={isLoading}
+          isStreaming={isStreaming}
+          activeSourceFooterMessageId={activeSourceFooterMessageId}
+          expandedSteerWorkIds={expandedSteerWorkIds}
+          setExpandedSteerWorkIds={setExpandedSteerWorkIds}
+          highlightedMessageId={highlightedMessageId}
+          editingMessageId={editingMessageId}
+          setEditingMessageId={setEditingMessageId}
+          editDraft={editDraft}
+          setEditDraft={setEditDraft}
+          pendingCaretRef={pendingCaretRef}
+          pendingEditDownXYRef={pendingEditDownXYRef}
+          editTextareaRef={editTextareaRef}
+          caretOffsetFromClick={caretOffsetFromClick}
+          enterEditMode={enterEditMode}
+          commitEditedMessage={commitEditedMessage}
+          citationPlan={citationPlan}
+          copiedMessageId={copiedMessageId}
+          setCopiedMessageId={setCopiedMessageId}
+          openMessageMenuId={openMessageMenuId}
+          setOpenMessageMenuId={setOpenMessageMenuId}
+          setImageViewer={setImageViewer}
+          setMessages={setMessages}
+          setScheduleDialogMessage={setScheduleDialogMessage}
+          sendMessage={sendMessage}
+          openFilePreview={openFilePreview}
+          branchConversation={branchConversation}
+        />
 
         <div ref={messagesEndRef} />
       </div> {/* End of max-w-4xl wrapper */}
@@ -6951,7 +5791,10 @@ export function StandaloneChat({
       </div> {/* End of main content area with history sidebar */}
 
       {/* Input */}
-      <div ref={inputSectionRef} className="relative bg-gradient-to-t from-background via-background/80 to-transparent">
+      <div
+        ref={inputSectionRef}
+        className="relative bg-gradient-to-t from-background via-background/80 to-transparent"
+      >
         <div className={CHAT_RAIL_CLASS}>
         {/* Prefill, filters, suggestions first; then attached images in gap; then agent bar; then form */}
         {/* Prefill context indicator from search */}
@@ -7104,114 +5947,15 @@ export function StandaloneChat({
           )
         )}
 
-        {/* Composer attachment strip — one row, docs + images side by side.
-            Both kinds share a 64px height so the row has a consistent
-            baseline (the previous design rendered them in two separate
-            <div> rows with different heights, producing a fragmented strip
-            when a user attached one of each). Mirrors the in-bubble
-            in-bubble attachment row order (pending first so the user sees
-            the spinner promote in-place to a resolved chip, then resolved
-            docs, then images). */}
-        {(attachedDocs.length > 0 || pendingDocs.length > 0 || pastedImages.length > 0) && (
-          <TooltipProvider delayDuration={150}>
-          <div className="px-5 sm:px-6 py-2 border-b border-border/30 flex flex-wrap items-center gap-2">
-            {pendingDocs.map((doc) => {
-              const badge = attachmentBadge(doc.ext);
-              return (
-                <div
-                  key={`pending-${doc.id}`}
-                  className="flex items-center gap-2.5 h-16 max-w-[240px] rounded-xl border border-border/50 bg-muted/40 px-2.5 shadow-sm opacity-80"
-                  title={`${doc.name} — extracting…`}
-                  aria-busy="true"
-                >
-                  <div className={`relative shrink-0 w-10 h-10 rounded-lg flex items-center justify-center text-[10px] font-semibold tracking-tight ${badge.tint}`}>
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <div className="truncate text-xs font-medium text-foreground">{doc.name}</div>
-                    <div className="truncate text-[10px] text-muted-foreground">extracting…</div>
-                  </div>
-                </div>
-              );
-            })}
-            {attachedDocs.map((doc, i) => {
-              const badge = attachmentBadge(doc.ext);
-              const isPastedText = isPastedTextDoc(doc);
-              const canShowInField = doc.text.length <= PASTED_TEXT_SHOW_IN_FIELD_MAX_CHARS;
-              return (
-                <div
-                  key={`doc-${doc.name}-${i}`}
-                  className="relative group flex items-center gap-2.5 h-16 max-w-[240px] rounded-xl border border-border/50 bg-muted/40 px-2.5 shadow-sm"
-                  title={`${doc.name} — ${doc.charCount.toLocaleString()} chars${doc.truncated ? " (truncated to fit)" : ""}`}
-                >
-                  <div className={`shrink-0 w-10 h-10 rounded-lg flex items-center justify-center text-[10px] font-semibold tracking-tight ${badge.tint}`}>
-                    {badge.label}
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <div className="truncate text-xs font-medium text-foreground">{doc.name}</div>
-                    {isPastedText ? (
-                      canShowInField ? (
-                        <button
-                          type="button"
-                          onClick={() => showPastedTextInField(doc, i)}
-                          className="inline-flex max-w-full items-center gap-0.5 truncate text-[10px] text-muted-foreground underline decoration-dotted underline-offset-2 hover:text-foreground"
-                        >
-                          <span className="truncate">Show in text field</span>
-                          <ChevronRight className="h-3 w-3 shrink-0" />
-                        </button>
-                      ) : (
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <span className="inline-flex max-w-full cursor-not-allowed items-center gap-0.5 truncate text-[10px] text-muted-foreground/70 underline decoration-dotted underline-offset-2">
-                              <span className="truncate">Show in text field</span>
-                              <ChevronRight className="h-3 w-3 shrink-0" />
-                            </span>
-                          </TooltipTrigger>
-                          <TooltipContent side="top">Too long to show in text field</TooltipContent>
-                        </Tooltip>
-                      )
-                    ) : (
-                      <div className="truncate text-[10px] text-muted-foreground">
-                        {doc.charCount.toLocaleString()} chars{doc.truncated ? " • truncated" : ""}
-                      </div>
-                    )}
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => setAttachedDocs((prev) => prev.filter((_, idx) => idx !== i))}
-                    className="absolute -top-1.5 -right-1.5 w-5 h-5 bg-destructive text-destructive-foreground rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity shadow-md hover:bg-destructive/90"
-                  >
-                    <X className="w-3 h-3" />
-                  </button>
-                </div>
-              );
-            })}
-            {pastedImages.map((img, i) => (
-              <div key={`img-${i}`} className="relative group shrink-0">
-                <button
-                  type="button"
-                  onClick={() => setImageViewer({ images: pastedImages, index: i })}
-                  className="block rounded-xl border border-border/50 shadow-sm overflow-hidden focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                >
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img
-                    src={img}
-                    alt={`Attached ${i + 1}`}
-                    className="h-16 w-16 min-h-16 min-w-16 object-cover cursor-pointer"
-                  />
-                </button>
-                <button
-                  type="button"
-                  onClick={(e) => { e.stopPropagation(); setPastedImages(prev => prev.filter((_, idx) => idx !== i)); }}
-                  className="absolute -top-1.5 -right-1.5 w-5 h-5 bg-destructive text-destructive-foreground rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity shadow-md hover:bg-destructive/90"
-                >
-                  <X className="w-3 h-3" />
-                </button>
-              </div>
-            ))}
-          </div>
-          </TooltipProvider>
-        )}
+        <AttachmentTray
+          pendingDocs={pendingDocs}
+          attachedDocs={attachedDocs}
+          pastedImages={pastedImages}
+          onShowPastedTextInField={showPastedTextInField}
+          onRemoveDoc={(index) => setAttachedDocs((prev) => prev.filter((_, idx) => idx !== index))}
+          onImageClick={(images, index) => setImageViewer({ images, index })}
+          onRemoveImage={(index) => setPastedImages((prev) => prev.filter((_, idx) => idx !== index))}
+        />
 
         <form
           onSubmit={handleSubmit}
@@ -7238,104 +5982,15 @@ export function StandaloneChat({
             </AnimatePresence>
           )}
 
-          {queuedPrompts.length > 0 && (
-            <motion.div
-              initial={{ opacity: 0, y: 8 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ duration: 0.18 }}
-              className="mb-2 rounded-lg border border-border/60 bg-background/95 backdrop-blur-sm shadow-sm overflow-hidden"
-            >
-              <div className="flex items-center justify-between gap-2 px-3 py-1.5 border-b border-border/50 bg-background">
-                <div className="flex items-center gap-1.5 min-w-0">
-                  <Clock className="h-3 w-3 text-muted-foreground/70 shrink-0" />
-                  <span className="text-[10px] uppercase tracking-wide text-muted-foreground font-medium">
-                    Queued
-                  </span>
-                </div>
-                <span className="text-[10px] font-mono text-muted-foreground/60">
-                  {queuedPrompts.length}
-                </span>
-              </div>
-              <TooltipProvider delayDuration={150}>
-                <div ref={queuedScrollRef} className="max-h-[112px] overflow-y-auto scrollbar-minimal">
-                  {queuedPrompts.map((p, i) => {
-                    const isBusy = queuedActionPromptId === p.id;
-                    const queuedDisplay = queuedDisplayBySessionRef.current[currentQueueSessionId]?.[p.id];
-                    const label = queuedDisplay?.preview || p.preview || "image follow-up";
-                    return (
-                      <motion.div
-                        key={p.id}
-                        layout
-                        initial={{ opacity: 0, y: 4 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        transition={{ duration: 0.16 }}
-                        tabIndex={0}
-                        role="listitem"
-                        onKeyDown={(e) => {
-                          if (isBusy) return;
-                          if (isQueuedItemSteerShortcut(e, isMac)) {
-                            e.preventDefault();
-                            steerQueuedPrompt(p);
-                          } else if (isQueuedItemCancelShortcut(e)) {
-                            e.preventDefault();
-                            cancelQueuedPrompt(p);
-                          }
-                        }}
-                        className="group/qcard select-none flex min-h-[36px] items-center gap-2 px-2.5 py-1.5 border-b border-border/40 last:border-b-0 text-sm text-foreground/90 focus-visible:outline-none focus-visible:bg-muted/20 hover:bg-muted/15 transition-colors"
-                        title={label.length > 90 ? label : undefined}
-                      >
-                        <span className="w-4 shrink-0 text-right font-mono text-[10px] text-muted-foreground/50">
-                          {i + 1}
-                        </span>
-                        <span className="flex-1 min-w-0 overflow-hidden text-ellipsis whitespace-nowrap font-mono text-[12px]">
-                          {label}
-                        </span>
-                        <div className="flex items-center gap-1 shrink-0">
-                          <Tooltip>
-                            <TooltipTrigger asChild>
-                              <button
-                                type="button"
-                                disabled={isBusy}
-                                onClick={() => steerQueuedPrompt(p)}
-                                className="h-6 px-2 inline-flex items-center gap-1 justify-center text-foreground bg-background hover:bg-muted/20 disabled:opacity-50 disabled:pointer-events-none transition-colors border border-border/50"
-                                aria-label={`steer queued message ${i + 1}`}
-                              >
-                                {isBusy ? (
-                                  <Loader2 className="h-3 w-3 animate-spin" />
-                                ) : (
-                                  <>
-                                    <CornerDownRight className="h-2.5 w-2.5" />
-                                    <span className="text-[10px] font-medium">Steer</span>
-                                  </>
-                                )}
-                              </button>
-                            </TooltipTrigger>
-                            <TooltipContent side="top">
-                              Steer current reply with this message ({formatSteerShortcut(isMac)})
-                            </TooltipContent>
-                          </Tooltip>
-                          <Tooltip>
-                            <TooltipTrigger asChild>
-                              <button
-                                type="button"
-                                disabled={isBusy}
-                                onClick={() => cancelQueuedPrompt(p)}
-                                className="h-6 w-6 inline-flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted/20 disabled:opacity-50 disabled:pointer-events-none transition-colors border border-transparent hover:border-border/50"
-                                aria-label={`remove queued message ${i + 1}`}
-                              >
-                                <Trash2 className="h-3 w-3" />
-                              </button>
-                            </TooltipTrigger>
-                            <TooltipContent side="top">Remove queued message</TooltipContent>
-                          </Tooltip>
-                        </div>
-                      </motion.div>
-                    );
-                  })}
-                </div>
-              </TooltipProvider>
-            </motion.div>
-          )}
+          <QueuedPromptsList
+            queuedPrompts={queuedPrompts}
+            queuedActionPromptId={queuedActionPromptId}
+            queuedDisplayById={queuedDisplayBySessionRef.current[currentQueueSessionId]}
+            queuedScrollRef={queuedScrollRef}
+            isMac={isMac}
+            onSteerQueuedPrompt={steerQueuedPrompt}
+            onCancelQueuedPrompt={cancelQueuedPrompt}
+          />
 
           <div
             className={cn(
@@ -7499,7 +6154,33 @@ export function StandaloneChat({
                 side="top"
                 sideOffset={6}
               >
-                {renderComposerUtilityMenu()}
+                <ComposerUtilityMenu
+                  canChat={Boolean(canChat)}
+                  activeFilterCount={activeFilterCount}
+                  activeFilters={activeFilters}
+                  filterSearch={filterSearch}
+                  setFilterSearch={setFilterSearch}
+                  filterSearchGroups={filterSearchGroups}
+                  filterSearchResults={filterSearchResults}
+                  isLoadingFilterSearch={isLoadingFilterSearch}
+                  selectedFilterResultIndex={selectedFilterResultIndex}
+                  setSelectedFilterResultIndex={setSelectedFilterResultIndex}
+                  staticMentionSuggestions={STATIC_MENTION_SUGGESTIONS}
+                  appMentionSuggestions={appMentionSuggestions}
+                  allTagMentionSuggestions={allTagMentionSuggestions}
+                  tagMentionSections={tagMentionSections}
+                  recentSpeakers={recentSpeakers}
+                  appsLoading={appsLoading}
+                  tagsLoading={tagsLoading}
+                  connections={connections}
+                  isWindows={isWindows}
+                  setAppFilterOpen={setAppFilterOpen}
+                  setInput={setInput}
+                  removeFilter={removeFilter}
+                  getFilterSuggestionState={getFilterSuggestionState}
+                  applyFilterSuggestion={applyFilterSuggestion}
+                  handleFilePicker={handleFilePicker}
+                />
               </PopoverContent>
             </Popover>
             <div className="flex-1 min-w-0">
@@ -7640,7 +6321,7 @@ export function StandaloneChat({
           )}
         </form>
 
-      </div> {/* End of max-w-4xl input wrapper */}
+        </div>
       </div>
       </div> {/* End of chat column */}
 
@@ -7677,65 +6358,6 @@ export function StandaloneChat({
       )}
       <ImageViewerDialog imageViewer={imageViewer} onChange={setImageViewer} />
 
-      {/* Delete chat confirmation dialog */}
-      <Dialog open={!!deletingConvId} onOpenChange={(open) => !open && setDeletingConvId(null)}>
-        <DialogContent className="sm:max-w-sm">
-          <DialogHeader>
-            <DialogTitle>Delete chat</DialogTitle>
-            <p className="text-sm text-muted-foreground">Are you sure you want to delete this chat?</p>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setDeletingConvId(null)}>
-              Cancel
-            </Button>
-            <Button
-              variant="destructive"
-              onClick={() => {
-                deleteConversation(deletingConvId!);
-                setDeletingConvId(null);
-              }}
-            >
-              Delete
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* Rename chat dialog */}
-      <Dialog open={!!renamingConvId} onOpenChange={(open) => !open && setRenamingConvId(null)}>
-        <DialogContent className="sm:max-w-sm">
-          <DialogHeader>
-            <DialogTitle>Rename chat</DialogTitle>
-          </DialogHeader>
-          <input
-            autoFocus
-            className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-ring"
-            value={renameValue}
-            onChange={(e) => setRenameValue(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") {
-                renameConversation(renamingConvId!, renameValue);
-                setRenamingConvId(null);
-              } else if (e.key === "Escape") {
-                setRenamingConvId(null);
-              }
-            }}
-          />
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setRenamingConvId(null)}>
-              Cancel
-            </Button>
-            <Button
-              onClick={() => {
-                renameConversation(renamingConvId!, renameValue);
-                setRenamingConvId(null);
-              }}
-            >
-              Save
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
     </div>
   );
 }
