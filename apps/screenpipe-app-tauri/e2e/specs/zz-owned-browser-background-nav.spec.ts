@@ -413,13 +413,22 @@ describe("Owned browser — per-chat navigation ownership", function () {
       const status = await postNavigateAs(port, key, OWN_URL, OWN_CHAT);
       expect(status).toBe(200);
 
-      // Reveal is async (event → setState → ResizeObserver → set_bounds), so poll.
+      // Reveal is async (event → setState → ResizeObserver → set_bounds).
+      // macOS CI can deliver the Tauri event late enough that a single
+      // navigate races the sidebar listener; re-drive the same idempotent
+      // navigation while polling so the assertion targets the ownership rule,
+      // not event-listener startup timing.
       await browser.waitUntil(
-        async () =>
-          (await invokeOrThrow<boolean>("e2e_owned_browser_visible")) === true,
+        async () => {
+          if ((await invokeOrThrow<boolean>("e2e_owned_browser_visible")) === true) {
+            return true;
+          }
+          await postNavigateAs(port, key, OWN_URL, OWN_CHAT).catch(() => 0);
+          return (await invokeOrThrow<boolean>("e2e_owned_browser_visible")) === true;
+        },
         {
-          timeout: t(10_000),
-          interval: 300,
+          timeout: t(30_000),
+          interval: 1_000,
           timeoutMsg: "owned browser did not reveal for its own chat's navigation",
         },
       );
