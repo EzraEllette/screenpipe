@@ -93,7 +93,7 @@ These are read-only and just surface insights. To pause any of them, open Pipes 
 - Actually CREATE the 3 pipes (write the pipe.md files) and enable them. Do not stop at suggestions.
 - Every created pipe must be read-only (\`permissions: reader\`) — never send, post, or modify anything.
 - Base each pipe on apps/patterns you actually observed. Never invent activity.
-- Create exactly 3. Keep the whole response under ~450 words.\`,
+- Create exactly 3. Keep the whole response under ~450 words.`,
   },
   {
     name: "day-recap",
