@@ -14,12 +14,12 @@
  */
 
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { saveScreenshot } from "../helpers/screenshot-utils.js";
 import { openHomeWindow, waitForAppReady, t } from "../helpers/test-utils.js";
 
-const SESSION = "55555555-5555-5555-5555-555555555555";
 const CHATS_DIR = join(homedir(), ".screenpipe", "chats");
 const HEADING = "E2E Preview Heading";
 const CODE_MARKER = "const e2eAnswer";
@@ -191,6 +191,7 @@ describe("Chat source citations open files in the preview sidebar", function () 
   this.timeout(90_000);
 
   let mdPath = "";
+  let sessionId = "";
 
   before(async () => {
     const dir = mkdtempSync(join(tmpdir(), "screenpipe-e2e-preview-"));
@@ -201,15 +202,18 @@ describe("Chat source citations open files in the preview sidebar", function () 
     await openHomeWindow();
     const home = await $('[data-testid="section-home"]');
     await home.waitForExist({ timeout: t(15_000) });
-    removeChatFile(SESSION);
   });
 
-  after(() => {
-    removeChatFile(SESSION);
+  afterEach(() => {
+    if (sessionId) {
+      removeChatFile(sessionId);
+      sessionId = "";
+    }
   });
 
   it("renders the file source, opens it on click, and shows rendered markdown + code", async () => {
-    await seedAssistantWithFileSource(SESSION, mdPath);
+    sessionId = randomUUID();
+    await seedAssistantWithFileSource(sessionId, mdPath);
 
     // The seeded assistant message renders.
     const assistant = await $('[data-testid="chat-message-assistant"]');
