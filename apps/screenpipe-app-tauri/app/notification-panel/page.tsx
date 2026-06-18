@@ -802,7 +802,6 @@ export default function NotificationPanelPage() {
             onMouseLeave={(e) => (e.currentTarget.style.color = "rgba(0, 0, 0, 0.3)")}
           >
             {copied ? <Check size={12} strokeWidth={1.8} /> : <Copy size={12} strokeWidth={1.8} />}
-            {copied ? "copied" : "copy"}
           </button>
           {payload.source_url && (
             <button
