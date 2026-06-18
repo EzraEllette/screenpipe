@@ -8236,7 +8236,7 @@ export function StandaloneChat({
   const copyFullChatAsMarkdown = async () => {
     if (messages.length === 0) return;
     const md = messages.map(formatMessageAsMarkdown).join("\n\n---\n\n");
-    await navigator.clipboard.writeText(md);
+    await commands.copyTextToClipboard(md);
     toast({ title: "copied full chat as markdown" });
   };
 
@@ -9224,7 +9224,7 @@ export function StandaloneChat({
                   <div className="flex items-center gap-0.5 self-end mt-1 opacity-0 group-hover/message:opacity-100 group-focus-within/message:opacity-100 transition-all duration-200">
                     <button
                       onClick={async () => {
-                        await navigator.clipboard.writeText(message.content);
+                        await commands.copyTextToClipboard(message.content);
                         setCopiedMessageId(message.id);
                         setTimeout(() => setCopiedMessageId(null), 2000);
                       }}

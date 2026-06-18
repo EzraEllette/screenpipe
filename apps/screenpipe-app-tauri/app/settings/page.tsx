@@ -111,7 +111,7 @@ function ReferralSection() {
 
   const handleCopy = async () => {
     if (!referralLink) return;
-    await navigator.clipboard.writeText(referralLink);
+    await commands.copyTextToClipboard(referralLink);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };

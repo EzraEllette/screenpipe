@@ -404,7 +404,7 @@ function EncryptionKeyReveal() {
 
   const handleCopy = () => {
     if (password) {
-      navigator.clipboard.writeText(password);
+      commands.copyTextToClipboard(password);
       toast({
         title: "copied to clipboard",
         description: "paste this on your other device to set up sync",

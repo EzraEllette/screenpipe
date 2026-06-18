@@ -3014,7 +3014,7 @@ export function PipesSection() {
                                   {exec.model && <span className="text-muted-foreground/60 truncate max-w-[100px]">{exec.model}</span>}
                                   {exec.status === "completed" && exec.stdout && cleanPipeStdout(exec.stdout) && (
                                     <div className="ml-auto flex items-center gap-1">
-                                      <button className="text-muted-foreground hover:text-foreground p-0.5" title="copy" onClick={() => navigator.clipboard.writeText(cleanPipeStdout(exec.stdout))}>
+                                      <button className="text-muted-foreground hover:text-foreground p-0.5" title="copy" onClick={() => commands.copyTextToClipboard(cleanPipeStdout(exec.stdout))}>
                                         <Copy className="w-3.5 h-3.5" />
                                       </button>
                                       <button className="text-muted-foreground hover:text-foreground p-0.5" title="open in chat" onClick={async () => {
@@ -3068,7 +3068,7 @@ export function PipesSection() {
                                   <div className="relative group">
                                     <button
                                       className="absolute top-1 right-1 opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded hover:bg-muted"
-                                      onClick={() => navigator.clipboard.writeText(cleanPipeStdout(log.stdout))}
+                                      onClick={() => commands.copyTextToClipboard(cleanPipeStdout(log.stdout))}
                                       title="copy"
                                     >
                                       <Copy className="h-3 w-3 text-muted-foreground" />

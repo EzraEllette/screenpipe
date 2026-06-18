@@ -11,6 +11,7 @@ import { Badge } from "@/components/ui/badge";
 import { Copy, Check, Gift, Send, Loader2 } from "lucide-react";
 import { toast } from "@/components/ui/use-toast";
 import { useSettings } from "@/lib/hooks/use-settings";
+import { commands } from "@/lib/utils/tauri";
 
 interface ReferralData {
   code: string;
@@ -62,7 +63,7 @@ export function ReferralCard() {
   const handleCopy = async () => {
     if (!referral) return;
     try {
-      await navigator.clipboard.writeText(referral.link);
+      await commands.copyTextToClipboard(referral.link);
       setCopied(true);
       toast({ title: "referral link copied!" });
       setTimeout(() => setCopied(false), 2000);

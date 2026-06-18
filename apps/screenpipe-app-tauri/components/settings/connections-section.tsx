@@ -1304,7 +1304,7 @@ function ClaudeCodePanel() {
   const cmd = "claude mcp add screenpipe -- npx -y screenpipe-mcp@latest";
   const handleCopy = useCallback(async () => {
     try {
-      await navigator.clipboard.writeText(cmd);
+      await commands.copyTextToClipboard(cmd);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch {}
@@ -1717,7 +1717,7 @@ function AnythingLLMPanel() {
   }, null, 2);
   const handleCopy = useCallback(async () => {
     try {
-      await navigator.clipboard.writeText(config);
+      await commands.copyTextToClipboard(config);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch {}
@@ -1755,7 +1755,7 @@ function MstyPanel() {
   }, null, 2);
   const handleCopy = useCallback(async () => {
     try {
-      await navigator.clipboard.writeText(config);
+      await commands.copyTextToClipboard(config);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch {}
@@ -1801,7 +1801,7 @@ function WarpPanel() {
   }, null, 2);
   const handleCopy = useCallback(async () => {
     try {
-      await navigator.clipboard.writeText(config);
+      await commands.copyTextToClipboard(config);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch {}

@@ -835,18 +835,15 @@ export function PrivacySection() {
                   onClick={async () => {
                     if (!liveApiKey) return;
                     try {
-                      await navigator.clipboard.writeText(liveApiKey);
-                    } catch {
-                      const el = document.createElement("textarea");
-                      el.value = liveApiKey;
-                      el.style.position = "fixed";
-                      el.style.opacity = "0";
-                      document.body.appendChild(el);
-                      el.select();
-                      document.execCommand("copy");
-                      document.body.removeChild(el);
+                      await commands.copyTextToClipboard(liveApiKey);
+                      toast({ title: "API key copied to clipboard" });
+                    } catch (error) {
+                      toast({
+                        title: "couldn't copy API key",
+                        description: error instanceof Error ? error.message : String(error),
+                        variant: "destructive",
+                      });
                     }
-                    toast({ title: "API key copied to clipboard" });
                   }}
                 >
                   <Copy className="h-3.5 w-3.5" />
@@ -1696,18 +1693,15 @@ function AdminTeamTokenCard() {
             onClick={async () => {
               if (!liveToken) return;
               try {
-                await navigator.clipboard.writeText(liveToken);
-              } catch {
-                const el = document.createElement("textarea");
-                el.value = liveToken;
-                el.style.position = "fixed";
-                el.style.opacity = "0";
-                document.body.appendChild(el);
-                el.select();
-                document.execCommand("copy");
-                document.body.removeChild(el);
+                await commands.copyTextToClipboard(liveToken);
+                toast({ title: "admin token copied to clipboard" });
+              } catch (error) {
+                toast({
+                  title: "couldn't copy admin token",
+                  description: error instanceof Error ? error.message : String(error),
+                  variant: "destructive",
+                });
               }
-              toast({ title: "admin token copied to clipboard" });
             }}
           >
             <Copy className="h-3.5 w-3.5" />
