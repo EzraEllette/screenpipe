@@ -259,17 +259,18 @@ async function waitForActiveConversation(id: string): Promise<void> {
   );
 }
 
-async function waitForForegroundReady(id: string): Promise<void> {
+async function waitForOwnedBrowserNavigateReady(id: string): Promise<void> {
   await browser.waitUntil(
     async () =>
       (await browser.execute(
-        (cid: string) => (window as any).__e2eForegroundReady === cid,
+        (cid: string) =>
+          (window as any).__e2eOwnedBrowserNavigateReady?.conversationId === cid,
         id,
       )) as boolean,
     {
       timeout: t(15_000),
       interval: 150,
-      timeoutMsg: `home foreground bus never registered conversation ${id}`,
+      timeoutMsg: `home browser sidebar never registered conversation ${id}`,
     },
   );
 }
@@ -351,7 +352,7 @@ describe("Owned browser — per-chat navigation ownership", function () {
       writeSeedChatFile(OWN_CHAT, "(e2e) owned-browser ownership probe");
       await loadChatIntoHome(OWN_CHAT);
       await waitForActiveConversation(OWN_CHAT);
-      await waitForForegroundReady(OWN_CHAT);
+      await waitForOwnedBrowserNavigateReady(OWN_CHAT);
 
       // 2. Drive owned-browser commands from a SECOND window: a regression
       //    attaches the native child to `home`, destroying home's WebDriver
@@ -411,7 +412,7 @@ describe("Owned browser — per-chat navigation ownership", function () {
       writeSeedChatFile(OWN_CHAT, "(e2e) owned-browser reveal probe");
       await loadChatIntoHome(OWN_CHAT);
       await waitForActiveConversation(OWN_CHAT);
-      await waitForForegroundReady(OWN_CHAT);
+      await waitForOwnedBrowserNavigateReady(OWN_CHAT);
 
       await showWindow({ Search: { query: null } });
       await waitForWindowHandle("search", t(10_000));
@@ -496,7 +497,7 @@ describe("Owned browser — fast chat switching keeps pipe state out of other ch
 
       await loadChatIntoHome(BROWSER_CHAT_A);
       await waitForActiveConversation(BROWSER_CHAT_A);
-      await waitForForegroundReady(BROWSER_CHAT_A);
+      await waitForOwnedBrowserNavigateReady(BROWSER_CHAT_A);
       await browser.pause(t(800));
       await invokeOrThrow("owned_browser_hide");
       expect(await invokeOrThrow<boolean>("e2e_owned_browser_visible")).toBe(
@@ -507,7 +508,7 @@ describe("Owned browser — fast chat switching keeps pipe state out of other ch
 
       await loadChatIntoHome(PLAIN_CHAT);
       await waitForActiveConversation(PLAIN_CHAT);
-      await waitForForegroundReady(PLAIN_CHAT);
+      await waitForOwnedBrowserNavigateReady(PLAIN_CHAT);
       const navigateStatus = await postNavigateAs(
         port,
         key,
@@ -522,10 +523,10 @@ describe("Owned browser — fast chat switching keeps pipe state out of other ch
 
       await loadChatIntoHome(BROWSER_CHAT_B);
       await waitForActiveConversation(BROWSER_CHAT_B);
-      await waitForForegroundReady(BROWSER_CHAT_B);
+      await waitForOwnedBrowserNavigateReady(BROWSER_CHAT_B);
       await loadChatIntoHome(PLAIN_CHAT);
       await waitForActiveConversation(PLAIN_CHAT);
-      await waitForForegroundReady(PLAIN_CHAT);
+      await waitForOwnedBrowserNavigateReady(PLAIN_CHAT);
       await postEvalWithUrlAs(port, key, FOREIGN_URL, FOREIGN_OWNER);
       await browser.pause(t(1_200));
       expect(await invokeOrThrow<boolean>("e2e_owned_browser_visible")).toBe(
@@ -533,10 +534,10 @@ describe("Owned browser — fast chat switching keeps pipe state out of other ch
       );
       await loadChatIntoHome(BROWSER_CHAT_A);
       await waitForActiveConversation(BROWSER_CHAT_A);
-      await waitForForegroundReady(BROWSER_CHAT_A);
+      await waitForOwnedBrowserNavigateReady(BROWSER_CHAT_A);
       await loadChatIntoHome(BROWSER_CHAT_B);
       await waitForActiveConversation(BROWSER_CHAT_B);
-      await waitForForegroundReady(BROWSER_CHAT_B);
+      await waitForOwnedBrowserNavigateReady(BROWSER_CHAT_B);
       await browser.pause(t(1_000));
 
       const chatA = loadChatFile(BROWSER_CHAT_A);

@@ -393,7 +393,24 @@ export function BrowserSidebar({
         }
       },
     );
+    unlistenPromise.then(() => {
+      if (typeof window !== "undefined") {
+        (window as any).__e2eOwnedBrowserNavigateReady = {
+          conversationId,
+          agentSessionId,
+        };
+      }
+    }).catch(() => {});
     return () => {
+      if (typeof window !== "undefined") {
+        const ready = (window as any).__e2eOwnedBrowserNavigateReady;
+        if (
+          ready?.conversationId === conversationId &&
+          ready?.agentSessionId === agentSessionId
+        ) {
+          (window as any).__e2eOwnedBrowserNavigateReady = null;
+        }
+      }
       unlistenPromise.then((fn) => fn()).catch(() => {});
     };
   }, [persistState, conversationId, agentSessionId]);
