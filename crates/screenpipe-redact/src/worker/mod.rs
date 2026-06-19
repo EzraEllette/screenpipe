@@ -590,11 +590,8 @@ impl Worker {
 
         if let Some(tree) = row.accessibility_tree_json.as_deref() {
             if !tree.is_empty() && row.accessibility_tree_redacted_at.is_none() {
-                match crate::tree_json::redact_tree_json_with_redactor(
-                    tree,
-                    self.redactor.as_ref(),
-                )
-                .await
+                match crate::tree_json::redact_tree_json_with_redactor(tree, self.redactor.as_ref())
+                    .await
                 {
                     Ok(Some(json)) => {
                         tables::write_redacted_tree(&self.pool, row.id, &json).await?;

@@ -637,10 +637,22 @@ async fn frame_fulltext_propagates_to_all_derived_copies_once() {
     let win_when: Option<i64> = row.get(3);
 
     // Secret gone from every derived copy; watermarks stamped.
-    assert!(!tree_red.contains(secret), "secret survived in tree: {tree_red:?}");
-    assert!(tree_red.contains("[SECRET]"), "tree not redacted: {tree_red:?}");
-    assert!(!win_red.contains(secret), "secret survived in window_name: {win_red:?}");
-    assert!(win_red.contains("[SECRET]"), "window_name not redacted: {win_red:?}");
+    assert!(
+        !tree_red.contains(secret),
+        "secret survived in tree: {tree_red:?}"
+    );
+    assert!(
+        tree_red.contains("[SECRET]"),
+        "tree not redacted: {tree_red:?}"
+    );
+    assert!(
+        !win_red.contains(secret),
+        "secret survived in window_name: {win_red:?}"
+    );
+    assert!(
+        win_red.contains("[SECRET]"),
+        "window_name not redacted: {win_red:?}"
+    );
     assert!(
         tree_when.is_some() && win_when.is_some(),
         "all derived watermarks must be stamped"
@@ -1059,8 +1071,14 @@ async fn frame_fulltext_no_map_path_scrubs_all_derived_copies() {
     let full_when: Option<i64> = row.get(5);
 
     // Every derived copy scrubbed on the enclave path.
-    assert!(!tree_red.contains(email), "email survived in tree: {tree_red:?}");
-    assert!(!win_red.contains(email), "email survived in window_name: {win_red:?}");
+    assert!(
+        !tree_red.contains(email),
+        "email survived in tree: {tree_red:?}"
+    );
+    assert!(
+        !win_red.contains(email),
+        "email survived in window_name: {win_red:?}"
+    );
     assert!(tree_red.contains("[EMAIL]") && win_red.contains("[EMAIL]"));
     // Watermarks stamped on both derived copies + full_text.
     assert!(row.get::<Option<i64>, _>(1).is_some());
