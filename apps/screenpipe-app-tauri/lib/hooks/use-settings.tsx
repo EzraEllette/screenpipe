@@ -388,6 +388,11 @@ export type Settings = SettingsStore & {
 	 * tray (and removes it from the taskbar) instead of minimizing. The Rust
 	 * close handler in src-tauri/src/main.rs reads this directly. Default off. */
 	minimizeToTrayOnClose?: boolean;
+	/** macOS-only: when true, run as a menu-bar-only "agent" app with no Dock
+	 * icon (NSApplication Accessory activation policy). The tray icon stays
+	 * visible. Read by reset_to_regular_and_refresh_tray in
+	 * src-tauri/src/window/panel.rs at startup and on window events. Default off. */
+	hideDockIcon?: boolean;
 }
 
 export function getEffectiveFilters(settings: Settings) {
