@@ -623,6 +623,16 @@
       "notes": "Brain coverage for filters, search, delete flows, selection pruning, add memory, and inline artifact markdown preview."
     },
     {
+      "spec": "html-artifact-render.spec.ts",
+      "platforms": ["windows", "macos", "linux"],
+      "layers": ["real-ui-e2e"],
+      "features": ["brain", "artifacts", "html-sandbox"],
+      "criticality": "high",
+      "confidence": "strong",
+      "ux": "real-user-flow",
+      "notes": "Registers an HTML artifact, opens it in Brain, and asserts it renders inside a sandboxed allow-scripts iframe (CSP default-src 'none') whose global <style> never leaks into the host app DOM (regression: rehype-raw repainting the whole window)."
+    },
+    {
       "spec": "zz-app-entitlement-gate.spec.ts",
       "platforms": ["windows", "macos", "linux"],
       "layers": ["settings", "billing", "real-ui-e2e"],

@@ -8,6 +8,8 @@ import {
   HUMAN_RENDER_MARKER,
   hasHumanRenderMarker,
   isHtmlFileName,
+  looksLikeFullHtmlDocument,
+  shouldRenderHtmlByDefault,
   wrapHtmlForSandbox,
 } from "./html-sandbox";
 
@@ -71,6 +73,54 @@ describe("isHtmlFileName", () => {
     expect(isHtmlFileName("data.json")).toBe(false);
     expect(isHtmlFileName("page.html.txt")).toBe(false);
     expect(isHtmlFileName("htmlfile")).toBe(false);
+  });
+});
+
+describe("looksLikeFullHtmlDocument", () => {
+  it("detects document-level tags anywhere, case-insensitively", () => {
+    expect(looksLikeFullHtmlDocument("<!doctype html><html>…")).toBe(true);
+    expect(looksLikeFullHtmlDocument("<!DOCTYPE HTML>")).toBe(true);
+    expect(looksLikeFullHtmlDocument("<html lang='en'>")).toBe(true);
+    expect(looksLikeFullHtmlDocument("<HEAD>")).toBe(true);
+    expect(looksLikeFullHtmlDocument("<body class='x'>")).toBe(true);
+    // a styled fragment (the exact crash shape) counts as a document to render
+    expect(looksLikeFullHtmlDocument("<style>body{background:#000}</style>")).toBe(
+      true,
+    );
+    expect(looksLikeFullHtmlDocument("   \n  <body>")).toBe(true);
+  });
+
+  it("treats a bare snippet as NOT a full document", () => {
+    expect(looksLikeFullHtmlDocument("<h1>just a heading</h1>")).toBe(false);
+    expect(looksLikeFullHtmlDocument("<div><p>hi</p></div>")).toBe(false);
+    expect(looksLikeFullHtmlDocument("")).toBe(false);
+    // a word containing 'body'/'html' must not false-positive (needs `<`)
+    expect(looksLikeFullHtmlDocument("the body of the html email")).toBe(false);
+    expect(looksLikeFullHtmlDocument("<bodyguard>")).toBe(false);
+  });
+});
+
+describe("shouldRenderHtmlByDefault", () => {
+  it("renders full documents and marked artifacts first", () => {
+    expect(shouldRenderHtmlByDefault("<!doctype html><html><body>x")).toBe(true);
+    expect(shouldRenderHtmlByDefault("<style>.a{}</style><div>x</div>")).toBe(
+      true,
+    );
+    // marker alone flips an otherwise-snippet to rendered
+    expect(
+      shouldRenderHtmlByDefault("<!-- screenpipe:render=human --><h1>hi</h1>"),
+    ).toBe(true);
+    expect(
+      shouldRenderHtmlByDefault(
+        '<meta name="screenpipe:render" content="human"><h1>hi</h1>',
+      ),
+    ).toBe(true);
+  });
+
+  it("shows source first for an unmarked bare snippet", () => {
+    expect(shouldRenderHtmlByDefault("<h1>just a heading</h1>")).toBe(false);
+    expect(shouldRenderHtmlByDefault("<div>code sample</div>")).toBe(false);
+    expect(shouldRenderHtmlByDefault("")).toBe(false);
   });
 });
 

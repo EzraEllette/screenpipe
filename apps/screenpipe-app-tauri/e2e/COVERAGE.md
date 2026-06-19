@@ -6,9 +6,9 @@ and layer declared in the manifest, weighted by confidence and criticality.
 
 - Manifest: `e2e/coverage-map.json`
 - Specs directory: `e2e/specs`
-- Mapped specs: 54
-- Declared test blocks: 178
-- Weighted coverage points: 139.7
+- Mapped specs: 55
+- Declared test blocks: 179
+- Weighted coverage points: 140.7
 
 Confidence weights: strong=1.0, partial=0.7, conditional=0.4, smoke=0.3.
 Criticality weights: high=1.0, medium=0.7, low=0.4.
@@ -19,9 +19,9 @@ can execute more runtime cases than this number shows.
 
 | Platform | Specs | Declared tests | Weighted points | Layers | Features | Critical score |
 | --- | --- | --- | --- | --- | --- | --- |
-| windows | 46 | 166 | 135.3 | 15 | 52 | 92% |
-| macos | 51 | 144 | 112.3 | 17 | 54 | 89% |
-| linux | 39 | 131 | 107.7 | 13 | 49 | 86% |
+| windows | 47 | 167 | 136.3 | 15 | 53 | 92% |
+| macos | 52 | 145 | 113.3 | 17 | 55 | 89% |
+| linux | 40 | 132 | 108.7 | 13 | 50 | 86% |
 
 ## Runtime Results
 
@@ -45,7 +45,7 @@ pass/fail/skip counts.
 | os-integration | 4 specs / 16 tests / 15.1 pts | 4 specs / 3 tests / 0.9 pts | - |
 | performance | 2 specs / 43 tests / 43.0 pts | 4 specs / 33 tests / 29.5 pts | 1 specs / 28 tests / 28.0 pts |
 | pipes | 2 specs / 11 tests / 11.0 pts | 2 specs / 11 tests / 11.0 pts | 2 specs / 11 tests / 11.0 pts |
-| real-ui-e2e | 26 specs / 90 tests / 73.6 pts | 27 specs / 77 tests / 63.1 pts | 23 specs / 71 tests / 61.2 pts |
+| real-ui-e2e | 27 specs / 91 tests / 74.6 pts | 28 specs / 78 tests / 64.1 pts | 24 specs / 72 tests / 62.2 pts |
 | settings | 10 specs / 27 tests / 24.9 pts | 11 specs / 21 tests / 18.2 pts | 9 specs / 19 tests / 16.9 pts |
 | storage-privacy | 6 specs / 20 tests / 19.1 pts | 5 specs / 12 tests / 11.1 pts | 4 specs / 12 tests / 11.1 pts |
 | tauri-command | 8 specs / 17 tests / 10.3 pts | 9 specs / 19 tests / 10.8 pts | 8 specs / 17 tests / 10.3 pts |
@@ -114,6 +114,7 @@ pass/fail/skip counts.
 | hd-recording-pipeline.spec.ts | macos | capture-ocr, local-api, performance | capture-ocr, hd-recording, timeline | high | conditional | api | 1 | Opt-in macOS HD capture and OCR indexing. |
 | help-discord-link.spec.ts | windows, macos, linux | real-ui-e2e | help | low | smoke | real-user-flow | 1 | Help section Discord invite link. |
 | home-window.spec.ts | windows, macos, linux | real-ui-e2e, window-lifecycle | app-launch, home-navigation, timeline, settings-recording, pipes | high | strong | real-user-flow | 1 | Clicks through Home, Pipes, Timeline, Help, and Settings. |
+| html-artifact-render.spec.ts | windows, macos, linux | real-ui-e2e | brain, artifacts, html-sandbox | high | strong | real-user-flow | 1 | Registers an HTML artifact, opens it in Brain, and asserts it renders inside a sandboxed allow-scripts iframe (CSP default-src 'none') whose global <style> never leaks into the host app DOM (regression: rehype-raw repainting the whole window). |
 | macos-ui-performance.spec.ts | macos | performance, real-ui-e2e | timeline, audio-device-health | medium | conditional | performance | 2 | macOS-only timeline/audio UI performance guards. |
 | main-overlay-visibility.spec.ts | windows, macos, linux | window-lifecycle, tauri-command | window-lifecycle, main-overlay | medium | partial | command | 1 | Main overlay show/hide without duplicate handles. |
 | main-window-close-reopen.spec.ts | windows, macos, linux | window-lifecycle, tauri-command | window-lifecycle, main-window | medium | partial | command | 1 | Main close/reopen without handle leaks. |

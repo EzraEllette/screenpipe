@@ -20,10 +20,14 @@
 //!      external origins: `default-src 'none'`, no `connect-src`, no remote
 //!      `img-src`, no `form-action`. Nothing can phone home.
 //!
-//!   2. INTENT (this module's marker + a human click in the viewer): we never
-//!      auto-render off the `.html` extension. A producer must explicitly opt a
-//!      document in with `HUMAN_RENDER_MARKER`, and the human still clicks
-//!      "preview rendered". Unmarked `.html` stays source-only.
+//!   2. INTENT (default view, NOT a gate): any `.html` can be rendered in the
+//!      sandbox, and a "view source" toggle is always one click away. The
+//!      producer marker (`HUMAN_RENDER_MARKER`) and a full-document shape only
+//!      decide whether the rendered or the source tab is shown FIRST. They do
+//!      not change containment — every artifact is wrapped and rendered inside
+//!      the same locked-down iframe whether or not it is marked. (Earlier this
+//!      module required the marker to render at all; that just meant real AI
+//!      artifacts never rendered, so the marker was demoted to a default hint.)
 //!
 //! Multiple CSPs intersect (a resource must pass every policy), so an artifact
 //! that ships its own permissive `<meta>` CSP cannot loosen the one we inject.
@@ -86,6 +90,31 @@ export function hasHumanRenderMarker(text: string): boolean {
 /** True for `.html` / `.htm` filenames (case-insensitive). */
 export function isHtmlFileName(name: string): boolean {
   return /\.html?$/i.test(name.trim());
+}
+
+/**
+ * Heuristic: does this text look like a full, human-facing HTML *document*
+ * (rather than a tiny snippet)? A document-level tag means the producer almost
+ * certainly intends it to be looked at rendered, not as source. Used only to
+ * pick the DEFAULT view — it never affects containment (the sandbox + CSP wrap
+ * everything regardless). Matches `<!doctype html>`, `<html>`, `<head>`,
+ * `<body>`, or a `<style>` block anywhere in the text, case-insensitively.
+ */
+export function looksLikeFullHtmlDocument(text: string): boolean {
+  return /<(?:!doctype\s+html|html|head|body|style)[\s>]/i.test(text);
+}
+
+/**
+ * Should an HTML artifact open as a rendered preview (vs. source) by default?
+ * True when the producer explicitly opted in (marker) OR the content looks like
+ * a full document. A bare fragment with no marker stays source-first so a code
+ * snippet someone is inspecting isn't surprisingly executed in the sandbox.
+ *
+ * IMPORTANT: this only chooses the initial tab. Rendering is ALWAYS done inside
+ * the locked-down sandbox iframe; this flag is not a security gate.
+ */
+export function shouldRenderHtmlByDefault(text: string): boolean {
+  return hasHumanRenderMarker(text) || looksLikeFullHtmlDocument(text);
 }
 
 /**

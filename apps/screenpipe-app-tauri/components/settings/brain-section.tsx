@@ -32,7 +32,9 @@ import {
 import { Input } from "@/components/ui/input";
 import { CompactMarkdown } from "@/components/settings/compact-markdown";
 import { SafArtifactBody } from "@/components/settings/saf-sop-view";
+import { ArtifactHtmlBody } from "@/components/settings/artifact-html-body";
 import { ConfirmDeleteDialog } from "@/components/settings/confirm-delete-dialog";
+import { isHtmlFileName } from "@/lib/utils/html-sandbox";
 import { localFetch } from "@/lib/api";
 import {
   useUnifiedArtifacts,
@@ -990,6 +992,13 @@ export function BrainSection() {
               const fullContent = artifactContents.get(artKey);
               const isArtExpanded = expandedArtifactKeys.has(artKey);
               const rawContent = isArtExpanded && fullContent ? fullContent : (artPreview ?? "");
+              // An .html artifact is a full document whose <style>/`*` rules are
+              // global. The inline markdown renderer passes raw HTML through
+              // (rehype-raw), so expanding one used to inject those styles into
+              // the whole app (dark background, invisible headings, reset
+              // layout). HTML artifacts are rendered in a sandboxed iframe via
+              // ArtifactHtmlBody instead, so they can never restyle the app.
+              const isHtmlArtifact = isHtmlFileName(artPath);
               return (
                 <div
                   key={artKey}
@@ -1011,6 +1020,17 @@ export function BrainSection() {
                       // SAF artifact (shared envelope with cloud): typed
                       // renderer instead of the plain markdown preview.
                       <SafArtifactBody
+                        title={artItem.title}
+                        content={isArtExpanded ? (fullContent ?? null) : null}
+                        expanded={isArtExpanded}
+                        onToggleExpanded={() =>
+                          void toggleArtifactExpanded(artKey, artPath)
+                        }
+                      />
+                    ) : isHtmlArtifact ? (
+                      // HTML artifact: render in a sandboxed iframe, never the
+                      // app DOM (see ArtifactHtmlBody).
+                      <ArtifactHtmlBody
                         title={artItem.title}
                         content={isArtExpanded ? (fullContent ?? null) : null}
                         expanded={isArtExpanded}
