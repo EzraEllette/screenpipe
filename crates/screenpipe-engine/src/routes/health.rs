@@ -948,9 +948,7 @@ async fn health_check_inner(state: &Arc<AppState>) -> HealthCheckResponse {
 
     let (overall_status, message, verbose_instructions, status_code) = if (frame_status == "ok"
         || frame_status == "disabled")
-        && (audio_status == "ok"
-            || audio_status == "disabled"
-            || audio_status == "no_input_device")
+        && (audio_status == "ok" || audio_status == "disabled" || audio_status == "no_input_device")
         && !vision_degraded
         && !audio_degraded
     {
