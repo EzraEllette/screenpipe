@@ -324,9 +324,19 @@ async function tryModel(
 }
 
 /**
- * Run a chain of models in order, returning the first success. Each
- * model is wrapped in tryModel; only transient failures advance to the
- * next entry, fatal errors bubble out immediately.
+ * Run a chain of models in order, returning the first success.
+ *
+ * A chain exists precisely to fall back, so we try EVERY entry and only fail
+ * once the chain is exhausted — even on a "fatal" (non-transient) error. A
+ * model-specific reject (e.g. gpt-5.4's stricter tool_call-id length limit, a
+ * region block, or a model-not-enabled) routinely succeeds on the next entry
+ * (glm-5/Gemini accept what OpenAI rejected). Before, a 400 broke the loop and
+ * the whole request hard-failed despite a working fallback being one line down
+ * (gpt-5.4 background pipes, SCREENPIPE-AI-PROXY auto_fatal, 600+/day).
+ *
+ * The `transient` flag still governs Sentry noise inside tryModel; here it no
+ * longer controls cascade. Cost: a genuinely universal failure now tries the
+ * whole (short) chain before surfacing — acceptable for a fallback chain.
  */
 async function runChain(
   chain: string[],
@@ -345,7 +355,7 @@ async function runChain(
       return { response, model };
     } catch (error: any) {
       lastError = error;
-      if (!error?.transient) break; // fatal — don't keep trying
+      // keep going — the next model in the chain may accept this request.
     }
   }
   return { error: lastError, lastModel };
@@ -377,8 +387,8 @@ export function friendlyError(model: string, status: number, fellThrough: boolea
     // model won't help; point the user at the real fix instead of a bare
     // "request failed (404)". (#3786)
     return fellThrough
-      ? `No available model accepted the request. "${model}" and the fallbacks may not be enabled on your account or API key. Pick a different model, or check your provider access.`
-      : `"${model}" isn't available on your account or API key (${status}). Pick a different model, or check that your provider or key has access to it.`;
+      ? `No available model could complete this request (${status}). It may contain an unsupported parameter or a malformed tool call, or the models may not be enabled on your account or API key. Try simplifying the request or picking a different model.`
+      : `"${model}" couldn't complete this request (${status}) — it may contain an unsupported parameter or tool call, or not be enabled on your account or API key. Pick a different model, or check your provider access.`;
   }
   if (status === 401 || status === 403) {
     return `Your provider rejected the request for "${model}" (${status}). Check that the API key in your AI preset is valid and has access to this model.`;
