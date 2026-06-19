@@ -294,7 +294,13 @@ const PlayheadTimeChip = React.memo(function PlayheadTimeChip({
 				return;
 			}
 			const r = el.getBoundingClientRect();
-			setRect({ x: r.left + r.width / 2, y: r.top });
+			// Pin the chip's vertical position to the timeline container so it stays
+			// put. The current bar constantly animates its height (80%) and scale
+			// (1.15) as frames scroll under the playhead, so following its measured
+			// top edge made the chip bob up and down. Only the horizontal position
+			// tracks the current bar; Y is anchored just above the bars region.
+			const cr = container.getBoundingClientRect();
+			setRect({ x: r.left + r.width / 2, y: cr.top + 72 });
 		};
 		const schedule = () => {
 			if (!raf) raf = requestAnimationFrame(measure);
@@ -321,12 +327,12 @@ const PlayheadTimeChip = React.memo(function PlayheadTimeChip({
 				transform: "translate(-50%, -100%) translateY(-6px)",
 			}}
 		>
-			<div className="flex items-center gap-1.5 rounded-full bg-primary px-2.5 py-1 text-[11px] font-mono font-semibold tabular-nums leading-none text-primary-foreground shadow-lg ring-1 ring-black/10 whitespace-nowrap">
+			<div className="flex items-center gap-1.5 rounded-full bg-white px-2.5 py-1 text-[11px] font-mono font-semibold tabular-nums leading-none text-neutral-900 shadow-lg ring-1 ring-black/10 whitespace-nowrap">
 				<Clock className="w-3 h-3 opacity-80" />
 				<span>{format(new Date(timestamp), "h:mm:ss a")}</span>
 			</div>
 			{/* downward pointer connecting the chip to the bar */}
-			<div className="-mt-[3px] h-2 w-2 rotate-45 rounded-[1px] bg-primary ring-1 ring-black/10" />
+			<div className="-mt-[3px] h-2 w-2 rotate-45 rounded-[1px] bg-white ring-1 ring-black/10" />
 		</div>,
 		document.body,
 	);
