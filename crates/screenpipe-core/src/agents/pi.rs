@@ -7,7 +7,7 @@
 //! Implements [`AgentExecutor`] for the pi CLI (`@earendil-works/pi-coding-agent`).
 //! Pi is installed via bun and executed as a subprocess in "print" mode (`pi -p`).
 
-use super::{AgentExecutor, AgentOutput, ExecutionHandle};
+use super::{install_spawned_pid, AgentExecutor, AgentOutput, ExecutionHandle};
 use anyhow::{anyhow, Result};
 use arc_swap::ArcSwap;
 use serde_json::json;
@@ -1254,9 +1254,15 @@ impl PiExecutor {
         let child = cmd.spawn()?;
         let pid = child.id();
 
-        // Set PID synchronously — no async race
+        // Set PID synchronously. If a stop was requested before spawn
+        // completed, honor it immediately against the fresh process group.
         if let (Some(ref sp), Some(p)) = (&shared_pid, pid) {
-            sp.store(p, std::sync::atomic::Ordering::SeqCst);
+            if install_spawned_pid(sp, p) {
+                // If the child is still entering setsid(), this first TERM can
+                // race the new process group; kill_process_group's delayed
+                // SIGKILL pass covers that short window.
+                let _ = kill_process_group(p);
+            }
         }
 
         let output = child.wait_with_output().await?;
@@ -1399,9 +1405,15 @@ impl PiExecutor {
         let mut child = cmd.spawn()?;
         let pid = child.id();
 
-        // Set PID synchronously — no async race
+        // Set PID synchronously. If a stop was requested before spawn
+        // completed, honor it immediately against the fresh process group.
         if let (Some(ref sp), Some(p)) = (&shared_pid, pid) {
-            sp.store(p, std::sync::atomic::Ordering::SeqCst);
+            if install_spawned_pid(sp, p) {
+                // If the child is still entering setsid(), this first TERM can
+                // race the new process group; kill_process_group's delayed
+                // SIGKILL pass covers that short window.
+                let _ = kill_process_group(p);
+            }
         }
 
         // Take stdout for streaming reads; stderr will be read after exit
@@ -1770,7 +1782,11 @@ impl AgentExecutor for PiExecutor {
     }
 
     fn kill(&self, handle: &ExecutionHandle) -> Result<()> {
-        kill_process_group(handle.pid)
+        let pid = handle.current_pid();
+        if pid == 0 {
+            return Ok(());
+        }
+        kill_process_group(pid)
     }
 
     fn is_available(&self) -> bool {
