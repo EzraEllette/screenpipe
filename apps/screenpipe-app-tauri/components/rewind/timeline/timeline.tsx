@@ -6,7 +6,7 @@ import { useTimelineSelection } from "@/lib/hooks/use-timeline-selection";
 import { getStore, type ChatConversation } from "@/lib/hooks/use-settings";
 import { isAfter, subDays, addDays, startOfDay, format, formatDistanceToNow } from "date-fns";
 import { motion } from "framer-motion";
-import { ZoomIn, ZoomOut, Mic, Monitor, AppWindow, Globe, Hash, RotateCcw, Phone, PanelBottomClose, PanelBottomOpen } from "lucide-react";
+import { ZoomIn, ZoomOut, Mic, Monitor, AppWindow, Globe, Hash, RotateCcw, Phone, PanelBottomClose, PanelBottomOpen, Clock } from "lucide-react";
 import type { Meeting } from "@/lib/hooks/use-meetings";
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
@@ -261,6 +261,76 @@ function appNameToColor(name: string, alpha?: number): string {
 function appNameToBarColor(name: string): string {
 	return `hsl(${appNameToHue(name)}, 35%, 65%)`;
 }
+
+/**
+ * Always-visible time label pinned above the current (playhead) bar.
+ *
+ * The current bar moves while the timeline scrolls — including during the smooth
+ * scroll that re-centers it on a new selection — so we re-measure the bar's screen
+ * rect on every scroll/resize (throttled to one rAF). Kept as its own component so
+ * this scroll-driven state churn never re-renders the (large) TimelineSlider.
+ */
+const PlayheadTimeChip = React.memo(function PlayheadTimeChip({
+	containerRef,
+	timestamp,
+}: {
+	containerRef: React.RefObject<HTMLDivElement | null>;
+	timestamp: string | undefined;
+}) {
+	const [rect, setRect] = useState<{ x: number; y: number } | null>(null);
+
+	useEffect(() => {
+		const container = containerRef.current;
+		if (!container || !timestamp) {
+			setRect(null);
+			return;
+		}
+		let raf = 0;
+		const measure = () => {
+			raf = 0;
+			const el = container.querySelector('[data-current="true"]') as HTMLElement | null;
+			if (!el) {
+				setRect(null);
+				return;
+			}
+			const r = el.getBoundingClientRect();
+			setRect({ x: r.left + r.width / 2, y: r.top });
+		};
+		const schedule = () => {
+			if (!raf) raf = requestAnimationFrame(measure);
+		};
+		// Defer the first measure a frame so the bar has laid out / started scrolling.
+		schedule();
+		container.addEventListener("scroll", schedule, { passive: true });
+		window.addEventListener("resize", schedule);
+		return () => {
+			container.removeEventListener("scroll", schedule);
+			window.removeEventListener("resize", schedule);
+			if (raf) cancelAnimationFrame(raf);
+		};
+	}, [containerRef, timestamp]);
+
+	if (!rect || !timestamp) return null;
+
+	return createPortal(
+		<div
+			className="fixed z-[9998] flex flex-col items-center pointer-events-none"
+			style={{
+				left: `clamp(64px, ${rect.x}px, calc(100vw - 64px))`,
+				top: `${rect.y}px`,
+				transform: "translate(-50%, -100%) translateY(-6px)",
+			}}
+		>
+			<div className="flex items-center gap-1.5 rounded-full bg-primary px-2.5 py-1 text-[11px] font-mono font-semibold tabular-nums leading-none text-primary-foreground shadow-lg ring-1 ring-black/10 whitespace-nowrap">
+				<Clock className="w-3 h-3 opacity-80" />
+				<span>{format(new Date(timestamp), "h:mm:ss a")}</span>
+			</div>
+			{/* downward pointer connecting the chip to the bar */}
+			<div className="-mt-[3px] h-2 w-2 rotate-45 rounded-[1px] bg-primary ring-1 ring-black/10" />
+		</div>,
+		document.body,
+	);
+});
 
 export const TimelineSlider = ({
 	frames = [],
@@ -1699,9 +1769,11 @@ export const TimelineSlider = ({
 										? timeMarkers.find(m => m.position === visibleFrames.indexOf(frame))
 										: null;
 
-									const shouldShowTooltip = hoveredTimestamp
-										? hoveredTimestamp === frame.timestamp
-										: frames[currentIndex]?.timestamp === frame.timestamp;
+									// Rich thumbnail preview shows only when hovering OTHER bars.
+									// The playhead bar never shows a thumbnail — it always shows the
+									// live time chip above it instead (PlayheadTimeChip), so hovering
+									// the playhead doesn't disturb the always-on current-time label.
+									const shouldShowTooltip = hoveredTimestamp === frame.timestamp && !isCurrent;
 
 									const frameId = frame.devices?.[0]?.frame_id || '';
 									const frameTags = frameId ? (tags[frameId] || []) : [];
@@ -1930,6 +2002,15 @@ export const TimelineSlider = ({
 				</div>,
 				document.body
 			)}
+
+			{/* Playhead time chip — always pinned above the current (big) bar so the
+			    current time position is visible at a glance, regardless of hover.
+			    Isolated component so the scroll-driven re-measuring doesn't re-render
+			    the whole timeline. */}
+			<PlayheadTimeChip
+				containerRef={containerRef}
+				timestamp={frames[currentIndex]?.timestamp}
+			/>
 		</div>
 	);
 };
