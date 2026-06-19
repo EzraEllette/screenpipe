@@ -16,11 +16,18 @@ use async_trait::async_trait;
 use screenpipe_redact::{
     adapters::regex::RegexRedactor,
     pipeline::Pipeline,
-    worker::{TargetTable, Worker, WorkerConfig, ALL_TARGET_TABLES},
+    worker::{column_keys, RedactColumns, TargetTable, Worker, WorkerConfig, ALL_TARGET_TABLES},
     Pseudonymizer, RedactError, RedactionMap, RedactionOutput, Redactor,
 };
 use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::Row;
+
+/// Every column enabled — tests that want to verify full coverage opt in to
+/// the optional columns (browser_url / element_name+description / url-field)
+/// that are OFF in the production default.
+fn all_columns() -> RedactColumns {
+    RedactColumns::from_keys(column_keys::ALL)
+}
 
 async fn setup_db() -> sqlx::SqlitePool {
     let pool = SqlitePoolOptions::new()
@@ -54,10 +61,12 @@ async fn setup_db() -> sqlx::SqlitePool {
             accessibility_tree_json TEXT,
             accessibility_tree_redacted_at INTEGER,
             window_name TEXT,
-            window_name_redacted_at INTEGER
+            window_name_redacted_at INTEGER,
+            browser_url TEXT,
+            browser_url_redacted_at INTEGER
         );
         -- ui_events: text_content plus the accessibility element context
-        -- + window_title, all redacted together (issue #4115).
+        -- + window_title + element_name/description, all redacted together.
         CREATE TABLE ui_events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             event_type TEXT NOT NULL,
@@ -68,12 +77,13 @@ async fn setup_db() -> sqlx::SqlitePool {
             element_description TEXT,
             redacted_at INTEGER
         );
-        -- Per-element OCR/accessibility rows (issue #3993); text is
-        -- NULL on container nodes. Watermark added by the 20260613
-        -- migration.
+        -- Per-element OCR/accessibility rows (issue #3993); text is NULL on
+        -- container nodes. `properties` holds the a11y value/placeholder/
+        -- help_text JSON, scrubbed alongside text (coverage audit).
         CREATE TABLE elements (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             text TEXT,
+            properties TEXT,
             redacted_at INTEGER
         );
         "#,
@@ -123,24 +133,32 @@ async fn seed(pool: &sqlx::SqlitePool) {
     .execute(pool)
     .await
     .unwrap();
-    // element_value (focused field contents) + window_title are runtime
-    // PII → must be redacted. element_name / element_description are
-    // developer-authored build-time labels → out of scope, must survive
-    // verbatim even though they happen to contain an email here. We seed
-    // emails into them precisely to prove the worker leaves them untouched.
+    // EVERY free-text ui_events column is now in scope (coverage audit):
+    // element_value, window_title, element_name AND element_description all
+    // carry potential PII (element_name is FTS-indexed) and must all be
+    // scrubbed. We seed an email into each to prove none survives.
     sqlx::query(
         "INSERT INTO ui_events (event_type, element_value, element_name, element_description, window_title) \
-         VALUES ('click', 'erin@example.com', 'Email field with frank@example.com', 'Field for henry@example.com', 'Inbox — grace@example.com')",
+         VALUES ('click', 'erin@example.com', 'frank@example.com', 'Field for henry@example.com', 'Inbox — grace@example.com')",
     )
     .execute(pool)
     .await
     .unwrap();
-    // elements: one container node (NULL text, must be skipped) and
-    // one text element carrying PII.
+    // elements: one container node (NULL text + NULL properties, must be
+    // skipped), one text element carrying PII, and one whose PII lives ONLY
+    // in the properties JSON value (the focused-field-value / password case
+    // that frame propagation can't reach).
     sqlx::query("INSERT INTO elements (text) VALUES (NULL)")
         .execute(pool)
         .await
         .unwrap();
+    sqlx::query(
+        "INSERT INTO elements (text, properties) \
+         VALUES (NULL, '{\"role_description\":\"text field\",\"value\":\"ivan@example.com\"}')",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
     sqlx::query("INSERT INTO elements (text) VALUES ('AXStaticText[carol@example.com]')")
         .execute(pool)
         .await
@@ -158,6 +176,7 @@ async fn worker_redacts_all_targets() {
         idle_between_batches: Duration::from_millis(1),
         poll_interval: Duration::from_millis(20),
         tables: ALL_TARGET_TABLES.to_vec(),
+        columns: all_columns(),
         ..Default::default()
     };
     let worker = Worker::new(pool.clone(), redactor, cfg);
@@ -173,7 +192,8 @@ async fn worker_redacts_all_targets() {
         TargetTable::FullText,
         TargetTable::AudioTranscription,
         TargetTable::Accessibility,
-        TargetTable::Elements,
+        // Elements is multi-column now (text + properties) — asserted
+        // separately below, since a properties-only row has NULL text.
     ] {
         let q = format!(
             "SELECT {src} AS r, {redacted_at} AS w FROM {tbl} \
@@ -203,32 +223,25 @@ async fn worker_redacts_all_targets() {
         );
     }
 
-    // ui_events: the multi-column surface. Only the IN-SCOPE runtime
-    // columns (text_content, element_value, window_title) must have their
-    // raw PII removed — those are the user-data sinks (issue #4115).
-    // element_name / element_description are deliberately excluded from
-    // this leak check: they're build-time developer labels and are NOT
-    // redacted (louis030195's CPU/GPU point), so an email seeded there is
-    // expected to survive and is asserted verbatim below.
+    // ui_events: EVERY free-text column must have its raw PII removed —
+    // text_content, element_value, window_title AND element_name /
+    // element_description (all now in scope; the coverage audit found real
+    // values + FTS-indexed names there).
     let leaked: i64 = sqlx::query(
         "SELECT COUNT(*) FROM ui_events WHERE \
             text_content LIKE '%@example.com%' OR text_content LIKE '%AKIA%' \
             OR element_value LIKE '%@example.com%' \
-            OR window_title LIKE '%@example.com%'",
+            OR window_title LIKE '%@example.com%' \
+            OR element_name LIKE '%@example.com%' \
+            OR element_description LIKE '%@example.com%'",
     )
     .fetch_one(&pool)
     .await
     .unwrap()
     .get(0);
-    assert_eq!(
-        leaked, 0,
-        "raw PII survived in an in-scope ui_events column"
-    );
+    assert_eq!(leaked, 0, "raw PII survived in a ui_events column");
 
-    // The click row specifically: the in-scope columns (element_value,
-    // window_title) are redacted; the out-of-scope build-time columns
-    // (element_name, element_description) are left EXACTLY as seeded —
-    // including the email we planted there — proving the trimmed scope.
+    // The click row specifically: all five free-text columns redacted.
     let click = sqlx::query(
         "SELECT element_value, element_name, element_description, window_title, redacted_at \
          FROM ui_events WHERE event_type = 'click'",
@@ -241,32 +254,52 @@ async fn worker_redacts_all_targets() {
     let ed: String = click.get(2);
     let wt: String = click.get(3);
     let when: Option<i64> = click.get(4);
+    assert!(ev.contains("[EMAIL]"), "element_value not redacted: {ev:?}");
+    assert!(wt.contains("[EMAIL]"), "window_title not redacted: {wt:?}");
+    assert!(en.contains("[EMAIL]"), "element_name not redacted: {en:?}");
     assert!(
-        ev.contains("[EMAIL]"),
-        "in-scope element_value not redacted: {ev:?}"
-    );
-    assert!(
-        wt.contains("[EMAIL]"),
-        "in-scope window_title not redacted: {wt:?}"
-    );
-    assert_eq!(
-        en, "Email field with frank@example.com",
-        "out-of-scope element_name must be left verbatim (not redacted)"
-    );
-    assert_eq!(
-        ed, "Field for henry@example.com",
-        "out-of-scope element_description must be left verbatim (not redacted)"
+        ed.contains("[EMAIL]"),
+        "element_description not redacted: {ed:?}"
     );
     assert!(when.is_some(), "ui_events.redacted_at must be stamped");
 
+    // elements: the text element must be redacted in `text` + stamped.
+    let elem_text: String =
+        sqlx::query("SELECT text FROM elements WHERE text IS NOT NULL AND redacted_at IS NOT NULL")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .get(0);
+    assert!(
+        elem_text.contains("[EMAIL]") && !elem_text.contains("carol@example.com"),
+        "elements.text not redacted: {elem_text:?}"
+    );
+    // elements: the properties-only row — PII lived ONLY in
+    // properties.value (no text), and it must be scrubbed there.
+    let props_row: String = sqlx::query(
+        "SELECT properties FROM elements WHERE text IS NULL AND properties IS NOT NULL",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap()
+    .get(0);
+    assert!(
+        !props_row.contains("ivan@example.com") && props_row.contains("[EMAIL]"),
+        "elements.properties value not redacted: {props_row:?}"
+    );
+    // role_description ("text field") is non-PII → preserved.
+    assert!(
+        props_row.contains("text field"),
+        "structure lost: {props_row:?}"
+    );
+
     let status = worker.status().await;
     assert!(status.running);
-    // full_text is seeded on both frames (the OCR-only frame and the
-    // shared accessibility+full_text frame) → 2 writes. audio (1),
-    // accessibility (1), elements (1 — the NULL-text container is skipped).
-    // ui_events: 3 ROWS processed (keyboard, clipboard, click), counted
-    // per row regardless of how many columns each touched. 2+1+1+1+3 = 8.
-    assert_eq!(status.redacted_total, 8);
+    // full_text seeded on both frames → 2 writes. audio (1), accessibility
+    // (1). elements: 2 rows processed (the text element + the properties-
+    // only element; the NULL/NULL container is skipped). ui_events: 3 ROWS
+    // (keyboard, clipboard, click). 2+1+1+2+3 = 9.
+    assert_eq!(status.redacted_total, 9);
     assert!(status.last_redacted_at.is_some());
 }
 
@@ -595,14 +628,16 @@ async fn frame_fulltext_propagates_to_all_derived_copies_once() {
             {{"role":"AXTextField","value":"resend to {secret}","depth":1,"automation_id":"f1"}}]"#
     );
     let window = format!("Dashboard — {secret}");
+    let url = format!("https://app.example.com/u/{secret}/settings");
     let full = format!("login {secret}\nocr dashboard {secret}");
     sqlx::query(
-        "INSERT INTO frames (id, full_text, accessibility_tree_json, window_name) \
-         VALUES (1, ?, ?, ?)",
+        "INSERT INTO frames (id, full_text, accessibility_tree_json, window_name, browser_url) \
+         VALUES (1, ?, ?, ?, ?)",
     )
     .bind(&full)
     .bind(&tree)
     .bind(&window)
+    .bind(&url)
     .execute(&pool)
     .await
     .unwrap();
@@ -617,6 +652,7 @@ async fn frame_fulltext_propagates_to_all_derived_copies_once() {
         idle_between_batches: Duration::from_millis(1),
         poll_interval: Duration::from_millis(20),
         tables: vec![TargetTable::FullText, TargetTable::Accessibility],
+        columns: all_columns(),
         ..Default::default()
     };
     let handle = Worker::new(pool.clone(), redactor.clone(), cfg).spawn();
@@ -625,7 +661,8 @@ async fn frame_fulltext_propagates_to_all_derived_copies_once() {
 
     let row = sqlx::query(
         "SELECT accessibility_tree_json, accessibility_tree_redacted_at, \
-                window_name, window_name_redacted_at \
+                window_name, window_name_redacted_at, \
+                browser_url, browser_url_redacted_at \
          FROM frames WHERE id = 1",
     )
     .fetch_one(&pool)
@@ -635,6 +672,8 @@ async fn frame_fulltext_propagates_to_all_derived_copies_once() {
     let tree_when: Option<i64> = row.get(1);
     let win_red: String = row.get(2);
     let win_when: Option<i64> = row.get(3);
+    let url_red: String = row.get(4);
+    let url_when: Option<i64> = row.get(5);
 
     // Secret gone from every derived copy; watermarks stamped.
     assert!(
@@ -654,7 +693,15 @@ async fn frame_fulltext_propagates_to_all_derived_copies_once() {
         "window_name not redacted: {win_red:?}"
     );
     assert!(
-        tree_when.is_some() && win_when.is_some(),
+        !url_red.contains(secret),
+        "secret survived in browser_url: {url_red:?}"
+    );
+    assert!(
+        url_red.contains("[SECRET]"),
+        "browser_url not redacted: {url_red:?}"
+    );
+    assert!(
+        tree_when.is_some() && win_when.is_some() && url_when.is_some(),
         "all derived watermarks must be stamped"
     );
 
@@ -698,6 +745,7 @@ async fn frame_fulltext_does_not_clobber_already_redacted_accessibility() {
         idle_between_batches: Duration::from_millis(1),
         poll_interval: Duration::from_millis(20),
         tables: vec![TargetTable::FullText, TargetTable::Accessibility],
+        columns: all_columns(),
         ..Default::default()
     };
     let handle = Worker::new(pool.clone(), redactor.clone(), cfg).spawn();
@@ -751,6 +799,7 @@ async fn frame_fulltext_clean_frame_marks_both_done() {
         idle_between_batches: Duration::from_millis(1),
         poll_interval: Duration::from_millis(20),
         tables: vec![TargetTable::FullText, TargetTable::Accessibility],
+        columns: all_columns(),
         ..Default::default()
     };
     let handle = Worker::new(pool.clone(), redactor.clone(), cfg).spawn();
@@ -856,6 +905,7 @@ async fn frame_fulltext_each_frame_detected_once() {
         idle_between_batches: Duration::from_millis(1),
         poll_interval: Duration::from_millis(20),
         tables: vec![TargetTable::FullText, TargetTable::Accessibility],
+        columns: all_columns(),
         ..Default::default()
     };
     let handle = Worker::new(pool.clone(), redactor.clone(), cfg).spawn();
@@ -910,6 +960,7 @@ async fn frame_fulltext_falls_back_when_no_map() {
         idle_between_batches: Duration::from_millis(1),
         poll_interval: Duration::from_millis(20),
         tables: vec![TargetTable::FullText, TargetTable::Accessibility],
+        columns: all_columns(),
         ..Default::default()
     };
     let handle = Worker::new(pool.clone(), redactor, cfg).spawn();
@@ -970,7 +1021,9 @@ async fn worker_disables_missing_table_and_keeps_reconciling_others() {
             accessibility_tree_json TEXT,
             accessibility_tree_redacted_at INTEGER,
             window_name TEXT,
-            window_name_redacted_at INTEGER
+            window_name_redacted_at INTEGER,
+            browser_url TEXT,
+            browser_url_redacted_at INTEGER
         );
         "#,
     )
@@ -1032,14 +1085,16 @@ async fn frame_fulltext_no_map_path_scrubs_all_derived_copies() {
         r#"[{{"role":"AXStaticText","text":"mail {email}","depth":0,"automation_id":"keepme"}}]"#
     );
     let window = format!("Inbox — {email}");
+    let url = format!("https://mail.example.com/inbox/{email}");
     let full = format!("mail {email}\nocr inbox {email}");
     sqlx::query(
-        "INSERT INTO frames (id, full_text, accessibility_tree_json, window_name) \
-         VALUES (1, ?, ?, ?)",
+        "INSERT INTO frames (id, full_text, accessibility_tree_json, window_name, browser_url) \
+         VALUES (1, ?, ?, ?, ?)",
     )
     .bind(&full)
     .bind(&tree)
     .bind(&window)
+    .bind(&url)
     .execute(&pool)
     .await
     .unwrap();
@@ -1050,6 +1105,7 @@ async fn frame_fulltext_no_map_path_scrubs_all_derived_copies() {
         idle_between_batches: Duration::from_millis(1),
         poll_interval: Duration::from_millis(20),
         tables: vec![TargetTable::FullText, TargetTable::Accessibility],
+        columns: all_columns(),
         ..Default::default()
     };
     let handle = Worker::new(pool.clone(), redactor, cfg).spawn();
@@ -1059,7 +1115,8 @@ async fn frame_fulltext_no_map_path_scrubs_all_derived_copies() {
     let row = sqlx::query(
         "SELECT accessibility_tree_json, accessibility_tree_redacted_at, \
                 window_name, window_name_redacted_at, \
-                full_text, full_text_redacted_at \
+                full_text, full_text_redacted_at, \
+                browser_url, browser_url_redacted_at \
          FROM frames WHERE id = 1",
     )
     .fetch_one(&pool)
@@ -1069,6 +1126,7 @@ async fn frame_fulltext_no_map_path_scrubs_all_derived_copies() {
     let win_red: String = row.get(2);
     let full_red: String = row.get(4);
     let full_when: Option<i64> = row.get(5);
+    let url_red: String = row.get(6);
 
     // Every derived copy scrubbed on the enclave path.
     assert!(
@@ -1079,10 +1137,20 @@ async fn frame_fulltext_no_map_path_scrubs_all_derived_copies() {
         !win_red.contains(email),
         "email survived in window_name: {win_red:?}"
     );
-    assert!(tree_red.contains("[EMAIL]") && win_red.contains("[EMAIL]"));
-    // Watermarks stamped on both derived copies + full_text.
+    assert!(
+        !url_red.contains(email),
+        "email survived in browser_url: {url_red:?}"
+    );
+    assert!(
+        tree_red.contains("[EMAIL]") && win_red.contains("[EMAIL]") && url_red.contains("[EMAIL]")
+    );
+    // Watermarks stamped on the derived copies + full_text.
     assert!(row.get::<Option<i64>, _>(1).is_some());
     assert!(row.get::<Option<i64>, _>(3).is_some());
+    assert!(
+        row.get::<Option<i64>, _>(7).is_some(),
+        "browser_url watermark"
+    );
     assert!(
         full_red.contains("[EMAIL]") && full_when.is_some(),
         "full_text must be redacted + stamped after the derived copies"
@@ -1090,4 +1158,91 @@ async fn frame_fulltext_no_map_path_scrubs_all_derived_copies() {
     // Structural (non-text) field preserved on the enclave path too.
     let tree_parsed: serde_json::Value = serde_json::from_str(&tree_red).unwrap();
     assert_eq!(tree_parsed[0]["automation_id"], "keepme");
+}
+
+/// The DEFAULT column config leaves the OPT-IN columns untouched:
+/// `browser_url`, `ui_events.element_name` / `element_description`, and the
+/// a11y `url` field are NOT redacted out of the box, while the core columns
+/// (full_text, window_name, element_value) still are. Proves the per-column
+/// config is honored (user's "by default url is not processed" requirement).
+#[tokio::test]
+async fn default_columns_leave_optin_columns_untouched() {
+    let pool = setup_db().await;
+    let email = "dana@example.com";
+    // Frame: full_text (core, on) + window_name (core, on) + browser_url (opt-in, off).
+    sqlx::query("INSERT INTO frames (id, full_text, window_name, browser_url) VALUES (1, ?, ?, ?)")
+        .bind(format!("page for {email}"))
+        .bind(format!("Inbox — {email}"))
+        .bind(format!("https://mail.example.com/u/{email}"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    // ui_event: element_value (core, on) + element_name (opt-in, off).
+    sqlx::query(
+        "INSERT INTO ui_events (event_type, element_value, element_name) VALUES ('click', ?, ?)",
+    )
+    .bind(email)
+    .bind(format!("field {email}"))
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let redactor = Arc::new(RegexRedactor::new()) as Arc<dyn Redactor>;
+    // DEFAULT columns (no `columns:` override) — browser_url / element_name off.
+    let cfg = WorkerConfig {
+        batch_size: 16,
+        idle_between_batches: Duration::from_millis(1),
+        poll_interval: Duration::from_millis(20),
+        tables: ALL_TARGET_TABLES.to_vec(),
+        ..Default::default()
+    };
+    let handle = Worker::new(pool.clone(), redactor, cfg).spawn();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    handle.abort();
+
+    let frame = sqlx::query(
+        "SELECT full_text, full_text_redacted_at, window_name, browser_url, browser_url_redacted_at \
+         FROM frames WHERE id = 1",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let full: String = frame.get(0);
+    let win: String = frame.get(2);
+    let url: String = frame.get(3);
+    // Core ON: full_text + window_name redacted.
+    assert!(
+        full.contains("[EMAIL]"),
+        "full_text should be redacted: {full:?}"
+    );
+    assert!(
+        win.contains("[EMAIL]"),
+        "window_name should be redacted: {win:?}"
+    );
+    // Opt-in OFF: browser_url untouched, and its watermark NOT stamped (we
+    // skip it entirely, not stamp-without-change).
+    assert!(
+        url.contains(email),
+        "browser_url must be left raw by default: {url:?}"
+    );
+    assert!(
+        frame.get::<Option<i64>, _>(4).is_none(),
+        "browser_url watermark must stay NULL when the column is off"
+    );
+
+    let ev =
+        sqlx::query("SELECT element_value, element_name FROM ui_events WHERE event_type='click'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let ev_val: String = ev.get(0);
+    let ev_name: String = ev.get(1);
+    assert!(
+        ev_val.contains("[EMAIL]"),
+        "element_value should be redacted: {ev_val:?}"
+    );
+    assert!(
+        ev_name.contains(email),
+        "element_name must be left raw by default: {ev_name:?}"
+    );
 }
