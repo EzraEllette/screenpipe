@@ -420,6 +420,12 @@ pub async fn start_device_monitor(
             .checked_sub(model_refresh_cooldown)
             .unwrap_or(Instant::now());
 
+        // "Follow the audio" output capture + in-meeting speaker watchdog
+        // state. Only does anything on Windows — see `windows_output_follow.rs`
+        // (loopback on the wrong endpoint hears nothing and looks healthy).
+        let mut output_follow_state = super::windows_output_follow::FollowState::new();
+        let mut speaker_watchdog_state = super::windows_output_follow::WatchdogState::new();
+
         // Pinned-input fallback state. In manual mode, when a user-selected
         // input device goes missing past the grace window we engage the
         // system default input as a substitute so capture continues. The
@@ -1276,6 +1282,17 @@ pub async fn start_device_monitor(
                     &mut pinned_missing_since,
                     &mut active_pinned_fallback,
                     &mut logged_pinned_fallback_default_disabled,
+                )
+                .await;
+
+                // Capture whichever render endpoint audio actually plays
+                // through, and notify if a meeting's speaker audio isn't
+                // reaching the pipeline. Inert outside Windows — see
+                // `windows_output_follow.rs`.
+                super::windows_output_follow::run_output_follow_sweep(
+                    &audio_manager,
+                    &mut output_follow_state,
+                    &mut speaker_watchdog_state,
                 )
                 .await;
             }
