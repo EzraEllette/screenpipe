@@ -597,6 +597,9 @@ export const TimelineSlider = ({
 	// When true we freeze the visible frames to prevent server pushes from
 	// recomputing groups and killing the popover / selection.
 	const isUserInteracting = isDragging || activePopoverGroup !== null || selectionRange !== null;
+	// While selecting (or mid-drag), suppress the hover thumbnail + the app-context
+	// popover so they don't clutter or fight the selection.
+	const hasActiveSelection = isDragging || selectionRange !== null || selectedIndices.size > 0;
 
 	// Visible frames window: sized to what actually fits on screen.
 	// Uses container width + frame size so filters (speakers, apps, etc.)
@@ -1778,7 +1781,7 @@ export const TimelineSlider = ({
 								)}
 
 								{/* App context popover */}
-								{activePopoverGroup === groupIndex && (
+								{activePopoverGroup === groupIndex && !hasActiveSelection && (
 									<AppContextPopover
 										appName={group.appName}
 										appNames={group.appNames}
@@ -1826,7 +1829,7 @@ export const TimelineSlider = ({
 									// The playhead bar never shows a thumbnail — it always shows the
 									// live time chip above it instead (PlayheadTimeChip), so hovering
 									// the playhead doesn't disturb the always-on current-time label.
-									const shouldShowTooltip = hoveredTimestamp === frame.timestamp && !isCurrent;
+									const shouldShowTooltip = hoveredTimestamp === frame.timestamp && !isCurrent && !hasActiveSelection;
 
 									const frameId = frame.devices?.[0]?.frame_id || '';
 									const frameTags = frameId ? (tags[frameId] || []) : [];
