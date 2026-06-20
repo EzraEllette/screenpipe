@@ -1947,7 +1947,7 @@ export const TimelineSlider = ({
 											{/* Tooltip on hover — rendered via portal to escape overflow clipping */}
 											{shouldShowTooltip && hoveredRect && createPortal(
 												<div
-													className="fixed z-[9999] w-max bg-popover border border-border rounded-lg px-3 py-2 text-xs shadow-2xl pointer-events-none"
+													className="fixed z-[9999] w-max max-w-[280px] bg-popover border border-border rounded-lg px-3 py-2 text-xs shadow-2xl pointer-events-none"
 													style={{
 														left: `clamp(80px, ${hoveredRect.x}px, calc(100vw - 80px))`,
 														top: `${hoveredRect.y}px`,
@@ -1997,9 +1997,11 @@ export const TimelineSlider = ({
 														</p>
 													)}
 													{hasTags && (
-														<p className="text-primary flex items-center gap-1 mt-1 text-[11px]">
-															<span>{frameTags.join(', ')}</span>
-														</p>
+														<div className="flex flex-wrap gap-1 mt-1.5 max-w-full">
+															{frameTags.map((t) => (
+																<span key={t} className="text-[10px] leading-none text-primary bg-primary/15 rounded px-1.5 py-0.5 break-all">{t}</span>
+															))}
+														</div>
 													)}
 													{/* UI events section */}
 													{(() => {
