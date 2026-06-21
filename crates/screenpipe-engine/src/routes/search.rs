@@ -230,7 +230,15 @@ pub struct SearchResponse {
 /// Safe on UTF-8 char boundaries.
 pub fn truncate_middle(text: &str, max_chars: usize) -> String {
     let char_count = text.chars().count();
-    if char_count <= max_chars {
+    // `max_chars == 0` means "no truncation" (opt out), mirroring the
+    // documented `max_content_length=0` ⇒ full text contract honored by the
+    // MCP server (`truncateMiddle`: `max <= 0` returns the text untouched) and
+    // surfaced to users as "pass max_content_length=0 for full text". Without
+    // this guard a 0 cap returned only the "...(truncated N chars)..." marker —
+    // it destroyed the very text the caller asked to see in full, and because
+    // the MCP forwards the param to this endpoint the damage happened here,
+    // server-side, before the MCP's own opt-out could apply.
+    if max_chars == 0 || char_count <= max_chars {
         return text.to_string();
     }
     let removed = char_count - max_chars;
@@ -1108,6 +1116,16 @@ mod tests {
     fn test_truncate_middle_short_text() {
         assert_eq!(truncate_middle("hello", 10), "hello");
         assert_eq!(truncate_middle("hello", 5), "hello");
+    }
+
+    #[test]
+    fn test_truncate_middle_zero_means_full_text() {
+        // max_content_length=0 is the documented "opt out / full text" signal.
+        // It must return the text untouched, not a marker-only stub that
+        // destroys the content the caller asked to see in full.
+        let text = "abcdefghijklmnopqrstuvwxyz";
+        assert_eq!(truncate_middle(text, 0), text);
+        assert_eq!(truncate_middle("", 0), "");
     }
 
     #[test]
