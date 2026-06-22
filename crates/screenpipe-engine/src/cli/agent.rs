@@ -227,7 +227,10 @@ fn merge_mcp_yaml(path: &Path, remote: bool, api_url: &str) -> Result<()> {
     let existing = std::fs::read_to_string(path).unwrap_or_default();
 
     if existing.contains("screenpipe-mcp") {
-        println!("  • {} already references screenpipe-mcp; left as-is", path.display());
+        println!(
+            "  • {} already references screenpipe-mcp; left as-is",
+            path.display()
+        );
         return Ok(());
     }
     if existing.contains("mcp_servers:") {
@@ -264,7 +267,10 @@ fn merge_mcp_toml(path: &Path, remote: bool, api_url: &str) -> Result<()> {
     );
     let existing = std::fs::read_to_string(path).unwrap_or_default();
     if existing.contains("[mcp_servers.screenpipe]") {
-        println!("  • {} already has [mcp_servers.screenpipe]; left as-is", path.display());
+        println!(
+            "  • {} already has [mcp_servers.screenpipe]; left as-is",
+            path.display()
+        );
         return Ok(());
     }
     let mut out = existing;
@@ -288,7 +294,10 @@ mod tests {
     fn test_host_port() {
         assert_eq!(host_port("http://localhost:3030"), "localhost:3030");
         assert_eq!(host_port("https://1.2.3.4:3030/"), "1.2.3.4:3030");
-        assert_eq!(host_port("http://box.tail.ts.net:3030"), "box.tail.ts.net:3030");
+        assert_eq!(
+            host_port("http://box.tail.ts.net:3030"),
+            "box.tail.ts.net:3030"
+        );
     }
 
     #[test]

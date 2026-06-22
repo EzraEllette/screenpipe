@@ -554,7 +554,11 @@ pub async fn archive_download(
         };
     }
 
-    spawn_download_task(manager, output_dir.clone(), state.archive_state.download.clone());
+    spawn_download_task(
+        manager,
+        output_dir.clone(),
+        state.archive_state.download.clone(),
+    );
 
     info!("archive-download: started → {}", output_dir.display());
 
@@ -720,7 +724,11 @@ struct WindowWalker {
 
 impl WindowWalker {
     fn new(start: DateTime<Utc>, end: DateTime<Utc>, page_limit: usize) -> Self {
-        let stack = if start <= end { vec![(start, end)] } else { Vec::new() };
+        let stack = if start <= end {
+            vec![(start, end)]
+        } else {
+            Vec::new()
+        };
         Self { stack, page_limit }
     }
 
@@ -1623,7 +1631,10 @@ mod tests {
 
     #[test]
     fn sniff_media_extension_detects_types() {
-        assert_eq!(sniff_media_extension(&[0xFF, 0xD8, 0xFF, 0xE0, 0x00]), "jpg");
+        assert_eq!(
+            sniff_media_extension(&[0xFF, 0xD8, 0xFF, 0xE0, 0x00]),
+            "jpg"
+        );
         assert_eq!(sniff_media_extension(b"\x89PNG\r\n\x1a\nrest"), "png");
 
         let mut mp4 = vec![0x00, 0x00, 0x00, 0x20];
@@ -1716,7 +1727,10 @@ mod tests {
         let (covered, steps, truncated) = simulate(&blobs, 10);
 
         let expected: HashSet<i64> = blobs.iter().copied().collect();
-        assert_eq!(covered, expected, "every blob must be downloaded exactly once");
+        assert_eq!(
+            covered, expected,
+            "every blob must be downloaded exactly once"
+        );
         assert_eq!(truncated, 0, "no window should be truncated");
         assert!(steps > 1, "must have split at least once");
     }

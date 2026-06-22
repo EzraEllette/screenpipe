@@ -338,7 +338,9 @@ const EXEC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10 * 60
 pub async fn exec_remote(config: &SyncConfig, command: &str) -> Result<ExecResult> {
     tokio::time::timeout(EXEC_TIMEOUT, exec_remote_inner(config, command))
         .await
-        .map_err(|_| anyhow::anyhow!("remote command timed out after {}s", EXEC_TIMEOUT.as_secs()))?
+        .map_err(|_| {
+            anyhow::anyhow!("remote command timed out after {}s", EXEC_TIMEOUT.as_secs())
+        })?
 }
 
 async fn exec_remote_inner(config: &SyncConfig, command: &str) -> Result<ExecResult> {
@@ -1158,7 +1160,9 @@ mod tests {
         assert!(should_skip("thing.bak"));
         // Stale secret-store copies must NEVER leave the machine.
         assert!(should_skip("store.bin.bak-20260423-150300"));
-        assert!(should_skip("store.bin.encrypted-before-recovery-20260514-155057"));
+        assert!(should_skip(
+            "store.bin.encrypted-before-recovery-20260514-155057"
+        ));
         // ...but the live secret store and real media are kept.
         assert!(!should_skip("store.bin"));
         assert!(!should_skip("data"));

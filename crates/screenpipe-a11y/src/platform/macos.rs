@@ -16,7 +16,7 @@ use crossbeam_channel::{bounded, Receiver, Sender};
 use parking_lot::Mutex;
 use screenpipe_core::pii_removal::remove_pii;
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, AtomicI8, AtomicI32, AtomicPtr, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI8, AtomicPtr, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
@@ -768,12 +768,9 @@ fn run_event_tap(
         .name("ctx-capture".into())
         .spawn(move || {
             while let Ok(req) = context_rx.recv() {
-                if let Some(element) = get_element_at_position(
-                    req.x,
-                    req.y,
-                    &req.config,
-                    req.app_pid,
-                ) {
+                if let Some(element) =
+                    get_element_at_position(req.x, req.y, &req.config, req.app_pid)
+                {
                     let ctx_event = UiEvent {
                         id: None,
                         timestamp: Utc::now(),

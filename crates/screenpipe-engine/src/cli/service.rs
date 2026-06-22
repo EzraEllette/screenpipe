@@ -21,7 +21,11 @@ pub enum ServiceCommand {
         /// Args appended to `screenpipe record`. Default is serve-only (no
         /// capture) — right for a headless box that just serves synced/cloud
         /// data to an agent. Pass `--record-args ""` to capture instead.
-        #[arg(long, allow_hyphen_values = true, default_value = "--disable-vision --disable-audio")]
+        #[arg(
+            long,
+            allow_hyphen_values = true,
+            default_value = "--disable-vision --disable-audio"
+        )]
         record_args: String,
     },
     /// Stop + remove the service.
@@ -88,7 +92,9 @@ fn launchd_plist(program_args: &[String]) -> String {
 }
 
 fn xml_escape(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 fn screenpipe_exe() -> Result<String> {
@@ -143,7 +149,15 @@ fn install(record_args: &str) -> Result<()> {
         run_quiet("loginctl", &["enable-linger", &user]);
     }
     run("systemctl", &["--user", "daemon-reload"])?;
-    run("systemctl", &["--user", "enable", "--now", &format!("{SERVICE_NAME}.service")])?;
+    run(
+        "systemctl",
+        &[
+            "--user",
+            "enable",
+            "--now",
+            &format!("{SERVICE_NAME}.service"),
+        ],
+    )?;
     println!("  ✓ screenpipe service enabled + started — runs at boot, restarts on crash");
     println!("    logs: journalctl --user -u {SERVICE_NAME} -f");
     Ok(())
@@ -160,7 +174,8 @@ fn install(record_args: &str) -> Result<()> {
     let dir = home.join("Library/LaunchAgents");
     std::fs::create_dir_all(&dir).context("create LaunchAgents dir")?;
     let plist_path = dir.join(format!("{LAUNCHD_LABEL}.plist"));
-    std::fs::write(&plist_path, &plist).with_context(|| format!("write {}", plist_path.display()))?;
+    std::fs::write(&plist_path, &plist)
+        .with_context(|| format!("write {}", plist_path.display()))?;
     println!("  ✓ wrote {}", plist_path.display());
 
     let p = plist_path.to_string_lossy().into_owned();
@@ -212,7 +227,12 @@ fn uninstall() -> Result<()> {
 fn status() -> Result<()> {
     let _ = run(
         "systemctl",
-        &["--user", "status", "--no-pager", &format!("{SERVICE_NAME}.service")],
+        &[
+            "--user",
+            "status",
+            "--no-pager",
+            &format!("{SERVICE_NAME}.service"),
+        ],
     );
     Ok(())
 }
@@ -234,7 +254,10 @@ mod tests {
 
     #[test]
     fn test_systemd_unit() {
-        let u = systemd_unit("/usr/local/bin/screenpipe record --disable-vision", "/usr/bin");
+        let u = systemd_unit(
+            "/usr/local/bin/screenpipe record --disable-vision",
+            "/usr/bin",
+        );
         assert!(u.contains("ExecStart=/usr/local/bin/screenpipe record --disable-vision"));
         assert!(u.contains("Restart=always"));
         assert!(u.contains("WantedBy=default.target"));
