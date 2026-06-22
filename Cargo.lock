@@ -8566,6 +8566,7 @@ dependencies = [
  "screenpipe-config",
  "serde",
  "serde_json",
+ "serial_test",
  "sqlx",
  "tempfile",
  "tokio",
