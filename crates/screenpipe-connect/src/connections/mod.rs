@@ -968,8 +968,14 @@ mod tests {
     fn agent_integrations_are_registered() {
         let ids: Vec<&str> = all_integrations().iter().map(|i| i.def().id).collect();
         // The two embeddable-agent gateways pipes can call back into.
-        assert!(ids.contains(&"hermes"), "hermes integration must be registered");
-        assert!(ids.contains(&"openclaw"), "openclaw integration must be registered");
+        assert!(
+            ids.contains(&"hermes"),
+            "hermes integration must be registered"
+        );
+        assert!(
+            ids.contains(&"openclaw"),
+            "openclaw integration must be registered"
+        );
     }
 
     #[tokio::test]
