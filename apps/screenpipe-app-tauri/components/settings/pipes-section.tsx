@@ -47,6 +47,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
+import { PipeTriggerPicker } from "./pipe-trigger-picker";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import {
   Select,
@@ -340,6 +341,13 @@ interface PipeConfig {
   trigger?: {
     events?: string[];
     custom?: string[];
+    sources?: {
+      app: string;
+      kind?: string;
+      instance?: string;
+      path?: string;
+      filter?: Record<string, string>;
+    }[];
   };
   // serde(flatten) merges extra YAML fields into this level at runtime
   [key: string]: unknown;
@@ -980,7 +988,8 @@ export function PipesSection() {
   const liveOutputRef = useRef<Record<string, string[]>>({});
   const isTriggeredPipe = (p: PipeStatus) =>
     !!(p.config.trigger?.events?.length) ||
-    !!(p.config.trigger?.custom?.length);
+    !!(p.config.trigger?.custom?.length) ||
+    !!(p.config.trigger?.sources?.length);
   const isScheduledPipe = (p: PipeStatus) =>
     !!p.config.schedule && p.config.schedule !== "manual" && !isTriggeredPipe(p);
   const isManualPipe = (p: PipeStatus) =>
@@ -2879,64 +2888,25 @@ export function PipesSection() {
                           </div>
                         </div>
 
-                        {/* Triggers — run pipe on local events */}
-                        <div>
-                          <Label className="text-xs flex items-center gap-1.5 mb-2 cursor-help" title="run this pipe when specific events happen (meeting starts, another pipe finishes, etc.)">
-                            triggers
-                          </Label>
-                          <div className="space-y-1.5">
-                            {(pipe.config.trigger?.events || []).map((event: string, i: number) => (
-                              <div key={`ev-${i}`} className="flex items-center gap-1.5 group/item">
-                                <span className="text-xs bg-muted/50 border px-3 py-1.5 flex-1 font-mono">› {event.replace(/_/g, " ")}</span>
-                                <button className="text-xs text-muted-foreground/0 group-hover/item:text-muted-foreground hover:!text-destructive transition-all duration-150" onClick={() => {
-                                  const updated = (pipe.config.trigger?.events || []).filter((_: string, j: number) => j !== i);
-                                  const newTrigger = { ...pipe.config.trigger, events: updated };
-                                  if (!newTrigger.events?.length && !newTrigger.custom?.length) {
-                                    setPipes((prev) => prev.map((p) => p.config.name === pipe.config.name ? { ...p, config: { ...p.config, trigger: undefined } } : p));
-                                    fetch(`${apiBase}/pipes/${pipe.config.name}/config`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ trigger: null }) }).then(() => fetchPipes());
-                                  } else {
-                                    setPipes((prev) => prev.map((p) => p.config.name === pipe.config.name ? { ...p, config: { ...p.config, trigger: newTrigger } } : p));
-                                    fetch(`${apiBase}/pipes/${pipe.config.name}/config`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ trigger: newTrigger }) }).then(() => fetchPipes());
-                                  }
-                                }}>×</button>
-                              </div>
-                            ))}
-                            {(pipe.config.trigger?.custom || []).map((trigger: string, i: number) => (
-                              <div key={`custom-${i}`} className="flex items-center gap-1.5 group/item">
-                                <span className="text-xs bg-muted/50 px-2 py-1 rounded flex-1 font-mono">› {trigger}</span>
-                                <button className="text-xs text-muted-foreground/0 group-hover/item:text-muted-foreground hover:!text-destructive transition-all duration-150" onClick={() => {
-                                  const updated = (pipe.config.trigger?.custom || []).filter((_: string, j: number) => j !== i);
-                                  const newTrigger = { ...pipe.config.trigger, custom: updated };
-                                  setPipes((prev) => prev.map((p) => p.config.name === pipe.config.name ? { ...p, config: { ...p.config, trigger: newTrigger } } : p));
-                                  fetch(`${apiBase}/pipes/${pipe.config.name}/config`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ trigger: newTrigger }) }).then(() => fetchPipes());
-                                }}>×</button>
-                              </div>
-                            ))}
-                            {/* Dropdown to add predefined triggers */}
-                            <select
-                              className="w-full h-7 text-xs font-mono bg-background border rounded px-2 text-muted-foreground"
-                              value=""
-                              onChange={(e) => {
-                                const value = e.target.value;
-                                if (!value) return;
-                                const existing = pipe.config.trigger?.events || [];
-                                if (existing.includes(value)) return;
-                                const newTrigger = { ...pipe.config.trigger, events: [...existing, value] };
-                                setPipes((prev) => prev.map((p) => p.config.name === pipe.config.name ? { ...p, config: { ...p.config, trigger: newTrigger } } : p));
-                                fetch(`${apiBase}/pipes/${pipe.config.name}/config`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ trigger: newTrigger }) }).then(() => fetchPipes());
-                              }}
-                            >
-                              <option value="">+ add trigger...</option>
-                              <option value="meeting_started">meeting started</option>
-                              <option value="meeting_ended">meeting ended</option>
-                              {pipes.filter((p) => p.config.name !== pipe.config.name && p.config.enabled).map((p) => (
-                                <option key={p.config.name} value={`pipe_completed:${p.config.name}`}>
-                                  after {p.config.name} finishes
-                                </option>
-                              ))}
-                            </select>
-                          </div>
-                        </div>
+                        {/* Triggers — Notion-style picker (events + per-app connection sources) */}
+                        <PipeTriggerPicker
+                          pipeName={pipe.config.name}
+                          trigger={pipe.config.trigger}
+                          apiBase={apiBase}
+                          otherPipes={pipes
+                            .filter((p) => p.config.name !== pipe.config.name && p.config.enabled)
+                            .map((p) => ({ name: p.config.name }))}
+                          fetchPipes={fetchPipes}
+                          applyOptimistic={(t) =>
+                            setPipes((prev) =>
+                              prev.map((p) =>
+                                p.config.name === pipe.config.name
+                                  ? { ...p, config: { ...p.config, trigger: t } }
+                                  : p
+                              )
+                            )
+                          }
+                        />
 
                         {/* Notifications toggle */}
                         <div className="flex items-center justify-between border px-3 py-2.5">
