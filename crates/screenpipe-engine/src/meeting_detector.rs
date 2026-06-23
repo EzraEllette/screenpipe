@@ -2018,6 +2018,30 @@ pub fn advance_state(
                     },
                     None,
                 )
+            } else if has_output_audio {
+                // Controls vanished but output audio is still flowing — the user
+                // minimized the window, switched tabs, moved controls to a floating
+                // toolbar, or the toolbar auto-hid. This is NOT the end of the call,
+                // so stay Active instead of dropping into Ending. Without this guard
+                // an audio-sustained meeting oscillates Active -> Ending (here) ->
+                // Active (Ending's audio branch) on every single scan, producing one
+                // flap per scan interval (24+ flaps on a multi-minute minimized call).
+                // This mirrors handle_no_apps_running's audio guard, keeping the two
+                // "controls absent" paths consistent.
+                debug!(
+                    "meeting v2: Active (no controls but output audio active — staying Active, app={}, id={})",
+                    app, meeting_id
+                );
+                (
+                    MeetingState::Active {
+                        meeting_id,
+                        app,
+                        started_at,
+                        last_seen: Instant::now(),
+                        is_browser,
+                    },
+                    None,
+                )
             } else {
                 let timeout = if is_browser {
                     ENDING_TIMEOUT_BROWSER
@@ -5059,6 +5083,49 @@ mod tests {
             MeetingState::Ending { meeting_id: 42, .. }
         ));
         assert!(action.is_none());
+    }
+
+    #[test]
+    fn test_active_no_controls_with_audio_stays_active() {
+        // Regression guard for the Active⇌Ending flap on audio-sustained
+        // meetings: when controls are absent but output audio is still flowing,
+        // advance_state must keep the meeting Active (not bounce through Ending).
+        // Mirrors handle_no_apps_running's audio guard. Without this, a minimized
+        // / tab-switched call flaps once per scan interval.
+        let state = MeetingState::Active {
+            meeting_id: 42,
+            app: "Google Chrome".to_string(),
+            started_at: Utc::now(),
+            last_seen: Instant::now(),
+            is_browser: true,
+        };
+        let results: Vec<ScanResult> = vec![];
+        let (new_state, action) = advance_state(state, &results, true);
+        assert!(
+            matches!(
+                new_state,
+                MeetingState::Active {
+                    meeting_id: 42,
+                    is_browser: true,
+                    ..
+                }
+            ),
+            "audio-sustained meeting with no controls must stay Active, got {new_state:?}"
+        );
+        assert!(action.is_none());
+
+        // And re-running many times must never leave Active or end the meeting —
+        // i.e. zero flaps across a long no-controls-but-audio window.
+        let mut state = new_state;
+        for scan in 0..20 {
+            let (next, action) = advance_state(state, &[], true);
+            assert!(
+                matches!(next, MeetingState::Active { meeting_id: 42, .. }),
+                "scan {scan}: must remain Active with audio flowing, got {next:?}"
+            );
+            assert!(action.is_none(), "scan {scan}: must not emit an action");
+            state = next;
+        }
     }
 
     #[test]
