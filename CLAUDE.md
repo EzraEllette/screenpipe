@@ -40,7 +40,7 @@ Use `#` for Python, `//` for Rust/TS/JS/Swift. Keep it as the first comment in t
 ## Github issues and Pull Requests
 
 Always add visuals to issues or PR bodies using either:
-- computer use + running the app and showing the before and after experience clearly (clicking, typing etc)
+- screen recording + computer use + running the app and showing the before and after experience clearly (clicking, typing etc)
 - taking screenshots of the UI and adding, or adding as video/gif
 - generating mockups of the UI in html + screenshot
 - ascii mockups
