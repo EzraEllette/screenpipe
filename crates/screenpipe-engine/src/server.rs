@@ -272,6 +272,43 @@ fn should_advertise_mdns(addr: SocketAddr) -> bool {
     !addr.ip().is_loopback()
 }
 
+fn is_allowed_local_origin(origin: &axum::http::HeaderValue) -> bool {
+    let Ok(origin) = origin.to_str() else {
+        return false;
+    };
+    let Ok(uri) = origin.parse::<axum::http::Uri>() else {
+        return false;
+    };
+    let Some(scheme) = uri.scheme_str() else {
+        return false;
+    };
+    let Some(host) = uri.host() else {
+        return false;
+    };
+
+    matches!(
+        (scheme, host),
+        ("http", "localhost")
+            | ("https", "localhost")
+            | ("tauri", "localhost")
+            | ("http", "tauri.localhost")
+            | ("http", "127.0.0.1")
+            | ("https", "127.0.0.1")
+    )
+}
+
+fn is_api_auth_exempt_path(path: &str) -> bool {
+    path == "/health"
+        || path == "/ws/health"
+        || path == "/audio/device/status"
+        || path == "/connections/oauth/callback"
+        || (path.starts_with("/mcp-servers/") && path.ends_with("/oauth/callback"))
+        || path == "/connections/browser/pair/start"
+        || path == "/connections/browser/pair/status"
+        || path == "/notify"
+        || path.starts_with("/pipes/store")
+}
+
 impl SCServer {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -656,12 +693,7 @@ impl SCServer {
         // cross-origin requests to the local API.
         let cors = CorsLayer::new()
             .allow_origin(AllowOrigin::predicate(|origin, _| {
-                origin.as_bytes().starts_with(b"http://localhost")
-                    || origin.as_bytes().starts_with(b"https://localhost")
-                    || origin.as_bytes().starts_with(b"tauri://localhost")
-                    || origin.as_bytes().starts_with(b"http://tauri.localhost") // Windows Tauri origin
-                    || origin.as_bytes().starts_with(b"http://127.0.0.1")
-                    || origin.as_bytes().starts_with(b"https://127.0.0.1")
+                is_allowed_local_origin(origin)
             }))
             .allow_methods(Any)
             .allow_headers(Any)
@@ -1109,18 +1141,7 @@ impl SCServer {
                             //   registry; publish/unpublish/review enforce their own
                             //   Bearer check inside the handler (see pipe_store.rs).
                             let path = req.uri().path();
-                            if path == "/health"
-                                || path == "/ws/health"
-                                || path == "/audio/device/status"
-                                || path == "/connections/oauth/callback"
-                                || (path.starts_with("/mcp-servers/")
-                                    && path.ends_with("/oauth/callback"))
-                                || path == "/connections/browser/pair/start"
-                                || path == "/connections/browser/pair/status"
-                                || path.starts_with("/frames/")
-                                || path == "/notify"
-                                || path.starts_with("/pipes/store")
-                            {
+                            if is_api_auth_exempt_path(path) {
                                 return next.run(req).await;
                             }
 
@@ -1205,7 +1226,8 @@ impl SCServer {
 
 #[cfg(test)]
 mod tests {
-    use super::should_advertise_mdns;
+    use super::{is_allowed_local_origin, is_api_auth_exempt_path, should_advertise_mdns};
+    use axum::http::HeaderValue;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
     #[test]
@@ -1230,5 +1252,66 @@ mod tests {
             IpAddr::V6(Ipv6Addr::UNSPECIFIED),
             3030,
         )));
+    }
+
+    #[test]
+    fn cors_allows_exact_local_origins() {
+        for origin in [
+            "http://localhost:1420",
+            "https://localhost:3030",
+            "tauri://localhost",
+            "http://tauri.localhost",
+            "http://127.0.0.1:3030",
+            "https://127.0.0.1:3030",
+        ] {
+            let origin = HeaderValue::from_static(origin);
+            assert!(is_allowed_local_origin(&origin));
+        }
+    }
+
+    #[test]
+    fn cors_rejects_localhost_prefix_origins() {
+        for origin in [
+            "http://localhost.evil.example",
+            "https://localhost.evil.example",
+            "http://localhost@evil.example",
+            "http://127.0.0.1.evil.example",
+            "http://tauri.localhost.evil.example",
+        ] {
+            let origin = HeaderValue::from_static(origin);
+            assert!(!is_allowed_local_origin(&origin));
+        }
+    }
+
+    #[test]
+    fn frame_routes_are_not_api_auth_exempt() {
+        for path in [
+            "/frames/123",
+            "/frames/123/text",
+            "/frames/123/context",
+            "/frames/123/metadata",
+            "/frames/123/elements",
+            "/frames/next-valid",
+        ] {
+            assert!(!is_api_auth_exempt_path(path));
+        }
+    }
+
+    #[test]
+    fn api_auth_exemptions_stay_narrow() {
+        for path in [
+            "/health",
+            "/ws/health",
+            "/audio/device/status",
+            "/connections/oauth/callback",
+            "/mcp-servers/example/oauth/callback",
+            "/connections/browser/pair/start",
+            "/connections/browser/pair/status",
+            "/notify",
+            "/pipes/store",
+            "/pipes/store/foo",
+        ] {
+            assert!(is_api_auth_exempt_path(path));
+        }
     }
 }
