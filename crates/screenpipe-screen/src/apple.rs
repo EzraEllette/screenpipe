@@ -180,9 +180,21 @@ pub fn perform_ocr_apple(
         request.set_recognition_langs(&languages_array);
         request.set_uses_lang_correction(false);
         let requests = ns::Array::<vn::Request>::from_slice(&[&request]);
-        let result = handler.perform(&requests);
-
-        if result.is_err() {
+        // Apple documents the BOOL/nil return value as the success signal for
+        // NSError-by-reference APIs: "Success or failure is indicated by the
+        // return value of the method." The NSError out-param is diagnostic.
+        // https://developer.apple.com/library/archive/documentation/Cocoa/Conceptual/ErrorHandlingCocoa/CreateCustomizeNSError/CreateCustomizeNSError.html
+        //
+        // Use the raw API so a false return with no NSError is still a normal
+        // OCR miss instead of going through cidre's convenience wrapper.
+        let mut perform_error = None;
+        let performed = unsafe { handler.perform_request_err(&requests, &mut perform_error) };
+        if !performed {
+            if let Some(error) = perform_error {
+                warn!("Apple Vision OCR request failed: {}", error);
+            } else {
+                warn!("Apple Vision OCR request failed without NSError");
+            }
             return default_ocr_result;
         }
 
