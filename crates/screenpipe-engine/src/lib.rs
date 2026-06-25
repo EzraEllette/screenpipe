@@ -28,7 +28,6 @@ pub mod logging;
 pub mod mcp_servers_api;
 pub mod meeting_detector;
 pub mod meeting_export;
-pub mod meeting_persister;
 mod meeting_telemetry;
 pub mod meeting_watcher;
 pub mod permission_monitor;
