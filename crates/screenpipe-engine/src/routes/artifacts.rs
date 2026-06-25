@@ -1842,7 +1842,11 @@ mod tests {
         // Verify it appears in the unfiltered list
         let rows = db.list_outputs(None, None, None, 10_000, 0).await.unwrap();
         let chat_rows: Vec<_> = rows.iter().filter(|r| r.source_type == "chat").collect();
-        assert_eq!(chat_rows.len(), 1, "chat artifact must appear in unfiltered listing");
+        assert_eq!(
+            chat_rows.len(),
+            1,
+            "chat artifact must appear in unfiltered listing"
+        );
         assert_eq!(chat_rows[0].id, id);
 
         // Verify display_source grouping: source_type="chat" → "display: chat"
