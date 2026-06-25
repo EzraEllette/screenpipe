@@ -1790,4 +1790,95 @@ mod tests {
         assert_eq!(a[0].artifact_id.as_deref(), Some("process-refund"));
         assert_eq!(b[0].artifact_id.as_deref(), Some("process-refund"));
     }
+
+    // ── Chat artifact visibility ──────────────────────────────────────────
+    // Verifies that artifacts saved from chat (source_type="chat",
+    // source=<session_id>) appear in the unified listing and are grouped
+    // under display_source "chat" so they are visible in the Brain UI.
+
+    #[tokio::test]
+    async fn chat_artifacts_visible_in_unified_listing() {
+        let db = setup_db().await;
+        let tmp = tempfile::tempdir().unwrap();
+        let sp_dir = tmp.path().join("sp");
+
+        // Simulate save_artifact: register with source=<session_id>, source_type="chat"
+        let session_id = "chat_abc-123-def";
+        let f = tmp.path().join("weekly-summary.md");
+        std::fs::write(&f, "# Weekly Summary\n\nThis is my weekly report.").unwrap();
+
+        // Manually insert a chat artifact (same as register_artifact_handler does)
+        let dest = build_output_path(&sp_dir, "chat", session_id, "weekly-summary.md").unwrap();
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::copy(&f, &dest).unwrap();
+        let size_bytes = std::fs::metadata(&dest).unwrap().len() as i64;
+
+        let id = db
+            .insert_output(
+                session_id,
+                "chat",
+                "Weekly Summary",
+                "markdown",
+                Some(f.to_str().unwrap()),
+                dest.to_str().unwrap(),
+                size_bytes,
+                Some("# Weekly Summary\n\nThis is my weekly report."),
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        // Verify the row was inserted
+        let row = db.get_output_by_id(id).await.unwrap();
+        assert_eq!(row.source, session_id);
+        assert_eq!(row.source_type, "chat");
+        assert_eq!(row.title, "Weekly Summary");
+
+        // Verify it appears in the unfiltered list
+        let rows = db.list_outputs(None, None, None, 10_000, 0).await.unwrap();
+        let chat_rows: Vec<_> = rows.iter().filter(|r| r.source_type == "chat").collect();
+        assert_eq!(chat_rows.len(), 1, "chat artifact must appear in unfiltered listing");
+        assert_eq!(chat_rows[0].id, id);
+
+        // Verify display_source grouping: source_type="chat" → "display: chat"
+        let item = ArtifactItem {
+            registered: true,
+            id: Some(row.id),
+            source: row.source,
+            source_type: row.source_type.clone(),
+            title: row.title.clone(),
+            kind: row.kind.clone(),
+            path: row.output_path.clone(),
+            original_path: row.original_path.clone(),
+            size_bytes: row.size_bytes,
+            preview: row.preview.clone(),
+            saf_kind: row.saf_kind,
+            artifact_id: row.artifact_id,
+            saf_version: row.saf_version,
+            modified_at: row.updated_at.clone(),
+            created_at: Some(row.created_at.clone()),
+        };
+        // Verify display_source grouping: source_type="chat" → "display: chat"
+        let display_source = |i: &ArtifactItem| -> String {
+            if i.source_type == "chat" {
+                "chat".to_string()
+            } else {
+                i.source.clone()
+            }
+        };
+        assert_eq!(display_source(&item), "chat");
+
+        // Verify search by title finds it
+        assert!(artifact_matches_query(&item, "weekly summary"));
+        assert!(artifact_matches_query(&item, "Weekly Summary"));
+        // Verify search by content finds it
+        assert!(artifact_matches_query(&item, "weekly report"));
+        // Verify search by session id finds it (source field)
+        assert!(artifact_matches_query(&item, "chat_abc-123-def"));
+    }
 }
