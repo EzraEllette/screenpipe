@@ -4,6 +4,7 @@
 
 pub mod analytics;
 pub mod archive;
+pub mod audio_process_meeting_watcher;
 pub mod auth_key;
 mod auto_destruct;
 pub mod calendar_speaker_id;

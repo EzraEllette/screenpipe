@@ -229,7 +229,7 @@ fn source_bucket(source: &str) -> &'static str {
     match source {
         "manual" => "manual",
         "split" => "split",
-        "ui_scan" | "app" => "auto",
+        "ui_scan" | "audio_process" | "app" => "auto",
         _ => "other",
     }
 }

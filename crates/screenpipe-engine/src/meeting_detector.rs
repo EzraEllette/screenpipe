@@ -1811,7 +1811,7 @@ const REENTRY_HYSTERESIS_SCANS: u8 = 2;
 /// `"Join with Google Meet - Calendar"` from triggering detection.
 ///
 /// `title_lower` must already be lowercased — hot path, called per window.
-fn browser_title_matches_pattern(title_lower: &str, pattern: &str) -> bool {
+pub(crate) fn browser_title_matches_pattern(title_lower: &str, pattern: &str) -> bool {
     if pattern.is_empty() {
         return false;
     }
@@ -1842,7 +1842,7 @@ fn browser_title_matches_pattern(title_lower: &str, pattern: &str) -> bool {
 }
 
 /// Check if an app name is a known browser.
-fn is_browser_app(app_name: &str) -> bool {
+pub(crate) fn is_browser_app(app_name: &str) -> bool {
     BROWSER_NAMES
         .iter()
         .any(|b| contains_case_insensitive(app_name, b))
@@ -2219,7 +2219,7 @@ pub fn meeting_app_is_ignored(
     meeting_app_is_ignored_with_terms(app_name, profile, &ignored_terms)
 }
 
-fn normalize_ignored_meeting_apps(ignored: &[String]) -> Vec<String> {
+pub(crate) fn normalize_ignored_meeting_apps(ignored: &[String]) -> Vec<String> {
     ignored
         .iter()
         .map(|raw| raw.trim().to_lowercase())
@@ -2227,7 +2227,7 @@ fn normalize_ignored_meeting_apps(ignored: &[String]) -> Vec<String> {
         .collect()
 }
 
-fn contains_normalized_term(haystack: &str, term_lower: &str) -> bool {
+pub(crate) fn contains_normalized_term(haystack: &str, term_lower: &str) -> bool {
     if term_lower.is_empty() {
         return false;
     }
@@ -2246,7 +2246,7 @@ fn contains_normalized_term(haystack: &str, term_lower: &str) -> bool {
 /// Return the part of a URL before the query string (`?`) and fragment (`#`).
 /// Meeting URL patterns are host/path shaped, so matching should ignore params:
 /// `https://x.com/p?to=meet.google.com` is an unrelated page, not a Meet call.
-fn url_without_query_or_fragment(url: &str) -> &str {
+pub(crate) fn url_without_query_or_fragment(url: &str) -> &str {
     let end = url.find(['?', '#']).unwrap_or(url.len());
     &url[..end]
 }
@@ -2266,7 +2266,7 @@ fn url_without_query_or_fragment(url: &str) -> &str {
 /// window "Meet" but does not expose the tab URL via AXDocument. When a URL IS
 /// available and is not a meeting URL, the page title is not evidence of a
 /// meeting.
-fn browser_window_matches_meeting(
+pub(crate) fn browser_window_matches_meeting(
     url: Option<&str>,
     title: Option<&str>,
     profile: &MeetingDetectionProfile,
@@ -2322,7 +2322,7 @@ fn contains_case_insensitive(haystack: &str, needle: &str) -> bool {
 /// Non-domain patterns (containing a space, or with no `.`) keep the previous
 /// case-insensitive substring behavior — they are free-text markers
 /// (e.g. "zoom meeting"), not hostnames.
-fn browser_url_pattern_matches(haystack: &str, pattern: &str) -> bool {
+pub(crate) fn browser_url_pattern_matches(haystack: &str, pattern: &str) -> bool {
     if pattern.contains(' ') || !pattern.contains('.') {
         return contains_case_insensitive(haystack, pattern);
     }
@@ -2370,7 +2370,7 @@ fn ends_with_ascii_case_insensitive(haystack: &str, suffix: &str) -> bool {
         && haystack[haystack.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
 }
 
-fn meeting_app_is_ignored_with_terms(
+pub(crate) fn meeting_app_is_ignored_with_terms(
     app_name: &str,
     profile: &MeetingDetectionProfile,
     ignored_terms: &[String],

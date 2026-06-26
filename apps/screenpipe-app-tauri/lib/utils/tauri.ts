@@ -1030,7 +1030,6 @@ async openGoogleCalendarAuthWindow(authUrl: string) : Promise<Result<null, strin
 },
 /**
  * Open the screenpipe.com login page.
- * Windows: system browser + registered deep-link scheme handles the redirect.
  * macOS: ASWebAuthenticationSession (system-managed sheet, forwards callback).
  * Linux: in-app WebView that intercepts the screenpipe:// redirect.
  * Pass `freshSession` when switching accounts so the auth sheet/webview does
