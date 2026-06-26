@@ -34,6 +34,7 @@ const CANDIDATE_CONFIRM_WINDOW: Duration = Duration::from_secs(3);
 const ENDING_GRACE: Duration = Duration::from_secs(20);
 const ACTIVE_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const IDLE_POLL_INTERVAL: Duration = Duration::from_secs(5);
+const UNKNOWN_BROWSER_PLATFORM: &str = "Unknown";
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) struct ProcessKey(String);
@@ -725,9 +726,12 @@ async fn ax_resolved_candidates(
 async fn db_find_browser_evidence(
     db: &DatabaseManager,
 ) -> Result<Vec<BrowserPageEvidence>, sqlx::Error> {
+    // `frames.timestamp` is RFC3339 (`...T...+00:00`). Comparing it to
+    // SQLite's `datetime()` string (`... ...`) is lexical and pulls in stale
+    // same-day frames.
     let rows: Vec<(String, String, Option<String>)> = sqlx::query_as(
         "SELECT DISTINCT app_name, window_name, browser_url FROM frames \
-         WHERE timestamp > datetime('now', '-30 seconds') \
+         WHERE timestamp > strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now', '-10 seconds') \
          AND app_name IS NOT NULL AND window_name IS NOT NULL",
     )
     .fetch_all(&db.pool)
@@ -803,6 +807,18 @@ pub(crate) fn resolve_process_candidate(
                 first_seen_at,
                 process: process.clone(),
             };
+        }
+
+        if candidate_is_ignored(
+            UNKNOWN_BROWSER_PLATFORM,
+            None,
+            process,
+            ignored_terms,
+            Some(&browser_app),
+            None,
+            None,
+        ) {
+            return ResolvedMeetingCandidate::Ignored;
         }
 
         return ResolvedMeetingCandidate::UnresolvedBrowser {
@@ -912,16 +928,29 @@ fn process_identity_fields(process: &AudioInputProcess) -> Vec<String> {
 }
 
 fn known_native_bundle_platform(field_lower: &str) -> Option<&'static str> {
-    if field_lower.starts_with("us.zoom.") || field_lower == "zoom.us" || field_lower == "zoom" {
+    // Matching is over identity fields that are macOS bundle ids on macOS and
+    // Windows exe names on Windows (e.g. `Zoom.exe`, `ms-teams.exe`), so the arms
+    // below accept both forms.
+    if field_lower.starts_with("us.zoom.")
+        || field_lower == "zoom.us"
+        || field_lower == "zoom"
+        || field_lower == "zoom.exe"
+    {
         return Some("Zoom");
     }
     if field_lower.starts_with("com.microsoft.teams")
         || field_lower == "microsoft teams"
         || field_lower == "teams"
+        // Windows: ms-teams.exe, teams.exe, ms-teams_modulehost.exe
+        || field_lower.starts_with("ms-teams")
+        || field_lower == "teams.exe"
     {
         return Some("Microsoft Teams");
     }
-    if field_lower.starts_with("com.tinyspeck.slackmacgap") || field_lower == "slack" {
+    if field_lower.starts_with("com.tinyspeck.slackmacgap")
+        || field_lower == "slack"
+        || field_lower == "slack.exe"
+    {
         return Some("Slack");
     }
     if field_lower == "com.apple.facetime" || field_lower == "facetime" {
@@ -1246,6 +1275,27 @@ pub(crate) fn advance_audio_process_state(
                 )
             } else if let Some((next_browser_app, key, next_first_seen_at)) = unresolved {
                 if key == session_key {
+                    if now.duration_since(first_seen_at) >= confirm_window {
+                        let platform = UNKNOWN_BROWSER_PLATFORM.to_string();
+                        return (
+                            AudioProcessMeetingState::Active {
+                                meeting_id: -1,
+                                platform: platform.clone(),
+                                session_key: session_key.clone(),
+                                meeting_url: None,
+                                first_seen_at,
+                                last_seen_at: now,
+                                is_browser: true,
+                            },
+                            Some(AudioProcessStateAction::StartMeeting {
+                                platform,
+                                session_key,
+                                meeting_url: None,
+                                first_seen_at,
+                                is_browser: true,
+                            }),
+                        );
+                    }
                     (
                         AudioProcessMeetingState::CandidateUnresolvedBrowser {
                             browser_app: next_browser_app,
@@ -1392,9 +1442,20 @@ fn session_present(
             meeting_url: candidate_meeting_url,
             ..
         } => {
-            (key == session_key || session_key.is_reattached())
-                && candidate_platform == platform
-                && meeting_url.is_none_or(|url| url == candidate_meeting_url)
+            if platform == UNKNOWN_BROWSER_PLATFORM && meeting_url.is_none() {
+                key == session_key || session_key.is_reattached()
+            } else {
+                (key == session_key || session_key.is_reattached())
+                    && candidate_platform == platform
+                    && meeting_url.is_none_or(|url| url == candidate_meeting_url)
+            }
+        }
+        ResolvedMeetingCandidate::UnresolvedBrowser {
+            session_key: key, ..
+        } => {
+            platform == UNKNOWN_BROWSER_PLATFORM
+                && meeting_url.is_none()
+                && (key == session_key || session_key.is_reattached())
         }
         _ => false,
     })
@@ -1764,6 +1825,19 @@ mod tests {
         }
     }
 
+    fn arc_process() -> AudioInputProcess {
+        AudioInputProcess {
+            audio_session_id: Some("coreaudio-process:300:input:built-in-mic".to_string()),
+            audio_object_id: Some(300),
+            pid: Some(84),
+            bundle_id: Some("company.thebrowser.Browser.helper".to_string()),
+            process_name: Some("Arc Helper".to_string()),
+            owner_app_name: Some("Arc".to_string()),
+            owner_bundle_id: Some("company.thebrowser.Browser".to_string()),
+            first_seen_at_ms: None,
+        }
+    }
+
     fn zoom_process() -> AudioInputProcess {
         AudioInputProcess {
             audio_session_id: Some("coreaudio-process:200:input:built-in-mic".to_string()),
@@ -1845,6 +1919,26 @@ mod tests {
     }
 
     #[test]
+    fn windows_exe_names_map_to_native_platform() {
+        // Windows snapshots carry exe basenames (from the WASAPI sensor) rather
+        // than macOS bundle ids; the matcher must resolve both.
+        for (exe, expected) in [
+            ("zoom.exe", "Zoom"),
+            ("ms-teams.exe", "Microsoft Teams"),
+            ("teams.exe", "Microsoft Teams"),
+            ("ms-teams_modulehost.exe", "Microsoft Teams"),
+            ("slack.exe", "Slack"),
+            ("webex.exe", "Webex"),
+        ] {
+            assert_eq!(
+                known_native_bundle_platform(exe),
+                Some(expected),
+                "{exe} should resolve to {expected}"
+            );
+        }
+    }
+
+    #[test]
     fn browser_helper_alone_is_unresolved_browser() {
         let profiles = load_detection_profiles();
         let process = chrome_process();
@@ -1890,7 +1984,7 @@ mod tests {
     }
 
     #[test]
-    fn browser_helper_unrelated_tab_does_not_start() {
+    fn browser_helper_unrelated_tab_starts_unknown() {
         let profiles = load_detection_profiles();
         let process = chrome_process();
         let evidence = vec![BrowserPageEvidence {
@@ -1907,6 +2001,10 @@ mod tests {
             &[],
             &[],
         );
+        assert!(matches!(
+            candidate,
+            ResolvedMeetingCandidate::UnresolvedBrowser { .. }
+        ));
         let start = Instant::now();
         let candidates = vec![candidate];
         let (state, action) = advance_audio_process_state(
@@ -1917,22 +2015,80 @@ mod tests {
             Duration::from_secs(3),
             Duration::from_secs(20),
         );
-        let unresolved_candidates = vec![ResolvedMeetingCandidate::UnresolvedBrowser {
-            browser_app: "Google Chrome".to_string(),
-            session_key: ProcessKey::from_process(&process).unwrap(),
-            first_seen_at: start,
-            process,
-        }];
         let (_state, second_action) = advance_audio_process_state(
             state,
-            &unresolved_candidates,
-            &unresolved_candidates,
+            &candidates,
+            &candidates,
             start + Duration::from_secs(10),
             Duration::from_secs(3),
             Duration::from_secs(20),
         );
         assert!(action.is_none());
-        assert!(second_action.is_none());
+        assert!(matches!(
+            second_action,
+            Some(AudioProcessStateAction::StartMeeting {
+                platform,
+                meeting_url: None,
+                is_browser: true,
+                ..
+            }) if platform == UNKNOWN_BROWSER_PLATFORM
+        ));
+    }
+
+    #[test]
+    fn arc_slack_client_url_starts_unknown_when_unattributed() {
+        let profiles = load_detection_profiles();
+        let process = arc_process();
+        let evidence = vec![BrowserPageEvidence {
+            browser_app: Some("Arc".to_string()),
+            url: Some("https://app.slack.com/client/T0BBNEEH6Q2/D0BBT87MELU".to_string()),
+            title: Some(
+                "Alex N (DM) - 1651 Market Apartments Residents - 1 new item - Slack".to_string(),
+            ),
+        }];
+        let candidate = resolve_process_candidate(
+            ProcessKey::from_process(&process).unwrap(),
+            Instant::now(),
+            &process,
+            &profiles,
+            &evidence,
+            &[],
+            &[],
+        );
+        assert!(
+            matches!(candidate, ResolvedMeetingCandidate::UnresolvedBrowser { .. }),
+            "Slack web client URLs are not yet attribution evidence, but Arc mic activity must remain startable"
+        );
+
+        let start = Instant::now();
+        let candidates = vec![candidate];
+        let (state, action) = advance_audio_process_state(
+            AudioProcessMeetingState::Idle,
+            &candidates,
+            &candidates,
+            start,
+            Duration::from_secs(3),
+            Duration::from_secs(20),
+        );
+        assert!(action.is_none());
+
+        let (_state, action) = advance_audio_process_state(
+            state,
+            &candidates,
+            &candidates,
+            start + Duration::from_secs(3),
+            Duration::from_secs(3),
+            Duration::from_secs(20),
+        );
+        assert!(matches!(
+            action,
+            Some(AudioProcessStateAction::StartMeeting {
+                platform,
+                meeting_url: None,
+                is_browser: true,
+                ..
+            }) if platform == UNKNOWN_BROWSER_PLATFORM
+        ));
     }
 
     #[test]
@@ -1969,7 +2125,7 @@ mod tests {
     }
 
     #[test]
-    fn unresolved_browser_never_starts() {
+    fn unresolved_browser_starts_unknown_after_confirmation() {
         let process = chrome_process();
         let key = ProcessKey::from_process(&process).unwrap();
         let start = Instant::now();
@@ -1989,12 +2145,61 @@ mod tests {
         );
         let (_state, action) = advance_audio_process_state(
             state,
-            &[candidate],
-            &[],
-            start + Duration::from_secs(30),
+            std::slice::from_ref(&candidate),
+            std::slice::from_ref(&candidate),
+            start + Duration::from_secs(3),
             Duration::from_secs(3),
             Duration::from_secs(20),
         );
+        assert!(matches!(
+            action,
+            Some(AudioProcessStateAction::StartMeeting {
+                platform,
+                meeting_url: None,
+                is_browser: true,
+                ..
+            }) if platform == UNKNOWN_BROWSER_PLATFORM
+        ));
+    }
+
+    #[test]
+    fn unresolved_browser_keeps_unknown_meeting_alive() {
+        let process = arc_process();
+        let key = ProcessKey::from_process(&process).unwrap();
+        let start = Instant::now();
+        let active = AudioProcessMeetingState::Active {
+            meeting_id: 123,
+            platform: UNKNOWN_BROWSER_PLATFORM.to_string(),
+            session_key: key.clone(),
+            meeting_url: None,
+            first_seen_at: start,
+            last_seen_at: start,
+            is_browser: true,
+        };
+        let unresolved = ResolvedMeetingCandidate::UnresolvedBrowser {
+            browser_app: "Arc".to_string(),
+            session_key: key,
+            first_seen_at: start,
+            process,
+        };
+
+        let (state, action) = advance_audio_process_state(
+            active,
+            std::slice::from_ref(&unresolved),
+            std::slice::from_ref(&unresolved),
+            start + Duration::from_secs(1),
+            Duration::from_secs(3),
+            Duration::from_secs(20),
+        );
+
+        assert!(matches!(
+            state,
+            AudioProcessMeetingState::Active {
+                platform,
+                meeting_url: None,
+                ..
+            } if platform == UNKNOWN_BROWSER_PLATFORM
+        ));
         assert!(action.is_none());
     }
 

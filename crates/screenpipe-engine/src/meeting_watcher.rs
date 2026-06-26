@@ -67,18 +67,27 @@ enum MeetingDetectorMode {
 }
 
 fn selected_detector_mode() -> MeetingDetectorMode {
+    // AudioProcess (mic-capture sensor) is the default on every platform where
+    // `meeting_processes::current_input_processes()` is implemented: macOS
+    // (CoreAudio) and Windows (WASAPI). Linux has no sensor yet, so it falls
+    // back to UI scanning. Override on any platform with SCREENPIPE_MEETING_DETECTOR.
+    let audio_process_is_default =
+        cfg!(target_os = "macos") || cfg!(target_os = "windows");
     selected_detector_mode_from(
         std::env::var("SCREENPIPE_MEETING_DETECTOR").ok().as_deref(),
-        cfg!(target_os = "macos"),
+        audio_process_is_default,
     )
 }
 
-fn selected_detector_mode_from(raw: Option<&str>, is_macos: bool) -> MeetingDetectorMode {
+fn selected_detector_mode_from(
+    raw: Option<&str>,
+    audio_process_is_default: bool,
+) -> MeetingDetectorMode {
     match raw.unwrap_or_default().to_lowercase().as_str() {
         "audio_process" => MeetingDetectorMode::AudioProcess,
         "ui_scan" => MeetingDetectorMode::UiScan,
         _ => {
-            if is_macos {
+            if audio_process_is_default {
                 MeetingDetectorMode::AudioProcess
             } else {
                 MeetingDetectorMode::UiScan
@@ -92,15 +101,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_detector_mode_uses_audio_process_only_on_macos() {
+    fn default_detector_mode_follows_audio_process_default() {
+        // Platforms with a mic-capture sensor (macOS, Windows) default to AudioProcess.
         assert_eq!(
             selected_detector_mode_from(None, true),
             MeetingDetectorMode::AudioProcess
         );
+        // Platforms without one (e.g. Linux) default to UI scanning.
         assert_eq!(
             selected_detector_mode_from(None, false),
             MeetingDetectorMode::UiScan
         );
+        // The env override wins regardless of platform default.
         assert_eq!(
             selected_detector_mode_from(Some("ui_scan"), true),
             MeetingDetectorMode::UiScan
