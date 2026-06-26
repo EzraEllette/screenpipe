@@ -67,6 +67,29 @@ pub fn restore_frontmost_app() {
     });
 }
 
+/// Bring screenpipe itself to the foreground (activate the app).
+///
+/// A macOS status-item (menu-bar) menu does NOT activate its owning app when
+/// the user selects an item. So a window created from a tray menu item is
+/// ordered on screen while the app is still in the background — it never
+/// becomes key and the window-server immediately orders it back out. That is
+/// the "first click flashes then closes, second click opens" bug: the second
+/// click finds the now-existing window and takes the existing-window show path
+/// (which already activates). Calling this BEFORE creating/showing a window
+/// from the tray makes the app frontmost first, so the new window comes up key
+/// and stays. MUST be called on the main thread.
+#[cfg(target_os = "macos")]
+pub fn activate_self_app() {
+    with_autorelease_pool(|| {
+        use objc::{class, msg_send, sel, sel_impl};
+        use tauri_nspanel::cocoa::base::id;
+        unsafe {
+            let ns_app: id = msg_send![class!(NSApplication), sharedApplication];
+            let _: () = msg_send![ns_app, activateIgnoringOtherApps: true];
+        }
+    });
+}
+
 /// Clear the saved frontmost app without re-activating it.
 /// Used when the user intentionally switches Spaces — we don't want to
 /// pull them back by re-activating the previous app.

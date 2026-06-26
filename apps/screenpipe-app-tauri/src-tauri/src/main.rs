@@ -1372,6 +1372,13 @@ async fn main() {
             if app_ui_hidden {
                 info!("enterprise: hidden UI mode active, skipping startup app windows");
             } else if !onboarding_store.is_completed {
+                // If the app launched in the background (login item), it isn't
+                // frontmost, so the freshly-created Onboarding window would flash
+                // and get ordered out before the user can interact with it.
+                // Activate first — onboarding legitimately needs the user's
+                // attention. (Same fix as the tray menu items.)
+                #[cfg(target_os = "macos")]
+                crate::window::activate_self_app();
                 let _ = ShowRewindWindow::Onboarding.show(&app.handle());
             } else {
                 let _ = ShowRewindWindow::Home { page: None }.show(&app.handle());
