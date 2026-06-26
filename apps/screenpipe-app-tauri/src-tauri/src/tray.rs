@@ -1326,6 +1326,11 @@ fn handle_menu_event(app_handle: &AppHandle, event: tauri::menu::MenuEvent) {
         "open_app" => {
             let app = app_handle.clone();
             let _ = app_handle.run_on_main_thread(move || {
+                // Activate the app first — a tray menu selection doesn't make the
+                // app frontmost, so a freshly-created Home window would otherwise
+                // flash and get ordered out (see activate_self_app docs).
+                #[cfg(target_os = "macos")]
+                crate::window::activate_self_app();
                 let _ = ShowRewindWindow::Home { page: None }.show(&app);
             });
         }
@@ -1333,6 +1338,8 @@ fn handle_menu_event(app_handle: &AppHandle, event: tauri::menu::MenuEvent) {
             let app = app_handle.clone();
             let page = Some("general".to_string());
             let _ = app_handle.run_on_main_thread(move || {
+                #[cfg(target_os = "macos")]
+                crate::window::activate_self_app();
                 let _ = ShowRewindWindow::Home { page }.show(&app);
             });
         }
@@ -1340,6 +1347,8 @@ fn handle_menu_event(app_handle: &AppHandle, event: tauri::menu::MenuEvent) {
             let app = app_handle.clone();
             let page = Some("help".to_string());
             let _ = app_handle.run_on_main_thread(move || {
+                #[cfg(target_os = "macos")]
+                crate::window::activate_self_app();
                 let _ = ShowRewindWindow::Home { page }.show(&app);
             });
         }
@@ -1373,6 +1382,10 @@ fn handle_menu_event(app_handle: &AppHandle, event: tauri::menu::MenuEvent) {
                 let _ = OnboardingStore::update(&app, |onboarding| {
                     onboarding.reset();
                 });
+                // Activate first so the freshly-created Onboarding window comes up
+                // key instead of flashing then closing (see activate_self_app docs).
+                #[cfg(target_os = "macos")]
+                crate::window::activate_self_app();
                 let _ = ShowRewindWindow::Onboarding.show(&app);
             });
         }
