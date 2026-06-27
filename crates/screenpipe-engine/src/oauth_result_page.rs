@@ -26,17 +26,17 @@ pub(crate) fn render_oauth_result_page(
   <title>{page_title}</title>
   <style>
     :root {{
-      color-scheme: dark;
-      --bg: #050706;
-      --panel: rgba(9, 14, 11, 0.82);
-      --paper: #f7f1e4;
-      --muted: rgba(247, 241, 228, 0.64);
-      --line: rgba(247, 241, 228, 0.13);
-      --grid: rgba(247, 241, 228, 0.035);
-      --green: #39f49a;
-      --amber: #f4c95d;
+      color-scheme: light;
+      --bg: #f6f8f7;
+      --panel: rgba(255, 255, 255, 0.9);
+      --paper: #101512;
+      --muted: rgba(16, 21, 18, 0.62);
+      --line: rgba(16, 21, 18, 0.12);
+      --grid: rgba(16, 21, 18, 0.045);
+      --green: #20e68a;
+      --amber: #f0b84d;
       --red: #ff5c7a;
-      --shadow: rgba(0, 0, 0, 0.58);
+      --shadow: rgba(20, 31, 25, 0.14);
     }}
 
     * {{
@@ -50,8 +50,8 @@ pub(crate) fn render_oauth_result_page(
       place-items: center;
       overflow: hidden;
       background:
-        linear-gradient(135deg, rgba(57, 244, 154, 0.18), rgba(57, 244, 154, 0.04) 28%, transparent 52%),
-        linear-gradient(315deg, rgba(244, 201, 93, 0.13), transparent 42%),
+        linear-gradient(135deg, rgba(32, 230, 138, 0.22), rgba(32, 230, 138, 0.08) 28%, transparent 52%),
+        linear-gradient(315deg, rgba(240, 184, 77, 0.18), transparent 42%),
         linear-gradient(transparent 0 23px, var(--grid) 24px),
         linear-gradient(90deg, transparent 0 23px, var(--grid) 24px),
         var(--bg);
@@ -67,10 +67,10 @@ pub(crate) fn render_oauth_result_page(
       border: 1px solid var(--line);
       border-radius: 8px;
       background:
-        linear-gradient(145deg, rgba(247, 241, 228, 0.06), transparent 42%),
-        linear-gradient(315deg, rgba(57, 244, 154, 0.10), transparent 48%),
+        linear-gradient(145deg, rgba(32, 230, 138, 0.08), transparent 42%),
+        linear-gradient(315deg, rgba(240, 184, 77, 0.10), transparent 48%),
         var(--panel);
-      box-shadow: 0 28px 90px var(--shadow), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+      box-shadow: 0 28px 90px var(--shadow), inset 0 1px 0 rgba(255, 255, 255, 0.9);
       backdrop-filter: blur(18px);
       text-align: center;
       animation: rise 700ms cubic-bezier(.2,.9,.2,1) both;
@@ -82,9 +82,9 @@ pub(crate) fn render_oauth_result_page(
       inset: -1px;
       z-index: -1;
       border-radius: inherit;
-      background: linear-gradient(135deg, rgba(57, 244, 154, 0.55), rgba(244, 201, 93, 0.28), rgba(247, 241, 228, 0.16));
+      background: linear-gradient(135deg, rgba(32, 230, 138, 0.48), rgba(240, 184, 77, 0.24), rgba(255, 255, 255, 0.7));
       filter: blur(16px);
-      opacity: 0.24;
+      opacity: 0.42;
     }}
 
     .brand {{
@@ -102,9 +102,9 @@ pub(crate) fn render_oauth_result_page(
     .app-icon {{
       display: grid;
       place-items: center;
-      background: linear-gradient(145deg, #ffffff, #d8d8d8);
-      color: #050706;
-      box-shadow: inset 0 0 0 1px rgba(5, 7, 6, 0.16), 0 10px 28px rgba(0, 0, 0, 0.24);
+      background: linear-gradient(145deg, #ffffff, #eef2ef);
+      color: #101512;
+      box-shadow: inset 0 0 0 1px rgba(16, 21, 18, 0.12), 0 10px 28px rgba(20, 31, 25, 0.16);
     }}
 
     .brand-mark {{
@@ -143,7 +143,7 @@ pub(crate) fn render_oauth_result_page(
       border-radius: 8px;
       position: relative;
       z-index: 1;
-      box-shadow: inset 0 0 0 1px rgba(5, 7, 6, 0.14), 0 18px 54px color-mix(in srgb, var(--accent) 22%, transparent);
+      box-shadow: inset 0 0 0 1px rgba(16, 21, 18, 0.14), 0 18px 54px color-mix(in srgb, var(--accent) 24%, transparent);
       animation: breathe 2.4s ease-in-out infinite;
     }}
 
@@ -162,9 +162,9 @@ pub(crate) fn render_oauth_result_page(
       display: grid;
       place-items: center;
       border-radius: 999px;
-      color: #050706;
+      color: #101512;
       background: var(--accent);
-      box-shadow: 0 12px 34px color-mix(in srgb, var(--accent) 36%, transparent), 0 0 0 5px rgba(5, 7, 6, 0.84);
+      box-shadow: 0 12px 34px color-mix(in srgb, var(--accent) 36%, transparent), 0 0 0 5px rgba(255, 255, 255, 0.95);
     }}
 
     .status-badge svg {{
@@ -203,8 +203,8 @@ pub(crate) fn render_oauth_result_page(
       padding: 14px 16px;
       border-radius: 8px;
       border: 1px solid var(--line);
-      background: rgba(247, 241, 228, 0.055);
-      color: rgba(247, 241, 228, 0.88);
+      background: rgba(16, 21, 18, 0.045);
+      color: rgba(16, 21, 18, 0.82);
       font-size: 14px;
       font-weight: 600;
       line-height: 1.5;
@@ -213,7 +213,7 @@ pub(crate) fn render_oauth_result_page(
 
     .hint {{
       margin-top: 22px;
-      color: rgba(247, 241, 228, 0.5);
+      color: rgba(16, 21, 18, 0.48);
       font-size: 13px;
     }}
 
