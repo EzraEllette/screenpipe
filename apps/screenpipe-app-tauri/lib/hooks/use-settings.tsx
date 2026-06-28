@@ -1013,6 +1013,29 @@ function createSettingsStore() {
 			}
 		}
 
+		// One-time migration (#4117): existing installs persisted
+		// `piiRedactionColumns` before `ocr_text_positions` existed. The engine
+		// builds the allow-list with exact-list semantics
+		// (`RedactColumns::from_keys`: a key absent → that column OFF), so those
+		// users had per-word OCR `text_json` redaction silently OFF — the leak
+		// #4117 fixes. Inject the key once into any persisted list that predates
+		// it. The marker means a user who later unchecks it isn't re-overridden.
+		// (Installs with no persisted list use the Rust serde default, which
+		// already includes the key, so they need no migration.)
+		if (
+			Array.isArray(settings.piiRedactionColumns) &&
+			!(settings as any)._ocrTextPositionsRedactionMigrated
+		) {
+			if (!settings.piiRedactionColumns.includes("ocr_text_positions")) {
+				settings.piiRedactionColumns = [
+					...settings.piiRedactionColumns,
+					"ocr_text_positions",
+				];
+			}
+			(settings as any)._ocrTextPositionsRedactionMigrated = true;
+			needsUpdate = true;
+		}
+
 		// Save migrations if needed
 		if (needsUpdate) {
 			await setSettingsStripped(store, settings);

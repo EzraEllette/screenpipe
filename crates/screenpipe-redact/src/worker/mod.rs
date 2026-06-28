@@ -627,6 +627,23 @@ impl Worker {
         for row in &rows {
             match self.redactor.redact_with_map(&row.full_text).await? {
                 Some((out, map)) => {
+                    // Propagate the single detection to every derived copy that
+                    // still needs it (no extra model pass) — CRITICAL: before
+                    // stamping full_text, mirroring the enclave arm below. The
+                    // fetch filters `full_text_redacted_at IS NULL`, so once
+                    // full_text is stamped the frame is never re-selected; if we
+                    // stamped it first and a derived write then failed (transient
+                    // DB error) or the process died mid-pass, that copy (e.g. the
+                    // raw OCR words in text_json) would be served raw forever
+                    // (#4116/#4117). Writing derived copies first means a failure
+                    // leaves full_text un-stamped and the whole frame is retried;
+                    // each copy's own `*_redacted_at IS NULL` guard makes the
+                    // retry idempotent. Establishes the invariant the single-
+                    // column fetch gate relies on: full_text stamped ⟹ every
+                    // enabled derived copy is done (malformed blobs excepted —
+                    // they're warned + skipped inside the helper, unfixable by
+                    // retry, so they must not wedge full_text).
+                    writes += self.propagate_frame_derived(row, &map).await?;
                     tables::write_redacted(
                         &self.pool,
                         TargetTable::FullText,
@@ -635,9 +652,6 @@ impl Worker {
                     )
                     .await?;
                     writes += 1;
-                    // Propagate the single detection to every derived copy
-                    // that still needs it — no extra model pass.
-                    writes += self.propagate_frame_derived(row, &map).await?;
                 }
                 None => {
                     // Span-less / no-map redactor (the Tinfoil enclave, whose

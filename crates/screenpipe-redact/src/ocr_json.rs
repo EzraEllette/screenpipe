@@ -41,15 +41,31 @@
 //! `full_text` detection map (no extra model pass); the span-less enclave
 //! backend drives the redactor directly, same as the tree path.
 //!
-//! ## Known limitation
+//! ## Known limitation — multi-word PII leaks (issue #4117 follow-up)
 //!
-//! Propagation matches whole PII values that appear contiguously within one
-//! block's `text`. PII split across adjacent OCR word-boxes (e.g. an email
-//! tokenized into `alice`, `@`, `example.com`) won't match the `full_text`
-//! map value and survives as fragments — but the bounding boxes alone, without
-//! the contiguous string, are far less reconstructible. This is the same
-//! best-effort fidelity the other derived copies accept (see
-//! `redaction_map.rs`).
+//! Propagation only matches PII values that appear contiguously within ONE
+//! block's `text`, but OCR stores one block PER WHITESPACE-DELIMITED WORD
+//! (apple-native: `screenpipe-screen/src/apple.rs` splits each Vision
+//! observation on whitespace and emits a record per word; Tesseract is
+//! word-level too). `full_text` keeps the whole phrase, so the `full_text`
+//! detection map is keyed on the contiguous value:
+//!
+//!   * **Single-token values redact correctly** — `alice@example.com`,
+//!     URLs, `sk-proj-…` keys, `4111111111111111` have no internal
+//!     whitespace, so they sit in one block and the map matches them.
+//!   * **Whitespace-separated values survive as fragments** — a name
+//!     `John Smith`, address `123 Main Street`, or space-formatted number
+//!     `4111 1111 1111 1111` is one map key but lands in separate per-word
+//!     blocks (`["John"]`, `["Smith"]`), so neither block matches and the
+//!     words pass through unredacted. The block order + `word_num` are
+//!     preserved, so the overlay endpoints still serve them in reading order
+//!     — i.e. reconstructible, NOT merely loose boxes.
+//!
+//! The frame is still stamped `text_json_redacted_at` in this case (the walk
+//! returns the blob unchanged), so it is never revisited. Closing this needs
+//! word-granularity redaction of `text_json` (token-wise fallback, with
+//! over-redaction risk, or a direct redactor pass per frame) — tracked as a
+//! follow-up, deliberately out of scope here.
 
 use crate::redaction_map::RedactionMap;
 use crate::tree_json::{
