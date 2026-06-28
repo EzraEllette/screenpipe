@@ -37,6 +37,11 @@ pub mod keys {
     pub const UI_ELEMENT_DESCRIPTION: &str = "ui_element_description";
     pub const ELEMENT_TEXT: &str = "element_text";
     pub const ELEMENT_PROPERTIES: &str = "element_properties";
+    /// The per-word OCR text in `frames.text_json` (the recognized words
+    /// inside the bounding-box array served by the text-overlay endpoints).
+    /// Scrubbed via `full_text` propagation — only each block's `text` field,
+    /// geometry preserved (issue #4117).
+    pub const OCR_TEXT_POSITIONS: &str = "ocr_text_positions";
     /// The `url` string field inside `accessibility_tree_json` /
     /// `elements.properties` node JSON (NOT a column — a field within the
     /// JSON copies). Off by default; URLs are structured and often non-PII.
@@ -56,6 +61,7 @@ pub mod keys {
         UI_ELEMENT_DESCRIPTION,
         ELEMENT_TEXT,
         ELEMENT_PROPERTIES,
+        OCR_TEXT_POSITIONS,
         A11Y_URL_FIELD,
     ];
 }
@@ -75,6 +81,8 @@ pub struct RedactColumns {
     pub ui_element_description: bool,
     pub element_text: bool,
     pub element_properties: bool,
+    /// The per-word OCR text in `frames.text_json` (issue #4117).
+    pub ocr_text_positions: bool,
     /// The `url` field inside the a11y JSON copies (tree / properties).
     pub a11y_url_field: bool,
 }
@@ -112,6 +120,10 @@ impl Default for RedactColumns {
             ui_element_description: false,
             element_text: true,
             element_properties: true,
+            // Per-word OCR words served by the overlay endpoints — a clear
+            // capture surface, and scrubbing is pure string propagation (no
+            // model pass), so ON by default like the other derived copies.
+            ocr_text_positions: true,
             a11y_url_field: false,
         }
     }
@@ -150,6 +162,7 @@ impl RedactColumns {
             ui_element_description: has(keys::UI_ELEMENT_DESCRIPTION),
             element_text: has(keys::ELEMENT_TEXT),
             element_properties: has(keys::ELEMENT_PROPERTIES),
+            ocr_text_positions: has(keys::OCR_TEXT_POSITIONS),
             a11y_url_field: has(keys::A11Y_URL_FIELD),
         }
     }
@@ -176,6 +189,7 @@ impl RedactColumns {
             keys::UI_ELEMENT_DESCRIPTION => self.ui_element_description,
             keys::ELEMENT_TEXT => self.element_text,
             keys::ELEMENT_PROPERTIES => self.element_properties,
+            keys::OCR_TEXT_POSITIONS => self.ocr_text_positions,
             keys::A11Y_URL_FIELD => self.a11y_url_field,
             _ => false,
         }
@@ -234,6 +248,8 @@ mod tests {
         // Form-field values — on by default (the real PII surface, incl.
         // password-field values OCR never sees).
         assert!(d.element_properties);
+        // Per-word OCR words served by the overlay endpoints — on (#4117).
+        assert!(d.ocr_text_positions);
         // Debatable / lossy — off (opt-in).
         assert!(!d.browser_url);
         assert!(!d.ui_element_name && !d.ui_element_description);

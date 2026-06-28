@@ -765,6 +765,7 @@ fn default_pii_redaction_columns() -> Vec<String> {
         "ui_window_title",
         "element_text",
         "element_properties",
+        "ocr_text_positions",
     ]
     .iter()
     .map(|s| s.to_string())
