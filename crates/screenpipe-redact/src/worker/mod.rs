@@ -774,23 +774,27 @@ impl Worker {
         // via the same map (geometry preserved). A malformed blob is logged
         // and left un-stamped (same as accessibility_tree_json), so a clean
         // frame still stamps its other copies. (issue #4117)
-        if cols.ocr_text_positions {
-            if let Some(tj) = row.text_json.as_deref() {
-                if !tj.is_empty() && row.text_json_redacted_at.is_none() {
-                    match crate::ocr_json::redact_ocr_text_json(tj, map) {
-                        Ok(Some(json)) => {
-                            tables::write_redacted_text_json(&self.pool, row.id, &json).await?;
-                            writes += 1;
-                        }
-                        // Ok(None) means the map was empty — impossible here
-                        // (we're inside the Some(map)-with-detections arm).
-                        Ok(None) => {}
-                        Err(e) => warn!(
-                            frame_id = row.id,
-                            error = %e,
-                            "skipping malformed text_json (leaving it un-stamped)"
-                        ),
+        //
+        // NOT gated by a column toggle: text_json is a derived copy of the
+        // same on-screen text as `full_text`, which is ALWAYS redacted (it's
+        // the detection source). Letting full_text be scrubbed while the raw
+        // OCR words survive here — and are served verbatim by the overlay
+        // endpoints — is exactly the #4117 leak, so the two move together.
+        if let Some(tj) = row.text_json.as_deref() {
+            if !tj.is_empty() && row.text_json_redacted_at.is_none() {
+                match crate::ocr_json::redact_ocr_text_json(tj, map) {
+                    Ok(Some(json)) => {
+                        tables::write_redacted_text_json(&self.pool, row.id, &json).await?;
+                        writes += 1;
                     }
+                    // Ok(None) means the map was empty — impossible here
+                    // (we're inside the Some(map)-with-detections arm).
+                    Ok(None) => {}
+                    Err(e) => warn!(
+                        frame_id = row.id,
+                        error = %e,
+                        "skipping malformed text_json (leaving it un-stamped)"
+                    ),
                 }
             }
         }
@@ -875,33 +879,35 @@ impl Worker {
         // `text` directly (no map on this path), geometry preserved. A
         // malformed blob is warned + left un-stamped; a redactor failure is a
         // transient error the worker's backoff retries. (issue #4117)
-        if cols.ocr_text_positions {
-            if let Some(tj) = row.text_json.as_deref() {
-                if !tj.is_empty() && row.text_json_redacted_at.is_none() {
-                    match crate::ocr_json::redact_ocr_text_json_with_redactor(
-                        tj,
-                        self.redactor.as_ref(),
-                    )
-                    .await
-                    {
-                        Ok(Some(json)) => {
-                            tables::write_redacted_text_json(&self.pool, row.id, &json).await?;
-                            writes += 1;
-                        }
-                        // No redactable text → stamp the verbatim blob so the
-                        // row isn't re-scanned for text_json forever.
-                        Ok(None) => {
-                            tables::write_redacted_text_json(&self.pool, row.id, tj).await?;
-                            writes += 1;
-                        }
-                        Err(crate::tree_json::TreeRedactError::Json(e)) => warn!(
-                            frame_id = row.id,
-                            error = %e,
-                            "skipping malformed text_json on enclave path (leaving it un-stamped)"
-                        ),
-                        Err(e @ crate::tree_json::TreeRedactError::Redact(_)) => {
-                            return Err(e.into());
-                        }
+        //
+        // NOT gated by a column toggle — see the map-path note above: text_json
+        // is the structured twin of `full_text` (always redacted), so the two
+        // move together to avoid the #4117 overlay leak.
+        if let Some(tj) = row.text_json.as_deref() {
+            if !tj.is_empty() && row.text_json_redacted_at.is_none() {
+                match crate::ocr_json::redact_ocr_text_json_with_redactor(
+                    tj,
+                    self.redactor.as_ref(),
+                )
+                .await
+                {
+                    Ok(Some(json)) => {
+                        tables::write_redacted_text_json(&self.pool, row.id, &json).await?;
+                        writes += 1;
+                    }
+                    // No redactable text → stamp the verbatim blob so the
+                    // row isn't re-scanned for text_json forever.
+                    Ok(None) => {
+                        tables::write_redacted_text_json(&self.pool, row.id, tj).await?;
+                        writes += 1;
+                    }
+                    Err(crate::tree_json::TreeRedactError::Json(e)) => warn!(
+                        frame_id = row.id,
+                        error = %e,
+                        "skipping malformed text_json on enclave path (leaving it un-stamped)"
+                    ),
+                    Err(e @ crate::tree_json::TreeRedactError::Redact(_)) => {
+                        return Err(e.into());
                     }
                 }
             }
