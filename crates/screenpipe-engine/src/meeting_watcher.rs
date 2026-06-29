@@ -83,7 +83,11 @@ fn selected_detector_mode_from(
     raw: Option<&str>,
     audio_process_is_default: bool,
 ) -> MeetingDetectorMode {
-    match raw.unwrap_or_default().to_lowercase().as_str() {
+    // Accept both hyphen and underscore spellings (the docs/PR body use
+    // hyphens, e.g. `ui-scan`), case-insensitively, with surrounding whitespace
+    // tolerated.
+    let normalized = raw.unwrap_or_default().trim().to_lowercase().replace('-', "_");
+    match normalized.as_str() {
         "audio_process" => MeetingDetectorMode::AudioProcess,
         "ui_scan" => MeetingDetectorMode::UiScan,
         _ => {
@@ -120,6 +124,29 @@ mod tests {
         assert_eq!(
             selected_detector_mode_from(Some("audio_process"), false),
             MeetingDetectorMode::AudioProcess
+        );
+    }
+
+    #[test]
+    fn detector_override_accepts_hyphenated_and_mixed_case_spellings() {
+        // The documented override (PR body + test step 5) uses hyphens, e.g.
+        // `SCREENPIPE_MEETING_DETECTOR=ui-scan`. Both hyphen and underscore
+        // spellings must work, case-insensitively, on every platform default.
+        assert_eq!(
+            selected_detector_mode_from(Some("ui-scan"), true),
+            MeetingDetectorMode::UiScan
+        );
+        assert_eq!(
+            selected_detector_mode_from(Some("UI-Scan"), true),
+            MeetingDetectorMode::UiScan
+        );
+        assert_eq!(
+            selected_detector_mode_from(Some("audio-process"), false),
+            MeetingDetectorMode::AudioProcess
+        );
+        assert_eq!(
+            selected_detector_mode_from(Some(" ui-scan "), true),
+            MeetingDetectorMode::UiScan
         );
     }
 }

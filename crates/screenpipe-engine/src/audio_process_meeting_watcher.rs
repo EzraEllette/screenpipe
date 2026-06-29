@@ -500,12 +500,17 @@ pub async fn run_audio_process_meeting_detection_loop(
             .filter(|(key, _)| live_session_keys.contains(key))
             .cloned()
             .collect();
+        let ax_candidates = if needs_ax_resolution(&state) {
+            should_use_ax_fallback(&live_tracked, &profiles, &ignored_terms).await
+        } else {
+            Vec::new()
+        };
         let mut candidates = resolve_tracked_candidates(
             &db,
             &profiles,
             &ignored_terms,
             &tracked,
-            should_use_ax_fallback(&live_tracked, &profiles, &ignored_terms).await,
+            ax_candidates,
         )
         .await;
 
@@ -666,6 +671,18 @@ async fn resolve_tracked_candidates(
             )
         })
         .collect()
+}
+
+/// AX resolution (a full accessibility-tree walk of every browser window) is
+/// only useful while we're still trying to attribute a browser to a known
+/// meeting platform. Once a meeting is `Active` — or already winding down in
+/// `Ending` — the platform is settled, so re-walking the tree every
+/// `ACTIVE_POLL_INTERVAL` for the rest of the call is pure overhead.
+fn needs_ax_resolution(state: &AudioProcessMeetingState) -> bool {
+    !matches!(
+        state,
+        AudioProcessMeetingState::Active { .. } | AudioProcessMeetingState::Ending { .. }
+    )
 }
 
 async fn should_use_ax_fallback(
@@ -1275,27 +1292,13 @@ pub(crate) fn advance_audio_process_state(
                 )
             } else if let Some((next_browser_app, key, next_first_seen_at)) = unresolved {
                 if key == session_key {
-                    if now.duration_since(first_seen_at) >= confirm_window {
-                        let platform = UNKNOWN_BROWSER_PLATFORM.to_string();
-                        return (
-                            AudioProcessMeetingState::Active {
-                                meeting_id: -1,
-                                platform: platform.clone(),
-                                session_key: session_key.clone(),
-                                meeting_url: None,
-                                first_seen_at,
-                                last_seen_at: now,
-                                is_browser: true,
-                            },
-                            Some(AudioProcessStateAction::StartMeeting {
-                                platform,
-                                session_key,
-                                meeting_url: None,
-                                first_seen_at,
-                                is_browser: true,
-                            }),
-                        );
-                    }
+                    // A browser holding the mic is NOT sufficient evidence to
+                    // auto-start a recorded meeting: voice notes, dictation, and
+                    // arbitrary WebRTC sites all hold the mic. We only start once
+                    // the browser resolves to a known platform/URL (the `resolved`
+                    // branch above), so an unresolved browser stays a pending
+                    // candidate indefinitely while we keep attempting resolution.
+                    let _ = confirm_window;
                     (
                         AudioProcessMeetingState::CandidateUnresolvedBrowser {
                             browser_app: next_browser_app,
@@ -1426,16 +1429,30 @@ fn session_present(
     platform: &str,
     meeting_url: Option<&str>,
 ) -> bool {
+    // A reattached meeting (adopted from the DB after a restart) has a synthetic
+    // session key and no real process/url to reconcile against — and a browser
+    // meeting (e.g. Google Meet) can take several poll cycles to re-resolve its
+    // platform after restart, surfacing as an `UnresolvedBrowser` in the gap.
+    // Keep it alive while *any* live meeting session is present; genuine
+    // disappearance still flows through the normal ending grace.
+    if session_key.is_reattached() {
+        return candidates.iter().any(|candidate| {
+            matches!(
+                candidate,
+                ResolvedMeetingCandidate::Native { .. }
+                    | ResolvedMeetingCandidate::Browser { .. }
+                    | ResolvedMeetingCandidate::UnresolvedBrowser { .. }
+            )
+        });
+    }
+    // Non-reattached sessions must match on the real process key (the
+    // `is_reattached()` branch above is the only place a synthetic key matches).
     candidates.iter().any(|candidate| match candidate {
         ResolvedMeetingCandidate::Native {
             platform: candidate_platform,
             session_key: key,
             ..
-        } => {
-            meeting_url.is_none()
-                && (key == session_key || session_key.is_reattached())
-                && candidate_platform == platform
-        }
+        } => meeting_url.is_none() && key == session_key && candidate_platform == platform,
         ResolvedMeetingCandidate::Browser {
             platform: candidate_platform,
             session_key: key,
@@ -1443,9 +1460,9 @@ fn session_present(
             ..
         } => {
             if platform == UNKNOWN_BROWSER_PLATFORM && meeting_url.is_none() {
-                key == session_key || session_key.is_reattached()
+                key == session_key
             } else {
-                (key == session_key || session_key.is_reattached())
+                key == session_key
                     && candidate_platform == platform
                     && meeting_url.is_none_or(|url| url == candidate_meeting_url)
             }
@@ -1453,9 +1470,7 @@ fn session_present(
         ResolvedMeetingCandidate::UnresolvedBrowser {
             session_key: key, ..
         } => {
-            platform == UNKNOWN_BROWSER_PLATFORM
-                && meeting_url.is_none()
-                && (key == session_key || session_key.is_reattached())
+            platform == UNKNOWN_BROWSER_PLATFORM && meeting_url.is_none() && key == session_key
         }
         _ => false,
     })
@@ -1984,7 +1999,7 @@ mod tests {
     }
 
     #[test]
-    fn browser_helper_unrelated_tab_starts_unknown() {
+    fn browser_helper_unrelated_tab_does_not_auto_start() {
         let profiles = load_detection_profiles();
         let process = chrome_process();
         let evidence = vec![BrowserPageEvidence {
@@ -2023,20 +2038,19 @@ mod tests {
             Duration::from_secs(3),
             Duration::from_secs(20),
         );
+        // An unattributed browser tab holding the mic (here a Calendar tab) must
+        // never auto-start a recorded "Unknown" meeting: it stays a pending
+        // candidate, waiting to resolve to a known platform/URL.
         assert!(action.is_none());
+        assert!(second_action.is_none());
         assert!(matches!(
-            second_action,
-            Some(AudioProcessStateAction::StartMeeting {
-                platform,
-                meeting_url: None,
-                is_browser: true,
-                ..
-            }) if platform == UNKNOWN_BROWSER_PLATFORM
+            _state,
+            AudioProcessMeetingState::CandidateUnresolvedBrowser { .. }
         ));
     }
 
     #[test]
-    fn arc_slack_client_url_starts_unknown_when_unattributed() {
+    fn arc_slack_client_url_does_not_auto_start_when_unattributed() {
         let profiles = load_detection_profiles();
         let process = arc_process();
         let evidence = vec![BrowserPageEvidence {
@@ -2080,14 +2094,12 @@ mod tests {
             Duration::from_secs(3),
             Duration::from_secs(20),
         );
+        // A Slack web-client tab is not meeting evidence; the unattributed
+        // browser must not auto-start a recorded meeting.
+        assert!(action.is_none());
         assert!(matches!(
-            action,
-            Some(AudioProcessStateAction::StartMeeting {
-                platform,
-                meeting_url: None,
-                is_browser: true,
-                ..
-            }) if platform == UNKNOWN_BROWSER_PLATFORM
+            _state,
+            AudioProcessMeetingState::CandidateUnresolvedBrowser { .. }
         ));
     }
 
@@ -2125,7 +2137,7 @@ mod tests {
     }
 
     #[test]
-    fn unresolved_browser_starts_unknown_after_confirmation() {
+    fn unresolved_browser_does_not_start_after_confirmation() {
         let process = chrome_process();
         let key = ProcessKey::from_process(&process).unwrap();
         let start = Instant::now();
@@ -2151,14 +2163,13 @@ mod tests {
             Duration::from_secs(3),
             Duration::from_secs(20),
         );
+        // Holding the mic in an unresolved browser past the confirm window must
+        // not auto-start a meeting; we only start once it resolves to a known
+        // platform/URL.
+        assert!(action.is_none());
         assert!(matches!(
-            action,
-            Some(AudioProcessStateAction::StartMeeting {
-                platform,
-                meeting_url: None,
-                is_browser: true,
-                ..
-            }) if platform == UNKNOWN_BROWSER_PLATFORM
+            _state,
+            AudioProcessMeetingState::CandidateUnresolvedBrowser { .. }
         ));
     }
 
@@ -2507,5 +2518,117 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(open_count.0, 1);
+    }
+
+    #[test]
+    fn reattached_meeting_survives_browser_resolution_lag() {
+        let process = chrome_process();
+        let key = ProcessKey::from_process(&process).unwrap();
+        let start = Instant::now();
+        // Mimics the post-restart reattach in `run_audio_process_meeting_detection_loop`:
+        // a synthetic `reattached:` key, the platform from the DB row, is_browser:false.
+        let reattached = AudioProcessMeetingState::Active {
+            meeting_id: 42,
+            platform: "Google Meet".to_string(),
+            session_key: ProcessKey::reattached("Google Meet"),
+            meeting_url: None,
+            first_seen_at: start,
+            last_seen_at: start,
+            is_browser: false,
+        };
+        // In the seconds after a restart the browser holding the mic is still
+        // unresolved (DB page evidence / AX walk haven't caught up yet), so it
+        // surfaces as an UnresolvedBrowser (platform "Unknown").
+        let unresolved = ResolvedMeetingCandidate::UnresolvedBrowser {
+            browser_app: "Google Chrome".to_string(),
+            session_key: key,
+            first_seen_at: start,
+            process,
+        };
+        let (state, action) = advance_audio_process_state(
+            reattached,
+            std::slice::from_ref(&unresolved),
+            std::slice::from_ref(&unresolved),
+            start + Duration::from_secs(1),
+            Duration::from_secs(3),
+            Duration::from_secs(20),
+        );
+        assert!(
+            matches!(state, AudioProcessMeetingState::Active { .. }),
+            "a reattached meeting must survive the post-restart resolution lag, not drop to Ending"
+        );
+        assert!(action.is_none());
+    }
+
+    #[test]
+    fn reattached_meeting_ends_when_no_session_is_live() {
+        let start = Instant::now();
+        let reattached = AudioProcessMeetingState::Active {
+            meeting_id: 42,
+            platform: "Google Meet".to_string(),
+            session_key: ProcessKey::reattached("Google Meet"),
+            meeting_url: None,
+            first_seen_at: start,
+            last_seen_at: start,
+            is_browser: false,
+        };
+        // No live meeting candidates at all — the reattached meeting must still
+        // wind down (the relaxation only keeps it alive while *some* session is live).
+        let (state, _) = advance_audio_process_state(
+            reattached,
+            &[],
+            &[],
+            start + Duration::from_secs(1),
+            Duration::from_secs(3),
+            Duration::from_secs(20),
+        );
+        assert!(matches!(state, AudioProcessMeetingState::Ending { .. }));
+    }
+
+    #[test]
+    fn ax_resolution_only_runs_before_a_meeting_is_active() {
+        let process = chrome_process();
+        let key = ProcessKey::from_process(&process).unwrap();
+        let now = Instant::now();
+
+        // States where the browser is still being resolved must run the AX walk.
+        assert!(needs_ax_resolution(&AudioProcessMeetingState::Idle));
+        assert!(needs_ax_resolution(&AudioProcessMeetingState::Candidate {
+            platform: "Google Meet".to_string(),
+            session_key: key.clone(),
+            meeting_url: None,
+            first_seen_at: now,
+            is_browser: true,
+        }));
+        assert!(needs_ax_resolution(
+            &AudioProcessMeetingState::CandidateUnresolvedBrowser {
+                browser_app: "Google Chrome".to_string(),
+                session_key: key.clone(),
+                first_seen_at: now,
+                last_resolution_attempt: now,
+            }
+        ));
+
+        // Once a meeting is Active (or winding down), the platform is already
+        // settled — re-walking the AX tree every 1s for the whole call is the
+        // expensive no-op the review flagged.
+        assert!(!needs_ax_resolution(&AudioProcessMeetingState::Active {
+            meeting_id: 1,
+            platform: "Google Meet".to_string(),
+            session_key: key.clone(),
+            meeting_url: None,
+            first_seen_at: now,
+            last_seen_at: now,
+            is_browser: true,
+        }));
+        assert!(!needs_ax_resolution(&AudioProcessMeetingState::Ending {
+            meeting_id: 1,
+            platform: "Google Meet".to_string(),
+            session_key: key,
+            meeting_url: None,
+            first_seen_at: now,
+            since: now,
+            is_browser: true,
+        }));
     }
 }
