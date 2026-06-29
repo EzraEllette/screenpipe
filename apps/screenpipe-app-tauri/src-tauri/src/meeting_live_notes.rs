@@ -405,7 +405,17 @@ async fn was_prewarmed(
         .and_then(|m| m.start.as_deref())
         .filter(|s| !s.trim().is_empty())
     {
-        if guard.contains_key(&format!("|{start}")) {
+        // The bare `|{start}` key is only ever emitted by an *untitled*
+        // event's prewarm. Honor it only when this started event is itself
+        // untitled, so a stray untitled prewarm can't swallow a distinct
+        // *titled* meeting that merely shares the same start instant
+        // (e.g. a double-booked slot).
+        let calendar_title_empty = calendar_match
+            .as_ref()
+            .and_then(|m| m.title.as_deref())
+            .map(|t| t.trim().is_empty())
+            .unwrap_or(true);
+        if calendar_title_empty && guard.contains_key(&format!("|{start}")) {
             return true;
         }
         return candidate_titles
@@ -814,6 +824,30 @@ mod tests {
         assert!(
             was_prewarmed(&suppressed, &calendar_match, "Google Meet", "Google Meet").await,
             "untitled calendar prewarm should still suppress the matching started toast"
+        );
+    }
+
+    #[tokio::test]
+    async fn dedup_untitled_prewarm_does_not_suppress_titled_meeting_at_same_start() {
+        let suppressed: Arc<RwLock<HashMap<String, Instant>>> =
+            Arc::new(RwLock::new(HashMap::new()));
+        let start = "2026-05-25T09:00:00+00:00";
+        // An untitled event prewarmed at this start → guard holds `|{start}`.
+        suppressed
+            .write()
+            .await
+            .insert(prewarm_key("", start), Instant::now());
+
+        // A distinct, *titled* meeting starts at the same instant (double-booked).
+        // The bare `|{start}` key belongs to the untitled event, not this one,
+        // so this started toast must still fire.
+        let titled_match = Some(CalendarMatch {
+            title: Some("Standup".into()),
+            start: Some(start.into()),
+        });
+        assert!(
+            !was_prewarmed(&suppressed, &titled_match, "Standup", "Standup").await,
+            "a titled meeting must not be suppressed by an untitled event's prewarm at the same start"
         );
     }
 }
