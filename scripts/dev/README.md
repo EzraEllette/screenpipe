@@ -93,9 +93,30 @@ local clone — so nothing here changes; it's purely a hardware choice. Skip it 
 only have one machine; `sp-dev-cli`'s isolated dir+port already lets dev and prod
 coexist on a single box.
 
+## Producing PR evidence
+
+Every PR gets asked for before/after evidence (the `potential-ai-slop` bot, and
+[`CONTRIBUTING.md`](../../CONTRIBUTING.md#pull-requests)). For app/UX changes you
+film the window. For backend / CLI / DB / log changes there's no window — so show
+the old behavior then the fixed behavior **in a terminal**. `pr-evidence` records
+both in one session and renders a single GIF (headless, no browser — an agent can
+run it end to end):
+
+```bash
+brew install asciinema agg
+./scripts/dev/pr-evidence --out fix.gif \
+  --before-label "before (#NNNN)" --before 'cmd that shows the bug' \
+  --after-label  "after"          --after  'cmd that shows it fixed'
+```
+
+Both commands run in the current directory. Host the GIF per
+[`CONTRIBUTING.md`](../../CONTRIBUTING.md#pull-requests) (drag-drop into the PR, or
+a fork release asset) — don't commit it to the repo. Unlike the dev scripts above,
+this one isn't macOS-specific.
+
 ## Scope
 
-macOS on Apple Silicon, which is screenpipe's primary dev target. The scripts use
-`osascript`/`pgrep`/`open` semantics that are macOS-specific; they aren't written or
-tested for Linux or Windows. Build screenpipe on those platforms with the steps in
-[`CONTRIBUTING.md`](../../CONTRIBUTING.md).
+macOS on Apple Silicon, which is screenpipe's primary dev target. The `sp-*` dev
+scripts use `osascript`/`pgrep`/`open` semantics that are macOS-specific; they aren't
+written or tested for Linux or Windows (`pr-evidence` is portable). Build screenpipe
+on those platforms with the steps in [`CONTRIBUTING.md`](../../CONTRIBUTING.md).
