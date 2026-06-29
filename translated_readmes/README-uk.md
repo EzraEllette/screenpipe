@@ -13,8 +13,8 @@
 <h1 align="center">[ screenpipe ]</h1>
 
 
-<p align="center">das 24/7-Gedächtnis deines Computers</p>
-<p align="center">Open-Source-rewind. 100% lokal. Deine Daten gehören dir.</p>
+<p align="center">пам'ять твого комп'ютера 24/7</p>
+<p align="center">Open-source rewind. 100% локально. Твої дані належать тобі.</p>
 
 
 
@@ -26,10 +26,10 @@
 
 <p align="center">
     <a href="https://screenpi.pe" target="_blank">
-        <img src="https://img.shields.io/badge/herunterladen-Desktop--App-black?style=for-the-badge" alt="herunterladen">
+        <img src="https://img.shields.io/badge/завантажити-Desktop%20застосунок-black?style=for-the-badge" alt="завантажити">
     </a>
     <a href="https://github.com/screenpipe/screenpipe/releases?q=mcp-v&expanded=true" target="_blank">
-        <img src="https://img.shields.io/badge/installieren-Claude--Extension-D97706?style=for-the-badge&logo=anthropic&logoColor=white" alt="claude extension installieren">
+        <img src="https://img.shields.io/badge/встановити-Claude%20розширення-D97706?style=for-the-badge&logo=anthropic&logoColor=white" alt="встановити розширення claude">
     </a>
 </p>
 
@@ -38,7 +38,7 @@
         <img src="https://img.shields.io/discord/823813159592001537?color=5865F2&logo=discord&logoColor=white&style=flat-square" alt="discord">
     </a>
     <a href="https://twitter.com/screenpipe">
-        <img alt="x" src="https://img.shields.io/twitter/url/https/twitter.com/diffuserslib.svg?style=social&label=folgen%20%40screenpipe">
+        <img alt="x" src="https://img.shields.io/twitter/url/https/twitter.com/diffuserslib.svg?style=social&label=стежити%20%40screenpipe">
     </a>
 </p>
 
@@ -50,36 +50,36 @@
 
 ---
 
-## was ist das?
+## що це?
 
-screenpipe zeichnet deinen Bildschirm und dein Audio rund um die Uhr auf, speichert alles lokal und verbindet deinen digitalen Verlauf mit KI.
+screenpipe записує твій екран та аудіо цілодобово, зберігає все локально та з'єднує твою цифрову історію зі штучним інтелектом.
 
 ```
 ┌─────────────────────────────────────────┐
-│  Bildschirm + Audio → lokal → KI        │
+│  екран + аудіо → локально → ШІ          │
 └─────────────────────────────────────────┘
 ```
 
-- **alles merken** — vergiss nie wieder, was du gesehen, gehört oder getan hast
-- **KI-Suche** — finde alles in natürlicher Sprache
-- **100% lokal** — deine Daten verlassen niemals deinen Rechner
-- **Open Source** — überprüfbar, anpassbar, dein
+- **пам'ятати все** — більше ніколи не забувай, що ти бачив, чув чи робив
+- **пошук зі ШІ** — знаходь будь-що природною мовою
+- **100% локально** — твої дані ніколи не залишають твій комп'ютер
+- **відкритий код** — перевіряй, змінюй, володій
 
-## installation
+## встановлення
 
-[Desktop-App herunterladen](https://screenpi.pe) — macOS, Windows, Linux
+[завантаж десктоп-застосунок](https://screenpi.pe) — macOS, Windows, Linux
 
-## anforderungen
+## вимоги
 
 - 10% CPU
-- 4 GB RAM
-- ~15 GB Speicher pro Monat
-- offline-fähig
+- 4 ГБ RAM
+- ~15 ГБ пам'яті на місяць
+- працює офлайн
 
 ---
 
 <p align="center">
-    <a href="https://docs.screenpi.pe">Dokumentation</a> ·
+    <a href="https://docs.screenpi.pe">Документація</a> ·
     <a href="https://discord.gg/screenpipe">discord</a> ·
     <a href="https://twitter.com/screenpipe">x</a>
 </p>
