@@ -645,6 +645,37 @@ fn build_capture(
         .uid()
         .map_err(|s| anyhow!("Failed to get tap UID: {:?}", s))?;
     let sub_tap = cf::DictionaryOf::with_keys_values(&[sub_keys::uid()], &[tap_uid.as_type_ref()]);
+    // #4638: on macOS < 26, an aggregate anchored to the system default OUTPUT
+    // device delivers only silence whenever that anchor device is idle — i.e.
+    // whenever the user's audio is routed to a non-default device (Zoom/Meet →
+    // AirPods, per-app routing, etc.). The tap itself captures fine; it's the
+    // aggregate's dependency on the output sub-device that goes mute. Reproduced
+    // on macOS 15.6.1 and fixed by making the TAP the aggregate's main device
+    // with NO output sub-device, so capture no longer depends on which output
+    // device the audio lands on.
+    //
+    // Scoped to macOS < 26: Tahoe (26+) does not have this bug (its global tap
+    // is device-routing-independent), and the original output-anchored aggregate
+    // there keeps the aggregate's nominal sample rate locked to the real output
+    // device (which avoids the 96kHz-DAC 2x-slowmo issue). So we only change
+    // behavior on the releases that are actually broken.
+    let tap_only = detect_os_version().is_some_and(|(major, _, _)| major < 26);
+    if tap_only {
+        info!(
+            "Process Tap: macOS <26 — TAP-ONLY aggregate (tap is main device, no output \
+             sub-device anchor) to fix #4638 off-default-output silence"
+        );
+    }
+    let main_sub: &cf::Type = if tap_only {
+        tap_uid.as_type_ref()
+    } else {
+        output_uid.as_type_ref()
+    };
+    let subs_array = if tap_only {
+        cf::ArrayOf::<cf::DictionaryOf<cf::String, cf::Type>>::from_slice(&[])
+    } else {
+        cf::ArrayOf::from_slice(&[sub_device.as_ref()])
+    };
     let agg_desc = cf::DictionaryOf::with_keys_values(
         &[
             agg_keys::is_private(),
@@ -661,9 +692,9 @@ fn build_capture(
             cf::Boolean::value_false(),
             cf::Boolean::value_true(),
             cf::str!(c"ScreenpipeProcessTap"),
-            &output_uid,
+            main_sub,
             &cf::Uuid::new().to_cf_string(),
-            &cf::ArrayOf::from_slice(&[sub_device.as_ref()]),
+            &subs_array,
             &cf::ArrayOf::from_slice(&[sub_tap.as_ref()]),
         ],
     );
