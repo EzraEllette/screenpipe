@@ -254,8 +254,6 @@ curl -X POST http://localhost:3030/raw_sql \
 
 **Rules**: Every SELECT needs LIMIT. Always filter by time. Read-only. Use `datetime('now', '-24 hours')` for time math.
 
-**Timestamp caveat**: DB timestamps are stored as RFC3339 strings like `2026-06-26T18:01:14.214586+00:00`. Do not compare these directly to SQLite `datetime()` strings like `timestamp > datetime('now', '-10 seconds')`: the `T` vs space makes it a lexical string comparison and can include stale same-day rows. Use `datetime(timestamp) > datetime('now', '-10 seconds')`, or for indexed string comparisons use an RFC3339-shaped cutoff: `timestamp > strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now', '-10 seconds')`.
-
 **WARNING**: Do NOT use frame counts for time estimates — frames are event-driven, not fixed-interval. Use `/activity-summary` for screen time.
 
 ### Schema
@@ -278,7 +276,7 @@ curl -X POST http://localhost:3030/raw_sql \
 ```sql
 -- Most used apps (last 24h)
 SELECT app_name, COUNT(*) as frames FROM frames
-WHERE timestamp > strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now', '-24 hours') AND app_name IS NOT NULL
+WHERE timestamp > datetime('now', '-24 hours') AND app_name IS NOT NULL
 GROUP BY app_name ORDER BY frames DESC LIMIT 20
 
 -- Most visited domains
@@ -286,18 +284,18 @@ SELECT CASE WHEN INSTR(SUBSTR(browser_url, INSTR(browser_url, '://') + 3), '/') 
   THEN SUBSTR(SUBSTR(browser_url, INSTR(browser_url, '://') + 3), 1, INSTR(SUBSTR(browser_url, INSTR(browser_url, '://') + 3), '/') - 1)
   ELSE SUBSTR(browser_url, INSTR(browser_url, '://') + 3) END as domain,
 COUNT(*) as visits FROM frames
-WHERE timestamp > strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now', '-24 hours') AND browser_url IS NOT NULL
+WHERE timestamp > datetime('now', '-24 hours') AND browser_url IS NOT NULL
 GROUP BY domain ORDER BY visits DESC LIMIT 20
 
 -- Speaker stats
 SELECT COALESCE(NULLIF(s.name, ''), 'Unknown') as speaker, COUNT(*) as segments
 FROM audio_transcriptions at LEFT JOIN speakers s ON at.speaker_id = s.id
-WHERE at.timestamp > strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now', '-24 hours')
+WHERE at.timestamp > datetime('now', '-24 hours')
 GROUP BY at.speaker_id ORDER BY segments DESC LIMIT 20
 
 -- Context switches per hour
 SELECT strftime('%H:00', timestamp) as hour, COUNT(*) as switches
-FROM ui_events WHERE event_type = 'app_switch' AND timestamp > strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now', '-24 hours')
+FROM ui_events WHERE event_type = 'app_switch' AND timestamp > datetime('now', '-24 hours')
 GROUP BY hour ORDER BY hour LIMIT 24
 ```
 
@@ -377,7 +375,7 @@ Meeting updates use `PUT /meetings/:id`, not PATCH. Before appending an AI-gener
 | `note` | string? | User notes / appended AI summaries |
 | `detection_source` | string | How detected (`app`, `calendar`, `ui`, etc.) |
 
-Also available via raw SQL: `SELECT * FROM meetings WHERE meeting_start > strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now', '-24 hours') LIMIT 20`
+Also available via raw SQL: `SELECT * FROM meetings WHERE meeting_start > datetime('now', '-24 hours') LIMIT 20`
 
 ---
 
