@@ -252,9 +252,9 @@ curl -X POST http://localhost:3030/raw_sql \
   -d '{"query": "SELECT ... LIMIT 100"}'
 ```
 
-**Rules**: Every SELECT needs LIMIT. Always filter by time. Read-only. Use `datetime('now', '-24 hours')` for time math.
+**Rules**: Every SELECT needs LIMIT. Always filter by time. Read-only. For time math, see the timestamp caveat below.
 
-**Timestamp caveat**: DB timestamps are stored as RFC3339 strings like `2026-06-26T18:01:14.214586+00:00`. Do not compare these directly to SQLite `datetime()` strings like `timestamp > datetime('now', '-10 seconds')`: the `T` vs space makes it a lexical string comparison and can include stale same-day rows. Use `datetime(timestamp) > datetime('now', '-10 seconds')`, or for indexed string comparisons use an RFC3339-shaped cutoff: `timestamp > strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now', '-10 seconds')`.
+**Timestamp caveat**: DB timestamps are stored as RFC3339 strings — usually `2026-06-26T18:01:14.214586+00:00` (frames / audio_transcriptions / ui_events), though some tables (e.g. `meetings.meeting_start`, memories) use a `Z` suffix with milliseconds: `2026-06-26T18:01:14.214Z`. Do not compare either form directly to SQLite `datetime()` strings like `timestamp > datetime('now', '-10 seconds')`: the `T` vs space makes it a lexical string comparison and can include stale same-day rows. Use `datetime(timestamp) > datetime('now', '-10 seconds')` (works for both forms), or for indexed string comparisons use an RFC3339-shaped cutoff: `timestamp > strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now', '-10 seconds')`.
 
 **WARNING**: Do NOT use frame counts for time estimates — frames are event-driven, not fixed-interval. Use `/activity-summary` for screen time.
 
