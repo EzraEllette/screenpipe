@@ -1424,25 +1424,25 @@ fn session_present(
             session_key: key,
             ..
         } => meeting_url.is_none() && key == session_key && candidate_platform == platform,
+        // A confirmed browser meeting is keyed by its audio session. Once it is
+        // live, the same browser audio session still holding the mic is sufficient
+        // proof the call is ongoing — so keep it alive on the `session_key` alone.
+        // We intentionally do NOT require the platform/URL to keep re-resolving:
+        // browser URL/platform attribution comes from a rolling 10s window of
+        // screen-capture evidence, which lapses whenever the user switches tabs or
+        // apps, the call goes fullscreen, or capture simply misses the URL. When
+        // that happens the candidate degrades to `UnresolvedBrowser` (or surfaces a
+        // slightly different URL string), but the audio session is unchanged. The
+        // mic is only released when the user actually leaves the call, which drops
+        // the `session_key` and lets the normal ending grace fire. URL/platform
+        // strictness still gates *starting* a meeting; this check only keeps a
+        // already-live one alive.
         ResolvedMeetingCandidate::Browser {
-            platform: candidate_platform,
-            session_key: key,
-            meeting_url: candidate_meeting_url,
-            ..
-        } => {
-            if platform == UNKNOWN_BROWSER_PLATFORM && meeting_url.is_none() {
-                key == session_key
-            } else {
-                key == session_key
-                    && candidate_platform == platform
-                    && meeting_url.is_none_or(|url| url == candidate_meeting_url)
-            }
-        }
-        ResolvedMeetingCandidate::UnresolvedBrowser {
             session_key: key, ..
-        } => {
-            platform == UNKNOWN_BROWSER_PLATFORM && meeting_url.is_none() && key == session_key
         }
+        | ResolvedMeetingCandidate::UnresolvedBrowser {
+            session_key: key, ..
+        } => key == session_key,
         _ => false,
     })
 }
@@ -2186,6 +2186,50 @@ mod tests {
     }
 
     #[test]
+    fn resolved_browser_meeting_stays_alive_when_url_evidence_lost() {
+        // Regression: a confirmed Google Meet (browser) must NOT auto-end just
+        // because screen-capture URL evidence lapsed — e.g. the user switched to
+        // another tab/app, the call went fullscreen, or capture simply missed the
+        // URL within the 10s evidence window. The same browser audio session is
+        // still holding the mic, which is sufficient proof the call is ongoing.
+        let process = chrome_process();
+        let key = ProcessKey::from_process(&process).unwrap();
+        let start = Instant::now();
+        let active = AudioProcessMeetingState::Active {
+            meeting_id: 7,
+            platform: "Google Meet".to_string(),
+            session_key: key.clone(),
+            meeting_url: Some("https://meet.google.com/abc-defg-hij".to_string()),
+            first_seen_at: start,
+            last_seen_at: start,
+            is_browser: true,
+        };
+        // URL evidence lapsed this poll: the same browser audio session still
+        // holds the mic, but it no longer resolves to a known platform/URL.
+        let unresolved = ResolvedMeetingCandidate::UnresolvedBrowser {
+            browser_app: "Google Chrome".to_string(),
+            session_key: key,
+            first_seen_at: start,
+            process,
+        };
+
+        let (state, action) = advance_audio_process_state(
+            active,
+            std::slice::from_ref(&unresolved),
+            std::slice::from_ref(&unresolved),
+            start + Duration::from_secs(1),
+            Duration::from_secs(3),
+            Duration::from_secs(20),
+        );
+
+        assert!(
+            matches!(state, AudioProcessMeetingState::Active { .. }),
+            "resolved browser meeting must stay Active while the same audio session holds the mic, got {state:?}"
+        );
+        assert!(action.is_none());
+    }
+
+    #[test]
     fn sticky_process_absent_from_live_snapshot_cannot_start() {
         let process = chrome_process();
         let key = ProcessKey::from_process(&process).unwrap();
@@ -2270,7 +2314,15 @@ mod tests {
     }
 
     #[test]
-    fn unresolved_browser_does_not_keep_active_meeting_alive() {
+    fn browser_meeting_ends_only_after_audio_session_disappears() {
+        // Corrected behavior (previously `unresolved_browser_does_not_keep_active_meeting_alive`,
+        // which asserted the opposite). A confirmed browser meeting whose URL
+        // evidence lapsed — degrading the live candidate to `UnresolvedBrowser`
+        // with the SAME audio session — must stay Active: the mic is still held,
+        // so the call is still ongoing. The meeting only winds down once the audio
+        // session actually disappears (the user left the call), after which the
+        // normal ending grace fires. This is the keep-alive-on-audio-session fix
+        // for browser calls ending while the user is still in them.
         let process = chrome_process();
         let key = ProcessKey::from_process(&process).unwrap();
         let start = Instant::now();
@@ -2291,7 +2343,9 @@ mod tests {
         };
         let unresolved_candidates = vec![unresolved];
 
-        let (ending, action) = advance_audio_process_state(
+        // URL evidence lapsed but the same browser audio session still holds the
+        // mic → stay Active, no end.
+        let (still_active, action) = advance_audio_process_state(
             active,
             &unresolved_candidates,
             &unresolved_candidates,
@@ -2299,14 +2353,30 @@ mod tests {
             Duration::from_secs(3),
             Duration::from_secs(20),
         );
+        assert!(matches!(
+            still_active,
+            AudioProcessMeetingState::Active { .. }
+        ));
+        assert!(action.is_none());
+
+        // Mic released (audio session gone) → transition toward Ending.
+        let (ending, action) = advance_audio_process_state(
+            still_active,
+            &[],
+            &[],
+            start + Duration::from_secs(2),
+            Duration::from_secs(3),
+            Duration::from_secs(20),
+        );
         assert!(matches!(ending, AudioProcessMeetingState::Ending { .. }));
         assert!(action.is_none());
 
+        // Past the ending grace with the session still gone → EndMeeting.
         let (_idle, action) = advance_audio_process_state(
             ending,
             &[],
             &[],
-            start + Duration::from_secs(22),
+            start + Duration::from_secs(23),
             Duration::from_secs(3),
             Duration::from_secs(20),
         );
