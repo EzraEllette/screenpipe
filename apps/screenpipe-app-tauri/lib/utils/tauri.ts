@@ -553,6 +553,14 @@ async getCachedSuggestions() : Promise<Result<CachedSuggestions, string>> {
     else return { status: "error", error: e  as any };
 }
 },
+async getChatsDir() : Promise<Result<string, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_chats_dir") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 /**
  * Read the user's screenpipe cloud session JWT.
  *
