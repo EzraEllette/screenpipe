@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 
 use crate::analytics;
-use crate::meeting_detector::ScanResult;
+use crate::meeting_watcher::shared::scanner::ScanResult;
 
 #[derive(Debug, Clone)]
 pub(crate) struct MeetingDetectionScanSummary {

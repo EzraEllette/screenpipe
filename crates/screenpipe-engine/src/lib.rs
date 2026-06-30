@@ -4,7 +4,6 @@
 
 pub mod analytics;
 pub mod archive;
-pub mod audio_process_meeting_watcher;
 pub mod auth_key;
 mod auto_destruct;
 pub mod calendar_speaker_id;
@@ -27,9 +26,7 @@ pub mod high_fps_controller;
 pub mod hot_frame_cache;
 pub mod logging;
 pub mod mcp_servers_api;
-pub mod meeting_detector;
 pub mod meeting_export;
-mod meeting_telemetry;
 pub mod meeting_watcher;
 pub mod permission_monitor;
 pub mod pipe_permissions_middleware;
