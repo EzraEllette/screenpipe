@@ -165,18 +165,10 @@ async function copyBunBinary() {
 			return;
 		}
 
-		if (process.env.CI === 'true' || process.env.GITHUB_ACTIONS === 'true') {
-			const systemBun = await findOnPath('bun');
-			if (!systemBun) {
-				throw new Error('CI expected bun on PATH, but command lookup failed');
-			}
-			console.log(`using CI bun binary for tauri sidecar: ${systemBun}`);
-			await copyFile(systemBun, bunDest1);
-			return;
-		}
-
 		// Download the baseline bun variant for broader glibc compatibility.
-		// Use npm's tarball mirror because GitHub release assets can 504.
+		// Use npm's tarball mirror because GitHub release assets can 504. Do
+		// this in CI too; the runner's bun can be a host-optimized binary, but
+		// the AppImage sidecar needs to run on older and different Linux hosts.
 		const bunVersion = '1.3.10';
 		const baselineUrl = `https://registry.npmjs.org/@oven/bun-linux-x64-baseline/-/bun-linux-x64-baseline-${bunVersion}.tgz`;
 		console.log(`downloading bun baseline v${bunVersion} for linux...`);
@@ -317,9 +309,10 @@ async function downloadStaticLinuxFfmpeg() {
 	}
 
 	// johnvansickle.com intermittently returns a transient HTTP 415 (and the odd
-	// 5xx). wget does NOT retry HTTP error responses by default — one 415 then
-	// hard-fails the whole build — so opt those codes into the retry budget.
-	await $`wget --no-config --tries=5 --waitretry=10 --retry-on-http-error=415,429,500,502,503,504 --timeout=60 ${config.linux.ffmpegUrl} -O ${archive}`
+	// 5xx). downloadFile() retries on any curl failure — including HTTP error
+	// codes via curl -f — so those transient responses fall inside the retry
+	// budget instead of hard-failing the build.
+	await downloadFile(config.linux.ffmpegUrl, archive, { retries: 5, timeoutMs: 120000 })
 	await $`tar xf ${archive}`
 
 	const entries = await fs.readdir(cwd, { withFileTypes: true });
@@ -330,6 +323,37 @@ async function downloadStaticLinuxFfmpeg() {
 
 	await fs.rename(path.join(cwd, extracted.name), config.ffmpegRealname)
 	await fs.rm(archive, { force: true })
+}
+
+async function copySystemLinuxFfmpeg() {
+	await fs.rm(config.ffmpegRealname, { recursive: true, force: true });
+	await fs.mkdir(config.ffmpegRealname, { recursive: true });
+	await copySystemBinary('ffmpeg', path.join(config.ffmpegRealname, 'ffmpeg'));
+	await copySystemBinary('ffprobe', path.join(config.ffmpegRealname, 'ffprobe'));
+
+	const qtFaststartDest = path.join(config.ffmpegRealname, 'qt-faststart');
+	const qtFaststart = await findOnPath('qt-faststart');
+	if (qtFaststart) {
+		await copyFile(qtFaststart, qtFaststartDest);
+		console.log(`using system qt-faststart: ${qtFaststart} -> ${qtFaststartDest}`);
+		return;
+	}
+
+	await fs.writeFile(
+		qtFaststartDest,
+		`#!/usr/bin/env sh
+set -eu
+
+if [ "$#" -lt 2 ]; then
+  echo "usage: qt-faststart input output" >&2
+  exit 2
+fi
+
+exec "$(dirname "$0")/ffmpeg" -y -i "$1" -c copy -movflags faststart "$2"
+`
+	);
+	await fs.chmod(qtFaststartDest, 0o755);
+	console.log(`created ffmpeg-backed qt-faststart wrapper at ${qtFaststartDest}`);
 }
 
 async function copySystemBinary(binaryName, destination) {
@@ -552,7 +576,12 @@ if (platform == 'linux') {
 		if (await fs.exists(config.ffmpegRealname)) {
 			await fs.rm(config.ffmpegRealname, { recursive: true, force: true });
 		}
-		await downloadStaticLinuxFfmpeg();
+		try {
+			await downloadStaticLinuxFfmpeg();
+		} catch (error) {
+			console.warn(`static Linux ffmpeg download failed (${error.message}); falling back to system ffmpeg`);
+			await copySystemLinuxFfmpeg();
+		}
 	} else {
 		console.log('FFMPEG already exists');
 	}
