@@ -129,6 +129,14 @@ impl DeviceRecoveryBackoff {
         let exp = 2u64.saturating_pow(self.attempts.min(10));
         exp.min(cap)
     }
+
+    /// True if enough time has elapsed since the last attempt to retry now.
+    /// Lets a caller gate per-tick retries so a permanently-missing device is
+    /// re-probed on the backoff schedule instead of on every monitor tick.
+    fn is_due(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.last_attempt)
+            >= Duration::from_secs(self.next_delay_secs())
+    }
 }
 
 /// Returns true if the error from `default_output_device()` indicates a
@@ -430,6 +438,10 @@ pub async fn start_device_monitor(
 
     *DEVICE_MONITOR.lock().await = Some(tokio::spawn(async move {
         let mut disconnected_devices: HashSet<String> = HashSet::new();
+        // Per-device exponential backoff for the reconnect loop below, so a
+        // device that stays gone (e.g. AirPods removed with no other input
+        // selected) is re-probed on a backoff schedule instead of every 2s tick.
+        let mut disconnected_retry_backoff: HashMap<String, DeviceRecoveryBackoff> = HashMap::new();
         let mut default_tracker = SystemDefaultTracker::new();
 
         // Track devices that repeatedly fail to start so we don't spam errors
@@ -1191,10 +1203,12 @@ pub async fn start_device_monitor(
                 }
 
                 let user_disabled_for_reconnect = audio_manager.user_disabled_devices().await;
+                let reconnect_now = Instant::now();
                 for device_name in disconnected_devices.clone() {
                     // Skip user-disabled devices — they're intentionally stopped
                     if user_disabled_for_reconnect.contains(&device_name) {
                         disconnected_devices.remove(&device_name);
+                        disconnected_retry_backoff.remove(&device_name);
                         continue;
                     }
 
@@ -1205,6 +1219,27 @@ pub async fn start_device_monitor(
                             continue;
                         }
                     };
+
+                    // Gate reconnect attempts behind per-device exponential backoff.
+                    // A device that stays gone (AirPods removed with no other input
+                    // selected) would otherwise be re-probed + re-logged on every
+                    // 2s tick — thousands of identical "not found" lines. The
+                    // backoff settles it to a handful.
+                    //
+                    // BUT if the device is back in the available set (user
+                    // reconnected it), bypass the backoff and retry immediately so
+                    // recovery is instant, not delayed by up to the 30s cap. The
+                    // entry is still created so the failure arm below can record it.
+                    let backoff = disconnected_retry_backoff
+                        .entry(device_name.clone())
+                        .or_insert_with(|| match device.device_type {
+                            DeviceType::Output => DeviceRecoveryBackoff::for_output(),
+                            DeviceType::Input => DeviceRecoveryBackoff::for_input(),
+                        });
+                    let device_back = currently_available_devices.contains(&device);
+                    if !device_back && !backoff.is_due(reconnect_now) {
+                        continue;
+                    }
 
                     // In system default mode, try to restart with current default instead
                     if audio_manager.use_system_default_audio().await {
@@ -1217,6 +1252,7 @@ pub async fn start_device_monitor(
                             if audio_manager.start_device(&default_device).await.is_ok() {
                                 info!("restarted with system default device: {}", default_device);
                                 disconnected_devices.remove(&device_name);
+                                disconnected_retry_backoff.remove(&device_name);
                                 continue;
                             }
                         }
@@ -1229,12 +1265,43 @@ pub async fn start_device_monitor(
                                 device_name
                             );
                             disconnected_devices.remove(&device_name);
+                            disconnected_retry_backoff.remove(&device_name);
                         }
                         Err(e) => {
-                            warn!(
-                                "[DEVICE_RECOVERY] failed to restart device {}: {}",
-                                device_name, e
-                            );
+                            let (first_failure, next_retry_secs) = {
+                                let backoff = disconnected_retry_backoff
+                                    .get_mut(&device_name)
+                                    .expect("backoff entry inserted above");
+                                backoff.record_failure(true);
+                                backoff.last_attempt = reconnect_now;
+                                (backoff.attempts == 1, backoff.next_delay_secs())
+                            };
+                            if first_failure {
+                                // Surface the dead-end ONCE, loudly: if this was the
+                                // user's only selected input there is nothing to fall
+                                // back to and capture has stopped until the device
+                                // returns or another is selected.
+                                warn!(
+                                    "[DEVICE_RECOVERY] '{}' is no longer available and could not \
+                                     be restarted — if it was your only selected {} device, \
+                                     capture has stopped until you reconnect it or select another \
+                                     device (backing off, next retry in {}s): {}",
+                                    device_name,
+                                    match device.device_type {
+                                        DeviceType::Input => "input",
+                                        DeviceType::Output => "output",
+                                    },
+                                    next_retry_secs,
+                                    e
+                                );
+                            } else {
+                                // Subsequent failures are expected while the device
+                                // is gone — keep them out of the user-facing log.
+                                debug!(
+                                    "[DEVICE_RECOVERY] '{}' still not available (next retry in {}s): {}",
+                                    device_name, next_retry_secs, e
+                                );
+                            }
                         }
                     }
                 }
@@ -1739,6 +1806,40 @@ mod tests {
         assert_eq!(b.next_delay_secs(), 8); // 2^3 = 8, under 120 cap
         b.record_failure(true);
         assert_eq!(b.next_delay_secs(), 16);
+    }
+
+    #[test]
+    fn backoff_throttles_a_permanently_missing_device_instead_of_every_tick() {
+        // REGRESSION: a disconnected device that stays "not found" (e.g. AirPods
+        // removed from the recording set with no other device selected) must NOT
+        // be re-probed + re-logged on every 2s monitor tick. Before this fix the
+        // `disconnected_devices` retry loop had no backoff and produced thousands
+        // of `[DEVICE_RECOVERY] failed to restart ... not found` lines. With the
+        // exponential backoff gate it should settle to a handful over the same
+        // window.
+        let mut b = DeviceRecoveryBackoff::for_input();
+        let start = Instant::now();
+        let mut attempts = 0;
+        // 60s of the monitor's 2-second ticks against a permanently-gone device.
+        for i in 0..30u64 {
+            let now = start + Duration::from_secs(i * 2);
+            if b.is_due(now) {
+                attempts += 1;
+                b.record_failure(true); // still "not found"
+                b.last_attempt = now;
+            }
+        }
+        // No backoff = 30 (one per tick = the spam bug). Exponential backoff
+        // capped at 30s should be ~5.
+        assert!(
+            attempts <= 8,
+            "permanently-missing device retried {attempts} times in 60s — backoff not applied (spam regression)"
+        );
+        // ...but it must still retry a few times so a genuinely-transient drop recovers.
+        assert!(
+            attempts >= 3,
+            "device retried only {attempts} times — backoff too aggressive, transient drops won't recover"
+        );
     }
 
     #[test]
