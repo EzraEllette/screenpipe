@@ -107,6 +107,11 @@ windows = { workspace = true, features = [
     "Win32_System_Threading",
     "Win32_Devices_FunctionDiscovery",
     "Win32_UI_Shell_PropertiesSystem",
+    # meeting_processes.rs WASAPI input-audio sensor: process resolution
+    # (OpenProcess/QueryFullProcessImageNameW + CloseHandle/HRESULT codes) and
+    # RDP-session detection (GetSystemMetrics/SM_REMOTESESSION).
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
 ] }
 
 # Bundle ONNX Runtime at build time on Windows x86_64 (same as Linux/macOS-arm64).
