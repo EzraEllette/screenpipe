@@ -128,7 +128,7 @@ libsamplerate-sys = { workspace = true }
 # so the `download-binaries` strategy that comes in transitively is overridden by
 # ORT_STRATEGY=system).
 [target.'cfg(all(target_os = "windows", target_arch = "aarch64"))'.dependencies]
-ort = { workspace = true, default-features = false, features = ["api-24", "tracing"] }
+ort = { workspace = true, default-features = false, features = ["api-24"] }
 ort-sys = { workspace = true }
 samplerate = { workspace = true }
 libsamplerate-sys = { workspace = true }
