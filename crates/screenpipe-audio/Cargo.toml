@@ -178,11 +178,16 @@ parakeet-mlx = ["dep:audiopipe", "audiopipe?/parakeet-mlx", "dep:mlx-rs"]
 name = "screenpipe-audio"
 path = "examples/screenpipe-audio.rs"
 
-# Live probe for the experimental per-process meeting tap (macOS-only; gated in
-# source so --all-targets still compiles a stub on other platforms).
+# Live probes for the experimental meeting capture (macOS-only; gated in source
+# so --all-targets still compiles a stub on other platforms). tap = far-end
+# (system/output), input = near-end (mic).
 [[example]]
 name = "meeting_tap_probe"
 path = "examples/meeting_tap_probe.rs"
+
+[[example]]
+name = "meeting_input_probe"
+path = "examples/meeting_input_probe.rs"
 
 # These benchmark/eval examples use the optional `audiopipe` crate (linked only
 # by the `parakeet` / `qwen3-asr` features). Without a `required-features` guard,
