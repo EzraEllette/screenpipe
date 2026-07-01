@@ -5,6 +5,17 @@
 //! Non-macOS stub for meeting input resolution. Windows WASAPI-session
 //! resolution is a documented follow-up; today the caller falls back to the
 //! system default input on these platforms.
+//!
+//! Platform/version support note: the per-process ("piggyback") meeting-capture
+//! feature is macOS-only AND has a hard floor of **macOS 14.4** (CoreAudio
+//! Process Tap TCC stability — see `process_tap::is_process_tap_available`).
+//! This module covers the non-macOS case; the < 14.4 macOS case degrades the
+//! same way (empty results → caller uses the system default).
+//
+// TODO(meeting-piggyback): the wiring follow-up must gate the experimental flag
+// on availability — don't enable per-process capture when it's unsupported;
+// fall back to the stable path and tell the user. See the matching TODO on
+// `process_tap::is_process_tap_available`.
 
 use super::ProcessAudioActivity;
 use crate::core::device::AudioDevice;

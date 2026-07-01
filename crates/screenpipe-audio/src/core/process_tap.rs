@@ -29,6 +29,30 @@ use crate::utils::audio::audio_to_mono;
 static MACOS_VERSION: OnceLock<Option<(u64, u64, u64)>> = OnceLock::new();
 
 /// Returns `true` when the CoreAudio Process Tap API is available (macOS >= 14.4).
+///
+/// # Minimum macOS version — 14.4
+///
+/// `AudioHardwareCreateProcessTap` / `CATapDescription` are declared
+/// `@available(macOS 14.2, *)`, so the API technically *exists* from 14.2. We
+/// require **14.4** because that is the first release where the TCC permission
+/// flow is stable: on 14.2–14.3 the "Screen & System Audio Recording" prompt
+/// lands in a different TCC category with divergent prompt copy, which makes
+/// permission handling unreliable. Apple's canonical sample (insidegui/AudioCap)
+/// and current guidance both target 14.4+. See:
+/// - <https://developer.apple.com/documentation/coreaudio/audiohardwarecreateprocesstap(_:_:)>
+/// - <https://github.com/insidegui/AudioCap>
+///
+/// The whole per-process ("piggyback") meeting-capture feature therefore has a
+/// **hard floor of macOS 14.4**. Below that (and on non-macOS) the tap cannot be
+/// built and the resolver/probe fall back to empty results.
+///
+// TODO(meeting-piggyback): the experimental_meeting_piggyback flag MUST NOT be
+// enabled on < macOS 14.4. Before the wiring follow-up ships, gate the setting
+// on this check — either (a) hide/disable the toggle in the UI when
+// `!is_process_tap_available()`, or (b) at runtime, when the flag is on but the
+// tap is unavailable, fall back to the stable capture path (default device +
+// global tap) instead of silently capturing nothing, and surface a one-time
+// "requires macOS 14.4+" notice to the user.
 pub fn is_process_tap_available() -> bool {
     let version = MACOS_VERSION.get_or_init(detect_os_version);
     match version {
