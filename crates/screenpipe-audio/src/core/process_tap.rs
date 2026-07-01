@@ -613,16 +613,15 @@ fn tap_desc_for_target(target: &TapTarget) -> arc::R<ca::TapDesc> {
     }
 }
 
-/// Build a fresh Process Tap + aggregate device against the current default
-/// output. Returns the capture handle, its audio config, the UID of the
-/// device it's anchored to (so callers can detect when the default changes),
-/// and the exclusion snapshot the tap was built with (so callers can detect
-/// when the exclusion list drifts and a rebuild is needed).
+/// Build a fresh global (system-wide) Process Tap capture against the current
+/// default output. Everything specific to the STABLE global tap — the default
+/// output device, the exclusion list, and the global tap descriptor — stays
+/// here and is unchanged. Only the generic aggregate/IO-proc plumbing is
+/// delegated to `build_capture_from_desc`, shared with the experimental
+/// per-process path.
 ///
 /// The user-configured exclusion list is always augmented with Screenpipe's
-/// own CoreAudio process object. Other tap-based meeting recorders do this by
-/// default to avoid recapturing their own playback, notifications, or live
-/// monitoring audio into the meeting/system stream.
+/// own CoreAudio process object, so we never recapture our own playback.
 fn build_capture(
     tx: broadcast::Sender<Vec<f32>>,
     is_disconnected: Arc<AtomicBool>,
@@ -634,11 +633,6 @@ fn build_capture(
 )> {
     let output_device = ca::System::default_output_device()
         .map_err(|s| anyhow!("No default output device: {:?}", s))?;
-    let output_uid = output_device
-        .uid()
-        .map_err(|s| anyhow!("Failed to get output device UID: {:?}", s))?;
-    let output_uid_str = output_uid.to_string();
-    debug!("Process Tap: anchoring to '{}'", output_uid_str);
 
     let snapshot = exclusions::snapshot();
     let self_process_id = current_process_audio_object_id();
@@ -657,6 +651,30 @@ fn build_capture(
         debug!("Process Tap: excluding Screenpipe's own audio process");
     }
     let tap_desc = ca::TapDesc::with_stereo_global_tap_excluding_processes(&excluded_array);
+
+    let (capture, config, output_uid_str) =
+        build_capture_from_desc(tx, is_disconnected, &tap_desc, &output_device, "global")?;
+    Ok((capture, config, output_uid_str, snapshot))
+}
+
+/// Generic tap plumbing shared by the stable global tap and the experimental
+/// per-process tap: create the tap from `tap_desc`, wrap it in an aggregate
+/// device clocked by `output_device`, start it, and return the running capture.
+/// The caller decides WHAT to tap (the descriptor) and WHICH output device to
+/// clock against; this function only does the plumbing, identically for both.
+fn build_capture_from_desc(
+    tx: broadcast::Sender<Vec<f32>>,
+    is_disconnected: Arc<AtomicBool>,
+    tap_desc: &ca::TapDesc,
+    output_device: &ca::Device,
+    label: &str,
+) -> Result<(ProcessTapCapture, AudioStreamConfig, String)> {
+    let output_uid = output_device
+        .uid()
+        .map_err(|s| anyhow!("Failed to get output device UID: {:?}", s))?;
+    let output_uid_str = output_uid.to_string();
+    debug!("Process Tap ({label}): anchoring to '{}'", output_uid_str);
+
     let tap = tap_desc.create_process_tap().map_err(|s| {
         anyhow!(
             "Failed to create process tap ({:?}). \
@@ -709,7 +727,7 @@ fn build_capture(
     // they're actually 15s @ 96kHz — produces files that play at 2x slowmo.
     let sample_rate = agg_device.nominal_sample_rate().unwrap_or(asbd.sample_rate);
     info!(
-        "Process Tap: {:.0} Hz (asbd reported {:.0} Hz), {} ch, {} bit",
+        "Process Tap ({label}): {:.0} Hz (asbd reported {:.0} Hz), {} ch, {} bit",
         sample_rate, asbd.sample_rate, channels, asbd.bits_per_channel
     );
     let config = AudioStreamConfig::new(sample_rate as u32, channels);
@@ -733,7 +751,7 @@ fn build_capture(
     let started = ca::device_start(agg_device, Some(proc_id))
         .map_err(|s| anyhow!("Failed to start aggregate device: {:?}", s))?;
     debug!(
-        "Process Tap gen {} started (device '{}', {} ch)",
+        "Process Tap gen {} started ({label}, device '{}', {} ch)",
         generation, output_uid_str, channels
     );
 
@@ -745,7 +763,7 @@ fn build_capture(
         generation,
     };
 
-    Ok((capture, config, output_uid_str, snapshot))
+    Ok((capture, config, output_uid_str))
 }
 
 fn current_process_audio_object_id() -> Option<u32> {
