@@ -723,10 +723,7 @@ async fn frame_fulltext_propagates_to_all_derived_copies_once() {
         "text_json not redacted: {text_json_red:?}"
     );
     assert!(
-        tree_when.is_some()
-            && win_when.is_some()
-            && url_when.is_some()
-            && text_json_when.is_some(),
+        tree_when.is_some() && win_when.is_some() && url_when.is_some() && text_json_when.is_some(),
         "all derived watermarks must be stamped"
     );
 
