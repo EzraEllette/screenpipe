@@ -224,13 +224,23 @@
     },
     {
       "spec": "chat-prefill-duplicate.spec.ts",
+      "platforms": ["macos"],
+      "layers": ["chat-ai"],
+      "features": ["chat", "chat-prefill"],
+      "criticality": "medium",
+      "confidence": "partial",
+      "ux": "synthetic",
+      "notes": "QUARANTINED (#4610): cross-window prefill duplicate regression. The autoSend persist precondition is racy in CI — times out with 0 conversations (not the duplicate=2 it guards) ~100% Linux + ~33% macOS. Re-enable once it seeds the persisted conversation deterministically."
+    },
+    {
+      "spec": "chat-prefill-context-leak.spec.ts",
       "platforms": ["windows", "macos", "linux"],
       "layers": ["chat-ai"],
       "features": ["chat", "chat-prefill"],
       "criticality": "medium",
       "confidence": "partial",
       "ux": "synthetic",
-      "notes": "Cross-window prefill duplicate regression."
+      "notes": "Pending auto-send prefill must render only the clean prompt, not the internal model context, as the user message."
     },
     {
       "spec": "chat-streaming-performance.spec.ts",
@@ -651,6 +661,16 @@
       "confidence": "strong",
       "ux": "real-user-flow",
       "notes": "Production billing gate blocks an unentitled session behind the paywall and restores access when the forced-gate flag is cleared."
+    },
+    {
+      "spec": "zz-enterprise-license-prompt.spec.ts",
+      "platforms": ["windows", "macos", "linux"],
+      "layers": ["settings", "billing", "real-ui-e2e"],
+      "features": ["app-entitlement-gate", "billing-gate"],
+      "criticality": "high",
+      "confidence": "strong",
+      "ux": "real-user-flow",
+      "notes": "Enterprise license prompt handles invalid keys, full-seat errors, and retry success after seats are added without staying stuck in validating state."
     },
     {
       "spec": "zz-logout-resurrect.spec.ts",
