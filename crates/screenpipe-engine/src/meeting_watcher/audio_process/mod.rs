@@ -33,13 +33,17 @@ use tracing::{debug, error, info, warn};
 
 #[cfg(target_os = "macos")]
 mod macos;
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 mod null;
+#[cfg(target_os = "windows")]
+mod windows;
 
 #[cfg(target_os = "macos")]
 use macos::ax_resolved_candidates;
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 use null::ax_resolved_candidates;
+#[cfg(target_os = "windows")]
+use windows::ax_resolved_candidates;
 
 const STICKY_PROCESS_WINDOW: Duration = Duration::from_secs(4);
 const CANDIDATE_CONFIRM_WINDOW: Duration = Duration::from_secs(3);

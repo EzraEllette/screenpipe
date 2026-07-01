@@ -84,8 +84,7 @@ fn selected_detector_mode() -> MeetingDetectorMode {
     // `meeting_processes::current_input_processes()` is implemented: macOS
     // (CoreAudio) and Windows (WASAPI). Linux has no sensor yet, so it falls
     // back to UI scanning. Override on any platform with SCREENPIPE_MEETING_DETECTOR.
-    let audio_process_is_default =
-        cfg!(target_os = "macos") || cfg!(target_os = "windows");
+    let audio_process_is_default = cfg!(target_os = "macos") || cfg!(target_os = "windows");
     selected_detector_mode_from(
         std::env::var("SCREENPIPE_MEETING_DETECTOR").ok().as_deref(),
         audio_process_is_default,
@@ -99,7 +98,11 @@ fn selected_detector_mode_from(
     // Accept both hyphen and underscore spellings (the docs/PR body use
     // hyphens, e.g. `ui-scan`), case-insensitively, with surrounding whitespace
     // tolerated.
-    let normalized = raw.unwrap_or_default().trim().to_lowercase().replace('-', "_");
+    let normalized = raw
+        .unwrap_or_default()
+        .trim()
+        .to_lowercase()
+        .replace('-', "_");
     match normalized.as_str() {
         "audio_process" => MeetingDetectorMode::AudioProcess,
         "ui_scan" => MeetingDetectorMode::UiScan,

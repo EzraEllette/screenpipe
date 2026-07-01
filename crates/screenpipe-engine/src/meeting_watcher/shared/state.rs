@@ -5,9 +5,9 @@
 //! Meeting state machine and keep-alive composition.
 
 use super::*;
-use std::time::{Duration, Instant};
 use chrono::{DateTime, Utc};
 use screenpipe_db::DatabaseManager;
+use std::time::{Duration, Instant};
 use tracing::{debug, info};
 
 /// The state machine for meeting detection.
@@ -124,7 +124,11 @@ pub fn audio_or_calendar_keepalive(
 /// end-detection-health signal. `was_active`/`was_ending` are captured from the
 /// prior state *before* it is consumed by the transition fn; typed `matches!`
 /// on `next` keeps it rename-safe (a state rename is a compile error).
-pub(crate) fn is_active_ending_flap(was_active: bool, was_ending: bool, next: &MeetingState) -> bool {
+pub(crate) fn is_active_ending_flap(
+    was_active: bool,
+    was_ending: bool,
+    next: &MeetingState,
+) -> bool {
     let now_active = matches!(next, MeetingState::Active { .. });
     let now_ending = matches!(next, MeetingState::Ending { .. });
     (was_active && now_ending) || (was_ending && now_active)

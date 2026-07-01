@@ -5,7 +5,6 @@
 //! Windows UI-Automation scanning backend for meeting detection.
 
 use super::*;
-use crate::meeting_watcher::shared::*;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
@@ -19,7 +18,7 @@ pub(crate) struct WindowsProcessInfo {
 
 /// Enumerate all running processes on Windows.
 pub(crate) fn windows_enumerate_processes() -> Vec<WindowsProcessInfo> {
-    use windows::Win32::System::Diagnostics::ToolHelp::{
+    use ::windows::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
         TH32CS_SNAPPROCESS,
     };
@@ -57,7 +56,7 @@ pub(crate) fn windows_enumerate_processes() -> Vec<WindowsProcessInfo> {
             }
         }
 
-        let _ = windows::Win32::Foundation::CloseHandle(snapshot);
+        let _ = ::windows::Win32::Foundation::CloseHandle(snapshot);
     }
 
     results
@@ -73,11 +72,11 @@ pub(crate) fn windows_get_process_name(pid: i32) -> Option<String> {
 
 /// Enumerate visible window titles and their PIDs on Windows.
 pub(crate) fn windows_enumerate_window_titles() -> Vec<(i32, String)> {
-    use std::sync::Mutex;
-    use windows::Win32::Foundation::{BOOL, HWND, LPARAM};
-    use windows::Win32::UI::WindowsAndMessaging::{
+    use ::windows::Win32::Foundation::{BOOL, HWND, LPARAM};
+    use ::windows::Win32::UI::WindowsAndMessaging::{
         EnumWindows, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible,
     };
+    use std::sync::Mutex;
 
     // Stack-pinned Mutex passed as LPARAM. Do NOT use Arc here: the previous
     // implementation kept a second strong ref alive across the call, which
@@ -115,12 +114,14 @@ pub(crate) fn windows_enumerate_window_titles() -> Vec<(i32, String)> {
 }
 
 /// Enumerate visible windows belonging to a specific PID.
-pub(crate) fn enumerate_windows_for_pid(target_pid: u32) -> Vec<windows::Win32::Foundation::HWND> {
-    use std::sync::Mutex;
-    use windows::Win32::Foundation::{BOOL, HWND, LPARAM};
-    use windows::Win32::UI::WindowsAndMessaging::{
+pub(crate) fn enumerate_windows_for_pid(
+    target_pid: u32,
+) -> Vec<::windows::Win32::Foundation::HWND> {
+    use ::windows::Win32::Foundation::{BOOL, HWND, LPARAM};
+    use ::windows::Win32::UI::WindowsAndMessaging::{
         EnumWindows, GetWindowThreadProcessId, IsWindowVisible,
     };
+    use std::sync::Mutex;
 
     let param_data = (target_pid, Mutex::new(Vec::<HWND>::new()));
 
@@ -162,10 +163,10 @@ pub(crate) fn windows_scan_process_uia(
     timeout: Duration,
     profile_ignore_window_titles: &[&str],
 ) -> Result<Vec<String>, String> {
-    use windows::Win32::System::Com::{
+    use ::windows::Win32::System::Com::{
         CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_APARTMENTTHREADED,
     };
-    use windows::Win32::UI::Accessibility::{
+    use ::windows::Win32::UI::Accessibility::{
         CUIAutomation, IUIAutomation, IUIAutomationCondition, PropertyConditionFlags_IgnoreCase,
         TreeScope_Descendants, UIA_AutomationIdPropertyId, UIA_NamePropertyId,
     };
@@ -185,7 +186,7 @@ pub(crate) fn windows_scan_process_uia(
                 CallSignal::AutomationId(id) => {
                     if let Ok(cond) = automation.CreatePropertyConditionEx(
                         UIA_AutomationIdPropertyId,
-                        &windows::core::VARIANT::from(*id),
+                        &::windows::core::VARIANT::from(*id),
                         PropertyConditionFlags_IgnoreCase,
                     ) {
                         conditions.push(cond);
@@ -201,7 +202,7 @@ pub(crate) fn windows_scan_process_uia(
                     // For "leave"/"hang up" this works because the button name IS the keyword.
                     if let Ok(cond) = automation.CreatePropertyConditionEx(
                         UIA_NamePropertyId,
-                        &windows::core::VARIANT::from(*name),
+                        &::windows::core::VARIANT::from(*name),
                         PropertyConditionFlags_IgnoreCase,
                     ) {
                         conditions.push(cond);

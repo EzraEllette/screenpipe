@@ -4,13 +4,13 @@
 
 //! Cross-platform meeting-detection logic, split by responsibility.
 
-pub(crate) mod telemetry;
-pub(crate) mod profiles;
-pub(crate) mod state;
-pub(crate) mod scanner;
-pub(crate) mod ignore;
 pub(crate) mod calendar;
+pub(crate) mod ignore;
+pub(crate) mod profiles;
+pub(crate) mod scanner;
 pub(crate) mod signal_match;
+pub(crate) mod state;
+pub(crate) mod telemetry;
 
 pub(crate) use calendar::*;
 pub(crate) use ignore::*;

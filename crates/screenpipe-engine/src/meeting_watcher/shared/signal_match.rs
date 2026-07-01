@@ -163,7 +163,10 @@ pub(crate) fn check_signal_match(
 /// no readable title (`None`) is never blocked — absence of a title can't prove
 /// it is the messaging window.
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
-pub(crate) fn window_title_is_ignored_titles(window_title: Option<&str>, ignore_titles: &[&str]) -> bool {
+pub(crate) fn window_title_is_ignored_titles(
+    window_title: Option<&str>,
+    ignore_titles: &[&str],
+) -> bool {
     let Some(title) = window_title else {
         return false;
     };
@@ -178,7 +181,10 @@ pub(crate) fn window_title_is_ignored_titles(window_title: Option<&str>, ignore_
 
 /// Profile-scoped convenience over [`window_title_is_ignored_titles`].
 #[cfg(any(target_os = "macos", test))]
-pub(crate) fn window_title_is_ignored(window_title: Option<&str>, profile: &MeetingDetectionProfile) -> bool {
+pub(crate) fn window_title_is_ignored(
+    window_title: Option<&str>,
+    profile: &MeetingDetectionProfile,
+) -> bool {
     window_title_is_ignored_titles(window_title, profile.ignore_window_titles)
 }
 

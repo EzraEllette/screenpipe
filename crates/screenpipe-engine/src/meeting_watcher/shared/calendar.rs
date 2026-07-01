@@ -5,8 +5,8 @@
 //! Calendar-event signals and meeting persistence helpers.
 
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
 use screenpipe_db::DatabaseManager;
+use serde::{Deserialize, Serialize};
 use tracing::{error, info, warn};
 
 /// Calendar event signal received from the event bus (published by calendar.rs in src-tauri).
@@ -69,7 +69,10 @@ pub(crate) fn find_overlapping_calendar_event(
 /// a parameter for deterministic testing. All-day events are excluded because the
 /// upstream stream already filters them, and they'd otherwise pin a meeting open
 /// all day.
-pub(crate) fn has_active_calendar_event(events: &[CalendarEventSignal], now: DateTime<Utc>) -> bool {
+pub(crate) fn has_active_calendar_event(
+    events: &[CalendarEventSignal],
+    now: DateTime<Utc>,
+) -> bool {
     events.iter().any(|e| {
         if e.is_all_day {
             return false;

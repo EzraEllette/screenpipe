@@ -212,7 +212,10 @@ pub(crate) fn check_signal_match_precomputed(
 }
 
 /// Get a string attribute from an AX element (macOS).
-pub(crate) fn get_ax_string_attr(elem: &cidre::ax::UiElement, attr: &cidre::ax::Attr) -> Option<String> {
+pub(crate) fn get_ax_string_attr(
+    elem: &cidre::ax::UiElement,
+    attr: &cidre::ax::Attr,
+) -> Option<String> {
     elem.attr_value(attr).ok().and_then(|v| {
         if v.get_type_id() == cidre::cf::String::type_id() {
             let s: &cidre::cf::String = unsafe { std::mem::transmute(&*v) };
