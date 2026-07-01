@@ -17,7 +17,7 @@ use tracing::{debug, info, warn};
 
 use ca::aggregate_device_keys as agg_keys;
 use ca::sub_device_keys as sub_keys;
-use cidre::{cat, cf, core_audio as ca, os};
+use cidre::{arc, cat, cf, core_audio as ca, os};
 
 use super::stream::AudioStreamConfig;
 use crate::utils::audio::audio_to_mono;
@@ -181,7 +181,7 @@ mod exclusions {
                 if let Ok(proc) = ca::Process::with_pid(pid) {
                     // ca::Process(pub Obj) where Obj(pub u32) is #[repr(transparent)].
                     // The inner u32 is the AudioObjectID that the tap descriptor
-                    // expects (wrapped in ns::Number, see build_exclusion_array).
+                    // expects (wrapped in ns::Number, see build_object_id_array).
                     let audio_obj_id = proc.0 .0;
                     if audio_obj_id != 0 {
                         out.push(audio_obj_id);
@@ -194,9 +194,10 @@ mod exclusions {
         out
     }
 
-    /// Build the `ns::Array<ns::Number>` exclusion list in the shape that
-    /// `TapDesc::with_stereo_global_tap_excluding_processes` expects.
-    pub fn build_exclusion_array(audio_object_ids: &[u32]) -> arc::R<ns::Array<ns::Number>> {
+    /// Convert AudioObjectIDs into the `ns::Array<ns::Number>` shape the tap
+    /// descriptor constructors expect. Include-list vs exclude-list is the
+    /// caller's choice — this is just the conversion, no exclusion semantics.
+    pub fn build_object_id_array(audio_object_ids: &[u32]) -> arc::R<ns::Array<ns::Number>> {
         let numbers: Vec<arc::R<ns::Number>> = audio_object_ids
             .iter()
             .map(|id| ns::Number::with_u32(*id))
@@ -582,6 +583,36 @@ impl Drop for ProcessTapCapture {
 // Public API
 // ---------------------------------------------------------------------------
 
+/// What a process tap should capture. `GlobalExcluding` is the existing
+/// system-wide behavior (everything minus a blocklist). `IncludingProcesses`
+/// is the per-process far-end tap: a stereo mixdown of ONLY the listed
+/// CoreAudio process object AudioObjectIDs.
+// Routed into `build_capture` in Task 4 and used by `build_inclusion_capture`
+// in Task 5; until then only the descriptor unit tests exercise these.
+#[allow(dead_code)] // consumed in Task 4 (build_capture routing) + Task 5
+pub(crate) enum TapTarget {
+    GlobalExcluding(Vec<u32>),
+    IncludingProcesses(Vec<u32>),
+}
+
+/// Build the `CATapDescription` for a target. The only difference between the
+/// two paths is the cidre constructor; both take the same `[AudioObjectID]`
+/// array shape (built by `exclusions::build_object_id_array`). The inclusion
+/// path has NO exclusion/blocklist — it captures exactly the listed PIDs.
+#[allow(dead_code)] // consumed in Task 4 (build_capture routing)
+fn tap_desc_for_target(target: &TapTarget) -> arc::R<ca::TapDesc> {
+    match target {
+        TapTarget::GlobalExcluding(ids) => {
+            let arr = exclusions::build_object_id_array(ids);
+            ca::TapDesc::with_stereo_global_tap_excluding_processes(&arr)
+        }
+        TapTarget::IncludingProcesses(ids) => {
+            let arr = exclusions::build_object_id_array(ids);
+            ca::TapDesc::with_stereo_mixdown_of_processes(&arr)
+        }
+    }
+}
+
 /// Build a fresh Process Tap + aggregate device against the current default
 /// output. Returns the capture handle, its audio config, the UID of the
 /// device it's anchored to (so callers can detect when the default changes),
@@ -613,7 +644,7 @@ fn build_capture(
     let self_process_id = current_process_audio_object_id();
     let exclusion_ids =
         merge_exclusion_audio_object_ids(snapshot.audio_object_ids.clone(), self_process_id);
-    let excluded_array = exclusions::build_exclusion_array(&exclusion_ids);
+    let excluded_array = exclusions::build_object_id_array(&exclusion_ids);
     if !snapshot.bundle_ids.is_empty() {
         info!(
             "Process Tap: excluding {} bundle ID(s), resolved to {} AudioObjectID(s), self_excluded={}: {:?}",
@@ -1044,7 +1075,7 @@ mod tests {
         };
 
         let exclusion_ids = merge_exclusion_audio_object_ids(Vec::new(), Some(self_process_id));
-        let excluded_array = exclusions::build_exclusion_array(&exclusion_ids);
+        let excluded_array = exclusions::build_object_id_array(&exclusion_ids);
         let tap_desc = ca::TapDesc::with_stereo_global_tap_excluding_processes(&excluded_array);
 
         assert!(
@@ -1081,5 +1112,35 @@ mod tests {
                 .any(|n| n.as_u32() == self_process_id),
             "created CoreAudio tap description must contain current process AudioObjectID {self_process_id}"
         );
+    }
+
+    #[test]
+    fn inclusion_tap_description_includes_target_process() {
+        if !is_process_tap_available() {
+            eprintln!("skipping: CoreAudio Process Tap unavailable on this macOS version");
+            return;
+        }
+        let Some(self_id) = current_process_audio_object_id() else {
+            panic!("current process did not translate to a CoreAudio process object");
+        };
+        let desc = tap_desc_for_target(&TapTarget::IncludingProcesses(vec![self_id]));
+        assert!(
+            !desc.is_exclusive(),
+            "a mixdown-of-processes (inclusion) tap must NOT be exclusive"
+        );
+        assert!(
+            desc.processes().iter().any(|n| n.as_u32() == self_id),
+            "inclusion tap description must list the target AudioObjectID {self_id}"
+        );
+    }
+
+    #[test]
+    fn global_excluding_tap_description_is_exclusive() {
+        if !is_process_tap_available() {
+            eprintln!("skipping: CoreAudio Process Tap unavailable on this macOS version");
+            return;
+        }
+        let desc = tap_desc_for_target(&TapTarget::GlobalExcluding(vec![]));
+        assert!(desc.is_exclusive(), "a global-excluding tap must be exclusive");
     }
 }
