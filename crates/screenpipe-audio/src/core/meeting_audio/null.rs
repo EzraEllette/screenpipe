@@ -6,8 +6,15 @@
 //! resolution is a documented follow-up; today the caller falls back to the
 //! system default input on these platforms.
 
+use super::ProcessAudioActivity;
 use crate::core::device::AudioDevice;
 
 pub fn resolve_meeting_inputs(_pid: i32) -> Vec<AudioDevice> {
     Vec::new()
+}
+
+pub fn process_audio_activity(_pid: i32) -> Option<ProcessAudioActivity> {
+    // Non-macOS has no way to determine process audio activity yet, so the
+    // honest answer is "couldn't determine", not a fabricated idle reading.
+    None
 }

@@ -31,3 +31,31 @@ pub fn resolve_meeting_inputs(pid: i32) -> Vec<AudioDevice> {
 pub fn resolve_meeting_inputs(pid: i32) -> Vec<AudioDevice> {
     null::resolve_meeting_inputs(pid)
 }
+
+/// Whether a process is *actively* doing audio IO right now. Lets the health
+/// layer tell real silence (flag false → nobody playing / muted → stay quiet)
+/// from a broken capture (flag true but our stream delivers only zeros → wrong
+/// device / dead tap → rebuild + alert). Buffer amplitude alone can't tell
+/// these apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ProcessAudioActivity {
+    pub input_active: bool,
+    pub output_active: bool,
+}
+
+/// Read whether the meeting process `pid` is actively recording input and/or
+/// rendering output.
+///
+/// `None` means the process could not be resolved (gone, or no CoreAudio audio
+/// object; always on non-macOS) — deliberately kept distinct from
+/// `Some { false, false }` ("resolved, confirmed idle") so the health layer and
+/// support logs can tell "couldn't determine" from "genuinely silent".
+#[cfg(target_os = "macos")]
+pub fn process_audio_activity(pid: i32) -> Option<ProcessAudioActivity> {
+    macos::process_audio_activity(pid)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn process_audio_activity(pid: i32) -> Option<ProcessAudioActivity> {
+    null::process_audio_activity(pid)
+}
