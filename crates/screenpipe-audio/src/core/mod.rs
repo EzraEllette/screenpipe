@@ -6,7 +6,8 @@ pub mod aec;
 pub mod device;
 pub mod device_detection;
 pub mod engine;
-#[cfg(target_os = "macos")]
+pub mod meeting_audio;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 pub mod process_tap;
 #[cfg(all(target_os = "linux", feature = "pulseaudio"))]
 pub mod pulse;

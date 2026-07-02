@@ -19,7 +19,7 @@ use ca::aggregate_device_keys as agg_keys;
 use ca::sub_device_keys as sub_keys;
 use cidre::{cat, cf, core_audio as ca, os};
 
-use super::stream::AudioStreamConfig;
+use crate::core::stream::AudioStreamConfig;
 use crate::utils::audio::audio_to_mono;
 
 // ---------------------------------------------------------------------------
@@ -29,6 +29,30 @@ use crate::utils::audio::audio_to_mono;
 static MACOS_VERSION: OnceLock<Option<(u64, u64, u64)>> = OnceLock::new();
 
 /// Returns `true` when the CoreAudio Process Tap API is available (macOS >= 14.4).
+///
+/// # Minimum macOS version — 14.4
+///
+/// `AudioHardwareCreateProcessTap` / `CATapDescription` are declared
+/// `@available(macOS 14.2, *)`, so the API technically *exists* from 14.2. We
+/// require **14.4** because that is the first release where the TCC permission
+/// flow is stable: on 14.2–14.3 the "Screen & System Audio Recording" prompt
+/// lands in a different TCC category with divergent prompt copy, which makes
+/// permission handling unreliable. Apple's canonical sample (insidegui/AudioCap)
+/// and current guidance both target 14.4+. See:
+/// - <https://developer.apple.com/documentation/coreaudio/audiohardwarecreateprocesstap(_:_:)>
+/// - <https://github.com/insidegui/AudioCap>
+///
+/// The whole per-process ("piggyback") meeting-capture feature therefore has a
+/// **hard floor of macOS 14.4**. Below that (and on non-macOS) the tap cannot be
+/// built and the resolver/probe fall back to empty results.
+///
+// TODO(meeting-piggyback): the experimental_meeting_piggyback flag MUST NOT be
+// enabled on < macOS 14.4. Before the wiring follow-up ships, gate the setting
+// on this check — either (a) hide/disable the toggle in the UI when
+// `!is_process_tap_available()`, or (b) at runtime, when the flag is on but the
+// tap is unavailable, fall back to the stable capture path (default device +
+// global tap) instead of silently capturing nothing, and surface a one-time
+// "requires macOS 14.4+" notice to the user.
 pub fn is_process_tap_available() -> bool {
     let version = MACOS_VERSION.get_or_init(detect_os_version);
     match version {
@@ -181,7 +205,7 @@ mod exclusions {
                 if let Ok(proc) = ca::Process::with_pid(pid) {
                     // ca::Process(pub Obj) where Obj(pub u32) is #[repr(transparent)].
                     // The inner u32 is the AudioObjectID that the tap descriptor
-                    // expects (wrapped in ns::Number, see build_exclusion_array).
+                    // expects (wrapped in ns::Number, see build_object_id_array).
                     let audio_obj_id = proc.0 .0;
                     if audio_obj_id != 0 {
                         out.push(audio_obj_id);
@@ -194,9 +218,10 @@ mod exclusions {
         out
     }
 
-    /// Build the `ns::Array<ns::Number>` exclusion list in the shape that
-    /// `TapDesc::with_stereo_global_tap_excluding_processes` expects.
-    pub fn build_exclusion_array(audio_object_ids: &[u32]) -> arc::R<ns::Array<ns::Number>> {
+    /// Convert AudioObjectIDs into the `ns::Array<ns::Number>` shape the tap
+    /// descriptor constructors expect. Include-list vs exclude-list is the
+    /// caller's choice — this is just the conversion, no exclusion semantics.
+    pub fn build_object_id_array(audio_object_ids: &[u32]) -> arc::R<ns::Array<ns::Number>> {
         let numbers: Vec<arc::R<ns::Number>> = audio_object_ids
             .iter()
             .map(|id| ns::Number::with_u32(*id))
@@ -582,16 +607,99 @@ impl Drop for ProcessTapCapture {
 // Public API
 // ---------------------------------------------------------------------------
 
-/// Build a fresh Process Tap + aggregate device against the current default
-/// output. Returns the capture handle, its audio config, the UID of the
-/// device it's anchored to (so callers can detect when the default changes),
-/// and the exclusion snapshot the tap was built with (so callers can detect
-/// when the exclusion list drifts and a rebuild is needed).
+/// Translate OS pids into CoreAudio process object AudioObjectIDs, dropping any
+/// that don't resolve (not running, or not a translatable process).
+#[allow(dead_code)] // wired into the live pipeline in the reconcile follow-up
+fn resolve_pids_to_audio_object_ids(pids: &[i32]) -> Vec<u32> {
+    let mut out = Vec::new();
+    for &pid in pids {
+        if let Ok(process) = ca::Process::with_pid(pid) {
+            let ca::Obj(id) = *process;
+            if id != 0 {
+                out.push(id);
+            }
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// Resolve the output device a meeting process is currently playing to, so the
+/// experimental tap clocks its aggregate against the SAME device the app is
+/// using ("copy whatever output the app is using"). Queries `PROCESS_DEVICES`
+/// in the OUTPUT scope and returns the first output device across the pids.
+/// `None` when nothing resolves — the caller falls back to the default output.
+#[allow(dead_code)] // wired into the live pipeline in the reconcile follow-up
+fn resolve_meeting_output_device(pids: &[i32]) -> Option<ca::Device> {
+    for &pid in pids {
+        let Ok(process) = ca::Process::with_pid(pid) else {
+            continue;
+        };
+        let devices: Vec<ca::Device> = process
+            .prop_vec(
+                &ca::PropSelector::PROCESS_DEVICES
+                    .addr(ca::PropScope::OUTPUT, ca::PropElement::MAIN),
+            )
+            .unwrap_or_default();
+        if let Some(dev) = devices.into_iter().next() {
+            return Some(dev);
+        }
+    }
+    None
+}
+
+/// Build the experimental per-process ("piggyback") capture: a stereo mixdown
+/// of ONLY the given meeting pids' output — the app's own sound, with NO
+/// exclusion/blocklist — clocked against the app's own output device (falling
+/// back to the system default only if the app's device can't be resolved).
+///
+/// Reuses `build_capture_from_desc`, so the aggregate/IO-proc plumbing is
+/// identical to the stable global tap; only WHAT we tap and WHICH device we
+/// clock against differ.
+#[allow(dead_code)] // wired into the live pipeline in the reconcile follow-up
+fn build_inclusion_capture(
+    pids: &[i32],
+    tx: broadcast::Sender<Vec<f32>>,
+    is_disconnected: Arc<AtomicBool>,
+) -> Result<(ProcessTapCapture, AudioStreamConfig, String)> {
+    let ids = resolve_pids_to_audio_object_ids(pids);
+    if ids.is_empty() {
+        return Err(anyhow!(
+            "no live CoreAudio process objects for pids {:?}",
+            pids
+        ));
+    }
+    let output_device = match resolve_meeting_output_device(pids) {
+        Some(dev) => dev,
+        None => ca::System::default_output_device()
+            .map_err(|s| anyhow!("No default output device: {:?}", s))?,
+    };
+    let include_array = exclusions::build_object_id_array(&ids);
+    let tap_desc = ca::TapDesc::with_stereo_mixdown_of_processes(&include_array);
+    info!(
+        "Process Tap (per-process): tapping {} process(es) {:?}",
+        ids.len(),
+        pids
+    );
+    build_capture_from_desc(
+        tx,
+        is_disconnected,
+        &tap_desc,
+        &output_device,
+        "per-process",
+    )
+}
+
+/// Build a fresh global (system-wide) Process Tap capture against the current
+/// default output. Everything specific to the STABLE global tap — the default
+/// output device, the exclusion list, and the global tap descriptor — stays
+/// here and is unchanged. Only the generic aggregate/IO-proc plumbing is
+/// delegated to `build_capture_from_desc`, shared with the experimental
+/// per-process path.
 ///
 /// The user-configured exclusion list is always augmented with Screenpipe's
-/// own CoreAudio process object. Other tap-based meeting recorders do this by
-/// default to avoid recapturing their own playback, notifications, or live
-/// monitoring audio into the meeting/system stream.
+/// own CoreAudio process object, so we never recapture our own playback.
 fn build_capture(
     tx: broadcast::Sender<Vec<f32>>,
     is_disconnected: Arc<AtomicBool>,
@@ -603,17 +711,12 @@ fn build_capture(
 )> {
     let output_device = ca::System::default_output_device()
         .map_err(|s| anyhow!("No default output device: {:?}", s))?;
-    let output_uid = output_device
-        .uid()
-        .map_err(|s| anyhow!("Failed to get output device UID: {:?}", s))?;
-    let output_uid_str = output_uid.to_string();
-    debug!("Process Tap: anchoring to '{}'", output_uid_str);
 
     let snapshot = exclusions::snapshot();
     let self_process_id = current_process_audio_object_id();
     let exclusion_ids =
         merge_exclusion_audio_object_ids(snapshot.audio_object_ids.clone(), self_process_id);
-    let excluded_array = exclusions::build_exclusion_array(&exclusion_ids);
+    let excluded_array = exclusions::build_object_id_array(&exclusion_ids);
     if !snapshot.bundle_ids.is_empty() {
         info!(
             "Process Tap: excluding {} bundle ID(s), resolved to {} AudioObjectID(s), self_excluded={}: {:?}",
@@ -626,6 +729,30 @@ fn build_capture(
         debug!("Process Tap: excluding Screenpipe's own audio process");
     }
     let tap_desc = ca::TapDesc::with_stereo_global_tap_excluding_processes(&excluded_array);
+
+    let (capture, config, output_uid_str) =
+        build_capture_from_desc(tx, is_disconnected, &tap_desc, &output_device, "global")?;
+    Ok((capture, config, output_uid_str, snapshot))
+}
+
+/// Generic tap plumbing shared by the stable global tap and the experimental
+/// per-process tap: create the tap from `tap_desc`, wrap it in an aggregate
+/// device clocked by `output_device`, start it, and return the running capture.
+/// The caller decides WHAT to tap (the descriptor) and WHICH output device to
+/// clock against; this function only does the plumbing, identically for both.
+fn build_capture_from_desc(
+    tx: broadcast::Sender<Vec<f32>>,
+    is_disconnected: Arc<AtomicBool>,
+    tap_desc: &ca::TapDesc,
+    output_device: &ca::Device,
+    label: &str,
+) -> Result<(ProcessTapCapture, AudioStreamConfig, String)> {
+    let output_uid = output_device
+        .uid()
+        .map_err(|s| anyhow!("Failed to get output device UID: {:?}", s))?;
+    let output_uid_str = output_uid.to_string();
+    debug!("Process Tap ({label}): anchoring to '{}'", output_uid_str);
+
     let tap = tap_desc.create_process_tap().map_err(|s| {
         anyhow!(
             "Failed to create process tap ({:?}). \
@@ -678,7 +805,7 @@ fn build_capture(
     // they're actually 15s @ 96kHz — produces files that play at 2x slowmo.
     let sample_rate = agg_device.nominal_sample_rate().unwrap_or(asbd.sample_rate);
     info!(
-        "Process Tap: {:.0} Hz (asbd reported {:.0} Hz), {} ch, {} bit",
+        "Process Tap ({label}): {:.0} Hz (asbd reported {:.0} Hz), {} ch, {} bit",
         sample_rate, asbd.sample_rate, channels, asbd.bits_per_channel
     );
     let config = AudioStreamConfig::new(sample_rate as u32, channels);
@@ -702,7 +829,7 @@ fn build_capture(
     let started = ca::device_start(agg_device, Some(proc_id))
         .map_err(|s| anyhow!("Failed to start aggregate device: {:?}", s))?;
     debug!(
-        "Process Tap gen {} started (device '{}', {} ch)",
+        "Process Tap gen {} started ({label}, device '{}', {} ch)",
         generation, output_uid_str, channels
     );
 
@@ -714,7 +841,7 @@ fn build_capture(
         generation,
     };
 
-    Ok((capture, config, output_uid_str, snapshot))
+    Ok((capture, config, output_uid_str))
 }
 
 fn current_process_audio_object_id() -> Option<u32> {
@@ -957,6 +1084,76 @@ pub fn spawn_process_tap_capture(
     Ok((config, handle))
 }
 
+/// Create and keep alive an experimental per-process ("piggyback") tap for the
+/// given meeting pids. Re-anchors when the app's output device changes (so
+/// switching speakers/headphones mid-call keeps capturing the app's sound), and
+/// exits when the target process(es) disappear.
+///
+/// `is_running` is accepted for signature parity with the cpal path and is not
+/// read (see the `TapCallbackCtx` comment).
+#[allow(dead_code)] // wired into the live pipeline in the reconcile follow-up
+pub fn spawn_process_tap_capture_for_pids(
+    pids: Vec<i32>,
+    tx: broadcast::Sender<Vec<f32>>,
+    _is_running: Arc<AtomicBool>,
+    is_disconnected: Arc<AtomicBool>,
+) -> Result<(AudioStreamConfig, tokio::task::JoinHandle<()>)> {
+    info!("Creating per-process CoreAudio tap for pids {:?}", pids);
+    let (capture, config, initial_uid) =
+        build_inclusion_capture(&pids, tx.clone(), is_disconnected.clone())?;
+
+    let handle = tokio::task::spawn_blocking(move || {
+        let mut current: Option<ProcessTapCapture> = Some(capture);
+        let mut current_uid = initial_uid;
+
+        const POLL: std::time::Duration = std::time::Duration::from_millis(500);
+
+        while !is_disconnected.load(Ordering::Relaxed) {
+            std::thread::sleep(POLL);
+
+            // Target process gone? Tear down and exit — nothing to tap.
+            if resolve_pids_to_audio_object_ids(&pids).is_empty() {
+                info!("Per-process tap: target pids {:?} gone, stopping", pids);
+                break;
+            }
+
+            // Follow the app's output device. If the device the app is playing
+            // to changed (user switched speakers/headphones), rebuild the tap so
+            // the aggregate re-anchors to the new device.
+            let new_uid = resolve_meeting_output_device(&pids)
+                .and_then(|d| d.uid().ok())
+                .map(|u| u.to_string());
+            let Some(new_uid) = new_uid else {
+                continue; // transient — app's output momentarily unresolvable
+            };
+            if new_uid == current_uid {
+                continue;
+            }
+
+            info!(
+                "Per-process tap: app output changed ({} -> {}), rebuilding",
+                current_uid, new_uid
+            );
+            current = None; // drop old capture before building the new one
+            match build_inclusion_capture(&pids, tx.clone(), is_disconnected.clone()) {
+                Ok((cap, _cfg, uid)) => {
+                    current = Some(cap);
+                    current_uid = uid;
+                }
+                Err(e) => {
+                    warn!("Per-process tap rebuild failed: {e}");
+                    current_uid = new_uid;
+                }
+            }
+        }
+
+        drop(current);
+        debug!("Per-process tap capture thread exited");
+    });
+
+    Ok((config, handle))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1044,7 +1241,7 @@ mod tests {
         };
 
         let exclusion_ids = merge_exclusion_audio_object_ids(Vec::new(), Some(self_process_id));
-        let excluded_array = exclusions::build_exclusion_array(&exclusion_ids);
+        let excluded_array = exclusions::build_object_id_array(&exclusion_ids);
         let tap_desc = ca::TapDesc::with_stereo_global_tap_excluding_processes(&excluded_array);
 
         assert!(
@@ -1081,5 +1278,46 @@ mod tests {
                 .any(|n| n.as_u32() == self_process_id),
             "created CoreAudio tap description must contain current process AudioObjectID {self_process_id}"
         );
+    }
+
+    #[test]
+    fn resolve_pids_maps_own_pid_to_nonzero_object_id() {
+        if !is_process_tap_available() {
+            eprintln!("skipping: CoreAudio Process Tap unavailable");
+            return;
+        }
+        let ids = resolve_pids_to_audio_object_ids(&[std::process::id() as i32]);
+        assert_eq!(ids.len(), 1, "own pid should map to exactly one object id");
+        assert_ne!(ids[0], 0, "object id must be non-zero");
+    }
+
+    #[test]
+    fn resolve_pids_skips_bogus_pid() {
+        if !is_process_tap_available() {
+            eprintln!("skipping: CoreAudio Process Tap unavailable");
+            return;
+        }
+        assert!(
+            resolve_pids_to_audio_object_ids(&[-1]).is_empty(),
+            "bogus pid must resolve to no object ids"
+        );
+    }
+
+    #[test]
+    fn build_inclusion_capture_for_self_starts() {
+        if !is_process_tap_available() {
+            eprintln!("skipping: CoreAudio Process Tap unavailable");
+            return;
+        }
+        let (tx, _rx) = broadcast::channel(16);
+        let is_disconnected = Arc::new(AtomicBool::new(false));
+        match build_inclusion_capture(&[std::process::id() as i32], tx, is_disconnected) {
+            Ok((_capture, config, uid)) => {
+                assert!(config.sample_rate().0 > 0, "sample rate must be positive");
+                assert!(!uid.is_empty(), "must anchor to a real output device uid");
+                // _capture drops here -> exercises teardown without panicking.
+            }
+            Err(e) => panic!("inclusion capture for own pid should build: {e}"),
+        }
     }
 }
