@@ -13,7 +13,7 @@ use anyhow::{anyhow, Result};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use tokio::sync::broadcast;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use ca::aggregate_device_keys as agg_keys;
 use ca::sub_device_keys as sub_keys;
@@ -1351,9 +1351,9 @@ pub fn spawn_process_tap_capture_for_pids(
                     // → the exit path latches `is_disconnected`, and the sweep
                     // falls back to the stable far end within a tick.
                     if consecutive_rebuild_failures >= MAX_CONSECUTIVE_REBUILD_FAILURES {
-                        warn!(
-                            "Per-process tap: {} consecutive rebuild failures, giving up (falling back to stable capture)",
-                            consecutive_rebuild_failures
+                        error!(
+                            "piggyback_tap_latched_dead: giving up per-process tap after {} consecutive rebuild failures (pids {:?})",
+                            MAX_CONSECUTIVE_REBUILD_FAILURES, pids
                         );
                         break;
                     }
