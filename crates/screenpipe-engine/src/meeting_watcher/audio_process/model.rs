@@ -147,6 +147,7 @@ impl ResolvedMeetingCandidate {
                 platform,
                 session_key,
                 first_seen_at,
+                process,
                 ..
             } => Some(ResolvedSession {
                 platform: platform.clone(),
@@ -154,12 +155,15 @@ impl ResolvedMeetingCandidate {
                 meeting_url: None,
                 first_seen_at: *first_seen_at,
                 is_browser: false,
+                pid: process.pid,
+                bundle_id: process.bundle_id.clone(),
             }),
             Self::Browser {
                 platform,
                 meeting_url,
                 session_key,
                 first_seen_at,
+                process,
                 ..
             } => Some(ResolvedSession {
                 platform: platform.clone(),
@@ -167,6 +171,8 @@ impl ResolvedMeetingCandidate {
                 meeting_url: Some(meeting_url.clone()),
                 first_seen_at: *first_seen_at,
                 is_browser: true,
+                pid: process.pid,
+                bundle_id: process.bundle_id.clone(),
             }),
             _ => None,
         }
@@ -199,6 +205,10 @@ pub(crate) struct ResolvedSession {
     pub(crate) meeting_url: Option<String>,
     pub(crate) first_seen_at: Instant,
     pub(crate) is_browser: bool,
+    /// Meeting process identity, threaded from the resolved candidate's
+    /// `AudioInputProcess` through to the published `ActiveMeeting`.
+    pub(crate) pid: Option<i32>,
+    pub(crate) bundle_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

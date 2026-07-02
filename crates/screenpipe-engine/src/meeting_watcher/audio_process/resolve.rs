@@ -506,8 +506,13 @@ pub(crate) fn acquire_input_processes(
             );
             *unsupported_logged = true;
         }
+        // This is a flag resync, not a fresh transition — preserve whatever
+        // identity is already published rather than clobbering it with
+        // `None` on every idle tick while the platform sensor is unsupported.
+        let current_active_meeting = detector.as_ref().and_then(|d| d.active_meeting());
         sync_meeting_flag(
             matches!(state, AudioProcessMeetingState::Active { .. }),
+            current_active_meeting,
             in_meeting_flag,
             detector,
         );
