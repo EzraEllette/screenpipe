@@ -31,7 +31,7 @@ use std::time::Duration;
 use sysinfo::{Pid, PidExt, ProcessExt, System, SystemExt};
 use tokio::sync::broadcast;
 use tracing::{debug, info, warn};
-use windows::core::{implement, IUnknown, Interface, HRESULT, PCWSTR};
+use windows::core::{implement, IUnknown, Interface, HRESULT, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{
     CloseHandle, HANDLE, RPC_E_CHANGED_MODE, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
@@ -47,11 +47,14 @@ use windows::Win32::Media::Audio::{
     VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK, WAVEFORMATEX, WAVE_FORMAT_PCM,
 };
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CoUninitialize, IAgileObject, IAgileObject_Impl, CLSCTX_ALL,
-    COINIT_MULTITHREADED,
+    CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, IAgileObject,
+    IAgileObject_Impl, CLSCTX_ALL, COINIT_MULTITHREADED,
 };
-use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
+use windows::Win32::System::Threading::{
+    CreateEventW, OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
+};
 
+use super::{classify_silence, SilenceVerdict, WatchdogCounters};
 use crate::core::stream::AudioStreamConfig;
 use crate::utils::audio::audio_to_mono;
 
@@ -191,24 +194,104 @@ fn spawn_wasapi_loopback(
     let thread_label = label.clone();
 
     let handle = tokio::task::spawn_blocking(move || {
-        let result = (|| -> Result<()> {
-            let _com = ComApartment::enter()?;
-            let mut capture = unsafe { build_capture(target)? };
-            let config = capture.config.clone();
-            let _ = ready_tx.send(Ok(config));
-            info!(
-                "Windows WASAPI loopback capture started ({}, {} Hz, {} ch)",
-                thread_label,
-                capture.config.sample_rate().0,
-                capture.channels
-            );
-            run_capture_loop(&mut capture, tx, is_disconnected, &thread_label);
-            Ok(())
-        })();
+        // COM must stay initialized for the whole supervisor lifetime, not just
+        // the first build: `build_wasapi_capture` and `current_default_render_endpoint_id`
+        // both create COM objects on rebuilds/endpoint checks.
+        let _com = match ComApartment::enter() {
+            Ok(com) => com,
+            Err(error) => {
+                let _ = ready_tx.send(Err(error));
+                return;
+            }
+        };
 
-        if let Err(error) = result {
-            let _ = ready_tx.send(Err(error));
+        // First build: activate the client and report the (fixed) config exactly
+        // once through the startup channel. On failure the caller learns via the
+        // same channel and aborts.
+        let (mut capture, mut watchdog) = match unsafe { build_wasapi_capture(target) } {
+            Ok(built) => built,
+            Err(error) => {
+                let _ = ready_tx.send(Err(error));
+                return;
+            }
+        };
+        let config = capture.config.clone();
+        let _ = ready_tx.send(Ok(config));
+        info!(
+            "Windows WASAPI loopback capture started ({}, {} Hz, {} ch)",
+            thread_label,
+            capture.config.sample_rate().0,
+            capture.channels
+        );
+
+        // Target-exit watch is opened once and survives rebuilds: the target
+        // process tree does not change, only the capture client does.
+        let target_watch = match target {
+            LoopbackTarget::ProcessTree(pid) => TargetProcessWatch::open(pid),
+            LoopbackTarget::DefaultEndpoint => None,
+        };
+        let mut rebuild_streak: u32 = 0;
+        loop {
+            let endpoint_baseline = match target {
+                LoopbackTarget::DefaultEndpoint => current_default_render_endpoint_id(),
+                LoopbackTarget::ProcessTree(_) => None,
+            };
+            let probe_pid = match target {
+                LoopbackTarget::ProcessTree(pid) => Some(pid as i32),
+                LoopbackTarget::DefaultEndpoint => None,
+            };
+            let exit = run_capture_loop(
+                &mut capture,
+                &tx,
+                &is_disconnected,
+                &thread_label,
+                target_watch.as_ref(),
+                endpoint_baseline.as_deref(),
+                &watchdog,
+                probe_pid,
+            );
+            unsafe {
+                let _ = capture.audio_client.0.Stop();
+            }
+            match supervisor_policy(exit) {
+                SupervisorStep::Stop => break,
+                SupervisorStep::RebuildNow => {}
+                SupervisorStep::RebuildAfterCooldown => {
+                    let cooldown = rebuild_cooldown(rebuild_streak);
+                    rebuild_streak = rebuild_streak.saturating_add(1);
+                    warn!(
+                        "Windows loopback ({thread_label}): {exit:?}; rebuilding in {}s",
+                        cooldown.as_secs()
+                    );
+                    // Sleep in slices so disconnect stays responsive.
+                    let waited = std::time::Instant::now();
+                    while waited.elapsed() < cooldown {
+                        if is_disconnected.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(250));
+                    }
+                }
+            }
+            if is_disconnected.load(Ordering::Relaxed) {
+                break;
+            }
+            match unsafe { build_wasapi_capture(target) } {
+                Ok((new_capture, new_watchdog)) => {
+                    capture = new_capture;
+                    watchdog = new_watchdog;
+                    if matches!(supervisor_policy(exit), SupervisorStep::RebuildNow) {
+                        rebuild_streak = 0;
+                    }
+                }
+                Err(e) => {
+                    warn!("Windows loopback rebuild failed ({thread_label}): {e}");
+                    // fall through — cooldown again on the next iteration
+                }
+            }
         }
+        is_disconnected.store(true, Ordering::Relaxed);
+        debug!("Windows WASAPI loopback supervisor exited ({thread_label})");
     });
 
     match ready_rx.recv_timeout(STARTUP_TIMEOUT) {
@@ -226,7 +309,13 @@ fn spawn_wasapi_loopback(
     }
 }
 
-unsafe fn build_capture(target: LoopbackTarget) -> Result<WasapiLoopbackCapture> {
+/// Activate → initialize → SetEventHandle → Start a fresh loopback client and a
+/// paired watchdog. Used for the first build and every supervisor rebuild so
+/// both paths are identical; the caller decides whether to report the config
+/// (only the first build does — the format is fixed 48k/2ch and never changes).
+unsafe fn build_wasapi_capture(
+    target: LoopbackTarget,
+) -> Result<(WasapiLoopbackCapture, Arc<WatchdogCounters>)> {
     let audio_client = match target {
         LoopbackTarget::ProcessTree(pid) => activate_process_loopback_client(pid)?,
         LoopbackTarget::DefaultEndpoint => activate_default_endpoint_loopback_client()?,
@@ -258,13 +347,14 @@ unsafe fn build_capture(target: LoopbackTarget) -> Result<WasapiLoopbackCapture>
         .Start()
         .map_err(|e| anyhow!("failed to start WASAPI loopback client: {e}"))?;
 
-    Ok(WasapiLoopbackCapture {
+    let capture = WasapiLoopbackCapture {
         audio_client,
         capture_client,
         sample_ready,
         config: AudioStreamConfig::new(SAMPLE_RATE, CHANNELS),
         channels: CHANNELS,
-    })
+    };
+    Ok((capture, WatchdogCounters::new()))
 }
 
 unsafe fn activate_default_endpoint_loopback_client() -> Result<AudioClientSend> {
@@ -635,5 +725,35 @@ mod tests {
         assert_eq!(bits_per_sample, 16);
         assert_eq!(block_align, 4);
         assert_eq!(avg_bytes_per_sec, 192_000);
+    }
+
+    #[test]
+    fn capture_exit_reasons_map_to_supervisor_policy() {
+        assert_eq!(supervisor_policy(CaptureExit::Disconnected), SupervisorStep::Stop);
+        assert_eq!(supervisor_policy(CaptureExit::TargetExited), SupervisorStep::Stop);
+        assert_eq!(
+            supervisor_policy(CaptureExit::EndpointChanged),
+            SupervisorStep::RebuildNow
+        );
+        assert_eq!(
+            supervisor_policy(CaptureExit::SilentBroken),
+            SupervisorStep::RebuildAfterCooldown
+        );
+        assert_eq!(
+            supervisor_policy(CaptureExit::WaitFailed),
+            SupervisorStep::RebuildAfterCooldown
+        );
+        assert_eq!(
+            supervisor_policy(CaptureExit::DrainFailed),
+            SupervisorStep::RebuildAfterCooldown
+        );
+    }
+
+    #[test]
+    fn rebuild_cooldown_backs_off_and_caps() {
+        assert_eq!(rebuild_cooldown(0).as_secs(), 60);
+        assert_eq!(rebuild_cooldown(1).as_secs(), 120);
+        assert_eq!(rebuild_cooldown(4).as_secs(), 960);
+        assert_eq!(rebuild_cooldown(9).as_secs(), 960, "cap at 2^4");
     }
 }
