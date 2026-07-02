@@ -111,10 +111,10 @@ pub(crate) struct PiggybackObservation {
     pub suspended: HashSet<String>,
     /// Running non-session INPUT device display names.
     pub running_inputs: Vec<String>,
-    /// The stable far-end device name to suspend/resume ("System Audio (output)"
-    /// on macOS; empty on Windows where windows_output_follow owns the far end
-    /// and is skipped via the sweep's return value instead).
-    pub stable_output: Option<String>,
+    /// Stable/global far-end captures to suspend only while the Meeting Tap is
+    /// streaming. macOS has one synthetic System Audio device; Windows may have
+    /// one or more endpoint loopbacks currently running.
+    pub stable_outputs: Vec<String>,
     pub tap_strikes: u32,
     pub tap_cooldown_elapsed: bool,
 }
@@ -165,9 +165,9 @@ pub(crate) fn decide_piggyback(obs: &PiggybackObservation) -> Vec<PiggybackActio
     if tap_registered && !tap_streaming {
         // Tap died (app-quit exit sets is_disconnected; supervisor gave up).
         actions.push(PiggybackAction::StopSessionDevice(tap.clone()));
-        if let Some(stable) = &obs.stable_output {
-            if obs.suspended.contains(stable) {
-                actions.push(PiggybackAction::Resume(stable.clone()));
+        for dev in &obs.suspended {
+            if dev.ends_with("(output)") {
+                actions.push(PiggybackAction::Resume(dev.clone()));
             }
         }
         actions.push(PiggybackAction::NoteTapFailure);
@@ -176,15 +176,15 @@ pub(crate) fn decide_piggyback(obs: &PiggybackObservation) -> Vec<PiggybackActio
             actions.push(PiggybackAction::StartTap { pids: vec![pid] });
         }
         // Stable output stays live (or resumes) while the tap isn't delivering.
-        if let Some(stable) = &obs.stable_output {
-            if obs.suspended.contains(stable) {
-                actions.push(PiggybackAction::Resume(stable.clone()));
+        for dev in &obs.suspended {
+            if dev.ends_with("(output)") {
+                actions.push(PiggybackAction::Resume(dev.clone()));
             }
         }
     } else {
         // Tap is streaming: the stable global capture is redundant (double
         // transcription) — suspend it for the meeting's duration.
-        if let Some(stable) = &obs.stable_output {
+        for stable in &obs.stable_outputs {
             if !obs.suspended.contains(stable) {
                 actions.push(PiggybackAction::Suspend(stable.clone()));
             }
@@ -494,40 +494,49 @@ fn fold_volatile_state(telemetry: &mut MeetingTelemetry, state: &PiggybackState)
 /// only exists on macOS and Windows; elsewhere the tap can't be built, so the
 /// observation simply never piggybacks and rides the stable path.
 ///
-/// Windows is force-gated OFF here: the Windows per-process capture supervisor
-/// (target-exit detection, endpoint re-anchor, silence watchdog) was deferred
-/// (see TESTING.md "Windows supervisor DEFERRED" — the re-enable checklist).
-/// Without it the per-pid tap can zombie or double-capture, so a Windows user
-/// with the flag on must land on WarnUnavailableOnce + the stable path, i.e.
-/// exactly today's behavior. Re-enable by returning the real availability once
-/// the supervisor lands and its checklist is verified on a real machine.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn tap_available() -> bool {
     crate::core::process_tap::is_process_tap_available()
 }
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn tap_available() -> bool {
     false
 }
 
-/// The stable far-end device name the sweep suspends while the tap streams and
-/// resumes on any gap. This is a device NAME, not a backend: when it restarts,
-/// `AudioStream::from_device` picks the capture method from the user's own
-/// settings (SCK default / CoreAudio global tap if their flag is on / whatever
-/// exists in the future). macOS captures system audio as a single global
-/// device; on Windows `windows_output_follow` owns the render endpoints, so
-/// there is no single name to suspend — the sweep's return value skips that
-/// sweep instead (see `run_output_follow_sweep`'s leading guard).
+/// Stable far-end device names the sweep suspends while the tap streams and
+/// resumes on any gap. These are device NAMES, not backend choices: restarting
+/// them re-enters the user's normal settings/default-device path. macOS has one
+/// synthetic System Audio device; Windows snapshots the currently running
+/// non-session output endpoints.
 #[cfg(target_os = "macos")]
-fn stable_output_name() -> Option<String> {
-    Some(format!(
+fn stable_output_names(
+    _audio_manager: &super::AudioManager,
+    _session_devices: &HashSet<String>,
+) -> Vec<String> {
+    vec![format!(
         "{} (output)",
         crate::core::device::MACOS_OUTPUT_AUDIO_DEVICE_NAME
-    ))
+    )]
 }
-#[cfg(not(target_os = "macos"))]
-fn stable_output_name() -> Option<String> {
-    None
+#[cfg(target_os = "windows")]
+fn stable_output_names(
+    audio_manager: &super::AudioManager,
+    session_devices: &HashSet<String>,
+) -> Vec<String> {
+    audio_manager
+        .current_devices()
+        .into_iter()
+        .filter(|d| d.device_type == crate::core::device::DeviceType::Output)
+        .map(|d| d.to_string())
+        .filter(|name| !session_devices.contains(name))
+        .collect()
+}
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn stable_output_names(
+    _audio_manager: &super::AudioManager,
+    _session_devices: &HashSet<String>,
+) -> Vec<String> {
+    Vec::new()
 }
 
 /// Side-effecting wrapper around [`decide_piggyback`]. Snapshots the relevant
@@ -612,6 +621,7 @@ pub(crate) async fn run_meeting_piggyback_sweep(
     let cooldown_elapsed = state
         .last_tap_attempt
         .is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(TAP_RETRY_COOLDOWN_SECS));
+    let stable_outputs = stable_output_names(audio_manager, &session_devices);
 
     let obs = PiggybackObservation {
         flag_on,
@@ -623,7 +633,7 @@ pub(crate) async fn run_meeting_piggyback_sweep(
         session_streaming: session_streaming.clone(),
         suspended,
         running_inputs,
-        stable_output: stable_output_name(),
+        stable_outputs,
         tap_strikes: state.tap_strikes,
         tap_cooldown_elapsed: cooldown_elapsed,
     };
@@ -887,7 +897,7 @@ mod tests {
             meetings_only: true,
             tap_available: true,
             meeting: Some(Some(4242)),
-            stable_output: Some("System Audio (output)".to_string()),
+            stable_outputs: vec!["System Audio (output)".to_string()],
             tap_cooldown_elapsed: true,
             ..Default::default()
         }
@@ -977,6 +987,22 @@ mod tests {
     }
 
     #[test]
+    fn streaming_tap_suspends_all_stable_outputs() {
+        let mut obs = base();
+        obs.stable_outputs = vec![
+            "Speakers (Realtek) (output)".to_string(),
+            "Headset (output)".to_string(),
+        ];
+        obs.session_devices = [tap_name()].into();
+        obs.session_streaming = [tap_name()].into();
+        let actions = decide_piggyback(&obs);
+        assert!(actions.contains(&PiggybackAction::Suspend(
+            "Speakers (Realtek) (output)".to_string()
+        )));
+        assert!(actions.contains(&PiggybackAction::Suspend("Headset (output)".to_string())));
+    }
+
+    #[test]
     fn dead_tap_falls_back_stopping_session_and_resuming_stable() {
         let mut obs = base();
         obs.session_devices = [tap_name()].into(); // registered…
@@ -988,6 +1014,21 @@ mod tests {
             "System Audio (output)".to_string()
         )));
         assert!(actions.contains(&PiggybackAction::NoteTapFailure));
+    }
+
+    #[test]
+    fn tap_retry_gap_resumes_suspended_output() {
+        let mut obs = base();
+        obs.tap_strikes = 1;
+        obs.tap_cooldown_elapsed = false;
+        obs.suspended = ["Speakers (Realtek) (output)".to_string()].into();
+        let actions = decide_piggyback(&obs);
+        assert!(actions.contains(&PiggybackAction::Resume(
+            "Speakers (Realtek) (output)".to_string()
+        )));
+        assert!(!actions
+            .iter()
+            .any(|a| matches!(a, PiggybackAction::StartTap { .. })));
     }
 
     #[test]
