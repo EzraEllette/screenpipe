@@ -6,8 +6,9 @@
 //!
 //! Verifies that we capture a meeting app's OWN output. On macOS this re-anchors
 //! as you switch output devices mid-call. On Windows build 20348+ it is
-//! endpoint-agnostic process loopback; older Windows builds fall back to default
-//! endpoint loopback and will include the whole system mix.
+//! endpoint-agnostic process loopback; older Windows builds cannot isolate a
+//! process tree, so the tap refuses to start rather than silently widening to
+//! the whole system mix.
 //!
 //! Usage (from the repo root):
 //!   cargo run -p screenpipe-audio --example meeting_tap_probe            # auto-find Zoom

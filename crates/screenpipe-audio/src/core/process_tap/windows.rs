@@ -16,9 +16,13 @@
 //! - Event-driven endpoint loopback is reliable on Windows 10 1703+.
 //! - Per-PID process loopback requires Windows build 20348+ / Windows 11.
 //!
-//! Below build 20348, `spawn_process_tap_capture_for_pids` deliberately falls
-//! back to full-endpoint loopback and logs a warning: audio keeps flowing, but
-//! the stream is the whole system mix rather than an isolated meeting app.
+//! Below build 20348, per-PID isolation is not possible. Falling back to
+//! full-endpoint loopback there would silently widen a meeting-only capture
+//! into the whole system mix (music, notifications, other apps), so
+//! `spawn_process_tap_capture_for_pids` instead returns an error and leaves
+//! the caller to decide on a non-tap fallback. Full-endpoint loopback stays
+//! available separately via `spawn_process_tap_capture`, which is explicitly
+//! system-wide by design (the Windows counterpart to the macOS global tap).
 
 use anyhow::{anyhow, Result};
 use std::collections::HashSet;
@@ -68,9 +72,11 @@ static WINDOWS_BUILD: OnceLock<Option<u32>> = OnceLock::new();
 
 /// True when endpoint-agnostic per-PID process loopback is available.
 ///
-/// Build < 20348 can still capture far-end audio via full-endpoint loopback,
-/// but that fallback is the whole system mix and can include music,
-/// notifications, and other apps.
+/// Build < 20348 cannot isolate a single process tree via loopback — the only
+/// loopback available there is full-endpoint (whole system mix), which is not
+/// an acceptable substitute for meeting-only capture. Callers that need
+/// per-PID isolation must treat `false` as "unsupported", not "use the
+/// endpoint-wide fallback".
 pub fn is_process_tap_available() -> bool {
     let build = WINDOWS_BUILD.get_or_init(detect_windows_build);
     match build {
@@ -82,15 +88,15 @@ pub fn is_process_tap_available() -> bool {
                 if available {
                     "available"
                 } else {
-                    "full-endpoint fallback required"
+                    "unavailable (per-PID isolation unsupported below build 20348)"
                 }
             );
             available
         }
         None => {
             warn!(
-                "could not determine Windows build; assuming process loopback unavailable \
-                 and using full-endpoint fallback"
+                "could not determine Windows build; assuming per-PID process loopback \
+                 unavailable"
             );
             false
         }
@@ -99,8 +105,12 @@ pub fn is_process_tap_available() -> bool {
 
 /// Create a full-system loopback capture against the default render endpoint.
 ///
-/// This is the Windows counterpart to the macOS global system-audio tap and is
-/// also the fallback when per-PID process loopback is unavailable.
+/// This is the Windows counterpart to the macOS global system-audio tap: an
+/// explicit, intentionally system-wide capture. It is a separate entry point
+/// from `spawn_process_tap_capture_for_pids`, which never falls back to this
+/// on unsupported builds — callers must opt into system-wide capture
+/// themselves rather than have it happen silently underneath a meeting-only
+/// request.
 pub fn spawn_process_tap_capture(
     tx: broadcast::Sender<Vec<f32>>,
     _is_running: Arc<AtomicBool>,
@@ -114,9 +124,13 @@ pub fn spawn_process_tap_capture(
 /// The detected mic-capturing PID is often a utility process (Chrome Audio
 /// Service, Electron helper, WebView2 child). We walk to the app root and use
 /// `PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE` so render audio from the
-/// app and its children is captured. If build < 20348, this falls back to
-/// full-endpoint loopback with a warning because process isolation is not
-/// available on that OS.
+/// app and its children is captured.
+///
+/// If build < 20348, per-PID isolation is unavailable and this returns an
+/// error rather than silently widening to full-endpoint (whole system mix)
+/// loopback — meeting-only capture must not record unrelated system audio.
+/// Callers that want a system-wide fallback should choose that explicitly via
+/// `spawn_process_tap_capture`.
 pub fn spawn_process_tap_capture_for_pids(
     pids: Vec<i32>,
     tx: broadcast::Sender<Vec<f32>>,
@@ -124,17 +138,15 @@ pub fn spawn_process_tap_capture_for_pids(
     is_disconnected: Arc<AtomicBool>,
 ) -> Result<(AudioStreamConfig, tokio::task::JoinHandle<()>)> {
     let root_pid = select_target_root_pid(&pids)?;
-    if is_process_tap_available() {
-        spawn_wasapi_loopback(tx, is_disconnected, LoopbackTarget::ProcessTree(root_pid))
-    } else {
-        warn!(
-            "Windows process loopback requires build {}+; falling back to full-endpoint \
-             loopback for requested root pid {}. Far-end capture will include the whole \
-             system mix on this OS.",
-            PROCESS_LOOPBACK_MIN_BUILD, root_pid
-        );
-        spawn_wasapi_loopback(tx, is_disconnected, LoopbackTarget::DefaultEndpoint)
+    if !is_process_tap_available() {
+        return Err(anyhow!(
+            "Windows per-process audio tap requires build {}+ (per-PID process loopback); \
+             this build cannot isolate root pid {} without capturing the whole system mix",
+            PROCESS_LOOPBACK_MIN_BUILD,
+            root_pid
+        ));
     }
+    spawn_wasapi_loopback(tx, is_disconnected, LoopbackTarget::ProcessTree(root_pid))
 }
 
 #[derive(Clone, Copy, Debug)]
