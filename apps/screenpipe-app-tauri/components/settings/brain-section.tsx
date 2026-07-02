@@ -169,6 +169,14 @@ export function resetBrainViewStateForTests() {
   brainViewState.scrollTopByType.artifacts = 0;
 }
 
+// Backoff base for retrying a failed initial /memories load. Mutable only so
+// tests don't have to sit through real multi-second backoffs.
+let memoryFetchRetryBaseDelayMs = 1_500;
+
+export function setMemoryFetchRetryBaseDelayForTests(ms: number) {
+  memoryFetchRetryBaseDelayMs = ms;
+}
+
 function timeAgo(iso: string): string {
   const ms = Date.now() - new Date(iso).getTime();
   if (!Number.isFinite(ms) || ms < 0) return "just now";
@@ -300,6 +308,7 @@ export function BrainSection() {
   const [memories, setMemories] = useState<MemoryRecord[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
   const [deletingId, setDeletingId] = useState<number | null>(null);
   const [confirmBatchDelete, setConfirmBatchDelete] = useState(false);
@@ -319,6 +328,9 @@ export function BrainSection() {
   const sentinelRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const loadingMoreRef = useRef(false);
+  // Monotonic id per fetchPage call: a newer call (filter change, retry
+  // button) invalidates any in-flight attempt/backoff of an older one.
+  const fetchGenerationRef = useRef(0);
   const didMountRenderResetRef = useRef(false);
   const memoryDisplayCacheRef = useRef<Map<string, MemoryCardDisplay>>(new Map());
 
@@ -512,6 +524,7 @@ export function BrainSection() {
 
   const fetchPage = useCallback(
     async (offset: number, append: boolean) => {
+      const generation = ++fetchGenerationRef.current;
       if (offset === 0) {
         setLoading(true);
         setSelectedItem(null);
@@ -520,46 +533,79 @@ export function BrainSection() {
         loadingMoreRef.current = true;
       }
 
-      try {
+      const attemptFetch = async (): Promise<MemoryListResponse> => {
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 10_000);
-        const params = new URLSearchParams({
-          limit: String(PAGE_SIZE),
-          offset: String(offset),
-          order_by: sortField,
-          order_dir: sortDir,
-        });
-        if (parsedSearch.contentQuery) params.set("q", parsedSearch.contentQuery);
-        if (typeFilter === "memories" && parsedSearch.memorySource) {
-          params.set("source", parsedSearch.memorySource);
+        try {
+          const params = new URLSearchParams({
+            limit: String(PAGE_SIZE),
+            offset: String(offset),
+            order_by: sortField,
+            order_dir: sortDir,
+          });
+          if (parsedSearch.contentQuery) params.set("q", parsedSearch.contentQuery);
+          if (typeFilter === "memories" && parsedSearch.memorySource) {
+            params.set("source", parsedSearch.memorySource);
+          }
+          if (typeFilter === "memories" && memorySearchTags.length > 0) {
+            params.set("tags", memorySearchTags.join(","));
+          }
+          const res = await localFetch(
+            `/memories?${params}`,
+            { signal: controller.signal },
+          );
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          return (await res.json()) as MemoryListResponse;
+        } finally {
+          clearTimeout(timeout);
         }
-        if (typeFilter === "memories" && memorySearchTags.length > 0) {
-          params.set("tags", memorySearchTags.join(","));
+      };
+
+      try {
+        // The initial page retries transient failures — on machines with a
+        // slow or contended disk the local API can stall past the 10s abort
+        // and recover moments later. Load-more fails fast; scrolling retries.
+        const attempts = offset === 0 ? 3 : 1;
+        let data: MemoryListResponse | undefined;
+        for (let attempt = 1; ; attempt++) {
+          try {
+            data = await attemptFetch();
+            break;
+          } catch (err) {
+            if (attempt >= attempts) throw err;
+            await new Promise((r) =>
+              setTimeout(r, memoryFetchRetryBaseDelayMs * attempt),
+            );
+            if (fetchGenerationRef.current !== generation) return;
+          }
         }
-        const res = await localFetch(
-          `/memories?${params}`,
-          { signal: controller.signal },
-        );
-        clearTimeout(timeout);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data: MemoryListResponse = await res.json();
+        if (fetchGenerationRef.current !== generation) return;
 
         setMemories((prev) =>
           append ? [...prev, ...data.data] : data.data,
         );
         setTotal(data.pagination.total);
+        setLoadError(null);
       } catch (err) {
+        if (fetchGenerationRef.current !== generation) return;
         if (offset === 0) {
+          const message =
+            err instanceof DOMException && err.name === "AbortError"
+              ? "screenpipe's local API didn't respond in time — the database may be busy; retrying in the background"
+              : String(err);
+          setLoadError(message);
           toast({
             title: "failed to load memories",
-            description: String(err),
+            description: message,
             variant: "destructive",
           });
         }
       } finally {
-        setLoading(false);
-        setLoadingMore(false);
-        loadingMoreRef.current = false;
+        if (fetchGenerationRef.current === generation) {
+          setLoading(false);
+          setLoadingMore(false);
+          loadingMoreRef.current = false;
+        }
       }
     },
     [
@@ -590,6 +636,12 @@ export function BrainSection() {
 
   // Silent background check every 30s — fetches only 1 record to detect new memories.
   // Updates the stale-warning state without touching the displayed list or showing a spinner.
+  // Doubles as self-healing for a failed initial load: when the API answers
+  // again after an error (e.g. a temporary database stall), reload the list.
+  const loadErrorRef = useRef<string | null>(null);
+  loadErrorRef.current = loadError;
+  const fetchPageRef = useRef(fetchPage);
+  fetchPageRef.current = fetchPage;
   useEffect(() => {
     const check = async () => {
       try {
@@ -598,6 +650,7 @@ export function BrainSection() {
         const data: MemoryListResponse = await res.json();
         setBgTotal(data.pagination.total);
         if (data.data[0]) setNewestCreatedAt(data.data[0].created_at);
+        if (loadErrorRef.current) fetchPageRef.current(0, false);
       } catch {}
     };
     check();
@@ -1539,6 +1592,23 @@ export function BrainSection() {
 
       {(typeFilter === "memories" ? loading : artifactsLoading) ? (
         <BrainSkeleton />
+      ) : typeFilter === "memories" && loadError && memories.length === 0 ? (
+        <div
+          data-testid="brain-load-error"
+          className="text-sm text-muted-foreground py-8 space-y-3 text-center"
+        >
+          <AlertCircle className="mx-auto h-5 w-5 text-destructive" />
+          <p>couldn&apos;t load memories</p>
+          <p className="text-xs">{loadError}</p>
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-7 text-xs"
+            onClick={() => fetchPage(0, false)}
+          >
+            retry
+          </Button>
+        </div>
       ) : unifiedItems.length === 0 ? (
         <div className="text-sm text-muted-foreground py-8 space-y-2 text-center">
           <p>{emptyStateMessage(typeFilter, debouncedQuery, activeTags.length > 0)}</p>

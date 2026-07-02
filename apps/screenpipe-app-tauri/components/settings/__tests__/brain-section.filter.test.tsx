@@ -107,7 +107,11 @@ vi.mock("@/components/ui/use-toast", () => ({
   useToast: () => ({ toast: vi.fn() }),
 }));
 
-import { BrainSection, resetBrainViewStateForTests } from "../brain-section";
+import {
+  BrainSection,
+  resetBrainViewStateForTests,
+  setMemoryFetchRetryBaseDelayForTests,
+} from "../brain-section";
 import { localFetch } from "@/lib/api";
 import { emit } from "@tauri-apps/api/event";
 import { useChatStore } from "@/lib/stores/chat-store";
@@ -332,5 +336,52 @@ describe("BrainSection type filter", () => {
         expect.objectContaining({ method: "PUT" }),
       );
     });
+  });
+});
+
+describe("BrainSection load failure", () => {
+  // Regression for "failed to load brain content": a slow/contended local DB
+  // made GET /memories fail; the tab silently fell back to "no memories yet",
+  // which reads as data loss. Failures must retry, then show an explicit
+  // error state with a working retry button.
+  beforeEach(() => {
+    setMemoryFetchRetryBaseDelayForTests(1);
+  });
+
+  const failMemories = () => {
+    const original = vi.mocked(localFetch).getMockImplementation()!;
+    vi.mocked(localFetch).mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path.startsWith("/memories")) {
+        throw new DOMException("The operation was aborted.", "AbortError");
+      }
+      return original(path, init);
+    });
+    return original;
+  };
+
+  it("retries the initial load and shows an error state, not the empty state", async () => {
+    failMemories();
+    render(<BrainSection />);
+
+    await waitFor(() => expect(screen.getByTestId("brain-load-error")).toBeTruthy());
+    // More paged requests than the mount-time fetches alone (2) proves the
+    // failed load was retried before surfacing the error.
+    const pagedCalls = vi
+      .mocked(localFetch)
+      .mock.calls.filter(([path]) => String(path).includes("limit=20"));
+    expect(pagedCalls.length).toBeGreaterThanOrEqual(3);
+    expect(screen.queryByText("no memories yet")).toBeNull();
+  });
+
+  it("recovers when the retry button is clicked", async () => {
+    const original = failMemories();
+    render(<BrainSection />);
+    await waitFor(() => expect(screen.getByTestId("brain-load-error")).toBeTruthy());
+
+    vi.mocked(localFetch).mockImplementation(original);
+    fireEvent.click(screen.getByRole("button", { name: "retry" }));
+
+    await waitFor(() => expect(memoryRows().length).toBe(8));
+    expect(screen.queryByTestId("brain-load-error")).toBeNull();
   });
 });
