@@ -36,7 +36,14 @@ fn is_legacy_display_output(device_name: &str) -> bool {
 /// the first audio frame — so we also require a live stream handle. Streams that
 /// failed to open never get inserted; streams that died (timeout, zero-fill hijack)
 /// set `is_disconnected` and are treated as not running so recovery can retry.
-fn is_device_actively_streaming(device_manager: &DeviceManager, device: &AudioDevice) -> bool {
+///
+/// `pub(crate)` so the piggyback sweep can observe stream liveness through the
+/// thin [`AudioManager::is_device_actively_streaming`] wrapper without
+/// duplicating this logic.
+pub(crate) fn is_device_actively_streaming(
+    device_manager: &DeviceManager,
+    device: &AudioDevice,
+) -> bool {
     if !device_manager.is_running(device) {
         return false;
     }
@@ -462,6 +469,11 @@ pub async fn start_device_monitor(
         let mut logged_pinned_fallback_default_disabled: HashSet<String> = HashSet::new();
         // One-shot guard for the "no microphone available" alert (see the sweep).
         let mut pinned_input_unavailable_notified = false;
+
+        // Meeting piggyback state (experimental flag). Owns the per-process
+        // tap + resolved-mic capture during meetings, with total fallback to
+        // the stable path on any gap. Pure decider in `meeting_piggyback.rs`.
+        let mut piggyback_state = super::meeting_piggyback::PiggybackState::default();
 
         // Initialize tracker with current defaults
         let _ = default_tracker.check_input_changed();
@@ -1355,11 +1367,23 @@ pub async fn start_device_monitor(
                 )
                 .await;
 
+                // Meeting piggyback: per-process tap + resolved mic during
+                // meetings (experimental flag). Owns its own fallback — every
+                // failure path lands on the stable capture. Pure decider in
+                // meeting_piggyback.rs; this call only applies side effects.
+                let piggyback_far_end_active = super::meeting_piggyback::run_meeting_piggyback_sweep(
+                    &audio_manager,
+                    &mut piggyback_state,
+                )
+                .await;
+
                 // Capture whichever render endpoint audio actually plays
                 // through, and notify if a meeting's speaker audio isn't
                 // reaching the pipeline. Inert outside Windows — see
-                // `windows_output_follow.rs`.
+                // `windows_output_follow.rs`. Skipped entirely while the
+                // piggyback tap is the far end (would double-capture).
                 super::windows_output_follow::run_output_follow_sweep(
+                    piggyback_far_end_active,
                     &audio_manager,
                     &mut output_follow_state,
                     &mut speaker_watchdog_state,
