@@ -519,7 +519,10 @@ impl ResourceMonitor {
                         // One Sentry issue for all leak reports; release/os
                         // tags (set at init) split it per version in the UI.
                         scope.set_fingerprint(Some(["memory-leak-suspected"].as_slice()));
-                        scope.set_tag("leak.slope_mb_per_h", format!("{:.0}", stats.slope_mb_per_h));
+                        scope.set_tag(
+                            "leak.slope_mb_per_h",
+                            format!("{:.0}", stats.slope_mb_per_h),
+                        );
                         scope.set_tag("leak.r2", format!("{:.2}", stats.r2));
                         scope.set_tag("leak.window_h", format!("{:.1}", stats.span_hours));
                         scope.set_extra("leak.start_gb", stats.start_gb.into());
@@ -926,7 +929,11 @@ mod tests {
     #[test]
     fn flat_memory_is_not_a_leak() {
         let s = samples_over(4.0, |dt| {
-            1.8 + if (dt / 30.0) as u64 % 2 == 0 { 0.005 } else { -0.005 }
+            1.8 + if (dt / 30.0) as u64 % 2 == 0 {
+                0.005
+            } else {
+                -0.005
+            }
         });
         let stats = analyze_memory_trend(&s).expect("4h window should be judged");
         assert!(
