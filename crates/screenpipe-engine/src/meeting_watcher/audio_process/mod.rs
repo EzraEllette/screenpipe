@@ -130,7 +130,17 @@ pub async fn run_audio_process_meeting_detection_loop(
             last_seen_at: now,
             is_browser: false,
         };
-        sync_meeting_flag(true, &in_meeting_flag, &detector);
+        // Reattaching after a restart: the DB knows a meeting was active but
+        // the sensor has no live process snapshot to attribute it to yet.
+        sync_meeting_flag(
+            true,
+            Some(screenpipe_audio::meeting_detector::ActiveMeeting {
+                pid: None,
+                bundle_id: None,
+            }),
+            &in_meeting_flag,
+            &detector,
+        );
         info!(
             "audio-process meeting detector: reattached active meeting (id={}, app={})",
             meeting.id, meeting.meeting_app
@@ -155,7 +165,7 @@ pub async fn run_audio_process_meeting_detection_loop(
             _ = shutdown_rx.recv() => {
                 info!("audio-process meeting detector: shutdown received");
                 end_active_meeting_on_shutdown(&db, &state).await;
-                sync_meeting_flag(false, &in_meeting_flag, &detector);
+                sync_meeting_flag(false, None, &in_meeting_flag, &detector);
                 return;
             }
         }
@@ -194,7 +204,10 @@ pub async fn run_audio_process_meeting_detection_loop(
                 debug!(
                     "audio-process meeting detector: manual meeting active, skipping auto detection"
                 );
-                sync_meeting_flag(true, &in_meeting_flag, &detector);
+                // A manually-started meeting owns the active slot; this
+                // detector has no process identity for it from here (mirrors
+                // the BlockedByActive case in `apply_state_action`).
+                sync_meeting_flag(true, None, &in_meeting_flag, &detector);
                 interval = IDLE_POLL_INTERVAL;
                 continue;
             }
@@ -291,7 +304,14 @@ pub async fn run_audio_process_meeting_detection_loop(
         }
 
         let active_now = matches!(state, AudioProcessMeetingState::Active { .. });
-        sync_meeting_flag(active_now, &in_meeting_flag, &detector);
+        // This end-of-tick call is a flag resync, not a transition:
+        // `apply_state_action` above already published the identity for a
+        // fresh `StartMeeting` this tick, and on every other tick nothing
+        // changed. Read back whatever is currently published and pass it
+        // through so this resync doesn't clobber it with `None` on every
+        // single loop iteration while a meeting stays active.
+        let current_active_meeting = detector.as_ref().and_then(|d| d.active_meeting());
+        sync_meeting_flag(active_now, current_active_meeting, &in_meeting_flag, &detector);
         interval = if processes.is_empty() {
             IDLE_POLL_INTERVAL
         } else {

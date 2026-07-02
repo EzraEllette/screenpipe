@@ -1391,7 +1391,7 @@ mod tests {
         print_states("before-tap");
         let (tx, _rx) = broadcast::channel(16);
         let is_disconnected = Arc::new(AtomicBool::new(false));
-        if let Ok((_capture, _config, uid)) =
+        if let Ok((_capture, _config, uid, _watchdog)) =
             build_inclusion_capture(&[std::process::id() as i32], tx, is_disconnected)
         {
             std::thread::sleep(std::time::Duration::from_millis(1500));
