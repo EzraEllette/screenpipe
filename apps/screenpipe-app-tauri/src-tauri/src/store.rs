@@ -82,10 +82,11 @@ const APP_ENTITLEMENT_CLOCK_SKEW_MINUTES: i64 = 5;
 //       leave it in place.
 //   L5: after the plugin builds, if the disk file has a `settings` key but
 //       the loaded store doesn't, the load silently failed — refuse to hand
-//       out the wipe-primed handle AND eject it from the plugin registry
-//       (the plugin registers stores before we can inspect them, and serves
-//       registry hits without re-reading disk), so retries and the webview
-//       rebuild from the file instead of re-serving the empty instance.
+//       out the wipe-primed handle AND heal the registered instance in
+//       place via reload() (the plugin registers stores before we can
+//       inspect them and serves registry hits without re-reading disk, so
+//       an unhealed instance would be re-served to retries, the webview,
+//       and the exit-time save-all).
 // ---------------------------------------------------------------------------
 
 /// Suffix for the most-recent known-healthy snapshot.
@@ -626,15 +627,37 @@ fn build_store_at<R: tauri::Runtime>(
                         store_path.display(),
                         attempt + 1
                     );
-                    // The plugin registered this instance (resources table +
-                    // path map) before we could inspect it, and `.build()`
-                    // serves registry hits without re-reading disk — so a
-                    // bare `continue` would hand every retry, the webview's
-                    // Store.load, and the plugin's exit-time save-all this
-                    // same empty store, and the first save would flush
-                    // defaults over the user's data. Eject it so the next
-                    // build re-reads the file.
-                    s.close_resource();
+                    // The plugin registered this instance before we could
+                    // inspect it and serves it from the registry on every
+                    // later build — ours AND the webview's — without ever
+                    // re-reading disk, so a bare `continue` would retry into
+                    // the same empty store and the first save would flush
+                    // defaults over the user's data. Heal it in place:
+                    // reload() re-reads the file with errors VISIBLE (build
+                    // swallows them), and fixing the shared instance fixes
+                    // every handle already pointing at it. Deliberately no
+                    // registry ejection — close_resource() takes the
+                    // resources-table and stores-map locks in the opposite
+                    // order to build_inner (ABBA deadlock risk) and would
+                    // invalidate resource ids held by live webview handles.
+                    match s.reload() {
+                        Ok(()) if s.get("settings").is_some() => {
+                            tracing::warn!(
+                                "store healed in place from {} after a \
+                                 silently-swallowed load failure",
+                                store_path.display()
+                            );
+                            encrypt_store_file(&store_path);
+                            return Ok(s);
+                        }
+                        Ok(()) => tracing::error!(
+                            "store reload succeeded but settings key still \
+                             missing — retrying"
+                        ),
+                        Err(e) => {
+                            tracing::error!("store reload from disk failed: {} — retrying", e)
+                        }
+                    }
                     last_err = None;
                     std::thread::sleep(std::time::Duration::from_millis(
                         100 * (attempt as u64 + 1),
@@ -2504,15 +2527,18 @@ mod tests {
     }
 
     #[test]
-    fn l5_refusal_ejects_wipe_primed_store_from_plugin_registry() {
+    fn l5_refusal_heals_wipe_primed_store_in_place() {
         // The plugin's build_inner registers a freshly-built store in its
         // registry BEFORE build_store can refuse it, and `.build()` serves
         // registry hits without re-reading disk. If the L5 refusal only
         // dropped its local Arc, every retry — and the webview's Store.load,
         // and the plugin's exit-time save-all — would keep getting the same
         // wipe-primed EMPTY instance, so the first save would flush defaults
-        // over the user's real store.bin. The refusal must eject the instance
-        // from the registry so the next build re-reads the disk file.
+        // over the user's real store.bin. The refusal must reload the SHARED
+        // instance from disk in place: healing it heals every handle already
+        // pointing at it (a webview's included), keeps its resource id valid,
+        // and needs no registry surgery (whose lock order inverts the
+        // plugin's and risks deadlock).
         use tauri_plugin_store::StoreExt;
 
         let tmp = tempfile::tempdir().unwrap();
@@ -2524,7 +2550,8 @@ mod tests {
             .expect("failed to build mock app");
 
         // Poison the registry the way a transient read failure does: the
-        // plugin swallows the load error and registers an EMPTY store.
+        // plugin swallows the load error and registers an EMPTY store. This
+        // handle also stands in for one a webview grabbed before recovery.
         std::fs::write(&store_path, b"transient garbage").unwrap();
         let poisoned = StoreBuilder::new(app.handle(), store_path.clone())
             .build()
@@ -2541,18 +2568,22 @@ mod tests {
         );
 
         let store = build_store_at(app.handle(), store_path.clone())
-            .expect("must eject the poisoned instance and load the disk state");
+            .expect("must heal the poisoned instance from the disk state");
         assert!(
             store.get("settings").is_some(),
             "must hand out the on-disk settings, not the wipe-primed empty store"
         );
         assert!(
-            !Arc::ptr_eq(&poisoned, &store),
-            "must not re-serve the ejected instance"
+            Arc::ptr_eq(&poisoned, &store),
+            "must heal the shared registered instance, not swap in a new one"
+        );
+        assert!(
+            poisoned.get("settings").is_some(),
+            "handles obtained before recovery must see the healed state"
         );
 
         // The registry — what the webview's Store.load and the plugin's
-        // exit-time save-all read — must also serve the healthy instance now.
+        // exit-time save-all read — must also serve the healthy instance.
         let registered = app
             .get_store(&store_path)
             .expect("healthy store must be registered");
