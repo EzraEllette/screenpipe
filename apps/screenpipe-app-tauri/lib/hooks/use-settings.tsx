@@ -725,15 +725,11 @@ export const getStore = async () => {
 			// Resolve the base dir via the backend so the webview opens the same
 			// store.bin as Rust (get_base_dir honors SCREENPIPE_DATA_DIR); a
 			// hardcoded ~/.screenpipe here splits the settings store in two
-			// whenever that override is set.
+			// whenever that override is set. The command never fails in a Tauri
+			// context, so the fallback only covers non-Tauri environments.
 			let baseDir: string | null = null;
 			try {
-				const res = await commands.getScreenpipeBaseDir();
-				if (res.status === "ok") {
-					baseDir = res.data;
-				} else {
-					console.warn("get_screenpipe_base_dir failed, using ~/.screenpipe:", res.error);
-				}
+				baseDir = await commands.getScreenpipeBaseDir();
 			} catch (e) {
 				console.warn("get_screenpipe_base_dir unavailable, using ~/.screenpipe:", e);
 			}
@@ -745,6 +741,12 @@ export const getStore = async () => {
 				defaults: {},
 			});
 		})();
+		// Don't cache a rejected promise: clear the singleton so the next
+		// getStore() call retries (pre-IIFE code retried resolution failures
+		// the same way). Callers awaiting this instance still see the error.
+		_store.catch(() => {
+			_store = undefined;
+		});
 	}
 	return _store;
 };

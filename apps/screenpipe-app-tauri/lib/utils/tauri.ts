@@ -719,15 +719,13 @@ async getPendingUpdate() : Promise<Result<PendingUpdateSnapshot | null, null>> {
  * Tauri command: absolute path of the screenpipe base dir (where store.bin
  * lives). Honors SCREENPIPE_DATA_DIR; the webview must use this instead of
  * hardcoding ~/.screenpipe, or it reads/writes a different settings file
- * than the Rust side whenever the override is set.
+ * than the Rust side whenever the override is set. Never fails: if the dir
+ * can't be created yet (unmounted volume, read-only target), the resolved
+ * path is still returned — the Rust store keeps using it too (main.rs falls
+ * back the same way), and the store plugin creates missing parents on save.
  */
-async getScreenpipeBaseDir() : Promise<Result<string, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("get_screenpipe_base_dir") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
+async getScreenpipeBaseDir() : Promise<string> {
+    return await TAURI_INVOKE("get_screenpipe_base_dir");
 },
 /**
  * Get sync configuration.
