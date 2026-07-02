@@ -26,6 +26,7 @@ export const searchIndex: SettingsField[] = [
   // conditional: platform/OS-gated (Windows-only / macOS CoreAudio tap).
   { label: "Microphone echo cancellation", keywords: ["echo", "voiceprocessingio"], conditional: true },
   { label: "CoreAudio system audio capture", keywords: ["coreaudio", "system audio"], conditional: true },
+  { label: "meeting piggyback (experimental)", keywords: ["meeting", "piggyback", "per-process", "meeting audio"], conditional: true },
   { label: "Screen recording", keywords: ["screen", "video"] },
   { label: "Use all monitors", keywords: ["monitor", "display"] },
   // conditional: monitor picker only renders when "Use all monitors" is off — paired right under that toggle.
@@ -3488,6 +3489,35 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
                 id="experimentalCoreaudioSystemAudio"
                 checked={Boolean(settings.experimentalCoreaudioSystemAudio ?? false)}
                 onCheckedChange={(checked) => handleSettingsChange({ experimentalCoreaudioSystemAudio: checked }, true)}
+              />
+            </div>
+          </CardContent>
+        </Card>
+        )}
+
+        {/* Meeting piggyback (experimental): during meetings, capture only the
+            meeting app's audio and the mic it actually uses. Windows always has
+            a piggyback path (WASAPI session capture); macOS needs the CoreAudio
+            Process Tap. */}
+        {!settings.disableAudio && (isWindows || coreaudioTapAvailable) && (
+        <Card className="border-border bg-card">
+          <CardContent className="px-3 py-2.5">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center space-x-2.5">
+                <Mic className="h-4 w-4 text-muted-foreground shrink-0" />
+                <div>
+                  <h3 className="text-sm font-medium text-foreground">
+                    meeting piggyback (experimental)
+                  </h3>
+                  <p className="text-xs text-muted-foreground">
+                    during meetings, capture only the meeting app&apos;s audio and the microphone it actually uses. falls back to standard capture automatically if unavailable.
+                  </p>
+                </div>
+              </div>
+              <Switch
+                id="experimentalMeetingPiggyback"
+                checked={Boolean(settings.experimentalMeetingPiggyback ?? false)}
+                onCheckedChange={(checked) => handleSettingsChange({ experimentalMeetingPiggyback: checked }, true)}
               />
             </div>
           </CardContent>
