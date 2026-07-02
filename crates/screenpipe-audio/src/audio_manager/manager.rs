@@ -1140,6 +1140,7 @@ impl AudioManager {
             TranscriptionMode::Batch => "background",
         };
         let use_pii_removal = options.use_pii_removal;
+        let output_path = options.output_path.clone();
         drop(options); // Release lock before spawning
         let metrics = self.metrics.clone();
         let on_insert = self.on_transcription_insert.clone();
@@ -1151,6 +1152,7 @@ impl AudioManager {
             use_pii_removal,
             metrics,
             on_insert,
+            output_path,
         )))
     }
 
