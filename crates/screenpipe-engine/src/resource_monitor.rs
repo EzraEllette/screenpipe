@@ -5,6 +5,7 @@
 use chrono::Local;
 use reqwest::Client;
 use serde_json::{json, Map};
+use std::collections::BTreeMap;
 use std::env;
 use std::fs::File;
 use std::fs::OpenOptions;
@@ -199,6 +200,113 @@ struct HardwareInfo {
     kernel_version: String,
 }
 
+/// Aggregated resource usage for a screenpipe-related process group.
+#[derive(Clone, Debug, serde::Serialize)]
+struct ProcessGroupUsage {
+    group: String,
+    process_count: usize,
+    rss_gb: f64,
+    cpu_percent: f32,
+}
+
+/// A single process row kept intentionally small for local diagnostics.
+///
+/// We log process names, not full command lines, to avoid leaking prompt text,
+/// file paths, or tokens through the resource log.
+#[derive(Clone, Debug, serde::Serialize)]
+struct ProcessUsage {
+    pid: u32,
+    parent_pid: Option<u32>,
+    parent_name: Option<String>,
+    name: String,
+    group: String,
+    rss_mb: f64,
+    cpu_percent: f32,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+struct ProcessBreakdown {
+    groups: Vec<ProcessGroupUsage>,
+    top_related_by_memory: Vec<ProcessUsage>,
+    top_related_by_cpu: Vec<ProcessUsage>,
+}
+
+impl ProcessBreakdown {
+    fn empty() -> Self {
+        Self {
+            groups: Vec::new(),
+            top_related_by_memory: Vec::new(),
+            top_related_by_cpu: Vec::new(),
+        }
+    }
+
+    fn group(&self, name: &str) -> Option<&ProcessGroupUsage> {
+        self.groups.iter().find(|group| group.group == name)
+    }
+
+    fn mcp_count(&self) -> usize {
+        self.group("screenpipe_mcp_child")
+            .map(|group| group.process_count)
+            .unwrap_or(0)
+            + self
+                .group("screenpipe_mcp_external")
+                .map(|group| group.process_count)
+                .unwrap_or(0)
+    }
+
+    fn mcp_child_count(&self) -> usize {
+        self.group("screenpipe_mcp_child")
+            .map(|group| group.process_count)
+            .unwrap_or(0)
+    }
+
+    fn mcp_rss_gb(&self) -> f64 {
+        self.group("screenpipe_mcp_child")
+            .map(|group| group.rss_gb)
+            .unwrap_or(0.0)
+            + self
+                .group("screenpipe_mcp_external")
+                .map(|group| group.rss_gb)
+                .unwrap_or(0.0)
+    }
+
+    fn related_rss_gb(&self) -> f64 {
+        self.groups.iter().map(|group| group.rss_gb).sum()
+    }
+
+    fn related_cpu_percent(&self) -> f32 {
+        self.groups.iter().map(|group| group.cpu_percent).sum()
+    }
+
+    fn should_warn(&self) -> bool {
+        self.mcp_child_count() >= 3
+            || self.mcp_count() >= 10
+            || self.mcp_rss_gb() >= 1.0
+            || self.related_rss_gb() >= 8.0
+            || self.related_cpu_percent() >= 250.0
+    }
+
+    fn compact_summary(&self) -> String {
+        let groups = self
+            .groups
+            .iter()
+            .map(|group| {
+                format!(
+                    "{}={}p/{:.2}GB/{:.0}%cpu",
+                    group.group, group.process_count, group.rss_gb, group.cpu_percent
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        if groups.is_empty() {
+            "no screenpipe-related processes found".to_string()
+        } else {
+            groups
+        }
+    }
+}
+
 impl HardwareInfo {
     fn collect() -> Self {
         let mut sys = System::new();
@@ -273,6 +381,56 @@ fn detect_gpus_platform() -> Vec<String> {
     {
         Vec::new()
     }
+}
+
+fn process_search_text(process: &sysinfo::Process) -> String {
+    let mut text = process.name().to_ascii_lowercase();
+    let cmd = process.cmd();
+    if !cmd.is_empty() {
+        text.push(' ');
+        text.push_str(&cmd.join(" ").to_ascii_lowercase());
+    }
+    text
+}
+
+fn safe_process_name(process: &sysinfo::Process) -> String {
+    let name = process.name().trim();
+    let name = if name.is_empty() { "unknown" } else { name };
+    if name.len() > 120 {
+        name[..120].to_string()
+    } else {
+        name.to_string()
+    }
+}
+
+fn related_process_group(
+    current_pid: sysinfo::Pid,
+    pid: sysinfo::Pid,
+    process: &sysinfo::Process,
+) -> Option<&'static str> {
+    let text = process_search_text(process);
+
+    if pid == current_pid {
+        return Some("screenpipe_app");
+    }
+
+    if text.contains("screenpipe-mcp") && process.parent() == Some(current_pid) {
+        return Some("screenpipe_mcp_child");
+    }
+
+    if text.contains("screenpipe-mcp") {
+        return Some("screenpipe_mcp_external");
+    }
+
+    if process.parent() == Some(current_pid) {
+        return Some("screenpipe_app_child");
+    }
+
+    if text.contains("screenpipe") {
+        return Some("screenpipe_other");
+    }
+
+    None
 }
 
 /// Run a command with a timeout to avoid blocking startup if a tool hangs.
@@ -681,7 +839,11 @@ impl ResourceMonitor {
     /// Max resource log file size (10 MB). When exceeded the file is truncated.
     const MAX_RESOURCE_LOG_BYTES: u64 = 10 * 1024 * 1024;
 
-    async fn log_to_file(&self, metrics: (f64, f64, f64, f32, f64, Duration, f64)) {
+    async fn log_to_file(
+        &self,
+        metrics: (f64, f64, f64, f32, f64, Duration, f64),
+        breakdown: &ProcessBreakdown,
+    ) {
         let (
             total_memory_gb,
             system_total_memory,
@@ -702,6 +864,7 @@ impl ResourceMonitor {
                 "total_cpu_percent": total_cpu,
                 "total_virtual_memory_gb": total_virtual_memory_gb,
                 "phys_footprint_gb": phys_footprint_gb,
+                "process_breakdown": breakdown,
             });
 
             // Append-only JSONL: one JSON object per line, no read-back needed.
@@ -728,6 +891,97 @@ impl ResourceMonitor {
         }
     }
 
+    fn collect_process_breakdown(sys: &System) -> ProcessBreakdown {
+        let current_pid = sysinfo::Pid::from_u32(std::process::id());
+        let mut groups: BTreeMap<&'static str, (usize, f64, f32)> = BTreeMap::new();
+        let mut related_processes = Vec::new();
+
+        for (pid, process) in sys.processes() {
+            let Some(group) = related_process_group(current_pid, *pid, process) else {
+                continue;
+            };
+
+            let rss_gb = process.memory() as f64 / (1024.0 * 1024.0 * 1024.0);
+            let cpu_percent = process.cpu_usage();
+            let entry = groups.entry(group).or_insert((0, 0.0, 0.0));
+            entry.0 += 1;
+            entry.1 += rss_gb;
+            entry.2 += cpu_percent;
+
+            related_processes.push(ProcessUsage {
+                pid: pid.as_u32(),
+                parent_pid: process.parent().map(|parent_pid| parent_pid.as_u32()),
+                parent_name: process
+                    .parent()
+                    .and_then(|parent_pid| sys.process(parent_pid))
+                    .map(safe_process_name),
+                name: safe_process_name(process),
+                group: group.to_string(),
+                rss_mb: rss_gb * 1024.0,
+                cpu_percent,
+            });
+        }
+
+        if related_processes.is_empty() {
+            return ProcessBreakdown::empty();
+        }
+
+        let mut top_related_by_memory = related_processes.clone();
+        top_related_by_memory.sort_by(|a, b| {
+            b.rss_mb
+                .partial_cmp(&a.rss_mb)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        top_related_by_memory.truncate(12);
+
+        let mut top_related_by_cpu = related_processes;
+        top_related_by_cpu.sort_by(|a, b| {
+            b.cpu_percent
+                .partial_cmp(&a.cpu_percent)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        top_related_by_cpu.truncate(12);
+
+        let groups = groups
+            .into_iter()
+            .map(
+                |(group, (process_count, rss_gb, cpu_percent))| ProcessGroupUsage {
+                    group: group.to_string(),
+                    process_count,
+                    rss_gb,
+                    cpu_percent,
+                },
+            )
+            .collect();
+
+        ProcessBreakdown {
+            groups,
+            top_related_by_memory,
+            top_related_by_cpu,
+        }
+    }
+
+    fn log_process_breakdown(breakdown: &ProcessBreakdown) {
+        if breakdown.should_warn() {
+            warn!(
+                "resource_monitor process breakdown pressure: {}",
+                breakdown.compact_summary()
+            );
+        } else if env::var("SCREENPIPE_RESOURCE_BREAKDOWN").is_ok()
+            || env::var("SAVE_RESOURCE_USAGE").is_ok()
+        {
+            info!(
+                "resource_monitor process breakdown: {}",
+                breakdown.compact_summary()
+            );
+        } else {
+            debug!(
+                "resource_monitor process breakdown: {}",
+                breakdown.compact_summary()
+            );
+        }
+    }
+
     async fn log_status(&self, sys: &System) {
         let metrics = self.collect_metrics(sys).await;
         let (
@@ -739,6 +993,7 @@ impl ResourceMonitor {
             runtime,
             phys_footprint_gb,
         ) = metrics;
+        let breakdown = Self::collect_process_breakdown(sys);
 
         // Log to console with virtual memory. Let tracing format lazily so
         // release builds with debug logging disabled avoid the String allocation.
@@ -752,9 +1007,10 @@ impl ResourceMonitor {
             total_virtual_memory_gb,
             total_cpu
         );
+        Self::log_process_breakdown(&breakdown);
 
         // Log to file
-        self.log_to_file(metrics).await;
+        self.log_to_file(metrics, &breakdown).await;
 
         let mem_trend = self.record_leak_sample(runtime.as_secs_f64(), total_memory_gb);
 
@@ -774,13 +1030,8 @@ impl ResourceMonitor {
         interval: Duration,
         posthog_interval: Option<Duration>,
     ) {
-        if !self.posthog_enabled
-            && self.resource_log_file.is_none()
-            && !tracing::enabled!(tracing::Level::DEBUG)
-        {
-            return;
-        }
-
+        // Always run locally so resource-pressure warnings still fire when
+        // analytics/debug/file logging are disabled.
         let monitor = Arc::clone(self);
         let posthog_interval = posthog_interval.unwrap_or(interval);
         let mut last_posthog_update = Instant::now();
@@ -860,6 +1111,7 @@ impl ResourceMonitor {
             runtime,
             phys_footprint_gb,
         ) = metrics;
+        let breakdown = Self::collect_process_breakdown(sys);
 
         // Log to console with virtual memory. Let tracing format lazily so
         // release builds with debug logging disabled avoid the String allocation.
@@ -873,9 +1125,10 @@ impl ResourceMonitor {
             total_virtual_memory_gb,
             total_cpu
         );
+        Self::log_process_breakdown(&breakdown);
 
         // Log to file
-        self.log_to_file(metrics).await;
+        self.log_to_file(metrics, &breakdown).await;
 
         // Every tick feeds the leak sentinel — alerting must not depend on
         // the (less frequent) PostHog cadence.

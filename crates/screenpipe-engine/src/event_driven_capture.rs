@@ -2604,9 +2604,11 @@ fn query_frontmost_app_name_uncached() -> Option<String> {
     let sys = ax::UiElement::sys_wide();
     let app = sys.focused_app().ok()?;
     let pid = app.pid().ok()?;
-    ns::RunningApp::with_pid(pid)
-        .and_then(|app| app.localized_name())
-        .map(|s| s.to_string())
+    objc::ar_pool(|| {
+        ns::RunningApp::with_pid(pid)
+            .and_then(|app| app.localized_name())
+            .map(|s| s.to_string())
+    })
 }
 
 /// Grid dimension for the corruption sampler: a ~15×15 grid ≈ 225 points.
