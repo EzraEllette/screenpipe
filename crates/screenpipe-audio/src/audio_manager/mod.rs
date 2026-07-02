@@ -5,6 +5,7 @@
 pub mod builder;
 mod device_monitor;
 mod manager;
+mod meeting_piggyback;
 // pub(crate) so the transcription pipeline can persist orphaned-chunk markers
 // for reconciliation recovery (SCREENPIPE-CLI-RC). Items inside stay pub(crate).
 pub(crate) mod reconciliation;
