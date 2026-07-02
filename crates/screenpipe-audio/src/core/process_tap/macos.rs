@@ -22,6 +22,8 @@ use cidre::{cat, cf, core_audio as ca, os};
 use crate::core::stream::AudioStreamConfig;
 use crate::utils::audio::audio_to_mono;
 
+use super::{classify_silence, SilenceVerdict};
+
 // ---------------------------------------------------------------------------
 // Version check (cached — only shells out once)
 // ---------------------------------------------------------------------------
@@ -625,6 +627,25 @@ fn resolve_pids_to_audio_object_ids(pids: &[i32]) -> Vec<u32> {
     out
 }
 
+/// Any target rendering? Some(true) if any pid reports output_active, Some(false)
+/// if every probeable pid is confirmed idle, None if nothing could be probed.
+fn aggregate_output_activity(pids: &[i32]) -> Option<bool> {
+    let mut any_probed = false;
+    for &pid in pids {
+        if let Some(activity) = crate::core::meeting_audio::process_audio_activity(pid) {
+            if activity.output_active {
+                return Some(true);
+            }
+            any_probed = true;
+        }
+    }
+    if any_probed {
+        Some(false)
+    } else {
+        None
+    }
+}
+
 /// Resolve the output device a meeting process is currently playing to, so the
 /// experimental tap clocks its aggregate against the SAME device the app is
 /// using ("copy whatever output the app is using"). Queries `PROCESS_DEVICES`
@@ -1119,12 +1140,17 @@ pub fn spawn_process_tap_capture_for_pids(
     let handle = tokio::task::spawn_blocking(move || {
         let mut current: Option<ProcessTapCapture> = Some(capture);
         let mut current_uid = initial_uid;
-        // Not yet consumed here — Task 2 wires this into the silence
-        // watchdog for the per-process loop. Kept alive (and reassigned on
-        // rebuild below) so the Arc always reflects the live capture.
-        let mut _watchdog = initial_watchdog;
+        let mut watchdog = initial_watchdog; // Arc from build_inclusion_capture (Task 1)
 
         const POLL: std::time::Duration = std::time::Duration::from_millis(500);
+        const WATCHDOG_SILENCE_SECS: u64 = 45;
+        const SILENCE_AMP_EPS: f32 = 0.002;
+        const REBUILD_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(60);
+        const SILENCE_BACKOFF_CAP: u32 = 4;
+
+        let mut silence_started: Option<std::time::Instant> = None;
+        let mut last_silent_rebuild: Option<std::time::Instant> = None;
+        let mut silent_rebuild_streak: u32 = 0;
 
         while !is_disconnected.load(Ordering::Relaxed) {
             std::thread::sleep(POLL);
@@ -1135,38 +1161,92 @@ pub fn spawn_process_tap_capture_for_pids(
                 break;
             }
 
-            // Follow the app's output device. If the device the app is playing
-            // to changed (user switched speakers/headphones), rebuild the tap so
-            // the aggregate re-anchors to the new device.
+            // --- Silence watchdog (per-capture window, probe-gated) ---
+            let (window_callbacks, window_peak) = watchdog.drain();
+            if window_callbacks > 0 && window_peak > SILENCE_AMP_EPS {
+                silence_started = None;
+                silent_rebuild_streak = 0;
+            } else {
+                silence_started.get_or_insert_with(std::time::Instant::now);
+            }
+            let silent_long_enough = silence_started
+                .map(|t| t.elapsed().as_secs() >= WATCHDOG_SILENCE_SECS)
+                .unwrap_or(false);
+            let cooldown = REBUILD_COOLDOWN
+                * 2u32.saturating_pow(silent_rebuild_streak.min(SILENCE_BACKOFF_CAP));
+            let cooldown_ok = last_silent_rebuild
+                .map(|t| t.elapsed() >= cooldown)
+                .unwrap_or(true);
+            let mut rebuild_for_silence = false;
+            if silent_long_enough && cooldown_ok {
+                // Probe ONLY at the decision boundary — cheap on macOS, but the
+                // discipline matters for the Windows twin of this loop.
+                let activity = aggregate_output_activity(&pids);
+                match classify_silence(
+                    window_callbacks,
+                    window_peak,
+                    SILENCE_AMP_EPS,
+                    true,
+                    activity,
+                ) {
+                    SilenceVerdict::SilentBroken => rebuild_for_silence = true,
+                    SilenceVerdict::SilentIdle | SilenceVerdict::Inconclusive => {
+                        // Real silence (or unknowable): re-arm the window so we
+                        // don't probe hot every 500ms for the rest of the call.
+                        silence_started = Some(std::time::Instant::now());
+                    }
+                    SilenceVerdict::Healthy => {}
+                }
+            }
+
+            // --- Follow the app's output device (existing behavior) ---
             let new_uid = resolve_meeting_output_device(&pids)
                 .and_then(|d| d.uid().ok())
                 .map(|u| u.to_string());
-            let Some(new_uid) = new_uid else {
-                continue; // transient — app's output momentarily unresolvable
+            let rebuild_for_switch = match &new_uid {
+                Some(uid) => uid != &current_uid,
+                None => false, // transient — app's output momentarily unresolvable
             };
-            if new_uid == current_uid {
+
+            if !rebuild_for_switch && !rebuild_for_silence {
                 continue;
             }
+            if rebuild_for_switch {
+                info!(
+                    "Per-process tap: app output changed ({} -> {}), rebuilding",
+                    current_uid,
+                    new_uid.as_deref().unwrap_or("?")
+                );
+            } else {
+                warn!(
+                    "Per-process tap: silent {}s while target is rendering, rebuilding",
+                    WATCHDOG_SILENCE_SECS
+                );
+                silent_rebuild_streak = silent_rebuild_streak.saturating_add(1);
+                last_silent_rebuild = Some(std::time::Instant::now());
+            }
 
-            info!(
-                "Per-process tap: app output changed ({} -> {}), rebuilding",
-                current_uid, new_uid
-            );
             current = None; // drop old capture before building the new one
             match build_inclusion_capture(&pids, tx.clone(), is_disconnected.clone()) {
-                Ok((cap, _cfg, uid, new_watchdog)) => {
+                Ok((cap, _cfg, uid, wd)) => {
                     current = Some(cap);
                     current_uid = uid;
-                    _watchdog = new_watchdog;
+                    watchdog = wd;
+                    silence_started = None;
                 }
                 Err(e) => {
                     warn!("Per-process tap rebuild failed: {e}");
-                    current_uid = new_uid;
+                    if let Some(uid) = new_uid {
+                        current_uid = uid;
+                    }
                 }
             }
         }
 
         drop(current);
+        // Signal upstream (piggyback sweep) that this capture is over — covers
+        // the pids-gone exit, not just external disconnects.
+        is_disconnected.store(true, Ordering::Relaxed);
         debug!("Per-process tap capture thread exited");
     });
 
