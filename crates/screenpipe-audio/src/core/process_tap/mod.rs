@@ -10,9 +10,11 @@ mod null;
 mod windows;
 
 mod counters;
+#[cfg_attr(not(target_os = "macos"), allow(unused_imports))] // Windows consumer arrives with the deferred supervisor task
 pub(crate) use counters::WatchdogCounters;
 
 mod health;
+#[cfg_attr(not(target_os = "macos"), allow(unused_imports))] // Windows consumer arrives with the deferred supervisor task
 pub(crate) use health::{classify_silence, SilenceVerdict};
 
 #[cfg(target_os = "macos")]
