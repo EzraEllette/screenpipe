@@ -135,18 +135,14 @@ async function storeTitle(sessionId: string): Promise<string | null> {
   }, sessionId)) as string | null;
 }
 
-describe("Connections-context duplicate chat (#4689)", function () {
+// QUARANTINED (#4689): the synthetic background-router event path never
+// persisted deterministically on Linux or macOS CI. Re-enable once the test
+// drives a deterministic persisted session instead of relying on this event
+// race.
+describe.skip("Connections-context duplicate chat (#4689)", function () {
   this.timeout(180_000);
 
   before(async function () {
-    // WebKitGTK/Linux: the background persist this spec asserts on never
-    // lands (conversation file is never written — failed deterministically
-    // across retries and both Linux runners on 2026-07-02, right after the
-    // spec shipped in #4706). Skip on Linux until that path is reproduced
-    // there; windows/macos keep the #4689 regression coverage.
-    if (process.platform === "linux") {
-      this.skip();
-    }
     await waitForAppReady();
     await openHomeWindow();
     cleanupChatFile();

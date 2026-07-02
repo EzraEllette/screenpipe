@@ -230,7 +230,7 @@
       "criticality": "medium",
       "confidence": "partial",
       "ux": "synthetic",
-      "notes": "Connections-context wrapper stripping regression: echoed user turns must persist and title chats from the real request, not the injected integrations blob. Skipped on Linux: the background persist never lands on WebKitGTK."
+      "notes": "QUARANTINED (#4689): connections-context wrapper stripping regression. The synthetic background-router event path never persists deterministically on Linux/macOS CI; re-enable once it drives a deterministic persisted session."
     },
     {
       "spec": "chat-prefill-duplicate.spec.ts",
