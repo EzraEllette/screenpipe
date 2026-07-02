@@ -18,18 +18,18 @@
 //!   1. Join a Zoom call and UNMUTE (the app must be actively recording the mic).
 //!   2. Run the command above. It prints which device it's recording from.
 //!   3. Talk — the `level [████…]` meter should move with YOUR voice.
-//!   4. While it runs, change the mic the app uses (macOS input device, or in
-//!      Zoom's audio settings). You should see:
+//!   4. While it runs, change the mic the app uses (system input device, or in
+//!      Zoom/Teams audio settings). You should see:
 //!        "input device changed: [old] -> [new], switching"
 //!      and a "now recording: <new device>" line, then the meter keeps moving.
 //!   5. Ctrl-C to stop.
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn main() {
-    eprintln!("meeting_input_probe is macOS-only (CoreAudio process device resolution).");
+    eprintln!("meeting_input_probe is only supported on macOS and Windows.");
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn main() -> anyhow::Result<()> {
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
@@ -39,7 +39,9 @@ fn main() -> anyhow::Result<()> {
         .with_target(false)
         .init();
 
-    let arg = std::env::args().nth(1).unwrap_or_else(|| "zoom".to_string());
+    let arg = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "zoom".to_string());
     let pids = resolve_pids(&arg)?;
 
     let mut current = resolve_active_inputs(&pids);
@@ -85,7 +87,7 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn names(devs: &[screenpipe_audio::core::device::AudioDevice]) -> String {
     devs.iter()
         .map(|d| d.name.as_str())
@@ -95,7 +97,7 @@ fn names(devs: &[screenpipe_audio::core::device::AudioDevice]) -> String {
 
 /// First non-empty input-device resolution across the pids (a meeting app is
 /// usually several processes; only the one actively recording resolves).
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn resolve_active_inputs(pids: &[i32]) -> Vec<screenpipe_audio::core::device::AudioDevice> {
     for &pid in pids {
         let devs = screenpipe_audio::core::meeting_audio::resolve_meeting_inputs(pid);
@@ -106,16 +108,15 @@ fn resolve_active_inputs(pids: &[i32]) -> Vec<screenpipe_audio::core::device::Au
     Vec::new()
 }
 
-/// Open a cpal capture on the CoreAudio-resolved device (matched by name),
+/// Open a cpal capture on the OS-resolved device (matched by name),
 /// falling back to the system default input if the exact device isn't found.
 /// The callback tracks a rolling peak amplitude the meter loop reads + resets.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn open_input_stream(
     dev: &screenpipe_audio::core::device::AudioDevice,
     peak: std::sync::Arc<std::sync::atomic::AtomicU32>,
 ) -> anyhow::Result<cpal::Stream> {
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-    use std::sync::atomic::Ordering;
 
     let host = cpal::default_host();
     let device = host
@@ -134,36 +135,49 @@ fn open_input_stream(
     }
     let config: cpal::StreamConfig = supported.into();
 
+    #[cfg(target_os = "macos")]
     let stream = device.build_input_stream(
         &config,
-        move |data: &[f32], _: &cpal::InputCallbackInfo| {
-            let mut local = 0f32;
-            for &s in data {
-                let a = s.abs();
-                if a > local {
-                    local = a;
-                }
-            }
-            let bits = local.to_bits();
-            loop {
-                let cur = peak.load(Ordering::Relaxed);
-                if local <= f32::from_bits(cur) {
-                    break;
-                }
-                if peak
-                    .compare_exchange(cur, bits, Ordering::Relaxed, Ordering::Relaxed)
-                    .is_ok()
-                {
-                    break;
-                }
-            }
-        },
+        move |data: &[f32], _: &cpal::InputCallbackInfo| update_peak(data, &peak),
         move |err| eprintln!("input stream error: {err}"),
         None,
-        None, // 5th arg: MacosVoiceProcessingInputConfig on this cpal fork
+        None,
+    )?;
+    #[cfg(target_os = "windows")]
+    let stream = device.build_input_stream(
+        &config,
+        move |data: &[f32], _: &cpal::InputCallbackInfo| update_peak(data, &peak),
+        move |err| eprintln!("input stream error: {err}"),
+        None,
     )?;
     stream.play()?;
     Ok(stream)
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn update_peak(data: &[f32], peak: &std::sync::atomic::AtomicU32) {
+    use std::sync::atomic::Ordering;
+
+    let mut local = 0f32;
+    for &s in data {
+        let a = s.abs();
+        if a > local {
+            local = a;
+        }
+    }
+    let bits = local.to_bits();
+    loop {
+        let cur = peak.load(Ordering::Relaxed);
+        if local <= f32::from_bits(cur) {
+            break;
+        }
+        if peak
+            .compare_exchange(cur, bits, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            break;
+        }
+    }
 }
 
 /// Numeric arg → that PID; otherwise `pgrep -i` for every matching process.
@@ -182,6 +196,37 @@ fn resolve_pids(arg: &str) -> anyhow::Result<Vec<i32>> {
         .collect();
     if pids.is_empty() {
         anyhow::bail!("no running process matching '{arg}' \u{2014} pass a PID instead");
+    }
+    Ok(pids)
+}
+
+/// Numeric arg -> that PID; otherwise match running process names on Windows.
+#[cfg(target_os = "windows")]
+fn resolve_pids(arg: &str) -> anyhow::Result<Vec<i32>> {
+    if let Ok(pid) = arg.parse::<i32>() {
+        return Ok(vec![pid]);
+    }
+
+    use sysinfo::{PidExt, ProcessExt, System, SystemExt};
+    let needle = arg.to_ascii_lowercase();
+    let mut sys = System::new_all();
+    sys.refresh_processes();
+    let mut pids = sys
+        .processes()
+        .iter()
+        .filter_map(|(pid, process)| {
+            process
+                .name()
+                .to_ascii_lowercase()
+                .contains(&needle)
+                .then_some(pid.as_u32() as i32)
+        })
+        .collect::<Vec<_>>();
+    pids.sort_unstable();
+    pids.dedup();
+
+    if pids.is_empty() {
+        anyhow::bail!("no running process matching '{arg}' - pass a PID instead");
     }
     Ok(pids)
 }

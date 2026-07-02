@@ -6,16 +6,18 @@
 //!
 //! "Actively recording" is a CoreAudio fact — the device the process holds
 //! open in the *input* scope — so the resolution lives in the platform layer
-//! (`macos.rs`); non-macOS returns nothing (`null.rs`) until WASAPI support
-//! lands. There is intentionally no shared heuristic: we ask the OS which
-//! device is recording rather than guessing from device capabilities.
+//! (`macos.rs`, `windows.rs`); unsupported platforms return nothing
+//! (`null.rs`). There is intentionally no shared heuristic: we ask the OS
+//! which device is recording rather than guessing from device capabilities.
 
 use crate::core::device::AudioDevice;
 
 #[cfg(target_os = "macos")]
 mod macos;
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 mod null;
+#[cfg(target_os = "windows")]
+mod windows;
 
 /// Every input device the meeting process `pid` is actively recording from.
 /// Returns an empty list when the process has no live input stream, when the
@@ -27,7 +29,12 @@ pub fn resolve_meeting_inputs(pid: i32) -> Vec<AudioDevice> {
     macos::resolve_meeting_inputs(pid)
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+pub fn resolve_meeting_inputs(pid: i32) -> Vec<AudioDevice> {
+    windows::resolve_meeting_inputs(pid)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub fn resolve_meeting_inputs(pid: i32) -> Vec<AudioDevice> {
     null::resolve_meeting_inputs(pid)
 }
@@ -55,7 +62,12 @@ pub fn process_audio_activity(pid: i32) -> Option<ProcessAudioActivity> {
     macos::process_audio_activity(pid)
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+pub fn process_audio_activity(pid: i32) -> Option<ProcessAudioActivity> {
+    windows::process_audio_activity(pid)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub fn process_audio_activity(pid: i32) -> Option<ProcessAudioActivity> {
     null::process_audio_activity(pid)
 }

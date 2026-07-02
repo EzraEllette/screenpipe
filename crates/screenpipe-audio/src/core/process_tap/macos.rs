@@ -19,7 +19,7 @@ use ca::aggregate_device_keys as agg_keys;
 use ca::sub_device_keys as sub_keys;
 use cidre::{cat, cf, core_audio as ca, os};
 
-use super::stream::AudioStreamConfig;
+use crate::core::stream::AudioStreamConfig;
 use crate::utils::audio::audio_to_mono;
 
 // ---------------------------------------------------------------------------
@@ -638,7 +638,8 @@ fn resolve_meeting_output_device(pids: &[i32]) -> Option<ca::Device> {
         };
         let devices: Vec<ca::Device> = process
             .prop_vec(
-                &ca::PropSelector::PROCESS_DEVICES.addr(ca::PropScope::OUTPUT, ca::PropElement::MAIN),
+                &ca::PropSelector::PROCESS_DEVICES
+                    .addr(ca::PropScope::OUTPUT, ca::PropElement::MAIN),
             )
             .unwrap_or_default();
         if let Some(dev) = devices.into_iter().next() {
@@ -681,7 +682,13 @@ fn build_inclusion_capture(
         ids.len(),
         pids
     );
-    build_capture_from_desc(tx, is_disconnected, &tap_desc, &output_device, "per-process")
+    build_capture_from_desc(
+        tx,
+        is_disconnected,
+        &tap_desc,
+        &output_device,
+        "per-process",
+    )
 }
 
 /// Build a fresh global (system-wide) Process Tap capture against the current
