@@ -312,6 +312,137 @@ pub(crate) struct PiggybackState {
     /// One-shot per meeting: a hard mic capture failure (StartSessionInput
     /// errored) was already reported. Reset on meeting end.
     pub mic_fail_reported: bool,
+    /// Per-meeting telemetry accumulator (Task 1). Folded from the volatile
+    /// fields above at the piggybacking-stop edge (before they reset) and at
+    /// the meeting-end edge; emitted to the events bus and reset there.
+    pub telemetry: MeetingTelemetry,
+    /// Whether a meeting was observed last tick (flag+mode on, detector
+    /// reports an active meeting — independent of pid/tap availability).
+    /// Drives the meeting-end emission edge, which is separate from (and can
+    /// fire after) the piggybacking-stop edge above on a pid flap.
+    pub last_meeting_seen: bool,
+}
+
+// --- Per-meeting telemetry (piggyback_meeting_summary) ----------------------
+//
+// A one-shot-per-meeting summary posted to the events bus for the PostHog
+// forwarder (Task 2) to relay. Purely additive: does not influence capture,
+// fallback, or health decisions above — it only observes them.
+
+/// Per-meeting telemetry accumulator. Ticked by the sweep (2s cadence) while a
+/// meeting is active with the flag on; volatile sweep state (strikes, mic
+/// flags) is FOLDED in at the piggybacking-stop edge because that state resets
+/// before meeting end on pid flaps. Emitted + reset at the meeting-end edge.
+#[derive(Debug, Default)]
+pub(crate) struct MeetingTelemetry {
+    pub meeting_seen: bool,
+    pub meeting_ticks: u64,
+    pub tap_streaming_ticks: u64,
+    pub tap_started_count: u32,
+    pub strikes_max: u32,
+    pub unavailable: bool,
+    pub pid_known: bool,
+    pub bundle_id: Option<String>,
+    pub mic_resolved_devices: std::collections::BTreeSet<String>,
+    pub mic_session_started: bool,
+    pub mic_restarts: u32,
+    pub silent_notified: bool,
+    pub capture_failed: bool,
+    /// Guards [`fold_volatile_state`] against double-counting when both the
+    /// piggybacking-stop edge and the meeting-end edge fire on the same tick
+    /// (meeting ends while still piggybacking). Cleared on reset (meeting end).
+    pub folded_this_meeting: bool,
+}
+
+/// The PostHog-bound summary. Field names are the PostHog property names —
+/// renaming any of them breaks the dashboard insights built on top.
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct PiggybackMeetingSummary {
+    pub outcome: &'static str,
+    pub meeting_seconds: u64,
+    pub tap_streaming_seconds: u64,
+    pub tap_started_count: u32,
+    pub tap_strikes: u32,
+    pub tap_gave_up: bool,
+    pub mic_resolved_devices: Vec<String>,
+    pub mic_session_started: bool,
+    pub mic_restarts: u32,
+    pub mic_silent_notified: bool,
+    pub mic_capture_failed: bool,
+    pub meeting_app_bundle_id: Option<String>,
+    pub pid_known: bool,
+    pub platform: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub os_version: Option<String>,
+}
+
+pub(crate) fn classify_outcome(t: &MeetingTelemetry) -> &'static str {
+    if t.unavailable {
+        return "unavailable";
+    }
+    if !t.pid_known {
+        return "no_pid";
+    }
+    if t.tap_streaming_ticks == 0 {
+        return "stable_fallback";
+    }
+    // meeting_ticks is >= 1 whenever meeting_seen; guard anyway.
+    if t.tap_streaming_ticks * 100 >= t.meeting_ticks.max(1) * 95 {
+        "full_piggyback"
+    } else {
+        "partial_piggyback"
+    }
+}
+
+const SWEEP_TICK_SECONDS: u64 = 2; // device-monitor cadence
+
+pub(crate) fn build_meeting_summary(t: &MeetingTelemetry) -> PiggybackMeetingSummary {
+    PiggybackMeetingSummary {
+        outcome: classify_outcome(t),
+        meeting_seconds: t.meeting_ticks * SWEEP_TICK_SECONDS,
+        tap_streaming_seconds: t.tap_streaming_ticks * SWEEP_TICK_SECONDS,
+        tap_started_count: t.tap_started_count,
+        tap_strikes: t.strikes_max,
+        tap_gave_up: t.strikes_max >= MAX_TAP_STRIKES,
+        mic_resolved_devices: t.mic_resolved_devices.iter().cloned().collect(),
+        mic_session_started: t.mic_session_started,
+        mic_restarts: t.mic_restarts,
+        mic_silent_notified: t.silent_notified,
+        mic_capture_failed: t.capture_failed,
+        meeting_app_bundle_id: t.bundle_id.clone(),
+        pid_known: t.pid_known,
+        platform: std::env::consts::OS,
+        os_version: os_version_string(),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn os_version_string() -> Option<String> {
+    crate::core::process_tap::macos_version_string()
+}
+#[cfg(not(target_os = "macos"))]
+fn os_version_string() -> Option<String> {
+    None
+}
+
+/// Folds the volatile per-meeting sweep state (which resets at the
+/// piggybacking-stop edge — see `run_meeting_piggyback_sweep` step 6) into the
+/// durable telemetry accumulator. Called at BOTH the piggybacking-stop edge
+/// (before that reset zeroes the source fields) and the meeting-end edge (to
+/// catch state accrued after the last piggybacking-stop, and meetings that
+/// end while still piggybacking, where both edges fire on the same tick).
+/// Idempotent per meeting via `folded_this_meeting`: `max`/`|=` are naturally
+/// idempotent, but `mic_restarts` is an additive count, so a second fold in
+/// the same meeting must be a no-op — the guard enforces that.
+fn fold_volatile_state(telemetry: &mut MeetingTelemetry, state: &PiggybackState) {
+    if telemetry.folded_this_meeting {
+        return;
+    }
+    telemetry.strikes_max = telemetry.strikes_max.max(state.tap_strikes);
+    telemetry.mic_restarts += state.mic_restarted_at_ms.is_some() as u32;
+    telemetry.silent_notified |= state.mic_notified;
+    telemetry.capture_failed |= state.mic_fail_reported;
+    telemetry.folded_this_meeting = true;
 }
 
 /// True when the CoreAudio Process Tap / Windows per-process loopback API is
@@ -453,6 +584,34 @@ pub(crate) async fn run_meeting_piggyback_sweep(
     let tap_device_str = format!("{} (output)", MEETING_TAP_DEVICE_NAME);
     let tap_streaming = session_streaming.contains(&tap_device_str);
 
+    // 4b. Telemetry accumulation (Task 1). Purely observational — does not
+    //     feed back into any decision above. Gated on `engaged` (flag+mode)
+    //     AND a meeting being observed so flag-off / Always-mode users
+    //     accumulate nothing (matches the decider's own "disengaged" path).
+    if engaged && meeting.is_some() {
+        let telemetry = &mut state.telemetry;
+        telemetry.meeting_seen = true;
+        telemetry.meeting_ticks += 1;
+        telemetry.pid_known |= meeting_pid.is_some();
+        if telemetry.bundle_id.is_none() {
+            telemetry.bundle_id = detector
+                .as_ref()
+                .and_then(|d| d.active_meeting())
+                .and_then(|m| m.bundle_id);
+        }
+        if tap_streaming {
+            telemetry.tap_streaming_ticks += 1;
+        }
+        telemetry.unavailable |= meeting_pid.is_some() && !tap_avail;
+        telemetry
+            .mic_resolved_devices
+            .extend(obs.resolved_inputs.iter().cloned());
+        telemetry.mic_session_started |= obs
+            .resolved_inputs
+            .iter()
+            .any(|d| obs.session_devices.contains(d));
+    }
+
     // 5. Apply actions in the decider's order. Suspend sets the flag BEFORE
     //    stop_device_recording so the monitor's suspension guard can't race a
     //    restart in the window between the two.
@@ -477,6 +636,8 @@ pub(crate) async fn run_meeting_piggyback_sweep(
                         "[MEETING_PIGGYBACK] failed to start meeting tap (strike {}/{}): {}",
                         state.tap_strikes, MAX_TAP_STRIKES, e
                     );
+                } else {
+                    state.telemetry.tap_started_count += 1;
                 }
             }
             PiggybackAction::StartSessionInput(name) => {
@@ -620,6 +781,15 @@ pub(crate) async fn run_meeting_piggyback_sweep(
     //    `mic_last_notify_ms` is the cross-meeting cooldown — both deliberately
     //    NOT reset here.
     if state.was_piggybacking && !piggybacking_now {
+        // Fold the volatile counters into the telemetry accumulator BEFORE the
+        // resets below zero them — this edge can fire mid-meeting on a pid
+        // flap, well before the meeting actually ends (see module docs on
+        // `MeetingTelemetry`). `mem::take` sidesteps borrowing `state.telemetry`
+        // mutably and `state` immutably in the same call.
+        let mut telemetry = std::mem::take(&mut state.telemetry);
+        fold_volatile_state(&mut telemetry, state);
+        state.telemetry = telemetry;
+
         state.tap_strikes = 0;
         state.last_tap_attempt = None;
         state.mic_restarted_at_ms = None;
@@ -627,6 +797,22 @@ pub(crate) async fn run_meeting_piggyback_sweep(
         state.mic_fail_reported = false;
     }
     state.was_piggybacking = piggybacking_now;
+
+    // 7. Meeting-end emission (Task 1). Separate edge from the piggybacking
+    //    transition above: a meeting can keep going on the stable path after a
+    //    pid flap, so this only fires when the meeting itself is gone. Folds
+    //    once more (idempotent per meeting — see `fold_volatile_state`) to
+    //    catch meetings that end while STILL piggybacking, where this edge and
+    //    the one above fire on the very same tick.
+    let meeting_now = engaged && meeting.is_some();
+    if state.last_meeting_seen && !meeting_now && state.telemetry.meeting_seen {
+        let mut telemetry = std::mem::take(&mut state.telemetry);
+        fold_volatile_state(&mut telemetry, state);
+        let summary = build_meeting_summary(&telemetry);
+        let _ = screenpipe_events::send_event("piggyback_meeting_summary", summary);
+        state.telemetry = MeetingTelemetry::default();
+    }
+    state.last_meeting_seen = meeting_now;
 
     tap_streaming
 }
@@ -927,5 +1113,107 @@ mod tests {
         assert_eq!(decide_mic_health(&obs), MicHealthAction::EmitMicRecovered);
         obs.notified = false; // sweep clears after emitting
         assert_eq!(decide_mic_health(&obs), MicHealthAction::None);
+    }
+
+    // --- Per-meeting telemetry (piggyback_meeting_summary) -----------------
+
+    fn telem() -> MeetingTelemetry {
+        MeetingTelemetry {
+            meeting_seen: true,
+            meeting_ticks: 900, // 30 min at 2s ticks
+            pid_known: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn outcome_unavailable_takes_precedence() {
+        let mut t = telem();
+        t.unavailable = true;
+        t.tap_streaming_ticks = 900;
+        assert_eq!(classify_outcome(&t), "unavailable");
+    }
+
+    #[test]
+    fn outcome_no_pid_when_never_known() {
+        let mut t = telem();
+        t.pid_known = false;
+        assert_eq!(classify_outcome(&t), "no_pid");
+    }
+
+    #[test]
+    fn outcome_full_at_95_percent() {
+        let mut t = telem();
+        t.tap_streaming_ticks = 855; // exactly 95% of 900
+        assert_eq!(classify_outcome(&t), "full_piggyback");
+    }
+
+    #[test]
+    fn outcome_partial_below_95() {
+        let mut t = telem();
+        t.tap_streaming_ticks = 500;
+        assert_eq!(classify_outcome(&t), "partial_piggyback");
+    }
+
+    #[test]
+    fn outcome_stable_fallback_when_tap_never_streamed() {
+        let t = telem(); // tap_streaming_ticks == 0
+        assert_eq!(classify_outcome(&t), "stable_fallback");
+    }
+
+    #[test]
+    fn summary_math_and_fields() {
+        let mut t = telem();
+        t.tap_streaming_ticks = 855;
+        t.tap_started_count = 2;
+        t.strikes_max = 1;
+        t.mic_restarts = 1;
+        t.silent_notified = true;
+        t.bundle_id = Some("us.zoom.xos".into());
+        t.mic_resolved_devices.insert("Rode NT (input)".into());
+        t.mic_session_started = true;
+        let s = build_meeting_summary(&t);
+        assert_eq!(s.outcome, "full_piggyback");
+        assert_eq!(s.meeting_seconds, 1800);
+        assert_eq!(s.tap_streaming_seconds, 1710);
+        assert_eq!(s.tap_started_count, 2);
+        assert_eq!(s.tap_strikes, 1);
+        assert!(!s.tap_gave_up);
+        assert_eq!(s.mic_restarts, 1);
+        assert!(s.mic_silent_notified);
+        assert_eq!(s.meeting_app_bundle_id.as_deref(), Some("us.zoom.xos"));
+        assert_eq!(s.mic_resolved_devices, vec!["Rode NT (input)".to_string()]);
+        assert!(s.mic_session_started);
+        assert_eq!(s.platform, std::env::consts::OS);
+    }
+
+    #[test]
+    fn gave_up_when_strikes_hit_max() {
+        let mut t = telem();
+        t.strikes_max = MAX_TAP_STRIKES;
+        let s = build_meeting_summary(&t);
+        assert!(s.tap_gave_up);
+        assert_eq!(s.outcome, "stable_fallback");
+    }
+
+    #[test]
+    fn fold_is_idempotent_per_meeting() {
+        // two folds in one meeting must not double-count mic_restarts
+        let state = PiggybackState {
+            tap_strikes: 2,
+            mic_restarted_at_ms: Some(1),
+            mic_notified: true,
+            mic_fail_reported: true,
+            ..Default::default()
+        };
+
+        let mut telemetry = MeetingTelemetry::default();
+        fold_volatile_state(&mut telemetry, &state);
+        fold_volatile_state(&mut telemetry, &state);
+
+        assert_eq!(telemetry.mic_restarts, 1, "second fold must be a no-op");
+        assert_eq!(telemetry.strikes_max, 2);
+        assert!(telemetry.silent_notified);
+        assert!(telemetry.capture_failed);
     }
 }

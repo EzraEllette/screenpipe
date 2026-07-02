@@ -73,6 +73,14 @@ pub fn is_process_tap_available() -> bool {
     }
 }
 
+/// Cached OS version as "major.minor.patch" for telemetry. None if detection
+/// failed (same cache `is_process_tap_available` uses — no extra syscalls).
+pub(crate) fn macos_version_string() -> Option<String> {
+    MACOS_VERSION
+        .get_or_init(detect_os_version)
+        .map(|(maj, min, patch)| format!("{maj}.{min}.{patch}"))
+}
+
 fn detect_os_version() -> Option<(u64, u64, u64)> {
     let output = std::process::Command::new("sw_vers")
         .arg("-productVersion")
