@@ -323,6 +323,32 @@ pub(crate) struct PiggybackState {
     pub last_meeting_seen: bool,
 }
 
+/// Increments `state.tap_strikes` by one and, on the edge where that crosses
+/// into [`MAX_TAP_STRIKES`] (not merely being AT it — a strike recorded while
+/// already exhausted, which can't normally happen since the sweep stops
+/// retrying at max, must not re-fire), logs the `piggyback_tap_gave_up`
+/// Sentry error point exactly once.
+///
+/// This is the ONLY place that increments `tap_strikes` — both strike sites
+/// in [`run_meeting_piggyback_sweep`] (the `StartTap` error path and
+/// `NoteTapFailure`) call this instead of incrementing the field directly, so
+/// the edge check lives in one spot and cannot double-fire no matter which
+/// site (or how many, across a tick) trips it. `tap_strikes` resets to 0 at
+/// the same piggybacking-stop edge that ends the strike-tracking period (see
+/// step 6 below), so within any one un-reset period the counter only ever
+/// increases — the `MAX_TAP_STRIKES` level can be crossed at most once before
+/// the next reset.
+fn record_tap_strike(state: &mut PiggybackState) {
+    let previous_strikes = state.tap_strikes;
+    state.tap_strikes += 1;
+    if state.tap_strikes == MAX_TAP_STRIKES && previous_strikes < MAX_TAP_STRIKES {
+        tracing::error!(
+            "piggyback_tap_gave_up: per-process tap failed {MAX_TAP_STRIKES} times this meeting, staying on stable capture (bundle_id={:?})",
+            state.telemetry.bundle_id
+        );
+    }
+}
+
 // --- Per-meeting telemetry (piggyback_meeting_summary) ----------------------
 //
 // A one-shot-per-meeting summary posted to the events bus for the PostHog
@@ -510,7 +536,7 @@ pub(crate) async fn run_meeting_piggyback_sweep(
     use super::now_ms;
     use crate::core::device::{parse_audio_device, AudioDevice, DeviceType, MEETING_TAP_DEVICE_NAME};
     use screenpipe_events::AudioCaptureHealthEvent;
-    use tracing::{info, warn};
+    use tracing::{error, info, warn};
 
     // 1. Read the flag + capture mode once, plus the detector Arc.
     let (flag_on, meetings_only) = audio_manager.piggyback_config().await;
@@ -640,7 +666,7 @@ pub(crate) async fn run_meeting_piggyback_sweep(
                 state.last_tap_attempt = Some(std::time::Instant::now());
                 let tap = AudioDevice::new(MEETING_TAP_DEVICE_NAME.to_string(), DeviceType::Output);
                 if let Err(e) = audio_manager.start_session_device(&tap, Some(pids)).await {
-                    state.tap_strikes += 1;
+                    record_tap_strike(state);
                     warn!(
                         "[MEETING_PIGGYBACK] failed to start meeting tap (strike {}/{}): {}",
                         state.tap_strikes, MAX_TAP_STRIKES, e
@@ -652,18 +678,23 @@ pub(crate) async fn run_meeting_piggyback_sweep(
             PiggybackAction::StartSessionInput(name) => {
                 if let Ok(device) = parse_audio_device(&name) {
                     if let Err(e) = audio_manager.start_session_device(&device, None).await {
-                        warn!(
-                            "[MEETING_PIGGYBACK] failed to start resolved meeting mic {}: {}",
-                            name, e
-                        );
                         // Hard failure: the resolved mic couldn't be opened at
                         // all (device busy / removed). Distinct from "opened but
                         // silent" — report once per meeting so the app can nudge
                         // the user while the meeting is live.
                         if !state.mic_fail_reported {
+                            error!(
+                                "piggyback_mic_capture_failed: could not open meeting mic '{}': {}",
+                                name, e
+                            );
                             let ev = AudioCaptureHealthEvent::mic_capture_failed(e.to_string());
                             let _ = screenpipe_events::send_event(ev.event_name(), ev);
                             state.mic_fail_reported = true;
+                        } else {
+                            warn!(
+                                "[MEETING_PIGGYBACK] failed to start resolved meeting mic {}: {}",
+                                name, e
+                            );
                         }
                     }
                 }
@@ -676,7 +707,7 @@ pub(crate) async fn run_meeting_piggyback_sweep(
                 }
             }
             PiggybackAction::NoteTapFailure => {
-                state.tap_strikes += 1;
+                record_tap_strike(state);
             }
             PiggybackAction::WarnUnavailableOnce => {
                 if !state.warned_unavailable {
