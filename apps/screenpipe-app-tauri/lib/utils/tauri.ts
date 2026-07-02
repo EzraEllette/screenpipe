@@ -2719,6 +2719,16 @@ useSystemDefaultAudio: boolean;
  */
 experimentalCoreaudioSystemAudio?: boolean;
 /**
+ * Experimental: during detected meetings, capture the meeting app's own
+ * audio via a per-process tap plus the microphone that app actually has
+ * open (instead of the global mix + assumed-default mic). Default `false`.
+ * Requires macOS 14.4+ or Windows; when the platform can't do it or the
+ * tap fails at runtime, capture automatically falls back to the stable
+ * path (default mic + global system audio) — never less capture than
+ * with the flag off.
+ */
+experimentalMeetingPiggyback?: boolean;
+/**
  * Experimental: request Windows WASAPI microphone Acoustic Echo Cancellation.
  * Ignored on non-Windows platforms and fail-open when unsupported by device/driver.
  */
