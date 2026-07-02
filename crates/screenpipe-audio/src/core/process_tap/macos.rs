@@ -48,13 +48,7 @@ static MACOS_VERSION: OnceLock<Option<(u64, u64, u64)>> = OnceLock::new();
 /// **hard floor of macOS 14.4**. Below that (and on non-macOS) the tap cannot be
 /// built and the resolver/probe fall back to empty results.
 ///
-// TODO(meeting-piggyback): the experimental_meeting_piggyback flag MUST NOT be
-// enabled on < macOS 14.4. Before the wiring follow-up ships, gate the setting
-// on this check — either (a) hide/disable the toggle in the UI when
-// `!is_process_tap_available()`, or (b) at runtime, when the flag is on but the
-// tap is unavailable, fall back to the stable capture path (default device +
-// global tap) instead of silently capturing nothing, and surface a one-time
-// "requires macOS 14.4+" notice to the user.
+// Availability gating + stable-path fallback live in audio_manager/meeting_piggyback.rs (decide_piggyback).
 pub fn is_process_tap_available() -> bool {
     let version = MACOS_VERSION.get_or_init(detect_os_version);
     match version {

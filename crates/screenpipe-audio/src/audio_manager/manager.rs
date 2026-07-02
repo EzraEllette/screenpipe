@@ -1315,6 +1315,15 @@ impl AudioManager {
             .collect::<Vec<AudioDevice>>()
     }
 
+    /// True when `device` has a live, non-disconnected stream. Thin wrapper over
+    /// the device monitor's [`super::is_device_actively_streaming`] so callers
+    /// that only hold an `AudioManager` (the piggyback sweep) can distinguish a
+    /// registered-but-dead stream from one actually delivering audio — without
+    /// reaching into the private `device_manager` or duplicating the check.
+    pub(crate) fn is_device_actively_streaming(&self, device: &AudioDevice) -> bool {
+        super::is_device_actively_streaming(&self.device_manager, device)
+    }
+
     /// Non-blocking read of the *configured* transcription mode. Returns `None`
     /// if the options lock is momentarily contended, so callers such as
     /// `/health` never block on it.
@@ -1407,6 +1416,18 @@ impl AudioManager {
     /// Returns the current capture-owned meeting detector, if enabled.
     pub async fn meeting_detector(&self) -> Option<Arc<MeetingDetector>> {
         self.meeting_detector.read().await.clone()
+    }
+
+    /// `(experimental_meeting_piggyback, meetings_only)` in one options read.
+    /// Consumed by the device monitor's piggyback sweep (`meeting_piggyback.rs`)
+    /// — the `options` field is private to this module, so the sweep can't read
+    /// it directly. `meetings_only` is `audio_capture_mode == MeetingsOnly`.
+    pub(crate) async fn piggyback_config(&self) -> (bool, bool) {
+        let options = self.options.read().await;
+        (
+            options.experimental_meeting_piggyback,
+            options.audio_capture_mode == AudioCaptureMode::MeetingsOnly,
+        )
     }
 
     /// Returns the shared WhisperContext for backward compatibility, if loaded.
