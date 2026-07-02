@@ -193,10 +193,10 @@ async checkBrowsersAutomationPermission() : Promise<boolean> {
     return await TAURI_INVOKE("check_browsers_automation_permission");
 },
 /**
- * Returns true on macOS 14.4+ where the CoreAudio Process Tap API is
- * available. Used to gate the "experimental System Audio via CoreAudio"
- * toggle — we don't show it on platforms where flipping it would be a
- * no-op. False on Windows, Linux, and older macOS.
+ * Returns true on platforms where Screenpipe's process-audio tap backend is
+ * available. On macOS that means CoreAudio Process Tap (14.4+); on Windows it
+ * means WASAPI process loopback (build 20348+). Linux and older OS versions
+ * return false.
  */
 async checkCoreaudioProcessTapAvailable() : Promise<boolean> {
     return await TAURI_INVOKE("check_coreaudio_process_tap_available");
