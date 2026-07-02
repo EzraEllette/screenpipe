@@ -115,6 +115,7 @@ commits: `28e5c247`
 - [ ] **mic-silent alert discipline** — muting in the meeting app for 5+ min produces NO notification (app not recording ⇒ real silence); a genuinely broken resolved-mic capture (zeros while the app records) first restarts silently, then notifies "screenpipe may not be hearing your mic" after ~4 min total, ≤1 per 30 min.
 - [ ] **per-pid tap silence watchdog (macOS)** — during a piggybacked call, tap silent 45s+ while the app renders audio → one rebuild (60s→960s backoff), never a rebuild while the app is genuinely idle.
 - [ ] **Windows supervisor DEFERRED** — the Windows per-process tap currently has no target-exit detection, endpoint re-anchor, or silence watchdog (plan Task 3, deferred 2026-07-01; WIP in git stash). Before enabling the piggyback flag for Windows users, complete the supervisor and verify on a real Windows machine: app-quit mid-meeting, endpoint switch, silent-capture rebuild.
+- [ ] **piggyback telemetry** — flag on, meetings-only: end a piggybacked meeting → one `piggyback_meeting_summary` appears in PostHog Live Events with the correct outcome; mic-silent incidents appear as `audio_capture_health_mic_*` events; analytics toggle OFF → nothing is sent (engine `TELEMETRY_ENABLED` gate).
 
 
 - [ ] **default audio device** — with "follow system default", recording uses whatever macOS says is default.
