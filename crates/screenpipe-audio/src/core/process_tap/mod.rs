@@ -12,6 +12,9 @@ mod windows;
 mod counters;
 pub(crate) use counters::WatchdogCounters;
 
+mod health;
+pub(crate) use health::{classify_silence, SilenceVerdict};
+
 #[cfg(target_os = "macos")]
 pub use macos::*;
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
