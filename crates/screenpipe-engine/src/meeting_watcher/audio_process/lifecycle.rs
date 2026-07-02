@@ -174,12 +174,14 @@ pub(crate) async fn capture_meeting_outcome(
 
 pub(crate) fn sync_meeting_flag(
     in_meeting: bool,
+    active: Option<screenpipe_audio::meeting_detector::ActiveMeeting>,
     flag: &AtomicBool,
     detector: &Option<Arc<MeetingDetector>>,
 ) {
     flag.store(in_meeting, Ordering::Relaxed);
     if let Some(detector) = detector {
         detector.set_v2_in_meeting(in_meeting);
+        detector.set_active_meeting(if in_meeting { active } else { None });
     }
 }
 
@@ -225,6 +227,8 @@ pub(crate) async fn apply_state_action(
             meeting_url,
             first_seen_at,
             is_browser,
+            pid,
+            bundle_id,
         } => {
             let (cal_title, cal_attendees) = find_overlapping_calendar_event(calendar_events);
             let attendees_str = cal_attendees.as_ref().map(|a| a.join(", "));
@@ -249,7 +253,12 @@ pub(crate) async fn apply_state_action(
                         last_seen_at: now,
                         is_browser,
                     };
-                    sync_meeting_flag(true, in_meeting_flag, detector);
+                    sync_meeting_flag(
+                        true,
+                        Some(screenpipe_audio::meeting_detector::ActiveMeeting { pid, bundle_id }),
+                        in_meeting_flag,
+                        detector,
+                    );
                     if let Ok(status) = resolve_meeting_status_from(db, manual_meeting).await {
                         emit_meeting_status_changed(&status);
                     }
@@ -260,7 +269,9 @@ pub(crate) async fn apply_state_action(
                         meeting_id
                     );
                     *state = AudioProcessMeetingState::Idle;
-                    sync_meeting_flag(true, in_meeting_flag, detector);
+                    // A different meeting already owns the active slot; we
+                    // don't know its process identity from here.
+                    sync_meeting_flag(true, None, in_meeting_flag, detector);
                     if let Ok(status) = resolve_meeting_status_from(db, manual_meeting).await {
                         emit_meeting_status_changed(&status);
                     }
@@ -295,7 +306,7 @@ pub(crate) async fn apply_state_action(
                     );
                 }
             }
-            sync_meeting_flag(false, in_meeting_flag, detector);
+            sync_meeting_flag(false, None, in_meeting_flag, detector);
         }
     }
 }
