@@ -86,6 +86,8 @@ pub struct RecordingConfig {
     pub use_system_default_audio: bool,
     /// Experimental: use CoreAudio Process Tap for System Audio on macOS 14.4+.
     pub experimental_coreaudio_system_audio: bool,
+    /// Experimental: meeting-driven per-process audio capture (piggyback).
+    pub experimental_meeting_piggyback: bool,
     /// Experimental: request Windows WASAPI microphone AEC when supported.
     pub windows_input_aec_enabled: bool,
     /// Use Apple VoiceProcessingIO on the default macOS microphone when supported.
@@ -314,6 +316,7 @@ impl RecordingConfig {
             audio_devices: settings.audio_devices.clone(),
             use_system_default_audio: settings.use_system_default_audio,
             experimental_coreaudio_system_audio: settings.experimental_coreaudio_system_audio,
+            experimental_meeting_piggyback: settings.experimental_meeting_piggyback,
             windows_input_aec_enabled: settings.windows_input_aec_enabled,
             macos_input_vpio_enabled: settings.macos_input_vpio_enabled,
             monitor_ids: settings.monitor_ids.clone(),
@@ -473,6 +476,7 @@ impl RecordingConfig {
             .enabled_devices(audio_devices)
             .use_system_default_audio(self.use_system_default_audio)
             .experimental_coreaudio_system_audio(self.experimental_coreaudio_system_audio)
+            .experimental_meeting_piggyback(self.experimental_meeting_piggyback)
             .windows_input_aec_enabled(self.windows_input_aec_enabled)
             .macos_input_vpio_enabled(self.macos_input_vpio_enabled)
             .deepgram_config(self.deepgram_config.clone())

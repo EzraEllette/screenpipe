@@ -119,6 +119,10 @@ pub struct AudioManagerOptions {
     /// When false (default), System Audio uses ScreenCaptureKit as before.
     /// Has no effect on non-macOS or macOS <14.4 — falls back to SCK.
     pub experimental_coreaudio_system_audio: bool,
+    /// Experimental: meeting-driven per-process capture (piggyback). Read by
+    /// the device monitor's piggyback sweep; no effect anywhere else. Default
+    /// false — see default_experimental_meeting_piggyback in screenpipe-config.
+    pub experimental_meeting_piggyback: bool,
     /// Experimental: request Windows WASAPI microphone AEC when the endpoint supports it.
     pub windows_input_aec_enabled: bool,
     /// Use Apple VoiceProcessingIO on the default macOS microphone when supported.
@@ -171,6 +175,7 @@ impl Default for AudioManagerOptions {
             filter_music: false,
             use_system_default_audio: true,
             experimental_coreaudio_system_audio: false,
+            experimental_meeting_piggyback: false,
             windows_input_aec_enabled: false,
             macos_input_vpio_enabled: false,
             transcription_mode: TranscriptionMode::default(),
@@ -271,6 +276,11 @@ impl AudioManagerBuilder {
 
     pub fn experimental_coreaudio_system_audio(mut self, enabled: bool) -> Self {
         self.options.experimental_coreaudio_system_audio = enabled;
+        self
+    }
+
+    pub fn experimental_meeting_piggyback(mut self, enabled: bool) -> Self {
+        self.options.experimental_meeting_piggyback = enabled;
         self
     }
 
