@@ -605,7 +605,6 @@ impl Drop for ProcessTapCapture {
 
 /// Translate OS pids into CoreAudio process object AudioObjectIDs, dropping any
 /// that don't resolve (not running, or not a translatable process).
-#[allow(dead_code)] // wired into the live pipeline in the reconcile follow-up
 fn resolve_pids_to_audio_object_ids(pids: &[i32]) -> Vec<u32> {
     let mut out = Vec::new();
     for &pid in pids {
@@ -645,7 +644,6 @@ fn aggregate_output_activity(pids: &[i32]) -> Option<bool> {
 /// using ("copy whatever output the app is using"). Queries `PROCESS_DEVICES`
 /// in the OUTPUT scope and returns the first output device across the pids.
 /// `None` when nothing resolves — the caller falls back to the default output.
-#[allow(dead_code)] // wired into the live pipeline in the reconcile follow-up
 fn resolve_meeting_output_device(pids: &[i32]) -> Option<ca::Device> {
     for &pid in pids {
         let Ok(process) = ca::Process::with_pid(pid) else {
@@ -672,7 +670,6 @@ fn resolve_meeting_output_device(pids: &[i32]) -> Option<ca::Device> {
 /// Reuses `build_capture_from_desc`, so the aggregate/IO-proc plumbing is
 /// identical to the stable global tap; only WHAT we tap and WHICH device we
 /// clock against differ.
-#[allow(dead_code)] // wired into the live pipeline in the reconcile follow-up
 fn build_inclusion_capture(
     pids: &[i32],
     tx: broadcast::Sender<Vec<f32>>,
@@ -1120,7 +1117,6 @@ pub fn spawn_process_tap_capture(
 ///
 /// `is_running` is accepted for signature parity with the cpal path and is not
 /// read (see the `TapCallbackCtx` comment).
-#[allow(dead_code)] // wired into the live pipeline in the reconcile follow-up
 pub fn spawn_process_tap_capture_for_pids(
     pids: Vec<i32>,
     tx: broadcast::Sender<Vec<f32>>,
