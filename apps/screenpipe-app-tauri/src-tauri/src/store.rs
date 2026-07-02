@@ -82,7 +82,10 @@ const APP_ENTITLEMENT_CLOCK_SKEW_MINUTES: i64 = 5;
 //       leave it in place.
 //   L5: after the plugin builds, if the disk file has a `settings` key but
 //       the loaded store doesn't, the load silently failed — refuse to hand
-//       out the wipe-primed handle.
+//       out the wipe-primed handle AND eject it from the plugin registry
+//       (the plugin registers stores before we can inspect them, and serves
+//       registry hits without re-reading disk), so retries and the webview
+//       rebuild from the file instead of re-serving the empty instance.
 // ---------------------------------------------------------------------------
 
 /// Suffix for the most-recent known-healthy snapshot.
@@ -538,8 +541,18 @@ static STORE_CACHE: Mutex<Option<Arc<tauri_plugin_store::Store<tauri::Wry>>>> = 
 /// Build (or rebuild) the store, retrying on TOCTOU races and stale resource IDs.
 fn build_store(app: &AppHandle) -> anyhow::Result<Arc<tauri_plugin_store::Store<tauri::Wry>>> {
     let base_dir = get_base_dir(app, None)?;
-    let store_path = base_dir.join("store.bin");
+    build_store_at(app, base_dir.join("store.bin"))
+}
 
+/// Runtime-generic core of [`build_store`]: decrypt, snapshot recovery and
+/// the guarded build-retry loop over an already-resolved store path. Split
+/// out so the recovery layers can be tested against `tauri::test::MockRuntime`
+/// — the registry the L5 guard must clean up lives in tauri-managed state,
+/// unreachable from pure path-based tests.
+fn build_store_at<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    store_path: std::path::PathBuf,
+) -> anyhow::Result<Arc<tauri_plugin_store::Store<R>>> {
     // Decrypt store.bin before the plugin reads it (no-op if plain JSON or keychain unavailable)
     if store_path.exists() && decrypt_store_file(&store_path) == DecryptOutcome::Locked {
         // L2b — the encrypted blob is unreadable (key denied/missing or
@@ -613,6 +626,15 @@ fn build_store(app: &AppHandle) -> anyhow::Result<Arc<tauri_plugin_store::Store<
                         store_path.display(),
                         attempt + 1
                     );
+                    // The plugin registered this instance (resources table +
+                    // path map) before we could inspect it, and `.build()`
+                    // serves registry hits without re-reading disk — so a
+                    // bare `continue` would hand every retry, the webview's
+                    // Store.load, and the plugin's exit-time save-all this
+                    // same empty store, and the first save would flush
+                    // defaults over the user's data. Eject it so the next
+                    // build re-reads the file.
+                    s.close_resource();
                     last_err = None;
                     std::thread::sleep(std::time::Duration::from_millis(
                         100 * (attempt as u64 + 1),
@@ -2479,6 +2501,62 @@ mod tests {
             blob,
             "file must be untouched when there is nothing to restore from"
         );
+    }
+
+    #[test]
+    fn l5_refusal_ejects_wipe_primed_store_from_plugin_registry() {
+        // The plugin's build_inner registers a freshly-built store in its
+        // registry BEFORE build_store can refuse it, and `.build()` serves
+        // registry hits without re-reading disk. If the L5 refusal only
+        // dropped its local Arc, every retry — and the webview's Store.load,
+        // and the plugin's exit-time save-all — would keep getting the same
+        // wipe-primed EMPTY instance, so the first save would flush defaults
+        // over the user's real store.bin. The refusal must eject the instance
+        // from the registry so the next build re-reads the disk file.
+        use tauri_plugin_store::StoreExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store_path = tmp.path().join("store.bin");
+
+        let app = tauri::test::mock_builder()
+            .plugin(tauri_plugin_store::Builder::default().build())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("failed to build mock app");
+
+        // Poison the registry the way a transient read failure does: the
+        // plugin swallows the load error and registers an EMPTY store.
+        std::fs::write(&store_path, b"transient garbage").unwrap();
+        let poisoned = StoreBuilder::new(app.handle(), store_path.clone())
+            .build()
+            .expect("plugin builds an empty store from an unreadable file");
+        assert!(
+            poisoned.get("settings").is_none(),
+            "precondition: the registered store is empty"
+        );
+
+        // The disk heals underneath it — the user's data was there all along.
+        write_store(
+            tmp.path(),
+            &json!({"settings": {"aiPresets": presets_n(2)}}),
+        );
+
+        let store = build_store_at(app.handle(), store_path.clone())
+            .expect("must eject the poisoned instance and load the disk state");
+        assert!(
+            store.get("settings").is_some(),
+            "must hand out the on-disk settings, not the wipe-primed empty store"
+        );
+        assert!(
+            !Arc::ptr_eq(&poisoned, &store),
+            "must not re-serve the ejected instance"
+        );
+
+        // The registry — what the webview's Store.load and the plugin's
+        // exit-time save-all read — must also serve the healthy instance now.
+        let registered = app
+            .get_store(&store_path)
+            .expect("healthy store must be registered");
+        assert!(Arc::ptr_eq(&registered, &store));
     }
 
     // ---- Existing tests ----
