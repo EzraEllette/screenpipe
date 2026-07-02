@@ -350,7 +350,12 @@ pub(crate) struct MeetingTelemetry {
     pub capture_failed: bool,
     /// Guards [`fold_volatile_state`] against double-counting when both the
     /// piggybacking-stop edge and the meeting-end edge fire on the same tick
-    /// (meeting ends while still piggybacking). Cleared on reset (meeting end).
+    /// (meeting ends while still piggybacking). Scoped to the current
+    /// piggybacking CYCLE, not the whole meeting: cleared both on reset
+    /// (meeting end) and on the piggybacking-resumes transition
+    /// (`!was_piggybacking && piggybacking_now` in the sweep), so a second
+    /// stop/resume cycle within one meeting still folds its own counters
+    /// instead of being silently dropped.
     pub folded_this_meeting: bool,
 }
 
@@ -431,9 +436,13 @@ fn os_version_string() -> Option<String> {
 /// (before that reset zeroes the source fields) and the meeting-end edge (to
 /// catch state accrued after the last piggybacking-stop, and meetings that
 /// end while still piggybacking, where both edges fire on the same tick).
-/// Idempotent per meeting via `folded_this_meeting`: `max`/`|=` are naturally
+/// Idempotent per CYCLE via `folded_this_meeting`: `max`/`|=` are naturally
 /// idempotent, but `mic_restarts` is an additive count, so a second fold in
-/// the same meeting must be a no-op — the guard enforces that.
+/// the same cycle must be a no-op — the guard enforces that. The guard is
+/// cleared on the piggybacking-resumes transition (see the sweep, right
+/// before `piggybacking_now`'s first use), so a meeting with multiple
+/// stop/resume cycles (pid flap, tap rebuild) folds each cycle's own counters
+/// instead of dropping every cycle after the first.
 fn fold_volatile_state(telemetry: &mut MeetingTelemetry, state: &PiggybackState) {
     if telemetry.folded_this_meeting {
         return;
@@ -684,6 +693,14 @@ pub(crate) async fn run_meeting_piggyback_sweep(
     //     health is the far-end watchdog's job). Restart silently first, notify
     //     only if that doesn't help, never cry wolf on a mute.
     let piggybacking_now = engaged && tap_avail && meeting_pid.is_some();
+    // Piggybacking RESUMES (a second tap/mic cycle within the same meeting,
+    // e.g. after a pid flap or a tap rebuild): clear the per-cycle fold guard
+    // so the next stop/meeting-end fold isn't silently dropped. The guard is
+    // cycle-scoped, not meeting-scoped — see `fold_volatile_state`'s doc
+    // comment and the review that flagged the under-fold this fixes.
+    if !state.was_piggybacking && piggybacking_now {
+        state.telemetry.folded_this_meeting = false;
+    }
     if piggybacking_now {
         // A single resolved mic is the norm; take the first registered one so we
         // hold at most one restart/notify per tick. `obs` is still alive here —
@@ -1215,5 +1232,54 @@ mod tests {
         assert_eq!(telemetry.strikes_max, 2);
         assert!(telemetry.silent_notified);
         assert!(telemetry.capture_failed);
+    }
+
+    #[test]
+    fn fold_guard_is_per_cycle_not_per_meeting() {
+        // Two full piggybacking-stop/resume cycles within ONE meeting must
+        // both contribute to the telemetry — the guard must reset on resume
+        // (the `!was_piggybacking && piggybacking_now` transition), not stay
+        // latched for the whole meeting. Regression for the under-fold the
+        // Task 1 review flagged: a second cycle's mic_restarts/strikes_max
+        // were silently dropped because `folded_this_meeting` only cleared
+        // at meeting end.
+        let mut telemetry = MeetingTelemetry::default();
+
+        // Cycle 1: one mic restart, then piggybacking stops (fold #1)…
+        let cycle1 = PiggybackState {
+            tap_strikes: 1,
+            mic_restarted_at_ms: Some(1),
+            ..Default::default()
+        };
+        fold_volatile_state(&mut telemetry, &cycle1);
+        // …and a double-fold within the SAME cycle (e.g. meeting-end edge
+        // firing on the same tick as the stop edge) must still count once.
+        fold_volatile_state(&mut telemetry, &cycle1);
+        assert_eq!(
+            telemetry.mic_restarts, 1,
+            "double-fold within one cycle must be a no-op"
+        );
+
+        // Piggybacking resumes: the per-cycle guard must clear so cycle 2's
+        // fold isn't silently dropped.
+        telemetry.folded_this_meeting = false;
+
+        // Cycle 2: another mic restart, higher strikes, then stops again
+        // (fold #1 of cycle 2).
+        let cycle2 = PiggybackState {
+            tap_strikes: 3,
+            mic_restarted_at_ms: Some(2),
+            ..Default::default()
+        };
+        fold_volatile_state(&mut telemetry, &cycle2);
+
+        assert_eq!(
+            telemetry.mic_restarts, 2,
+            "both cycles' mic_restarts must accumulate (1 + 1 = 2)"
+        );
+        assert_eq!(
+            telemetry.strikes_max, 3,
+            "strikes_max must reflect the max across both cycles"
+        );
     }
 }
