@@ -1141,10 +1141,21 @@ pub fn spawn_process_tap_capture_for_pids(
         const SILENCE_AMP_EPS: f32 = 0.002;
         const REBUILD_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(60);
         const SILENCE_BACKOFF_CAP: u32 = 4;
+        /// After this many CONSECUTIVE failed rebuilds (silence-driven or
+        /// output-switch-driven), give up and exit the loop instead of looping
+        /// with `current = None`. A failed rebuild leaves no live capture yet
+        /// the stream still looks "actively streaming" to the sweep (it never
+        /// latched `is_disconnected`), so the sweep keeps the stable far-end
+        /// output suspended → far-end audio is lost until a deep-backoff retry
+        /// happens to succeed. Breaking here hits the exit path that sets
+        /// `is_disconnected`, so the sweep's dead-tap arm falls back to the
+        /// stable path within a tick. Reset to 0 on any successful rebuild.
+        const MAX_CONSECUTIVE_REBUILD_FAILURES: u32 = 3;
 
         let mut silence_started: Option<std::time::Instant> = None;
         let mut last_silent_rebuild: Option<std::time::Instant> = None;
         let mut silent_rebuild_streak: u32 = 0;
+        let mut consecutive_rebuild_failures: u32 = 0;
 
         while !is_disconnected.load(Ordering::Relaxed) {
             std::thread::sleep(POLL);
@@ -1227,11 +1238,27 @@ pub fn spawn_process_tap_capture_for_pids(
                     current_uid = uid;
                     watchdog = wd;
                     silence_started = None;
+                    consecutive_rebuild_failures = 0;
                 }
                 Err(e) => {
-                    warn!("Per-process tap rebuild failed: {e}");
+                    consecutive_rebuild_failures += 1;
+                    warn!(
+                        "Per-process tap rebuild failed ({}/{}): {e}",
+                        consecutive_rebuild_failures, MAX_CONSECUTIVE_REBUILD_FAILURES
+                    );
                     if let Some(uid) = new_uid {
                         current_uid = uid;
+                    }
+                    // Persistent failure: stop looping with a dead (None)
+                    // capture that the sweep still reads as "streaming". Break
+                    // → the exit path latches `is_disconnected`, and the sweep
+                    // falls back to the stable far end within a tick.
+                    if consecutive_rebuild_failures >= MAX_CONSECUTIVE_REBUILD_FAILURES {
+                        warn!(
+                            "Per-process tap: {} consecutive rebuild failures, giving up (falling back to stable capture)",
+                            consecutive_rebuild_failures
+                        );
+                        break;
                     }
                 }
             }
