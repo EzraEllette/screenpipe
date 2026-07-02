@@ -318,11 +318,19 @@ pub(crate) struct PiggybackState {
 /// available. The `process_tap` module (and thus `is_process_tap_available`)
 /// only exists on macOS and Windows; elsewhere the tap can't be built, so the
 /// observation simply never piggybacks and rides the stable path.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+///
+/// Windows is force-gated OFF here: the Windows per-process capture supervisor
+/// (target-exit detection, endpoint re-anchor, silence watchdog) was deferred
+/// (see TESTING.md "Windows supervisor DEFERRED" — the re-enable checklist).
+/// Without it the per-pid tap can zombie or double-capture, so a Windows user
+/// with the flag on must land on WarnUnavailableOnce + the stable path, i.e.
+/// exactly today's behavior. Re-enable by returning the real availability once
+/// the supervisor lands and its checklist is verified on a real machine.
+#[cfg(target_os = "macos")]
 fn tap_available() -> bool {
     crate::core::process_tap::is_process_tap_available()
 }
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(not(target_os = "macos"))]
 fn tap_available() -> bool {
     false
 }
