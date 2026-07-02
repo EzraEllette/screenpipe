@@ -747,9 +747,21 @@ pub async fn start_device_monitor(
 
                             // Only stop the old inputs once the new one is live.
                             if new_started {
+                                // Never stop meeting-session or piggyback-suspended
+                                // devices during a default swap: they are not user
+                                // intent and the sweep owns their lifecycle. (They
+                                // are already absent from enabled_devices; this is a
+                                // belt-and-suspenders skip that also documents it.)
+                                let session = audio_manager.session_devices();
+                                let suspended = audio_manager.suspended_devices();
                                 for device_name in enabled_devices.iter() {
                                     if *device_name == new_default_input {
                                         continue; // don't stop the one we just started
+                                    }
+                                    if session.contains(device_name)
+                                        || suspended.contains(device_name)
+                                    {
+                                        continue;
                                     }
                                     if let Ok(device) = parse_audio_device(device_name) {
                                         if device.device_type == DeviceType::Input {
@@ -808,6 +820,13 @@ pub async fn start_device_monitor(
                                 // Don't stop the communications output device during swap
                                 #[cfg(target_os = "windows")]
                                 let comm_name = default_tracker.last_communications_output.clone();
+                                // Never stop the Meeting Tap or other meeting-session /
+                                // piggyback-suspended outputs during a default swap: they
+                                // are meeting-lifetime, not user intent, and the sweep owns
+                                // their teardown. Misattributing/stopping the Meeting Tap
+                                // here would drop far-end call audio mid-meeting.
+                                let session = audio_manager.session_devices();
+                                let suspended = audio_manager.suspended_devices();
                                 for device_name in audio_manager.enabled_devices().await.iter() {
                                     if *device_name == new_default_output {
                                         continue; // don't stop the one we just started
@@ -815,6 +834,11 @@ pub async fn start_device_monitor(
                                     #[cfg(target_os = "windows")]
                                     if comm_name.as_deref() == Some(device_name.as_str()) {
                                         continue; // don't stop the communications device
+                                    }
+                                    if session.contains(device_name)
+                                        || suspended.contains(device_name)
+                                    {
+                                        continue;
                                     }
                                     if let Ok(device) = parse_audio_device(device_name) {
                                         if device.device_type == DeviceType::Output {
