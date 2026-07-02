@@ -24,20 +24,35 @@ pub(crate) const TAP_RETRY_COOLDOWN_SECS: u64 = 60;
 // actively recording (`Some(true)`) and we still see nothing but zeros do we
 // escalate — restart silently first, notify only if the restart doesn't help.
 
-/// How long chunks must arrive as literal zeros before the mic counts as
-/// "silent". Also gates the sweep's probe cadence (probe only when the last
-/// non-zero is older than half this window — see `run_meeting_piggyback_sweep`).
+// Granularity note (all thresholds below): the liveness stamps these windows
+// measure against are written by the single receiver loop, which sees ONE chunk
+// per device per `audio_chunk_duration` (~30s). So `last_nonzero_ms` advances in
+// ~30s steps, not continuously — a window must be a comfortable multiple of that
+// chunk cadence or a single healthy-but-coarse chunk boundary would read as a
+// gap. 120s is 4 chunks; well clear of jitter.
+
+/// How long the mic must go WITHOUT a non-zero chunk before it counts as
+/// "silent", measured from the last real data (or, if none has ever arrived,
+/// from stream start — see `decide_mic_health`). Given the ~30s chunk cadence
+/// this is 4 chunks of sustained zeros. Also gates the sweep's probe cadence
+/// (probe only when the last non-zero is older than half this window — see
+/// `run_meeting_piggyback_sweep`).
 pub(crate) const MIC_ZERO_WINDOW_MS: u64 = 120_000;
 /// How long after a silent restart we wait before deciding it didn't help and
 /// notifying the user. Same magnitude as the zero window: give the fresh stream
-/// a full window to prove itself.
+/// a full window (~4 chunks at the 30s cadence) to prove itself.
 pub(crate) const MIC_RESTART_TO_NOTIFY_MS: u64 = 120_000;
 /// Minimum gap between `mic_silent` notifications. Persists ACROSS meetings
 /// (mirrors `NOTIFY_COOLDOWN` in `windows_output_follow.rs`) so a chronically
 /// mis-routed mic can't nag every meeting.
 pub(crate) const MIC_NOTIFY_COOLDOWN_MS: u64 = 1_800_000;
 /// Grace period after a session stream starts before its silence counts —
-/// covers device warm-up before the first real chunk lands.
+/// covers device warm-up before the first real chunk lands. Now largely
+/// redundant with the zero-window anchoring in `decide_mic_health` (which keys
+/// off `max(started_ms, last_nonzero_ms)`), but kept as a cheap, explicit floor
+/// that documents intent. NOTE: this is shorter than one ~30s chunk, so on its
+/// own it never fires before the first chunk could arrive — the zero window is
+/// what actually protects the never-received case.
 pub(crate) const MIC_STARTUP_GRACE_MS: u64 = 10_000;
 
 /// Everything `decide_mic_health` may look at for one resolved session mic.
@@ -217,6 +232,15 @@ pub(crate) fn decide_mic_health(obs: &MicHealthObservation) -> MicHealthAction {
     if obs.now_ms.saturating_sub(obs.started_ms) < MIC_STARTUP_GRACE_MS {
         return MicHealthAction::None;
     }
+    // Anchor the zero-window on the last time we saw REAL data — or, when none
+    // has ever arrived (`last_nonzero_ms == 0`), on stream start. Keying off the
+    // epoch instead treated "no chunk yet" as "silent since forever" and, at the
+    // first sweep tick past the short startup grace, restarted a perfectly
+    // healthy mic mid-warm-up (truncating near-end audio, churning a BT open —
+    // the #3750 etiquette violation). The receiver stamps these fields at the
+    // ~30s chunk cadence, so `MIC_ZERO_WINDOW_MS` (4 chunks) is the real floor
+    // before the never-received case can escalate.
+    let zero_anchor = obs.started_ms.max(obs.last_nonzero_ms);
     let nonzero_recent = obs.last_nonzero_ms != 0
         && obs.now_ms.saturating_sub(obs.last_nonzero_ms) < MIC_ZERO_WINDOW_MS;
     if nonzero_recent {
@@ -225,6 +249,12 @@ pub(crate) fn decide_mic_health(obs: &MicHealthObservation) -> MicHealthAction {
         } else {
             MicHealthAction::None
         };
+    }
+    // Not silent yet if the anchor (last data, or stream start) is still inside
+    // the zero window — covers the never-received case without a special epoch
+    // branch.
+    if obs.now_ms.saturating_sub(zero_anchor) < MIC_ZERO_WINDOW_MS {
+        return MicHealthAction::None;
     }
     // Sustained zeros. Only escalate when the OS says the app IS recording —
     // Some(false) is a mute (stay quiet), None is unknowable (stay quiet).
@@ -805,6 +835,44 @@ mod tests {
     fn startup_grace_holds_fire() {
         let mut obs = mic_obs(5_000);
         obs.started_ms = 0;
+        assert_eq!(decide_mic_health(&obs), MicHealthAction::None);
+    }
+
+    #[test]
+    fn never_received_data_waits_full_zero_window() {
+        // No chunk has ever arrived (last_nonzero == 0) and the stream started
+        // at epoch. 15s in — past the 10s startup grace but WELL inside the
+        // 120s zero window. The old epoch-anchored logic restarted here; the
+        // anchored logic must hold fire (the receiver only stamps every ~30s,
+        // so the first real chunk may not even have landed yet).
+        let mut obs = mic_obs(15_000);
+        obs.started_ms = 0;
+        obs.last_nonzero_ms = 0;
+        obs.input_active = Some(true);
+        assert_eq!(decide_mic_health(&obs), MicHealthAction::None);
+    }
+
+    #[test]
+    fn never_received_data_restarts_after_full_window() {
+        // Same never-received stream, but now 125s in: the full zero window has
+        // elapsed since stream start with no data while the app records → the
+        // capture really is broken, so restart.
+        let mut obs = mic_obs(125_000);
+        obs.started_ms = 0;
+        obs.last_nonzero_ms = 0;
+        obs.input_active = Some(true);
+        assert_eq!(decide_mic_health(&obs), MicHealthAction::RestartInput);
+    }
+
+    #[test]
+    fn healthy_chunk_at_thirty_seconds_is_silent() {
+        // The realistic healthy meeting: a non-zero chunk landed at the 30s
+        // cadence boundary and it's now 35s. This must NOT restart — the anchor
+        // is the recent chunk, comfortably inside the window.
+        let mut obs = mic_obs(35_000);
+        obs.started_ms = 0;
+        obs.last_nonzero_ms = 30_000;
+        obs.input_active = Some(true);
         assert_eq!(decide_mic_health(&obs), MicHealthAction::None);
     }
 
