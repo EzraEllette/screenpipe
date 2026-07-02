@@ -72,6 +72,41 @@ pub(crate) fn advance_audio_process_state(
         .iter()
         .find_map(ResolvedMeetingCandidate::unresolved_browser_session);
 
+    // Live evidence — a native app identity, the active-tab URL probe, or the
+    // AX window sweep, all observed on THIS poll — starts a meeting from any
+    // pre-start state on a single sighting. The confirm window exists so that
+    // stored frame evidence (up to 10s stale) has to prove itself across two
+    // polls; a live observation has nothing to prove by waiting, and every
+    // poll spent waiting is time a competing notes app owns the user's
+    // attention.
+    let pre_start = matches!(
+        state,
+        AudioProcessMeetingState::Idle
+            | AudioProcessMeetingState::Candidate { .. }
+            | AudioProcessMeetingState::CandidateUnresolvedBrowser { .. }
+    );
+    if pre_start && resolved.as_ref().is_some_and(|s| s.live_evidence) {
+        let session = resolved.expect("checked is_some above");
+        return (
+            AudioProcessMeetingState::Active {
+                meeting_id: -1,
+                platform: session.platform.clone(),
+                session_key: session.session_key.clone(),
+                meeting_url: session.meeting_url.clone(),
+                first_seen_at: session.first_seen_at,
+                last_seen_at: now,
+                is_browser: session.is_browser,
+            },
+            Some(AudioProcessStateAction::StartMeeting {
+                platform: session.platform,
+                session_key: session.session_key,
+                meeting_url: session.meeting_url,
+                first_seen_at: session.first_seen_at,
+                is_browser: session.is_browser,
+            }),
+        );
+    }
+
     match state {
         AudioProcessMeetingState::Idle => advance_from_idle(resolved, unresolved, now),
         AudioProcessMeetingState::Candidate {

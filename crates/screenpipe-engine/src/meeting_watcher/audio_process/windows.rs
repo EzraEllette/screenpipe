@@ -8,6 +8,18 @@ use super::*;
 use crate::meeting_watcher::shared::ignore::{is_browser_app, meeting_app_is_ignored_with_terms};
 use crate::meeting_watcher::shared::profiles::MeetingDetectionProfile;
 
+/// Windows: no live active-tab URL probe yet. The UIA sweep in
+/// `ax_resolved_candidates` reads browser window titles/URLs already; wiring
+/// `browser_utils`' UIA URL detector here is possible but unverified, so keep
+/// this a no-op until it's tested on a real Windows browser matrix.
+pub(crate) async fn active_tab_url_candidates(
+    _browser_apps: &[String],
+    _profiles: &[MeetingDetectionProfile],
+    _ignored_terms: &[String],
+) -> Vec<AxResolvedCandidate> {
+    Vec::new()
+}
+
 pub(crate) async fn ax_resolved_candidates(
     profiles: &[MeetingDetectionProfile],
     ignored_terms: &[String],

@@ -39,18 +39,32 @@ mod null;
 mod windows;
 
 #[cfg(target_os = "macos")]
-use macos::ax_resolved_candidates;
+use macos::{active_tab_url_candidates, ax_resolved_candidates};
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-use null::ax_resolved_candidates;
+use null::{active_tab_url_candidates, ax_resolved_candidates};
 #[cfg(target_os = "windows")]
-use windows::ax_resolved_candidates;
+use windows::{active_tab_url_candidates, ax_resolved_candidates};
 
 const STICKY_PROCESS_WINDOW: Duration = Duration::from_secs(4);
-const CANDIDATE_CONFIRM_WINDOW: Duration = Duration::from_secs(3);
+/// How long a session resolved from STORED evidence (DB frames, up to 10s
+/// stale) must persist before a meeting starts — two consecutive sightings at
+/// the 1s active poll, so one stale frame alone can't mint a meeting. Live
+/// evidence (active-tab probe, AX window sweep, native app identity) bypasses
+/// this entirely and starts on the first sighting. This window does NOT
+/// filter voice notes on messaging platforms (real voice notes run 5–60s and
+/// outlast any sane value) — that is #4776's call-signal gate, not this
+/// constant.
+const CANDIDATE_CONFIRM_WINDOW: Duration = Duration::from_secs(1);
 const ENDING_GRACE: Duration = Duration::from_secs(20);
 const ACTIVE_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const IDLE_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const UNKNOWN_BROWSER_PLATFORM: &str = "Unknown";
+/// Log (at INFO, so it lands in the shipped log file) once a mic-holding
+/// browser has stayed unattributed this long — the "my call was never
+/// detected" failure mode is otherwise completely silent.
+const UNRESOLVED_BROWSER_LOG_AFTER: Duration = Duration::from_secs(15);
+/// Rate limit for the unresolved-browser log line.
+const UNRESOLVED_BROWSER_LOG_EVERY: Duration = Duration::from_secs(60);
 
 mod model;
 pub(crate) use model::*;
@@ -89,6 +103,7 @@ pub async fn run_audio_process_meeting_detection_loop(
     let mut last_explicit_stop_id: Option<i64> = None;
     let mut suppressed_sessions: Vec<SuppressedSession> = Vec::new();
     let mut flap_count = 0u32;
+    let mut last_unresolved_browser_log: Option<Instant> = None;
 
     if close_orphaned_meetings_on_start {
         match db.close_orphaned_meetings().await {
@@ -229,6 +244,34 @@ pub async fn run_audio_process_meeting_detection_loop(
             flap_count = flap_count.saturating_add(1);
         }
         state = new_state;
+
+        // A browser holding the mic that we can't attribute to a platform is
+        // the silent failure mode behind "my call was never detected": every
+        // resolution attempt happens at debug level. Surface it at INFO once
+        // it has been pending a while, rate-limited.
+        if let AudioProcessMeetingState::CandidateUnresolvedBrowser {
+            browser_app,
+            first_seen_at,
+            ..
+        } = &state
+        {
+            let pending_for = now.duration_since(*first_seen_at);
+            if pending_for >= UNRESOLVED_BROWSER_LOG_AFTER
+                && last_unresolved_browser_log
+                    .is_none_or(|at| now.duration_since(at) >= UNRESOLVED_BROWSER_LOG_EVERY)
+            {
+                info!(
+                    "audio-process meeting detector: {} has held the mic for {}s without \
+                     resolving to a meeting platform (no fresh URL/title evidence and the \
+                     active-tab probe found no meeting URL; still retrying every poll)",
+                    browser_app,
+                    pending_for.as_secs()
+                );
+                last_unresolved_browser_log = Some(now);
+            }
+        } else {
+            last_unresolved_browser_log = None;
+        }
 
         if let Some(action) = action {
             apply_state_action(

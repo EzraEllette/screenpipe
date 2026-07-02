@@ -13,3 +13,11 @@ pub(crate) async fn ax_resolved_candidates(
 ) -> Vec<AxResolvedCandidate> {
     Vec::new()
 }
+
+pub(crate) async fn active_tab_url_candidates(
+    _browser_apps: &[String],
+    _profiles: &[MeetingDetectionProfile],
+    _ignored_terms: &[String],
+) -> Vec<AxResolvedCandidate> {
+    Vec::new()
+}

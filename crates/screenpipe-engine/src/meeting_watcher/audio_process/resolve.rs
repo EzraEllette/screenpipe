@@ -56,14 +56,70 @@ pub(crate) async fn should_use_ax_fallback(
     profiles: &[MeetingDetectionProfile],
     ignored_terms: &[String],
 ) -> Vec<AxResolvedCandidate> {
-    let has_browser = tracked
+    let mut browser_apps: Vec<String> = tracked
         .iter()
-        .any(|(_, tracked)| browser_app_name(&tracked.raw).is_some());
-    if !has_browser {
+        .filter_map(|(_, tracked)| browser_app_name(&tracked.raw))
+        .collect();
+    browser_apps.sort();
+    browser_apps.dedup();
+    if browser_apps.is_empty() {
         return Vec::new();
     }
 
-    ax_resolved_candidates(profiles, ignored_terms).await
+    let mut candidates = ax_resolved_candidates(profiles, ignored_terms).await;
+
+    // The AX window sweep is blind on browsers that expose neither AXDocument
+    // nor a URL in the window title (Arc titles its in-call window with just
+    // the meeting code). For mic-holding browsers it could not attribute, ask
+    // the browser directly for its active-tab URL — this works with the URL
+    // bar hidden and does not depend on the vision pipeline having recently
+    // captured a frame (event-driven capture produces none on a static call
+    // screen, which starved `db_find_browser_evidence` exactly when a call
+    // just started).
+    let unattributed: Vec<String> = browser_apps
+        .into_iter()
+        .filter(|app| {
+            !candidates
+                .iter()
+                .any(|candidate| browser_names_match(app, &candidate.browser_app))
+        })
+        .collect();
+    if !unattributed.is_empty() {
+        candidates.extend(active_tab_url_candidates(&unattributed, profiles, ignored_terms).await);
+    }
+    candidates
+}
+
+/// Match a browser's live active-tab URL against the meeting profiles.
+///
+/// URL-only matching (titles are never consulted here), with query/fragment
+/// ignored by `browser_window_matches_meeting` so a meeting link carried as a
+/// parameter on an unrelated page can't resolve (#4246). The stored
+/// `meeting_url` keeps the browser-reported form for parity with the DB
+/// evidence path.
+pub(crate) fn resolve_active_tab_url_candidate(
+    browser_app: &str,
+    active_tab_url: &str,
+    profiles: &[MeetingDetectionProfile],
+) -> Option<AxResolvedCandidate> {
+    let url = active_tab_url.trim();
+    if url.is_empty() {
+        return None;
+    }
+    profiles.iter().enumerate().find_map(|(idx, profile)| {
+        if profile.app_identifiers.browser_url_patterns.is_empty() {
+            return None;
+        }
+        if browser_window_matches_meeting(Some(url), None, profile) {
+            Some(AxResolvedCandidate {
+                browser_app: browser_app.to_string(),
+                profile_index: idx,
+                meeting_url: Some(url.to_string()),
+            })
+        } else {
+            None
+        }
+    })
 }
 
 pub(crate) async fn db_find_browser_evidence(
@@ -101,6 +157,48 @@ pub(crate) fn resolve_process_candidate(
     ignored_terms: &[String],
 ) -> ResolvedMeetingCandidate {
     if let Some(browser_app) = browser_app_name(process) {
+        // Live observation first (active-tab URL probe / AX window sweep):
+        // it reflects the browser RIGHT NOW, while DB frame evidence can be
+        // up to 10s stale — a stale frame must never outrank a live answer.
+        // Live evidence is also what entitles the state machine to start a
+        // meeting on a single sighting.
+        if let Some(ax) = resolve_ax_browser_candidate(&browser_app, profiles, ax_candidates) {
+            let profile = &profiles[ax.profile_index];
+            let platform = platform_name_for_profile(profile, true);
+            // The AX window sweep resolves without a URL; borrow the URL from
+            // frame evidence when it agrees on the profile so meeting_url
+            // quality doesn't regress (e.g. Safari: AXDocument match while a
+            // fresh frame carries the real URL).
+            let meeting_url = ax
+                .meeting_url
+                .or_else(|| {
+                    resolve_browser_evidence(&browser_app, profiles, evidence)
+                        .filter(|(idx, _)| *idx == ax.profile_index)
+                        .map(|(_, url)| url)
+                })
+                .unwrap_or_else(|| platform.clone());
+            if candidate_is_ignored(
+                &platform,
+                Some(profile),
+                process,
+                ignored_terms,
+                Some(&browser_app),
+                Some(&meeting_url),
+                None,
+            ) {
+                return ResolvedMeetingCandidate::Ignored;
+            }
+            return ResolvedMeetingCandidate::Browser {
+                platform,
+                meeting_url,
+                browser_app,
+                session_key,
+                first_seen_at,
+                process: process.clone(),
+                live_evidence: true,
+            };
+        }
+
         if let Some((profile_index, meeting_url)) =
             resolve_browser_evidence(&browser_app, profiles, evidence)
         {
@@ -124,31 +222,7 @@ pub(crate) fn resolve_process_candidate(
                 session_key,
                 first_seen_at,
                 process: process.clone(),
-            };
-        }
-
-        if let Some(ax) = resolve_ax_browser_candidate(&browser_app, profiles, ax_candidates) {
-            let profile = &profiles[ax.profile_index];
-            let platform = platform_name_for_profile(profile, true);
-            let meeting_url = ax.meeting_url.unwrap_or_else(|| platform.clone());
-            if candidate_is_ignored(
-                &platform,
-                Some(profile),
-                process,
-                ignored_terms,
-                Some(&browser_app),
-                Some(&meeting_url),
-                None,
-            ) {
-                return ResolvedMeetingCandidate::Ignored;
-            }
-            return ResolvedMeetingCandidate::Browser {
-                platform,
-                meeting_url,
-                browser_app,
-                session_key,
-                first_seen_at,
-                process: process.clone(),
+                live_evidence: false,
             };
         }
 
