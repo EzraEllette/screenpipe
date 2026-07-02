@@ -41,6 +41,11 @@ pub struct ServerCore {
     /// toggles. Handed to both the HTTP server and the VisionManager so HTTP
     /// toggles and the capture loop see the same session state.
     pub high_fps_controller: Arc<screenpipe_engine::high_fps_controller::HighFpsController>,
+    /// Runtime handle to the active VisionManager. CaptureSession registers
+    /// its instance on start and clears on stop so `/vision/device/*` routes
+    /// hit the manager that is actually capturing.
+    pub vision_manager_handle:
+        Arc<arc_swap::ArcSwap<Option<Arc<screenpipe_engine::vision_manager::VisionManager>>>>,
     pub data_dir: PathBuf,
     pub data_path: PathBuf,
     pub port: u16,
@@ -664,6 +669,8 @@ impl ServerCore {
 
         info!("HTTP server bound to port {}", config.port);
 
+        let vision_manager_handle = server.vision_manager.clone();
+
         // Start serving in background
         tokio::spawn(async move {
             if let Err(e) = server.start_with_listener(listener).await {
@@ -983,6 +990,7 @@ impl ServerCore {
             pipe_manager: shared_pipe_manager,
             manual_meeting,
             high_fps_controller,
+            vision_manager_handle,
             data_dir: local_data_dir,
             data_path,
             port: config.port,
