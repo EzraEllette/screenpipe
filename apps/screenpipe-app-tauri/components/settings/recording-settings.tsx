@@ -3496,10 +3496,11 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
         )}
 
         {/* Meeting piggyback (experimental): during meetings, capture only the
-            meeting app's audio and the mic it actually uses. Windows always has
-            a piggyback path (WASAPI session capture); macOS needs the CoreAudio
-            Process Tap. */}
-        {!settings.disableAudio && (isWindows || coreaudioTapAvailable) && (
+            meeting app's audio and the mic it actually uses. macOS-only for now
+            (needs the CoreAudio Process Tap); Windows is re-enabled once the
+            per-process capture supervisor lands (see TESTING.md "Windows
+            supervisor DEFERRED"). */}
+        {!settings.disableAudio && coreaudioTapAvailable && (
         <Card className="border-border bg-card">
           <CardContent className="px-3 py-2.5">
             <div className="flex items-center justify-between">
@@ -3510,7 +3511,7 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
                     meeting piggyback (experimental)
                   </h3>
                   <p className="text-xs text-muted-foreground">
-                    during meetings, capture only the meeting app&apos;s audio and the microphone it actually uses. falls back to standard capture automatically if unavailable.
+                    during meetings, capture only the meeting app&apos;s audio and the microphone it actually uses. falls back to standard capture automatically if unavailable. only active when audio capture mode is set to meetings-only.
                   </p>
                 </div>
               </div>
