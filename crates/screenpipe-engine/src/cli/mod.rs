@@ -412,6 +412,10 @@ pub struct RecordArgs {
     #[arg(long, default_value_t = false)]
     pub experimental_coreaudio_system_audio: bool,
 
+    /// Experimental: meeting-driven per-process audio capture (piggyback).
+    #[arg(long, default_value_t = false)]
+    pub experimental_meeting_piggyback: bool,
+
     /// [experimental, Windows] Request WASAPI microphone AEC when supported.
     /// Ignored on non-Windows platforms and unsupported endpoints.
     #[arg(long, default_value_t = false)]
@@ -776,6 +780,7 @@ pub struct RecordArgSources {
     pub audio_device: bool,
     pub use_system_default_audio: bool,
     pub experimental_coreaudio_system_audio: bool,
+    pub experimental_meeting_piggyback: bool,
     pub windows_input_aec_enabled: bool,
     pub macos_input_vpio_enabled: bool,
     pub audio_transcription_engine: bool,
@@ -830,6 +835,10 @@ impl RecordArgSources {
                 record,
                 "experimental_coreaudio_system_audio",
             ),
+            experimental_meeting_piggyback: from_command_line(
+                record,
+                "experimental_meeting_piggyback",
+            ),
             windows_input_aec_enabled: from_command_line(record, "windows_input_aec_enabled"),
             macos_input_vpio_enabled: from_command_line(record, "macos_input_vpio_enabled"),
             audio_transcription_engine: from_command_line(record, "audio_transcription_engine"),
@@ -876,6 +885,7 @@ impl RecordArgSources {
             || self.audio_device
             || self.use_system_default_audio
             || self.experimental_coreaudio_system_audio
+            || self.experimental_meeting_piggyback
             || self.windows_input_aec_enabled
             || self.macos_input_vpio_enabled
             || self.audio_transcription_engine
@@ -1043,6 +1053,7 @@ impl RecordArgs {
             audio_devices: self.audio_device.clone(),
             use_system_default_audio: self.use_system_default_audio,
             experimental_coreaudio_system_audio: self.experimental_coreaudio_system_audio,
+            experimental_meeting_piggyback: self.experimental_meeting_piggyback,
             windows_input_aec_enabled: self.windows_input_aec_enabled,
             macos_input_vpio_enabled: self.macos_input_vpio_enabled,
             monitor_ids: self.monitor_id.iter().map(|id| id.to_string()).collect(),
@@ -1270,6 +1281,9 @@ impl RecordArgs {
         }
         if sources.experimental_coreaudio_system_audio {
             settings.experimental_coreaudio_system_audio = self.experimental_coreaudio_system_audio;
+        }
+        if sources.experimental_meeting_piggyback {
+            settings.experimental_meeting_piggyback = self.experimental_meeting_piggyback;
         }
         if sources.windows_input_aec_enabled {
             settings.windows_input_aec_enabled = self.windows_input_aec_enabled;
