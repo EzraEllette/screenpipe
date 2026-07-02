@@ -50,6 +50,8 @@ pub(crate) enum AudioProcessStateAction {
         meeting_url: Option<String>,
         first_seen_at: Instant,
         is_browser: bool,
+        pid: Option<i32>,
+        bundle_id: Option<String>,
     },
     EndMeeting {
         meeting_id: i64,
@@ -207,6 +209,8 @@ fn advance_from_candidate(
                         meeting_url,
                         first_seen_at,
                         is_browser,
+                        pid: session.pid,
+                        bundle_id: session.bundle_id,
                     }),
                 );
             }
@@ -456,4 +460,57 @@ pub(crate) fn is_active_ending_flap(
     let now_active = matches!(next, AudioProcessMeetingState::Active { .. });
     let now_ending = matches!(next, AudioProcessMeetingState::Ending { .. });
     (was_active && now_ending) || (was_ending && now_active)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn zoom_process() -> AudioInputProcess {
+        AudioInputProcess {
+            audio_session_id: None,
+            audio_object_id: None,
+            pid: Some(4242),
+            bundle_id: Some("us.zoom.xos".to_string()),
+            process_name: Some("zoom.us".to_string()),
+            owner_app_name: Some("zoom.us".to_string()),
+            owner_bundle_id: Some("us.zoom.xos".to_string()),
+            first_seen_at_ms: None,
+        }
+    }
+
+    #[test]
+    fn start_meeting_action_carries_pid_and_bundle() {
+        // Build a ResolvedSession as the sensors do, run advance_from_candidate
+        // past its confirm window, and assert the action carries the identity.
+        let process = zoom_process();
+        let session_key = ProcessKey::from_process(&process).unwrap();
+        let session = ResolvedSession {
+            platform: "zoom".into(),
+            session_key: session_key.clone(),
+            meeting_url: None,
+            first_seen_at: Instant::now() - Duration::from_secs(60),
+            is_browser: false,
+            pid: Some(4242),
+            bundle_id: Some("us.zoom.xos".into()),
+        };
+        let (_state, action) = advance_from_candidate(
+            "zoom".into(),
+            session.session_key.clone(),
+            None,
+            session.first_seen_at,
+            false,
+            Some(session),
+            None,
+            Instant::now(),
+            Duration::from_secs(10),
+        );
+        match action {
+            Some(AudioProcessStateAction::StartMeeting { pid, bundle_id, .. }) => {
+                assert_eq!(pid, Some(4242));
+                assert_eq!(bundle_id.as_deref(), Some("us.zoom.xos"));
+            }
+            other => panic!("expected StartMeeting, got {other:?}"),
+        }
+    }
 }
