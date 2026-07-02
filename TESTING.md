@@ -104,7 +104,17 @@ commits: `28e5c247`
 
 ### 4. audio device handling
 
-- [ ] **CoreAudio Process Tap** — On macOS 14.4+, verify that system audio defaults to CoreAudio Process Tap and rebuilds if silence is detected. (`75a52603b`, `5634664da`)
+- [ ] **CoreAudio Process Tap (experimental)** — with `experimentalCoreaudioSystemAudio` ON on macOS 14.4+, System Audio uses the CoreAudio Process Tap and rebuilds if silence is detected; with the flag OFF (default) System Audio uses SCK. (`75a52603b`, `5634664da`)
+- [ ] **meeting piggyback OFF (default)** — with `experimentalMeetingPiggyback` off, a meeting starts/ends with zero device-set changes: no "Meeting Tap" device, no suspensions, logs contain no `meeting_piggyback` actions.
+- [ ] **meeting piggyback ON, detected meeting** — flag on, meetings-only mode, macOS 14.4+: join a Zoom call with a NON-default mic selected in Zoom → within ~4s a "Meeting Tap (output)" session stream and the Zoom-selected mic are capturing; the global "System Audio (output)" stream and non-resolved mics are suspended; transcripts attribute to "Meeting Tap"/the resolved mic; on meeting end everything reverts and the resolved mic is NOT left in enabled devices (settings unchanged).
+- [ ] **piggyback fallback: tap build failure** — flag on, force tap failure (revoke System Audio Recording permission): capture continues on the stable path (SCK System Audio + default mic), a warning logs, ≤3 retries per meeting with 60s cooldown, no notification unless the stable path is also silent.
+- [ ] **piggyback fallback: app quits mid-meeting** — kill the meeting app: tap stream tears down within ~2s, global output resumes (unsuspended) until the watcher ends the meeting; no crash, no rebuild storm.
+- [ ] **piggyback fallback: no pid (manual/ui_scan/reattach)** — a meeting without a detected pid behaves exactly like flag-off (stable path).
+- [ ] **piggyback on unsupported OS** — flag on, macOS <14.4: one-time log "using the stable capture path", capture identical to flag-off. Windows <20348: per-process tap degrades to full-endpoint loopback (whole system mix) with a warning.
+- [ ] **mid-call mic switch in the app** — change Zoom's mic mid-call: capture follows within ~4s (old session mic stops, new one starts); changing the OS default while Zoom is pinned elsewhere does NOT switch capture.
+- [ ] **mic-silent alert discipline** — muting in the meeting app for 5+ min produces NO notification (app not recording ⇒ real silence); a genuinely broken resolved-mic capture (zeros while the app records) first restarts silently, then notifies "screenpipe may not be hearing your mic" after ~4 min total, ≤1 per 30 min.
+- [ ] **per-pid tap silence watchdog (macOS)** — during a piggybacked call, tap silent 45s+ while the app renders audio → one rebuild (60s→960s backoff), never a rebuild while the app is genuinely idle.
+- [ ] **Windows supervisor DEFERRED** — the Windows per-process tap currently has no target-exit detection, endpoint re-anchor, or silence watchdog (plan Task 3, deferred 2026-07-01; WIP in git stash). Before enabling the piggyback flag for Windows users, complete the supervisor and verify on a real Windows machine: app-quit mid-meeting, endpoint switch, silent-capture rebuild.
 
 
 - [ ] **default audio device** — with "follow system default", recording uses whatever macOS says is default.
