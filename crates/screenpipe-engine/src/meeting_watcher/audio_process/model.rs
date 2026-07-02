@@ -129,6 +129,12 @@ pub(crate) enum ResolvedMeetingCandidate {
         session_key: ProcessKey,
         first_seen_at: Instant,
         process: AudioInputProcess,
+        /// True when the platform was observed live on this poll (active-tab
+        /// URL probe or AX window sweep) rather than replayed from stored
+        /// frame evidence, which can be up to 10s stale. Live evidence starts
+        /// a meeting on a single sighting; stored evidence waits out the
+        /// confirm window.
+        live_evidence: bool,
     },
     UnresolvedBrowser {
         browser_app: String,
@@ -154,12 +160,16 @@ impl ResolvedMeetingCandidate {
                 meeting_url: None,
                 first_seen_at: *first_seen_at,
                 is_browser: false,
+                // A native app holding the mic is by definition a live
+                // observation of the current snapshot.
+                live_evidence: true,
             }),
             Self::Browser {
                 platform,
                 meeting_url,
                 session_key,
                 first_seen_at,
+                live_evidence,
                 ..
             } => Some(ResolvedSession {
                 platform: platform.clone(),
@@ -167,6 +177,7 @@ impl ResolvedMeetingCandidate {
                 meeting_url: Some(meeting_url.clone()),
                 first_seen_at: *first_seen_at,
                 is_browser: true,
+                live_evidence: *live_evidence,
             }),
             _ => None,
         }
@@ -199,6 +210,9 @@ pub(crate) struct ResolvedSession {
     pub(crate) meeting_url: Option<String>,
     pub(crate) first_seen_at: Instant,
     pub(crate) is_browser: bool,
+    /// See [`ResolvedMeetingCandidate::Browser::live_evidence`]. Always true
+    /// for native candidates.
+    pub(crate) live_evidence: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

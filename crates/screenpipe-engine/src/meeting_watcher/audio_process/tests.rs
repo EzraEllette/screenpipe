@@ -317,6 +317,66 @@ fn ax_fallback_can_resolve_browser_platform() {
 }
 
 #[test]
+fn active_tab_meet_url_resolves_candidate() {
+    // Arc exposes no AXDocument and titles its in-call window with just the
+    // meeting code ("phv-jdrc-vxw"), so the AX sweep can never attribute it.
+    // The live active-tab URL probe must resolve it directly.
+    let profiles = load_detection_profiles();
+    let candidate =
+        resolve_active_tab_url_candidate("Arc", "https://meet.google.com/abc-defg-hij", &profiles)
+            .expect("meet url should resolve to a candidate");
+    assert_eq!(candidate.browser_app, "Arc");
+    assert_eq!(
+        platform_name_for_profile(&profiles[candidate.profile_index], true),
+        "Google Meet"
+    );
+    assert_eq!(
+        candidate.meeting_url.as_deref(),
+        Some("https://meet.google.com/abc-defg-hij")
+    );
+}
+
+#[test]
+fn active_tab_join_url_with_query_params_resolves_candidate() {
+    // Green-room join URLs carry query params (?ijlm=…&adhoc=1). Matching
+    // strips them, but the stored meeting_url keeps the browser-reported form.
+    let profiles = load_detection_profiles();
+    let url = "https://meet.google.com/abc-defg-hij?ijlm=1783008102488&hs=187&adhoc=1";
+    let candidate = resolve_active_tab_url_candidate("Arc", url, &profiles)
+        .expect("join url should resolve to a candidate");
+    assert_eq!(
+        platform_name_for_profile(&profiles[candidate.profile_index], true),
+        "Google Meet"
+    );
+    assert_eq!(candidate.meeting_url.as_deref(), Some(url));
+}
+
+#[test]
+fn active_tab_unrelated_url_does_not_resolve() {
+    let profiles = load_detection_profiles();
+    assert!(resolve_active_tab_url_candidate(
+        "Arc",
+        "https://github.com/screenpipe/screenpipe/pull/4772",
+        &profiles
+    )
+    .is_none());
+    assert!(resolve_active_tab_url_candidate("Arc", "", &profiles).is_none());
+}
+
+#[test]
+fn active_tab_meeting_link_in_query_does_not_resolve() {
+    // A meeting URL carried as a query param on an unrelated page is not the
+    // page you're on (#4246): the query/fragment must be ignored for matching.
+    let profiles = load_detection_profiles();
+    assert!(resolve_active_tab_url_candidate(
+        "Arc",
+        "https://example.com/redirect?to=https://meet.google.com/abc-defg-hij",
+        &profiles
+    )
+    .is_none());
+}
+
+#[test]
 fn unresolved_browser_does_not_start_after_confirmation() {
     let process = chrome_process();
     let key = ProcessKey::from_process(&process).unwrap();
@@ -443,6 +503,8 @@ fn sticky_process_absent_from_live_snapshot_cannot_start() {
     let process = chrome_process();
     let key = ProcessKey::from_process(&process).unwrap();
     let start = Instant::now();
+    // live_evidence: true on purpose — even live evidence must not start a
+    // meeting for a process that is absent from the live snapshot.
     let sticky_only = vec![ResolvedMeetingCandidate::Browser {
         platform: "Google Meet".to_string(),
         meeting_url: "https://meet.google.com/abc-defg-hij".to_string(),
@@ -450,6 +512,7 @@ fn sticky_process_absent_from_live_snapshot_cannot_start() {
         session_key: key,
         first_seen_at: start,
         process,
+        live_evidence: true,
     }];
 
     let (state, action) = advance_audio_process_state(
@@ -466,7 +529,9 @@ fn sticky_process_absent_from_live_snapshot_cannot_start() {
 }
 
 #[test]
-fn unresolved_browser_resolution_gets_fresh_confirm_window() {
+fn stored_evidence_resolution_gets_fresh_confirm_window() {
+    // Resolution via stored frame evidence (live_evidence: false) still has to
+    // survive the confirm window, measured from the moment it resolved.
     let process = chrome_process();
     let key = ProcessKey::from_process(&process).unwrap();
     let start = Instant::now();
@@ -492,6 +557,7 @@ fn unresolved_browser_resolution_gets_fresh_confirm_window() {
         session_key: key,
         first_seen_at: start,
         process,
+        live_evidence: false,
     };
     let resolved_at = start + Duration::from_secs(10);
     let (state, action) = advance_audio_process_state(
@@ -520,6 +586,124 @@ fn unresolved_browser_resolution_gets_fresh_confirm_window() {
         action,
         Some(AudioProcessStateAction::StartMeeting { first_seen_at, .. }) if first_seen_at == resolved_at
     ));
+}
+
+#[test]
+fn live_resolution_starts_meeting_on_first_sighting() {
+    // Evidence observed live on this poll (active-tab probe / AX sweep /
+    // native identity) starts the meeting immediately — no confirm window,
+    // even a generous one.
+    let process = arc_process();
+    let key = ProcessKey::from_process(&process).unwrap();
+    let start = Instant::now();
+    let resolved = ResolvedMeetingCandidate::Browser {
+        platform: "Google Meet".to_string(),
+        meeting_url: "https://meet.google.com/abc-defg-hij".to_string(),
+        browser_app: "Arc".to_string(),
+        session_key: key,
+        first_seen_at: start,
+        process,
+        live_evidence: true,
+    };
+    let (state, action) = advance_audio_process_state(
+        AudioProcessMeetingState::Idle,
+        std::slice::from_ref(&resolved),
+        std::slice::from_ref(&resolved),
+        start,
+        Duration::from_secs(30),
+        Duration::from_secs(20),
+    );
+    assert!(matches!(state, AudioProcessMeetingState::Active { .. }));
+    assert!(matches!(
+        action,
+        Some(AudioProcessStateAction::StartMeeting { platform, .. }) if platform == "Google Meet"
+    ));
+}
+
+#[test]
+fn live_resolution_starts_immediately_from_unresolved_browser() {
+    // An unresolved browser that resolves via live evidence does not wait out
+    // a fresh confirm window — that wait exists for stored evidence only.
+    let process = arc_process();
+    let key = ProcessKey::from_process(&process).unwrap();
+    let start = Instant::now();
+    let state = AudioProcessMeetingState::CandidateUnresolvedBrowser {
+        browser_app: "Arc".to_string(),
+        session_key: key.clone(),
+        first_seen_at: start,
+        last_resolution_attempt: start,
+    };
+    let resolved = ResolvedMeetingCandidate::Browser {
+        platform: "Google Meet".to_string(),
+        meeting_url: "https://meet.google.com/abc-defg-hij".to_string(),
+        browser_app: "Arc".to_string(),
+        session_key: key,
+        first_seen_at: start,
+        process,
+        live_evidence: true,
+    };
+    let (state, action) = advance_audio_process_state(
+        state,
+        std::slice::from_ref(&resolved),
+        std::slice::from_ref(&resolved),
+        start + Duration::from_secs(5),
+        Duration::from_secs(3),
+        Duration::from_secs(20),
+    );
+    assert!(matches!(state, AudioProcessMeetingState::Active { .. }));
+    assert!(action.is_some());
+}
+
+#[test]
+fn live_ax_candidate_outranks_stored_frame_evidence() {
+    // A live observation wins over stored frame evidence (which can be up to
+    // 10s stale), and an urlless AX-sweep candidate borrows the stored URL
+    // when both agree on the profile.
+    let profiles = load_detection_profiles();
+    let process = arc_process();
+    let meet_profile = profiles
+        .iter()
+        .position(|p| {
+            p.app_identifiers
+                .browser_url_patterns
+                .contains(&"meet.google.com")
+        })
+        .unwrap();
+    let evidence = vec![BrowserPageEvidence {
+        browser_app: Some("Arc".to_string()),
+        url: Some("https://meet.google.com/abc-defg-hij".to_string()),
+        title: Some("abc-defg-hij".to_string()),
+    }];
+    let ax = vec![AxResolvedCandidate {
+        browser_app: "Arc".to_string(),
+        profile_index: meet_profile,
+        meeting_url: None,
+    }];
+    let candidate = resolve_process_candidate(
+        ProcessKey::from_process(&process).unwrap(),
+        Instant::now(),
+        &process,
+        &profiles,
+        &evidence,
+        &ax,
+        &[],
+    );
+    match candidate {
+        ResolvedMeetingCandidate::Browser {
+            platform,
+            meeting_url,
+            live_evidence,
+            ..
+        } => {
+            assert_eq!(platform, "Google Meet");
+            assert!(live_evidence, "ax-resolved candidate must be live");
+            assert_eq!(
+                meeting_url, "https://meet.google.com/abc-defg-hij",
+                "urlless AX candidate should borrow the stored URL for the same profile"
+            );
+        }
+        other => panic!("expected Browser candidate, got {other:?}"),
+    }
 }
 
 #[test]
@@ -640,6 +824,7 @@ fn auto_end_suppresses_same_session_restart_until_audio_session_disappears() {
         session_key: key.clone(),
         first_seen_at: start + Duration::from_secs(22),
         process: process.clone(),
+        live_evidence: true,
     }];
     filter_suppressed_candidates(&mut candidates, &suppressed);
     assert!(
@@ -672,6 +857,7 @@ fn explicit_stop_suppresses_current_session_until_process_disappears() {
         session_key: key.clone(),
         first_seen_at: start,
         process: process.clone(),
+        live_evidence: true,
     }];
 
     filter_suppressed_candidates(&mut candidates, &suppressed);
@@ -708,6 +894,7 @@ fn explicit_stop_does_not_suppress_new_browser_meeting_url() {
         session_key: key,
         first_seen_at: start,
         process,
+        live_evidence: true,
     }];
 
     filter_suppressed_candidates(&mut candidates, &suppressed);
@@ -739,6 +926,7 @@ fn explicit_stop_does_not_suppress_new_audio_session_same_browser_pid() {
         session_key: new_key,
         first_seen_at: start,
         process: new_process,
+        live_evidence: true,
     }];
 
     filter_suppressed_candidates(&mut candidates, &suppressed);
