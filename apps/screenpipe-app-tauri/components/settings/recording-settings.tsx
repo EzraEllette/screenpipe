@@ -3511,7 +3511,7 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
                     meeting piggyback (experimental)
                   </h3>
                   <p className="text-xs text-muted-foreground">
-                    during meetings, capture only the meeting app&apos;s audio and the microphone it actually uses. falls back to standard capture automatically if unavailable. only active when audio capture mode is set to meetings-only.
+                    during meetings, capture only the meeting app&apos;s audio and the microphone it actually uses. falls back to your configured capture automatically if unavailable. only active when audio capture mode is set to meetings-only.
                   </p>
                 </div>
               </div>
