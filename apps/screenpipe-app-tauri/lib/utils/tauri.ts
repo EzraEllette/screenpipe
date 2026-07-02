@@ -553,6 +553,18 @@ async getCachedSuggestions() : Promise<Result<CachedSuggestions, string>> {
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * Resolve the chat-conversations directory under the *active* screenpipe data
+ * dir (honors `SCREENPIPE_DATA_DIR` / a relocated data dir), creating it if
+ * needed. The frontend previously hardcoded `~/.screenpipe/chats` via
+ * `homeDir()`, which (a) ignored a relocated data dir and (b) leaked the
+ * developer's real chats into isolated e2e runs.
+ *
+ * One-time migration: for a relocated data dir whose `chats/` is still empty,
+ * copy conversations from the legacy `~/.screenpipe/chats` so history isn't
+ * orphaned. Skipped under e2e (`SCREENPIPE_E2E_SEED` set) so isolated runs
+ * stay empty.
+ */
 async getChatsDir() : Promise<Result<string, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_chats_dir") };
@@ -2652,6 +2664,16 @@ useSystemDefaultAudio: boolean;
  * falls back to the SCK path automatically. Ignored on non-macOS platforms.
  */
 experimentalCoreaudioSystemAudio?: boolean;
+/**
+ * Experimental: during detected meetings, capture the meeting app's own
+ * audio via a per-process tap plus the microphone that app actually has
+ * open (instead of the global mix + assumed-default mic). Default `false`.
+ * Requires macOS 14.4+ or Windows; when the platform can't do it or the
+ * tap fails at runtime, capture automatically falls back to the stable
+ * path (default mic + global system audio) — never less capture than
+ * with the flag off.
+ */
+experimentalMeetingPiggyback?: boolean;
 /**
  * Experimental: request Windows WASAPI microphone Acoustic Echo Cancellation.
  * Ignored on non-Windows platforms and fail-open when unsupported by device/driver.
