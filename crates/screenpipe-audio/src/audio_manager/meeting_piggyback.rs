@@ -14,6 +14,61 @@ use std::collections::HashSet;
 pub(crate) const MAX_TAP_STRIKES: u32 = 3;
 pub(crate) const TAP_RETRY_COOLDOWN_SECS: u64 = 60;
 
+// --- Mic capture-health (Task 9) ---------------------------------------------
+//
+// A separate, self-contained decider from `decide_piggyback`. It answers ONE
+// question about the resolved meeting mic: "the app is recording but our
+// session delivers only zeros — is that a broken capture we should fix, or a
+// legitimate mute we must stay quiet about?" The discriminator is the
+// OS-reported `process_audio_activity(pid).input_active`: only when the app IS
+// actively recording (`Some(true)`) and we still see nothing but zeros do we
+// escalate — restart silently first, notify only if the restart doesn't help.
+
+/// How long chunks must arrive as literal zeros before the mic counts as
+/// "silent". Also gates the sweep's probe cadence (probe only when the last
+/// non-zero is older than half this window — see `run_meeting_piggyback_sweep`).
+pub(crate) const MIC_ZERO_WINDOW_MS: u64 = 120_000;
+/// How long after a silent restart we wait before deciding it didn't help and
+/// notifying the user. Same magnitude as the zero window: give the fresh stream
+/// a full window to prove itself.
+pub(crate) const MIC_RESTART_TO_NOTIFY_MS: u64 = 120_000;
+/// Minimum gap between `mic_silent` notifications. Persists ACROSS meetings
+/// (mirrors `NOTIFY_COOLDOWN` in `windows_output_follow.rs`) so a chronically
+/// mis-routed mic can't nag every meeting.
+pub(crate) const MIC_NOTIFY_COOLDOWN_MS: u64 = 1_800_000;
+/// Grace period after a session stream starts before its silence counts —
+/// covers device warm-up before the first real chunk lands.
+pub(crate) const MIC_STARTUP_GRACE_MS: u64 = 10_000;
+
+/// Everything `decide_mic_health` may look at for one resolved session mic.
+/// Plain data — no OS, no manager, no clock. Built by the sweep from the
+/// per-session stamps map plus (gated) one `process_audio_activity` probe.
+#[derive(Debug, Clone)]
+pub(crate) struct MicHealthObservation {
+    pub device: String,
+    pub now_ms: u64,
+    pub started_ms: u64,
+    /// Most recent chunk of ANY amplitude (0 = never). Not consulted by the
+    /// current decider (which keys off `last_nonzero_ms`) but carried for
+    /// support logging + future "chunks stopped entirely" discrimination.
+    #[allow(dead_code)]
+    pub last_chunk_ms: u64,
+    pub last_nonzero_ms: u64, // 0 = never
+    /// OS-reported: is the meeting app actively recording? None = unprobeable.
+    pub input_active: Option<bool>,
+    pub restarted_at_ms: Option<u64>,
+    pub notified: bool,
+    pub last_notify_ms: Option<u64>, // cross-meeting cooldown
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum MicHealthAction {
+    None,
+    RestartInput,
+    EmitMicSilent,
+    EmitMicRecovered,
+}
+
 /// Everything the decider may look at. Plain data — no OS, no manager.
 #[derive(Debug, Default)]
 pub(crate) struct PiggybackObservation {
@@ -152,6 +207,48 @@ pub(crate) fn decide_piggyback(obs: &PiggybackObservation) -> Vec<PiggybackActio
     actions
 }
 
+/// Pure mic capture-health decision for ONE resolved session mic. Never emits
+/// for a mute or an unprobeable app — the only path to `EmitMicSilent` requires
+/// the OS to confirm the app is recording (`input_active == Some(true)`), the
+/// session to have delivered only zeros for the whole window, a silent restart
+/// to have already been tried and settled, no notification outstanding, and the
+/// cross-meeting cooldown to have elapsed. Exhaustively unit-tested.
+pub(crate) fn decide_mic_health(obs: &MicHealthObservation) -> MicHealthAction {
+    if obs.now_ms.saturating_sub(obs.started_ms) < MIC_STARTUP_GRACE_MS {
+        return MicHealthAction::None;
+    }
+    let nonzero_recent = obs.last_nonzero_ms != 0
+        && obs.now_ms.saturating_sub(obs.last_nonzero_ms) < MIC_ZERO_WINDOW_MS;
+    if nonzero_recent {
+        return if obs.notified {
+            MicHealthAction::EmitMicRecovered
+        } else {
+            MicHealthAction::None
+        };
+    }
+    // Sustained zeros. Only escalate when the OS says the app IS recording —
+    // Some(false) is a mute (stay quiet), None is unknowable (stay quiet).
+    if obs.input_active != Some(true) {
+        return MicHealthAction::None;
+    }
+    match obs.restarted_at_ms {
+        None => MicHealthAction::RestartInput,
+        Some(restarted) => {
+            let restart_settled =
+                obs.now_ms.saturating_sub(restarted) >= MIC_RESTART_TO_NOTIFY_MS;
+            let cooldown_ok = obs
+                .last_notify_ms
+                .map(|t| obs.now_ms.saturating_sub(t) >= MIC_NOTIFY_COOLDOWN_MS)
+                .unwrap_or(true);
+            if restart_settled && !obs.notified && cooldown_ok {
+                MicHealthAction::EmitMicSilent
+            } else {
+                MicHealthAction::None
+            }
+        }
+    }
+}
+
 /// Persistent sweep state across monitor ticks. Everything the pure decider
 /// can't see (retry bookkeeping, one-shot flags, meeting-edge detection).
 #[derive(Default)]
@@ -171,6 +268,20 @@ pub(crate) struct PiggybackState {
     /// Whether the previous tick was actively piggybacking (meeting with a
     /// pid, flag engaged, tap available). Drives meeting-boundary bookkeeping.
     pub was_piggybacking: bool,
+    /// When the resolved mic was last silently restarted this meeting (wall ms).
+    /// Feeds `MicHealthObservation::restarted_at_ms`; reset on meeting end.
+    pub mic_restarted_at_ms: Option<u64>,
+    /// Whether a `mic_silent` notification is currently outstanding (cleared by
+    /// a `mic_recovered` emit). Reset on meeting end.
+    pub mic_notified: bool,
+    /// When the last `mic_silent` was published (wall ms). Enforces the 30-min
+    /// cross-meeting cooldown, so this deliberately PERSISTS across meetings
+    /// (NOT reset on meeting end) — mirrors `NOTIFY_COOLDOWN` bookkeeping in
+    /// `windows_output_follow.rs`.
+    pub mic_last_notify_ms: Option<u64>,
+    /// One-shot per meeting: a hard mic capture failure (StartSessionInput
+    /// errored) was already reported. Reset on meeting end.
+    pub mic_fail_reported: bool,
 }
 
 /// True when the CoreAudio Process Tap / Windows per-process loopback API is
@@ -218,8 +329,10 @@ pub(crate) async fn run_meeting_piggyback_sweep(
     audio_manager: &std::sync::Arc<super::AudioManager>,
     state: &mut PiggybackState,
 ) -> bool {
+    use super::now_ms;
     use crate::core::device::{parse_audio_device, AudioDevice, DeviceType, MEETING_TAP_DEVICE_NAME};
-    use tracing::warn;
+    use screenpipe_events::AudioCaptureHealthEvent;
+    use tracing::{info, warn};
 
     // 1. Read the flag + capture mode once, plus the detector Arc.
     let (flag_on, meetings_only) = audio_manager.piggyback_config().await;
@@ -335,6 +448,15 @@ pub(crate) async fn run_meeting_piggyback_sweep(
                             "[MEETING_PIGGYBACK] failed to start resolved meeting mic {}: {}",
                             name, e
                         );
+                        // Hard failure: the resolved mic couldn't be opened at
+                        // all (device busy / removed). Distinct from "opened but
+                        // silent" — report once per meeting so the app can nudge
+                        // the user while the meeting is live.
+                        if !state.mic_fail_reported {
+                            let ev = AudioCaptureHealthEvent::mic_capture_failed(e.to_string());
+                            let _ = screenpipe_events::send_event(ev.event_name(), ev);
+                            state.mic_fail_reported = true;
+                        }
                     }
                 }
             }
@@ -357,14 +479,114 @@ pub(crate) async fn run_meeting_piggyback_sweep(
         }
     }
 
+    // 5b. Mic capture-health. Only while actively piggybacking on a known pid,
+    //     and only for a resolved mic that is a REGISTERED session device (the
+    //     Meeting Tap is an OUTPUT device and never enters this pass — output
+    //     health is the far-end watchdog's job). Restart silently first, notify
+    //     only if that doesn't help, never cry wolf on a mute.
+    let piggybacking_now = engaged && tap_avail && meeting_pid.is_some();
+    if piggybacking_now {
+        // A single resolved mic is the norm; take the first registered one so we
+        // hold at most one restart/notify per tick. `obs` is still alive here —
+        // `decide_piggyback` borrowed it, didn't consume it.
+        let mic = obs
+            .resolved_inputs
+            .iter()
+            .find(|d| d.ends_with("(input)") && obs.session_devices.contains(*d))
+            .cloned();
+        if let Some(device) = mic {
+            let now = now_ms();
+            // Read the stamps into an owned observation inside a tight scope so
+            // the DashMap shard read-guard (and the map handle it borrows) drop
+            // BEFORE any await below — a restart stops + starts the session,
+            // which mutates this very map. `None` = the mic isn't a live session
+            // stream this tick (just torn down), so there's nothing to judge.
+            let mic_obs: Option<MicHealthObservation> = {
+                let stamps_map = audio_manager.session_stamps();
+                stamps_map.get(&device).map(|stamps| {
+                    let last_nonzero =
+                        stamps.last_nonzero_ms.load(std::sync::atomic::Ordering::Relaxed);
+                    // Probe the OS ONLY when we're actually seeing sustained
+                    // zeros (last non-zero older than half the window, or
+                    // never). This keeps the expensive Windows session-
+                    // enumeration probe off the steady-state path — a healthy
+                    // mic never probes.
+                    let zeros_suspect = last_nonzero == 0
+                        || now.saturating_sub(last_nonzero) >= MIC_ZERO_WINDOW_MS / 2;
+                    let input_active = if zeros_suspect {
+                        meeting_pid.and_then(|pid| {
+                            crate::core::meeting_audio::process_audio_activity(pid)
+                                .map(|a| a.input_active)
+                        })
+                    } else {
+                        None
+                    };
+                    MicHealthObservation {
+                        device: device.clone(),
+                        now_ms: now,
+                        started_ms: stamps.started_ms,
+                        last_chunk_ms: stamps
+                            .last_chunk_ms
+                            .load(std::sync::atomic::Ordering::Relaxed),
+                        last_nonzero_ms: last_nonzero,
+                        input_active,
+                        restarted_at_ms: state.mic_restarted_at_ms,
+                        notified: state.mic_notified,
+                        last_notify_ms: state.mic_last_notify_ms,
+                    }
+                })
+            };
+            if let Some(mic_obs) = mic_obs {
+                match decide_mic_health(&mic_obs) {
+                    MicHealthAction::None => {}
+                    MicHealthAction::RestartInput => {
+                        if let Ok(dev) = parse_audio_device(&mic_obs.device) {
+                            warn!(
+                                "[MEETING_PIGGYBACK] resolved mic {} delivering only zeros while the app records — restarting capture",
+                                mic_obs.device
+                            );
+                            let _ = audio_manager.stop_session_device(&dev).await;
+                            if let Err(e) = audio_manager.start_session_device(&dev, None).await {
+                                warn!(
+                                    "[MEETING_PIGGYBACK] mic restart of {} failed: {}",
+                                    mic_obs.device, e
+                                );
+                            }
+                            state.mic_restarted_at_ms = Some(now);
+                        }
+                    }
+                    MicHealthAction::EmitMicSilent => {
+                        warn!(
+                            "[MEETING_PIGGYBACK] mic {} still silent after restart while the app records — notifying user",
+                            mic_obs.device
+                        );
+                        let ev = AudioCaptureHealthEvent::mic_silent(vec![mic_obs.device.clone()]);
+                        let _ = screenpipe_events::send_event(ev.event_name(), ev);
+                        state.mic_notified = true;
+                        state.mic_last_notify_ms = Some(now);
+                    }
+                    MicHealthAction::EmitMicRecovered => {
+                        info!("[MEETING_PIGGYBACK] mic {} capture recovered", mic_obs.device);
+                        let ev = AudioCaptureHealthEvent::mic_recovered();
+                        let _ = screenpipe_events::send_event(ev.event_name(), ev);
+                        state.mic_notified = false;
+                    }
+                }
+            }
+        }
+    }
+
     // 6. Meeting-boundary bookkeeping. On the piggybacking→not transition
     //    (meeting ended, or pid vanished) reset the per-meeting retry counters
     //    so the next meeting starts fresh. `warned_unavailable` is per-boot and
-    //    deliberately NOT reset here.
-    let piggybacking_now = engaged && tap_avail && meeting_pid.is_some();
+    //    `mic_last_notify_ms` is the cross-meeting cooldown — both deliberately
+    //    NOT reset here.
     if state.was_piggybacking && !piggybacking_now {
         state.tap_strikes = 0;
         state.last_tap_attempt = None;
+        state.mic_restarted_at_ms = None;
+        state.mic_notified = false;
+        state.mic_fail_reported = false;
     }
     state.was_piggybacking = piggybacking_now;
 
@@ -561,5 +783,73 @@ mod tests {
         assert!(actions.contains(&PiggybackAction::Resume(
             "MacBook Pro Microphone (input)".to_string()
         )));
+    }
+
+    // --- Mic capture-health decider (Task 9) --------------------------------
+
+    fn mic_obs(now: u64) -> MicHealthObservation {
+        MicHealthObservation {
+            device: "Rode NT (input)".into(),
+            now_ms: now,
+            started_ms: 0,
+            last_chunk_ms: now,      // chunks flowing
+            last_nonzero_ms: 0,      // …but all zeros
+            input_active: Some(true),
+            restarted_at_ms: None,
+            notified: false,
+            last_notify_ms: None,
+        }
+    }
+
+    #[test]
+    fn startup_grace_holds_fire() {
+        let mut obs = mic_obs(5_000);
+        obs.started_ms = 0;
+        assert_eq!(decide_mic_health(&obs), MicHealthAction::None);
+    }
+
+    #[test]
+    fn zeros_with_app_recording_restart_first() {
+        let obs = mic_obs(200_000); // 200s in, zeros the whole time
+        assert_eq!(decide_mic_health(&obs), MicHealthAction::RestartInput);
+    }
+
+    #[test]
+    fn still_zeros_after_restart_notifies() {
+        let mut obs = mic_obs(400_000);
+        obs.restarted_at_ms = Some(200_000); // restarted 200s ago, still zeros
+        assert_eq!(decide_mic_health(&obs), MicHealthAction::EmitMicSilent);
+    }
+
+    #[test]
+    fn zeros_while_app_idle_is_real_silence() {
+        let mut obs = mic_obs(400_000);
+        obs.input_active = Some(false); // user muted in-app / app not recording
+        assert_eq!(decide_mic_health(&obs), MicHealthAction::None);
+    }
+
+    #[test]
+    fn unprobeable_app_never_alerts() {
+        let mut obs = mic_obs(400_000);
+        obs.input_active = None;
+        assert_eq!(decide_mic_health(&obs), MicHealthAction::None);
+    }
+
+    #[test]
+    fn notify_cooldown_is_respected() {
+        let mut obs = mic_obs(400_000);
+        obs.restarted_at_ms = Some(200_000);
+        obs.last_notify_ms = Some(300_000); // notified 100s ago (< 30 min)
+        assert_eq!(decide_mic_health(&obs), MicHealthAction::None);
+    }
+
+    #[test]
+    fn recovery_after_notify_emits_recovered_once() {
+        let mut obs = mic_obs(500_000);
+        obs.last_nonzero_ms = 499_000; // audio came back
+        obs.notified = true;
+        assert_eq!(decide_mic_health(&obs), MicHealthAction::EmitMicRecovered);
+        obs.notified = false; // sweep clears after emitting
+        assert_eq!(decide_mic_health(&obs), MicHealthAction::None);
     }
 }
