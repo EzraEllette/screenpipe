@@ -33,12 +33,12 @@
  */
 
 import { existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
+import { E2E_DATA_DIR } from "../helpers/app-launcher.js";
 import { openHomeWindow, waitForAppReady, t } from "../helpers/test-utils.js";
 import { saveScreenshot } from "../helpers/screenshot-utils.js";
 
-const CHATS_DIR = join(homedir(), ".screenpipe", "chats");
+const CHATS_DIR = join(E2E_DATA_DIR, "chats");
 
 // Fresh id the foreground panel never opens → its events flow through the
 // background router (registerDefault → handlePiEvent), which is the path that
