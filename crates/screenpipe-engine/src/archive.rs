@@ -1894,7 +1894,9 @@ mod tests {
         assert!(is_quota_error(&anyhow::anyhow!(
             "quota exceeded: storage quota exceeded"
         )));
-        assert!(is_quota_error(&anyhow::anyhow!("server error: QuotaExceeded")));
+        assert!(is_quota_error(&anyhow::anyhow!(
+            "server error: QuotaExceeded"
+        )));
         assert!(!is_quota_error(&anyhow::anyhow!("network error: timeout")));
     }
 
