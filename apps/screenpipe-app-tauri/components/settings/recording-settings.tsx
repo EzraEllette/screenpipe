@@ -1786,15 +1786,17 @@ export function RecordingSettings() {
     AudioDeviceInfo[]
   >([]);
 
-  // Gate for the experimental CoreAudio Process Tap toggle — we only show
-  // the switch on macOS 14.4+ where the API exists. Probed once via a
-  // Tauri command that proxies to
-  // `screenpipe_audio::core::process_tap::is_process_tap_available()`.
-  const [coreaudioTapAvailable, setCoreaudioTapAvailable] = useState<boolean | null>(null);
+  const [isMacOS, setIsMacOS] = useState(false);
+  const [isWindows, setIsWindows] = useState(false);
+
+  // Gate for process-tap-backed experimental audio controls. CoreAudio global
+  // system audio is macOS-only; meeting piggyback can use the same availability
+  // probe on macOS and Windows.
+  const [processTapAvailable, setProcessTapAvailable] = useState<boolean | null>(null);
   useEffect(() => {
     commands.checkCoreaudioProcessTapAvailable()
-      .then(setCoreaudioTapAvailable)
-      .catch(() => setCoreaudioTapAvailable(false));
+      .then(setProcessTapAvailable)
+      .catch(() => setProcessTapAvailable(false));
   }, []);
 
   type ExcludedApp = {
@@ -1832,9 +1834,9 @@ export function RecordingSettings() {
   }, [toast]);
 
   useEffect(() => {
-    if (!coreaudioTapAvailable) return;
+    if (!isMacOS || !processTapAvailable) return;
     reloadAudioExclusions();
-  }, [coreaudioTapAvailable, reloadAudioExclusions]);
+  }, [isMacOS, processTapAvailable, reloadAudioExclusions]);
 
   const addAudioExclusion = useCallback(
     (app: ExcludedApp) => {
@@ -1897,8 +1899,6 @@ export function RecordingSettings() {
   const { health } = useHealthCheck();
   const isDisabled = health?.status_code === 500;
   const audioPipeline = health?.audio_pipeline ?? null;
-  const [isMacOS, setIsMacOS] = useState(false);
-  const [isWindows, setIsWindows] = useState(false);
   const [platformReady, setPlatformReady] = useState(false);
   const [showApiKey, setShowApiKey] = useState(false);
   const [showOpenAIApiKey, setShowOpenAIApiKey] = useState(false);
@@ -3525,7 +3525,7 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
         )}
 
         {/* CoreAudio System Audio (macOS 14.4+ only) */}
-        {!settings.disableAudio && coreaudioTapAvailable && (
+        {!settings.disableAudio && isMacOS && processTapAvailable && (
         <Card className="border-border bg-card">
           <CardContent className="px-3 py-2.5">
             <div className="flex items-center justify-between">
@@ -3551,11 +3551,9 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
         )}
 
         {/* Meeting piggyback (experimental): during meetings, capture only the
-            meeting app's audio and the mic it actually uses. macOS-only for now
-            (needs the CoreAudio Process Tap); Windows is re-enabled once the
-            per-process capture supervisor lands (see TESTING.md "Windows
-            supervisor DEFERRED"). */}
-        {!settings.disableAudio && coreaudioTapAvailable && (
+            meeting app's audio and the mic it actually uses. Uses CoreAudio
+            Process Tap on macOS and WASAPI process loopback on Windows. */}
+        {!settings.disableAudio && (isMacOS || isWindows) && processTapAvailable && (
         <Card className="border-border bg-card">
           <CardContent className="px-3 py-2.5">
             <div className="flex items-center justify-between">
@@ -3582,7 +3580,7 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
 
         {/* Per-app exclusion list for the CoreAudio Process Tap. Only
             meaningful when the tap is the active backend. */}
-        {!settings.disableAudio && coreaudioTapAvailable && settings.experimentalCoreaudioSystemAudio && (
+        {!settings.disableAudio && isMacOS && processTapAvailable && settings.experimentalCoreaudioSystemAudio && (
         <Card className="border-border bg-card">
           <CardContent className="px-3 py-2.5 space-y-2">
             <div className="flex items-center space-x-2.5">
