@@ -301,6 +301,16 @@ export const CurrentFrameTimeline: FC<CurrentFrameTimelineProps> = ({
 		disabled: settings?.disableTimeline === true,
 	});
 
+	const handleContextMenu = useCallback(
+		(e: React.MouseEvent) => {
+			e.preventDefault();
+			if (!debouncedFrame?.frameId) return;
+			contextMenuPositionRef.current = { x: e.clientX, y: e.clientY };
+			setContextMenuOpen(true);
+		},
+		[debouncedFrame?.frameId],
+	);
+
 	if (!frameId) {
 		return (
 			<div className="absolute inset-0 overflow-hidden bg-background">
@@ -411,19 +421,6 @@ export const CurrentFrameTimeline: FC<CurrentFrameTimelineProps> = ({
 			</div>
 		);
 	}
-
-	/* eslint-disable react-hooks/rules-of-hooks */
-	// biome-ignore lint/correctness/useHookAtTopLevel: hook called after a stable conditional return guarded by render-stable refs; matches the eslint suppression above
-	const handleContextMenu = useCallback(
-		(e: React.MouseEvent) => {
-			e.preventDefault();
-			if (!debouncedFrame?.frameId) return;
-			contextMenuPositionRef.current = { x: e.clientX, y: e.clientY };
-			setContextMenuOpen(true);
-		},
-		[debouncedFrame?.frameId],
-	);
-	/* eslint-enable react-hooks/rules-of-hooks */
 
 	return (
 		<div
