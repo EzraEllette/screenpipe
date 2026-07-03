@@ -290,12 +290,9 @@ const FrameThumbnail = ({ frameId, alt }: { frameId: number; alt: string }) => {
   const [src, setSrc] = useState(appendAuthToken(`${getApiBaseUrl()}/frames/${frameId}`));
   const retryCount = useRef(0);
 
-  useEffect(() => {
-    setSrc(appendAuthToken(`${getApiBaseUrl()}/frames/${frameId}`));
-    setIsLoading(true);
-    setHasError(false);
-    retryCount.current = 0;
-  }, [frameId]);
+  // State resets on a new frameId via `key={frameId}` at each render site —
+  // the initializers above already produce the correct fresh values, so no
+  // reset effect is needed.
 
   return (
     <div className="aspect-video bg-muted relative overflow-hidden">
@@ -1486,6 +1483,7 @@ export function SearchModal({ isOpen, onClose, onNavigateToTimestamp, embedded =
                   >
                     {frameId ? (
                       <FrameThumbnail
+                        key={frameId}
                         frameId={frameId}
                         alt={t.transcription || t.speaker_name}
                       />
@@ -1610,6 +1608,7 @@ export function SearchModal({ isOpen, onClose, onNavigateToTimestamp, embedded =
                   className="cursor-pointer rounded overflow-hidden border border-border hover:border-foreground/50 transition-all duration-150"
                 >
                   <FrameThumbnail
+                    key={frame.frame_id}
                     frameId={frame.frame_id}
                     alt={frame.tag_names.join(", ")}
                   />
@@ -2048,6 +2047,7 @@ export function SearchModal({ isOpen, onClose, onNavigateToTimestamp, embedded =
                     >
                       <div className="relative">
                         <FrameThumbnail
+                          key={result.frame_id}
                           frameId={result.frame_id}
                           alt={`${result.app_name} - ${result.window_name}`}
                         />
