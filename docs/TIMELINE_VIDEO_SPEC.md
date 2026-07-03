@@ -102,7 +102,7 @@ CREATE TABLE frames (
 | Frames per chunk | ~15 (at 0.5fps, 30s) |
 | Resolution | Native monitor resolution (e.g., 1920×1080, 3024×1964) |
 | Typical file size | 300KB–1MB per chunk |
-| Naming | `monitor_{id}_{YYYY-MM-DD_HH-MM-SS}.mp4` |
+| Naming | `{device_name}_{YYYY-MM-DD_HH-MM-SS}.mp4` — device_name is the monitor's stable id (`{name}_{WxH}_{x},{y}`, e.g. `DELL U2415_1920x1200_1920,0`). Before 2026-07 it was `monitor_{runtime_id}`; a startup backfill rewrites historical DB rows, old file names stay as-is (file_path in the DB is the source of truth). |
 
 ### 3.3 Seeking Math
 
@@ -125,7 +125,7 @@ interface StreamTimeSeriesResponse {
 }
 
 interface DeviceFrameResponse {
-    device_id: string;          // "monitor_1"
+    device_id: string;          // stable id, e.g. "DELL U2415_1920x1200_1920,0" ("monitor_1" in legacy rows)
     frame_id: string;           // DB id — used for GET /frames/{id}
     metadata: {
         file_path: string;      // ✅ ALREADY SENT — the MP4 path

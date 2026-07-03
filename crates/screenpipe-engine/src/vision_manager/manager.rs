@@ -241,13 +241,7 @@ impl VisionManager {
         }
         let stable_id = monitor.stable_id();
         let numeric_id = monitor.id().to_string();
-        fn prefix(sid: &str) -> &str {
-            sid.rsplitn(2, '_').last().unwrap_or(sid)
-        }
-        let monitor_prefix = prefix(&stable_id);
-        self.config.monitor_ids.iter().any(|allowed| {
-            *allowed == stable_id || *allowed == numeric_id || prefix(allowed) == monitor_prefix
-        })
+        monitor_matches_allowlist(&self.config.monitor_ids, &stable_id, &numeric_id)
     }
 
     /// Start recording on all currently connected monitors
@@ -430,7 +424,12 @@ impl VisionManager {
 
         let db = self.db.clone();
         let output_path = self.config.output_path.clone();
-        let device_name = format!("monitor_{}", monitor_id);
+        // Storage identity is the stable id ("DELL U2415_1920x1200_1920,0"),
+        // not the runtime monitor id: HMONITOR values are reassigned on every
+        // display-topology change, so "monitor_{id}" fragments one physical
+        // display into many device_names (duplicate timeline filter entries).
+        // The runtime id still drives live capture (WGC lookup, task registry).
+        let device_name = monitor.stable_id();
 
         // Create snapshot writer for this monitor's data directory.
         //
@@ -725,6 +724,55 @@ impl VisionManager {
     }
 }
 
+/// Match a monitor against the user's `monitorIds` allowlist. Entries may be:
+/// - a full stable id ("DELL U2415_1920x1200_1920,0")
+/// - a bare numeric runtime id ("2") — legacy CLI-style configs
+/// - matched by prefix (name + resolution) so position changes after
+///   reconnect don't break the filter
+/// - legacy GDI-path entries ("\\.\DISPLAY1_1920x1200_1920,0", stored before
+///   the EDID friendly-name switch) are matched by geometry suffix
+///   ("{W}x{H}_{x},{y}") so they keep selecting the same physical display:
+///   among simultaneously connected monitors a position is unique. Only
+///   `\\.\`-prefixed entries get this treatment — for anything newer the name
+///   is comparable directly, and geometry alone would over-match (any panel
+///   later placed at the same spot).
+pub(crate) fn monitor_matches_allowlist(
+    allowed_ids: &[String],
+    stable_id: &str,
+    numeric_id: &str,
+) -> bool {
+    fn prefix(sid: &str) -> &str {
+        sid.rsplitn(2, '_').last().unwrap_or(sid)
+    }
+    // The "{W}x{H}_{x},{y}" tail of a stable id, or None when `s` doesn't end
+    // in valid geometry (bare numeric ids, "default", arbitrary strings).
+    fn geometry_suffix(s: &str) -> Option<&str> {
+        let mut it = s.rsplitn(3, '_');
+        let pos = it.next()?;
+        let dims = it.next()?;
+        it.next()?; // a name part must exist, mirroring the stable-id format
+        let (x, y) = pos.split_once(',')?;
+        if x.parse::<i64>().is_err() || y.parse::<i64>().is_err() {
+            return None;
+        }
+        let (w, h) = dims.split_once('x')?;
+        if w.parse::<u64>().is_err() || h.parse::<u64>().is_err() {
+            return None;
+        }
+        Some(&s[s.len() - pos.len() - 1 - dims.len()..])
+    }
+    let monitor_prefix = prefix(stable_id);
+    let monitor_geometry = geometry_suffix(stable_id);
+    allowed_ids.iter().any(|allowed| {
+        allowed == stable_id
+            || allowed == numeric_id
+            || prefix(allowed) == monitor_prefix
+            || (allowed.starts_with(r"\\.\")
+                && monitor_geometry.is_some()
+                && geometry_suffix(allowed) == monitor_geometry)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -760,6 +808,62 @@ mod tests {
             capture_on_clipboard: None,
         };
         VisionManager::new(config, db, Handle::current())
+    }
+
+    #[test]
+    fn allowlist_matches_exact_numeric_and_prefix() {
+        let allowed = vec!["DELL U2415_1920x1200_1920,0".to_string()];
+        // exact stable id
+        assert!(monitor_matches_allowlist(
+            &allowed,
+            "DELL U2415_1920x1200_1920,0",
+            "65537"
+        ));
+        // prefix (name + resolution): position moved after re-dock
+        assert!(monitor_matches_allowlist(
+            &allowed,
+            "DELL U2415_1920x1200_-1920,0",
+            "65537"
+        ));
+        // a different panel does not match, even at the same geometry —
+        // geometry bridging is reserved for legacy \\.\ entries
+        assert!(!monitor_matches_allowlist(
+            &allowed,
+            "LG ULTRAFINE_1920x1200_1920,0",
+            "65537"
+        ));
+        // bare numeric entry
+        assert!(monitor_matches_allowlist(
+            &["2".to_string()],
+            "DELL U2415_1920x1200_1920,0",
+            "2"
+        ));
+    }
+
+    /// Entries stored under the old GDI-device-path naming must keep selecting
+    /// the same physical display after the EDID friendly-name switch: the
+    /// geometry suffix is the bridge (positions are unique among connected
+    /// monitors).
+    #[test]
+    fn allowlist_matches_legacy_gdi_entries_by_geometry() {
+        let stored_pre_rename = vec![r"\\.\DISPLAY1_1920x1200_1920,0".to_string()];
+        assert!(monitor_matches_allowlist(
+            &stored_pre_rename,
+            "DELL U2415_1920x1200_1920,0",
+            "65537"
+        ));
+        // ...but a different geometry must not match
+        assert!(!monitor_matches_allowlist(
+            &stored_pre_rename,
+            "DELL U2415_1920x1200_0,0",
+            "65537"
+        ));
+        // entries without a valid geometry tail never geometry-match
+        assert!(!monitor_matches_allowlist(
+            &["default".to_string()],
+            "DELL U2415_1920x1200_1920,0",
+            "65537"
+        ));
     }
 
     /// When the allowlist is stale but physical monitors exist, fall back to

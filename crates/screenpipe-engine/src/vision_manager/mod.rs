@@ -3,6 +3,7 @@
 //! This module provides automatic detection and recording of all connected monitors,
 //! with support for hot-plugging (monitors connecting/disconnecting).
 
+mod device_name_backfill;
 mod manager;
 mod monitor_watcher;
 

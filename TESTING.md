@@ -101,6 +101,9 @@ commits: `28e5c247`
 - [ ] **resolution change (e.g., clamshell mode)** — closing MacBook lid with external monitor. recording continues on external.
 - [ ] **queue stats after unplug** — check logs. no queue stats for disconnected monitor after disconnect.
 - [ ] **--use-all-monitors flag override** — Verify that the `--use-all-monitors` CLI flag correctly overrides tier-based defaults (e.g., if a tier defaults to a single monitor, the flag should still enable all monitors). (`bd5b94328`)
+- [ ] **stable device_name across replug (Windows)** — unplug/replug or dock/undock a monitor, then check `SELECT DISTINCT device_name FROM frames WHERE timestamp > <today>`: the display keeps ONE stable id (`{name}_{WxH}_{x},{y}`), no new `monitor_{id}` entries. Timeline monitor filter shows one dot per physical display.
+- [ ] **device_name backfill on upgrade** — on a DB with legacy `monitor_{id}` rows, first start logs `device-name backfill: renamed N frames / M chunks`; second start logs nothing (watermark). Timeline history groups under the stable name. Frames whose monitor is long gone and absent from display_layout keep their legacy name (expected).
+- [ ] **monitor selection survives the name switch** — with specific monitors configured before the EDID friendly-name change (settings store `\\.\DISPLAYn_...` ids), recording still targets the same physical displays (geometry-suffix match), and a fully stale allowlist still falls back to recording all monitors.
 
 ### 4. audio device handling
 

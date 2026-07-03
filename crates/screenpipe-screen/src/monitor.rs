@@ -160,21 +160,52 @@ impl SafeMonitor {
     }
 
     /// A deterministic identifier derived from stable monitor properties
-    /// (name, resolution, position). Unlike `id()`, this survives OS reboots.
-    /// Format: "{name}_{width}x{height}_{x},{y}"
-    /// If the monitor name is empty, falls back to "Display" to avoid ambiguous IDs.
+    /// (name, resolution, position). Unlike `id()`, this survives OS reboots
+    /// and topology changes that reassign runtime handles (HMONITOR on
+    /// Windows). Format: "{name}_{width}x{height}_{x},{y}", with the name
+    /// passed through [`sanitize_monitor_name`] so the id is safe to embed in
+    /// file names (video chunks are named `compact_{device_name}_{ts}.mp4`).
+    /// If the monitor name is empty, falls back to "Display" to avoid
+    /// ambiguous IDs.
     pub fn stable_id(&self) -> String {
         let d = &self.monitor_data;
-        let name = if d.name.is_empty() {
-            "Display"
-        } else {
-            &d.name
-        };
+        let name = sanitize_monitor_name(&d.name);
         format!("{}_{}x{}_{},{}", name, d.width, d.height, d.x, d.y)
     }
 
     pub fn get_info(&self) -> MonitorData {
         (*self.monitor_data).clone()
+    }
+}
+
+/// Make a monitor name safe to embed in device identifiers and file names.
+/// Windows reserves `\ / : * ? " < > |` in file names (the GDI device path
+/// `\\.\DISPLAY1` hits this), and control characters are never wanted.
+/// Offending characters become '-'. Returns "Display" when nothing
+/// identifying survives (empty name, or separators only).
+///
+/// The device-name backfill reconstructs historical stable ids from persisted
+/// `display_layout` rows through this same function — keep it deterministic.
+pub fn sanitize_monitor_name(name: &str) -> String {
+    // GDI device paths look like `\\.\DISPLAY1` — drop the Win32 device
+    // namespace prefix so the fallback reads "DISPLAY1", not "--.-DISPLAY1".
+    let name = name.strip_prefix(r"\\.\").unwrap_or(name);
+    let sanitized: String = name
+        .chars()
+        .map(|c| match c {
+            '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '-',
+            c if (c as u32) < 0x20 => '-',
+            c => c,
+        })
+        .collect();
+    let trimmed = sanitized.trim();
+    if trimmed
+        .chars()
+        .all(|c| c == '-' || c == '.' || c.is_whitespace())
+    {
+        "Display".to_string()
+    } else {
+        trimmed.to_string()
     }
 }
 
@@ -256,6 +287,25 @@ mod tests {
         // But changing runtime ID should NOT change stable ID
         let m3 = make_test_monitor(999, "Display", 2560, 1440, 0, 0);
         assert_eq!(m1.stable_id(), m3.stable_id());
+    }
+
+    #[test]
+    fn test_sanitize_monitor_name_gdi_device_path() {
+        // Windows GDI device path: namespace prefix dropped, no illegal chars left
+        assert_eq!(sanitize_monitor_name(r"\\.\DISPLAY1"), "DISPLAY1");
+        // Embedded reserved characters become '-'
+        assert_eq!(sanitize_monitor_name("LG HDR 4K / DP"), "LG HDR 4K - DP");
+        assert_eq!(sanitize_monitor_name("we\"ird:name?"), "we-ird-name-");
+        // Nothing identifying left → generic fallback
+        assert_eq!(sanitize_monitor_name(""), "Display");
+        assert_eq!(sanitize_monitor_name(r"\\.\"), "Display");
+        assert_eq!(sanitize_monitor_name("  "), "Display");
+    }
+
+    #[test]
+    fn test_stable_id_sanitizes_gdi_name() {
+        let m = make_test_monitor(7, r"\\.\DISPLAY2", 2560, 1440, 2560, 0);
+        assert_eq!(m.stable_id(), "DISPLAY2_2560x1440_2560,0");
     }
 
     #[test]

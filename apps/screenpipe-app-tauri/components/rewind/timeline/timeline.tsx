@@ -18,6 +18,7 @@ import { PipeAIIcon } from "@/components/pipe-ai-icon";
 import { type TemplatePipe } from "@/lib/hooks/use-pipes";
 import { AppContextPopover } from "./app-context-popover";
 import { TimelineTagToolbar } from "./timeline-tag-toolbar";
+import { deviceGroupKey, formatDeviceLabel } from "./device-name-utils";
 import { extractDomain, FaviconImg } from "./favicon-utils";
 import { localFetch, getApiBaseUrl, appendAuthToken } from "@/lib/api";
 
@@ -123,8 +124,8 @@ interface TimelineSliderProps {
 	templatePipes?: TemplatePipe[];
 	isPlaying?: boolean; // Whether audio playback is active
 	onTogglePlayPause?: () => void; // Toggle audio playback (Space key)
-	selectedDeviceId?: string; // "all" or a specific device_id — dims non-matching bars
-	allDeviceIds?: string[]; // All unique device IDs for monitor dot indicators
+	selectedDeviceId?: string; // "all" or a device group key ("{name}_{WxH}") — dims non-matching bars
+	allDeviceIds?: string[]; // All unique device group keys for monitor dot indicators
 	onDeviceChange?: (deviceId: string) => void; // Callback when a monitor dot is clicked
 	selectedAppName?: string; // "all" or a specific app_name — dims non-matching bars
 	onAppChange?: (appName: string) => void; // Callback when an app dot is clicked
@@ -1240,7 +1241,7 @@ export const TimelineSlider = ({
 									}}
 									onMouseEnter={(e) => {
 										const rect = e.currentTarget.getBoundingClientRect();
-										setHoveredFilterDot({ name: id.replace("monitor_", "Monitor "), x: rect.right + 8, y: rect.top + rect.height / 2 });
+										setHoveredFilterDot({ name: formatDeviceLabel(id), x: rect.right + 8, y: rect.top + rect.height / 2 });
 									}}
 									onMouseLeave={() => setHoveredFilterDot(null)}
 								/>
@@ -1806,7 +1807,7 @@ export const TimelineSlider = ({
 
 									const hasAudio = frame?.devices?.some((d) => d.audio?.some((a) => a.transcription?.trim()));
 									const isCurrent = frameIndex === currentIndex;
-									const matchesDevice = selectedDeviceId === "all" || (frame.devices?.some((d) => d.device_id === selectedDeviceId) ?? false);
+									const matchesDevice = selectedDeviceId === "all" || (frame.devices?.some((d) => deviceGroupKey(d.device_id) === selectedDeviceId) ?? false);
 									const matchesApp = selectedAppName === "all" || (frame.devices?.some((d) => d.metadata?.app_name === selectedAppName) ?? false);
 									const matchesDomain = selectedDomain === "all" || (frame.devices?.some((d) => {
 										const url = d.metadata?.browser_url?.trim();

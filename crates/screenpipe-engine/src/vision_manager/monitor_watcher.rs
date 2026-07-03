@@ -15,6 +15,7 @@ use tracing::{debug, info, warn};
 use screenpipe_events::PermissionKind;
 use screenpipe_screen::monitor::{list_monitors_detailed, MonitorListError};
 
+use super::device_name_backfill::{run_stable_device_name_backfill, CurrentMonitor};
 use super::manager::{VisionManager, VisionManagerStatus};
 use crate::drm_detector;
 use crate::permission_monitor;
@@ -272,6 +273,17 @@ pub async fn start_monitor_watcher(
                     known_monitors.insert(monitor.id(), monitor.name().to_string());
                 }
                 permission_denied_logged = false;
+                // Heal historical "monitor_{runtime_id}" device_names into
+                // stable ids (display_layout epochs + the topology we just
+                // enumerated). Watermarked: after the first run this is a
+                // no-op costing one SELECT. Spawned so a large first-run
+                // rewrite never delays capture start.
+                let current: Vec<CurrentMonitor> =
+                    monitors.iter().map(CurrentMonitor::from_monitor).collect();
+                tokio::spawn(run_stable_device_name_backfill(
+                    vision_manager.db_handle(),
+                    current,
+                ));
             }
             Err(MonitorListError::PermissionDenied) => {
                 warn!("Screen recording permission denied. Vision capture is disabled. Grant access in System Settings > Privacy & Security > Screen Recording");

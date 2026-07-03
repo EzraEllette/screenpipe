@@ -8,6 +8,20 @@ use image::DynamicImage;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 
+/// Prefer the EDID friendly name ("DELL U2415") over the GDI device path
+/// ("\\.\DISPLAY1"): it names the physical panel, so it survives topology
+/// changes that renumber DISPLAYn slots, and it's what stable_id() (and thus
+/// the stored device_name) is built from. xcap substitutes
+/// "Unknown Monitor {hmonitor}" when DisplayConfig has no name for the target
+/// — that embeds the runtime handle, which is exactly what stable ids must
+/// avoid, so fall back to the GDI device path instead.
+fn monitor_display_name(monitor: &XcapMonitor) -> String {
+    match monitor.friendly_name() {
+        Ok(name) if !name.is_empty() && !name.starts_with("Unknown Monitor") => name,
+        _ => monitor.name().unwrap_or_default().to_string(),
+    }
+}
+
 impl SafeMonitor {
     // Windows: Create from xcap monitor
     // NOTE: We don't cache the XcapMonitor because on Windows it contains
@@ -19,7 +33,7 @@ impl SafeMonitor {
             height: monitor.height().unwrap_or(0),
             x: monitor.x().unwrap_or(0),
             y: monitor.y().unwrap_or(0),
-            name: monitor.name().unwrap_or_default().to_string(),
+            name: monitor_display_name(&monitor),
             is_primary: monitor.is_primary().unwrap_or(false),
         });
 
@@ -165,7 +179,7 @@ impl SafeMonitor {
                 height: monitor.height().unwrap_or(0),
                 x: monitor.x().unwrap_or(0),
                 y: monitor.y().unwrap_or(0),
-                name: monitor.name().unwrap_or_default().to_string(),
+                name: monitor_display_name(&monitor),
                 is_primary: monitor.is_primary().unwrap_or(false),
             })
         })
