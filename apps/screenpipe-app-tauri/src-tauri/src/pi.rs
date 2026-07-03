@@ -1214,6 +1214,25 @@ fn default_max_tokens() -> i32 {
     4096
 }
 
+fn model_supports_reasoning(provider: &str, model: &str) -> bool {
+    let model = model.to_ascii_lowercase();
+    match provider {
+        "openai-byok" | "openai-chatgpt" | "custom" => {
+            model.starts_with("gpt-5")
+                || model.starts_with("o1")
+                || model.starts_with("o3")
+                || model.starts_with("o4")
+        }
+        "anthropic-byok" => model.starts_with("claude-"),
+        "ollama" => {
+            model.contains("thinking")
+                || model.starts_with("qwen3")
+                || model.starts_with("deepseek-r1")
+        }
+        _ => false,
+    }
+}
+
 /// Build the providers to add/update in models.json for pi-coding-agent.
 ///
 /// Returns a map of provider entries to merge into the existing models.json.
@@ -1299,6 +1318,10 @@ async fn build_models_json(
                 let mut model_def = serde_json::Map::new();
                 model_def.insert("id".into(), json!(config.model));
                 model_def.insert("name".into(), json!(config.model));
+                model_def.insert(
+                    "reasoning".into(),
+                    json!(model_supports_reasoning(provider_name, &config.model)),
+                );
                 model_def.insert("input".into(), json!(["text", "image"]));
                 model_def.insert("maxTokens".into(), json!(config.max_tokens));
                 model_def.insert(
@@ -4102,6 +4125,26 @@ error: InstallFailed extracting tarball"#;
         let models = openai["models"].as_array().unwrap();
         assert_eq!(models.len(), 1);
         assert_eq!(models[0]["id"], "gpt-4o");
+        assert_eq!(models[0]["reasoning"], false);
+    }
+
+    #[tokio::test]
+    async fn test_build_models_json_chatgpt_gpt55_supports_reasoning() {
+        let pc = make_provider_config("openai-chatgpt", "gpt-5.5");
+        let config = build_models_json(None, Some(&pc)).await;
+        let model = &config["providers"]["openai-chatgpt"]["models"][0];
+        assert_eq!(model["id"], "gpt-5.5");
+        assert_eq!(model["reasoning"], true);
+    }
+
+    #[tokio::test]
+    async fn test_build_models_json_openai_reasoning_models_support_reasoning() {
+        for model_id in ["gpt-5.5-codex", "gpt-5", "o3-mini", "o4-mini"] {
+            let pc = make_provider_config("openai", model_id);
+            let config = build_models_json(None, Some(&pc)).await;
+            let model = &config["providers"]["openai-byok"]["models"][0];
+            assert_eq!(model["reasoning"], true, "{model_id}");
+        }
     }
 
     #[tokio::test]
