@@ -715,10 +715,9 @@ mod tests {
         // batches. Under the bug this call would have been identical to the
         // first — and would stay identical forever, every 5 minutes.
         let t1 = std::time::Instant::now();
-        let (deleted, watermark2) =
-            do_local_cleanup(&db, watermark, cutoff, RetentionMode::Media)
-                .await
-                .unwrap();
+        let (deleted, watermark2) = do_local_cleanup(&db, watermark, cutoff, RetentionMode::Media)
+            .await
+            .unwrap();
         let resumed_pass_elapsed = t1.elapsed();
         assert_eq!(deleted, 0);
         assert_eq!(
@@ -834,9 +833,7 @@ mod tests {
         // instantly: `begin_immediate_with_retry` only retries
         // connection-acquisition errors, not query errors after BEGIN, so a
         // missing table surfaces immediately as Err, no backoff needed.
-        db.execute_raw_sql("DROP TABLE video_chunks")
-            .await
-            .unwrap();
+        db.execute_raw_sql("DROP TABLE video_chunks").await.unwrap();
 
         let now = Utc::now();
         let start = now - Duration::hours(2);

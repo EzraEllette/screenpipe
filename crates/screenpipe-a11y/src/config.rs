@@ -213,7 +213,7 @@ impl Default for UiCaptureConfig {
             capture_clipboard_content: true,
             capture_context: true,
             capture_mouse_move: false, // High volume
-            capture_tree: false, // Freezes foreground apps on Windows; snapshots unconsumed
+            capture_tree: false,       // Freezes foreground apps on Windows; snapshots unconsumed
             tree_debounce_ms: 300,
             tree_max_elements: 10000,
             tree_capture_interval_ms: 0,

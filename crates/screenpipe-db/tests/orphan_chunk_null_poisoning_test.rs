@@ -100,10 +100,7 @@ async fn delete_time_range_batch_collects_files_despite_out_of_range_null_chunk_
     let start = Utc::now() - Duration::days(31);
     let end = Utc::now() - Duration::days(29);
 
-    let result = db
-        .delete_time_range_batch(start, end, true)
-        .await
-        .unwrap();
+    let result = db.delete_time_range_batch(start, end, true).await.unwrap();
     assert_eq!(
         result.video_files,
         vec!["/data/old.mp4".to_string()],
@@ -199,10 +196,7 @@ async fn delete_time_range_batch_archive_mode_collects_cloud_files_despite_null_
     let start = Utc::now() - Duration::days(31);
     let end = Utc::now() - Duration::days(29);
 
-    let result = db
-        .delete_time_range_batch(start, end, false)
-        .await
-        .unwrap();
+    let result = db.delete_time_range_batch(start, end, false).await.unwrap();
     assert_eq!(
         result.video_files,
         vec!["/data/old.mp4".to_string()],

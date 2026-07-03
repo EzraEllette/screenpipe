@@ -147,7 +147,11 @@ async fn straddling_chunk_is_still_skipped() {
     );
     assert_eq!(result.video_chunks_evicted, 0);
     assert_eq!(
-        count(&db, "SELECT COUNT(*) FROM video_chunks WHERE id = 1 AND evicted_at IS NULL").await,
+        count(
+            &db,
+            "SELECT COUNT(*) FROM video_chunks WHERE id = 1 AND evicted_at IS NULL"
+        )
+        .await,
         1
     );
 }
