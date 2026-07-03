@@ -173,7 +173,7 @@ impl DatabaseManager {
 
         // 6. Delete orphaned video_chunks (no frames reference them anymore)
         let video_chunks_result = sqlx::query(
-            "DELETE FROM video_chunks WHERE id NOT IN (SELECT DISTINCT video_chunk_id FROM frames)",
+            "DELETE FROM video_chunks WHERE id NOT IN (SELECT DISTINCT video_chunk_id FROM frames WHERE video_chunk_id IS NOT NULL)",
         )
         .execute(&mut **tx.conn())
         .await?;
@@ -190,7 +190,7 @@ impl DatabaseManager {
 
         // 8. Delete orphaned audio_chunks — audio_tags CASCADE'd automatically
         let audio_chunks_result = sqlx::query(
-            "DELETE FROM audio_chunks WHERE id NOT IN (SELECT DISTINCT audio_chunk_id FROM audio_transcriptions)",
+            "DELETE FROM audio_chunks WHERE id NOT IN (SELECT DISTINCT audio_chunk_id FROM audio_transcriptions WHERE audio_chunk_id IS NOT NULL)",
         )
         .execute(&mut **tx.conn())
         .await?;
@@ -377,7 +377,7 @@ impl DatabaseManager {
 
         // 8. Delete orphaned video_chunks
         let video_chunks_result = sqlx::query(
-            "DELETE FROM video_chunks WHERE id NOT IN (SELECT DISTINCT video_chunk_id FROM frames)",
+            "DELETE FROM video_chunks WHERE id NOT IN (SELECT DISTINCT video_chunk_id FROM frames WHERE video_chunk_id IS NOT NULL)",
         )
         .execute(&mut **tx.conn())
         .await?;
@@ -394,7 +394,7 @@ impl DatabaseManager {
 
         // 10. Delete orphaned audio_chunks
         let audio_chunks_result = sqlx::query(
-            "DELETE FROM audio_chunks WHERE id NOT IN (SELECT DISTINCT audio_chunk_id FROM audio_transcriptions)",
+            "DELETE FROM audio_chunks WHERE id NOT IN (SELECT DISTINCT audio_chunk_id FROM audio_transcriptions WHERE audio_chunk_id IS NOT NULL)",
         )
         .execute(&mut **tx.conn())
         .await?;
@@ -523,15 +523,23 @@ impl DatabaseManager {
         .fetch_all(&mut **tx.conn())
         .await?;
 
-        // Mark video_chunks as evicted (file_path -> '', evicted_at -> now)
+        // Mark video_chunks as evicted (file_path -> '', evicted_at -> now).
+        // Both video_chunk_id columns below must exclude NULLs from the
+        // anti-join subquery: `x NOT IN (set containing NULL)` evaluates to
+        // NULL (not TRUE) for every row in SQL's three-valued logic, so a
+        // single frame outside the range with a NULL video_chunk_id would
+        // silently zero out every match and the UPDATE would never fire —
+        // the same trap the SELECT above already guards against.
         let video_evict = sqlx::query(
             r#"UPDATE video_chunks
                SET file_path = '', evicted_at = CURRENT_TIMESTAMP
                WHERE evicted_at IS NULL
                AND file_path != ''
                AND file_path NOT LIKE 'cloud://%'
-               AND id IN (SELECT DISTINCT video_chunk_id FROM frames WHERE timestamp BETWEEN ?1 AND ?2)
-               AND id NOT IN (SELECT DISTINCT video_chunk_id FROM frames WHERE timestamp NOT BETWEEN ?1 AND ?2)"#,
+               AND id IN (SELECT DISTINCT video_chunk_id FROM frames
+                          WHERE timestamp BETWEEN ?1 AND ?2 AND video_chunk_id IS NOT NULL)
+               AND id NOT IN (SELECT DISTINCT video_chunk_id FROM frames
+                              WHERE timestamp NOT BETWEEN ?1 AND ?2 AND video_chunk_id IS NOT NULL)"#,
         )
         .bind(&start_str)
         .bind(&end_str)
@@ -544,8 +552,10 @@ impl DatabaseManager {
                WHERE evicted_at IS NULL
                AND file_path != ''
                AND file_path NOT LIKE 'cloud://%'
-               AND id IN (SELECT DISTINCT audio_chunk_id FROM audio_transcriptions WHERE timestamp BETWEEN ?1 AND ?2)
-               AND id NOT IN (SELECT DISTINCT audio_chunk_id FROM audio_transcriptions WHERE timestamp NOT BETWEEN ?1 AND ?2)"#,
+               AND id IN (SELECT DISTINCT audio_chunk_id FROM audio_transcriptions
+                          WHERE timestamp BETWEEN ?1 AND ?2 AND audio_chunk_id IS NOT NULL)
+               AND id NOT IN (SELECT DISTINCT audio_chunk_id FROM audio_transcriptions
+                              WHERE timestamp NOT BETWEEN ?1 AND ?2 AND audio_chunk_id IS NOT NULL)"#,
         )
         .bind(&start_str)
         .bind(&end_str)
@@ -749,13 +759,20 @@ impl DatabaseManager {
         let start_str = start.to_rfc3339();
         let end_str = end.to_rfc3339();
 
+        // Same NULL-guard as evict_media_in_range (#4843): frames.video_chunk_id
+        // is nullable, so the anti-join subquery must exclude NULLs or a single
+        // out-of-range snapshot frame silently zeroes out this whole estimate —
+        // the retention settings UI would show "0 bytes reclaimable" even when
+        // eviction would free real space.
         let mut paths: Vec<String> = sqlx::query_scalar(
             r#"SELECT file_path FROM video_chunks
                WHERE evicted_at IS NULL
                AND file_path != ''
                AND file_path NOT LIKE 'cloud://%'
-               AND id IN (SELECT DISTINCT video_chunk_id FROM frames WHERE timestamp BETWEEN ?1 AND ?2)
-               AND id NOT IN (SELECT DISTINCT video_chunk_id FROM frames WHERE timestamp NOT BETWEEN ?1 AND ?2)"#,
+               AND id IN (SELECT DISTINCT video_chunk_id FROM frames
+                          WHERE timestamp BETWEEN ?1 AND ?2 AND video_chunk_id IS NOT NULL)
+               AND id NOT IN (SELECT DISTINCT video_chunk_id FROM frames
+                              WHERE timestamp NOT BETWEEN ?1 AND ?2 AND video_chunk_id IS NOT NULL)"#,
         )
         .bind(&start_str)
         .bind(&end_str)
@@ -767,8 +784,10 @@ impl DatabaseManager {
                WHERE evicted_at IS NULL
                AND file_path != ''
                AND file_path NOT LIKE 'cloud://%'
-               AND id IN (SELECT DISTINCT audio_chunk_id FROM audio_transcriptions WHERE timestamp BETWEEN ?1 AND ?2)
-               AND id NOT IN (SELECT DISTINCT audio_chunk_id FROM audio_transcriptions WHERE timestamp NOT BETWEEN ?1 AND ?2)"#,
+               AND id IN (SELECT DISTINCT audio_chunk_id FROM audio_transcriptions
+                          WHERE timestamp BETWEEN ?1 AND ?2 AND audio_chunk_id IS NOT NULL)
+               AND id NOT IN (SELECT DISTINCT audio_chunk_id FROM audio_transcriptions
+                              WHERE timestamp NOT BETWEEN ?1 AND ?2 AND audio_chunk_id IS NOT NULL)"#,
         )
         .bind(&start_str)
         .bind(&end_str)
@@ -827,18 +846,26 @@ impl DatabaseManager {
         .fetch_all(&mut **tx.conn())
         .await?;
 
-        // Collect video files that are fully within this batch (all frames in chunk are in range)
+        // Collect video files that are fully within this batch (all frames in chunk are in range).
+        // NULL-guard the anti-join subqueries — same trap as evict_media_in_range
+        // (#4843): frames.video_chunk_id is nullable, and an unguarded
+        // `NOT IN (SELECT ... WHERE timestamp NOT BETWEEN ...)` is poisoned by
+        // any out-of-range snapshot frame, silently returning zero files.
         let video_query = if collect_all_files {
             // Local retention: collect all files regardless of cloud status
             r#"SELECT file_path FROM video_chunks
-               WHERE id IN (SELECT DISTINCT video_chunk_id FROM frames WHERE timestamp BETWEEN ?1 AND ?2)
-               AND id NOT IN (SELECT DISTINCT video_chunk_id FROM frames WHERE timestamp NOT BETWEEN ?1 AND ?2)
+               WHERE id IN (SELECT DISTINCT video_chunk_id FROM frames
+                            WHERE timestamp BETWEEN ?1 AND ?2 AND video_chunk_id IS NOT NULL)
+               AND id NOT IN (SELECT DISTINCT video_chunk_id FROM frames
+                              WHERE timestamp NOT BETWEEN ?1 AND ?2 AND video_chunk_id IS NOT NULL)
                AND file_path NOT LIKE 'cloud://%'"#
         } else {
             // Archive: only collect cloud-uploaded files
             r#"SELECT file_path FROM video_chunks
-               WHERE id IN (SELECT DISTINCT video_chunk_id FROM frames WHERE timestamp BETWEEN ?1 AND ?2)
-               AND id NOT IN (SELECT DISTINCT video_chunk_id FROM frames WHERE timestamp NOT BETWEEN ?1 AND ?2)
+               WHERE id IN (SELECT DISTINCT video_chunk_id FROM frames
+                            WHERE timestamp BETWEEN ?1 AND ?2 AND video_chunk_id IS NOT NULL)
+               AND id NOT IN (SELECT DISTINCT video_chunk_id FROM frames
+                              WHERE timestamp NOT BETWEEN ?1 AND ?2 AND video_chunk_id IS NOT NULL)
                AND (cloud_blob_id IS NOT NULL OR file_path LIKE 'cloud://%')"#
         };
         let video_files: Vec<String> = sqlx::query_scalar(video_query)
@@ -850,8 +877,10 @@ impl DatabaseManager {
         // Collect audio files
         let audio_files: Vec<String> = sqlx::query_scalar(
             r#"SELECT file_path FROM audio_chunks
-               WHERE id IN (SELECT DISTINCT audio_chunk_id FROM audio_transcriptions WHERE timestamp BETWEEN ?1 AND ?2)
-               AND id NOT IN (SELECT DISTINCT audio_chunk_id FROM audio_transcriptions WHERE timestamp NOT BETWEEN ?1 AND ?2)
+               WHERE id IN (SELECT DISTINCT audio_chunk_id FROM audio_transcriptions
+                            WHERE timestamp BETWEEN ?1 AND ?2 AND audio_chunk_id IS NOT NULL)
+               AND id NOT IN (SELECT DISTINCT audio_chunk_id FROM audio_transcriptions
+                              WHERE timestamp NOT BETWEEN ?1 AND ?2 AND audio_chunk_id IS NOT NULL)
                AND file_path NOT LIKE 'cloud://%'"#,
         )
         .bind(&start_str)
@@ -999,14 +1028,14 @@ impl DatabaseManager {
         let mut tx = self.begin_immediate_with_retry().await?;
 
         let video_chunks_result = sqlx::query(
-            "DELETE FROM video_chunks WHERE id NOT IN (SELECT DISTINCT video_chunk_id FROM frames)",
+            "DELETE FROM video_chunks WHERE id NOT IN (SELECT DISTINCT video_chunk_id FROM frames WHERE video_chunk_id IS NOT NULL)",
         )
         .execute(&mut **tx.conn())
         .await?;
         let video_chunks_deleted = video_chunks_result.rows_affected();
 
         let audio_chunks_result = sqlx::query(
-            "DELETE FROM audio_chunks WHERE id NOT IN (SELECT DISTINCT audio_chunk_id FROM audio_transcriptions)",
+            "DELETE FROM audio_chunks WHERE id NOT IN (SELECT DISTINCT audio_chunk_id FROM audio_transcriptions WHERE audio_chunk_id IS NOT NULL)",
         )
         .execute(&mut **tx.conn())
         .await?;
@@ -1074,7 +1103,7 @@ impl DatabaseManager {
 
         // 3. Delete orphaned video_chunks (cloud:// placeholders from sync)
         let video_chunks_result = sqlx::query(
-            "DELETE FROM video_chunks WHERE machine_id = ?1 AND id NOT IN (SELECT DISTINCT video_chunk_id FROM frames)",
+            "DELETE FROM video_chunks WHERE machine_id = ?1 AND id NOT IN (SELECT DISTINCT video_chunk_id FROM frames WHERE video_chunk_id IS NOT NULL)",
         )
         .bind(machine_id)
         .execute(&mut **tx.conn())
@@ -1092,7 +1121,7 @@ impl DatabaseManager {
 
         // 5. Delete orphaned audio_chunks from this machine (audio_tags CASCADE automatically)
         let audio_chunks_result = sqlx::query(
-            "DELETE FROM audio_chunks WHERE machine_id = ?1 AND id NOT IN (SELECT DISTINCT audio_chunk_id FROM audio_transcriptions)",
+            "DELETE FROM audio_chunks WHERE machine_id = ?1 AND id NOT IN (SELECT DISTINCT audio_chunk_id FROM audio_transcriptions WHERE audio_chunk_id IS NOT NULL)",
         )
         .bind(machine_id)
         .execute(&mut **tx.conn())
