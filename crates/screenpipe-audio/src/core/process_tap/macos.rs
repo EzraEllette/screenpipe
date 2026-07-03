@@ -862,6 +862,33 @@ fn merge_exclusion_audio_object_ids(
     configured
 }
 
+/// Best-effort check: is any process other than ours currently rendering audio
+/// output anywhere on the system? Distinguishes "expected silence" (nothing is
+/// playing, so a silent tap is healthy) from "suspicious silence" (an app is
+/// playing but the tap captures zeros — e.g. per-app routing bypasses the
+/// anchored device — where a rebuild can re-anchor). Our own process always
+/// runs IO on the tap's aggregate device, so it must be excluded.
+///
+/// Returns `None` when CoreAudio can't answer; callers must treat that as
+/// "possibly playing" so a genuinely broken tap is never left un-rebuilt.
+fn any_other_process_rendering_audio() -> Option<bool> {
+    let self_pid = std::process::id() as i32;
+    let processes = ca::Process::list().ok()?;
+    for process in processes {
+        // Skip only entries that positively identify as us. Entries whose pid
+        // can't be read still count: erring toward "something is playing"
+        // keeps rebuilds allowed, which can only reproduce today's behavior,
+        // never suppress a needed rebuild.
+        if process.pid().map(|pid| pid == self_pid).unwrap_or(false) {
+            continue;
+        }
+        if process.is_running_output().unwrap_or(false) {
+            return Some(true);
+        }
+    }
+    Some(false)
+}
+
 /// Create and start a CoreAudio Process Tap for system audio capture.
 ///
 /// Returns the audio config and a thread handle. The thread keeps capture
@@ -955,12 +982,30 @@ pub fn spawn_process_tap_capture(
             let silence_cooldown = REBUILD_COOLDOWN
                 .checked_mul(1u32 << silence_rebuild_streak.min(SILENCE_BACKOFF_CAP))
                 .unwrap_or(REBUILD_COOLDOWN);
-            let should_rebuild_for_silence = silence_started
+            let mut should_rebuild_for_silence = silence_started
                 .map(|t| t.elapsed().as_secs() >= WATCHDOG_SILENCE_SECS)
                 .unwrap_or(false)
                 && last_rebuild
                     .map(|t| t.elapsed() >= silence_cooldown)
                     .unwrap_or(true);
+
+            // Silence while nothing is playing anywhere is EXPECTED, not a
+            // broken anchor — on a quiet machine the old behavior rebuilt the
+            // tap all day (~150 generations/day observed). Only checked at the
+            // moment a rebuild would fire, so the Process::list() enumeration
+            // runs at most once per silence window, not per 500ms tick. On a
+            // CoreAudio error (None) we fall through and rebuild as before.
+            if should_rebuild_for_silence && any_other_process_rendering_audio() == Some(false) {
+                debug!(
+                    "Process Tap silent for {}s on '{}' but no other process is \
+                     rendering audio — expected silence, skipping rebuild",
+                    WATCHDOG_SILENCE_SECS, current_uid
+                );
+                should_rebuild_for_silence = false;
+                // Restart the window: once playback resumes, the tap gets a
+                // fresh 45s to prove it captures audio before any rebuild.
+                silence_started = None;
+            }
 
             // Check the current default output device UID.
             let new_uid = match ca::System::default_output_device().and_then(|d| d.uid()) {
@@ -1163,6 +1208,19 @@ mod tests {
         let a = is_process_tap_available();
         let b = is_process_tap_available();
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn other_process_audio_probe_answers() {
+        // Smoke test: on any Mac with coreaudiod the probe must produce an
+        // answer (Some), never panic. Whether audio is playing depends on the
+        // machine, so only the availability of an answer is asserted — the
+        // watchdog treats None as "possibly playing" and keeps old behavior.
+        let result = any_other_process_rendering_audio();
+        assert!(
+            result.is_some(),
+            "CoreAudio process list should be readable"
+        );
     }
 
     #[test]
