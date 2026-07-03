@@ -1019,7 +1019,8 @@ mod tests {
     #[test]
     fn test_incognito_detection() {
         use crate::incognito::is_title_private;
-        assert!(is_title_private("Enter Password - Chrome"));
+        // bare "password" was deliberately removed from privacy filters (false positives)
+        assert!(!is_title_private("Enter Password - Chrome"));
         assert!(is_title_private("Private Browsing - Firefox"));
         assert!(is_title_private("New Tab - Google Chrome (Incognito)"));
         assert!(!is_title_private("Calculator"));
