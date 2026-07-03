@@ -28,7 +28,6 @@ export const searchIndex: SettingsField[] = [
   { label: "CoreAudio system audio capture", keywords: ["coreaudio", "system audio"], conditional: true },
   { label: "Screen context capture", keywords: ["screen", "video", "accessibility"] },
   { label: "Screenshot images", keywords: ["screenshot", "pixels", "ocr", "jpeg"] },
-  { label: "Screenshot-to-video compaction", keywords: ["screenshot", "jpeg", "mp4", "timeline", "rewind"] },
   { label: "Use all monitors", keywords: ["monitor", "display"], conditional: true },
   // conditional: monitor picker only renders when "Use all monitors" is off — paired right under that toggle.
   { label: "Monitors", conditional: true },
@@ -3748,31 +3747,6 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
                   id="disableScreenshots"
                   checked={!(settings.disableScreenshots ?? false)}
                   onCheckedChange={(checked) => handleSettingsChange({ disableScreenshots: !checked }, true)}
-                />
-              </div>
-            </CardContent>
-          </Card>
-        )}
-
-        {!settings.disableVision && (
-          <Card className="border-border bg-card">
-            <CardContent className="px-3 py-2.5">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center space-x-2.5">
-                  <FileText className="h-4 w-4 text-muted-foreground shrink-0" />
-                  <div>
-                    <h3 className="text-sm font-medium text-foreground flex items-center gap-1.5">
-                      Screenshot-to-video compaction
-                      <HelpTooltip text="Converts stored screenshot JPEGs into MP4 chunks for rewind playback. Turn this off for task-mining or accessibility-text-only deployments that do not need visual rewind playback." />
-                    </h3>
-                    <p className="text-xs text-muted-foreground">Convert screenshot JPEGs into MP4 chunks for rewind playback</p>
-                  </div>
-                </div>
-                <ManagedSwitch
-                  settingKey="disableSnapshotCompaction"
-                  id="disableSnapshotCompaction"
-                  checked={!(settings.disableSnapshotCompaction ?? false)}
-                  onCheckedChange={(checked) => handleSettingsChange({ disableSnapshotCompaction: !checked }, true)}
                 />
               </div>
             </CardContent>
