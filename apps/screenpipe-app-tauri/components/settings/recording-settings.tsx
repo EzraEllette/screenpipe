@@ -2641,7 +2641,7 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
   };
 
   return (
-    <div className="space-y-5" ref={sectionRootRef}>
+    <div className="space-y-5" data-testid="section-settings-recording" ref={sectionRootRef}>
       <p className="text-muted-foreground text-sm mb-4">
         Screen and audio recording preferences
       </p>

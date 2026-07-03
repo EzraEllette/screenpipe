@@ -430,14 +430,31 @@ describe("Windows user journey", function () {
 
     const recordingNav = await $('[data-testid="settings-nav-recording"]');
     await recordingNav.waitForDisplayed({ timeout: t(15_000) });
+    await recordingNav.scrollIntoView();
     await recordingNav.click();
+    await expectCurrentSettingsSection("recording", t(20_000));
 
-    await waitForBodyText(
-      (bodyText) =>
-        bodyText.includes("screen and audio recording preferences") &&
-        bodyText.includes("audio recording") &&
-        bodyText.includes("screen recording"),
-      "Recording settings did not show the core audio/screen controls",
+    const recordingSection = await $('[data-testid="section-settings-recording"]');
+    await recordingSection.waitForDisplayed({ timeout: t(20_000) });
+
+    await browser.waitUntil(
+      async () => {
+        const sectionText = (await recordingSection.getText()).toLowerCase();
+        const hasScreenControls =
+          sectionText.includes("screen context capture") ||
+          sectionText.includes("screenshot images");
+
+        return (
+          sectionText.includes("screen and audio recording preferences") &&
+          sectionText.includes("audio recording") &&
+          hasScreenControls
+        );
+      },
+      {
+        timeout: t(20_000),
+        interval: 500,
+        timeoutMsg: "Recording settings did not show the core audio/screen controls",
+      },
     );
 
     const recordingScreenshot = await saveScreenshot("windows-user-journey-recording-settings");
