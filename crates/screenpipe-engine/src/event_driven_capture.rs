@@ -1911,6 +1911,7 @@ fn is_ocr_heavy_app(app_name: &str) -> bool {
         || contains_ascii_case_insensitive(app_name, "hyper")
         || contains_ascii_case_insensitive(app_name, "warp")
         || app_name.eq_ignore_ascii_case("obsidian")
+        || app_name.eq_ignore_ascii_case("obsidian.exe")
 }
 
 fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
@@ -1928,6 +1929,11 @@ fn is_lock_screen_app(app_name: &str) -> bool {
     app_name.eq_ignore_ascii_case("loginwindow")
         || app_name.eq_ignore_ascii_case("screensaverengine")
         || app_name.eq_ignore_ascii_case("lockscreen")
+        // Windows: LockApp.exe hosts the lock screen UI, LogonUI.exe the
+        // credential prompt. Both must be recognized here — an unrecognized
+        // Some(app) would otherwise clear the global screen-locked flag.
+        || app_name.eq_ignore_ascii_case("lockapp.exe")
+        || app_name.eq_ignore_ascii_case("logonui.exe")
 }
 
 /// How long the persistent stream's frame-delivery sequence may stay flat
@@ -2598,7 +2604,54 @@ fn get_focused_metadata_lightweight() -> Option<LightweightFocusedMetadata> {
     })
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+/// Windows: `GetForegroundWindow` + cached process-name lookup — no UIA/COM.
+/// The app name matches what the tree walker reports (both go through
+/// `get_effective_app_name`), so the walk budget's per-app cost tracking keys
+/// line up across `should_walk` and `record_walk`.
+///
+/// **Caching**: capture triggers fire on every click / typing pause / visual
+/// change, and the focused window rarely changes between triggers. A 1-second
+/// TTL bounds staleness below human perception while collapsing the common
+/// case to a single atomic load — same rationale as the macOS implementation.
+#[cfg(target_os = "windows")]
+fn get_focused_metadata_lightweight() -> Option<LightweightFocusedMetadata> {
+    use arc_swap::ArcSwap;
+    use std::sync::OnceLock;
+    use std::time::{Duration, Instant};
+
+    const CACHE_TTL: Duration = Duration::from_secs(1);
+
+    static CACHE: OnceLock<ArcSwap<(Option<LightweightFocusedMetadata>, Instant)>> =
+        OnceLock::new();
+    let cache = CACHE.get_or_init(|| {
+        // Seed with an already-expired timestamp. Windows `Instant` counts
+        // from boot, so subtracting can fail in the first seconds after boot
+        // (autostart) — fall back to "fresh", costing one stale-second at most.
+        let expired = Instant::now()
+            .checked_sub(CACHE_TTL + Duration::from_secs(1))
+            .unwrap_or_else(Instant::now);
+        ArcSwap::from_pointee((None, expired))
+    });
+
+    let now = Instant::now();
+    {
+        let snap = cache.load();
+        if now.duration_since(snap.1) < CACHE_TTL {
+            return snap.0.clone();
+        }
+    }
+
+    let fresh = screenpipe_a11y::platform::windows::get_focused_app_window_lightweight().map(
+        |(app_name, window_name)| LightweightFocusedMetadata {
+            app_name: Some(app_name),
+            window_name,
+        },
+    );
+    cache.store(std::sync::Arc::new((fresh.clone(), now)));
+    fresh
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn get_focused_metadata_lightweight() -> Option<LightweightFocusedMetadata> {
     None
 }
@@ -3222,7 +3275,11 @@ mod tests {
         assert!(is_ocr_heavy_app("WezTerm"));
         assert!(is_ocr_heavy_app("com.mitchellh.ghostty.WARP"));
         assert!(is_ocr_heavy_app("Obsidian"));
+        // Windows process names carry the extension.
+        assert!(is_ocr_heavy_app("Obsidian.exe"));
+        assert!(is_ocr_heavy_app("wezterm-gui.exe"));
         assert!(!is_ocr_heavy_app("Chrome"));
+        assert!(!is_ocr_heavy_app("chrome.exe"));
     }
 
     #[test]
@@ -3230,7 +3287,12 @@ mod tests {
         assert!(is_lock_screen_app("loginwindow"));
         assert!(is_lock_screen_app("ScreenSaverEngine"));
         assert!(is_lock_screen_app("LOCKSCREEN"));
+        // Windows lock screen host + credential UI. Must be recognized or a
+        // Some(app) at the lock screen clears the global screen-locked flag.
+        assert!(is_lock_screen_app("LockApp.exe"));
+        assert!(is_lock_screen_app("LogonUI.exe"));
         assert!(!is_lock_screen_app("Finder"));
+        assert!(!is_lock_screen_app("explorer.exe"));
     }
 
     #[test]
