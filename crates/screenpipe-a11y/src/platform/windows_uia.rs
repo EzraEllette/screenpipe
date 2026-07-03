@@ -108,7 +108,11 @@ pub(crate) struct CapturedTree {
 /// Records the first limit hit so callers can report truncation.
 struct TreeBudget {
     max_elements: usize,
-    deadline: Instant,
+    /// `None` = node cap only. Used for the cached path: its subtree is
+    /// already materialized in-process by the time nodes are built, so a
+    /// deadline there can only discard data that was already paid for —
+    /// it cannot shorten the target app's freeze.
+    deadline: Option<Instant>,
     count: usize,
     truncation: TruncationReason,
 }
@@ -117,13 +121,23 @@ impl TreeBudget {
     fn new(max_elements: usize, deadline: Instant) -> Self {
         Self {
             max_elements,
-            deadline,
+            deadline: Some(deadline),
             count: 0,
             truncation: TruncationReason::None,
         }
     }
 
-    /// True once either limit is hit; records the reason on first hit.
+    /// Budget bounded by node count only (cached, in-process tree builds).
+    fn node_capped(max_elements: usize) -> Self {
+        Self {
+            max_elements,
+            deadline: None,
+            count: 0,
+            truncation: TruncationReason::None,
+        }
+    }
+
+    /// True once a limit is hit; records the reason on first hit.
     fn exhausted(&mut self) -> bool {
         if self.count >= self.max_elements {
             if self.truncation == TruncationReason::None {
@@ -131,11 +145,13 @@ impl TreeBudget {
             }
             return true;
         }
-        if Instant::now() >= self.deadline {
-            if self.truncation == TruncationReason::None {
-                self.truncation = TruncationReason::Timeout;
+        if let Some(deadline) = self.deadline {
+            if Instant::now() >= deadline {
+                if self.truncation == TruncationReason::None {
+                    self.truncation = TruncationReason::Timeout;
+                }
+                return true;
             }
-            return true;
         }
         false
     }
@@ -275,18 +291,22 @@ impl UiaContext {
             .map(|captured| captured.root)
     }
 
-    /// Capture the full accessibility tree of a window by HWND, bounded by both
-    /// a node cap and a wall-clock deadline.
+    /// Capture the full accessibility tree of a window by HWND, bounded by a
+    /// node cap and a wall-clock deadline.
     ///
     /// Uses CacheRequest to batch all property reads into minimal cross-process
     /// calls. Falls back to TreeWalker for apps whose UIA providers don't
     /// populate the cached subtree (Chromium, Electron, etc.).
     ///
-    /// The deadline is checked between elements, so the walk overruns it by at
-    /// most one element fetch. The initial `ElementFromHandleBuildCache` is a
-    /// single synchronous COM call that cannot be interrupted — the deadline
-    /// mainly bounds the per-element TreeWalker fallback, which is serviced on
-    /// the target app's UI thread and freezes it for the duration of the walk.
+    /// The deadline bounds the per-element TreeWalker fallback (~2 cross-process
+    /// COM round-trips per element, serviced on the target app's UI thread — the
+    /// unbounded-freeze path), checked before every element fetch so it overruns
+    /// by at most one element. The cached path is different: its one
+    /// `ElementFromHandleBuildCache` call is synchronous and cannot be
+    /// interrupted, and afterwards the subtree is already materialized
+    /// in-process — so building it is bounded by the node cap only. Truncating
+    /// that local build on the deadline would discard data the target app
+    /// already paid to produce without shortening its freeze.
     pub(crate) fn capture_window_tree_bounded(
         &self,
         hwnd: HWND,
@@ -317,7 +337,9 @@ impl UiaContext {
                 .ElementFromHandleBuildCache(hwnd, &self.cache_request)
                 .ok()?;
 
-            let mut budget = TreeBudget::new(max_elements, deadline);
+            // Node cap only: the whole subtree was materialized by the single
+            // COM call above; building nodes from it is local work.
+            let mut budget = TreeBudget::node_capped(max_elements);
             let root = self.build_node(&element, &mut budget);
             let count = budget.count;
 
@@ -325,8 +347,9 @@ impl UiaContext {
             // cached subtree via ElementFromHandleBuildCache, returning only a
             // handful of titlebar nodes. When this happens, fall back to
             // TreeWalker which makes individual COM calls per element. The
-            // fallback shares the deadline (a capture never exceeds `timeout`)
-            // but gets a fresh node budget, matching the count comparison below.
+            // fallback runs against the original deadline (so a slow cached
+            // attempt shrinks its window) with a fresh node budget, matching
+            // the count comparison below.
             if count <= 10 {
                 let mut walker_budget = TreeBudget::new(max_elements, deadline);
                 if let Some(walker_root) = self.capture_window_tree_walker(hwnd, &mut walker_budget)
@@ -455,8 +478,7 @@ impl UiaContext {
 
     /// Recursively build an AccessibilityNode from a cached UIA element.
     /// The subtree is already materialized in-process, so per-node work is a
-    /// local property read — the budget's deadline is a cheap safety net here;
-    /// the node cap does most of the bounding.
+    /// local property read; callers pass a node-cap-only budget.
     fn build_node(
         &self,
         element: &IUIAutomationElement,
@@ -1340,7 +1362,7 @@ mod tests {
         assert_eq!(budget.truncation, TruncationReason::MaxNodes);
 
         // First-hit reason sticks even if the deadline also passes later.
-        budget.deadline = Instant::now() - Duration::from_secs(1);
+        budget.deadline = Some(Instant::now() - Duration::from_secs(1));
         assert!(budget.exhausted());
         assert_eq!(budget.truncation, TruncationReason::MaxNodes);
     }
@@ -1350,6 +1372,16 @@ mod tests {
         let mut budget = TreeBudget::new(10_000, Instant::now() - Duration::from_millis(1));
         assert!(budget.exhausted());
         assert_eq!(budget.truncation, TruncationReason::Timeout);
+    }
+
+    #[test]
+    fn test_tree_budget_node_capped_ignores_time() {
+        // Cached-path budget: no deadline, only the node cap binds.
+        let mut budget = TreeBudget::node_capped(3);
+        assert!(!budget.exhausted());
+        budget.count = 3;
+        assert!(budget.exhausted());
+        assert_eq!(budget.truncation, TruncationReason::MaxNodes);
     }
 
     #[test]
@@ -1365,9 +1397,12 @@ mod tests {
         assert!(!needs_walker_fallback(hwnd));
     }
 
-    /// Live test: the wall-clock deadline truncates a real capture.
+    /// Live test: the wall-clock deadline bounds a real capture.
     /// Focus a Chromium/Electron window (whose provider forces the
-    /// per-element TreeWalker fallback) for the strongest signal, then run:
+    /// per-element TreeWalker fallback) to see `Timeout` truncation — the
+    /// deadline binds that path. Windows served by the cached path return
+    /// their full (node-capped) tree regardless of the deadline, since the
+    /// subtree arrives in one COM call. Run:
     /// cargo test -p screenpipe-a11y test_live_bounded_capture -- --ignored --nocapture
     #[test]
     #[ignore]
