@@ -1750,6 +1750,19 @@ mod tests {
     }
 
     #[test]
+    fn tree_walks_disabled_by_default_through_to_ui_config() {
+        // Full-window UIA tree walks are serviced on the target app's UI thread
+        // and freeze it (TESTING.md §15), and their snapshots have no consumers —
+        // paired_capture.rs owns accessibility capture. Guard the production
+        // path so the defaults can't silently flip back on.
+        let ui_config = UiRecorderConfig::default().to_ui_config();
+        assert!(!ui_config.capture_tree);
+        assert_eq!(ui_config.tree_capture_interval_ms, 0);
+        // Per-click / focused-element enrichment must stay on.
+        assert!(ui_config.capture_context);
+    }
+
+    #[test]
     fn clipboard_trigger_detection_does_not_require_clipboard_storage() {
         let config = UiRecorderConfig {
             capture_clipboard: false,
