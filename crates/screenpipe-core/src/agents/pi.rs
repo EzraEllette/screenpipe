@@ -20,6 +20,15 @@ const PI_AI_PACKAGE: &str = "@earendil-works/pi-ai@0.75.4";
 const PI_NAMESPACE_DIR: &str = "@earendil-works";
 pub const SCREENPIPE_API_URL: &str = "https://api.screenpipe.com/v1";
 
+/// Windows creation flags for background agent spawns: CREATE_NO_WINDOW
+/// (0x08000000) so no console flashes, plus BELOW_NORMAL_PRIORITY_CLASS
+/// (0x00004000) so the bun→pi→tool-call subtree yields CPU to whatever the
+/// user is doing (#4849) — children inherit the class. Interactive chat is
+/// NOT this path: the desktop app manages its own pi sidecar
+/// (src-tauri/src/pi.rs) at Normal.
+#[cfg(windows)]
+const BACKGROUND_SPAWN_FLAGS: u32 = 0x08000000 | 0x00004000;
+
 /// Bounded retries for provider rate limiting (HTTP 429) in streaming runs.
 const MAX_RATE_LIMIT_RETRIES: usize = 3;
 /// Fallback wait when the 429 payload carries no `reset_in` hint.
@@ -1254,10 +1263,7 @@ impl PiExecutor {
         }
 
         #[cfg(windows)]
-        {
-            const CREATE_NO_WINDOW: u32 = 0x08000000;
-            cmd.creation_flags(CREATE_NO_WINDOW);
-        }
+        cmd.creation_flags(BACKGROUND_SPAWN_FLAGS);
 
         let child = cmd.spawn()?;
         let pid = child.id();
@@ -1405,10 +1411,7 @@ impl PiExecutor {
         }
 
         #[cfg(windows)]
-        {
-            const CREATE_NO_WINDOW: u32 = 0x08000000;
-            cmd.creation_flags(CREATE_NO_WINDOW);
-        }
+        cmd.creation_flags(BACKGROUND_SPAWN_FLAGS);
 
         let mut child = cmd.spawn()?;
         let pid = child.id();
@@ -1842,8 +1845,8 @@ impl AgentExecutor for PiExecutor {
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x08000000;
-            cmd.creation_flags(CREATE_NO_WINDOW);
+            // CPU/IO-heavy dependency install — background bootstrap work.
+            cmd.creation_flags(BACKGROUND_SPAWN_FLAGS);
         }
 
         let output = cmd.output().map_err(|e| {

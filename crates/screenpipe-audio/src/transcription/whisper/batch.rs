@@ -20,6 +20,59 @@ const MIN_RMS_ENERGY: f32 = 0.015;
 /// prompt window. Entries past this are dropped (whole entries only).
 const INITIAL_PROMPT_CHAR_BUDGET: usize = 800;
 
+/// Dips the calling thread to BELOW_NORMAL for the lifetime of the guard and
+/// restores the previous priority on drop (including unwind). Whisper/ggml
+/// inference runs inline on the calling thread; dipping it makes STT yield
+/// CPU to the user's foreground apps during the compute burst (#4849).
+/// Scoped to the thread, not the process — nothing else is affected. The
+/// extra worker thread ggml spawns (n_threads=2) stays at Normal; this covers
+/// the calling thread's share of the compute.
+#[cfg(windows)]
+struct SttPriorityDip {
+    previous: i32,
+}
+
+#[cfg(windows)]
+impl SttPriorityDip {
+    fn new() -> Option<Self> {
+        use windows::Win32::System::Threading::{
+            GetCurrentThread, GetThreadPriority, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL,
+        };
+        // GetThreadPriority's failure sentinel (MAXLONG); not emitted by windows-rs.
+        const THREAD_PRIORITY_ERROR_RETURN: i32 = 0x7FFF_FFFF;
+        unsafe {
+            let previous = GetThreadPriority(GetCurrentThread());
+            if previous == THREAD_PRIORITY_ERROR_RETURN {
+                return None;
+            }
+            // Never RAISE the thread: if something explicitly set it to
+            // BELOW_NORMAL or lower already, leave it alone. Note this is the
+            // RELATIVE thread priority — a lowered process class (the CLI's
+            // BELOW_NORMAL, #4849) is invisible here, so there the dip stacks
+            // to one notch below the process's other threads. Intended: STT
+            // should be the first thing to yield.
+            if previous <= THREAD_PRIORITY_BELOW_NORMAL.0 {
+                return None;
+            }
+            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL)
+                .ok()
+                .map(|_| Self { previous })
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for SttPriorityDip {
+    fn drop(&mut self) {
+        use windows::Win32::System::Threading::{
+            GetCurrentThread, SetThreadPriority, THREAD_PRIORITY,
+        };
+        unsafe {
+            let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY(self.previous));
+        }
+    }
+}
+
 /// Build the Whisper initial_prompt from vocabulary, capped to `budget` chars by
 /// adding *whole* comma-joined entries. Never byte-slices a joined string: a cut
 /// at a non-char boundary panics, and a unicode term (e.g. an accented attendee
@@ -64,6 +117,24 @@ pub async fn process_with_whisper(
         );
         return Ok(String::new());
     }
+
+    transcribe_sync(audio, languages, whisper_state, vocabulary)
+}
+
+/// Sync body of [`process_with_whisper`]. Deliberately NOT async: the
+/// thread-priority guard below must never live across an `.await` (the task
+/// could resume on a different tokio worker and the guard would restore the
+/// wrong thread). Keeping the compute in a sync fn makes that impossible.
+fn transcribe_sync(
+    audio: &[f32],
+    languages: Vec<Language>,
+    whisper_state: &mut WhisperState,
+    vocabulary: &[VocabularyEntry],
+) -> Result<String> {
+    // Yield to foreground apps for the duration of the mel/lang/inference
+    // compute below; restored when the guard drops at function exit.
+    #[cfg(windows)]
+    let _priority_dip = SttPriorityDip::new();
 
     let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
 
@@ -129,6 +200,43 @@ pub async fn process_with_whisper(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Guard mechanics on a dedicated thread (never mutate the test runner's
+    /// worker threads): dips to BELOW_NORMAL while held, restores on drop,
+    /// and refuses to touch a thread that is already at or below the target.
+    #[cfg(windows)]
+    #[test]
+    fn stt_priority_dip_lowers_and_restores() {
+        use windows::Win32::System::Threading::{
+            GetCurrentThread, GetThreadPriority, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL,
+            THREAD_PRIORITY_LOWEST, THREAD_PRIORITY_NORMAL,
+        };
+
+        std::thread::spawn(|| unsafe {
+            let baseline = GetThreadPriority(GetCurrentThread());
+            assert_eq!(baseline, THREAD_PRIORITY_NORMAL.0);
+
+            {
+                let dip = SttPriorityDip::new();
+                assert!(dip.is_some(), "dip should engage from Normal");
+                assert_eq!(
+                    GetThreadPriority(GetCurrentThread()),
+                    THREAD_PRIORITY_BELOW_NORMAL.0
+                );
+            }
+            assert_eq!(GetThreadPriority(GetCurrentThread()), baseline, "restored");
+
+            // Already lower than the target → guard must not raise it.
+            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST).unwrap();
+            assert!(SttPriorityDip::new().is_none());
+            assert_eq!(
+                GetThreadPriority(GetCurrentThread()),
+                THREAD_PRIORITY_LOWEST.0
+            );
+        })
+        .join()
+        .unwrap();
+    }
 
     fn vocab(words: &[&str]) -> Vec<VocabularyEntry> {
         words
