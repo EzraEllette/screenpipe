@@ -84,7 +84,15 @@ export async function mirrorCloudTokenToSecretStore(token: string): Promise<bool
 	const myGeneration = ++generation;
 	const promise = attemptPersist(token, myGeneration);
 	pending.set(token, promise);
-	promise.finally(() => pending.delete(token));
+	promise.finally(() => {
+		// Only remove OUR entry: after a resetCloudTokenMirror() cleared the map,
+		// a re-attempt for the same token may have registered a NEWER promise —
+		// deleting unconditionally would evict it and lose coalescing for the
+		// callers that arrive after us.
+		if (pending.get(token) === promise) {
+			pending.delete(token);
+		}
+	});
 	return promise;
 }
 

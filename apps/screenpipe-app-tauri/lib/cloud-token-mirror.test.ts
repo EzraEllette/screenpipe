@@ -149,6 +149,33 @@ describe("mirrorCloudTokenToSecretStore", () => {
 		expect(setCloudToken.mock.calls.length).toBe(1);
 	});
 
+	it("a stale attempt's cleanup can't evict a newer in-flight attempt from coalescing", async () => {
+		// Sequence: attempt A is mid-IPC when a sign-out reset clears the pending
+		// map; a re-attempt B for the same token registers anew; A then resolves.
+		// A's cleanup must NOT evict B's pending entry — otherwise a third caller
+		// arriving while B is still in flight would fire a duplicate IPC.
+		const dA = deferred<Result>();
+		const dB = deferred<Result>();
+		let call = 0;
+		respond = () => (call++ === 0 ? dA.promise : dB.promise);
+
+		const pA = mirrorCloudTokenToSecretStore("tok-a"); // attempt A in flight
+		resetCloudTokenMirror(); // clears pending
+		const pB = mirrorCloudTokenToSecretStore("tok-a"); // attempt B registers anew
+		expect(setCloudToken.mock.calls.length).toBe(2);
+
+		dA.resolve(OK); // stale A resolves — its cleanup runs
+		expect(await pA).toBe(true);
+
+		// B is still in flight; a third caller must coalesce onto it, not re-fire.
+		const pC = mirrorCloudTokenToSecretStore("tok-a");
+		expect(setCloudToken.mock.calls.length).toBe(2);
+
+		dB.resolve(OK);
+		expect(await pB).toBe(true);
+		expect(await pC).toBe(true);
+	});
+
 	it("an older token's late resolution can't clobber a newer token's cache entry", async () => {
 		// Two different tokens in flight at once (e.g. a save racing a sign-in);
 		// if the older request's IPC resolves AFTER the newer one, its outcome
