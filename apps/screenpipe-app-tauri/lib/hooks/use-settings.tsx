@@ -14,6 +14,7 @@ import { cacheAnalyticsId, cacheAnalyticsEnabled } from "@/lib/analytics-id";
 import { User } from "../utils/tauri";
 import { SettingsStore } from "../utils/tauri";
 import { installAuthInterceptor, stripSessionToken } from "../auth-guard";
+import { mirrorCloudTokenToSecretStore, resetCloudTokenMirror } from "../cloud-token-mirror";
 import { hasAppEntitlement, normalizeAppUser } from "@/lib/app-entitlement";
 import { screenpipeWebUrl } from "@/lib/web-url";
 import type { SourceCitation } from "@/lib/source-citations";
@@ -788,22 +789,22 @@ export const saveAndEncrypt = async (store: Store) => {
  * to disk. A token-less save never clears the secret store — only explicit
  * logout (`setCloudToken(null)`) does — so a save during a transient
  * pre-hydration state can't sign the user out.
+ *
+ * The mirror is deduped per token (cloud-token-mirror.ts): hydrateCloudToken
+ * puts the token back into every settings object, so without dedup every save
+ * re-wrote the same secret into db.sqlite — and on slow disks lost the write
+ * lock to the engine and warned once per save (39×/session in feedback
+ * 663c38a6).
  */
 async function setSettingsStripped(store: Store, settings: Settings) {
 	const token = settings?.user?.token;
-	// Default to "safe to write as-is" when there's no token to protect.
+	// No token to protect: safe to write as-is, and drop the mirror's dedupe
+	// cache so the next signed-in save re-persists instead of trusting it.
 	let persisted = !token;
 	if (token) {
-		try {
-			const res = await commands.setCloudToken(token);
-			if (res.status === "ok") {
-				persisted = true;
-			} else {
-				console.warn("cloud token not persisted to secret store:", res.error);
-			}
-		} catch (e) {
-			console.warn("failed to mirror cloud token to secret store:", e);
-		}
+		persisted = await mirrorCloudTokenToSecretStore(token);
+	} else {
+		resetCloudTokenMirror();
 	}
 	// Only strip the plaintext token from store.bin once it's safely in the
 	// encrypted secret store. If persistence failed, keep it on disk so the user
@@ -1276,9 +1277,19 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 	// button or 401 interceptor), bump THIS window's auth generation so an
 	// in-flight loadUser here also aborts instead of writing the user back
 	// into the shared store. Pairs with the emit() in updateSettings.
+	//
+	// Also reset THIS window's cloud-token mirror cache: the signing-out
+	// window deletes the secrets row via `commands.setCloudToken(null)`, but
+	// that window only resets its OWN mirror module instance. Without this,
+	// a re-login in another still-open window that returns the same token
+	// (deep-link accounts issue a stable per-account key) would dedupe
+	// against a token this window "persisted" earlier — skipping the
+	// set_cloud_token call that would actually re-create the row — and the
+	// stripped store.bin ends up backed by nothing.
 	useEffect(() => {
 		const unlistenPromise = listen("screenpipe-auth-signout", () => {
 			authGenerationRef.current += 1;
+			resetCloudTokenMirror();
 		});
 		return () => {
 			unlistenPromise.then((un) => un()).catch(() => {});
@@ -1541,20 +1552,13 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 				}
 			}
 
+			// updateSettings persists userData (token === `token`, forced by
+			// normalizeAppUser) through setSettingsStripped, which pushes it to
+			// the running sidecar's `Server.cloud_token` / `PiExecutor.user_token`
+			// via the mirror — see that function's docs. Without it, sign-in would
+			// only update the webview's settings and every Sonnet/Opus pipe would
+			// 403 on tier=anonymous until the engine restarts.
 			await updateSettings({ user: userData });
-
-			// Push the fresh token into the running sidecar so the
-			// `Server.cloud_token` (used by /v1/chat/completions proxy) and
-			// the `PiExecutor.user_token` (used by pi-agent's models.json
-			// apiKey) both pick up the new value on the next pipe run.
-			// Without this, sign-in only updates the webview's settings —
-			// the engine keeps whatever token it captured at boot (often
-			// `null`), and every Sonnet/Opus pipe 403s on tier=anonymous.
-			try {
-				await commands.setCloudToken(token);
-			} catch (e) {
-				console.warn("failed to push cloud token to sidecar:", e);
-			}
 		} catch (err) {
 			console.error("failed to load user:", err instanceof Error ? err.message : err);
 			throw err;
