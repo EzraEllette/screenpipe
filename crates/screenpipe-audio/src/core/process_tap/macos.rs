@@ -862,31 +862,37 @@ fn merge_exclusion_audio_object_ids(
     configured
 }
 
-/// Best-effort check: is any process other than ours currently rendering audio
-/// output anywhere on the system? Distinguishes "expected silence" (nothing is
-/// playing, so a silent tap is healthy) from "suspicious silence" (an app is
-/// playing but the tap captures zeros — e.g. per-app routing bypasses the
-/// anchored device — where a rebuild can re-anchor). Our own process always
-/// runs IO on the tap's aggregate device, so it must be excluded.
+/// pid + bundle id of every process other than ours that CoreAudio reports as
+/// rendering audio output right now. Returns `None` when CoreAudio can't
+/// answer; callers must treat that as "possibly playing" so a genuinely broken
+/// tap is never left un-rebuilt.
 ///
-/// Returns `None` when CoreAudio can't answer; callers must treat that as
-/// "possibly playing" so a genuinely broken tap is never left un-rebuilt.
-fn any_other_process_rendering_audio() -> Option<bool> {
+/// NOTE: `is_running_output` is IO *registration*, not audible playback —
+/// always-on daemons (com.apple.CoreSpeech, remote-desktop helpers) report 1
+/// around the clock (device-level DEVICE_IS_RUNNING_SOMEWHERE is polluted the
+/// same way; measured empirically). A plain "is anything rendering?" check is
+/// therefore a no-op on such machines. The watchdog instead tracks the SET of
+/// renderer pids and treats only a NEWLY appearing renderer as evidence that
+/// audible playback started.
+fn other_audio_renderers() -> Option<Vec<(i32, Option<String>)>> {
     let self_pid = std::process::id() as i32;
     let processes = ca::Process::list().ok()?;
+    let mut renderers = Vec::new();
     for process in processes {
-        // Skip only entries that positively identify as us. Entries whose pid
-        // can't be read still count: erring toward "something is playing"
-        // keeps rebuilds allowed, which can only reproduce today's behavior,
-        // never suppress a needed rebuild.
-        if process.pid().map(|pid| pid == self_pid).unwrap_or(false) {
+        // Fail-open per entry: an unreadable pid becomes sentinel -1 (still
+        // counted as a renderer once), and an unreadable is_running_output
+        // counts as rendering. Erring toward "something is playing" keeps
+        // rebuilds allowed — it can only reproduce the old behavior, never
+        // suppress a needed rebuild.
+        let pid = process.pid().unwrap_or(-1);
+        if pid == self_pid {
             continue;
         }
-        if process.is_running_output().unwrap_or(false) {
-            return Some(true);
+        if process.is_running_output().unwrap_or(true) {
+            renderers.push((pid, process.bundle_id().ok().map(|b| b.to_string())));
         }
     }
-    Some(false)
+    Some(renderers)
 }
 
 /// Create and start a CoreAudio Process Tap for system audio capture.
@@ -954,6 +960,10 @@ pub fn spawn_process_tap_capture(
         let mut silence_started: Option<std::time::Instant> = None;
         let mut last_rebuild: Option<std::time::Instant> = None;
         let mut silence_rebuild_streak: u32 = 0;
+        // Renderer pids already observed registered during silence — treated
+        // as inaudible daemons by the silence gate below. Cleared whenever the
+        // tap captures real audio, so every playback source gets re-detected.
+        let mut known_renderers: std::collections::HashSet<i32> = std::collections::HashSet::new();
 
         while !is_disconnected.load(Ordering::Relaxed) {
             std::thread::sleep(POLL);
@@ -966,6 +976,7 @@ pub fn spawn_process_tap_capture(
             if got_real_audio {
                 silence_started = None;
                 silence_rebuild_streak = 0;
+                known_renderers.clear();
             } else if window_callbacks > 0 {
                 // Callback IS firing — buffers are just silent. Start (or
                 // continue) the silence window.
@@ -989,22 +1000,52 @@ pub fn spawn_process_tap_capture(
                     .map(|t| t.elapsed() >= silence_cooldown)
                     .unwrap_or(true);
 
-            // Silence while nothing is playing anywhere is EXPECTED, not a
+            // Silence while nothing is audibly playing is EXPECTED, not a
             // broken anchor — on a quiet machine the old behavior rebuilt the
-            // tap all day (~150 generations/day observed). Only checked at the
-            // moment a rebuild would fire, so the Process::list() enumeration
-            // runs at most once per silence window, not per 500ms tick. On a
-            // CoreAudio error (None) we fall through and rebuild as before.
-            if should_rebuild_for_silence && any_other_process_rendering_audio() == Some(false) {
-                debug!(
-                    "Process Tap silent for {}s on '{}' but no other process is \
-                     rendering audio — expected silence, skipping rebuild",
-                    WATCHDOG_SILENCE_SECS, current_uid
-                );
-                should_rebuild_for_silence = false;
-                // Restart the window: once playback resumes, the tap gets a
-                // fresh 45s to prove it captures audio before any rebuild.
-                silence_started = None;
+            // tap all day (~150 generations/day observed). Registration-level
+            // signals can't tell "audible" apart from "registered" (always-on
+            // daemons like CoreSpeech report rendering 24/7), so the gate is a
+            // set-delta: renderers already registered through a silent window
+            // are treated as inaudible; only a NEWLY appearing renderer (a
+            // meeting app or player starting) counts as playback and lets the
+            // rebuild through. `known_renderers` clears whenever real audio is
+            // captured, so a tap that breaks mid-playback re-detects its source
+            // as "new" on the next window and still recovers. Only evaluated at
+            // the moment a rebuild would fire (at most once per silence
+            // window), never on the 500ms tick. On a CoreAudio error (None) we
+            // fall through and rebuild as before.
+            if should_rebuild_for_silence {
+                match other_audio_renderers() {
+                    None => {}
+                    Some(renderers) => {
+                        let new_renderers: Vec<(i32, Option<String>)> = renderers
+                            .iter()
+                            .filter(|(pid, _)| !known_renderers.contains(pid))
+                            .cloned()
+                            .collect();
+                        known_renderers.extend(renderers.iter().map(|(pid, _)| *pid));
+                        if new_renderers.is_empty() {
+                            debug!(
+                                "Process Tap silent for {}s on '{}' with no new audio \
+                                 renderer ({} long-registered) — expected silence, \
+                                 skipping rebuild",
+                                WATCHDOG_SILENCE_SECS,
+                                current_uid,
+                                renderers.len()
+                            );
+                            should_rebuild_for_silence = false;
+                            // Restart the window: once a new renderer appears, the
+                            // tap gets a fresh 45s to prove it captures audio
+                            // before any rebuild.
+                            silence_started = None;
+                        } else {
+                            debug!(
+                                "new audio renderer(s) while Process Tap silent: {:?}",
+                                new_renderers
+                            );
+                        }
+                    }
+                }
             }
 
             // Check the current default output device UID.
@@ -1211,15 +1252,82 @@ mod tests {
     }
 
     #[test]
+    fn list_output_device_running_state() {
+        // Diagnostic (run with --nocapture): for every output-capable device,
+        // print is_running_somewhere BEFORE and DURING a live tap capture.
+        // Answers two questions: (a) do registered-but-inaudible daemons
+        // (CoreSpeech, remote desktop) keep output devices "running"? (b) does
+        // our own tap's aggregate mark its anchor sub-device as running?
+        if !is_process_tap_available() {
+            eprintln!("skipping: CoreAudio Process Tap unavailable");
+            return;
+        }
+        let print_states = |label: &str| {
+            if let Ok(devices) = ca::System::devices() {
+                for d in devices {
+                    let has_output = d
+                        .output_stream_cfg()
+                        .map(|c| c.number_buffers() > 0)
+                        .unwrap_or(false);
+                    if !has_output {
+                        continue;
+                    }
+                    let running: u32 = d
+                        .prop(&ca::PropSelector::DEVICE_IS_RUNNING_SOMEWHERE.global_addr())
+                        .unwrap_or(999);
+                    println!(
+                        "{label}: uid={:?} running_somewhere={running}",
+                        d.uid().ok().map(|u| u.to_string()),
+                    );
+                }
+            }
+        };
+        print_states("before-tap");
+        let (tx, _rx) = broadcast::channel(16);
+        let is_disconnected = Arc::new(AtomicBool::new(false));
+        if let Ok((_capture, _config, uid)) =
+            build_inclusion_capture(&[std::process::id() as i32], tx, is_disconnected)
+        {
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+            println!("tap anchored to uid={uid}");
+            print_states("during-tap");
+        }
+    }
+
+    #[test]
+    fn list_current_audio_renderers() {
+        // Diagnostic (run with --nocapture): prints every process CoreAudio
+        // reports as rendering output right now. Used to check whether
+        // always-on IO daemons defeat the idle gate on a given machine.
+        let Ok(processes) = ca::Process::list() else {
+            println!("Process::list failed");
+            return;
+        };
+        for p in processes {
+            let out = p.is_running_output().unwrap_or(false);
+            if out {
+                println!(
+                    "renderer: pid={:?} bundle={:?}",
+                    p.pid().ok(),
+                    p.bundle_id().ok().map(|b| b.to_string()),
+                );
+            }
+        }
+        println!("self pid = {}", std::process::id());
+    }
+
+    #[test]
     fn other_process_audio_probe_answers() {
         // Smoke test: on any Mac with coreaudiod the probe must produce an
-        // answer (Some), never panic. Whether audio is playing depends on the
-        // machine, so only the availability of an answer is asserted — the
-        // watchdog treats None as "possibly playing" and keeps old behavior.
-        let result = any_other_process_rendering_audio();
+        // answer (Some), never panic. Which renderers are registered depends
+        // on the machine, so only the availability of an answer and the
+        // self-exclusion are asserted — the watchdog treats None as "possibly
+        // playing" and keeps old behavior.
+        let renderers = other_audio_renderers().expect("CoreAudio process list should be readable");
+        let self_pid = std::process::id() as i32;
         assert!(
-            result.is_some(),
-            "CoreAudio process list should be readable"
+            renderers.iter().all(|(pid, _)| *pid != self_pid),
+            "own process must be excluded from the renderer set"
         );
     }
 

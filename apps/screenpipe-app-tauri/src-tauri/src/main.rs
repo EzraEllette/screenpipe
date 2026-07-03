@@ -1319,7 +1319,8 @@ async fn main() {
                         // models at load time — don't fetch the 834MB whisper file for them.
                         // If the user later switches to a whisper engine, TranscriptionEngine::new
                         // downloads it in the background ("will retry at server start").
-                        "disabled" | "parakeet" | "parakeet-mlx" | "qwen3-asr" => None,
+                        "disabled" | "parakeet" | "parakeet-tdt-0.6b-v2" | "parakeet-mlx"
+                        | "qwen3-asr" => None,
                         _ => {
                             use screenpipe_audio::core::engine::AudioTranscriptionEngine;
                             Some(std::sync::Arc::new(match store_for_download.recording.audio_transcription_engine.as_str() {
