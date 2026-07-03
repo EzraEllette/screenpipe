@@ -552,7 +552,7 @@ mod tests {
         }
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     #[test]
     fn unsupported_platform_stub_reports_no_processes() {
         let snapshot = current_input_processes();
