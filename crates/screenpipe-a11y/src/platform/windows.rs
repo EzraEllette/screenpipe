@@ -111,7 +111,9 @@ impl RecordingHandle {
         &self.events_rx
     }
 
-    /// Receiver for accessibility tree snapshots
+    /// Receiver for accessibility tree snapshots. Only produces snapshots when
+    /// `capture_tree` is enabled — off by default because full-window UIA walks
+    /// freeze the foreground app (see `UiCaptureConfig::capture_tree`).
     pub fn tree_receiver(&self) -> &Receiver<WindowTreeSnapshot> {
         &self.tree_rx
     }

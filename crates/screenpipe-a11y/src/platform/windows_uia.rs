@@ -664,19 +664,25 @@ pub fn run_uia_thread(
     let interval_dur = Duration::from_millis(config.tree_capture_interval_ms);
     let mut was_lock_paused = false;
 
-    // Capture initial focused window (no input has happened yet, so input_too_recent is a no-op)
-    let initial_hwnd = unsafe { GetForegroundWindow() };
-    if !initial_hwnd.is_invalid() {
-        capture_and_send(
-            &uia,
-            initial_hwnd,
-            &config,
-            &tree_tx,
-            &focused_element,
-            &mut last_captured_hwnd,
-            &mut last_tree_hash,
-            &mut last_capture_time,
-        );
+    // Seed initial state (no input has happened yet, so input_too_recent is a no-op).
+    // Full tree walk only when tree capture is on; otherwise just prime the focused
+    // element so click/app-switch enrichment has context from the start.
+    if config.capture_tree {
+        let initial_hwnd = unsafe { GetForegroundWindow() };
+        if !initial_hwnd.is_invalid() {
+            capture_and_send(
+                &uia,
+                initial_hwnd,
+                &config,
+                &tree_tx,
+                &focused_element,
+                &mut last_captured_hwnd,
+                &mut last_tree_hash,
+                &mut last_capture_time,
+            );
+        }
+    } else if config.capture_context {
+        refresh_focused_element(&uia, &config, &focused_element);
     }
 
     // Compute the cooldown for shortening MsgWaitForMultipleObjects timeout when input is recent.
@@ -704,65 +710,9 @@ pub fn run_uia_thread(
             continue;
         }
 
-        if was_lock_paused && config.capture_tree {
+        if was_lock_paused {
             was_lock_paused = false;
-            let hwnd = unsafe { GetForegroundWindow() };
-            if !hwnd.is_invalid() {
-                capture_and_send(
-                    &uia,
-                    hwnd,
-                    &config,
-                    &tree_tx,
-                    &focused_element,
-                    &mut last_captured_hwnd,
-                    &mut last_tree_hash,
-                    &mut last_capture_time,
-                );
-            } else {
-                last_capture_time = Instant::now();
-            }
-        } else {
-            was_lock_paused = false;
-        }
-
-        // Defer tree captures while the user is actively typing/clicking. The captured
-        // tree would be stale within ms anyway, and the work would steal CPU from input
-        // threads. We keep `pending_focus` and don't bump `last_capture_time` so the
-        // capture is retried on the next loop once input pauses.
-        let skip_capture = input_too_recent(&config, start_time, &last_input_at_ms);
-
-        // Check for pending focus change (debounced)
-        if config.capture_tree && !skip_capture {
-            let should_capture = {
-                let pending = pending_focus.lock();
-                if let Some(ref pf) = *pending {
-                    pf.time.elapsed() >= debounce_dur
-                } else {
-                    false
-                }
-            };
-
-            if should_capture {
-                let hwnd = {
-                    let mut pending = pending_focus.lock();
-                    pending.take().map(|pf| pf.hwnd)
-                };
-                if let Some(hwnd) = hwnd {
-                    capture_and_send(
-                        &uia,
-                        hwnd,
-                        &config,
-                        &tree_tx,
-                        &focused_element,
-                        &mut last_captured_hwnd,
-                        &mut last_tree_hash,
-                        &mut last_capture_time,
-                    );
-                }
-            }
-
-            // Periodic safety-net re-capture
-            if config.tree_capture_interval_ms > 0 && last_capture_time.elapsed() >= interval_dur {
+            if config.capture_tree {
                 let hwnd = unsafe { GetForegroundWindow() };
                 if !hwnd.is_invalid() {
                     capture_and_send(
@@ -778,6 +728,76 @@ pub fn run_uia_thread(
                 } else {
                     last_capture_time = Instant::now();
                 }
+            } else if config.capture_context {
+                refresh_focused_element(&uia, &config, &focused_element);
+            }
+        }
+
+        // Defer tree captures while the user is actively typing/clicking. The captured
+        // tree would be stale within ms anyway, and the work would steal CPU from input
+        // threads. We keep `pending_focus` and don't bump `last_capture_time` so the
+        // capture is retried on the next loop once input pauses.
+        let skip_capture = input_too_recent(&config, start_time, &last_input_at_ms);
+
+        // Check for pending focus change (debounced). With capture_tree this walks
+        // the full window tree; without it we only refresh the focused element —
+        // a single cross-process call, same cost class as per-click ElementFromPoint —
+        // so click/app-switch/window-focus enrichment stays fresh without the
+        // foreground-app freezes full walks cause (see capture_tree in config.rs).
+        if (config.capture_tree || config.capture_context) && !skip_capture {
+            let should_capture = {
+                let pending = pending_focus.lock();
+                if let Some(ref pf) = *pending {
+                    pf.time.elapsed() >= debounce_dur
+                } else {
+                    false
+                }
+            };
+
+            if should_capture {
+                let hwnd = {
+                    let mut pending = pending_focus.lock();
+                    pending.take().map(|pf| pf.hwnd)
+                };
+                if let Some(hwnd) = hwnd {
+                    if config.capture_tree {
+                        capture_and_send(
+                            &uia,
+                            hwnd,
+                            &config,
+                            &tree_tx,
+                            &focused_element,
+                            &mut last_captured_hwnd,
+                            &mut last_tree_hash,
+                            &mut last_capture_time,
+                        );
+                    } else {
+                        refresh_focused_element(&uia, &config, &focused_element);
+                    }
+                }
+            }
+        }
+
+        // Periodic safety-net re-capture — full tree walks only.
+        if config.capture_tree
+            && !skip_capture
+            && config.tree_capture_interval_ms > 0
+            && last_capture_time.elapsed() >= interval_dur
+        {
+            let hwnd = unsafe { GetForegroundWindow() };
+            if !hwnd.is_invalid() {
+                capture_and_send(
+                    &uia,
+                    hwnd,
+                    &config,
+                    &tree_tx,
+                    &focused_element,
+                    &mut last_captured_hwnd,
+                    &mut last_tree_hash,
+                    &mut last_capture_time,
+                );
+            } else {
+                last_capture_time = Instant::now();
             }
         }
 
@@ -820,8 +840,9 @@ pub fn run_uia_thread(
 
 /// Compute the next timeout for MsgWaitForMultipleObjects.
 /// Returns the minimum of:
-/// - Time until debounce fires (if pending focus exists)
-/// - Time until periodic re-capture
+/// - Time until debounce fires (if pending focus exists) — drives tree walks
+///   (capture_tree) and focused-element refresh (capture_context)
+/// - Time until periodic re-capture (tree walks only)
 /// - Max 1000ms safety ceiling
 fn compute_next_timeout(
     pending_focus: &Arc<Mutex<Option<PendingFocus>>>,
@@ -832,22 +853,20 @@ fn compute_next_timeout(
 ) -> u64 {
     let mut min_ms: u64 = 1000; // safety ceiling
 
-    if !config.capture_tree {
-        return min_ms;
-    }
-
     // Time until debounce fires
-    if let Some(ref pf) = *pending_focus.lock() {
-        let elapsed = pf.time.elapsed();
-        if elapsed >= debounce_dur {
-            return 0; // Ready now
+    if config.capture_tree || config.capture_context {
+        if let Some(ref pf) = *pending_focus.lock() {
+            let elapsed = pf.time.elapsed();
+            if elapsed >= debounce_dur {
+                return 0; // Ready now
+            }
+            let remaining = (debounce_dur - elapsed).as_millis() as u64;
+            min_ms = min_ms.min(remaining);
         }
-        let remaining = (debounce_dur - elapsed).as_millis() as u64;
-        min_ms = min_ms.min(remaining);
     }
 
     // Time until periodic re-capture
-    if config.tree_capture_interval_ms > 0 {
+    if config.capture_tree && config.tree_capture_interval_ms > 0 {
         let elapsed = last_capture_time.elapsed();
         if elapsed >= interval_dur {
             return 0; // Ready now
@@ -857,6 +876,32 @@ fn compute_next_timeout(
     }
 
     min_ms.max(1) // avoid 0 (which means infinite in Win32)
+}
+
+/// Refresh the shared focused-element context without walking the window tree.
+/// One `GetFocusedElement` call is the same cost class as the per-click
+/// `ElementFromPoint` enrichment (a single cross-process request), unlike a
+/// full subtree walk which is serviced synchronously on the target app's UI
+/// thread and measurably freezes it. Used when `capture_tree` is off so
+/// click/app-switch/window-focus events keep their element context.
+fn refresh_focused_element(
+    uia: &UiaContext,
+    config: &UiCaptureConfig,
+    focused_element: &Arc<Mutex<Option<ElementContext>>>,
+) {
+    let hwnd = unsafe { GetForegroundWindow() };
+    if hwnd.is_invalid() {
+        return;
+    }
+
+    let (app_name, window_title, _pid) = get_window_info(hwnd);
+    if !config.should_capture_target(&app_name, window_title.as_deref()) {
+        return;
+    }
+
+    if let Some(ctx) = uia.get_focused_element() {
+        *focused_element.lock() = Some(ctx);
+    }
 }
 
 /// Process names (lowercased, with extension) of apps whose in-process UI Automation
@@ -1296,6 +1341,51 @@ mod tests {
             hwnd: HWND::default(),
             time: Instant::now() - Duration::from_secs(1),
         })));
+        let mut config = UiCaptureConfig::new();
+        config.capture_tree = false;
+        config.capture_context = false;
+        config.tree_capture_interval_ms = 1;
+
+        let wait_ms = compute_next_timeout(
+            &pending_focus,
+            Duration::from_millis(10),
+            &(Instant::now() - Duration::from_secs(1)),
+            Duration::from_millis(1),
+            &config,
+        );
+
+        assert_eq!(wait_ms, 1000);
+    }
+
+    #[test]
+    fn test_compute_next_timeout_honors_focus_debounce_for_element_refresh() {
+        // capture_tree off + capture_context on (the default config): a pending
+        // focus change must still wake the worker so the focused-element
+        // refresh runs — enrichment for clicks/app-switches depends on it.
+        let pending_focus = Arc::new(Mutex::new(Some(PendingFocus {
+            hwnd: HWND::default(),
+            time: Instant::now() - Duration::from_secs(1),
+        })));
+        let config = UiCaptureConfig::new();
+        assert!(!config.capture_tree);
+        assert!(config.capture_context);
+
+        let wait_ms = compute_next_timeout(
+            &pending_focus,
+            Duration::from_millis(10),
+            &(Instant::now() - Duration::from_secs(1)),
+            Duration::from_millis(1),
+            &config,
+        );
+
+        assert_eq!(wait_ms, 0); // debounce elapsed — ready now
+    }
+
+    #[test]
+    fn test_compute_next_timeout_ignores_periodic_interval_without_capture_tree() {
+        // Even with an interval configured, the periodic timer only drives full
+        // tree walks — it must not wake the worker when capture_tree is off.
+        let pending_focus = Arc::new(Mutex::new(None::<PendingFocus>));
         let mut config = UiCaptureConfig::new();
         config.capture_tree = false;
         config.tree_capture_interval_ms = 1;
@@ -1741,7 +1831,11 @@ mod tests {
     #[test]
     #[ignore]
     fn test_live_uia_thread_lifecycle() {
-        let config = UiCaptureConfig::new();
+        // Tree capture is off by default (freezes foreground apps) — this test
+        // exercises the tree-walk machinery, so opt in explicitly.
+        let mut config = UiCaptureConfig::new();
+        config.capture_tree = true;
+        config.tree_capture_interval_ms = 2000;
         let (tree_tx, tree_rx) = crossbeam_channel::bounded::<WindowTreeSnapshot>(64);
         let (element_tx, _element_rx) =
             crossbeam_channel::bounded::<(ClickElementRequest, ElementContext)>(64);
@@ -1785,7 +1879,7 @@ mod tests {
         assert!(snap.element_count >= 1, "Should have elements");
         assert!(!snap.app_name.is_empty(), "Should have app name");
 
-        // Wait for periodic re-capture (interval_ms=2000 by default, but dedup will skip if same)
+        // Wait for periodic re-capture (interval_ms=2000 set above, but dedup will skip if same)
         // Sleep 3s to allow interval to fire
         std::thread::sleep(std::time::Duration::from_secs(3));
 
@@ -1849,7 +1943,10 @@ mod tests {
             }
         }
 
-        let config = UiCaptureConfig::new();
+        // Opt into tree capture — off by default, and this test asserts snapshots.
+        let mut config = UiCaptureConfig::new();
+        config.capture_tree = true;
+        config.tree_capture_interval_ms = 2000;
         let (tree_tx, tree_rx) = crossbeam_channel::bounded::<WindowTreeSnapshot>(256);
         let (element_tx, _element_rx) =
             crossbeam_channel::bounded::<(ClickElementRequest, ElementContext)>(64);
