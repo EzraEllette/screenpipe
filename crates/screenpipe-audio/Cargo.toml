@@ -23,7 +23,7 @@ oasgen = { workspace = true }
 # (fixes SetThreadPriority being called with a thread id instead of a handle,
 # so the WASAPI capture/render thread priority boost silently never applied)
 # merges, then swap back to https://github.com/screenpipe/cpal.git.
-cpal = { git = "https://github.com/EzraEllette/cpal.git", rev = "93647b9b5de39d6d4fd9f0a8224fbc0921e1e6bd" }
+cpal = { git = "https://github.com/screenpipe/cpal.git" }
 
 # Wav encoding
 hound = { workspace = true }
