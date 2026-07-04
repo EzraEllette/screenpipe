@@ -20,58 +20,12 @@ const MIN_RMS_ENERGY: f32 = 0.015;
 /// prompt window. Entries past this are dropped (whole entries only).
 const INITIAL_PROMPT_CHAR_BUDGET: usize = 800;
 
-/// Dips the calling thread to BELOW_NORMAL for the lifetime of the guard and
-/// restores the previous priority on drop (including unwind). Whisper/ggml
-/// inference runs inline on the calling thread; dipping it makes STT yield
-/// CPU to the user's foreground apps during the compute burst (#4849).
-/// Scoped to the thread, not the process — nothing else is affected. The
-/// extra worker thread ggml spawns (n_threads=2) stays at Normal; this covers
-/// the calling thread's share of the compute.
-#[cfg(windows)]
-struct SttPriorityDip {
-    previous: i32,
-}
-
-#[cfg(windows)]
-impl SttPriorityDip {
-    fn new() -> Option<Self> {
-        use windows::Win32::System::Threading::{
-            GetCurrentThread, GetThreadPriority, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL,
-        };
-        // GetThreadPriority's failure sentinel (MAXLONG); not emitted by windows-rs.
-        const THREAD_PRIORITY_ERROR_RETURN: i32 = 0x7FFF_FFFF;
-        unsafe {
-            let previous = GetThreadPriority(GetCurrentThread());
-            if previous == THREAD_PRIORITY_ERROR_RETURN {
-                return None;
-            }
-            // Never RAISE the thread: if something explicitly set it to
-            // BELOW_NORMAL or lower already, leave it alone. Note this is the
-            // RELATIVE thread priority — a lowered process class (the CLI's
-            // BELOW_NORMAL, #4849) is invisible here, so there the dip stacks
-            // to one notch below the process's other threads. Intended: STT
-            // should be the first thing to yield.
-            if previous <= THREAD_PRIORITY_BELOW_NORMAL.0 {
-                return None;
-            }
-            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL)
-                .ok()
-                .map(|_| Self { previous })
-        }
-    }
-}
-
-#[cfg(windows)]
-impl Drop for SttPriorityDip {
-    fn drop(&mut self) {
-        use windows::Win32::System::Threading::{
-            GetCurrentThread, SetThreadPriority, THREAD_PRIORITY,
-        };
-        unsafe {
-            let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY(self.previous));
-        }
-    }
-}
+// Whisper/ggml inference runs inline on the calling thread; dipping it makes
+// STT yield CPU to the user's foreground apps during the compute burst
+// (#4849). The extra worker thread ggml spawns (n_threads=2) stays at Normal;
+// the guard covers the calling thread's share of the compute. The guard lives
+// in screenpipe-core (`BackgroundWorkDip`) and is shared with the vision
+// pipeline's OCR/frame-diff/encode dips.
 
 /// Build the Whisper initial_prompt from vocabulary, capped to `budget` chars by
 /// adding *whole* comma-joined entries. Never byte-slices a joined string: a cut
@@ -133,8 +87,7 @@ fn transcribe_sync(
 ) -> Result<String> {
     // Yield to foreground apps for the duration of the mel/lang/inference
     // compute below; restored when the guard drops at function exit.
-    #[cfg(windows)]
-    let _priority_dip = SttPriorityDip::new();
+    let _priority_dip = screenpipe_core::thread_priority::BackgroundWorkDip::new();
 
     let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
 
