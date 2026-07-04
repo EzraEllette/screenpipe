@@ -36,6 +36,15 @@ const ARTIFACTS = Array.from({ length: 5 }, (_, i) => ({
   created_at: null,
 }));
 
+// Failure switch consulted by the base mock at call time — flipping a flag
+// avoids wrapping/capturing mock implementations across tests, which broke
+// when vi.clearAllMocks() (which does NOT reset implementations) let one
+// test's failing wrapper leak into the next test's "original".
+// Only paged list fetches (limit=20) fail; the limit=1 background probe stays
+// healthy, mirroring the real failure mode (cheap query answers, heavy one
+// stalls) and letting tests exercise the probe-driven self-heal.
+const mockState = vi.hoisted(() => ({ failPagedMemories: false }));
+
 vi.mock("@/lib/api", () => ({
   localFetch: vi.fn(async (path: string) => {
     const ok = (body: unknown) => ({
@@ -44,6 +53,13 @@ vi.mock("@/lib/api", () => ({
       json: async () => body,
       text: async () => JSON.stringify(body),
     });
+    if (
+      mockState.failPagedMemories &&
+      path.startsWith("/memories") &&
+      path.includes("limit=20")
+    ) {
+      throw new DOMException("The operation was aborted.", "AbortError");
+    }
     if (path.startsWith("/tags/autocomplete")) {
       return ok([
         { name: "visa", count: 1, frame_count: 0, audio_count: 0, memory_count: 1 },
@@ -111,6 +127,7 @@ import {
   BrainSection,
   resetBrainViewStateForTests,
   setMemoryFetchRetryBaseDelayForTests,
+  setMemoryBackgroundCheckIntervalForTests,
 } from "../brain-section";
 import { localFetch } from "@/lib/api";
 import { emit } from "@tauri-apps/api/event";
@@ -118,6 +135,11 @@ import { useChatStore } from "@/lib/stores/chat-store";
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // Restore module-level test seams to production values so no suite inherits
+  // another's failure flag or shortened timings.
+  mockState.failPagedMemories = false;
+  setMemoryFetchRetryBaseDelayForTests(1_500);
+  setMemoryBackgroundCheckIntervalForTests(30_000);
   resetBrainViewStateForTests();
   useChatStore.getState().actions.hydrateFromDisk([
     {
@@ -227,6 +249,7 @@ describe("BrainSection type filter", () => {
     await waitFor(() => {
       expect(vi.mocked(localFetch)).toHaveBeenCalledWith(
         expect.stringContaining("/artifacts?limit=500&offset=0&q=artifact&source=glob-pipe"),
+        expect.any(Object),
       );
     });
   });
@@ -343,43 +366,47 @@ describe("BrainSection load failure", () => {
   // Regression for "failed to load brain content": a slow/contended local DB
   // made GET /memories fail; the tab silently fell back to "no memories yet",
   // which reads as data loss. Failures must retry, then show an explicit
-  // error state with a working retry button.
+  // error state with a working retry button — and the background check must
+  // reload the list on its own once the API answers again.
   beforeEach(() => {
     setMemoryFetchRetryBaseDelayForTests(1);
   });
 
-  const failMemories = () => {
-    const original = vi.mocked(localFetch).getMockImplementation()!;
-    vi.mocked(localFetch).mockImplementation(async (path: string, init?: RequestInit) => {
-      if (path.startsWith("/memories")) {
-        throw new DOMException("The operation was aborted.", "AbortError");
-      }
-      return original(path, init);
-    });
-    return original;
-  };
-
   it("retries the initial load and shows an error state, not the empty state", async () => {
-    failMemories();
+    mockState.failPagedMemories = true;
     render(<BrainSection />);
 
     await waitFor(() => expect(screen.getByTestId("brain-load-error")).toBeTruthy());
-    // More paged requests than the mount-time fetches alone (2) proves the
+    // Mount fires a single paged request; seeing more than one proves the
     // failed load was retried before surfacing the error.
     const pagedCalls = vi
       .mocked(localFetch)
       .mock.calls.filter(([path]) => String(path).includes("limit=20"));
-    expect(pagedCalls.length).toBeGreaterThanOrEqual(3);
+    expect(pagedCalls.length).toBeGreaterThanOrEqual(2);
     expect(screen.queryByText("no memories yet")).toBeNull();
   });
 
   it("recovers when the retry button is clicked", async () => {
-    const original = failMemories();
+    mockState.failPagedMemories = true;
     render(<BrainSection />);
     await waitFor(() => expect(screen.getByTestId("brain-load-error")).toBeTruthy());
 
-    vi.mocked(localFetch).mockImplementation(original);
+    mockState.failPagedMemories = false;
     fireEvent.click(screen.getByRole("button", { name: "retry" }));
+
+    await waitFor(() => expect(memoryRows().length).toBe(8));
+    expect(screen.queryByTestId("brain-load-error")).toBeNull();
+  });
+
+  it("self-heals from the background check once the API answers again", async () => {
+    setMemoryBackgroundCheckIntervalForTests(25);
+    mockState.failPagedMemories = true;
+    render(<BrainSection />);
+    await waitFor(() => expect(screen.getByTestId("brain-load-error")).toBeTruthy());
+
+    // The paged query recovers (the limit=1 probe was healthy throughout);
+    // the next background tick must reload the list without any user action.
+    mockState.failPagedMemories = false;
 
     await waitFor(() => expect(memoryRows().length).toBe(8));
     expect(screen.queryByTestId("brain-load-error")).toBeNull();

@@ -73,7 +73,11 @@ export function useUnifiedArtifacts(
       });
       if (q) params.set("q", q);
       if (source) params.set("source", source);
-      const res = await localFetch(`/artifacts?${params}`);
+      // The local API can stall under DB contention; without a deadline a
+      // hung request pins isLoading (and the skeleton) forever.
+      const res = await localFetch(`/artifacts?${params}`, {
+        signal: AbortSignal.timeout(10_000),
+      });
       if (!res.ok) {
         throw new Error(`HTTP ${res.status}`);
       }
@@ -91,7 +95,15 @@ export function useUnifiedArtifacts(
       }
       setError(null);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      // A newer fetch superseded this one — its outcome is the one that counts.
+      if (seq !== fetchSeqRef.current) return;
+      const message =
+        e instanceof DOMException && e.name === "TimeoutError"
+          ? "screenpipe's local API didn't respond in time — the database may be busy"
+          : e instanceof Error
+            ? e.message
+            : String(e);
+      setError(message);
     } finally {
       if (seq === fetchSeqRef.current) setIsLoading(false);
     }

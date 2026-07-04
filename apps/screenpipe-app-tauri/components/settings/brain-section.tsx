@@ -56,6 +56,7 @@ import {
   useUnifiedArtifacts,
   type UnifiedArtifact,
 } from "@/lib/hooks/use-unified-artifacts";
+import { useInterval } from "@/lib/hooks/use-interval";
 import { commands } from "@/lib/utils/tauri";
 import { invoke } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
@@ -175,6 +176,24 @@ let memoryFetchRetryBaseDelayMs = 1_500;
 
 export function setMemoryFetchRetryBaseDelayForTests(ms: number) {
   memoryFetchRetryBaseDelayMs = ms;
+}
+
+// Cadence of the background stale-check/self-heal poll. Mutable only so tests
+// can exercise the self-heal without waiting 30s.
+let memoryBackgroundCheckIntervalMs = 30_000;
+
+export function setMemoryBackgroundCheckIntervalForTests(ms: number) {
+  memoryBackgroundCheckIntervalMs = ms;
+}
+
+// An HTTP status from the local API is deterministic — retrying it only delays
+// the error state. Timeouts and dropped connections are the transient failures
+// the retry loop exists for.
+class HttpStatusError extends Error {
+  constructor(status: number) {
+    super(`HTTP ${status}`);
+    this.name = "HttpStatusError";
+  }
 }
 
 function timeAgo(iso: string): string {
@@ -302,6 +321,39 @@ function emptyStateMessage(
 type SortField = "created_at" | "importance";
 type SortDir = "desc" | "asc";
 
+// Explicit load-failure state for a list tab — an error must never fall
+// through to the "no <items> yet" empty state, which reads as data loss.
+function LoadErrorNotice({
+  what,
+  detail,
+  onRetry,
+  testId,
+}: {
+  what: string;
+  detail: string;
+  onRetry: () => void;
+  testId: string;
+}) {
+  return (
+    <div
+      data-testid={testId}
+      className="text-sm text-muted-foreground py-8 space-y-3 text-center"
+    >
+      <AlertCircle className="mx-auto h-5 w-5 text-destructive" />
+      <p>couldn&apos;t load {what}</p>
+      <p className="text-xs">{detail}</p>
+      <Button
+        size="sm"
+        variant="outline"
+        className="h-7 text-xs"
+        onClick={onRetry}
+      >
+        retry
+      </Button>
+    </div>
+  );
+}
+
 export function BrainSection() {
   const { toast } = useToast();
   const chatSessions = useChatStore((state) => state.sessions);
@@ -331,6 +383,10 @@ export function BrainSection() {
   // Monotonic id per fetchPage call: a newer call (filter change, retry
   // button) invalidates any in-flight attempt/backoff of an older one.
   const fetchGenerationRef = useRef(0);
+  // Controller of the newest in-flight /memories request, so a superseding
+  // call or unmount can abort it instead of letting it run to the 10s cap
+  // against an already-contended database.
+  const activeFetchAbortRef = useRef<AbortController | null>(null);
   const didMountRenderResetRef = useRef(false);
   const memoryDisplayCacheRef = useRef<Map<string, MemoryCardDisplay>>(new Map());
 
@@ -482,9 +538,11 @@ export function BrainSection() {
     total: artifactsTotal,
     sources: artifactSources,
     isLoading: artifactsLoading,
+    error: artifactsError,
     hasMore: artifactsHaveMore,
     loadMore: loadMoreArtifacts,
     deleteRegistered,
+    refresh: refreshArtifacts,
   } = useUnifiedArtifacts(
     parsedSearch.contentQuery,
     artifactSourceFilter,
@@ -523,8 +581,12 @@ export function BrainSection() {
   }, [typeFilter, filterOpen, debouncedFilterSearch]);
 
   const fetchPage = useCallback(
-    async (offset: number, append: boolean) => {
+    async (offset: number, append: boolean, opts?: { attempts?: number }) => {
       const generation = ++fetchGenerationRef.current;
+      const isStale = () => fetchGenerationRef.current !== generation;
+      // Cancel the superseded call's in-flight request — no point finishing a
+      // query whose result nobody will apply.
+      activeFetchAbortRef.current?.abort();
       if (offset === 0) {
         setLoading(true);
         setSelectedItem(null);
@@ -535,6 +597,7 @@ export function BrainSection() {
 
       const attemptFetch = async (): Promise<MemoryListResponse> => {
         const controller = new AbortController();
+        activeFetchAbortRef.current = controller;
         const timeout = setTimeout(() => controller.abort(), 10_000);
         try {
           const params = new URLSearchParams({
@@ -554,7 +617,7 @@ export function BrainSection() {
             `/memories?${params}`,
             { signal: controller.signal },
           );
-          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          if (!res.ok) throw new HttpStatusError(res.status);
           return (await res.json()) as MemoryListResponse;
         } finally {
           clearTimeout(timeout);
@@ -564,22 +627,26 @@ export function BrainSection() {
       try {
         // The initial page retries transient failures — on machines with a
         // slow or contended disk the local API can stall past the 10s abort
-        // and recover moments later. Load-more fails fast; scrolling retries.
-        const attempts = offset === 0 ? 3 : 1;
+        // and recover moments later. HTTP statuses are deterministic and fail
+        // in one attempt. Load-more gets one attempt; a failure surfaces a
+        // toast and the sentinel refetches when it re-enters the viewport.
+        const attempts = offset === 0 ? opts?.attempts ?? 3 : 1;
         let data: MemoryListResponse | undefined;
         for (let attempt = 1; ; attempt++) {
           try {
             data = await attemptFetch();
             break;
           } catch (err) {
-            if (attempt >= attempts) throw err;
+            if (err instanceof HttpStatusError || attempt >= attempts || isStale()) {
+              throw err;
+            }
             await new Promise((r) =>
               setTimeout(r, memoryFetchRetryBaseDelayMs * attempt),
             );
-            if (fetchGenerationRef.current !== generation) return;
+            if (isStale()) return;
           }
         }
-        if (fetchGenerationRef.current !== generation) return;
+        if (isStale()) return;
 
         setMemories((prev) =>
           append ? [...prev, ...data.data] : data.data,
@@ -587,21 +654,37 @@ export function BrainSection() {
         setTotal(data.pagination.total);
         setLoadError(null);
       } catch (err) {
-        if (fetchGenerationRef.current !== generation) return;
+        if (isStale()) return;
+        const message =
+          err instanceof DOMException && err.name === "AbortError"
+            ? "screenpipe's local API didn't respond in time — the database may be busy; retrying in the background"
+            : err instanceof HttpStatusError
+              ? `screenpipe's local API returned an error (${err.message})`
+              : err instanceof TypeError
+                ? "can't reach screenpipe's local API — it may be restarting; retrying in the background"
+                : String(err);
         if (offset === 0) {
-          const message =
-            err instanceof DOMException && err.name === "AbortError"
-              ? "screenpipe's local API didn't respond in time — the database may be busy; retrying in the background"
-              : String(err);
+          // Drop rows from the superseded query — leaving them up would
+          // render stale results under the new search/sort as if they
+          // matched, and a later load-more would append the new query's
+          // pages after them.
+          setMemories([]);
+          setTotal(0);
           setLoadError(message);
           toast({
             title: "failed to load memories",
             description: message,
             variant: "destructive",
           });
+        } else {
+          toast({
+            title: "failed to load more memories",
+            description: message,
+            variant: "destructive",
+          });
         }
       } finally {
-        if (fetchGenerationRef.current === generation) {
+        if (!isStale()) {
           setLoading(false);
           setLoadingMore(false);
           loadingMoreRef.current = false;
@@ -619,43 +702,60 @@ export function BrainSection() {
     ],
   );
 
-  // fetch on mount + refetch when search/tag filter changes
+  // fetch on mount + refetch when search/tag filter or sort changes. One
+  // effect (not one per trigger) so mount fires a single request — two
+  // identical concurrent generations could otherwise discard a completed
+  // success because its newer twin failed.
   useEffect(() => {
     fetchPage(0, false);
-  }, [debouncedQuery, activeTags, typeFilter]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [debouncedQuery, activeTags, typeFilter, sortField, sortDir]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // refetch when sort changes so the API returns correctly ordered data
+  // Cancel any in-flight load and its retry/backoff loop when the tab
+  // unmounts — otherwise the loop keeps querying the (possibly struggling)
+  // API for up to ~25 more seconds and fires its failure toast over whatever
+  // screen the user moved to.
   useEffect(() => {
-    fetchPage(0, false);
-  }, [sortField, sortDir]); // eslint-disable-line react-hooks/exhaustive-deps
+    return () => {
+      // Reading the refs at cleanup time is the point: bump whatever
+      // generation is current at unmount (these are stable value containers,
+      // not DOM refs, so the lint's stale-node concern doesn't apply).
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+      fetchGenerationRef.current++;
+      activeFetchAbortRef.current?.abort();
+    };
+  }, []);
 
   // Separate state for the newest memory timestamp — used only for the stale warning.
   // Kept outside fetchPage so the background poll can update it without resetting the list.
   const [newestCreatedAt, setNewestCreatedAt] = useState<string | null>(null);
   const [bgTotal, setBgTotal] = useState<number | null>(null);
 
-  // Silent background check every 30s — fetches only 1 record to detect new memories.
-  // Updates the stale-warning state without touching the displayed list or showing a spinner.
-  // Doubles as self-healing for a failed initial load: when the API answers
-  // again after an error (e.g. a temporary database stall), reload the list.
-  const loadErrorRef = useRef<string | null>(null);
-  loadErrorRef.current = loadError;
-  const fetchPageRef = useRef(fetchPage);
-  fetchPageRef.current = fetchPage;
+  // Silent background check every 30s — fetches only 1 record to detect new
+  // memories. Updates the stale-warning state without touching the displayed
+  // list or showing a spinner. Doubles as self-healing for a failed load:
+  // when the API answers again after an error (e.g. a temporary database
+  // stall), reload the list — but only while the memories error panel is
+  // actually showing and nothing is in flight, so a tick can never stomp
+  // live data or restart an ongoing retry.
+  const backgroundCheck = async () => {
+    try {
+      const res = await localFetch(
+        "/memories?limit=1&order_by=created_at&order_dir=desc",
+        { signal: AbortSignal.timeout(10_000) },
+      );
+      if (!res.ok) return;
+      const data: MemoryListResponse = await res.json();
+      setBgTotal(data.pagination.total);
+      if (data.data[0]) setNewestCreatedAt(data.data[0].created_at);
+      if (loadError && !loading && typeFilter === "memories" && memories.length === 0) {
+        fetchPage(0, false);
+      }
+    } catch {}
+  };
+  useInterval(() => void backgroundCheck(), memoryBackgroundCheckIntervalMs);
   useEffect(() => {
-    const check = async () => {
-      try {
-        const res = await localFetch("/memories?limit=1&order_by=created_at&order_dir=desc");
-        if (!res.ok) return;
-        const data: MemoryListResponse = await res.json();
-        setBgTotal(data.pagination.total);
-        if (data.data[0]) setNewestCreatedAt(data.data[0].created_at);
-        if (loadErrorRef.current) fetchPageRef.current(0, false);
-      } catch {}
-    };
-    check();
-    const id = setInterval(check, 30_000);
-    return () => clearInterval(id);
+    void backgroundCheck();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const deleteMemory = async (id: number) => {
@@ -1593,22 +1693,22 @@ export function BrainSection() {
       {(typeFilter === "memories" ? loading : artifactsLoading) ? (
         <BrainSkeleton />
       ) : typeFilter === "memories" && loadError && memories.length === 0 ? (
-        <div
-          data-testid="brain-load-error"
-          className="text-sm text-muted-foreground py-8 space-y-3 text-center"
-        >
-          <AlertCircle className="mx-auto h-5 w-5 text-destructive" />
-          <p>couldn&apos;t load memories</p>
-          <p className="text-xs">{loadError}</p>
-          <Button
-            size="sm"
-            variant="outline"
-            className="h-7 text-xs"
-            onClick={() => fetchPage(0, false)}
-          >
-            retry
-          </Button>
-        </div>
+        <LoadErrorNotice
+          testId="brain-load-error"
+          what="memories"
+          detail={loadError}
+          // A user-initiated retry fails fast (one attempt) — the automatic
+          // multi-attempt budget would leave an unexplained half-minute
+          // skeleton after an explicit click.
+          onRetry={() => fetchPage(0, false, { attempts: 1 })}
+        />
+      ) : typeFilter === "artifacts" && artifactsError && artifacts.length === 0 ? (
+        <LoadErrorNotice
+          testId="brain-artifacts-load-error"
+          what="artifacts"
+          detail={artifactsError}
+          onRetry={refreshArtifacts}
+        />
       ) : unifiedItems.length === 0 ? (
         <div className="text-sm text-muted-foreground py-8 space-y-2 text-center">
           <p>{emptyStateMessage(typeFilter, debouncedQuery, activeTags.length > 0)}</p>

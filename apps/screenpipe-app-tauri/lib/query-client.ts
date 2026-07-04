@@ -15,7 +15,11 @@ import { QueryClient } from "@tanstack/react-query";
  *    IPC, so a short freshness window de-dupes the bursty renders in panels
  *    like connections/settings without hiding real updates for long.
  *  - `retry: 1` — a local call that fails once rarely succeeds on blind retry;
- *    fail fast to the error state instead of stacking backoff.
+ *    fail fast to the error state instead of stacking backoff. Exception:
+ *    DB-heavy endpoints can stall past a timeout under disk contention and
+ *    recover moments later (seen with /memories in the brain tab) — those
+ *    opt into their own timeout+retry policy at the call site instead of
+ *    changing this default.
  *
  * A module-level singleton is intentional: there is one long-lived webview per
  * window and no SSR request boundary (Next static export), so per-request
