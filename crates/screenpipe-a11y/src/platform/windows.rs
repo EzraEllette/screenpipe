@@ -1704,6 +1704,46 @@ pub(crate) fn get_effective_app_name(hwnd: HWND, pid: u32) -> String {
     effective
 }
 
+/// Cheaply resolve the focused window's (app name, window title) without any
+/// UIA/COM calls: `GetForegroundWindow` + cached process-name lookup +
+/// `GetWindowTextW`. Used by the engine's capture throttles (walk budget,
+/// terminal-OCR rate limit) to identify the focused app on non-AppSwitch
+/// triggers. The app name goes through [`get_effective_app_name`] so it matches
+/// the names produced by the tree walker and app-switch events.
+///
+/// Returns `None` when there is no usable foreground window, including the
+/// transient shell-internal windows (MSCTFIME UI, Shell_TrayWnd) that briefly
+/// steal focus on clicks — attributing those to explorer.exe would poison the
+/// per-app throttle state.
+pub fn get_focused_app_window_lightweight() -> Option<(String, Option<String>)> {
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        if hwnd.is_invalid() {
+            return None;
+        }
+        if is_transient_shell_window(hwnd) {
+            return None;
+        }
+
+        let mut pid: u32 = 0;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        if pid == 0 {
+            return None;
+        }
+        let app_name = get_effective_app_name(hwnd, pid);
+
+        let mut title_buf = [0u16; 512];
+        let len = GetWindowTextW(hwnd, &mut title_buf);
+        let window_title = if len > 0 {
+            Some(String::from_utf16_lossy(&title_buf[..len as usize]))
+        } else {
+            None
+        };
+
+        Some((app_name, window_title))
+    }
+}
+
 fn get_process_name_uncached(pid: u32) -> Option<String> {
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Diagnostics::ToolHelp::{
