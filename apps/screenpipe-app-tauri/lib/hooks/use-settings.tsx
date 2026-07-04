@@ -113,6 +113,7 @@ export interface ChatMessage {
 	}>;
 	interruptedBySteer?: boolean;
 	steeredResponse?: boolean;
+	stoppedByUser?: boolean;
 	/** Wall-clock work duration for coalesced assistant messages (pipe
 	 *  runs). Used by the chat renderer as a fallback when no thinking
 	 *  blocks contributed a duration, so the work-group can still show
@@ -300,6 +301,10 @@ export type Settings = SettingsStore & {
 	windowsInputAecEnabled?: boolean;
 	/** Experimental: request Apple VoiceProcessingIO AEC on the default macOS microphone. */
 	macosInputVpioEnabled?: boolean;
+	/** Request Screenpipe's software Acoustic Echo Cancellation (via sonora WebRTC AEC3). */
+	screenpipeAecEnabled?: boolean;
+	/** Selected echo cancellation engine. Missing values default to off. */
+	aecMode?: "off" | "screenpipe" | "macos" | "windows";
 	/** Continue recording audio when the screen is locked (default: false) */
 	recordWhileLocked?: boolean;
 	/** Auto-delete local data older than retention days (free alternative to cloud archive) */
@@ -316,8 +321,6 @@ export type Settings = SettingsStore & {
 	localRetentionMode?: "media" | "lean" | "all";
 	/** Apply macOS vibrancy effect to sidebar for a translucent glass look */
 	translucentSidebar?: boolean;
-	/** Hide model "thinking" reasoning blocks in chat (default: true) */
-	hideThinkingBlocks?: boolean;
 	/** Show the chat suggestion chips above the input — the "follow up"
 	 *  questions and the connection-aware suggested prompts. The single inline
 	 *  X on the chips flips this to false; re-enable from Settings → Display.
@@ -646,6 +649,7 @@ let DEFAULT_SETTINGS: Settings = {
 			searchShortcut: "Control+Super+K",
 			lockVaultShortcut: "Super+Shift+L",
 			disableVision: false,
+			disableScreenshots: false,
 			useAllMonitors: true,
 			showShortcutOverlay: true,
 			chatHistory: {
@@ -671,6 +675,8 @@ let DEFAULT_SETTINGS: Settings = {
 			experimentalCoreaudioSystemAudio: false,
 			windowsInputAecEnabled: false,
 			macosInputVpioEnabled: false,
+			screenpipeAecEnabled: false,
+			aecMode: "off",
 			recordWhileLocked: false,
 			localRetentionEnabled: false,
 			localRetentionDays: 14,
@@ -715,12 +721,30 @@ let _store: Promise<Store> | undefined;
 
 export const getStore = async () => {
 	if (!_store) {
-		// Use homeDir to match Rust backend's get_base_dir which uses $HOME/.screenpipe
-		const dir = await homeDir();
-		_store = Store.load(`${dir}/.screenpipe/store.bin`, {
-			autoSave: false,
-			defaults: {},
-		});
+		_store = (async () => {
+			// Resolve the base dir via the backend so the webview opens the same
+			// store.bin as Rust (get_base_dir honors SCREENPIPE_DATA_DIR); a
+			// hardcoded ~/.screenpipe here splits the settings store in two
+			// whenever that override is set.
+			let baseDir: string | null = null;
+			try {
+				const res = await commands.getScreenpipeBaseDir();
+				if (res.status === "ok") {
+					baseDir = res.data;
+				} else {
+					console.warn("get_screenpipe_base_dir failed, using ~/.screenpipe:", res.error);
+				}
+			} catch (e) {
+				console.warn("get_screenpipe_base_dir unavailable, using ~/.screenpipe:", e);
+			}
+			if (!baseDir) {
+				baseDir = `${await homeDir()}/.screenpipe`;
+			}
+			return Store.load(`${baseDir}/store.bin`, {
+				autoSave: false,
+				defaults: {},
+			});
+		})();
 	}
 	return _store;
 };

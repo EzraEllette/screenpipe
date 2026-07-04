@@ -18,6 +18,8 @@ import { AppEntitlementGate } from "@/components/app-entitlement-gate";
 import { DeeplinkHandler } from "@/components/deeplink-handler";
 import { usePathname } from "next/navigation";
 import { readCachedAnalyticsId } from "@/lib/analytics-id";
+import { QueryClientProvider } from "@tanstack/react-query";
+import { queryClient } from "@/lib/query-client";
 
 /// Global mount point for the updater event listener. Lives here (not in
 /// per-page hooks) so the listener is registered for the lifetime of the
@@ -61,7 +63,12 @@ export const Providers = forwardRef<
   useEffect(() => {
     if (typeof window !== "undefined") {
       const isDebug = process.env.TAURI_ENV_DEBUG === "true";
-      if (isDebug) return;
+      // Skip in E2E too: the suite runs a release-like build, so posthog would
+      // otherwise init, load the live `app-announcement` flag, and pop a modal
+      // over every spec (clean localStorage each run = empty dismissed-set) —
+      // plus pollute prod analytics with test traffic.
+      const isE2E = process.env.NEXT_PUBLIC_SCREENPIPE_E2E === "true";
+      if (isDebug || isE2E) return;
       // Bootstrap with the stable per-install id (mirrors settings.analyticsId,
       // cached by the identify() effect in use-settings) so EVERY event — incl.
       // ones fired by overlay windows like the floating search bar before the
@@ -85,6 +92,7 @@ export const Providers = forwardRef<
   return (
     <Suspense>
     <NuqsAdapter>
+      <QueryClientProvider client={queryClient}>
       <SettingsProvider>
         <AuthGuard>
           <ThemeProvider defaultTheme="system" storageKey="screenpipe-ui-theme">
@@ -104,6 +112,7 @@ export const Providers = forwardRef<
           </ThemeProvider>
         </AuthGuard>
       </SettingsProvider>
+      </QueryClientProvider>
     </NuqsAdapter>
     </Suspense>
   );

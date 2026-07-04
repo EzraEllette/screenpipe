@@ -2345,6 +2345,27 @@ const OAUTH_SCOPE_VARIANTS: Record<
   ],
 };
 
+export function getOAuthFallbackMessage(
+  integrationId: string,
+  phase: "pending" | "failed",
+  error?: unknown
+): string | null {
+  if (integrationId !== "zendesk") return null;
+  if (phase === "pending") {
+    return "If Zendesk shows Invalid Authorization Request / No such client, use advanced: connect with a token instead.";
+  }
+  const reason = error instanceof Error ? error.message : String(error ?? "");
+  if (
+    reason.includes("timed out") ||
+    reason.includes("channel closed") ||
+    reason.includes("No such client") ||
+    reason.includes("Invalid Authorization Request")
+  ) {
+    return "Zendesk OAuth is not available for this subdomain yet. Use advanced: connect with a token instead.";
+  }
+  return "Zendesk OAuth failed. Use advanced: connect with a token instead.";
+}
+
 function OAuthPanel({
   integrationId,
   integrationName,
@@ -2365,8 +2386,10 @@ function OAuthPanel({
   const [status, setStatus] = useState<"idle" | "loading">("idle");
   const [accounts, setAccounts] = useState<OAuthAccount[]>([]);
   const [disconnecting, setDisconnecting] = useState<string | null>(null);
+  const [oauthMessage, setOauthMessage] = useState<string | null>(null);
   // Ref guard so a cancelled or timed-out connect attempt doesn't update state after cancel.
   const connectingRef = useRef(false);
+  const fallbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Zendesk (and any future per-account provider) authorizes against the
   // customer's own subdomain, so collect it up front and pass it as the OAuth
   // instance. The token is then stored under oauth:zendesk:{subdomain}.
@@ -2380,6 +2403,15 @@ function OAuthPanel({
     ? initialScopeVariant!
     : scopeVariants?.[0]?.id ?? null;
   const [scopeVariant, setScopeVariant] = useState(defaultScopeVariant);
+
+  const clearFallbackTimer = useCallback(() => {
+    if (fallbackTimerRef.current) {
+      clearTimeout(fallbackTimerRef.current);
+      fallbackTimerRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => () => clearFallbackTimer(), [clearFallbackTimer]);
 
   useEffect(() => {
     if (!scopeVariants?.some((v) => v.id === initialScopeVariant)) return;
@@ -2418,19 +2450,37 @@ function OAuthPanel({
     const instanceArg = isSubdomainProvider ? subdomain.trim() : null;
     if (isSubdomainProvider && !instanceArg) return;
     setStatus("loading");
+    setOauthMessage(null);
     connectingRef.current = true;
+    clearFallbackTimer();
+    const pendingMessage = getOAuthFallbackMessage(integrationId, "pending");
+    if (pendingMessage) {
+      fallbackTimerRef.current = setTimeout(() => {
+        if (connectingRef.current) setOauthMessage(pendingMessage);
+      }, 8000);
+    }
     try {
       const res = await commands.oauthConnect(integrationId, instanceArg, scopeVariant);
       if (!connectingRef.current) return; // cancelled — handleCancel owns the UI
       if (res.status === "ok" && res.data.connected) {
+        clearFallbackTimer();
+        setOauthMessage(null);
         await fetchStatus();
         notifyConnectionsUpdated();
         onConnected?.();
       } else {
+        clearFallbackTimer();
+        setOauthMessage(
+          getOAuthFallbackMessage(integrationId, "failed", res.status === "error" ? res.error : null)
+        );
         setStatus("idle");
       }
-    } catch {
-      if (connectingRef.current) setStatus("idle");
+    } catch (error) {
+      clearFallbackTimer();
+      if (connectingRef.current) {
+        setOauthMessage(getOAuthFallbackMessage(integrationId, "failed", error));
+        setStatus("idle");
+      }
     } finally {
       connectingRef.current = false;
       setStatus("idle");
@@ -2439,6 +2489,7 @@ function OAuthPanel({
 
   const handleCancel = async () => {
     connectingRef.current = false;
+    clearFallbackTimer();
     // Stay in "loading" (cancel button visible, connect button hidden) until the
     // backend has actually dropped the pending sender. Otherwise a quick
     // cancel→connect sequence can race: a late-arriving oauth_cancel would
@@ -2566,6 +2617,12 @@ function OAuthPanel({
           </Button>
         )}
       </div>
+      {oauthMessage && (
+        <div className="flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-2.5 py-2 text-[11px] text-muted-foreground">
+          <AlertCircle className="mt-0.5 h-3 w-3 shrink-0 text-amber-600" />
+          <span>{oauthMessage}</span>
+        </div>
+      )}
     </div>
   );
 }
@@ -3282,7 +3339,7 @@ const PLAUD_MCP_URL = "https://mcp.plaud.ai/mcp";
 // (/mcp), NOT the legacy /sse transport the engine can't drive. Each id
 // must match a registered connector id so it lands on the right tile.
 // (DCR support verified live against each provider's OAuth metadata.)
-const MCP_OAUTH_PROVIDERS: {
+export const MCP_OAUTH_PROVIDERS: {
   id: string;
   name: string;
   url: string;
@@ -3851,17 +3908,30 @@ export function ConnectionsSection({
         return;
       }
       const body = await r.json();
-      const list = (body?.data ?? []) as { enabled: boolean; url?: string }[];
+      const list = (body?.data ?? []) as { id: string; enabled: boolean; url?: string }[];
       const enabled = list.filter(s => s.enabled);
       setCustomMcpServerCount(list.length);
       setCustomMcpEnabledCount(enabled.length);
       setCustomMcpConnected(enabled.length > 0);
       setKrispConnected(list.some(s => s.enabled && (s.url ?? "").replace(/\/+$/, "") === KRISP_MCP_URL));
       setPlaudConnected(list.some(s => s.enabled && (s.url ?? "").replace(/\/+$/, "") === PLAUD_MCP_URL));
-      const enabledUrls = new Set(list.filter(s => s.enabled).map(s => (s.url ?? "").replace(/\/+$/, "")));
-      setMcpProviderConnected(Object.fromEntries(
-        MCP_OAUTH_PROVIDERS.map(p => [p.id, enabledUrls.has(p.url.replace(/\/+$/, ""))])
-      ));
+      const providerStatuses = await Promise.all(
+        MCP_OAUTH_PROVIDERS.map(async p => {
+          const server = list.find(s => (s.url ?? "").replace(/\/+$/, "") === p.url.replace(/\/+$/, ""));
+          if (!server) return [p.id, false] as const;
+          try {
+            const sr = await localFetch(
+              `/mcp-servers/${encodeURIComponent(server.id)}/oauth/status`
+            );
+            if (!sr.ok) return [p.id, false] as const;
+            const sb = await sr.json();
+            return [p.id, !!sb?.data?.connected] as const;
+          } catch {
+            return [p.id, false] as const;
+          }
+        })
+      );
+      setMcpProviderConnected(Object.fromEntries(providerStatuses));
       setExcalidrawConnected(list.some(s => s.enabled && (s.url ?? "").replace(/\/+$/, "") === EXCALIDRAW_MCP_URL));
     }).catch(() => {
       setCustomMcpConnected(false);

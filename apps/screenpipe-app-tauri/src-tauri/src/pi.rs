@@ -163,7 +163,7 @@ fn build_command_for_path(path: &str) -> Command {
         if let Some(bun) = find_bun_executable() {
             if let Some(js) = resolve_bun_global_entrypoint(path) {
                 info!("Resolved bun shim {} → JS entrypoint {}", path, js);
-                let mut cmd = Command::new(bun);
+                let mut cmd = bun_command(&bun);
                 cmd.arg(js);
                 return cmd;
             }
@@ -173,7 +173,7 @@ fn build_command_for_path(path: &str) -> Command {
             Command::new(path)
         }
     } else if let Some(bun) = find_bun_executable() {
-        let mut cmd = Command::new(bun);
+        let mut cmd = bun_command(&bun);
         cmd.arg(path);
         cmd
     } else {
@@ -186,7 +186,7 @@ fn build_command_for_path(path: &str) -> Command {
 #[cfg(not(windows))]
 fn build_command_for_path(path: &str) -> Command {
     if let Some(bun) = find_bun_executable() {
-        let mut cmd = Command::new(bun);
+        let mut cmd = bun_command(&bun);
         cmd.arg(path);
         cmd
     } else {
@@ -873,6 +873,15 @@ fn apply_no_window(_cmd: &mut Command) {
     }
 }
 
+fn bun_command(bun: &str) -> Command {
+    let mut cmd = Command::new(bun);
+    // Single source of truth in screenpipe-core: on Linux, bun subprocesses
+    // must not inherit the app's LD_LIBRARY_PATH, or bundled runtimes like
+    // AppImage can make bun crash before it prints diagnostics.
+    screenpipe_core::agents::pi::scrub_bun_runtime_env(&mut cmd);
+    cmd
+}
+
 fn run_command_output(mut cmd: Command) -> Result<Output, String> {
     apply_no_window(&mut cmd);
     cmd.output().map_err(|e| format!("failed to spawn: {}", e))
@@ -936,7 +945,53 @@ fn verify_pi_package_install(install_dir: &Path) -> Result<(), String> {
     }
 }
 
+/// Install Pi dependencies, self-healing on verification failure.
+///
+/// An interrupted cache→node_modules copy (app quit, AV lock, EPERM) leaves a
+/// package dir without `dist/`, and a later `bun install` trusts bun.lock
+/// ("no changes") without re-checking file contents — so the corruption is
+/// permanent until node_modules is cleared. Never ask the user to delete
+/// directories: retry once with node_modules+lockfiles cleared, then once
+/// more with the bun cache wiped too, before reporting failure.
 fn run_pi_package_install(install_dir: &Path, bun: &str) -> Result<(), String> {
+    let first = run_pi_package_install_once(install_dir, bun);
+    let Err(e) = first else { return Ok(()) };
+    if !e.contains("dependency verification failed") {
+        return Err(e);
+    }
+
+    warn!(
+        "Pi install verification failed; self-healing (clearing node_modules + lockfiles): {}",
+        e
+    );
+    clear_pi_install_artifacts(install_dir);
+    seed_pi_package_json(install_dir);
+    let second = run_pi_package_install_once(install_dir, bun);
+    let Err(e) = second else {
+        info!("Pi install self-heal succeeded after clearing node_modules");
+        return Ok(());
+    };
+    if !e.contains("dependency verification failed") {
+        return Err(e);
+    }
+
+    warn!(
+        "Pi install still failing verification; self-healing (wiping bun cache too): {}",
+        e
+    );
+    clear_pi_install_artifacts(install_dir);
+    let _ = std::fs::remove_dir_all(install_dir.join(".bun-cache"));
+    seed_pi_package_json(install_dir);
+    match run_pi_package_install_once(install_dir, bun) {
+        Ok(()) => {
+            info!("Pi install self-heal succeeded after wiping bun cache");
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
+}
+
+fn run_pi_package_install_once(install_dir: &Path, bun: &str) -> Result<(), String> {
     let cache_dir = install_dir.join(".bun-cache");
     let _ = std::fs::create_dir_all(&cache_dir);
 
@@ -950,7 +1005,7 @@ fn run_pi_package_install(install_dir: &Path, bun: &str) -> Result<(), String> {
         screenpipe_core::agents::pi::bun_version_string(bun),
     );
 
-    let mut bun_cmd = Command::new(bun);
+    let mut bun_cmd = bun_command(bun);
     bun_cmd
         .current_dir(install_dir)
         .env("BUN_INSTALL_CACHE_DIR", &cache_dir)
@@ -1010,14 +1065,23 @@ fn find_local_pi_entrypoint() -> Option<String> {
 
 fn find_pi_executable() -> Option<String> {
     // 1. Check screenpipe-managed local install first (preferred — we control the deps)
-    if let Some(js) = find_local_pi_entrypoint() {
-        if let Some(install_dir) = pi_local_install_dir() {
-            if let Some(error) = local_pi_install_integrity_error(&install_dir) {
-                warn!("Ignoring unhealthy local pi-agent install: {}", error);
-                return None;
+    if let Some(install_dir) = pi_local_install_dir() {
+        if install_dir.join("package.json").exists() {
+            // A managed install exists (or was attempted). Never fall through
+            // to global installs from here: a stale global bun shim crash-loops
+            // with a misleading module-not-found error, hiding the real install
+            // failure that pi_start would otherwise surface.
+            match local_pi_install_integrity_error(&install_dir) {
+                None => return find_local_pi_entrypoint(),
+                Some(error) => {
+                    warn!(
+                        "Local pi-agent install is unhealthy, not falling back to global pi: {}",
+                        error
+                    );
+                    return None;
+                }
             }
         }
-        return Some(js);
     }
 
     // 2. Fallback to global install locations
@@ -1167,6 +1231,20 @@ fn ensure_save_artifact_extension(project_dir: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn ensure_connection_gate_extension(project_dir: &str) -> Result<(), String> {
+    let ext_dir = Path::new(project_dir)
+        .join(".pi")
+        .join("extensions");
+    std::fs::create_dir_all(&ext_dir)
+        .map_err(|e| format!("Failed to create extensions dir: {}", e))?;
+    let ext_path = ext_dir.join("connection-gate.ts");
+    let ext_content = include_str!("../assets/extensions/connection-gate.ts");
+    std::fs::write(&ext_path, ext_content)
+        .map_err(|e| format!("Failed to write connection-gate extension: {}", e))?;
+    debug!("connection-gate extension installed at {:?}", ext_path);
+    Ok(())
+}
+
 /// Configuration for which AI provider Pi should use
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
@@ -1189,6 +1267,25 @@ pub struct PiProviderConfig {
 
 fn default_max_tokens() -> i32 {
     4096
+}
+
+fn model_supports_reasoning(provider: &str, model: &str) -> bool {
+    let model = model.to_ascii_lowercase();
+    match provider {
+        "openai-byok" | "openai-chatgpt" | "custom" => {
+            model.starts_with("gpt-5")
+                || model.starts_with("o1")
+                || model.starts_with("o3")
+                || model.starts_with("o4")
+        }
+        "anthropic-byok" => model.starts_with("claude-"),
+        "ollama" => {
+            model.contains("thinking")
+                || model.starts_with("qwen3")
+                || model.starts_with("deepseek-r1")
+        }
+        _ => false,
+    }
 }
 
 /// Build the providers to add/update in models.json for pi-coding-agent.
@@ -1261,6 +1358,8 @@ async fn build_models_json(
                     "openai-completions"
                 };
 
+                let resolved_model = resolve_pi_model(&config.model, provider_name);
+
                 // Detect endpoints that require `max_completion_tokens` instead
                 // of `max_tokens`. Azure Foundry, Azure OpenAI (newer deployments),
                 // and GPT-5 / o-series models all reject `max_tokens`.
@@ -1268,14 +1367,18 @@ async fn build_models_json(
                     || base_url.contains("openai.azure.com")
                     || base_url.contains("services.ai.azure.com")
                     || base_url.contains("cognitiveservices.azure.com")
-                    || config.model.starts_with("gpt-5")
-                    || config.model.starts_with("o1")
-                    || config.model.starts_with("o3")
-                    || config.model.starts_with("o4");
+                    || resolved_model.starts_with("gpt-5")
+                    || resolved_model.starts_with("o1")
+                    || resolved_model.starts_with("o3")
+                    || resolved_model.starts_with("o4");
 
                 let mut model_def = serde_json::Map::new();
-                model_def.insert("id".into(), json!(config.model));
-                model_def.insert("name".into(), json!(config.model));
+                model_def.insert("id".into(), json!(resolved_model));
+                model_def.insert("name".into(), json!(resolved_model));
+                model_def.insert(
+                    "reasoning".into(),
+                    json!(model_supports_reasoning(provider_name, &resolved_model)),
+                );
                 model_def.insert("input".into(), json!(["text", "image"]));
                 model_def.insert("maxTokens".into(), json!(config.max_tokens));
                 model_def.insert(
@@ -1521,6 +1624,28 @@ fn resolve_screenpipe_model(requested: &str, provider: &str) -> String {
     base.to_string()
 }
 
+fn resolve_chatgpt_model(requested: &str) -> String {
+    let model = requested.trim();
+    if model.to_ascii_lowercase().ends_with("-codex") {
+        let base = &model[..model.len() - "-codex".len()];
+        let base = if base.is_empty() { "gpt-5.5" } else { base };
+        warn!(
+            "resolved unsupported ChatGPT Codex model '{}' -> '{}'",
+            requested, base
+        );
+        return base.to_string();
+    }
+    model.to_string()
+}
+
+fn resolve_pi_model(requested: &str, provider: &str) -> String {
+    match provider {
+        "screenpipe" => resolve_screenpipe_model(requested, provider),
+        "openai-chatgpt" => resolve_chatgpt_model(requested),
+        _ => requested.to_string(),
+    }
+}
+
 /// Soft cap on concurrent Pi sessions. Each session is its own bun + node
 /// subprocess holding ~150–300 MB RSS plus a live LLM connection, so we
 /// guard against accidental fork-bombs (a misbehaving caller spawning
@@ -1561,6 +1686,10 @@ pub async fn pi_start_inner(
     // Save artifact: lets the agent register deliverables in the Artifacts library.
     ensure_save_artifact_extension(&project_dir)?;
 
+    // Connection gate: lets Pi block on inline app authorization before
+    // continuing app-dependent tasks.
+    ensure_connection_gate_extension(&project_dir)?;
+
     // Ensure Pi is configured with the user's provider
     ensure_pi_config(user_token.as_deref(), provider_config.as_ref()).await?;
 
@@ -1576,7 +1705,7 @@ pub async fn pi_start_inner(
                 "custom" if !config.url.is_empty() => "custom",
                 "screenpipe-cloud" | "pi" | _ => "screenpipe",
             };
-            let model = resolve_screenpipe_model(&config.model, provider_name);
+            let model = resolve_pi_model(&config.model, provider_name);
             (provider_name.to_string(), model)
         }
         None => ("screenpipe".to_string(), "auto".to_string()),
@@ -2338,7 +2467,7 @@ pub async fn pi_start_inner(
                         m.child = None;
                         m.stdin = None;
                         let install_hint = take_pi_install_error()
-                            .map(|e| format!(" The Pi install previously failed: {} Try removing ~/.screenpipe/pi-agent and restarting.", e))
+                            .map(|e| format!(" The Pi install previously failed: {} Restart screenpipe to retry the install automatically.", e))
                             .unwrap_or_default();
                         let stderr_hint = first_stderr_line
                             .lock()
@@ -2417,13 +2546,31 @@ async fn foreground_connections_context(app: &AppHandle) -> String {
     screenpipe_connect::connections::render_context(&data_dir, api.port, store.as_ref()).await
 }
 
-async fn attach_foreground_connections_context(app: &AppHandle, message: String) -> String {
+async fn attach_foreground_connections_context(
+    app: &AppHandle,
+    sid: &str,
+    message: String,
+) -> String {
+    // Internal title-generation sessions (`__title:` prefix) must not receive
+    // the connections context: it wastes tokens on a throwaway title prompt
+    // and, if it ever reached the store, would title the chat after the blob.
+    if sid.starts_with("__title:") {
+        return message;
+    }
     let ctx = foreground_connections_context(app).await;
     if ctx.trim().is_empty() {
         return message;
     }
+    // Wrap the per-turn context in a tag so the frontend can strip it back
+    // out before persisting/titling the user turn (mirrors the
+    // `<conversation_history>` plumbing). A free-text prefix here leaked into
+    // chat titles and spawned a duplicate "Current Screenpipe connected
+    // integrations context" chat via the background router — the tag makes the
+    // wrapper unambiguously removable end-to-end. Keep the tag name in sync
+    // with `stripPromptPlumbing` / `extractConnectionsContextUserText` on the
+    // TypeScript side.
     format!(
-        "Current Screenpipe connected integrations context, refreshed for this turn:\n{}\n\nUser request:\n{}",
+        "<connections_context>\nCurrent Screenpipe connected integrations context, refreshed for this turn:\n{}\n</connections_context>\n\n{}",
         ctx, message
     )
 }
@@ -2472,7 +2619,7 @@ pub async fn pi_prompt(
     };
 
     let preview = display_preview.unwrap_or_else(|| message.clone());
-    let message = attach_foreground_connections_context(&app, message).await;
+    let message = attach_foreground_connections_context(&app, &sid, message).await;
     let cmd = build_prompt_command(message, images)?;
     let (queue_id, rx) = queue
         .send_prompt(
@@ -2514,7 +2661,7 @@ pub async fn pi_queue_prompt(
     };
 
     let preview = display_preview.unwrap_or_else(|| message.clone());
-    let message = attach_foreground_connections_context(&app, message).await;
+    let message = attach_foreground_connections_context(&app, &sid, message).await;
     let cmd = build_prompt_command(message, images)?;
     let (queue_id, _rx) = queue
         .send_prompt(
@@ -2552,7 +2699,7 @@ pub async fn pi_steer(
             .ok_or("Pi command queue not initialized")?
     };
 
-    let message = attach_foreground_connections_context(&app, message).await;
+    let message = attach_foreground_connections_context(&app, &sid, message).await;
     let mut cmd = json!({
         "type": "steer",
         "message": message,
@@ -2641,6 +2788,41 @@ pub async fn pi_pending(
         None => return Ok(Vec::new()),
     };
     Ok(qs.queued_snapshot())
+}
+
+/// Answer a Pi extension UI request. The request id must be the id from Pi's
+/// `extension_ui_request` event; the SDK uses it to resume the waiting tool.
+#[tauri::command]
+#[specta::specta]
+pub async fn pi_extension_ui_response(
+    state: State<'_, PiState>,
+    session_id: Option<String>,
+    request_id: String,
+    response: serde_json::Value,
+) -> Result<(), String> {
+    let sid = session_id.unwrap_or_else(|| "chat".to_string());
+    if request_id.trim().is_empty() {
+        return Err("extension UI request id is required".to_string());
+    }
+    let queue = {
+        let mut pool = state.0.lock().await;
+        let m = pool.sessions.get_mut(&sid).ok_or("Pi not initialized")?;
+        if !m.is_running() {
+            return Err("Pi is not running".to_string());
+        }
+        m.last_activity = std::time::Instant::now();
+        m.queue_handle
+            .clone()
+            .ok_or("Pi command queue not initialized")?
+    };
+
+    let mut payload = response;
+    let obj = payload
+        .as_object_mut()
+        .ok_or("extension UI response must be an object".to_string())?;
+    obj.insert("type".to_string(), json!("extension_ui_response"));
+    obj.insert("id".to_string(), json!(request_id));
+    queue.send_raw_immediate(payload).await
 }
 
 /// Abort current Pi operation. Priority command — cancels all pending commands
@@ -2772,7 +2954,7 @@ pub async fn pi_set_model(
         "custom" if !provider_config.url.is_empty() => "custom",
         "screenpipe-cloud" | "pi" | _ => "screenpipe",
     };
-    let pi_model = resolve_screenpipe_model(&provider_config.model, pi_provider);
+    let pi_model = resolve_pi_model(&provider_config.model, pi_provider);
 
     let queue = {
         let mut pool = state.0.lock().await;
@@ -3213,7 +3395,7 @@ mod tests {
     #[cfg(windows)]
     use super::parse_where_output;
     #[cfg(not(windows))]
-    use super::{find_bun_executable, find_pi_executable};
+    use super::{bun_command, find_bun_executable, find_pi_executable};
     use serde_json::{json, Value};
     use std::io::{BufRead, BufReader, Write};
     use std::process::{Command, Stdio};
@@ -3487,7 +3669,7 @@ error: InstallFailed extracting tarball"#;
     fn spawn_pi_rpc(provider: &str, model: &str) -> Option<std::process::Child> {
         let pi_path = find_pi_executable()?;
         let mut cmd = if let Some(bun) = find_bun_executable() {
-            let mut c = Command::new(bun);
+            let mut c = bun_command(&bun);
             c.arg(&pi_path);
             c
         } else {
@@ -3961,7 +4143,7 @@ error: InstallFailed extracting tarball"#;
 
     // -- build_models_json tests --
 
-    use super::{build_models_json, PiProviderConfig};
+    use super::{build_models_json, resolve_pi_model, PiProviderConfig};
 
     fn make_provider_config(provider: &str, model: &str) -> PiProviderConfig {
         PiProviderConfig {
@@ -3972,6 +4154,23 @@ error: InstallFailed extracting tarball"#;
             max_tokens: 4096,
             system_prompt: None,
         }
+    }
+
+    #[test]
+    fn test_resolve_pi_model_maps_unsupported_chatgpt_codex_model() {
+        assert_eq!(
+            resolve_pi_model("gpt-5.5-codex", "openai-chatgpt"),
+            "gpt-5.5"
+        );
+        assert_eq!(resolve_pi_model("gpt-5.5", "openai-chatgpt"), "gpt-5.5");
+        assert_eq!(
+            resolve_pi_model("gpt-5.3-codex", "openai-chatgpt"),
+            "gpt-5.3"
+        );
+        assert_eq!(
+            resolve_pi_model("gpt-5.5-codex", "screenpipe"),
+            "gpt-5.5-codex"
+        );
     }
 
     #[tokio::test]
@@ -4022,6 +4221,36 @@ error: InstallFailed extracting tarball"#;
         let models = openai["models"].as_array().unwrap();
         assert_eq!(models.len(), 1);
         assert_eq!(models[0]["id"], "gpt-4o");
+        assert_eq!(models[0]["reasoning"], false);
+    }
+
+    #[tokio::test]
+    async fn test_build_models_json_chatgpt_gpt55_supports_reasoning() {
+        let pc = make_provider_config("openai-chatgpt", "gpt-5.5");
+        let config = build_models_json(None, Some(&pc)).await;
+        let model = &config["providers"]["openai-chatgpt"]["models"][0];
+        assert_eq!(model["id"], "gpt-5.5");
+        assert_eq!(model["reasoning"], true);
+    }
+
+    #[tokio::test]
+    async fn test_build_models_json_openai_reasoning_models_support_reasoning() {
+        for model_id in ["gpt-5.5-codex", "gpt-5", "o3-mini", "o4-mini"] {
+            let pc = make_provider_config("openai", model_id);
+            let config = build_models_json(None, Some(&pc)).await;
+            let model = &config["providers"]["openai-byok"]["models"][0];
+            assert_eq!(model["reasoning"], true, "{model_id}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_build_models_json_chatgpt_rewrites_unsupported_codex_model() {
+        let pc = make_provider_config("openai-chatgpt", "gpt-5.5-codex");
+        let config = build_models_json(None, Some(&pc)).await;
+        let model = &config["providers"]["openai-chatgpt"]["models"][0];
+        assert_eq!(model["id"], "gpt-5.5");
+        assert_eq!(model["name"], "gpt-5.5");
+        assert_eq!(model["reasoning"], true);
     }
 
     #[tokio::test]

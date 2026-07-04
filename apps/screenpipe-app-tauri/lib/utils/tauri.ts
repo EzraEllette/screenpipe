@@ -18,8 +18,9 @@ async applyEnterpriseUiVisibility() : Promise<void> {
 /**
  * Frontend-callable gate. The banner awaits this before calling
  * `downloadAndInstall` (Windows: triggers process::exit internally) or
- * `relaunch`. Returns one of `"proceed"`, `"errored"`, or `"pending"`
- * — frontend toasts on the latter two.
+ * `relaunch`. Returns `"proceed"` when a restart may go ahead — including
+ * on an errored boot, where the relaunch IS the recovery (#4726) — or
+ * `"pending"` while a boot is still in progress (frontend toasts).
  */
 async awaitSafeRestart(timeoutSecs: number | null) : Promise<string> {
     return await TAURI_INVOKE("await_safe_restart", { timeoutSecs });
@@ -554,6 +555,26 @@ async getCachedSuggestions() : Promise<Result<CachedSuggestions, string>> {
 }
 },
 /**
+ * Resolve the chat-conversations directory under the *active* screenpipe data
+ * dir (honors `SCREENPIPE_DATA_DIR` / a relocated data dir), creating it if
+ * needed. The frontend previously hardcoded `~/.screenpipe/chats` via
+ * `homeDir()`, which (a) ignored a relocated data dir and (b) leaked the
+ * developer's real chats into isolated e2e runs.
+ *
+ * One-time migration: for a relocated data dir whose `chats/` is still empty,
+ * copy conversations from the legacy `~/.screenpipe/chats` so history isn't
+ * orphaned. Skipped under e2e (`SCREENPIPE_E2E_SEED` set) so isolated runs
+ * stay empty.
+ */
+async getChatsDir() : Promise<Result<string, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_chats_dir") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Read the user's screenpipe cloud session JWT.
  *
  * #3943: the authoritative copy lives in the encrypted secret store and is
@@ -690,6 +711,20 @@ async getOnboardingStatus() : Promise<Result<OnboardingStore, string>> {
 async getPendingUpdate() : Promise<Result<PendingUpdateSnapshot | null, null>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_pending_update") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Tauri command: absolute path of the screenpipe base dir (where store.bin
+ * lives). Honors SCREENPIPE_DATA_DIR; the webview must use this instead of
+ * hardcoding ~/.screenpipe, or it reads/writes a different settings file
+ * than the Rust side whenever the override is set.
+ */
+async getScreenpipeBaseDir() : Promise<Result<string, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_screenpipe_base_dir") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -843,6 +878,18 @@ async listCacheFiles() : Promise<Result<CacheFile[], string>> {
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * List `*.json` conversation files in `dir`, newest-first by mtime, in a SINGLE
+ * native directory scan.
+ *
+ * The chat list/search previously sorted by firing one `stat()` IPC call per
+ * file via `Promise.all` — with 15k+ conversations that's 15k Tauri round-trips
+ * on every cold open, which (alongside the webview cold-boot) froze the search
+ * modal for seconds before the input was usable. Doing the readdir + metadata
+ * pass in Rust collapses it to one call (~40ms for 15k files).
+ *
+ * A missing dir (first run) returns an empty list, not an error.
+ */
 async listChatEntriesByMtime(dir: string) : Promise<Result<ChatDirEntry[], string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("list_chat_entries_by_mtime", { dir }) };
@@ -1030,13 +1077,14 @@ async openGoogleCalendarAuthWindow(authUrl: string) : Promise<Result<null, strin
 },
 /**
  * Open the screenpipe.com login page.
- * Windows: system browser + registered deep-link scheme handles the redirect.
  * macOS: ASWebAuthenticationSession (system-managed sheet, forwards callback).
- * Linux: in-app WebView that intercepts the screenpipe:// redirect.
- * Pass `freshSession` when switching accounts so the auth sheet/webview does
- * not reuse the previous browser session.
+ * Windows/Linux: in-app WebView that intercepts the screenpipe:// redirect.
+ *
+ * `fresh_session` is used by "use different account": macOS asks
+ * ASWebAuthenticationSession for an ephemeral browser session instead of
+ * reusing Safari cookies, and Windows/Linux use a throwaway webview profile.
  */
-async openLoginWindow(freshSession?: boolean) : Promise<Result<null, string>> {
+async openLoginWindow(freshSession: boolean | null) : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("open_login_window", { freshSession }) };
 } catch (e) {
@@ -1211,6 +1259,18 @@ async piCancelQueued(sessionId: string | null, promptId: string) : Promise<Resul
 async piCheck() : Promise<Result<PiCheckResult, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("pi_check") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Answer a Pi extension UI request. The request id must be the id from Pi's
+ * `extension_ui_request` event; the SDK uses it to resume the waiting tool.
+ */
+async piExtensionUiResponse(sessionId: string | null, requestId: string, response: JsonValue) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("pi_extension_ui_response", { sessionId, requestId, response }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1452,6 +1512,23 @@ async readAudioExclusions() : Promise<Result<ExcludedApp[], string>> {
 async readViewerFile(path: string) : Promise<Result<ViewerContent, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("read_viewer_file", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Redact a feedback bundle for upload.
+ *
+ * `text` is the raw logs + chat (PII-dense chat first); `settings_json` is the
+ * raw settings store. Config secrets are stripped by field name, then the whole
+ * thing goes through the crate's redaction pipeline (enclave model under a time
+ * budget, regex for the overflow). Never returns `Err` — worst case is
+ * regex-only redaction — so feedback submission is never blocked.
+ */
+async redactPiiForFeedback(text: string, settingsJson: string) : Promise<Result<string, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("redact_pii_for_feedback", { text, settingsJson }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2265,6 +2342,7 @@ async writeBrowserLogs(entries: BrowserLogEntry[]) : Promise<void> {
 
 export type AIPreset = { id: string; prompt: string; provider: AIProviderType; url?: string; model?: string; defaultPreset: boolean; apiKey: string | null; maxContextChars: number; maxTokens?: number }
 export type AIProviderType = "openai" | "openai-chatgpt" | "native-ollama" | "custom" | "screenpipe-cloud" | "pi" | "anthropic"
+export type AecMode = "off" | "screenpipe" | "macos" | "windows"
 export type AudioDeviceInfo = { name: string; isDefault: boolean }
 export type BootPhaseSnapshot = {
 /**
@@ -2316,6 +2394,10 @@ endDisplay: string; attendees: string[]; location: string | null; meetingUrl: st
  */
 source?: string }
 export type CalendarStatus = { available: boolean; authorized: boolean; authorizationStatus: string; calendarCount: number }
+/**
+ * One conversation file with its modified time (epoch millis). Returned by
+ * [`list_chat_entries_by_mtime`].
+ */
 export type ChatDirEntry = { name: string; mtime_ms: number }
 export type ChatGptOAuthStatus = { logged_in: boolean }
 export type Credits = { amount: number }
@@ -2621,6 +2703,14 @@ windowsInputAecEnabled?: boolean;
  */
 macosInputVpioEnabled?: boolean;
 /**
+ * Request Screenpipe's software Acoustic Echo Cancellation (via sonora WebRTC AEC3).
+ */
+screenpipeAecEnabled?: boolean;
+/**
+ * Durable AEC engine choice. Missing values default to off so AEC remains opt-in.
+ */
+aecMode?: AecMode;
+/**
  * Duration of each audio chunk in seconds before transcription.
  * Stored as i32 to match existing store.bin schema (cast to u64 by engine).
  */
@@ -2647,9 +2737,17 @@ batchMaxDurationSecs?: number | null;
  */
 vocabularyWords?: VocabEntry[];
 /**
- * Disable all screen capture.
+ * Disable the entire vision pipeline (screen images + accessibility/OCR).
+ * Prefer `disableScreenshots` when the goal is to stop image capture while
+ * keeping accessibility text and UI events.
  */
 disableVision: boolean;
+/**
+ * Stop taking screenshot images while keeping accessibility-tree capture.
+ * This skips visual-diff screenshots, full screenshot capture, JPEG writes,
+ * and OCR fallback.
+ */
+disableScreenshots?: boolean;
 /**
  * Disable the timeline / rewind feature. When true, the engine skips
  * timeline-only work: warming the hot frame cache from the DB at startup
@@ -3080,12 +3178,6 @@ showRestartNotifications?: boolean;
  * When true, apply macOS vibrancy effect to the sidebar for a translucent look.
  */
 translucentSidebar?: boolean;
-/**
- * When true (default), hide model "thinking" reasoning blocks in the chat
- * transcript. The model still emits them server-side; we just don't
- * render the collapsible block in the UI.
- */
-hideThinkingBlocks?: boolean;
 /**
  * UI theme: "light", "dark", or "system".
  */

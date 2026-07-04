@@ -770,9 +770,64 @@ export function cleanPipeStdout(raw: string): string {
   flushText();
   const text = parts.join("\n\n").trim();
   if (!text && errorMessage) {
-    return `error: ${errorMessage}`;
+    const parsed = parsePipeError(errorMessage);
+    return parsed.type === "unknown" ? `error: ${errorMessage}` : parsed.message;
   }
   return text;
+}
+
+type PipeExecutionStatusFields = {
+  status: string;
+  stdout?: string | null;
+  stderr?: string | null;
+};
+
+function stdoutHasCompactionRetryAfterAgentEnd(raw: string): boolean {
+  let sawAgentEnd = false;
+  for (const line of raw.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) continue;
+
+    try {
+      const evt = JSON.parse(trimmed);
+      if (evt.type === "agent_end") {
+        sawAgentEnd = agentEndHasSuccessfulAssistantText(evt);
+      } else if (evt.type === "compaction_end" && sawAgentEnd && evt.willRetry === true) {
+        return true;
+      }
+    } catch {
+      continue;
+    }
+  }
+  return false;
+}
+
+function agentEndHasSuccessfulAssistantText(evt: any): boolean {
+  if (!Array.isArray(evt.messages)) return false;
+  for (let i = evt.messages.length - 1; i >= 0; i--) {
+    const msg = evt.messages[i];
+    if (msg?.role !== "assistant") continue;
+    if (msg.stopReason === "error") return false;
+    return Array.isArray(msg.content) && msg.content.some((block: any) => (
+      block?.type === "text" && typeof block.text === "string" && block.text.trim().length > 0
+    ));
+  }
+  return false;
+}
+
+export function pipeExecutionCompletedBeforeContinueError(exec: PipeExecutionStatusFields): boolean {
+  const stderr = exec.stderr || "";
+  const stdout = exec.stdout || "";
+  return (
+    exec.status === "failed" &&
+    stderr.toLowerCase().includes("cannot continue from message role: assistant") &&
+    stdoutHasCompactionRetryAfterAgentEnd(stdout) &&
+    cleanPipeStdout(stdout).trim().length > 0
+  );
+}
+
+function pipeExecutionDisplayStatus(exec: PipeExecutionStatusFields): string {
+  return pipeExecutionCompletedBeforeContinueError(exec) ? "completed" : exec.status;
 }
 
 function ElapsedTimer({ startedAt }: { startedAt: string }) {
@@ -966,6 +1021,7 @@ export function PipesSection() {
   // Per-pipe recent executions (always fetched for all pipes)
   const [pipeExecutions, setPipeExecutions] = useState<Record<string, PipeExecution[]>>({});
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [runningPipe, setRunningPipe] = useState<string | null>(null);
   const [stoppingPipe, setStoppingPipe] = useState<string | null>(null);
   const [promptDrafts, setPromptDrafts] = useState<Record<string, string>>({});
@@ -1140,6 +1196,7 @@ export function PipesSection() {
 
   const fetchPipes = useCallback(async () => {
     try {
+      setLoadError(null);
       // Load pipes WITH recent executions inline so the list shows the real
       // last-run status. Without this the "last run" column always reads
       // "never run" for pipes that have actually run (the badge is driven by
@@ -1149,7 +1206,13 @@ export function PipesSection() {
       // tab still loads lazily via /pipes/:name/executions.
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 5_000);
-      const res = await fetch(`${apiBase}/pipes?include_executions=true`, { signal: controller.signal }).finally(() => clearTimeout(timeout));
+      const pipesEndpoint = isRemote
+        ? `${apiBase}/pipes?include_executions=true`
+        : "/pipes?include_executions=true";
+      const res = await localFetch(pipesEndpoint, { signal: controller.signal }).finally(() => clearTimeout(timeout));
+      if (!res.ok) {
+        throw new Error(`pipes api returned ${res.status}`);
+      }
       const data = await res.json();
       const rawItems: Array<PipeStatus & { recent_executions?: PipeExecution[] }> = data.data || [];
       const fetched: PipeStatus[] = [];
@@ -1188,10 +1251,16 @@ export function PipesSection() {
       });
     } catch (e) {
       console.error("failed to fetch pipes:", e);
+      const message = (e as any)?.name === "AbortError"
+        ? `timed out connecting to ${apiBase}`
+        : e instanceof Error
+          ? e.message
+          : "failed to fetch pipes";
+      setLoadError(message);
     } finally {
       setLoading(false);
     }
-  }, [apiBase]);
+  }, [apiBase, isRemote]);
 
   const fetchConnections = useCallback(async () => {
     try {
@@ -2008,6 +2077,28 @@ export function PipesSection() {
             </Card>
           ))}
         </div>
+      ) : loadError ? (
+        <Card>
+          <CardContent className="py-8 text-center">
+            <div className="mx-auto max-w-md space-y-4 text-muted-foreground">
+              <AlertCircle className="h-7 w-7 mx-auto text-muted-foreground/70" />
+              <div>
+                <p className="text-foreground font-medium text-base">
+                  {isRemote ? "couldn't load pipes from this device" : "screenpipe backend is unavailable"}
+                </p>
+                <p className="text-sm mt-1">
+                  {isRemote
+                    ? `the remote API at ${apiBase} did not answer. check that screenpipe is running on that device.`
+                    : `your pipe files may still be installed, but the local API at ${apiBase} did not answer.`}
+                </p>
+                <p className="text-xs mt-2 font-mono text-muted-foreground/80">{loadError}</p>
+              </div>
+              <Button variant="outline" size="sm" onClick={() => void fetchPipes()}>
+                retry
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
       ) : filteredPipes.length === 0 ? (
         <Card>
           <CardContent className="py-8 text-center text-muted-foreground">
@@ -2719,12 +2810,12 @@ export function PipesSection() {
                                   <span className="text-muted-foreground">
                                     {exec.started_at ? new Date(exec.started_at).toLocaleString() : "queued"}
                                   </span>
-                                  <Badge variant={statusBadgeVariant(exec.status)} className="text-[10px] h-5">{exec.status}</Badge>
-                                  {errorTypeBadge(exec.error_type)}
+                                  <Badge variant={statusBadgeVariant(pipeExecutionDisplayStatus(exec))} className="text-[10px] h-5">{pipeExecutionDisplayStatus(exec)}</Badge>
+                                  {!pipeExecutionCompletedBeforeContinueError(exec) && errorTypeBadge(exec.error_type)}
                                   {exec.duration_ms != null && <span className="text-muted-foreground">{(exec.duration_ms / 1000).toFixed(1)}s</span>}
                                   <span className="text-muted-foreground/60">{exec.trigger_type}</span>
                                   {exec.model && <span className="text-muted-foreground/60 truncate max-w-[100px]">{exec.model}</span>}
-                                  {exec.status === "completed" && exec.stdout && cleanPipeStdout(exec.stdout) && (
+                                  {pipeExecutionDisplayStatus(exec) === "completed" && exec.stdout && cleanPipeStdout(exec.stdout) && (
                                     <div className="ml-auto flex items-center gap-1">
                                       <button className="text-muted-foreground hover:text-foreground p-0.5" title="copy" onClick={() => {
                                         commands.copyTextToClipboard(cleanPipeStdout(exec.stdout));
@@ -2752,13 +2843,13 @@ export function PipesSection() {
                                     </div>
                                   )}
                                 </div>
-                                {exec.error_message && <p className="text-xs text-muted-foreground">{exec.error_message}</p>}
-                                {exec.status === "completed" && exec.stdout && cleanPipeStdout(exec.stdout) && (
+                                {exec.error_message && !pipeExecutionCompletedBeforeContinueError(exec) && <p className="text-xs text-muted-foreground">{exec.error_message}</p>}
+                                {pipeExecutionDisplayStatus(exec) === "completed" && exec.stdout && cleanPipeStdout(exec.stdout) && (
                                   <div>
                                     <div className="text-xs text-muted-foreground max-h-96 overflow-y-auto scrollbar-hide"><MemoizedReactMarkdown className="prose prose-xs dark:prose-invert max-w-none break-words text-xs [&>*:first-child]:mt-0 [&>*:last-child]:mb-0 [&_h1]:text-sm [&_h2]:text-xs [&_h3]:text-xs [&_p]:text-xs [&_li]:text-xs [&_code]:text-[10px]">{cleanPipeStdout(exec.stdout)}</MemoizedReactMarkdown></div>
                                   </div>
                                 )}
-                                {exec.status === "failed" && exec.stderr && !exec.error_message && (
+                                {pipeExecutionDisplayStatus(exec) === "failed" && exec.stderr && !exec.error_message && (
                                   <pre className="text-xs text-muted-foreground whitespace-pre-wrap break-words max-h-96 overflow-y-auto scrollbar-hide">{exec.stderr}</pre>
                                 )}
                                 {exec.status === "running" && (() => {
@@ -2965,10 +3056,10 @@ export function PipesSection() {
                                     ? new Date(exec.started_at).toLocaleString()
                                     : "queued"}
                                 </span>
-                                <Badge variant={statusBadgeVariant(exec.status)} className="text-[10px] h-5">
-                                  {exec.status}
+                                <Badge variant={statusBadgeVariant(pipeExecutionDisplayStatus(exec))} className="text-[10px] h-5">
+                                  {pipeExecutionDisplayStatus(exec)}
                                 </Badge>
-                                {errorTypeBadge(exec.error_type)}
+                                {!pipeExecutionCompletedBeforeContinueError(exec) && errorTypeBadge(exec.error_type)}
                                 {exec.duration_ms != null && (
                                   <span className="text-muted-foreground">
                                     {formatDuration(exec.duration_ms)}
@@ -3009,7 +3100,7 @@ export function PipesSection() {
                                   </button>
                                 )}
                               </div>
-                              {exec.error_message && (
+                              {exec.error_message && !pipeExecutionCompletedBeforeContinueError(exec) && (
                                 <p className="text-xs text-muted-foreground">
                                   {exec.error_message}
                                 </p>
@@ -3028,12 +3119,12 @@ export function PipesSection() {
                                   </pre>
                                 );
                               })()}
-                              {exec.status === "completed" && exec.stdout && cleanPipeStdout(exec.stdout) && (
+                              {pipeExecutionDisplayStatus(exec) === "completed" && exec.stdout && cleanPipeStdout(exec.stdout) && (
                                 <pre className="text-xs text-muted-foreground whitespace-pre-wrap break-words max-h-96 overflow-y-auto">
                                   {cleanPipeStdout(exec.stdout)}
                                 </pre>
                               )}
-                              {exec.status === "failed" && exec.stderr && !exec.error_message && (
+                              {pipeExecutionDisplayStatus(exec) === "failed" && exec.stderr && !exec.error_message && (
                                 <pre className="text-xs text-muted-foreground whitespace-pre-wrap break-words max-h-96 overflow-y-auto">
                                   {exec.stderr}
                                 </pre>

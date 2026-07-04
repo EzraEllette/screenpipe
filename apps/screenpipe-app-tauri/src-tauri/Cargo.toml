@@ -2,7 +2,7 @@
 
 [package]
 name = "screenpipe-app"
-version = "2.5.80"
+version = "2.5.93"
 description = "24/7 memory for your desktop. 100% local."
 authors = ["you"]
 license = ""
@@ -297,6 +297,9 @@ jemalloc = ["tikv-jemallocator"]
 tempfile = "3"
 wiremock = "0.6"
 serial_test = "3"
+# MockRuntime for store.rs recovery tests that must exercise the real
+# tauri-plugin-store registry (state + resources table).
+tauri = { version = "=2.11.2", features = ["test"] }
 
 
 [package.metadata.cargo-machete]
