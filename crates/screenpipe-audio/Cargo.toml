@@ -19,11 +19,7 @@ oasgen = { workspace = true }
 
 # Cross-platform audio capture. Tracks screenpipe/cpal main, which carries
 # the Windows WASAPI AEC and macOS VoiceProcessingIO patches.
-# TODO(#4916): temporarily pinned to EzraEllette/cpal until screenpipe/cpal#5
-# (fixes SetThreadPriority being called with a thread id instead of a handle,
-# so the WASAPI capture/render thread priority boost silently never applied)
-# merges, then swap back to https://github.com/screenpipe/cpal.git.
-cpal = { git = "https://github.com/screenpipe/cpal.git" }
+cpal = { git = "https://github.com/screenpipe/cpal.git", rev = "e7edfa174466e87a467d1a58e3a4aec233ff8a21" }
 
 # Wav encoding
 hound = { workspace = true }
