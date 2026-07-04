@@ -6,6 +6,71 @@ use log::debug;
 use screenpipe_core::Language;
 use whisper_rs::get_lang_str;
 
+/// How many consecutive segments per speaker reuse a detected language before
+/// re-detecting. Detection costs a full encoder forward pass — roughly as
+/// expensive as the transcription itself — so paying it once every N speech
+/// segments instead of every segment cuts steady-state whisper compute nearly
+/// in half for auto-detect users. A speaker's language is a stable property,
+/// so a long interval is safe; the refresh exists to recover from a bad
+/// detection or a speaker who genuinely code-switches.
+const LANG_REDETECT_INTERVAL: u32 = 10;
+
+/// Cache key for audio that diarization did not attribute to a speaker
+/// (no-segmentation-model fallback, live-meeting chunks, backfill batches).
+const UNATTRIBUTED_SPEAKER: &str = "unattributed";
+
+/// Bound on tracked speakers. Embedding clustering can mint new ids over a
+/// long session; past this the whole cache resets rather than grow forever
+/// (worst case: one extra detection per speaker).
+const MAX_TRACKED_SPEAKERS: usize = 64;
+
+/// Per-speaker cache of the detected language across whisper calls (one call
+/// per diarized speaker turn). Keyed by speaker so a bilingual conversation
+/// keeps a separately detected language per participant instead of forcing
+/// one speaker's language onto the other. Owned by the transcription session
+/// so it lives as long as the `WhisperState` it schedules detection for.
+#[derive(Default)]
+pub struct LanguageCache {
+    by_speaker: std::collections::HashMap<String, SpeakerLang>,
+}
+
+struct SpeakerLang {
+    lang: Option<&'static str>,
+    reuses_left: u32,
+}
+
+impl LanguageCache {
+    /// Returns this speaker's cached detection result while it is still
+    /// fresh, counting down freshness. `None` means "stale or unseen speaker
+    /// — run detection again".
+    pub fn reuse(&mut self, speaker: Option<&str>) -> Option<Option<&'static str>> {
+        let entry = self
+            .by_speaker
+            .get_mut(speaker.unwrap_or(UNATTRIBUTED_SPEAKER))?;
+        if entry.reuses_left == 0 {
+            return None;
+        }
+        entry.reuses_left -= 1;
+        Some(entry.lang)
+    }
+
+    /// Stores a fresh detection result for this speaker, resetting their
+    /// reuse budget.
+    pub fn store(&mut self, speaker: Option<&str>, lang: Option<&'static str>) {
+        let key = speaker.unwrap_or(UNATTRIBUTED_SPEAKER);
+        if self.by_speaker.len() >= MAX_TRACKED_SPEAKERS && !self.by_speaker.contains_key(key) {
+            self.by_speaker.clear();
+        }
+        self.by_speaker.insert(
+            key.to_string(),
+            SpeakerLang {
+                lang,
+                reuses_left: LANG_REDETECT_INTERVAL - 1,
+            },
+        );
+    }
+}
+
 /// Picks the spoken language from whisper's per-language probabilities.
 ///
 /// `lang_probs` comes from [`whisper_rs::WhisperState::lang_detect`] and is
@@ -17,11 +82,9 @@ use whisper_rs::get_lang_str;
 /// value in `[0, 1)` to `0` (english). That is why automatic language detection
 /// "only detected english" for local whisper transcription (issue #3550).
 pub fn detect_language(lang_probs: Vec<f32>, languages: Vec<Language>) -> Option<&'static str> {
-    // A single explicit language needs no detection — force it.
-    if let [single] = languages.as_slice() {
-        return Some(single.as_lang_code());
-    }
-
+    // No single-language fast path here: `process_with_whisper` short-circuits
+    // that case before ever running detection. A single-entry allow-list still
+    // degenerates to that language below, since the filter admits nothing else.
     let mut best: Option<(&'static str, f32)> = None;
     for (id, prob) in lang_probs.into_iter().enumerate() {
         let Some(code) = get_lang_str(id as i32) else {
@@ -61,8 +124,8 @@ mod tests {
 
     #[test]
     fn single_language_is_forced() {
-        // No detection happens; the one selected language is returned verbatim,
-        // even if the probability vector says otherwise.
+        // A single-entry allow-list must win regardless of the probability
+        // vector — the filter admits only that language, even at p=0.
         let mut probs = zeroed_probs();
         set(&mut probs, "en", 1.0);
         assert_eq!(
@@ -86,6 +149,71 @@ mod tests {
         set(&mut probs, "es", 0.9);
         set(&mut probs, "en", 0.05);
         assert_eq!(detect_language(probs, vec![]), Some("es"));
+    }
+
+    #[test]
+    fn cache_starts_stale_then_reuses_for_interval() {
+        let mut cache = LanguageCache::default();
+        // A fresh cache must force detection.
+        assert_eq!(cache.reuse(Some("speaker_0")), None);
+
+        cache.store(Some("speaker_0"), Some("pt"));
+        // The stored value is reused INTERVAL-1 times (the detection call
+        // itself covered the first segment)...
+        for _ in 0..LANG_REDETECT_INTERVAL - 1 {
+            assert_eq!(cache.reuse(Some("speaker_0")), Some(Some("pt")));
+        }
+        // ...then goes stale so language switches are eventually picked up.
+        assert_eq!(cache.reuse(Some("speaker_0")), None);
+    }
+
+    #[test]
+    fn cache_is_independent_per_speaker() {
+        // A bilingual conversation: each participant keeps their own detected
+        // language, and a new speaker forces detection instead of inheriting
+        // the previous speaker's language.
+        let mut cache = LanguageCache::default();
+        cache.store(Some("speaker_0"), Some("es"));
+        assert_eq!(cache.reuse(Some("speaker_1")), None);
+
+        cache.store(Some("speaker_1"), Some("en"));
+        assert_eq!(cache.reuse(Some("speaker_0")), Some(Some("es")));
+        assert_eq!(cache.reuse(Some("speaker_1")), Some(Some("en")));
+    }
+
+    #[test]
+    fn unattributed_audio_shares_one_entry() {
+        // Paths without diarization (live meeting, backfill) all key to the
+        // same fallback entry, giving them plain session-level caching.
+        let mut cache = LanguageCache::default();
+        cache.store(None, Some("de"));
+        assert_eq!(cache.reuse(None), Some(Some("de")));
+    }
+
+    #[test]
+    fn cache_can_hold_a_none_detection() {
+        // detect_language returning None (whisper decides) is a valid cached
+        // outcome, distinct from "stale".
+        let mut cache = LanguageCache::default();
+        cache.store(Some("speaker_0"), None);
+        assert_eq!(cache.reuse(Some("speaker_0")), Some(None));
+    }
+
+    #[test]
+    fn cache_resets_instead_of_growing_unbounded() {
+        let mut cache = LanguageCache::default();
+        for i in 0..MAX_TRACKED_SPEAKERS {
+            cache.store(Some(&format!("speaker_{i}")), Some("en"));
+        }
+        // The cap is full but re-storing a known speaker must not wipe state.
+        cache.store(Some("speaker_0"), Some("en"));
+        assert_eq!(cache.by_speaker.len(), MAX_TRACKED_SPEAKERS);
+
+        // One speaker past the cap resets the map (cheap: one extra detection
+        // per speaker) rather than growing forever.
+        cache.store(Some("one_too_many"), Some("en"));
+        assert_eq!(cache.by_speaker.len(), 1);
+        assert_eq!(cache.reuse(Some("one_too_many")), Some(Some("en")));
     }
 
     #[test]

@@ -14,6 +14,7 @@ use crate::transcription::deepgram::DeepgramTranscriptionConfig;
 use crate::transcription::engine::TranscriptionSession;
 use crate::transcription::openai_compatible::batch::transcribe_with_openai_compatible;
 use crate::transcription::whisper::batch::process_with_whisper;
+use crate::transcription::whisper::LanguageCache;
 use crate::transcription::VocabularyEntry;
 use crate::utils::audio::resample;
 use crate::utils::ffmpeg::{get_new_file_path_with_timestamp, write_audio_to_file};
@@ -109,7 +110,11 @@ impl OpenAICompatibleConfig {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[deprecated(
+    note = "dead entry point with no callers — use TranscriptionSession::transcribe_detailed_with_speaker, \
+            which also caches language detection across segments instead of re-detecting per call"
+)]
+#[allow(deprecated, clippy::too_many_arguments)]
 pub async fn stt_sync(
     audio: &[f32],
     sample_rate: u32,
@@ -141,6 +146,10 @@ pub async fn stt_sync(
     .await
 }
 
+#[deprecated(
+    note = "dead entry point with no callers — use TranscriptionSession::transcribe_detailed_with_speaker, \
+            which also caches language detection across segments instead of re-detecting per call"
+)]
 #[allow(clippy::too_many_arguments)]
 pub async fn stt(
     audio: &[f32],
@@ -154,6 +163,9 @@ pub async fn stt(
     vocabulary: &[VocabularyEntry],
     alternate_stt: Option<AlternateSttEngine>,
 ) -> Result<String> {
+    // Callers of this entry point don't hold a session, so language detection
+    // is at most once per call here (the session path caches across calls).
+    let mut lang_cache = LanguageCache::default();
     let transcription: Result<String> = if *audio_transcription_engine
         == AudioTranscriptionEngine::Disabled
     {
@@ -194,7 +206,15 @@ pub async fn stt(
                         device, e
                     );
                     // Fallback to Whisper
-                    process_with_whisper(audio, languages.clone(), whisper_state, vocabulary).await
+                    process_with_whisper(
+                        audio,
+                        languages.clone(),
+                        None,
+                        &mut lang_cache,
+                        whisper_state,
+                        vocabulary,
+                    )
+                    .await
                 }
             }
         }
@@ -242,12 +262,28 @@ pub async fn stt(
                         device, e
                     );
                 // Fallback to Whisper
-                process_with_whisper(audio, languages.clone(), whisper_state, vocabulary).await
+                process_with_whisper(
+                    audio,
+                    languages.clone(),
+                    None,
+                    &mut lang_cache,
+                    whisper_state,
+                    vocabulary,
+                )
+                .await
             }
         }
     } else {
         // Existing Whisper implementation
-        process_with_whisper(audio, languages, whisper_state, vocabulary).await
+        process_with_whisper(
+            audio,
+            languages,
+            None,
+            &mut lang_cache,
+            whisper_state,
+            vocabulary,
+        )
+        .await
     };
 
     // Post-processing: apply vocabulary replacements
@@ -367,7 +403,7 @@ pub async fn run_stt(
     let audio = segment.samples.clone();
     let sample_rate = segment.sample_rate;
     match session
-        .transcribe_detailed(&audio, sample_rate, device_name)
+        .transcribe_detailed_with_speaker(&audio, sample_rate, device_name, Some(&segment.speaker))
         .await
     {
         Ok(output) => {

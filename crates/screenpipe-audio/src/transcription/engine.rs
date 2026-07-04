@@ -12,6 +12,7 @@ use crate::transcription::whisper::batch::process_with_whisper;
 use crate::transcription::whisper::model::{
     create_whisper_context_parameters, download_whisper_model, get_cached_whisper_model_path,
 };
+use crate::transcription::whisper::LanguageCache;
 use crate::transcription::{TranscriptionOutput, VocabularyEntry};
 use anyhow::{anyhow, Result};
 use reqwest::Client;
@@ -460,6 +461,7 @@ impl TranscriptionEngine {
                     config: config.clone(),
                     languages: languages.clone(),
                     vocabulary: merge_keyterms(vocabulary, extra_keyterms),
+                    lang_cache: LanguageCache::default(),
                 })
             }
             #[cfg(feature = "qwen3-asr")]
@@ -544,6 +546,9 @@ pub enum TranscriptionSession {
         config: Arc<AudioTranscriptionEngine>,
         languages: Vec<Language>,
         vocabulary: Vec<VocabularyEntry>,
+        /// Detected-language cache so the expensive language-detection encoder
+        /// pass runs once per interval, not once per segment (#4838).
+        lang_cache: LanguageCache,
     },
     #[cfg(feature = "qwen3-asr")]
     Qwen3Asr {
@@ -585,6 +590,21 @@ impl TranscriptionSession {
         sample_rate: u32,
         device: &str,
     ) -> Result<TranscriptionOutput> {
+        self.transcribe_detailed_with_speaker(audio, sample_rate, device, None)
+            .await
+    }
+
+    /// Like [`Self::transcribe_detailed`], but attributes the audio to a
+    /// diarized speaker so the whisper language-detection cache is keyed per
+    /// speaker (#4838) — a bilingual conversation keeps a separately detected
+    /// language per participant.
+    pub async fn transcribe_detailed_with_speaker(
+        &mut self,
+        audio: &[f32],
+        sample_rate: u32,
+        device: &str,
+        speaker: Option<&str>,
+    ) -> Result<TranscriptionOutput> {
         match self {
             Self::Deepgram {
                 config,
@@ -624,7 +644,7 @@ impl TranscriptionSession {
                 }
             }
             _ => self
-                .transcribe(audio, sample_rate, device)
+                .transcribe_with_speaker(audio, sample_rate, device, speaker)
                 .await
                 .map(TranscriptionOutput::plain),
         }
@@ -636,6 +656,19 @@ impl TranscriptionSession {
         audio: &[f32],
         sample_rate: u32,
         device: &str,
+    ) -> Result<String> {
+        self.transcribe_with_speaker(audio, sample_rate, device, None)
+            .await
+    }
+
+    /// Like [`Self::transcribe`], but attributes the audio to a diarized
+    /// speaker for per-speaker language-detection caching (#4838).
+    pub async fn transcribe_with_speaker(
+        &mut self,
+        audio: &[f32],
+        sample_rate: u32,
+        device: &str,
+        speaker: Option<&str>,
     ) -> Result<String> {
         let transcription = match self {
             Self::Disabled => Ok(String::new()),
@@ -820,8 +853,19 @@ impl TranscriptionSession {
                 state,
                 languages,
                 vocabulary,
+                lang_cache,
                 ..
-            } => process_with_whisper(audio, languages.clone(), state, vocabulary).await,
+            } => {
+                process_with_whisper(
+                    audio,
+                    languages.clone(),
+                    speaker,
+                    lang_cache,
+                    state,
+                    vocabulary,
+                )
+                .await
+            }
 
             Self::OpenAICompatible {
                 endpoint,

@@ -7,6 +7,7 @@ pub mod models;
 pub mod utils;
 pub mod vad;
 pub use transcription::engine::TranscriptionEngine;
+#[allow(deprecated)]
 pub use transcription::stt::stt;
 pub use transcription::{AudioInput, TranscriptionResult};
 pub mod speaker;

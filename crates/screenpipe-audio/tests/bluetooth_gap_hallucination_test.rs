@@ -152,6 +152,7 @@ async fn whisper_hallucination_before_after() {
         .expect("failed to load whisper tiny model");
 
     let mut state = ctx.create_state().expect("failed to create whisper state");
+    let mut lang_cache = screenpipe_audio::transcription::whisper::LanguageCache::default();
 
     // ── Audio fixtures: 3 seconds at 16 kHz ─────────────────────────────────
     let n = (SAMPLE_RATE * 3) as usize;
@@ -167,6 +168,8 @@ async fn whisper_hallucination_before_after() {
     let crackle_transcript = screenpipe_audio::transcription::whisper::batch::process_with_whisper(
         &crackle_audio,
         vec![Language::English],
+        None,
+        &mut lang_cache,
         &mut state,
         &[],
     )
@@ -177,6 +180,8 @@ async fn whisper_hallucination_before_after() {
     let silence_transcript = screenpipe_audio::transcription::whisper::batch::process_with_whisper(
         &silence_audio,
         vec![Language::English],
+        None,
+        &mut lang_cache,
         &mut state,
         &[],
     )
