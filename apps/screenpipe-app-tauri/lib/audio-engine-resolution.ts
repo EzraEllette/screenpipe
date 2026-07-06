@@ -83,6 +83,17 @@ export function getEngineRequirement(
   return engine === "parakeet-mlx" ? "macOS" : null;
 }
 
+/**
+ * True when this device can't run ANY local transcription engine (the
+ * Whisper fallback covers all AVX2-gated engines; parakeet is the only
+ * non-AVX2 local one). On such hardware the boot-time store guard parks the
+ * setting on "disabled" — audio transcription off — so cloud is the only way
+ * to keep the product's "audio on by default" promise.
+ */
+export const deviceLacksLocalEngine = (caps: EngineCapabilities) =>
+  getEngineRequirement(FALLBACK_TRANSCRIPTION_ENGINE, caps) !== null &&
+  getEngineRequirement("parakeet", caps) !== null;
+
 export type AudioEngineFallbackReason =
   | "notLoggedIn"
   | "notSubscribed"

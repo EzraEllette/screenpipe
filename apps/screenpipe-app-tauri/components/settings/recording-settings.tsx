@@ -112,10 +112,11 @@ import { hasAppEntitlement } from "@/lib/app-entitlement";
 import {
   FALLBACK_TRANSCRIPTION_ENGINE,
   type EngineCapabilities,
+  deviceLacksLocalEngine,
   getAudioEngineResolution,
   getAudioFallbackMessage,
   getEngineRequirement,
-} from "./audio-engine-resolution";
+} from "@/lib/audio-engine-resolution";
 import { useToast } from "@/components/ui/use-toast";
 import { useHealthCheck } from "@/lib/hooks/use-health-check";
 import { localFetch } from "@/lib/api";
@@ -2867,6 +2868,24 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
                         }
                       >
                         Use Parakeet
+                      </Button>
+                    )}
+                    {/* Hardware that can run no local engine at all: cloud is
+                        the only way to keep transcription on. Routed through
+                        the picker handler so login/checkout kick in first. */}
+                    {deviceLacksLocalEngine(engineCaps) &&
+                      audioEngineResolution.requested !== "screenpipe-cloud" && (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="h-7 px-2 text-xs"
+                        data-testid="audio-engine-fallback-use-cloud"
+                        onClick={() =>
+                          handleAudioTranscriptionModelChange("screenpipe-cloud")
+                        }
+                      >
+                        Use Screenpipe Cloud{!hasCloudTranscriptionAccess && " (pro)"}
                       </Button>
                     )}
                   </div>

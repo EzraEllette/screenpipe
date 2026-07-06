@@ -6,11 +6,12 @@ import { describe, expect, it } from "vitest";
 import {
   FALLBACK_TRANSCRIPTION_ENGINE,
   type EngineCapabilities,
+  deviceLacksLocalEngine,
   engineRequiresAvx2,
   getAudioEngineResolution,
   getAudioFallbackMessage,
   getEngineRequirement,
-} from "@/components/settings/audio-engine-resolution";
+} from "@/lib/audio-engine-resolution";
 
 // Entitled user: fresh check, active plan with the app feature — mirrors what
 // normalizeAppUser produces for a paying account.
@@ -118,6 +119,28 @@ describe("getEngineRequirement", () => {
     expect(
       getEngineRequirement("parakeet", caps({ isMacOS: true, macosMajorVersion: null }))
     ).toBeNull();
+  });
+});
+
+describe("deviceLacksLocalEngine", () => {
+  it("is true only when neither whisper nor parakeet can run", () => {
+    // compat + low tier off-mac: whisper needs AVX2, parakeet needs 12 GB+
+    expect(
+      deviceLacksLocalEngine(caps({ cpuCompatMode: true, deviceTier: "low" }))
+    ).toBe(true);
+    // compat + old Intel Mac: whisper needs AVX2, parakeet needs macOS 26
+    expect(
+      deviceLacksLocalEngine(
+        caps({ cpuCompatMode: true, isMacOS: true, macosMajorVersion: 12 })
+      )
+    ).toBe(true);
+    // compat mid tier off-mac: parakeet runs
+    expect(
+      deviceLacksLocalEngine(caps({ cpuCompatMode: true, deviceTier: "mid" }))
+    ).toBe(false);
+    // any AVX2 device: whisper runs
+    expect(deviceLacksLocalEngine(caps({ deviceTier: "low" }))).toBe(false);
+    expect(deviceLacksLocalEngine(caps())).toBe(false);
   });
 });
 

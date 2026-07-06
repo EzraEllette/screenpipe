@@ -15,6 +15,7 @@ import { User } from "../utils/tauri";
 import { SettingsStore } from "../utils/tauri";
 import { installAuthInterceptor } from "../auth-guard";
 import { hasAppEntitlement, normalizeAppUser } from "@/lib/app-entitlement";
+import { deviceLacksLocalEngine } from "@/lib/audio-engine-resolution";
 import { screenpipeWebUrl } from "@/lib/web-url";
 import type { SourceCitation } from "@/lib/source-citations";
 import type {
@@ -530,6 +531,36 @@ const DEFAULT_CLOUD_PRESET: AIPreset = makeDefaultPresets(false)[0];
 
 const DEFAULT_AUDIO_ENGINE = "whisper-large-v3-turbo-quantized";
 
+// cpu_compat_mode is fixed at process start, so cache the boot-phase read.
+let cachedCpuCompatMode: boolean | null = null;
+
+// True when this hardware can't run any local transcription engine — the
+// boot-time store guard (screenpipe_config::is_engine_unsafe) then parks
+// audioTranscriptionEngine on "disabled". Fails closed (false) on any error
+// so we never rewrite settings on guesswork.
+const deviceLacksLocalEngineNow = async (settings: Settings): Promise<boolean> => {
+	try {
+		if (cachedCpuCompatMode === null) {
+			cachedCpuCompatMode = (await commands.getBootPhase()).cpuCompatMode;
+		}
+		// With AVX2 the Whisper fallback always runs, so a local engine exists.
+		if (!cachedCpuCompatMode) return false;
+		const { platform: getPlatform, version: getOsVersion } = await import(
+			"@tauri-apps/plugin-os"
+		);
+		const isMacOS = getPlatform() === "macos";
+		const major = parseInt(getOsVersion().split(".")[0], 10);
+		return deviceLacksLocalEngine({
+			cpuCompatMode: true,
+			isMacOS,
+			deviceTier: settings.deviceTier,
+			macosMajorVersion: isMacOS && Number.isFinite(major) ? major : null,
+		});
+	} catch {
+		return false;
+	}
+};
+
 // "Paid" = any active app entitlement (Basic / Business / Enterprise / Lifetime)
 // OR the legacy cloud-sync subscription. Broadened from `cloud_subscribed`-only so
 // every paying user — not just Cloud Sync subscribers — gets Screenpipe Cloud
@@ -538,7 +569,10 @@ const DEFAULT_AUDIO_ENGINE = "whisper-large-v3-turbo-quantized";
 const isLoggedInProUser = (user: User | null | undefined) =>
 	hasAppEntitlement(user as any) && Boolean(user?.token || user?.id);
 
-const applyProCloudAudioDefaults = (settings: Settings): Settings => {
+const applyProCloudAudioDefaults = (
+	settings: Settings,
+	hardwareForcedDisabled = false
+): Settings => {
 	if (!isLoggedInProUser(settings.user)) return settings;
 	if ((settings as any)._proCloudAudioDefaultsAppliedV2) return settings;
 
@@ -547,10 +581,14 @@ const applyProCloudAudioDefaults = (settings: Settings): Settings => {
 	// V2 marker is intentionally left unset so a later switch back to default re-evaluates.
 	// Both platform defaults count as "untouched": macOS seeds whisper-turbo, while
 	// Windows/Linux seed parakeet — without the latter, paid users on those platforms
-	// would never be auto-switched to cloud.
+	// would never be auto-switched to cloud. On hardware that can't run any local
+	// engine, the boot guard parks the setting on "disabled" — that's the machine's
+	// default, not a user choice, so a paying user there must still be lifted to
+	// cloud (audio on by default is a core product promise).
 	const isPlatformDefaultEngine =
 		settings.audioTranscriptionEngine === DEFAULT_AUDIO_ENGINE ||
-		settings.audioTranscriptionEngine === "parakeet";
+		settings.audioTranscriptionEngine === "parakeet" ||
+		(hardwareForcedDisabled && settings.audioTranscriptionEngine === "disabled");
 	const userChoseCustomEngine =
 		!isPlatformDefaultEngine &&
 		settings.audioTranscriptionEngine !== "screenpipe-cloud";
@@ -1003,7 +1041,10 @@ function createSettingsStore() {
 		// both background and live transcription to Screenpipe Cloud. The marker
 		// prevents future user refreshes from overriding a manual engine choice.
 		if (isLoggedInProUser(settings.user) && !(settings as any)._proCloudAudioDefaultsAppliedV2) {
-			applyProCloudAudioDefaults(settings);
+			const hardwareForcedDisabled =
+				settings.audioTranscriptionEngine === "disabled" &&
+				(await deviceLacksLocalEngineNow(settings));
+			applyProCloudAudioDefaults(settings, hardwareForcedDisabled);
 			needsUpdate = true;
 		}
 
@@ -1057,7 +1098,10 @@ function createSettingsStore() {
 			if (!isLoggedInProUser(newSettings.user)) {
 				delete (newSettings as any)._proCloudAudioDefaultsAppliedV2;
 			}
-			newSettings = applyProCloudAudioDefaults(newSettings);
+			const hardwareForcedDisabled =
+				newSettings.audioTranscriptionEngine === "disabled" &&
+				(await deviceLacksLocalEngineNow(newSettings));
+			newSettings = applyProCloudAudioDefaults(newSettings, hardwareForcedDisabled);
 		}
 		await setSettingsStripped(store, newSettings);
 		await saveAndEncrypt(store);
