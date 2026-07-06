@@ -12,6 +12,11 @@ on:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      smoke_only:
+        description: "Windows launch-smoke run only: build the Windows CLI package and run the native + Intel SDE (non-AVX2) probes; skip macOS/Linux builds, EV signing, Sentry symbols, npm publish, and the GitHub release (publish-npm/release skip via their skipped needs)"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -59,7 +64,9 @@ jobs:
 
   build-macos:
     needs: check_commit
-    if: needs.check_commit.outputs.should_release == 'true'
+    # smoke_only skipping this job also skips publish-npm/release downstream
+    # (their `needs` include it and they have no `if: always()`).
+    if: needs.check_commit.outputs.should_release == 'true' && !inputs.smoke_only
     runs-on: macos-latest
     strategy:
       matrix:
@@ -403,6 +410,8 @@ jobs:
           cargo build --release -p screenpipe-engine --bin screenpipe --features directml,redact-onnx-directml --target x86_64-pc-windows-msvc
 
       - name: Upload debug symbols to Sentry
+        # Skipped on smoke_only dispatches: nothing from those builds ships.
+        if: ${{ !inputs.smoke_only }}
         shell: pwsh
         env:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
@@ -412,6 +421,8 @@ jobs:
           .\sentry-cli.exe debug-files upload --org $env:SENTRY_ORG --project screenpipe-cli target/x86_64-pc-windows-msvc/release/
 
       - name: Install CodeSignTool for SSL.com EV signing (Windows)
+        # Skipped on smoke_only dispatches (only used by the signing step below).
+        if: ${{ !inputs.smoke_only }}
         shell: pwsh
         run: |
           # Same SSL.com eSigner cert + tool the desktop app uses (release-app.yml).
@@ -423,6 +434,9 @@ jobs:
           Write-Host "CodeSignTool installed at $cstDest"
 
       - name: Sign screenpipe.exe with SSL.com EV (Windows)
+        # Skipped on smoke_only dispatches: each SSL.com sign consumes monthly
+        # quota and nothing from those builds ships.
+        if: ${{ !inputs.smoke_only }}
         shell: pwsh
         env:
           ESIGNER_USERNAME: ${{ secrets.ESIGNER_USERNAME }}
@@ -568,7 +582,9 @@ jobs:
 
   build-linux:
     needs: check_commit
-    if: needs.check_commit.outputs.should_release == 'true'
+    # See build-macos: skipped under smoke_only, which cascades to
+    # publish-npm/release.
+    if: needs.check_commit.outputs.should_release == 'true' && !inputs.smoke_only
     runs-on: ubuntu-24.04
     strategy:
       matrix:
