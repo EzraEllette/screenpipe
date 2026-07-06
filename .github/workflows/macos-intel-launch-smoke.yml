@@ -67,7 +67,12 @@ jobs:
     # macos-15-intel is the current — and per actions/runner-images#13027,
     # final — hosted x86_64 macOS image, supported into 2027.
     runs-on: macos-15-intel
-    timeout-minutes: 60
+    # Measured cold (no sccache/rust-cache/sidecar-cache warm yet): the Rust
+    # build alone didn't finish in 60min on this runner tier (screenpipe-audio
+    # links whisper.cpp/llama.cpp, which is slow to compile from scratch).
+    # Caches populate as this job runs repeatedly, so later runs should be
+    # much faster than this budget suggests.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
 
