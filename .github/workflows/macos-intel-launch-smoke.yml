@@ -21,14 +21,17 @@
 # check_screen_recording_tauri().is_granted() — without it, the vulnerable
 # get_excluded_sck_window_ids() call is never reached). No GitHub-hosted
 # runner starts with that TCC permission granted, so this job attempts to
-# grant it non-interactively via direct TCC.db writes before launching.
-# That trick only works because macos-15-intel (like its predecessor
-# macos-13, see actions/runner-images#8162) ships with SIP disabled — it is
-# unsupported by GitHub and could stop working on a future image bump. The
-# "verify TCC" step checks this for real instead of assuming, and the job
-# fails loudly (distinctly from an actual app crash) if the grant didn't
-# take, so a silent green run never hides "we stopped exercising the crash
-# path."
+# grant it non-interactively before launching — currently via direct TCC.db
+# writes (.github/scripts/macos/grant-screen-recording-tcc.sh), isolated into
+# its own script so the mechanism can be swapped for a purpose-built CLI
+# later without touching this workflow. That trick only works because
+# macos-15-intel (like its predecessor macos-13, see
+# actions/runner-images#8162) ships with SIP disabled — it is unsupported by
+# GitHub and could stop working on a future image bump. The verify step
+# (.github/scripts/macos/verify_screen_recording_tcc.c) checks this for real
+# instead of assuming, and the job fails loudly (distinctly from an actual
+# app crash) if the grant didn't take, so a silent green run never hides "we
+# stopped exercising the crash path."
 name: macOS Intel Launch Smoke
 
 on:
@@ -156,65 +159,28 @@ jobs:
       - name: Grant Screen Recording TCC to the built binary
         id: grant_tcc
         shell: bash
+        # Isolated in its own script (.github/scripts/macos/grant-screen-recording-tcc.sh)
+        # so the grant mechanism can be swapped later (e.g. for a purpose-built
+        # CLI) without touching this workflow — nothing downstream depends on
+        # how the grant happened, only on the verify step's output.
         run: |
           set -euo pipefail
           APP_BIN="$(realpath apps/screenpipe-app-tauri/src-tauri/target/debug/screenpipe-app)"
           echo "app_bin=${APP_BIN}" >> "$GITHUB_OUTPUT"
-          test -x "$APP_BIN"
-
-          # Path-based grant (client_type=1) with csreq=NULL: TCC skips the
-          # code-requirement check when csreq is NULL, which is the only way
-          # to authorize an ad-hoc/unsigned --no-sign debug build — it has no
-          # stable Team ID for a proper csreq match. Named-column INSERT so
-          # this doesn't break if Apple adds columns (pid/pid_version/
-          # boot_uuid/last_reminded showed up in Sonoma) — unlisted columns
-          # just take their default/NULL.
-          grant_sql="INSERT OR REPLACE INTO access
-            (service, client, client_type, auth_value, auth_reason, auth_version,
-             csreq, policy_id, indirect_object_identifier_type, indirect_object_identifier,
-             indirect_object_code_identity, flags, last_modified)
-            VALUES
-            ('kTCCServiceScreenCapture', '${APP_BIN}', 1, 2, 4, 1,
-             NULL, NULL, 0, 'UNUSED', NULL, 0, strftime('%s','now'));"
-
-          for db in "/Library/Application Support/com.apple.TCC/TCC.db" "$HOME/Library/Application Support/com.apple.TCC/TCC.db"; do
-            echo "-- attempting grant in: $db --"
-            sudo sqlite3 "$db" "$grant_sql" && echo "  insert reported success" || echo "  insert failed (likely SIP/lock) — will confirm via the real probe below"
-          done
-
-          # tccd caches authorization decisions in memory and doesn't reliably
-          # notice a direct TCC.db write — a first real run of this job (see
-          # PR discussion) inserted successfully but the probe still read
-          # DENIED until tccd was forced to reload from disk.
-          echo "-- restarting tccd to pick up the direct TCC.db write --"
-          sudo killall tccd 2>&1 || echo "  tccd not running / already restarted"
-          sleep 2
+          .github/scripts/macos/grant-screen-recording-tcc.sh "$APP_BIN"
 
       - name: Verify Screen Recording TCC actually took effect
         id: verify_tcc
         shell: bash
+        # Also isolated (.github/scripts/macos/verify_screen_recording_tcc.c) —
+        # this is the source of truth for whether the grant above (whatever
+        # mechanism it used) actually worked, independent of that mechanism.
         run: |
           set -euo pipefail
-          cat > "$RUNNER_TEMP/check_screen_recording.swift" <<'EOF'
-          import CoreGraphics
+          clang -framework CoreGraphics -o "$RUNNER_TEMP/verify_screen_recording_tcc" \
+            .github/scripts/macos/verify_screen_recording_tcc.c
 
-          // Mirrors screenpipe_core::permissions::check_screen_recording_tauri's
-          // debug-build branch exactly: preflight() || capture_probe().
-          func capture_probe() -> Bool {
-              let rect = CGRect(x: 0, y: 0, width: 1, height: 1)
-              guard let image = CGWindowListCreateImage(rect, .optionOnScreenOnly, kCGNullWindowID, []) else {
-                  return false
-              }
-              _ = image
-              return true
-          }
-
-          let granted = CGPreflightScreenCaptureAccess() || capture_probe()
-          print(granted ? "GRANTED" : "DENIED")
-          exit(granted ? 0 : 1)
-          EOF
-
-          if swift "$RUNNER_TEMP/check_screen_recording.swift"; then
+          if "$RUNNER_TEMP/verify_screen_recording_tcc"; then
             echo "granted=true" >> "$GITHUB_OUTPUT"
           else
             echo "granted=false" >> "$GITHUB_OUTPUT"
