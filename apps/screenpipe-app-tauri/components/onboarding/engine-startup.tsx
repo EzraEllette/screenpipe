@@ -90,6 +90,9 @@ type BootPhaseSnapshot = {
   message: string | null;
   error: string | null;
   sinceEpochSecs: number;
+  // True when the CPU lacks AVX2 (compatibility mode): local whisper/qwen3
+  // STT is disabled at runtime; parakeet + cloud engines still work.
+  cpuCompatMode: boolean;
 };
 
 const BOOT_PHASE_POLL_MS = 500;
@@ -1080,6 +1083,16 @@ if the input is sparse, just describe what little you have warmly. don't apologi
               </motion.p>
             )}
         </AnimatePresence>
+
+        {/* CPU compatibility mode — pre-AVX2 CPUs can't run the local
+            whisper/qwen3 kernels; the backend disables them at runtime and
+            reports it via the boot-phase snapshot. */}
+        {bootPhase?.cpuCompatMode && (
+          <p className="font-mono text-[10px] text-muted-foreground/60 mt-2 max-w-[360px] text-center">
+            compatibility mode: this CPU lacks AVX2 — local whisper
+            transcription is unavailable (cloud + parakeet engines still work)
+          </p>
+        )}
 
         {/* Stuck UI */}
         <AnimatePresence>

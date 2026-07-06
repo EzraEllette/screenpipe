@@ -460,6 +460,22 @@ async fn main() {
     // subprocesses are touched.
     windows_ca_bundle::install();
 
+    // Detect pre-AVX2 CPUs once, before the engine boots. The exe itself is
+    // baseline-safe; whisper/qwen3 kernels are AVX2-compiled and gated at
+    // runtime in screenpipe-audio. This flag drives the "compatibility mode"
+    // notice in onboarding via the boot-phase snapshot. tracing isn't
+    // initialized yet — eprintln! here, warn! again after logging init.
+    {
+        let cpu = screenpipe_core::cpu_features::snapshot();
+        if !cpu.avx2 {
+            eprintln!(
+                "screenpipe: cpu lacks AVX2 ({}); running in compatibility mode — local whisper/qwen3 STT disabled",
+                cpu.as_log_string()
+            );
+            health::set_cpu_compat_mode(true);
+        }
+    }
+
     // Handle --check-arc-automation / --trigger-arc-automation flags early,
     // before any Tauri initialization. Used by the permission system to run
     // this binary via launchctl (detached from Terminal) so that macOS TCC
@@ -1112,6 +1128,15 @@ async fn main() {
                 registry.init();
             }
 
+            // Repeat the pre-logging compatibility-mode eprintln! now that the
+            // subscriber is up, so it lands in the log files users send us.
+            if !screenpipe_core::cpu_features::has_avx2() {
+                warn!(
+                    "cpu lacks AVX2 ({}); running in compatibility mode — local whisper/qwen3 STT disabled, parakeet/cloud engines still available",
+                    screenpipe_core::cpu_features::snapshot().as_log_string()
+                );
+            }
+
             #[cfg(target_os = "windows")]
             windows_webview_env::log_diagnostics();
 
@@ -1366,15 +1391,22 @@ async fn main() {
                         }
                     };
 
-                    // Download whisper model (834MB default) — biggest download, start first
+                    // Download whisper model (834MB default) — biggest download, start first.
+                    // Skipped on non-AVX2 CPUs: whisper can never run there (the runtime
+                    // gate in screenpipe-audio disables it), so don't burn 834MB of
+                    // bandwidth/disk on a model that can't load.
                     if let Some(engine) = engine {
-                        let engine_clone = engine.clone();
-                        tokio::task::spawn_blocking(move || {
-                            match screenpipe_audio::transcription::whisper::model::download_whisper_model(engine_clone) {
-                                Ok(path) => info!("whisper model pre-download complete: {:?}", path),
-                                Err(e) => warn!("whisper model pre-download failed (will retry at server start): {}", e),
-                            }
-                        });
+                        if screenpipe_core::cpu_features::has_avx2() {
+                            let engine_clone = engine.clone();
+                            tokio::task::spawn_blocking(move || {
+                                match screenpipe_audio::transcription::whisper::model::download_whisper_model(engine_clone) {
+                                    Ok(path) => info!("whisper model pre-download complete: {:?}", path),
+                                    Err(e) => warn!("whisper model pre-download failed (will retry at server start): {}", e),
+                                }
+                            });
+                        } else {
+                            warn!("skipping whisper model pre-download: CPU lacks AVX2 (whisper disabled)");
+                        }
                     }
 
                     // Download small ONNX models in parallel — these complete in seconds
@@ -2026,11 +2058,17 @@ async fn main() {
                     let app_handle = app_handle.app_handle().clone();
                     tauri::async_runtime::spawn(async move {
                         if let Some(analytics) = app_handle.try_state::<Arc<AnalyticsManager>>() {
+                            // cpu_avx2/cpu_features size the pre-AVX2 population
+                            // running in compatibility mode (local whisper/qwen3
+                            // STT disabled) — see cpu_features in screenpipe-core.
+                            let cpu = screenpipe_core::cpu_features::snapshot();
                             let _ = analytics
                                 .send_event(
                                     "app_started",
                                     Some(json!({
-                                        "startup_type": "normal"
+                                        "startup_type": "normal",
+                                        "cpu_avx2": cpu.avx2,
+                                        "cpu_features": cpu.as_log_string()
                                     })),
                                 )
                                 .await;

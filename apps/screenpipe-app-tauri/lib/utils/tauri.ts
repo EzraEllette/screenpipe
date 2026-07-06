@@ -2387,7 +2387,14 @@ error: string | null;
  * Unix epoch seconds when the current phase was entered. Lets the UI
  * show "X minutes" on slow migrations.
  */
-sinceEpochSecs: number }
+sinceEpochSecs: number;
+/**
+ * True when this CPU lacks AVX2 (pre-2013 x86-64 / Atom-line): local
+ * whisper/qwen3 STT is disabled at runtime (their kernels are
+ * AVX2-compiled); parakeet + cloud engines still work. Drives the
+ * "compatibility mode" notice in onboarding/settings.
+ */
+cpuCompatMode: boolean }
 /**
  * Per-browser automation status: "granted", "denied", or "not_asked".
  * Also includes whether the browser is currently running.
