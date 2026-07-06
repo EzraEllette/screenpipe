@@ -493,7 +493,10 @@ jobs:
           # (0xC0000142) on customer machines without the VC++ redistributable.
           # Hard-fail rather than silently shipping an incomplete package
           # (these previously used -ErrorAction SilentlyContinue).
-          $vcDlls = @('vcruntime140.dll', 'vcruntime140_1.dll', 'msvcp140.dll')
+          # msvcp140_1.dll: load-time import of the MS DirectML-flavored
+          # onnxruntime.dll (verified via its PE import table) — the previous
+          # list predates the switch off pyke's static libs.
+          $vcDlls = @('vcruntime140.dll', 'vcruntime140_1.dll', 'msvcp140.dll', 'msvcp140_1.dll')
           foreach ($dll in $vcDlls) {
             $src = "C:\Windows\System32\$dll"
             if (!(Test-Path $src)) {
@@ -509,6 +512,36 @@ jobs:
             }
           }
           7z a "$packageDir.zip" "./$packageDir/*"
+
+      - name: Smoke test on emulated non-AVX2 CPU (Intel SDE)
+        shell: pwsh
+        run: |
+          # Intel SDE emulates older CPUs and raises the same illegal-instruction
+          # fault a real pre-AVX2 chip would. -snb = Sandy Bridge (AVX, no AVX2);
+          # -mrm = Merom (no AVX at all — harshest baseline case).
+          # Guards against regressions of the 0xc000001d launch crash: global
+          # /arch:AVX2 CFLAGS, AVX2 static onnxruntime, eager ggml init, etc.
+          # CI runners have AVX2, so without SDE a poisoned build sails through
+          # CI and dies on customer machines (see the 2026-07 pre-Haswell report).
+          # A --version probe exercises process init end-to-end: CRT startup,
+          # the import table (onnxruntime.dll → MSVCP/VCRUNTIME), and every
+          # static initializer. Run from the deployment package dir so DLL
+          # resolution matches exactly what customers get.
+          # SDE URL: pinned release; if Intel rotates the mirror, grab the new
+          # URL from https://www.intel.com/content/www/us/en/developer/articles/tool/software-development-emulator.html
+          $sdeUrl = 'https://downloadmirror.intel.com/915934/sde-external-10.8.0-2026-03-15-win.tar.xz'
+          curl.exe -fSL -o sde.tar.xz $sdeUrl
+          7z x sde.tar.xz -y | Out-Null
+          7z x sde.tar -y | Out-Null
+          $sde = (Get-ChildItem "sde-external-*" -Recurse -Filter sde.exe | Select-Object -First 1).FullName
+          if (-not $sde) { throw "sde.exe not found after extraction" }
+          $packageDir = "screenpipe-${{ env.VERSION }}-x86_64-pc-windows-msvc"
+          $exe = (Resolve-Path "$packageDir/bin/screenpipe.exe").Path
+          foreach ($cpu in @('-snb', '-mrm')) {
+            Write-Host "=== SDE $cpu — screenpipe.exe --version ==="
+            & $sde $cpu -- $exe --version
+            if ($LASTEXITCODE -ne 0) { throw "screenpipe.exe faulted under SDE $cpu (exit $LASTEXITCODE) — a non-AVX2 CPU cannot launch this build" }
+          }
 
       - name: Calculate SHA256
         shell: pwsh
