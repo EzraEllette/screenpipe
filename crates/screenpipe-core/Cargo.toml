@@ -8,6 +8,7 @@ license-file = { workspace = true }
 edition = { workspace = true }
 
 [dependencies]
+screenpipe-cpu-features = { path = "../screenpipe-cpu-features" }
 screenpipe-events = { path = "../screenpipe-events" }
 futures = { workspace = true }
 serde = { workspace = true }
