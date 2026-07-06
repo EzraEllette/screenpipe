@@ -111,11 +111,12 @@ import {
 import { hasAppEntitlement } from "@/lib/app-entitlement";
 import {
   FALLBACK_TRANSCRIPTION_ENGINE,
-  type EngineCapabilities,
+  type EngineSupportMap,
   deviceLacksLocalEngine,
   getAudioEngineResolution,
   getAudioFallbackMessage,
   getEngineRequirement,
+  toEngineSupportMap,
 } from "@/lib/audio-engine-resolution";
 import { useToast } from "@/components/ui/use-toast";
 import { useHealthCheck } from "@/lib/hooks/use-health-check";
@@ -127,7 +128,7 @@ import { Switch } from "@/components/ui/switch";
 import { Slider } from "@/components/ui/slider";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import { platform, version as osVersion } from "@tauri-apps/plugin-os";
+import { platform } from "@tauri-apps/plugin-os";
 import posthog from "posthog-js";
 import {
   Language,
@@ -1843,12 +1844,10 @@ export function RecordingSettings() {
   const { checkLogin } = useLoginDialog();
   const overlayData = useOverlayData();
   const [hwCapability, setHwCapability] = useState<HardwareCapability | null>(null);
-  // True when the CPU lacks AVX2 (compatibility mode): whisper/qwen3 local
-  // engines can never load, so the picker must not offer them.
-  const [cpuCompatMode, setCpuCompatMode] = useState(false);
-  // Needed for parakeet's macOS 26 requirement; null while unknown (fails
-  // open — the boot-time store guard is the backstop).
-  const [macosMajorVersion, setMacosMajorVersion] = useState<number | null>(null);
+  // Per-engine verdicts from the backend's engine_requirement matrix (the
+  // same one behind the boot-time store guard). Empty until loaded — every
+  // lookup fails open, so the picker never disables engines on guesswork.
+  const [engineSupport, setEngineSupport] = useState<EngineSupportMap>({});
 
   // OpenAI Compatible model fetching
   const {
@@ -1875,29 +1874,13 @@ export function RecordingSettings() {
 
   useEffect(() => {
     commands.getHardwareCapability().then(setHwCapability).catch(() => {});
-    // cpu_compat_mode rides on the boot-phase snapshot (no dedicated command)
-    // and is fixed at process start, so one read is enough.
+    // Verdicts are fixed for the process lifetime (CPU features and RAM
+    // don't change at runtime), so one read is enough.
     commands
-      .getBootPhase()
-      .then((phase) => setCpuCompatMode(phase.cpuCompatMode))
+      .getEngineSupport()
+      .then((list) => setEngineSupport(toEngineSupportMap(list)))
       .catch(() => {});
-    try {
-      const major = parseInt(osVersion().split(".")[0], 10);
-      setMacosMajorVersion(Number.isFinite(major) ? major : null);
-    } catch {
-      setMacosMajorVersion(null);
-    }
   }, []);
-
-  const engineCaps = useMemo<EngineCapabilities>(
-    () => ({
-      cpuCompatMode,
-      isMacOS,
-      deviceTier: settings.deviceTier,
-      macosMajorVersion: isMacOS ? macosMajorVersion : null,
-    }),
-    [cpuCompatMode, isMacOS, settings.deviceTier, macosMajorVersion]
-  );
 
   // Offline engines offered by the picker. Each is checked against this
   // device's capabilities: unsupported ones render disabled with the missing
@@ -1917,13 +1900,13 @@ export function RecordingSettings() {
   const hasUnsupportedOfflineEngines = useMemo(
     () =>
       offlineEngineOptions.some((option) =>
-        getEngineRequirement(option.value, engineCaps)
+        getEngineRequirement(option.value, engineSupport)
       ),
-    [offlineEngineOptions, engineCaps]
+    [offlineEngineOptions, engineSupport]
   );
 
   const audioEngineResolution = useMemo(
-    () => getAudioEngineResolution(settings, engineCaps),
+    () => getAudioEngineResolution(settings, engineSupport),
     [
       settings.audioTranscriptionEngine,
       settings.deepgramApiKey,
@@ -1932,7 +1915,7 @@ export function RecordingSettings() {
       settings.user?.entitlement,
       settings.user?.id,
       settings.user?.token,
-      engineCaps,
+      engineSupport,
     ]
   );
   const hasCloudTranscriptionAccess = hasAppEntitlement(settings.user as any);
@@ -2363,9 +2346,9 @@ export function RecordingSettings() {
     value: string,
     realtime = false
   ) => {
-    // The picker disables unsupported items; this guard covers the brief
-    // window before the boot-phase snapshot / os version have loaded.
-    if (getEngineRequirement(value, engineCaps)) {
+    // The picker disables unsupported items; this guard covers races where
+    // the support list arrives between opening the dropdown and selecting.
+    if (getEngineRequirement(value, engineSupport)) {
       return;
     }
 
@@ -2417,7 +2400,7 @@ export function RecordingSettings() {
           ...settings,
           audioTranscriptionEngine: value,
         },
-        engineCaps
+        engineSupport
       );
       const nextLanguageSupportEngine = nextAudioEngineResolution.active;
       const nextLanguageSupportKey =
@@ -2763,7 +2746,7 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
                     <SelectGroup>
                       <SelectLabel className="text-[10px] text-muted-foreground/70 uppercase tracking-wider">offline</SelectLabel>
                       {offlineEngineOptions.map(({ value, label }) => {
-                        const requirement = getEngineRequirement(value, engineCaps);
+                        const requirement = getEngineRequirement(value, engineSupport);
                         return (
                           <SelectItem key={value} value={value} disabled={!!requirement}>
                             {label}
@@ -2834,7 +2817,7 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
                     {/* Recovery buttons offer only engines this device can
                         actually run: Whisper when it works here, otherwise
                         parakeet (ONNX, runtime CPU dispatch) where supported. */}
-                    {!getEngineRequirement(FALLBACK_TRANSCRIPTION_ENGINE, engineCaps) &&
+                    {!getEngineRequirement(FALLBACK_TRANSCRIPTION_ENGINE, engineSupport) &&
                       audioEngineResolution.requested !== FALLBACK_TRANSCRIPTION_ENGINE && (
                       <Button
                         type="button"
@@ -2852,8 +2835,8 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
                         Use Whisper setting
                       </Button>
                     )}
-                    {!!getEngineRequirement(FALLBACK_TRANSCRIPTION_ENGINE, engineCaps) &&
-                      !getEngineRequirement("parakeet", engineCaps) && (
+                    {!!getEngineRequirement(FALLBACK_TRANSCRIPTION_ENGINE, engineSupport) &&
+                      !getEngineRequirement("parakeet", engineSupport) && (
                       <Button
                         type="button"
                         variant="outline"
@@ -2873,7 +2856,7 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
                     {/* Hardware that can run no local engine at all: cloud is
                         the only way to keep transcription on. Routed through
                         the picker handler so login/checkout kick in first. */}
-                    {deviceLacksLocalEngine(engineCaps) &&
+                    {deviceLacksLocalEngine(engineSupport) &&
                       audioEngineResolution.requested !== "screenpipe-cloud" && (
                       <Button
                         type="button"

@@ -10,9 +10,9 @@ use sysinfo::{System, SystemExt};
 /// Minimum macOS major version required for parakeet-mlx (Metal GPU).
 /// macOS 26 (Tahoe) is required for the MLX framework APIs used by parakeet.
 /// On older macOS versions, the model loading segfaults during Metal buffer allocation.
-/// (cfg-gated: since the AVX2-aware refactor its only uses live in macOS-only blocks.)
-#[cfg(target_os = "macos")]
-const PARAKEET_MIN_MACOS_MAJOR: u32 = 26;
+/// (Not cfg-gated: [`engine_requirement_for_platform`] is platform-explicit so
+/// its macOS rules are testable from any host OS.)
+pub const PARAKEET_MIN_MACOS_MAJOR: u32 = 26;
 
 /// Device performance tier, determined by hardware detection.
 /// Used to select conservative or aggressive default settings on first launch.
@@ -323,41 +323,99 @@ pub fn best_engine_for_platform_for_cpu(tier: DeviceTier, has_avx2: bool) -> &'s
     }
 }
 
-/// Returns true if the given engine string is unsafe for the current platform.
+/// The capability an engine is missing on a given device, when it can't run.
 ///
-/// An engine is unsafe if:
-/// - It's whisper*/qwen3* on an x86-64 CPU without AVX2 (their native kernels
-///   are AVX2-compiled — STATUS_ILLEGAL_INSTRUCTION at first use)
-/// - It's parakeet/parakeet-mlx on a Low-tier device (OOM crash)
-/// - It's parakeet/parakeet-mlx on a Mid-tier device (too heavy), EXCEPT
-///   plain parakeet on a non-AVX2 x86-64 CPU where it's the only local
-///   engine that can run at all (and what the default picker chooses)
-/// - It's parakeet/parakeet-mlx on macOS < 26 (segfault during Metal init)
-/// - It's parakeet-mlx on a non-macOS platform (no MLX support; plain
-///   parakeet is ONNX CPU and fine on High tier)
-pub fn is_engine_unsafe(engine: &str, tier: DeviceTier) -> bool {
-    is_engine_unsafe_for_cpu(engine, tier, screenpipe_cpu_features::has_avx2())
+/// [`label`](Self::label) renders the short human string the app's settings
+/// UI shows next to disabled picker items ("requires AVX2") and inside the
+/// degraded-engine alert.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EngineRequirement {
+    /// whisper*/qwen3* native kernels are AVX2-compiled; the CPU lacks AVX2.
+    Avx2,
+    /// parakeet (~2GB) needs a High-tier device (≥24 GB RAM).
+    Ram24Gb,
+    /// parakeet needs at least a Mid-tier device (≥12 GB RAM) even where
+    /// it's the only local engine (non-AVX2 x86-64 off-macOS).
+    Ram12Gb,
+    /// parakeet auto-upgrades to MLX on macOS, which needs macOS ≥ 26.
+    MacOs26,
+    /// parakeet-mlx is explicitly MLX — macOS only.
+    MacOs,
 }
 
-/// CPU-explicit core of [`is_engine_unsafe`], testable without the host
-/// CPU's actual feature set.
-pub fn is_engine_unsafe_for_cpu(engine: &str, tier: DeviceTier, has_avx2: bool) -> bool {
+impl EngineRequirement {
+    /// Short human label of the missing capability.
+    pub fn label(&self) -> String {
+        match self {
+            Self::Avx2 => "AVX2".to_string(),
+            Self::Ram24Gb => "24 GB+ RAM".to_string(),
+            Self::Ram12Gb => "12 GB+ RAM".to_string(),
+            Self::MacOs26 => format!("macOS {PARAKEET_MIN_MACOS_MAJOR}"),
+            Self::MacOs => "macOS".to_string(),
+        }
+    }
+}
+
+/// The capability the given engine is missing on the current device, or
+/// `None` when it can run.
+///
+/// THE single source of truth for engine support: the boot-time store guard
+/// ([`is_engine_unsafe`]) and the app's `get_engine_support` command (which
+/// feeds the settings picker) both derive from it, so the UI can never offer
+/// an engine the guard would silently revert.
+pub fn engine_requirement(engine: &str, tier: DeviceTier) -> Option<EngineRequirement> {
+    engine_requirement_for_platform(
+        engine,
+        tier,
+        cfg!(target_arch = "x86_64") && !screenpipe_cpu_features::has_avx2(),
+        cfg!(target_os = "macos"),
+        macos_major_version(),
+    )
+}
+
+/// Platform-explicit core of [`engine_requirement`], testable from any host.
+///
+/// An engine can't run if:
+/// - It's whisper*/qwen3* on an x86-64 CPU without AVX2 (`cpu_compat_mode`;
+///   their native kernels are AVX2-compiled — STATUS_ILLEGAL_INSTRUCTION at
+///   first use)
+/// - It's parakeet/parakeet-mlx on a Low-tier device (OOM crash)
+/// - It's parakeet/parakeet-mlx on a Mid-tier device (too heavy), EXCEPT
+///   plain parakeet on a non-AVX2 x86-64 CPU off-macOS where it's the only
+///   local engine that can run at all (and what the default picker chooses)
+/// - It's parakeet/parakeet-mlx on macOS < 26 (segfault during Metal init);
+///   an unknown macOS version counts as too old — fail closed, never risk
+///   the crash
+/// - It's parakeet-mlx on a non-macOS platform (no MLX support; plain
+///   parakeet is ONNX CPU and fine on High tier)
+pub fn engine_requirement_for_platform(
+    engine: &str,
+    tier: DeviceTier,
+    cpu_compat_mode: bool,
+    is_macos: bool,
+    macos_major: Option<u32>,
+) -> Option<EngineRequirement> {
     // AVX2-compiled static kernels: whisper* (ggml) and qwen3* (antirez C).
     // Applies on every x86-64 target (macOS included) — mirrors the runtime
     // gate in screenpipe-audio's TranscriptionEngine::new exactly, so the
     // store migration moves users off an engine that could never load.
-    let non_avx2_x86 = cfg!(target_arch = "x86_64") && !has_avx2;
-    if non_avx2_x86 && (engine.starts_with("whisper") || engine.starts_with("qwen3")) {
-        return true;
+    if cpu_compat_mode && (engine.starts_with("whisper") || engine.starts_with("qwen3")) {
+        return Some(EngineRequirement::Avx2);
     }
 
     let is_parakeet = engine == "parakeet" || engine == "parakeet-mlx";
     if !is_parakeet {
-        return false;
+        return None;
     }
 
     if tier == DeviceTier::Low {
-        return true;
+        // On a non-AVX2 x86-64 (off-macOS) parakeet is the only local engine,
+        // so it's allowed from Mid tier up; everywhere else it needs High.
+        return Some(if cpu_compat_mode && !is_macos {
+            EngineRequirement::Ram12Gb
+        } else {
+            EngineRequirement::Ram24Gb
+        });
     }
     if tier == DeviceTier::Mid {
         // Parakeet (~2GB) is normally too heavy for Mid, but on a non-AVX2
@@ -365,25 +423,50 @@ pub fn is_engine_unsafe_for_cpu(engine: &str, tier: DeviceTier, has_avx2: bool) 
         // regardless) plain parakeet is the only local engine that can run
         // (whisper/qwen3 are AVX2-compiled) and Mid (≥12GB) holds it — it is
         // also exactly what best_engine_for_platform_for_cpu picks there.
-        return !(non_avx2_x86 && cfg!(not(target_os = "macos")) && engine == "parakeet");
+        if cpu_compat_mode && !is_macos && engine == "parakeet" {
+            return None;
+        }
+        return Some(EngineRequirement::Ram24Gb);
     }
 
     // High tier from here.
-    #[cfg(target_os = "macos")]
-    {
+    if is_macos {
         // parakeet auto-upgrades to MLX on macOS, so both variants need
         // macOS ≥ 26 (Metal buffer allocation segfaults on older versions).
-        let macos_ok = macos_major_version()
+        let macos_ok = macos_major
             .map(|v| v >= PARAKEET_MIN_MACOS_MAJOR)
             .unwrap_or(false);
-        !macos_ok
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
+        if macos_ok {
+            None
+        } else {
+            Some(EngineRequirement::MacOs26)
+        }
+    } else if engine == "parakeet-mlx" {
         // Off-macOS, plain parakeet is ONNX CPU — safe on High tier. Only the
         // explicit MLX variant is impossible here (no MLX support).
-        engine == "parakeet-mlx"
+        Some(EngineRequirement::MacOs)
+    } else {
+        None
     }
+}
+
+/// Returns true if the given engine string is unsafe for the current platform.
+/// Boolean view of [`engine_requirement`]; see there for the rules.
+pub fn is_engine_unsafe(engine: &str, tier: DeviceTier) -> bool {
+    engine_requirement(engine, tier).is_some()
+}
+
+/// CPU-explicit variant of [`is_engine_unsafe`], testable without the host
+/// CPU's actual feature set.
+pub fn is_engine_unsafe_for_cpu(engine: &str, tier: DeviceTier, has_avx2: bool) -> bool {
+    engine_requirement_for_platform(
+        engine,
+        tier,
+        cfg!(target_arch = "x86_64") && !has_avx2,
+        cfg!(target_os = "macos"),
+        macos_major_version(),
+    )
+    .is_some()
 }
 
 /// Apply platform-specific defaults to a `RecordingSettings`.
@@ -561,6 +644,123 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ── engine_requirement_for_platform matrix ────────────────────────
+    // Platform-explicit, so every OS branch runs on every CI host. This is
+    // the matrix the app's settings picker renders (via get_engine_support),
+    // moved here from the frontend when Rust became the single source of
+    // truth.
+
+    const AVX2_ENGINES: [&str; 5] = [
+        "whisper-large-v3-turbo",
+        "whisper-large-v3-turbo-quantized",
+        "whisper-tiny",
+        "whisper-tiny-quantized",
+        "qwen3-asr",
+    ];
+
+    fn requirement_on(
+        engine: &str,
+        tier: DeviceTier,
+        cpu_compat_mode: bool,
+        is_macos: bool,
+        macos_major: Option<u32>,
+    ) -> Option<EngineRequirement> {
+        engine_requirement_for_platform(engine, tier, cpu_compat_mode, is_macos, macos_major)
+    }
+
+    #[test]
+    fn whisper_and_qwen3_require_avx2_in_compat_mode_only() {
+        for engine in AVX2_ENGINES {
+            assert_eq!(
+                requirement_on(engine, DeviceTier::High, true, false, None),
+                Some(EngineRequirement::Avx2)
+            );
+            // macOS x86-64 without AVX2 (Mac Pro 2013) is gated the same way
+            assert_eq!(
+                requirement_on(engine, DeviceTier::High, true, true, Some(15)),
+                Some(EngineRequirement::Avx2)
+            );
+            assert_eq!(requirement_on(engine, DeviceTier::High, false, false, None), None);
+        }
+    }
+
+    #[test]
+    fn cloud_and_passthrough_engines_never_have_requirements() {
+        for engine in ["screenpipe-cloud", "deepgram", "openai-compatible", "disabled"] {
+            // worst-case device: compat mode, low tier, old macOS
+            assert_eq!(requirement_on(engine, DeviceTier::Low, true, true, Some(12)), None);
+        }
+    }
+
+    #[test]
+    fn parakeet_needs_ram_below_high_tier() {
+        for engine in ["parakeet", "parakeet-mlx"] {
+            assert_eq!(
+                requirement_on(engine, DeviceTier::Low, false, false, None),
+                Some(EngineRequirement::Ram24Gb)
+            );
+            assert_eq!(
+                requirement_on(engine, DeviceTier::Mid, false, false, None),
+                Some(EngineRequirement::Ram24Gb)
+            );
+        }
+    }
+
+    #[test]
+    fn compat_mode_off_macos_relaxes_plain_parakeet_to_mid_tier() {
+        // The only local engine there — allowed from Mid up, needs ≥12 GB
+        assert_eq!(requirement_on("parakeet", DeviceTier::Mid, true, false, None), None);
+        assert_eq!(
+            requirement_on("parakeet", DeviceTier::Low, true, false, None),
+            Some(EngineRequirement::Ram12Gb)
+        );
+        // the explicit MLX variant and macOS keep the strict rule
+        assert_eq!(
+            requirement_on("parakeet-mlx", DeviceTier::Mid, true, false, None),
+            Some(EngineRequirement::Ram24Gb)
+        );
+        assert_eq!(
+            requirement_on("parakeet", DeviceTier::Mid, true, true, Some(26)),
+            Some(EngineRequirement::Ram24Gb)
+        );
+    }
+
+    #[test]
+    fn parakeet_on_macos_needs_min_major_version() {
+        assert_eq!(
+            requirement_on("parakeet", DeviceTier::High, false, true, Some(15)),
+            Some(EngineRequirement::MacOs26)
+        );
+        assert_eq!(requirement_on("parakeet", DeviceTier::High, false, true, Some(26)), None);
+        // Unknown version fails closed — same verdict the boot guard has
+        // always applied, and the UI must show what the guard will do.
+        assert_eq!(
+            requirement_on("parakeet", DeviceTier::High, false, true, None),
+            Some(EngineRequirement::MacOs26)
+        );
+    }
+
+    #[test]
+    fn parakeet_mlx_is_macos_only() {
+        assert_eq!(
+            requirement_on("parakeet-mlx", DeviceTier::High, false, false, None),
+            Some(EngineRequirement::MacOs)
+        );
+        assert_eq!(requirement_on("parakeet", DeviceTier::High, false, false, None), None);
+    }
+
+    #[test]
+    fn requirement_labels_match_ui_vocabulary() {
+        assert_eq!(EngineRequirement::Avx2.label(), "AVX2");
+        assert_eq!(EngineRequirement::Ram24Gb.label(), "24 GB+ RAM");
+        assert_eq!(EngineRequirement::Ram12Gb.label(), "12 GB+ RAM");
+        assert_eq!(
+            EngineRequirement::MacOs26.label(),
+            format!("macOS {PARAKEET_MIN_MACOS_MAJOR}")
+        );
+        assert_eq!(EngineRequirement::MacOs.label(), "macOS");
     }
 
     #[test]

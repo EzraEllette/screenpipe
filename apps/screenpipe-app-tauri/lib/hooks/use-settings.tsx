@@ -15,7 +15,11 @@ import { User } from "../utils/tauri";
 import { SettingsStore } from "../utils/tauri";
 import { installAuthInterceptor } from "../auth-guard";
 import { hasAppEntitlement, normalizeAppUser } from "@/lib/app-entitlement";
-import { deviceLacksLocalEngine } from "@/lib/audio-engine-resolution";
+import {
+	type EngineSupportMap,
+	deviceLacksLocalEngine,
+	toEngineSupportMap,
+} from "@/lib/audio-engine-resolution";
 import { screenpipeWebUrl } from "@/lib/web-url";
 import type { SourceCitation } from "@/lib/source-citations";
 import type {
@@ -531,31 +535,21 @@ const DEFAULT_CLOUD_PRESET: AIPreset = makeDefaultPresets(false)[0];
 
 const DEFAULT_AUDIO_ENGINE = "whisper-large-v3-turbo-quantized";
 
-// cpu_compat_mode is fixed at process start, so cache the boot-phase read.
-let cachedCpuCompatMode: boolean | null = null;
+// Engine-support verdicts are fixed for the process lifetime, so cache the
+// backend read (get_engine_support — the same engine_requirement matrix the
+// boot-time store guard enforces).
+let cachedEngineSupport: EngineSupportMap | null = null;
 
 // True when this hardware can't run any local transcription engine — the
 // boot-time store guard (screenpipe_config::is_engine_unsafe) then parks
 // audioTranscriptionEngine on "disabled". Fails closed (false) on any error
 // so we never rewrite settings on guesswork.
-const deviceLacksLocalEngineNow = async (settings: Settings): Promise<boolean> => {
+const deviceLacksLocalEngineNow = async (): Promise<boolean> => {
 	try {
-		if (cachedCpuCompatMode === null) {
-			cachedCpuCompatMode = (await commands.getBootPhase()).cpuCompatMode;
+		if (cachedEngineSupport === null) {
+			cachedEngineSupport = toEngineSupportMap(await commands.getEngineSupport());
 		}
-		// With AVX2 the Whisper fallback always runs, so a local engine exists.
-		if (!cachedCpuCompatMode) return false;
-		const { platform: getPlatform, version: getOsVersion } = await import(
-			"@tauri-apps/plugin-os"
-		);
-		const isMacOS = getPlatform() === "macos";
-		const major = parseInt(getOsVersion().split(".")[0], 10);
-		return deviceLacksLocalEngine({
-			cpuCompatMode: true,
-			isMacOS,
-			deviceTier: settings.deviceTier,
-			macosMajorVersion: isMacOS && Number.isFinite(major) ? major : null,
-		});
+		return deviceLacksLocalEngine(cachedEngineSupport);
 	} catch {
 		return false;
 	}
@@ -1043,7 +1037,7 @@ function createSettingsStore() {
 		if (isLoggedInProUser(settings.user) && !(settings as any)._proCloudAudioDefaultsAppliedV2) {
 			const hardwareForcedDisabled =
 				settings.audioTranscriptionEngine === "disabled" &&
-				(await deviceLacksLocalEngineNow(settings));
+				(await deviceLacksLocalEngineNow());
 			applyProCloudAudioDefaults(settings, hardwareForcedDisabled);
 			needsUpdate = true;
 		}
@@ -1100,7 +1094,7 @@ function createSettingsStore() {
 			}
 			const hardwareForcedDisabled =
 				newSettings.audioTranscriptionEngine === "disabled" &&
-				(await deviceLacksLocalEngineNow(newSettings));
+				(await deviceLacksLocalEngineNow());
 			newSettings = applyProCloudAudioDefaults(newSettings, hardwareForcedDisabled);
 		}
 		await setSettingsStripped(store, newSettings);

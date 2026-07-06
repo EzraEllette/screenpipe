@@ -384,6 +384,7 @@ macro_rules! define_specta_builder {
             .typ::<suggestions::CachedSuggestions>()
             .typ::<suggestions::Suggestion>()
             .typ::<hardware::HardwareCapability>()
+            .typ::<hardware::EngineSupport>()
             .typ::<enterprise_install_metadata::EnterpriseInstallMetadata>()
             .typ::<chatgpt_oauth::ChatGptOAuthStatus>()
             .typ::<oauth::OAuthStatus>()

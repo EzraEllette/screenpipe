@@ -5,13 +5,18 @@
 import { describe, expect, it } from "vitest";
 import {
   FALLBACK_TRANSCRIPTION_ENGINE,
-  type EngineCapabilities,
+  type EngineSupportMap,
   deviceLacksLocalEngine,
-  engineRequiresAvx2,
   getAudioEngineResolution,
   getAudioFallbackMessage,
   getEngineRequirement,
+  toEngineSupportMap,
 } from "@/lib/audio-engine-resolution";
+
+// The support matrix itself lives in Rust (engine_requirement in
+// crates/screenpipe-config/src/defaults.rs, tested there) — these tests
+// cover the frontend's lookup and resolution layer over stubbed verdicts,
+// shaped like real get_engine_support responses.
 
 // Entitled user: fresh check, active plan with the app feature — mirrors what
 // normalizeAppUser produces for a paying account.
@@ -33,114 +38,73 @@ const settingsWith = (engine: string, user: any = entitledUser) =>
     user,
   }) as any;
 
-const caps = (overrides: Partial<EngineCapabilities> = {}): EngineCapabilities => ({
-  cpuCompatMode: false,
-  isMacOS: false,
-  deviceTier: "high",
-  macosMajorVersion: null,
-  ...overrides,
-});
+// get_engine_support verdicts on a non-AVX2 (compat-mode) Low-tier machine:
+// no local engine can run at all.
+const COMPAT_LOW_SUPPORT: EngineSupportMap = {
+  "screenpipe-cloud": null,
+  deepgram: null,
+  "whisper-large-v3-turbo": "AVX2",
+  "whisper-large-v3-turbo-quantized": "AVX2",
+  "whisper-tiny": "AVX2",
+  "whisper-tiny-quantized": "AVX2",
+  "qwen3-asr": "AVX2",
+  parakeet: "12 GB+ RAM",
+  "parakeet-mlx": "12 GB+ RAM",
+  "openai-compatible": null,
+  disabled: null,
+};
 
-const AVX2_ENGINES = [
-  "whisper-large-v3-turbo",
-  "whisper-large-v3-turbo-quantized",
-  "whisper-tiny",
-  "whisper-tiny-quantized",
-  "qwen3-asr",
-];
+// Same CPU, Mid tier: parakeet is the one runnable local engine.
+const COMPAT_MID_SUPPORT: EngineSupportMap = {
+  ...COMPAT_LOW_SUPPORT,
+  parakeet: null,
+  "parakeet-mlx": "24 GB+ RAM",
+};
 
-describe("engineRequiresAvx2", () => {
-  it("matches every whisper variant and qwen3, nothing else", () => {
-    for (const engine of AVX2_ENGINES) {
-      expect(engineRequiresAvx2(engine)).toBe(true);
-    }
-    for (const engine of [
-      "parakeet",
-      "parakeet-mlx",
-      "screenpipe-cloud",
-      "deepgram",
-      "openai-compatible",
-      "disabled",
-    ]) {
-      expect(engineRequiresAvx2(engine)).toBe(false);
-    }
+// AVX2-capable Mid-tier machine (the common laptop): whisper runs,
+// parakeet needs more RAM.
+const AVX2_MID_SUPPORT: EngineSupportMap = {
+  parakeet: "24 GB+ RAM",
+  "parakeet-mlx": "24 GB+ RAM",
+};
+
+describe("toEngineSupportMap", () => {
+  it("keys verdicts by engine id, preserving null for supported engines", () => {
+    const map = toEngineSupportMap([
+      { engine: "whisper-tiny", requirement: "AVX2" },
+      { engine: "parakeet", requirement: null },
+    ]);
+    expect(map["whisper-tiny"]).toBe("AVX2");
+    expect(map["parakeet"]).toBeNull();
   });
 });
 
-// Mirrors is_engine_unsafe_for_cpu in crates/screenpipe-config/src/defaults.rs
-// — every case the boot-time store guard would revert must surface a
-// requirement here, or the picker re-creates the select-then-silently-revert
-// trap for that engine.
 describe("getEngineRequirement", () => {
-  it("flags whisper/qwen3 with AVX2 in compatibility mode only", () => {
-    for (const engine of AVX2_ENGINES) {
-      expect(getEngineRequirement(engine, caps({ cpuCompatMode: true }))).toBe("AVX2");
-      expect(getEngineRequirement(engine, caps())).toBeNull();
-    }
+  it("returns the backend verdict for reported engines", () => {
+    expect(getEngineRequirement("whisper-tiny", COMPAT_LOW_SUPPORT)).toBe("AVX2");
+    expect(getEngineRequirement("parakeet", COMPAT_LOW_SUPPORT)).toBe("12 GB+ RAM");
+    expect(getEngineRequirement("parakeet", AVX2_MID_SUPPORT)).toBe("24 GB+ RAM");
+    expect(getEngineRequirement("screenpipe-cloud", COMPAT_LOW_SUPPORT)).toBeNull();
   });
 
-  it("never flags cloud engines or disabled", () => {
-    for (const engine of ["screenpipe-cloud", "deepgram", "openai-compatible", "disabled"]) {
-      expect(getEngineRequirement(engine, caps({ cpuCompatMode: true, deviceTier: "low" }))).toBeNull();
-    }
-  });
-
-  it("flags parakeet on low and mid tier as needing more RAM", () => {
-    expect(getEngineRequirement("parakeet", caps({ deviceTier: "low" }))).toBe("24 GB+ RAM");
-    expect(getEngineRequirement("parakeet", caps({ deviceTier: "mid" }))).toBe("24 GB+ RAM");
-    expect(getEngineRequirement("parakeet", caps({ deviceTier: "medium" }))).toBe("24 GB+ RAM");
-    expect(getEngineRequirement("parakeet", caps({ deviceTier: "high" }))).toBeNull();
-  });
-
-  it("allows plain parakeet on mid tier only for compat-mode non-mac (the only local engine there)", () => {
-    const compatMid = caps({ cpuCompatMode: true, deviceTier: "mid" });
-    expect(getEngineRequirement("parakeet", compatMid)).toBeNull();
-    expect(getEngineRequirement("parakeet-mlx", compatMid)).toBe("24 GB+ RAM");
-    expect(
-      getEngineRequirement("parakeet", caps({ cpuCompatMode: true, deviceTier: "mid", isMacOS: true }))
-    ).toBe("24 GB+ RAM");
-    // compat low tier off-mac: parakeet needs at least Mid
-    expect(
-      getEngineRequirement("parakeet", caps({ cpuCompatMode: true, deviceTier: "low" }))
-    ).toBe("12 GB+ RAM");
-  });
-
-  it("flags parakeet on macOS before 26", () => {
-    expect(
-      getEngineRequirement("parakeet", caps({ isMacOS: true, macosMajorVersion: 15 }))
-    ).toBe("macOS 26");
-    expect(
-      getEngineRequirement("parakeet", caps({ isMacOS: true, macosMajorVersion: 26 }))
-    ).toBeNull();
-  });
-
-  it("fails open on unknown tier or unknown macOS version (boot guard is the backstop)", () => {
-    expect(getEngineRequirement("parakeet", caps({ deviceTier: null }))).toBeNull();
-    expect(
-      getEngineRequirement("parakeet", caps({ isMacOS: true, macosMajorVersion: null }))
-    ).toBeNull();
+  it("fails open before the support list loads and for unreported engines", () => {
+    // The boot-time store guard is the backstop; the UI never disables
+    // engines on guesswork.
+    expect(getEngineRequirement("whisper-tiny")).toBeNull();
+    expect(getEngineRequirement("whisper-tiny", {})).toBeNull();
+    expect(getEngineRequirement("some-future-engine", COMPAT_LOW_SUPPORT)).toBeNull();
   });
 });
 
 describe("deviceLacksLocalEngine", () => {
   it("is true only when neither whisper nor parakeet can run", () => {
-    // compat + low tier off-mac: whisper needs AVX2, parakeet needs 12 GB+
-    expect(
-      deviceLacksLocalEngine(caps({ cpuCompatMode: true, deviceTier: "low" }))
-    ).toBe(true);
-    // compat + old Intel Mac: whisper needs AVX2, parakeet needs macOS 26
-    expect(
-      deviceLacksLocalEngine(
-        caps({ cpuCompatMode: true, isMacOS: true, macosMajorVersion: 12 })
-      )
-    ).toBe(true);
-    // compat mid tier off-mac: parakeet runs
-    expect(
-      deviceLacksLocalEngine(caps({ cpuCompatMode: true, deviceTier: "mid" }))
-    ).toBe(false);
-    // any AVX2 device: whisper runs
-    expect(deviceLacksLocalEngine(caps({ deviceTier: "low" }))).toBe(false);
-    expect(deviceLacksLocalEngine(caps())).toBe(false);
+    expect(deviceLacksLocalEngine(COMPAT_LOW_SUPPORT)).toBe(true);
+    // compat mid tier: parakeet runs
+    expect(deviceLacksLocalEngine(COMPAT_MID_SUPPORT)).toBe(false);
+    // AVX2 device: whisper runs
+    expect(deviceLacksLocalEngine(AVX2_MID_SUPPORT)).toBe(false);
+    // unloaded support list fails open
+    expect(deviceLacksLocalEngine({})).toBe(false);
   });
 });
 
@@ -148,7 +112,7 @@ describe("getAudioEngineResolution with an unsupported engine", () => {
   it("reports whisper degraded to disabled in compatibility mode", () => {
     const resolution = getAudioEngineResolution(
       settingsWith("whisper-tiny"),
-      caps({ cpuCompatMode: true })
+      COMPAT_LOW_SUPPORT
     );
     expect(resolution).toEqual({
       requested: "whisper-tiny",
@@ -161,7 +125,7 @@ describe("getAudioEngineResolution with an unsupported engine", () => {
   it("reports parakeet degraded on a mid-tier device", () => {
     const resolution = getAudioEngineResolution(
       settingsWith("parakeet"),
-      caps({ deviceTier: "mid" })
+      AVX2_MID_SUPPORT
     );
     expect(resolution.active).toBe("disabled");
     expect(resolution.fallbackReason).toBe("engineUnsupported");
@@ -172,7 +136,7 @@ describe("getAudioEngineResolution with an unsupported engine", () => {
     for (const engine of ["parakeet", "screenpipe-cloud", "disabled"]) {
       const resolution = getAudioEngineResolution(
         settingsWith(engine),
-        caps({ cpuCompatMode: true, deviceTier: "mid" })
+        COMPAT_MID_SUPPORT
       );
       expect(resolution.active).toBe(engine);
       expect(resolution.fallbackReason).toBeNull();
@@ -182,7 +146,7 @@ describe("getAudioEngineResolution with an unsupported engine", () => {
   it("falls back to disabled (not whisper) for cloud reasons when whisper can't run", () => {
     const notLoggedIn = getAudioEngineResolution(
       settingsWith("screenpipe-cloud", null),
-      caps({ cpuCompatMode: true })
+      COMPAT_LOW_SUPPORT
     );
     expect(notLoggedIn.fallbackReason).toBe("notLoggedIn");
     expect(notLoggedIn.active).toBe("disabled");
@@ -190,7 +154,7 @@ describe("getAudioEngineResolution with an unsupported engine", () => {
 
     const missingKey = getAudioEngineResolution(
       settingsWith("deepgram"),
-      caps({ cpuCompatMode: true })
+      COMPAT_LOW_SUPPORT
     );
     expect(missingKey.fallbackReason).toBe("missingDeepgramKey");
     expect(missingKey.active).toBe("disabled");
@@ -199,7 +163,7 @@ describe("getAudioEngineResolution with an unsupported engine", () => {
 
 describe("getAudioEngineResolution on a fully capable device", () => {
   it("keeps whisper active with no fallback", () => {
-    const resolution = getAudioEngineResolution(settingsWith("whisper-tiny"), caps());
+    const resolution = getAudioEngineResolution(settingsWith("whisper-tiny"), {});
     expect(resolution).toEqual({
       requested: "whisper-tiny",
       active: "whisper-tiny",
@@ -211,14 +175,14 @@ describe("getAudioEngineResolution on a fully capable device", () => {
   it("still falls back to local whisper when cloud auth is missing", () => {
     const resolution = getAudioEngineResolution(
       settingsWith("screenpipe-cloud", null),
-      caps()
+      {}
     );
     expect(resolution.fallbackReason).toBe("notLoggedIn");
     expect(resolution.active).toBe(FALLBACK_TRANSCRIPTION_ENGINE);
     expect(resolution.requirement).toBeNull();
   });
 
-  it("defaults to a capable device when caps are omitted", () => {
+  it("defaults to a capable device when the support map is omitted", () => {
     const resolution = getAudioEngineResolution(settingsWith("whisper-tiny"));
     expect(resolution.active).toBe("whisper-tiny");
   });

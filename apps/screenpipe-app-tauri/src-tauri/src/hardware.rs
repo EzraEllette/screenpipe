@@ -47,3 +47,51 @@ pub fn detect_hardware_capability() -> HardwareCapability {
 pub fn get_hardware_capability() -> HardwareCapability {
     detect_hardware_capability()
 }
+
+/// Per-engine support verdict for this device. `requirement` is the missing
+/// capability label ("AVX2", "24 GB+ RAM", "macOS 26") or null when the
+/// engine can run here.
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct EngineSupport {
+    pub engine: String,
+    pub requirement: Option<String>,
+}
+
+/// Every transcription engine id the settings picker can offer, across all
+/// platforms. The frontend looks verdicts up by id and treats missing ids as
+/// supported (fail open), so listing a superset here is safe while omissions
+/// would silently re-enable an unrunnable engine.
+const TRANSCRIPTION_ENGINE_IDS: [&str; 11] = [
+    "screenpipe-cloud",
+    "deepgram",
+    "whisper-large-v3-turbo",
+    "whisper-large-v3-turbo-quantized",
+    "whisper-tiny",
+    "whisper-tiny-quantized",
+    "qwen3-asr",
+    "parakeet",
+    "parakeet-mlx",
+    "openai-compatible",
+    "disabled",
+];
+
+/// Which transcription engines this device can run, from the same
+/// `engine_requirement` matrix the boot-time store guard enforces
+/// (crates/screenpipe-config/src/defaults.rs) — the settings picker renders
+/// exactly what the guard would allow, so the two can't drift apart.
+/// Verdicts are fixed for the process lifetime (CPU features and RAM don't
+/// change at runtime), so the frontend caches one read.
+#[tauri::command]
+#[specta::specta]
+pub fn get_engine_support() -> Vec<EngineSupport> {
+    let tier = screenpipe_config::detect_tier();
+    TRANSCRIPTION_ENGINE_IDS
+        .iter()
+        .map(|engine| EngineSupport {
+            engine: engine.to_string(),
+            requirement: screenpipe_config::engine_requirement(engine, tier)
+                .map(|requirement| requirement.label()),
+        })
+        .collect()
+}

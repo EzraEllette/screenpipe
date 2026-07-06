@@ -607,6 +607,17 @@ async getDiskUsage(forceRefresh: boolean | null, dataDir: string | null) : Promi
 async getE2eSeedFlags() : Promise<string[]> {
     return await TAURI_INVOKE("get_e2e_seed_flags");
 },
+/**
+ * Which transcription engines this device can run, from the same
+ * `engine_requirement` matrix the boot-time store guard enforces
+ * (crates/screenpipe-config/src/defaults.rs) — the settings picker renders
+ * exactly what the guard would allow, so the two can't drift apart.
+ * Verdicts are fixed for the process lifetime (CPU features and RAM don't
+ * change at runtime), so the frontend caches one read.
+ */
+async getEngineSupport() : Promise<EngineSupport[]> {
+    return await TAURI_INVOKE("get_engine_support");
+},
 async getEnterpriseInstallMetadata() : Promise<EnterpriseInstallMetadata> {
     return await TAURI_INVOKE("get_enterprise_install_metadata");
 },
@@ -2469,6 +2480,12 @@ alias?: string | null }
 export type E2eAgentStreamResult = { emitted_deltas: number; emit_ms: number }
 export type EmbeddedLLM = { enabled: boolean; model: string; port: number }
 export type EngineEvent = { name: string; data: JsonValue }
+/**
+ * Per-engine support verdict for this device. `requirement` is the missing
+ * capability label ("AVX2", "24 GB+ RAM", "macOS 26") or null when the
+ * engine can run here.
+ */
+export type EngineSupport = { engine: string; requirement: string | null }
 export type EnterpriseInstallMetadata = { install_source: string; update_manager: string; managed: boolean; detected_by: string[] }
 export type ExcludedApp = { bundleId: string; name: string | null; icon: string | null }
 export type ExportEvent = { kind: "started"; jobId: string; request: ExportRequestInfo } | { kind: "completed"; jobId: string; request: ExportRequestInfo; summary: MeetingExportSummary } | { kind: "failed"; jobId: string; request: ExportRequestInfo; error: string }
