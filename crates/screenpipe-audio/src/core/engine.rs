@@ -33,7 +33,7 @@ impl AudioTranscriptionEngine {
             Self::Qwen3Asr => true,
             Self::Deepgram | Self::OpenAICompatible | Self::Disabled => false,
             Self::Parakeet | Self::ParakeetMlx => false, // ONNX Runtime: runtime CPU dispatch
-            _ => true, // all Whisper variants (ggml)
+            _ => true,                                   // all Whisper variants (ggml)
         }
     }
 }

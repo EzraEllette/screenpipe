@@ -3165,9 +3165,7 @@ fn download_baseline_bun() -> std::result::Result<String, String> {
     if !extracted_dir.join("bun.exe").exists() {
         let _ = std::fs::remove_dir_all(&extract_temp);
         let _ = std::fs::remove_file(&temp_file);
-        return Err(
-            "Extraction completed but bun.exe not found in expected location".to_string(),
-        );
+        return Err("Extraction completed but bun.exe not found in expected location".to_string());
     }
 
     // Atomic rename: move extracted dir to final location

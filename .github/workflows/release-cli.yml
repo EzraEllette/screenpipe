@@ -12,6 +12,11 @@ on:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      smoke_only:
+        description: "Windows launch-smoke run only: build the Windows CLI package and run the native + Intel SDE (non-AVX2) probes; skip macOS/Linux builds, EV signing, Sentry symbols, npm publish, and the GitHub release (publish-npm/release skip via their skipped needs)"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -59,7 +64,9 @@ jobs:
 
   build-macos:
     needs: check_commit
-    if: needs.check_commit.outputs.should_release == 'true'
+    # smoke_only skipping this job also skips publish-npm/release downstream
+    # (their `needs` include it and they have no `if: always()`).
+    if: needs.check_commit.outputs.should_release == 'true' && !inputs.smoke_only
     runs-on: macos-latest
     strategy:
       matrix:
@@ -403,6 +410,8 @@ jobs:
           cargo build --release -p screenpipe-engine --bin screenpipe --features directml,redact-onnx-directml --target x86_64-pc-windows-msvc
 
       - name: Upload debug symbols to Sentry
+        # Skipped on smoke_only dispatches: nothing from those builds ships.
+        if: ${{ !inputs.smoke_only }}
         shell: pwsh
         env:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
@@ -412,6 +421,8 @@ jobs:
           .\sentry-cli.exe debug-files upload --org $env:SENTRY_ORG --project screenpipe-cli target/x86_64-pc-windows-msvc/release/
 
       - name: Install CodeSignTool for SSL.com EV signing (Windows)
+        # Skipped on smoke_only dispatches (only used by the signing step below).
+        if: ${{ !inputs.smoke_only }}
         shell: pwsh
         run: |
           # Same SSL.com eSigner cert + tool the desktop app uses (release-app.yml).
@@ -423,6 +434,9 @@ jobs:
           Write-Host "CodeSignTool installed at $cstDest"
 
       - name: Sign screenpipe.exe with SSL.com EV (Windows)
+        # Skipped on smoke_only dispatches: each SSL.com sign consumes monthly
+        # quota and nothing from those builds ships.
+        if: ${{ !inputs.smoke_only }}
         shell: pwsh
         env:
           ESIGNER_USERNAME: ${{ secrets.ESIGNER_USERNAME }}
@@ -513,35 +527,75 @@ jobs:
           }
           7z a "$packageDir.zip" "./$packageDir/*"
 
-      - name: Smoke test on emulated non-AVX2 CPU (Intel SDE)
+      - name: Launch smoke test (native CPU + emulated non-AVX2 via Intel SDE)
         shell: pwsh
+        # Belt-and-braces against emulator wedges (run 28808593583 sat 80+ min):
+        # the whole step is bounded even if a phase outside the PS timeout hangs.
+        timeout-minutes: 20
         run: |
-          # Intel SDE emulates older CPUs and raises the same illegal-instruction
-          # fault a real pre-AVX2 chip would. -snb = Sandy Bridge (AVX, no AVX2);
-          # -mrm = Merom (no AVX at all — harshest baseline case).
-          # Guards against regressions of the 0xc000001d launch crash: global
-          # /arch:AVX2 CFLAGS, AVX2 static onnxruntime, eager ggml init, etc.
-          # CI runners have AVX2, so without SDE a poisoned build sails through
-          # CI and dies on customer machines (see the 2026-07 pre-Haswell report).
           # A --version probe exercises process init end-to-end: CRT startup,
           # the import table (onnxruntime.dll → MSVCP/VCRUNTIME), and every
           # static initializer. Run from the deployment package dir so DLL
           # resolution matches exactly what customers get.
-          # SDE URL: pinned release; if Intel rotates the mirror, grab the new
-          # URL from https://www.intel.com/content/www/us/en/developer/articles/tool/software-development-emulator.html
-          $sdeUrl = 'https://downloadmirror.intel.com/915934/sde-external-10.8.0-2026-03-15-win.tar.xz'
+          #
+          # Native first: the runner's own modern (AVX2) CPU is what ~99.9% of
+          # users run — a native failure means the package is broken for
+          # EVERYONE (e.g. a DLL missing from the zip), independent of any
+          # AVX2 work. Ordering it first makes failures unambiguous:
+          # native fails = broken for all; native passes but SDE fails =
+          # AVX2/baseline regression specifically.
+          $packageDir = "screenpipe-${{ env.VERSION }}-x86_64-pc-windows-msvc"
+          $exe = (Resolve-Path "$packageDir/bin/screenpipe.exe").Path
+          Write-Host "=== native (runner CPU) — screenpipe.exe --version ==="
+          & $exe --version
+          if ($LASTEXITCODE -ne 0) { throw "screenpipe.exe failed natively (exit $LASTEXITCODE) — the package is broken for ALL CPUs" }
+
+          # Intel SDE emulates older CPUs and raises the same illegal-instruction
+          # fault a real pre-AVX2 chip would. -snb = Sandy Bridge (AVX, no AVX2)
+          # — exactly the pre-Haswell class from the 2026-07 customer report.
+          # Guards against regressions of the 0xc000001d launch crash: global
+          # /arch:AVX2 CFLAGS, AVX2 static onnxruntime, eager ggml init, etc.
+          # CI runners have AVX2, so without SDE a poisoned build sails through
+          # CI and dies on customer machines.
+          #
+          # Probe design notes (validated 2026-07-06 on a real Windows machine
+          # against this exact build config — the probe completes in ~2s):
+          # - SDE 9.44.0: 10.8's Pin injector fails on windows-2022 runners
+          #   ("Invalid file name and base dir combination: pincrt4.dll",
+          #   run 28806190901). 9.44.0 is the version google/XNNPACK runs on
+          #   the same runner image.
+          # - 7z two-step extraction: the one method proven to work on the
+          #   runner (run 28806190901); a tar -xf variant wedged for 60+ min
+          #   without ever reaching the SDE invocation (run 28808593583).
+          # - -snb ONLY. Pre-AVX chips (-nhm/-mrm) are a false-negative trap:
+          #   modern hosts' own system DLLs (e.g. Win11 msvcrt.dll strncpy)
+          #   execute AVX, so emulating a pre-AVX chip faults in the OS, not
+          #   in our code. Real pre-AVX machines run OS builds with matching
+          #   DLLs; our no-AVX floor is covered by baseline codegen + the
+          #   runtime AVX2 gates.
+          # - Hard timeout per invocation + step timeout-minutes: a wedged
+          #   emulator must fail fast and loud, never eat runner-hours.
+          # If Intel rotates the mirror, grab a fresh URL from
+          # https://www.intel.com/content/www/us/en/developer/articles/tool/software-development-emulator.html
+          $sdeUrl = 'https://downloadmirror.intel.com/831748/sde-external-9.44.0-2024-08-22-win.tar.xz'
+          Write-Host "=== downloading SDE ==="
           curl.exe -fSL -o sde.tar.xz $sdeUrl
+          Write-Host "=== extracting SDE (7z two-step) ==="
           7z x sde.tar.xz -y | Out-Null
           7z x sde.tar -y | Out-Null
           $sde = (Get-ChildItem "sde-external-*" -Recurse -Filter sde.exe | Select-Object -First 1).FullName
           if (-not $sde) { throw "sde.exe not found after extraction" }
-          $packageDir = "screenpipe-${{ env.VERSION }}-x86_64-pc-windows-msvc"
-          $exe = (Resolve-Path "$packageDir/bin/screenpipe.exe").Path
-          foreach ($cpu in @('-snb', '-mrm')) {
-            Write-Host "=== SDE $cpu — screenpipe.exe --version ==="
-            & $sde $cpu -- $exe --version
-            if ($LASTEXITCODE -ne 0) { throw "screenpipe.exe faulted under SDE $cpu (exit $LASTEXITCODE) — a non-AVX2 CPU cannot launch this build" }
+          Write-Host "=== SDE -snb — screenpipe.exe --version (8 min timeout; ~2s when healthy) ==="
+          $p = Start-Process -FilePath $sde -ArgumentList @('-snb','--',$exe,'--version') `
+            -NoNewWindow -PassThru -RedirectStandardOutput sde-out.txt -RedirectStandardError sde-err.txt
+          if (-not $p.WaitForExit(480000)) {
+            taskkill /PID $($p.Id) /T /F | Out-Null
+            Get-Content sde-out.txt, sde-err.txt -ErrorAction SilentlyContinue
+            throw "SDE -snb probe timed out after 8 minutes (locally it takes ~2s) — emulator wedged on the runner or a startup-path hang on non-AVX2 CPUs"
           }
+          Get-Content sde-out.txt, sde-err.txt -ErrorAction SilentlyContinue
+          if ($p.ExitCode -ne 0) { throw "screenpipe.exe faulted under SDE -snb (exit $($p.ExitCode)) — a non-AVX2 CPU cannot launch this build" }
+          Write-Host "=== SDE -snb probe passed: the package launches without AVX2 ==="
 
       - name: Calculate SHA256
         shell: pwsh
@@ -557,7 +611,9 @@ jobs:
 
   build-linux:
     needs: check_commit
-    if: needs.check_commit.outputs.should_release == 'true'
+    # See build-macos: skipped under smoke_only, which cascades to
+    # publish-npm/release.
+    if: needs.check_commit.outputs.should_release == 'true' && !inputs.smoke_only
     runs-on: ubuntu-24.04
     strategy:
       matrix:
