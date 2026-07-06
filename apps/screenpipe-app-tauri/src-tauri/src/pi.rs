@@ -3593,6 +3593,25 @@ pub async fn cleanup_pi(state: &PiState) {
 
 /// Find bun executable (shared by pi_install and ensure_pi_installed_background)
 fn find_bun_executable() -> Option<String> {
+    // Pre-AVX2 CPU: the bundled/stock bun.exe requires AVX2 and dies with
+    // 0xC000001D at spawn. Prefer the baseline build screenpipe-core
+    // downloads; if it isn't on disk yet, kick the background download and
+    // fall through to the stock bun for this run (the next spawn picks the
+    // baseline up). Mirrors screenpipe_core::agents::pi::find_bun_executable.
+    #[cfg(windows)]
+    if !screenpipe_core::cpu_features::has_avx2() {
+        if let Some(baseline) = screenpipe_core::agents::pi::baseline_bun_path() {
+            if baseline.exists() {
+                info!(
+                    "Found baseline bun (non-AVX2 CPU) at: {}",
+                    baseline.display()
+                );
+                return Some(baseline.to_string_lossy().to_string());
+            }
+        }
+        screenpipe_core::agents::pi::spawn_baseline_bun_download();
+    }
+
     // First check next to our own executable (bundled bun in AppData/Local/screenpipe/)
     if let Ok(exe_path) = std::env::current_exe() {
         if let Some(exe_folder) = exe_path.parent() {
