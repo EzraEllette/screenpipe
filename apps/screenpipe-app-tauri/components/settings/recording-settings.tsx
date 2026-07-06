@@ -111,9 +111,10 @@ import {
 import { hasAppEntitlement } from "@/lib/app-entitlement";
 import {
   FALLBACK_TRANSCRIPTION_ENGINE,
-  engineRequiresAvx2,
+  type EngineCapabilities,
   getAudioEngineResolution,
   getAudioFallbackMessage,
+  getEngineRequirement,
 } from "./audio-engine-resolution";
 import { useToast } from "@/components/ui/use-toast";
 import { useHealthCheck } from "@/lib/hooks/use-health-check";
@@ -125,7 +126,7 @@ import { Switch } from "@/components/ui/switch";
 import { Slider } from "@/components/ui/slider";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import { platform } from "@tauri-apps/plugin-os";
+import { platform, version as osVersion } from "@tauri-apps/plugin-os";
 import posthog from "posthog-js";
 import {
   Language,
@@ -1844,6 +1845,9 @@ export function RecordingSettings() {
   // True when the CPU lacks AVX2 (compatibility mode): whisper/qwen3 local
   // engines can never load, so the picker must not offer them.
   const [cpuCompatMode, setCpuCompatMode] = useState(false);
+  // Needed for parakeet's macOS 26 requirement; null while unknown (fails
+  // open — the boot-time store guard is the backstop).
+  const [macosMajorVersion, setMacosMajorVersion] = useState<number | null>(null);
 
   // OpenAI Compatible model fetching
   const {
@@ -1876,10 +1880,49 @@ export function RecordingSettings() {
       .getBootPhase()
       .then((phase) => setCpuCompatMode(phase.cpuCompatMode))
       .catch(() => {});
+    try {
+      const major = parseInt(osVersion().split(".")[0], 10);
+      setMacosMajorVersion(Number.isFinite(major) ? major : null);
+    } catch {
+      setMacosMajorVersion(null);
+    }
   }, []);
 
+  const engineCaps = useMemo<EngineCapabilities>(
+    () => ({
+      cpuCompatMode,
+      isMacOS,
+      deviceTier: settings.deviceTier,
+      macosMajorVersion: isMacOS ? macosMajorVersion : null,
+    }),
+    [cpuCompatMode, isMacOS, settings.deviceTier, macosMajorVersion]
+  );
+
+  // Offline engines offered by the picker. Each is checked against this
+  // device's capabilities: unsupported ones render disabled with the missing
+  // requirement, mirroring the boot-time store guard that would otherwise
+  // silently revert them.
+  const offlineEngineOptions = useMemo(
+    () => [
+      { value: "whisper-large-v3-turbo", label: "Whisper Turbo" },
+      { value: "whisper-large-v3-turbo-quantized", label: "Whisper Turbo (fast)" },
+      { value: "whisper-tiny", label: "Whisper Tiny" },
+      { value: "whisper-tiny-quantized", label: "Whisper Tiny (fast)" },
+      ...(!isMacOS ? [{ value: "qwen3-asr", label: "Qwen3-ASR" }] : []),
+      { value: "parakeet", label: isMacOS ? "Parakeet (experimental)" : "Parakeet" },
+    ],
+    [isMacOS]
+  );
+  const hasUnsupportedOfflineEngines = useMemo(
+    () =>
+      offlineEngineOptions.some((option) =>
+        getEngineRequirement(option.value, engineCaps)
+      ),
+    [offlineEngineOptions, engineCaps]
+  );
+
   const audioEngineResolution = useMemo(
-    () => getAudioEngineResolution(settings, cpuCompatMode),
+    () => getAudioEngineResolution(settings, engineCaps),
     [
       settings.audioTranscriptionEngine,
       settings.deepgramApiKey,
@@ -1888,7 +1931,7 @@ export function RecordingSettings() {
       settings.user?.entitlement,
       settings.user?.id,
       settings.user?.token,
-      cpuCompatMode,
+      engineCaps,
     ]
   );
   const hasCloudTranscriptionAccess = hasAppEntitlement(settings.user as any);
@@ -2319,9 +2362,9 @@ export function RecordingSettings() {
     value: string,
     realtime = false
   ) => {
-    // The picker disables these items in compatibility mode; this guard covers
-    // the brief window before the boot-phase snapshot has loaded.
-    if (cpuCompatMode && engineRequiresAvx2(value)) {
+    // The picker disables unsupported items; this guard covers the brief
+    // window before the boot-phase snapshot / os version have loaded.
+    if (getEngineRequirement(value, engineCaps)) {
       return;
     }
 
@@ -2373,7 +2416,7 @@ export function RecordingSettings() {
           ...settings,
           audioTranscriptionEngine: value,
         },
-        cpuCompatMode
+        engineCaps
       );
       const nextLanguageSupportEngine = nextAudioEngineResolution.active;
       const nextLanguageSupportKey =
@@ -2690,8 +2733,8 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
                   <HelpTooltip
                     text={
                       "Cloud engines send audio to a server for fast, accurate transcription. Offline engines run on your device — fully private but use more CPU/RAM." +
-                      (cpuCompatMode
-                        ? " This CPU doesn't support AVX2, so the Whisper and Qwen3 engines can't run on this machine."
+                      (hasUnsupportedOfflineEngines
+                        ? " Engines this device can't run are disabled, with the missing requirement shown next to them."
                         : "")
                     }
                   />
@@ -2718,24 +2761,15 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
                     </SelectGroup>
                     <SelectGroup>
                       <SelectLabel className="text-[10px] text-muted-foreground/70 uppercase tracking-wider">offline</SelectLabel>
-                      <SelectItem value="whisper-large-v3-turbo" disabled={cpuCompatMode}>
-                        Whisper Turbo{cpuCompatMode && " (requires AVX2)"}
-                      </SelectItem>
-                      <SelectItem value="whisper-large-v3-turbo-quantized" disabled={cpuCompatMode}>
-                        Whisper Turbo (fast){cpuCompatMode && " (requires AVX2)"}
-                      </SelectItem>
-                      <SelectItem value="whisper-tiny" disabled={cpuCompatMode}>
-                        Whisper Tiny{cpuCompatMode && " (requires AVX2)"}
-                      </SelectItem>
-                      <SelectItem value="whisper-tiny-quantized" disabled={cpuCompatMode}>
-                        Whisper Tiny (fast){cpuCompatMode && " (requires AVX2)"}
-                      </SelectItem>
-                      {!isMacOS && (
-                        <SelectItem value="qwen3-asr" disabled={cpuCompatMode}>
-                          Qwen3-ASR{cpuCompatMode && " (requires AVX2)"}
-                        </SelectItem>
-                      )}
-                      <SelectItem value="parakeet">Parakeet{isMacOS ? " (experimental)" : ""}</SelectItem>
+                      {offlineEngineOptions.map(({ value, label }) => {
+                        const requirement = getEngineRequirement(value, engineCaps);
+                        return (
+                          <SelectItem key={value} value={value} disabled={!!requirement}>
+                            {label}
+                            {requirement ? ` (requires ${requirement})` : ""}
+                          </SelectItem>
+                        );
+                      })}
                     </SelectGroup>
                     <SelectGroup>
                       <SelectLabel className="text-[10px] text-muted-foreground/70 uppercase tracking-wider">other</SelectLabel>
@@ -2756,7 +2790,7 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
                   {getTranscriptionEngineLabel(audioEngineResolution.requested)} is not active
                 </AlertTitle>
                 <AlertDescription className="space-y-2 text-xs">
-                  <p>{getAudioFallbackMessage(audioEngineResolution.fallbackReason, cpuCompatMode)}</p>
+                  <p>{getAudioFallbackMessage(audioEngineResolution.fallbackReason, audioEngineResolution.requirement)}</p>
                   <div className="grid gap-1">
                     <div>
                       Saved choice:{" "}
@@ -2796,7 +2830,11 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
                         Upgrade
                       </Button>
                     )}
-                    {!cpuCompatMode && (
+                    {/* Recovery buttons offer only engines this device can
+                        actually run: Whisper when it works here, otherwise
+                        parakeet (ONNX, runtime CPU dispatch) where supported. */}
+                    {!getEngineRequirement(FALLBACK_TRANSCRIPTION_ENGINE, engineCaps) &&
+                      audioEngineResolution.requested !== FALLBACK_TRANSCRIPTION_ENGINE && (
                       <Button
                         type="button"
                         variant="outline"
@@ -2813,11 +2851,8 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
                         Use Whisper setting
                       </Button>
                     )}
-                    {/* In compatibility mode Whisper can't run; parakeet (ONNX,
-                        runtime CPU dispatch) is the one local engine that can —
-                        except on macOS (needs MLX/macOS 26) and Low tier (OOM),
-                        matching best_engine_for_platform_for_cpu. */}
-                    {cpuCompatMode && !isMacOS && settings.deviceTier !== "low" && (
+                    {!!getEngineRequirement(FALLBACK_TRANSCRIPTION_ENGINE, engineCaps) &&
+                      !getEngineRequirement("parakeet", engineCaps) && (
                       <Button
                         type="button"
                         variant="outline"
