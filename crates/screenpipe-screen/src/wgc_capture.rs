@@ -96,7 +96,9 @@ static SHARED_D3D: Mutex<Option<Arc<D3dContext>>> = Mutex::new(None);
 fn shared_d3d_cache() -> MutexGuard<'static, Option<Arc<D3dContext>>> {
     // Poison recovery: the cache holds an Option we always overwrite consistently;
     // propagating a poison would permanently kill capture over an unrelated panic.
-    SHARED_D3D.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    SHARED_D3D
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// Get the shared device, recreating it if a GPU reset / driver update removed it.
@@ -353,24 +355,23 @@ impl PersistentCapture {
         let handler_closed = closed.clone();
         let handler_d3d = d3d.clone();
         let frame_arrived_token = frame_pool
-            .FrameArrived(&TypedEventHandler::<
-                Direct3D11CaptureFramePool,
-                IInspectable,
-            >::new(
-                move |frame_pool: &Option<Direct3D11CaptureFramePool>, _| {
-                    if let Some(frame_pool) = frame_pool {
-                        if let Err(e) = Self::on_frame_arrived(
-                            frame_pool,
-                            &handler_d3d,
-                            &handler_latest,
-                            &handler_closed,
-                        ) {
-                            tracing::debug!("wgc FrameArrived: {}", e);
+            .FrameArrived(
+                &TypedEventHandler::<Direct3D11CaptureFramePool, IInspectable>::new(
+                    move |frame_pool: &Option<Direct3D11CaptureFramePool>, _| {
+                        if let Some(frame_pool) = frame_pool {
+                            if let Err(e) = Self::on_frame_arrived(
+                                frame_pool,
+                                &handler_d3d,
+                                &handler_latest,
+                                &handler_closed,
+                            ) {
+                                tracing::debug!("wgc FrameArrived: {}", e);
+                            }
                         }
-                    }
-                    Ok(())
-                },
-            ))
+                        Ok(())
+                    },
+                ),
+            )
             .map_err(|e| {
                 let _ = frame_pool.Close();
                 anyhow!("failed to register FrameArrived handler: {}", e)
@@ -379,8 +380,8 @@ impl PersistentCapture {
         let closed_flag = closed.clone();
         let closed_latest = latest.clone();
         let closed_token = item
-            .Closed(&TypedEventHandler::<GraphicsCaptureItem, IInspectable>::new(
-                move |_, _| {
+            .Closed(
+                &TypedEventHandler::<GraphicsCaptureItem, IInspectable>::new(move |_, _| {
                     tracing::info!(
                         "WGC capture item closed (monitor disconnected or session invalidated)"
                     );
@@ -395,8 +396,8 @@ impl PersistentCapture {
                     }
                     closed_latest.1.notify_all();
                     Ok(())
-                },
-            ))
+                }),
+            )
             .map_err(|e| {
                 let _ = frame_pool.RemoveFrameArrived(frame_arrived_token);
                 let _ = frame_pool.Close();
@@ -501,12 +502,14 @@ impl PersistentCapture {
         let surface = frame
             .Surface()
             .map_err(|e| anyhow!("Direct3D11CaptureFrame::Surface failed: {}", e))?;
-        let access = surface.cast::<IDirect3DDxgiInterfaceAccess>().map_err(|e| {
-            anyhow!(
-                "failed to cast surface to IDirect3DDxgiInterfaceAccess: {}",
-                e
-            )
-        })?;
+        let access = surface
+            .cast::<IDirect3DDxgiInterfaceAccess>()
+            .map_err(|e| {
+                anyhow!(
+                    "failed to cast surface to IDirect3DDxgiInterfaceAccess: {}",
+                    e
+                )
+            })?;
         let source_texture: ID3D11Texture2D = unsafe {
             access
                 .GetInterface()
@@ -604,7 +607,9 @@ impl PersistentCapture {
             // Closed takes precedence over any cached frame: a dead session must
             // error (=> reinit upstream), never serve its last frame forever.
             if self.closed.load(Ordering::Acquire) {
-                return Err(anyhow!("WGC session closed (capture item closed or stopped)"));
+                return Err(anyhow!(
+                    "WGC session closed (capture item closed or stopped)"
+                ));
             }
             if slot.texture.is_some() {
                 break;
@@ -783,7 +788,11 @@ mod tests {
         let image = capture
             .get_latest_image(Duration::from_secs(2))
             .expect("failed to get frame");
-        assert_eq!(image.width(), monitor_width, "captured width != monitor width");
+        assert_eq!(
+            image.width(),
+            monitor_width,
+            "captured width != monitor width"
+        );
         assert_eq!(
             image.height(),
             monitor_height,
