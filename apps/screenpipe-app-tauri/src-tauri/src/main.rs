@@ -176,6 +176,19 @@ fn get_e2e_seed_flags() -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Returns true when SCREENPIPE_SKIP_ONBOARDING is set to a truthy value
+/// ("1", "true", "yes" — case-insensitive). Escape hatch for corp VDI,
+/// headless containers, MDM-preseeded deploys, and any environment where
+/// the interactive onboarding cannot complete (sandboxed WebView2, blocked
+/// egress, missing permissions dialog). When set, startup marks onboarding
+/// complete so the app lands on the main view.
+fn should_skip_onboarding() -> bool {
+    std::env::var("SCREENPIPE_SKIP_ONBOARDING")
+        .ok()
+        .map(|s| matches!(s.trim().to_lowercase().as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false)
+}
+
 use tokio::time::{sleep, Duration};
 
 #[tauri::command]
@@ -502,7 +515,7 @@ async fn main() {
         }
     }
 
-    // Check if telemetry is disabled via store setting (analyticsEnabled) or offline mode
+    // Check if telemetry is disabled via store setting (analyticsEnabled)
     let store_path = screenpipe_core::paths::default_screenpipe_data_dir().join("store.bin");
     let store_json = std::fs::read(&store_path).ok().and_then(|data| {
         if data.len() >= 8 && &data[..8] == b"SPSTORE1" {
@@ -1218,6 +1231,11 @@ async fn main() {
             // sidecar inherits this env).
             std::env::set_var("SCREENPIPE_DATA_DIR", &data_dir);
 
+            // Enterprise builds can identify org/device health in Sentry and
+            // PostHog without sending the raw license key. No-op on consumer
+            // builds; explicit MDM/support env vars still win when provided.
+            enterprise_sync::configure_telemetry_context(&app_handle);
+
             if data_dir_fell_back {
                 let app_handle_fb = app_handle.clone();
                 tauri::async_runtime::spawn(async move {
@@ -1278,7 +1296,7 @@ async fn main() {
             app.manage(sync::SyncState::default());
 
             // Initialize onboarding store
-            let onboarding_store = store::init_onboarding_store(&app.handle()).unwrap_or_else(|e| {
+            let mut onboarding_store = store::init_onboarding_store(&app.handle()).unwrap_or_else(|e| {
                 error!("Failed to init onboarding store, using defaults: {}", e);
                 store::OnboardingStore::default()
             });
@@ -1291,6 +1309,20 @@ async fn main() {
                     error!("E2E seed: failed to complete onboarding: {}", e);
                 } else {
                     info!("E2E seed: onboarding marked complete");
+                }
+            }
+
+            // Escape hatch: SCREENPIPE_SKIP_ONBOARDING=1 marks onboarding complete
+            // at startup so corp/VDI/headless environments (where the interactive
+            // flow can't run) land at the main view. Persists to store so downstream
+            // consumers (show.rs re-reads from disk) see the same state.
+            if should_skip_onboarding() && !onboarding_store.is_completed {
+                match store::OnboardingStore::update(&app.handle(), |o| o.complete()) {
+                    Ok(_) => {
+                        info!("SCREENPIPE_SKIP_ONBOARDING: onboarding marked complete");
+                        onboarding_store.is_completed = true;
+                    }
+                    Err(e) => error!("SCREENPIPE_SKIP_ONBOARDING: failed to complete onboarding: {}", e),
                 }
             }
 
@@ -1936,7 +1968,7 @@ async fn main() {
             // telemetry builds with SCREENPIPE_ENTERPRISE_LICENSE_KEY env set.
             let _enterprise_shutdown_tx = enterprise_sync::spawn(&app_handle);
 
-            // Auto-start cloud sync if it was enabled
+            // Disable removed Storage cloud backends if old settings enabled them.
             let app_handle_clone = app_handle.clone();
             let sync_state = app_handle.state::<sync::SyncState>();
             let sync_state_clone = sync::SyncState {
@@ -1953,7 +1985,7 @@ async fn main() {
                 sync::auto_start_sync(&app_handle_clone, &sync_state_clone).await;
             });
 
-            // Auto-start cloud archive if it was enabled (after sync so it can reuse sync manager)
+            // Disable removed Storage archive backend if old settings enabled it.
             let app_handle_clone = app_handle.clone();
             tauri::async_runtime::spawn(async move {
                 tokio::time::sleep(tokio::time::Duration::from_secs(15)).await;
