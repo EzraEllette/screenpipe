@@ -143,8 +143,6 @@ mod specta_bindings;
 mod vault;
 mod viewer;
 
-#[cfg(target_os = "macos")]
-static MIC_FOCUS_CAPTURE_RESTART: AtomicBool = AtomicBool::new(false);
 use base64::Engine;
 use health::start_health_check;
 use log_files::{get_log_files, get_screenpipe_data_dir};
@@ -831,12 +829,6 @@ async fn main() {
                         return;
                     }
                     if !health::get_audio_device_status().is_empty() {
-                        return;
-                    }
-                    if MIC_FOCUS_CAPTURE_RESTART
-                        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-                        .is_err()
-                    {
                         return;
                     }
                     info!(
