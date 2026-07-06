@@ -109,6 +109,12 @@ import {
   Settings,
 } from "@/lib/hooks/use-settings";
 import { hasAppEntitlement } from "@/lib/app-entitlement";
+import {
+  FALLBACK_TRANSCRIPTION_ENGINE,
+  engineRequiresAvx2,
+  getAudioEngineResolution,
+  getAudioFallbackMessage,
+} from "./audio-engine-resolution";
 import { useToast } from "@/components/ui/use-toast";
 import { useHealthCheck } from "@/lib/hooks/use-health-check";
 import { localFetch } from "@/lib/api";
@@ -180,8 +186,6 @@ const getAppIconUrl = (appName: string): string => {
   return `http://localhost:11435/app-icon?name=${encodeURIComponent(appName)}`;
 };
 
-const FALLBACK_TRANSCRIPTION_ENGINE = "whisper-large-v3-turbo-quantized";
-
 const TRANSCRIPTION_ENGINE_LABELS: Record<string, string> = {
   "screenpipe-cloud": "Screenpipe Cloud",
   deepgram: "Deepgram",
@@ -196,23 +200,7 @@ const TRANSCRIPTION_ENGINE_LABELS: Record<string, string> = {
   disabled: "Disabled (capture only)",
 };
 
-type AudioEngineFallbackReason =
-  | "notLoggedIn"
-  | "notSubscribed"
-  | "missingDeepgramKey";
-
-type AudioEngineResolution = {
-  requested: string;
-  active: string;
-  fallbackReason: AudioEngineFallbackReason | null;
-};
-
 type AecMode = "off" | "screenpipe" | "macos" | "windows";
-
-type AudioEngineResolutionSettings = Pick<
-  Settings,
-  "audioTranscriptionEngine" | "deepgramApiKey" | "user"
->;
 
 const getTranscriptionEngineLabel = (engine: string) =>
   TRANSCRIPTION_ENGINE_LABELS[engine] ?? engine;
@@ -252,58 +240,6 @@ const AEC_MODE_DETAILS: Record<AecMode, { label: string; description: string }> 
     label: "Windows WASAPI AEC",
     description: "Uses Windows microphone AEC when the input endpoint supports it",
   },
-};
-
-const getAudioEngineResolution = (
-  settings: AudioEngineResolutionSettings
-): AudioEngineResolution => {
-  const requested = settings.audioTranscriptionEngine;
-  const fallback = FALLBACK_TRANSCRIPTION_ENGINE;
-  const hasCloudAuth = Boolean(settings.user?.token || settings.user?.id);
-  const hasDeepgramKey = Boolean(
-    settings.deepgramApiKey && settings.deepgramApiKey !== "default"
-  );
-
-  if (requested === "screenpipe-cloud" && !hasCloudAuth) {
-    return {
-      requested,
-      active: fallback,
-      fallbackReason: "notLoggedIn",
-    };
-  }
-
-  if (requested === "screenpipe-cloud" && !hasAppEntitlement(settings.user as any)) {
-    return {
-      requested,
-      active: fallback,
-      fallbackReason: "notSubscribed",
-    };
-  }
-
-  if (requested === "deepgram" && !hasDeepgramKey) {
-    return {
-      requested,
-      active: fallback,
-      fallbackReason: "missingDeepgramKey",
-    };
-  }
-
-  return {
-    requested,
-    active: requested,
-    fallbackReason: null,
-  };
-};
-
-const getAudioFallbackMessage = (reason: AudioEngineFallbackReason) => {
-  switch (reason) {
-    case "notLoggedIn":
-      return "You are not logged in, so audio is being transcribed locally.";
-    case "notSubscribed":
-      return "Screenpipe Cloud requires an active subscription, so audio is being transcribed locally.";
-    case "missingDeepgramKey":
-      return "Deepgram has no API key configured, so audio is being transcribed locally.";
-  }
 };
 
 const SERVER_RESTART_SETTINGS = new Set<keyof SettingsStore>([
@@ -1905,6 +1841,9 @@ export function RecordingSettings() {
   const { checkLogin } = useLoginDialog();
   const overlayData = useOverlayData();
   const [hwCapability, setHwCapability] = useState<HardwareCapability | null>(null);
+  // True when the CPU lacks AVX2 (compatibility mode): whisper/qwen3 local
+  // engines can never load, so the picker must not offer them.
+  const [cpuCompatMode, setCpuCompatMode] = useState(false);
 
   // OpenAI Compatible model fetching
   const {
@@ -1931,10 +1870,16 @@ export function RecordingSettings() {
 
   useEffect(() => {
     commands.getHardwareCapability().then(setHwCapability).catch(() => {});
+    // cpu_compat_mode rides on the boot-phase snapshot (no dedicated command)
+    // and is fixed at process start, so one read is enough.
+    commands
+      .getBootPhase()
+      .then((phase) => setCpuCompatMode(phase.cpuCompatMode))
+      .catch(() => {});
   }, []);
 
   const audioEngineResolution = useMemo(
-    () => getAudioEngineResolution(settings),
+    () => getAudioEngineResolution(settings, cpuCompatMode),
     [
       settings.audioTranscriptionEngine,
       settings.deepgramApiKey,
@@ -1943,6 +1888,7 @@ export function RecordingSettings() {
       settings.user?.entitlement,
       settings.user?.id,
       settings.user?.token,
+      cpuCompatMode,
     ]
   );
   const hasCloudTranscriptionAccess = hasAppEntitlement(settings.user as any);
@@ -2373,6 +2319,12 @@ export function RecordingSettings() {
     value: string,
     realtime = false
   ) => {
+    // The picker disables these items in compatibility mode; this guard covers
+    // the brief window before the boot-phase snapshot has loaded.
+    if (cpuCompatMode && engineRequiresAvx2(value)) {
+      return;
+    }
+
     const isLoggedIn = checkLogin(settings.user);
     // If trying to use cloud but not logged in
     if (value === "screenpipe-cloud" && !isLoggedIn) {
@@ -2416,10 +2368,13 @@ export function RecordingSettings() {
         languages: [...settings.languages],
       };
 
-      const nextAudioEngineResolution = getAudioEngineResolution({
-        ...settings,
-        audioTranscriptionEngine: value,
-      });
+      const nextAudioEngineResolution = getAudioEngineResolution(
+        {
+          ...settings,
+          audioTranscriptionEngine: value,
+        },
+        cpuCompatMode
+      );
       const nextLanguageSupportEngine = nextAudioEngineResolution.active;
       const nextLanguageSupportKey =
         getTranscriptionEngineLanguageSupportKey(nextLanguageSupportEngine);
@@ -2732,7 +2687,14 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
                 <Mic className="h-4 w-4 text-muted-foreground shrink-0" />
                 <h3 className="text-sm font-medium text-foreground flex items-center gap-1.5">
                   Transcription engine
-                  <HelpTooltip text="Cloud engines send audio to a server for fast, accurate transcription. Offline engines run on your device — fully private but use more CPU/RAM." />
+                  <HelpTooltip
+                    text={
+                      "Cloud engines send audio to a server for fast, accurate transcription. Offline engines run on your device — fully private but use more CPU/RAM." +
+                      (cpuCompatMode
+                        ? " This CPU doesn't support AVX2, so the Whisper and Qwen3 engines can't run on this machine."
+                        : "")
+                    }
+                  />
                 </h3>
               </div>
               <div className="flex items-center gap-2">
@@ -2756,11 +2718,23 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
                     </SelectGroup>
                     <SelectGroup>
                       <SelectLabel className="text-[10px] text-muted-foreground/70 uppercase tracking-wider">offline</SelectLabel>
-                      <SelectItem value="whisper-large-v3-turbo">Whisper Turbo</SelectItem>
-                      <SelectItem value="whisper-large-v3-turbo-quantized">Whisper Turbo (fast)</SelectItem>
-                      <SelectItem value="whisper-tiny">Whisper Tiny</SelectItem>
-                      <SelectItem value="whisper-tiny-quantized">Whisper Tiny (fast)</SelectItem>
-                      {!isMacOS && <SelectItem value="qwen3-asr">Qwen3-ASR</SelectItem>}
+                      <SelectItem value="whisper-large-v3-turbo" disabled={cpuCompatMode}>
+                        Whisper Turbo{cpuCompatMode && " (requires AVX2)"}
+                      </SelectItem>
+                      <SelectItem value="whisper-large-v3-turbo-quantized" disabled={cpuCompatMode}>
+                        Whisper Turbo (fast){cpuCompatMode && " (requires AVX2)"}
+                      </SelectItem>
+                      <SelectItem value="whisper-tiny" disabled={cpuCompatMode}>
+                        Whisper Tiny{cpuCompatMode && " (requires AVX2)"}
+                      </SelectItem>
+                      <SelectItem value="whisper-tiny-quantized" disabled={cpuCompatMode}>
+                        Whisper Tiny (fast){cpuCompatMode && " (requires AVX2)"}
+                      </SelectItem>
+                      {!isMacOS && (
+                        <SelectItem value="qwen3-asr" disabled={cpuCompatMode}>
+                          Qwen3-ASR{cpuCompatMode && " (requires AVX2)"}
+                        </SelectItem>
+                      )}
                       <SelectItem value="parakeet">Parakeet{isMacOS ? " (experimental)" : ""}</SelectItem>
                     </SelectGroup>
                     <SelectGroup>
@@ -2782,7 +2756,7 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
                   {getTranscriptionEngineLabel(audioEngineResolution.requested)} is not active
                 </AlertTitle>
                 <AlertDescription className="space-y-2 text-xs">
-                  <p>{getAudioFallbackMessage(audioEngineResolution.fallbackReason)}</p>
+                  <p>{getAudioFallbackMessage(audioEngineResolution.fallbackReason, cpuCompatMode)}</p>
                   <div className="grid gap-1">
                     <div>
                       Saved choice:{" "}
@@ -2822,21 +2796,44 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
                         Upgrade
                       </Button>
                     )}
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      className="h-7 px-2 text-xs"
-                      data-testid="audio-engine-fallback-use-whisper"
-                      onClick={() =>
-                        handleSettingsChange(
-                          { audioTranscriptionEngine: FALLBACK_TRANSCRIPTION_ENGINE },
-                          true
-                        )
-                      }
-                    >
-                      Use Whisper setting
-                    </Button>
+                    {!cpuCompatMode && (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="h-7 px-2 text-xs"
+                        data-testid="audio-engine-fallback-use-whisper"
+                        onClick={() =>
+                          handleSettingsChange(
+                            { audioTranscriptionEngine: FALLBACK_TRANSCRIPTION_ENGINE },
+                            true
+                          )
+                        }
+                      >
+                        Use Whisper setting
+                      </Button>
+                    )}
+                    {/* In compatibility mode Whisper can't run; parakeet (ONNX,
+                        runtime CPU dispatch) is the one local engine that can —
+                        except on macOS (needs MLX/macOS 26) and Low tier (OOM),
+                        matching best_engine_for_platform_for_cpu. */}
+                    {cpuCompatMode && !isMacOS && settings.deviceTier !== "low" && (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="h-7 px-2 text-xs"
+                        data-testid="audio-engine-fallback-use-parakeet"
+                        onClick={() =>
+                          handleSettingsChange(
+                            { audioTranscriptionEngine: "parakeet" },
+                            true
+                          )
+                        }
+                      >
+                        Use Parakeet
+                      </Button>
+                    )}
                   </div>
                 </AlertDescription>
               </Alert>
