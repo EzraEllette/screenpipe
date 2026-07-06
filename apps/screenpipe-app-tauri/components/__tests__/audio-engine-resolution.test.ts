@@ -142,6 +142,22 @@ describe("getAudioFallbackMessage", () => {
     }
   });
 
+  it("points at the remedy instead of dead-ending in compatibility mode", () => {
+    // Parakeet/cloud still work in compat mode but never kick in
+    // automatically (the runtime fallback is hardcoded to Whisper), so every
+    // compat message must tell the user to switch engines.
+    for (const reason of [
+      "notLoggedIn",
+      "notSubscribed",
+      "missingDeepgramKey",
+      "cpuUnsupported",
+    ] as const) {
+      expect(getAudioFallbackMessage(reason, true)).toMatch(
+        /switch to a supported engine/
+      );
+    }
+  });
+
   it("explains the avx2 requirement for cpuUnsupported", () => {
     expect(getAudioFallbackMessage("cpuUnsupported", true)).toMatch(/AVX2/);
   });

@@ -91,20 +91,24 @@ export const getAudioFallbackMessage = (
   reason: AudioEngineFallbackReason,
   cpuCompatMode: boolean
 ) => {
+  // In compatibility mode the automatic fallback is still Whisper (see
+  // process_with_whisper in screenpipe-audio's stt.rs), which can't load on
+  // this CPU — other engines keep working but only if the user selects one,
+  // so the message must name the remedy instead of dead-ending.
   switch (reason) {
     case "notLoggedIn":
       return cpuCompatMode
-        ? "You are not logged in, and this CPU can't run local Whisper (requires AVX2), so transcription is off."
+        ? "You are not logged in, and the automatic Whisper fallback needs AVX2, which this CPU lacks — transcription is off until you log in or switch to a supported engine."
         : "You are not logged in, so audio is being transcribed locally.";
     case "notSubscribed":
       return cpuCompatMode
-        ? "Screenpipe Cloud requires an active subscription, and this CPU can't run local Whisper (requires AVX2), so transcription is off."
+        ? "Screenpipe Cloud requires an active subscription, and the automatic Whisper fallback needs AVX2, which this CPU lacks — transcription is off until you upgrade or switch to a supported engine."
         : "Screenpipe Cloud requires an active subscription, so audio is being transcribed locally.";
     case "missingDeepgramKey":
       return cpuCompatMode
-        ? "Deepgram has no API key configured, and this CPU can't run local Whisper (requires AVX2), so transcription is off."
+        ? "Deepgram has no API key configured, and the automatic Whisper fallback needs AVX2, which this CPU lacks — transcription is off until you add a key or switch to a supported engine."
         : "Deepgram has no API key configured, so audio is being transcribed locally.";
     case "cpuUnsupported":
-      return "This CPU doesn't support AVX2, which this engine needs to run. Audio is still recorded, but nothing is transcribed until you switch to a supported engine.";
+      return "This CPU doesn't support AVX2, which this engine needs to run. Audio is still recorded, but nothing is transcribed until you switch to a supported engine — cloud engines still work, and so does Parakeet where available.";
   }
 };
