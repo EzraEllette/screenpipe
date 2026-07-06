@@ -294,18 +294,39 @@ jobs:
             ~/.cargo/git/db/
           key: windows-cargo-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Download ONNX Runtime (CPU)
+      - name: Download ONNX Runtime
         shell: pwsh
         run: |
-          # Pre-download CPU onnxruntime so ort crate finds it via ORT_LIB_LOCATION
-          $url = "https://github.com/microsoft/onnxruntime/releases/download/v1.24.2/onnxruntime-win-x64-1.24.2.zip"
-          $zipFile = "onnxruntime-win-x64-1.24.2.zip"
-          $extractDir = "apps/screenpipe-app-tauri/src-tauri/onnxruntime-win-x64-1.24.2"
-          Invoke-WebRequest -Uri $url -OutFile $zipFile
+          # DirectML flavor of the OFFICIAL MS build: baseline SSE2 + MLAS runtime
+          # CPUID dispatch (full AVX2 speed on modern CPUs, no crash on old ones),
+          # DML EP for parakeet/PII. pyke's download-binaries static libs are
+          # compiled /arch:AVX2 since Oct 2025 and caused 0xc000001d at launch on
+          # pre-Haswell CPUs. Keep in sync with release-app.yml's x64 branch.
+          $version = '1.24.2'
+          $dmlVersion = '1.15.4'
+          $extractDir = "apps/screenpipe-app-tauri/src-tauri/onnxruntime-win-x64-$version"
           if (Test-Path $extractDir) { Remove-Item $extractDir -Recurse -Force }
-          7z x $zipFile -o"apps/screenpipe-app-tauri/src-tauri/" -y
-          Write-Host "ONNX Runtime extracted to $extractDir"
-          Get-ChildItem "$extractDir/lib" | ForEach-Object { Write-Host $_.Name }
+          Invoke-WebRequest -Uri "https://www.nuget.org/api/v2/package/Microsoft.ML.OnnxRuntime.DirectML/$version" -OutFile ort-dml.zip
+          Invoke-WebRequest -Uri "https://www.nuget.org/api/v2/package/Microsoft.AI.DirectML/$dmlVersion" -OutFile directml.zip
+          7z x ort-dml.zip -oort-dml -y
+          7z x directml.zip -odirectml -y
+          New-Item -ItemType Directory -Force -Path "$extractDir/lib" | Out-Null
+          Copy-Item "ort-dml/runtimes/win-x64/native/onnxruntime.dll" "$extractDir/lib/"
+          Copy-Item "ort-dml/runtimes/win-x64/native/onnxruntime.lib" "$extractDir/lib/"
+          Copy-Item "directml/bin/x64-win/DirectML.dll" "$extractDir/lib/"
+          # Import-table (load-time) link against the MS DLL — NOT ort's
+          # `load-dynamic` feature (runtime LoadLibrary deadlocks with ort
+          # rc.12, #4171/#4173). ORT_PREFER_DYNAMIC_LINK=1 makes ort-sys emit
+          # a dynamic import instead of attempting a static link (which needs
+          # onnxruntime_common.lib + the static _deps tree the MS prebuilt
+          # doesn't ship).
+          $libDir = (Resolve-Path "$extractDir/lib").Path
+          "ORT_STRATEGY=system"        | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "ORT_LIB_LOCATION=$libDir"   | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "ORT_PREFER_DYNAMIC_LINK=1"  | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "$libDir"                    | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          Write-Host "x64: ORT_LIB_LOCATION=$libDir (dynamic import link)"
+          Get-ChildItem "$extractDir/lib"
 
       - name: Install wget (Windows)
         shell: pwsh
@@ -344,25 +365,37 @@ jobs:
           CARGO_PROFILE_RELEASE_STRIP: "none"
           CARGO_PROFILE_RELEASE_PANIC: "abort"
           CARGO_PROFILE_RELEASE_INCREMENTAL: "false"
-          # LTCG removed: MSVC LTCG ignores /arch:AVX2 and can emit AVX-512 on Xeon CI runners
+          # LTCG removed: MSVC LTCG ignores /arch flags and can emit AVX-512 on Xeon CI runners
           # causing STATUS_ILLEGAL_INSTRUCTION on consumer CPUs (Arrow Lake, Panther Lake, Lunar Lake)
           RUSTFLAGS: ""
-          CFLAGS: "/arch:AVX2"
-          CXXFLAGS: "/arch:AVX2"
+          # Do NOT set global CFLAGS/CXXFLAGS=/arch:AVX2. That made EVERY cc/cmake
+          # C dep (bundled SQLite, sqlite-vec, lame, webrtc-vad, knf, samplerate,
+          # antirez qwen3 kernels...) require AVX2 → 0xc000001d AT LAUNCH on
+          # pre-Haswell/Atom CPUs. MSVC's x64 default is baseline SSE2. AVX2 is
+          # opted into ONLY where there's a runtime guard: ggml below (whisper is
+          # gated on is_x86_feature_detected in screenpipe-audio), and ONNX
+          # Runtime does its own runtime CPUID dispatch (MS official DLL).
+          CFLAGS: ""
+          CXXFLAGS: ""
           # whisper-rs build.rs passes GGML_* env vars as cmake defines.
           # CMAKE_ARGS string was ignored — these individual vars actually work.
+          # GGML_NATIVE=OFF prevents FindSIMD.cmake AVX-512 detection on CI Xeons.
+          # AVX2/BMI2 pinned ON explicitly: whisper keeps full speed; the runtime
+          # AVX2 gate in screenpipe-audio disables whisper instead of crashing.
           GGML_NATIVE: "OFF"
+          GGML_SSE42: "ON"
+          GGML_AVX: "ON"
+          GGML_AVX2: "ON"
+          GGML_BMI2: "ON"
           GGML_AVX512: "OFF"
           GGML_AVX512_VBMI: "OFF"
           GGML_AVX512_VNNI: "OFF"
           GGML_AVX512_BF16: "OFF"
-          CMAKE_ARGS: "-DGGML_NATIVE=OFF -DGGML_AVX512=OFF -DGGML_AVX512_VBMI=OFF -DGGML_AVX512_VNNI=OFF -DGGML_AVX512_BF16=OFF -DCMAKE_C_FLAGS=/arch:AVX2 -DCMAKE_CXX_FLAGS=/arch:AVX2"
-          # Link ONNX Runtime via ort's download-binaries (pyke prebuilt), same as the
-          # green release-app.yml. Setting ORT_LIB_LOCATION forces ort-sys into system
-          # static-linking, which needs onnxruntime_common.lib + the static _deps tree
-          # the dynamic MS prebuilt doesn't ship -> "ort-sys could not link" (#4173
-          # fallout, after Windows x86_64 moved off load-dynamic). The MS zip staged
-          # above still provides the runtime DLL.
+          CMAKE_ARGS: "-DGGML_NATIVE=OFF -DGGML_AVX512=OFF -DGGML_AVX512_VBMI=OFF -DGGML_AVX512_VNNI=OFF -DGGML_AVX512_BF16=OFF"
+          # ONNX Runtime links dynamically (import table) against the MS
+          # DirectML-flavored onnxruntime.dll: the "Download ONNX Runtime" step
+          # sets ORT_STRATEGY/ORT_LIB_LOCATION/ORT_PREFER_DYNAMIC_LINK via
+          # $GITHUB_ENV. Same mechanism as release-app.yml — keep in sync.
           OPENBLAS_PATH: ${{ github.workspace }}/apps/screenpipe-app-tauri/src-tauri/openblas
           # Use prebuilt NASM objects on Windows: https://aws.github.io/aws-lc-rs/requirements/windows.html#prebuilt-nasm-objects
           AWS_LC_SYS_PREBUILT_NASM: "1"
@@ -447,6 +480,9 @@ jobs:
             $ortDll = "apps/screenpipe-app-tauri/src-tauri/onnxruntime-win-x64-1.24.2/lib/onnxruntime.dll"
           }
           Copy-Item $ortDll "$packageDir/bin/"
+          # DirectML.dll: the DirectML-flavored onnxruntime.dll needs it for the
+          # DML EP (staged by the "Download ONNX Runtime" step).
+          Copy-Item "apps/screenpipe-app-tauri/src-tauri/onnxruntime-win-x64-1.24.2/lib/DirectML.dll" "$packageDir/bin/"
           # Copy OpenBLAS DLL(s) for qwen3-asr (libopenblas.dll or openblas.dll)
           $openblasBin = "apps/screenpipe-app-tauri/src-tauri/openblas/bin"
           if (Test-Path $openblasBin) {
