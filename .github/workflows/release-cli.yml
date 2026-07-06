@@ -554,12 +554,18 @@ jobs:
           # /arch:AVX2 CFLAGS, AVX2 static onnxruntime, eager ggml init, etc.
           # CI runners have AVX2, so without SDE a poisoned build sails through
           # CI and dies on customer machines (see the 2026-07 pre-Haswell report).
-          # SDE URL: pinned release; if Intel rotates the mirror, grab the new
-          # URL from https://www.intel.com/content/www/us/en/developer/articles/tool/software-development-emulator.html
-          $sdeUrl = 'https://downloadmirror.intel.com/915934/sde-external-10.8.0-2026-03-15-win.tar.xz'
+          # SDE URL: pinned to 9.44.0 — the exact version + extraction recipe
+          # proven on these runners in google/XNNPACK's CI. SDE 10.8's Pin
+          # injector fails on windows-2022 runners with "Invalid file name and
+          # base dir combination: pincrt4.dll / Injection failed (ffffffff)"
+          # (run 28806190901) before the app under test even starts. Use plain
+          # tar -xf (bsdtar handles .tar.xz natively on Win10+); the 7z
+          # two-step extraction is another delta from the proven recipe.
+          # If Intel rotates the mirror, grab a fresh URL from
+          # https://www.intel.com/content/www/us/en/developer/articles/tool/software-development-emulator.html
+          $sdeUrl = 'https://downloadmirror.intel.com/831748/sde-external-9.44.0-2024-08-22-win.tar.xz'
           curl.exe -fSL -o sde.tar.xz $sdeUrl
-          7z x sde.tar.xz -y | Out-Null
-          7z x sde.tar -y | Out-Null
+          tar -xf sde.tar.xz
           $sde = (Get-ChildItem "sde-external-*" -Recurse -Filter sde.exe | Select-Object -First 1).FullName
           if (-not $sde) { throw "sde.exe not found after extraction" }
           foreach ($cpu in @('-snb', '-mrm')) {
