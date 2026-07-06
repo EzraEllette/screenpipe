@@ -194,10 +194,29 @@ jobs:
         # Whether this actually took effect is confirmed later from the
         # app's own log line, not from this command's own success/failure —
         # see the workflow header comment for why a separate probe isn't used.
+        #
+        # Explicitly revoke microphone first: on the first real run here,
+        # check_microphone_permission().permitted() unexpectedly read true on
+        # this fresh runner (root cause unconfirmed — a TCC "responsible
+        # process" quirk for an ad-hoc-signed bare binary is the leading
+        # theory), which fires the window-focus handler in main.rs that calls
+        # restart_capture_on_mic_grant(). That path checks a DIFFERENT,
+        # slower-to-populate RecordingState.server than the one the boot-time
+        # 'start_server: block itself uses, gives up permanently after a
+        # fixed 10s, and nothing ever retries afterward — capture (vision
+        # included) never starts at all, so the #4968 code path never runs
+        # regardless of the screen-recording grant. Revoking mic here forces
+        # that handler's own permission check to fail closed so it never
+        # fires, leaving the normal (race-free) boot path to run capture on
+        # its own. This is a real app-level bug independent of Intel/TCC
+        # setup — flagged separately, not fixed here (out of scope for a CI
+        # smoke test).
         run: |
           set -euo pipefail
+          sudo scripts/tcc-grant/tcc-grant.sh revoke --app "$APP_BUNDLE" --service microphone
           sudo scripts/tcc-grant/tcc-grant.sh grant --app "$APP_BUNDLE" --service screen-recording --adhoc-sign
           scripts/tcc-grant/tcc-grant.sh status --app "$APP_BUNDLE" --service screen-recording
+          scripts/tcc-grant/tcc-grant.sh status --app "$APP_BUNDLE" --service microphone
 
       - name: Launch app and watch for a crash
         id: launch
