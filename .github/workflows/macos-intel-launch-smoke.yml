@@ -20,18 +20,33 @@
 # (capture_session.rs gates VisionManager construction on
 # check_screen_recording_tauri().is_granted() — without it, the vulnerable
 # get_excluded_sck_window_ids() call is never reached). No GitHub-hosted
-# runner starts with that TCC permission granted, so this job attempts to
-# grant it non-interactively before launching — currently via direct TCC.db
-# writes (.github/scripts/macos/grant-screen-recording-tcc.sh), isolated into
-# its own script so the mechanism can be swapped for a purpose-built CLI
-# later without touching this workflow. That trick only works because
+# runner starts with that TCC permission granted, so this job grants it
+# non-interactively before launching, via scripts/tcc-grant/tcc-grant.sh — a
+# general-purpose CLI (not CI-specific) that writes a real, code-identity-
+# matched TCC.db row for a given .app bundle. That only works because
 # macos-15-intel (like its predecessor macos-13, see
 # actions/runner-images#8162) ships with SIP disabled — it is unsupported by
-# GitHub and could stop working on a future image bump. The verify step
-# (.github/scripts/macos/verify_screen_recording_tcc.c) checks this for real
-# instead of assuming, and the job fails loudly (distinctly from an actual
-# app crash) if the grant didn't take, so a silent green run never hides "we
-# stopped exercising the crash path."
+# GitHub and could stop working on a future image bump.
+#
+# tcc-grant.sh requires a real .app bundle (it reads CFBundleIdentifier and
+# computes a csreq from the bundle's code signature) — this job builds with
+# `--no-bundle` for speed (already validated across several runs), so
+# .github/scripts/macos/wrap-binary-as-app-bundle.sh wraps the resulting raw
+# binary in a minimal synthetic bundle just for tcc-grant.sh to target.
+#
+# Whether the grant actually took effect is read back from the app's own
+# real startup decision — it logs "VisionManager started successfully" when
+# check_screen_recording_tauri() passes, or "Screen recording permission not
+# yet granted — skipping VisionManager" when it doesn't (capture_session.rs)
+# — rather than from a separate probe process. A separate probe binary
+# (tried first) turned out to be unreliable here: macOS's TCC "responsible
+# process" delegation can attribute a bare, unbundled probe's permission
+# check to whatever launched it rather than the probe itself, so it doesn't
+# actually answer "is the target app granted?". Reading the app's own log
+# line has no such ambiguity, and needs no separate binary at all. The job
+# fails loudly (distinctly from an actual app crash) if that log line never
+# shows up granted, so a silent green run never hides "we stopped exercising
+# the crash path."
 name: macOS Intel Launch Smoke
 
 on:
@@ -46,6 +61,8 @@ on:
       - "apps/screenpipe-app-tauri/src-tauri/src/capture_session.rs"
       - "apps/screenpipe-app-tauri/src-tauri/src/main.rs"
       - "apps/screenpipe-app-tauri/src-tauri/Cargo.toml"
+      - "scripts/tcc-grant/**"
+      - ".github/scripts/macos/**"
       - ".github/workflows/macos-intel-launch-smoke.yml"
   pull_request:
     paths: *paths
@@ -156,42 +173,37 @@ jobs:
           projectPath: "./apps/screenpipe-app-tauri"
           tauriScript: bunx tauri -v
 
+      - name: Wrap binary as .app bundle for tcc-grant
+        id: wrap_bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          RAW_BIN="$(realpath apps/screenpipe-app-tauri/src-tauri/target/debug/screenpipe-app)"
+          BUNDLE_ID="$(python3 -c "import json; print(json.load(open('apps/screenpipe-app-tauri/src-tauri/tauri.conf.json'))['identifier'])")"
+          APP_BUNDLE="$RUNNER_TEMP/screenpipe-intel-smoke.app"
+          .github/scripts/macos/wrap-binary-as-app-bundle.sh "$RAW_BIN" "$BUNDLE_ID" "screenpipe-app" "$APP_BUNDLE"
+          echo "app_bundle=${APP_BUNDLE}" >> "$GITHUB_OUTPUT"
+          echo "app_bin=${APP_BUNDLE}/Contents/MacOS/screenpipe-app" >> "$GITHUB_OUTPUT"
+
       - name: Grant Screen Recording TCC to the built binary
-        id: grant_tcc
         shell: bash
-        # Isolated in its own script (.github/scripts/macos/grant-screen-recording-tcc.sh)
-        # so the grant mechanism can be swapped later (e.g. for a purpose-built
-        # CLI) without touching this workflow — nothing downstream depends on
-        # how the grant happened, only on the verify step's output.
+        env:
+          APP_BUNDLE: ${{ steps.wrap_bundle.outputs.app_bundle }}
+        # --adhoc-sign: this is an unsigned --no-sign dev build, so
+        # tcc-grant.sh needs to sign it itself before it can compute a csreq.
+        # Whether this actually took effect is confirmed later from the
+        # app's own log line, not from this command's own success/failure —
+        # see the workflow header comment for why a separate probe isn't used.
         run: |
           set -euo pipefail
-          APP_BIN="$(realpath apps/screenpipe-app-tauri/src-tauri/target/debug/screenpipe-app)"
-          echo "app_bin=${APP_BIN}" >> "$GITHUB_OUTPUT"
-          .github/scripts/macos/grant-screen-recording-tcc.sh "$APP_BIN"
-
-      - name: Verify Screen Recording TCC actually took effect
-        id: verify_tcc
-        shell: bash
-        # Also isolated (.github/scripts/macos/verify_screen_recording_tcc.c) —
-        # this is the source of truth for whether the grant above (whatever
-        # mechanism it used) actually worked, independent of that mechanism.
-        run: |
-          set -euo pipefail
-          clang -framework CoreGraphics -o "$RUNNER_TEMP/verify_screen_recording_tcc" \
-            .github/scripts/macos/verify_screen_recording_tcc.c
-
-          if "$RUNNER_TEMP/verify_screen_recording_tcc"; then
-            echo "granted=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "granted=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::Screen Recording TCC grant did not take (SIP status above, or a runner-image change closed the hole). The launch below will run with vision permission DENIED, so it cannot exercise the #4968 crash path — see the job summary for what that means for this run's result."
-          fi
+          sudo scripts/tcc-grant/tcc-grant.sh grant --app "$APP_BUNDLE" --service screen-recording --adhoc-sign
+          scripts/tcc-grant/tcc-grant.sh status --app "$APP_BUNDLE" --service screen-recording
 
       - name: Launch app and watch for a crash
         id: launch
         shell: bash
         env:
-          APP_BIN: ${{ steps.grant_tcc.outputs.app_bin }}
+          APP_BIN: ${{ steps.wrap_bundle.outputs.app_bin }}
         run: |
           set +e
           DATA_DIR="$RUNNER_TEMP/screenpipe-intel-smoke-data"
@@ -240,6 +252,20 @@ jobs:
           echo "── app log ──"
           cat "$LOG" || true
 
+          # This is the app's own real decision, straight from
+          # capture_session.rs — not a separate probe process (see workflow
+          # header comment for why a separate probe isn't trustworthy here).
+          if grep -q "VisionManager started successfully" "$LOG"; then
+            echo "vision_granted=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "vision_granted=false" >> "$GITHUB_OUTPUT"
+            if grep -q "Screen recording permission not yet granted" "$LOG"; then
+              echo "::warning::App itself logged that Screen Recording permission was not granted — the tcc-grant.sh call above did not take (SIP status from the System info step, or a runner-image change closed the hole). This run cannot exercise the #4968 crash path."
+            else
+              echo "::warning::Never saw the app's VisionManager-started log line at all within the watch window — inconclusive, treating as not granted."
+            fi
+          fi
+
           # Collect any crash report the OS wrote for this binary during the
           # run, independent of the exit-status check above — ReportCrash is
           # asynchronous, so this is the only way to see the *actual* crash
@@ -264,7 +290,7 @@ jobs:
       - name: Evaluate result
         shell: bash
         env:
-          TCC_GRANTED: ${{ steps.verify_tcc.outputs.granted }}
+          TCC_GRANTED: ${{ steps.launch.outputs.vision_granted }}
           STATUS: ${{ steps.launch.outputs.status }}
           CRASH_REPORT: ${{ steps.launch.outputs.found_crash_report }}
         run: |
@@ -291,7 +317,7 @@ jobs:
           fi
 
           if [ "$TCC_GRANTED" != "true" ]; then
-            echo "::error::Screen Recording permission was never confirmed granted, so this run did NOT exercise the SCWindow-enumeration path that #4968 crashes in. Treating as a failure so this doesn't silently read as 'Intel is fine' — see the 'Verify Screen Recording TCC' step above for why the grant didn't take."
+            echo "::error::Screen Recording permission was never confirmed granted, so this run did NOT exercise the SCWindow-enumeration path that #4968 crashes in. Treating as a failure so this doesn't silently read as 'Intel is fine' — see the 'Grant Screen Recording TCC' and 'Launch app' steps above for why the grant didn't take."
             exit 1
           fi
 
