@@ -14,7 +14,7 @@ import { CaptureFrequencyPreview, AudioCaptureModePreview } from "./setting-prev
 export const searchIndex: SettingsField[] = [
   // Mirrors the labels actually rendered by RecordingSettings. Keep in sync.
   { label: "Audio Recording", keywords: ["mic", "microphone", "audio"] },
-  { label: "Transcription engine", keywords: ["whisper", "cloud", "stt"] },
+  { label: "Transcription engine", keywords: ["whisper", "cloud", "stt", "avx2"] },
   // conditional: rendered only when audio is enabled / engine selected.
   { label: "Live meeting notes", keywords: ["captions", "meeting", "live"], conditional: true },
   { label: "Append typed text to note", keywords: ["note", "append"], conditional: true },
