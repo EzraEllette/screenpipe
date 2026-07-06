@@ -10,6 +10,8 @@ use sysinfo::{System, SystemExt};
 /// Minimum macOS major version required for parakeet-mlx (Metal GPU).
 /// macOS 26 (Tahoe) is required for the MLX framework APIs used by parakeet.
 /// On older macOS versions, the model loading segfaults during Metal buffer allocation.
+/// (cfg-gated: since the AVX2-aware refactor its only uses live in macOS-only blocks.)
+#[cfg(target_os = "macos")]
 const PARAKEET_MIN_MACOS_MAJOR: u32 = 26;
 
 /// Device performance tier, determined by hardware detection.
@@ -511,11 +513,23 @@ mod tests {
             DeviceTier::High,
             false
         ));
-        assert!(is_engine_unsafe_for_cpu("qwen3-asr", DeviceTier::High, false));
+        assert!(is_engine_unsafe_for_cpu(
+            "qwen3-asr",
+            DeviceTier::High,
+            false
+        ));
         // parakeet is ONNX (runtime-dispatched MS DLL) — safe without AVX2 off-macOS
-        assert!(!is_engine_unsafe_for_cpu("parakeet", DeviceTier::High, false));
+        assert!(!is_engine_unsafe_for_cpu(
+            "parakeet",
+            DeviceTier::High,
+            false
+        ));
         // with AVX2 everything keeps its existing verdicts
-        assert!(!is_engine_unsafe_for_cpu("whisper-tiny", DeviceTier::High, true));
+        assert!(!is_engine_unsafe_for_cpu(
+            "whisper-tiny",
+            DeviceTier::High,
+            true
+        ));
     }
 
     #[cfg(all(target_arch = "x86_64", not(target_os = "macos")))]
