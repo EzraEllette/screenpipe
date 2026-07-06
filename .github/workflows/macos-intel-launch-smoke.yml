@@ -182,6 +182,14 @@ jobs:
             sudo sqlite3 "$db" "$grant_sql" && echo "  insert reported success" || echo "  insert failed (likely SIP/lock) — will confirm via the real probe below"
           done
 
+          # tccd caches authorization decisions in memory and doesn't reliably
+          # notice a direct TCC.db write — a first real run of this job (see
+          # PR discussion) inserted successfully but the probe still read
+          # DENIED until tccd was forced to reload from disk.
+          echo "-- restarting tccd to pick up the direct TCC.db write --"
+          sudo killall tccd 2>&1 || echo "  tccd not running / already restarted"
+          sleep 2
+
       - name: Verify Screen Recording TCC actually took effect
         id: verify_tcc
         shell: bash
