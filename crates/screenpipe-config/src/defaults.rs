@@ -275,11 +275,22 @@ pub fn best_engine_for_platform(tier: DeviceTier) -> &'static str {
 /// CPU-explicit core of [`best_engine_for_platform`], testable without the
 /// host CPU's actual feature set.
 pub fn best_engine_for_platform_for_cpu(tier: DeviceTier, has_avx2: bool) -> &'static str {
-    // ggml/whisper is compiled with AVX2 on Windows/Linux x64; on CPUs without
-    // AVX2 (pre-2013 Intel, Atom-line Celeron/Pentium) whisper would die with
-    // an illegal instruction. Parakeet runs on ONNX Runtime, which does
-    // runtime CPU dispatch — safe everywhere, but too heavy for Low tier.
-    if cfg!(all(target_arch = "x86_64", not(target_os = "macos"))) && !has_avx2 {
+    // ggml/whisper is compiled with AVX2 on x86-64 release builds; on CPUs
+    // without AVX2 (pre-2013 Intel, Atom-line Celeron/Pentium) whisper would
+    // die with an illegal instruction, and the runtime gate in
+    // screenpipe-audio disables it on EVERY x86-64 target — this picker must
+    // stay consistent with that gate or settings show an engine that
+    // silently never runs.
+    if cfg!(target_arch = "x86_64") && !has_avx2 {
+        // macOS: the only local alternative is parakeet, which auto-upgrades
+        // to MLX and needs macOS 26 — a non-AVX2 Intel Mac (Mac Pro 2013 is
+        // the only such supported model) can't run it either. Disable local
+        // STT outright; cloud engines remain selectable.
+        if cfg!(target_os = "macos") {
+            return "disabled";
+        }
+        // Windows/Linux: parakeet runs on ONNX Runtime, which does runtime
+        // CPU dispatch — safe everywhere, but too heavy for Low tier.
         return if tier == DeviceTier::Low {
             "disabled"
         } else {
@@ -330,7 +341,10 @@ pub fn is_engine_unsafe(engine: &str, tier: DeviceTier) -> bool {
 /// CPU's actual feature set.
 pub fn is_engine_unsafe_for_cpu(engine: &str, tier: DeviceTier, has_avx2: bool) -> bool {
     // AVX2-compiled static kernels: whisper* (ggml) and qwen3* (antirez C).
-    let non_avx2_x86 = cfg!(all(target_arch = "x86_64", not(target_os = "macos"))) && !has_avx2;
+    // Applies on every x86-64 target (macOS included) — mirrors the runtime
+    // gate in screenpipe-audio's TranscriptionEngine::new exactly, so the
+    // store migration moves users off an engine that could never load.
+    let non_avx2_x86 = cfg!(target_arch = "x86_64") && !has_avx2;
     if non_avx2_x86 && (engine.starts_with("whisper") || engine.starts_with("qwen3")) {
         return true;
     }
@@ -345,10 +359,11 @@ pub fn is_engine_unsafe_for_cpu(engine: &str, tier: DeviceTier, has_avx2: bool) 
     }
     if tier == DeviceTier::Mid {
         // Parakeet (~2GB) is normally too heavy for Mid, but on a non-AVX2
-        // x86-64 CPU plain parakeet is the only local engine that can run
+        // x86-64 CPU (off-macOS: on macOS parakeet needs MLX/macOS 26
+        // regardless) plain parakeet is the only local engine that can run
         // (whisper/qwen3 are AVX2-compiled) and Mid (≥12GB) holds it — it is
         // also exactly what best_engine_for_platform_for_cpu picks there.
-        return !(non_avx2_x86 && engine == "parakeet");
+        return !(non_avx2_x86 && cfg!(not(target_os = "macos")) && engine == "parakeet");
     }
 
     // High tier from here.

@@ -160,11 +160,22 @@ impl TranscriptionEngine {
         // model-not-downloaded path; the onboarding compat notice and the
         // engine-safety check in screenpipe-config explain the limitation.
         if !screenpipe_core::cpu_features::has_avx2() && config.requires_avx2() {
-            warn!(
+            // Warn once per process: the audio manager re-runs engine
+            // creation on every device/model refresh tick, and repeating the
+            // same warning forever buries real errors in the logs.
+            static AVX2_GATE_WARNED: std::sync::Once = std::sync::Once::new();
+            let mut first_time = false;
+            AVX2_GATE_WARNED.call_once(|| first_time = true);
+            let msg = format!(
                 "transcription engine {:?} requires AVX2 but this CPU has none ({}); disabling local STT — parakeet/cloud engines remain available",
                 *config,
                 screenpipe_core::cpu_features::snapshot().as_log_string()
             );
+            if first_time {
+                warn!("{msg}");
+            } else {
+                tracing::debug!("{msg}");
+            }
             return Ok(Self::Disabled);
         }
 

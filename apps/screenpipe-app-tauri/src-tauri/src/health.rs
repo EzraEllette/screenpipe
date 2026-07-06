@@ -1407,6 +1407,13 @@ mod tests {
 
     #[test]
     fn cpu_compat_mode_round_trips_through_snapshot() {
+        // Serialize with every other test that mutates the process-wide
+        // BOOT_PHASE singleton (see the boot-readiness section for the
+        // convention) — an unguarded set_boot_phase here would race the
+        // wait_for_boot_ready tests and flap them.
+        let _guard = BOOT_PHASE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         // Default off.
         assert!(!get_boot_phase_snapshot().cpu_compat_mode);
         set_cpu_compat_mode(true);
@@ -1416,6 +1423,8 @@ mod tests {
         assert!(get_boot_phase_snapshot().cpu_compat_mode);
         set_cpu_compat_mode(false);
         assert!(!get_boot_phase_snapshot().cpu_compat_mode);
+        // Reset so other tests see a known-pending baseline.
+        set_boot_phase("idle", None);
     }
 
     fn make_healthy_response() -> Result<HealthCheckResponse> {
