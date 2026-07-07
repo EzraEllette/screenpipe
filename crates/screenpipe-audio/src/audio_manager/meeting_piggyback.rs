@@ -115,6 +115,15 @@ pub(crate) struct PiggybackObservation {
     pub suspended: HashSet<String>,
     /// Running non-session INPUT device display names.
     pub running_inputs: Vec<String>,
+    /// Subset of `running_inputs` that is actively streaming (same liveness
+    /// check the sweep applies to session devices). Displacement keys off
+    /// this so an ENABLED resolved mic counts exactly like a session one
+    /// (G1/D1 in the 2026-07-02 displacement design): the meeting app using
+    /// an already-enrolled mic is the COMMON case, and without this the
+    /// user's other mics are never suspended — every enabled mic transcribes
+    /// the whole meeting, and after a mid-meeting device drop the fallback
+    /// mics are never re-suspended once the meeting app recovers.
+    pub running_streaming: HashSet<String>,
     /// Stable/global far-end captures to suspend only while the Meeting Tap is
     /// streaming. macOS has one synthetic System Audio device; Windows may have
     /// one or more endpoint loopbacks currently running.
@@ -196,10 +205,15 @@ pub(crate) fn decide_piggyback(obs: &PiggybackObservation) -> Vec<PiggybackActio
     }
 
     // --- Near end ---
-    let mic_session_streaming: Vec<&String> = obs
+    // Resolved mics that are actually delivering — as a session stream OR as
+    // an already-enabled running device (D1: the enabled case is the common
+    // one, and displacement must fire for it too).
+    let mic_streaming: Vec<&String> = obs
         .resolved_inputs
         .iter()
-        .filter(|d| obs.session_streaming.contains(*d))
+        .filter(|d| {
+            obs.session_streaming.contains(*d) || obs.running_streaming.contains(*d)
+        })
         .collect();
     for dev in &obs.resolved_inputs {
         let already_running =
@@ -208,7 +222,7 @@ pub(crate) fn decide_piggyback(obs: &PiggybackObservation) -> Vec<PiggybackActio
             actions.push(PiggybackAction::StartSessionInput(dev.clone()));
         }
     }
-    if !mic_session_streaming.is_empty() {
+    if !mic_streaming.is_empty() {
         // Only a STREAMING resolved mic may displace the user's other inputs —
         // never trade a working default mic for a dead resolved one.
         for dev in &obs.running_inputs {
@@ -217,8 +231,8 @@ pub(crate) fn decide_piggyback(obs: &PiggybackObservation) -> Vec<PiggybackActio
             }
         }
     }
-    // Resolution vanished / mic session dead → lift input suspensions.
-    if obs.resolved_inputs.is_empty() || mic_session_streaming.is_empty() {
+    // Resolution vanished / resolved mic dead → lift input suspensions.
+    if obs.resolved_inputs.is_empty() || mic_streaming.is_empty() {
         for dev in &obs.suspended {
             if dev.ends_with("(input)") {
                 actions.push(PiggybackAction::Resume(dev.clone()));
@@ -623,6 +637,17 @@ pub(crate) async fn run_meeting_piggyback_sweep(
         .map(|d| d.to_string())
         .filter(|name| !session_devices.contains(name))
         .collect();
+    // Liveness of the enabled mics, mirroring `session_streaming` — feeds the
+    // decider's displacement gate for the enabled-resolved-mic case (D1).
+    let running_streaming: HashSet<String> = running_inputs
+        .iter()
+        .filter(|name| {
+            parse_audio_device(name)
+                .ok()
+                .is_some_and(|d| audio_manager.is_device_actively_streaming(&d))
+        })
+        .cloned()
+        .collect();
 
     let cooldown_elapsed = state
         .last_tap_attempt
@@ -638,6 +663,7 @@ pub(crate) async fn run_meeting_piggyback_sweep(
         session_streaming: session_streaming.clone(),
         suspended,
         running_inputs,
+        running_streaming,
         stable_outputs,
         tap_strikes: state.tap_strikes,
         tap_cooldown_elapsed: cooldown_elapsed,
@@ -1106,6 +1132,9 @@ mod tests {
 
     #[test]
     fn resolved_mic_already_running_as_enabled_needs_no_session() {
+        // Running but NOT yet streaming: no session start (it's enabled), and
+        // no displacement either — only a mic that's confirmed delivering may
+        // suspend the user's other inputs.
         let mut obs = base();
         obs.resolved_inputs = vec!["MacBook Pro Microphone (input)".to_string()];
         obs.running_inputs = vec!["MacBook Pro Microphone (input)".to_string()];
@@ -1116,6 +1145,78 @@ mod tests {
         assert!(!actions
             .iter()
             .any(|a| matches!(a, PiggybackAction::Suspend(_))));
+    }
+
+    #[test]
+    fn enabled_resolved_mic_streaming_suspends_other_inputs() {
+        // D1 / the AirPods-recovery bug: the meeting app's mic is an ENABLED
+        // device (no session stream). Once it is actually streaming it must
+        // displace the user's other running mics exactly like a session mic —
+        // observed live 2026-07-07: Meet recovered onto AirPods (enabled)
+        // after a device drop and the MacBook mic kept transcribing forever.
+        let mut obs = base();
+        obs.resolved_inputs = vec!["Ezra's AirPods Max (input)".to_string()];
+        obs.running_inputs = vec![
+            "Ezra's AirPods Max (input)".to_string(),
+            "MacBook Pro Microphone (input)".to_string(),
+        ];
+        obs.running_streaming = ["Ezra's AirPods Max (input)".to_string()].into();
+        let actions = decide_piggyback(&obs);
+        assert!(actions.contains(&PiggybackAction::Suspend(
+            "MacBook Pro Microphone (input)".to_string()
+        )));
+        assert!(
+            !actions
+                .iter()
+                .any(|a| matches!(a, PiggybackAction::StartSessionInput(_))),
+            "enabled resolved mic must not also get a session stream: {actions:?}"
+        );
+        assert!(
+            !actions
+                .iter()
+                .any(|a| matches!(a, PiggybackAction::Suspend(d) if d.contains("AirPods"))),
+            "the resolved mic must never suspend itself: {actions:?}"
+        );
+    }
+
+    #[test]
+    fn enabled_resolved_mic_stops_streaming_resumes_others() {
+        // The enabled resolved mic dies (device drop): suspended inputs must
+        // come back — never trade a working mic for a dead resolved one.
+        let mut obs = base();
+        obs.resolved_inputs = vec!["Ezra's AirPods Max (input)".to_string()];
+        obs.running_inputs = vec!["Ezra's AirPods Max (input)".to_string()];
+        obs.suspended = ["MacBook Pro Microphone (input)".to_string()].into();
+        let actions = decide_piggyback(&obs);
+        assert!(actions.contains(&PiggybackAction::Resume(
+            "MacBook Pro Microphone (input)".to_string()
+        )));
+    }
+
+    #[test]
+    fn mixed_resolved_set_sessions_only_the_unenabled_mic() {
+        // Enabled mic A streaming + non-enabled mic B resolved: B gets a
+        // session stream, A does not, and displacement still fires off A.
+        let mut obs = base();
+        obs.resolved_inputs = vec![
+            "Ezra's AirPods Max (input)".to_string(),
+            "Rode NT (input)".to_string(),
+        ];
+        obs.running_inputs = vec![
+            "Ezra's AirPods Max (input)".to_string(),
+            "MacBook Pro Microphone (input)".to_string(),
+        ];
+        obs.running_streaming = ["Ezra's AirPods Max (input)".to_string()].into();
+        let actions = decide_piggyback(&obs);
+        assert!(actions.contains(&PiggybackAction::StartSessionInput(
+            "Rode NT (input)".to_string()
+        )));
+        assert!(actions.contains(&PiggybackAction::Suspend(
+            "MacBook Pro Microphone (input)".to_string()
+        )));
+        assert!(!actions.contains(&PiggybackAction::StartSessionInput(
+            "Ezra's AirPods Max (input)".to_string()
+        )));
     }
 
     #[test]
