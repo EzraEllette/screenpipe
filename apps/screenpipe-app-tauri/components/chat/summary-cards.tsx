@@ -267,9 +267,7 @@ export function SummaryCards({
             tabIndex={0}
             onClick={openConnection}
             onKeyDown={(e) => e.key === "Enter" && openConnection()}
-            className={`group relative text-left p-2 border bg-muted/10 hover:bg-foreground hover:text-background hover:border-foreground transition-all duration-150 cursor-pointer ${
-              isBrowseAll ? "border-border/40" : "border-dashed border-border/60"
-            }`}
+            className="group relative text-left p-2 border border-border/40 bg-muted/10 hover:bg-foreground hover:text-background hover:border-foreground transition-all duration-150 cursor-pointer"
           >
             <div className="mb-0.5 flex h-4 w-4 items-center justify-center">
               {isBrowseAll
@@ -277,7 +275,7 @@ export function SummaryCards({
                 : <ConnectionSuggestionIcon name={connection.icon} />}
             </div>
             <div className="text-[11px] font-medium group-hover:text-background mb-0.5 leading-tight pr-4">
-              {isBrowseAll ? connection.title.toLowerCase() : `+ ${connection.title.toLowerCase()}`}
+              {connection.title.toLowerCase()}
             </div>
             <div className="text-[10px] text-muted-foreground group-hover:text-background/60 leading-tight line-clamp-1">
               {connection.description}
