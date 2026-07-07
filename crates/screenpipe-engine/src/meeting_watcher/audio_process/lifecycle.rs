@@ -255,7 +255,11 @@ pub(crate) async fn apply_state_action(
                     };
                     sync_meeting_flag(
                         true,
-                        Some(screenpipe_audio::meeting_detector::ActiveMeeting { pid, bundle_id }),
+                        Some(screenpipe_audio::meeting_detector::ActiveMeeting {
+                            pid,
+                            bundle_id,
+                            manual: false,
+                        }),
                         in_meeting_flag,
                         detector,
                     );

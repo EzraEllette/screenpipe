@@ -137,6 +137,7 @@ pub async fn run_audio_process_meeting_detection_loop(
             Some(screenpipe_audio::meeting_detector::ActiveMeeting {
                 pid: None,
                 bundle_id: None,
+                manual: false,
             }),
             &in_meeting_flag,
             &detector,
@@ -205,9 +206,21 @@ pub async fn run_audio_process_meeting_detection_loop(
                     "audio-process meeting detector: manual meeting active, skipping auto detection"
                 );
                 // A manually-started meeting owns the active slot; this
-                // detector has no process identity for it from here (mirrors
-                // the BlockedByActive case in `apply_state_action`).
-                sync_meeting_flag(true, None, &in_meeting_flag, &detector);
+                // detector has no process identity for it and never will —
+                // republish the MANUAL identity (not `None`) so the piggyback
+                // sweep keeps deriving its tap targets from the live
+                // mic-holder enumeration. Publishing `None` here clobbered
+                // the manual marker set by the start-meeting route every 5s.
+                sync_meeting_flag(
+                    true,
+                    Some(screenpipe_audio::meeting_detector::ActiveMeeting {
+                        pid: None,
+                        bundle_id: None,
+                        manual: true,
+                    }),
+                    &in_meeting_flag,
+                    &detector,
+                );
                 interval = IDLE_POLL_INTERVAL;
                 continue;
             }

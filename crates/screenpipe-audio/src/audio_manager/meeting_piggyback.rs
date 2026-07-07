@@ -102,9 +102,13 @@ pub(crate) struct PiggybackObservation {
     /// structural: the flag takes precedence over everything.
     pub flag_on: bool,
     pub tap_available: bool,
-    /// None = no active meeting. Some(None) = meeting without a known pid
-    /// (ui_scan sensor / post-restart reattach) — stable path.
-    pub meeting: Option<Option<i32>>,
+    /// None = no active meeting. Some(empty) = meeting without any known
+    /// process (ui_scan sensor / post-restart reattach, or a manual meeting
+    /// with no mic-holders observed yet) — stable path. Some(pids) = tap
+    /// these processes: the single sensor-attributed pid for detected
+    /// meetings, or every mic-holding process for MANUAL meetings (built by
+    /// the sweep, sorted + deduped, damped by two-tick adoption).
+    pub meeting: Option<Vec<i32>>,
     /// Display names ("Name (input)") the meeting app actively records from.
     pub resolved_inputs: Vec<String>,
     /// Currently registered session devices (display names).
@@ -130,11 +134,19 @@ pub(crate) struct PiggybackObservation {
     pub stable_outputs: Vec<String>,
     pub tap_strikes: u32,
     pub tap_cooldown_elapsed: bool,
+    /// Pids the currently-registered Meeting Tap was built over (sorted).
+    /// Empty when no tap is registered. Lets the decider notice the
+    /// mic-holder set changing mid-meeting (manual meetings track it live)
+    /// and rebuild the tap over the new set.
+    pub tap_built_pids: Vec<i32>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum PiggybackAction {
     StartTap { pids: Vec<i32> },
+    /// Stop + immediately restart the tap over a new pid set — a deliberate
+    /// rebuild, NOT a failure: no strike, no cooldown gap, suspensions kept.
+    RetapForPidChange { pids: Vec<i32> },
     StopSessionDevice(String),
     StartSessionInput(String),
     Suspend(String),
@@ -152,11 +164,11 @@ pub(crate) enum PiggybackAction {
 pub(crate) fn decide_piggyback(obs: &PiggybackObservation) -> Vec<PiggybackAction> {
     let mut actions = Vec::new();
     let engaged = obs.flag_on;
-    let meeting_pid = obs.meeting.flatten();
+    let meeting_pids: &[i32] = obs.meeting.as_deref().unwrap_or(&[]);
 
-    // Disengaged, meeting over, or meeting without a pid: tear down every
+    // Disengaged, meeting over, or meeting without any pid: tear down every
     // session stream and lift every suspension → exactly today's stable path.
-    let piggybacking = engaged && obs.tap_available && meeting_pid.is_some();
+    let piggybacking = engaged && obs.tap_available && !meeting_pids.is_empty();
     if !piggybacking {
         for dev in &obs.session_devices {
             actions.push(PiggybackAction::StopSessionDevice(dev.clone()));
@@ -164,12 +176,11 @@ pub(crate) fn decide_piggyback(obs: &PiggybackObservation) -> Vec<PiggybackActio
         for dev in &obs.suspended {
             actions.push(PiggybackAction::Resume(dev.clone()));
         }
-        if engaged && meeting_pid.is_some() && !obs.tap_available {
+        if engaged && !meeting_pids.is_empty() && !obs.tap_available {
             actions.push(PiggybackAction::WarnUnavailableOnce);
         }
         return actions;
     }
-    let pid = meeting_pid.expect("checked above");
     let tap = format!("{} (output)", crate::core::device::MEETING_TAP_DEVICE_NAME);
 
     // --- Far end ---
@@ -186,7 +197,9 @@ pub(crate) fn decide_piggyback(obs: &PiggybackObservation) -> Vec<PiggybackActio
         actions.push(PiggybackAction::NoteTapFailure);
     } else if !tap_registered {
         if obs.tap_strikes < MAX_TAP_STRIKES && obs.tap_cooldown_elapsed {
-            actions.push(PiggybackAction::StartTap { pids: vec![pid] });
+            actions.push(PiggybackAction::StartTap {
+                pids: meeting_pids.to_vec(),
+            });
         }
         // Stable output stays live (or resumes) while the tap isn't delivering.
         for dev in &obs.suspended {
@@ -194,6 +207,14 @@ pub(crate) fn decide_piggyback(obs: &PiggybackObservation) -> Vec<PiggybackActio
                 actions.push(PiggybackAction::Resume(dev.clone()));
             }
         }
+    } else if !obs.tap_built_pids.is_empty() && obs.tap_built_pids != meeting_pids {
+        // Tap is healthy but the pid set moved under it (a mic-holding app
+        // joined or left a MANUAL meeting; the sweep already damped the set
+        // with two-tick adoption). Deliberate rebuild over the new set —
+        // suspensions stay, no failure strike, no cooldown gap.
+        actions.push(PiggybackAction::RetapForPidChange {
+            pids: meeting_pids.to_vec(),
+        });
     } else {
         // Tap is streaming: the stable global capture is redundant (double
         // transcription) — suspend it for the meeting's duration.
@@ -348,6 +369,34 @@ pub(crate) struct PiggybackState {
     /// Drives the meeting-end emission edge, which is separate from (and can
     /// fire after) the piggybacking-stop edge above on a pid flap.
     pub last_meeting_seen: bool,
+    /// Pids the currently-registered Meeting Tap was built over (sorted).
+    /// Set on successful StartTap/Retap, cleared when the tap session stops.
+    /// Mirrored into `PiggybackObservation::tap_built_pids` so the decider
+    /// can spot the mic-holder set changing under a live tap.
+    pub tap_pids: Vec<i32>,
+    /// MANUAL meetings only: the currently-adopted mic-holder pid set (sorted)
+    /// and the candidate awaiting its second consecutive sighting. Two-tick
+    /// adoption (~4s at the 2s cadence) damps holder-set flap (push-to-talk,
+    /// dictation, helper pid rotation) — every adoption while the tap streams
+    /// costs a rebuild. Reset on meeting end.
+    pub manual_pids_adopted: Vec<i32>,
+    pub manual_pids_candidate: Option<Vec<i32>>,
+}
+
+/// Two-tick adoption for a MANUAL meeting's mic-holder pid set: a freshly
+/// enumerated set (sorted, deduped) is adopted only after being seen on two
+/// consecutive ticks; until then the previously-adopted set stays in force.
+/// Pure state transition — unit-tested directly.
+pub(crate) fn adopt_manual_pids(state: &mut PiggybackState, fresh: Vec<i32>) -> Vec<i32> {
+    if fresh == state.manual_pids_adopted {
+        state.manual_pids_candidate = None;
+    } else if state.manual_pids_candidate.as_ref() == Some(&fresh) {
+        state.manual_pids_adopted = fresh;
+        state.manual_pids_candidate = None;
+    } else {
+        state.manual_pids_candidate = Some(fresh);
+    }
+    state.manual_pids_adopted.clone()
 }
 
 /// Increments `state.tap_strikes` by one and, on the edge where that crosses
@@ -585,31 +634,57 @@ pub(crate) async fn run_meeting_piggyback_sweep(
 
     // 2. Meeting identity. Detector `None` (engine-less CLI, detector disabled)
     //    ⇒ observation `meeting: None` ⇒ decider tears down any leftovers and
-    //    rides the stable path. `active_meeting()` returns `Some(pid: None)`
-    //    mid-meeting when the sensor doesn't know the process — also stable.
-    let meeting: Option<Option<i32>> = detector
-        .as_ref()
-        .and_then(|d| d.active_meeting())
-        .map(|m| m.pid);
-    let meeting_pid = meeting.flatten();
+    //    rides the stable path. A meeting with an EMPTY pid set (sensor can't
+    //    know the process: ui_scan / post-restart reattach, or a manual
+    //    meeting with no mic-holder observed) — also stable. MANUAL meetings
+    //    carry no sensor pid ever, so the sweep derives the set itself: every
+    //    process currently holding a microphone (the enumerator filters
+    //    screenpipe's own), damped by two-tick adoption so a flapping holder
+    //    set (push-to-talk, dictation) doesn't rebuild-storm the tap.
     let engaged = flag_on;
     let tap_avail = tap_available();
+    let active = detector.as_ref().and_then(|d| d.active_meeting());
+    let meeting: Option<Vec<i32>> = active.as_ref().map(|m| {
+        if m.manual {
+            // The enumeration is a CoreAudio/WASAPI process walk — pay it
+            // only when the result could actually engage the tap.
+            if engaged && tap_avail {
+                let mut fresh: Vec<i32> = crate::meeting_processes::current_input_processes()
+                    .processes
+                    .iter()
+                    .filter_map(|p| p.pid)
+                    .collect();
+                fresh.sort_unstable();
+                fresh.dedup();
+                adopt_manual_pids(state, fresh)
+            } else {
+                Vec::new()
+            }
+        } else {
+            m.pid.map(|pid| vec![pid]).unwrap_or_default()
+        }
+    });
+    let meeting_pids: Vec<i32> = meeting.clone().unwrap_or_default();
 
     // 3. Resolve the meeting app's open mics — only when actually piggybacking
-    //    on a known pid. Skipping it otherwise keeps the flag-off / no-meeting
-    //    paths free of any OS enumeration (and side-effect free). Called at
-    //    most once per tick. Runs on the 2s monitor cadence rather than the
-    //    ~500ms the spec sketches; that's coarser than ideal but well inside a
-    //    30s transcription segment, so a mic swap is still picked up promptly.
-    let resolved_inputs: Vec<String> = if engaged && tap_avail {
-        meeting_pid
-            .map(|pid| {
-                crate::core::meeting_audio::resolve_meeting_inputs(pid)
-                    .iter()
-                    .map(|d| d.to_string())
-                    .collect()
-            })
-            .unwrap_or_default()
+    //    on known pids. Skipping it otherwise keeps the flag-off / no-meeting
+    //    paths free of any OS enumeration (and side-effect free). Runs on the
+    //    2s monitor cadence rather than the ~500ms the spec sketches; that's
+    //    coarser than ideal but well inside a 30s transcription segment, so a
+    //    mic swap is still picked up promptly. Multi-pid (manual meetings):
+    //    the union across all tapped processes, first-seen order, deduped.
+    let resolved_inputs: Vec<String> = if engaged && tap_avail && !meeting_pids.is_empty() {
+        let mut seen = HashSet::new();
+        let mut out = Vec::new();
+        for pid in &meeting_pids {
+            for device in crate::core::meeting_audio::resolve_meeting_inputs(*pid) {
+                let name = device.to_string();
+                if seen.insert(name.clone()) {
+                    out.push(name);
+                }
+            }
+        }
+        out
     } else {
         Vec::new()
     };
@@ -653,6 +728,10 @@ pub(crate) async fn run_meeting_piggyback_sweep(
         .last_tap_attempt
         .is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(TAP_RETRY_COOLDOWN_SECS));
     let stable_outputs = stable_output_names(audio_manager, &session_devices);
+    // A meeting is "seen" whenever the detector reports one, pid set or not —
+    // the telemetry gate and the meeting-end edge below key off this, and
+    // `meeting` itself moves into the observation next.
+    let meeting_seen = meeting.is_some();
 
     let obs = PiggybackObservation {
         flag_on,
@@ -667,6 +746,7 @@ pub(crate) async fn run_meeting_piggyback_sweep(
         stable_outputs,
         tap_strikes: state.tap_strikes,
         tap_cooldown_elapsed: cooldown_elapsed,
+        tap_built_pids: state.tap_pids.clone(),
     };
 
     let tap_device_str = format!("{} (output)", MEETING_TAP_DEVICE_NAME);
@@ -676,11 +756,11 @@ pub(crate) async fn run_meeting_piggyback_sweep(
     //     feed back into any decision above. Gated on `engaged` (the flag)
     //     AND a meeting being observed so flag-off users accumulate nothing
     //     (matches the decider's own "disengaged" path).
-    if engaged && meeting.is_some() {
+    if engaged && meeting_seen {
         let telemetry = &mut state.telemetry;
         telemetry.meeting_seen = true;
         telemetry.meeting_ticks += 1;
-        telemetry.pid_known |= meeting_pid.is_some();
+        telemetry.pid_known |= !meeting_pids.is_empty();
         if telemetry.bundle_id.is_none() {
             telemetry.bundle_id = detector
                 .as_ref()
@@ -690,7 +770,7 @@ pub(crate) async fn run_meeting_piggyback_sweep(
         if tap_streaming {
             telemetry.tap_streaming_ticks += 1;
         }
-        telemetry.unavailable |= meeting_pid.is_some() && !tap_avail;
+        telemetry.unavailable |= !meeting_pids.is_empty() && !tap_avail;
         telemetry
             .mic_resolved_devices
             .extend(obs.resolved_inputs.iter().cloned());
@@ -708,6 +788,9 @@ pub(crate) async fn run_meeting_piggyback_sweep(
             PiggybackAction::StopSessionDevice(name) => {
                 if let Ok(device) = parse_audio_device(&name) {
                     let _ = audio_manager.stop_session_device(&device).await;
+                }
+                if name == tap_device_str {
+                    state.tap_pids.clear();
                 }
             }
             PiggybackAction::Resume(name) => {
@@ -736,13 +819,44 @@ pub(crate) async fn run_meeting_piggyback_sweep(
             PiggybackAction::StartTap { pids } => {
                 state.last_tap_attempt = Some(std::time::Instant::now());
                 let tap = AudioDevice::new(MEETING_TAP_DEVICE_NAME.to_string(), DeviceType::Output);
-                if let Err(e) = audio_manager.start_session_device(&tap, Some(pids)).await {
+                if let Err(e) = audio_manager
+                    .start_session_device(&tap, Some(pids.clone()))
+                    .await
+                {
                     record_tap_strike(state);
                     warn!(
                         "[MEETING_PIGGYBACK] failed to start meeting tap (strike {}/{}): {}",
                         state.tap_strikes, MAX_TAP_STRIKES, e
                     );
                 } else {
+                    state.tap_pids = pids;
+                    state.telemetry.tap_started_count += 1;
+                }
+            }
+            PiggybackAction::RetapForPidChange { pids } => {
+                // Deliberate rebuild over a changed pid set (manual meetings
+                // track the mic-holder set live). Stop + start in one action
+                // so there's no far-end gap tick; a start failure falls into
+                // the normal strike/cooldown retry machinery.
+                info!(
+                    "[MEETING_PIGGYBACK] mic-holder set changed {:?} -> {:?}, rebuilding tap",
+                    state.tap_pids, pids
+                );
+                let tap = AudioDevice::new(MEETING_TAP_DEVICE_NAME.to_string(), DeviceType::Output);
+                let _ = audio_manager.stop_session_device(&tap).await;
+                state.tap_pids.clear();
+                state.last_tap_attempt = Some(std::time::Instant::now());
+                if let Err(e) = audio_manager
+                    .start_session_device(&tap, Some(pids.clone()))
+                    .await
+                {
+                    record_tap_strike(state);
+                    warn!(
+                        "[MEETING_PIGGYBACK] failed to rebuild meeting tap over new pid set (strike {}/{}): {}",
+                        state.tap_strikes, MAX_TAP_STRIKES, e
+                    );
+                } else {
+                    state.tap_pids = pids;
                     state.telemetry.tap_started_count += 1;
                 }
             }
@@ -789,12 +903,12 @@ pub(crate) async fn run_meeting_piggyback_sweep(
         }
     }
 
-    // 5b. Mic capture-health. Only while actively piggybacking on a known pid,
+    // 5b. Mic capture-health. Only while actively piggybacking on known pids,
     //     and only for a resolved mic that is a REGISTERED session device (the
     //     Meeting Tap is an OUTPUT device and never enters this pass — output
     //     health is the far-end watchdog's job). Restart silently first, notify
     //     only if that doesn't help, never cry wolf on a mute.
-    let piggybacking_now = engaged && tap_avail && meeting_pid.is_some();
+    let piggybacking_now = engaged && tap_avail && !meeting_pids.is_empty();
     // Piggybacking RESUMES (a second tap/mic cycle within the same meeting,
     // e.g. after a pid flap or a tap rebuild): clear the per-cycle fold guard
     // so the next stop/meeting-end fold isn't silently dropped. The guard is
@@ -832,10 +946,25 @@ pub(crate) async fn run_meeting_piggyback_sweep(
                     let zeros_suspect = last_nonzero == 0
                         || now.saturating_sub(last_nonzero) >= MIC_ZERO_WINDOW_MS / 2;
                     let input_active = if zeros_suspect {
-                        meeting_pid.and_then(|pid| {
-                            crate::core::meeting_audio::process_audio_activity(pid)
+                        // Multi-pid (manual meetings): ANY tapped process
+                        // actively recording counts as "the app is recording"
+                        // — we can't attribute the resolved mic to one pid
+                        // here, and a false `Some(true)` only triggers a
+                        // silent restart, never a notification by itself.
+                        let mut probed: Option<bool> = None;
+                        for pid in &meeting_pids {
+                            match crate::core::meeting_audio::process_audio_activity(*pid)
                                 .map(|a| a.input_active)
-                        })
+                            {
+                                Some(true) => {
+                                    probed = Some(true);
+                                    break;
+                                }
+                                Some(false) => probed = Some(probed.unwrap_or(false)),
+                                None => {}
+                            }
+                        }
+                        probed
                     } else {
                         None
                     };
@@ -923,13 +1052,17 @@ pub(crate) async fn run_meeting_piggyback_sweep(
     //    once more (idempotent per meeting — see `fold_volatile_state`) to
     //    catch meetings that end while STILL piggybacking, where this edge and
     //    the one above fire on the very same tick.
-    let meeting_now = engaged && meeting.is_some();
+    let meeting_now = engaged && meeting_seen;
     if state.last_meeting_seen && !meeting_now && state.telemetry.meeting_seen {
         let mut telemetry = std::mem::take(&mut state.telemetry);
         fold_volatile_state(&mut telemetry, state);
         let summary = build_meeting_summary(&telemetry);
         let _ = screenpipe_events::send_event("piggyback_meeting_summary", summary);
         state.telemetry = MeetingTelemetry::default();
+        // Manual pid-set bookkeeping is meeting-scoped: the next manual
+        // meeting starts from an empty adopted set (two-tick warm-up).
+        state.manual_pids_adopted = Vec::new();
+        state.manual_pids_candidate = None;
     }
     state.last_meeting_seen = meeting_now;
 
@@ -944,7 +1077,7 @@ mod tests {
         PiggybackObservation {
             flag_on: true,
             tap_available: true,
-            meeting: Some(Some(4242)),
+            meeting: Some(vec![4242]),
             stable_outputs: vec!["System Audio (output)".to_string()],
             tap_cooldown_elapsed: true,
             ..Default::default()
@@ -993,12 +1126,72 @@ mod tests {
     #[test]
     fn meeting_without_pid_is_stable_path() {
         let mut obs = base();
-        obs.meeting = Some(None);
+        obs.meeting = Some(vec![]);
         let actions = decide_piggyback(&obs);
         assert!(
             actions.is_empty(),
             "no session streams, nothing suspended: {actions:?}"
         );
+    }
+
+    #[test]
+    fn multi_pid_meeting_taps_all_processes() {
+        // Manual meetings tap EVERY mic-holding process — the StartTap action
+        // must carry the whole set, not just the first pid.
+        let mut obs = base();
+        obs.meeting = Some(vec![100, 200, 300]);
+        let actions = decide_piggyback(&obs);
+        assert!(actions.contains(&PiggybackAction::StartTap {
+            pids: vec![100, 200, 300]
+        }));
+    }
+
+    #[test]
+    fn pid_set_change_rebuilds_live_tap_without_strike() {
+        // The mic-holder set moved under a healthy tap (an app joined a
+        // manual meeting): rebuild deliberately — no failure strike, no
+        // teardown of suspensions.
+        let mut obs = base();
+        obs.meeting = Some(vec![100, 200]);
+        obs.session_devices = [tap_name()].into();
+        obs.session_streaming = [tap_name()].into();
+        obs.tap_built_pids = vec![100];
+        let actions = decide_piggyback(&obs);
+        assert!(actions.contains(&PiggybackAction::RetapForPidChange {
+            pids: vec![100, 200]
+        }));
+        assert!(!actions.contains(&PiggybackAction::NoteTapFailure));
+        assert!(!actions.contains(&PiggybackAction::StopSessionDevice(tap_name())));
+    }
+
+    #[test]
+    fn unchanged_pid_set_never_retaps() {
+        let mut obs = base();
+        obs.meeting = Some(vec![100, 200]);
+        obs.session_devices = [tap_name()].into();
+        obs.session_streaming = [tap_name()].into();
+        obs.tap_built_pids = vec![100, 200];
+        let actions = decide_piggyback(&obs);
+        assert!(!actions
+            .iter()
+            .any(|a| matches!(a, PiggybackAction::RetapForPidChange { .. })));
+    }
+
+    #[test]
+    fn manual_pid_adoption_requires_two_consecutive_sightings() {
+        let mut state = PiggybackState::default();
+        // First sighting: candidate only — the previously-adopted (empty) set
+        // stays in force.
+        assert!(adopt_manual_pids(&mut state, vec![10, 20]).is_empty());
+        // Second consecutive sighting: adopted.
+        assert_eq!(adopt_manual_pids(&mut state, vec![10, 20]), vec![10, 20]);
+        // A flapping set never displaces the adopted one...
+        assert_eq!(adopt_manual_pids(&mut state, vec![10]), vec![10, 20]);
+        assert_eq!(adopt_manual_pids(&mut state, vec![10, 30]), vec![10, 20]);
+        // ...until it holds still for two ticks.
+        assert_eq!(adopt_manual_pids(&mut state, vec![10, 30]), vec![10, 30]);
+        // Seeing the adopted set again clears any stale candidate.
+        assert_eq!(adopt_manual_pids(&mut state, vec![10, 30]), vec![10, 30]);
     }
 
     #[test]

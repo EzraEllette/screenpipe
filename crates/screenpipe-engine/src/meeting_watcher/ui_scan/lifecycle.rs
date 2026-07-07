@@ -25,6 +25,7 @@ pub(crate) fn sync_meeting_flag(
             Some(screenpipe_audio::meeting_detector::ActiveMeeting {
                 pid: None,
                 bundle_id: None,
+                manual: false,
             })
         } else {
             None

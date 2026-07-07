@@ -45,6 +45,12 @@ pub struct ActiveMeeting {
     /// back to the stable capture path in that case.
     pub pid: Option<i32>,
     pub bundle_id: Option<String>,
+    /// The user started this meeting manually — no sensor attributed a
+    /// process to it, and none will. Consumers needing process identity
+    /// (the piggyback sweep) derive their own: for manual meetings the
+    /// sweep taps EVERY process currently holding a microphone instead of
+    /// riding the stable path like the other `pid: None` cases.
+    pub manual: bool,
 }
 
 /// Lightweight meeting state holder for the audio pipeline.
@@ -301,6 +307,7 @@ mod tests {
         d.set_active_meeting(Some(ActiveMeeting {
             pid: Some(4242),
             bundle_id: Some("us.zoom.xos".into()),
+            manual: false,
         }));
         assert_eq!(d.active_meeting().unwrap().pid, Some(4242));
         d.set_active_meeting(None);
