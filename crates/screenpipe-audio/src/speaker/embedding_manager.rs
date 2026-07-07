@@ -280,7 +280,10 @@ mod tests {
         // memory leak and a per-segment CPU leak (search_speaker scans every
         // cluster). The default must now be finite.
         assert_ne!(DEFAULT_MAX_SPEAKERS, usize::MAX);
-        assert!(DEFAULT_MAX_SPEAKERS >= 256, "cap must be generous enough not to harm real diarization");
+        assert!(
+            DEFAULT_MAX_SPEAKERS >= 256,
+            "cap must be generous enough not to harm real diarization"
+        );
 
         // Feed far more distinct (orthogonal, so never matching) embeddings than
         // the cap. Without a bound this would allocate one cluster each; with the
