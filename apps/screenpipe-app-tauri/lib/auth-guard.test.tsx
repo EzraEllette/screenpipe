@@ -41,6 +41,7 @@ import {
   isScreenpipeApi,
   isScreenpipeAuthApi,
   shouldReverifyOnFocus,
+  stripSessionToken,
 } from "./auth-guard";
 
 const LOGGED_IN = { token: "tok-123", cloud_subscribed: false };
@@ -122,6 +123,35 @@ describe("isScreenpipeAuthApi", () => {
   it("returns false for the local engine and non-screenpipe hosts", () => {
     expect(isScreenpipeAuthApi("http://localhost:3030/health")).toBe(false);
     expect(isScreenpipeAuthApi("https://evil.example.com/?ref=screenpi.pe")).toBe(false);
+  });
+});
+
+describe("stripSessionToken", () => {
+  it("returns null for a missing user", () => {
+    expect(stripSessionToken(null)).toBeNull();
+    expect(stripSessionToken(undefined)).toBeNull();
+  });
+
+  it("removes the token but preserves the profile + entitlement evidence", () => {
+    const user = {
+      id: "u-1",
+      email: "antonio@bungalow.com",
+      token: "tok-123",
+      app_entitled: true,
+      cloud_subscribed: true,
+      subscription_plan: "enterprise",
+    };
+    const stripped = stripSessionToken(user)!;
+    expect("token" in stripped).toBe(false);
+    expect(stripped).toMatchObject({
+      id: "u-1",
+      email: "antonio@bungalow.com",
+      app_entitled: true,
+      cloud_subscribed: true,
+      subscription_plan: "enterprise",
+    });
+    // original object untouched
+    expect(user.token).toBe("tok-123");
   });
 });
 
@@ -224,14 +254,20 @@ describe("AuthGuard session-expiry handling", () => {
     mocks.state.user = { ...LOGGED_IN };
   });
 
-  it("signs the user out when a focus re-verify returns 401", async () => {
+  it("strips only the token (keeps the user) when a focus re-verify returns 401", async () => {
     mocks.loadUser.mockRejectedValueOnce(
       new Error("failed to verify token: 401 Unauthorized")
     );
     renderGuard();
     fireEvent(window, new Event("focus"));
 
-    await waitFor(() => expect(mocks.updateSettings).toHaveBeenCalledWith({ user: null }));
+    await waitFor(() => expect(mocks.updateSettings).toHaveBeenCalled());
+    // SCR-132: the user object must survive so the entitlement gate's
+    // transient-loss cushion can hold — only the token is removed.
+    const arg = mocks.updateSettings.mock.calls[0][0];
+    expect(arg.user).not.toBeNull();
+    expect(arg.user.token).toBeUndefined();
+    expect(arg.user.cloud_subscribed).toBe(false); // profile fields preserved
     expect(mocks.setCloudToken).toHaveBeenCalledWith(null);
     expect(mocks.capture).toHaveBeenCalledWith(
       "session_expired",
@@ -239,14 +275,17 @@ describe("AuthGuard session-expiry handling", () => {
     );
   });
 
-  it("signs the user out when a focus re-verify returns 403", async () => {
+  it("strips only the token (keeps the user) when a focus re-verify returns 403", async () => {
     mocks.loadUser.mockRejectedValueOnce(
       new Error("failed to verify token: 403 Forbidden")
     );
     renderGuard();
     fireEvent(window, new Event("focus"));
 
-    await waitFor(() => expect(mocks.updateSettings).toHaveBeenCalledWith({ user: null }));
+    await waitFor(() => expect(mocks.updateSettings).toHaveBeenCalled());
+    const arg = mocks.updateSettings.mock.calls[0][0];
+    expect(arg.user).not.toBeNull();
+    expect(arg.user.token).toBeUndefined();
     expect(mocks.setCloudToken).toHaveBeenCalledWith(null);
   });
 

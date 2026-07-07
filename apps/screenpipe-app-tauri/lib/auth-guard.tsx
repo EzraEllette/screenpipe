@@ -52,9 +52,12 @@ function showSignedOutToast() {
   if (now - lastToastTime < TOAST_COOLDOWN_MS) return;
   lastToastTime = now;
 
+  // Don't claim "app paused": with the entitlement evidence preserved (see
+  // stripSessionToken) a previously-entitled account keeps recording while
+  // signed out — only never-entitled accounts get gated.
   toast({
-    title: "signed out — app paused",
-    description: "sign in with an active plan to keep using screenpipe.",
+    title: "session expired",
+    description: "sign in again to keep your account connected.",
     variant: "destructive",
     duration: 30000,
     action: (
@@ -63,6 +66,24 @@ function showSignedOutToast() {
       </ToastAction>
     ),
   });
+}
+
+// On session expiry, strip ONLY the token instead of nulling the whole user.
+// The persisted profile + entitlement evidence must survive so the entitlement
+// gate's transient-loss cushion (`failOpenForTransientAccessLoss`, keyed on
+// `isTokenHydrationPending` + `hasPersistedEntitlementEvidence` in
+// app-entitlement.ts) can keep a previously-entitled account recording and
+// onboarding intact while the user re-authenticates. Nulling the whole user
+// here is what looped enterprise users through the gate + onboarding after an
+// auto-update (SCR-132). An explicit, user-initiated logout still sets
+// `user: null` elsewhere — that path also triggers the cross-window sign-out
+// invalidation in updateSettings, which this deliberately does not.
+export function stripSessionToken<T extends { token?: string | null }>(
+  user: T | null | undefined,
+): T | null {
+  if (!user) return null;
+  const { token: _token, ...rest } = user as T & { token?: string | null };
+  return rest as T;
 }
 
 function cloudRequestHost(url: string): string | null {
@@ -132,6 +153,8 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
   const { settings, updateSettings, loadUser } = useSettings();
   const tokenRef = useRef(settings.user?.token);
   tokenRef.current = settings.user?.token;
+  const userRef = useRef(settings.user);
+  userRef.current = settings.user;
 
   const handleSessionExpired = useCallback(
     async (context?: { source?: string; status?: number | null }) => {
@@ -145,7 +168,7 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
         source: context?.source ?? "verify_token",
         status: context?.status ?? null,
       });
-      await updateSettings({ user: null as any });
+      await updateSettings({ user: stripSessionToken(userRef.current) as any });
       try {
         await commands.setCloudToken(null);
       } catch {}
