@@ -339,7 +339,19 @@ pub(crate) fn process_identity_fields(process: &AudioInputProcess) -> Vec<String
     ]
     .into_iter()
     .flatten()
-    .map(|s| s.trim().to_lowercase())
+    .map(|s| {
+        // macOS NSRunningApp.localized_name() can prepend invisible Unicode
+        // formatting characters (e.g. U+200E LEFT-TO-RIGHT MARK on WhatsApp:
+        // "\u{200e}WhatsApp"). Strip them so profile name matching works.
+        s.chars()
+            .filter(|c| {
+                !c.is_control()
+                    && !matches!(c, '\u{200e}' | '\u{200f}' | '\u{200b}' | '\u{feff}')
+            })
+            .collect::<String>()
+            .trim()
+            .to_lowercase()
+    })
     .filter(|s| !s.is_empty())
     .collect()
 }
@@ -379,15 +391,9 @@ pub(crate) fn known_native_bundle_platform(field_lower: &str) -> Option<&'static
     if field_lower.contains("discord") {
         return Some("Discord");
     }
-    if field_lower.contains("signal") {
-        return Some("Signal");
-    }
-    if field_lower.contains("whatsapp") {
-        return Some("WhatsApp");
-    }
-    if field_lower.contains("telegram") {
-        return Some("Telegram");
-    }
+    // Signal, WhatsApp, and Telegram are intentionally NOT matched here.
+    // They must fall through to the profile-matching loop below so they get
+    // a profile index, which is needed to check `requires_call_signal` (#4776).
     if field_lower.contains("skype") {
         return Some("Skype");
     }
@@ -599,6 +605,80 @@ pub(crate) fn acquire_input_processes(
     )
 }
 
+/// Scan messaging apps (those with `requires_call_signal: true`) for call UI
+/// evidence in the AX tree. Returns a `CallSignalEvidence` per scanned app.
+///
+/// Only called during pre-active states (`needs_ax_resolution`) and only for
+/// `Native` candidates whose profile requires call signal verification.
+/// Platform-agnostic: delegates to `MeetingUiScanner::scan_process` which
+/// uses AX on macOS, UIA on Windows, and is a no-op on other platforms.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+async fn scan_messaging_call_signals(
+    candidates: &[ResolvedMeetingCandidate],
+    profiles: &[MeetingDetectionProfile],
+) -> Vec<CallSignalEvidence> {
+    let to_scan: Vec<(String, i32, usize)> = candidates
+        .iter()
+        .filter_map(|c| {
+            if let ResolvedMeetingCandidate::Native {
+                platform, process, ..
+            } = c
+            {
+                let profile_idx = profiles
+                    .iter()
+                    .position(|p| platform_name_for_profile(p, false) == *platform)?;
+                let profile = &profiles[profile_idx];
+                if profile.requires_call_signal {
+                    Some((platform.clone(), process.pid?, profile_idx))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if to_scan.is_empty() {
+        return Vec::new();
+    }
+
+    let profiles = profiles.to_vec();
+    let scan = tokio::task::spawn_blocking(move || {
+        let scanner = crate::meeting_watcher::shared::scanner::MeetingUiScanner::new();
+        to_scan
+            .into_iter()
+            .map(|(platform, pid, profile_idx)| {
+                let profile = &profiles[profile_idx];
+                let result = scanner.scan_process(pid, profile);
+                debug!(
+                    "audio-process meeting detector: call signal scan for {} (pid {}): \
+                     is_in_call={}, signals={:?}",
+                    platform, pid, result.is_in_call, result.matched_signals
+                );
+                CallSignalEvidence {
+                    platform: platform.to_lowercase(),
+                    is_in_call: result.is_in_call,
+                    matched_signals: result.matched_signals,
+                }
+            })
+            .collect()
+    });
+    match tokio::time::timeout(Duration::from_secs(5), scan).await {
+        Ok(Ok(results)) => results,
+        _ => Vec::new(),
+    }
+}
+
+/// Stub: no call signal scanning on unsupported platforms.
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+async fn scan_messaging_call_signals(
+    _candidates: &[ResolvedMeetingCandidate],
+    _profiles: &[MeetingDetectionProfile],
+) -> Vec<CallSignalEvidence> {
+    Vec::new()
+}
+
 /// Run the full candidate pipeline for one snapshot: sticky tracking, optional
 /// AX fallback, profile/URL resolution, then ignore/suppression filtering.
 /// Returns `(candidates, live_candidates)`.
@@ -630,6 +710,58 @@ pub(crate) async fn build_candidates(
         resolve_tracked_candidates(db, profiles, ignored_terms, &tracked, ax_candidates).await;
 
     candidates.retain(|candidate| !matches!(candidate, ResolvedMeetingCandidate::Ignored));
+
+    // Call signal gate for messaging-first platforms (#4776): apps like
+    // WhatsApp/Signal/Telegram grab the mic for voice notes identically to
+    // calls. Before promoting them to Native, scan their AX tree for real
+    // call UI (e.g. Calling_Window). Only run during pre-active states —
+    // once a meeting is Active the platform is settled.
+    if needs_ax_resolution(state) {
+        let call_evidence =
+            scan_messaging_call_signals(&candidates, profiles).await;
+        candidates.retain(|candidate| {
+            if let ResolvedMeetingCandidate::Native { platform, .. } = candidate {
+                let platform_lower = platform.to_lowercase();
+                // Check if this platform requires call signal verification.
+                let requires_gate = profiles.iter().any(|p| {
+                    p.requires_call_signal
+                        && platform_name_for_profile(p, false).to_lowercase() == platform_lower
+                });
+                if requires_gate {
+                    // Fail-closed: block unless we have explicit evidence of a
+                    // real call. If the AX scan timed out or the process had no
+                    // PID, no evidence is produced and we err on the side of NOT
+                    // starting a phantom meeting.
+                    match call_evidence
+                        .iter()
+                        .find(|e| e.platform == platform_lower)
+                    {
+                        Some(evidence) if evidence.is_in_call => {
+                            // Real call confirmed — allow.
+                        }
+                        Some(_) => {
+                            debug!(
+                                "audio-process meeting detector: {} blocked by call signal gate \
+                                 (voice note / idle, no call UI found)",
+                                platform
+                            );
+                            return false;
+                        }
+                        None => {
+                            debug!(
+                                "audio-process meeting detector: {} blocked by call signal gate \
+                                 (no evidence produced — scan may have timed out)",
+                                platform
+                            );
+                            return false;
+                        }
+                    }
+                }
+            }
+            true
+        });
+    }
+
     filter_suppressed_candidates(&mut candidates, suppressed_sessions);
     let live_candidates: Vec<_> = candidates
         .iter()
