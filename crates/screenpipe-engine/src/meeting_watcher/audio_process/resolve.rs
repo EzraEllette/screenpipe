@@ -151,19 +151,48 @@ pub(crate) fn arc_window_title_meet_code(title: &str) -> Option<&str> {
 /// through `resolve_active_tab_url_candidate` with the canonical
 /// `https://meet.google.com/<code>` URL so the candidate shape (profile
 /// matching, ignore filtering, live evidence) is identical to the URL probe's.
-pub(crate) fn little_arc_meet_candidate(
+///
+/// `excluded_titles` are the AppleScript-visible FULL-window titles: those
+/// windows' active-tab URLs were just resolved by the AppleScript probe (and
+/// did NOT match a meeting, or we wouldn't be in this fallback), so a full
+/// window whose tab title merely LOOKS like a meeting code (a lowercase 3-4-3
+/// kebab slug) must not fabricate a Meet meeting here. Little Arc windows are
+/// absent from Arc's AppleScript `windows` collection, so their titles
+/// survive the subtraction. Titles are trim-compared.
+pub(crate) fn little_arc_meet_candidate_excluding(
     browser_app: &str,
     window_titles: &[String],
+    excluded_titles: &[String],
     profiles: &[MeetingDetectionProfile],
 ) -> Option<AxResolvedCandidate> {
     if !browser_app.eq_ignore_ascii_case("arc") {
         return None;
     }
     window_titles.iter().find_map(|title| {
-        let code = arc_window_title_meet_code(title.trim())?;
+        let title = title.trim();
+        if excluded_titles
+            .iter()
+            .any(|excluded| excluded.trim() == title)
+        {
+            return None;
+        }
+        let code = arc_window_title_meet_code(title)?;
         let url = format!("https://meet.google.com/{}", code);
         resolve_active_tab_url_candidate(browser_app, &url, profiles)
     })
+}
+
+/// `little_arc_meet_candidate_excluding` with no exclusions. Kept under the
+/// original name so existing callers/tests of the plain fallback stay valid;
+/// the live probe (`active_tab_url_candidates`) passes the AppleScript window
+/// titles through the `_excluding` variant.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn little_arc_meet_candidate(
+    browser_app: &str,
+    window_titles: &[String],
+    profiles: &[MeetingDetectionProfile],
+) -> Option<AxResolvedCandidate> {
+    little_arc_meet_candidate_excluding(browser_app, window_titles, &[], profiles)
 }
 
 pub(crate) async fn db_find_browser_evidence(
@@ -861,4 +890,90 @@ pub(crate) async fn build_candidates(
         .cloned()
         .collect();
     (candidates, live_candidates)
+}
+
+#[cfg(test)]
+mod little_arc_exclusion_tests {
+    use super::*;
+    use crate::meeting_watcher::shared::profiles::load_detection_profiles;
+
+    fn titles(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn full_window_slug_title_is_excluded() {
+        // A FULL Arc window whose active-tab title happens to be a lowercase
+        // 3-4-3 kebab slug: the AppleScript probe already resolved that
+        // window's URL as non-meeting, so its title must not fabricate a
+        // Meet meeting via the Little Arc fallback.
+        let profiles = load_detection_profiles();
+        let ax_titles = titles(&["abc-defg-hij"]);
+        let applescript_titles = titles(&["abc-defg-hij"]);
+        assert!(little_arc_meet_candidate_excluding(
+            "Arc",
+            &ax_titles,
+            &applescript_titles,
+            &profiles
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn little_arc_window_survives_exclusion() {
+        // Little Arc windows are absent from Arc's AppleScript `windows`
+        // collection: the AX title set contains the meeting-code window plus
+        // full windows, the exclusion list only the full windows' titles.
+        let profiles = load_detection_profiles();
+        let ax_titles = titles(&["My Docs - Notion", "abc-defg-hij"]);
+        let applescript_titles = titles(&["My Docs - Notion"]);
+        let candidate = little_arc_meet_candidate_excluding(
+            "Arc",
+            &ax_titles,
+            &applescript_titles,
+            &profiles,
+        )
+        .expect("Little Arc code title should resolve");
+        assert_eq!(
+            candidate.meeting_url.as_deref(),
+            Some("https://meet.google.com/abc-defg-hij")
+        );
+    }
+
+    #[test]
+    fn exclusion_is_trim_compared() {
+        // AX and AppleScript may disagree on surrounding whitespace for the
+        // same window title; the subtraction must still hit.
+        let profiles = load_detection_profiles();
+        let ax_titles = titles(&["  abc-defg-hij  "]);
+        let applescript_titles = titles(&["abc-defg-hij "]);
+        assert!(little_arc_meet_candidate_excluding(
+            "Arc",
+            &ax_titles,
+            &applescript_titles,
+            &profiles
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn empty_exclusion_matches_plain_fallback() {
+        let profiles = load_detection_profiles();
+        let ax_titles = titles(&["abc-defg-hij"]);
+        let with_empty =
+            little_arc_meet_candidate_excluding("Arc", &ax_titles, &[], &profiles);
+        let plain = little_arc_meet_candidate("Arc", &ax_titles, &profiles);
+        assert_eq!(with_empty.is_some(), plain.is_some());
+        assert!(with_empty.is_some());
+    }
+
+    #[test]
+    fn non_arc_browsers_never_resolve() {
+        let profiles = load_detection_profiles();
+        let ax_titles = titles(&["abc-defg-hij"]);
+        assert!(
+            little_arc_meet_candidate_excluding("Google Chrome", &ax_titles, &[], &profiles)
+                .is_none()
+        );
+    }
 }

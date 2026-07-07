@@ -1654,7 +1654,7 @@ fn native_meeting_survives_mic_switch_rekey() {
 
     let candidates = [ResolvedMeetingCandidate::Native {
         platform: "Zoom".to_string(),
-        session_key: new_key,
+        session_key: new_key.clone(),
         first_seen_at: now,
         process: samsung,
     }];
@@ -1676,13 +1676,18 @@ fn native_meeting_survives_mic_switch_rekey() {
         Duration::from_secs(20),
     );
     assert!(action.is_none(), "expected no action, got {action:?}");
-    assert!(
-        matches!(
-            next,
-            AudioProcessMeetingState::Active { meeting_id: 67, .. }
+    match next {
+        AudioProcessMeetingState::Active {
+            meeting_id: 67,
+            session_key,
+            ..
+        } => assert_eq!(
+            session_key, new_key,
+            "active state must adopt the re-keyed session so end-of-meeting \
+             suppression targets the live process"
         ),
-        "meeting must stay active across a mic-switch re-key, got {next:?}"
-    );
+        other => panic!("meeting must stay active across a mic-switch re-key, got {other:?}"),
+    }
 }
 
 #[test]
@@ -1697,10 +1702,11 @@ fn ending_native_meeting_revives_on_rekeyed_session() {
 
     let mut samsung = zoom_process();
     samsung.audio_session_id = Some("coreaudio-process:200:input:samsung-uid".to_string());
+    let new_key = ProcessKey::from_process(&samsung).unwrap();
 
     let candidates = [ResolvedMeetingCandidate::Native {
         platform: "Zoom".to_string(),
-        session_key: ProcessKey::from_process(&samsung).unwrap(),
+        session_key: new_key.clone(),
         first_seen_at: now,
         process: samsung,
     }];
@@ -1722,11 +1728,115 @@ fn ending_native_meeting_revives_on_rekeyed_session() {
         Duration::from_secs(20),
     );
     assert!(action.is_none(), "expected no action, got {action:?}");
-    assert!(
-        matches!(
-            next,
-            AudioProcessMeetingState::Active { meeting_id: 67, .. }
+    match next {
+        AudioProcessMeetingState::Active {
+            meeting_id: 67,
+            session_key,
+            ..
+        } => assert_eq!(
+            session_key, new_key,
+            "revived state must adopt the re-keyed session so end-of-meeting \
+             suppression targets the live process"
         ),
-        "ending meeting must revive on a re-keyed session, got {next:?}"
+        other => panic!("ending meeting must revive on a re-keyed session, got {other:?}"),
+    }
+}
+
+#[test]
+fn end_after_mic_switch_rekey_suppresses_adopted_session_key() {
+    // The suppression consequence of key adoption: after a mic switch re-keys
+    // the native session, the Active state must carry the NEW candidate key,
+    // so when the meeting ends the EndMeeting action suppresses the LIVE
+    // session. Suppressing the stale pre-switch key would be a no-op (Windows
+    // WASAPI keys are per-endpoint GUIDs, so the dead key never matches) and
+    // the process still holding the mic would instantly restart the meeting
+    // the user just stopped.
+    let now = Instant::now();
+    let mut airpods = zoom_process();
+    airpods.audio_session_id = Some("coreaudio-process:200:input:airpods-uid".to_string());
+    let old_key = ProcessKey::from_process(&airpods).unwrap();
+
+    let mut samsung = zoom_process();
+    samsung.audio_session_id = Some("coreaudio-process:200:input:samsung-uid".to_string());
+    let new_key = ProcessKey::from_process(&samsung).unwrap();
+    assert_ne!(old_key, new_key, "fixture must model a re-keyed session");
+
+    let candidates = [ResolvedMeetingCandidate::Native {
+        platform: "Zoom".to_string(),
+        session_key: new_key.clone(),
+        first_seen_at: now,
+        process: samsung.clone(),
+    }];
+
+    // Mic switch mid-meeting: the platform-only keep-alive fires and the
+    // state adopts the new key.
+    let (active, action) = advance_audio_process_state(
+        AudioProcessMeetingState::Active {
+            meeting_id: 67,
+            platform: "Zoom".to_string(),
+            session_key: old_key.clone(),
+            meeting_url: None,
+            first_seen_at: now - Duration::from_secs(120),
+            last_seen_at: now - Duration::from_secs(1),
+            is_browser: false,
+        },
+        &[],
+        &candidates,
+        now,
+        Duration::from_secs(1),
+        Duration::from_secs(20),
+    );
+    assert!(action.is_none(), "expected no action, got {action:?}");
+
+    // The call winds down: no candidates → Ending.
+    let (ending, action) = advance_audio_process_state(
+        active,
+        &[],
+        &[],
+        now + Duration::from_secs(1),
+        Duration::from_secs(1),
+        Duration::from_secs(20),
+    );
+    assert!(
+        matches!(ending, AudioProcessMeetingState::Ending { .. }),
+        "expected Ending, got {ending:?}"
+    );
+    assert!(action.is_none(), "expected no action, got {action:?}");
+
+    // Past the ending grace → EndMeeting, whose suppression must carry the
+    // ADOPTED key, not the stale pre-switch one.
+    let (_idle, action) = advance_audio_process_state(
+        ending,
+        &[],
+        &[],
+        now + Duration::from_secs(22),
+        Duration::from_secs(1),
+        Duration::from_secs(20),
+    );
+    let Some(AudioProcessStateAction::EndMeeting {
+        meeting_id: 67,
+        suppressed_session: Some(suppressed),
+    }) = action
+    else {
+        panic!("expected EndMeeting with a suppressed session, got {action:?}");
+    };
+    assert_eq!(
+        suppressed.session_key, new_key,
+        "suppression must target the adopted (live) key, not the stale pre-switch key"
+    );
+
+    // And the suppression must actually bite: the process still holding the
+    // mic under the new key is filtered out, so the just-ended meeting cannot
+    // instantly restart.
+    let mut live_candidates = vec![ResolvedMeetingCandidate::Native {
+        platform: "Zoom".to_string(),
+        session_key: new_key,
+        first_seen_at: now + Duration::from_secs(22),
+        process: samsung,
+    }];
+    filter_suppressed_candidates(&mut live_candidates, &[suppressed]);
+    assert!(
+        live_candidates.is_empty(),
+        "the live re-keyed session must stay suppressed after the meeting ends"
     );
 }

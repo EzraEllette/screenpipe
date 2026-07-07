@@ -381,6 +381,13 @@ pub(crate) struct PiggybackState {
     /// costs a rebuild. Reset on meeting end.
     pub manual_pids_adopted: Vec<i32>,
     pub manual_pids_candidate: Option<Vec<i32>>,
+    /// One-shot per meeting: the MANUAL-meeting mic-holder enumeration
+    /// returned an error (or reported unsupported) and the sweep logged it.
+    /// Errored ticks keep the previously adopted pid set in force instead of
+    /// feeding adoption (see [`adopt_manual_snapshot`]); warning on every 2s
+    /// tick would be noise. Reset at the meeting-end edge alongside
+    /// `manual_pids_adopted`.
+    pub manual_enum_error_logged: bool,
 }
 
 /// Two-tick adoption for a MANUAL meeting's mic-holder pid set: a freshly
@@ -397,6 +404,29 @@ pub(crate) fn adopt_manual_pids(state: &mut PiggybackState, fresh: Vec<i32>) -> 
         state.manual_pids_candidate = Some(fresh);
     }
     state.manual_pids_adopted.clone()
+}
+
+/// Feeds one mic-holder enumeration snapshot into MANUAL-meeting pid
+/// adoption. A failed (`error: Some`) or unsupported snapshot carries
+/// `processes: []`, which at the pid level is indistinguishable from "no mic
+/// holders" — feeding it into [`adopt_manual_pids`] would adopt the empty set
+/// after two consecutive error ticks and tear down a healthy piggyback. So on
+/// error the previously adopted set stays in force untouched (candidate
+/// included: an error tick neither confirms nor refutes a pending candidate)
+/// and only a healthy snapshot feeds two-tick adoption. Pure state
+/// transition — unit-tested directly; the sweep owns the once-per-meeting
+/// error logging.
+pub(crate) fn adopt_manual_snapshot(
+    state: &mut PiggybackState,
+    snapshot: &crate::meeting_processes::AudioProcessSnapshot,
+) -> Vec<i32> {
+    if !snapshot.supported || snapshot.error.is_some() {
+        return state.manual_pids_adopted.clone();
+    }
+    let mut fresh: Vec<i32> = snapshot.processes.iter().filter_map(|p| p.pid).collect();
+    fresh.sort_unstable();
+    fresh.dedup();
+    adopt_manual_pids(state, fresh)
 }
 
 /// Increments `state.tap_strikes` by one and, on the edge where that crosses
@@ -444,6 +474,10 @@ pub(crate) struct MeetingTelemetry {
     pub strikes_max: u32,
     pub unavailable: bool,
     pub pid_known: bool,
+    /// The user started this meeting manually (no sensor pid ever; the pid
+    /// set comes from the live mic-holder enumeration). Lets the PostHog
+    /// dashboards segment the manual-meeting population from detected ones.
+    pub manual: bool,
     pub bundle_id: Option<String>,
     pub mic_resolved_devices: std::collections::BTreeSet<String>,
     pub mic_session_started: bool,
@@ -478,6 +512,7 @@ pub(crate) struct PiggybackMeetingSummary {
     pub mic_capture_failed: bool,
     pub meeting_app_bundle_id: Option<String>,
     pub pid_known: bool,
+    pub manual: bool,
     pub platform: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub os_version: Option<String>,
@@ -518,6 +553,7 @@ pub(crate) fn build_meeting_summary(t: &MeetingTelemetry) -> PiggybackMeetingSum
         mic_capture_failed: t.capture_failed,
         meeting_app_bundle_id: t.bundle_id.clone(),
         pid_known: t.pid_known,
+        manual: t.manual,
         platform: std::env::consts::OS,
         os_version: os_version_string(),
     }
@@ -647,16 +683,32 @@ pub(crate) async fn run_meeting_piggyback_sweep(
     let meeting: Option<Vec<i32>> = active.as_ref().map(|m| {
         if m.manual {
             // The enumeration is a CoreAudio/WASAPI process walk — pay it
-            // only when the result could actually engage the tap.
-            if engaged && tap_avail {
-                let mut fresh: Vec<i32> = crate::meeting_processes::current_input_processes()
-                    .processes
-                    .iter()
-                    .filter_map(|p| p.pid)
-                    .collect();
-                fresh.sort_unstable();
-                fresh.dedup();
-                adopt_manual_pids(state, fresh)
+            // whenever the flag is engaged, even with the tap UNAVAILABLE:
+            // a non-empty pid set is what routes a manual meeting on an old
+            // OS (macOS <14.4 / Windows <20348) into the decider's
+            // WarnUnavailableOnce and the "unavailable" telemetry outcome —
+            // gating on tap availability left the pid set empty there, so
+            // the warn never fired and telemetry misreported "no_pid". Cost:
+            // a per-2s-tick process walk during manual meetings only, the
+            // same class of work the engine watcher already does at 1s for
+            // auto detection.
+            if engaged {
+                let snapshot = crate::meeting_processes::current_input_processes();
+                if !snapshot.supported || snapshot.error.is_some() {
+                    // Log the failure once per meeting; the errored ticks
+                    // keep the previously adopted set in force instead of
+                    // feeding adoption (see `adopt_manual_snapshot`).
+                    if !state.manual_enum_error_logged {
+                        warn!(
+                            "[MEETING_PIGGYBACK] mic-holder enumeration failed (supported={}): {} — keeping previously adopted pid set {:?}",
+                            snapshot.supported,
+                            snapshot.error.as_deref().unwrap_or("unknown error"),
+                            state.manual_pids_adopted
+                        );
+                        state.manual_enum_error_logged = true;
+                    }
+                }
+                adopt_manual_snapshot(state, &snapshot)
             } else {
                 Vec::new()
             }
@@ -761,6 +813,7 @@ pub(crate) async fn run_meeting_piggyback_sweep(
         telemetry.meeting_seen = true;
         telemetry.meeting_ticks += 1;
         telemetry.pid_known |= !meeting_pids.is_empty();
+        telemetry.manual |= active.as_ref().is_some_and(|m| m.manual);
         if telemetry.bundle_id.is_none() {
             telemetry.bundle_id = detector
                 .as_ref()
@@ -855,6 +908,31 @@ pub(crate) async fn run_meeting_piggyback_sweep(
                         "[MEETING_PIGGYBACK] failed to rebuild meeting tap over new pid set (strike {}/{}): {}",
                         state.tap_strikes, MAX_TAP_STRIKES, e
                     );
+                    // The stable "(output)" devices were suspended for the
+                    // tap that just died with this failed rebuild — resume
+                    // them NOW rather than waiting for the next tick's
+                    // decider pass, which would leave a ~2s far-end capture
+                    // hole. Mirrors the Resume handler above: unsuspend
+                    // first, then restart immediately (gated on
+                    // enabled_devices because start_device would otherwise
+                    // ADD the device) instead of deferring to the monitor's
+                    // enabled pass, which already ran this tick.
+                    for name in audio_manager.suspended_devices() {
+                        if !name.ends_with("(output)") {
+                            continue;
+                        }
+                        audio_manager.unsuspend_device(&name);
+                        if audio_manager.enabled_devices().await.contains(&name) {
+                            if let Ok(device) = parse_audio_device(&name) {
+                                if let Err(e) = audio_manager.start_device(&device).await {
+                                    warn!(
+                                        "[MEETING_PIGGYBACK] failed to restart resumed device {} after tap rebuild failure: {}",
+                                        name, e
+                                    );
+                                }
+                            }
+                        }
+                    }
                 } else {
                     state.tap_pids = pids;
                     state.telemetry.tap_started_count += 1;
@@ -1060,9 +1138,11 @@ pub(crate) async fn run_meeting_piggyback_sweep(
         let _ = screenpipe_events::send_event("piggyback_meeting_summary", summary);
         state.telemetry = MeetingTelemetry::default();
         // Manual pid-set bookkeeping is meeting-scoped: the next manual
-        // meeting starts from an empty adopted set (two-tick warm-up).
+        // meeting starts from an empty adopted set (two-tick warm-up) and
+        // gets its own one-shot enumeration-error log.
         state.manual_pids_adopted = Vec::new();
         state.manual_pids_candidate = None;
+        state.manual_enum_error_logged = false;
     }
     state.last_meeting_seen = meeting_now;
 
@@ -1201,6 +1281,102 @@ mod tests {
         assert_eq!(
             decide_piggyback(&obs),
             vec![PiggybackAction::WarnUnavailableOnce]
+        );
+    }
+
+    #[test]
+    fn manual_meeting_on_unavailable_platform_warns() {
+        // Manual meetings enumerate mic holders whenever the flag is engaged,
+        // even with the tap UNAVAILABLE (the sweep gates enumeration on
+        // `engaged` alone), so this decider cell is REACHABLE: a non-empty
+        // multi-pid set (the mic-holder enumeration result) with no tap must
+        // fire WarnUnavailableOnce and ride the stable path — the same
+        // outcome as a detected meeting on macOS <14.4 / Windows <20348.
+        // Telemetry then classifies the meeting "unavailable" instead of the
+        // misleading "no_pid".
+        let mut obs = base();
+        obs.meeting = Some(vec![100, 200]);
+        obs.tap_available = false;
+        assert_eq!(
+            decide_piggyback(&obs),
+            vec![PiggybackAction::WarnUnavailableOnce]
+        );
+    }
+
+    fn snapshot_ok(pids: Vec<i32>) -> crate::meeting_processes::AudioProcessSnapshot {
+        crate::meeting_processes::AudioProcessSnapshot {
+            supported: true,
+            processes: pids
+                .into_iter()
+                .map(|pid| crate::meeting_processes::AudioInputProcess {
+                    audio_session_id: None,
+                    audio_object_id: None,
+                    pid: Some(pid),
+                    bundle_id: None,
+                    process_name: None,
+                    owner_app_name: None,
+                    owner_bundle_id: None,
+                    first_seen_at_ms: None,
+                })
+                .collect(),
+            error: None,
+        }
+    }
+
+    #[test]
+    fn enumeration_error_keeps_adopted_pids_in_force() {
+        let mut state = PiggybackState::default();
+        // Healthy enumeration adopts {10, 20} over two ticks.
+        let healthy = snapshot_ok(vec![20, 10, 10]); // unsorted + dup: normalized
+        assert!(adopt_manual_snapshot(&mut state, &healthy).is_empty());
+        assert_eq!(adopt_manual_snapshot(&mut state, &healthy), vec![10, 20]);
+
+        // An errored snapshot (processes:[] + error:Some) must NOT feed
+        // adoption — two consecutive error ticks would otherwise adopt the
+        // empty set and tear down a healthy piggyback.
+        let errored = crate::meeting_processes::AudioProcessSnapshot {
+            supported: true,
+            processes: Vec::new(),
+            error: Some("enumeration blew up".into()),
+        };
+        assert_eq!(adopt_manual_snapshot(&mut state, &errored), vec![10, 20]);
+        assert_eq!(adopt_manual_snapshot(&mut state, &errored), vec![10, 20]);
+        assert!(
+            state.manual_pids_candidate.is_none(),
+            "error ticks must not seed a candidate"
+        );
+
+        // An unsupported snapshot is the same non-signal.
+        let unsupported = crate::meeting_processes::AudioProcessSnapshot::unsupported("plan9");
+        assert_eq!(adopt_manual_snapshot(&mut state, &unsupported), vec![10, 20]);
+
+        // Recovery: a HEALTHY empty snapshot ("everyone hung up their mic")
+        // does feed adoption again, through the normal two-tick damping.
+        let empty_ok = snapshot_ok(vec![]);
+        assert_eq!(adopt_manual_snapshot(&mut state, &empty_ok), vec![10, 20]);
+        assert!(adopt_manual_snapshot(&mut state, &empty_ok).is_empty());
+    }
+
+    #[test]
+    fn enumeration_error_leaves_pending_candidate_as_is() {
+        // A candidate awaiting its second sighting survives an error tick
+        // untouched: the error neither confirms nor refutes it.
+        let mut state = PiggybackState {
+            manual_pids_adopted: vec![10, 20],
+            manual_pids_candidate: Some(vec![10, 30]),
+            ..Default::default()
+        };
+        let errored = crate::meeting_processes::AudioProcessSnapshot {
+            supported: true,
+            processes: Vec::new(),
+            error: Some("transient".into()),
+        };
+        assert_eq!(adopt_manual_snapshot(&mut state, &errored), vec![10, 20]);
+        assert_eq!(state.manual_pids_candidate, Some(vec![10, 30]));
+        // Its next healthy sighting still completes adoption.
+        assert_eq!(
+            adopt_manual_snapshot(&mut state, &snapshot_ok(vec![30, 10])),
+            vec![10, 30]
         );
     }
 
@@ -1588,6 +1764,7 @@ mod tests {
         t.bundle_id = Some("us.zoom.xos".into());
         t.mic_resolved_devices.insert("Rode NT (input)".into());
         t.mic_session_started = true;
+        t.manual = true;
         let s = build_meeting_summary(&t);
         assert_eq!(s.outcome, "full_piggyback");
         assert_eq!(s.meeting_seconds, 1800);
@@ -1600,7 +1777,10 @@ mod tests {
         assert_eq!(s.meeting_app_bundle_id.as_deref(), Some("us.zoom.xos"));
         assert_eq!(s.mic_resolved_devices, vec!["Rode NT (input)".to_string()]);
         assert!(s.mic_session_started);
+        assert!(s.manual, "manual marker must survive into the summary");
         assert_eq!(s.platform, std::env::consts::OS);
+        // Detected meetings stay segmentable: manual defaults to false.
+        assert!(!build_meeting_summary(&telem()).manual);
     }
 
     #[test]

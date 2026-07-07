@@ -2807,11 +2807,7 @@ fn ax_window_popout_title_matches_without_document_url() {
     let profiles = load_detection_profiles();
     let meet = google_meet_profile(&profiles);
 
-    let popout_titles = [
-        "Meet – abc-defg-hij",
-        "Meet - abc-defg-hij - Google Chrome",
-        "Meet", // Arc main window
-    ];
+    let popout_titles = ["Meet – abc-defg-hij", "Meet - abc-defg-hij - Google Chrome"];
     for title in &popout_titles {
         assert!(
             ax_window_matches_meeting(None, Some(title), meet),
@@ -2819,6 +2815,63 @@ fn ax_window_popout_title_matches_without_document_url() {
             title
         );
     }
+}
+
+#[test]
+fn ax_window_title_fallback_requires_meeting_code() {
+    // The AX sweep is NOT gated on the browser holding the mic, so anchored
+    // titles that are ordinary pages must not become live meeting evidence.
+    // The URL-less title fallback additionally requires a standalone
+    // Meet-code-shaped token (see `title_contains_meeting_code`).
+    let profiles = load_detection_profiles();
+    let meet = google_meet_profile(&profiles);
+
+    let anchored_but_ordinary_titles = [
+        "Meet the Team | Acme",
+        "Meet Kevin - YouTube",
+        "Meet: quarterly planning",
+        // Arc's bare "Meet" main-window title no longer resolves via the AX
+        // sweep; Arc keeps coverage through the mic-gated AppleScript URL
+        // probe, the Little Arc code-title fallback, and DB frame evidence
+        // (`browser_window_matches_meeting`, which is unchanged).
+        "Meet",
+    ];
+    for title in &anchored_but_ordinary_titles {
+        assert!(
+            !ax_window_matches_meeting(None, Some(title), meet),
+            "anchored non-call title {:?} must NOT match without a meeting code",
+            title
+        );
+    }
+}
+
+#[test]
+fn title_contains_meeting_code_requires_standalone_lowercase_token() {
+    // Real pop-out shapes.
+    assert!(title_contains_meeting_code("Meet – abc-defg-hij"));
+    assert!(title_contains_meeting_code(
+        "Meet - abc-defg-hij - Google Chrome"
+    ));
+    assert!(title_contains_meeting_code("abc-defg-hij"));
+
+    // No code at all.
+    assert!(!title_contains_meeting_code("Meet the Team | Acme"));
+    assert!(!title_contains_meeting_code("Meet Kevin - YouTube"));
+    assert!(!title_contains_meeting_code("Meet: quarterly planning"));
+    assert!(!title_contains_meeting_code("Meet"));
+
+    // Wrong shape: uppercase, digits, wrong segment lengths.
+    assert!(!title_contains_meeting_code("Meet – ABC-DEFG-HIJ"));
+    assert!(!title_contains_meeting_code("Meet – ab1-defg-hij"));
+    assert!(!title_contains_meeting_code("Meet – ab-defg-hij"));
+    assert!(!title_contains_meeting_code("Meet – abc-def-hij"));
+
+    // Code-shaped run embedded in a longer kebab slug or word is not
+    // standalone: `-` and alphanumerics extend the token on both sides.
+    assert!(!title_contains_meeting_code("how-to-run-fast-fyi"));
+    assert!(!title_contains_meeting_code("xabc-defg-hij"));
+    assert!(!title_contains_meeting_code("abc-defg-hijx"));
+    assert!(!title_contains_meeting_code("abc-defg-hij9"));
 }
 
 #[test]

@@ -176,10 +176,23 @@ pub(crate) fn browser_window_matches_meeting(
 ///   in calendar pages and must not match.
 /// - Anchored `browser_title_patterns` (see `browser_title_matches_pattern`):
 ///   consulted ONLY when the window exposes no page URL, mirroring the
-///   URL-first rule of `browser_window_matches_meeting`. This is what catches
-///   a Chrome/Edge Meet pop-out titled "Meet – abc-defg-hij" (no AXDocument,
-///   no domain in the title) without letting a page whose URL is known to be
-///   non-meeting resolve off its title.
+///   URL-first rule of `browser_window_matches_meeting`, AND only when the
+///   title also carries a Google-Meet-code-shaped token (see
+///   `title_contains_meeting_code`). This is what catches a Chrome/Edge Meet
+///   pop-out titled "Meet – abc-defg-hij" (no AXDocument, no domain in the
+///   title) without letting a page whose URL is known to be non-meeting
+///   resolve off its title.
+///
+/// The meeting-code gate deliberately narrows the AX-sweep escalation added
+/// in ff0337416: the sweep is NOT gated on the browser holding the mic, so an
+/// anchored-but-ordinary title ("Meet the Team - Acme", "Meet Kevin -
+/// YouTube", "Meet: quarterly planning") in any open browser window was
+/// enough live evidence to start a false meeting. Only the Google Meet
+/// profile declares `browser_title_patterns` today, and every real
+/// Chrome/Edge pop-out title embeds the meeting code, so requiring it costs
+/// no genuine detection. The mic-gated URL probe and DB-evidence paths
+/// (`browser_window_matches_meeting`) are unchanged, and non-Meet platforms
+/// keep their coverage via URL patterns and the Windows UIA path.
 pub(crate) fn ax_window_matches_meeting(
     doc: Option<&str>,
     title: Option<&str>,
@@ -206,7 +219,7 @@ pub(crate) fn ax_window_matches_meeting(
         {
             return true;
         }
-        if doc.is_none() {
+        if doc.is_none() && title_contains_meeting_code(title) {
             let title_lower = title.to_lowercase();
             if ids
                 .browser_title_patterns
@@ -218,6 +231,40 @@ pub(crate) fn ax_window_matches_meeting(
         }
     }
     false
+}
+
+/// True when `title` contains a standalone Google-Meet-code-shaped token:
+/// lowercase `[a-z]{3}-[a-z]{4}-[a-z]{3}` bounded by non-alphanumeric,
+/// non-`-` characters (or the string ends). `-` is treated as extending the
+/// token so a code-shaped run inside a longer kebab slug
+/// ("how-to-run-fast-fyi") does not count as standalone.
+///
+/// A real Chrome/Edge Meet pop-out is titled "Meet – abc-defg-hij"; this is
+/// the gate `ax_window_matches_meeting` applies on top of the anchored
+/// `browser_title_patterns` fallback for URL-less windows. Byte-level scan is
+/// UTF-8 safe: multi-byte separators (the en dash above) have non-ASCII bytes,
+/// which neither form the code nor extend the token.
+pub(crate) fn title_contains_meeting_code(title: &str) -> bool {
+    const CODE_LEN: usize = 12; // aaa-bbbb-ccc
+    let bytes = title.as_bytes();
+    if bytes.len() < CODE_LEN {
+        return false;
+    }
+    let is_code_at = |start: usize| {
+        bytes[start..start + CODE_LEN]
+            .iter()
+            .enumerate()
+            .all(|(i, &b)| match i {
+                3 | 8 => b == b'-',
+                _ => b.is_ascii_lowercase(),
+            })
+    };
+    let extends_token = |b: u8| b.is_ascii_alphanumeric() || b == b'-';
+    (0..=bytes.len() - CODE_LEN).any(|start| {
+        is_code_at(start)
+            && (start == 0 || !extends_token(bytes[start - 1]))
+            && (start + CODE_LEN == bytes.len() || !extends_token(bytes[start + CODE_LEN]))
+    })
 }
 
 pub(crate) fn contains_case_insensitive(haystack: &str, needle: &str) -> bool {

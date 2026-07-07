@@ -35,14 +35,19 @@ fn now_ms() -> u64 {
 /// `pid: None` is a legal published state meaning "a meeting is active but
 /// the sensor that detected it can't identify the process" (ui_scan, a
 /// post-restart reattach, or a `BlockedByActive` outcome where a different,
-/// already-active meeting owns the mic). Consumers must fall back to the
-/// stable (non-per-process) capture path in that case — this is not an
-/// error condition.
+/// already-active meeting owns the mic). For DETECTED meetings consumers
+/// must fall back to the stable (non-per-process) capture path in that
+/// case — this is not an error condition. The exception is `manual: true`:
+/// manual meetings never carry a sensor pid, and the piggyback sweep
+/// derives its tap targets from the live mic-holder enumeration instead of
+/// riding the stable path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActiveMeeting {
     /// Detected meeting process. None when the sensor can't know one
-    /// (ui_scan, post-restart reattach) — the piggyback layer must fall
-    /// back to the stable capture path in that case.
+    /// (ui_scan, post-restart reattach) — the piggyback layer falls back
+    /// to the stable capture path then, EXCEPT when `manual` is true: a
+    /// manual meeting's pid is always None, and the sweep derives its tap
+    /// targets from the live mic-holder enumeration instead (see `manual`).
     pub pid: Option<i32>,
     pub bundle_id: Option<String>,
     /// The user started this meeting manually — no sensor attributed a

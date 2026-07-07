@@ -522,8 +522,15 @@ mod platform {
                     _ => continue,
                 };
 
-                // Globally-unique, lifetime-stable session id → drives engine
-                // session identity / stickiness (ProcessKey).
+                // WASAPI SessionInstanceIdentifier: unique while the session
+                // lives, but PER-ENDPOINT — when the app switches input
+                // devices its session lands on a different endpoint and this
+                // id ROTATES. It feeds ProcessKey identity, so that rotation
+                // used to re-key the engine's meeting session on every in-app
+                // mic switch (riding the ending grace into an end/restart
+                // pair); the platform-based native keep-alive (67645e665) is
+                // what holds meetings together across it. Do NOT treat this
+                // id as lifetime-stable process identity.
                 let session_instance = control2
                     .GetSessionInstanceIdentifier()
                     .ok()

@@ -27,6 +27,17 @@ pub trait BrowserUrlDetector {
             .into_iter()
             .collect())
     }
+
+    /// Titles of the browser windows the detector can enumerate natively
+    /// (e.g. Arc's AppleScript `windows` collection on macOS).
+    ///
+    /// Used by the meeting probe to subtract full windows — whose active-tab
+    /// URL `get_window_urls` already resolved — from AX-title fallbacks that
+    /// only see windows invisible to the native enumeration (Little Arc).
+    /// Default: no native enumeration, nothing to subtract.
+    fn get_window_titles(&self, _app_name: &str, _process_id: i32) -> Result<Vec<String>> {
+        Ok(Vec::new())
+    }
 }
 
 // Factory function

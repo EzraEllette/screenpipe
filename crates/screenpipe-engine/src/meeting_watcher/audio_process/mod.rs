@@ -132,12 +132,17 @@ pub async fn run_audio_process_meeting_detection_loop(
         };
         // Reattaching after a restart: the DB knows a meeting was active but
         // the sensor has no live process snapshot to attribute it to yet.
+        // Derive `manual` from the meeting row's detection_source: this publish
+        // deterministically runs AFTER the app's capture-restart restore path
+        // (which publishes ActiveMeeting{manual: true} for manual meetings —
+        // see recording.rs), and hardcoding `manual: false` here clobbered
+        // that, stripping a restored manual meeting of its manual piggyback.
         sync_meeting_flag(
             true,
             Some(screenpipe_audio::meeting_detector::ActiveMeeting {
                 pid: None,
                 bundle_id: None,
-                manual: false,
+                manual: meeting.detection_source == "manual",
             }),
             &in_meeting_flag,
             &detector,

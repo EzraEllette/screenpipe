@@ -355,7 +355,10 @@ fn advance_from_active(
     session_candidates: &[ResolvedMeetingCandidate],
     now: Instant,
 ) -> (AudioProcessMeetingState, Option<AudioProcessStateAction>) {
-    if session_present(
+    // Adopt the matching candidate's key: a platform-only native keep-alive
+    // means the session was re-keyed by a mic switch, and the eventual
+    // end-of-meeting suppression must target the LIVE key, not the stale one.
+    if let Some(adopted_key) = matching_session_key(
         session_candidates,
         &session_key,
         &platform,
@@ -365,7 +368,7 @@ fn advance_from_active(
             AudioProcessMeetingState::Active {
                 meeting_id,
                 platform,
-                session_key,
+                session_key: adopted_key,
                 meeting_url,
                 first_seen_at,
                 last_seen_at: now,
@@ -404,7 +407,10 @@ fn advance_from_ending(
     now: Instant,
     ending_grace: Duration,
 ) -> (AudioProcessMeetingState, Option<AudioProcessStateAction>) {
-    if session_present(
+    // Revive with the matching candidate's key (see `advance_from_active`):
+    // a re-keyed native session mid-grace must leave the state carrying the
+    // live key so end-of-meeting suppression works.
+    if let Some(adopted_key) = matching_session_key(
         session_candidates,
         &session_key,
         &platform,
@@ -414,7 +420,7 @@ fn advance_from_ending(
             AudioProcessMeetingState::Active {
                 meeting_id,
                 platform,
-                session_key,
+                session_key: adopted_key,
                 meeting_url,
                 first_seen_at,
                 last_seen_at: now,

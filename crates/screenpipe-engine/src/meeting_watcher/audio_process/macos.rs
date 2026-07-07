@@ -23,7 +23,9 @@ use crate::meeting_watcher::shared::profiles::MeetingDetectionProfile;
 ///
 /// Little Arc mini windows are invisible even to that (no AppleScript entry,
 /// no AXDocument); their bare-meeting-code AX title is accepted as evidence
-/// via `little_arc_meet_candidate`, Arc-only and strictly shaped.
+/// via `little_arc_meet_candidate_excluding`, Arc-only, strictly shaped, and
+/// with AppleScript-visible full-window titles subtracted so an already
+/// URL-resolved full window can't re-enter off a slug-shaped tab title.
 ///
 /// Only called while a browser candidate is still unresolved (same gating as
 /// `ax_resolved_candidates`), so the ~100ms osascript round-trip runs at most
@@ -66,8 +68,21 @@ pub(crate) async fn active_tab_url_candidates(
                         if !app.eq_ignore_ascii_case("arc") {
                             return None;
                         }
+                        // Subtract the AppleScript-visible FULL windows from
+                        // the AX title set: their active-tab URLs were just
+                        // resolved above as non-meeting, so a full window
+                        // whose tab title is a code-shaped slug must not
+                        // re-enter as Meet evidence. Little Arc windows have
+                        // no AppleScript entry, so their titles survive.
+                        let applescript_titles =
+                            detector.get_window_titles(app, pid).unwrap_or_default();
                         let titles = crate::meeting_watcher::ui_scan::browser_window_titles(pid);
-                        little_arc_meet_candidate(app, &titles, &profiles)
+                        little_arc_meet_candidate_excluding(
+                            app,
+                            &titles,
+                            &applescript_titles,
+                            &profiles,
+                        )
                     })?;
                 let profile = profiles.get(candidate.profile_index)?;
                 let platform = platform_name_for_profile(profile, true);
