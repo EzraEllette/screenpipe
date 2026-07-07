@@ -1601,6 +1601,36 @@ mod tests {
         )));
     }
 
+    #[test]
+    fn switch_to_suspended_mic_recovers_in_one_tick() {
+        // The meeting app switches TO a mic this sweep previously suspended
+        // (D1 displaced it while another resolved mic streamed). The device is
+        // suspended AND stopped: not running, not a session, not streaming.
+        // The decider must both open it (StartSessionInput — session starts
+        // are NOT blocked by the suspension guard, which only gates
+        // `start_device`) and lift the suspension (Resume — no resolved mic is
+        // streaming this tick), so capture follows the switch within a tick
+        // instead of wedging on a suspended-but-wanted device.
+        let mut obs = base();
+        obs.resolved_inputs = vec!["MacBook Pro Microphone (input)".to_string()];
+        obs.suspended = ["MacBook Pro Microphone (input)".to_string()].into();
+        // The previously resolved session mic was just torn down; nothing else
+        // is running or streaming.
+        let actions = decide_piggyback(&obs);
+        assert!(
+            actions.contains(&PiggybackAction::StartSessionInput(
+                "MacBook Pro Microphone (input)".to_string()
+            )),
+            "the newly-resolved mic must get a session stream: {actions:?}"
+        );
+        assert!(
+            actions.contains(&PiggybackAction::Resume(
+                "MacBook Pro Microphone (input)".to_string()
+            )),
+            "its suspension must lift in the same tick: {actions:?}"
+        );
+    }
+
     // --- Mic capture-health decider (Task 9) --------------------------------
 
     fn mic_obs(now: u64) -> MicHealthObservation {

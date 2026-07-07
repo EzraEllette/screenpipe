@@ -137,6 +137,12 @@ pub async fn run_audio_process_meeting_detection_loop(
         // (which publishes ActiveMeeting{manual: true} for manual meetings —
         // see recording.rs), and hardcoding `manual: false` here clobbered
         // that, stripping a restored manual meeting of its manual piggyback.
+        // `pid: None` here is TRANSIENT for detected meetings: the loop keeps
+        // resolution running for the reattached key (`needs_ax_resolution`)
+        // and republishes the pid from the first live candidate that resolves
+        // to this platform (see the heal before the end-of-tick resync), so
+        // the piggyback sweep re-engages instead of riding the stable path
+        // for the rest of the meeting.
         sync_meeting_flag(
             true,
             Some(screenpipe_audio::meeting_detector::ActiveMeeting {
@@ -328,7 +334,38 @@ pub async fn run_audio_process_meeting_detection_loop(
         // changed. Read back whatever is currently published and pass it
         // through so this resync doesn't clobber it with `None` on every
         // single loop iteration while a meeting stays active.
-        let current_active_meeting = detector.as_ref().and_then(|d| d.active_meeting());
+        let mut current_active_meeting = detector.as_ref().and_then(|d| d.active_meeting());
+        // Heal a pid-less DETECTED meeting from this tick's live candidates.
+        // A post-restart reattach publishes `ActiveMeeting { pid: None }`, and
+        // only `StartMeeting` ever published a pid — so without this the
+        // piggyback sweep (per-process tap + mic-follow) stayed disengaged for
+        // the rest of the meeting and in-meeting mic switches were never
+        // followed. Only a candidate resolved to the meeting's own platform is
+        // adopted (see `resolved_platform_identity`); manual meetings derive
+        // their pids from the live mic-holder enumeration and are left alone.
+        if active_now {
+            if let (AudioProcessMeetingState::Active { platform, .. }, Some(published)) =
+                (&state, current_active_meeting.as_ref())
+            {
+                if !published.manual && published.pid.is_none() {
+                    if let Some((pid, bundle_id)) =
+                        resolved_platform_identity(&live_candidates, platform)
+                    {
+                        info!(
+                            "audio-process meeting detector: re-resolved meeting process \
+                             (pid={}, app={}) — per-process capture re-engages",
+                            pid, platform
+                        );
+                        current_active_meeting =
+                            Some(screenpipe_audio::meeting_detector::ActiveMeeting {
+                                pid: Some(pid),
+                                bundle_id,
+                                manual: false,
+                            });
+                    }
+                }
+            }
+        }
         sync_meeting_flag(active_now, current_active_meeting, &in_meeting_flag, &detector);
         interval = if processes.is_empty() {
             IDLE_POLL_INTERVAL

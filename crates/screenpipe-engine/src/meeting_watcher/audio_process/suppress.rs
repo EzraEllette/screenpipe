@@ -34,7 +34,23 @@ pub(crate) fn matching_session_key(
     // platform after restart, surfacing as an `UnresolvedBrowser` in the gap.
     // Keep it alive while *any* live meeting session is present; genuine
     // disappearance still flows through the normal ending grace.
+    //
+    // The moment a candidate RESOLVES to this meeting's own platform, ADOPT its
+    // real key (mirroring the native re-key adoption below): the state stops
+    // being keyed to a synthetic string that matches any mic holder,
+    // end-of-meeting suppression targets the live session, the per-poll AX /
+    // active-tab probing gated on `is_reattached` stops, and the detection
+    // loop can republish the candidate's pid so the piggyback sweep
+    // (per-process tap + mic-follow) re-engages after a capture restart.
     if session_key.is_reattached() {
+        if let Some(adopted) = candidates
+            .iter()
+            .filter_map(ResolvedMeetingCandidate::resolved_session)
+            .find(|session| session.platform == platform)
+            .map(|session| session.session_key)
+        {
+            return Some(adopted);
+        }
         return candidates
             .iter()
             .any(|candidate| {

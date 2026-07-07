@@ -44,11 +44,40 @@ pub(crate) async fn resolve_tracked_candidates(
 /// meeting platform. Once a meeting is `Active` — or already winding down in
 /// `Ending` — the platform is settled, so re-walking the tree every
 /// `ACTIVE_POLL_INTERVAL` for the rest of the call is pure overhead.
+///
+/// EXCEPTION: a meeting reattached after a capture restart carries a synthetic
+/// `reattached:` key and a published `ActiveMeeting { pid: None }` — the
+/// platform is settled but the PROCESS identity isn't, and the piggyback
+/// sweep (per-process tap + mic-follow) stays disengaged until it heals. A
+/// browser meeting on a static call screen produces no fresh frame evidence,
+/// so the active-tab probe / AX sweep is the only thing that can re-attribute
+/// it. Keep resolving until the state adopts a real key (see the reattached
+/// branch of `matching_session_key`); the extra per-poll cost is exactly the
+/// pre-meeting cost and stops as soon as the identity heals.
 pub(crate) fn needs_ax_resolution(state: &AudioProcessMeetingState) -> bool {
-    !matches!(
-        state,
-        AudioProcessMeetingState::Active { .. } | AudioProcessMeetingState::Ending { .. }
-    )
+    match state {
+        AudioProcessMeetingState::Active { session_key, .. }
+        | AudioProcessMeetingState::Ending { session_key, .. } => session_key.is_reattached(),
+        _ => true,
+    }
+}
+
+/// Live process identity for the given platform, from this tick's resolved
+/// candidates. The detection loop uses this to heal a pid-less published
+/// `ActiveMeeting` (post-restart reattach) so the piggyback sweep re-engages:
+/// only a candidate RESOLVED to the meeting's own platform counts — an
+/// unresolved browser merely holding the mic could be any WebRTC page, and
+/// tapping the wrong process would replace the stable capture with the wrong
+/// app's audio.
+pub(crate) fn resolved_platform_identity(
+    candidates: &[ResolvedMeetingCandidate],
+    platform: &str,
+) -> Option<(i32, Option<String>)> {
+    candidates
+        .iter()
+        .filter_map(ResolvedMeetingCandidate::resolved_session)
+        .find(|session| session.platform == platform && session.pid.is_some())
+        .and_then(|session| session.pid.map(|pid| (pid, session.bundle_id)))
 }
 
 pub(crate) async fn should_use_ax_fallback(

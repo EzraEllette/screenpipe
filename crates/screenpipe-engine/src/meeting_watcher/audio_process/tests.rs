@@ -1840,3 +1840,179 @@ fn end_after_mic_switch_rekey_suppresses_adopted_session_key() {
         "the live re-keyed session must stay suppressed after the meeting ends"
     );
 }
+
+// --- Post-restart reattach: the meeting must re-acquire its process identity ---
+//
+// Regression (2026-07-07, live Google Meet in Arc): a mid-meeting capture
+// restart reattaches the meeting with a synthetic `reattached:` key and a
+// published `ActiveMeeting { pid: None }`. Nothing ever healed that identity:
+// `matching_session_key` kept the synthetic key forever, `needs_ax_resolution`
+// stopped the active-tab/AX probes the moment the state was Active, and the
+// detection loop only publishes a pid on `StartMeeting`. With `pid: None` the
+// piggyback sweep computes an empty pid set and disengages entirely — no
+// Meeting Tap, no `resolve_meeting_inputs`, so in-meeting mic switches are
+// never followed for the rest of the call.
+
+#[test]
+fn ax_resolution_keeps_running_for_reattached_meeting() {
+    // A reattached meeting has a synthetic identity: the platform is known
+    // (from the DB row) but the PROCESS isn't. Resolution must keep running
+    // until a live candidate re-attributes it — otherwise a browser meeting
+    // (evidence-starved on a static call screen) can never heal its pid.
+    let now = Instant::now();
+    assert!(
+        needs_ax_resolution(&AudioProcessMeetingState::Active {
+            meeting_id: 73,
+            platform: "Google Meet".to_string(),
+            session_key: ProcessKey::reattached("Google Meet"),
+            meeting_url: None,
+            first_seen_at: now,
+            last_seen_at: now,
+            is_browser: false,
+        }),
+        "an Active meeting with a synthetic reattached key must keep resolving"
+    );
+    assert!(
+        needs_ax_resolution(&AudioProcessMeetingState::Ending {
+            meeting_id: 73,
+            platform: "Google Meet".to_string(),
+            session_key: ProcessKey::reattached("Google Meet"),
+            meeting_url: None,
+            first_seen_at: now,
+            since: now,
+            is_browser: false,
+        }),
+        "an Ending meeting with a synthetic reattached key must keep resolving"
+    );
+}
+
+#[test]
+fn reattached_meeting_adopts_resolved_platform_session_key() {
+    // Once a live candidate RESOLVES to the reattached meeting's platform, the
+    // state must adopt that candidate's real key (mirroring the native
+    // mic-switch re-key adoption): end-of-meeting suppression then targets the
+    // live session, and the meeting stops being keyed to a synthetic string
+    // that matches any mic holder.
+    let process = chrome_process();
+    let live_key = ProcessKey::from_process(&process).unwrap();
+    let start = Instant::now();
+    let reattached = AudioProcessMeetingState::Active {
+        meeting_id: 73,
+        platform: "Google Meet".to_string(),
+        session_key: ProcessKey::reattached("Google Meet"),
+        meeting_url: None,
+        first_seen_at: start,
+        last_seen_at: start,
+        is_browser: false,
+    };
+    let resolved = ResolvedMeetingCandidate::Browser {
+        platform: "Google Meet".to_string(),
+        meeting_url: "https://meet.google.com/abc-defg-hij".to_string(),
+        browser_app: "Google Chrome".to_string(),
+        session_key: live_key.clone(),
+        first_seen_at: start,
+        process,
+        live_evidence: true,
+    };
+    let (state, action) = advance_audio_process_state(
+        reattached,
+        &[],
+        std::slice::from_ref(&resolved),
+        start + Duration::from_secs(2),
+        Duration::from_secs(1),
+        Duration::from_secs(20),
+    );
+    assert!(action.is_none(), "expected no action, got {action:?}");
+    match state {
+        AudioProcessMeetingState::Active {
+            meeting_id: 73,
+            session_key,
+            ..
+        } => assert_eq!(
+            session_key, live_key,
+            "reattached state must adopt the resolved same-platform candidate's key"
+        ),
+        other => panic!("meeting must stay active, got {other:?}"),
+    }
+}
+
+#[test]
+fn reattached_meeting_keeps_synthetic_key_when_resolution_is_other_platform() {
+    // A resolved candidate for a DIFFERENT platform (say a Zoom call in
+    // another window) must not be adopted as the reattached meeting's
+    // identity — the synthetic keep-alive stays in force instead.
+    let start = Instant::now();
+    let reattached_key = ProcessKey::reattached("Google Meet");
+    let reattached = AudioProcessMeetingState::Active {
+        meeting_id: 73,
+        platform: "Google Meet".to_string(),
+        session_key: reattached_key.clone(),
+        meeting_url: None,
+        first_seen_at: start,
+        last_seen_at: start,
+        is_browser: false,
+    };
+    let zoom = ResolvedMeetingCandidate::Native {
+        platform: "Zoom".to_string(),
+        session_key: ProcessKey::from_process(&zoom_process()).unwrap(),
+        first_seen_at: start,
+        process: zoom_process(),
+    };
+    let (state, _) = advance_audio_process_state(
+        reattached,
+        &[],
+        std::slice::from_ref(&zoom),
+        start + Duration::from_secs(2),
+        Duration::from_secs(1),
+        Duration::from_secs(20),
+    );
+    match state {
+        AudioProcessMeetingState::Active { session_key, .. } => assert_eq!(
+            session_key, reattached_key,
+            "an other-platform candidate must not hijack the meeting's identity"
+        ),
+        other => panic!("meeting must stay active on the keep-alive, got {other:?}"),
+    }
+}
+
+#[test]
+fn resolved_platform_identity_heals_pid_from_matching_candidate() {
+    // The pure helper the detection loop uses to republish a healed
+    // `ActiveMeeting`: a live candidate resolved to the meeting's platform
+    // yields its pid + bundle id; unresolved or other-platform candidates
+    // yield nothing.
+    let start = Instant::now();
+    let process = chrome_process();
+    let candidates = vec![
+        ResolvedMeetingCandidate::UnresolvedBrowser {
+            browser_app: "Arc".to_string(),
+            session_key: ProcessKey::from_process(&arc_process()).unwrap(),
+            first_seen_at: start,
+            process: arc_process(),
+        },
+        ResolvedMeetingCandidate::Browser {
+            platform: "Google Meet".to_string(),
+            meeting_url: "https://meet.google.com/abc-defg-hij".to_string(),
+            browser_app: "Google Chrome".to_string(),
+            session_key: ProcessKey::from_process(&process).unwrap(),
+            first_seen_at: start,
+            process: process.clone(),
+            live_evidence: true,
+        },
+    ];
+    assert_eq!(
+        resolved_platform_identity(&candidates, "Google Meet"),
+        Some((42, Some("com.google.Chrome.helper".to_string()))),
+        "the matching resolved candidate's pid/bundle must be surfaced"
+    );
+    assert_eq!(
+        resolved_platform_identity(&candidates, "Zoom"),
+        None,
+        "an other-platform meeting must not adopt this candidate's pid"
+    );
+    assert_eq!(
+        resolved_platform_identity(&candidates[..1], "Google Meet"),
+        None,
+        "an unresolved browser alone must not be adopted (could be any WebRTC page)"
+    );
+}
