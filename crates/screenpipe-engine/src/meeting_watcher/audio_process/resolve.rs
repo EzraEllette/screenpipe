@@ -365,8 +365,7 @@ pub(crate) fn process_identity_fields(process: &AudioInputProcess) -> Vec<String
         // "\u{200e}WhatsApp"). Strip them so profile name matching works.
         s.chars()
             .filter(|c| {
-                !c.is_control()
-                    && !matches!(c, '\u{200e}' | '\u{200f}' | '\u{200b}' | '\u{feff}')
+                !c.is_control() && !matches!(c, '\u{200e}' | '\u{200f}' | '\u{200b}' | '\u{feff}')
             })
             .collect::<String>()
             .trim()
@@ -743,8 +742,7 @@ pub(crate) async fn build_candidates(
     // call UI (e.g. Calling_Window). Only run during pre-active states —
     // once a meeting is Active the platform is settled.
     if needs_ax_resolution(state) {
-        let call_evidence =
-            scan_messaging_call_signals(&candidates, profiles).await;
+        let call_evidence = scan_messaging_call_signals(&candidates, profiles).await;
         candidates.retain(|candidate| {
             if let ResolvedMeetingCandidate::Native { platform, .. } = candidate {
                 let platform_lower = platform.to_lowercase();
@@ -758,10 +756,7 @@ pub(crate) async fn build_candidates(
                     // real call. If the AX scan timed out or the process had no
                     // PID, no evidence is produced and we err on the side of NOT
                     // starting a phantom meeting.
-                    match call_evidence
-                        .iter()
-                        .find(|e| e.platform == platform_lower)
-                    {
+                    match call_evidence.iter().find(|e| e.platform == platform_lower) {
                         Some(evidence) if evidence.is_in_call => {
                             // Real call confirmed — allow.
                         }
