@@ -26,7 +26,7 @@ export const searchIndex: SettingsField[] = [
   // conditional: platform/OS-gated (Windows-only / macOS CoreAudio tap).
   { label: "Echo cancellation mode", keywords: ["echo", "aec", "voiceprocessingio", "wasapi"], conditional: true },
   { label: "CoreAudio system audio capture", keywords: ["coreaudio", "system audio"], conditional: true },
-  { label: "meeting piggyback (experimental)", keywords: ["meeting", "piggyback", "per-process", "meeting audio"], conditional: true },
+  { label: "Smart recording", keywords: ["smart recording", "beta", "meeting", "piggyback", "per-process", "meeting audio"], conditional: true },
   { label: "Screen context capture", keywords: ["screen", "video", "accessibility"] },
   { label: "Screenshot images", keywords: ["screenshot", "pixels", "ocr", "jpeg"] },
   { label: "Use all monitors", keywords: ["monitor", "display"], conditional: true },
@@ -3550,9 +3550,12 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
         </Card>
         )}
 
-        {/* Meeting piggyback (experimental): during meetings, capture only the
-            meeting app's audio and the mic it actually uses. Uses CoreAudio
-            Process Tap on macOS and WASAPI process loopback on Windows. */}
+        {/* Smart recording (beta; internally "meeting piggyback"): during
+            meetings, capture only the meeting app's audio and the mic it
+            actually uses. Takes precedence over every other audio setting —
+            engages in ANY capture mode (continuous or meetings-only), not just
+            meetings-only. Uses CoreAudio Process Tap on macOS and WASAPI
+            process loopback on Windows. */}
         {!settings.disableAudio && (isMacOS || isWindows) && processTapAvailable && (
         <Card className="border-border bg-card">
           <CardContent className="px-3 py-2.5">
@@ -3560,17 +3563,26 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
               <div className="flex items-center space-x-2.5">
                 <Mic className="h-4 w-4 text-muted-foreground shrink-0" />
                 <div>
-                  <h3 className="text-sm font-medium text-foreground">
-                    meeting piggyback (experimental)
+                  <h3 className="text-sm font-medium text-foreground flex items-center gap-1.5">
+                    Smart recording
+                    <Badge variant="secondary" aria-label="beta" className="px-1.5 py-0 text-[10px] font-medium uppercase tracking-wide">
+                      beta
+                    </Badge>
                   </h3>
                   <p className="text-xs text-muted-foreground">
-                    during meetings, capture only the meeting app&apos;s audio and the microphone it actually uses. falls back to your configured capture automatically if unavailable. only active when audio capture mode is set to meetings-only.
+                    during meetings, records your meeting&apos;s audio and whichever microphone you pick in the meeting app — taking precedence over your other audio settings. falls back to your configured capture automatically if unavailable.
                   </p>
+                  {settings.disableMeetingDetector && (
+                    <p className="text-xs text-amber-600 dark:text-amber-500">
+                      requires automatic meeting detection — turn it back on above to use this.
+                    </p>
+                  )}
                 </div>
               </div>
               <Switch
                 id="experimentalMeetingPiggyback"
                 checked={Boolean(settings.experimentalMeetingPiggyback ?? false)}
+                disabled={Boolean(settings.disableMeetingDetector)}
                 onCheckedChange={(checked) => handleSettingsChange({ experimentalMeetingPiggyback: checked }, true)}
               />
             </div>
