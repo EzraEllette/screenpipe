@@ -30,11 +30,23 @@ pub(crate) fn session_present(
     // Non-reattached sessions must match on the real process key (the
     // `is_reattached()` branch above is the only place a synthetic key matches).
     candidates.iter().any(|candidate| match candidate {
+        // A native meeting's session key is NOT stable across the app
+        // switching input devices: macOS synthesized it from the device set
+        // the process records from (fixed to pid-keying now, but stale keys
+        // can persist in live state), and Windows WASAPI sessions are
+        // per-endpoint, so picking a different mic mints a new GUID. Ending a
+        // live call over that rotation — Active → Ending → 20s grace →
+        // EndMeeting, then an instant "new" meeting under the new key — tears
+        // capture down for ~20s per mic switch. The same native platform
+        // holding ANY mic is proof the call is ongoing, so keep-alive matches
+        // on platform alone; keys still gate meeting START. (One audio-holding
+        // process per native platform is the operating assumption, and
+        // back-to-back calls in the same app were already glued by the
+        // ending grace.)
         ResolvedMeetingCandidate::Native {
             platform: candidate_platform,
-            session_key: key,
             ..
-        } => meeting_url.is_none() && key == session_key && candidate_platform == platform,
+        } => meeting_url.is_none() && candidate_platform == platform,
         // A confirmed browser meeting is keyed by its audio session. Once it is
         // live, the same browser audio session still holding the mic is sufficient
         // proof the call is ongoing — so keep it alive on the `session_key` alone.

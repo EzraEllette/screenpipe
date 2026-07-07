@@ -1525,3 +1525,100 @@ fn signal_windows_call_not_blocked_by_macos_only_renderer_gate() {
         result
     );
 }
+
+#[test]
+fn native_meeting_survives_mic_switch_rekey() {
+    // Switching the mic inside the meeting app rotates its session key: macOS
+    // synthesizes the id from the device set the process records from, and
+    // Windows WASAPI sessions are per-endpoint, so a new device means a new
+    // GUID. The active meeting must NOT slide into Ending (and 20s later
+    // EndMeeting) just because the key rotated — the same native platform
+    // holding ANY mic is proof the call is ongoing.
+    let now = Instant::now();
+    let mut airpods = zoom_process();
+    airpods.audio_session_id = Some("coreaudio-process:200:input:airpods-uid".to_string());
+    let old_key = ProcessKey::from_process(&airpods).unwrap();
+
+    let mut samsung = zoom_process();
+    samsung.audio_session_id = Some("coreaudio-process:200:input:samsung-uid".to_string());
+    let new_key = ProcessKey::from_process(&samsung).unwrap();
+    assert_ne!(old_key, new_key, "fixture must model a re-keyed session");
+
+    let candidates = [ResolvedMeetingCandidate::Native {
+        platform: "Zoom".to_string(),
+        session_key: new_key,
+        first_seen_at: now,
+        process: samsung,
+    }];
+
+    let (next, action) = advance_audio_process_state(
+        AudioProcessMeetingState::Active {
+            meeting_id: 67,
+            platform: "Zoom".to_string(),
+            session_key: old_key,
+            meeting_url: None,
+            first_seen_at: now - Duration::from_secs(120),
+            last_seen_at: now - Duration::from_secs(1),
+            is_browser: false,
+        },
+        &[],
+        &candidates,
+        now,
+        Duration::from_secs(1),
+        Duration::from_secs(20),
+    );
+    assert!(action.is_none(), "expected no action, got {action:?}");
+    assert!(
+        matches!(
+            next,
+            AudioProcessMeetingState::Active { meeting_id: 67, .. }
+        ),
+        "meeting must stay active across a mic-switch re-key, got {next:?}"
+    );
+}
+
+#[test]
+fn ending_native_meeting_revives_on_rekeyed_session() {
+    // Same re-key mid-grace: a meeting already in Ending (e.g. the switch
+    // briefly showed no session at all) must revive when the platform's
+    // session reappears under a new key, not wait out the grace and end.
+    let now = Instant::now();
+    let mut airpods = zoom_process();
+    airpods.audio_session_id = Some("coreaudio-process:200:input:airpods-uid".to_string());
+    let old_key = ProcessKey::from_process(&airpods).unwrap();
+
+    let mut samsung = zoom_process();
+    samsung.audio_session_id = Some("coreaudio-process:200:input:samsung-uid".to_string());
+
+    let candidates = [ResolvedMeetingCandidate::Native {
+        platform: "Zoom".to_string(),
+        session_key: ProcessKey::from_process(&samsung).unwrap(),
+        first_seen_at: now,
+        process: samsung,
+    }];
+
+    let (next, action) = advance_audio_process_state(
+        AudioProcessMeetingState::Ending {
+            meeting_id: 67,
+            platform: "Zoom".to_string(),
+            session_key: old_key,
+            meeting_url: None,
+            first_seen_at: now - Duration::from_secs(120),
+            since: now - Duration::from_secs(10),
+            is_browser: false,
+        },
+        &[],
+        &candidates,
+        now,
+        Duration::from_secs(1),
+        Duration::from_secs(20),
+    );
+    assert!(action.is_none(), "expected no action, got {action:?}");
+    assert!(
+        matches!(
+            next,
+            AudioProcessMeetingState::Active { meeting_id: 67, .. }
+        ),
+        "ending meeting must revive on a re-keyed session, got {next:?}"
+    );
+}
