@@ -247,6 +247,26 @@ pub(crate) fn resolve_process_candidate(
     }
 
     if let Some((platform, profile_index)) = resolve_native_platform(process, profiles) {
+        // Signal voice note gate (#4776): Signal is an Electron app whose AX
+        // tree is opaque, so we can't scan for call UI. Instead we use the
+        // process bundle ID: voice notes use the `.helper` subprocess while
+        // real calls use `.helper.Renderer`. If the bundle doesn't contain
+        // "renderer", it's a voice note — block it.
+        if platform == "Signal" {
+            let bundle = process
+                .bundle_id
+                .as_deref()
+                .or(process.owner_bundle_id.as_deref())
+                .unwrap_or("");
+            if !bundle.to_lowercase().contains("renderer") {
+                debug!(
+                    "audio-process meeting detector: Signal blocked — voice note helper \
+                     (bundle={:?}, no .Renderer suffix)",
+                    bundle
+                );
+                return ResolvedMeetingCandidate::NonMeeting;
+            }
+        }
         let profile = profile_index.and_then(|idx| profiles.get(idx));
         if candidate_is_ignored(&platform, profile, process, ignored_terms, None, None, None) {
             return ResolvedMeetingCandidate::Ignored;
@@ -391,9 +411,15 @@ pub(crate) fn known_native_bundle_platform(field_lower: &str) -> Option<&'static
     if field_lower.contains("discord") {
         return Some("Discord");
     }
-    // Signal, WhatsApp, and Telegram are intentionally NOT matched here.
-    // They must fall through to the profile-matching loop below so they get
-    // a profile index, which is needed to check `requires_call_signal` (#4776).
+    // Signal is kept here (not gated) because its Electron AX tree is opaque
+    // — we can't distinguish calls from voice notes, so requires_call_signal
+    // is false and it doesn't need a profile index for the gate (#4776).
+    if field_lower.contains("signal") {
+        return Some("Signal");
+    }
+    // WhatsApp and Telegram are intentionally NOT matched here. They must
+    // fall through to the profile-matching loop below so they get a profile
+    // index, which is needed to check `requires_call_signal` (#4776).
     if field_lower.contains("skype") {
         return Some("Skype");
     }

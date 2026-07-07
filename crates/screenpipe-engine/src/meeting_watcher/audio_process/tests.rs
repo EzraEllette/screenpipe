@@ -1088,15 +1088,30 @@ fn whatsapp_process() -> AudioInputProcess {
     }
 }
 
+/// Signal call: uses the .helper.Renderer subprocess (real WebRTC call).
 fn signal_process() -> AudioInputProcess {
     AudioInputProcess {
-        audio_session_id: Some("coreaudio-process:600:input:built-in-mic".to_string()),
-        audio_object_id: Some(600),
-        pid: Some(101),
-        bundle_id: Some("org.whispersystems.signal-desktop".to_string()),
-        process_name: Some("Signal".to_string()),
-        owner_app_name: Some("Signal".to_string()),
-        owner_bundle_id: Some("org.whispersystems.signal-desktop".to_string()),
+        audio_session_id: Some("coreaudio-process:115:input:BuiltInMicrophoneDevice".to_string()),
+        audio_object_id: Some(115),
+        pid: Some(63225),
+        bundle_id: Some("org.whispersystems.signal-desktop.helper.Renderer".to_string()),
+        process_name: None,
+        owner_app_name: None,
+        owner_bundle_id: None,
+        first_seen_at_ms: None,
+    }
+}
+
+/// Signal voice note: uses the .helper subprocess (no .Renderer suffix).
+fn signal_voice_note_process() -> AudioInputProcess {
+    AudioInputProcess {
+        audio_session_id: Some("coreaudio-process:116:input:BuiltInMicrophoneDevice".to_string()),
+        audio_object_id: Some(116),
+        pid: Some(63247),
+        bundle_id: Some("org.whispersystems.signal-desktop.helper".to_string()),
+        process_name: None,
+        owner_app_name: None,
+        owner_bundle_id: None,
         first_seen_at_ms: None,
     }
 }
@@ -1152,23 +1167,65 @@ fn whatsapp_resolves_to_native_with_profile_index() {
 }
 
 #[test]
-fn signal_resolves_to_native_with_profile_index() {
+fn signal_resolves_to_native_without_gate() {
     let profiles = load_detection_profiles();
     let process = signal_process();
     let result = resolve_native_platform(&process, &profiles);
     assert!(result.is_some(), "Signal should resolve as native");
     let (platform, profile_index) = result.unwrap();
     assert_eq!(platform, "Signal");
+    // Signal resolves via known_native_bundle_platform (no profile index)
+    // because its Electron AX tree is opaque — requires_call_signal is
+    // false and the gate is not needed.
     assert!(
-        profile_index.is_some(),
-        "Signal must have a profile index for call signal gating"
+        profile_index.is_none(),
+        "Signal should resolve via known_native_bundle_platform, not profile loop"
     );
-    // Signal's Electron AX tree is opaque (buttons show title="-"), so
-    // requires_call_signal is false until Signal exposes call UI.
-    let profile = &profiles[profile_index.unwrap()];
+}
+
+#[test]
+fn signal_voice_note_blocked_by_renderer_gate() {
+    // Signal voice notes use the .helper subprocess (no .Renderer suffix).
+    // The bundle-based gate should block them as NonMeeting.
+    let profiles = load_detection_profiles();
+    let process = signal_voice_note_process();
+    let session_key = ProcessKey::from_process(&process).unwrap();
+    let result = resolve_process_candidate(
+        session_key,
+        Instant::now(),
+        &process,
+        &profiles,
+        &[],
+        &[],
+        &[],
+    );
     assert!(
-        !profile.requires_call_signal,
-        "Signal profile must have requires_call_signal = false (opaque AX tree)"
+        matches!(result, ResolvedMeetingCandidate::NonMeeting),
+        "Signal voice note (.helper) should be blocked: got {:?}",
+        result
+    );
+}
+
+#[test]
+fn signal_call_passes_renderer_gate() {
+    // Signal calls use the .helper.Renderer subprocess.
+    // The bundle-based gate should allow them as Native.
+    let profiles = load_detection_profiles();
+    let process = signal_process();
+    let session_key = ProcessKey::from_process(&process).unwrap();
+    let result = resolve_process_candidate(
+        session_key,
+        Instant::now(),
+        &process,
+        &profiles,
+        &[],
+        &[],
+        &[],
+    );
+    assert!(
+        matches!(result, ResolvedMeetingCandidate::Native { ref platform, .. } if platform == "Signal"),
+        "Signal call (.helper.Renderer) should resolve as Native Signal: got {:?}",
+        result
     );
 }
 
