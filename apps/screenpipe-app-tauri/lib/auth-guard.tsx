@@ -65,8 +65,20 @@ function showSignedOutToast() {
   });
 }
 
-// Only the screenpipe CLOUD API (screenpi.pe / screenpipe.com and their
-// subdomains) carries the login session whose 401/403 means "signed out".
+function cloudRequestHost(url: string): string | null {
+  try {
+    const base =
+      typeof window !== "undefined" && window.location?.href
+        ? window.location.href
+        : "http://localhost";
+    return new URL(url, base).hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+// True for any screenpipe CLOUD host (screenpi.pe / screenpipe.com and their
+// subdomains).
 //
 // Match on the URL *host* — never a substring of the whole URL. The local
 // engine at localhost:3030 routinely carries a screenpipe-domain value in the
@@ -77,16 +89,8 @@ function showSignedOutToast() {
 // them signed the user out and paused recording. This bit anyone whose
 // connected-account email is @screenpi.pe / @screenpipe.com.
 export function isScreenpipeApi(url: string): boolean {
-  let host: string;
-  try {
-    const base =
-      typeof window !== "undefined" && window.location?.href
-        ? window.location.href
-        : "http://localhost";
-    host = new URL(url, base).hostname.toLowerCase();
-  } catch {
-    return false;
-  }
+  const host = cloudRequestHost(url);
+  if (!host) return false;
 
   // The local engine is never the cloud auth surface.
   if (
@@ -106,21 +110,49 @@ export function isScreenpipeApi(url: string): boolean {
   );
 }
 
+// The subset of screenpipe cloud hosts whose 401/403 genuinely means the login
+// SESSION died — the website auth surface (screenpipe.com/api/user and the
+// OAuth/session endpoints). This is what the fetch interceptor keys its
+// sign-out on.
+//
+// The AI inference gateway `api.screenpipe.com` is EXCLUDED: it is fail-open on
+// auth (a bad/expired token silently degrades to the anonymous tier) and returns
+// 401 (anonymous-tier `/v1/messages`) and 403 (`model_not_allowed` / entitlement)
+// for reasons that are NOT session expiry. Treating a gateway 401/403 as a
+// sign-out nulled the whole user and looped enterprise users through onboarding
+// after an auto-update (SCR-132). Session validity lives on the website, not the
+// inference subdomain.
+export function isScreenpipeAuthApi(url: string): boolean {
+  if (!isScreenpipeApi(url)) return false;
+  const host = cloudRequestHost(url);
+  return host !== "api.screenpipe.com" && host !== "api.screenpi.pe";
+}
+
 export function AuthGuard({ children }: { children: React.ReactNode }) {
   const { settings, updateSettings, loadUser } = useSettings();
   const tokenRef = useRef(settings.user?.token);
   tokenRef.current = settings.user?.token;
 
-  const handleSessionExpired = useCallback(async () => {
-    if (!tokenRef.current) return; // already signed out
-    console.warn("auth-guard: session expired, clearing");
-    posthog.capture("session_expired");
-    await updateSettings({ user: null as any });
-    try {
-      await commands.setCloudToken(null);
-    } catch {}
-    showSignedOutToast();
-  }, [updateSettings]);
+  const handleSessionExpired = useCallback(
+    async (context?: { source?: string; status?: number | null }) => {
+      if (!tokenRef.current) return; // already signed out
+      console.warn("auth-guard: session expired, clearing");
+      // Capture WHY the session dropped so a transient post-update 401 (token
+      // briefly invalid while the encrypted secret store re-hydrates) can be
+      // told apart from a real sign-out. Without this the Bungalow enterprise
+      // post-update loop (SCR-132) is invisible in PostHog.
+      posthog.capture("session_expired", {
+        source: context?.source ?? "verify_token",
+        status: context?.status ?? null,
+      });
+      await updateSettings({ user: null as any });
+      try {
+        await commands.setCloudToken(null);
+      } catch {}
+      showSignedOutToast();
+    },
+    [updateSettings],
+  );
 
   const lastVerifyAtRef = useRef(0);
 
@@ -142,7 +174,10 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
       // auth failures; treat those as session expiry. Anything else
       // (network blip, 5xx) is silent — retry on the next interval.
       if (msg.includes(" 401 ") || msg.includes(" 403 ")) {
-        await handleSessionExpired();
+        await handleSessionExpired({
+          source: "verify_token",
+          status: msg.includes(" 403 ") ? 403 : 401,
+        });
       }
     }
   }, [loadUser, handleSessionExpired]);
@@ -207,11 +242,29 @@ export function installAuthInterceptor(
           ? input.href
           : input.url;
 
-    if (isScreenpipeApi(url) && (res.status === 401 || res.status === 403)) {
+    if (isScreenpipeAuthApi(url) && (res.status === 401 || res.status === 403)) {
       const token = getToken();
       if (token) {
         console.warn("auth-interceptor: 401 from", url);
-        posthog.capture("session_expired", { source: "fetch_interceptor" });
+        // Record which endpoint 401'd so we can pinpoint the trigger of the
+        // post-update session loop (SCR-132) — host + path only, never the
+        // query string (it can carry the token / PII).
+        let apiHost: string | null = null;
+        let apiPath: string | null = null;
+        try {
+          const u = new URL(
+            url,
+            typeof window !== "undefined" ? window.location?.href : undefined,
+          );
+          apiHost = u.host;
+          apiPath = u.pathname;
+        } catch {}
+        posthog.capture("session_expired", {
+          source: "fetch_interceptor",
+          status: res.status,
+          api_host: apiHost,
+          api_path: apiPath,
+        });
         await clearSession();
         showSignedOutToast();
       }
