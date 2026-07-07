@@ -172,8 +172,21 @@ export function SummaryCards({
     onSendMessage(template.prompt, `\u{1F4CC} ${template.title}`);
   };
 
+  // Keep the 3-column grid rows full: only show as many per-app setup suggestions
+  // as leave no orphan cells in the last row. Setup suggestions are for *unconnected*
+  // apps, so a typical user has plenty (>= a full row); the trim only kicks in for
+  // someone who has connected almost everything, where a tidy 2-row grid reads fine.
+  const GRID_COLUMNS = 3;
+  const alwaysOnCardCount =
+    featured.length + 1 /* custom summary */ + (discover.length > 0 ? 1 : 0) + 1 /* browse all */;
+  const setupRowRemainder =
+    (alwaysOnCardCount + connectionSetupSuggestions.length) % GRID_COLUMNS;
+  const rowFilledConnectionSuggestions = connectionSetupSuggestions.slice(
+    0,
+    Math.max(0, connectionSetupSuggestions.length - setupRowRemainder),
+  );
   const visibleConnectionSetupSuggestions = [
-    ...connectionSetupSuggestions,
+    ...rowFilledConnectionSuggestions,
     { id: "connections", title: "Connect Apps", description: "Browse all connections", icon: "connections" },
   ];
 
