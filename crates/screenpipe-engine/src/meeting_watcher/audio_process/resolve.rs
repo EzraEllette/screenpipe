@@ -122,6 +122,50 @@ pub(crate) fn resolve_active_tab_url_candidate(
     })
 }
 
+/// Return the Google Meet meeting code if a window title IS one: exactly
+/// `xxx-yyyy-zzz`, lowercase ASCII letters (the regex `^[a-z]{3}-[a-z]{4}-[a-z]{3}$`).
+///
+/// Nothing looser: this shape is used as standalone meeting evidence for
+/// Little Arc (see `little_arc_meet_candidate`), so a hyphenated slug, a
+/// dashed document name, uppercase, digits, or the code embedded in a longer
+/// title must all be rejected.
+pub(crate) fn arc_window_title_meet_code(title: &str) -> Option<&str> {
+    let bytes = title.as_bytes();
+    if bytes.len() != 12 {
+        return None;
+    }
+    let shape_ok = bytes.iter().enumerate().all(|(i, &b)| match i {
+        3 | 8 => b == b'-',
+        _ => b.is_ascii_lowercase(),
+    });
+    shape_ok.then_some(title)
+}
+
+/// Little Arc fallback: accept a mic-holding Arc process as Google Meet
+/// evidence when one of its AX window titles is a bare Meet meeting code.
+///
+/// Little Arc mini windows are invisible to every other evidence path: they
+/// are not in Arc's AppleScript `windows` collection and expose no AXDocument
+/// — the title (the bare meeting code) is their entire AX footprint. Gated to
+/// Arc AND the strict code shape (`arc_window_title_meet_code`), and routed
+/// through `resolve_active_tab_url_candidate` with the canonical
+/// `https://meet.google.com/<code>` URL so the candidate shape (profile
+/// matching, ignore filtering, live evidence) is identical to the URL probe's.
+pub(crate) fn little_arc_meet_candidate(
+    browser_app: &str,
+    window_titles: &[String],
+    profiles: &[MeetingDetectionProfile],
+) -> Option<AxResolvedCandidate> {
+    if !browser_app.eq_ignore_ascii_case("arc") {
+        return None;
+    }
+    window_titles.iter().find_map(|title| {
+        let code = arc_window_title_meet_code(title.trim())?;
+        let url = format!("https://meet.google.com/{}", code);
+        resolve_active_tab_url_candidate(browser_app, &url, profiles)
+    })
+}
+
 pub(crate) async fn db_find_browser_evidence(
     db: &DatabaseManager,
 ) -> Result<Vec<BrowserPageEvidence>, sqlx::Error> {

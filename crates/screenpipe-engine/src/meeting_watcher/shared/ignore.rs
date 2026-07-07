@@ -165,6 +165,61 @@ pub(crate) fn browser_window_matches_meeting(
     false
 }
 
+/// Per-window decision for the macOS AX window sweep, which sees each window's
+/// AXDocument (the page URL, when the browser exposes one — Safari does,
+/// Chrome mostly doesn't) and its title.
+///
+/// - Page URL: matched against `browser_url_patterns` (query/fragment
+///   stripped, #4246).
+/// - Title vs dotted `browser_url_patterns`: only a verbatim domain in the
+///   title ("meet.google.com") counts — bare text like "Google Meet" appears
+///   in calendar pages and must not match.
+/// - Anchored `browser_title_patterns` (see `browser_title_matches_pattern`):
+///   consulted ONLY when the window exposes no page URL, mirroring the
+///   URL-first rule of `browser_window_matches_meeting`. This is what catches
+///   a Chrome/Edge Meet pop-out titled "Meet – abc-defg-hij" (no AXDocument,
+///   no domain in the title) without letting a page whose URL is known to be
+///   non-meeting resolve off its title.
+pub(crate) fn ax_window_matches_meeting(
+    doc: Option<&str>,
+    title: Option<&str>,
+    profile: &MeetingDetectionProfile,
+) -> bool {
+    let ids = &profile.app_identifiers;
+    let doc = doc.map(str::trim).filter(|d| !d.is_empty());
+    if let Some(doc) = doc {
+        let doc_for_match = url_without_query_or_fragment(doc);
+        if ids
+            .browser_url_patterns
+            .iter()
+            .any(|p| browser_url_pattern_matches(doc_for_match, p))
+        {
+            return true;
+        }
+    }
+    if let Some(title) = title {
+        if ids
+            .browser_url_patterns
+            .iter()
+            .filter(|p| p.contains('.'))
+            .any(|p| browser_url_pattern_matches(title, p))
+        {
+            return true;
+        }
+        if doc.is_none() {
+            let title_lower = title.to_lowercase();
+            if ids
+                .browser_title_patterns
+                .iter()
+                .any(|p| browser_title_matches_pattern(&title_lower, p))
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 pub(crate) fn contains_case_insensitive(haystack: &str, needle: &str) -> bool {
     if needle.is_empty() {
         return false;

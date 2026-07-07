@@ -377,6 +377,114 @@ fn active_tab_meeting_link_in_query_does_not_resolve() {
 }
 
 #[test]
+fn meet_code_title_shape_is_strict() {
+    // The bare meeting code is standalone meeting evidence for Little Arc, so
+    // only the exact ^[a-z]{3}-[a-z]{4}-[a-z]{3}$ shape may pass.
+    assert_eq!(
+        arc_window_title_meet_code("abc-defg-hij"),
+        Some("abc-defg-hij")
+    );
+    assert_eq!(
+        arc_window_title_meet_code("phv-jdrc-vxw"),
+        Some("phv-jdrc-vxw")
+    );
+
+    // Anything looser is rejected.
+    for title in [
+        "",
+        "abc-defg-hi",              // last group too short
+        "abc-defg-hijk",            // last group too long
+        "ab-cdefg-hij",             // first group too short
+        "ABC-DEFG-HIJ",             // uppercase
+        "abc-defg-hi1",             // digit
+        "abc_defg_hij",             // wrong separator
+        "abc-defg-hij ",            // trailing whitespace (caller trims)
+        "Meet - abc-defg-hij",      // code embedded in a longer title
+        "meet.google.com",          // domain, not a code
+        "one-two-three-four",       // hyphenated slug
+        "new-doc-nov",              // 3-3-3 dashed doc name
+        "\u{0430}bc-defg-hij",      // non-ASCII lookalike (Cyrillic а)
+    ] {
+        assert_eq!(arc_window_title_meet_code(title), None, "{:?}", title);
+    }
+}
+
+#[test]
+fn little_arc_meet_code_title_resolves_google_meet_candidate() {
+    // Little Arc windows expose no AXDocument and are absent from Arc's
+    // AppleScript `windows` collection; their AX title is the bare meeting
+    // code. That title must resolve to a live Google Meet candidate with the
+    // same shape as the URL probe's.
+    let profiles = load_detection_profiles();
+    let titles = vec!["Untitled".to_string(), "phv-jdrc-vxw".to_string()];
+    let candidate = little_arc_meet_candidate("Arc", &titles, &profiles)
+        .expect("meeting-code title should resolve");
+    assert_eq!(candidate.browser_app, "Arc");
+    assert_eq!(
+        platform_name_for_profile(&profiles[candidate.profile_index], true),
+        "Google Meet"
+    );
+    assert_eq!(
+        candidate.meeting_url.as_deref(),
+        Some("https://meet.google.com/phv-jdrc-vxw")
+    );
+}
+
+#[test]
+fn little_arc_candidate_is_gated_to_arc() {
+    // The bare-code heuristic is justified only by Little Arc's rendering
+    // (title == code, no other footprint); other browsers must never resolve
+    // from a title-shaped code.
+    let profiles = load_detection_profiles();
+    let titles = vec!["phv-jdrc-vxw".to_string()];
+    assert!(little_arc_meet_candidate("Google Chrome", &titles, &profiles).is_none());
+    assert!(little_arc_meet_candidate("Safari", &titles, &profiles).is_none());
+    // Arc but no code-shaped title -> nothing.
+    assert!(little_arc_meet_candidate(
+        "Arc",
+        &["Meet - planning".to_string(), "Arc".to_string()],
+        &profiles
+    )
+    .is_none());
+    assert!(little_arc_meet_candidate("Arc", &[], &profiles).is_none());
+}
+
+#[test]
+fn little_arc_candidate_starts_meeting_as_live_evidence() {
+    // End-to-end through resolve_process_candidate: the Little Arc candidate
+    // must behave exactly like a URL-probe candidate — live evidence, Google
+    // Meet platform, canonical meeting URL.
+    let profiles = load_detection_profiles();
+    let process = arc_process();
+    let titles = vec!["phv-jdrc-vxw".to_string()];
+    let ax = vec![little_arc_meet_candidate("Arc", &titles, &profiles).unwrap()];
+    let candidate = resolve_process_candidate(
+        ProcessKey::from_process(&process).unwrap(),
+        Instant::now(),
+        &process,
+        &profiles,
+        &[],
+        &ax,
+        &[],
+    );
+    match candidate {
+        ResolvedMeetingCandidate::Browser {
+            platform,
+            meeting_url,
+            browser_app,
+            live_evidence,
+            ..
+        } => {
+            assert_eq!(platform, "Google Meet");
+            assert_eq!(meeting_url, "https://meet.google.com/phv-jdrc-vxw");
+            assert_eq!(browser_app, "Arc");
+            assert!(live_evidence);
+        }
+        other => panic!("expected Browser candidate, got {:?}", other),
+    }
+}
+
+#[test]
 fn unresolved_browser_does_not_start_after_confirmation() {
     let process = chrome_process();
     let key = ProcessKey::from_process(&process).unwrap();
