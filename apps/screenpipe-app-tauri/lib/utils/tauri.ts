@@ -2719,13 +2719,17 @@ useSystemDefaultAudio: boolean;
  */
 experimentalCoreaudioSystemAudio?: boolean;
 /**
- * Experimental: during detected meetings, capture the meeting app's own
- * audio via a per-process tap plus the microphone that app actually has
- * open (instead of the global mix + assumed-default mic). Default `false`.
- * Requires macOS 14.4+ or Windows; when the platform can't do it or the
- * tap fails at runtime, capture automatically falls back to the stable
- * path (default mic + global system audio) — never less capture than
- * with the flag off.
+ * Beta ("Smart recording" in the app): during detected meetings, capture
+ * the meeting app's own audio via a per-process tap plus the microphone
+ * that app actually has open (instead of the global mix + assumed-default
+ * mic). Default `false`. Takes precedence over everything: it engages in
+ * ANY `audio_capture_mode` (continuous or meetings-only) and displaces
+ * the configured devices for the meeting's duration. Requires macOS 14.4+
+ * or Windows, plus the meeting detector (with `disable_meeting_detector`
+ * no meeting is ever observed, so this flag is inert); when the platform
+ * can't do it or the tap fails at runtime, capture automatically falls
+ * back to the stable path (default mic + global system audio) — never
+ * less capture than with the flag off.
  */
 experimentalMeetingPiggyback?: boolean;
 /**

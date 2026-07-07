@@ -90,7 +90,8 @@ pub struct RecordingConfig {
     pub use_system_default_audio: bool,
     /// Experimental: use CoreAudio Process Tap for System Audio on macOS 14.4+.
     pub experimental_coreaudio_system_audio: bool,
-    /// Experimental: meeting-driven per-process audio capture (piggyback).
+    /// Beta: meeting-driven per-process audio capture (piggyback; "Smart
+    /// recording" in the app). Engages during meetings in any capture mode.
     pub experimental_meeting_piggyback: bool,
     /// Experimental: request Windows WASAPI microphone AEC when supported.
     pub windows_input_aec_enabled: bool,

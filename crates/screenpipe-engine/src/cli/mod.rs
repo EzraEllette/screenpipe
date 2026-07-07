@@ -412,7 +412,8 @@ pub struct RecordArgs {
     #[arg(long, default_value_t = false)]
     pub experimental_coreaudio_system_audio: bool,
 
-    /// Experimental: meeting-driven per-process audio capture (piggyback).
+    /// Beta: meeting-driven per-process audio capture (piggyback; "Smart
+    /// recording" in the app). Engages during meetings in any capture mode.
     #[arg(long, default_value_t = false)]
     pub experimental_meeting_piggyback: bool,
 

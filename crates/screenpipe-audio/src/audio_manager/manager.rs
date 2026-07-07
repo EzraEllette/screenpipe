@@ -1521,16 +1521,14 @@ impl AudioManager {
         self.meeting_detector.read().await.clone()
     }
 
-    /// `(experimental_meeting_piggyback, meetings_only)` in one options read.
-    /// Consumed by the device monitor's piggyback sweep (`meeting_piggyback.rs`)
-    /// — the `options` field is private to this module, so the sweep can't read
-    /// it directly. `meetings_only` is `audio_capture_mode == MeetingsOnly`.
-    pub(crate) async fn piggyback_config(&self) -> (bool, bool) {
-        let options = self.options.read().await;
-        (
-            options.experimental_meeting_piggyback,
-            options.audio_capture_mode == AudioCaptureMode::MeetingsOnly,
-        )
+    /// Whether the meeting piggyback ("smart recording") flag is on. Consumed
+    /// by the device monitor's piggyback sweep (`meeting_piggyback.rs`) — the
+    /// `options` field is private to this module, so the sweep can't read it
+    /// directly. Deliberately independent of `audio_capture_mode`: the flag
+    /// takes precedence over everything, so a detected meeting engages the
+    /// piggyback in continuous ("always") capture just as in meetings-only.
+    pub(crate) async fn piggyback_enabled(&self) -> bool {
+        self.options.read().await.experimental_meeting_piggyback
     }
 
     /// Returns the shared WhisperContext for backward compatibility, if loaded.
