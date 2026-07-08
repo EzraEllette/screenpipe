@@ -17,6 +17,7 @@ pub mod mcp_access;
 pub mod permissions;
 pub mod preset_fallback;
 pub mod sync;
+pub(crate) mod trajectory;
 
 use crate::agents::{
     pi::{PiExecutor, SCREENPIPE_API_URL},
@@ -1516,6 +1517,139 @@ fn parse_error_type_from_output(stderr: &str, stdout: &str) -> (Option<String>, 
     parse_error_type(stdout)
 }
 
+struct ClassifiedPipeProcessResult {
+    status: &'static str,
+    success: bool,
+    stderr: String,
+    error_type: Option<String>,
+    error_message: Option<String>,
+}
+
+fn classify_pipe_process_result(
+    process_success: bool,
+    was_cancelled: bool,
+    stderr: &str,
+    filtered_stdout: &str,
+) -> ClassifiedPipeProcessResult {
+    if was_cancelled {
+        return ClassifiedPipeProcessResult {
+            status: "cancelled",
+            success: false,
+            stderr: String::new(),
+            error_type: Some("cancelled".to_string()),
+            error_message: None,
+        };
+    }
+
+    if process_success {
+        return ClassifiedPipeProcessResult {
+            status: "completed",
+            success: true,
+            stderr: stderr.to_string(),
+            error_type: None,
+            error_message: None,
+        };
+    }
+
+    if is_post_completion_continue_error(stderr, filtered_stdout) {
+        return ClassifiedPipeProcessResult {
+            status: "completed",
+            success: true,
+            stderr: String::new(),
+            error_type: None,
+            error_message: None,
+        };
+    }
+
+    let (error_type, error_message) = parse_error_type_from_output(stderr, filtered_stdout);
+    ClassifiedPipeProcessResult {
+        status: "failed",
+        success: false,
+        stderr: stderr.to_string(),
+        error_type,
+        error_message,
+    }
+}
+
+fn is_post_completion_continue_error(stderr: &str, stdout: &str) -> bool {
+    if !stderr
+        .to_lowercase()
+        .contains("cannot continue from message role: assistant")
+    {
+        return false;
+    }
+
+    stdout_has_successful_agent_end_before_retry(stdout)
+}
+
+fn stdout_has_successful_agent_end_before_retry(stdout: &str) -> bool {
+    let mut saw_successful_agent_end = false;
+
+    for line in stdout.lines() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with('{') || !trimmed.ends_with('}') {
+            continue;
+        }
+
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+            continue;
+        };
+
+        match value.get("type").and_then(|v| v.as_str()) {
+            Some("agent_end") => {
+                if agent_end_has_successful_assistant_text(&value) {
+                    saw_successful_agent_end = true;
+                }
+            }
+            Some("compaction_end") if saw_successful_agent_end => {
+                if value
+                    .get("willRetry")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+                {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    false
+}
+
+fn agent_end_has_successful_assistant_text(value: &serde_json::Value) -> bool {
+    let Some(messages) = value.get("messages").and_then(|v| v.as_array()) else {
+        return false;
+    };
+
+    let Some(message) = messages
+        .iter()
+        .rev()
+        .find(|m| m.get("role").and_then(|v| v.as_str()) == Some("assistant"))
+    else {
+        return false;
+    };
+
+    if message.get("stopReason").and_then(|v| v.as_str()) == Some("error") {
+        return false;
+    }
+
+    message
+        .get("content")
+        .and_then(|v| v.as_array())
+        .map(|blocks| {
+            blocks.iter().any(|block| {
+                block.get("type").and_then(|v| v.as_str()) == Some("text")
+                    && block
+                        .get("text")
+                        .and_then(|v| v.as_str())
+                        .map(|text| !text.trim().is_empty())
+                        .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false)
+}
+
 /// Specific tokens that mean a terminal provider quota/billing gate (no point
 /// retrying or falling back). Deliberately NOT a bare "quota"/"billing" match:
 /// transient rate-limit messages often mention those words (e.g. "rate limited —
@@ -2757,11 +2891,26 @@ impl PipeManager {
             let drain_pipe_name = pipe_name.clone();
             let drain_exec_id = exec_id.unwrap_or(0);
             let drain_on_output = on_output.clone();
+            // Tee the full agent event stream to a per-run trajectory file
+            // (model-training/eval export). Best-effort: None on IO failure.
+            let mut drain_trajectory = trajectory::TrajectoryWriter::create(
+                &pipes_dir_for_log,
+                &drain_pipe_name,
+                drain_exec_id,
+                &run_model,
+                &prompt,
+            );
             tokio::spawn(async move {
                 while let Some(line) = line_rx.recv().await {
+                    if let Some(ref mut tw) = drain_trajectory {
+                        tw.append_line(&line);
+                    }
                     if let Some(ref cb) = drain_on_output {
                         cb(&drain_pipe_name, drain_exec_id, &line);
                     }
+                }
+                if let Some(tw) = drain_trajectory.take() {
+                    tw.finish();
                 }
                 // Channel closed — pipe process exited. Emit a done sentinel.
                 if let Some(ref cb) = drain_on_output {
@@ -2826,54 +2975,51 @@ impl PipeManager {
             let (log, cb_error_type): (PipeRunLog, Option<String>) = match run_result {
                 Ok(Ok(output)) => {
                     let filtered_stdout = filter_ndjson_stdout(&output.stdout);
-                    let (error_type, error_message) = if was_cancelled {
-                        (Some("cancelled".to_string()), None)
-                    } else if !output.success {
-                        parse_error_type_from_output(&output.stderr, &filtered_stdout)
-                    } else {
-                        (None, None)
-                    };
-                    let status = if was_cancelled {
-                        "cancelled"
-                    } else if output.success {
-                        "completed"
-                    } else {
-                        "failed"
-                    };
+                    let classified = classify_pipe_process_result(
+                        output.success,
+                        was_cancelled,
+                        &output.stderr,
+                        &filtered_stdout,
+                    );
                     let session_path =
                         find_latest_pi_session(&pipe_dir).map(|p| p.to_string_lossy().to_string());
                     if let (Some(ref store), Some(id)) = (&store_ref, exec_id) {
                         let _ = store
                             .finish_execution(
                                 id,
-                                status,
+                                classified.status,
                                 &filtered_stdout,
-                                &output.stderr,
+                                &classified.stderr,
                                 None,
-                                error_type.as_deref(),
-                                error_message.as_deref(),
+                                classified.error_type.as_deref(),
+                                classified.error_message.as_deref(),
                                 session_path.as_deref(),
                             )
                             .await;
                     }
                     if let Some(ref store) = store_ref {
                         let _ = store
-                            .upsert_scheduler_state(&pipe_name, output.success && !was_cancelled)
+                            .upsert_scheduler_state(&pipe_name, classified.success)
                             .await;
                     }
-                    let et = if output.success && !was_cancelled {
+                    let et = if classified.success {
                         None
                     } else {
-                        Some(error_type.unwrap_or_else(|| "unknown".to_string()))
+                        Some(
+                            classified
+                                .error_type
+                                .clone()
+                                .unwrap_or_else(|| "unknown".to_string()),
+                        )
                     };
                     (
                         PipeRunLog {
                             pipe_name: pipe_name.clone(),
                             started_at,
                             finished_at,
-                            success: output.success && !was_cancelled,
+                            success: classified.success,
                             stdout: filtered_stdout.clone(),
-                            stderr: output.stderr.clone(),
+                            stderr: classified.stderr.clone(),
                         },
                         et,
                     )
@@ -3284,11 +3430,26 @@ impl PipeManager {
             let drain_pipe_name = name.to_string();
             let drain_exec_id = exec_id.unwrap_or(0);
             let drain_on_output = self.on_output_line.clone();
+            // Tee the full agent event stream to a per-run trajectory file
+            // (model-training/eval export). Best-effort: None on IO failure.
+            let mut drain_trajectory = trajectory::TrajectoryWriter::create(
+                &self.pipes_dir,
+                &drain_pipe_name,
+                drain_exec_id,
+                &run_model,
+                &prompt,
+            );
             tokio::spawn(async move {
                 while let Some(line) = line_rx.recv().await {
+                    if let Some(ref mut tw) = drain_trajectory {
+                        tw.append_line(&line);
+                    }
                     if let Some(ref cb) = drain_on_output {
                         cb(&drain_pipe_name, drain_exec_id, &line);
                     }
+                }
+                if let Some(tw) = drain_trajectory.take() {
+                    tw.finish();
                 }
                 // Channel closed — pipe process exited. Emit a done sentinel.
                 if let Some(ref cb) = drain_on_output {
@@ -3355,53 +3516,42 @@ impl PipeManager {
                     // Normal completion
                     let filtered_stdout = filter_ndjson_stdout(&output.stdout);
                     let cancelled = was_cancelled();
-                    let (error_type, error_message) = if cancelled {
-                        (Some("cancelled".to_string()), None)
-                    } else if !output.success {
-                        parse_error_type_from_output(&output.stderr, &filtered_stdout)
-                    } else {
-                        (None, None)
-                    };
-
-                    let status = if cancelled {
-                        "cancelled"
-                    } else if output.success {
-                        "completed"
-                    } else {
-                        "failed"
-                    };
+                    let classified = classify_pipe_process_result(
+                        output.success,
+                        cancelled,
+                        &output.stderr,
+                        &filtered_stdout,
+                    );
                     let session_path =
                         find_latest_pi_session(&pipe_dir).map(|p| p.to_string_lossy().to_string());
                     if let (Some(ref store), Some(id)) = (&self.store, exec_id) {
                         let _ = store
                             .finish_execution(
                                 id,
-                                status,
+                                classified.status,
                                 &filtered_stdout,
-                                &output.stderr,
+                                &classified.stderr,
                                 None,
-                                error_type.as_deref(),
-                                error_message.as_deref(),
+                                classified.error_type.as_deref(),
+                                classified.error_message.as_deref(),
                                 session_path.as_deref(),
                             )
                             .await;
                     }
                     if let Some(ref store) = self.store {
-                        let _ = store
-                            .upsert_scheduler_state(name, output.success && !cancelled)
-                            .await;
+                        let _ = store.upsert_scheduler_state(name, classified.success).await;
                     }
 
                     // Update circuit breaker state — always record failures
                     // even with a single preset, so the breaker is pre-tripped
                     // when the user adds a fallback preset later.
                     if let Some(ref pid) = active_preset_id {
-                        if output.success && !cancelled {
+                        if classified.success {
                             self.fallback_registry.record_success(pid);
                         } else if !cancelled {
                             self.fallback_registry.record_failure_from_output(
                                 pid,
-                                &output.stderr,
+                                &classified.stderr,
                                 &filtered_stdout,
                             );
                         }
@@ -3411,9 +3561,9 @@ impl PipeManager {
                         pipe_name: name.to_string(),
                         started_at,
                         finished_at,
-                        success: output.success && !cancelled,
+                        success: classified.success,
                         stdout: filtered_stdout.clone(),
-                        stderr: output.stderr.clone(),
+                        stderr: classified.stderr.clone(),
                     }
                 }
                 Ok(Err(e)) => {
@@ -4636,11 +4786,26 @@ impl PipeManager {
                         let sched_pipe_name = pipe_name.clone();
                         let sched_exec_id = exec_id.unwrap_or(0);
                         let sched_on_output = on_output.clone();
+                        // Tee the full agent event stream to a per-run
+                        // trajectory file (model-training/eval export).
+                        let mut sched_trajectory = trajectory::TrajectoryWriter::create(
+                            &pipes_dir_for_log,
+                            &sched_pipe_name,
+                            sched_exec_id,
+                            &model,
+                            &prompt,
+                        );
                         tokio::spawn(async move {
                             while let Some(line) = line_rx.recv().await {
+                                if let Some(ref mut tw) = sched_trajectory {
+                                    tw.append_line(&line);
+                                }
                                 if let Some(ref cb) = sched_on_output {
                                     cb(&sched_pipe_name, sched_exec_id, &line);
                                 }
+                            }
+                            if let Some(tw) = sched_trajectory.take() {
+                                tw.finish();
                             }
                             // Channel closed — pipe process exited. Emit a done sentinel.
                             if let Some(ref cb) = sched_on_output {
@@ -4709,63 +4874,57 @@ impl PipeManager {
                             Ok(Ok(output)) => {
                                 let filtered_stdout = filter_ndjson_stdout(&output.stdout);
                                 let cancelled = was_cancelled();
-                                let (error_type, error_message) = if cancelled {
-                                    (Some("cancelled".to_string()), None)
-                                } else if !output.success {
-                                    parse_error_type_from_output(&output.stderr, &filtered_stdout)
-                                } else {
-                                    (None, None)
-                                };
-                                let status = if cancelled {
-                                    "cancelled"
-                                } else if output.success {
-                                    "completed"
-                                } else {
-                                    "failed"
-                                };
+                                let classified = classify_pipe_process_result(
+                                    output.success,
+                                    cancelled,
+                                    &output.stderr,
+                                    &filtered_stdout,
+                                );
                                 let session_path = find_latest_pi_session(&pipe_dir)
                                     .map(|p| p.to_string_lossy().to_string());
                                 if let (Some(ref store), Some(id)) = (&store_ref, exec_id) {
                                     let _ = store
                                         .finish_execution(
                                             id,
-                                            status,
+                                            classified.status,
                                             &filtered_stdout,
-                                            &output.stderr,
+                                            &classified.stderr,
                                             None,
-                                            error_type.as_deref(),
-                                            error_message.as_deref(),
+                                            classified.error_type.as_deref(),
+                                            classified.error_message.as_deref(),
                                             session_path.as_deref(),
                                         )
                                         .await;
                                 }
                                 if let Some(ref store) = store_ref {
                                     let _ = store
-                                        .upsert_scheduler_state(
-                                            &pipe_name,
-                                            output.success && !cancelled,
-                                        )
+                                        .upsert_scheduler_state(&pipe_name, classified.success)
                                         .await;
                                 }
 
-                                if output.success && !cancelled {
+                                if classified.success {
                                     info!("pipe '{}' completed successfully", pipe_name);
                                 } else {
-                                    warn!("pipe '{}' failed: {}", pipe_name, output.stderr);
+                                    warn!("pipe '{}' failed: {}", pipe_name, classified.stderr);
                                 }
-                                let et = if output.success && !cancelled {
+                                let et = if classified.success {
                                     None
                                 } else {
-                                    Some(error_type.unwrap_or_else(|| "unknown".to_string()))
+                                    Some(
+                                        classified
+                                            .error_type
+                                            .clone()
+                                            .unwrap_or_else(|| "unknown".to_string()),
+                                    )
                                 };
                                 (
                                     PipeRunLog {
                                         pipe_name: pipe_name.clone(),
                                         started_at,
                                         finished_at,
-                                        success: output.success && !cancelled,
+                                        success: classified.success,
                                         stdout: filtered_stdout.clone(),
-                                        stderr: output.stderr.clone(),
+                                        stderr: classified.stderr.clone(),
                                     },
                                     et,
                                 )
@@ -6906,6 +7065,69 @@ mod tests {
         assert_eq!(msg, None);
     }
 
+    fn successful_agent_then_compaction_retry_stdout() -> String {
+        [
+            r#"{"type":"agent_end","messages":[{"role":"user","content":[{"type":"text","text":"run the pipe"}]},{"role":"assistant","content":[{"type":"text","text":"SOP_UPDATED: /tmp/sop.md"}],"stopReason":"stop"}]}"#,
+            r#"{"type":"compaction_start","reason":"overflow"}"#,
+            r#"{"type":"compaction_end","reason":"overflow","result":{"summary":"compact"},"aborted":false,"willRetry":true}"#,
+        ]
+        .join("\n")
+    }
+
+    #[test]
+    fn test_post_completion_continue_error_is_recovered() {
+        let classified = classify_pipe_process_result(
+            false,
+            false,
+            "Cannot continue from message role: assistant\n",
+            &successful_agent_then_compaction_retry_stdout(),
+        );
+
+        assert_eq!(classified.status, "completed");
+        assert!(classified.success);
+        assert_eq!(classified.stderr, "");
+        assert_eq!(classified.error_type, None);
+        assert_eq!(classified.error_message, None);
+    }
+
+    #[test]
+    fn test_post_completion_continue_error_requires_successful_agent_end() {
+        let stdout = [
+            r#"{"type":"agent_end","messages":[{"role":"assistant","content":[],"stopReason":"error","errorMessage":"rate_limit_exceeded"}]}"#,
+            r#"{"type":"compaction_end","reason":"overflow","aborted":false,"willRetry":true}"#,
+        ]
+        .join("\n");
+
+        let classified = classify_pipe_process_result(
+            false,
+            false,
+            "Cannot continue from message role: assistant\n",
+            &stdout,
+        );
+
+        assert_eq!(classified.status, "failed");
+        assert!(!classified.success);
+        assert_eq!(
+            classified.stderr,
+            "Cannot continue from message role: assistant\n"
+        );
+    }
+
+    #[test]
+    fn test_post_completion_continue_error_requires_retry_after_success() {
+        let stdout = r#"{"type":"agent_end","messages":[{"role":"assistant","content":[{"type":"text","text":"done"}],"stopReason":"stop"}]}"#;
+
+        let classified = classify_pipe_process_result(
+            false,
+            false,
+            "Cannot continue from message role: assistant\n",
+            stdout,
+        );
+
+        assert_eq!(classified.status, "failed");
+        assert!(!classified.success);
+    }
+
     #[test]
     fn test_parse_error_type_empty() {
         let (etype, msg) = parse_error_type("");
@@ -7114,21 +7336,33 @@ mod tests {
         }
     }
 
+    /// Parse a raw cron schedule string through the production entry point
+    /// (`parse_schedule`) and unwrap the cron, so tests that pin `now` via
+    /// `cron_should_fire` still cover the string→cron glue `should_run` uses.
+    fn parse_cron(s: &str) -> CronSchedule {
+        match parse_schedule(s) {
+            Some(ParsedSchedule::Cron(c)) => *c,
+            other => panic!("expected cron for {:?}, got {:?}", s, other.is_some()),
+        }
+    }
+
     #[test]
     fn test_should_run_human_daily() {
         // Wall-clock cron only fires when we're actually inside the scheduled
-        // slot (within CRON_GRACE_WINDOW). Anchor to the current hour:minute
-        // so the slot is "right now" regardless of when the test runs.
-        let now = Utc::now();
+        // slot (within CRON_GRACE_WINDOW). `should_run` evaluates crons against
+        // the machine's LOCAL timezone (issue #3851), so anchor the slot to
+        // Local::now() — anchoring to Utc::now() puts the slot hours away on
+        // any non-UTC machine and both assertions break.
+        let now = Local::now();
         let cron_str = format!("0 {} {} * * * *", now.minute(), now.hour());
-        let yesterday = now - chrono::Duration::hours(25);
+        let yesterday = (now - chrono::Duration::hours(25)).with_timezone(&Utc);
         // Last run was yesterday, current minute's slot just passed → fire.
         assert!(should_run(&cron_str, yesterday));
 
         // Same cron, but last_run is "right now" (this slot already claimed) →
         // don't re-fire. `cron.after(last_run)` is strictly after, so the next
         // candidate is tomorrow's slot.
-        assert!(!should_run(&cron_str, now));
+        assert!(!should_run(&cron_str, now.with_timezone(&Utc)));
     }
 
     #[test]
@@ -7137,13 +7371,13 @@ mod tests {
         // just because today's cron slot already passed. Should wait until the
         // next future slot. Regression test: a user reported creating an
         // "every day at 7am" pipe at 5:39pm that fired 12 seconds later.
-        let now = Utc::now();
-        // Pick an hour that's unambiguously outside the grace window from now
-        // (6h away in either direction).
-        let safe_hour = (now.hour() + 6) % 24;
-        let cron_str = format!("0 0 {} * * * *", safe_hour);
+        // Pin `now` through the `cron_should_fire` seam (the exact decision
+        // `should_run` delegates to) instead of anchoring an hour to the real
+        // clock, which drifts into the grace window on non-UTC machines.
+        let cron = parse_cron("0 0 7 * * * *"); // every day at 07:00
+        let now = Utc.with_ymd_and_hms(2026, 6, 5, 17, 39, 0).unwrap();
         assert!(
-            !should_run(&cron_str, DateTime::UNIX_EPOCH),
+            !cron_should_fire(&cron, DateTime::UNIX_EPOCH, now),
             "newly-installed cron pipe must not fire immediately on install — \
              should wait for the next scheduled slot, not catch up from 1970"
         );
@@ -7152,13 +7386,15 @@ mod tests {
     #[test]
     fn test_should_run_cron_stale_last_run_waits() {
         // App was off for days. On restart, a daily cron whose slot passed
-        // hours ago must NOT fire immediately — wait for the next slot.
-        let now = Utc::now();
-        let safe_hour = (now.hour() + 6) % 24;
-        let cron_str = format!("0 0 {} * * * *", safe_hour);
+        // hours ago (beyond CRON_CATCHUP_WINDOW) must NOT fire immediately —
+        // wait for the next slot. Pinned `now`: the slot is 16:30 daily, so
+        // its most recent occurrence was 18h before `now` and the next is 6h
+        // after — unambiguously outside the catch-up window in any timezone.
+        let cron = parse_cron("0 30 16 * * * *");
+        let now = Utc.with_ymd_and_hms(2026, 6, 5, 10, 30, 30).unwrap();
         let three_days_ago = now - chrono::Duration::days(3);
         assert!(
-            !should_run(&cron_str, three_days_ago),
+            !cron_should_fire(&cron, three_days_ago, now),
             "after extended downtime, cron must wait for the next slot \
              instead of firing stale catch-up runs"
         );
@@ -7168,10 +7404,12 @@ mod tests {
     fn test_should_run_cron_within_grace_fires() {
         // Slot was hit moments ago (typical: scheduler tick lag, brief sleep).
         // Within grace → fire even though last_run is far in the past.
-        let now = Utc::now();
-        let cron_str = format!("0 {} {} * * * *", now.minute(), now.hour());
+        // `now` is pinned 30s past the 10:30:00 slot so the assertion holds
+        // in any timezone.
+        let cron = parse_cron("0 30 10 * * * *");
+        let now = Utc.with_ymd_and_hms(2026, 6, 5, 10, 30, 30).unwrap();
         let yesterday = now - chrono::Duration::hours(25);
-        assert!(should_run(&cron_str, yesterday));
+        assert!(cron_should_fire(&cron, yesterday, now));
     }
 
     #[test]
@@ -7179,15 +7417,13 @@ mod tests {
         // Regression: app was offline during the scheduled slot. When it restarts
         // minutes (or hours) after the slot, the pipe must still fire — not silently
         // wait until tomorrow. Reproduces the "morning-brief didn't run" report where
-        // the app started at 7:12am after missing the 7am slot.
-        use chrono::Timelike;
-        let now = Utc::now();
-        // Build a cron expression whose last slot was ~12 minutes ago
-        let slot_time = now - chrono::Duration::minutes(12);
-        let cron_str = format!("0 {} {} * * * *", slot_time.minute(), slot_time.hour());
+        // the app started at 7:12am after missing the 7am slot — pinned literally:
+        // slot at 07:00, `now` at 07:12 (past grace, inside the catch-up window).
+        let cron = parse_cron("0 0 7 * * * *");
+        let now = Utc.with_ymd_and_hms(2026, 6, 5, 7, 12, 0).unwrap();
         let last_run = now - chrono::Duration::hours(25); // ran yesterday
         assert!(
-            should_run(&cron_str, last_run),
+            cron_should_fire(&cron, last_run, now),
             "pipe whose slot passed 12 minutes ago must fire on app restart, not wait until tomorrow"
         );
     }

@@ -49,7 +49,14 @@ pub struct UiCaptureConfig {
     /// Capture mouse movement (high volume - disabled by default)
     pub capture_mouse_move: bool,
 
-    /// Capture full accessibility tree of focused window
+    /// Capture full accessibility tree of focused window.
+    ///
+    /// Off by default: on Windows these walks are synchronous cross-process
+    /// UIA calls serviced on the *target app's* UI thread — measured at p95
+    /// 213ms message-pump stalls in Edge, and responsible for ~100% of severe
+    /// foreground freezes (see TESTING.md §15). The resulting snapshots also
+    /// have no consumers — `paired_capture.rs` owns accessibility text capture.
+    /// Per-click / focused-element enrichment does not depend on this flag.
     pub capture_tree: bool,
 
     /// Debounce time before capturing tree after focus change (ms)
@@ -58,7 +65,8 @@ pub struct UiCaptureConfig {
     /// Maximum elements to capture per window tree
     pub tree_max_elements: usize,
 
-    /// Safety-net interval for periodic tree re-capture (ms, 0 = disabled)
+    /// Safety-net interval for periodic tree re-capture (ms, 0 = disabled).
+    /// Only relevant when `capture_tree` is on.
     pub tree_capture_interval_ms: u64,
 
     /// Mouse move threshold in pixels (higher = fewer events)
@@ -205,10 +213,10 @@ impl Default for UiCaptureConfig {
             capture_clipboard_content: true,
             capture_context: true,
             capture_mouse_move: false, // High volume
-            capture_tree: true,
+            capture_tree: false,       // Freezes foreground apps on Windows; snapshots unconsumed
             tree_debounce_ms: 300,
             tree_max_elements: 10000,
-            tree_capture_interval_ms: 2000,
+            tree_capture_interval_ms: 0,
             mouse_move_threshold: 5.0,
             text_timeout_ms: 300,
             max_buffer_size: 10000,
@@ -465,6 +473,9 @@ mod tests {
         assert!(config.capture_window_focus);
         assert!(!config.capture_keystrokes); // Should be off by default
         assert!(config.capture_clipboard_content); // On by default
+        assert!(!config.capture_tree); // Off by default — freezes foreground apps on Windows
+        assert_eq!(config.tree_capture_interval_ms, 0);
+        assert!(config.capture_context); // Element enrichment stays on
     }
 
     #[test]

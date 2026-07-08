@@ -537,9 +537,13 @@ pub struct RecordArgs {
     #[arg(long, default_value_t = false)]
     pub filter_music: bool,
 
-    /// Disable vision recording
+    /// Disable the full vision pipeline (screen images + accessibility/OCR)
     #[arg(long, default_value_t = false)]
     pub disable_vision: bool,
+
+    /// Disable screenshot pixels/JPEG/OCR while keeping accessibility-tree capture
+    #[arg(long, default_value_t = false)]
+    pub disable_screenshots: bool,
 
     /// Windows to ignore (case-insensitive contains). Use `App::Title` to
     /// scope to one window of one app (e.g. `Slack::#hr`). `::title` matches
@@ -735,8 +739,10 @@ pub struct RecordArgs {
     pub encrypt_secrets: bool,
 
     /// Local data retention in days. Old screen/audio data is auto-deleted after this period.
-    /// Set to 0 to disable retention (keep data forever).
-    #[arg(long, default_value_t = 14)]
+    /// Disabled by default (0 = keep data forever); set a positive number of days to opt in.
+    /// CLI deployments must never silently delete data — the desktop app opts new users in
+    /// through its own onboarding default instead.
+    #[arg(long, default_value_t = 0)]
     pub retention_days: u32,
 
     /// What gets cleaned up past the retention cutoff.
@@ -801,6 +807,7 @@ pub struct RecordArgSources {
     pub pii_redaction_pseudonyms: bool,
     pub filter_music: bool,
     pub disable_vision: bool,
+    pub disable_screenshots: bool,
     pub ignored_windows: bool,
     pub included_windows: bool,
     pub ignored_urls: bool,
@@ -856,6 +863,7 @@ impl RecordArgSources {
             pii_redaction_pseudonyms: from_command_line(record, "pii_redaction_pseudonyms"),
             filter_music: from_command_line(record, "filter_music"),
             disable_vision: from_command_line(record, "disable_vision"),
+            disable_screenshots: from_command_line(record, "disable_screenshots"),
             ignored_windows: from_command_line(record, "ignored_windows"),
             included_windows: from_command_line(record, "included_windows"),
             ignored_urls: from_command_line(record, "ignored_urls"),
@@ -903,6 +911,7 @@ impl RecordArgSources {
             || self.pii_redaction_pseudonyms
             || self.filter_music
             || self.disable_vision
+            || self.disable_screenshots
             || self.ignored_windows
             || self.included_windows
             || self.ignored_urls
@@ -1046,6 +1055,7 @@ impl RecordArgs {
             port: self.port,
             disable_audio: self.disable_audio,
             disable_vision: self.disable_vision,
+            disable_screenshots: self.disable_screenshots,
             // CLI has no --disable-timeline flag; the desktop app drives this
             // toggle. Default to enabled (timeline on) for the engine binary.
             disable_timeline: false,
@@ -1358,6 +1368,9 @@ impl RecordArgs {
         }
         if sources.disable_vision {
             settings.disable_vision = self.disable_vision;
+        }
+        if sources.disable_screenshots {
+            settings.disable_screenshots = self.disable_screenshots;
         }
         // An explicit --monitor-id or --use-all-monitors means the user wants
         // vision on, so it clears a persisted disable_vision:true (the #3648

@@ -91,6 +91,8 @@ mod store;
 mod suggestions;
 mod sync;
 mod tray;
+#[cfg(target_os = "macos")]
+mod tray_monitor_preview;
 mod updates;
 mod voice_training;
 mod window;
@@ -174,6 +176,19 @@ fn get_e2e_seed_flags() -> Vec<String> {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default()
+}
+
+/// Returns true when SCREENPIPE_SKIP_ONBOARDING is set to a truthy value
+/// ("1", "true", "yes" — case-insensitive). Escape hatch for corp VDI,
+/// headless containers, MDM-preseeded deploys, and any environment where
+/// the interactive onboarding cannot complete (sandboxed WebView2, blocked
+/// egress, missing permissions dialog). When set, startup marks onboarding
+/// complete so the app lands on the main view.
+fn should_skip_onboarding() -> bool {
+    std::env::var("SCREENPIPE_SKIP_ONBOARDING")
+        .ok()
+        .map(|s| matches!(s.trim().to_lowercase().as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false)
 }
 
 use tokio::time::{sleep, Duration};
@@ -502,7 +517,7 @@ async fn main() {
         }
     }
 
-    // Check if telemetry is disabled via store setting (analyticsEnabled) or offline mode
+    // Check if telemetry is disabled via store setting (analyticsEnabled)
     let store_path = screenpipe_core::paths::default_screenpipe_data_dir().join("store.bin");
     let store_json = std::fs::read(&store_path).ok().and_then(|data| {
         if data.len() >= 8 && &data[..8] == b"SPSTORE1" {
@@ -1218,6 +1233,11 @@ async fn main() {
             // sidecar inherits this env).
             std::env::set_var("SCREENPIPE_DATA_DIR", &data_dir);
 
+            // Enterprise builds can identify org/device health in Sentry and
+            // PostHog without sending the raw license key. No-op on consumer
+            // builds; explicit MDM/support env vars still win when provided.
+            enterprise_sync::configure_telemetry_context(&app_handle);
+
             if data_dir_fell_back {
                 let app_handle_fb = app_handle.clone();
                 tauri::async_runtime::spawn(async move {
@@ -1278,7 +1298,7 @@ async fn main() {
             app.manage(sync::SyncState::default());
 
             // Initialize onboarding store
-            let onboarding_store = store::init_onboarding_store(&app.handle()).unwrap_or_else(|e| {
+            let mut onboarding_store = store::init_onboarding_store(&app.handle()).unwrap_or_else(|e| {
                 error!("Failed to init onboarding store, using defaults: {}", e);
                 store::OnboardingStore::default()
             });
@@ -1291,6 +1311,20 @@ async fn main() {
                     error!("E2E seed: failed to complete onboarding: {}", e);
                 } else {
                     info!("E2E seed: onboarding marked complete");
+                }
+            }
+
+            // Escape hatch: SCREENPIPE_SKIP_ONBOARDING=1 marks onboarding complete
+            // at startup so corp/VDI/headless environments (where the interactive
+            // flow can't run) land at the main view. Persists to store so downstream
+            // consumers (show.rs re-reads from disk) see the same state.
+            if should_skip_onboarding() && !onboarding_store.is_completed {
+                match store::OnboardingStore::update(&app.handle(), |o| o.complete()) {
+                    Ok(_) => {
+                        info!("SCREENPIPE_SKIP_ONBOARDING: onboarding marked complete");
+                        onboarding_store.is_completed = true;
+                    }
+                    Err(e) => error!("SCREENPIPE_SKIP_ONBOARDING: failed to complete onboarding: {}", e),
                 }
             }
 
@@ -1315,6 +1349,12 @@ async fn main() {
                     // Determine which whisper model the user's config needs
                     let engine = match store_for_download.recording.audio_transcription_engine.as_str() {
                         "deepgram" | "screenpipe-cloud" => None, // Cloud engines don't need local model
+                        // Non-whisper local engines (parakeet MLX, qwen3) download their own
+                        // models at load time — don't fetch the 834MB whisper file for them.
+                        // If the user later switches to a whisper engine, TranscriptionEngine::new
+                        // downloads it in the background ("will retry at server start").
+                        "disabled" | "parakeet" | "parakeet-tdt-0.6b-v2" | "parakeet-mlx"
+                        | "qwen3-asr" => None,
                         _ => {
                             use screenpipe_audio::core::engine::AudioTranscriptionEngine;
                             Some(std::sync::Arc::new(match store_for_download.recording.audio_transcription_engine.as_str() {
@@ -1348,7 +1388,13 @@ async fn main() {
                             }
                         },
                         async {
-                            match screenpipe_audio::speaker::models::get_or_download_model(
+                            // File-only fetch — NOT get_or_download_model, which also builds
+                            // an ORT session. That session would be immediately discarded here
+                            // and would compete for CPU with the real session build that
+                            // SegmentationManager does moments later for the same file (root
+                            // cause of the "ort session init: timed out after 30s" boot warning
+                            // observed on the macos-15-intel CI runner).
+                            match screenpipe_audio::speaker::models::ensure_model_file(
                                 screenpipe_audio::speaker::models::PyannoteModel::Segmentation
                             ).await {
                                 Ok(p) => info!("segmentation model pre-download complete: {:?}", p),
@@ -1356,7 +1402,7 @@ async fn main() {
                             }
                         },
                         async {
-                            match screenpipe_audio::speaker::models::get_or_download_model(
+                            match screenpipe_audio::speaker::models::ensure_model_file(
                                 screenpipe_audio::speaker::models::PyannoteModel::Embedding
                             ).await {
                                 Ok(p) => info!("embedding model pre-download complete: {:?}", p),
@@ -1930,7 +1976,7 @@ async fn main() {
             // telemetry builds with SCREENPIPE_ENTERPRISE_LICENSE_KEY env set.
             let _enterprise_shutdown_tx = enterprise_sync::spawn(&app_handle);
 
-            // Auto-start cloud sync if it was enabled
+            // Disable removed Storage cloud backends if old settings enabled them.
             let app_handle_clone = app_handle.clone();
             let sync_state = app_handle.state::<sync::SyncState>();
             let sync_state_clone = sync::SyncState {
@@ -1947,7 +1993,7 @@ async fn main() {
                 sync::auto_start_sync(&app_handle_clone, &sync_state_clone).await;
             });
 
-            // Auto-start cloud archive if it was enabled (after sync so it can reuse sync manager)
+            // Disable removed Storage archive backend if old settings enabled it.
             let app_handle_clone = app_handle.clone();
             tauri::async_runtime::spawn(async move {
                 tokio::time::sleep(tokio::time::Duration::from_secs(15)).await;
