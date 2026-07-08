@@ -286,6 +286,12 @@ export default function EngineStartup({
 
   // Live feed: poll search for recent activity + thumbnails
   const emptyPollCountRef = useRef(0);
+  // Auth-race: /search 401s when _apiKey in lib/api.ts hasn't propagated to
+  // the webview yet (ensureInitialized retries getLocalApiConfig up to 30×
+  // 500ms; on corp-VDI Windows 11 that init sometimes exhausts before the
+  // engine binds its key). Surface it explicitly instead of leaving the user
+  // staring at "no activity" for the full 15s.
+  const [authNotReady, setAuthNotReady] = useState(false);
 
   useEffect(() => {
     if (state !== "live-feed") return;
@@ -316,6 +322,16 @@ export default function EngineStartup({
               ).catch(() => null)
             : Promise.resolve(null),
         ]);
+
+        // Detect the auth-key propagation race: if lib/api.ts _apiKey hasn't
+        // landed yet, /search returns 401. Surface it so the copy tells the
+        // user this is an auth issue, not a data-flow issue.
+        if (mainRes?.status === 401 || audioRes?.status === 401) {
+          console.warn(
+            "onboarding live-feed: /search returned 401 — api key not yet propagated to webview"
+          );
+          setAuthNotReady(true);
+        }
 
         const items: ActivityItem[] = [];
         const seen = new Set<string>();
@@ -382,6 +398,8 @@ export default function EngineStartup({
         if (items.length > 0) {
           setActivityItems(items.slice(0, SUMMARY_MAX_ITEMS));
           emptyPollCountRef.current = 0;
+          // Real data flowing → auth clearly recovered. Clear the hint.
+          setAuthNotReady(false);
         } else {
           emptyPollCountRef.current++;
         }
@@ -928,6 +946,12 @@ if the input is sparse, just describe what little you have warmly. don't apologi
               >
                 screenpipe is up and watching. as you work, what you see and
                 say will start appearing here. you can continue now.
+                {authNotReady && (
+                  <span className="block text-xs text-muted-foreground/60 mt-2">
+                    auth still initializing — if this persists, quit and
+                    relaunch screenpipe
+                  </span>
+                )}
               </motion.p>
             ) : showWaiting ? (
               <motion.p
@@ -938,6 +962,12 @@ if the input is sparse, just describe what little you have warmly. don't apologi
                 <span className="inline-block animate-pulse">
                   settling in. give me a moment to notice what you&apos;re up to…
                 </span>
+                {authNotReady && (
+                  <span className="block text-xs text-muted-foreground/60 mt-2">
+                    auth still initializing — if this persists, quit and
+                    relaunch screenpipe
+                  </span>
+                )}
               </motion.p>
             ) : (
               <motion.p
