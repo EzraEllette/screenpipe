@@ -1735,7 +1735,19 @@ pub async fn start_device_monitor(
                 )
                 .await;
             }
-            sleep(Duration::from_secs(2)).await;
+            // Event-driven wake (macOS): while the piggyback sweep is engaged
+            // it registers CoreAudio property listeners (default input device;
+            // the meeting processes' input-device-list / is-running-input)
+            // that poke this Notify the instant anything changes — so a mic
+            // switch in Meet/Zoom is followed on the very next pass instead
+            // of up to a poll interval later. The 2s tick remains as the
+            // reconciliation fallback and is the only wake source on Windows.
+            // A wake that fires mid-pass is stored (single permit) and drains
+            // here immediately, so no event is ever lost to timing.
+            tokio::select! {
+                _ = sleep(Duration::from_secs(2)) => {}
+                _ = super::piggyback_listeners::sweep_wake_notified() => {}
+            }
         }
     }));
     Ok(())

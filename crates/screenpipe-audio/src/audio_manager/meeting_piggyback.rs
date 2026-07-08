@@ -17,24 +17,40 @@
 //!   `decide_pinned_input_fallback` / `windows_output_follow`.
 //!
 //! * **Near end** — [`MicFollow`], an explicit per-meeting mic-follow state
-//!   machine (`Pending → Adopted | Capturing → Backoff`). It exists because
-//!   the previous per-tick reactive logic starved the meeting app of its own
-//!   microphone (observed live 2026-07-07, Meet/Zoom on AirPods): opening the
-//!   resolved mic the same tick it appeared raced the app's own device
-//!   acquisition, and re-evaluating displacement every tick off
-//!   `is_device_actively_streaming` turned every transient stream stall into a
-//!   real close+open of a Bluetooth mic — an SCO renegotiation storm (#3750)
-//!   that killed the app's capture. The machine is calm by construction:
+//!   machine (`Adopted | Capturing → Backoff`). It exists because a previous
+//!   per-tick reactive design starved the meeting app of its own microphone
+//!   (observed live 2026-07-07, Meet/Zoom on AirPods): re-evaluating
+//!   displacement every tick off `is_device_actively_streaming` turned every
+//!   transient stream stall into a real close+open of a Bluetooth mic — an
+//!   SCO renegotiation storm (#3750) that killed the app's capture.
 //!
-//!   - we only open our own stream on a mic after the app's use of it has been
-//!     confirmed for [`MIC_CONFIRM_TICKS`] consecutive sweep ticks (the app
-//!     always finishes acquiring first — we never race it);
+//!   The machine is **event-driven** (macOS): while piggybacking, the sweep
+//!   registers CoreAudio property listeners (`piggyback_listeners`) on the
+//!   system default-input selector and the tapped processes' input-device /
+//!   is-running-input selectors. Any change wakes the device monitor
+//!   immediately, so the sweep runs — and the machine follows — the instant
+//!   CoreAudio publishes an in-app mic switch, not up to a poll interval
+//!   later. The 2s tick remains purely as reconciliation (and is the only
+//!   driver on Windows). Latency comes from events; SAFETY comes from these
+//!   invariants, not from waiting:
+//!
+//!   - a resolved mic is followed on the FIRST sweep pass that observes it.
+//!     There is no confirm delay: the wake fires only after the app's device
+//!     acquisition is already visible in CoreAudio (and the poll path is a
+//!     full cadence behind), so the machine can never race the app mid-SCO
+//!     negotiation the way the old same-tick reactive open could;
 //!   - a mic that is already running as an enabled device is **adopted** with
 //!     zero device I/O, and the machine never opens, closes, or restarts it;
-//!   - an open failure or a dead capture stream backs off exponentially
-//!     ([`MIC_OPEN_BACKOFF_SECS`]) through a single reopen point — never a
-//!     per-tick retry hammer, and never a health-driven stop/reopen of the mic
-//!     the meeting app is using;
+//!   - a WORKING stream is never closed or reopened — flapping liveness
+//!     observations produce zero device actions;
+//!   - an open failure or a dead capture stream retries FAST (the next event
+//!     or tick, floored at [`MIC_RETRY_FLOOR_MS`]) through a single reopen
+//!     point with at most one in-flight open per device — during a meeting
+//!     the mic must come back ASAP. Only a PERSISTENTLY failing device
+//!     ([`MIC_PERSISTENT_FAILURES`] consecutive failures spanning
+//!     [`MIC_PERSISTENT_WINDOW_MS`]) slows to [`MIC_PERSISTENT_RETRY_MS`]
+//!     retries (warned once), so a truly broken device can't hammer a
+//!     Bluetooth link forever;
 //!   - displacement of the user's other mics is a **latch**: suspended once
 //!     when a followed mic is confirmed delivering, lifted once when the app
 //!     releases its mics, the resolved capture stays dead past
@@ -127,38 +143,59 @@ pub(crate) enum MicHealthAction {
 
 // --- Near-end mic-follow state machine ---------------------------------------
 
-/// Consecutive sweep ticks (2s cadence) a resolved mic must be observed before
-/// the machine engages it (~4s settle). The OS reporting the device in the
-/// app's actively-recording set is necessary but not sufficient — the app may
-/// still be mid-acquisition (Bluetooth SCO negotiation takes seconds); opening
-/// our own stream during that window is what used to break the app's capture.
-pub(crate) const MIC_CONFIRM_TICKS: u32 = 2;
-/// Consecutive ticks a followed mic must be absent from the resolved set
+/// How long a followed mic must be continuously absent from the resolved set
 /// before the machine releases it — damps resolver flap during an in-app mic
 /// switch so we don't tear down capture on a single missed enumeration.
-pub(crate) const MIC_RELEASE_TICKS: u32 = 2;
-/// Reopen backoff ladder after a failed open or a dead capture stream:
-/// first retry after 10s, then 30s, then every 60s. NEVER a per-tick retry —
-/// each open of a Bluetooth mic renegotiates the link (#3750), so retries must
-/// be rare and the meeting app must always win contention.
-pub(crate) const MIC_OPEN_BACKOFF_SECS: [u64; 3] = [10, 30, 60];
+/// Deliberately TIME-based, not tick-counted: event wakes can drive sweep
+/// passes milliseconds apart, and a tick count would let a burst compress the
+/// damping window to nothing. One reconciliation tick of wall time.
+pub(crate) const MIC_RELEASE_HOLDOFF_MS: u64 = 2_000;
+/// How long a changed MANUAL-meeting mic-holder pid set must persist before
+/// the sweep adopts it (and rebuilds the tap over it) — damps holder-set flap
+/// (push-to-talk, dictation, helper pid rotation), since every adoption while
+/// the tap streams costs a rebuild. Time-based for the same reason as
+/// [`MIC_RELEASE_HOLDOFF_MS`].
+pub(crate) const MANUAL_PID_ADOPT_HOLDOFF_MS: u64 = 2_000;
+/// Floor between open attempts on the same mic after a failed open or a dead
+/// capture stream. In-meeting failures retry FAST — on the next event wake or
+/// reconciliation tick — because a meeting without the mic is dead air; the
+/// floor only guarantees at most one attempt per ~1.5s window so an event
+/// burst can never turn into a same-second open hammer.
+pub(crate) const MIC_RETRY_FLOOR_MS: u64 = 1_500;
+/// A device is PERSISTENTLY failing once this many consecutive open failures
+/// have accumulated AND they span at least [`MIC_PERSISTENT_WINDOW_MS`]. Both
+/// conditions must hold, so the first ~30s of failures always retry at the
+/// fast floor.
+pub(crate) const MIC_PERSISTENT_FAILURES: u32 = 10;
+/// Minimum elapsed time since the first consecutive failure before the
+/// persistent slowdown can engage. Together with the failure-count threshold
+/// this is the "truly broken device" discriminator: a Bluetooth mic that is
+/// genuinely gone shouldn't be link-renegotiated every 2s forever (#3750).
+pub(crate) const MIC_PERSISTENT_WINDOW_MS: u64 = 30_000;
+/// Retry cadence once a device is persistently failing (warned once).
+pub(crate) const MIC_PERSISTENT_RETRY_MS: u64 = 5_000;
 /// How long the followed mics must be continuously non-delivering before the
 /// displacement latch lifts and the user's other mics come back. Sized well
-/// above any SCO renegotiation transient (seconds) and above one reopen
-/// backoff step, so a recoverable stall never bounces the fallback mics.
+/// above any SCO renegotiation transient (seconds), so a recoverable stall
+/// never bounces the fallback mics.
 pub(crate) const DISPLACEMENT_LIFT_HOLDOFF_MS: u64 = 60_000;
 
-fn mic_backoff_ms(failures: u32) -> u64 {
-    let idx = (failures.saturating_sub(1) as usize).min(MIC_OPEN_BACKOFF_SECS.len() - 1);
-    MIC_OPEN_BACKOFF_SECS[idx] * 1000
+fn is_persistent_failure(failures: u32, first_failure_ms: u64, now_ms: u64) -> bool {
+    failures >= MIC_PERSISTENT_FAILURES
+        && now_ms.saturating_sub(first_failure_ms) >= MIC_PERSISTENT_WINDOW_MS
+}
+
+fn mic_retry_delay_ms(failures: u32, first_failure_ms: u64, now_ms: u64) -> u64 {
+    if is_persistent_failure(failures, first_failure_ms, now_ms) {
+        MIC_PERSISTENT_RETRY_MS
+    } else {
+        MIC_RETRY_FLOOR_MS
+    }
 }
 
 /// Phase of one followed (resolved) meeting mic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MicPhase {
-    /// Resolved, waiting for [`MIC_CONFIRM_TICKS`] consecutive sightings
-    /// before we touch anything.
-    Pending { ticks: u32 },
     /// The user's own enabled stream already carries this mic. The machine
     /// performs ZERO device I/O on an adopted mic — the device monitor owns
     /// that stream's lifecycle, and the mic the meeting app is using is
@@ -166,17 +203,28 @@ pub(crate) enum MicPhase {
     Adopted,
     /// Our session stream is open on this mic.
     Capturing,
-    /// The open failed or our capture stream died. Wait until `retry_at_ms`,
-    /// then retry through the single open point; `failures` drives the
-    /// exponential ladder.
-    Backoff { failures: u32, retry_at_ms: u64 },
+    /// The open failed or our capture stream died. Wait until `retry_at_ms`
+    /// (the fast floor, or the persistent cadence once the failure run is
+    /// long enough), then retry through the single open point. `failures`
+    /// counts the consecutive-failure run; `first_failure_ms` anchors the
+    /// persistent-window check.
+    Backoff {
+        failures: u32,
+        first_failure_ms: u64,
+        retry_at_ms: u64,
+    },
 }
 
 #[derive(Debug)]
 struct MicEntry {
     phase: MicPhase,
-    /// Consecutive ticks this device was absent from the resolved set.
-    missing_ticks: u32,
+    /// When this device was first observed absent from the resolved set
+    /// (`None` = currently present). Released only once the absence persists
+    /// [`MIC_RELEASE_HOLDOFF_MS`] of wall time.
+    missing_since_ms: Option<u64>,
+    /// One-shot: the persistent-failure slowdown for this device was already
+    /// surfaced (the sweep logs it once per device per meeting).
+    persistent_warned: bool,
 }
 
 /// Everything the machine may look at for one tick. Plain data — no OS, no
@@ -200,9 +248,9 @@ pub(crate) struct MicFollowObservation {
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum MicFollowAction {
-    /// Open our session stream on a confirmed resolved mic. Emitted at most
-    /// once per confirm/backoff edge; the sweep MUST report the outcome via
-    /// [`MicFollow::note_open_result`].
+    /// Open our session stream on a resolved mic. Emitted at most once per
+    /// enroll/retry edge (floored by [`MIC_RETRY_FLOOR_MS`]); the sweep MUST
+    /// report the outcome via [`MicFollow::note_open_result`].
     OpenSessionInput(String),
     /// Tear down our session stream (dead handle, or the app released the mic).
     CloseSessionInput(String),
@@ -213,7 +261,7 @@ pub(crate) enum MicFollowAction {
     ResumeInput(String),
     /// A previously displaced mic became the app's resolved mic (in-app mic
     /// switch onto it): clear its suspension flag WITHOUT restarting it — the
-    /// machine now owns its capture through the normal confirm/open path.
+    /// machine now owns its capture through the normal open path.
     UnsuspendInput(String),
 }
 
@@ -237,22 +285,51 @@ impl MicFollow {
     pub(crate) fn tick(&mut self, obs: &MicFollowObservation) -> Vec<MicFollowAction> {
         let mut actions = Vec::new();
 
-        // 1. Enroll newly resolved mics. A device the latch previously
-        //    displaced is handed back: unsuspend (flag only — no restart, the
-        //    app is acquiring it) and let the confirm path take over.
+        // 1. Enroll newly resolved mics and decide their phase on this very
+        //    pass — there is no confirm delay. The observation naming a
+        //    resolved mic was produced either by a CoreAudio property event
+        //    (macOS), which fires only after the app's acquisition is already
+        //    visible to the HAL, or by the reconciliation tick (Windows /
+        //    fallback), which is itself a full cadence behind the
+        //    acquisition. Either way, by the time the device appears in the
+        //    app's actively-recording set, the app HAS it — the mid-SCO race
+        //    the old confirm ticks guarded against cannot occur here.
+        //    A device the latch previously displaced is handed back:
+        //    unsuspend (flag only — no restart) and follow it through the
+        //    normal open path below.
         for dev in &obs.resolved_inputs {
-            if !self.entries.contains_key(dev) {
-                if self.displaced.remove(dev) {
-                    actions.push(MicFollowAction::UnsuspendInput(dev.clone()));
-                }
-                self.entries.insert(
-                    dev.clone(),
-                    MicEntry {
-                        phase: MicPhase::Pending { ticks: 0 },
-                        missing_ticks: 0,
-                    },
-                );
+            if self.entries.contains_key(dev) {
+                continue;
             }
+            if self.displaced.remove(dev) {
+                actions.push(MicFollowAction::UnsuspendInput(dev.clone()));
+            }
+            let phase = if obs.running_inputs.contains(dev) {
+                // The user's enabled stream already carries it.
+                MicPhase::Adopted
+            } else if obs.session_devices.contains(dev) {
+                // Already open (machine rebuilt mid-meeting).
+                MicPhase::Capturing
+            } else {
+                actions.push(MicFollowAction::OpenSessionInput(dev.clone()));
+                // `note_open_result` moves us to Capturing or Backoff;
+                // pre-arm a pessimistic retry so a missed callback can never
+                // turn into a per-pass open hammer (single in-flight open per
+                // device, floored by MIC_RETRY_FLOOR_MS).
+                MicPhase::Backoff {
+                    failures: 0,
+                    first_failure_ms: obs.now_ms,
+                    retry_at_ms: obs.now_ms + MIC_RETRY_FLOOR_MS,
+                }
+            };
+            self.entries.insert(
+                dev.clone(),
+                MicEntry {
+                    phase,
+                    missing_since_ms: None,
+                    persistent_warned: false,
+                },
+            );
         }
 
         // 2. Advance every followed mic.
@@ -264,36 +341,24 @@ impl MicFollow {
         for dev in &names {
             let entry = self.entries.get_mut(dev).expect("key from entries");
             if obs.resolved_inputs.contains(dev) {
-                entry.missing_ticks = 0;
+                entry.missing_since_ms = None;
                 match entry.phase {
-                    MicPhase::Pending { ticks } => {
-                        let ticks = ticks + 1;
-                        entry.phase = if ticks < MIC_CONFIRM_TICKS {
-                            MicPhase::Pending { ticks }
-                        } else if obs.running_inputs.contains(dev) {
-                            // The user's enabled stream already carries it.
-                            MicPhase::Adopted
-                        } else if obs.session_devices.contains(dev) {
-                            // Already open (machine rebuilt mid-meeting).
-                            MicPhase::Capturing
-                        } else {
-                            actions.push(MicFollowAction::OpenSessionInput(dev.clone()));
-                            // `note_open_result` moves us to Capturing or
-                            // Backoff; pre-arm a pessimistic retry so a
-                            // missed callback can never turn into a
-                            // per-tick open hammer.
-                            MicPhase::Backoff {
-                                failures: 0,
-                                retry_at_ms: obs.now_ms + mic_backoff_ms(1),
-                            }
-                        };
-                    }
                     MicPhase::Adopted => {
                         if !obs.running_inputs.contains(dev) {
                             // The enabled stream was disenrolled under us
                             // (user disabled the device / default moved away).
-                            // Re-confirm, then follow with our own stream.
-                            entry.phase = MicPhase::Pending { ticks: 0 };
+                            // Follow with our own stream immediately — the
+                            // app still records from this mic.
+                            if obs.session_devices.contains(dev) {
+                                entry.phase = MicPhase::Capturing;
+                            } else {
+                                actions.push(MicFollowAction::OpenSessionInput(dev.clone()));
+                                entry.phase = MicPhase::Backoff {
+                                    failures: 0,
+                                    first_failure_ms: obs.now_ms,
+                                    retry_at_ms: obs.now_ms + MIC_RETRY_FLOOR_MS,
+                                };
+                            }
                         }
                         // A dead-but-enrolled enabled stream is the device
                         // monitor's to recover — deliberately no action here.
@@ -301,36 +366,48 @@ impl MicFollow {
                     MicPhase::Capturing => {
                         if !obs.session_streaming.contains(dev) {
                             // Our stream died (device drop / BT renegotiation).
-                            // Free the dead handle now; reopen only after
-                            // backoff — never trade the app's link stability
-                            // for our own capture.
+                            // Free the dead handle now; the single open point
+                            // reopens it on the next pass past the fast floor
+                            // — during a meeting the mic comes back ASAP.
                             actions.push(MicFollowAction::CloseSessionInput(dev.clone()));
                             entry.phase = MicPhase::Backoff {
                                 failures: 1,
-                                retry_at_ms: obs.now_ms + mic_backoff_ms(1),
+                                first_failure_ms: obs.now_ms,
+                                retry_at_ms: obs.now_ms + MIC_RETRY_FLOOR_MS,
                             };
                         }
                     }
-                    MicPhase::Backoff { failures, retry_at_ms } => {
+                    MicPhase::Backoff {
+                        failures,
+                        first_failure_ms,
+                        retry_at_ms,
+                    } => {
                         if obs.now_ms >= retry_at_ms {
                             if obs.running_inputs.contains(dev) {
                                 // The enabled pass brought it back meanwhile.
                                 entry.phase = MicPhase::Adopted;
                             } else {
                                 actions.push(MicFollowAction::OpenSessionInput(dev.clone()));
-                                // Pre-arm the next retry; `note_open_result`
+                                // Pre-arm the next retry at the cadence the
+                                // NEXT failure would earn; `note_open_result`
                                 // overrides with the real outcome.
                                 entry.phase = MicPhase::Backoff {
                                     failures,
-                                    retry_at_ms: obs.now_ms + mic_backoff_ms(1),
+                                    first_failure_ms,
+                                    retry_at_ms: obs.now_ms
+                                        + mic_retry_delay_ms(
+                                            failures.saturating_add(1),
+                                            first_failure_ms,
+                                            obs.now_ms,
+                                        ),
                                 };
                             }
                         }
                     }
                 }
             } else {
-                entry.missing_ticks += 1;
-                if entry.missing_ticks >= MIC_RELEASE_TICKS {
+                let since = *entry.missing_since_ms.get_or_insert(obs.now_ms);
+                if obs.now_ms.saturating_sub(since) >= MIC_RELEASE_HOLDOFF_MS {
                     // The app released this mic (or switched away). Close our
                     // session stream if we own one; an adopted (enabled)
                     // stream is the user's — leave it running, the latch below
@@ -390,34 +467,51 @@ impl MicFollow {
     }
 
     /// Report the outcome of an [`MicFollowAction::OpenSessionInput`]. Success
-    /// moves the mic to `Capturing`; failure schedules the next retry on the
-    /// exponential ladder.
-    pub(crate) fn note_open_result(&mut self, device: &str, ok: bool, now_ms: u64) {
-        if let Some(entry) = self.entries.get_mut(device) {
-            entry.phase = if ok {
-                MicPhase::Capturing
-            } else {
-                let failures = match entry.phase {
-                    MicPhase::Backoff { failures, .. } => failures.saturating_add(1),
-                    _ => 1,
-                };
-                MicPhase::Backoff {
-                    failures,
-                    retry_at_ms: now_ms + mic_backoff_ms(failures),
-                }
-            };
+    /// moves the mic to `Capturing` (and resets the consecutive-failure run);
+    /// failure schedules the next retry — at the fast floor, or the persistent
+    /// cadence once the run is long enough. Returns `true` exactly when this
+    /// failure crossed the device into persistent-failure mode (the caller
+    /// warns once).
+    pub(crate) fn note_open_result(&mut self, device: &str, ok: bool, now_ms: u64) -> bool {
+        let Some(entry) = self.entries.get_mut(device) else {
+            return false;
+        };
+        if ok {
+            entry.phase = MicPhase::Capturing;
+            entry.persistent_warned = false;
+            return false;
         }
+        let (failures, first_failure_ms) = match entry.phase {
+            MicPhase::Backoff {
+                failures,
+                first_failure_ms,
+                ..
+            } => (failures.saturating_add(1), first_failure_ms),
+            _ => (1, now_ms),
+        };
+        entry.phase = MicPhase::Backoff {
+            failures,
+            first_failure_ms,
+            retry_at_ms: now_ms + mic_retry_delay_ms(failures, first_failure_ms, now_ms),
+        };
+        let crossed =
+            is_persistent_failure(failures, first_failure_ms, now_ms) && !entry.persistent_warned;
+        if crossed {
+            entry.persistent_warned = true;
+        }
+        crossed
     }
 
-    /// Force a capturing mic onto the backoff ladder (used by the mic
+    /// Force a capturing mic through the single reopen point (used by the mic
     /// capture-health pass: sustained zeros while the app records → close our
-    /// stream, reopen through the single open point after backoff — the
-    /// resolved mic is never stop/started inline).
+    /// stream now, reopen on the next pass past the fast floor — the resolved
+    /// mic is never stop/started inline).
     pub(crate) fn force_backoff(&mut self, device: &str, now_ms: u64) {
         if let Some(entry) = self.entries.get_mut(device) {
             entry.phase = MicPhase::Backoff {
                 failures: 1,
-                retry_at_ms: now_ms + mic_backoff_ms(1),
+                first_failure_ms: now_ms,
+                retry_at_ms: now_ms + MIC_RETRY_FLOOR_MS,
             };
         }
     }
@@ -453,7 +547,7 @@ pub(crate) struct PiggybackObservation {
     /// with no mic-holders observed yet) — stable path. Some(pids) = tap
     /// these processes: the single sensor-attributed pid for detected
     /// meetings, or every mic-holding process for MANUAL meetings (built by
-    /// the sweep, sorted + deduped, damped by two-tick adoption).
+    /// the sweep, sorted + deduped, damped by persistence-gated adoption).
     pub meeting: Option<Vec<i32>>,
     /// Currently registered session devices (display names).
     pub session_devices: HashSet<String>,
@@ -542,7 +636,7 @@ pub(crate) fn decide_piggyback(obs: &PiggybackObservation) -> Vec<PiggybackActio
     } else if !obs.tap_built_pids.is_empty() && obs.tap_built_pids != meeting_pids {
         // Tap is healthy but the pid set moved under it (a mic-holding app
         // joined or left a MANUAL meeting; the sweep already damped the set
-        // with two-tick adoption). Deliberate rebuild over the new set —
+        // with persistence-gated adoption). Deliberate rebuild over the new set —
         // suspensions stay, no failure strike, no cooldown gap.
         actions.push(PiggybackAction::RetapForPidChange {
             pids: meeting_pids.to_vec(),
@@ -669,12 +763,13 @@ pub(crate) struct PiggybackState {
     /// can spot the mic-holder set changing under a live tap.
     pub tap_pids: Vec<i32>,
     /// MANUAL meetings only: the currently-adopted mic-holder pid set (sorted)
-    /// and the candidate awaiting its second consecutive sighting. Two-tick
-    /// adoption (~4s at the 2s cadence) damps holder-set flap (push-to-talk,
-    /// dictation, helper pid rotation) — every adoption while the tap streams
-    /// costs a rebuild. Reset on meeting end.
+    /// and the candidate set awaiting adoption with when it was first seen
+    /// (wall ms). A changed set is adopted only after persisting
+    /// [`MANUAL_PID_ADOPT_HOLDOFF_MS`] — damps holder-set flap (push-to-talk,
+    /// dictation, helper pid rotation), since every adoption while the tap
+    /// streams costs a rebuild. Reset on meeting end.
     pub manual_pids_adopted: Vec<i32>,
-    pub manual_pids_candidate: Option<Vec<i32>>,
+    pub manual_pids_candidate: Option<(Vec<i32>, u64)>,
     /// One-shot per meeting: the MANUAL-meeting mic-holder enumeration
     /// returned an error (or reported unsupported) and the sweep logged it.
     /// Errored ticks keep the previously adopted pid set in force instead of
@@ -685,20 +780,38 @@ pub(crate) struct PiggybackState {
     /// Near-end mic-follow machine (see the module docs). Reset whenever
     /// piggybacking stops — the disengage teardown owns the device side.
     pub mic_follow: MicFollow,
+    /// macOS: RAII registration of the CoreAudio property listeners that make
+    /// the sweep event-driven (see `piggyback_listeners`). `ensure`d with the
+    /// tapped pid set while piggybacking, `clear`ed on disengage/meeting end;
+    /// `Drop` also clears, so listeners cannot outlive the monitor task.
+    #[cfg(target_os = "macos")]
+    pub listeners: super::piggyback_listeners::PiggybackListenerGuard,
 }
 
-/// Two-tick adoption for a MANUAL meeting's mic-holder pid set: a freshly
-/// enumerated set (sorted, deduped) is adopted only after being seen on two
-/// consecutive ticks; until then the previously-adopted set stays in force.
-/// Pure state transition — unit-tested directly.
-pub(crate) fn adopt_manual_pids(state: &mut PiggybackState, fresh: Vec<i32>) -> Vec<i32> {
+/// Persistence-damped adoption for a MANUAL meeting's mic-holder pid set: a
+/// freshly enumerated set (sorted, deduped) is adopted only once it has held
+/// still for [`MANUAL_PID_ADOPT_HOLDOFF_MS`] of wall time; until then the
+/// previously-adopted set stays in force. Time-based rather than
+/// sighting-counted so event-driven wakes (sweep passes milliseconds apart)
+/// cannot compress the damping window. Pure state transition — unit-tested
+/// directly.
+pub(crate) fn adopt_manual_pids(
+    state: &mut PiggybackState,
+    fresh: Vec<i32>,
+    now_ms: u64,
+) -> Vec<i32> {
     if fresh == state.manual_pids_adopted {
         state.manual_pids_candidate = None;
-    } else if state.manual_pids_candidate.as_ref() == Some(&fresh) {
-        state.manual_pids_adopted = fresh;
-        state.manual_pids_candidate = None;
     } else {
-        state.manual_pids_candidate = Some(fresh);
+        match &state.manual_pids_candidate {
+            Some((candidate, first_seen_ms)) if *candidate == fresh => {
+                if now_ms.saturating_sub(*first_seen_ms) >= MANUAL_PID_ADOPT_HOLDOFF_MS {
+                    state.manual_pids_adopted = fresh;
+                    state.manual_pids_candidate = None;
+                }
+            }
+            _ => state.manual_pids_candidate = Some((fresh, now_ms)),
+        }
     }
     state.manual_pids_adopted.clone()
 }
@@ -707,15 +820,16 @@ pub(crate) fn adopt_manual_pids(state: &mut PiggybackState, fresh: Vec<i32>) -> 
 /// adoption. A failed (`error: Some`) or unsupported snapshot carries
 /// `processes: []`, which at the pid level is indistinguishable from "no mic
 /// holders" — feeding it into [`adopt_manual_pids`] would adopt the empty set
-/// after two consecutive error ticks and tear down a healthy piggyback. So on
-/// error the previously adopted set stays in force untouched (candidate
-/// included: an error tick neither confirms nor refutes a pending candidate)
-/// and only a healthy snapshot feeds two-tick adoption. Pure state
+/// after a run of error ticks and tear down a healthy piggyback. So on error
+/// the previously adopted set stays in force untouched (candidate included:
+/// an error tick neither confirms nor refutes a pending candidate) and only a
+/// healthy snapshot feeds persistence-damped adoption. Pure state
 /// transition — unit-tested directly; the sweep owns the once-per-meeting
 /// error logging.
 pub(crate) fn adopt_manual_snapshot(
     state: &mut PiggybackState,
     snapshot: &crate::meeting_processes::AudioProcessSnapshot,
+    now_ms: u64,
 ) -> Vec<i32> {
     if !snapshot.supported || snapshot.error.is_some() {
         return state.manual_pids_adopted.clone();
@@ -723,7 +837,7 @@ pub(crate) fn adopt_manual_snapshot(
     let mut fresh: Vec<i32> = snapshot.processes.iter().filter_map(|p| p.pid).collect();
     fresh.sort_unstable();
     fresh.dedup();
-    adopt_manual_pids(state, fresh)
+    adopt_manual_pids(state, fresh, now_ms)
 }
 
 /// Increments `state.tap_strikes` by one and, on the edge where that crosses
@@ -997,7 +1111,7 @@ pub(crate) async fn run_meeting_piggyback_sweep(
     //    meeting with no mic-holder observed) — also stable. MANUAL meetings
     //    carry no sensor pid ever, so the sweep derives the set itself: every
     //    process currently holding a microphone (the enumerator filters
-    //    screenpipe's own), damped by two-tick adoption so a flapping holder
+    //    screenpipe's own), damped by persistence-gated adoption so a flapping holder
     //    set (push-to-talk, dictation) doesn't rebuild-storm the tap.
     let engaged = flag_on;
     let tap_avail = tap_available();
@@ -1030,7 +1144,7 @@ pub(crate) async fn run_meeting_piggyback_sweep(
                         state.manual_enum_error_logged = true;
                     }
                 }
-                adopt_manual_snapshot(state, &snapshot)
+                adopt_manual_snapshot(state, &snapshot, now_ms())
             } else {
                 Vec::new()
             }
@@ -1042,11 +1156,13 @@ pub(crate) async fn run_meeting_piggyback_sweep(
 
     // 3. Resolve the meeting app's open mics — only when actually piggybacking
     //    on known pids. Skipping it otherwise keeps the flag-off / no-meeting
-    //    paths free of any OS enumeration (and side-effect free). Runs on the
-    //    2s monitor cadence rather than the ~500ms the spec sketches; that's
-    //    coarser than ideal but well inside a 30s transcription segment, so a
-    //    mic swap is still picked up promptly. Multi-pid (manual meetings):
-    //    the union across all tapped processes, first-seen order, deduped.
+    //    paths free of any OS enumeration (and side-effect free). On macOS the
+    //    sweep is event-driven (the listeners registered below wake the
+    //    monitor the instant the app's input state changes), so this
+    //    resolution runs — and a mic swap is followed — immediately after the
+    //    change; the 2s cadence is only the reconciliation floor (and the
+    //    Windows path). Multi-pid (manual meetings): the union across all
+    //    tapped processes, first-seen order, deduped.
     let resolved_inputs: Vec<String> = if engaged && tap_avail && !meeting_pids.is_empty() {
         let mut seen = HashSet::new();
         let mut out = Vec::new();
@@ -1244,6 +1360,22 @@ pub(crate) async fn run_meeting_piggyback_sweep(
     }
 
     let piggybacking_now = engaged && tap_avail && !meeting_pids.is_empty();
+
+    // Event-wake registration (macOS): while piggybacking, CoreAudio property
+    // listeners on the system default-input selector and the tapped
+    // processes' input-device / is-running-input selectors wake the monitor
+    // loop the instant anything changes, so the next sweep pass (and the
+    // MicFollow tick below) runs immediately instead of up to 2s later. The
+    // guard is idempotent per pid and reconciles when the tapped set changes
+    // mid-meeting (manual meetings). Cleared on disengage/meeting end.
+    #[cfg(target_os = "macos")]
+    {
+        if piggybacking_now {
+            state.listeners.ensure(&meeting_pids);
+        } else {
+            state.listeners.clear();
+        }
+    }
     // Piggybacking RESUMES (a second tap/mic cycle within the same meeting,
     // e.g. after a pid flap or a tap rebuild): clear the per-cycle fold guard
     // so the next stop/meeting-end fold isn't silently dropped. The guard is
@@ -1275,10 +1407,7 @@ pub(crate) async fn run_meeting_piggyback_sweep(
                         Ok(device) => {
                             match audio_manager.start_session_device(&device, None).await {
                                 Ok(()) => {
-                                    info!(
-                                        "[MEETING_PIGGYBACK] following meeting mic {} (confirmed for {} ticks)",
-                                        name, MIC_CONFIRM_TICKS
-                                    );
+                                    info!("[MEETING_PIGGYBACK] following meeting mic {}", name);
                                     true
                                 }
                                 Err(e) => {
@@ -1301,7 +1430,7 @@ pub(crate) async fn run_meeting_piggyback_sweep(
                                         state.mic_fail_reported = true;
                                     } else {
                                         warn!(
-                                            "[MEETING_PIGGYBACK] failed to open meeting mic {} (backing off): {}",
+                                            "[MEETING_PIGGYBACK] failed to open meeting mic {} (retrying): {}",
                                             name, e
                                         );
                                     }
@@ -1311,7 +1440,20 @@ pub(crate) async fn run_meeting_piggyback_sweep(
                         }
                         Err(_) => false,
                     };
-                    state.mic_follow.note_open_result(&name, opened, now);
+                    if state.mic_follow.note_open_result(&name, opened, now) {
+                        // Crossed into persistent-failure mode: the fast
+                        // retry window is over, slow down so a truly broken
+                        // device can't renegotiate a Bluetooth link every
+                        // pass forever (#3750). Warned once per device per
+                        // meeting.
+                        warn!(
+                            "[MEETING_PIGGYBACK] mic {} still failing to open after {}+ attempts over {}s — slowing retries to {}s",
+                            name,
+                            MIC_PERSISTENT_FAILURES,
+                            MIC_PERSISTENT_WINDOW_MS / 1000,
+                            MIC_PERSISTENT_RETRY_MS / 1000
+                        );
+                    }
                 }
                 MicFollowAction::CloseSessionInput(name) => {
                     if let Ok(device) = parse_audio_device(&name) {
@@ -1502,7 +1644,7 @@ pub(crate) async fn run_meeting_piggyback_sweep(
         let _ = screenpipe_events::send_event("piggyback_meeting_summary", summary);
         state.telemetry = MeetingTelemetry::default();
         // Manual pid-set bookkeeping is meeting-scoped: the next manual
-        // meeting starts from an empty adopted set (two-tick warm-up) and
+        // meeting starts from an empty adopted set (persistence warm-up) and
         // gets its own one-shot enumeration-error log.
         state.manual_pids_adopted = Vec::new();
         state.manual_pids_candidate = None;
@@ -1622,20 +1764,42 @@ mod tests {
     }
 
     #[test]
-    fn manual_pid_adoption_requires_two_consecutive_sightings() {
+    fn manual_pid_adoption_requires_persistence_not_sighting_count() {
         let mut state = PiggybackState::default();
+        let t0 = 10_000u64;
         // First sighting: candidate only — the previously-adopted (empty) set
         // stays in force.
-        assert!(adopt_manual_pids(&mut state, vec![10, 20]).is_empty());
-        // Second consecutive sighting: adopted.
-        assert_eq!(adopt_manual_pids(&mut state, vec![10, 20]), vec![10, 20]);
+        assert!(adopt_manual_pids(&mut state, vec![10, 20], t0).is_empty());
+        // Re-sightings INSIDE the holdoff must not adopt — event wakes can
+        // drive sweep passes milliseconds apart, and a sighting count would
+        // let a burst compress the damping window to nothing.
+        assert!(adopt_manual_pids(&mut state, vec![10, 20], t0 + 200).is_empty());
+        assert!(adopt_manual_pids(&mut state, vec![10, 20], t0 + 400).is_empty());
+        // Held still for the full holdoff: adopted.
+        assert_eq!(
+            adopt_manual_pids(&mut state, vec![10, 20], t0 + MANUAL_PID_ADOPT_HOLDOFF_MS),
+            vec![10, 20]
+        );
         // A flapping set never displaces the adopted one...
-        assert_eq!(adopt_manual_pids(&mut state, vec![10]), vec![10, 20]);
-        assert_eq!(adopt_manual_pids(&mut state, vec![10, 30]), vec![10, 20]);
-        // ...until it holds still for two ticks.
-        assert_eq!(adopt_manual_pids(&mut state, vec![10, 30]), vec![10, 30]);
+        assert_eq!(
+            adopt_manual_pids(&mut state, vec![10], t0 + 4_000),
+            vec![10, 20]
+        );
+        assert_eq!(
+            adopt_manual_pids(&mut state, vec![10, 30], t0 + 6_000),
+            vec![10, 20]
+        );
+        // ...until it holds still for the holdoff.
+        assert_eq!(
+            adopt_manual_pids(&mut state, vec![10, 30], t0 + 8_000),
+            vec![10, 30]
+        );
         // Seeing the adopted set again clears any stale candidate.
-        assert_eq!(adopt_manual_pids(&mut state, vec![10, 30]), vec![10, 30]);
+        assert_eq!(
+            adopt_manual_pids(&mut state, vec![10, 30], t0 + 10_000),
+            vec![10, 30]
+        );
+        assert!(state.manual_pids_candidate.is_none());
     }
 
     #[test]
@@ -1690,21 +1854,31 @@ mod tests {
     #[test]
     fn enumeration_error_keeps_adopted_pids_in_force() {
         let mut state = PiggybackState::default();
-        // Healthy enumeration adopts {10, 20} over two ticks.
+        let t0 = 10_000u64;
+        // Healthy enumeration adopts {10, 20} once it persists the holdoff.
         let healthy = snapshot_ok(vec![20, 10, 10]); // unsorted + dup: normalized
-        assert!(adopt_manual_snapshot(&mut state, &healthy).is_empty());
-        assert_eq!(adopt_manual_snapshot(&mut state, &healthy), vec![10, 20]);
+        assert!(adopt_manual_snapshot(&mut state, &healthy, t0).is_empty());
+        assert_eq!(
+            adopt_manual_snapshot(&mut state, &healthy, t0 + 2_000),
+            vec![10, 20]
+        );
 
         // An errored snapshot (processes:[] + error:Some) must NOT feed
-        // adoption — two consecutive error ticks would otherwise adopt the
-        // empty set and tear down a healthy piggyback.
+        // adoption — a run of error ticks would otherwise adopt the empty
+        // set and tear down a healthy piggyback.
         let errored = crate::meeting_processes::AudioProcessSnapshot {
             supported: true,
             processes: Vec::new(),
             error: Some("enumeration blew up".into()),
         };
-        assert_eq!(adopt_manual_snapshot(&mut state, &errored), vec![10, 20]);
-        assert_eq!(adopt_manual_snapshot(&mut state, &errored), vec![10, 20]);
+        assert_eq!(
+            adopt_manual_snapshot(&mut state, &errored, t0 + 4_000),
+            vec![10, 20]
+        );
+        assert_eq!(
+            adopt_manual_snapshot(&mut state, &errored, t0 + 6_000),
+            vec![10, 20]
+        );
         assert!(
             state.manual_pids_candidate.is_none(),
             "error ticks must not seed a candidate"
@@ -1712,22 +1886,28 @@ mod tests {
 
         // An unsupported snapshot is the same non-signal.
         let unsupported = crate::meeting_processes::AudioProcessSnapshot::unsupported("plan9");
-        assert_eq!(adopt_manual_snapshot(&mut state, &unsupported), vec![10, 20]);
+        assert_eq!(
+            adopt_manual_snapshot(&mut state, &unsupported, t0 + 8_000),
+            vec![10, 20]
+        );
 
         // Recovery: a HEALTHY empty snapshot ("everyone hung up their mic")
-        // does feed adoption again, through the normal two-tick damping.
+        // does feed adoption again, through the normal persistence damping.
         let empty_ok = snapshot_ok(vec![]);
-        assert_eq!(adopt_manual_snapshot(&mut state, &empty_ok), vec![10, 20]);
-        assert!(adopt_manual_snapshot(&mut state, &empty_ok).is_empty());
+        assert_eq!(
+            adopt_manual_snapshot(&mut state, &empty_ok, t0 + 10_000),
+            vec![10, 20]
+        );
+        assert!(adopt_manual_snapshot(&mut state, &empty_ok, t0 + 12_000).is_empty());
     }
 
     #[test]
     fn enumeration_error_leaves_pending_candidate_as_is() {
-        // A candidate awaiting its second sighting survives an error tick
+        // A candidate awaiting its persistence holdoff survives an error tick
         // untouched: the error neither confirms nor refutes it.
         let mut state = PiggybackState {
             manual_pids_adopted: vec![10, 20],
-            manual_pids_candidate: Some(vec![10, 30]),
+            manual_pids_candidate: Some((vec![10, 30], 10_000)),
             ..Default::default()
         };
         let errored = crate::meeting_processes::AudioProcessSnapshot {
@@ -1735,11 +1915,14 @@ mod tests {
             processes: Vec::new(),
             error: Some("transient".into()),
         };
-        assert_eq!(adopt_manual_snapshot(&mut state, &errored), vec![10, 20]);
-        assert_eq!(state.manual_pids_candidate, Some(vec![10, 30]));
-        // Its next healthy sighting still completes adoption.
         assert_eq!(
-            adopt_manual_snapshot(&mut state, &snapshot_ok(vec![30, 10])),
+            adopt_manual_snapshot(&mut state, &errored, 11_000),
+            vec![10, 20]
+        );
+        assert_eq!(state.manual_pids_candidate, Some((vec![10, 30], 10_000)));
+        // Its next healthy sighting past the holdoff still completes adoption.
+        assert_eq!(
+            adopt_manual_snapshot(&mut state, &snapshot_ok(vec![30, 10]), 12_000),
             vec![10, 30]
         );
     }
@@ -1837,13 +2020,13 @@ mod tests {
 
     // --- Near-end mic-follow machine -----------------------------------------
     //
-    // These specify the CALM machine that replaced the per-tick reactive
-    // near-end after the 2026-07-07 regression (Meet/Zoom starved of their own
-    // mic by open/close churn — see the module docs): no open before the app's
-    // use of the mic is confirmed, no per-tick retries, and no suspend/resume
-    // oscillation, ever.
+    // These specify the EVENT-DRIVEN calm machine (see the module docs): a
+    // resolved mic is followed on the first pass that observes it (the wake
+    // fires after the app's acquisition is visible — no confirm delay), open
+    // failures retry fast with a small floor, a WORKING stream is never
+    // closed/reopened, and displacement is a latch that can never oscillate.
 
-    const TICK_MS: u64 = 2_000; // sweep cadence
+    const TICK_MS: u64 = 2_000; // reconciliation cadence (event wakes run sooner)
 
     fn mf_obs(now_ms: u64) -> MicFollowObservation {
         MicFollowObservation {
@@ -1853,42 +2036,45 @@ mod tests {
     }
 
     #[test]
-    fn resolved_mic_produces_no_open_until_confirmed() {
+    fn resolved_mic_opens_on_first_observed_pass() {
         let mut m = MicFollow::default();
         let mut obs = mf_obs(TICK_MS);
         obs.resolved_inputs = vec!["Rode NT (input)".to_string()];
-        // Tick 1: the app may still be mid-acquisition (BT SCO negotiation) —
-        // we must not race it.
-        assert!(m.tick(&obs).is_empty(), "no open on first sighting");
-        // Tick 2: confirmed — exactly one open.
-        obs.now_ms += TICK_MS;
+        // The very first pass that observes the resolved mic follows it —
+        // event wakes fire only after the app's device change is visible in
+        // CoreAudio, so there is nothing left to wait for.
         assert_eq!(
             m.tick(&obs),
             vec![MicFollowAction::OpenSessionInput("Rode NT (input)".to_string())]
         );
-        m.note_open_result("Rode NT (input)", true, obs.now_ms);
+        assert!(!m.note_open_result("Rode NT (input)", true, obs.now_ms));
         assert!(m.is_capturing("Rode NT (input)"));
-        // Steady state: zero actions.
-        obs.now_ms += TICK_MS;
+        // Steady state: zero actions — a working stream is never touched.
         obs.session_devices = ["Rode NT (input)".to_string()].into();
         obs.session_streaming = ["Rode NT (input)".to_string()].into();
-        assert!(m.tick(&obs).is_empty());
+        for _ in 0..30 {
+            obs.now_ms += TICK_MS;
+            assert!(
+                m.tick(&obs).is_empty(),
+                "a healthy capturing stream must never emit device actions"
+            );
+        }
     }
 
     #[test]
     fn enabled_resolved_mic_adopts_with_zero_device_actions() {
         // The meeting app uses the mic screenpipe already records (the common
-        // case). The machine must adopt it without ANY device I/O — the mic
-        // the app is using is sacred.
+        // case). The machine must adopt it on the first pass without ANY
+        // device I/O — the mic the app is using is sacred.
         let mut m = MicFollow::default();
         let mut obs = mf_obs(TICK_MS);
         obs.resolved_inputs = vec!["Ezra's AirPods Max (input)".to_string()];
         obs.running_inputs = vec!["Ezra's AirPods Max (input)".to_string()];
         obs.running_streaming = ["Ezra's AirPods Max (input)".to_string()].into();
-        assert!(m.tick(&obs).is_empty());
-        obs.now_ms += TICK_MS;
         assert!(m.tick(&obs).is_empty(), "adoption must be action-free");
         assert!(!m.is_capturing("Ezra's AirPods Max (input)"));
+        obs.now_ms += TICK_MS;
+        assert!(m.tick(&obs).is_empty());
     }
 
     #[test]
@@ -1904,9 +2090,7 @@ mod tests {
         obs.resolved_inputs = vec![mic.clone()];
         obs.running_inputs = vec![mic.clone(), other.clone()];
         obs.running_streaming = [mic.clone()].into();
-        assert!(m.tick(&obs).is_empty());
-        obs.now_ms += TICK_MS;
-        // Confirmation tick: adopt + latch displacement of the other mic.
+        // First pass: adopt + latch displacement of the other mic.
         assert_eq!(m.tick(&obs), vec![MicFollowAction::SuspendInput(other.clone())]);
         obs.running_inputs = vec![mic.clone()]; // the sweep stopped `other`
         // 25 ticks (~50s) of liveness flapping: strictly zero actions.
@@ -1925,67 +2109,117 @@ mod tests {
     }
 
     #[test]
-    fn open_failure_backs_off_exponentially_never_next_tick() {
+    fn open_failure_retries_on_the_next_tick_never_within_the_floor() {
         let mut m = MicFollow::default();
         let mic = "Rode NT (input)".to_string();
         let mut obs = mf_obs(TICK_MS);
         obs.resolved_inputs = vec![mic.clone()];
-        assert!(m.tick(&obs).is_empty());
-        obs.now_ms += TICK_MS; // t=4s: confirmed → first open
         assert_eq!(m.tick(&obs), vec![MicFollowAction::OpenSessionInput(mic.clone())]);
-        m.note_open_result(&mic, false, obs.now_ms);
-        let fail_at = obs.now_ms;
+        assert!(!m.note_open_result(&mic, false, obs.now_ms));
 
-        // Expected retry gaps after consecutive failures: 10s, 30s, then 60s.
-        let mut expect_retry = fail_at + 10_000;
-        for gap in [30_000u64, 60_000, 60_000] {
-            // Every tick before the deadline must be action-free.
-            while obs.now_ms + TICK_MS < expect_retry {
-                obs.now_ms += TICK_MS;
-                assert!(
-                    m.tick(&obs).is_empty(),
-                    "no retry before backoff deadline (now={})",
-                    obs.now_ms
-                );
-            }
-            obs.now_ms = expect_retry;
-            assert_eq!(
-                m.tick(&obs),
-                vec![MicFollowAction::OpenSessionInput(mic.clone())],
-                "retry expected at {}",
-                expect_retry
-            );
-            m.note_open_result(&mic, false, obs.now_ms);
-            expect_retry = obs.now_ms + gap;
-        }
+        // An event wake inside the retry floor must NOT duplicate the open —
+        // at most one in-flight attempt per device per floor window.
+        obs.now_ms += MIC_RETRY_FLOOR_MS / 2;
+        assert!(
+            m.tick(&obs).is_empty(),
+            "no duplicate open inside the retry floor"
+        );
+
+        // The next reconciliation tick is past the floor: retry immediately.
+        // During a meeting the mic must come back ASAP — never a 10-60s wait.
+        obs.now_ms = TICK_MS + TICK_MS;
+        assert_eq!(
+            m.tick(&obs),
+            vec![MicFollowAction::OpenSessionInput(mic.clone())],
+            "failed open must retry within one tick"
+        );
+        assert!(!m.note_open_result(&mic, true, obs.now_ms));
+        assert!(m.is_capturing(&mic));
     }
 
     #[test]
-    fn capture_death_closes_once_then_reopens_after_backoff() {
+    fn persistent_open_failure_slows_after_fast_window_and_warns_once() {
+        // The anti-storm cap: a device that keeps failing retries FAST for the
+        // first ~30s, then (>= MIC_PERSISTENT_FAILURES failures spanning
+        // >= MIC_PERSISTENT_WINDOW_MS) slows to MIC_PERSISTENT_RETRY_MS with
+        // exactly one warning edge.
+        let mut m = MicFollow::default();
+        let mic = "Rode NT (input)".to_string();
+        let mut obs = mf_obs(TICK_MS);
+        obs.resolved_inputs = vec![mic.clone()];
+        let start = obs.now_ms;
+
+        let mut warned = 0u32;
+        let mut opens: Vec<u64> = Vec::new();
+        for _ in 0..40 {
+            // 80s of failing 2s ticks
+            for a in m.tick(&obs) {
+                match a {
+                    MicFollowAction::OpenSessionInput(d) => {
+                        opens.push(obs.now_ms);
+                        if m.note_open_result(&d, false, obs.now_ms) {
+                            warned += 1;
+                        }
+                    }
+                    other => panic!("unexpected action while failing: {other:?}"),
+                }
+            }
+            obs.now_ms += TICK_MS;
+        }
+        assert_eq!(warned, 1, "persistent-failure warning must fire exactly once");
+
+        // Fast window: every retry inside the first MIC_PERSISTENT_WINDOW_MS
+        // arrived at tick cadence (2s) — never slower.
+        let fast_gaps: Vec<u64> = opens
+            .windows(2)
+            .filter(|w| w[1] <= start + MIC_PERSISTENT_WINDOW_MS)
+            .map(|w| w[1] - w[0])
+            .collect();
+        assert!(!fast_gaps.is_empty());
+        assert!(
+            fast_gaps.iter().all(|gap| *gap <= TICK_MS),
+            "the first {}s of failures must retry at tick cadence: {fast_gaps:?}",
+            MIC_PERSISTENT_WINDOW_MS / 1000
+        );
+
+        // Persistent tail: retries settle to the slow cadence — no faster.
+        let slow_gaps: Vec<u64> = opens
+            .windows(2)
+            .filter(|w| w[0] >= start + MIC_PERSISTENT_WINDOW_MS + 2 * TICK_MS)
+            .map(|w| w[1] - w[0])
+            .collect();
+        assert!(slow_gaps.len() >= 2, "expected slow-cadence retries: {opens:?}");
+        assert!(
+            slow_gaps.iter().all(|gap| *gap >= MIC_PERSISTENT_RETRY_MS),
+            "persistent failures must retry no faster than {}s: {slow_gaps:?}",
+            MIC_PERSISTENT_RETRY_MS / 1000
+        );
+    }
+
+    #[test]
+    fn capture_death_closes_once_then_reopens_within_a_tick() {
         let mut m = MicFollow::default();
         let mic = "Rode NT (input)".to_string();
         let mut obs = mf_obs(TICK_MS);
         obs.resolved_inputs = vec![mic.clone()];
         obs.session_devices = [mic.clone()].into();
         obs.session_streaming = [mic.clone()].into();
-        assert!(m.tick(&obs).is_empty());
-        obs.now_ms += TICK_MS;
-        assert!(m.tick(&obs).is_empty()); // confirmed → Capturing (already open)
+        assert!(m.tick(&obs).is_empty()); // already open → Capturing, zero I/O
         assert!(m.is_capturing(&mic));
 
-        // Stream dies: exactly one close, then silence until the backoff.
+        // Stream dies: exactly one close…
         obs.now_ms += TICK_MS;
         obs.session_streaming.clear();
-        let died_at = obs.now_ms;
         assert_eq!(m.tick(&obs), vec![MicFollowAction::CloseSessionInput(mic.clone())]);
         obs.session_devices.clear(); // the sweep closed it
-        while obs.now_ms + TICK_MS < died_at + 10_000 {
-            obs.now_ms += TICK_MS;
-            assert!(m.tick(&obs).is_empty(), "no reopen before backoff");
-        }
-        obs.now_ms = died_at + 10_000;
+        // …no duplicate open inside the retry floor (event-wake burst)…
+        obs.now_ms += MIC_RETRY_FLOOR_MS / 2;
+        assert!(m.tick(&obs).is_empty(), "floor holds after a death");
+        // …then reopen on the very next tick — fast reacquisition, not a
+        // 10-60s backoff.
+        obs.now_ms = 2 * TICK_MS + TICK_MS;
         assert_eq!(m.tick(&obs), vec![MicFollowAction::OpenSessionInput(mic.clone())]);
-        m.note_open_result(&mic, true, obs.now_ms);
+        assert!(!m.note_open_result(&mic, true, obs.now_ms));
         assert!(m.is_capturing(&mic));
     }
 
@@ -2001,9 +2235,7 @@ mod tests {
         obs.running_inputs = vec![other.clone()];
         obs.session_devices = [mic.clone()].into();
         obs.session_streaming = [mic.clone()].into();
-        assert!(m.tick(&obs).is_empty());
-        obs.now_ms += TICK_MS;
-        // Confirmed + delivering → latch.
+        // First pass: already open → Capturing + delivering → latch.
         assert_eq!(m.tick(&obs), vec![MicFollowAction::SuspendInput(other.clone())]);
         obs.running_inputs.clear();
         let last_delivering = obs.now_ms;
@@ -2014,8 +2246,8 @@ mod tests {
         assert_eq!(m.tick(&obs), vec![MicFollowAction::CloseSessionInput(mic.clone())]);
         obs.session_devices.clear();
 
-        // Until the holdoff elapses: reopen attempts only (backoff ladder),
-        // never a Resume.
+        // Until the holdoff elapses: reopen attempts only (fast retries, then
+        // the persistent slowdown), never a Resume.
         let lift_at = last_delivering + DISPLACEMENT_LIFT_HOLDOFF_MS;
         let mut resumed = Vec::new();
         while obs.now_ms + TICK_MS < lift_at {
@@ -2023,7 +2255,7 @@ mod tests {
             for a in m.tick(&obs) {
                 match a {
                     MicFollowAction::OpenSessionInput(d) => {
-                        m.note_open_result(&d, false, obs.now_ms)
+                        m.note_open_result(&d, false, obs.now_ms);
                     }
                     MicFollowAction::ResumeInput(d) => resumed.push(d),
                     other => panic!("unexpected action before holdoff: {other:?}"),
@@ -2048,12 +2280,13 @@ mod tests {
     }
 
     #[test]
-    fn app_mic_switch_follows_after_settle_and_displaces_old_mic() {
+    fn app_mic_switch_follows_on_first_post_event_pass_and_displaces_old_mic() {
         // Meet switches from the (enabled, adopted) AirPods to an external
-        // mic: the machine follows within ~2 ticks of the app HAVING the new
-        // device, then displaces the now-unused old mic. The old mic's enabled
-        // stream is never closed by the machine itself (it is suspended via
-        // the latch — one action, not a churn).
+        // mic: the machine follows on the very first pass that observes the
+        // switch (the event wake fires once the app HAS the new device), then
+        // displaces the now-unused old mic. The old mic's enabled stream is
+        // never closed by the machine itself (it is suspended via the latch —
+        // one action, not a churn).
         let mut m = MicFollow::default();
         let old = "Ezra's AirPods Max (input)".to_string();
         let new = "Rode NT (input)".to_string();
@@ -2061,28 +2294,20 @@ mod tests {
         obs.resolved_inputs = vec![old.clone()];
         obs.running_inputs = vec![old.clone()];
         obs.running_streaming = [old.clone()].into();
-        assert!(m.tick(&obs).is_empty());
-        obs.now_ms += TICK_MS;
         assert!(m.tick(&obs).is_empty()); // adopted
 
-        // The app switches: `new` appears in the resolved set.
+        // The app switches: `new` appears in the resolved set. Follow NOW.
         obs.now_ms += TICK_MS;
         obs.resolved_inputs = vec![new.clone()];
-        assert!(
-            m.tick(&obs).is_empty(),
-            "no action on first sighting of the new mic"
-        );
-        obs.now_ms += TICK_MS;
-        let actions = m.tick(&obs);
         assert_eq!(
-            actions,
+            m.tick(&obs),
             vec![MicFollowAction::OpenSessionInput(new.clone())],
-            "follow the switch once confirmed"
+            "the switch must be followed on the first post-event pass"
         );
-        m.note_open_result(&new, true, obs.now_ms);
+        assert!(!m.note_open_result(&new, true, obs.now_ms));
 
         // New mic delivers → the old (still running, no longer the app's) is
-        // displaced exactly once.
+        // displaced exactly once, after its release damping.
         obs.now_ms += TICK_MS;
         obs.session_devices = [new.clone()].into();
         obs.session_streaming = [new.clone()].into();
@@ -2094,8 +2319,9 @@ mod tests {
     fn switch_onto_displaced_mic_unsuspends_without_restart() {
         // The app switches TO a mic the latch previously suspended: the
         // machine clears the suspension flag (so recovery guards don't fight)
-        // but must NOT restart it — the app is acquiring the device, and our
-        // capture follows through the normal confirm/open path.
+        // but must NOT restart the enabled stream — our capture follows
+        // through its own open on the same pass. Flag-only unsuspend + open,
+        // never a ResumeInput.
         let mut m = MicFollow::default();
         let a = "Ezra's AirPods Max (input)".to_string();
         let b = "MacBook Pro Microphone (input)".to_string();
@@ -2103,8 +2329,6 @@ mod tests {
         obs.resolved_inputs = vec![a.clone()];
         obs.running_inputs = vec![a.clone(), b.clone()];
         obs.running_streaming = [a.clone()].into();
-        assert!(m.tick(&obs).is_empty());
-        obs.now_ms += TICK_MS;
         assert_eq!(m.tick(&obs), vec![MicFollowAction::SuspendInput(b.clone())]);
         obs.running_inputs = vec![a.clone()];
 
@@ -2115,17 +2339,20 @@ mod tests {
         let actions = m.tick(&obs);
         assert_eq!(
             actions,
-            vec![MicFollowAction::UnsuspendInput(b.clone())],
-            "flag-only unsuspend, no restart: {actions:?}"
+            vec![
+                MicFollowAction::UnsuspendInput(b.clone()),
+                MicFollowAction::OpenSessionInput(b.clone()),
+            ],
+            "flag-only unsuspend, then capture follows via the open path"
         );
-        obs.now_ms += TICK_MS;
-        let actions = m.tick(&obs);
-        assert_eq!(
-            actions,
-            vec![MicFollowAction::OpenSessionInput(b.clone())],
-            "capture follows via the confirm/open path"
+        assert!(
+            !actions
+                .iter()
+                .any(|a| matches!(a, MicFollowAction::ResumeInput(_))),
+            "never a restart of the suspended enabled stream"
         );
-        m.note_open_result(&b, true, obs.now_ms);
+        assert!(!m.note_open_result(&b, true, obs.now_ms));
+        assert!(m.is_capturing(&b));
     }
 
     #[test]
@@ -2137,8 +2364,6 @@ mod tests {
         obs.resolved_inputs = vec![mic.clone()];
         obs.running_inputs = vec![mic.clone(), other.clone()];
         obs.running_streaming = [mic.clone()].into();
-        assert!(m.tick(&obs).is_empty());
-        obs.now_ms += TICK_MS;
         assert_eq!(m.tick(&obs), vec![MicFollowAction::SuspendInput(other.clone())]);
         obs.running_inputs = vec![mic.clone()];
 
@@ -2156,19 +2381,23 @@ mod tests {
     fn reset_clears_all_state() {
         let mut m = MicFollow::default();
         let mic = "Rode NT (input)".to_string();
+        let other = "MacBook Pro Microphone (input)".to_string();
         let mut obs = mf_obs(TICK_MS);
         obs.resolved_inputs = vec![mic.clone()];
-        obs.running_inputs = vec![mic.clone(), "MacBook Pro Microphone (input)".to_string()];
+        obs.running_inputs = vec![mic.clone(), other.clone()];
         obs.running_streaming = [mic.clone()].into();
-        let _ = m.tick(&obs);
+        // Adopt + latch.
+        assert_eq!(m.tick(&obs), vec![MicFollowAction::SuspendInput(other.clone())]);
         obs.now_ms += TICK_MS;
-        let _ = m.tick(&obs);
+        assert!(m.tick(&obs).is_empty(), "latched: no repeat suspend");
         m.reset();
-        // A fresh meeting starts from scratch: full confirmation again.
+        // A fresh meeting starts from scratch: the machine re-enrolls and the
+        // latch re-engages — proof that entries AND the displaced set cleared.
         obs.now_ms += TICK_MS;
-        assert!(
-            m.tick(&obs).is_empty(),
-            "post-reset tick must re-confirm from zero"
+        assert_eq!(
+            m.tick(&obs),
+            vec![MicFollowAction::SuspendInput(other.clone())],
+            "post-reset state must be indistinguishable from a fresh machine"
         );
     }
 
