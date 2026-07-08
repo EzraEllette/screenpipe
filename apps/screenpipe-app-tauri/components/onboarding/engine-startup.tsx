@@ -292,10 +292,16 @@ export default function EngineStartup({
   // engine binds its key). Surface it explicitly instead of leaving the user
   // staring at "no activity" for the full 15s.
   const [authNotReady, setAuthNotReady] = useState(false);
+  // Tracks the last-logged value of authNotReady so the 401 warning only
+  // fires on the false->true transition, not on every 2s poll while the
+  // race persists. A ref (not the state var) because `poll` is captured
+  // once by this effect and never sees state updates from later renders.
+  const authNotReadyLoggedRef = useRef(false);
 
   useEffect(() => {
     if (state !== "live-feed") return;
     emptyPollCountRef.current = 0;
+    authNotReadyLoggedRef.current = false;
 
     const poll = async () => {
       try {
@@ -327,10 +333,24 @@ export default function EngineStartup({
         // landed yet, /search returns 401. Surface it so the copy tells the
         // user this is an auth issue, not a data-flow issue.
         if (mainRes?.status === 401 || audioRes?.status === 401) {
-          console.warn(
-            "onboarding live-feed: /search returned 401 — api key not yet propagated to webview"
-          );
+          if (!authNotReadyLoggedRef.current) {
+            console.warn(
+              "onboarding live-feed: /search returned 401 — api key not yet propagated to webview"
+            );
+            authNotReadyLoggedRef.current = true;
+          }
           setAuthNotReady(true);
+        }
+
+        // Clear the hint on any successful response — auth has recovered as
+        // soon as the key propagates, independent of whether this poll
+        // happened to find anything to show (e.g. idle machine, no
+        // activity yet, but auth is fine). Evaluated separately from the
+        // items.length check below so an all-empty-but-200 poll still
+        // clears a stuck "auth still initializing" hint.
+        if (mainRes?.ok || audioRes?.ok) {
+          authNotReadyLoggedRef.current = false;
+          setAuthNotReady(false);
         }
 
         const items: ActivityItem[] = [];
@@ -398,8 +418,6 @@ export default function EngineStartup({
         if (items.length > 0) {
           setActivityItems(items.slice(0, SUMMARY_MAX_ITEMS));
           emptyPollCountRef.current = 0;
-          // Real data flowing → auth clearly recovered. Clear the hint.
-          setAuthNotReady(false);
         } else {
           emptyPollCountRef.current++;
         }
@@ -932,7 +950,7 @@ if the input is sparse, just describe what little you have warmly. don't apologi
           </h2>
 
           {/* Streaming prose — sans-serif body, soft and readable */}
-          <div className="w-full min-h-[140px] flex items-start">
+          <div className="w-full min-h-[140px] flex flex-col items-start">
             {noActivityYet ? (
               <motion.p
                 className="font-sans text-sm text-muted-foreground/70 leading-relaxed text-center w-full"
@@ -941,12 +959,6 @@ if the input is sparse, just describe what little you have warmly. don't apologi
               >
                 screenpipe is up and watching. as you work, what you see and
                 say will start appearing here. you can continue now.
-                {authNotReady && (
-                  <span className="block text-xs text-muted-foreground/60 mt-2">
-                    auth still initializing — if this persists, quit and
-                    relaunch screenpipe
-                  </span>
-                )}
               </motion.p>
             ) : showWaiting ? (
               <motion.p
@@ -957,12 +969,6 @@ if the input is sparse, just describe what little you have warmly. don't apologi
                 <span className="inline-block animate-pulse">
                   settling in. give me a moment to notice what you&apos;re up to…
                 </span>
-                {authNotReady && (
-                  <span className="block text-xs text-muted-foreground/60 mt-2">
-                    auth still initializing — if this persists, quit and
-                    relaunch screenpipe
-                  </span>
-                )}
               </motion.p>
             ) : (
               <motion.p
@@ -981,6 +987,16 @@ if the input is sparse, just describe what little you have warmly. don't apologi
                   />
                 )}
               </motion.p>
+            )}
+            {/* Auth-race hint — identical whether we're showing the
+                "no activity yet" copy or the "settling in" copy, so it's
+                rendered once here instead of duplicated inside both
+                branches above. */}
+            {authNotReady && (noActivityYet || showWaiting) && (
+              <span className="block text-xs text-muted-foreground/60 mt-2 text-center w-full">
+                auth still initializing — if this persists, quit and relaunch
+                screenpipe
+              </span>
             )}
           </div>
 
