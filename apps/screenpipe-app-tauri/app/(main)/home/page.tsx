@@ -31,7 +31,7 @@ import {
   loadConversationFile,
 } from "@/lib/chat-storage";
 import { cn } from "@/lib/utils";
-import { AppSidebar, SidebarProvider, useSidebarContext } from "@/components/app-sidebar";
+import { AppSidebar, useSidebarContext } from "@/components/app-sidebar";
 import { UpdateBanner } from "@/components/update-banner";
 import { usePlatform } from "@/lib/hooks/use-platform";
 import { useIsFullscreen } from "@/lib/hooks/use-is-fullscreen";
@@ -860,14 +860,17 @@ function HomeContent() {
     activeSection === "history" ||
     activeSection === "brain";
 
+  // The outer flex row (sidebar shell + content column) lives in the shared
+  // (main)/layout.tsx so the sidebar width survives navigation to /settings.
+  // This page contributes overlays, the floating top-left strip, the sidebar
+  // content (portaled into the shell by AppSidebar) and the content column.
   return (
-    <div className={cn("bg-transparent", isFullHeight ? "h-screen overflow-hidden" : "min-h-screen")} data-testid="home-page">
+    <>
       {/* Enterprise license key prompt */}
       {needsLicenseKey && <EnterpriseLicensePrompt onSubmit={submitLicenseKey} />}
       {/* Drag region — always absolute so it works with full-bleed translucent layout */}
       <div className="absolute top-0 left-0 right-0 h-8 z-10" data-tauri-drag-region />
 
-      <div className="h-screen flex min-h-0">
           {/* Sidebar */}
           <TooltipProvider delayDuration={0}>
           {/* Top-left chrome strip — pinned next to the macOS traffic
@@ -1144,7 +1147,7 @@ function HomeContent() {
               nowrap, so that's the FULL untruncated text width), and in a
               narrow window with the sidebar open the whole pane gets
               clipped at the right window edge instead of truncating. */}
-          <div className={cn("flex-1 min-w-0 flex flex-col h-full bg-background min-h-0 relative", isTranslucent ? "rounded-none" : "rounded-tr-lg")}>
+          <div className={cn("flex-1 min-w-0 flex flex-col h-full bg-background min-h-0 relative", isTranslucent ? "rounded-none" : "rounded-tr-lg")} data-testid="home-page">
             {/* ALWAYS-MOUNTED chat layer.
                 Hidden via CSS (display:none) when the user is on a non-chat
                 section, so the StandaloneChat component never unmounts. This
@@ -1184,20 +1187,16 @@ function HomeContent() {
             )}
 
           </div>
-      </div>
-
-    </div>
+    </>
   );
 }
 
 export default function HomePage() {
   return (
-    <Suspense fallback={<div className="min-h-screen bg-background flex items-center justify-center">
+    <Suspense fallback={<div className="flex-1 min-w-0 h-full bg-background flex items-center justify-center">
       <div className="text-muted-foreground">Loading...</div>
     </div>}>
-      <SidebarProvider>
-        <HomeContent />
-      </SidebarProvider>
+      <HomeContent />
     </Suspense>
   );
 }
