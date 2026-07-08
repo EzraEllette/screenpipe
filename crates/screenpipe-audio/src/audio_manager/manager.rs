@@ -132,26 +132,6 @@ pub(crate) fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// Per-session-device liveness stamps, updated on the audio-receiver hot path
-/// and read by the piggyback mic-health sweep. Registered by
-/// `start_session_device`, removed by `stop_session_device`. All wall-clock ms.
-///
-/// The two timestamps are atomics so the single-threaded receiver loop can
-/// stamp them with one relaxed store each (no lock, no allocation) while the
-/// sweep reads them off-thread. `started_ms` is set once at registration and
-/// never mutated, so a plain `u64` suffices.
-#[derive(Debug)]
-pub(crate) struct SessionStreamStamps {
-    /// Most recent chunk of ANY amplitude (0 = none yet).
-    pub last_chunk_ms: AtomicU64,
-    /// Most recent chunk carrying non-zero audio (0 = none yet). Distinguishes
-    /// a dead/mis-routed stream (chunks arrive but are literal zeros) from a
-    /// live one.
-    pub last_nonzero_ms: AtomicU64,
-    /// When this session device was registered — anchors the startup grace.
-    pub started_ms: u64,
-}
-
 #[derive(Clone)]
 pub struct AudioManager {
     options: Arc<RwLock<AudioManagerOptions>>,
@@ -200,12 +180,6 @@ pub struct AudioManager {
     /// in this set; the sweep resumes it on meeting end / fallback. Same
     /// `std::sync::RwLock` discipline as `session_devices`.
     suspended_devices: Arc<std::sync::RwLock<HashSet<String>>>,
-    /// Per-session-device liveness stamps, keyed by device display name.
-    /// Inserted by `start_session_device`, removed by `stop_session_device`,
-    /// stamped in the audio-receiver loop, read by the piggyback mic-health
-    /// sweep. A `DashMap` (not the `RwLock<HashSet>` above) so the hot-path
-    /// stamp is one lock-free shard read + relaxed atomic stores.
-    session_stamps: Arc<DashMap<String, Arc<SessionStreamStamps>>>,
 }
 
 /// Result of checking / restarting the two central handler tasks.
@@ -294,7 +268,6 @@ impl AudioManager {
             user_disabled_devices: Arc::new(RwLock::new(HashSet::new())),
             session_devices: Arc::new(std::sync::RwLock::new(HashSet::new())),
             suspended_devices: Arc::new(std::sync::RwLock::new(HashSet::new())),
-            session_stamps: Arc::new(DashMap::new()),
         };
 
         Ok(manager)
@@ -768,17 +741,6 @@ impl AudioManager {
             .write()
             .unwrap()
             .insert(device.to_string());
-        // Register liveness stamps alongside the session entry (same lifetime,
-        // same rollback). `started_ms` anchors the mic-health startup grace;
-        // a restart (stop+start) drops the old stamp and re-arms the grace.
-        self.session_stamps.insert(
-            device.to_string(),
-            Arc::new(SessionStreamStamps {
-                last_chunk_ms: AtomicU64::new(0),
-                last_nonzero_ms: AtomicU64::new(0),
-                started_ms: now_ms(),
-            }),
-        );
         let start_result = match tap_pids {
             Some(pids) => {
                 self.device_manager
@@ -794,7 +756,6 @@ impl AudioManager {
                     .write()
                     .unwrap()
                     .remove(&device.to_string());
-                self.session_stamps.remove(&device.to_string());
                 return Err(e);
             }
         }
@@ -812,7 +773,6 @@ impl AudioManager {
                         .write()
                         .unwrap()
                         .remove(&device.to_string());
-                    self.session_stamps.remove(&device.to_string());
                     return Err(e);
                 }
             }
@@ -826,15 +786,7 @@ impl AudioManager {
             .write()
             .unwrap()
             .remove(&device.to_string());
-        self.session_stamps.remove(&device.to_string());
         self.stop_device_recording(device).await
-    }
-
-    /// Snapshot handle to the per-session-device liveness stamps. Cheap `Arc`
-    /// clone of the shared `DashMap`; the piggyback mic-health sweep reads it
-    /// each tick to build its `MicHealthObservation`s.
-    pub(crate) fn session_stamps(&self) -> Arc<DashMap<String, Arc<SessionStreamStamps>>> {
-        self.session_stamps.clone()
     }
 
     /// Snapshot of the currently-registered meeting-session device names.
@@ -989,9 +941,6 @@ impl AudioManager {
         // Session streams (Meeting Tap, piggyback mic) bypass the meetings-only
         // drop gate below — they exist only during a meeting by construction.
         let session_devices = self.session_devices.clone();
-        // Per-session-device liveness stamps updated on the hot path below;
-        // read off-thread by the piggyback mic-health sweep.
-        let session_stamps = self.session_stamps.clone();
 
         // Build unified transcription engine — only loads the needed model
         let engine = TranscriptionEngine::new(
@@ -1036,9 +985,7 @@ impl AudioManager {
                 metrics.record_chunk_received();
                 debug!("received audio from device: {:?}", audio.device.name);
 
-                // RMS is computed once here and reused by both the meeting
-                // detector's activity gate and the per-session liveness stamp
-                // below (hoisted so we don't scan the buffer twice).
+                // RMS feeds the meeting detector's activity gate below.
                 let rms = {
                     let sum_sq: f32 = audio.data.iter().map(|&x| x * x).sum();
                     (sum_sq / audio.data.len() as f32).sqrt()
@@ -1059,22 +1006,6 @@ impl AudioManager {
                         crate::core::device::DeviceType::Input => rms > 0.05,
                     };
                     meeting.on_audio_activity(&audio.device.device_type, has_activity);
-                }
-
-                // Per-session-device liveness stamp (piggyback mic-health). One
-                // lock-free DashMap shard read (the map is String-keyed, so the
-                // lookup key is formatted — a short-string alloc, same as the
-                // meetings-only drop gate below already does); on a hit, two
-                // relaxed atomic stores and nothing else — no lock, no further
-                // alloc. Non-session devices miss and skip. `1e-6` matches
-                // `SILENT_BUFFER_PEAK_THRESHOLD` — literal zeros (dead /
-                // mis-routed stream), not merely quiet speech.
-                if let Some(stamps) = session_stamps.get(&audio.device.to_string()) {
-                    let now = now_ms();
-                    stamps.last_chunk_ms.store(now, Ordering::Relaxed);
-                    if rms > 1e-6 {
-                        stamps.last_nonzero_ms.store(now, Ordering::Relaxed);
-                    }
                 }
 
                 // Meetings-only capture: drop this chunk before it is persisted or

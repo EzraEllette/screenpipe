@@ -13,13 +13,12 @@
 //! output capture, so a notification (with a RESTART action) is the right
 //! escalation: the user can fix audio routing while it still matters.
 //!
-//! The mic-side twins (`audio_capture_health_mic_silent`,
-//! `audio_capture_health_mic_recovered`, `audio_capture_health_mic_capture_failed`)
-//! cover the meeting-piggyback per-process mic tap: silent means the tap is
-//! open but no audio has arrived for 2+ minutes (RESTART action, same as
-//! speaker-silent); capture-failed means the tap never opened at all
-//! (no action — capture already fell back to the default mic); recovered is
-//! emit-only, no notification, matching `audio_capture_health_recovered`.
+//! The mic side has exactly one event (`audio_capture_health_mic_capture_failed`),
+//! covering the meeting-piggyback mic follow: the meeting app's mic could not
+//! be opened at all (no action button — capture already fell back to the
+//! default mic). There are deliberately NO mic-silence events: the piggyback
+//! never acts on silence (a silent meeting mic is the user's own in-meeting
+//! feedback loop — they fix it in the app and the piggyback follows).
 //!
 //! See `crates/screenpipe-audio/src/audio_manager/windows_output_follow.rs`
 //! for the watchdog, and
@@ -35,8 +34,6 @@ pub(super) fn handle(app: &AppHandle, name: &str, data: &Value) {
     let tauri_event = match name {
         "audio_capture_health_speaker_silent" => "audio-capture-health-speaker-silent",
         "audio_capture_health_recovered" => "audio-capture-health-recovered",
-        "audio_capture_health_mic_silent" => "audio-capture-health-mic-silent",
-        "audio_capture_health_mic_recovered" => "audio-capture-health-mic-recovered",
         "audio_capture_health_mic_capture_failed" => "audio-capture-health-mic-capture-failed",
         _ => {
             debug!("audio_health::handle called with unexpected name: {}", name);
@@ -52,13 +49,10 @@ pub(super) fn handle(app: &AppHandle, name: &str, data: &Value) {
         "audio_capture_health_speaker_silent" => {
             show_speaker_silent_notification(app.clone(), data.clone());
         }
-        "audio_capture_health_mic_silent" => {
-            show_mic_silent_notification(app.clone(), data.clone());
-        }
         "audio_capture_health_mic_capture_failed" => {
             show_mic_capture_failed_notification(app.clone(), data.clone());
         }
-        // mic_recovered: tauri event emit only (parity with speaker Recovered) — no notification.
+        // recovered: tauri event emit only — no notification.
         _ => {}
     }
 }
@@ -106,52 +100,6 @@ fn show_speaker_silent_notification(app: AppHandle, data: Value) {
     tauri::async_runtime::spawn(async move {
         if let Err(e) = crate::commands::show_notification_panel(app, payload.to_string()).await {
             warn!("failed to show speaker-silent notification: {}", e);
-        }
-    });
-}
-
-/// Show the in-app notification panel telling the user their meeting's
-/// per-process mic capture has gone silent. Mirrors [`show_speaker_silent_notification`]
-/// (same RESTART action and panel type) — the mic-side twin of the speaker
-/// stall alert.
-fn show_mic_silent_notification(app: AppHandle, data: Value) {
-    let capturing_inputs = data
-        .get("capturing_inputs")
-        .and_then(|v| v.as_array())
-        .map(|a| {
-            a.iter()
-                .filter_map(|v| v.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        })
-        .unwrap_or_default();
-
-    let body = if capturing_inputs.is_empty() {
-        "your meeting app is recording, but screenpipe's mic capture has been \
-         silent for 2+ minutes."
-            .to_string()
-    } else {
-        format!(
-            "your meeting app is recording from {}, but screenpipe's capture \
-             has been silent for 2+ minutes.",
-            capturing_inputs
-        )
-    };
-
-    let payload = serde_json::json!({
-        "id": "audio_capture_health_mic_silent",
-        "type": "capture_stall",
-        "title": "screenpipe may not be hearing your mic",
-        "body": body,
-        "actions": [
-            { "label": "RESTART", "action": "restart_recording", "primary": true }
-        ],
-        "autoDismissMs": 30000
-    });
-
-    tauri::async_runtime::spawn(async move {
-        if let Err(e) = crate::commands::show_notification_panel(app, payload.to_string()).await {
-            warn!("failed to show mic-silent notification: {}", e);
         }
     });
 }

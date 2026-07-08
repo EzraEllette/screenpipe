@@ -59,7 +59,6 @@ use windows::Win32::System::Threading::{
     PROCESS_SYNCHRONIZE, THREAD_PRIORITY_TIME_CRITICAL,
 };
 
-use super::{classify_silence, SilenceVerdict, WatchdogCounters};
 use crate::core::stream::AudioStreamConfig;
 use crate::utils::audio::audio_to_mono;
 
@@ -67,8 +66,6 @@ const PROCESS_LOOPBACK_MIN_BUILD: u32 = 20_348;
 const ACTIVATION_TIMEOUT: Duration = Duration::from_secs(5);
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(8);
 const CAPTURE_WAIT_MS: u32 = 250;
-const WATCHDOG_SILENCE_SECS: u64 = 45;
-const SILENCE_AMP_EPS: f32 = 0.002;
 const REBUILD_COOLDOWN_SECS: u64 = 60;
 const REBUILD_BACKOFF_CAP: u32 = 4;
 const MAX_CONSECUTIVE_REBUILD_FAILURES: u32 = 3;
@@ -220,7 +217,7 @@ fn spawn_wasapi_loopback(
             }
         };
 
-        let (mut capture, mut watchdog) = match unsafe { build_wasapi_capture(target) } {
+        let mut capture = match unsafe { build_wasapi_capture(target) } {
             Ok(built) => built,
             Err(error) => {
                 let _ = ready_tx.send(Err(error));
@@ -240,10 +237,6 @@ fn spawn_wasapi_loopback(
             LoopbackTarget::ProcessTree(pid) => TargetProcessWatch::open(pid),
             LoopbackTarget::DefaultEndpoint => None,
         };
-        let probe_pid = match target {
-            LoopbackTarget::ProcessTree(pid) => Some(pid as i32),
-            LoopbackTarget::DefaultEndpoint => None,
-        };
         let mut rebuild_streak = 0u32;
         let mut rebuild_failures = 0u32;
 
@@ -259,8 +252,6 @@ fn spawn_wasapi_loopback(
                 &thread_label,
                 target_watch.as_ref(),
                 endpoint_baseline.as_deref(),
-                watchdog.as_ref(),
-                probe_pid,
             );
             unsafe {
                 let _ = capture.audio_client.0.Stop();
@@ -292,9 +283,8 @@ fn spawn_wasapi_loopback(
                 }
 
                 match unsafe { build_wasapi_capture(target) } {
-                    Ok((new_capture, new_watchdog)) => {
+                    Ok(new_capture) => {
                         capture = new_capture;
-                        watchdog = new_watchdog;
                         rebuild_failures = 0;
                         if step == SupervisorStep::RebuildNow {
                             rebuild_streak = 0;
@@ -342,9 +332,7 @@ fn spawn_wasapi_loopback(
     }
 }
 
-unsafe fn build_wasapi_capture(
-    target: LoopbackTarget,
-) -> Result<(WasapiLoopbackCapture, Arc<WatchdogCounters>)> {
+unsafe fn build_wasapi_capture(target: LoopbackTarget) -> Result<WasapiLoopbackCapture> {
     let audio_client = match target {
         LoopbackTarget::ProcessTree(pid) => activate_process_loopback_client(pid)?,
         LoopbackTarget::DefaultEndpoint => activate_default_endpoint_loopback_client()?,
@@ -376,14 +364,13 @@ unsafe fn build_wasapi_capture(
         .Start()
         .map_err(|e| anyhow!("failed to start WASAPI loopback client: {e}"))?;
 
-    let capture = WasapiLoopbackCapture {
+    Ok(WasapiLoopbackCapture {
         audio_client,
         capture_client,
         sample_ready,
         config: AudioStreamConfig::new(SAMPLE_RATE, CHANNELS),
         channels: CHANNELS,
-    };
-    Ok((capture, WatchdogCounters::new()))
+    })
 }
 
 unsafe fn activate_default_endpoint_loopback_client() -> Result<AudioClientSend> {
@@ -438,7 +425,6 @@ enum CaptureExit {
     Disconnected,
     TargetExited,
     EndpointChanged,
-    SilentBroken,
     WaitFailed,
     DrainFailed,
 }
@@ -454,7 +440,7 @@ fn supervisor_policy(exit: CaptureExit) -> SupervisorStep {
     match exit {
         CaptureExit::Disconnected | CaptureExit::TargetExited => SupervisorStep::Stop,
         CaptureExit::EndpointChanged => SupervisorStep::RebuildNow,
-        CaptureExit::SilentBroken | CaptureExit::WaitFailed | CaptureExit::DrainFailed => {
+        CaptureExit::WaitFailed | CaptureExit::DrainFailed => {
             SupervisorStep::RebuildAfterCooldown
         }
     }
@@ -477,6 +463,11 @@ fn wait_for_disconnect(is_disconnected: &AtomicBool, duration: Duration) -> bool
     is_disconnected.load(Ordering::Relaxed)
 }
 
+// NOTE: deliberately NO silence watchdog here. The per-pid Meeting Tap
+// tracks the meeting app's devices; a silent capture is the user's own
+// in-meeting feedback loop (they notice and fix the device in the app) and
+// must never trigger a probe or rebuild. Death handling remains: target
+// exit, endpoint change, wait/drain failures, external disconnects.
 fn run_capture_loop(
     capture: &mut WasapiLoopbackCapture,
     tx: &broadcast::Sender<Vec<f32>>,
@@ -484,8 +475,6 @@ fn run_capture_loop(
     label: &str,
     target_watch: Option<&TargetProcessWatch>,
     endpoint_baseline: Option<&str>,
-    watchdog: &WatchdogCounters,
-    probe_pid: Option<i32>,
 ) -> CaptureExit {
     // Insulates this capture thread from the process's BELOW_NORMAL priority
     // class (and foreground contention generally) the same way cpal's WASAPI
@@ -493,7 +482,6 @@ fn run_capture_loop(
     unsafe {
         let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
     }
-    let mut silence_started: Option<std::time::Instant> = None;
 
     while !is_disconnected.load(Ordering::Relaxed) {
         if target_watch.is_some_and(TargetProcessWatch::has_exited) {
@@ -513,47 +501,9 @@ fn run_capture_loop(
             return CaptureExit::WaitFailed;
         }
         if wait == WAIT_OBJECT_0 {
-            if let Err(error) = unsafe { drain_capture_packets(capture, tx, watchdog) } {
+            if let Err(error) = unsafe { drain_capture_packets(capture, tx) } {
                 warn!("Windows WASAPI loopback packet drain failed ({label}): {error}");
                 return CaptureExit::DrainFailed;
-            }
-        }
-
-        let (window_callbacks, window_peak) = watchdog.drain();
-        if window_callbacks > 0 && window_peak > SILENCE_AMP_EPS {
-            silence_started = None;
-            continue;
-        }
-        silence_started.get_or_insert_with(std::time::Instant::now);
-        let silent_long_enough = silence_started
-            .map(|t| t.elapsed().as_secs() >= WATCHDOG_SILENCE_SECS)
-            .unwrap_or(false);
-        if !silent_long_enough {
-            continue;
-        }
-
-        let target_output_active = probe_pid.and_then(|pid| {
-            crate::core::meeting_audio::process_audio_activity(pid).map(|a| a.output_active)
-        });
-        match classify_silence(
-            window_callbacks,
-            window_peak,
-            SILENCE_AMP_EPS,
-            false,
-            target_output_active,
-        ) {
-            SilenceVerdict::SilentBroken => {
-                warn!(
-                    "Windows WASAPI loopback silent for {}s while target is rendering ({label})",
-                    WATCHDOG_SILENCE_SECS
-                );
-                return CaptureExit::SilentBroken;
-            }
-            SilenceVerdict::Healthy => {
-                silence_started = None;
-            }
-            SilenceVerdict::SilentIdle | SilenceVerdict::Inconclusive => {
-                silence_started = Some(std::time::Instant::now());
             }
         }
     }
@@ -564,7 +514,6 @@ fn run_capture_loop(
 unsafe fn drain_capture_packets(
     capture: &WasapiLoopbackCapture,
     tx: &broadcast::Sender<Vec<f32>>,
-    watchdog: &WatchdogCounters,
 ) -> Result<()> {
     loop {
         let frames = capture
@@ -585,7 +534,6 @@ unsafe fn drain_capture_packets(
             .GetBuffer(&mut data, &mut frames_available, &mut flags, None, None)
             .map_err(|e| anyhow!("GetBuffer failed: {e}"))?;
 
-        watchdog.count_callback();
         let sample_count = frames_available as usize * capture.channels as usize;
         let interleaved = if (flags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32) != 0 || data.is_null() {
             vec![0.0; sample_count]
@@ -602,10 +550,6 @@ unsafe fn drain_capture_packets(
             .map_err(|e| anyhow!("ReleaseBuffer failed: {e}"))?;
 
         let mono = audio_to_mono(&interleaved, capture.channels);
-        let peak = mono
-            .iter()
-            .fold(0.0_f32, |max, sample| max.max(sample.abs()));
-        watchdog.record_peak(peak);
         let _ = tx.send(mono);
     }
 }
@@ -954,10 +898,6 @@ mod tests {
         assert_eq!(
             supervisor_policy(CaptureExit::EndpointChanged),
             SupervisorStep::RebuildNow
-        );
-        assert_eq!(
-            supervisor_policy(CaptureExit::SilentBroken),
-            SupervisorStep::RebuildAfterCooldown
         );
         assert_eq!(
             supervisor_policy(CaptureExit::WaitFailed),

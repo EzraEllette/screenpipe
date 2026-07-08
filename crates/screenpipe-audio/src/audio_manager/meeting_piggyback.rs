@@ -71,75 +71,14 @@ use std::collections::HashSet;
 pub(crate) const MAX_TAP_STRIKES: u32 = 3;
 pub(crate) const TAP_RETRY_COOLDOWN_SECS: u64 = 60;
 
-// --- Mic capture-health (Task 9) ---------------------------------------------
-//
-// A separate, self-contained decider from `decide_piggyback`. It answers ONE
-// question about the resolved meeting mic: "the app is recording but our
-// session delivers only zeros — is that a broken capture we should fix, or a
-// legitimate mute we must stay quiet about?" The discriminator is the
-// OS-reported `process_audio_activity(pid).input_active`: only when the app IS
-// actively recording (`Some(true)`) and we still see nothing but zeros do we
-// escalate — restart silently first, notify only if the restart doesn't help.
-
-// Granularity note (all thresholds below): the liveness stamps these windows
-// measure against are written by the single receiver loop, which sees ONE chunk
-// per device per `audio_chunk_duration` (~30s). So `last_nonzero_ms` advances in
-// ~30s steps, not continuously — a window must be a comfortable multiple of that
-// chunk cadence or a single healthy-but-coarse chunk boundary would read as a
-// gap. 120s is 4 chunks; well clear of jitter.
-
-/// How long the mic must go WITHOUT a non-zero chunk before it counts as
-/// "silent", measured from the last real data (or, if none has ever arrived,
-/// from stream start — see `decide_mic_health`). Given the ~30s chunk cadence
-/// this is 4 chunks of sustained zeros. Also gates the sweep's probe cadence
-/// (probe only when the last non-zero is older than half this window — see
-/// `run_meeting_piggyback_sweep`).
-pub(crate) const MIC_ZERO_WINDOW_MS: u64 = 120_000;
-/// How long after a silent restart we wait before deciding it didn't help and
-/// notifying the user. Same magnitude as the zero window: give the fresh stream
-/// a full window (~4 chunks at the 30s cadence) to prove itself.
-pub(crate) const MIC_RESTART_TO_NOTIFY_MS: u64 = 120_000;
-/// Minimum gap between `mic_silent` notifications. Persists ACROSS meetings
-/// (mirrors `NOTIFY_COOLDOWN` in `windows_output_follow.rs`) so a chronically
-/// mis-routed mic can't nag every meeting.
-pub(crate) const MIC_NOTIFY_COOLDOWN_MS: u64 = 1_800_000;
-/// Grace period after a session stream starts before its silence counts —
-/// covers device warm-up before the first real chunk lands. Now largely
-/// redundant with the zero-window anchoring in `decide_mic_health` (which keys
-/// off `max(started_ms, last_nonzero_ms)`), but kept as a cheap, explicit floor
-/// that documents intent. NOTE: this is shorter than one ~30s chunk, so on its
-/// own it never fires before the first chunk could arrive — the zero window is
-/// what actually protects the never-received case.
-pub(crate) const MIC_STARTUP_GRACE_MS: u64 = 10_000;
-
-/// Everything `decide_mic_health` may look at for one resolved session mic.
-/// Plain data — no OS, no manager, no clock. Built by the sweep from the
-/// per-session stamps map plus (gated) one `process_audio_activity` probe.
-#[derive(Debug, Clone)]
-pub(crate) struct MicHealthObservation {
-    pub device: String,
-    pub now_ms: u64,
-    pub started_ms: u64,
-    /// Most recent chunk of ANY amplitude (0 = never). Not consulted by the
-    /// current decider (which keys off `last_nonzero_ms`) but carried for
-    /// support logging + future "chunks stopped entirely" discrimination.
-    #[allow(dead_code)]
-    pub last_chunk_ms: u64,
-    pub last_nonzero_ms: u64, // 0 = never
-    /// OS-reported: is the meeting app actively recording? None = unprobeable.
-    pub input_active: Option<bool>,
-    pub restarted_at_ms: Option<u64>,
-    pub notified: bool,
-    pub last_notify_ms: Option<u64>, // cross-meeting cooldown
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum MicHealthAction {
-    None,
-    RestartInput,
-    EmitMicSilent,
-    EmitMicRecovered,
-}
+// NOTE: the piggyback deliberately has NO mic capture-health / silence
+// machinery (removed by product decision). We track the meeting app's own
+// devices; a silent resolved mic is the user's in-meeting feedback loop —
+// they notice they can't be heard, switch the device in the app, and the
+// mic-follow machine tracks that switch. Silence must never make the
+// piggyback rebuild, restart, probe, or notify. Only DEAD streams (open
+// failures, capture streams that stopped running) are acted on — see
+// [`MicFollow`]'s liveness handling below.
 
 // --- Near-end mic-follow state machine ---------------------------------------
 
@@ -502,21 +441,10 @@ impl MicFollow {
         crossed
     }
 
-    /// Force a capturing mic through the single reopen point (used by the mic
-    /// capture-health pass: sustained zeros while the app records → close our
-    /// stream now, reopen on the next pass past the fast floor — the resolved
-    /// mic is never stop/started inline).
-    pub(crate) fn force_backoff(&mut self, device: &str, now_ms: u64) {
-        if let Some(entry) = self.entries.get_mut(device) {
-            entry.phase = MicPhase::Backoff {
-                failures: 1,
-                first_failure_ms: now_ms,
-                retry_at_ms: now_ms + MIC_RETRY_FLOOR_MS,
-            };
-        }
-    }
-
     /// True when `device` is followed and our own session stream carries it.
+    /// Test-only observability into the machine's phase; production code acts
+    /// exclusively through [`MicFollow::tick`]'s returned actions.
+    #[cfg(test)]
     pub(crate) fn is_capturing(&self, device: &str) -> bool {
         self.entries
             .get(device)
@@ -658,63 +586,6 @@ pub(crate) fn decide_piggyback(obs: &PiggybackObservation) -> Vec<PiggybackActio
     actions
 }
 
-/// Pure mic capture-health decision for ONE resolved session mic. Never emits
-/// for a mute or an unprobeable app — the only path to `EmitMicSilent` requires
-/// the OS to confirm the app is recording (`input_active == Some(true)`), the
-/// session to have delivered only zeros for the whole window, a silent restart
-/// to have already been tried and settled, no notification outstanding, and the
-/// cross-meeting cooldown to have elapsed. Exhaustively unit-tested.
-pub(crate) fn decide_mic_health(obs: &MicHealthObservation) -> MicHealthAction {
-    if obs.now_ms.saturating_sub(obs.started_ms) < MIC_STARTUP_GRACE_MS {
-        return MicHealthAction::None;
-    }
-    // Anchor the zero-window on the last time we saw REAL data — or, when none
-    // has ever arrived (`last_nonzero_ms == 0`), on stream start. Keying off the
-    // epoch instead treated "no chunk yet" as "silent since forever" and, at the
-    // first sweep tick past the short startup grace, restarted a perfectly
-    // healthy mic mid-warm-up (truncating near-end audio, churning a BT open —
-    // the #3750 etiquette violation). The receiver stamps these fields at the
-    // ~30s chunk cadence, so `MIC_ZERO_WINDOW_MS` (4 chunks) is the real floor
-    // before the never-received case can escalate.
-    let zero_anchor = obs.started_ms.max(obs.last_nonzero_ms);
-    let nonzero_recent = obs.last_nonzero_ms != 0
-        && obs.now_ms.saturating_sub(obs.last_nonzero_ms) < MIC_ZERO_WINDOW_MS;
-    if nonzero_recent {
-        return if obs.notified {
-            MicHealthAction::EmitMicRecovered
-        } else {
-            MicHealthAction::None
-        };
-    }
-    // Not silent yet if the anchor (last data, or stream start) is still inside
-    // the zero window — covers the never-received case without a special epoch
-    // branch.
-    if obs.now_ms.saturating_sub(zero_anchor) < MIC_ZERO_WINDOW_MS {
-        return MicHealthAction::None;
-    }
-    // Sustained zeros. Only escalate when the OS says the app IS recording —
-    // Some(false) is a mute (stay quiet), None is unknowable (stay quiet).
-    if obs.input_active != Some(true) {
-        return MicHealthAction::None;
-    }
-    match obs.restarted_at_ms {
-        None => MicHealthAction::RestartInput,
-        Some(restarted) => {
-            let restart_settled =
-                obs.now_ms.saturating_sub(restarted) >= MIC_RESTART_TO_NOTIFY_MS;
-            let cooldown_ok = obs
-                .last_notify_ms
-                .map(|t| obs.now_ms.saturating_sub(t) >= MIC_NOTIFY_COOLDOWN_MS)
-                .unwrap_or(true);
-            if restart_settled && !obs.notified && cooldown_ok {
-                MicHealthAction::EmitMicSilent
-            } else {
-                MicHealthAction::None
-            }
-        }
-    }
-}
-
 /// Persistent sweep state across monitor ticks. Everything the pure decider
 /// can't see (retry bookkeeping, one-shot flags, meeting-edge detection).
 #[derive(Default)]
@@ -734,17 +605,6 @@ pub(crate) struct PiggybackState {
     /// Whether the previous tick was actively piggybacking (meeting with a
     /// pid, flag engaged, tap available). Drives meeting-boundary bookkeeping.
     pub was_piggybacking: bool,
-    /// When the resolved mic was last silently restarted this meeting (wall ms).
-    /// Feeds `MicHealthObservation::restarted_at_ms`; reset on meeting end.
-    pub mic_restarted_at_ms: Option<u64>,
-    /// Whether a `mic_silent` notification is currently outstanding (cleared by
-    /// a `mic_recovered` emit). Reset on meeting end.
-    pub mic_notified: bool,
-    /// When the last `mic_silent` was published (wall ms). Enforces the 30-min
-    /// cross-meeting cooldown, so this deliberately PERSISTS across meetings
-    /// (NOT reset on meeting end) — mirrors `NOTIFY_COOLDOWN` bookkeeping in
-    /// `windows_output_follow.rs`.
-    pub mic_last_notify_ms: Option<u64>,
     /// One-shot per meeting: a hard mic capture failure (StartSessionInput
     /// errored) was already reported. Reset on meeting end.
     pub mic_fail_reported: bool,
@@ -873,9 +733,10 @@ fn record_tap_strike(state: &mut PiggybackState) {
 // fallback, or health decisions above — it only observes them.
 
 /// Per-meeting telemetry accumulator. Ticked by the sweep (2s cadence) while a
-/// meeting is active with the flag on; volatile sweep state (strikes, mic
-/// flags) is FOLDED in at the piggybacking-stop edge because that state resets
-/// before meeting end on pid flaps. Emitted + reset at the meeting-end edge.
+/// meeting is active with the flag on; volatile sweep state (strikes, the
+/// mic-failure flag) is FOLDED in at the piggybacking-stop edge because that
+/// state resets before meeting end on pid flaps. Emitted + reset at the
+/// meeting-end edge.
 #[derive(Debug, Default)]
 pub(crate) struct MeetingTelemetry {
     pub meeting_seen: bool,
@@ -892,18 +753,7 @@ pub(crate) struct MeetingTelemetry {
     pub bundle_id: Option<String>,
     pub mic_resolved_devices: std::collections::BTreeSet<String>,
     pub mic_session_started: bool,
-    pub mic_restarts: u32,
-    pub silent_notified: bool,
     pub capture_failed: bool,
-    /// Guards [`fold_volatile_state`] against double-counting when both the
-    /// piggybacking-stop edge and the meeting-end edge fire on the same tick
-    /// (meeting ends while still piggybacking). Scoped to the current
-    /// piggybacking CYCLE, not the whole meeting: cleared both on reset
-    /// (meeting end) and on the piggybacking-resumes transition
-    /// (`!was_piggybacking && piggybacking_now` in the sweep), so a second
-    /// stop/resume cycle within one meeting still folds its own counters
-    /// instead of being silently dropped.
-    pub folded_this_meeting: bool,
 }
 
 /// The PostHog-bound summary. Field names are the PostHog property names —
@@ -918,8 +768,6 @@ pub(crate) struct PiggybackMeetingSummary {
     pub tap_gave_up: bool,
     pub mic_resolved_devices: Vec<String>,
     pub mic_session_started: bool,
-    pub mic_restarts: u32,
-    pub mic_silent_notified: bool,
     pub mic_capture_failed: bool,
     pub meeting_app_bundle_id: Option<String>,
     pub pid_known: bool,
@@ -959,8 +807,6 @@ pub(crate) fn build_meeting_summary(t: &MeetingTelemetry) -> PiggybackMeetingSum
         tap_gave_up: t.strikes_max >= MAX_TAP_STRIKES,
         mic_resolved_devices: t.mic_resolved_devices.iter().cloned().collect(),
         mic_session_started: t.mic_session_started,
-        mic_restarts: t.mic_restarts,
-        mic_silent_notified: t.silent_notified,
         mic_capture_failed: t.capture_failed,
         meeting_app_bundle_id: t.bundle_id.clone(),
         pid_known: t.pid_known,
@@ -985,22 +831,11 @@ fn os_version_string() -> Option<String> {
 /// (before that reset zeroes the source fields) and the meeting-end edge (to
 /// catch state accrued after the last piggybacking-stop, and meetings that
 /// end while still piggybacking, where both edges fire on the same tick).
-/// Idempotent per CYCLE via `folded_this_meeting`: `max`/`|=` are naturally
-/// idempotent, but `mic_restarts` is an additive count, so a second fold in
-/// the same cycle must be a no-op — the guard enforces that. The guard is
-/// cleared on the piggybacking-resumes transition (see the sweep, right
-/// before `piggybacking_now`'s first use), so a meeting with multiple
-/// stop/resume cycles (pid flap, tap rebuild) folds each cycle's own counters
-/// instead of dropping every cycle after the first.
+/// Naturally idempotent: every fold is a `max`/`|=`, so double-folding on the
+/// same tick (or across stop/resume cycles) can never over-count.
 fn fold_volatile_state(telemetry: &mut MeetingTelemetry, state: &PiggybackState) {
-    if telemetry.folded_this_meeting {
-        return;
-    }
     telemetry.strikes_max = telemetry.strikes_max.max(state.tap_strikes);
-    telemetry.mic_restarts += state.mic_restarted_at_ms.is_some() as u32;
-    telemetry.silent_notified |= state.mic_notified;
     telemetry.capture_failed |= state.mic_fail_reported;
-    telemetry.folded_this_meeting = true;
 }
 
 /// True when the CoreAudio Process Tap / Windows per-process loopback API is
@@ -1376,15 +1211,6 @@ pub(crate) async fn run_meeting_piggyback_sweep(
             state.listeners.clear();
         }
     }
-    // Piggybacking RESUMES (a second tap/mic cycle within the same meeting,
-    // e.g. after a pid flap or a tap rebuild): clear the per-cycle fold guard
-    // so the next stop/meeting-end fold isn't silently dropped. The guard is
-    // cycle-scoped, not meeting-scoped — see `fold_volatile_state`'s doc
-    // comment and the review that flagged the under-fold this fixes.
-    if !state.was_piggybacking && piggybacking_now {
-        state.telemetry.folded_this_meeting = false;
-    }
-
     // 5a. Near end: tick the mic-follow machine (see the module docs). All
     //     resolved-mic capture and displacement decisions live in the machine;
     //     this block only applies its actions. When not piggybacking the
@@ -1488,127 +1314,17 @@ pub(crate) async fn run_meeting_piggyback_sweep(
         }
     }
 
-    // 5b. Mic capture-health. Only while actively piggybacking on known pids,
-    //     and only for a resolved mic OUR OWN session stream carries (the
-    //     Meeting Tap is an OUTPUT device and never enters this pass — output
-    //     health is the far-end watchdog's job; an adopted enabled mic is the
-    //     device monitor's). Sustained zeros while the app records puts the
-    //     mic on the machine's backoff ladder (close now, reopen through the
-    //     single open point) — notify only if that doesn't help, never cry
-    //     wolf on a mute.
-    if piggybacking_now {
-        // A single resolved mic is the norm; take the first captured one so we
-        // hold at most one recycle/notify per tick.
-        let mic = resolved_inputs
-            .iter()
-            .find(|d| {
-                d.ends_with("(input)")
-                    && session_devices.contains(*d)
-                    && state.mic_follow.is_capturing(d)
-            })
-            .cloned();
-        if let Some(device) = mic {
-            let now = now_ms();
-            // Read the stamps into an owned observation inside a tight scope so
-            // the DashMap shard read-guard (and the map handle it borrows) drop
-            // BEFORE any await below — a restart stops + starts the session,
-            // which mutates this very map. `None` = the mic isn't a live session
-            // stream this tick (just torn down), so there's nothing to judge.
-            let mic_obs: Option<MicHealthObservation> = {
-                let stamps_map = audio_manager.session_stamps();
-                stamps_map.get(&device).map(|stamps| {
-                    let last_nonzero =
-                        stamps.last_nonzero_ms.load(std::sync::atomic::Ordering::Relaxed);
-                    // Probe the OS ONLY when we're actually seeing sustained
-                    // zeros (last non-zero older than half the window, or
-                    // never). This keeps the expensive Windows session-
-                    // enumeration probe off the steady-state path — a healthy
-                    // mic never probes.
-                    let zeros_suspect = last_nonzero == 0
-                        || now.saturating_sub(last_nonzero) >= MIC_ZERO_WINDOW_MS / 2;
-                    let input_active = if zeros_suspect {
-                        // Multi-pid (manual meetings): ANY tapped process
-                        // actively recording counts as "the app is recording"
-                        // — we can't attribute the resolved mic to one pid
-                        // here, and a false `Some(true)` only triggers a
-                        // silent restart, never a notification by itself.
-                        let mut probed: Option<bool> = None;
-                        for pid in &meeting_pids {
-                            match crate::core::meeting_audio::process_audio_activity(*pid)
-                                .map(|a| a.input_active)
-                            {
-                                Some(true) => {
-                                    probed = Some(true);
-                                    break;
-                                }
-                                Some(false) => probed = Some(probed.unwrap_or(false)),
-                                None => {}
-                            }
-                        }
-                        probed
-                    } else {
-                        None
-                    };
-                    MicHealthObservation {
-                        device: device.clone(),
-                        now_ms: now,
-                        started_ms: stamps.started_ms,
-                        last_chunk_ms: stamps
-                            .last_chunk_ms
-                            .load(std::sync::atomic::Ordering::Relaxed),
-                        last_nonzero_ms: last_nonzero,
-                        input_active,
-                        restarted_at_ms: state.mic_restarted_at_ms,
-                        notified: state.mic_notified,
-                        last_notify_ms: state.mic_last_notify_ms,
-                    }
-                })
-            };
-            if let Some(mic_obs) = mic_obs {
-                match decide_mic_health(&mic_obs) {
-                    MicHealthAction::None => {}
-                    MicHealthAction::RestartInput => {
-                        // NEVER an inline stop+reopen — that is a Bluetooth
-                        // link renegotiation on the very mic the meeting app
-                        // is using (#3750). Close the zero-delivering stream
-                        // and let the machine's single open point reopen it
-                        // after backoff.
-                        if let Ok(dev) = parse_audio_device(&mic_obs.device) {
-                            warn!(
-                                "[MEETING_PIGGYBACK] resolved mic {} delivering only zeros while the app records — recycling capture via backoff",
-                                mic_obs.device
-                            );
-                            let _ = audio_manager.stop_session_device(&dev).await;
-                            state.mic_follow.force_backoff(&mic_obs.device, now);
-                            state.mic_restarted_at_ms = Some(now);
-                        }
-                    }
-                    MicHealthAction::EmitMicSilent => {
-                        warn!(
-                            "[MEETING_PIGGYBACK] mic {} still silent after restart while the app records — notifying user",
-                            mic_obs.device
-                        );
-                        let ev = AudioCaptureHealthEvent::mic_silent(vec![mic_obs.device.clone()]);
-                        let _ = screenpipe_events::send_event(ev.event_name(), ev);
-                        state.mic_notified = true;
-                        state.mic_last_notify_ms = Some(now);
-                    }
-                    MicHealthAction::EmitMicRecovered => {
-                        info!("[MEETING_PIGGYBACK] mic {} capture recovered", mic_obs.device);
-                        let ev = AudioCaptureHealthEvent::mic_recovered();
-                        let _ = screenpipe_events::send_event(ev.event_name(), ev);
-                        state.mic_notified = false;
-                    }
-                }
-            }
-        }
-    }
+    // NOTE: deliberately NO mic capture-health pass here (removed by product
+    // decision). A resolved mic delivering silence is the user's own
+    // in-meeting feedback loop — they notice, switch devices in the app, and
+    // the mic-follow machine above tracks the switch. Silence never restarts,
+    // probes, or notifies. Dead-stream liveness (open failures, streams that
+    // stopped running) is handled inside [`MicFollow`] itself.
 
     // 6. Meeting-boundary bookkeeping. On the piggybacking→not transition
     //    (meeting ended, or pid vanished) reset the per-meeting retry counters
     //    so the next meeting starts fresh. `warned_unavailable` is per-boot and
-    //    `mic_last_notify_ms` is the cross-meeting cooldown — both deliberately
-    //    NOT reset here.
+    //    deliberately NOT reset here.
     if state.was_piggybacking && !piggybacking_now {
         // Fold the volatile counters into the telemetry accumulator BEFORE the
         // resets below zero them — this edge can fire mid-meeting on a pid
@@ -1621,8 +1337,6 @@ pub(crate) async fn run_meeting_piggyback_sweep(
 
         state.tap_strikes = 0;
         state.last_tap_attempt = None;
-        state.mic_restarted_at_ms = None;
-        state.mic_notified = false;
         state.mic_fail_reported = false;
         // The decider's disengage teardown just stopped every session stream
         // and lifted every suspension — drop the machine's bookkeeping with it.
@@ -2401,112 +2115,6 @@ mod tests {
         );
     }
 
-    // --- Mic capture-health decider (Task 9) --------------------------------
-
-    fn mic_obs(now: u64) -> MicHealthObservation {
-        MicHealthObservation {
-            device: "Rode NT (input)".into(),
-            now_ms: now,
-            started_ms: 0,
-            last_chunk_ms: now,      // chunks flowing
-            last_nonzero_ms: 0,      // …but all zeros
-            input_active: Some(true),
-            restarted_at_ms: None,
-            notified: false,
-            last_notify_ms: None,
-        }
-    }
-
-    #[test]
-    fn startup_grace_holds_fire() {
-        let mut obs = mic_obs(5_000);
-        obs.started_ms = 0;
-        assert_eq!(decide_mic_health(&obs), MicHealthAction::None);
-    }
-
-    #[test]
-    fn never_received_data_waits_full_zero_window() {
-        // No chunk has ever arrived (last_nonzero == 0) and the stream started
-        // at epoch. 15s in — past the 10s startup grace but WELL inside the
-        // 120s zero window. The old epoch-anchored logic restarted here; the
-        // anchored logic must hold fire (the receiver only stamps every ~30s,
-        // so the first real chunk may not even have landed yet).
-        let mut obs = mic_obs(15_000);
-        obs.started_ms = 0;
-        obs.last_nonzero_ms = 0;
-        obs.input_active = Some(true);
-        assert_eq!(decide_mic_health(&obs), MicHealthAction::None);
-    }
-
-    #[test]
-    fn never_received_data_restarts_after_full_window() {
-        // Same never-received stream, but now 125s in: the full zero window has
-        // elapsed since stream start with no data while the app records → the
-        // capture really is broken, so restart.
-        let mut obs = mic_obs(125_000);
-        obs.started_ms = 0;
-        obs.last_nonzero_ms = 0;
-        obs.input_active = Some(true);
-        assert_eq!(decide_mic_health(&obs), MicHealthAction::RestartInput);
-    }
-
-    #[test]
-    fn healthy_chunk_at_thirty_seconds_is_silent() {
-        // The realistic healthy meeting: a non-zero chunk landed at the 30s
-        // cadence boundary and it's now 35s. This must NOT restart — the anchor
-        // is the recent chunk, comfortably inside the window.
-        let mut obs = mic_obs(35_000);
-        obs.started_ms = 0;
-        obs.last_nonzero_ms = 30_000;
-        obs.input_active = Some(true);
-        assert_eq!(decide_mic_health(&obs), MicHealthAction::None);
-    }
-
-    #[test]
-    fn zeros_with_app_recording_restart_first() {
-        let obs = mic_obs(200_000); // 200s in, zeros the whole time
-        assert_eq!(decide_mic_health(&obs), MicHealthAction::RestartInput);
-    }
-
-    #[test]
-    fn still_zeros_after_restart_notifies() {
-        let mut obs = mic_obs(400_000);
-        obs.restarted_at_ms = Some(200_000); // restarted 200s ago, still zeros
-        assert_eq!(decide_mic_health(&obs), MicHealthAction::EmitMicSilent);
-    }
-
-    #[test]
-    fn zeros_while_app_idle_is_real_silence() {
-        let mut obs = mic_obs(400_000);
-        obs.input_active = Some(false); // user muted in-app / app not recording
-        assert_eq!(decide_mic_health(&obs), MicHealthAction::None);
-    }
-
-    #[test]
-    fn unprobeable_app_never_alerts() {
-        let mut obs = mic_obs(400_000);
-        obs.input_active = None;
-        assert_eq!(decide_mic_health(&obs), MicHealthAction::None);
-    }
-
-    #[test]
-    fn notify_cooldown_is_respected() {
-        let mut obs = mic_obs(400_000);
-        obs.restarted_at_ms = Some(200_000);
-        obs.last_notify_ms = Some(300_000); // notified 100s ago (< 30 min)
-        assert_eq!(decide_mic_health(&obs), MicHealthAction::None);
-    }
-
-    #[test]
-    fn recovery_after_notify_emits_recovered_once() {
-        let mut obs = mic_obs(500_000);
-        obs.last_nonzero_ms = 499_000; // audio came back
-        obs.notified = true;
-        assert_eq!(decide_mic_health(&obs), MicHealthAction::EmitMicRecovered);
-        obs.notified = false; // sweep clears after emitting
-        assert_eq!(decide_mic_health(&obs), MicHealthAction::None);
-    }
-
     // --- Per-meeting telemetry (piggyback_meeting_summary) -----------------
 
     fn telem() -> MeetingTelemetry {
@@ -2559,8 +2167,7 @@ mod tests {
         t.tap_streaming_ticks = 855;
         t.tap_started_count = 2;
         t.strikes_max = 1;
-        t.mic_restarts = 1;
-        t.silent_notified = true;
+        t.capture_failed = true;
         t.bundle_id = Some("us.zoom.xos".into());
         t.mic_resolved_devices.insert("Rode NT (input)".into());
         t.mic_session_started = true;
@@ -2572,8 +2179,7 @@ mod tests {
         assert_eq!(s.tap_started_count, 2);
         assert_eq!(s.tap_strikes, 1);
         assert!(!s.tap_gave_up);
-        assert_eq!(s.mic_restarts, 1);
-        assert!(s.mic_silent_notified);
+        assert!(s.mic_capture_failed);
         assert_eq!(s.meeting_app_bundle_id.as_deref(), Some("us.zoom.xos"));
         assert_eq!(s.mic_resolved_devices, vec!["Rode NT (input)".to_string()]);
         assert!(s.mic_session_started);
@@ -2593,72 +2199,33 @@ mod tests {
     }
 
     #[test]
-    fn fold_is_idempotent_per_meeting() {
-        // two folds in one meeting must not double-count mic_restarts
-        let state = PiggybackState {
+    fn fold_is_idempotent() {
+        // Both edges (piggybacking-stop and meeting-end) can fire on the same
+        // tick, so a double-fold of the same state must not change anything —
+        // and a later cycle's fold must still accumulate (max/|=).
+        let cycle1 = PiggybackState {
             tap_strikes: 2,
-            mic_restarted_at_ms: Some(1),
-            mic_notified: true,
             mic_fail_reported: true,
             ..Default::default()
         };
 
         let mut telemetry = MeetingTelemetry::default();
-        fold_volatile_state(&mut telemetry, &state);
-        fold_volatile_state(&mut telemetry, &state);
+        fold_volatile_state(&mut telemetry, &cycle1);
+        fold_volatile_state(&mut telemetry, &cycle1);
 
-        assert_eq!(telemetry.mic_restarts, 1, "second fold must be a no-op");
-        assert_eq!(telemetry.strikes_max, 2);
-        assert!(telemetry.silent_notified);
+        assert_eq!(telemetry.strikes_max, 2, "double-fold must be a no-op");
         assert!(telemetry.capture_failed);
-    }
 
-    #[test]
-    fn fold_guard_is_per_cycle_not_per_meeting() {
-        // Two full piggybacking-stop/resume cycles within ONE meeting must
-        // both contribute to the telemetry — the guard must reset on resume
-        // (the `!was_piggybacking && piggybacking_now` transition), not stay
-        // latched for the whole meeting. Regression for the under-fold the
-        // Task 1 review flagged: a second cycle's mic_restarts/strikes_max
-        // were silently dropped because `folded_this_meeting` only cleared
-        // at meeting end.
-        let mut telemetry = MeetingTelemetry::default();
-
-        // Cycle 1: one mic restart, then piggybacking stops (fold #1)…
-        let cycle1 = PiggybackState {
-            tap_strikes: 1,
-            mic_restarted_at_ms: Some(1),
-            ..Default::default()
-        };
-        fold_volatile_state(&mut telemetry, &cycle1);
-        // …and a double-fold within the SAME cycle (e.g. meeting-end edge
-        // firing on the same tick as the stop edge) must still count once.
-        fold_volatile_state(&mut telemetry, &cycle1);
-        assert_eq!(
-            telemetry.mic_restarts, 1,
-            "double-fold within one cycle must be a no-op"
-        );
-
-        // Piggybacking resumes: the per-cycle guard must clear so cycle 2's
-        // fold isn't silently dropped.
-        telemetry.folded_this_meeting = false;
-
-        // Cycle 2: another mic restart, higher strikes, then stops again
-        // (fold #1 of cycle 2).
+        // A second stop/resume cycle within the same meeting still folds.
         let cycle2 = PiggybackState {
             tap_strikes: 3,
-            mic_restarted_at_ms: Some(2),
             ..Default::default()
         };
         fold_volatile_state(&mut telemetry, &cycle2);
-
-        assert_eq!(
-            telemetry.mic_restarts, 2,
-            "both cycles' mic_restarts must accumulate (1 + 1 = 2)"
-        );
         assert_eq!(
             telemetry.strikes_max, 3,
             "strikes_max must reflect the max across both cycles"
         );
+        assert!(telemetry.capture_failed, "|= flags never un-latch");
     }
 }

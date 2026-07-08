@@ -19,8 +19,6 @@ use crate::analytics;
 fn posthog_event_name(bus_name: &str) -> Option<&'static str> {
     match bus_name {
         "piggyback_meeting_summary" => Some("piggyback_meeting_summary"),
-        "audio_capture_health_mic_silent" => Some("audio_capture_health_mic_silent"),
-        "audio_capture_health_mic_recovered" => Some("audio_capture_health_mic_recovered"),
         "audio_capture_health_mic_capture_failed" => {
             Some("audio_capture_health_mic_capture_failed")
         }
@@ -47,18 +45,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn allowlist_maps_exactly_the_four_names() {
+    fn allowlist_maps_exactly_the_two_names() {
         assert_eq!(
             posthog_event_name("piggyback_meeting_summary"),
             Some("piggyback_meeting_summary")
-        );
-        assert_eq!(
-            posthog_event_name("audio_capture_health_mic_silent"),
-            Some("audio_capture_health_mic_silent")
-        );
-        assert_eq!(
-            posthog_event_name("audio_capture_health_mic_recovered"),
-            Some("audio_capture_health_mic_recovered")
         );
         assert_eq!(
             posthog_event_name("audio_capture_health_mic_capture_failed"),
@@ -67,6 +57,13 @@ mod tests {
         // Everything else on the bus must NOT reach PostHog through this path.
         assert_eq!(
             posthog_event_name("audio_capture_health_speaker_silent"),
+            None
+        );
+        // The mic-silence events no longer exist (the piggyback never acts on
+        // silence); nothing may forward their old names.
+        assert_eq!(posthog_event_name("audio_capture_health_mic_silent"), None);
+        assert_eq!(
+            posthog_event_name("audio_capture_health_mic_recovered"),
             None
         );
         assert_eq!(posthog_event_name("transcription"), None);
