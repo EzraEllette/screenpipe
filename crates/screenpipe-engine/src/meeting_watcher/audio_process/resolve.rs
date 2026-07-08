@@ -252,20 +252,29 @@ pub(crate) fn resolve_process_candidate(
         // process bundle ID: voice notes use the `.helper` subprocess while
         // real calls use `.helper.Renderer`. If the bundle doesn't contain
         // "renderer", it's a voice note — block it.
-        if platform == "Signal" {
-            let bundle = process
-                .bundle_id
-                .as_deref()
-                .or(process.owner_bundle_id.as_deref())
-                .unwrap_or("");
-            if !bundle.to_lowercase().contains("renderer") {
-                debug!(
-                    "audio-process meeting detector: Signal blocked — voice note helper \
-                     (bundle={:?}, no .Renderer suffix)",
-                    bundle
-                );
-                return ResolvedMeetingCandidate::NonMeeting;
-            }
+        //
+        // `bundle_id`/`owner_bundle_id` are macOS-only fields (always `None` on
+        // Windows — see `screenpipe_audio::meeting_processes::platform`), so
+        // the heuristic only fires when one of them is actually present.
+        // Applying it unconditionally used to fail closed on Windows: with
+        // both fields `None`, `unwrap_or("")` always produced a string that
+        // never contains "renderer", so it silently blocked EVERY Windows
+        // Signal session, including real calls (#4998 review). When the
+        // discriminating field is structurally absent, fail open instead —
+        // matching pre-gate behavior on platforms this heuristic can't reach.
+        let signal_bundle = process
+            .bundle_id
+            .as_deref()
+            .or(process.owner_bundle_id.as_deref());
+        if platform == "Signal"
+            && signal_bundle.is_some_and(|b| !b.to_lowercase().contains("renderer"))
+        {
+            debug!(
+                "audio-process meeting detector: Signal blocked — voice note helper \
+                 (bundle={:?}, no .Renderer suffix)",
+                signal_bundle
+            );
+            return ResolvedMeetingCandidate::NonMeeting;
         }
         let profile = profile_index.and_then(|idx| profiles.get(idx));
         if candidate_is_ignored(&platform, profile, process, ignored_terms, None, None, None) {
@@ -338,11 +347,22 @@ pub(crate) fn resolve_native_platform(
     }
 
     for (idx, profile) in profiles.iter().enumerate() {
-        let matches = profile.app_identifiers.macos_app_names.iter().any(|name| {
-            fields
-                .iter()
-                .any(|field| field.eq_ignore_ascii_case(name) || field == &name.to_lowercase())
-        });
+        // Match against both macOS app names and Windows process names: identity
+        // fields are macOS bundle ids/app names on macOS and Windows exe names
+        // (e.g. "whatsapp.exe") on Windows, so a profile with only
+        // `macos_app_names` populated (WhatsApp, Telegram, ...) would otherwise
+        // never resolve on Windows once it's not also in
+        // `known_native_bundle_platform` (#4998 review).
+        let matches = profile
+            .app_identifiers
+            .macos_app_names
+            .iter()
+            .chain(profile.app_identifiers.windows_process_names.iter())
+            .any(|name| {
+                fields
+                    .iter()
+                    .any(|field| field.eq_ignore_ascii_case(name) || field == &name.to_lowercase())
+            });
         if matches {
             return Some((platform_name_for_profile(profile, false), Some(idx)));
         }

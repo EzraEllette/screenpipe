@@ -1408,3 +1408,120 @@ fn zoom_not_filtered_by_call_signal_gate() {
         "Zoom must not be affected by call signal gate"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #4998 review: Windows identity shape for WhatsApp/Telegram, and the Signal
+// bundle-id gate must not fail closed on Windows (where bundle_id/
+// owner_bundle_id are structurally absent, not merely non-"renderer").
+// ---------------------------------------------------------------------------
+
+/// Windows-shaped WhatsApp process: no bundle_id/owner_bundle_id (those are
+/// macOS-only fields), identity carried entirely by the `.exe` process name.
+fn whatsapp_process_windows() -> AudioInputProcess {
+    AudioInputProcess {
+        audio_session_id: Some("wasapi:whatsapp.exe:99".to_string()),
+        audio_object_id: None,
+        pid: Some(99),
+        bundle_id: None,
+        process_name: Some("whatsapp.exe".to_string()),
+        owner_app_name: None,
+        owner_bundle_id: None,
+        first_seen_at_ms: None,
+    }
+}
+
+/// Windows-shaped Telegram process: same shape as above.
+fn telegram_process_windows() -> AudioInputProcess {
+    AudioInputProcess {
+        audio_session_id: Some("wasapi:telegram.exe:102".to_string()),
+        audio_object_id: None,
+        pid: Some(102),
+        bundle_id: None,
+        process_name: Some("telegram.exe".to_string()),
+        owner_app_name: None,
+        owner_bundle_id: None,
+        first_seen_at_ms: None,
+    }
+}
+
+/// Windows-shaped Signal process: same shape as above (a real call — Windows
+/// has no `.helper`/`.helper.Renderer` bundle-id distinction to gate on).
+fn signal_process_windows() -> AudioInputProcess {
+    AudioInputProcess {
+        audio_session_id: Some("wasapi:signal.exe:200".to_string()),
+        audio_object_id: None,
+        pid: Some(200),
+        bundle_id: None,
+        process_name: Some("signal.exe".to_string()),
+        owner_app_name: None,
+        owner_bundle_id: None,
+        first_seen_at_ms: None,
+    }
+}
+
+#[test]
+fn whatsapp_resolves_to_native_on_windows_identity_shape() {
+    // Windows never populates bundle_id/owner_bundle_id, so identity is
+    // carried only by `process_name` = "whatsapp.exe". Before the #4998
+    // review fix, the profile-matching fallback loop only checked
+    // `macos_app_names` ("whatsapp"), which never matches "whatsapp.exe",
+    // so WhatsApp (and real WhatsApp calls, not just voice notes) could never
+    // resolve as a Native candidate on Windows at all.
+    let profiles = load_detection_profiles();
+    let process = whatsapp_process_windows();
+    let result = resolve_native_platform(&process, &profiles);
+    assert!(
+        result.is_some(),
+        "WhatsApp should resolve as native from Windows process_name alone"
+    );
+    let (platform, profile_index) = result.unwrap();
+    assert_eq!(platform, "WhatsApp");
+    assert!(
+        profile_index.is_some(),
+        "WhatsApp must still get a profile index on Windows for call signal gating"
+    );
+}
+
+#[test]
+fn telegram_resolves_to_native_on_windows_identity_shape() {
+    let profiles = load_detection_profiles();
+    let process = telegram_process_windows();
+    let result = resolve_native_platform(&process, &profiles);
+    assert!(
+        result.is_some(),
+        "Telegram should resolve as native from Windows process_name alone"
+    );
+    let (platform, profile_index) = result.unwrap();
+    assert_eq!(platform, "Telegram");
+    assert!(
+        profile_index.is_some(),
+        "Telegram must still get a profile index on Windows for call signal gating"
+    );
+}
+
+#[test]
+fn signal_windows_call_not_blocked_by_macos_only_renderer_gate() {
+    // On Windows, bundle_id/owner_bundle_id are always None (structurally
+    // absent, not merely "not containing renderer"). Before the #4998 review
+    // fix, `unwrap_or("")` fed into `.contains("renderer")` always evaluated
+    // to false, so this gate silently blocked EVERY Signal session on
+    // Windows, including real calls. It must fail open there instead.
+    let profiles = load_detection_profiles();
+    let process = signal_process_windows();
+    let session_key = ProcessKey::from_process(&process).unwrap();
+    let result = resolve_process_candidate(
+        session_key,
+        Instant::now(),
+        &process,
+        &profiles,
+        &[],
+        &[],
+        &[],
+    );
+    assert!(
+        matches!(result, ResolvedMeetingCandidate::Native { ref platform, .. } if platform == "Signal"),
+        "Signal on Windows should resolve as Native (fail open, no bundle-id \
+         discriminator available on this platform): got {:?}",
+        result
+    );
+}
