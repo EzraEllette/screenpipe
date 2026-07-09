@@ -126,8 +126,7 @@ async fn fetch_models_from_gateway(
 /// selectable. Omit locked entries here so a pipe never appears to select a
 /// model only for the gateway to silently rewrite it to `auto`.
 fn gateway_models_to_pi_models(data: &[serde_json::Value]) -> Vec<serde_json::Value> {
-    data
-        .iter()
+    data.iter()
         .filter(|m| !m.get("locked").and_then(|v| v.as_bool()).unwrap_or(false))
         .map(|m| {
             let id = m.get("id").and_then(|v| v.as_str()).unwrap_or("");
