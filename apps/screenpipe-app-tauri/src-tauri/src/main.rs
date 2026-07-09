@@ -1129,9 +1129,9 @@ async fn main() {
             }
 
             // mlx.metallib and libonnxruntime.dylib are staged at build time
-            // for bundle.macOS.files (see build.rs stage_macos_sidecar_libs).
-            // Real nested sidecars are pre-signed before Tauri copies them into
-            // Contents/MacOS; unused per-arch placeholders are truncated empty.
+            // for macOS release bundling (see build.rs stage_macos_sidecar_libs).
+            // arm64 bundles mlx.metallib as a Tauri externalBin so Tauri signs it;
+            // x86_64 copies libonnxruntime.dylib via macOS.files.
             //
             // Previously this block created a symlink at Contents/MacOS/mlx.metallib
             // pointing at Contents/Resources/mlx.metallib on first launch. Apple

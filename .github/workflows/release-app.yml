@@ -690,7 +690,7 @@ jobs:
           echo "args=$ARGS" >> $GITHUB_OUTPUT
           echo "Final tauri args: $ARGS"
 
-      - name: Select macOS sidecar bundle entries
+      - name: Configure macOS sidecar bundle entries
         if: matrix.os_type == 'macos'
         shell: bash
         run: |
@@ -703,8 +703,11 @@ jobs:
           const config = JSON.parse(fs.readFileSync(path, "utf8"));
           config.bundle ??= {};
           config.bundle.macOS ??= {};
+          config.bundle.externalBin = [...new Set(config.bundle.externalBin ?? [])]
+            .filter((entry) => entry !== "mlx.metallib");
           if (target === "aarch64-apple-darwin") {
-            config.bundle.macOS.files = { "MacOS/mlx.metallib": "mlx.metallib" };
+            config.bundle.macOS.files = {};
+            config.bundle.externalBin.push("mlx.metallib");
           } else if (target === "x86_64-apple-darwin") {
             config.bundle.macOS.files = {
               "MacOS/libonnxruntime.dylib": "libonnxruntime.dylib",
@@ -713,7 +716,7 @@ jobs:
             throw new Error(`unknown macOS release target: ${target}`);
           }
           fs.writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`);
-          console.log(`macOS bundle sidecars selected for ${target}`);
+          console.log(`macOS bundle sidecars configured for ${target}`);
           NODE
         env:
           TARGET: ${{ matrix.target }}
@@ -1097,8 +1100,8 @@ jobs:
         # build-keychain dance (the `errSecInternalComponent` class — see
         # the keychain setup above) only surfaces as a notarization failure
         # much later in the workflow.
-        # Covers the single Tauri codesign pass for the architecture-specific
-        # sidecar staged into Contents/MacOS/ via bundle.macOS.files.
+        # Covers the single Tauri codesign pass for architecture-specific
+        # sidecars staged into Contents/MacOS/ via externalBin/macOS.files.
         if: matrix.os_type == 'macos'
         shell: bash
         run: |

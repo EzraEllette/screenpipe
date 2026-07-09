@@ -341,9 +341,9 @@ fn main() {
         // Build SwiftUI shortcut reminder
         build_shortcut_reminder();
 
-        // Copy mlx.metallib and libonnxruntime.dylib to src-tauri/ for bundle.macOS.files
-        // (Contents/MacOS/). MLX metallib must be next to the binary; onnx dylib
-        // is loaded via ort load-dynamic on x86_64.
+        // Stage macOS runtime sidecars into src-tauri/. Release builds bundle
+        // mlx.metallib as a Tauri externalBin on arm64 so Tauri signs it, and
+        // copy libonnxruntime.dylib via macOS.files on x86_64 for ort load-dynamic.
         stage_macos_sidecar_libs();
 
         // Stage permission-flow's resource bundle for Tauri to pick up.
@@ -554,8 +554,8 @@ int shortcut_is_available(void) { return 0; }
     println!("cargo:rustc-link-lib=static=shortcut_reminder");
 }
 
-/// Stage mlx.metallib and libonnxruntime.dylib into `src-tauri/` so Tauri's
-/// `bundle.macOS.files` can copy them into `Contents/MacOS/` before codesign.
+/// Stage mlx.metallib and libonnxruntime.dylib into `src-tauri/` for macOS
+/// release bundling.
 /// MLX needs metallib next to the binary at runtime (parakeet-mlx crashes without it).
 /// x86_64 Intel builds need libonnxruntime.dylib colocated for ort `load-dynamic`.
 /// Same build-time staging pattern as `copy_permission_flow_bundle` (#3990).
@@ -565,10 +565,10 @@ fn stage_macos_sidecar_libs() {
     stage_libonnxruntime_dylib();
 }
 
-/// Copy mlx.metallib to a known location so Tauri can bundle it via
-/// bundle.macOS.files on aarch64 macOS release builds. MLX compiles Metal
-/// shaders into this file during mlx-sys build. Without it, parakeet-mlx
-/// crashes with "Failed to load the default metallib".
+/// Copy mlx.metallib to a known location so release packaging can bundle it as
+/// a Tauri externalBin on aarch64 macOS builds. MLX compiles Metal shaders into
+/// this file during mlx-sys build. Without it, parakeet-mlx crashes with
+/// "Failed to load the default metallib".
 #[cfg(target_os = "macos")]
 fn stage_mlx_metallib() {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
@@ -588,8 +588,8 @@ fn stage_mlx_metallib() {
 
     if needs_download {
         // Download mlx.metallib (pre-compiled MLX Metal shaders) for parakeet-mlx.
-        // MLX needs this file next to the binary at runtime. Tauri copies it into
-        // Contents/MacOS/ via bundle.macOS.files (see tauri.macos.conf.json).
+        // MLX needs this file next to the binary at runtime. The release
+        // workflow exposes the target-suffixed externalBin copy to Tauri.
         println!("cargo:warning=mlx-metallib: downloading from GitHub releases...");
         let url =
             "https://github.com/screenpipe/screenpipe/releases/download/mlx-metallib-v0.2.0/mlx.metallib";
