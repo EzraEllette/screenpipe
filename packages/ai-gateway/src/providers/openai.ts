@@ -181,6 +181,17 @@ export class OpenAIProvider implements AIProvider {
 		(params as ChatCompletionCreateParams & { max_tokens?: number }).max_tokens = maxTokens;
 	}
 
+	private applyToolCompatibilityOptions(params: ChatCompletionCreateParams, body: RequestBody): void {
+		// GPT-5.6 accepts function tools through Chat Completions only when
+		// reasoning_effort is "none". Pi speaks the Chat Completions protocol,
+		// so preserve tool support there rather than silently cascading a Luna
+		// request to another provider. Agentic callers that need reasoning plus
+		// tools can use the Responses API directly.
+		if (body.model.toLowerCase().startsWith('gpt-5.6') && Array.isArray(body.tools) && body.tools.length > 0) {
+			(params as ChatCompletionCreateParams & { reasoning_effort?: 'none' }).reasoning_effort = 'none';
+		}
+	}
+
 	async createCompletion(body: RequestBody): Promise<Response> {
 		const messages = this.formatMessages(body.messages);
 		const responseFormat = this.formatResponseFormat(body.response_format);
@@ -196,6 +207,7 @@ export class OpenAIProvider implements AIProvider {
 
 		this.applyGenerationOptions(params, body);
 		this.applyTokenLimit(params, body);
+		this.applyToolCompatibilityOptions(params, body);
 
 		const response = await this.createWithUnsupportedParamRetry(params, (p) =>
 			this.client.chat.completions.create(p),
@@ -227,6 +239,7 @@ export class OpenAIProvider implements AIProvider {
 
 		this.applyGenerationOptions(params, body);
 		this.applyTokenLimit(params, body);
+		this.applyToolCompatibilityOptions(params, body);
 
 		const stream = (await this.createWithUnsupportedParamRetry(params, (p) =>
 			this.client.chat.completions.create(p as ChatCompletionCreateParams & { stream: true }),

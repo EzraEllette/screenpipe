@@ -112,6 +112,26 @@ describe('OpenAIProvider usage reporting', () => {
 
 		expect(calls[0].tools).toEqual(tools);
 		expect(calls[0].tool_choice).toBe('required');
+		expect(calls[0].reasoning_effort).toBe('none');
+	});
+
+	it('does not disable reasoning for GPT-5.6 requests without tools', async () => {
+		async function* stream() {
+			yield { choices: [{ delta: { content: 'ok' }, finish_reason: 'stop' }] };
+		}
+		const { provider, calls } = makeOpenAIProvider(async () => {
+			const s: any = stream();
+			s.controller = { abort: () => {} };
+			return s;
+		});
+
+		await new Response(await provider.createStreamingCompletion({
+			...body,
+			model: 'gpt-5.6-luna',
+			stream: true,
+		})).text();
+
+		expect(calls[0].reasoning_effort).toBeUndefined();
 	});
 
 	it('drops stream_options and retries when an OpenAI-compatible server rejects it', async () => {
