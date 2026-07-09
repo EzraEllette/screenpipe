@@ -690,6 +690,34 @@ jobs:
           echo "args=$ARGS" >> $GITHUB_OUTPUT
           echo "Final tauri args: $ARGS"
 
+      - name: Select macOS sidecar bundle entries
+        if: matrix.os_type == 'macos'
+        shell: bash
+        run: |
+          set -euo pipefail
+          TARGET="${{ matrix.target }}"
+          node <<'NODE'
+          const fs = require("fs");
+          const path = "apps/screenpipe-app-tauri/src-tauri/tauri.macos.conf.json";
+          const target = process.env.TARGET;
+          const config = JSON.parse(fs.readFileSync(path, "utf8"));
+          config.bundle ??= {};
+          config.bundle.macOS ??= {};
+          if (target === "aarch64-apple-darwin") {
+            config.bundle.macOS.files = { "MacOS/mlx.metallib": "mlx.metallib" };
+          } else if (target === "x86_64-apple-darwin") {
+            config.bundle.macOS.files = {
+              "MacOS/libonnxruntime.dylib": "libonnxruntime.dylib",
+            };
+          } else {
+            throw new Error(`unknown macOS release target: ${target}`);
+          }
+          fs.writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`);
+          console.log(`macOS bundle sidecars selected for ${target}`);
+          NODE
+        env:
+          TARGET: ${{ matrix.target }}
+
       - name: Re-unlock build keychain before signing (macOS)
         if: matrix.os_type == 'macos'
         shell: bash
@@ -1069,8 +1097,8 @@ jobs:
         # build-keychain dance (the `errSecInternalComponent` class — see
         # the keychain setup above) only surfaces as a notarization failure
         # much later in the workflow.
-        # Covers the single Tauri codesign pass (mlx.metallib / libonnxruntime.dylib
-        # are staged into Contents/MacOS/ at build time via bundle.macOS.files).
+        # Covers the single Tauri codesign pass for the architecture-specific
+        # sidecar staged into Contents/MacOS/ via bundle.macOS.files.
         if: matrix.os_type == 'macos'
         shell: bash
         run: |

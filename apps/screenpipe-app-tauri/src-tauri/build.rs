@@ -565,13 +565,22 @@ fn stage_macos_sidecar_libs() {
     stage_libonnxruntime_dylib();
 }
 
-/// Copy mlx.metallib to a known location so Tauri can bundle it via bundle.macOS.files.
-/// MLX compiles Metal shaders into this file during mlx-sys build. Without it,
-/// parakeet-mlx crashes with "Failed to load the default metallib".
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+/// Copy mlx.metallib to a known location so Tauri can bundle it via
+/// bundle.macOS.files on aarch64 macOS release builds. MLX compiles Metal
+/// shaders into this file during mlx-sys build. Without it, parakeet-mlx
+/// crashes with "Failed to load the default metallib".
+#[cfg(target_os = "macos")]
 fn stage_mlx_metallib() {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
     let metallib = std::path::Path::new(&manifest_dir).join("mlx.metallib");
+    let target_arch =
+        std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_else(|_| "aarch64".to_string());
+
+    if target_arch != "aarch64" {
+        let _ = std::fs::remove_file(&metallib);
+        return;
+    }
+
     let min_size = 1_000_000; // real metallib is ~84MB
 
     let needs_download = !metallib.exists()
@@ -605,18 +614,6 @@ fn stage_mlx_metallib() {
     }
 
     sign_macos_sidecar_if_needed(&metallib);
-}
-
-/// Ensure mlx.metallib exists so Tauri doesn't fail on the bundle.macOS.files entry.
-/// On non-aarch64-macOS builds, create an empty placeholder (it won't be used).
-#[cfg(all(target_os = "macos", not(target_arch = "aarch64")))]
-fn stage_mlx_metallib() {
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
-    let metallib = std::path::Path::new(&manifest_dir).join("mlx.metallib");
-    // Truncate any cached real metallib from a previous arm64 build. The
-    // non-arm64 bundle entry is only a placeholder so Tauri's macOS.files entry
-    // resolves; stale nested code in Contents/MacOS breaks app signing.
-    let _ = std::fs::write(&metallib, b"");
 }
 
 /// Stage libonnxruntime.dylib for x86_64 Intel builds. ort `load-dynamic` resolves
@@ -673,10 +670,7 @@ fn stage_libonnxruntime_dylib() {
         }
         sign_macos_sidecar_if_needed(&dylib);
     } else {
-        // Truncate any cached real dylib from a previous x86_64 build. The
-        // non-x86_64 bundle entry is only a placeholder so Tauri's macOS.files
-        // entry resolves; stale nested code in Contents/MacOS breaks app signing.
-        let _ = std::fs::write(&dylib, b"");
+        let _ = std::fs::remove_file(&dylib);
     }
 }
 
