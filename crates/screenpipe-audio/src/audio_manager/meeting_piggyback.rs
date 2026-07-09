@@ -498,10 +498,14 @@ pub(crate) struct PiggybackObservation {
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum PiggybackAction {
-    StartTap { pids: Vec<i32> },
+    StartTap {
+        pids: Vec<i32>,
+    },
     /// Stop + immediately restart the tap over a new pid set — a deliberate
     /// rebuild, NOT a failure: no strike, no cooldown gap, suspensions kept.
-    RetapForPidChange { pids: Vec<i32> },
+    RetapForPidChange {
+        pids: Vec<i32>,
+    },
     StopSessionDevice(String),
     Suspend(String),
     Resume(String),
@@ -931,7 +935,9 @@ pub(crate) async fn run_meeting_piggyback_sweep(
     state: &mut PiggybackState,
 ) -> bool {
     use super::now_ms;
-    use crate::core::device::{parse_audio_device, AudioDevice, DeviceType, MEETING_TAP_DEVICE_NAME};
+    use crate::core::device::{
+        parse_audio_device, AudioDevice, DeviceType, MEETING_TAP_DEVICE_NAME,
+    };
     use screenpipe_events::AudioCaptureHealthEvent;
     use tracing::{error, info, warn};
 
@@ -1098,9 +1104,8 @@ pub(crate) async fn run_meeting_piggyback_sweep(
         telemetry
             .mic_resolved_devices
             .extend(resolved_inputs.iter().cloned());
-        telemetry.mic_session_started |= resolved_inputs
-            .iter()
-            .any(|d| session_devices.contains(d));
+        telemetry.mic_session_started |=
+            resolved_inputs.iter().any(|d| session_devices.contains(d));
     }
 
     // 5. Apply actions in the decider's order. Suspend sets the flag BEFORE
@@ -1251,8 +1256,7 @@ pub(crate) async fn run_meeting_piggyback_sweep(
                                         let ev = AudioCaptureHealthEvent::mic_capture_failed(
                                             e.to_string(),
                                         );
-                                        let _ =
-                                            screenpipe_events::send_event(ev.event_name(), ev);
+                                        let _ = screenpipe_events::send_event(ev.event_name(), ev);
                                         state.mic_fail_reported = true;
                                     } else {
                                         warn!(
@@ -1759,7 +1763,9 @@ mod tests {
         // CoreAudio, so there is nothing left to wait for.
         assert_eq!(
             m.tick(&obs),
-            vec![MicFollowAction::OpenSessionInput("Rode NT (input)".to_string())]
+            vec![MicFollowAction::OpenSessionInput(
+                "Rode NT (input)".to_string()
+            )]
         );
         assert!(!m.note_open_result("Rode NT (input)", true, obs.now_ms));
         assert!(m.is_capturing("Rode NT (input)"));
@@ -1805,9 +1811,12 @@ mod tests {
         obs.running_inputs = vec![mic.clone(), other.clone()];
         obs.running_streaming = [mic.clone()].into();
         // First pass: adopt + latch displacement of the other mic.
-        assert_eq!(m.tick(&obs), vec![MicFollowAction::SuspendInput(other.clone())]);
+        assert_eq!(
+            m.tick(&obs),
+            vec![MicFollowAction::SuspendInput(other.clone())]
+        );
         obs.running_inputs = vec![mic.clone()]; // the sweep stopped `other`
-        // 25 ticks (~50s) of liveness flapping: strictly zero actions.
+                                                // 25 ticks (~50s) of liveness flapping: strictly zero actions.
         for i in 0..25 {
             obs.now_ms += TICK_MS;
             if i % 2 == 0 {
@@ -1828,7 +1837,10 @@ mod tests {
         let mic = "Rode NT (input)".to_string();
         let mut obs = mf_obs(TICK_MS);
         obs.resolved_inputs = vec![mic.clone()];
-        assert_eq!(m.tick(&obs), vec![MicFollowAction::OpenSessionInput(mic.clone())]);
+        assert_eq!(
+            m.tick(&obs),
+            vec![MicFollowAction::OpenSessionInput(mic.clone())]
+        );
         assert!(!m.note_open_result(&mic, false, obs.now_ms));
 
         // An event wake inside the retry floor must NOT duplicate the open —
@@ -1880,7 +1892,10 @@ mod tests {
             }
             obs.now_ms += TICK_MS;
         }
-        assert_eq!(warned, 1, "persistent-failure warning must fire exactly once");
+        assert_eq!(
+            warned, 1,
+            "persistent-failure warning must fire exactly once"
+        );
 
         // Fast window: every retry inside the first MIC_PERSISTENT_WINDOW_MS
         // arrived at tick cadence (2s) — never slower.
@@ -1902,7 +1917,10 @@ mod tests {
             .filter(|w| w[0] >= start + MIC_PERSISTENT_WINDOW_MS + 2 * TICK_MS)
             .map(|w| w[1] - w[0])
             .collect();
-        assert!(slow_gaps.len() >= 2, "expected slow-cadence retries: {opens:?}");
+        assert!(
+            slow_gaps.len() >= 2,
+            "expected slow-cadence retries: {opens:?}"
+        );
         assert!(
             slow_gaps.iter().all(|gap| *gap >= MIC_PERSISTENT_RETRY_MS),
             "persistent failures must retry no faster than {}s: {slow_gaps:?}",
@@ -1924,15 +1942,21 @@ mod tests {
         // Stream dies: exactly one close…
         obs.now_ms += TICK_MS;
         obs.session_streaming.clear();
-        assert_eq!(m.tick(&obs), vec![MicFollowAction::CloseSessionInput(mic.clone())]);
+        assert_eq!(
+            m.tick(&obs),
+            vec![MicFollowAction::CloseSessionInput(mic.clone())]
+        );
         obs.session_devices.clear(); // the sweep closed it
-        // …no duplicate open inside the retry floor (event-wake burst)…
+                                     // …no duplicate open inside the retry floor (event-wake burst)…
         obs.now_ms += MIC_RETRY_FLOOR_MS / 2;
         assert!(m.tick(&obs).is_empty(), "floor holds after a death");
         // …then reopen on the very next tick — fast reacquisition, not a
         // 10-60s backoff.
         obs.now_ms = 2 * TICK_MS + TICK_MS;
-        assert_eq!(m.tick(&obs), vec![MicFollowAction::OpenSessionInput(mic.clone())]);
+        assert_eq!(
+            m.tick(&obs),
+            vec![MicFollowAction::OpenSessionInput(mic.clone())]
+        );
         assert!(!m.note_open_result(&mic, true, obs.now_ms));
         assert!(m.is_capturing(&mic));
     }
@@ -1950,14 +1974,20 @@ mod tests {
         obs.session_devices = [mic.clone()].into();
         obs.session_streaming = [mic.clone()].into();
         // First pass: already open → Capturing + delivering → latch.
-        assert_eq!(m.tick(&obs), vec![MicFollowAction::SuspendInput(other.clone())]);
+        assert_eq!(
+            m.tick(&obs),
+            vec![MicFollowAction::SuspendInput(other.clone())]
+        );
         obs.running_inputs.clear();
         let last_delivering = obs.now_ms;
 
         // Capture dies for good.
         obs.now_ms += TICK_MS;
         obs.session_streaming.clear();
-        assert_eq!(m.tick(&obs), vec![MicFollowAction::CloseSessionInput(mic.clone())]);
+        assert_eq!(
+            m.tick(&obs),
+            vec![MicFollowAction::CloseSessionInput(mic.clone())]
+        );
         obs.session_devices.clear();
 
         // Until the holdoff elapses: reopen attempts only (fast retries, then
@@ -2078,7 +2108,10 @@ mod tests {
         obs.resolved_inputs = vec![mic.clone()];
         obs.running_inputs = vec![mic.clone(), other.clone()];
         obs.running_streaming = [mic.clone()].into();
-        assert_eq!(m.tick(&obs), vec![MicFollowAction::SuspendInput(other.clone())]);
+        assert_eq!(
+            m.tick(&obs),
+            vec![MicFollowAction::SuspendInput(other.clone())]
+        );
         obs.running_inputs = vec![mic.clone()];
 
         // The app hangs up its mic (meeting still detected): after the release
@@ -2101,7 +2134,10 @@ mod tests {
         obs.running_inputs = vec![mic.clone(), other.clone()];
         obs.running_streaming = [mic.clone()].into();
         // Adopt + latch.
-        assert_eq!(m.tick(&obs), vec![MicFollowAction::SuspendInput(other.clone())]);
+        assert_eq!(
+            m.tick(&obs),
+            vec![MicFollowAction::SuspendInput(other.clone())]
+        );
         obs.now_ms += TICK_MS;
         assert!(m.tick(&obs).is_empty(), "latched: no repeat suspend");
         m.reset();

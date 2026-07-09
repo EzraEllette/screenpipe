@@ -655,7 +655,7 @@ jobs:
 
         cat > "$RUNNER_TEMP/sway/config" <<EOF
         output * resolution 1280x720
-        exec foot --title "$SCREENPIPE_WAYLAND_TEST_TITLE" sh -lc 'sleep 300'
+        exec foot --title "$SCREENPIPE_WAYLAND_TEST_TITLE" sh -lc 'sleep 1800'
         EOF
 
         sway --config "$RUNNER_TEMP/sway/config" --validate
