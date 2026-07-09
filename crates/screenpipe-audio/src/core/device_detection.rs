@@ -157,6 +157,13 @@ impl InputDeviceKind {
 /// default, Bluetooth mics are only captured during a detected meeting;
 /// `always_override` lets the user opt back into the old always-on behavior.
 ///
+/// This only matters for a *combo* headset — one physical accessory the user
+/// might be listening through as well as recording from. A dedicated
+/// Bluetooth microphone with no output side of its own (`is_combo_headset ==
+/// false`, see `device::bluetooth_input_is_combo_headset`) has nothing to
+/// protect: there's no headphone output on that hardware to degrade, so it's
+/// always allowed, same as a wired mic.
+///
 /// Deliberately checks `== InputDeviceKind::Bluetooth`, NOT `.is_bluetooth()`
 /// — that helper also matches `Unknown` (a conservative default for
 /// buffer-timeout tuning), which would silently gate ordinary wired mics
@@ -166,8 +173,13 @@ impl InputDeviceKind {
 /// Smart recording (`experimental_meeting_piggyback`) is deliberately not a
 /// separate input: it never captures outside a detected meeting, so
 /// `in_meeting` already covers it.
-pub fn bluetooth_mic_allowed(kind: &InputDeviceKind, always_override: bool, in_meeting: bool) -> bool {
-    *kind != InputDeviceKind::Bluetooth || always_override || in_meeting
+pub fn bluetooth_mic_allowed(
+    kind: &InputDeviceKind,
+    is_combo_headset: bool,
+    always_override: bool,
+    in_meeting: bool,
+) -> bool {
+    *kind != InputDeviceKind::Bluetooth || !is_combo_headset || always_override || in_meeting
 }
 
 #[cfg(test)]
@@ -259,43 +271,85 @@ mod tests {
     }
 
     #[test]
-    fn bluetooth_gate_blocks_by_default_outside_a_meeting() {
-        assert!(!bluetooth_mic_allowed(&InputDeviceKind::Bluetooth, false, false));
+    fn bluetooth_gate_blocks_combo_headset_by_default_outside_a_meeting() {
+        assert!(!bluetooth_mic_allowed(
+            &InputDeviceKind::Bluetooth,
+            true,
+            false,
+            false
+        ));
     }
 
     #[test]
-    fn bluetooth_gate_allows_during_a_meeting() {
-        assert!(bluetooth_mic_allowed(&InputDeviceKind::Bluetooth, false, true));
+    fn bluetooth_gate_allows_combo_headset_during_a_meeting() {
+        assert!(bluetooth_mic_allowed(
+            &InputDeviceKind::Bluetooth,
+            true,
+            false,
+            true
+        ));
     }
 
     #[test]
-    fn bluetooth_gate_allows_with_override() {
-        assert!(bluetooth_mic_allowed(&InputDeviceKind::Bluetooth, true, false));
+    fn bluetooth_gate_allows_combo_headset_with_override() {
+        assert!(bluetooth_mic_allowed(
+            &InputDeviceKind::Bluetooth,
+            true,
+            true,
+            false
+        ));
     }
 
     #[test]
-    fn bluetooth_gate_allows_with_override_and_meeting() {
-        assert!(bluetooth_mic_allowed(&InputDeviceKind::Bluetooth, true, true));
+    fn bluetooth_gate_allows_combo_headset_with_override_and_meeting() {
+        assert!(bluetooth_mic_allowed(
+            &InputDeviceKind::Bluetooth,
+            true,
+            true,
+            true
+        ));
+    }
+
+    #[test]
+    fn bluetooth_gate_never_blocks_a_dedicated_mic_with_no_output_side() {
+        // A Bluetooth device confirmed to have no output capability of its
+        // own (`is_combo_headset == false`) has nothing to protect — no
+        // headphone output on that hardware to degrade — so it's always
+        // recorded, regardless of meeting state or the override setting.
+        for always_override in [false, true] {
+            for in_meeting in [false, true] {
+                assert!(bluetooth_mic_allowed(
+                    &InputDeviceKind::Bluetooth,
+                    false,
+                    always_override,
+                    in_meeting
+                ));
+            }
+        }
     }
 
     #[test]
     fn bluetooth_gate_never_blocks_wired_or_unknown() {
-        for always_override in [false, true] {
-            for in_meeting in [false, true] {
-                assert!(bluetooth_mic_allowed(
-                    &InputDeviceKind::Wired,
-                    always_override,
-                    in_meeting
-                ));
-                // Unknown is treated as Bluetooth-like by `is_bluetooth()` for
-                // buffer tuning, but the recording gate must NOT mute
-                // unrecognized wired mics — it checks strict equality
-                // against `Bluetooth`, not `.is_bluetooth()`.
-                assert!(bluetooth_mic_allowed(
-                    &InputDeviceKind::Unknown,
-                    always_override,
-                    in_meeting
-                ));
+        for is_combo_headset in [false, true] {
+            for always_override in [false, true] {
+                for in_meeting in [false, true] {
+                    assert!(bluetooth_mic_allowed(
+                        &InputDeviceKind::Wired,
+                        is_combo_headset,
+                        always_override,
+                        in_meeting
+                    ));
+                    // Unknown is treated as Bluetooth-like by `is_bluetooth()` for
+                    // buffer tuning, but the recording gate must NOT mute
+                    // unrecognized wired mics — it checks strict equality
+                    // against `Bluetooth`, not `.is_bluetooth()`.
+                    assert!(bluetooth_mic_allowed(
+                        &InputDeviceKind::Unknown,
+                        is_combo_headset,
+                        always_override,
+                        in_meeting
+                    ));
+                }
             }
         }
     }

@@ -1246,24 +1246,6 @@ const getAudioDeviceIcon = (name: string) => {
   return Volume2;
 };
 
-// Best-effort name heuristic for the device-picker hint only — mirrors the
-// gist of the Rust classifier (InputDeviceKind::detect) but doesn't need to
-// match it exactly, since the actual meeting/override gate is enforced
-// backend-side regardless of what this hint shows.
-const isLikelyBluetoothMicName = (name: string): boolean => {
-  const lower = name.toLowerCase();
-  if (lower.includes("blackhole") || lower.includes("vb-audio") || lower.includes("virtual") || lower.includes("loopback")) {
-    return false;
-  }
-  return (
-    lower.includes("airpods") ||
-    lower.includes("bluetooth") ||
-    lower.includes("jabra") ||
-    lower.includes("beats") ||
-    /wh-1000x|wf-1000x|wl-1000x/.test(lower)
-  );
-};
-
 // ─── Transcription Dictionary ────────────────────────────────────────────────
 
 const DEEPGRAM_LIMIT = 100;
@@ -3439,10 +3421,10 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
             const displayName = getAudioDeviceDisplayName(device.name);
             // Use per-device level if available, fall back to global speechRatio
             const deviceLevel = overlayData.deviceLevels[device.name] ?? overlayData.speechRatio;
-            const isBluetoothMicGated =
-              getAudioDeviceType(device.name) === "input" &&
-              isLikelyBluetoothMicName(device.name) &&
-              !settings.alwaysRecordBluetoothMic;
+            // Backend-computed: exactly mirrors AudioManager::start_device's
+            // real gate (Bluetooth input + combo headset), so this hint
+            // never mismatches actual recording behavior.
+            const isBluetoothMicGated = device.isComboBluetoothMic && !settings.alwaysRecordBluetoothMic;
             return (
               <div
                 key={device.name}

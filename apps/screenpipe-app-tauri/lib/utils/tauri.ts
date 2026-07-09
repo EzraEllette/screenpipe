@@ -2368,7 +2368,20 @@ async writeBrowserLogs(entries: BrowserLogEntry[]) : Promise<void> {
 export type AIPreset = { id: string; prompt: string; provider: AIProviderType; url?: string; model?: string; defaultPreset: boolean; apiKey: string | null; maxContextChars: number; maxTokens?: number }
 export type AIProviderType = "openai" | "openai-chatgpt" | "native-ollama" | "custom" | "screenpipe-cloud" | "pi" | "anthropic"
 export type AecMode = "off" | "screenpipe" | "macos" | "windows"
-export type AudioDeviceInfo = { name: string; isDefault: boolean }
+export type AudioDeviceInfo = { name: string; isDefault: boolean;
+/**
+ * True for a Bluetooth *input* device that is also a combo headset (the
+ * same hardware exposes an output side) — i.e. exactly the devices the
+ * `alwaysRecordBluetoothMic` gate actually holds back outside a
+ * detected meeting. A dedicated Bluetooth mic with no output side is
+ * never gated, so this is `false` for one even though it's Bluetooth.
+ * Mirrors `AudioManager::start_device`'s real gate condition
+ * (screenpipe-audio's `device_detection::bluetooth_mic_allowed` +
+ * `device::bluetooth_input_is_combo_headset`) so the settings UI's
+ * "meetings only" hint matches actual recording behavior instead of
+ * guessing from the device name.
+ */
+isComboBluetoothMic: boolean }
 export type BootPhaseSnapshot = {
 /**
  * One of: idle | starting | migrating_database | building_audio |
@@ -2742,7 +2755,10 @@ experimentalMeetingPiggyback?: boolean;
  * stay enabled-but-gated (selected in settings, not streaming) so the
  * Bluetooth link stays in A2DP. Set `true` to always record Bluetooth
  * mics regardless of meeting state (prior behavior). Has no effect on
- * wired/built-in/unrecognized mics or on Bluetooth output devices.
+ * wired/built-in/unrecognized mics, on Bluetooth output devices, or on a
+ * dedicated Bluetooth microphone with no output side of its own (macOS:
+ * confirmed via `bluetooth_input_is_combo_headset` — nothing to protect
+ * there, since there's no headphone output on that hardware to degrade).
  */
 alwaysRecordBluetoothMic?: boolean;
 /**

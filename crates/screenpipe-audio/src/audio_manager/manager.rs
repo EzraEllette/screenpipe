@@ -697,25 +697,13 @@ impl AudioManager {
         // A2DP into SCO, degrading the user's headphone/speaker output — a
         // macOS/OS-level tradeoff with no external workaround (issue #3750).
         // Gated to detected meetings by default; `always_record_bluetooth_mic`
-        // opts back into always-on capture. Each `.await` below reads its own
-        // lock and drops the guard immediately — holding `options`'s guard
-        // across the `meeting_detector()` call would invert lock order
-        // against `apply_options` (which writes `meeting_detector` then
-        // `options`) and risk an AB-BA deadlock.
-        if device.device_type == crate::core::device::DeviceType::Input {
-            let kind = crate::core::device_detection::InputDeviceKind::detect(&device.name);
-            let always_override = self.always_record_bluetooth_mic().await;
-            let in_meeting = match self.meeting_detector().await {
-                Some(d) => d.is_in_meeting(),
-                None => false,
-            };
-            if !crate::core::device_detection::bluetooth_mic_allowed(&kind, always_override, in_meeting) {
-                debug!(
-                    "skipping start of bluetooth mic {}: not in a meeting (always_record_bluetooth_mic is off)",
-                    device
-                );
-                return Ok(());
-            }
+        // opts back into always-on capture.
+        if self.bluetooth_input_gate_blocks(device).await {
+            debug!(
+                "skipping start of bluetooth mic {}: not in a meeting (always_record_bluetooth_mic is off)",
+                device
+            );
+            return Ok(());
         }
 
         if let Err(e) = self.device_manager.start_device(device).await {
@@ -1493,6 +1481,46 @@ impl AudioManager {
     /// `pub(crate)` rather than private, matching `piggyback_enabled`.
     pub(crate) async fn always_record_bluetooth_mic(&self) -> bool {
         self.options.read().await.always_record_bluetooth_mic
+    }
+
+    /// Whether `device` is currently withheld by the Bluetooth meeting gate.
+    /// `start_device` uses this internally, but it's also `pub(crate)` for
+    /// callers in `device_monitor.rs` that swap the active input device
+    /// based on system-default changes or "no input running" recovery —
+    /// they MUST check this BEFORE stopping a working device or resetting a
+    /// retry backoff on the strength of `start_device` returning `Ok(())`.
+    /// That `Ok(())` only means "no error", not "now actually capturing" —
+    /// this gate is a deliberate, often long-lived no-op, not a failure, so
+    /// treating it as success causes real capture loss (stopping a working
+    /// mic in favor of one that silently never started) or a tight retry
+    /// loop (backoff keeps getting reset by a "success" that never streams
+    /// a single frame, hammering the Bluetooth device's CoreAudio object
+    /// every couple of seconds — this is what caused the AirPods to flicker
+    /// between showing up as an input and an output, since sitting on the
+    /// mic-open path this often perturbs the A2DP/SCO profile negotiation).
+    pub(crate) async fn bluetooth_input_gate_blocks(&self, device: &crate::core::device::AudioDevice) -> bool {
+        if device.device_type != crate::core::device::DeviceType::Input {
+            return false;
+        }
+        let kind = crate::core::device_detection::InputDeviceKind::detect(&device.name);
+        if kind != crate::core::device_detection::InputDeviceKind::Bluetooth {
+            return false;
+        }
+        // Only probe hardware for confirmed-Bluetooth devices — a dedicated
+        // mic-only Bluetooth device (no output side on the same hardware)
+        // has nothing to protect, so it's exempt from the gate entirely.
+        let is_combo_headset = crate::core::device::bluetooth_input_is_combo_headset(&device.name);
+        let always_override = self.always_record_bluetooth_mic().await;
+        let in_meeting = match self.meeting_detector().await {
+            Some(d) => d.is_in_meeting(),
+            None => false,
+        };
+        !crate::core::device_detection::bluetooth_mic_allowed(
+            &kind,
+            is_combo_headset,
+            always_override,
+            in_meeting,
+        )
     }
 
     /// Returns the shared WhisperContext for backward compatibility, if loaded.

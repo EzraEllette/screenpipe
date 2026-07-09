@@ -712,7 +712,16 @@ pub async fn start_device_monitor(
                                 .ok()
                                 .is_some_and(|d| is_device_actively_streaming(&device_manager, &d));
 
-                            if !has_correct_input {
+                            // The default input is a Bluetooth mic the meeting
+                            // gate withholds outside a meeting — starting it
+                            // would just silently no-op. Leave whatever input
+                            // is already running alone rather than stopping it
+                            // in favor of one that will never actually stream.
+                            let default_input_gated = audio_manager
+                                .bluetooth_input_gate_blocks(&default_input)
+                                .await;
+
+                            if !has_correct_input && !default_input_gated {
                                 info!(
                                     "[DEVICE_RECOVERY] initial sync: default input '{}' not active, switching",
                                     default_input_name
@@ -824,12 +833,37 @@ pub async fn start_device_monitor(
                     // Check if system default input changed
                     let previous_default_input = default_tracker.last_input.clone();
                     if let Some(new_default_input) = default_tracker.check_input_changed() {
+                        // The new default may be a Bluetooth mic the meeting
+                        // gate withholds outside a meeting — starting it would
+                        // just silently no-op. Computed once up front since
+                        // the check itself needs `.await`.
+                        let new_default_input_gated = match parse_audio_device(&new_default_input) {
+                            Ok(d) => audio_manager.bluetooth_input_gate_blocks(&d).await,
+                            Err(_) => false,
+                        };
                         if audio_manager
                             .user_disabled_devices()
                             .await
                             .contains(&new_default_input)
                         {
                             debug!("[DEVICE_RECOVERY] skipping default input change: {} is user-disabled", new_default_input);
+                        } else if new_default_input_gated {
+                            // Don't stop the currently-working input in favor of
+                            // one that will never actually stream — this used to
+                            // cause total input capture loss the moment a gated
+                            // Bluetooth mic became the OS default, since
+                            // `start_device` returning `Ok(())` here was wrongly
+                            // read as "the swap succeeded". Deliberately does NOT
+                            // revert `default_tracker.last_input` (unlike the
+                            // genuine-failure path below) — matching the
+                            // user-disabled branch above, so this only logs once
+                            // per actual OS default-change event instead of
+                            // retrying (and re-logging) every 2s tick for as long
+                            // as the gate stays closed.
+                            debug!(
+                                "[DEVICE_RECOVERY] skipping default input change: {} is gated by the bluetooth meeting gate",
+                                new_default_input
+                            );
                         } else {
                             info!("system default input changed to: {}", new_default_input);
 
@@ -1092,6 +1126,28 @@ pub async fn start_device_monitor(
                                             // leave backoff untouched
                                         } else if user_disabled.contains(&device_name) {
                                             input_recovery_backoff.record_failure(true);
+                                        } else if audio_manager
+                                            .bluetooth_input_gate_blocks(&default_input)
+                                            .await
+                                        {
+                                            // Same "no-op'd success" hazard as the
+                                            // suspended-device case above: the
+                                            // default input is a Bluetooth mic the
+                                            // meeting gate withholds outside a
+                                            // meeting. Starting it here would
+                                            // silently no-op, then get mis-logged
+                                            // as "restored" with a backoff reset —
+                                            // this was the actual root cause of the
+                                            // AirPods flickering between showing up
+                                            // as an input and an output: this loop
+                                            // was retrying every couple of seconds
+                                            // once backoff kept resetting on a
+                                            // "success" that never streamed a
+                                            // frame, hammering the device's
+                                            // CoreAudio object often enough to
+                                            // perturb its A2DP/SCO profile
+                                            // negotiation. Skip this tick entirely,
+                                            // no log, no reset, no retry storm.
                                         } else {
                                             warn!(
                                                 "[DEVICE_RECOVERY] no input device running (attempt {}), starting default: {}",
@@ -1998,6 +2054,11 @@ async fn run_pinned_input_fallback_sweep(
 /// separate suspended-devices tracking, since the gate itself prevents
 /// anything from re-starting a device this sweep just stopped.
 ///
+/// A dedicated Bluetooth microphone with no output side of its own
+/// (`bluetooth_input_is_combo_headset` false) is exempt from the gate
+/// entirely — it's checked per candidate below, since a dedicated mic and a
+/// combo headset could both be enabled at once.
+///
 /// Candidates come from two sources, since either alone misses real cases:
 /// `enabled_devices()` (explicitly selected devices — but a Bluetooth device
 /// gated on its very first start never lands there, since that insert is a
@@ -2006,6 +2067,7 @@ async fn run_pinned_input_fallback_sweep(
 /// where a paired headset becomes the default mic without ever being
 /// explicitly enabled).
 async fn run_bluetooth_mic_gate_sweep(audio_manager: &AudioManager) {
+    use crate::core::device::bluetooth_input_is_combo_headset;
     use crate::core::device_detection::{bluetooth_mic_allowed, InputDeviceKind};
 
     let always_override = audio_manager.always_record_bluetooth_mic().await;
@@ -2013,8 +2075,6 @@ async fn run_bluetooth_mic_gate_sweep(audio_manager: &AudioManager) {
         Some(d) => d.is_in_meeting(),
         None => false,
     };
-    // Uniform across every confirmed-Bluetooth candidate below — compute once.
-    let allowed = bluetooth_mic_allowed(&InputDeviceKind::Bluetooth, always_override, in_meeting);
 
     let mut candidates: HashSet<String> = audio_manager
         .enabled_devices()
@@ -2039,6 +2099,15 @@ async fn run_bluetooth_mic_gate_sweep(audio_manager: &AudioManager) {
         let Ok(device) = parse_audio_device(&name) else {
             continue;
         };
+        // Per-device: a dedicated mic-only Bluetooth device (no output side
+        // on the same hardware) is never gated, regardless of other devices.
+        let is_combo_headset = bluetooth_input_is_combo_headset(&name);
+        let allowed = bluetooth_mic_allowed(
+            &InputDeviceKind::Bluetooth,
+            is_combo_headset,
+            always_override,
+            in_meeting,
+        );
         let running = audio_manager.is_device_actively_streaming(&device);
         if allowed && !running {
             if let Err(e) = audio_manager.start_device(&device).await {

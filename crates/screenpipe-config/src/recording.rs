@@ -187,7 +187,10 @@ pub struct RecordingSettings {
     /// stay enabled-but-gated (selected in settings, not streaming) so the
     /// Bluetooth link stays in A2DP. Set `true` to always record Bluetooth
     /// mics regardless of meeting state (prior behavior). Has no effect on
-    /// wired/built-in/unrecognized mics or on Bluetooth output devices.
+    /// wired/built-in/unrecognized mics, on Bluetooth output devices, or on a
+    /// dedicated Bluetooth microphone with no output side of its own (macOS:
+    /// confirmed via `bluetooth_input_is_combo_headset` — nothing to protect
+    /// there, since there's no headphone output on that hardware to degrade).
     #[serde(rename = "alwaysRecordBluetoothMic", default)]
     pub always_record_bluetooth_mic: bool,
 

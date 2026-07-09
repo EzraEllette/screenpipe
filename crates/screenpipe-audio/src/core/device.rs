@@ -189,6 +189,121 @@ fn detect_device_type_from_system(bare_name: &str) -> Option<DeviceType> {
     None
 }
 
+/// Whether the Bluetooth input device named `bare_name` is a combo headset —
+/// i.e. paired with a sibling AudioObject that has an output side on the
+/// SAME physical hardware — as opposed to a dedicated Bluetooth microphone
+/// with no output capability at all. The SCO/A2DP quality tradeoff (issue
+/// #3750, see `device_detection::bluetooth_mic_allowed`) only matters for
+/// combo devices: opening the mic degrades that hardware's own output, so
+/// gating only makes sense when the user could actually be listening through
+/// that same accessory. A dedicated mic-only device (no output side to
+/// degrade) should always be recorded, same as a wired mic.
+///
+/// CoreAudio does NOT expose a Bluetooth combo accessory as one AudioObject
+/// with both directions — it splits it into two SIBLING AudioObjectIDs, one
+/// per direction, sharing a UID with a `:input` / `:output` suffix on a
+/// common (MAC-address-derived) prefix. Measured live for a real AirPods Max:
+/// `70-F9-4A-9C-2C-F0:input` (1 input stream, 0 output streams) and
+/// `70-F9-4A-9C-2C-F0:output` (0 input streams, 1 output stream) — both
+/// reporting the SAME `name()`. Checking `output_stream_cfg()` on the object
+/// resolved by name alone is therefore wrong: `ca::System::devices()` can
+/// return either sibling first, and the input-side sibling *always* reports
+/// zero output streams by construction — that isn't evidence the hardware
+/// lacks a speaker, it's just not this AudioObjectID's problem. The fix is to
+/// resolve by name once to get this object's UID, then look up the sibling
+/// by UID prefix (never by name — the pair share the same name, so name
+/// matching can't distinguish them) and check *its* output capability.
+///
+/// Resolves the device by name once (unavoidable — screenpipe's device model
+/// is name-keyed throughout); the combo/dedicated determination itself reads
+/// the sibling object's own properties, not a name-based guess.
+///
+/// Conservative on any ambiguity (lookup failure, device vanished mid-query,
+/// or a UID that doesn't follow the `:input`/`:output` sibling-split pattern
+/// at all — some transports may expose a single bidirectional object):
+/// defaults to `true` (combo), i.e. falls back to gating exactly like before
+/// this distinction existed. Non-macOS platforms have no equivalent probe
+/// yet, so they also default to `true` — this only *narrows* the existing
+/// gate, it never widens it. Only a *confirmed* sibling with zero output
+/// streams returns `false`.
+#[cfg(target_os = "macos")]
+pub fn bluetooth_input_is_combo_headset(bare_name: &str) -> bool {
+    use cidre::core_audio as ca;
+
+    let Ok(devices) = ca::System::devices() else {
+        return true;
+    };
+    let Some(device) = devices
+        .iter()
+        .find(|d| d.name().ok().map(|n| n.to_string()).as_deref() == Some(bare_name))
+    else {
+        return true;
+    };
+    let Some(uid) = device.uid().ok().map(|u| u.to_string()) else {
+        return device
+            .output_stream_cfg()
+            .map(|cfg| cfg.number_buffers() > 0)
+            .unwrap_or(true);
+    };
+    let Some(prefix) = uid.strip_suffix(":input") else {
+        // Not a split sibling pair (or this IS the output-side object) —
+        // this object's own output capability is the right thing to check.
+        return device
+            .output_stream_cfg()
+            .map(|cfg| cfg.number_buffers() > 0)
+            .unwrap_or(true);
+    };
+    let sibling_uid = format!("{prefix}:output");
+    match devices
+        .iter()
+        .find(|d| d.uid().ok().map(|u| u.to_string()).as_deref() == Some(sibling_uid.as_str()))
+    {
+        Some(sibling) => sibling
+            .output_stream_cfg()
+            .map(|cfg| cfg.number_buffers() > 0)
+            .unwrap_or(true),
+        // No sibling output object exists at all — a genuinely dedicated mic.
+        None => false,
+    }
+}
+
+/// STUB — not yet implemented. Always returns `true` (conservative: assume
+/// combo), so Windows behavior is unchanged from before this distinction
+/// existed; this only documents the intended real implementation.
+///
+/// Bluetooth headsets on Windows are, like macOS (see the real
+/// implementation above — measured live: CoreAudio splits a combo device
+/// into sibling AudioObjectIDs sharing a MAC-address UID prefix with a
+/// `:input`/`:output` suffix), commonly split into separate WASAPI endpoints
+/// per profile — e.g. a "Headphones" render endpoint for A2DP stereo
+/// output-only, and a "Headset" endpoint for the Hands-Free Profile mono
+/// capture+render. The Windows analog of macOS's shared UID prefix is
+/// `PKEY_Device_ContainerId` (`windows::Win32::Devices::Properties`):
+/// endpoints belonging to the same physical hardware share the same
+/// container ID even though they're separate `IMMDevice`s with unrelated
+/// endpoint IDs. A real implementation would:
+///   1. Resolve `bare_name` to its capture `IMMDevice` via
+///      `IMMDeviceEnumerator::EnumAudioEndpoints` (`eCapture`,
+///      `DEVICE_STATE_ACTIVE`) — the same enumerator already used elsewhere
+///      in this file (see `default_communications_output_device` /
+///      `list_windows_render_endpoints` above) — matching on
+///      `PKEY_Device_FriendlyName`.
+///   2. Read that device's `PKEY_Device_ContainerId` via its
+///      `IPropertyStore`.
+///   3. Enumerate render (`eRender`) endpoints and check whether any share
+///      that container ID and report a non-zero channel count (via the
+///      endpoint's `IAudioClient::GetMixFormat`, or `PKEY_AudioEndpoint_*`
+///      properties).
+#[cfg(target_os = "windows")]
+pub fn bluetooth_input_is_combo_headset(_bare_name: &str) -> bool {
+    true
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub fn bluetooth_input_is_combo_headset(_bare_name: &str) -> bool {
+    true
+}
+
 /// Attempts an operation with exponential backoff retry
 #[cfg(target_os = "macos")]
 async fn with_retry<T, F, Fut>(operation: F, max_retries: usize) -> Result<T>
