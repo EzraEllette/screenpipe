@@ -603,6 +603,8 @@ fn stage_mlx_metallib() {
             size / 1_000_000
         );
     }
+
+    sign_macos_sidecar_if_needed(&metallib);
 }
 
 /// Ensure mlx.metallib exists so Tauri doesn't fail on the bundle.macOS.files entry.
@@ -611,9 +613,10 @@ fn stage_mlx_metallib() {
 fn stage_mlx_metallib() {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
     let metallib = std::path::Path::new(&manifest_dir).join("mlx.metallib");
-    if !metallib.exists() {
-        let _ = std::fs::write(&metallib, b"");
-    }
+    // Truncate any cached real metallib from a previous arm64 build. The
+    // non-arm64 bundle entry is only a placeholder so Tauri's macOS.files entry
+    // resolves; stale nested code in Contents/MacOS breaks app signing.
+    let _ = std::fs::write(&metallib, b"");
 }
 
 /// Stage libonnxruntime.dylib for x86_64 Intel builds. ort `load-dynamic` resolves
@@ -668,8 +671,66 @@ fn stage_libonnxruntime_dylib() {
                 }
             }
         }
-    } else if !dylib.exists() {
+        sign_macos_sidecar_if_needed(&dylib);
+    } else {
+        // Truncate any cached real dylib from a previous x86_64 build. The
+        // non-x86_64 bundle entry is only a placeholder so Tauri's macOS.files
+        // entry resolves; stale nested code in Contents/MacOS breaks app signing.
         let _ = std::fs::write(&dylib, b"");
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn sign_macos_sidecar_if_needed(path: &std::path::Path) {
+    let is_release = std::env::var("PROFILE").as_deref() == Ok("release");
+    if !is_release {
+        return;
+    }
+
+    let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    if size == 0 {
+        return;
+    }
+
+    let Ok(identity) = std::env::var("APPLE_SIGNING_IDENTITY") else {
+        println!(
+            "cargo:warning=macos-sidecar-sign: APPLE_SIGNING_IDENTITY missing; Tauri app signing may reject {}",
+            path.display()
+        );
+        return;
+    };
+
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+    let entitlements = std::path::Path::new(&manifest_dir).join("entitlements.plist");
+    let status = std::process::Command::new("codesign")
+        .arg("--force")
+        .arg("--sign")
+        .arg(identity)
+        .arg("--options")
+        .arg("runtime")
+        .arg("--timestamp")
+        .arg("--entitlements")
+        .arg(&entitlements)
+        .arg(path)
+        .status();
+
+    match status {
+        Ok(status) if status.success() => {
+            println!(
+                "cargo:warning=macos-sidecar-sign: signed {}",
+                path.file_name().and_then(|n| n.to_str()).unwrap_or("sidecar")
+            );
+        }
+        Ok(status) => panic!(
+            "codesign failed for staged macOS sidecar {} with status {}",
+            path.display(),
+            status
+        ),
+        Err(err) => panic!(
+            "failed to run codesign for staged macOS sidecar {}: {}",
+            path.display(),
+            err
+        ),
     }
 }
 

@@ -1128,9 +1128,10 @@ async fn main() {
                 env::set_var("TESSDATA_PREFIX", tessdata_path);
             }
 
-            // mlx.metallib and libonnxruntime.dylib are placed at Contents/MacOS/ at
-            // build time via bundle.macOS.files (see build.rs stage_macos_sidecar_libs),
-            // then signed as part of the normal codesign pass.
+            // mlx.metallib and libonnxruntime.dylib are staged at build time
+            // for bundle.macOS.files (see build.rs stage_macos_sidecar_libs).
+            // Real nested sidecars are pre-signed before Tauri copies them into
+            // Contents/MacOS; unused per-arch placeholders are truncated empty.
             //
             // Previously this block created a symlink at Contents/MacOS/mlx.metallib
             // pointing at Contents/Resources/mlx.metallib on first launch. Apple
