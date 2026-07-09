@@ -1128,10 +1128,9 @@ async fn main() {
                 env::set_var("TESSDATA_PREFIX", tessdata_path);
             }
 
-            // mlx.metallib is now placed at Contents/MacOS/mlx.metallib at
-            // build time (see "Inject mlx.metallib into Contents/MacOS/" step
-            // in .github/workflows/release-app.yml), then signed as part of
-            // the normal codesign pass.
+            // mlx.metallib and libonnxruntime.dylib are placed at Contents/MacOS/ at
+            // build time via bundle.macOS.files (see build.rs stage_macos_sidecar_libs),
+            // then signed as part of the normal codesign pass.
             //
             // Previously this block created a symlink at Contents/MacOS/mlx.metallib
             // pointing at Contents/Resources/mlx.metallib on first launch. Apple
