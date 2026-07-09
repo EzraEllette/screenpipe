@@ -85,14 +85,14 @@ export function PermissionBanner() {
             // (e.g. mic prompt, accessibility prompt). If the permission was already
             // denied, it falls back to opening System Settings internally.
             try {
-              if (!permissions.screenOk) await requestPermissionWithFlow("screenRecording");
-              else if (!permissions.micOk) await commands.requestPermission("microphone");
+              if (!permissions.micOk) await commands.requestPermission("microphone");
               else if (!permissions.accessibilityOk) await requestPermissionWithFlow("accessibility");
+              else if (!permissions.screenOk) await requestPermissionWithFlow("screenRecording");
             } catch {
               // fallback to opening settings directly
-              if (!permissions.screenOk) await openPermissionSettingsWithFlow("screenRecording");
-              else if (!permissions.micOk) await commands.openPermissionSettings("microphone");
+              if (!permissions.micOk) await openPermissionSettingsWithFlow("microphone");
               else if (!permissions.accessibilityOk) await openPermissionSettingsWithFlow("accessibility");
+              else if (!permissions.screenOk) await openPermissionSettingsWithFlow("screenRecording");
             }
           }}
         >
