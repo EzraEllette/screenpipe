@@ -43,12 +43,14 @@ export const AUTO_WATERFALL_VISION = [
 // lacks). Measured (6/19): gpt-5.4 here cost $590/day vs $177 on flex for the SAME
 // traffic — 3.3x more, on the small OpenAI pool, for a marginal IQ gain (54 vs ~50-55)
 // that pipes don't need; reverted (#4285→). glm-5 + gemini-3-flash are standard-tier
-// fallbacks for when flex is throttled. Keep Luna out of this tool-heavy lane:
-// GPT-5.6 Luna can serve ordinary background chat, but tool-enabled Pi pipe
-// requests currently fall through to GLM. Retrying it here would add latency
-// without actually serving the pipe.
+// fallbacks for when flex is throttled. Luna is a paid, high-volume fallback
+// immediately after the flex primary: it improves resilience without replacing
+// the proven cache-efficient default for every scheduled run. Pi's streaming
+// tool policy is forwarded by the OpenAI adapter, so this lane can use Luna for
+// tool-enabled pipes as intended.
 export const AUTO_WATERFALL_BACKGROUND = [
   'gemini-3.5-flash', // flex tier — cheapest on the cache-heavy background mix
+  'gpt-5.6-luna',     // paid fallback for complex / tool-enabled pipe work
   'glm-5',            // free Vertex MaaS fallback, standard tier
   'gemini-3-flash',   // near-free safety net
 ];

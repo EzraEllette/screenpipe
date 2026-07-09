@@ -218,6 +218,11 @@ export class OpenAIProvider implements AIProvider {
 			stream_options: { include_usage: true },
 			response_format: this.formatResponseFormat(body.response_format),
 			tools: body.tools as ChatCompletionCreateParams['tools'],
+			// Keep the streaming path semantically identical to non-streaming
+			// requests. Pi streams every pipe run; dropping tool_choice here meant
+			// a caller's explicit tool policy (notably "required") never reached
+			// GPT-5.6 Luna even though the model supports function calling.
+			tool_choice: body.tool_choice as ChatCompletionCreateParams['tool_choice'],
 		};
 
 		this.applyGenerationOptions(params, body);

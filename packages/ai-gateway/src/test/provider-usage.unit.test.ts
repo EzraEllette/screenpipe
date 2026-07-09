@@ -78,6 +78,42 @@ describe('OpenAIProvider usage reporting', () => {
 		expect(text.trim().endsWith('data: [DONE]')).toBe(true);
 	});
 
+	it('forwards Pi-shaped tools and required tool_choice on streams', async () => {
+		async function* stream() {
+			yield { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_1', type: 'function', function: { name: 'add_one', arguments: '{"a":1}' } }] }, finish_reason: 'tool_calls' }] };
+		}
+		const { provider, calls } = makeOpenAIProvider(async () => {
+			const s: any = stream();
+			s.controller = { abort: () => {} };
+			return s;
+		});
+		const tools: any = [{
+			type: 'function',
+			function: {
+				name: 'add_one',
+				description: 'Adds one to a number.',
+				strict: false,
+				parameters: {
+					type: 'object',
+					properties: { a: { type: 'integer' } },
+					required: ['a'],
+					additionalProperties: false,
+				},
+			},
+		}];
+
+		await new Response(await provider.createStreamingCompletion({
+			...body,
+			model: 'gpt-5.6-luna',
+			stream: true,
+			tools,
+			tool_choice: 'required',
+		})).text();
+
+		expect(calls[0].tools).toEqual(tools);
+		expect(calls[0].tool_choice).toBe('required');
+	});
+
 	it('drops stream_options and retries when an OpenAI-compatible server rejects it', async () => {
 		let attempt = 0;
 		async function* stream() {

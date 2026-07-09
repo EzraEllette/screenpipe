@@ -115,8 +115,20 @@ async fn fetch_models_from_gateway(
     let body: serde_json::Value = resp.json().await.ok()?;
     let data = body.get("data")?.as_array()?;
 
-    let models: Vec<serde_json::Value> = data
+    let models = gateway_models_to_pi_models(data);
+
+    info!("fetched {} models from gateway", models.len());
+    Some(json!(models))
+}
+
+/// Turn the gateway catalog into Pi's provider catalog. The gateway retains
+/// locked models for UI upgrade prompts, while Pi treats every listed model as
+/// selectable. Omit locked entries here so a pipe never appears to select a
+/// model only for the gateway to silently rewrite it to `auto`.
+fn gateway_models_to_pi_models(data: &[serde_json::Value]) -> Vec<serde_json::Value> {
+    data
         .iter()
+        .filter(|m| !m.get("locked").and_then(|v| v.as_bool()).unwrap_or(false))
         .map(|m| {
             let id = m.get("id").and_then(|v| v.as_str()).unwrap_or("");
             let name = m.get("name").and_then(|v| v.as_str()).unwrap_or(id);
@@ -140,10 +152,7 @@ async fn fetch_models_from_gateway(
                 "maxTokens": 32000,
             })
         })
-        .collect();
-
-    info!("fetched {} models from gateway", models.len());
-    Some(json!(models))
+        .collect()
 }
 
 /// Minimal fallback when the gateway is unreachable.
@@ -3390,6 +3399,38 @@ mod tests {
         assert!(!PiExecutor::is_gateway_fallback_catalog(&[
             "claude-haiku-4-5".to_string()
         ]));
+    }
+
+    #[test]
+    fn gateway_catalog_omits_locked_models_from_pi() {
+        let models = gateway_models_to_pi_models(&[
+            json!({
+                "id": "auto",
+                "name": "Auto",
+                "context_window": 128000,
+                "intelligence": "standard",
+            }),
+            json!({
+                "id": "gpt-5.6-terra",
+                "name": "GPT-5.6 Terra",
+                "locked": true,
+                "context_window": 128000,
+                "intelligence": "highest",
+            }),
+            json!({
+                "id": "gpt-5.6-luna",
+                "name": "GPT-5.6 Luna",
+                "locked": null,
+                "context_window": 128000,
+                "intelligence": "high",
+            }),
+        ]);
+
+        let ids: Vec<&str> = models
+            .iter()
+            .filter_map(|model| model.get("id").and_then(|id| id.as_str()))
+            .collect();
+        assert_eq!(ids, vec!["auto", "gpt-5.6-luna"]);
     }
 
     #[test]
