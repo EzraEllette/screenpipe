@@ -73,10 +73,10 @@ describe('routing chains stay priceable (no silent $0.01 fallback rows)', () => 
 		expect(getModelCost('gemini-3-flash', 1_000_000, 0)).toBeCloseTo(0.10, 10);
 	});
 
-	it('places Luna behind the current auto primaries for text, vision, and pipes', () => {
+	it('places Luna behind the current chat primaries but keeps tool-heavy pipes on proven models', () => {
 		const luna = 'gpt-5.6-luna';
 		expect(AUTO_WATERFALL.indexOf('glm-5')).toBeLessThan(AUTO_WATERFALL.indexOf(luna));
 		expect(AUTO_WATERFALL_VISION.indexOf('gemini-3.5-flash')).toBeLessThan(AUTO_WATERFALL_VISION.indexOf(luna));
-		expect(AUTO_WATERFALL_BACKGROUND.indexOf('gemini-3.5-flash')).toBeLessThan(AUTO_WATERFALL_BACKGROUND.indexOf(luna));
+		expect(AUTO_WATERFALL_BACKGROUND).not.toContain(luna);
 	});
 });
