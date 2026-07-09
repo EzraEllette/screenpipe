@@ -2733,6 +2733,19 @@ experimentalCoreaudioSystemAudio?: boolean;
  */
 experimentalMeetingPiggyback?: boolean;
 /**
+ * Opening a Bluetooth microphone always forces the paired device's audio
+ * link out of A2DP into SCO, degrading the user's headphone/speaker
+ * output quality (48kHz stereo -> 24kHz stereo or mono HFP, depending on
+ * hardware) — a macOS/OS-level tradeoff with no external workaround
+ * (issue #3750). Default `false`: Bluetooth input devices are only
+ * actually opened while a meeting is detected; outside a meeting they
+ * stay enabled-but-gated (selected in settings, not streaming) so the
+ * Bluetooth link stays in A2DP. Set `true` to always record Bluetooth
+ * mics regardless of meeting state (prior behavior). Has no effect on
+ * wired/built-in/unrecognized mics or on Bluetooth output devices.
+ */
+alwaysRecordBluetoothMic?: boolean;
+/**
  * Experimental: request Windows WASAPI microphone Acoustic Echo Cancellation.
  * Ignored on non-Windows platforms and fail-open when unsupported by device/driver.
  */

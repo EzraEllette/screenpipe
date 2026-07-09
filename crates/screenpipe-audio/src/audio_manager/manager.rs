@@ -693,6 +693,31 @@ impl AudioManager {
             return Ok(());
         }
 
+        // Bluetooth mics always force the paired device's audio link out of
+        // A2DP into SCO, degrading the user's headphone/speaker output — a
+        // macOS/OS-level tradeoff with no external workaround (issue #3750).
+        // Gated to detected meetings by default; `always_record_bluetooth_mic`
+        // opts back into always-on capture. Each `.await` below reads its own
+        // lock and drops the guard immediately — holding `options`'s guard
+        // across the `meeting_detector()` call would invert lock order
+        // against `apply_options` (which writes `meeting_detector` then
+        // `options`) and risk an AB-BA deadlock.
+        if device.device_type == crate::core::device::DeviceType::Input {
+            let kind = crate::core::device_detection::InputDeviceKind::detect(&device.name);
+            let always_override = self.always_record_bluetooth_mic().await;
+            let in_meeting = match self.meeting_detector().await {
+                Some(d) => d.is_in_meeting(),
+                None => false,
+            };
+            if !crate::core::device_detection::bluetooth_mic_allowed(&kind, always_override, in_meeting) {
+                debug!(
+                    "skipping start of bluetooth mic {}: not in a meeting (always_record_bluetooth_mic is off)",
+                    device
+                );
+                return Ok(());
+            }
+        }
+
         if let Err(e) = self.device_manager.start_device(device).await {
             let err_str = e.to_string();
 
@@ -1460,6 +1485,14 @@ impl AudioManager {
     /// piggyback in continuous ("always") capture just as in meetings-only.
     pub(crate) async fn piggyback_enabled(&self) -> bool {
         self.options.read().await.experimental_meeting_piggyback
+    }
+
+    /// Whether Bluetooth mics are exempt from the meeting gate (see
+    /// `start_device`'s Bluetooth check and the device monitor's
+    /// `run_bluetooth_mic_gate_sweep`). Consumed outside this module, so
+    /// `pub(crate)` rather than private, matching `piggyback_enabled`.
+    pub(crate) async fn always_record_bluetooth_mic(&self) -> bool {
+        self.options.read().await.always_record_bluetooth_mic
     }
 
     /// Returns the shared WhisperContext for backward compatibility, if loaded.

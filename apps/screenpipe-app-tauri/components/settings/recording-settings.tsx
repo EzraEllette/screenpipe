@@ -29,6 +29,7 @@ export const searchIndex: SettingsField[] = [
   { label: "Echo cancellation mode", keywords: ["echo", "aec", "voiceprocessingio", "wasapi"], conditional: true },
   { label: "CoreAudio system audio capture", keywords: ["coreaudio", "system audio"], conditional: true },
   { label: "Smart recording", keywords: ["smart recording", "beta", "meeting", "piggyback", "per-process", "meeting audio"], conditional: true },
+  { label: "Bluetooth microphones", keywords: ["bluetooth", "airpods", "headset", "a2dp", "sco", "meeting"], conditional: true },
   { label: "Screen context capture", keywords: ["screen", "video", "accessibility"] },
   { label: "Screenshot images", keywords: ["screenshot", "pixels", "ocr", "jpeg"] },
   { label: "Use all monitors", keywords: ["monitor", "display"], conditional: true },
@@ -95,6 +96,7 @@ import {
   Play,
   Rewind,
   FastForward,
+  Bluetooth,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
@@ -1242,6 +1244,24 @@ const getAudioDeviceIcon = (name: string) => {
   }
   if (getAudioDeviceType(name) === "input") return Mic;
   return Volume2;
+};
+
+// Best-effort name heuristic for the device-picker hint only — mirrors the
+// gist of the Rust classifier (InputDeviceKind::detect) but doesn't need to
+// match it exactly, since the actual meeting/override gate is enforced
+// backend-side regardless of what this hint shows.
+const isLikelyBluetoothMicName = (name: string): boolean => {
+  const lower = name.toLowerCase();
+  if (lower.includes("blackhole") || lower.includes("vb-audio") || lower.includes("virtual") || lower.includes("loopback")) {
+    return false;
+  }
+  return (
+    lower.includes("airpods") ||
+    lower.includes("bluetooth") ||
+    lower.includes("jabra") ||
+    lower.includes("beats") ||
+    /wh-1000x|wf-1000x|wl-1000x/.test(lower)
+  );
 };
 
 // ─── Transcription Dictionary ────────────────────────────────────────────────
@@ -3419,6 +3439,10 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
             const displayName = getAudioDeviceDisplayName(device.name);
             // Use per-device level if available, fall back to global speechRatio
             const deviceLevel = overlayData.deviceLevels[device.name] ?? overlayData.speechRatio;
+            const isBluetoothMicGated =
+              getAudioDeviceType(device.name) === "input" &&
+              isLikelyBluetoothMicName(device.name) &&
+              !settings.alwaysRecordBluetoothMic;
             return (
               <div
                 key={device.name}
@@ -3436,6 +3460,15 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
                     <p className="text-xs font-medium truncate">{displayName}</p>
                     {device.isDefault && (
                       <Badge variant="secondary" className="text-[9px] h-3.5 px-1 shrink-0">Default</Badge>
+                    )}
+                    {isBluetoothMicGated && (
+                      <Badge
+                        variant="outline"
+                        className="text-[9px] h-3.5 px-1 shrink-0"
+                        title="only recorded during a detected meeting — turn on &quot;always record bluetooth mic&quot; to change this"
+                      >
+                        meetings only
+                      </Badge>
                     )}
                   </div>
                   {isSelected && (
@@ -3585,6 +3618,34 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
                 checked={Boolean(settings.experimentalMeetingPiggyback ?? false)}
                 disabled={Boolean(settings.disableMeetingDetector)}
                 onCheckedChange={(checked) => handleSettingsChange({ experimentalMeetingPiggyback: checked }, true)}
+              />
+            </div>
+          </CardContent>
+        </Card>
+        )}
+
+        {/* Bluetooth mic recording: opening a Bluetooth mic always degrades
+            the paired device's output audio quality (A2DP -> SCO, a macOS/OS
+            limitation — issue #3750). Off by default, Bluetooth mics are only
+            recorded during a detected meeting; this override records them
+            always, like any other mic. */}
+        {!settings.disableAudio && (
+        <Card className="border-border bg-card">
+          <CardContent className="px-3 py-2.5">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center space-x-2.5">
+                <Bluetooth className="h-4 w-4 text-muted-foreground shrink-0" />
+                <div>
+                  <h3 className="text-sm font-medium text-foreground">Bluetooth microphones</h3>
+                  <p className="text-xs text-muted-foreground">
+                    connecting to a bluetooth mic degrades your headphones&apos; audio quality — a macOS/OS limitation we can&apos;t avoid. by default we only record bluetooth mics while you&apos;re in a detected meeting.
+                  </p>
+                </div>
+              </div>
+              <Switch
+                id="alwaysRecordBluetoothMic"
+                checked={Boolean(settings.alwaysRecordBluetoothMic ?? false)}
+                onCheckedChange={(checked) => handleSettingsChange({ alwaysRecordBluetoothMic: checked }, true)}
               />
             </div>
           </CardContent>

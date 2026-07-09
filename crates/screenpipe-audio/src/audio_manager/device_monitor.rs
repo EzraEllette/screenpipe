@@ -1720,6 +1720,13 @@ pub async fn start_device_monitor(
                     )
                     .await;
 
+                // Bluetooth mic recording gated to detected meetings by
+                // default (issue #3750 — opening a Bluetooth mic always
+                // degrades the paired device's output audio). Independent of
+                // the piggyback tap above; runs every tick regardless of
+                // `experimental_meeting_piggyback`.
+                run_bluetooth_mic_gate_sweep(&audio_manager).await;
+
                 // Capture whichever render endpoint audio actually plays
                 // through, and notify if a meeting's speaker audio isn't
                 // reaching the pipeline. Inert outside Windows — see
@@ -1977,6 +1984,68 @@ async fn run_pinned_input_fallback_sweep(
                 );
                 logged_default_disabled.clear();
             }
+        }
+    }
+}
+
+/// Reconciles Bluetooth *input* device capture against the meeting gate
+/// (`bluetooth_mic_allowed`): starts a Bluetooth mic the instant a meeting
+/// begins (or `always_record_bluetooth_mic` is on) and stops it the instant
+/// the meeting ends, so the Bluetooth link returns to A2DP as soon as
+/// capture isn't needed. Gating `AudioManager::start_device` (used by every
+/// other start path) stops new starts already; this sweep only needs to
+/// reconcile actual running-state against the gate decision each tick — no
+/// separate suspended-devices tracking, since the gate itself prevents
+/// anything from re-starting a device this sweep just stopped.
+///
+/// Candidates come from two sources, since either alone misses real cases:
+/// `enabled_devices()` (explicitly selected devices — but a Bluetooth device
+/// gated on its very first start never lands there, since that insert is a
+/// side effect of a successful start) and the OS default input when "Auto-
+/// select audio devices" (`use_system_default_audio`) is on (the common case
+/// where a paired headset becomes the default mic without ever being
+/// explicitly enabled).
+async fn run_bluetooth_mic_gate_sweep(audio_manager: &AudioManager) {
+    use crate::core::device_detection::{bluetooth_mic_allowed, InputDeviceKind};
+
+    let always_override = audio_manager.always_record_bluetooth_mic().await;
+    let in_meeting = match audio_manager.meeting_detector().await {
+        Some(d) => d.is_in_meeting(),
+        None => false,
+    };
+    // Uniform across every confirmed-Bluetooth candidate below — compute once.
+    let allowed = bluetooth_mic_allowed(&InputDeviceKind::Bluetooth, always_override, in_meeting);
+
+    let mut candidates: HashSet<String> = audio_manager
+        .enabled_devices()
+        .await
+        .into_iter()
+        .filter(|name| {
+            parse_audio_device(name)
+                .map(|d| d.device_type == DeviceType::Input)
+                .unwrap_or(false)
+        })
+        .collect();
+    if audio_manager.use_system_default_audio().await {
+        if let Ok(default_input) = default_input_device() {
+            candidates.insert(default_input.to_string());
+        }
+    }
+
+    for name in candidates {
+        if InputDeviceKind::detect(&name) != InputDeviceKind::Bluetooth {
+            continue;
+        }
+        let Ok(device) = parse_audio_device(&name) else {
+            continue;
+        };
+        let running = audio_manager.is_device_actively_streaming(&device);
+        if allowed && !running {
+            if let Err(e) = audio_manager.start_device(&device).await {
+                warn!("bluetooth mic gate: failed to start {}: {:?}", device, e);
+            }
+        } else if !allowed && running {
+            let _ = audio_manager.stop_device_recording(&device).await;
         }
     }
 }

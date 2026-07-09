@@ -149,6 +149,27 @@ impl InputDeviceKind {
     }
 }
 
+/// Whether a Bluetooth input device should actually be opened right now.
+///
+/// Opening a Bluetooth mic always forces the paired device's audio link out
+/// of A2DP into SCO, degrading the user's headphone/speaker output quality —
+/// a macOS/OS-level tradeoff with no external workaround (issue #3750). By
+/// default, Bluetooth mics are only captured during a detected meeting;
+/// `always_override` lets the user opt back into the old always-on behavior.
+///
+/// Deliberately checks `== InputDeviceKind::Bluetooth`, NOT `.is_bluetooth()`
+/// — that helper also matches `Unknown` (a conservative default for
+/// buffer-timeout tuning), which would silently gate ordinary wired mics
+/// with an unrecognized name (e.g. "Blue Yeti", "Elgato Wave"). Only
+/// confirmed-Bluetooth devices are gated here.
+///
+/// Smart recording (`experimental_meeting_piggyback`) is deliberately not a
+/// separate input: it never captures outside a detected meeting, so
+/// `in_meeting` already covers it.
+pub fn bluetooth_mic_allowed(kind: &InputDeviceKind, always_override: bool, in_meeting: bool) -> bool {
+    *kind != InputDeviceKind::Bluetooth || always_override || in_meeting
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -235,5 +256,47 @@ mod tests {
     fn unknown_is_conservative() {
         let kind = InputDeviceKind::detect("Some Unknown Mic 3000");
         assert!(kind.is_bluetooth()); // Unknown treated as Bluetooth-like
+    }
+
+    #[test]
+    fn bluetooth_gate_blocks_by_default_outside_a_meeting() {
+        assert!(!bluetooth_mic_allowed(&InputDeviceKind::Bluetooth, false, false));
+    }
+
+    #[test]
+    fn bluetooth_gate_allows_during_a_meeting() {
+        assert!(bluetooth_mic_allowed(&InputDeviceKind::Bluetooth, false, true));
+    }
+
+    #[test]
+    fn bluetooth_gate_allows_with_override() {
+        assert!(bluetooth_mic_allowed(&InputDeviceKind::Bluetooth, true, false));
+    }
+
+    #[test]
+    fn bluetooth_gate_allows_with_override_and_meeting() {
+        assert!(bluetooth_mic_allowed(&InputDeviceKind::Bluetooth, true, true));
+    }
+
+    #[test]
+    fn bluetooth_gate_never_blocks_wired_or_unknown() {
+        for always_override in [false, true] {
+            for in_meeting in [false, true] {
+                assert!(bluetooth_mic_allowed(
+                    &InputDeviceKind::Wired,
+                    always_override,
+                    in_meeting
+                ));
+                // Unknown is treated as Bluetooth-like by `is_bluetooth()` for
+                // buffer tuning, but the recording gate must NOT mute
+                // unrecognized wired mics — it checks strict equality
+                // against `Bluetooth`, not `.is_bluetooth()`.
+                assert!(bluetooth_mic_allowed(
+                    &InputDeviceKind::Unknown,
+                    always_override,
+                    in_meeting
+                ));
+            }
+        }
     }
 }
