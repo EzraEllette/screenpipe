@@ -63,6 +63,7 @@ pub mod budget;
 pub mod config;
 pub mod events;
 pub mod incognito;
+pub mod incremental;
 pub mod platform;
 pub mod scroll;
 pub mod tree;
