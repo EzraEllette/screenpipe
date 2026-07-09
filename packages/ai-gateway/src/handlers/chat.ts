@@ -20,6 +20,7 @@ import { captureException } from '@sentry/cloudflare';
 // (otherwise served-model cost rows fall into the unknown-model estimate).
 export const AUTO_WATERFALL = [
   'glm-5',            // fast (~1.2s) + AA 50, free Vertex MaaS — best fast/smart for latency-bound chat
+  'gpt-5.6-luna',     // paid high-volume fallback — stronger when the fast free primary is unavailable
   'kimi-k2.5',
   'glm-4.7',
   'gemini-3-flash',
@@ -28,6 +29,7 @@ export const AUTO_WATERFALL = [
 // Vision-capable models for requests containing images
 export const AUTO_WATERFALL_VISION = [
   'gemini-3.5-flash', // multimodal, leads on agent/vision benchmarks
+  'gpt-5.6-luna',     // OpenAI vision fallback before the lower-capability free options
   'llama-4-maverick', // free (Vertex MaaS), 400B MoE, strong vision + reasoning
   'gemini-3-flash',   // near-free, good vision
   'llama-4-scout',    // free (Vertex MaaS), 109B MoE, decent vision fallback
@@ -41,9 +43,12 @@ export const AUTO_WATERFALL_VISION = [
 // lacks). Measured (6/19): gpt-5.4 here cost $590/day vs $177 on flex for the SAME
 // traffic — 3.3x more, on the small OpenAI pool, for a marginal IQ gain (54 vs ~50-55)
 // that pipes don't need; reverted (#4285→). glm-5 + gemini-3-flash are standard-tier
-// fallbacks for when flex is throttled.
+// fallbacks for when flex is throttled. Luna is a paid, high-volume fallback
+// immediately after the flex primary: it improves resilience without replacing
+// the proven cache-efficient default for every scheduled run.
 export const AUTO_WATERFALL_BACKGROUND = [
   'gemini-3.5-flash', // flex tier — cheapest on the cache-heavy background mix
+  'gpt-5.6-luna',     // paid fallback when the flex primary is unavailable
   'glm-5',            // free Vertex MaaS fallback, standard tier
   'gemini-3-flash',   // near-free safety net
 ];
@@ -79,6 +84,9 @@ export const MODEL_FALLBACKS: Record<string, string[]> = {
   'gemini-3.5-flash': ['gemini-3-flash', 'gemini-2.5-flash'],
   'gemini-3-flash': ['gemini-2.5-flash'],
   'gemini-2.5-flash': ['gemini-3-flash'],
+  // Luna is safe for high-volume work, but still paid. Fall back to current
+  // auto-quality options if OpenAI is unavailable rather than failing a pipe.
+  'gpt-5.6-luna': ['glm-5', 'gemini-3.5-flash', 'gemini-3-flash'],
 };
 
 // HTTP statuses we consider upstream/transient — eligible for cascade.
