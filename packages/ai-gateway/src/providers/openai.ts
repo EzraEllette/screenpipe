@@ -17,6 +17,15 @@ type OpenAIChatStream = AsyncIterable<ChatCompletionChunk> & {
 };
 
 /**
+ * GPT-5.6 reports prompt-cache writes separately. Keep the gateway's
+ * OpenAI-compatible cache-creation field so the shared cost logger can apply
+ * the 1.25x write rate, while accepting either documented response shape.
+ */
+function getCacheWriteTokens(usage: any): number {
+	return usage?.cache_write_tokens ?? usage?.prompt_tokens_details?.cache_write_tokens ?? 0;
+}
+
+/**
  * OpenAI rejects tool_call ids longer than 40 chars. Other models mint longer
  * ids that arrive in conversation history; remap any over-length id to a short
  * stable id, applied IDENTICALLY to the assistant's tool_calls[].id and the
@@ -302,6 +311,7 @@ export class OpenAIProvider implements AIProvider {
 										prompt_tokens_details: {
 											cached_tokens: usage.prompt_tokens_details?.cached_tokens || 0,
 										},
+										cache_creation_input_tokens: getCacheWriteTokens(usage),
 									},
 								})}\n\n`
 							)
@@ -453,8 +463,8 @@ export class OpenAIProvider implements AIProvider {
 				},
 			],
 			// Pass usage through (was dropped — non-streaming OpenAI requests
-			// were cost-logged with estimated token counts). cached_tokens =
-			// OpenAI automatic prompt caching, billed at a discount.
+			// were cost-logged with estimated token counts). Cache writes are
+			// normalized to the gateway's cache-creation field for cost tracking.
 			...(response.usage
 				? {
 						usage: {
@@ -466,6 +476,7 @@ export class OpenAIProvider implements AIProvider {
 							prompt_tokens_details: {
 								cached_tokens: response.usage.prompt_tokens_details?.cached_tokens ?? 0,
 							},
+							cache_creation_input_tokens: getCacheWriteTokens(response.usage),
 						},
 				  }
 				: {}),

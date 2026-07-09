@@ -51,6 +51,7 @@ describe('OpenAIProvider usage reporting', () => {
 					completion_tokens: 50,
 					total_tokens: 5_050,
 					prompt_tokens_details: { cached_tokens: 4_000 },
+					cache_write_tokens: 200,
 				},
 			};
 		}
@@ -73,6 +74,7 @@ describe('OpenAIProvider usage reporting', () => {
 		expect(usageEvent.usage.prompt_tokens).toBe(5_000);
 		expect(usageEvent.usage.completion_tokens).toBe(50);
 		expect(usageEvent.usage.prompt_tokens_details.cached_tokens).toBe(4_000);
+		expect(usageEvent.usage.cache_creation_input_tokens).toBe(200);
 		expect(text.trim().endsWith('data: [DONE]')).toBe(true);
 	});
 
@@ -110,6 +112,7 @@ describe('OpenAIProvider usage reporting', () => {
 				completion_tokens: 30,
 				total_tokens: 1_230,
 				prompt_tokens_details: { cached_tokens: 1_024 },
+				cache_write_tokens: 176,
 			},
 		}));
 		const response = await provider.createCompletion(body);
@@ -118,6 +121,7 @@ describe('OpenAIProvider usage reporting', () => {
 		expect(json.usage.completion_tokens).toBe(30);
 		expect(json.usage.total_tokens).toBe(1_230);
 		expect(json.usage.prompt_tokens_details.cached_tokens).toBe(1_024);
+		expect(json.usage.cache_creation_input_tokens).toBe(176);
 	});
 
 	it('omits usage when upstream provides none (no fake zeros)', async () => {
