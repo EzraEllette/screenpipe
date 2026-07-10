@@ -517,6 +517,9 @@ impl MacosTreeWalker {
             return Ok(TreeWalkResult::Skipped(SkipReason::UserIgnored));
         }
 
+        // Resolve before `state`'s owned fields start moving out below.
+        let window_bounds = normalized_window_bounds(&state);
+
         let text_content = state.text_buffer;
         // Don't bail on empty text — we still need the app_name and window_name
         // for frame metadata. Some apps may return empty text on the first walk
@@ -582,7 +585,30 @@ impl MacosTreeWalker {
             truncated: state.truncated,
             truncation_reason: state.truncation_reason,
             max_depth_reached: state.max_depth_reached,
+            window_bounds,
         }))
+    }
+}
+
+/// The walked window's AX frame normalized to the monitor's extent (both in
+/// screen points, same global coordinate space), as fractions that map onto
+/// the capture image at any resolution. Requires both frames — without
+/// monitor dimensions the fractions wouldn't match a full-monitor capture,
+/// so return `None` rather than window-relative values.
+fn normalized_window_bounds(state: &WalkState) -> Option<super::WindowBounds> {
+    if state.window_w > 0.0
+        && state.window_h > 0.0
+        && state.monitor_w > 0.0
+        && state.monitor_h > 0.0
+    {
+        Some(super::WindowBounds {
+            x: (state.window_x - state.monitor_x) / state.monitor_w,
+            y: (state.window_y - state.monitor_y) / state.monitor_h,
+            width: state.window_w / state.monitor_w,
+            height: state.window_h / state.monitor_h,
+        })
+    } else {
+        None
     }
 }
 

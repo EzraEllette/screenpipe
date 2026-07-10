@@ -1617,6 +1617,15 @@ pub async fn event_driven_capture_loop(
                                     vision_metrics.record_ocr_empty();
                                 }
                             }
+                            // Meeting-gate telemetry (#5054): decision counters
+                            // (skip / crop / full — the fast-path ratio) plus
+                            // detect latency when the rate-limited detect ran.
+                            if let Some(decision) = result.meeting_gate_decision {
+                                vision_metrics.record_meeting_gate_decision(decision);
+                            }
+                            if let Some(detect) = result.meeting_gate_detect_duration {
+                                vision_metrics.record_meeting_gate_detect(detect);
+                            }
 
                             if let Some(ref cache) = hot_frame_cache {
                                 push_to_hot_cache(cache, result, &device_name, &trigger).await;
@@ -2700,6 +2709,34 @@ async fn do_capture(
         });
     }
 
+    // Focused-window bounds for window-scoped meeting OCR (#5054 follow-up):
+    // scale the walker's monitor-normalized fractions to this frame's actual
+    // pixel size (the capture may be width-capped below native resolution).
+    // Guard on the walked app matching the resolved app — for focus-change
+    // triggers the trigger payload can outrun a lagging tree walk, and bounds
+    // from the previously-focused window would crop the wrong pixels; full
+    // frame is the safe fallback. Float→int casts saturate, and
+    // paired_capture clamps to the frame, so wild AX values degrade to
+    // full-frame behavior rather than a bogus crop.
+    let focused_window_bounds = {
+        use image::GenericImageView;
+        let (frame_w, frame_h) = image.dimensions();
+        tree_snapshot
+            .as_ref()
+            .filter(|snap| {
+                app_name_owned
+                    .as_deref()
+                    .is_some_and(|app| app.eq_ignore_ascii_case(&snap.app_name))
+            })
+            .and_then(|snap| snap.window_bounds)
+            .map(|b| screenpipe_capture::paired_capture::FocusedWindowBounds {
+                x: (b.x * frame_w as f64).round() as i32,
+                y: (b.y * frame_h as f64).round() as i32,
+                width: (b.width * frame_w as f64).round().max(0.0) as u32,
+                height: (b.height * frame_h as f64).round().max(0.0) as u32,
+            })
+    };
+
     let ctx = CaptureContext {
         db: params.db,
         snapshot_writer: params.snapshot_writer,
@@ -2719,6 +2756,7 @@ async fn do_capture(
         screenshot_disabled,
         in_meeting,
         monitor_hosts_focus,
+        focused_window_bounds,
     };
 
     let result = paired_capture(&ctx, tree_snapshot.as_ref(), Some(meeting_gate)).await?;
@@ -3153,6 +3191,7 @@ mod tests {
             truncated: false,
             truncation_reason: screenpipe_a11y::tree::TruncationReason::None,
             max_depth_reached: 0,
+            window_bounds: None,
         };
         let metadata = LightweightFocusedMetadata {
             app_name: Some(" org.telegram.desktop ".into()),
@@ -3183,6 +3222,7 @@ mod tests {
             truncated: false,
             truncation_reason: screenpipe_a11y::tree::TruncationReason::None,
             max_depth_reached: 0,
+            window_bounds: None,
         };
         let metadata = LightweightFocusedMetadata {
             app_name: Some("Alacritty".into()),
@@ -3217,6 +3257,7 @@ mod tests {
             truncated: false,
             truncation_reason: screenpipe_a11y::tree::TruncationReason::None,
             max_depth_reached: 0,
+            window_bounds: None,
         };
         let metadata = LightweightFocusedMetadata {
             app_name: Some("Terminal".into()),
@@ -3251,6 +3292,7 @@ mod tests {
             truncated: false,
             truncation_reason: screenpipe_a11y::tree::TruncationReason::None,
             max_depth_reached: 0,
+            window_bounds: None,
         };
 
         let (app_name, window_name, _, _) =

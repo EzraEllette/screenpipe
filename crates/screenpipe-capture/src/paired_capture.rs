@@ -21,6 +21,7 @@ use screenpipe_core::pii_removal::remove_pii;
 use screenpipe_db::DatabaseManager;
 use screenpipe_screen::snapshot_writer::SnapshotWriter;
 use screenpipe_screen::text_regions::{detect_text_regions, TextRegion};
+use screenpipe_screen::MeetingGateDecision;
 
 use crate::meeting_ocr_gate::{MeetingOcrDecision, MeetingOcrGate};
 use std::sync::Arc;
@@ -52,6 +53,63 @@ static OCR_SEMAPHORE: OnceLock<Semaphore> = OnceLock::new();
 #[cfg(not(target_os = "windows"))]
 fn ocr_semaphore() -> &'static Semaphore {
     OCR_SEMAPHORE.get_or_init(|| Semaphore::new(1))
+}
+
+/// Screen bounds of the focused window, in the pixel coordinate space of the
+/// captured monitor frame (origin = the frame's top-left, same scale as the
+/// frame). `x`/`y` are signed because a window dragged partly off the
+/// monitor's edge legitimately starts at negative offsets; [`paired_capture`]
+/// clamps to the frame before use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FocusedWindowBounds {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Reject window crops smaller than this on either side — resize/move races
+/// can hand us a sliver, and no readable meeting window is this small.
+const MIN_WINDOW_CROP_PX: u32 = 64;
+
+/// Clamp focused-window bounds to the frame. Returns `None` (→ full-frame
+/// behavior) when the intersection is degenerate/sliver-sized, or when the
+/// window covers the whole frame anyway (cropping would only buy a copy).
+fn clamp_window_crop(
+    b: FocusedWindowBounds,
+    frame_w: u32,
+    frame_h: u32,
+) -> Option<TextRegion> {
+    if frame_w == 0 || frame_h == 0 {
+        return None;
+    }
+    let x0 = b.x.max(0) as u32;
+    let y0 = b.y.max(0) as u32;
+    let x1 = b
+        .x
+        .saturating_add(i32::try_from(b.width).unwrap_or(i32::MAX))
+        .clamp(0, frame_w.min(i32::MAX as u32) as i32) as u32;
+    let y1 = b
+        .y
+        .saturating_add(i32::try_from(b.height).unwrap_or(i32::MAX))
+        .clamp(0, frame_h.min(i32::MAX as u32) as i32) as u32;
+    if x0 >= x1 || y0 >= y1 {
+        return None;
+    }
+    let (w, h) = (x1 - x0, y1 - y0);
+    if w < MIN_WINDOW_CROP_PX || h < MIN_WINDOW_CROP_PX {
+        return None;
+    }
+    if x0 == 0 && y0 == 0 && w == frame_w && h == frame_h {
+        return None;
+    }
+    Some(TextRegion {
+        x: x0,
+        y: y0,
+        width: w,
+        height: h,
+        ink: 0,
+    })
 }
 
 /// Context for a paired capture operation — replaces positional arguments.
@@ -94,6 +152,17 @@ pub struct CaptureContext<'a> {
     /// unknown-focus cases behave like the focused monitor, matching the
     /// focus controller's own all-Active fallback).
     pub monitor_hosts_focus: bool,
+    /// Screen bounds of the focused window in this frame's pixel space, when
+    /// the platform exposes them (macOS AX frame, Windows GetWindowRect).
+    /// While meeting-gated, the text-region detect and any escalated OCR are
+    /// scoped to this rectangle instead of the whole monitor: neighboring
+    /// windows stop churning the fingerprint / inflating the density count,
+    /// and OCR cost scales with the window. The meeting force-OCR exists for
+    /// screen-share pixels with no a11y tree behind them, and those live in
+    /// the meeting window — side content was/will be a11y-indexed when
+    /// focused (same judgment call as `monitor_hosts_focus`). `None` keeps
+    /// full-frame behavior.
+    pub focused_window_bounds: Option<FocusedWindowBounds>,
 }
 
 /// Result of a paired capture operation.
@@ -121,6 +190,15 @@ pub struct PairedCaptureResult {
     /// True when OCR ran but produced (near-)empty text — an OCR-quality
     /// failure proxy. False when OCR didn't run or returned usable text.
     pub ocr_was_empty: bool,
+    /// How the meeting OCR gate resolved this capture — `Some` only when the
+    /// capture was meeting-scoped AND a gate was wired (the engine loop).
+    /// The capture loop feeds this to
+    /// `PipelineMetrics::record_meeting_gate_decision`.
+    pub meeting_gate_decision: Option<MeetingGateDecision>,
+    /// Wall-clock of the gate's text-region detect pass — `Some` only when
+    /// the detect actually ran this capture (it's rate-limited by the gate's
+    /// stability backoff). Feeds `PipelineMetrics::record_meeting_gate_detect`.
+    pub meeting_gate_detect_duration: Option<std::time::Duration>,
     /// App name from accessibility tree or OCR
     pub app_name: Option<String>,
     /// Window name from accessibility tree or OCR
@@ -233,7 +311,31 @@ pub async fn paired_capture(
 
     let mut meeting_gate = meeting_gate;
     let mut meeting_gate_escalated = false;
+    let mut meeting_gate_decision: Option<MeetingGateDecision> = None;
+    let mut meeting_gate_detect_duration: Option<std::time::Duration> = None;
     let mut ocr_crop: Option<TextRegion> = None;
+    // Meeting-window scoping: when the focused window's bounds are known,
+    // the detect and any escalated OCR run on the window's rectangle
+    // instead of the whole monitor (see `focused_window_bounds`). The gate's
+    // fingerprint then lives in window-local coordinates, which also makes
+    // it invariant to the window being dragged around. `None` (bounds
+    // unavailable, degenerate after clamping, or effectively fullscreen)
+    // keeps the monitor-frame behavior.
+    //
+    // Known bounded cost: a Some↔None flip in bounds availability (the
+    // a11y walk intermittently failing) changes the fingerprint's
+    // coordinate space, so a SUSTAINED flip re-OCRs the unchanged screen
+    // once — the new fingerprint must still repeat across consecutive
+    // detects to escalate, so per-capture flicker never stabilizes and
+    // stays skipped. Same class as the documented A→B→A screen-alternation
+    // limitation in the gate's fingerprint memory.
+    let (frame_w, frame_h) = ctx.image.dimensions();
+    let window_crop = if meeting_scoped {
+        ctx.focused_window_bounds
+            .and_then(|b| clamp_window_crop(b, frame_w, frame_h))
+    } else {
+        None
+    };
     if meeting_scoped {
         match meeting_gate.as_deref_mut() {
             Some(gate) => {
@@ -241,34 +343,71 @@ pub async fn paired_capture(
                 let now = Instant::now();
                 if gate.detection_due(&app_key, now) {
                     let detect_started = Instant::now();
-                    let image_for_detect = ctx.image.clone();
+                    let image_for_detect = match window_crop {
+                        Some(w) => Arc::new(ctx.image.crop_imm(w.x, w.y, w.width, w.height)),
+                        None => ctx.image.clone(),
+                    };
                     let regions =
                         tokio::task::spawn_blocking(move || detect_text_regions(&image_for_detect))
                             .await
                             .unwrap_or_default();
-                    let (frame_w, frame_h) = ctx.image.dimensions();
-                    let decision = gate.observe(&app_key, now, &regions, frame_w, frame_h);
+                    meeting_gate_detect_duration = Some(detect_started.elapsed());
+                    let (gate_w, gate_h) = window_crop
+                        .map(|w| (w.width, w.height))
+                        .unwrap_or((frame_w, frame_h));
+                    let decision = gate.observe(&app_key, now, &regions, gate_w, gate_h);
                     debug!(
-                        "meeting OCR gate: {} regions in {:?} -> {:?} (app={})",
+                        "meeting OCR gate: {} regions in {:?} -> {:?} (app={}, window_crop={:?})",
                         regions.len(),
                         detect_started.elapsed(),
                         decision,
                         app_key,
+                        window_crop,
                     );
                     match decision {
-                        MeetingOcrDecision::Skip => {}
+                        MeetingOcrDecision::Skip => {
+                            meeting_gate_decision = Some(MeetingGateDecision::Skip);
+                        }
                         MeetingOcrDecision::CropOcr(region) => {
                             meeting_gate_escalated = true;
-                            ocr_crop = Some(region);
+                            meeting_gate_decision = Some(MeetingGateDecision::CropOcr);
+                            // The union region is in detect-image coordinates;
+                            // offset by the window origin to get frame coords.
+                            // Stays in-bounds: the region is clamped to the
+                            // detect image, which the window crop clamped to
+                            // the frame.
+                            ocr_crop = Some(match window_crop {
+                                Some(w) => TextRegion {
+                                    x: w.x + region.x,
+                                    y: w.y + region.y,
+                                    ..region
+                                },
+                                None => region,
+                            });
                         }
-                        MeetingOcrDecision::FullFrameOcr => meeting_gate_escalated = true,
+                        MeetingOcrDecision::FullFrameOcr => {
+                            meeting_gate_escalated = true;
+                            meeting_gate_decision = Some(MeetingGateDecision::FullFrameOcr);
+                            // Dense fallback: OCR the meeting window when its
+                            // bounds are known (the monitor's other pixels are
+                            // a11y territory), the whole frame otherwise.
+                            ocr_crop = window_crop;
+                        }
                     }
+                } else {
+                    // Detect backoff not due: implicitly Skip — this is the
+                    // density-backoff saving, counted like any other skip.
+                    meeting_gate_decision = Some(MeetingGateDecision::Skip);
                 }
             }
             // No gate wired (callers outside the engine capture loop):
             // keep the pre-#5054 forced-OCR behavior rather than silently
-            // dropping meeting OCR.
-            None => meeting_gate_escalated = true,
+            // dropping meeting OCR — scoped to the meeting window when its
+            // bounds are known, like the gated path.
+            None => {
+                meeting_gate_escalated = true;
+                ocr_crop = window_crop;
+            }
         }
     }
 
@@ -529,6 +668,8 @@ pub async fn paired_capture(
         duration_ms,
         ocr_duration_ms,
         ocr_was_empty,
+        meeting_gate_decision,
+        meeting_gate_detect_duration,
         app_name: ctx.app_name.map(String::from),
         window_name: ctx.window_name.map(String::from),
         browser_url: ctx.browser_url.map(String::from),
@@ -869,6 +1010,7 @@ mod tests {
             screenshot_disabled: false,
             in_meeting: false,
             monitor_hosts_focus: true,
+            focused_window_bounds: None,
         };
 
         let result = paired_capture(&ctx, None, None).await.unwrap();
@@ -907,6 +1049,7 @@ mod tests {
             screenshot_disabled: true,
             in_meeting: false,
             monitor_hosts_focus: true,
+            focused_window_bounds: None,
         };
 
         let result = paired_capture(&ctx, None, None).await.unwrap();
@@ -949,6 +1092,7 @@ mod tests {
             screenshot_disabled: false,
             in_meeting: false,
             monitor_hosts_focus: true,
+            focused_window_bounds: None,
         };
 
         let snap = TreeSnapshot {
@@ -972,6 +1116,7 @@ mod tests {
             truncated: false,
             truncation_reason: screenpipe_a11y::tree::TruncationReason::None,
             max_depth_reached: 0,
+            window_bounds: None,
         };
         let result = paired_capture(&ctx, Some(&snap), None).await.unwrap();
 
@@ -1014,6 +1159,7 @@ mod tests {
             screenshot_disabled: false,
             in_meeting: false,
             monitor_hosts_focus: true,
+            focused_window_bounds: None,
         };
 
         // Empty accessibility text should be treated as no text
@@ -1032,6 +1178,7 @@ mod tests {
             truncated: false,
             truncation_reason: screenpipe_a11y::tree::TruncationReason::None,
             max_depth_reached: 0,
+            window_bounds: None,
         };
         let result = paired_capture(&ctx, Some(&snap), None).await.unwrap();
 
@@ -1145,6 +1292,7 @@ mod tests {
             truncated: false,
             truncation_reason: screenpipe_a11y::tree::TruncationReason::None,
             max_depth_reached: 0,
+            window_bounds: None,
         }
     }
 
@@ -1418,12 +1566,18 @@ mod tests {
     /// A 400x300 frame with glyph-like strokes, so the contour detector
     /// finds a sparse text region (mirrors the text_regions unit tests).
     fn strokes_image() -> Arc<DynamicImage> {
+        strokes_image_at(50, 100)
+    }
+
+    /// 400x300 light canvas with a 10-stroke text-like blob whose top-left
+    /// glyph starts at (ox, oy) — the blob spans ~66x12 px.
+    fn strokes_image_at(ox: u32, oy: u32) -> Arc<DynamicImage> {
         let mut canvas = image::RgbImage::from_pixel(400, 300, image::Rgb([235, 235, 235]));
         for s in 0..10u32 {
-            let sx = 50 + s * 7;
+            let sx = ox + s * 7;
             for dy in 0..12 {
                 for dx in 0..3 {
-                    canvas.put_pixel(sx + dx, 100 + dy, image::Rgb([10, 10, 10]));
+                    canvas.put_pixel(sx + dx, oy + dy, image::Rgb([10, 10, 10]));
                 }
             }
         }
@@ -1456,6 +1610,7 @@ mod tests {
             screenshot_disabled: false,
             in_meeting: false,
             monitor_hosts_focus: true,
+            focused_window_bounds: None,
         };
         let snap = rich_meeting_snap();
         let mut gate = MeetingOcrGate::new();
@@ -1499,6 +1654,7 @@ mod tests {
             screenshot_disabled: false,
             in_meeting: true,
             monitor_hosts_focus: true,
+            focused_window_bounds: None,
         };
         let snap = rich_meeting_snap();
         let mut gate = MeetingOcrGate::new();
@@ -1539,6 +1695,7 @@ mod tests {
             screenshot_disabled: false,
             in_meeting: true,
             monitor_hosts_focus: true,
+            focused_window_bounds: None,
         };
         let snap = rich_meeting_snap();
         // No gate wired: callers outside the engine loop keep the
@@ -1588,6 +1745,7 @@ mod tests {
             screenshot_disabled: false,
             in_meeting: true,
             monitor_hosts_focus: false,
+            focused_window_bounds: None,
         };
         let mut gate = MeetingOcrGate::new();
         let result = paired_capture(&ctx, Some(&snap), Some(&mut gate))
@@ -1629,6 +1787,7 @@ mod tests {
             screenshot_disabled: false,
             in_meeting: true,
             monitor_hosts_focus: true,
+            focused_window_bounds: None,
         };
         let mut gate = MeetingOcrGate::new();
         // Bootstrap: first detect finds the stroke region → sparse →
@@ -1638,12 +1797,188 @@ mod tests {
             result.ocr_duration_ms.is_some(),
             "sparse escalation must run OCR on the cropped region"
         );
+        // Gate telemetry travels out with the result for PipelineMetrics.
+        assert_eq!(result.meeting_gate_decision, Some(MeetingGateDecision::CropOcr));
+        assert!(
+            result.meeting_gate_detect_duration.is_some(),
+            "detect ran, so its latency must be reported"
+        );
         // Second capture of the identical frame: fingerprint unchanged →
         // gate skips OCR entirely.
         let result2 = paired_capture(&ctx, None, Some(&mut gate)).await.unwrap();
         assert!(
             result2.ocr_duration_ms.is_none(),
             "unchanged text must not re-run OCR"
+        );
+        assert_eq!(result2.meeting_gate_decision, Some(MeetingGateDecision::Skip));
+        assert!(
+            result2.meeting_gate_detect_duration.is_none(),
+            "detect backoff not due — no detect latency to report"
+        );
+    }
+
+    #[test]
+    fn clamp_window_crop_handles_edges_slivers_and_fullscreen() {
+        let b = |x, y, w, h| FocusedWindowBounds {
+            x,
+            y,
+            width: w,
+            height: h,
+        };
+        // Fully inside: passed through.
+        let r = clamp_window_crop(b(100, 50, 200, 150), 400, 300).unwrap();
+        assert_eq!((r.x, r.y, r.width, r.height), (100, 50, 200, 150));
+        // Dragged past the top-left corner: clipped to the frame.
+        let r = clamp_window_crop(b(-40, -30, 200, 150), 400, 300).unwrap();
+        assert_eq!((r.x, r.y, r.width, r.height), (0, 0, 160, 120));
+        // Overhanging the bottom-right: clipped to the frame.
+        let r = clamp_window_crop(b(300, 200, 200, 150), 400, 300).unwrap();
+        assert_eq!((r.x, r.y, r.width, r.height), (300, 200, 100, 100));
+        // Sliver after clamping (resize/move race): full-frame fallback.
+        assert!(clamp_window_crop(b(390, 50, 200, 150), 400, 300).is_none());
+        assert!(clamp_window_crop(b(100, 50, 200, 20), 400, 300).is_none());
+        // Entirely off-frame: full-frame fallback.
+        assert!(clamp_window_crop(b(500, 50, 200, 150), 400, 300).is_none());
+        assert!(clamp_window_crop(b(-300, 50, 200, 150), 400, 300).is_none());
+        // Effectively fullscreen: cropping buys nothing — fall back.
+        assert!(clamp_window_crop(b(0, 0, 400, 300), 400, 300).is_none());
+        assert!(clamp_window_crop(b(-10, -10, 420, 320), 400, 300).is_none());
+        // Degenerate frame.
+        assert!(clamp_window_crop(b(0, 0, 100, 100), 0, 0).is_none());
+    }
+
+    #[tokio::test]
+    async fn window_bounds_blind_the_gate_to_neighboring_window_text() {
+        // Partial-screen meeting: text-like strokes exist ONLY outside the
+        // focused meeting window. With bounds, the detect is scoped to the
+        // (blank) window and the gate skips; without bounds, the same frame
+        // escalates on the neighbor's pixels. This is the fingerprint-churn
+        // fix the window crop exists for.
+        let tmp = TempDir::new().unwrap();
+        let snapshot_writer = SnapshotWriter::new(tmp.path(), 80, 1920);
+        let db = DatabaseManager::new("sqlite::memory:", Default::default())
+            .await
+            .unwrap();
+        // Strokes at (50,100)-(116,112); window on the blank right side.
+        let image = strokes_image_at(50, 100);
+        let make_ctx = |bounds| CaptureContext {
+            db: &db,
+            snapshot_writer: &snapshot_writer,
+            image: image.clone(),
+            captured_at: Utc::now(),
+            monitor_id: 0,
+            device_name: "test_monitor",
+            app_name: Some("zoom.us"),
+            window_name: Some("Zoom Meeting"),
+            browser_url: None,
+            document_path: None,
+            focused: true,
+            capture_trigger: "visual_change",
+            use_pii_removal: false,
+            languages: vec![],
+            elements_ref_frame_id: None,
+            screenshot_disabled: false,
+            in_meeting: true,
+            monitor_hosts_focus: true,
+            focused_window_bounds: bounds,
+        };
+
+        let mut gate = MeetingOcrGate::new();
+        let ctx = make_ctx(Some(FocusedWindowBounds {
+            x: 200,
+            y: 150,
+            width: 180,
+            height: 140,
+        }));
+        let result = paired_capture(&ctx, None, Some(&mut gate)).await.unwrap();
+        assert!(
+            result.ocr_duration_ms.is_none(),
+            "no text inside the meeting window — the gate must skip"
+        );
+        assert_eq!(result.meeting_gate_decision, Some(MeetingGateDecision::Skip));
+
+        // Control: the identical frame WITHOUT bounds escalates on the
+        // neighboring text (fresh gate — independent decision).
+        let mut gate2 = MeetingOcrGate::new();
+        let ctx2 = make_ctx(None);
+        let result2 = paired_capture(&ctx2, None, Some(&mut gate2)).await.unwrap();
+        assert!(
+            result2.ocr_duration_ms.is_some(),
+            "without bounds the neighbor's text drives the gate — control check"
+        );
+    }
+
+    #[tokio::test]
+    async fn window_local_fingerprint_is_invariant_to_window_moves() {
+        // Dragging the meeting window without changing its content must not
+        // re-escalate: regions are fingerprinted in window-local coordinates.
+        let tmp = TempDir::new().unwrap();
+        let snapshot_writer = SnapshotWriter::new(tmp.path(), 80, 1920);
+        let db = DatabaseManager::new("sqlite::memory:", Default::default())
+            .await
+            .unwrap();
+        // Identical window content (strokes at window-local (20, 30)) at two
+        // different window positions on the monitor.
+        let make_ctx = |image, bounds| CaptureContext {
+            db: &db,
+            snapshot_writer: &snapshot_writer,
+            image,
+            captured_at: Utc::now(),
+            monitor_id: 0,
+            device_name: "test_monitor",
+            app_name: Some("zoom.us"),
+            window_name: Some("Zoom Meeting"),
+            browser_url: None,
+            document_path: None,
+            focused: true,
+            capture_trigger: "visual_change",
+            use_pii_removal: false,
+            languages: vec![],
+            elements_ref_frame_id: None,
+            screenshot_disabled: false,
+            in_meeting: true,
+            monitor_hosts_focus: true,
+            focused_window_bounds: Some(bounds),
+        };
+
+        let mut gate = MeetingOcrGate::new();
+        let ctx1 = make_ctx(
+            strokes_image_at(120, 80),
+            FocusedWindowBounds {
+                x: 100,
+                y: 50,
+                width: 200,
+                height: 150,
+            },
+        );
+        let first = paired_capture(&ctx1, None, Some(&mut gate)).await.unwrap();
+        assert!(
+            first.ocr_duration_ms.is_some(),
+            "bootstrap escalation indexes the window content"
+        );
+
+        // Window dragged +60/+60; content (window-local) unchanged. Wait out
+        // the establishing detect interval so the decision comes from the
+        // fingerprint, not the rate limit.
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        let ctx2 = make_ctx(
+            strokes_image_at(180, 140),
+            FocusedWindowBounds {
+                x: 160,
+                y: 110,
+                width: 200,
+                height: 150,
+            },
+        );
+        let moved = paired_capture(&ctx2, None, Some(&mut gate)).await.unwrap();
+        assert!(
+            moved.ocr_duration_ms.is_none(),
+            "moved-but-unchanged window must not re-OCR"
+        );
+        assert_eq!(moved.meeting_gate_decision, Some(MeetingGateDecision::Skip));
+        assert!(
+            moved.meeting_gate_detect_duration.is_some(),
+            "detect ran (interval elapsed) and produced the skip"
         );
     }
 
@@ -1676,6 +2011,7 @@ mod tests {
             screenshot_disabled: false,
             in_meeting: true,
             monitor_hosts_focus: true,
+            focused_window_bounds: None,
         };
 
         // Fully closed DB (both pools + drain loop) → the frame insert

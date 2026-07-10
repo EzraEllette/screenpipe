@@ -78,10 +78,13 @@ pub enum MeetingOcrDecision {
     /// frame still gets stored with its accessibility text.
     Skip,
     /// Text changed and the frame is sparse: run one OCR call on this
-    /// padded union of the detected text regions.
+    /// padded union of the detected text regions (in the coordinates of
+    /// the surface the detect ran on — the caller offsets window-scoped
+    /// regions back to frame space).
     CropOcr(TextRegion),
-    /// Text changed and the frame is dense: run full-frame OCR (identical
-    /// to pre-#5054 behavior).
+    /// Text changed and the frame is dense: run OCR on the whole detect
+    /// surface — the focused meeting window when its bounds are known,
+    /// else the full frame (identical to pre-#5054 behavior).
     FullFrameOcr,
 }
 
