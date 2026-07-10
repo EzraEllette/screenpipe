@@ -39,7 +39,9 @@ pub fn process_audio_activity(pid: i32) -> Option<ProcessAudioActivity> {
 /// than one input at once (an aggregate rig, or two mics); all are returned so
 /// the caller can capture each. Gated on `is_running_input` so a muted /
 /// not-yet-opened mic resolves to an empty list and the caller keeps the system
-/// default until the app actually opens an input.
+/// default until the app actually opens an input. Devices that expose zero
+/// input streams (an output-only speaker surfaced by a VPIO aggregate — see
+/// the loop below) are dropped: they cannot be recorded from.
 pub fn resolve_meeting_inputs(pid: i32) -> Vec<AudioDevice> {
     let Ok(process) = ca::Process::with_pid(pid) else {
         return Vec::new();
@@ -61,6 +63,25 @@ pub fn resolve_meeting_inputs(pid: i32) -> Vec<AudioDevice> {
         let Ok(name) = device.name() else { continue };
         let name = name.to_string();
         if name.is_empty() {
+            continue;
+        }
+        // Meeting apps running the voice-processing unit (VPIO) hold an
+        // aggregate spanning the mic AND the speaker, and CoreAudio can list
+        // that speaker under kAudioProcessPropertyDevices even in the INPUT
+        // scope. Treating it as a mic makes the mic-follow machine try to open
+        // an input stream on a device with no input side ("Audio device not
+        // found") and retry for the rest of the meeting. Skip only on a
+        // POSITIVE zero-input-buffers reading — a transient stream-cfg read
+        // error must not drop a real mic.
+        let output_only = device
+            .input_stream_cfg()
+            .map(|cfg| cfg.number_buffers() == 0)
+            .unwrap_or(false);
+        if output_only {
+            debug!(
+                "meeting_audio: pid {pid} lists '{name}' in input scope but it has \
+                 no input streams (output-only device), skipping"
+            );
             continue;
         }
         let dev = AudioDevice::new(name, DeviceType::Input);
