@@ -18,6 +18,7 @@ pub use monitor::MonitorListError;
 pub mod metrics;
 pub mod ocr_cache;
 pub mod tesseract;
+pub mod text_regions;
 pub mod utils;
 #[cfg(target_os = "macos")]
 pub use apple::perform_ocr_apple;

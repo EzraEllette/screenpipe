@@ -14,6 +14,7 @@ use anyhow::Result;
 use chrono::Utc;
 use screenpipe_a11y::tree::TreeWalkerConfig;
 use screenpipe_a11y::ActivityFeed;
+use screenpipe_capture::meeting_ocr_gate::MeetingOcrGate;
 use screenpipe_capture::paired_capture::{paired_capture, CaptureContext, PairedCaptureResult};
 use screenpipe_core::window_pattern::{self, WindowPattern};
 use screenpipe_db::DatabaseManager;
@@ -722,6 +723,11 @@ pub async fn event_driven_capture_loop(
     // for expensive apps (e.g., Electron apps whose UIA providers block the UI thread).
     let mut walk_budget = screenpipe_a11y::budget::AppWalkBudget::new();
 
+    // Meeting OCR gate (#5054): while a meeting is detected, meeting apps'
+    // OCR runs only when the on-screen text fingerprint actually changes,
+    // instead of on every capture. Per-monitor, like the walk budget.
+    let mut meeting_gate = MeetingOcrGate::new();
+
     // Frame comparer for visual change detection
     let mut frame_comparer = if visual_check_enabled {
         Some(FrameComparer::new(FrameComparisonConfig::max_performance()))
@@ -824,6 +830,7 @@ pub async fn event_driven_capture_loop(
                 last_db_write,
                 None, // first capture — no elements ref
                 &mut walk_budget,
+                &mut meeting_gate,
                 false, // screenshot enabled on startup
                 false, // hd not active at startup (Manual is dedup-exempt anyway)
                 false, // not in a meeting at startup
@@ -1178,7 +1185,13 @@ pub async fn event_driven_capture_loop(
             // Source of truth for dedup-bypass this tick. Read from the same
             // snapshot as the interval install so the two can't disagree.
             hd_active = snap.active;
+            let was_in_meeting = in_meeting;
             in_meeting = snap.meeting.unwrap_or(false);
+            if was_in_meeting && !in_meeting {
+                // Meeting ended: clear meeting-scoped OCR-gate state so the
+                // next meeting starts from a fresh bootstrap (#5054).
+                meeting_gate.reset();
+            }
             // Cap the idle-capture interval while in a meeting so the shared
             // screen is captured on a guaranteed floor, not just when the
             // visual detector trips.
@@ -1521,6 +1534,7 @@ pub async fn event_driven_capture_loop(
                         last_db_write,
                         elements_ref,
                         &mut walk_budget,
+                        &mut meeting_gate,
                         screenshot_disabled,
                         hd_active,
                         in_meeting,
@@ -2274,6 +2288,7 @@ async fn do_capture(
     last_db_write: Instant,
     elements_ref_frame_id: Option<i64>,
     walk_budget: &mut screenpipe_a11y::budget::AppWalkBudget,
+    meeting_gate: &mut MeetingOcrGate,
     screenshot_disabled: bool,
     hd_active: bool,
     in_meeting: bool,
@@ -2693,9 +2708,10 @@ async fn do_capture(
         languages: params.languages.to_vec(),
         elements_ref_frame_id,
         screenshot_disabled,
+        in_meeting,
     };
 
-    let result = paired_capture(&ctx, tree_snapshot.as_ref()).await?;
+    let result = paired_capture(&ctx, tree_snapshot.as_ref(), Some(meeting_gate)).await?;
     let deduped = elements_ref_frame_id.is_some();
     // Extract image from Arc for comparer reuse. Arc::try_unwrap succeeds
     // because paired_capture no longer retains a clone.

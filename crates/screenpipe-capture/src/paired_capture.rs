@@ -13,13 +13,16 @@
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use image::DynamicImage;
+use image::{DynamicImage, GenericImageView};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use screenpipe_a11y::tree::{create_tree_walker, TreeSnapshot, TreeWalkerConfig};
 use screenpipe_core::pii_removal::remove_pii;
 use screenpipe_db::DatabaseManager;
 use screenpipe_screen::snapshot_writer::SnapshotWriter;
+use screenpipe_screen::text_regions::{detect_text_regions, TextRegion};
+
+use crate::meeting_ocr_gate::{MeetingOcrDecision, MeetingOcrGate};
 use std::sync::Arc;
 #[cfg(not(target_os = "windows"))]
 use std::sync::OnceLock;
@@ -78,6 +81,10 @@ pub struct CaptureContext<'a> {
     /// The accessibility tree walk still runs — metadata row is still written.
     /// Set by AudioPaused / FullPause power profiles and enterprise policy.
     pub screenshot_disabled: bool,
+    /// Whether the meeting detector currently reports an active call.
+    /// Gates the meeting-app forced-OCR path (#5054): outside a meeting,
+    /// meeting apps/URLs get no special OCR treatment at all.
+    pub in_meeting: bool,
 }
 
 /// Result of a paired capture operation.
@@ -119,9 +126,15 @@ pub struct PairedCaptureResult {
 ///
 /// This is the primary capture function for event-driven mode.
 /// Accepts an optional `TreeSnapshot` with structured node data.
+///
+/// `meeting_gate` owns the OCR decision for meeting apps while
+/// `ctx.in_meeting` is true (#5054). Callers without a gate (`None`) keep
+/// the pre-gate behavior: meeting apps force full OCR whenever
+/// `ctx.in_meeting` is set.
 pub async fn paired_capture(
     ctx: &CaptureContext<'_>,
     tree_snapshot: Option<&TreeSnapshot>,
+    meeting_gate: Option<&mut MeetingOcrGate>,
 ) -> Result<PairedCaptureResult> {
     let start = Instant::now();
 
@@ -179,27 +192,108 @@ pub async fn paired_capture(
     // (toolbar, sidebar, browser chrome) but likely missed the main content.
     // This happens with canvas-rendered apps (Google Docs, Figma, etc.)
     // where the document body is invisible to the accessibility tree.
-    let a11y_is_thin = has_accessibility_text
+    // Meeting apps/URLs are deliberately no longer part of this check —
+    // their forced OCR is gated on an actual detected meeting below (#5054).
+    let a11y_is_thin_generic = has_accessibility_text
         && tree_snapshot
-            .map(|s| a11y_content_is_thin(s, ctx.window_name, ctx.browser_url, ctx.app_name))
+            .map(|s| a11y_content_is_thin(s, ctx.window_name, ctx.browser_url))
             .unwrap_or(false);
 
-    // Run OCR when screenshots are available and: no a11y text, app prefers
-    // OCR, OR a11y text is thin (hybrid). With screenshots disabled we keep
-    // a11y-only frames and never burn CPU on OCR over a placeholder image.
+    // Meeting OCR gate (#5054): while the meeting detector reports an
+    // active call AND the focused surface is a meeting app/URL, OCR no
+    // longer runs on every capture. A cheap contour text-region detect
+    // (rate-limited by the gate's density backoff) decides IF the on-screen
+    // text actually changed (escalate) and WHERE to OCR (sparse frame →
+    // one call on the padded union of text regions; dense frame → full
+    // frame, exactly the pre-gate cost). Outside a meeting, meeting apps
+    // get no special treatment: the generic canvas/density heuristics
+    // above apply like for any other app.
+    let meeting_matched = ctx.app_name.map(is_meeting_app).unwrap_or(false)
+        || ctx.browser_url.map(is_meeting_url).unwrap_or(false);
+    let meeting_scoped =
+        ctx.in_meeting && meeting_matched && !ctx.screenshot_disabled && !app_prefers_ocr;
+
+    let mut meeting_gate = meeting_gate;
+    let mut meeting_gate_escalated = false;
+    let mut ocr_crop: Option<TextRegion> = None;
+    if meeting_scoped {
+        match meeting_gate.as_deref_mut() {
+            Some(gate) => {
+                let app_key = ctx.app_name.unwrap_or("unknown").to_lowercase();
+                let now = Instant::now();
+                if gate.detection_due(&app_key, now) {
+                    let detect_started = Instant::now();
+                    let image_for_detect = ctx.image.clone();
+                    let regions =
+                        tokio::task::spawn_blocking(move || detect_text_regions(&image_for_detect))
+                            .await
+                            .unwrap_or_default();
+                    let (frame_w, frame_h) = ctx.image.dimensions();
+                    let decision = gate.observe(&app_key, now, &regions, frame_w, frame_h);
+                    debug!(
+                        "meeting OCR gate: {} regions in {:?} -> {:?} (app={})",
+                        regions.len(),
+                        detect_started.elapsed(),
+                        decision,
+                        app_key,
+                    );
+                    match decision {
+                        MeetingOcrDecision::Skip => {}
+                        MeetingOcrDecision::CropOcr(region) => {
+                            meeting_gate_escalated = true;
+                            ocr_crop = Some(region);
+                        }
+                        MeetingOcrDecision::FullFrameOcr => meeting_gate_escalated = true,
+                    }
+                }
+            }
+            // No gate wired (callers outside the engine capture loop):
+            // keep the pre-#5054 forced-OCR behavior rather than silently
+            // dropping meeting OCR.
+            None => meeting_gate_escalated = true,
+        }
+    }
+
+    // Run OCR when screenshots are available and: the app always prefers
+    // OCR (terminals), the meeting gate escalated, or — outside the
+    // meeting-gated path — no/thin a11y text. While `meeting_scoped`, the
+    // gate owns the decision entirely (including the no-a11y-text case:
+    // a fullscreen call with zero AX text only OCRs when text changes).
     // Time the OCR step so the caller can feed `PipelineMetrics::record_ocr`
     // (ocr_completed / avg_ocr_latency_ms). `ocr_duration_ms` is Some only when
     // OCR actually ran — None when accessibility text was sufficient.
-    let ocr_ran = !ctx.screenshot_disabled && (!has_accessibility_text || a11y_is_thin);
+    let ocr_ran = !ctx.screenshot_disabled
+        && (app_prefers_ocr
+            || meeting_gate_escalated
+            || (!meeting_scoped && (!has_accessibility_text || a11y_is_thin_generic)));
+
+    // "Thin" for hybrid-labeling below: generic canvas/density thinness, or
+    // a meeting-gate escalation supplementing existing a11y chrome text.
+    let a11y_is_thin = a11y_is_thin_generic || (meeting_gate_escalated && has_accessibility_text);
+
     let ocr_started = Instant::now();
+    // True when the OCR *engine* failed (task join error / platform OCR
+    // error) as opposed to legitimately returning no text. Feeds back into
+    // the meeting gate so a failed escalation retries instead of marking
+    // the layout as indexed.
+    let mut ocr_engine_failed = false;
     let (ocr_text, ocr_text_json) = if ocr_ran {
+        // Meeting-gate sparse escalations OCR only the padded union of the
+        // detected text regions (#5054: measured 4-5.5x cheaper than
+        // full-frame on sparse meeting content). Everything else OCRs the
+        // full frame exactly as before.
+        let ocr_input: Arc<DynamicImage> = match ocr_crop {
+            Some(r) => Arc::new(ctx.image.crop_imm(r.x, r.y, r.width, r.height)),
+            None => ctx.image.clone(),
+        };
         // Windows native OCR is async, so call it directly (not inside spawn_blocking)
         #[cfg(target_os = "windows")]
         let raw = {
-            match screenpipe_screen::perform_ocr_windows(&ctx.image, &ctx.languages).await {
+            match screenpipe_screen::perform_ocr_windows(&ocr_input, &ctx.languages).await {
                 Ok((text, json, _confidence)) => (text, json),
                 Err(e) => {
                     warn!("windows OCR failed: {}", e);
+                    ocr_engine_failed = true;
                     (String::new(), "[]".to_string())
                 }
             }
@@ -209,9 +303,9 @@ pub async fn paired_capture(
         #[cfg(not(target_os = "windows"))]
         let raw = {
             let _permit = ocr_semaphore().acquire().await.unwrap();
-            let image_for_ocr = ctx.image.clone();
+            let image_for_ocr = ocr_input.clone();
             let languages = ctx.languages.clone();
-            tokio::task::spawn_blocking(move || {
+            match tokio::task::spawn_blocking(move || {
                 #[cfg(target_os = "macos")]
                 {
                     let (text, json, _confidence) =
@@ -226,16 +320,45 @@ pub async fn paired_capture(
                 }
             })
             .await
-            .unwrap_or_else(|_| (String::new(), "[]".to_string()))
+            {
+                Ok(r) => r,
+                Err(_) => {
+                    ocr_engine_failed = true;
+                    (String::new(), "[]".to_string())
+                }
+            }
+        };
+
+        // Crop-mode box coordinates are normalized to the crop; remap them
+        // to full-frame space so stored text positions stay valid for the
+        // selectable-text overlay.
+        let text_json = match ocr_crop {
+            Some(r) => remap_ocr_json_to_frame(&raw.1, r, ctx.image.width(), ctx.image.height()),
+            None => raw.1,
         };
 
         // Strip editor gutter noise (see strip_gutter_noise doc). Applied to
         // the flat text but NOT to text_json — the JSON carries per-box OCR
         // coordinates which downstream overlay/highlight UIs need intact.
-        (strip_gutter_noise(&raw.0), raw.1)
+        (strip_gutter_noise(&raw.0), text_json)
     } else {
         (String::new(), "[]".to_string())
     };
+
+    // A gate escalation whose OCR engine failed must not stay marked as
+    // indexed — roll it back so the next detect of the same layout retries
+    // (#5054 review finding). Legit-empty results stay marked (see
+    // `MeetingOcrGate::ocr_failed`).
+    if meeting_gate_escalated && ocr_engine_failed {
+        if let Some(gate) = meeting_gate.as_deref_mut() {
+            let app_key = ctx.app_name.unwrap_or("unknown").to_lowercase();
+            debug!(
+                "meeting OCR gate: engine failure, unmarking fingerprint for retry (app={})",
+                app_key
+            );
+            gate.ocr_failed(&app_key);
+        }
+    }
     // Capture the OCR wall-clock right after the block — only meaningful when
     // OCR actually ran.
     let ocr_duration_ms = if ocr_ran {
@@ -448,6 +571,11 @@ const CANVAS_APP_PATTERNS: &[&str] = &[
 /// Meeting/video apps whose main content is screen-shared or GPU-rendered video.
 /// The a11y tree only returns UI chrome (buttons, menus) not the actual content.
 /// Matched against app_name (lowercased).
+///
+/// Since #5054 these patterns no longer force OCR by themselves — they only
+/// scope the meeting OCR gate, which additionally requires an actual
+/// detected meeting (`CaptureContext::in_meeting`) and a changed on-screen
+/// text fingerprint before any OCR runs.
 const MEETING_APP_PATTERNS: &[&str] = &[
     "zoom",
     "teams",
@@ -502,6 +630,74 @@ const CANVAS_URL_PATTERNS: &[&str] = &[
     "tldraw.com",
 ];
 
+/// Whether this app name matches a known meeting/video app. Scopes the
+/// meeting OCR gate (#5054) — has no OCR effect outside a detected meeting.
+pub(crate) fn is_meeting_app(app_name: &str) -> bool {
+    let app_lower = app_name.to_lowercase();
+    MEETING_APP_PATTERNS
+        .iter()
+        .any(|pat| app_lower.contains(pat))
+}
+
+/// Whether this URL matches a browser-hosted meeting. Scopes the meeting
+/// OCR gate (#5054) — has no OCR effect outside a detected meeting.
+pub(crate) fn is_meeting_url(url: &str) -> bool {
+    let url_lower = url.to_lowercase();
+    MEETING_URL_PATTERNS
+        .iter()
+        .any(|pat| url_lower.contains(pat))
+}
+
+/// Remap OCR box coordinates from crop-normalized space to full-frame
+/// normalized space. All three OCR engines emit `left`/`top`/`width`/
+/// `height` normalized 0-1 to the image they were handed; when that image
+/// was the meeting-gate union crop, downstream consumers (text-position
+/// overlays) still expect full-frame coordinates. Unparseable JSON is
+/// stored unchanged rather than dropped.
+fn remap_ocr_json_to_frame(
+    text_json: &str,
+    crop: TextRegion,
+    frame_w: u32,
+    frame_h: u32,
+) -> String {
+    if frame_w == 0 || frame_h == 0 {
+        return text_json.to_string();
+    }
+    let Ok(mut entries) = serde_json::from_str::<Vec<serde_json::Value>>(text_json) else {
+        debug!("remap_ocr_json_to_frame: unparseable text_json, storing as-is");
+        return text_json.to_string();
+    };
+    fn value_as_f64(v: &serde_json::Value) -> Option<f64> {
+        match v {
+            serde_json::Value::String(s) => s.parse().ok(),
+            serde_json::Value::Number(n) => n.as_f64(),
+            _ => None,
+        }
+    }
+    for entry in &mut entries {
+        let Some(obj) = entry.as_object_mut() else {
+            continue;
+        };
+        // (key, pixel offset into the frame, crop extent, frame extent)
+        let mappings = [
+            ("left", crop.x as f64, crop.width as f64, frame_w as f64),
+            ("top", crop.y as f64, crop.height as f64, frame_h as f64),
+            ("width", 0.0, crop.width as f64, frame_w as f64),
+            ("height", 0.0, crop.height as f64, frame_h as f64),
+        ];
+        for (key, offset, crop_dim, frame_dim) in mappings {
+            if let Some(v) = obj.get(key).and_then(value_as_f64) {
+                let mapped = (offset + v * crop_dim) / frame_dim;
+                obj.insert(
+                    key.to_string(),
+                    serde_json::Value::String(mapped.to_string()),
+                );
+            }
+        }
+    }
+    serde_json::to_string(&entries).unwrap_or_else(|_| text_json.to_string())
+}
+
 /// Check if the accessibility tree captured mostly UI chrome and likely missed
 /// the actual content. Returns `true` when OCR should supplement a11y data.
 ///
@@ -509,11 +705,15 @@ const CANVAS_URL_PATTERNS: &[&str] = &[
 /// 1. **Known canvas apps**: window title matches a known pattern → always thin.
 /// 2. **Content density heuristic**: classify nodes by role; if <30% of text
 ///    characters come from content roles (vs toolbar/menu chrome), it's thin.
+///
+/// Meeting apps/URLs are deliberately NOT checked here anymore: since #5054
+/// their OCR is owned by the meeting gate in `paired_capture` (active
+/// meeting + changed text fingerprint), so a Zoom home screen or an idle
+/// Slack window is treated like any other app.
 fn a11y_content_is_thin(
     snap: &screenpipe_a11y::tree::TreeSnapshot,
     window_name: Option<&str>,
     browser_url: Option<&str>,
-    app_name: Option<&str>,
 ) -> bool {
     // 1a. Known canvas-rendered apps by window title
     if let Some(win) = window_name {
@@ -536,27 +736,6 @@ fn a11y_content_is_thin(
             .any(|pat| url_lower.contains(pat))
         {
             debug!("a11y_content_is_thin: known canvas URL '{}'", url);
-            return true;
-        }
-
-        if MEETING_URL_PATTERNS
-            .iter()
-            .any(|pat| url_lower.contains(pat))
-        {
-            debug!("a11y_content_is_thin: meeting URL '{}'", url);
-            return true;
-        }
-    }
-
-    // 1c. Meeting/video apps — main content is screen-shared or GPU-rendered,
-    //     a11y tree only has UI chrome (buttons like "Mute my audio" repeated).
-    if let Some(app) = app_name {
-        let app_lower = app.to_lowercase();
-        if MEETING_APP_PATTERNS
-            .iter()
-            .any(|pat| app_lower.contains(pat))
-        {
-            debug!("a11y_content_is_thin: meeting app '{}'", app);
             return true;
         }
     }
@@ -668,9 +847,10 @@ mod tests {
             languages: vec![],
             elements_ref_frame_id: None,
             screenshot_disabled: false,
+            in_meeting: false,
         };
 
-        let result = paired_capture(&ctx, None).await.unwrap();
+        let result = paired_capture(&ctx, None, None).await.unwrap();
 
         assert!(result.frame_id > 0);
         assert!(result.snapshot_path.ends_with(".jpg"));
@@ -704,9 +884,10 @@ mod tests {
             languages: vec![],
             elements_ref_frame_id: None,
             screenshot_disabled: true,
+            in_meeting: false,
         };
 
-        let result = paired_capture(&ctx, None).await.unwrap();
+        let result = paired_capture(&ctx, None, None).await.unwrap();
 
         assert!(result.frame_id > 0);
         assert_eq!(result.snapshot_path, "");
@@ -744,6 +925,7 @@ mod tests {
             languages: vec![],
             elements_ref_frame_id: None,
             screenshot_disabled: false,
+            in_meeting: false,
         };
 
         let snap = TreeSnapshot {
@@ -768,7 +950,7 @@ mod tests {
             truncation_reason: screenpipe_a11y::tree::TruncationReason::None,
             max_depth_reached: 0,
         };
-        let result = paired_capture(&ctx, Some(&snap)).await.unwrap();
+        let result = paired_capture(&ctx, Some(&snap), None).await.unwrap();
 
         assert!(result.frame_id > 0);
         assert_eq!(result.text_source.as_deref(), Some("accessibility"));
@@ -807,6 +989,7 @@ mod tests {
             languages: vec![],
             elements_ref_frame_id: None,
             screenshot_disabled: false,
+            in_meeting: false,
         };
 
         // Empty accessibility text should be treated as no text
@@ -826,7 +1009,7 @@ mod tests {
             truncation_reason: screenpipe_a11y::tree::TruncationReason::None,
             max_depth_reached: 0,
         };
-        let result = paired_capture(&ctx, Some(&snap)).await.unwrap();
+        let result = paired_capture(&ctx, Some(&snap), None).await.unwrap();
 
         assert!(result.frame_id > 0);
         // Empty string → treated as no text source
@@ -955,19 +1138,13 @@ mod tests {
             &snap,
             Some("Untitled - Google Docs"),
             None,
-            None,
         ));
     }
 
     #[test]
     fn test_thin_known_canvas_app_figma() {
         let snap = make_snap(vec![]);
-        assert!(a11y_content_is_thin(
-            &snap,
-            Some("My Design - Figma"),
-            None,
-            None
-        ));
+        assert!(a11y_content_is_thin(&snap, Some("My Design - Figma"), None,));
     }
 
     #[test]
@@ -978,12 +1155,7 @@ mod tests {
             AccessibilityTreeNode { role: "AXStaticText".into(), text: "This is a long article about dogs. Dogs are domesticated descendants of wolves. They were the first species to be domesticated over 14,000 years ago.".into(), depth: 1, bounds: None, ..Default::default() },
             AccessibilityTreeNode { role: "AXLink".into(), text: "Read more about canine history".into(), depth: 1, bounds: None, ..Default::default() },
         ]);
-        assert!(!a11y_content_is_thin(
-            &snap,
-            Some("Dog - Wikipedia"),
-            None,
-            None
-        ));
+        assert!(!a11y_content_is_thin(&snap, Some("Dog - Wikipedia"), None,));
     }
 
     #[test]
@@ -1097,12 +1269,7 @@ mod tests {
             },
         ]);
         // >70% chrome text
-        assert!(a11y_content_is_thin(
-            &snap,
-            Some("Untitled document"),
-            None,
-            None
-        ));
+        assert!(a11y_content_is_thin(&snap, Some("Untitled document"), None,));
     }
 
     #[test]
@@ -1115,7 +1282,7 @@ mod tests {
             ..Default::default()
         }]);
         // < 100 chars total
-        assert!(a11y_content_is_thin(&snap, Some("Some App"), None, None));
+        assert!(a11y_content_is_thin(&snap, Some("Some App"), None));
     }
 
     #[test]
@@ -1129,7 +1296,6 @@ mod tests {
         assert!(!a11y_content_is_thin(
             &snap,
             Some("main.rs - Visual Studio Code"),
-            None,
             None,
         ));
     }
@@ -1146,19 +1312,27 @@ mod tests {
             &snap,
             Some("Creon's list of profound books"),
             Some("https://docs.google.com/document/d/abc123/edit"),
-            None,
         ));
         // Same content on a non-canvas URL → not thin (content ratio is fine)
         assert!(!a11y_content_is_thin(
             &snap,
             Some("Creon's list of profound books"),
             Some("https://example.com"),
-            None,
         ));
     }
 
     #[test]
-    fn test_thin_browser_hosted_google_meet_by_url() {
+    fn test_meeting_urls_match_gate_scope_but_are_not_thin_by_themselves() {
+        // Since #5054, browser-hosted meeting URLs scope the meeting OCR
+        // gate (is_meeting_url) instead of unconditionally forcing OCR via
+        // the thin heuristic. Rich chrome text on a meeting page is NOT
+        // "thin" anymore — the gate decides OCR while a meeting is live.
+        assert!(is_meeting_url("https://meet.google.com/abc-defg-hij"));
+        assert!(is_meeting_url("https://zoom.us/wc/123456789/start"));
+        assert!(is_meeting_url(
+            "https://teams.microsoft.com/l/meetup-join/x"
+        ));
+
         let snap = make_snap(vec![AccessibilityTreeNode {
             role: "AXStaticText".into(),
             text: "Mute microphone Camera Captions Present now Participants Chat More options Meeting details People Controls Share screen presentation toolbar repeated meeting chrome".into(),
@@ -1166,35 +1340,28 @@ mod tests {
             bounds: None,
             ..Default::default()
         }]);
-
-        assert!(a11y_content_is_thin(
+        assert!(!a11y_content_is_thin(
             &snap,
             Some("Team sync - Google Meet"),
             Some("https://meet.google.com/abc-defg-hij"),
-            Some("Arc"),
         ));
     }
 
     #[test]
-    fn test_thin_browser_hosted_zoom_by_url() {
-        let snap = make_snap(vec![AccessibilityTreeNode {
-            role: "AXStaticText".into(),
-            text: "Mute Start Video Security Participants Chat Share Screen Record Reactions Apps Whiteboards More leave meeting browser client controls".into(),
-            depth: 0,
-            bounds: None,
-            ..Default::default()
-        }]);
-
-        assert!(a11y_content_is_thin(
-            &snap,
-            Some("Zoom Meeting"),
-            Some("https://zoom.us/wc/123456789/start"),
-            Some("Google Chrome"),
-        ));
+    fn test_meeting_app_name_matching() {
+        assert!(is_meeting_app("zoom.us"));
+        assert!(is_meeting_app("Microsoft Teams"));
+        assert!(is_meeting_app("FaceTime"));
+        assert!(!is_meeting_app("Google Chrome"));
+        assert!(!is_meeting_app("Visual Studio Code"));
     }
 
     #[test]
     fn test_calendar_page_with_meet_link_is_not_meeting_url() {
+        assert!(!is_meeting_url(
+            "https://calendar.google.com/calendar/u/0/r/eventedit/abc123"
+        ));
+
         let snap = make_snap(vec![AccessibilityTreeNode {
             role: "AXStaticText".into(),
             text: "Calendar event details Product review agenda project milestones join with Google Meet attendee notes and preparation checklist with substantial readable event content".into(),
@@ -1207,7 +1374,222 @@ mod tests {
             &snap,
             Some("Product review - Google Calendar"),
             Some("https://calendar.google.com/calendar/u/0/r/eventedit/abc123"),
-            Some("Google Chrome"),
         ));
+    }
+
+    // --- Meeting OCR gate integration (#5054) ---
+
+    /// Content-dense snapshot: enough real text that the generic density
+    /// heuristic does NOT flag it as thin.
+    fn rich_meeting_snap() -> TreeSnapshot {
+        make_snap(vec![AccessibilityTreeNode {
+            role: "AXStaticText".into(),
+            text: "Full readable message history with plenty of real content text that comfortably exceeds the density heuristic minimums for a normal application window".into(),
+            depth: 0,
+            bounds: None,
+            ..Default::default()
+        }])
+    }
+
+    /// A 400x300 frame with glyph-like strokes, so the contour detector
+    /// finds a sparse text region (mirrors the text_regions unit tests).
+    fn strokes_image() -> Arc<DynamicImage> {
+        let mut canvas = image::RgbImage::from_pixel(400, 300, image::Rgb([235, 235, 235]));
+        for s in 0..10u32 {
+            let sx = 50 + s * 7;
+            for dy in 0..12 {
+                for dx in 0..3 {
+                    canvas.put_pixel(sx + dx, 100 + dy, image::Rgb([10, 10, 10]));
+                }
+            }
+        }
+        Arc::new(DynamicImage::ImageRgb8(canvas))
+    }
+
+    #[tokio::test]
+    async fn meeting_app_outside_meeting_gets_no_forced_ocr() {
+        let tmp = TempDir::new().unwrap();
+        let snapshot_writer = SnapshotWriter::new(tmp.path(), 80, 1920);
+        let db = DatabaseManager::new("sqlite::memory:", Default::default())
+            .await
+            .unwrap();
+        let ctx = CaptureContext {
+            db: &db,
+            snapshot_writer: &snapshot_writer,
+            image: test_image(),
+            captured_at: Utc::now(),
+            monitor_id: 0,
+            device_name: "test_monitor",
+            app_name: Some("zoom.us"),
+            window_name: Some("Zoom Workplace"),
+            browser_url: None,
+            document_path: None,
+            focused: true,
+            capture_trigger: "click",
+            use_pii_removal: false,
+            languages: vec![],
+            elements_ref_frame_id: None,
+            screenshot_disabled: false,
+            in_meeting: false,
+        };
+        let snap = rich_meeting_snap();
+        let mut gate = MeetingOcrGate::new();
+        let result = paired_capture(&ctx, Some(&snap), Some(&mut gate))
+            .await
+            .unwrap();
+        // Pre-#5054 this forced OCR purely on the app name. Outside a
+        // meeting, a meeting app with rich a11y text is a normal app.
+        assert!(
+            result.ocr_duration_ms.is_none(),
+            "meeting app outside a meeting must not force OCR"
+        );
+        assert_eq!(result.text_source.as_deref(), Some("accessibility"));
+    }
+
+    #[tokio::test]
+    async fn meeting_app_in_meeting_gate_skips_ocr_when_no_text_regions() {
+        let tmp = TempDir::new().unwrap();
+        let snapshot_writer = SnapshotWriter::new(tmp.path(), 80, 1920);
+        let db = DatabaseManager::new("sqlite::memory:", Default::default())
+            .await
+            .unwrap();
+        let ctx = CaptureContext {
+            db: &db,
+            snapshot_writer: &snapshot_writer,
+            // All-black frame: the contour detector finds no text regions,
+            // so the gate reports Skip and no OCR runs.
+            image: test_image(),
+            captured_at: Utc::now(),
+            monitor_id: 0,
+            device_name: "test_monitor",
+            app_name: Some("zoom.us"),
+            window_name: Some("Zoom Meeting"),
+            browser_url: None,
+            document_path: None,
+            focused: true,
+            capture_trigger: "visual_change",
+            use_pii_removal: false,
+            languages: vec![],
+            elements_ref_frame_id: None,
+            screenshot_disabled: false,
+            in_meeting: true,
+        };
+        let snap = rich_meeting_snap();
+        let mut gate = MeetingOcrGate::new();
+        let result = paired_capture(&ctx, Some(&snap), Some(&mut gate))
+            .await
+            .unwrap();
+        assert!(
+            result.ocr_duration_ms.is_none(),
+            "gate must skip OCR when no text regions are detected"
+        );
+        // The frame is still stored with its accessibility text.
+        assert_eq!(result.text_source.as_deref(), Some("accessibility"));
+    }
+
+    #[tokio::test]
+    async fn meeting_app_in_meeting_without_gate_keeps_legacy_forced_ocr() {
+        let tmp = TempDir::new().unwrap();
+        let snapshot_writer = SnapshotWriter::new(tmp.path(), 80, 1920);
+        let db = DatabaseManager::new("sqlite::memory:", Default::default())
+            .await
+            .unwrap();
+        let ctx = CaptureContext {
+            db: &db,
+            snapshot_writer: &snapshot_writer,
+            image: test_image(),
+            captured_at: Utc::now(),
+            monitor_id: 0,
+            device_name: "test_monitor",
+            app_name: Some("zoom.us"),
+            window_name: Some("Zoom Meeting"),
+            browser_url: None,
+            document_path: None,
+            focused: true,
+            capture_trigger: "visual_change",
+            use_pii_removal: false,
+            languages: vec![],
+            elements_ref_frame_id: None,
+            screenshot_disabled: false,
+            in_meeting: true,
+        };
+        let snap = rich_meeting_snap();
+        // No gate wired: callers outside the engine loop keep the
+        // pre-gate forced-OCR behavior.
+        let result = paired_capture(&ctx, Some(&snap), None).await.unwrap();
+        assert!(
+            result.ocr_duration_ms.is_some(),
+            "gateless callers must keep forced meeting OCR"
+        );
+    }
+
+    #[tokio::test]
+    async fn meeting_gate_crop_escalation_runs_ocr() {
+        let tmp = TempDir::new().unwrap();
+        let snapshot_writer = SnapshotWriter::new(tmp.path(), 80, 1920);
+        let db = DatabaseManager::new("sqlite::memory:", Default::default())
+            .await
+            .unwrap();
+        let ctx = CaptureContext {
+            db: &db,
+            snapshot_writer: &snapshot_writer,
+            image: strokes_image(),
+            captured_at: Utc::now(),
+            monitor_id: 0,
+            device_name: "test_monitor",
+            app_name: Some("zoom.us"),
+            window_name: Some("Zoom Meeting"),
+            browser_url: None,
+            document_path: None,
+            focused: true,
+            capture_trigger: "visual_change",
+            use_pii_removal: false,
+            languages: vec![],
+            elements_ref_frame_id: None,
+            screenshot_disabled: false,
+            in_meeting: true,
+        };
+        let mut gate = MeetingOcrGate::new();
+        // Bootstrap: first detect finds the stroke region → sparse →
+        // CropOcr escalation → OCR actually runs (on the crop).
+        let result = paired_capture(&ctx, None, Some(&mut gate)).await.unwrap();
+        assert!(
+            result.ocr_duration_ms.is_some(),
+            "sparse escalation must run OCR on the cropped region"
+        );
+        // Second capture of the identical frame: fingerprint unchanged →
+        // gate skips OCR entirely.
+        let result2 = paired_capture(&ctx, None, Some(&mut gate)).await.unwrap();
+        assert!(
+            result2.ocr_duration_ms.is_none(),
+            "unchanged text must not re-run OCR"
+        );
+    }
+
+    #[test]
+    fn remap_ocr_json_maps_crop_coords_to_frame_space() {
+        let crop = TextRegion {
+            x: 100,
+            y: 200,
+            width: 400,
+            height: 300,
+        };
+        let json =
+            r#"[{"text":"hi","left":"0.5","top":"0.5","width":"0.1","height":"0.2","conf":"1.0"}]"#;
+        let out = remap_ocr_json_to_frame(json, crop, 1000, 1000);
+        let v: Vec<serde_json::Value> = serde_json::from_str(&out).unwrap();
+        let obj = v[0].as_object().unwrap();
+        let f = |k: &str| obj[k].as_str().unwrap().parse::<f64>().unwrap();
+        assert_eq!(f("left"), 0.3); // (100 + 0.5*400) / 1000
+        assert_eq!(f("top"), 0.35); // (200 + 0.5*300) / 1000
+        assert_eq!(f("width"), 0.04); // 0.1*400 / 1000
+        assert_eq!(f("height"), 0.06); // 0.2*300 / 1000
+        assert_eq!(obj["text"].as_str().unwrap(), "hi");
+        assert_eq!(obj["conf"].as_str().unwrap(), "1.0");
+        // Unparseable input is stored unchanged, never dropped.
+        assert_eq!(
+            remap_ocr_json_to_frame("not json", crop, 1000, 1000),
+            "not json"
+        );
     }
 }
