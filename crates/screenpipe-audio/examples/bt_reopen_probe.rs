@@ -104,7 +104,9 @@ fn dump_device_props(bare_name: &str) {
 
 #[cfg(target_os = "macos")]
 fn main() -> anyhow::Result<()> {
-    use screenpipe_audio::core::device::{bluetooth_input_is_combo_headset, AudioDevice, DeviceType};
+    use screenpipe_audio::core::device::{
+        bluetooth_input_is_combo_headset, AudioDevice, DeviceType,
+    };
     use screenpipe_audio::core::stream::AudioStream;
     use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
@@ -161,9 +163,7 @@ fn main() -> anyhow::Result<()> {
 
             let open_start = Instant::now();
             let stream_result = rt.block_on(AudioStream::from_device(
-                device,
-                is_running,
-                false, // use_coreaudio_tap
+                device, is_running, false, // use_coreaudio_tap
                 false, // windows_input_aec (unused on macOS)
                 false, // macos_input_vpio
                 None,  // tap_pids
@@ -172,7 +172,10 @@ fn main() -> anyhow::Result<()> {
             let stream = match stream_result {
                 Ok(s) => s,
                 Err(e) => {
-                    println!("  [{i}] from_device FAILED immediately ({:?}): {e}", open_start.elapsed());
+                    println!(
+                        "  [{i}] from_device FAILED immediately ({:?}): {e}",
+                        open_start.elapsed()
+                    );
                     deaths += 1;
                     continue;
                 }

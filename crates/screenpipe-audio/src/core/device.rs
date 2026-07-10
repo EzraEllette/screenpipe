@@ -1350,8 +1350,8 @@ mod windows_com_audio {
                 break;
             }
         }
-        let capture_device = capture_device
-            .ok_or_else(|| anyhow!("capture endpoint '{}' not found", bare_name))?;
+        let capture_device =
+            capture_device.ok_or_else(|| anyhow!("capture endpoint '{}' not found", bare_name))?;
         let capture_container_id = endpoint_container_id(&capture_device)?;
 
         let renders = enumerator.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE)?;
@@ -1495,7 +1495,10 @@ mod windows_com_audio {
         /// No render endpoints active on the system at all.
         #[test]
         fn empty_render_list_is_dedicated_mic() {
-            assert!(!container_id_indicates_combo_headset("airpods-container", &[]));
+            assert!(!container_id_indicates_combo_headset(
+                "airpods-container",
+                &[]
+            ));
         }
 
         /// Not run in CI (no guaranteed audio hardware on CI runners): exercises

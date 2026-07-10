@@ -1498,7 +1498,10 @@ impl AudioManager {
     /// every couple of seconds — this is what caused the AirPods to flicker
     /// between showing up as an input and an output, since sitting on the
     /// mic-open path this often perturbs the A2DP/SCO profile negotiation).
-    pub(crate) async fn bluetooth_input_gate_blocks(&self, device: &crate::core::device::AudioDevice) -> bool {
+    pub(crate) async fn bluetooth_input_gate_blocks(
+        &self,
+        device: &crate::core::device::AudioDevice,
+    ) -> bool {
         if device.device_type != crate::core::device::DeviceType::Input {
             return false;
         }
