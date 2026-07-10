@@ -85,6 +85,15 @@ pub struct CaptureContext<'a> {
     /// Gates the meeting-app forced-OCR path (#5054): outside a meeting,
     /// meeting apps/URLs get no special OCR treatment at all.
     pub in_meeting: bool,
+    /// Whether the captured monitor is the one hosting the focused window.
+    /// App/window metadata comes from the globally focused window, so on a
+    /// multi-monitor setup a second monitor's frames inherit the meeting
+    /// app's name while showing unrelated pixels — the meeting OCR gate
+    /// must not fingerprint-gate those (#5054 review). Callers without
+    /// per-monitor focus knowledge should pass `true` (single-monitor and
+    /// unknown-focus cases behave like the focused monitor, matching the
+    /// focus controller's own all-Active fallback).
+    pub monitor_hosts_focus: bool,
 }
 
 /// Result of a paired capture operation.
@@ -210,8 +219,17 @@ pub async fn paired_capture(
     // above apply like for any other app.
     let meeting_matched = ctx.app_name.map(is_meeting_app).unwrap_or(false)
         || ctx.browser_url.map(is_meeting_url).unwrap_or(false);
-    let meeting_scoped =
-        ctx.in_meeting && meeting_matched && !ctx.screenshot_disabled && !app_prefers_ocr;
+    // `monitor_hosts_focus`: only the monitor actually showing the meeting
+    // window is gated — a second monitor's frames carry the meeting app's
+    // *name* (focused-window attribution) but show unrelated pixels, and
+    // fingerprint-gating those starves continuously-changing content
+    // (dashboards, logs) of the OCR coverage it previously had. Non-focused
+    // monitors fall through to the generic heuristics below.
+    let meeting_scoped = ctx.in_meeting
+        && meeting_matched
+        && ctx.monitor_hosts_focus
+        && !ctx.screenshot_disabled
+        && !app_prefers_ocr;
 
     let mut meeting_gate = meeting_gate;
     let mut meeting_gate_escalated = false;
@@ -848,6 +866,7 @@ mod tests {
             elements_ref_frame_id: None,
             screenshot_disabled: false,
             in_meeting: false,
+            monitor_hosts_focus: true,
         };
 
         let result = paired_capture(&ctx, None, None).await.unwrap();
@@ -885,6 +904,7 @@ mod tests {
             elements_ref_frame_id: None,
             screenshot_disabled: true,
             in_meeting: false,
+            monitor_hosts_focus: true,
         };
 
         let result = paired_capture(&ctx, None, None).await.unwrap();
@@ -926,6 +946,7 @@ mod tests {
             elements_ref_frame_id: None,
             screenshot_disabled: false,
             in_meeting: false,
+            monitor_hosts_focus: true,
         };
 
         let snap = TreeSnapshot {
@@ -990,6 +1011,7 @@ mod tests {
             elements_ref_frame_id: None,
             screenshot_disabled: false,
             in_meeting: false,
+            monitor_hosts_focus: true,
         };
 
         // Empty accessibility text should be treated as no text
@@ -1431,6 +1453,7 @@ mod tests {
             elements_ref_frame_id: None,
             screenshot_disabled: false,
             in_meeting: false,
+            monitor_hosts_focus: true,
         };
         let snap = rich_meeting_snap();
         let mut gate = MeetingOcrGate::new();
@@ -1473,6 +1496,7 @@ mod tests {
             elements_ref_frame_id: None,
             screenshot_disabled: false,
             in_meeting: true,
+            monitor_hosts_focus: true,
         };
         let snap = rich_meeting_snap();
         let mut gate = MeetingOcrGate::new();
@@ -1512,6 +1536,7 @@ mod tests {
             elements_ref_frame_id: None,
             screenshot_disabled: false,
             in_meeting: true,
+            monitor_hosts_focus: true,
         };
         let snap = rich_meeting_snap();
         // No gate wired: callers outside the engine loop keep the
@@ -1520,6 +1545,59 @@ mod tests {
         assert!(
             result.ocr_duration_ms.is_some(),
             "gateless callers must keep forced meeting OCR"
+        );
+    }
+
+    #[tokio::test]
+    async fn non_focused_monitor_is_not_meeting_gated() {
+        // Multi-monitor (#5054 review): a second monitor's frames inherit
+        // the focused meeting app's NAME while showing unrelated pixels.
+        // The gate must not fingerprint-gate them — generic heuristics
+        // apply, so thin a11y still forces OCR exactly like pre-#5054.
+        let tmp = TempDir::new().unwrap();
+        let snapshot_writer = SnapshotWriter::new(tmp.path(), 80, 1920);
+        let db = DatabaseManager::new("sqlite::memory:", Default::default())
+            .await
+            .unwrap();
+        // Thin a11y text (in-call meeting chrome is typically <100 chars).
+        let snap = make_snap(vec![AccessibilityTreeNode {
+            role: "AXStaticText".into(),
+            text: "Leave meeting".into(),
+            depth: 0,
+            bounds: None,
+            ..Default::default()
+        }]);
+        let ctx = CaptureContext {
+            db: &db,
+            snapshot_writer: &snapshot_writer,
+            image: test_image(),
+            captured_at: Utc::now(),
+            monitor_id: 1,
+            device_name: "monitor_2",
+            app_name: Some("zoom.us"),
+            window_name: Some("Zoom Meeting"),
+            browser_url: None,
+            document_path: None,
+            focused: true,
+            capture_trigger: "visual_change",
+            use_pii_removal: false,
+            languages: vec![],
+            elements_ref_frame_id: None,
+            screenshot_disabled: false,
+            in_meeting: true,
+            monitor_hosts_focus: false,
+        };
+        let mut gate = MeetingOcrGate::new();
+        let result = paired_capture(&ctx, Some(&snap), Some(&mut gate))
+            .await
+            .unwrap();
+        // The generic density heuristic (<100 chars -> thin) fires OCR on
+        // this monitor's own pixels — NOT the gate (which, on an all-black
+        // frame, would have skipped: see
+        // meeting_app_in_meeting_gate_skips_ocr_when_no_text_regions).
+        assert!(
+            result.ocr_duration_ms.is_some(),
+            "non-focused monitor must keep generic-heuristic OCR coverage"
         );
     }
 
@@ -1548,6 +1626,7 @@ mod tests {
             elements_ref_frame_id: None,
             screenshot_disabled: false,
             in_meeting: true,
+            monitor_hosts_focus: true,
         };
         let mut gate = MeetingOcrGate::new();
         // Bootstrap: first detect finds the stroke region → sparse →

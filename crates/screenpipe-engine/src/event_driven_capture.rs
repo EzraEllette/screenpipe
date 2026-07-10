@@ -834,6 +834,7 @@ pub async fn event_driven_capture_loop(
                 false, // screenshot enabled on startup
                 false, // hd not active at startup (Manual is dedup-exempt anyway)
                 false, // not in a meeting at startup
+                true,  // focus unknown at startup — controller defaults to Active
             ),
         )
         .await
@@ -1538,6 +1539,13 @@ pub async fn event_driven_capture_loop(
                         screenshot_disabled,
                         hd_active,
                         in_meeting,
+                        // Meeting-OCR-gate scope (#5054): only the monitor
+                        // hosting the focused window is gated; Active is also
+                        // the controller's safe fallback when focus is unknown.
+                        matches!(
+                            focus_controller.state_for_monitor(&monitor),
+                            crate::focus_aware_controller::CaptureState::Active
+                        ),
                     ),
                 )
                 .await;
@@ -2292,6 +2300,7 @@ async fn do_capture(
     screenshot_disabled: bool,
     hd_active: bool,
     in_meeting: bool,
+    monitor_hosts_focus: bool,
 ) -> Result<CaptureOutput> {
     let captured_at = Utc::now();
     let bypass_capture_throttles = bypasses_capture_throttles(trigger);
@@ -2709,6 +2718,7 @@ async fn do_capture(
         elements_ref_frame_id,
         screenshot_disabled,
         in_meeting,
+        monitor_hosts_focus,
     };
 
     let result = paired_capture(&ctx, tree_snapshot.as_ref(), Some(meeting_gate)).await?;
