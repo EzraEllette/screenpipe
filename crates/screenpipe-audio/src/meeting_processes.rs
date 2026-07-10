@@ -70,6 +70,30 @@ fn is_screenpipe_bundle_id(bundle_id: &str) -> bool {
         || bundle_id.starts_with("com.mediar.screenpipe.")
 }
 
+/// Always-on system voice daemons whose input claims are ambient noise, not
+/// meeting evidence. `corespeechd` (com.apple.CoreSpeech) holds the mic for
+/// the "Hey Siri" voice trigger more or less permanently, so counting it made
+/// manual meetings adopt it as a mic holder — flapping the tap pid set and,
+/// worse, resolving its AEC-reference *speaker* as the "meeting mic" (the
+/// 2026-07-09 "MacBook Pro Speakers (input) not found" retry loop).
+///
+/// Deliberately NOT listed: `com.apple.avconferenced` — that daemon IS
+/// FaceTime's audio engine; excluding it would break FaceTime meeting capture.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn is_system_voice_daemon(process: &AudioInputProcess) -> bool {
+    const DAEMON_BUNDLE_IDS: [&str; 1] = ["com.apple.corespeech"];
+    [
+        process.bundle_id.as_deref(),
+        process.owner_bundle_id.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|bundle| {
+        let bundle = bundle.trim().to_ascii_lowercase();
+        DAEMON_BUNDLE_IDS.contains(&bundle.as_str())
+    })
+}
+
 fn is_screenpipe_app_name(name: &str) -> bool {
     let name = name.trim().to_ascii_lowercase();
     name == "screenpipe"
@@ -148,6 +172,14 @@ mod platform {
                         .owner_app_name
                         .as_ref()
                         .or(snapshot.process_name.as_ref())
+                );
+                continue;
+            }
+
+            if super::is_system_voice_daemon(&snapshot) {
+                debug!(
+                    "audio-process snapshot: skipped always-on voice daemon (pid={:?}, bundle={:?})",
+                    snapshot.pid, snapshot.bundle_id
                 );
                 continue;
             }
@@ -648,6 +680,51 @@ mod tests {
         assert!(!snapshot.supported);
         assert!(snapshot.processes.is_empty());
         assert!(snapshot.error.is_some());
+    }
+
+    /// Regression: corespeechd (Hey Siri voice trigger) holds input more or
+    /// less permanently. Counting it as a mic holder made manual meetings
+    /// adopt it and resolve its AEC-reference speaker as the "meeting mic"
+    /// (the 2026-07-09 `MacBook Pro Speakers (input) not found` retry loop).
+    #[test]
+    fn corespeechd_is_a_system_voice_daemon() {
+        for bundle_id in ["com.apple.CoreSpeech", "com.apple.corespeech"] {
+            let p = process(Some(727), Some(bundle_id), None, None, None);
+            assert!(
+                is_system_voice_daemon(&p),
+                "{bundle_id} must be excluded from mic-holder evidence"
+            );
+        }
+        // Also excluded when only the owner metadata carries the bundle id.
+        let p = process(Some(727), None, None, None, Some("com.apple.CoreSpeech"));
+        assert!(is_system_voice_daemon(&p));
+    }
+
+    /// avconferenced IS FaceTime's audio engine — excluding it would break
+    /// FaceTime meeting capture (its pid is what the per-process tap follows).
+    #[test]
+    fn avconferenced_is_not_excluded() {
+        let p = process(
+            Some(809),
+            Some("com.apple.avconferenced"),
+            None,
+            None,
+            None,
+        );
+        assert!(
+            !is_system_voice_daemon(&p),
+            "avconferenced must stay adoptable: it is FaceTime's audio process"
+        );
+    }
+
+    #[test]
+    fn meeting_apps_are_not_system_voice_daemons() {
+        for bundle_id in ["us.zoom.xos", "com.google.Chrome", "com.microsoft.teams2"] {
+            let p = process(Some(42), Some(bundle_id), None, None, None);
+            assert!(!is_system_voice_daemon(&p), "{bundle_id} must not be excluded");
+        }
+        // No metadata at all → keep it (unknown ≠ daemon).
+        assert!(!is_system_voice_daemon(&process(Some(1), None, None, None, None)));
     }
 
     #[test]
