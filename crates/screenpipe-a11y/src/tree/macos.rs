@@ -8,6 +8,7 @@ use super::{
     AccessibilityTreeNode, LineBudget, SkipReason, TreeSnapshot, TreeWalkResult, TreeWalkerConfig,
     TreeWalkerPlatform,
 };
+use crate::incremental::{EmissionRecord, NodePath, SubtreeWalkResult, WindowIdentity};
 use crate::tree::macos_lines::{self, NormalizeRefs};
 use anyhow::Result;
 use chrono::Utc;
@@ -314,6 +315,7 @@ impl TreeWalkerPlatform for MacosTreeWalker {
         // and convert back to anyhow::Error.
         cidre::objc::ar_pool(|| -> Result<TreeWalkResult, String> {
             self.walk_focused_window_inner()
+                .map(|(result, _records)| result)
                 .map_err(|e| format!("{}", e))
         })
         .map_err(|s| anyhow::anyhow!(s))
@@ -321,7 +323,161 @@ impl TreeWalkerPlatform for MacosTreeWalker {
 }
 
 impl MacosTreeWalker {
-    fn walk_focused_window_inner(&self) -> Result<TreeWalkResult> {
+    /// Like `walk_focused_window`, but also returns the ordered, path-tagged
+    /// text-emission stream backing the snapshot's `nodes`/`text_content` —
+    /// see `crate::incremental`. Not part of `TreeWalkerPlatform` since only
+    /// the macOS event-scoped-subtree-walk feature needs it; every other
+    /// caller keeps using the plain trait method above.
+    pub fn walk_focused_window_with_records(
+        &self,
+    ) -> Result<(TreeWalkResult, Vec<EmissionRecord>)> {
+        cidre::objc::ar_pool(
+            || -> Result<(TreeWalkResult, Vec<EmissionRecord>), String> {
+                self.walk_focused_window_inner()
+                    .map_err(|e| format!("{}", e))
+            },
+        )
+        .map_err(|s| anyhow::anyhow!(s))
+    }
+}
+
+/// Maximum nodes a subtree walk will visit before giving up and reporting
+/// `PathMismatch`. Deliberately much smaller than a full walk's default
+/// (5000) — a subtree walk exists to replace a handful of changed elements,
+/// not a whole window; a subtree this large means the cached anchor point
+/// was wrong, or the notified element sits somewhere a merge shouldn't
+/// apply blindly, matching Phase 2.3's "hitting the cap ⇒ treat as
+/// mismatch" rule.
+const SUBTREE_WALK_MAX_NODES: usize = 500;
+
+/// Wall-clock cap for a subtree walk, tighter than a full walk's default
+/// (250ms) — a subtree walk exists specifically to be fast; if it isn't,
+/// something's wrong and a full walk is the safer answer.
+const SUBTREE_WALK_TIMEOUT: Duration = Duration::from_millis(60);
+
+/// Outcome of [`MacosTreeWalker::walk_subtree`].
+#[derive(Debug, Clone)]
+pub enum SubtreeWalkOutcome {
+    Found(SubtreeWalkResult),
+    /// The caller must fall back to a full walk. Covers every way a subtree
+    /// walk can't be trusted: the currently-focused app/window no longer
+    /// matches `expected` (focus changed since the caller decided to
+    /// attempt a merge — a real race between the decision and this call,
+    /// since both independently re-resolve focus rather than sharing a
+    /// lock), a child index in `path` is out of range at some level, the
+    /// subtree hit [`SUBTREE_WALK_MAX_NODES`]/[`SUBTREE_WALK_TIMEOUT`], or
+    /// the app is one this function deliberately never attempts (see the
+    /// `is_vscode_like` check below).
+    PathMismatch,
+}
+
+impl MacosTreeWalker {
+    /// Walk only the subtree rooted at `path` (index-in-parent chain from
+    /// the focused window, in the same coordinate space as
+    /// `incremental::NodePath`) instead of the whole window.
+    ///
+    /// Deliberately skips every gate a full walk applies — excluded-app,
+    /// incognito, ignored/included window patterns, the extension-popup
+    /// check — because a subtree walk is only ever attempted against a
+    /// window whose cache was populated by a full walk that already passed
+    /// those gates; any state change that would flip one of them (app
+    /// switch, window switch, navigating into a private tab) invalidates
+    /// the cache first (see `incremental::SnapshotCache`'s invalidation
+    /// triggers), so `walk_subtree` can never legitimately be called
+    /// against a window that would fail them today.
+    pub fn walk_subtree(
+        &self,
+        expected: &WindowIdentity,
+        path: &[u32],
+    ) -> Result<SubtreeWalkOutcome> {
+        cidre::objc::ar_pool(|| -> Result<SubtreeWalkOutcome, String> {
+            self.walk_subtree_inner(expected, path)
+                .map_err(|e| format!("{}", e))
+        })
+        .map_err(|s| anyhow::anyhow!(s))
+    }
+
+    fn walk_subtree_inner(
+        &self,
+        expected: &WindowIdentity,
+        path: &[u32],
+    ) -> Result<SubtreeWalkOutcome> {
+        let (focused_app, pid, app_name) = match resolve_focused_ax_app() {
+            Some(f) => f,
+            // Focus changed (or AX can't resolve it right now) since the
+            // caller decided to attempt a merge -- safe to treat exactly
+            // like any other mismatch.
+            None => return Ok(SubtreeWalkOutcome::PathMismatch),
+        };
+        if pid != expected.pid {
+            return Ok(SubtreeWalkOutcome::PathMismatch);
+        }
+        let app_lower = app_name.to_lowercase();
+
+        // Electron/xterm.js apps derive their walk-time app state
+        // (AXWebArea depth-reset entry, terminal-vs-editor mode)
+        // incrementally as a full walk descends from the window root — see
+        // `AppState::VsCode` and `is_vscode_terminal_list_role`. A subtree
+        // walk starting mid-tree has no way to reconstruct that context
+        // short of re-walking from the root, which would defeat the point.
+        // Not attempted: always fall back to a full walk for these apps.
+        if is_vscode_like(&app_lower) {
+            return Ok(SubtreeWalkOutcome::PathMismatch);
+        }
+
+        let ax_app = focused_app;
+        let _ = ax_app.set_messaging_timeout_secs(self.config.element_timeout_secs);
+        let window_val = match resolve_focused_window(&ax_app, &app_name, pid) {
+            Some(w) => w,
+            None => return Ok(SubtreeWalkOutcome::PathMismatch),
+        };
+        let window: &ax::UiElement = &window_val;
+        let window_name = get_string_attr(window, ax::attr::title()).unwrap_or_default();
+        if window_name != expected.window_key {
+            return Ok(SubtreeWalkOutcome::PathMismatch);
+        }
+
+        let mut current: Retained<ax::UiElement> = window_val.retained();
+        for &idx in path {
+            let _ = current.set_messaging_timeout_secs(self.config.element_timeout_secs);
+            let children = match current.children() {
+                Ok(c) => c,
+                Err(_) => return Ok(SubtreeWalkOutcome::PathMismatch),
+            };
+            if (idx as usize) >= children.len() {
+                return Ok(SubtreeWalkOutcome::PathMismatch);
+            }
+            current = children[idx as usize].retained();
+        }
+
+        let ignored_patterns = self.config.resolved_ignored().to_vec();
+        let mut state = WalkState::new(&self.config, Instant::now(), ignored_patterns, app_lower);
+        state.max_nodes = state.max_nodes.min(SUBTREE_WALK_MAX_NODES);
+        state.walk_timeout = state.walk_timeout.min(SUBTREE_WALK_TIMEOUT);
+        state.path_stack = path.to_vec();
+        if let Some((wx, wy, ww, wh)) = get_element_frame(window) {
+            if ww > 0.0 && wh > 0.0 {
+                state.window_x = wx;
+                state.window_y = wy;
+                state.window_w = ww;
+                state.window_h = wh;
+            }
+        }
+
+        walk_element(&current, 0, &mut state);
+
+        if state.truncated {
+            return Ok(SubtreeWalkOutcome::PathMismatch);
+        }
+
+        Ok(SubtreeWalkOutcome::Found(SubtreeWalkResult {
+            records: state.records,
+        }))
+    }
+}
+
+impl MacosTreeWalker {
+    fn walk_focused_window_inner(&self) -> Result<(TreeWalkResult, Vec<EmissionRecord>)> {
         let start = Instant::now();
 
         // 1. Get the focused application via the AX system-wide element.
@@ -329,7 +485,7 @@ impl MacosTreeWalker {
         // NSWorkspace's foreground-app state from a background thread.
         let (focused_app, pid, app_name) = match resolve_focused_ax_app() {
             Some(focused) => focused,
-            None => return Ok(TreeWalkResult::NotFound),
+            None => return Ok((TreeWalkResult::NotFound, Vec::new())),
         };
 
         // Skip excluded apps (password managers, etc.)
@@ -345,7 +501,7 @@ impl MacosTreeWalker {
             "loginwindow",
         ];
         if EXCLUDED_APPS.iter().any(|ex| app_lower.contains(ex)) {
-            return Ok(TreeWalkResult::Skipped(SkipReason::ExcludedApp));
+            return Ok((TreeWalkResult::Skipped(SkipReason::ExcludedApp), Vec::new()));
         }
 
         // Apply user-configured ignored windows (app-name pre-check).
@@ -354,7 +510,7 @@ impl MacosTreeWalker {
         let ignored_patterns = self.config.resolved_ignored();
         let included_patterns = self.config.resolved_included();
         if window_pattern::matches_any(ignored_patterns.as_ref(), &app_lower, "") {
-            return Ok(TreeWalkResult::Skipped(SkipReason::UserIgnored));
+            return Ok((TreeWalkResult::Skipped(SkipReason::UserIgnored), Vec::new()));
         }
 
         // 2. Get the focused window via AX API
@@ -419,7 +575,7 @@ impl MacosTreeWalker {
 
         let window_val = match resolve_focused_window(&ax_app, &app_name, pid) {
             Some(window) => window,
-            None => return Ok(TreeWalkResult::NotFound),
+            None => return Ok((TreeWalkResult::NotFound, Vec::new())),
         };
         let window: &ax::UiElement = &window_val;
 
@@ -432,7 +588,7 @@ impl MacosTreeWalker {
             if let Some(ax_id) = get_string_attr(window, ax::attr::id()) {
                 let ax_id_lower = ax_id.to_lowercase();
                 if ax_id_lower.contains("incognito") || ax_id_lower.contains("private") {
-                    return Ok(TreeWalkResult::Skipped(SkipReason::Incognito));
+                    return Ok((TreeWalkResult::Skipped(SkipReason::Incognito), Vec::new()));
                 }
             }
         }
@@ -445,21 +601,24 @@ impl MacosTreeWalker {
                 .incognito_detector
                 .is_incognito(&app_name, 0, &window_name)
         {
-            return Ok(TreeWalkResult::Skipped(SkipReason::Incognito));
+            return Ok((TreeWalkResult::Skipped(SkipReason::Incognito), Vec::new()));
         }
 
         // Full app + title check — scoped patterns (`App::Title`) and any
         // legacy pattern matching the title are evaluated here.
         let window_lower = window_name.to_lowercase();
         if window_pattern::matches_any(ignored_patterns.as_ref(), &app_lower, &window_lower) {
-            return Ok(TreeWalkResult::Skipped(SkipReason::UserIgnored));
+            return Ok((TreeWalkResult::Skipped(SkipReason::UserIgnored), Vec::new()));
         }
 
         // Apply user-configured included windows. Scoped includes act as
         // per-app whitelists; apps without a scoped include rule fall back to
         // global semantics — see `window_pattern::passes_includes`.
         if !window_pattern::passes_includes(included_patterns.as_ref(), &app_lower, &window_lower) {
-            return Ok(TreeWalkResult::Skipped(SkipReason::NotInIncludeList));
+            return Ok((
+                TreeWalkResult::Skipped(SkipReason::NotInIncludeList),
+                Vec::new(),
+            ));
         }
 
         // 3. Read window frame for normalizing element bounds to 0-1 coords
@@ -514,7 +673,7 @@ impl MacosTreeWalker {
                 "skipping capture: browser extension popup matched ignored window in app={}",
                 app_name
             );
-            return Ok(TreeWalkResult::Skipped(SkipReason::UserIgnored));
+            return Ok((TreeWalkResult::Skipped(SkipReason::UserIgnored), Vec::new()));
         }
 
         let text_content = state.text_buffer;
@@ -567,22 +726,42 @@ impl MacosTreeWalker {
             walk_duration
         );
 
-        Ok(TreeWalkResult::Found(TreeSnapshot {
-            app_name,
-            window_name,
-            text_content,
-            nodes: state.nodes,
-            browser_url,
-            document_path,
-            timestamp: Utc::now(),
-            node_count: state.node_count,
-            walk_duration,
-            content_hash,
-            simhash,
-            truncated: state.truncated,
-            truncation_reason: state.truncation_reason,
-            max_depth_reached: state.max_depth_reached,
-        }))
+        // Sanity check the invariant `crate::incremental::SnapshotCache::populate`
+        // also asserts: `records`' Node emissions must line up with `nodes`
+        // exactly, since callers use them interchangeably (`nodes` for the
+        // stored snapshot, `records` to seed the merge cache). A mismatch
+        // here means the two were pushed out of sync somewhere in
+        // `extract_text`/`walk_element` — a bug, not a runtime condition to
+        // recover from.
+        debug_assert_eq!(
+            state.nodes.len(),
+            state
+                .records
+                .iter()
+                .filter(|r| matches!(r.emission, crate::incremental::TextEmission::Node(_)))
+                .count(),
+            "records' Node emissions must match nodes exactly"
+        );
+        let records = state.records;
+        Ok((
+            TreeWalkResult::Found(TreeSnapshot {
+                app_name,
+                window_name,
+                text_content,
+                nodes: state.nodes,
+                browser_url,
+                document_path,
+                timestamp: Utc::now(),
+                node_count: state.node_count,
+                walk_duration,
+                content_hash,
+                simhash,
+                truncated: state.truncated,
+                truncation_reason: state.truncation_reason,
+                max_depth_reached: state.max_depth_reached,
+            }),
+            records,
+        ))
     }
 }
 
@@ -643,6 +822,21 @@ fn is_vscode_terminal_list_role(role_str: &str, depth: usize, app: &AppState) ->
 struct WalkState {
     text_buffer: String,
     nodes: Vec<AccessibilityTreeNode>,
+    /// Index-in-parent chain of the element currently being visited,
+    /// maintained as a stack by the recursion in `walk_element` (push
+    /// before descending into a child, pop on return). Empty at the walk
+    /// root. Feeds `records` below — see `crate::incremental` for why a
+    /// node's path has to be tracked independent of `depth`.
+    path_stack: NodePath,
+    /// Every text contribution this walk has made, tagged with the path of
+    /// the element that made it — a strict superset of `nodes` (see
+    /// `crate::incremental`'s module doc comment for why `AXGroup`/
+    /// `AXWebArea` direct-value contributions need their own entry here
+    /// even though they never become a node). Consumed by
+    /// `incremental::SnapshotCache`/`merge` to enable event-scoped subtree
+    /// walks; `nodes`/`text_content` themselves are computed exactly as
+    /// before and don't depend on this field.
+    records: Vec<EmissionRecord>,
     node_count: usize,
     max_depth: usize,
     max_nodes: usize,
@@ -694,6 +888,8 @@ impl WalkState {
         Self {
             text_buffer: String::with_capacity(4096),
             nodes: Vec::with_capacity(256),
+            path_stack: Vec::with_capacity(64),
+            records: Vec::with_capacity(256),
             node_count: 0,
             max_depth: config.max_depth,
             max_nodes: config.effective_max_nodes(),
@@ -1022,6 +1218,11 @@ fn walk_element(elem: &ax::UiElement, depth: usize, state: &mut WalkState) {
     if depth > state.max_depth_reached {
         state.max_depth_reached = depth;
     }
+    // This element's own path, captured before any recursion mutates the
+    // stack further — `state.path_stack` at entry is exactly this element's
+    // path because the caller (the children loop below) pushes an index
+    // before calling in, for every element, not just text-bearing ones.
+    let current_path: NodePath = state.path_stack.clone();
 
     // Yield every 100 elements to let macOS process pending HID/input events.
     // Without this, tight AX IPC loops can starve USB mouse/keyboard event delivery.
@@ -1083,7 +1284,7 @@ fn walk_element(elem: &ax::UiElement, depth: usize, state: &mut WalkState) {
             _ => true,
         };
         if emit {
-            extract_text(elem, &role_str, depth, state);
+            extract_text(elem, &role_str, depth, &current_path, state);
         }
     } else if role_str == "AXWebArea" {
         // Browser extension popup detection: AXWebArea nodes inside Chrome/Arc/Edge
@@ -1105,17 +1306,23 @@ fn walk_element(elem: &ax::UiElement, depth: usize, state: &mut WalkState) {
                 return;
             }
         }
-        // Groups and web areas: only extract if they have a direct value
+        // Groups and web areas: only extract if they have a direct value.
+        // This contributes to text_content without ever becoming a node —
+        // recorded as a TextOnly emission so incremental merges don't
+        // silently drop it (see `crate::incremental`'s module doc comment).
         if let Some(val) = get_string_attr(elem, ax::attr::value()) {
             if !val.is_empty() {
                 append_text(&mut state.text_buffer, &val);
+                push_text_only_record(state, &current_path, depth, &val);
             }
         }
     } else if role_str == "AXGroup" {
-        // Groups: only extract if they have a direct value
+        // Groups: only extract if they have a direct value (same TextOnly
+        // caveat as the AXWebArea branch above).
         if let Some(val) = get_string_attr(elem, ax::attr::value()) {
             if !val.is_empty() {
                 append_text(&mut state.text_buffer, &val);
+                push_text_only_record(state, &current_path, depth, &val);
             }
         }
     }
@@ -1162,7 +1369,9 @@ fn walk_element(elem: &ax::UiElement, depth: usize, state: &mut WalkState) {
             if state.should_stop() {
                 break;
             }
+            state.path_stack.push(i as u32);
             walk_element(&children[i], next_depth, state);
+            state.path_stack.pop();
         }
         if let AppState::VsCode {
             in_terminal_subtree,
@@ -1175,7 +1384,13 @@ fn walk_element(elem: &ax::UiElement, depth: usize, state: &mut WalkState) {
 }
 
 /// Extract text attributes from an element, append to the buffer, and collect a structured node.
-fn extract_text(elem: &ax::UiElement, role_str: &str, depth: usize, state: &mut WalkState) {
+fn extract_text(
+    elem: &ax::UiElement,
+    role_str: &str,
+    depth: usize,
+    path: &NodePath,
+    state: &mut WalkState,
+) {
     // Read element bounds once (used for all text extraction paths). The
     // raw screen-absolute frame is also passed to is_on_screen() so we
     // know whether the captured screenshot actually shows this element —
@@ -1204,6 +1419,11 @@ fn extract_text(elem: &ax::UiElement, role_str: &str, depth: usize, state: &mut 
                 if role_str == "AXTextArea" {
                     node.lines = capture_lines_for_node(elem, &trimmed, &bounds, on_screen, state);
                 }
+                state.records.push(EmissionRecord::node(
+                    path.clone(),
+                    depth.min(255) as u8,
+                    node.clone(),
+                ));
                 state.nodes.push(node);
                 return;
             }
@@ -1225,6 +1445,11 @@ fn extract_text(elem: &ax::UiElement, role_str: &str, depth: usize, state: &mut 
                 node.on_screen = on_screen;
                 fill_ax_props(&mut node, elem, role_str);
                 node.lines = capture_lines_for_node(elem, &trimmed, &bounds, on_screen, state);
+                state.records.push(EmissionRecord::node(
+                    path.clone(),
+                    depth.min(255) as u8,
+                    node.clone(),
+                ));
                 state.nodes.push(node);
                 return;
             }
@@ -1243,6 +1468,11 @@ fn extract_text(elem: &ax::UiElement, role_str: &str, depth: usize, state: &mut 
             );
             node.on_screen = on_screen;
             fill_ax_props(&mut node, elem, role_str);
+            state.records.push(EmissionRecord::node(
+                path.clone(),
+                depth.min(255) as u8,
+                node.clone(),
+            ));
             state.nodes.push(node);
             return;
         }
@@ -1260,6 +1490,11 @@ fn extract_text(elem: &ax::UiElement, role_str: &str, depth: usize, state: &mut 
             );
             node.on_screen = on_screen;
             fill_ax_props(&mut node, elem, role_str);
+            state.records.push(EmissionRecord::node(
+                path.clone(),
+                depth.min(255) as u8,
+                node.clone(),
+            ));
             state.nodes.push(node);
         }
     }
@@ -1275,6 +1510,23 @@ fn append_text(buffer: &mut String, text: &str) {
         buffer.push('\n');
     }
     buffer.push_str(trimmed);
+}
+
+/// Record a container's direct-value text contribution (the `AXGroup`/
+/// `AXWebArea` case that never produces a node) in the emission stream.
+/// Mirrors `append_text`'s own trim-and-skip-empty guard exactly, since a
+/// record must exist if and only if this text actually landed in the
+/// buffer.
+fn push_text_only_record(state: &mut WalkState, path: &NodePath, depth: usize, text: &str) {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    state.records.push(EmissionRecord::text_only(
+        path.clone(),
+        depth.min(255) as u8,
+        trimmed.to_string(),
+    ));
 }
 
 /// Read the AXPosition + AXSize of an element, returning (x, y, width, height) in screen points.
@@ -1849,6 +2101,115 @@ mod tests {
         let _ = walker.walk_focused_window();
         // Should complete reasonably quickly (< 5s even with IPC delays)
         assert!(start.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    // ── Event-scoped subtree walk: records + walk_subtree ───────────────────
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn test_walk_focused_window_with_records_matches_nodes() {
+        let config = TreeWalkerConfig::default();
+        let walker = MacosTreeWalker::new(config);
+        let result = walker.walk_focused_window_with_records();
+        assert!(result.is_ok());
+        if let Ok((TreeWalkResult::Found(snapshot), records)) = result {
+            // Same invariant `walk_focused_window_inner` debug_asserts: every
+            // node has exactly one corresponding Node-kind record, in order.
+            let node_records: Vec<&AccessibilityTreeNode> = records
+                .iter()
+                .filter_map(|r| match &r.emission {
+                    crate::incremental::TextEmission::Node(n) => Some(n.as_ref()),
+                    crate::incremental::TextEmission::TextOnly(_) => None,
+                })
+                .collect();
+            assert_eq!(node_records.len(), snapshot.nodes.len());
+            for (from_records, from_snapshot) in node_records.iter().zip(snapshot.nodes.iter()) {
+                assert_eq!(from_records.text, from_snapshot.text);
+                assert_eq!(from_records.depth, from_snapshot.depth);
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn test_walk_subtree_path_mismatch_when_focus_does_not_match() {
+        let config = TreeWalkerConfig::default();
+        let walker = MacosTreeWalker::new(config);
+        // No real process has this pid -- must be reported as a mismatch,
+        // never panic or silently walk the wrong window.
+        let bogus_identity = WindowIdentity {
+            pid: -1,
+            window_key: "definitely-not-a-real-window".to_string(),
+        };
+        let result = walker.walk_subtree(&bogus_identity, &[0]);
+        assert!(result.is_ok());
+        assert!(matches!(result.unwrap(), SubtreeWalkOutcome::PathMismatch));
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn test_walk_subtree_out_of_range_index_is_path_mismatch() {
+        let config = TreeWalkerConfig::default();
+        let walker = MacosTreeWalker::new(config);
+        let Ok((TreeWalkResult::Found(snapshot), _)) = walker.walk_focused_window_with_records()
+        else {
+            return; // nothing focused in this environment -- nothing to prove
+        };
+        // Re-resolve the actual focused pid the same way the full walk did,
+        // since TreeSnapshot doesn't carry it directly.
+        let Some((_, pid, _)) = resolve_focused_ax_app() else {
+            return;
+        };
+        let identity = WindowIdentity {
+            pid,
+            window_key: snapshot.window_name.clone(),
+        };
+        // An absurdly large child index can never be valid.
+        let result = walker.walk_subtree(&identity, &[u32::MAX]);
+        assert!(result.is_ok());
+        assert!(matches!(result.unwrap(), SubtreeWalkOutcome::PathMismatch));
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn test_walk_subtree_on_real_node_path_succeeds() {
+        let config = TreeWalkerConfig::default();
+        let walker = MacosTreeWalker::new(config);
+        let Ok((TreeWalkResult::Found(snapshot), records)) =
+            walker.walk_focused_window_with_records()
+        else {
+            return; // nothing focused in this environment -- nothing to prove
+        };
+        if is_vscode_like(&snapshot.app_name.to_lowercase()) {
+            return; // deliberately unsupported -- see walk_subtree_inner's doc comment
+        }
+        let Some(first_node_record) = records
+            .iter()
+            .find(|r| matches!(r.emission, crate::incremental::TextEmission::Node(_)))
+        else {
+            return; // nothing text-bearing to target in this environment
+        };
+        let Some((_, pid, _)) = resolve_focused_ax_app() else {
+            return;
+        };
+        let identity = WindowIdentity {
+            pid,
+            window_key: snapshot.window_name.clone(),
+        };
+        let result = walker.walk_subtree(&identity, &first_node_record.path);
+        assert!(result.is_ok());
+        // Focus/content can change between the two live AX calls above, so
+        // this only checks internal consistency when a subtree comes back
+        // -- not exact equality with the first walk's content.
+        match result.unwrap() {
+            SubtreeWalkOutcome::Found(subtree) => {
+                assert!(subtree.records.len() <= SUBTREE_WALK_MAX_NODES);
+                for record in &subtree.records {
+                    assert!(record.path.starts_with(&first_node_record.path));
+                }
+            }
+            SubtreeWalkOutcome::PathMismatch => {}
+        }
     }
 
     // ── VS Code terminal helper unit tests ──────────────────────────────────

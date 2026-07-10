@@ -1054,7 +1054,8 @@ mod tests {
 
     #[test]
     fn merge_splices_at_root_replacing_whole_tree() {
-        let cached = synthetic_snapshot(vec![node_record(&[0], "AXStaticText", "old-root-text", 0)]);
+        let cached =
+            synthetic_snapshot(vec![node_record(&[0], "AXStaticText", "old-root-text", 0)]);
         let changes = vec![(
             vec![0],
             SubtreeWalkResult {
