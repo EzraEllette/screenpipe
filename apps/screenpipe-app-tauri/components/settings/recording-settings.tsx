@@ -3620,7 +3620,7 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
                 <div>
                   <h3 className="text-sm font-medium text-foreground">Bluetooth microphones</h3>
                   <p className="text-xs text-muted-foreground">
-                    connecting to a bluetooth mic degrades your headphones&apos; audio quality — a macOS/OS limitation we can&apos;t avoid. by default we only record bluetooth mics while you&apos;re in a detected meeting.
+                    connecting to a bluetooth mic degrades your headphones&apos; audio quality, an OS limitation we can&apos;t avoid. by default we only record bluetooth mics while you&apos;re in a detected meeting.
                   </p>
                 </div>
               </div>
