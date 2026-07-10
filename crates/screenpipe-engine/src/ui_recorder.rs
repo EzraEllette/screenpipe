@@ -984,6 +984,13 @@ pub async fn start_ui_recording(
                     }
                 }
             }
+            // No observer channel to drain on this platform yet — accept
+            // and hold `ax_changes_tx` for API uniformity with macOS
+            // rather than gating the parameter itself out of the signature.
+            #[cfg(not(target_os = "macos"))]
+            {
+                let _ = &ax_changes_tx;
+            }
 
             // Bound the events retained across failed flushes. `flush_batch`
             // keeps the batch on error (so a transient stall doesn't drop
