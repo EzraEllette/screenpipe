@@ -1017,6 +1017,22 @@ mod tests {
     }
 
     #[test]
+    fn changed_set_force_invalidate_matches_overflow_state() {
+        let mut set = ChangedSet::new();
+        set.record(vec![1], ChangeKind::ValueChanged, 1);
+        set.record(vec![2], ChangeKind::TitleChanged, 2);
+        assert!(!set.is_invalidated());
+        set.force_invalidate();
+        assert!(set.is_invalidated());
+        assert_eq!(set.len(), 0);
+        assert!(!set.is_empty()); // invalidated, not "nothing happened"
+        // A subsequent record() while invalidated must still be a no-op,
+        // exactly like the overflow path.
+        set.record(vec![3], ChangeKind::ValueChanged, 3);
+        assert_eq!(set.len(), 0);
+    }
+
+    #[test]
     fn changed_set_all_mergeable_false_with_one_invalidating_entry() {
         let mut set = ChangedSet::new();
         set.record(vec![1], ChangeKind::ValueChanged, 1);
