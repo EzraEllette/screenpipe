@@ -25,6 +25,11 @@
 //! (1s → 5s → 15s), and a 30s idle gap decays the window so a stale
 //! classification re-establishes quickly.
 //!
+//! A layout only counts as indexed once the caller confirms durable
+//! persistence via [`MeetingOcrGate::ocr_indexed`] — escalations whose OCR
+//! engine call or DB insert fails are never committed and retry on the next
+//! detect of the same stable layout.
+//!
 //! Pure logic — no I/O, no platform dependencies; callers inject `Instant`s
 //! so every transition is unit-testable.
 
@@ -89,7 +94,13 @@ struct AppGate {
     /// detects (including the latest) produced it.
     last_fingerprint: Option<u64>,
     fingerprint_repeats: u32,
-    /// Fingerprint of the layout at the last escalation (last OCR'd state).
+    /// Fingerprint of the most recent escalation, awaiting durable
+    /// persistence. Promoted to `last_ocr_fingerprint` by
+    /// [`MeetingOcrGate::ocr_indexed`] once the caller has actually stored
+    /// the OCR result; escalations whose OCR engine or DB write failed are
+    /// simply never promoted, so the layout stays unindexed and retries.
+    pending_ocr_fingerprint: Option<u64>,
+    /// Fingerprint of the last layout whose OCR result was durably stored.
     last_ocr_fingerprint: Option<u64>,
 }
 
@@ -155,17 +166,21 @@ impl MeetingOcrGate {
         self.apps.clear();
     }
 
-    /// Roll back the last escalation's bookkeeping after the OCR engine
-    /// itself failed (task join error / platform OCR error). The layout is
-    /// no longer marked as indexed, so the next detect of the same stable
-    /// layout escalates again — a transient OCR failure self-heals instead
-    /// of permanently dropping that screen state from the index.
-    /// Deliberately NOT called for legitimately-empty OCR results (e.g.
-    /// detector false positives on textured video): those must stay marked,
-    /// or faces would escalate-and-OCR forever.
-    pub fn ocr_failed(&mut self, app_key: &str) {
+    /// Commit the pending escalation: the OCR result for this layout was
+    /// durably persisted (frame row stored). Only now does the layout count
+    /// as indexed. Escalations that fail anywhere — OCR engine error, DB
+    /// insert error — are simply never committed, so the next detect of the
+    /// same stable layout escalates again and self-heals (#5060 review:
+    /// committing at decision time left a transiently-failed layout marked
+    /// indexed, skipping its text until it changed). Callers must NOT call
+    /// this on OCR-engine failure, but MUST call it for legitimately-empty
+    /// OCR results (detector false positives on textured video): those have
+    /// to stay marked or faces would escalate-and-OCR forever.
+    pub fn ocr_indexed(&mut self, app_key: &str) {
         if let Some(gate) = self.apps.get_mut(app_key) {
-            gate.last_ocr_fingerprint = None;
+            if let Some(fp) = gate.pending_ocr_fingerprint.take() {
+                gate.last_ocr_fingerprint = Some(fp);
+            }
         }
     }
 
@@ -227,7 +242,10 @@ impl MeetingOcrGate {
             return MeetingOcrDecision::Skip;
         }
 
-        gate.last_ocr_fingerprint = Some(fingerprint);
+        // Deliberately NOT committed to `last_ocr_fingerprint` here — the
+        // caller promotes it via `ocr_indexed` only after the OCR result is
+        // durably stored (see that method's docs).
+        gate.pending_ocr_fingerprint = Some(fingerprint);
         if regions.len() > DENSE_BOX_THRESHOLD {
             MeetingOcrDecision::FullFrameOcr
         } else {
@@ -283,6 +301,7 @@ mod tests {
         let mut t = Instant::now();
         let regions = regions_at(100, 3);
         gate.observe("zoom", t, &regions, W, H);
+        gate.ocr_indexed("zoom"); // bootstrap OCR persisted
         for _ in 0..10 {
             t += Duration::from_secs(3);
             assert_eq!(
@@ -297,6 +316,7 @@ mod tests {
         let mut gate = MeetingOcrGate::new();
         let mut t = Instant::now();
         gate.observe("zoom", t, &regions_at(100, 3), W, H); // bootstrap
+        gate.ocr_indexed("zoom");
 
         // New layout, first sighting: not yet stable → Skip.
         t += Duration::from_secs(3);
@@ -311,6 +331,7 @@ mod tests {
             gate.observe("zoom", t, &new_layout, W, H),
             MeetingOcrDecision::CropOcr(_)
         ));
+        gate.ocr_indexed("zoom");
         // And not again after that.
         t += Duration::from_secs(3);
         assert_eq!(
@@ -326,6 +347,7 @@ mod tests {
         let mut gate = MeetingOcrGate::new();
         let mut t = Instant::now();
         gate.observe("zoom", t, &regions_at(100, 3), W, H); // bootstrap
+        gate.ocr_indexed("zoom");
         for i in 0..20u32 {
             t += Duration::from_secs(3);
             let jitter = regions_at(200 + i * 64, 5 + (i % 3) as usize);
@@ -357,6 +379,7 @@ mod tests {
             gate.observe("zoom", t, &regions, W, H),
             MeetingOcrDecision::CropOcr(_)
         ));
+        gate.ocr_indexed("zoom");
         // Text disappears (e.g. share stops): skip, and last-OCR'd state
         // is intentionally preserved.
         t += Duration::from_secs(3);
@@ -436,6 +459,7 @@ mod tests {
         for _ in 0..4 {
             assert!(gate.detection_due("zoom", t));
             gate.observe("zoom", t, &a, W, H);
+            gate.ocr_indexed("zoom"); // bootstrap escalation persists
             t += Duration::from_secs(35);
         }
         // Slide flip: a new stable layout, only ever seen at >30s gaps.
@@ -458,29 +482,37 @@ mod tests {
     }
 
     #[test]
-    fn ocr_failure_rollback_allows_retry() {
-        // Regression (#5054 review): a transient OCR-engine failure after
-        // an escalation must not permanently drop that screen state.
+    fn unpersisted_escalation_retries_until_committed() {
+        // Regression (#5054/#5060 review): a layout only counts as indexed
+        // once `ocr_indexed` confirms durable persistence. An escalation
+        // whose OCR engine call or DB insert failed (caller never confirms)
+        // must escalate again on the next detect of the same stable layout.
         let mut gate = MeetingOcrGate::new();
-        let t = Instant::now();
+        let mut t = Instant::now();
         let a = regions_at(100, 3);
         assert!(matches!(
             gate.observe("zoom", t, &a, W, H),
             MeetingOcrDecision::CropOcr(_)
         ));
-        gate.ocr_failed("zoom");
+        // No ocr_indexed() — simulates engine or DB failure. Retry fires.
+        t += Duration::from_secs(3);
         assert!(
             matches!(
-                gate.observe("zoom", t + Duration::from_secs(3), &a, W, H),
+                gate.observe("zoom", t, &a, W, H),
                 MeetingOcrDecision::CropOcr(_)
             ),
-            "same stable layout must escalate again after an engine failure"
+            "unpersisted layout must escalate again"
         );
-        // Without a failure, the second sighting stays skipped (control).
-        assert_eq!(
-            gate.observe("zoom", t + Duration::from_secs(6), &a, W, H),
-            MeetingOcrDecision::Skip
-        );
+        // This attempt persists: the same layout now stays skipped.
+        gate.ocr_indexed("zoom");
+        for _ in 0..3 {
+            t += Duration::from_secs(3);
+            assert_eq!(gate.observe("zoom", t, &a, W, H), MeetingOcrDecision::Skip);
+        }
+        // A confirm without a pending escalation is a harmless no-op.
+        gate.ocr_indexed("zoom");
+        t += Duration::from_secs(3);
+        assert_eq!(gate.observe("zoom", t, &a, W, H), MeetingOcrDecision::Skip);
     }
 
     #[test]

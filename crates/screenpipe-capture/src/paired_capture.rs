@@ -363,20 +363,6 @@ pub async fn paired_capture(
         (String::new(), "[]".to_string())
     };
 
-    // A gate escalation whose OCR engine failed must not stay marked as
-    // indexed — roll it back so the next detect of the same layout retries
-    // (#5054 review finding). Legit-empty results stay marked (see
-    // `MeetingOcrGate::ocr_failed`).
-    if meeting_gate_escalated && ocr_engine_failed {
-        if let Some(gate) = meeting_gate.as_deref_mut() {
-            let app_key = ctx.app_name.unwrap_or("unknown").to_lowercase();
-            debug!(
-                "meeting OCR gate: engine failure, unmarking fingerprint for retry (app={})",
-                app_key
-            );
-            gate.ocr_failed(&app_key);
-        }
-    }
     // Capture the OCR wall-clock right after the block — only meaningful when
     // OCR actually ran.
     let ocr_duration_ms = if ocr_ran {
@@ -511,6 +497,21 @@ pub async fn paired_capture(
             ctx.elements_ref_frame_id,
         )
         .await?;
+
+    // Commit the gate's pending fingerprint only now that the frame (and
+    // its OCR result) is durably stored, and only when the OCR engine
+    // itself didn't fail. An escalation whose OCR call or DB insert failed
+    // is never committed — the `?` above returns before this line — so the
+    // next detect of the same stable layout escalates again and self-heals
+    // (#5060 review: committing at decision time left transiently-failed
+    // layouts marked indexed, skipping their text until it changed).
+    // Legit-empty OCR results DO commit: detector false positives (face
+    // texture) must stay marked or they'd re-OCR forever.
+    if meeting_gate_escalated && !ocr_engine_failed {
+        if let Some(gate) = meeting_gate.as_deref_mut() {
+            gate.ocr_indexed(&ctx.app_name.unwrap_or("unknown").to_lowercase());
+        }
+    }
 
     let duration_ms = start.elapsed().as_millis() as u64;
     debug!(
@@ -831,6 +832,7 @@ mod tests {
     use super::*;
     use image::{DynamicImage, RgbImage};
     use screenpipe_a11y::tree::AccessibilityTreeNode;
+    use std::time::Duration;
     use tempfile::TempDir;
 
     fn test_image() -> Arc<DynamicImage> {
@@ -1642,6 +1644,75 @@ mod tests {
         assert!(
             result2.ocr_duration_ms.is_none(),
             "unchanged text must not re-run OCR"
+        );
+    }
+
+    #[tokio::test]
+    async fn meeting_gate_retries_after_failed_db_insert() {
+        // Regression (#5060 review): an escalation whose frame insert FAILS
+        // must not mark the layout as indexed — the same frame against a
+        // healthy DB must escalate and OCR again, then settle.
+        let tmp = TempDir::new().unwrap();
+        let snapshot_writer = SnapshotWriter::new(tmp.path(), 80, 1920);
+        let image = strokes_image();
+        let mut gate = MeetingOcrGate::new();
+
+        let make_ctx = |db| CaptureContext {
+            db,
+            snapshot_writer: &snapshot_writer,
+            image: image.clone(),
+            captured_at: Utc::now(),
+            monitor_id: 0,
+            device_name: "test_monitor",
+            app_name: Some("zoom.us"),
+            window_name: Some("Zoom Meeting"),
+            browser_url: None,
+            document_path: None,
+            focused: true,
+            capture_trigger: "visual_change",
+            use_pii_removal: false,
+            languages: vec![],
+            elements_ref_frame_id: None,
+            screenshot_disabled: false,
+            in_meeting: true,
+            monitor_hosts_focus: true,
+        };
+
+        // Fully closed DB (both pools + drain loop) → the frame insert
+        // fails after the gate escalated.
+        let db_bad = DatabaseManager::new("sqlite::memory:", Default::default())
+            .await
+            .unwrap();
+        db_bad.close().await;
+        let ctx_bad = make_ctx(&db_bad);
+        let failed = paired_capture(&ctx_bad, None, Some(&mut gate)).await;
+        assert!(failed.is_err(), "insert on a closed pool must fail");
+
+        // Same frame, healthy DB: the layout must escalate and OCR again.
+        // (Wait out the gate's establishing detect interval so the retry
+        // decision comes from the fingerprint logic, not the rate limit.)
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        let db_ok = DatabaseManager::new("sqlite::memory:", Default::default())
+            .await
+            .unwrap();
+        let ctx_ok = make_ctx(&db_ok);
+        let retried = paired_capture(&ctx_ok, None, Some(&mut gate))
+            .await
+            .unwrap();
+        assert!(
+            retried.ocr_duration_ms.is_some(),
+            "layout unpersisted by the failed insert must be retried"
+        );
+
+        // Now durably stored: the identical frame skips OCR — with detect
+        // due again, so the Skip comes from the committed fingerprint.
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        let settled = paired_capture(&ctx_ok, None, Some(&mut gate))
+            .await
+            .unwrap();
+        assert!(
+            settled.ocr_duration_ms.is_none(),
+            "persisted layout must not re-OCR"
         );
     }
 
