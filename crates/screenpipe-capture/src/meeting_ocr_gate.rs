@@ -252,6 +252,7 @@ mod tests {
                 y,
                 width: 200,
                 height: 20,
+                ..Default::default()
             })
             .collect()
     }

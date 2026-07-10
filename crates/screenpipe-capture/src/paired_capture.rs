@@ -1652,6 +1652,7 @@ mod tests {
             y: 200,
             width: 400,
             height: 300,
+            ..Default::default()
         };
         let json =
             r#"[{"text":"hi","left":"0.5","top":"0.5","width":"0.1","height":"0.2","conf":"1.0"}]"#;

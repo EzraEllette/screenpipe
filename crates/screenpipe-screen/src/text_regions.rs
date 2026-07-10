@@ -31,12 +31,20 @@ use image::DynamicImage;
 use std::hash::{DefaultHasher, Hash, Hasher};
 
 /// A detected text-like region, in pixel coordinates of the input image.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TextRegion {
     pub x: u32,
     pub y: u32,
     pub width: u32,
     pub height: u32,
+    /// Stroke mass: count of thresholded stroke pixels (pre-close binary)
+    /// inside the box. A *content* signal folded into the fingerprint so
+    /// text that changes in place with identical geometry (dashboard
+    /// numbers, timers, same-width word swaps) still reads as changed —
+    /// different glyphs almost always have different outline mass, while
+    /// truly static screen text renders pixel-identically and keeps the
+    /// count byte-stable.
+    pub ink: u32,
 }
 
 /// Minimum box width/height, aspect-ratio band, and area band for a
@@ -57,6 +65,12 @@ const MAX_AREA_FRACTION: f64 = 0.5;
 /// "changed". Genuine content changes move boxes by whole glyph/line sizes,
 /// far past one grid cell.
 const FINGERPRINT_GRID_PX: u32 = 8;
+
+/// Ink-mass quantization bucket for the fingerprint. Static screen text is
+/// pixel-identical between frames (ink count byte-stable), so this only
+/// needs to absorb sub-visual noise; a single glyph swap moves the outline
+/// mass by tens of pixels at UI text sizes, well past one bucket.
+const FINGERPRINT_INK_QUANT: u32 = 8;
 
 /// Detect text-like regions in a frame.
 ///
@@ -94,11 +108,14 @@ pub fn detect_text_regions(image: &DynamicImage) -> Vec<TextRegion> {
 
     // 9x1 horizontal close (dilate then erode, radius 4): connects nearby
     // strokes into word/line blobs. Border semantics per cv2: outside is
-    // black for dilate, white for erode.
+    // black for dilate, white for erode. `binary` stays alive — per-box
+    // ink mass is counted from it below.
     let closed = close_9x1(&binary, w, h);
-    drop(binary);
 
-    // Connected components (8-connectivity) → bounding boxes → text filter.
+    // Connected components (8-connectivity) → bounding boxes → text filter
+    // → per-box ink mass from the pre-close binary (the actual stroke
+    // edges, not the close's gap-bridging fill; closing is extensive, so
+    // every generating stroke pixel lies inside its component's box).
     let boxes = connected_component_boxes(&closed, w, h);
     let total_area = (w as u64) * (h as u64);
     boxes
@@ -113,15 +130,36 @@ pub fn detect_text_regions(image: &DynamicImage) -> Vec<TextRegion> {
                 && area >= MIN_AREA
                 && (area as f64) <= total_area as f64 * MAX_AREA_FRACTION
         })
+        .map(|mut r| {
+            r.ink = ink_in_box(&binary, w, &r);
+            r
+        })
         .collect()
 }
 
-/// Order-independent hash of the quantized box layout. Two frames whose text
-/// occupies the same places (within [`FINGERPRINT_GRID_PX`]) produce the same
-/// fingerprint; the meeting gate escalates to OCR only when this changes and
-/// the new value holds across consecutive detects.
+/// Sum of binary stroke pixels inside a region's rectangle.
+fn ink_in_box(binary: &[u8], w: usize, r: &TextRegion) -> u32 {
+    let (x0, y0) = (r.x as usize, r.y as usize);
+    let (bw, bh) = (r.width as usize, r.height as usize);
+    let mut sum = 0u32;
+    for y in y0..y0 + bh {
+        sum += binary[y * w + x0..y * w + x0 + bw]
+            .iter()
+            .map(|&b| b as u32)
+            .sum::<u32>();
+    }
+    sum
+}
+
+/// Order-independent hash of the quantized box layout AND per-box ink mass.
+/// Two frames whose text occupies the same places (within
+/// [`FINGERPRINT_GRID_PX`]) with the same stroke mass (within
+/// [`FINGERPRINT_INK_QUANT`]) produce the same fingerprint; the meeting gate
+/// escalates to OCR only when this changes and the new value holds across
+/// consecutive detects. The ink component catches text that changes in
+/// place without moving box geometry (dashboard values, timers).
 pub fn region_fingerprint(regions: &[TextRegion]) -> u64 {
-    let mut quantized: Vec<(u32, u32, u32, u32)> = regions
+    let mut quantized: Vec<(u32, u32, u32, u32, u32)> = regions
         .iter()
         .map(|r| {
             (
@@ -129,6 +167,7 @@ pub fn region_fingerprint(regions: &[TextRegion]) -> u64 {
                 r.y / FINGERPRINT_GRID_PX,
                 r.width / FINGERPRINT_GRID_PX,
                 r.height / FINGERPRINT_GRID_PX,
+                r.ink / FINGERPRINT_INK_QUANT,
             )
         })
         .collect();
@@ -174,6 +213,8 @@ pub fn union_region(
         y,
         width: max_x - x,
         height: max_y - y,
+        // The union is a crop rectangle; ink is not meaningful for it.
+        ink: 0,
     })
 }
 
@@ -435,6 +476,8 @@ fn connected_component_boxes(binary: &[u8], w: usize, h: usize) -> Vec<TextRegio
             y: e.min_y,
             width: e.max_x - e.min_x + 1,
             height: e.max_y - e.min_y + 1,
+            // Filled in by detect_text_regions after the shape filter.
+            ink: 0,
         })
         .collect()
 }
@@ -510,24 +553,21 @@ mod tests {
 
     #[test]
     fn fingerprint_stable_for_identical_layout_changes_on_moved_text() {
-        let a = vec![TextRegion {
+        let base = TextRegion {
             x: 100,
             y: 50,
             width: 200,
             height: 20,
-        }];
+            ink: 500,
+        };
+        let a = vec![base];
         let b = vec![TextRegion {
             x: 101,
             y: 51,
             width: 201,
-            height: 20,
+            ..base
         }]; // sub-grid jitter
-        let c = vec![TextRegion {
-            x: 100,
-            y: 250,
-            width: 200,
-            height: 20,
-        }]; // real move
+        let c = vec![TextRegion { y: 250, ..base }]; // real move
         assert_eq!(region_fingerprint(&a), region_fingerprint(&b));
         assert_ne!(region_fingerprint(&a), region_fingerprint(&c));
         // Order-independent.
@@ -539,6 +579,61 @@ mod tests {
     }
 
     #[test]
+    fn fingerprint_catches_in_place_content_change_via_ink() {
+        // Same geometry, different stroke mass — e.g. a dashboard value
+        // updating inside a fixed table cell. Must read as changed.
+        let before = vec![TextRegion {
+            x: 100,
+            y: 50,
+            width: 200,
+            height: 20,
+            ink: 500,
+        }];
+        let after = vec![TextRegion {
+            ink: 540,
+            ..before[0]
+        }];
+        assert_ne!(region_fingerprint(&before), region_fingerprint(&after));
+        // Sub-bucket ink noise does NOT read as change (static text is
+        // pixel-identical anyway; this documents the tolerance).
+        let noisy = vec![TextRegion {
+            ink: 503,
+            ..before[0]
+        }];
+        assert_eq!(region_fingerprint(&before), region_fingerprint(&noisy));
+    }
+
+    #[test]
+    fn detector_ink_changes_when_text_changes_in_place() {
+        // Two frames whose text blob has (near-)identical geometry but
+        // different glyph density — the in-place-change case the geometric
+        // fingerprint alone is blind to. Sparser strokes across the same
+        // span: same merged blob extent, less ink.
+        let mut dense = light_canvas(400, 300);
+        draw_text_like_line(&mut dense, 50, 100, 10); // 3px strokes, 7px pitch
+        let mut sparse = light_canvas(400, 300);
+        for s in 0..10u32 {
+            let sx = 50 + s * 7;
+            for dy in 0..12 {
+                // 1px strokes at the same pitch and span
+                sparse.put_pixel(sx, 100 + dy, Rgb([10, 10, 10]));
+            }
+        }
+        let r_dense = detect_text_regions(&DynamicImage::ImageRgb8(dense));
+        let r_sparse = detect_text_regions(&DynamicImage::ImageRgb8(sparse));
+        assert_eq!(r_dense.len(), 1);
+        assert_eq!(r_sparse.len(), 1);
+        assert!(r_dense[0].ink > 0 && r_sparse[0].ink > 0);
+        assert_ne!(
+            region_fingerprint(&r_dense),
+            region_fingerprint(&r_sparse),
+            "in-place content change must alter the fingerprint: dense={:?} sparse={:?}",
+            r_dense[0],
+            r_sparse[0]
+        );
+    }
+
+    #[test]
     fn union_region_pads_and_clamps() {
         let regions = vec![
             TextRegion {
@@ -546,12 +641,14 @@ mod tests {
                 y: 10,
                 width: 50,
                 height: 20,
+                ..Default::default()
             },
             TextRegion {
                 x: 200,
                 y: 100,
                 width: 80,
                 height: 30,
+                ..Default::default()
             },
         ];
         let u = union_region(&regions, 20, 300, 140).unwrap();
