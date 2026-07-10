@@ -1435,19 +1435,15 @@ fn get_bool_attr(elem: &ax::UiElement, attr: &ax::Attr) -> Option<bool> {
 }
 
 fn resolve_focused_ax_app() -> Option<(Retained<ax::UiElement>, i32, String)> {
-    let sys = ax::UiElement::sys_wide();
-    if let Ok(focused_app) = sys.focused_app() {
-        if let Ok(pid) = focused_app.pid() {
-            let app_name = localized_app_name_for_pid(pid);
-            return Some((focused_app, pid, app_name));
-        }
-    }
-
-    // Electron apps can return no AXFocusedApplication even while NSWorkspace
-    // correctly reports them active. Build the app AX element from the active
-    // process pid so Obsidian/Discord can still be walked instead of falling
-    // straight to OCR.
-    let active_app = cidre::objc::ar_pool(|| -> Option<(i32, String)> {
+    // NSWorkspace's active app is the AppKit-authoritative "frontmost".
+    // Queried up front because the AX system-wide focusedApplication is not
+    // just *empty* for Chromium/Electron apps that haven't materialized
+    // their AX tree — it can go STALE, still reporting the previously
+    // focused app. A walker that trusts it keeps walking the old app (and
+    // never reaches the Electron flag-setting below that would fix the new
+    // one). Caught by the #5060 ocr_gate_ab probe: focusing an Electron app
+    // from a terminal kept resolving the terminal indefinitely.
+    let ws_active = cidre::objc::ar_pool(|| -> Option<(i32, String)> {
         let workspace = ns::Workspace::shared();
         for app in workspace.running_apps().iter() {
             if !app.is_active() {
@@ -1463,10 +1459,36 @@ fn resolve_focused_ax_app() -> Option<(Retained<ax::UiElement>, i32, String)> {
         None
     });
 
-    if let Some((pid, app_name)) = active_app {
+    let sys = ax::UiElement::sys_wide();
+    if let Ok(focused_app) = sys.focused_app() {
+        if let Ok(pid) = focused_app.pid() {
+            match &ws_active {
+                Some((ws_pid, ws_name)) if *ws_pid != pid => {
+                    debug!(
+                        "AX focusedApplication (pid={}, app={}) disagrees with NSWorkspace \
+                         active app (pid={}, app={}) — trusting NSWorkspace (stale AX focus)",
+                        pid,
+                        localized_app_name_for_pid(pid),
+                        ws_pid,
+                        ws_name
+                    );
+                }
+                _ => {
+                    let app_name = localized_app_name_for_pid(pid);
+                    return Some((focused_app, pid, app_name));
+                }
+            }
+        }
+    }
+
+    // AX gave nothing (Electron apps can return no AXFocusedApplication) or
+    // disagreed with AppKit. Build the app AX element from the active
+    // process pid so Obsidian/Discord/Claude can still be walked instead of
+    // falling straight to OCR.
+    if let Some((pid, app_name)) = ws_active {
         let ax_app = ax::UiElement::with_app_pid(pid);
         debug!(
-            "focused AX app fallback via NSWorkspace: pid={} app={}",
+            "focused AX app via NSWorkspace: pid={} app={}",
             pid, app_name
         );
         return Some((ax_app, pid, app_name));

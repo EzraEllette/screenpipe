@@ -205,6 +205,17 @@ mod macos {
             );
         }
         drop(probe);
+        // Accessibility: without it the walker can only resolve the app that
+        // launched us (a process may always read its own app's AX tree), so
+        // every other app walks as "unknown" and gets filtered/uncropped.
+        if !screenpipe_core::permissions::check_accessibility().is_granted() {
+            eprintln!(
+                "WARNING: this process is NOT trusted for Accessibility — the focused-app \
+                 walker will fail for every app except the launching terminal's own windows. \
+                 Grant your terminal Accessibility in System Settings → Privacy & Security → \
+                 Accessibility, then restart it and rerun."
+            );
+        }
 
         loop {
             let tick_started = Instant::now();
@@ -229,9 +240,7 @@ mod macos {
                 );
                 let _ = log.flush();
             }
-            if tick % 12 == 0 {
-                sum.print(tick);
-            }
+            sum.print(tick);
             tokio::time::sleep(args.interval.saturating_sub(tick_started.elapsed())).await;
         }
     }
@@ -242,6 +251,11 @@ mod macos {
         crops: u64,
         fulls: u64,
         offtarget: u64,
+        /// Focused app seen on the most recent tick — surfaces WHY ticks are
+        /// off-target ("unknown" = the walker is failing, likely missing
+        /// Accessibility permission for the launching terminal; a real app
+        /// name = focus is simply elsewhere).
+        last_app: String,
         recall_window_sum: f64,
         recall_substr_sum: f64,
         recall_window_n: u64,
@@ -260,12 +274,13 @@ mod macos {
                 }
             };
             eprintln!(
-                "[tick {tick}] decisions skip/crop/full={}/{}/{} (offtarget {}) | window-recall token {:.3} / \
+                "[tick {tick}] decisions skip/crop/full={}/{}/{} (offtarget {}, focused: {}) | window-recall token {:.3} / \
                  substr {:.3} ({} ticks substr<0.9) | OCR ms baseline={} optimized={} ({:.0}% saved)",
                 self.skips,
                 self.crops,
                 self.fulls,
                 self.offtarget,
+                if self.last_app.is_empty() { "?" } else { &self.last_app },
                 mean(self.recall_window_sum),
                 mean(self.recall_substr_sum),
                 self.low_recall,
@@ -322,9 +337,24 @@ mod macos {
                 "notfound".to_string(),
             ),
         };
+        sum.last_app = format!("{app_key} [{walk_outcome}]");
         if let Some(filter) = &args.app_filter {
             if !app_key.contains(filter.as_str()) {
                 sum.offtarget += 1;
+                // Minimal row so off-target stretches are diagnosable
+                // offline too (is the walker failing, or is focus elsewhere?).
+                writeln!(
+                    log,
+                    "{}",
+                    json!({
+                        "ts": chrono::Utc::now().to_rfc3339(),
+                        "tick": tick,
+                        "app": app_key,
+                        "walk": walk_outcome,
+                        "offtarget": true,
+                    })
+                )?;
+                log.flush()?;
                 return Ok(());
             }
         }
