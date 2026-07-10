@@ -267,6 +267,16 @@ impl ChangedSet {
         self.entries.clear();
         self.invalidated = false;
     }
+
+    /// Force the same invalidated state a [`CHANGED_SET_CAP`] overflow
+    /// would produce, without needing a real path to record it against.
+    /// For signals that mean "too much changed to reason about precisely"
+    /// but don't come with their own path — e.g. the observer's own
+    /// delivery channel dropping a notification because it was full.
+    pub fn force_invalidate(&mut self) {
+        self.invalidated = true;
+        self.entries.clear();
+    }
 }
 
 // ---------------------------------------------------------------------

@@ -1167,88 +1167,99 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Create VisionManager for event-driven capture on all monitors
-    let (handle, capture_trigger_tx, linker_tx, vision_manager_for_server) = if !config
-        .disable_vision
-    {
-        let vision_config =
-            config.to_vision_manager_config(output_path_clone.to_string(), vision_metrics.clone());
-        // Hot frame cache is only consumed by the timeline streaming endpoint;
-        // skip frame buffering when the timeline is disabled.
-        let hot_cache_for_capture = if config.disable_timeline {
-            None
+    let (handle, capture_trigger_tx, linker_tx, vision_manager_for_server, ax_changes_tx) =
+        if !config.disable_vision {
+            let vision_config = config
+                .to_vision_manager_config(output_path_clone.to_string(), vision_metrics.clone());
+            // Hot frame cache is only consumed by the timeline streaming endpoint;
+            // skip frame buffering when the timeline is disabled.
+            let hot_cache_for_capture = if config.disable_timeline {
+                None
+            } else {
+                Some(hot_frame_cache.clone())
+            };
+            let vision_manager = Arc::new(
+                VisionManager::new(vision_config, db_clone.clone(), vision_handle.clone())
+                    .with_hot_frame_cache(hot_cache_for_capture)
+                    .with_power_profile(power_manager.subscribe())
+                    .with_high_fps_controller(high_fps_controller.clone()),
+            );
+
+            // Get the broadcast trigger sender BEFORE moving the VisionManager into
+            // the spawned task. This sender is passed to start_ui_recording so UI
+            // events (clicks, app switches, clipboard) trigger captures.
+            let trigger_tx = vision_manager.trigger_sender();
+            // Same idea for the frame-linker channel: shared between the
+            // recorder (sends EventPersisted after batch flush) and each
+            // capture loop (sends FrameCaptured after a successful capture).
+            let linker_tx = vision_manager.linker_sender();
+            // Same idea for native AX content-change notifications: shared
+            // between the recorder (forwards from the observer) and each
+            // capture loop (subscribes to feed its own ChangedSet).
+            let ax_changes_tx = vision_manager.ax_changes_sender();
+
+            let vm_clone = vision_manager.clone();
+            let audio_manager_for_drm = if !config.disable_audio {
+                Some((*audio_manager).clone())
+            } else {
+                None
+            };
+            let shutdown_tx_clone2 = shutdown_tx_clone.clone();
+            let runtime = &tokio::runtime::Handle::current();
+            let h = runtime.spawn(async move {
+                let mut shutdown_rx = shutdown_tx_clone2.subscribe();
+
+                // Start VisionManager. A failure here must NOT abort this task.
+                // `VisionManager::start()` returns Err when zero monitors are
+                // enumerated at boot — lid closed at login, screen locked, or a
+                // transient TCC/ScreenCaptureKit race (list_monitors swallows
+                // those to an empty set). Returning here used to leave vision
+                // permanently dead for the whole process lifetime, because every
+                // retry/recovery path lives inside the monitor watcher spawned
+                // below (it re-calls VisionManager::start() whenever status !=
+                // Running — see monitor_watcher.rs). Log and fall through so the
+                // watcher gets a chance to recover once a display appears.
+                if let Err(e) = vm_clone.start().await {
+                    error!(
+                        "Failed to start VisionManager (monitor watcher will retry): {:?}",
+                        e
+                    );
+                }
+
+                // Start MonitorWatcher for dynamic detection (with audio DRM pause support)
+                if let Err(e) = start_monitor_watcher(vm_clone.clone(), audio_manager_for_drm).await
+                {
+                    error!("Failed to start monitor watcher: {:?}", e);
+                }
+
+                // Wait for shutdown signal
+                let _ = shutdown_rx.recv().await;
+                info!("received shutdown signal for VisionManager");
+
+                // Stop monitor watcher and VisionManager
+                let _ = stop_monitor_watcher().await;
+                if let Err(e) = vm_clone.shutdown().await {
+                    error!("Error shutting down VisionManager: {:?}", e);
+                }
+            });
+            (
+                h,
+                Some(trigger_tx),
+                Some(linker_tx),
+                Some(vision_manager.clone()),
+                Some(ax_changes_tx),
+            )
         } else {
-            Some(hot_frame_cache.clone())
+            // Vision disabled — spawn a pending task so `handle` never completes
+            // (otherwise the no-op future wins the tokio::select! race and shuts down the server)
+            (
+                tokio::spawn(std::future::pending::<()>()),
+                None,
+                None,
+                None,
+                None,
+            )
         };
-        let vision_manager = Arc::new(
-            VisionManager::new(vision_config, db_clone.clone(), vision_handle.clone())
-                .with_hot_frame_cache(hot_cache_for_capture)
-                .with_power_profile(power_manager.subscribe())
-                .with_high_fps_controller(high_fps_controller.clone()),
-        );
-
-        // Get the broadcast trigger sender BEFORE moving the VisionManager into
-        // the spawned task. This sender is passed to start_ui_recording so UI
-        // events (clicks, app switches, clipboard) trigger captures.
-        let trigger_tx = vision_manager.trigger_sender();
-        // Same idea for the frame-linker channel: shared between the
-        // recorder (sends EventPersisted after batch flush) and each
-        // capture loop (sends FrameCaptured after a successful capture).
-        let linker_tx = vision_manager.linker_sender();
-
-        let vm_clone = vision_manager.clone();
-        let audio_manager_for_drm = if !config.disable_audio {
-            Some((*audio_manager).clone())
-        } else {
-            None
-        };
-        let shutdown_tx_clone2 = shutdown_tx_clone.clone();
-        let runtime = &tokio::runtime::Handle::current();
-        let h = runtime.spawn(async move {
-            let mut shutdown_rx = shutdown_tx_clone2.subscribe();
-
-            // Start VisionManager. A failure here must NOT abort this task.
-            // `VisionManager::start()` returns Err when zero monitors are
-            // enumerated at boot — lid closed at login, screen locked, or a
-            // transient TCC/ScreenCaptureKit race (list_monitors swallows
-            // those to an empty set). Returning here used to leave vision
-            // permanently dead for the whole process lifetime, because every
-            // retry/recovery path lives inside the monitor watcher spawned
-            // below (it re-calls VisionManager::start() whenever status !=
-            // Running — see monitor_watcher.rs). Log and fall through so the
-            // watcher gets a chance to recover once a display appears.
-            if let Err(e) = vm_clone.start().await {
-                error!(
-                    "Failed to start VisionManager (monitor watcher will retry): {:?}",
-                    e
-                );
-            }
-
-            // Start MonitorWatcher for dynamic detection (with audio DRM pause support)
-            if let Err(e) = start_monitor_watcher(vm_clone.clone(), audio_manager_for_drm).await {
-                error!("Failed to start monitor watcher: {:?}", e);
-            }
-
-            // Wait for shutdown signal
-            let _ = shutdown_rx.recv().await;
-            info!("received shutdown signal for VisionManager");
-
-            // Stop monitor watcher and VisionManager
-            let _ = stop_monitor_watcher().await;
-            if let Err(e) = vm_clone.shutdown().await {
-                error!("Error shutting down VisionManager: {:?}", e);
-            }
-        });
-        (
-            h,
-            Some(trigger_tx),
-            Some(linker_tx),
-            Some(vision_manager.clone()),
-        )
-    } else {
-        // Vision disabled — spawn a pending task so `handle` never completes
-        // (otherwise the no-op future wins the tokio::select! race and shuts down the server)
-        (tokio::spawn(std::future::pending::<()>()), None, None, None)
-    };
 
     let local_data_dir_clone_2 = local_data_dir_clone.clone();
 
@@ -1789,6 +1800,7 @@ async fn main() -> anyhow::Result<()> {
                 linker_tx,
                 config.ignored_windows.clone(),
                 true, // CLI: show native TCC dialogs for accessibility + input monitoring
+                ax_changes_tx,
             )
             .await
             {

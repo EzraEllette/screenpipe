@@ -664,6 +664,7 @@ pub async fn start_ui_recording(
     linker_tx: Option<LinkerSender>,
     ignored_windows: Vec<String>,
     prompt_permissions: bool,
+    ax_changes_tx: Option<crate::event_driven_capture::AxChangeSender>,
 ) -> Result<UiRecorderHandle> {
     if !config.enabled {
         info!("UI event capture is disabled");
@@ -958,6 +959,28 @@ pub async fn start_ui_recording(
                             );
                             tokio::time::sleep(backoff).await;
                         }
+                    }
+                }
+            }
+
+            // Drain native AX content-change notifications (see
+            // `screenpipe_a11y::incremental`) and forward them onto the
+            // broadcast channel every monitor loop subscribes to. Only
+            // macOS's `RecordingHandle` exposes these today — see its doc
+            // comment for why (Windows/Linux have their own separate
+            // `RecordingHandle` with no equivalent yet). Non-blocking:
+            // this channel is small and meant to be drained every
+            // iteration, not waited on.
+            #[cfg(target_os = "macos")]
+            {
+                while let Ok(entry) = handle.ax_changes().try_recv() {
+                    if let Some(ref tx) = ax_changes_tx {
+                        let _ = tx.send(crate::event_driven_capture::AxChangeMsg::Entry(entry));
+                    }
+                }
+                if handle.take_ax_changes_overflowed() {
+                    if let Some(ref tx) = ax_changes_tx {
+                        let _ = tx.send(crate::event_driven_capture::AxChangeMsg::Overflowed);
                     }
                 }
             }

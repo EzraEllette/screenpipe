@@ -505,6 +505,34 @@ pub fn trigger_channel() -> (TriggerSender, TriggerReceiver) {
     (tx, rx)
 }
 
+/// One message on the AX-change broadcast channel — either a real
+/// `ChangedEntry` from the observer, or a signal that the observer's own
+/// channel overflowed (dropped a notification). Kept as an enum rather
+/// than sending only `ChangedEntry` because "something was dropped" has
+/// no natural encoding as an entry itself, but every consumer's
+/// `incremental::ChangedSet` needs to know about it — a dropped
+/// notification means the set can no longer trust what it's tracking and
+/// must invalidate, exactly like exceeding its own coalescing cap.
+#[derive(Debug, Clone)]
+pub enum AxChangeMsg {
+    Entry(screenpipe_a11y::incremental::ChangedEntry),
+    Overflowed,
+}
+
+/// Native AX content-change notifications (see
+/// `screenpipe_a11y::incremental`), broadcast the same way capture
+/// triggers are — one shared sender owned by the UI recorder, one
+/// receiver subscribed per monitor. All monitor loops describe the same
+/// system-wide focused window (there's exactly one AXObserver, not one
+/// per monitor), so fan-out to every subscriber is correct, not
+/// redundant.
+pub type AxChangeSender = broadcast::Sender<AxChangeMsg>;
+pub type AxChangeReceiver = broadcast::Receiver<AxChangeMsg>;
+
+/// Small buffer — content-change notifications arrive far less densely
+/// than raw UI events, and the per-monitor loop drains this every tick.
+pub const AX_CHANGE_CHANNEL_BUFFER: usize = 256;
+
 /// Edge-triggered bookkeeping for the high-FPS override.
 ///
 /// The override interval lives in [`crate::high_fps_controller::HighFpsController`]
@@ -664,6 +692,7 @@ pub async fn event_driven_capture_loop(
     tree_walker_config: TreeWalkerConfig,
     config: EventDrivenCaptureConfig,
     mut trigger_rx: TriggerReceiver,
+    mut ax_changes_rx: AxChangeReceiver,
     stop_signal: Arc<AtomicBool>,
     vision_metrics: Arc<screenpipe_screen::PipelineMetrics>,
     hot_frame_cache: Option<Arc<HotFrameCache>>,
@@ -721,6 +750,23 @@ pub async fn event_driven_capture_loop(
     // Adaptive accessibility throttle: tracks per-app walk cost and backs off
     // for expensive apps (e.g., Electron apps whose UIA providers block the UI thread).
     let mut walk_budget = screenpipe_a11y::budget::AppWalkBudget::new();
+
+    // Event-scoped subtree walks: accumulates native AX content-change
+    // notifications between captures. Not yet consumed by `do_capture` —
+    // populating this is step one of wiring the fast path in; the actual
+    // `incremental::decide`/`merge` integration needs a cheap way to
+    // resolve the focused window's pid before the walk, which doesn't
+    // exist in this loop's data flow yet (see `LightweightFocusedMetadata`,
+    // which only carries app/window name). This accumulates real signal so
+    // that integration can be verified against live data once it lands.
+    let mut ax_changed_set = screenpipe_a11y::incremental::ChangedSet::new();
+    // Wall-clock origin for translating the observer's own `Instant`-based
+    // timestamps (relative to *its* start) isn't available here — the
+    // observer and this loop start at different times on different
+    // threads. Each drained entry's timestamp is only ever compared to
+    // other entries drained in the same loop, so this loop stamps its own
+    // monotonic clock at drain time instead of trusting the observer's.
+    let ax_changes_loop_start = Instant::now();
 
     // Frame comparer for visual change detection
     let mut frame_comparer = if visual_check_enabled {
@@ -1329,6 +1375,36 @@ pub async fn event_driven_capture_loop(
             }
         }
 
+        // Drain native AX content-change notifications accumulated since
+        // the last tick. Not yet consulted by `do_capture` — see
+        // `ax_changed_set`'s declaration for why.
+        loop {
+            match ax_changes_rx.try_recv() {
+                Ok(AxChangeMsg::Entry(entry)) => {
+                    ax_changed_set.record(
+                        entry.path,
+                        entry.kind,
+                        ax_changes_loop_start.elapsed().as_nanos() as u64,
+                    );
+                }
+                Ok(AxChangeMsg::Overflowed) => {
+                    // The observer's own delivery channel dropped a
+                    // notification -- too much changed to reason about
+                    // precisely, same as exceeding ChangedSet's own cap.
+                    ax_changed_set.force_invalidate();
+                }
+                Err(broadcast::error::TryRecvError::Empty) => break,
+                Err(broadcast::error::TryRecvError::Closed) => break,
+                Err(broadcast::error::TryRecvError::Lagged(n)) => {
+                    debug!(
+                        "AX-change channel lagged by {} messages on monitor {}",
+                        n, monitor_id
+                    );
+                    continue;
+                }
+            }
+        }
+
         // Promote a deferred soft checkpoint (#4844) once its floor has
         // elapsed and nothing more urgent showed up this tick. Must run
         // before the visual-change check below, which only fires when
@@ -1404,6 +1480,9 @@ pub async fn event_driven_capture_loop(
                 last_content_hash = None;
                 // Also reset elements cache on context change
                 last_elements_cache.remove(&device_name);
+                // Whatever the AX observer accumulated described the
+                // previous app/window -- stale in the new context.
+                ax_changed_set.clear();
             }
 
             // Soft-checkpoint coalescing (#4844): KeyPress/TypingPause/

@@ -77,6 +77,9 @@ impl CaptureSession {
             None;
         // --- Frame-linker sender (set by VisionManager, consumed by UI recorder + capture loops) ---
         let mut linker_tx: Option<screenpipe_engine::frame_linker_actor::LinkerSender> = None;
+        // --- AX-change sender (set by VisionManager, consumed by UI recorder + capture loops) ---
+        let mut ax_changes_tx: Option<screenpipe_engine::event_driven_capture::AxChangeSender> =
+            None;
         let mut vision_task = None;
         let mut vision_manager_handle = None;
 
@@ -135,6 +138,7 @@ impl CaptureSession {
 
             capture_trigger_tx = Some(vision_manager.trigger_sender());
             linker_tx = Some(vision_manager.linker_sender());
+            ax_changes_tx = Some(vision_manager.ax_changes_sender());
 
             let shutdown_rx = shutdown_tx.subscribe();
             let audio_manager_for_drm = if !config.disable_audio {
@@ -224,6 +228,7 @@ impl CaptureSession {
                 linker_tx,
                 config.ignored_windows.clone(),
                 cfg!(debug_assertions), // debug: dragflow unavailable, fall back to native dialog; release: dragflow handles it
+                ax_changes_tx,
             )
             .await
             {

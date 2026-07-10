@@ -87,6 +87,10 @@ pub struct VisionManager {
     /// Broadcast sender for capture triggers — shared with UI recorder.
     /// Each monitor subscribes via `trigger_tx.subscribe()`.
     trigger_tx: TriggerSender,
+    /// Broadcast sender for native AX content-change notifications — shared
+    /// with UI recorder the same way `trigger_tx` is. Each monitor
+    /// subscribes via `ax_changes_tx.subscribe()`.
+    ax_changes_tx: crate::event_driven_capture::AxChangeSender,
     /// Sender for the frame-linker actor — shared with UI recorder and
     /// each event-driven capture loop. The recorder forwards
     /// `EventPersisted` after batch flush; the capture loop forwards
@@ -132,6 +136,10 @@ impl VisionManager {
         let (trigger_tx, _rx) = tokio::sync::broadcast::channel::<CaptureTriggerMsg>(
             crate::event_driven_capture::TRIGGER_CHANNEL_BUFFER,
         );
+        let (ax_changes_tx, _ax_rx) =
+            tokio::sync::broadcast::channel::<crate::event_driven_capture::AxChangeMsg>(
+                crate::event_driven_capture::AX_CHANGE_CHANNEL_BUFFER,
+            );
 
         // Frame-linker actor: pairs UI events with the frames they
         // caused us to capture. Single shared instance across all
@@ -163,6 +171,7 @@ impl VisionManager {
             recording_tasks: Arc::new(DashMap::new()),
             hd_recording_tasks: Arc::new(DashMap::new()),
             trigger_tx,
+            ax_changes_tx,
             linker_tx,
             linker_stop,
             hot_frame_cache: None,
@@ -199,6 +208,13 @@ impl VisionManager {
     /// Pass this to `start_ui_recording()` so UI events trigger captures.
     pub fn trigger_sender(&self) -> TriggerSender {
         self.trigger_tx.clone()
+    }
+
+    /// Get a clone of the broadcast AX-change sender.
+    /// Pass this to `start_ui_recording()` so native content-change
+    /// notifications reach every monitor's capture loop.
+    pub fn ax_changes_sender(&self) -> crate::event_driven_capture::AxChangeSender {
+        self.ax_changes_tx.clone()
     }
 
     /// Get a clone of the frame-linker sender. Pass this to
@@ -518,6 +534,8 @@ impl VisionManager {
 
         // Subscribe to the shared broadcast channel so UI events reach this monitor
         let trigger_rx = self.trigger_tx.subscribe();
+        // Subscribe to native AX content-change notifications the same way.
+        let ax_changes_rx = self.ax_changes_tx.subscribe();
 
         // Stop signal
         let stop_signal = Arc::new(AtomicBool::new(false));
@@ -577,6 +595,7 @@ impl VisionManager {
                 tree_walker_config,
                 capture_config,
                 trigger_rx,
+                ax_changes_rx,
                 stop_signal,
                 vision_metrics,
                 hot_frame_cache,
