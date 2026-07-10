@@ -567,6 +567,35 @@ impl std::fmt::Display for SkipReason {
 pub trait TreeWalkerPlatform: Send {
     /// Walk the focused window's accessibility tree.
     fn walk_focused_window(&self) -> Result<TreeWalkResult>;
+
+    /// Like `walk_focused_window`, but also returns the ordered, path-tagged
+    /// text-emission stream (`crate::incremental::EmissionRecord`) needed to
+    /// seed `incremental::SnapshotCache` for event-scoped subtree walks.
+    ///
+    /// Default: no incremental support — always an empty stream. That makes
+    /// every future `incremental::merge` attempt anchor-less (`None`),
+    /// which always falls back to a full walk: the same "fast path never
+    /// engages" degradation every other missing-support case in this
+    /// feature uses. Only macOS overrides this today.
+    fn walk_focused_window_with_records(
+        &self,
+    ) -> Result<(TreeWalkResult, Vec<crate::incremental::EmissionRecord>)> {
+        Ok((self.walk_focused_window()?, Vec::new()))
+    }
+
+    /// Walk only the subtree rooted at `path` (index-in-parent chain from
+    /// the focused window), instead of the whole window.
+    ///
+    /// Default: unsupported — always `PathMismatch`, so the caller always
+    /// falls back to a full walk. Only macOS overrides this today; Windows
+    /// (UIA `RuntimeId`) and Linux (AT-SPI) are tracked as follow-ups.
+    fn walk_subtree(
+        &self,
+        _expected: &crate::incremental::WindowIdentity,
+        _path: &[u32],
+    ) -> Result<crate::incremental::SubtreeWalkOutcome> {
+        Ok(crate::incremental::SubtreeWalkOutcome::PathMismatch)
+    }
 }
 
 /// Create a platform-appropriate tree walker.

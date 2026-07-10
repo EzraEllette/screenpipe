@@ -528,6 +528,21 @@ impl SubtreeWalkResult {
     }
 }
 
+/// Outcome of `tree::TreeWalkerPlatform::walk_subtree`. Lives here (rather
+/// than in a platform-specific module) because the trait method that
+/// returns it has a safe cross-platform default -- `PathMismatch` -- so
+/// every platform without a real implementation degrades to "the fast
+/// path never engages" without needing its own copy of this type.
+#[derive(Debug, Clone)]
+pub enum SubtreeWalkOutcome {
+    Found(SubtreeWalkResult),
+    /// The caller must fall back to a full walk. Covers every way a
+    /// subtree walk can't be trusted (see the macOS implementation's own
+    /// doc comment for the concrete list) as well as "this platform
+    /// doesn't implement subtree walks at all".
+    PathMismatch,
+}
+
 /// Remove the cached descendant-or-self range for `changed_path` and
 /// splice in `subtree`'s records at that position, rebasing depths.
 /// Returns `false` (no mutation) if no anchor could be found for depth

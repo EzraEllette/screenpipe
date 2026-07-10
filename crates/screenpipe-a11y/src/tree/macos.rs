@@ -8,7 +8,9 @@ use super::{
     AccessibilityTreeNode, LineBudget, SkipReason, TreeSnapshot, TreeWalkResult, TreeWalkerConfig,
     TreeWalkerPlatform,
 };
-use crate::incremental::{EmissionRecord, NodePath, SubtreeWalkResult, WindowIdentity};
+use crate::incremental::{
+    EmissionRecord, NodePath, SubtreeWalkOutcome, SubtreeWalkResult, WindowIdentity,
+};
 use crate::tree::macos_lines::{self, NormalizeRefs};
 use anyhow::Result;
 use chrono::Utc;
@@ -305,6 +307,19 @@ impl MacosTreeWalker {
     }
 }
 
+/// Maximum nodes a subtree walk will visit before giving up and reporting
+/// `PathMismatch`. Deliberately much smaller than a full walk's default
+/// (5000) — a subtree walk exists to replace a handful of changed elements,
+/// not a whole window; a subtree this large means the cached anchor point
+/// was wrong, or the notified element sits somewhere a merge shouldn't
+/// apply blindly.
+const SUBTREE_WALK_MAX_NODES: usize = 500;
+
+/// Wall-clock cap for a subtree walk, tighter than a full walk's default
+/// (250ms) — a subtree walk exists specifically to be fast; if it isn't,
+/// something's wrong and a full walk is the safer answer.
+const SUBTREE_WALK_TIMEOUT: Duration = Duration::from_millis(60);
+
 impl TreeWalkerPlatform for MacosTreeWalker {
     fn walk_focused_window(&self) -> Result<TreeWalkResult> {
         // Wrap in autorelease pool — cidre AX/NS APIs create autoreleased
@@ -320,17 +335,8 @@ impl TreeWalkerPlatform for MacosTreeWalker {
         })
         .map_err(|s| anyhow::anyhow!(s))
     }
-}
 
-impl MacosTreeWalker {
-    /// Like `walk_focused_window`, but also returns the ordered, path-tagged
-    /// text-emission stream backing the snapshot's `nodes`/`text_content` —
-    /// see `crate::incremental`. Not part of `TreeWalkerPlatform` since only
-    /// the macOS event-scoped-subtree-walk feature needs it; every other
-    /// caller keeps using the plain trait method above.
-    pub fn walk_focused_window_with_records(
-        &self,
-    ) -> Result<(TreeWalkResult, Vec<EmissionRecord>)> {
+    fn walk_focused_window_with_records(&self) -> Result<(TreeWalkResult, Vec<EmissionRecord>)> {
         cidre::objc::ar_pool(
             || -> Result<(TreeWalkResult, Vec<EmissionRecord>), String> {
                 self.walk_focused_window_inner()
@@ -339,43 +345,7 @@ impl MacosTreeWalker {
         )
         .map_err(|s| anyhow::anyhow!(s))
     }
-}
 
-/// Maximum nodes a subtree walk will visit before giving up and reporting
-/// `PathMismatch`. Deliberately much smaller than a full walk's default
-/// (5000) — a subtree walk exists to replace a handful of changed elements,
-/// not a whole window; a subtree this large means the cached anchor point
-/// was wrong, or the notified element sits somewhere a merge shouldn't
-/// apply blindly, matching Phase 2.3's "hitting the cap ⇒ treat as
-/// mismatch" rule.
-const SUBTREE_WALK_MAX_NODES: usize = 500;
-
-/// Wall-clock cap for a subtree walk, tighter than a full walk's default
-/// (250ms) — a subtree walk exists specifically to be fast; if it isn't,
-/// something's wrong and a full walk is the safer answer.
-const SUBTREE_WALK_TIMEOUT: Duration = Duration::from_millis(60);
-
-/// Outcome of [`MacosTreeWalker::walk_subtree`].
-#[derive(Debug, Clone)]
-pub enum SubtreeWalkOutcome {
-    Found(SubtreeWalkResult),
-    /// The caller must fall back to a full walk. Covers every way a subtree
-    /// walk can't be trusted: the currently-focused app/window no longer
-    /// matches `expected` (focus changed since the caller decided to
-    /// attempt a merge — a real race between the decision and this call,
-    /// since both independently re-resolve focus rather than sharing a
-    /// lock), a child index in `path` is out of range at some level, the
-    /// subtree hit [`SUBTREE_WALK_MAX_NODES`]/[`SUBTREE_WALK_TIMEOUT`], or
-    /// the app is one this function deliberately never attempts (see the
-    /// `is_vscode_like` check below).
-    PathMismatch,
-}
-
-impl MacosTreeWalker {
-    /// Walk only the subtree rooted at `path` (index-in-parent chain from
-    /// the focused window, in the same coordinate space as
-    /// `incremental::NodePath`) instead of the whole window.
-    ///
     /// Deliberately skips every gate a full walk applies — excluded-app,
     /// incognito, ignored/included window patterns, the extension-popup
     /// check — because a subtree walk is only ever attempted against a
@@ -385,18 +355,25 @@ impl MacosTreeWalker {
     /// the cache first (see `incremental::SnapshotCache`'s invalidation
     /// triggers), so `walk_subtree` can never legitimately be called
     /// against a window that would fail them today.
-    pub fn walk_subtree(
-        &self,
-        expected: &WindowIdentity,
-        path: &[u32],
-    ) -> Result<SubtreeWalkOutcome> {
+    fn walk_subtree(&self, expected: &WindowIdentity, path: &[u32]) -> Result<SubtreeWalkOutcome> {
         cidre::objc::ar_pool(|| -> Result<SubtreeWalkOutcome, String> {
             self.walk_subtree_inner(expected, path)
                 .map_err(|e| format!("{}", e))
         })
         .map_err(|s| anyhow::anyhow!(s))
     }
+}
 
+impl MacosTreeWalker {
+    /// Covers every way a subtree walk can't be trusted, all reported as
+    /// `PathMismatch`: the currently-focused app/window no longer matches
+    /// `expected` (focus changed since the caller decided to attempt a
+    /// merge — a real race between the decision and this call, since both
+    /// independently re-resolve focus rather than sharing a lock), a child
+    /// index in `path` is out of range at some level, the subtree hit
+    /// `SUBTREE_WALK_MAX_NODES`/`SUBTREE_WALK_TIMEOUT`, or the app is one
+    /// this function deliberately never attempts (see the `is_vscode_like`
+    /// check below).
     fn walk_subtree_inner(
         &self,
         expected: &WindowIdentity,
