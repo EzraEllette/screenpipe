@@ -143,8 +143,6 @@ mod specta_bindings;
 mod vault;
 mod viewer;
 
-#[cfg(target_os = "macos")]
-static MIC_FOCUS_CAPTURE_RESTART: AtomicBool = AtomicBool::new(false);
 use base64::Engine;
 use health::start_health_check;
 use log_files::{get_log_files, get_screenpipe_data_dir};
@@ -833,12 +831,6 @@ async fn main() {
                     if !health::get_audio_device_status().is_empty() {
                         return;
                     }
-                    if MIC_FOCUS_CAPTURE_RESTART
-                        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-                        .is_err()
-                    {
-                        return;
-                    }
                     info!(
                         "Microphone permission newly granted (focus return) — restarting capture for audio reinit"
                     );
@@ -1129,9 +1121,9 @@ async fn main() {
             }
 
             // mlx.metallib and libonnxruntime.dylib are staged at build time
-            // for bundle.macOS.files (see build.rs stage_macos_sidecar_libs).
-            // Real nested sidecars are pre-signed before Tauri copies them into
-            // Contents/MacOS; unused per-arch placeholders are truncated empty.
+            // for macOS release bundling (see build.rs stage_macos_sidecar_libs).
+            // arm64 bundles mlx.metallib as a Tauri externalBin so Tauri signs it;
+            // x86_64 copies libonnxruntime.dylib via macOS.files.
             //
             // Previously this block created a symlink at Contents/MacOS/mlx.metallib
             // pointing at Contents/Resources/mlx.metallib on first launch. Apple

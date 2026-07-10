@@ -627,6 +627,16 @@ fn has_usable_output_configs(device: &cpal::Device) -> bool {
     }
 }
 
+/// True for screenpipe's own private tap aggregate (macOS Process Tap).
+/// The aggregate is created `is_private`, which hides it from other processes
+/// — but not from us, and this enumeration runs in the creating process. cpal
+/// reports it as an input device (the tap side has input streams), so without
+/// this filter it appears in the settings device picker whenever a tap is
+/// live; selecting it would feed our own capture back into recording.
+fn is_own_tap_aggregate(name: &str) -> bool {
+    name == super::process_tap::TAP_AGGREGATE_DEVICE_NAME
+}
+
 async fn list_audio_devices_uncached() -> Result<Vec<AudioDevice>> {
     #[cfg(all(target_os = "linux", feature = "pulseaudio"))]
     {
@@ -649,6 +659,10 @@ async fn list_audio_devices_uncached() -> Result<Vec<AudioDevice>> {
                 continue;
             }
             if let Ok(name) = device.name() {
+                if is_own_tap_aggregate(&name) {
+                    tracing::debug!("skipping our own private tap aggregate: {}", name);
+                    continue;
+                }
                 devices.push(AudioDevice::new(name, DeviceType::Input));
             }
         }
@@ -1571,6 +1585,34 @@ mod meeting_tap_device_tests {
             parse_audio_device("Meeting Tap (output)").unwrap(),
             AudioDevice::new(MEETING_TAP_DEVICE_NAME.to_string(), DeviceType::Output)
         );
+    }
+}
+
+#[cfg(test)]
+mod tap_aggregate_filter_tests {
+    use super::is_own_tap_aggregate;
+
+    /// Regression: our private tap aggregate is visible to our own process
+    /// (private only hides it from OTHERS), so enumeration must drop it or it
+    /// appears as a selectable input in the settings device picker.
+    #[test]
+    fn own_tap_aggregate_is_filtered() {
+        assert!(is_own_tap_aggregate("ScreenpipeProcessTap"));
+        assert!(is_own_tap_aggregate(
+            crate::core::process_tap::TAP_AGGREGATE_DEVICE_NAME
+        ));
+    }
+
+    #[test]
+    fn real_devices_are_not_filtered() {
+        for name in [
+            "MacBook Pro Microphone",
+            "Ezra’s AirPods Max",
+            "Samsung Microphone",
+            "System Audio",
+        ] {
+            assert!(!is_own_tap_aggregate(name), "{name} must not be filtered");
+        }
     }
 }
 
