@@ -180,6 +180,41 @@ pub fn region_fingerprint(regions: &[TextRegion]) -> u64 {
     hasher.finish()
 }
 
+/// Content signature of the detected text regions: hashes each box's
+/// coordinates plus the quantized luma of the pixels inside it. Two detects
+/// produce the same signature only when the same boxes hold visually
+/// identical content — moved boxes, in-place digit flips, and new text all
+/// change it, while sub-quantum capture noise does not (luma quantized to
+/// 32 levels; text edits flip pixels by ~full contrast). This is the
+/// meeting gate's skip signal: "is this exactly the content whose OCR
+/// result we already stored?" — replacing the earlier geometry+ink
+/// fingerprint *stability* gate, which starved continuously-changing
+/// surfaces (see `meeting_ocr_gate` docs).
+///
+/// Cost: one luma pass over the region pixels (`O(total box area)`), well
+/// under the detect pass that produced the regions.
+pub fn region_pixel_signature(image: &DynamicImage, regions: &[TextRegion]) -> u64 {
+    let gray = to_gray_bt601(image);
+    let (w, h) = (image.width(), image.height());
+    let mut hasher = DefaultHasher::new();
+    regions.len().hash(&mut hasher);
+    let mut row_buf: Vec<u8> = Vec::new();
+    for r in regions {
+        (r.x, r.y, r.width, r.height).hash(&mut hasher);
+        let x0 = r.x.min(w) as usize;
+        let y0 = r.y.min(h) as usize;
+        let x1 = r.x.saturating_add(r.width).min(w) as usize;
+        let y1 = r.y.saturating_add(r.height).min(h) as usize;
+        for y in y0..y1 {
+            let row = &gray[y * w as usize + x0..y * w as usize + x1];
+            row_buf.clear();
+            row_buf.extend(row.iter().map(|&px| px >> 3));
+            std::hash::Hasher::write(&mut hasher, &row_buf);
+        }
+    }
+    hasher.finish()
+}
+
 /// Union bounding box of all regions, expanded by `pad` on each side and
 /// clamped to the frame. `None` when there are no regions. This is the crop
 /// the sparse-mode OCR call runs on (#5054: one OCR call on the padded union
@@ -630,6 +665,58 @@ mod tests {
             "in-place content change must alter the fingerprint: dense={:?} sparse={:?}",
             r_dense[0],
             r_sparse[0]
+        );
+    }
+
+    #[test]
+    fn pixel_signature_exact_on_identity_sensitive_to_content_and_position() {
+        let mut a = light_canvas(400, 300);
+        draw_text_like_line(&mut a, 50, 100, 10);
+        let img_a = DynamicImage::ImageRgb8(a.clone());
+        let regions = detect_text_regions(&img_a);
+        assert_eq!(regions.len(), 1);
+
+        // Identical pixels + regions → identical signature.
+        let s_a = region_pixel_signature(&img_a, &regions);
+        assert_eq!(
+            s_a,
+            region_pixel_signature(&DynamicImage::ImageRgb8(a.clone()), &regions)
+        );
+
+        // In-place content change with the same blob geometry (thinner
+        // strokes across the same span) → different signature. This is the
+        // "bounds are the same, diff the pixels" case.
+        let mut thin = light_canvas(400, 300);
+        for s in 0..10u32 {
+            let sx = 50 + s * 7;
+            for dy in 0..12 {
+                thin.put_pixel(sx, 100 + dy, Rgb([10, 10, 10]));
+            }
+        }
+        let img_thin = DynamicImage::ImageRgb8(thin);
+        let r_thin = detect_text_regions(&img_thin);
+        assert_eq!(r_thin.len(), 1);
+        assert_ne!(s_a, region_pixel_signature(&img_thin, &r_thin));
+
+        // Same content at a different position → different signature (the
+        // box coordinates are hashed too).
+        let mut moved = light_canvas(400, 300);
+        draw_text_like_line(&mut moved, 50, 200, 10);
+        let img_moved = DynamicImage::ImageRgb8(moved);
+        let r_moved = detect_text_regions(&img_moved);
+        assert_eq!(r_moved.len(), 1);
+        assert_ne!(s_a, region_pixel_signature(&img_moved, &r_moved));
+
+        // Sub-quantum luma noise (±2 on a 32-level quantization) does not
+        // flip the signature — tolerance for capture-pipeline jitter.
+        let mut noisy = a.clone();
+        for px in noisy.pixels_mut() {
+            px.0 = [px.0[0].saturating_add(2), px.0[1], px.0[2]];
+        }
+        // Quantized luma moves by <1 level for a +2 red-channel nudge.
+        assert_eq!(
+            s_a,
+            region_pixel_signature(&DynamicImage::ImageRgb8(noisy), &regions)
         );
     }
 

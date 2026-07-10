@@ -65,7 +65,7 @@ mod macos {
     use screenpipe_capture::{MeetingOcrDecision, MeetingOcrGate};
     use screenpipe_screen::monitor::{get_default_monitor, get_monitor_by_id, SafeMonitor};
     use screenpipe_screen::text_regions::{
-        detect_text_regions, region_fingerprint, TextRegion,
+        detect_text_regions, region_pixel_signature, TextRegion,
     };
     use serde_json::{json, Value};
     use std::collections::{HashMap, HashSet};
@@ -368,11 +368,10 @@ mod macos {
         let mut decision_label = "skip_backoff";
         let mut detect_ms: Option<u64> = None;
         let mut optimized_ocr_ms: Option<u64> = None;
-        // Raw fingerprint of this tick's detect regions (when a detect ran).
-        // Lets analysis distinguish "content changed but fingerprint blind"
-        // (fp stable across a visible change) from "fingerprint churning so
-        // the 2-consecutive-detects stability gate never confirms" (fp
-        // different on every detect — e.g. a ticking timer in the surface).
+        // Content signature of this tick's detect (when one ran) — the
+        // gate's actual skip signal (box coords + quantized pixels inside).
+        // Logged so analysis can see signature churn: consecutive-detect
+        // signature changes are exactly what drives OCR now.
         let mut fingerprint: Option<String> = None;
         let mut regions_count: Option<usize> = None;
         if gate.detection_due(&app_key, now) {
@@ -382,16 +381,19 @@ mod macos {
                 None => frame.clone(),
             };
             let detect_for_task = detect_image.clone();
-            let regions =
-                tokio::task::spawn_blocking(move || detect_text_regions(&detect_for_task))
-                    .await?;
+            let (regions, signature) = tokio::task::spawn_blocking(move || {
+                let regions = detect_text_regions(&detect_for_task);
+                let signature = region_pixel_signature(&detect_for_task, &regions);
+                (regions, signature)
+            })
+            .await?;
             detect_ms = Some(detect_started.elapsed().as_millis() as u64);
-            fingerprint = Some(format!("{:016x}", region_fingerprint(&regions)));
+            fingerprint = Some(format!("{signature:016x}"));
             regions_count = Some(regions.len());
             let (gate_w, gate_h) = window_crop
                 .map(|w| (w.width, w.height))
                 .unwrap_or((frame_w, frame_h));
-            let decision = gate.observe(&app_key, now, &regions, gate_w, gate_h);
+            let decision = gate.observe(&app_key, now, &regions, signature, gate_w, gate_h);
             let ocr_region: Option<TextRegion> = match decision {
                 MeetingOcrDecision::Skip => {
                     decision_label = "skip_unchanged";

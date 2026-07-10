@@ -20,7 +20,7 @@ use screenpipe_a11y::tree::{create_tree_walker, TreeSnapshot, TreeWalkerConfig};
 use screenpipe_core::pii_removal::remove_pii;
 use screenpipe_db::DatabaseManager;
 use screenpipe_screen::snapshot_writer::SnapshotWriter;
-use screenpipe_screen::text_regions::{detect_text_regions, TextRegion};
+use screenpipe_screen::text_regions::{detect_text_regions, region_pixel_signature, TextRegion};
 use screenpipe_screen::MeetingGateDecision;
 
 use crate::meeting_ocr_gate::{MeetingOcrDecision, MeetingOcrGate};
@@ -315,20 +315,18 @@ pub async fn paired_capture(
     let mut meeting_gate_detect_duration: Option<std::time::Duration> = None;
     let mut ocr_crop: Option<TextRegion> = None;
     // Meeting-window scoping: when the focused window's bounds are known,
-    // the detect and any escalated OCR run on the window's rectangle
-    // instead of the whole monitor (see `focused_window_bounds`). The gate's
-    // fingerprint then lives in window-local coordinates, which also makes
+    // the detect and any OCR run on the window's rectangle instead of the
+    // whole monitor (see `focused_window_bounds`). The gate's content
+    // signature then lives in window-local coordinates, which also makes
     // it invariant to the window being dragged around. `None` (bounds
     // unavailable, degenerate after clamping, or effectively fullscreen)
     // keeps the monitor-frame behavior.
     //
-    // Known bounded cost: a Some↔None flip in bounds availability (the
-    // a11y walk intermittently failing) changes the fingerprint's
-    // coordinate space, so a SUSTAINED flip re-OCRs the unchanged screen
-    // once — the new fingerprint must still repeat across consecutive
-    // detects to escalate, so per-capture flicker never stabilizes and
-    // stays skipped. Same class as the documented A→B→A screen-alternation
-    // limitation in the gate's fingerprint memory.
+    // Known bounded cost: a flip in bounds availability (the a11y walk
+    // intermittently failing) changes the detect surface and therefore the
+    // signature, re-OCRing the unchanged screen once per flip — same class
+    // as the documented A→B→A screen-alternation limitation in the gate's
+    // single-state memory.
     let (frame_w, frame_h) = ctx.image.dimensions();
     let window_crop = if meeting_scoped {
         ctx.focused_window_bounds
@@ -347,15 +345,22 @@ pub async fn paired_capture(
                         Some(w) => Arc::new(ctx.image.crop_imm(w.x, w.y, w.width, w.height)),
                         None => ctx.image.clone(),
                     };
-                    let regions =
-                        tokio::task::spawn_blocking(move || detect_text_regions(&image_for_detect))
-                            .await
-                            .unwrap_or_default();
+                    // Detect + content signature in one blocking hop: the
+                    // signature (box coords + quantized pixels inside them)
+                    // is the gate's exact-match skip signal.
+                    let (regions, signature) = tokio::task::spawn_blocking(move || {
+                        let regions = detect_text_regions(&image_for_detect);
+                        let signature = region_pixel_signature(&image_for_detect, &regions);
+                        (regions, signature)
+                    })
+                    .await
+                    .unwrap_or_default();
                     meeting_gate_detect_duration = Some(detect_started.elapsed());
                     let (gate_w, gate_h) = window_crop
                         .map(|w| (w.width, w.height))
                         .unwrap_or((frame_w, frame_h));
-                    let decision = gate.observe(&app_key, now, &regions, gate_w, gate_h);
+                    let decision =
+                        gate.observe(&app_key, now, &regions, signature, gate_w, gate_h);
                     debug!(
                         "meeting OCR gate: {} regions in {:?} -> {:?} (app={}, window_crop={:?})",
                         regions.len(),
