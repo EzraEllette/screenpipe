@@ -511,7 +511,15 @@ mod speaker_reassignment_tests {
             .await
             .unwrap();
         let t0 = chrono::Utc::now();
-        seed_mirrored_segment(&db, meeting_id, chunk_id, "speaker 1", "first utterance", t0).await;
+        seed_mirrored_segment(
+            &db,
+            meeting_id,
+            chunk_id,
+            "speaker 1",
+            "first utterance",
+            t0,
+        )
+        .await;
         seed_mirrored_segment(
             &db,
             meeting_id,
@@ -550,5 +558,4 @@ mod speaker_reassignment_tests {
             );
         }
     }
-
 }

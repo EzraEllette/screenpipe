@@ -971,7 +971,10 @@ impl DatabaseManager {
 
         for (idx, seg_ms) in unresolved.drain(..) {
             let seg = &mut segments[idx];
-            let key = (seg.device_type == "input", seg.transcript.trim().to_string());
+            let key = (
+                seg.device_type == "input",
+                seg.transcript.trim().to_string(),
+            );
             let Some(matches) = candidates.get(&key) else {
                 continue;
             };
