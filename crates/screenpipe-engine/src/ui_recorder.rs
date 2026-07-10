@@ -314,6 +314,11 @@ pub struct TreeWalkerSnapshot {
     pub avg_nodes_per_walk: u64,
     pub max_depth_reached: u64,
     pub total_text_chars: u64,
+    /// Event-scoped subtree walks (see `screenpipe_a11y::incremental`)
+    /// that spliced into the cache instead of a full walk.
+    pub walks_merged: u64,
+    /// Captures where the cache was reused outright with no walk at all.
+    pub walks_skipped_by_observer: u64,
 }
 
 /// Outcome of a single production accessibility tree walk, recorded by the
@@ -349,6 +354,20 @@ pub enum TreeWalkOutcome {
     Empty,
     /// Walk failed — no focused window / AX error (`TreeWalkResult::NotFound`).
     Error,
+    /// Event-scoped subtree walk (see `screenpipe_a11y::incremental`)
+    /// spliced fresh content into the cached tree instead of a full walk.
+    /// Carries the same cost metrics as `Stored`/`Deduped`, plus how many
+    /// subtrees were walked.
+    Merged {
+        duration_ms: u64,
+        node_count: u64,
+        max_depth: u64,
+        text_chars: u64,
+        subtree_count: u64,
+    },
+    /// The cache was reused outright with no walk at all — the AX
+    /// observer had live coverage and reported nothing changed.
+    SkippedByObserver,
 }
 
 /// Internal cumulative accumulator behind [`TREE_WALKER_METRICS`]. Stores
@@ -370,6 +389,8 @@ struct TreeWalkerAccumulator {
     sum_nodes: u64,
     max_depth_reached: u64,
     total_text_chars: u64,
+    walks_merged: u64,
+    walks_skipped_by_observer: u64,
 }
 
 impl TreeWalkerAccumulator {
@@ -397,6 +418,8 @@ impl TreeWalkerAccumulator {
             avg_nodes_per_walk: avg(self.sum_nodes),
             max_depth_reached: self.max_depth_reached,
             total_text_chars: self.total_text_chars,
+            walks_merged: self.walks_merged,
+            walks_skipped_by_observer: self.walks_skipped_by_observer,
         }
     }
 }
@@ -461,6 +484,23 @@ pub fn record_tree_walk(outcome: TreeWalkOutcome) {
         }
         TreeWalkOutcome::Error => {
             acc.walks_error += 1;
+        }
+        TreeWalkOutcome::Merged {
+            duration_ms,
+            node_count,
+            max_depth,
+            text_chars,
+            subtree_count: _,
+        } => {
+            acc.walks_merged += 1;
+            acc.sum_walk_duration_ms += duration_ms;
+            acc.max_walk_duration_ms = acc.max_walk_duration_ms.max(duration_ms);
+            acc.sum_nodes += node_count;
+            acc.max_depth_reached = acc.max_depth_reached.max(max_depth);
+            acc.total_text_chars += text_chars;
+        }
+        TreeWalkOutcome::SkippedByObserver => {
+            acc.walks_skipped_by_observer += 1;
         }
     }
 }
@@ -2255,6 +2295,21 @@ mod tests {
             }
             TreeWalkOutcome::Empty => acc.walks_empty += 1,
             TreeWalkOutcome::Error => acc.walks_error += 1,
+            TreeWalkOutcome::Merged {
+                duration_ms,
+                node_count,
+                max_depth,
+                text_chars,
+                subtree_count: _,
+            } => {
+                acc.walks_merged += 1;
+                acc.sum_walk_duration_ms += duration_ms;
+                acc.max_walk_duration_ms = acc.max_walk_duration_ms.max(duration_ms);
+                acc.sum_nodes += node_count;
+                acc.max_depth_reached = acc.max_depth_reached.max(max_depth);
+                acc.total_text_chars += text_chars;
+            }
+            TreeWalkOutcome::SkippedByObserver => acc.walks_skipped_by_observer += 1,
         }
     }
 
@@ -2318,5 +2373,33 @@ mod tests {
         assert_eq!(snap.truncation_rate, 0.0);
         assert_eq!(snap.avg_walk_duration_ms, 0);
         assert_eq!(snap.avg_nodes_per_walk, 0);
+    }
+
+    #[test]
+    fn tree_walker_accumulator_counts_merged_and_skipped_by_observer() {
+        let mut acc = TreeWalkerAccumulator::default();
+        apply(
+            &mut acc,
+            TreeWalkOutcome::Merged {
+                duration_ms: 3,
+                node_count: 5,
+                max_depth: 2,
+                text_chars: 40,
+                subtree_count: 1,
+            },
+        );
+        apply(&mut acc, TreeWalkOutcome::SkippedByObserver);
+        apply(&mut acc, TreeWalkOutcome::SkippedByObserver);
+
+        let snap = acc.snapshot();
+        assert_eq!(snap.walks_total, 3);
+        assert_eq!(snap.walks_merged, 1);
+        assert_eq!(snap.walks_skipped_by_observer, 2);
+        // Merged contributes to the same cost sums Stored/Deduped do, so
+        // averages/maxes stay meaningful across all three outcome kinds.
+        assert_eq!(snap.max_walk_duration_ms, 3);
+        assert_eq!(snap.total_text_chars, 40);
+        // SkippedByObserver carries no cost data — must not corrupt sums.
+        assert_eq!(snap.avg_walk_duration_ms, 1); // 3 / 3 total
     }
 }

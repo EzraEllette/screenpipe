@@ -596,6 +596,17 @@ pub trait TreeWalkerPlatform: Send {
     ) -> Result<crate::incremental::SubtreeWalkOutcome> {
         Ok(crate::incremental::SubtreeWalkOutcome::PathMismatch)
     }
+
+    /// Resolve the currently-focused window's identity (pid + an opaque
+    /// window key) without doing a full walk — cheap enough to call once
+    /// after every full walk, to seed `incremental::SnapshotCache`'s
+    /// identity. Returns `None` if focus can't be resolved right now, or on
+    /// platforms without a real implementation — either way, the caller
+    /// simply can't populate the cache for this capture, which is the same
+    /// safe "fast path never engages" degradation as everywhere else.
+    fn resolve_focused_identity(&self) -> Option<crate::incremental::WindowIdentity> {
+        None
+    }
 }
 
 /// Create a platform-appropriate tree walker.

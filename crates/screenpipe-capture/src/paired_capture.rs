@@ -399,10 +399,30 @@ pub async fn paired_capture(
 ///
 /// This is a blocking operation that should be spawned on a blocking thread.
 pub fn walk_accessibility_tree(config: &TreeWalkerConfig) -> screenpipe_a11y::tree::TreeWalkResult {
+    walk_accessibility_tree_for_incremental(config).tree
+}
+
+/// Result of a full walk that also carries what
+/// `screenpipe_a11y::incremental::SnapshotCache` needs to seed itself: the
+/// path-tagged emission stream, and the focused window's identity (when
+/// resolvable). Still exactly one full walk — the extra data comes from
+/// the same walker instance `walk_accessibility_tree` already creates, not
+/// a second one.
+pub struct IncrementalWalkResult {
+    pub tree: screenpipe_a11y::tree::TreeWalkResult,
+    pub records: Vec<screenpipe_a11y::incremental::EmissionRecord>,
+    pub identity: Option<screenpipe_a11y::incremental::WindowIdentity>,
+}
+
+/// Like [`walk_accessibility_tree`], but for callers that also need to
+/// populate `incremental::SnapshotCache` from this walk's result.
+///
+/// This is a blocking operation that should be spawned on a blocking thread.
+pub fn walk_accessibility_tree_for_incremental(config: &TreeWalkerConfig) -> IncrementalWalkResult {
     use screenpipe_a11y::tree::TreeWalkResult;
     let walker = create_tree_walker(config.clone());
-    match walker.walk_focused_window() {
-        Ok(TreeWalkResult::Found(snapshot)) => {
+    let (tree, records) = match walker.walk_focused_window_with_records() {
+        Ok((TreeWalkResult::Found(snapshot), records)) => {
             debug!(
                 "tree walk: app={}, window={}, text_len={}, nodes={}, structured_nodes={}, dur={:?}",
                 snapshot.app_name,
@@ -412,20 +432,33 @@ pub fn walk_accessibility_tree(config: &TreeWalkerConfig) -> screenpipe_a11y::tr
                 snapshot.nodes.len(),
                 snapshot.walk_duration
             );
-            TreeWalkResult::Found(snapshot)
+            (TreeWalkResult::Found(snapshot), records)
         }
-        Ok(TreeWalkResult::Skipped(reason)) => {
+        Ok((TreeWalkResult::Skipped(reason), _)) => {
             debug!("tree walk: window skipped ({})", reason);
-            TreeWalkResult::Skipped(reason)
+            (TreeWalkResult::Skipped(reason), Vec::new())
         }
-        Ok(TreeWalkResult::NotFound) => {
+        Ok((TreeWalkResult::NotFound, _)) => {
             debug!("tree walk: no focused window found");
-            TreeWalkResult::NotFound
+            (TreeWalkResult::NotFound, Vec::new())
         }
         Err(e) => {
             warn!("tree walk failed: {}", e);
-            TreeWalkResult::NotFound
+            (TreeWalkResult::NotFound, Vec::new())
         }
+    };
+    // Only worth resolving (one more cheap AX round-trip) when there's a
+    // clean snapshot for it to identify -- matches `SnapshotCache::populate`
+    // only ever being called for a `Found` result anyway.
+    let identity = if matches!(tree, TreeWalkResult::Found(_)) {
+        walker.resolve_focused_identity()
+    } else {
+        None
+    };
+    IncrementalWalkResult {
+        tree,
+        records,
+        identity,
     }
 }
 

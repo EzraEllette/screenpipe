@@ -362,6 +362,24 @@ impl TreeWalkerPlatform for MacosTreeWalker {
         })
         .map_err(|s| anyhow::anyhow!(s))
     }
+
+    fn resolve_focused_identity(&self) -> Option<WindowIdentity> {
+        cidre::objc::ar_pool(current_window_identity)
+    }
+}
+
+/// Resolve the currently-focused window's pid + title as a `WindowIdentity`,
+/// via a fresh, independent focus resolution — the same AX calls
+/// `walk_subtree_inner` already makes to validate its own `expected`
+/// parameter, just packaged as a value instead of a comparison. Callers
+/// must not treat this as proof a *specific* cached snapshot is still
+/// current — only `walk_subtree`'s own pid/window check at merge time is
+/// the actual safety net for that race.
+fn current_window_identity() -> Option<WindowIdentity> {
+    let (ax_app, pid, _app_name) = resolve_focused_ax_app()?;
+    let window = resolve_focused_window(&ax_app, &_app_name, pid)?;
+    let window_key = get_string_attr(&window, ax::attr::title()).unwrap_or_default();
+    Some(WindowIdentity { pid, window_key })
 }
 
 impl MacosTreeWalker {

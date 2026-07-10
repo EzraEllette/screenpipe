@@ -630,6 +630,15 @@ fn splice_subtree(
 /// record at all, so these two can only ever be a lower bound here —
 /// nothing downstream hashes or dedups on them.
 ///
+/// Returns `(snapshot, records)` — the caller must feed `records` (not
+/// just `snapshot`) back into [`SnapshotCache::populate`] if it wants a
+/// *second* merge to be able to splice into this one's result. Handing
+/// back only the `TreeSnapshot` would silently lose every `TextOnly`
+/// emission on the next merge (`TreeSnapshot::nodes` only ever holds the
+/// `Node` half of the stream — see the module doc comment for why that
+/// distinction exists at all), quietly reintroducing the exact text-loss
+/// bug the `EmissionRecord` model exists to close.
+///
 /// Returns `None` if any change's anchor can't be resolved — the caller
 /// must fall back to a full walk. Changes are applied in
 /// reverse-lexicographic order internally regardless of the order
@@ -643,7 +652,7 @@ pub fn merge(
     cached: &CachedSnapshot,
     mut changes: Vec<(NodePath, SubtreeWalkResult)>,
     walk_duration: Duration,
-) -> Option<TreeSnapshot> {
+) -> Option<(TreeSnapshot, Vec<EmissionRecord>)> {
     changes.sort_by(|a, b| b.0.cmp(&a.0));
 
     let mut records = cached.records.clone();
@@ -666,7 +675,7 @@ pub fn merge(
         .max()
         .unwrap_or(cached.snapshot.max_depth_reached);
 
-    Some(TreeSnapshot {
+    let snapshot = TreeSnapshot {
         app_name: cached.snapshot.app_name.clone(),
         window_name: cached.snapshot.window_name.clone(),
         text_content,
@@ -681,7 +690,9 @@ pub fn merge(
         truncated: false,
         truncation_reason: TruncationReason::None,
         max_depth_reached,
-    })
+    };
+
+    Some((snapshot, records))
 }
 
 // ---------------------------------------------------------------------
@@ -1026,8 +1037,8 @@ mod tests {
         assert!(set.is_invalidated());
         assert_eq!(set.len(), 0);
         assert!(!set.is_empty()); // invalidated, not "nothing happened"
-        // A subsequent record() while invalidated must still be a no-op,
-        // exactly like the overflow path.
+                                  // A subsequent record() while invalidated must still be a no-op,
+                                  // exactly like the overflow path.
         set.record(vec![3], ChangeKind::ValueChanged, 3);
         assert_eq!(set.len(), 0);
     }
@@ -1069,7 +1080,8 @@ mod tests {
                 records: vec![node_record(&[0], "AXStaticText", "FIRST-CHANGED", 0)],
             },
         )];
-        let merged = merge(&cached, changes, Duration::ZERO).expect("anchor exists");
+        let (merged, _merged_records) =
+            merge(&cached, changes, Duration::ZERO).expect("anchor exists");
         let texts: Vec<&str> = merged.nodes.iter().map(|n| n.text.as_str()).collect();
         assert_eq!(texts, vec!["FIRST-CHANGED", "second", "third"]);
         assert_eq!(merged.text_content, "FIRST-CHANGED\nsecond\nthird");
@@ -1088,7 +1100,8 @@ mod tests {
                 records: vec![node_record(&[2], "AXStaticText", "THIRD-CHANGED", 0)],
             },
         )];
-        let merged = merge(&cached, changes, Duration::ZERO).expect("anchor exists");
+        let (merged, _merged_records) =
+            merge(&cached, changes, Duration::ZERO).expect("anchor exists");
         let texts: Vec<&str> = merged.nodes.iter().map(|n| n.text.as_str()).collect();
         assert_eq!(texts, vec!["first", "second", "THIRD-CHANGED"]);
     }
@@ -1106,7 +1119,8 @@ mod tests {
                 ],
             },
         )];
-        let merged = merge(&cached, changes, Duration::ZERO).expect("anchor exists");
+        let (merged, _merged_records) =
+            merge(&cached, changes, Duration::ZERO).expect("anchor exists");
         let texts: Vec<&str> = merged.nodes.iter().map(|n| n.text.as_str()).collect();
         assert_eq!(texts, vec!["new-a", "new-b"]);
     }
@@ -1132,7 +1146,8 @@ mod tests {
                 ],
             },
         )];
-        let merged = merge(&cached, changes, Duration::ZERO).expect("anchor exists");
+        let (merged, _merged_records) =
+            merge(&cached, changes, Duration::ZERO).expect("anchor exists");
         let texts: Vec<&str> = merged.nodes.iter().map(|n| n.text.as_str()).collect();
         assert_eq!(texts, vec!["A", "B-new", "B1-new", "B2-new", "C"]);
     }
@@ -1160,7 +1175,8 @@ mod tests {
                 },
             ),
         ];
-        let merged = merge(&cached, changes, Duration::ZERO).expect("anchors exist");
+        let (merged, _merged_records) =
+            merge(&cached, changes, Duration::ZERO).expect("anchors exist");
         let texts: Vec<&str> = merged.nodes.iter().map(|n| n.text.as_str()).collect();
         assert_eq!(texts, vec!["a-new", "b", "c-new"]);
     }
@@ -1191,7 +1207,8 @@ mod tests {
                 records: vec![node_record(&[1], "AXStaticText", "new", 0)],
             },
         )];
-        let merged = merge(&cached, changes, Duration::ZERO).expect("anchor exists");
+        let (merged, _merged_records) =
+            merge(&cached, changes, Duration::ZERO).expect("anchor exists");
         assert_eq!(merged.text_content, "group-value\nnew");
     }
 
@@ -1210,7 +1227,8 @@ mod tests {
                 ],
             },
         )];
-        let merged = merge(&cached, changes, Duration::ZERO).expect("anchor exists");
+        let (merged, _merged_records) =
+            merge(&cached, changes, Duration::ZERO).expect("anchor exists");
         assert_eq!(merged.text_content, "new-group-value\nnew-child");
         assert_eq!(merged.nodes.len(), 1);
         assert_eq!(merged.nodes[0].text, "new-child");
@@ -1229,7 +1247,8 @@ mod tests {
                 records: vec![node_record(&[2, 1], "AXStaticText", "new-root", 0)],
             },
         )];
-        let merged = merge(&cached, changes, Duration::ZERO).expect("anchor exists");
+        let (merged, _merged_records) =
+            merge(&cached, changes, Duration::ZERO).expect("anchor exists");
         assert_eq!(merged.nodes[0].depth, 7);
     }
 
@@ -1244,7 +1263,8 @@ mod tests {
                 records: vec![node_record(&[2, 1], "AXStaticText", "child", 0)],
             },
         )];
-        let merged = merge(&cached, changes, Duration::ZERO).expect("ancestor anchor exists");
+        let (merged, _merged_records) =
+            merge(&cached, changes, Duration::ZERO).expect("ancestor anchor exists");
         // Ancestor [2] at depth 3, changed path is 1 hop deeper -> base 4,
         // subtree root at relative depth 0 -> absolute 4.
         let child = merged
@@ -1267,7 +1287,8 @@ mod tests {
                 records: vec![node_record(&[2, 1], "AXStaticText", "child", 0)],
             },
         )];
-        let merged = merge(&cached, changes, Duration::ZERO).expect("text-only ancestor anchors");
+        let (merged, _merged_records) =
+            merge(&cached, changes, Duration::ZERO).expect("text-only ancestor anchors");
         assert_eq!(merged.nodes[0].depth, 4);
     }
 
@@ -1282,6 +1303,61 @@ mod tests {
             },
         )];
         assert!(merge(&cached, changes, Duration::ZERO).is_none());
+    }
+
+    // -----------------------------------------------------------------
+    // Chained merges — the returned records, not just the snapshot, must
+    // seed the next cache so a second merge sees the first one's result
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn merge_records_feed_a_second_merge_correctly() {
+        let cached = synthetic_snapshot(vec![
+            text_only_record(&[0], "header-value", 0),
+            node_record(&[1], "AXStaticText", "alpha", 0),
+        ]);
+
+        let (first_merged, first_records) = merge(
+            &cached,
+            vec![(
+                vec![1],
+                SubtreeWalkResult {
+                    records: vec![node_record(&[1], "AXStaticText", "alpha-v2", 0)],
+                },
+            )],
+            Duration::ZERO,
+        )
+        .expect("first anchor exists");
+        assert_eq!(first_merged.text_content, "header-value\nalpha-v2");
+
+        // Re-cache using the RETURNED records (not a fresh synthetic_snapshot
+        // built from first_merged.nodes alone) -- this is the step that
+        // would silently drop "header-value" if a caller used only the
+        // snapshot's `nodes` field to repopulate the cache, since `nodes`
+        // never carries TextOnly emissions.
+        let recached = CachedSnapshot {
+            snapshot: first_merged,
+            records: first_records,
+            identity: cached.identity.clone(),
+            captured_at: 0,
+            observer_live: true,
+        };
+
+        let (second_merged, _) = merge(
+            &recached,
+            vec![(
+                vec![1],
+                SubtreeWalkResult {
+                    records: vec![node_record(&[1], "AXStaticText", "alpha-v3", 0)],
+                },
+            )],
+            Duration::ZERO,
+        )
+        .expect("second anchor exists");
+
+        // The TextOnly contribution from the ORIGINAL cache must still be
+        // present after two chained merges.
+        assert_eq!(second_merged.text_content, "header-value\nalpha-v3");
     }
 
     // -----------------------------------------------------------------
@@ -1301,7 +1377,8 @@ mod tests {
                 records: vec![node_record(&[1], "AXStaticText", "BETA-EDITED", 0)],
             },
         )];
-        let merged = merge(&cached, changes, Duration::ZERO).expect("anchor exists");
+        let (merged, _merged_records) =
+            merge(&cached, changes, Duration::ZERO).expect("anchor exists");
 
         // What a from-scratch full walk of the resulting tree would produce.
         let expected_text = "alpha\nBETA-EDITED\ngamma";
@@ -1332,7 +1409,8 @@ mod tests {
                 ],
             },
         )];
-        let merged = merge(&cached, changes, Duration::ZERO).expect("anchor exists");
+        let (merged, _merged_records) =
+            merge(&cached, changes, Duration::ZERO).expect("anchor exists");
         let expected_text = "header-value\nalpha\nBETA-EDITED\nfooter-value";
         assert_eq!(merged.text_content, expected_text);
         assert_eq!(

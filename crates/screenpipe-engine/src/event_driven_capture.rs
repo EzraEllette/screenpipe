@@ -328,6 +328,36 @@ pub struct EventDrivenCaptureConfig {
     /// loosen the floor the user asked for. `None` = follow the active
     /// PowerProfile's `idle_capture_interval_ms` as before.
     pub idle_capture_interval_override_ms: Option<u64>,
+    /// Event-scoped subtree walks (see `screenpipe_a11y::incremental`).
+    /// No app-UI toggle for this prototype — see [`AxSubtreeWalkMode::from_env`].
+    pub ax_subtree_walk: AxSubtreeWalkMode,
+}
+
+/// Rollout mode for event-scoped subtree walks. Default `Off` makes this
+/// branch behaviorally identical to before it existed: `do_capture` never
+/// even computes a `FastPathDecision`. `Shadow` computes and attempts the
+/// fast path alongside the existing full walk purely for comparison —
+/// storage always comes from the full walk, zero data risk. `On` actually
+/// uses the fast path's result when the decision allows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AxSubtreeWalkMode {
+    #[default]
+    Off,
+    Shadow,
+    On,
+}
+
+impl AxSubtreeWalkMode {
+    /// No settings-UI plumbing for this prototype (see the original design
+    /// doc) — controlled by an env var so it's still toggleable for
+    /// dogfooding without a user-facing surface.
+    pub fn from_env() -> Self {
+        match std::env::var("SCREENPIPE_AX_SUBTREE_WALK").ok().as_deref() {
+            Some("shadow") => Self::Shadow,
+            Some("on") => Self::On,
+            _ => Self::Off,
+        }
+    }
 }
 
 impl Default for EventDrivenCaptureConfig {
@@ -343,6 +373,7 @@ impl Default for EventDrivenCaptureConfig {
             visual_change_threshold: 0.05,   // ~5% difference triggers capture
             disable_screenshots: false,
             idle_capture_interval_override_ms: None, // follow PowerProfile unless pinned
+            ax_subtree_walk: AxSubtreeWalkMode::from_env(),
         }
     }
 }
@@ -751,14 +782,13 @@ pub async fn event_driven_capture_loop(
     // for expensive apps (e.g., Electron apps whose UIA providers block the UI thread).
     let mut walk_budget = screenpipe_a11y::budget::AppWalkBudget::new();
 
-    // Event-scoped subtree walks: accumulates native AX content-change
-    // notifications between captures. Not yet consumed by `do_capture` —
-    // populating this is step one of wiring the fast path in; the actual
-    // `incremental::decide`/`merge` integration needs a cheap way to
-    // resolve the focused window's pid before the walk, which doesn't
-    // exist in this loop's data flow yet (see `LightweightFocusedMetadata`,
-    // which only carries app/window name). This accumulates real signal so
-    // that integration can be verified against live data once it lands.
+    // Event-scoped subtree walks (see `screenpipe_a11y::incremental`).
+    // `snapshot_cache` holds the last clean full walk per this monitor;
+    // `ax_changed_set` accumulates native AX content-change notifications
+    // between captures. Both are consulted by `do_capture` via
+    // `incremental::decide`, gated by `config.ax_subtree_walk`
+    // (`AxSubtreeWalkMode::Off` by default — see its doc comment).
+    let mut snapshot_cache = screenpipe_a11y::incremental::SnapshotCache::new();
     let mut ax_changed_set = screenpipe_a11y::incremental::ChangedSet::new();
     // Wall-clock origin for translating the observer's own `Instant`-based
     // timestamps (relative to *its* start) isn't available here — the
@@ -873,6 +903,10 @@ pub async fn event_driven_capture_loop(
                 false, // screenshot enabled on startup
                 false, // hd not active at startup (Manual is dedup-exempt anyway)
                 false, // not in a meeting at startup
+                &mut snapshot_cache,
+                &mut ax_changed_set,
+                ax_changes_loop_start.elapsed().as_nanos() as u64,
+                state.config.ax_subtree_walk,
             ),
         )
         .await
@@ -987,6 +1021,13 @@ pub async fn event_driven_capture_loop(
             let is_cold = matches!(capture_state, CaptureState::Cold);
             if is_cold && !was_cold {
                 monitor.release_capture_stream();
+                // Cold means this monitor isn't focused -- by the time
+                // focus returns, an AppSwitch/WindowFocus trigger will
+                // fire and invalidate anyway, but clearing now means a
+                // stale cache never lingers across an unbounded Cold
+                // stretch in the meantime.
+                snapshot_cache.invalidate();
+                ax_changed_set.clear();
             }
             was_cold = is_cold;
 
@@ -1115,6 +1156,11 @@ pub async fn event_driven_capture_loop(
                     crate::schedule_monitor::schedule_paused(),
                 );
                 monitor.release_capture_stream();
+                // Screen lock / DRM / power-pause / schedule-pause can all
+                // outlast a single capture cycle with no intervening
+                // AppSwitch to invalidate on -- clear explicitly on entry.
+                snapshot_cache.invalidate();
+                ax_changed_set.clear();
             }
             was_in_pause_state = true;
             // Drain triggers that piled up while paused so the linker
@@ -1400,6 +1446,7 @@ pub async fn event_driven_capture_loop(
                         "AX-change channel lagged by {} messages on monitor {}",
                         n, monitor_id
                     );
+                    ax_changed_set.force_invalidate();
                     continue;
                 }
             }
@@ -1480,8 +1527,29 @@ pub async fn event_driven_capture_loop(
                 last_content_hash = None;
                 // Also reset elements cache on context change
                 last_elements_cache.remove(&device_name);
-                // Whatever the AX observer accumulated described the
-                // previous app/window -- stale in the new context.
+            }
+
+            // Event-scoped subtree walks: invalidate the cached tree (and
+            // whatever changes were accumulated against it) on every
+            // trigger kind that means "the AX observer's coverage can no
+            // longer be trusted for what's about to be captured" --
+            // app/window switches obviously, but also scroll/click/visual
+            // change, since those can mutate on-screen content in ways the
+            // registered notifications (value/title/layout/destroyed on
+            // specific elements) don't reliably cover end-to-end. This is
+            // deliberately conservative for this prototype: it means
+            // Click/ScrollStop/VisualChange captures always take a full
+            // walk, and only the AX-notification-dense triggers (typing,
+            // clipboard) ever actually see a skip or merge.
+            if matches!(
+                trigger,
+                CaptureTrigger::AppSwitch { .. }
+                    | CaptureTrigger::WindowFocus { .. }
+                    | CaptureTrigger::ScrollStop
+                    | CaptureTrigger::Click { .. }
+                    | CaptureTrigger::VisualChange
+            ) {
+                snapshot_cache.invalidate();
                 ax_changed_set.clear();
             }
 
@@ -1603,6 +1671,10 @@ pub async fn event_driven_capture_loop(
                         screenshot_disabled,
                         hd_active,
                         in_meeting,
+                        &mut snapshot_cache,
+                        &mut ax_changed_set,
+                        ax_changes_loop_start.elapsed().as_nanos() as u64,
+                        state.config.ax_subtree_walk,
                     ),
                 )
                 .await;
@@ -2356,6 +2428,10 @@ async fn do_capture(
     screenshot_disabled: bool,
     hd_active: bool,
     in_meeting: bool,
+    snapshot_cache: &mut screenpipe_a11y::incremental::SnapshotCache,
+    changed_set: &mut screenpipe_a11y::incremental::ChangedSet,
+    ax_now: screenpipe_a11y::incremental::MonoTimestamp,
+    ax_mode: AxSubtreeWalkMode,
 ) -> Result<CaptureOutput> {
     let captured_at = Utc::now();
     let bypass_capture_throttles = bypasses_capture_throttles(trigger);
@@ -2511,10 +2587,196 @@ async fn do_capture(
         config.walk_timeout_override = Some(decision.timeout);
     }
 
-    let tree_walk_result = tokio::task::spawn_blocking(move || {
-        screenpipe_capture::paired_capture::walk_accessibility_tree(&config)
-    })
-    .await?;
+    // Event-scoped subtree walks (see `screenpipe_a11y::incremental`).
+    // `Off` costs one enum comparison and nothing else — no decision is
+    // even computed. `Shadow` computes a decision and, when it allows a
+    // merge/skip, attempts the fast path purely for comparison: storage
+    // always comes from the full walk below, so shadow mode carries zero
+    // data risk. `On` uses the fast path's result directly when it
+    // succeeds, falling back to a full walk on any anchor miss or path
+    // mismatch — the same universal "give up and ask for a full walk"
+    // rule every layer of this feature follows.
+    //
+    // Identity for the decision: whatever the cache currently claims to
+    // represent. This is intentional, not a shortcut — cache/identity
+    // consistency is maintained by explicit invalidation (app switch,
+    // window switch, scroll, click, visual change, pause/Cold entry — see
+    // the invalidation call sites in `event_driven_capture_loop`), and the
+    // actual adversarial check against a *stale* identity already lives
+    // inside `walk_subtree` itself (it re-resolves focus fresh and bails
+    // to `PathMismatch` on any mismatch). A sentinel identity when the
+    // cache is empty is safe: `decide()` checks `cache.get().is_none()`
+    // before ever inspecting `identity`.
+    let ax_identity = snapshot_cache.get().map(|c| c.identity.clone()).unwrap_or(
+        screenpipe_a11y::incremental::WindowIdentity {
+            pid: -1,
+            window_key: String::new(),
+        },
+    );
+    let ax_decision = if ax_mode == AxSubtreeWalkMode::Off {
+        None
+    } else {
+        let decision =
+            screenpipe_a11y::incremental::decide(screenpipe_a11y::incremental::DecisionInputs {
+                cache: snapshot_cache,
+                changed_set,
+                identity: &ax_identity,
+                now: ax_now,
+                trigger_allows_fast_path: dedup_applies(
+                    trigger,
+                    hd_active,
+                    in_meeting,
+                    last_db_write.elapsed(),
+                ),
+                inputs_quiescent: !matches!(trigger, CaptureTrigger::KeyPress),
+            });
+        // Every entry has now either been folded into an attempted merge
+        // or judged irrelevant (SkipWalk/FullWalk) -- either way the next
+        // capture starts counting fresh from whatever this one produces.
+        changed_set.clear();
+        Some(decision)
+    };
+
+    // Attempt the fast path. `fast_path_snapshot` is `Some` only on a
+    // clean Found result; `fast_path_abort_reason` explains why it isn't
+    // when a Merge was attempted and failed (SkipWalk failing just means
+    // the cache emptied between `decide()` and here, vanishingly rare).
+    let mut fast_path_snapshot: Option<screenpipe_a11y::tree::TreeSnapshot> = None;
+    let mut fast_path_records: Option<Vec<screenpipe_a11y::incremental::EmissionRecord>> = None;
+    let mut fast_path_abort_reason: Option<&'static str> = None;
+    let mut fast_path_was_skip = false;
+    let mut fast_path_subtree_count: u64 = 0;
+    if let Some(ref decision) = ax_decision {
+        match decision {
+            screenpipe_a11y::incremental::FastPathDecision::SkipWalk => {
+                if let Some(cached) = snapshot_cache.get() {
+                    fast_path_snapshot = Some(cached.snapshot.clone());
+                    fast_path_was_skip = true;
+                } else {
+                    fast_path_abort_reason = Some("no_cache");
+                }
+            }
+            screenpipe_a11y::incremental::FastPathDecision::Merge(paths) => {
+                fast_path_subtree_count = paths.len() as u64;
+                let identity_for_walk = ax_identity.clone();
+                let paths_for_walk = paths.clone();
+                let config_for_walk = config.clone();
+                let subtree_start = Instant::now();
+                let subtree_result = tokio::task::spawn_blocking(move || {
+                    let walker = screenpipe_a11y::tree::create_tree_walker(config_for_walk);
+                    let mut changes = Vec::with_capacity(paths_for_walk.len());
+                    for path in paths_for_walk {
+                        match walker.walk_subtree(&identity_for_walk, &path) {
+                            Ok(screenpipe_a11y::incremental::SubtreeWalkOutcome::Found(
+                                subtree,
+                            )) => {
+                                changes.push((path, subtree));
+                            }
+                            _ => return None,
+                        }
+                    }
+                    Some(changes)
+                })
+                .await?;
+                let subtree_duration = subtree_start.elapsed();
+                match subtree_result {
+                    Some(changes) => match snapshot_cache.get() {
+                        Some(cached) => {
+                            match screenpipe_a11y::incremental::merge(
+                                cached,
+                                changes,
+                                subtree_duration,
+                            ) {
+                                Some((merged, merged_records)) => {
+                                    fast_path_snapshot = Some(merged);
+                                    fast_path_records = Some(merged_records);
+                                }
+                                None => fast_path_abort_reason = Some("no_anchor"),
+                            }
+                        }
+                        None => fast_path_abort_reason = Some("no_cache"),
+                    },
+                    None => fast_path_abort_reason = Some("path_mismatch"),
+                }
+            }
+            screenpipe_a11y::incremental::FastPathDecision::FullWalk(_) => {}
+        }
+    }
+
+    // `ax_walk_source` gates the walk-budget update below (subtree/skip
+    // outcomes must never feed `AppWalkBudget::record_walk` — see that
+    // type's own doc comment) and is logged for visibility either way.
+    let ax_walk_source: &'static str;
+    let tree_walk_result: TreeWalkResult = if ax_mode == AxSubtreeWalkMode::On
+        && fast_path_snapshot.is_some()
+    {
+        ax_walk_source = if fast_path_was_skip {
+            "ax_skip"
+        } else {
+            "ax_merge"
+        };
+        let snap = fast_path_snapshot.take().expect("checked above");
+        // A merge's cache re-population uses the RECORDS this merge
+        // produced (`fast_path_records`), not a re-derivation from
+        // `snap.nodes` alone — see `merge`'s doc comment for why that
+        // distinction is load-bearing (nodes-only would silently drop
+        // every TextOnly emission on the *next* merge).
+        if let Some(records) = fast_path_records.take() {
+            snapshot_cache.populate(snap.clone(), records, ax_identity.clone(), ax_now);
+        }
+        TreeWalkResult::Found(snap)
+    } else {
+        if ax_mode == AxSubtreeWalkMode::Off {
+            debug!(
+                "ax subtree walk: {:?} (mode=off, no decision computed)",
+                fast_path_abort_reason
+            );
+        } else if let Some(reason) = fast_path_abort_reason {
+            debug!(
+                "ax subtree walk: fast path aborted ({}), falling back to full walk",
+                reason
+            );
+        }
+        let config_for_full = config.clone();
+        let full = tokio::task::spawn_blocking(move || {
+            screenpipe_capture::paired_capture::walk_accessibility_tree_for_incremental(
+                &config_for_full,
+            )
+        })
+        .await?;
+        if let TreeWalkResult::Found(ref snap) = full.tree {
+            if let Some(identity) = full.identity {
+                // `populate` internally refuses truncated snapshots (clears
+                // the slot instead) — no need to check `snap.truncated` here.
+                snapshot_cache.populate(snap.clone(), full.records, identity, ax_now);
+            }
+        }
+        if ax_mode == AxSubtreeWalkMode::Shadow {
+            match (&fast_path_snapshot, &full.tree) {
+                (Some(fp_snap), TreeWalkResult::Found(ref full_snap)) => {
+                    let hash_matches = fp_snap.content_hash == full_snap.content_hash;
+                    if !hash_matches {
+                        warn!(
+                            "ax subtree walk shadow MISMATCH: fast_path_hash={} full_walk_hash={} decision={:?} app={:?}",
+                            fp_snap.content_hash, full_snap.content_hash, ax_decision, trigger_app,
+                        );
+                    } else {
+                        debug!(
+                            "ax subtree walk shadow: hash matched full walk (decision={:?})",
+                            ax_decision
+                        );
+                    }
+                }
+                _ => {
+                    if let Some(reason) = fast_path_abort_reason {
+                        debug!("ax subtree walk shadow: fast path aborted ({})", reason);
+                    }
+                }
+            }
+        }
+        ax_walk_source = "full";
+        full.tree
+    };
 
     // If the window was skipped (incognito/private browsing or user filter),
     // bail out entirely — don't OCR the screenshot.
@@ -2527,21 +2789,30 @@ async fn do_capture(
     // attempts — they're user/incognito filters, not real walks.
     match tree_walk_result {
         TreeWalkResult::Found(ref snap) => {
-            walk_budget.record_walk(&snap.app_name, snap.walk_duration, snap.truncated);
-            if snap.walk_duration > std::time::Duration::from_millis(100) {
-                let next = walk_budget.should_walk(&snap.app_name);
-                debug!(
-                    "walk budget: {}ms for {} → tier={:?} (next: max_nodes={}, timeout={}ms)",
-                    snap.walk_duration.as_millis(),
-                    snap.app_name,
-                    next.tier,
-                    next.max_nodes,
-                    next.timeout.as_millis(),
-                );
+            // Budget stats reflect real walk cost -- a subtree walk (3ms) or
+            // a skip (0ms) must never launder an app's Critical tier into
+            // Light. Only a genuine full walk updates it.
+            if ax_walk_source == "full" {
+                walk_budget.record_walk(&snap.app_name, snap.walk_duration, snap.truncated);
+                if snap.walk_duration > std::time::Duration::from_millis(100) {
+                    let next = walk_budget.should_walk(&snap.app_name);
+                    debug!(
+                        "walk budget: {}ms for {} → tier={:?} (next: max_nodes={}, timeout={}ms)",
+                        snap.walk_duration.as_millis(),
+                        snap.app_name,
+                        next.tier,
+                        next.max_nodes,
+                        next.timeout.as_millis(),
+                    );
+                }
             }
 
             use screenpipe_a11y::tree::TruncationReason;
-            if snap.text_content.is_empty() {
+            if ax_walk_source == "ax_skip" {
+                crate::ui_recorder::record_tree_walk(
+                    crate::ui_recorder::TreeWalkOutcome::SkippedByObserver,
+                );
+            } else if snap.text_content.is_empty() {
                 crate::ui_recorder::record_tree_walk(crate::ui_recorder::TreeWalkOutcome::Empty);
             } else {
                 let duration_ms = snap.walk_duration.as_millis() as u64;
@@ -2550,39 +2821,52 @@ async fn do_capture(
                 // UTF-8 byte length (O(1)) as a cheap text-volume proxy —
                 // avoids an O(n) char-count scan on the capture path.
                 let text_chars = snap.text_content.len() as u64;
-                let truncated = snap.truncated;
-                let truncated_timeout = matches!(snap.truncation_reason, TruncationReason::Timeout);
-                let truncated_max_nodes =
-                    matches!(snap.truncation_reason, TruncationReason::MaxNodes);
-                // Mirror the downstream content-dedup gate: a non-empty walk
-                // whose hash matches the previous frame (and which is dedup
-                // eligible) won't be stored — count it as deduped.
-                let is_dedup =
-                    dedup_applies(trigger, hd_active, in_meeting, last_db_write.elapsed())
-                        && previous_content_hash
-                            .is_some_and(|prev| prev == snap.content_hash as i64 && prev != 0);
-                let outcome = if is_dedup {
-                    crate::ui_recorder::TreeWalkOutcome::Deduped {
-                        duration_ms,
-                        node_count,
-                        max_depth,
-                        text_chars,
-                        truncated,
-                        truncated_timeout,
-                        truncated_max_nodes,
-                    }
+                if ax_walk_source == "ax_merge" {
+                    crate::ui_recorder::record_tree_walk(
+                        crate::ui_recorder::TreeWalkOutcome::Merged {
+                            duration_ms,
+                            node_count,
+                            max_depth,
+                            text_chars,
+                            subtree_count: fast_path_subtree_count,
+                        },
+                    );
                 } else {
-                    crate::ui_recorder::TreeWalkOutcome::Stored {
-                        duration_ms,
-                        node_count,
-                        max_depth,
-                        text_chars,
-                        truncated,
-                        truncated_timeout,
-                        truncated_max_nodes,
-                    }
-                };
-                crate::ui_recorder::record_tree_walk(outcome);
+                    let truncated = snap.truncated;
+                    let truncated_timeout =
+                        matches!(snap.truncation_reason, TruncationReason::Timeout);
+                    let truncated_max_nodes =
+                        matches!(snap.truncation_reason, TruncationReason::MaxNodes);
+                    // Mirror the downstream content-dedup gate: a non-empty walk
+                    // whose hash matches the previous frame (and which is dedup
+                    // eligible) won't be stored — count it as deduped.
+                    let is_dedup =
+                        dedup_applies(trigger, hd_active, in_meeting, last_db_write.elapsed())
+                            && previous_content_hash
+                                .is_some_and(|prev| prev == snap.content_hash as i64 && prev != 0);
+                    let outcome = if is_dedup {
+                        crate::ui_recorder::TreeWalkOutcome::Deduped {
+                            duration_ms,
+                            node_count,
+                            max_depth,
+                            text_chars,
+                            truncated,
+                            truncated_timeout,
+                            truncated_max_nodes,
+                        }
+                    } else {
+                        crate::ui_recorder::TreeWalkOutcome::Stored {
+                            duration_ms,
+                            node_count,
+                            max_depth,
+                            text_chars,
+                            truncated,
+                            truncated_timeout,
+                            truncated_max_nodes,
+                        }
+                    };
+                    crate::ui_recorder::record_tree_walk(outcome);
+                }
             }
         }
         TreeWalkResult::NotFound => {
