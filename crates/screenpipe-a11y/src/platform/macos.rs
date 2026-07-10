@@ -9,6 +9,7 @@
 use crate::activity_feed::{ActivityFeed, ActivityKind};
 use crate::config::UiCaptureConfig;
 use crate::events::{ElementBounds, ElementContext, EventData, Modifiers, UiEvent};
+use crate::incremental::{ChangeKind, ChangedEntry, NodePath};
 use crate::scroll::{ScrollBuffer, ScrollFlush};
 use anyhow::Result;
 use arc_swap::ArcSwap;
@@ -141,6 +142,21 @@ pub struct UiRecorder {
 pub struct RecordingHandle {
     stop: Arc<AtomicBool>,
     events_rx: Receiver<UiEvent>,
+    /// Native AX content-change notifications (`value_changed`/
+    /// `title_changed`/`layout_changed`/`ui_element_destroyed`) from the app
+    /// observer, for the event-scoped-subtree-walk fast path. Separate from
+    /// `events_rx` rather than a new `EventData` variant on the same
+    /// channel — that would ripple into every exhaustive match over
+    /// `EventData`/`EventType` in the engine, which is out of scope here;
+    /// nothing currently drains this receiver.
+    ax_changes_rx: Receiver<ChangedEntry>,
+    /// Set when `try_send` on the AX-changes channel above found it full
+    /// (dropped a notification). A dropped content notification means the
+    /// engine's own `ChangedSet` can no longer trust "nothing changed" —
+    /// the drain side must treat this the same as an overflow inside
+    /// `ChangedSet` itself and force a full walk. `swap`ped back to `false`
+    /// on read so repeated drains don't re-report the same overflow.
+    ax_changes_overflowed: Arc<AtomicBool>,
     threads: Vec<thread::JoinHandle<()>>,
 }
 
@@ -176,6 +192,17 @@ impl RecordingHandle {
     /// Receive with timeout
     pub fn recv_timeout(&self, timeout: std::time::Duration) -> Option<UiEvent> {
         self.events_rx.recv_timeout(timeout).ok()
+    }
+
+    /// Get the AX content-change receiver (see `ax_changes_rx`).
+    pub fn ax_changes(&self) -> &Receiver<ChangedEntry> {
+        &self.ax_changes_rx
+    }
+
+    /// Consume the AX-changes overflow flag: `true` iff a content
+    /// notification was dropped since the last call.
+    pub fn take_ax_changes_overflowed(&self) -> bool {
+        self.ax_changes_overflowed.swap(false, Ordering::SeqCst)
     }
 }
 
@@ -256,6 +283,11 @@ impl UiRecorder {
         }
 
         let (tx, rx) = bounded::<UiEvent>(self.config.max_buffer_size);
+        // Small bounded channel for AX content-change notifications --
+        // these are meant to be drained every capture (a few seconds at
+        // most), so 64 is generous headroom, not a real limit in practice.
+        let (changed_tx, changed_rx) = bounded::<ChangedEntry>(64);
+        let ax_changes_overflowed = Arc::new(AtomicBool::new(false));
         let stop = Arc::new(AtomicBool::new(false));
         let start_time = Instant::now();
 
@@ -310,14 +342,28 @@ impl UiRecorder {
         let app2 = current_app.clone();
         let window2 = current_window.clone();
         let pid2 = current_pid.clone();
+        let changed_tx2 = changed_tx.clone();
+        let ax_changes_overflowed2 = ax_changes_overflowed.clone();
         threads.push(thread::spawn(move || {
-            run_app_observer(tx2, stop2, start_time, config2, app2, window2, pid2);
+            run_app_observer(
+                tx2,
+                stop2,
+                start_time,
+                config2,
+                app2,
+                window2,
+                pid2,
+                changed_tx2,
+                ax_changes_overflowed2,
+            );
         }));
 
         Ok((
             RecordingHandle {
                 stop,
                 events_rx: rx,
+                ax_changes_rx: changed_rx,
+                ax_changes_overflowed,
                 threads,
             },
             activity_feed,
@@ -1332,6 +1378,12 @@ struct ObserverCallbackState {
     current_pid: Arc<AtomicI32>,
     focus: Mutex<FocusState>,
     refresh_requested: Arc<AtomicBool>,
+    /// AX content-change notifications (`value_changed`/`title_changed`/
+    /// `layout_changed`/`ui_element_destroyed`), separate from `tx` above —
+    /// see `RecordingHandle::ax_changes_rx`'s doc comment for why.
+    changed_tx: Sender<ChangedEntry>,
+    /// Set when `changed_tx.try_send` finds the channel full.
+    ax_changes_overflowed: Arc<AtomicBool>,
 }
 
 fn emit_focus_state(state: &ObserverCallbackState) {
@@ -1401,6 +1453,60 @@ fn emit_focus_state(state: &ObserverCallbackState) {
     }
 }
 
+/// Map a native AX notification to a mergeable/invalidating `ChangeKind`.
+/// `None` for anything not registered as a content-change notification
+/// (the focus-lifecycle ones are handled separately in the callback).
+fn content_change_kind(notification: &ax::Notification) -> Option<ChangeKind> {
+    if notification == ax::notification::value_changed() {
+        Some(ChangeKind::ValueChanged)
+    } else if notification == ax::notification::title_changed() {
+        Some(ChangeKind::TitleChanged)
+    } else if notification == ax::notification::layout_changed() {
+        Some(ChangeKind::LayoutChanged)
+    } else if notification == ax::notification::ui_element_destroyed() {
+        Some(ChangeKind::Destroyed)
+    } else {
+        None
+    }
+}
+
+/// Ascend from `elem` to the nearest window-role ancestor (`AXWindow`/
+/// `AXDialog`/`AXSheet`), recording the index-in-parent chain along the
+/// way -- the same coordinate space `tree::macos`'s own path tracking
+/// uses. Bounded at 100 hops. Any failure along the way -- AXParent/
+/// AXChildren erroring, the element not found among its reported
+/// siblings, or exceeding the hop bound without reaching a window --
+/// returns `None`; callers must treat that as `ChangeKind::Unknown`
+/// (invalidating), never as "no changes". No attribute reads happen here
+/// beyond role/parent/children -- this runs on the callback thread, and a
+/// read that blocks on a hung target process is exactly the
+/// cross-process-fetch-on-event-thread failure mode this design avoids
+/// everywhere else.
+fn resolve_element_path(elem: &ax::UiElement) -> Option<NodePath> {
+    const MAX_ASCENT_HOPS: usize = 100;
+    let mut chain: Vec<u32> = Vec::with_capacity(32);
+    let mut current: Retained<ax::UiElement> = elem.retained();
+    for _ in 0..MAX_ASCENT_HOPS {
+        let role = get_string_attr(&current, ax::attr::role());
+        if matches!(role.as_deref(), Some("AXWindow" | "AXDialog" | "AXSheet")) {
+            chain.reverse();
+            return Some(chain);
+        }
+        let parent = current.parent().ok()?;
+        let siblings = parent.children().ok()?;
+        let mut found_index = None;
+        for i in 0..siblings.len() {
+            if current.equal(&siblings[i]) {
+                found_index = Some(i as u32);
+                break;
+            }
+        }
+        chain.push(found_index?);
+        current = parent;
+    }
+    None
+}
+
 extern "C" fn ax_focus_observer_callback(
     _observer: &mut ax::Observer,
     _elem: &mut ax::UiElement,
@@ -1417,11 +1523,35 @@ extern "C" fn ax_focus_observer_callback(
         || notification == ax::notification::app_deactivated()
     {
         state.refresh_requested.store(true, Ordering::SeqCst);
+        emit_focus_state(state);
+        return;
     }
 
+    if let Some(kind) = content_change_kind(notification) {
+        let (path, kind) = match resolve_element_path(_elem) {
+            Some(path) => (path, kind),
+            None => (Vec::new(), ChangeKind::Unknown),
+        };
+        let timestamp = state.start.elapsed().as_nanos() as u64;
+        if state
+            .changed_tx
+            .try_send(ChangedEntry {
+                path,
+                kind,
+                timestamp,
+            })
+            .is_err()
+        {
+            state.ax_changes_overflowed.store(true, Ordering::SeqCst);
+        }
+        return;
+    }
+
+    // focused_window_changed / focused_ui_element_changed
     emit_focus_state(state);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_app_observer(
     tx: Sender<UiEvent>,
     stop: Arc<AtomicBool>,
@@ -1430,6 +1560,8 @@ fn run_app_observer(
     current_app: Arc<ArcSwap<Option<String>>>,
     current_window: Arc<ArcSwap<Option<String>>>,
     current_pid: Arc<AtomicI32>,
+    changed_tx: Sender<ChangedEntry>,
+    ax_changes_overflowed: Arc<AtomicBool>,
 ) {
     let workspace = ns::Workspace::shared();
     let mut notification_center = workspace.notification_center();
@@ -1447,6 +1579,8 @@ fn run_app_observer(
             last_window: None,
         }),
         refresh_requested: refresh_requested.clone(),
+        changed_tx,
+        ax_changes_overflowed,
     });
     let callback_state_ptr = Box::into_raw(callback_state);
 
@@ -1545,6 +1679,14 @@ fn run_app_observer(
             ax::notification::app_deactivated(),
             ax::notification::focused_window_changed(),
             ax::notification::focused_ui_element_changed(),
+            // Content-change notifications for the event-scoped-subtree-walk
+            // fast path — see `content_change_kind` for the mapping and
+            // `ax_focus_observer_callback` for how they're routed
+            // separately from the focus-lifecycle ones above.
+            ax::notification::value_changed(),
+            ax::notification::title_changed(),
+            ax::notification::layout_changed(),
+            ax::notification::ui_element_destroyed(),
         ] {
             if let Err(err) = new_observer.add_notification(&app, notification, context) {
                 debug!(
@@ -1591,6 +1733,10 @@ fn run_app_observer(
                 ax::notification::app_deactivated(),
                 ax::notification::focused_window_changed(),
                 ax::notification::focused_ui_element_changed(),
+                ax::notification::value_changed(),
+                ax::notification::title_changed(),
+                ax::notification::layout_changed(),
+                ax::notification::ui_element_destroyed(),
             ] {
                 let _ = existing.remove_notification(&app, notification);
             }
