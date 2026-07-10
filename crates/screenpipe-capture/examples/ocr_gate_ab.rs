@@ -83,6 +83,14 @@ mod macos {
         monitor_id: Option<u32>,
         full_text_threshold: f64,
         analyze: Option<String>,
+        /// Only run the comparison when the focused app's name contains this
+        /// (case-insensitive). Off-target ticks are skipped without OCR.
+        app_filter: Option<String>,
+        /// Extra pixels added around the window crop before detect/OCR.
+        /// Default 0 = production parity. Set e.g. 16 to test whether crop
+        /// word-merging comes from edge cutoffs (if the substr−token gap
+        /// doesn't shrink, the merging is Vision line-regrouping instead).
+        pad: u32,
     }
 
     fn parse_args() -> Args {
@@ -92,6 +100,8 @@ mod macos {
             monitor_id: None,
             full_text_threshold: 0.9,
             analyze: None,
+            app_filter: None,
+            pad: 0,
         };
         let argv: Vec<String> = std::env::args().skip(1).collect();
         let mut i = 0;
@@ -110,6 +120,8 @@ mod macos {
                     args.full_text_threshold = take(&mut i).parse().unwrap_or(0.9)
                 }
                 "--analyze" => args.analyze = Some(take(&mut i)),
+                "--app" => args.app_filter = Some(take(&mut i).to_lowercase()),
+                "--pad" => args.pad = take(&mut i).parse().unwrap_or(0),
                 other => {
                     eprintln!("unknown arg: {other}");
                     std::process::exit(2);
@@ -135,13 +147,15 @@ mod macos {
                 .context("no default monitor")?,
         };
         eprintln!(
-            "ocr_gate_ab: monitor {} ({}x{} at {},{}) every {:?}",
+            "ocr_gate_ab: monitor {} ({}x{} at {},{}) every {:?} | app filter: {} | crop pad: {}px",
             monitor.id(),
             monitor.width(),
             monitor.height(),
             monitor.x(),
             monitor.y(),
-            args.interval
+            args.interval,
+            args.app_filter.as_deref().unwrap_or("<none>"),
+            args.pad
         );
 
         std::fs::create_dir_all(&args.out_dir)?;
@@ -202,7 +216,7 @@ mod macos {
                 &mut gate,
                 &mut indexed,
                 &mut log,
-                args.full_text_threshold,
+                &args,
                 &mut sum,
             )
             .await
@@ -227,6 +241,7 @@ mod macos {
         skips: u64,
         crops: u64,
         fulls: u64,
+        offtarget: u64,
         recall_window_sum: f64,
         recall_substr_sum: f64,
         recall_window_n: u64,
@@ -245,11 +260,12 @@ mod macos {
                 }
             };
             eprintln!(
-                "[tick {tick}] decisions skip/crop/full={}/{}/{} | window-recall token {:.3} / \
+                "[tick {tick}] decisions skip/crop/full={}/{}/{} (offtarget {}) | window-recall token {:.3} / \
                  substr {:.3} ({} ticks substr<0.9) | OCR ms baseline={} optimized={} ({:.0}% saved)",
                 self.skips,
                 self.crops,
                 self.fulls,
+                self.offtarget,
                 mean(self.recall_window_sum),
                 mean(self.recall_substr_sum),
                 self.low_recall,
@@ -272,38 +288,24 @@ mod macos {
         gate: &mut MeetingOcrGate,
         indexed: &mut HashMap<String, (String, HashSet<String>, u64)>,
         log: &mut impl Write,
-        full_text_threshold: f64,
+        args: &Args,
         sum: &mut Summary,
     ) -> Result<()> {
-        let frame = Arc::new(monitor.capture_image().await.context("capture")?);
-        let (frame_w, frame_h) = frame.dimensions();
-
-        // Focused app + window bounds via the production walker.
+        // Focused app + window bounds via the production walker — before the
+        // capture, so off-target ticks (--app filter) cost no screenshot/OCR.
         let cfg = walker_config.clone();
         let walk = tokio::task::spawn_blocking(move || walk_accessibility_tree(&cfg)).await?;
-        let (app_key, window_name, window_crop, walk_outcome) = match walk {
+        let (app_key, window_name, window_bounds, walk_outcome) = match walk {
             screenpipe_a11y::tree::TreeWalkResult::Found(snap) => {
-                let crop = snap.window_bounds.and_then(|b| {
-                    clamp_window_crop(
-                        (b.x * frame_w as f64).round() as i32,
-                        (b.y * frame_h as f64).round() as i32,
-                        (b.width * frame_w as f64).round().max(0.0) as u32,
-                        (b.height * frame_h as f64).round().max(0.0) as u32,
-                        frame_w,
-                        frame_h,
-                    )
-                });
                 let outcome = if snap.window_bounds.is_none() {
                     "found_no_bounds"
-                } else if crop.is_none() {
-                    "found_bounds_clamped_away"
                 } else {
                     "found"
                 };
                 (
                     snap.app_name.to_lowercase(),
                     snap.window_name,
-                    crop,
+                    snap.window_bounds,
                     outcome.to_string(),
                 )
             }
@@ -319,6 +321,35 @@ mod macos {
                 None,
                 "notfound".to_string(),
             ),
+        };
+        if let Some(filter) = &args.app_filter {
+            if !app_key.contains(filter.as_str()) {
+                sum.offtarget += 1;
+                return Ok(());
+            }
+        }
+
+        let frame = Arc::new(monitor.capture_image().await.context("capture")?);
+        let (frame_w, frame_h) = frame.dimensions();
+        // Fractions → frame pixels, optionally expanded by --pad on every
+        // side (edge-cutoff hypothesis testing), then clamped like production.
+        let pad = args.pad as i32;
+        let window_crop = window_bounds.and_then(|b| {
+            clamp_window_crop(
+                (b.x * frame_w as f64).round() as i32 - pad,
+                (b.y * frame_h as f64).round() as i32 - pad,
+                ((b.width * frame_w as f64).round().max(0.0) as u32)
+                    .saturating_add(2 * args.pad),
+                ((b.height * frame_h as f64).round().max(0.0) as u32)
+                    .saturating_add(2 * args.pad),
+                frame_w,
+                frame_h,
+            )
+        });
+        let walk_outcome = if walk_outcome == "found" && window_crop.is_none() {
+            "found_bounds_clamped_away".to_string()
+        } else {
+            walk_outcome
         };
 
         // --- BASELINE arm: full-frame OCR every tick (pre-#5054). ---
@@ -455,7 +486,8 @@ mod macos {
 
         // Full texts only for real-loss incidents (substring recall — spacing
         // artifacts alone don't qualify) and a periodic calibration sample.
-        let keep_full_text = recall_window_substr < full_text_threshold || tick % 200 == 1;
+        let keep_full_text =
+            recall_window_substr < args.full_text_threshold || tick % 200 == 1;
         let mut record = json!({
             "ts": chrono::Utc::now().to_rfc3339(),
             "tick": tick,
