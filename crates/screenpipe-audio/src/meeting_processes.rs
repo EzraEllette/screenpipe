@@ -70,6 +70,26 @@ fn is_screenpipe_bundle_id(bundle_id: &str) -> bool {
         || bundle_id.starts_with("com.mediar.screenpipe.")
 }
 
+/// The snapshot inclusion decision: `Some(reason)` if this mic-holding
+/// process must be dropped from the snapshot, `None` if it counts as meeting
+/// evidence. This is the single gate the macOS collector runs, kept pure so
+/// the contract is directly testable — in particular the FaceTime contract:
+/// `avconferenced` (FaceTime's audio engine) and the FaceTime app itself MUST
+/// pass, or FaceTime meetings lose adoption/capture.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn excluded_input_process_reason(
+    process: &AudioInputProcess,
+    self_pid: i32,
+) -> Option<&'static str> {
+    if is_screenpipe_process(process, self_pid) {
+        return Some("Screenpipe process");
+    }
+    if is_system_voice_daemon(process) {
+        return Some("always-on voice daemon");
+    }
+    None
+}
+
 /// Always-on system voice daemons whose input claims are ambient noise, not
 /// meeting evidence. `corespeechd` (com.apple.CoreSpeech) holds the mic for
 /// the "Hey Siri" voice trigger more or less permanently, so counting it made
@@ -104,7 +124,7 @@ fn is_screenpipe_app_name(name: &str) -> bool {
 
 #[cfg(target_os = "macos")]
 mod platform {
-    use super::{is_screenpipe_process, AudioInputProcess, AudioProcessSnapshot};
+    use super::{excluded_input_process_reason, AudioInputProcess, AudioProcessSnapshot};
     use cidre::{core_audio as ca, ns};
     use tracing::debug;
 
@@ -162,9 +182,9 @@ mod platform {
                 first_seen_at_ms: None,
             };
 
-            if is_screenpipe_process(&snapshot, self_pid) {
+            if let Some(reason) = excluded_input_process_reason(&snapshot, self_pid) {
                 debug!(
-                    "audio-process snapshot: skipped Screenpipe process (pid={:?}, bundle={:?}, owner_bundle={:?}, name={:?})",
+                    "audio-process snapshot: skipped {reason} (pid={:?}, bundle={:?}, owner_bundle={:?}, name={:?})",
                     snapshot.pid,
                     snapshot.bundle_id,
                     snapshot.owner_bundle_id,
@@ -172,14 +192,6 @@ mod platform {
                         .owner_app_name
                         .as_ref()
                         .or(snapshot.process_name.as_ref())
-                );
-                continue;
-            }
-
-            if super::is_system_voice_daemon(&snapshot) {
-                debug!(
-                    "audio-process snapshot: skipped always-on voice daemon (pid={:?}, bundle={:?})",
-                    snapshot.pid, snapshot.bundle_id
                 );
                 continue;
             }
@@ -715,6 +727,45 @@ mod tests {
             !is_system_voice_daemon(&p),
             "avconferenced must stay adoptable: it is FaceTime's audio process"
         );
+    }
+
+    /// The FaceTime contract, pinned on the exact gate the macOS collector
+    /// runs: during a FaceTime call the mic holders are `avconferenced`
+    /// (audio IO daemon) and/or the FaceTime app itself. BOTH must pass the
+    /// snapshot gate — the daemon's pid is what manual-meeting adoption taps
+    /// and what mic-follow resolves; the app's bundle id is what the auto
+    /// meeting detector maps to the "FaceTime" platform.
+    #[test]
+    fn facetime_processes_pass_the_snapshot_gate() {
+        let daemon = process(
+            Some(809),
+            Some("com.apple.avconferenced"),
+            None,
+            None,
+            None,
+        );
+        let app = process(
+            Some(1234),
+            Some("com.apple.FaceTime"),
+            Some("FaceTime"),
+            Some("FaceTime"),
+            Some("com.apple.FaceTime"),
+        );
+        assert_eq!(
+            excluded_input_process_reason(&daemon, 999),
+            None,
+            "avconferenced must be included in mic-holder snapshots"
+        );
+        assert_eq!(
+            excluded_input_process_reason(&app, 999),
+            None,
+            "the FaceTime app must be included in mic-holder snapshots"
+        );
+        // And the gate still drops what it must:
+        let siri = process(Some(727), Some("com.apple.CoreSpeech"), None, None, None);
+        assert!(excluded_input_process_reason(&siri, 999).is_some());
+        let own = process(Some(999), None, None, None, None);
+        assert!(excluded_input_process_reason(&own, 999).is_some());
     }
 
     #[test]
