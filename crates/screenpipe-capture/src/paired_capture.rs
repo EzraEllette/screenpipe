@@ -292,59 +292,43 @@ pub async fn paired_capture(
             .map(|s| a11y_content_is_thin(s, ctx.window_name, ctx.browser_url))
             .unwrap_or(false);
 
-    // Meeting OCR gate (#5054): while the meeting detector reports an
-    // active call AND the focused surface is a meeting app/URL, OCR no
-    // longer runs on every capture. A cheap contour text-region detect
-    // (rate-limited by the gate's density backoff) decides IF the on-screen
-    // text actually changed (escalate) and WHERE to OCR (sparse frame →
-    // one call on the padded union of text regions; dense frame → full
-    // frame, exactly the pre-gate cost). Outside a meeting, meeting apps
-    // get no special treatment: the generic canvas/density heuristics
-    // above apply like for any other app.
+    // What would trigger OCR at all (the pre-gate rules, unchanged):
+    // terminals that always prefer OCR, meeting apps during a detected call
+    // (screen-share pixels have no a11y tree even when chrome a11y is
+    // rich), and the generic no/thin-a11y fallback (canvas apps, games).
     let meeting_matched = ctx.app_name.map(is_meeting_app).unwrap_or(false)
         || ctx.browser_url.map(is_meeting_url).unwrap_or(false);
-    // `monitor_hosts_focus`: only the monitor actually showing the meeting
-    // window is gated — a second monitor's frames carry the meeting app's
-    // *name* (focused-window attribution) but show unrelated pixels, and
-    // fingerprint-gating those starves continuously-changing content
-    // (dashboards, logs) of the OCR coverage it previously had. Non-focused
-    // monitors fall through to the generic heuristics below.
-    let meeting_scoped = ctx.in_meeting
-        && meeting_matched
-        && ctx.monitor_hosts_focus
-        && !ctx.screenshot_disabled
-        && !app_prefers_ocr;
+    let meeting_trigger = ctx.in_meeting && meeting_matched && ctx.monitor_hosts_focus;
+    let wants_ocr = !ctx.screenshot_disabled
+        && (app_prefers_ocr
+            || meeting_trigger
+            || !has_accessibility_text
+            || a11y_is_thin_generic);
 
     let mut meeting_gate = meeting_gate;
     let mut meeting_gate_escalated = false;
     let mut meeting_gate_decision: Option<MeetingGateDecision> = None;
     let mut meeting_gate_detect_duration: Option<std::time::Duration> = None;
     let mut ocr_crop: Option<TextRegion> = None;
-    // Meeting-window scoping: when the focused window's bounds are known,
-    // the detect and any OCR run on the window's rectangle instead of the
-    // whole monitor (see `focused_window_bounds`). The gate's content
-    // signature then lives in window-local coordinates, which also makes
-    // it invariant to the window being dragged around. `None` (bounds
-    // unavailable, degenerate after clamping, or effectively fullscreen)
-    // keeps the monitor-frame behavior.
-    //
-    // Known bounded cost: a flip in bounds availability (the a11y walk
-    // intermittently failing) changes the detect surface and therefore the
-    // signature, re-OCRing the unchanged screen once per flip — same class
-    // as the documented A→B→A screen-alternation limitation in the gate's
-    // single-state memory.
+    // On a gate-skipped capture, the previously indexed OCR text re-mapped
+    // to the current crop position — frames whose only text source is OCR
+    // (terminals, no-a11y apps) keep their text at zero OCR cost.
+    let mut gate_cached_text: Option<(String, String)> = None;
+    // Window scoping: when the focused window's bounds are known, the
+    // detect and any OCR run on the window's rectangle instead of the whole
+    // monitor (see `focused_window_bounds`). `None` (bounds unavailable,
+    // degenerate after clamping, or effectively fullscreen) keeps the
+    // monitor-frame behavior.
     let (frame_w, frame_h) = ctx.image.dimensions();
-    let window_crop = if meeting_scoped {
-        ctx.focused_window_bounds
-            .and_then(|b| clamp_window_crop(b, frame_w, frame_h))
-    } else {
-        None
-    };
-    if meeting_scoped {
+    let window_crop = ctx
+        .focused_window_bounds
+        .and_then(|b| clamp_window_crop(b, frame_w, frame_h));
+    if wants_ocr {
         match meeting_gate.as_deref_mut() {
             Some(gate) => {
                 let app_key = ctx.app_name.unwrap_or("unknown").to_lowercase();
-                // The gated pipeline (#5060): screenshot → crop to the app
+                // The gated OCR pipeline (#5060) — applies to EVERY OCR
+                // trigger, not just meetings: screenshot → crop to the app
                 // window → detect text → crop to the padded union of the
                 // detected text → pixel-compare that crop to the last
                 // indexed one → different? OCR that same crop. One blocking
@@ -371,10 +355,11 @@ pub async fn paired_capture(
                     // No text detected at all: nothing to OCR. The gate's
                     // indexed state is deliberately untouched — text that
                     // disappears (share stops) and reappears unchanged
-                    // still matches and stays skipped.
+                    // still matches and stays skipped. No cached text is
+                    // attached either: the screen genuinely has none.
                     None => {
                         debug!(
-                            "meeting OCR gate: no text regions in {:?} -> Skip (app={}, window_crop={:?}, detect_dims={:?})",
+                            "OCR gate: no text regions in {:?} -> Skip (app={}, window_crop={:?}, detect_dims={:?})",
                             detect_started.elapsed(),
                             app_key,
                             window_crop,
@@ -383,11 +368,23 @@ pub async fn paired_capture(
                         meeting_gate_decision = Some(MeetingGateDecision::Skip);
                     }
                     Some((union, signature, region_count)) => {
+                        // The union is in detect-image coordinates; offset
+                        // by the window origin to get frame coords. Stays
+                        // in-bounds: the union is clamped to the detect
+                        // image, which the window crop clamped to the frame.
+                        let union_in_frame = match window_crop {
+                            Some(w) => TextRegion {
+                                x: w.x + union.x,
+                                y: w.y + union.y,
+                                ..union
+                            },
+                            None => union,
+                        };
                         let decision = gate.observe(&app_key, signature);
                         debug!(
-                            "meeting OCR gate: {} regions, union {:?} in {:?} -> {:?} (app={}, window_crop={:?})",
+                            "OCR gate: {} regions, union {:?} in {:?} -> {:?} (app={}, window_crop={:?})",
                             region_count,
-                            union,
+                            union_in_frame,
                             detect_started.elapsed(),
                             decision,
                             app_key,
@@ -396,32 +393,39 @@ pub async fn paired_capture(
                         match decision {
                             MeetingOcrDecision::Skip => {
                                 meeting_gate_decision = Some(MeetingGateDecision::Skip);
+                                // Identical pixels ⇒ identical text: reuse
+                                // the indexed OCR result. Signature equality
+                                // implies equal crop dimensions (they're
+                                // hashed), so remapping the cached
+                                // crop-relative boxes to the current union
+                                // position is exact even if the window
+                                // moved.
+                                gate_cached_text =
+                                    gate.indexed_text(&app_key).map(|(text, crop_json)| {
+                                        (
+                                            text.to_string(),
+                                            remap_ocr_json_to_frame(
+                                                crop_json,
+                                                union_in_frame,
+                                                frame_w,
+                                                frame_h,
+                                            ),
+                                        )
+                                    });
                             }
                             MeetingOcrDecision::Ocr => {
                                 meeting_gate_escalated = true;
                                 meeting_gate_decision = Some(MeetingGateDecision::CropOcr);
-                                // The union is in detect-image coordinates;
-                                // offset by the window origin to get frame
-                                // coords. Stays in-bounds: the union is
-                                // clamped to the detect image, which the
-                                // window crop clamped to the frame.
-                                ocr_crop = Some(match window_crop {
-                                    Some(w) => TextRegion {
-                                        x: w.x + union.x,
-                                        y: w.y + union.y,
-                                        ..union
-                                    },
-                                    None => union,
-                                });
+                                ocr_crop = Some(union_in_frame);
                             }
                         }
                     }
                 }
             }
             // No gate wired (callers outside the engine capture loop):
-            // keep the pre-#5054 forced-OCR behavior rather than silently
-            // dropping meeting OCR — scoped to the meeting window when its
-            // bounds are known, like the gated path.
+            // keep the pre-gate forced-OCR behavior rather than silently
+            // dropping OCR — scoped to the focused window when its bounds
+            // are known, like the gated path.
             None => {
                 meeting_gate_escalated = true;
                 ocr_crop = window_crop;
@@ -429,18 +433,12 @@ pub async fn paired_capture(
         }
     }
 
-    // Run OCR when screenshots are available and: the app always prefers
-    // OCR (terminals), the meeting gate escalated, or — outside the
-    // meeting-gated path — no/thin a11y text. While `meeting_scoped`, the
-    // gate owns the decision entirely (including the no-a11y-text case:
-    // a fullscreen call with zero AX text only OCRs when text changes).
-    // Time the OCR step so the caller can feed `PipelineMetrics::record_ocr`
-    // (ocr_completed / avg_ocr_latency_ms). `ocr_duration_ms` is Some only when
-    // OCR actually ran — None when accessibility text was sufficient.
-    let ocr_ran = !ctx.screenshot_disabled
-        && (app_prefers_ocr
-            || meeting_gate_escalated
-            || (!meeting_scoped && (!has_accessibility_text || a11y_is_thin_generic)));
+    // OCR actually runs only when a trigger fired AND the gate (when wired)
+    // saw changed content. Time the OCR step so the caller can feed
+    // `PipelineMetrics::record_ocr` (ocr_completed / avg_ocr_latency_ms).
+    // `ocr_duration_ms` is Some only when OCR actually ran — None when
+    // accessibility text was sufficient or the gate reused its cache.
+    let ocr_ran = wants_ocr && meeting_gate_escalated;
 
     // "Thin" for hybrid-labeling below: generic canvas/density thinness, or
     // a meeting-gate escalation supplementing existing a11y chrome text.
@@ -449,14 +447,17 @@ pub async fn paired_capture(
     let ocr_started = Instant::now();
     // True when the OCR *engine* failed (task join error / platform OCR
     // error) as opposed to legitimately returning no text. Feeds back into
-    // the meeting gate so a failed escalation retries instead of marking
-    // the layout as indexed.
+    // the gate so a failed OCR retries instead of marking the content as
+    // indexed.
     let mut ocr_engine_failed = false;
+    // The raw crop-relative OCR output, cached into the gate at the commit
+    // point so pixel-identical future captures can reuse it without OCR.
+    let mut ocr_cache_payload: Option<(String, String)> = None;
     let (ocr_text, ocr_text_json) = if ocr_ran {
-        // Meeting-gate sparse escalations OCR only the padded union of the
-        // detected text regions (#5054: measured 4-5.5x cheaper than
-        // full-frame on sparse meeting content). Everything else OCRs the
-        // full frame exactly as before.
+        // Gated captures OCR the padded union of the detected text regions
+        // (#5054: measured 4-5.5x cheaper than full-frame on sparse
+        // content; naturally approaches the window on dense content).
+        // Gateless callers OCR the window/frame as before.
         let ocr_input: Arc<DynamicImage> = match ocr_crop {
             Some(r) => Arc::new(ctx.image.crop_imm(r.x, r.y, r.width, r.height)),
             None => ctx.image.clone(),
@@ -509,13 +510,25 @@ pub async fn paired_capture(
         // selectable-text overlay.
         let text_json = match ocr_crop {
             Some(r) => remap_ocr_json_to_frame(&raw.1, r, ctx.image.width(), ctx.image.height()),
-            None => raw.1,
+            None => raw.1.clone(),
         };
 
         // Strip editor gutter noise (see strip_gutter_noise doc). Applied to
         // the flat text but NOT to text_json — the JSON carries per-box OCR
         // coordinates which downstream overlay/highlight UIs need intact.
-        (strip_gutter_noise(&raw.0), text_json)
+        let text = strip_gutter_noise(&raw.0);
+        // Cache the gutter-stripped text + crop-relative json for reuse on
+        // future pixel-identical captures (committed only after the DB
+        // insert succeeds, alongside the signature).
+        ocr_cache_payload = Some((text.clone(), raw.1));
+        (text, text_json)
+    } else if let Some((cached_text, cached_json)) = gate_cached_text {
+        // Gate skip with a previously indexed result: the crop is
+        // pixel-identical to what was OCR'd before, so the frame carries
+        // that text (json already re-mapped to the current crop position)
+        // at zero OCR cost. Matters for surfaces whose ONLY text source is
+        // OCR — terminals, no-a11y apps.
+        (cached_text, cached_json)
     } else {
         (String::new(), "[]".to_string())
     };
@@ -655,18 +668,25 @@ pub async fn paired_capture(
         )
         .await?;
 
-    // Commit the gate's pending fingerprint only now that the frame (and
-    // its OCR result) is durably stored, and only when the OCR engine
-    // itself didn't fail. An escalation whose OCR call or DB insert failed
-    // is never committed — the `?` above returns before this line — so the
-    // next detect of the same stable layout escalates again and self-heals
-    // (#5060 review: committing at decision time left transiently-failed
-    // layouts marked indexed, skipping their text until it changed).
-    // Legit-empty OCR results DO commit: detector false positives (face
-    // texture) must stay marked or they'd re-OCR forever.
+    // Commit the gate's pending signature (and cache the OCR result for
+    // reuse on pixel-identical captures) only now that the frame is durably
+    // stored, and only when the OCR engine itself didn't fail. An OCR whose
+    // engine call or DB insert failed is never committed — the `?` above
+    // returns before this line — so the next capture of the same content
+    // OCRs again and self-heals (#5060 review: committing at decision time
+    // left transiently-failed content marked indexed, skipping its text
+    // until it changed). Legit-empty OCR results DO commit: texture the
+    // detector boxed but that holds no readable text must stay marked or
+    // it would re-OCR forever.
     if meeting_gate_escalated && !ocr_engine_failed {
-        if let Some(gate) = meeting_gate.as_deref_mut() {
-            gate.ocr_indexed(&ctx.app_name.unwrap_or("unknown").to_lowercase());
+        if let (Some(gate), Some((cache_text, cache_json))) =
+            (meeting_gate.as_deref_mut(), ocr_cache_payload.as_ref())
+        {
+            gate.ocr_indexed(
+                &ctx.app_name.unwrap_or("unknown").to_lowercase(),
+                cache_text,
+                cache_json,
+            );
         }
     }
 
@@ -991,7 +1011,6 @@ mod tests {
     use super::*;
     use image::{DynamicImage, RgbImage};
     use screenpipe_a11y::tree::AccessibilityTreeNode;
-    use std::time::Duration;
     use tempfile::TempDir;
 
     fn test_image() -> Arc<DynamicImage> {
@@ -1726,11 +1745,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn non_focused_monitor_is_not_meeting_gated() {
-        // Multi-monitor (#5054 review): a second monitor's frames inherit
-        // the focused meeting app's NAME while showing unrelated pixels.
-        // The gate must not fingerprint-gate them — generic heuristics
-        // apply, so thin a11y still forces OCR exactly like pre-#5054.
+    async fn non_focused_monitor_gets_gated_ocr_on_its_own_pixels() {
+        // Multi-monitor: a second monitor's frames inherit the focused
+        // meeting app's NAME while showing unrelated pixels. Since the gate
+        // moved to pixel-exact skipping (#5060), gating them is safe — a
+        // changing dashboard changes the signature and OCRs; only truly
+        // static content skips. This replaced the earlier rule that
+        // exempted non-focused monitors (which existed to protect changing
+        // content from fingerprint-stability starvation).
         let tmp = TempDir::new().unwrap();
         let snapshot_writer = SnapshotWriter::new(tmp.path(), 80, 1920);
         let db = DatabaseManager::new("sqlite::memory:", Default::default())
@@ -1744,10 +1766,10 @@ mod tests {
             bounds: None,
             ..Default::default()
         }]);
-        let ctx = CaptureContext {
+        let make_ctx = |image| CaptureContext {
             db: &db,
             snapshot_writer: &snapshot_writer,
-            image: test_image(),
+            image,
             captured_at: Utc::now(),
             monitor_id: 1,
             device_name: "monitor_2",
@@ -1766,16 +1788,37 @@ mod tests {
             focused_window_bounds: None,
         };
         let mut gate = MeetingOcrGate::new();
+        // Text on this monitor: first sighting OCRs it.
+        let ctx = make_ctx(strokes_image_at(50, 100));
         let result = paired_capture(&ctx, Some(&snap), Some(&mut gate))
             .await
             .unwrap();
-        // The generic density heuristic (<100 chars -> thin) fires OCR on
-        // this monitor's own pixels — NOT the gate (which, on an all-black
-        // frame, would have skipped: see
-        // meeting_app_in_meeting_gate_skips_ocr_when_no_text_regions).
         assert!(
             result.ocr_duration_ms.is_some(),
-            "non-focused monitor must keep generic-heuristic OCR coverage"
+            "new text on a non-focused monitor must be OCR'd"
+        );
+        // Content changes (a second text line appears): the union crop's
+        // pixels differ → OCR again. This is the coverage the old
+        // fingerprint gate starved. (Note: purely MOVED text is skipped by
+        // design — the union crop follows it and its pixels are identical.)
+        let mut canvas = image::RgbImage::from_pixel(400, 300, image::Rgb([235, 235, 235]));
+        for (y0, strokes) in [(100u32, 10u32), (200, 6)] {
+            for s in 0..strokes {
+                let sx = 50 + s * 7;
+                for dy in 0..12 {
+                    for dx in 0..3 {
+                        canvas.put_pixel(sx + dx, y0 + dy, image::Rgb([10, 10, 10]));
+                    }
+                }
+            }
+        }
+        let ctx2 = make_ctx(Arc::new(DynamicImage::ImageRgb8(canvas)));
+        let result2 = paired_capture(&ctx2, Some(&snap), Some(&mut gate))
+            .await
+            .unwrap();
+        assert!(
+            result2.ocr_duration_ms.is_some(),
+            "changed content on a non-focused monitor must re-OCR"
         );
     }
 

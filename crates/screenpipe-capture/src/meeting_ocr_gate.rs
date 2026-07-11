@@ -65,6 +65,11 @@ struct AppGate {
     pending_ocr_signature: Option<u64>,
     /// Signature of the union crop whose OCR result was durably stored.
     last_ocr_signature: Option<u64>,
+    /// The stored OCR result for `last_ocr_signature`: flat text plus the
+    /// crop-relative `text_json`. Skipped captures reuse this (re-mapped to
+    /// the current crop position) so frames whose ONLY text source is OCR
+    /// — terminals, no-a11y apps — still carry text at zero OCR cost.
+    indexed_text: Option<(String, String)>,
 }
 
 /// Per-monitor gate. Keyed by lowercased app name, mirroring
@@ -105,6 +110,20 @@ impl MeetingOcrGate {
         MeetingOcrDecision::Ocr
     }
 
+    /// The stored OCR result for the indexed crop: `(flat_text,
+    /// crop_relative_text_json)`. Callers reuse it on [`Skip`] ticks —
+    /// re-mapping the json to the current crop position — so OCR-only
+    /// surfaces keep their text on every frame without re-running OCR.
+    ///
+    /// [`Skip`]: MeetingOcrDecision::Skip
+    pub fn indexed_text(&self, app_key: &str) -> Option<(&str, &str)> {
+        self.apps
+            .get(app_key)?
+            .indexed_text
+            .as_ref()
+            .map(|(t, j)| (t.as_str(), j.as_str()))
+    }
+
     /// Commit the pending OCR: its result was durably persisted (frame row
     /// stored). Only now does the content count as indexed. OCRs that fail
     /// anywhere — engine error, DB insert error — are simply never
@@ -115,10 +134,14 @@ impl MeetingOcrGate {
     /// call it for legitimately-empty OCR results (texture the detector
     /// boxed that holds no readable text): committing lets an identical
     /// next frame skip instead of re-OCRing.
-    pub fn ocr_indexed(&mut self, app_key: &str) {
+    ///
+    /// `text` / `crop_text_json` are the OCR output for the pending crop
+    /// (json in crop-relative coordinates), cached for [`Self::indexed_text`].
+    pub fn ocr_indexed(&mut self, app_key: &str, text: &str, crop_text_json: &str) {
         if let Some(gate) = self.apps.get_mut(app_key) {
             if let Some(sig) = gate.pending_ocr_signature.take() {
                 gate.last_ocr_signature = Some(sig);
+                gate.indexed_text = Some((text.to_string(), crop_text_json.to_string()));
             }
         }
     }
@@ -132,7 +155,7 @@ mod tests {
     fn first_sighting_ocrs_then_identical_crop_skips() {
         let mut gate = MeetingOcrGate::new();
         assert_eq!(gate.observe("zoom", 1), MeetingOcrDecision::Ocr);
-        gate.ocr_indexed("zoom");
+        gate.ocr_indexed("zoom", "hello world", "[]");
         for _ in 0..5 {
             assert_eq!(gate.observe("zoom", 1), MeetingOcrDecision::Skip);
         }
@@ -142,11 +165,11 @@ mod tests {
     fn any_pixel_change_ocrs_immediately() {
         let mut gate = MeetingOcrGate::new();
         gate.observe("zoom", 1);
-        gate.ocr_indexed("zoom");
+        gate.ocr_indexed("zoom", "hello world", "[]");
         // In-place edit, moved text, new caption — all just "different
         // signature": OCR on this capture, no confirmation cycle.
         assert_eq!(gate.observe("zoom", 2), MeetingOcrDecision::Ocr);
-        gate.ocr_indexed("zoom");
+        gate.ocr_indexed("zoom", "hello world", "[]");
         assert_eq!(gate.observe("zoom", 2), MeetingOcrDecision::Skip);
         // Returning to a previously-indexed state re-OCRs: only the LAST
         // indexed crop is remembered (known A→B→A limitation, bounded to
@@ -164,18 +187,36 @@ mod tests {
         assert_eq!(gate.observe("zoom", 1), MeetingOcrDecision::Ocr);
         // No ocr_indexed() — simulates engine or DB failure. Retry fires.
         assert_eq!(gate.observe("zoom", 1), MeetingOcrDecision::Ocr);
-        gate.ocr_indexed("zoom");
+        gate.ocr_indexed("zoom", "hello world", "[]");
         assert_eq!(gate.observe("zoom", 1), MeetingOcrDecision::Skip);
         // A confirm without a pending OCR is a harmless no-op.
-        gate.ocr_indexed("zoom");
+        gate.ocr_indexed("zoom", "hello world", "[]");
         assert_eq!(gate.observe("zoom", 1), MeetingOcrDecision::Skip);
+    }
+
+    #[test]
+    fn indexed_text_available_only_after_commit() {
+        let mut gate = MeetingOcrGate::new();
+        assert_eq!(gate.observe("term", 1), MeetingOcrDecision::Ocr);
+        // Pending (uncommitted) OCR exposes no cached text — a failed
+        // OCR/insert must not let later skips serve unpersisted text.
+        assert!(gate.indexed_text("term").is_none());
+        gate.ocr_indexed("term", "ls -la src", r#"[{"text":"ls"}]"#);
+        assert_eq!(
+            gate.indexed_text("term"),
+            Some(("ls -la src", r#"[{"text":"ls"}]"#))
+        );
+        // Re-commit replaces the cache alongside the signature.
+        assert_eq!(gate.observe("term", 2), MeetingOcrDecision::Ocr);
+        gate.ocr_indexed("term", "cargo test", "[]");
+        assert_eq!(gate.indexed_text("term"), Some(("cargo test", "[]")));
     }
 
     #[test]
     fn apps_are_tracked_independently_and_reset_clears() {
         let mut gate = MeetingOcrGate::new();
         assert_eq!(gate.observe("zoom", 1), MeetingOcrDecision::Ocr);
-        gate.ocr_indexed("zoom");
+        gate.ocr_indexed("zoom", "hello world", "[]");
         assert_eq!(gate.observe("teams", 1), MeetingOcrDecision::Ocr);
         assert_eq!(gate.observe("zoom", 1), MeetingOcrDecision::Skip);
         gate.reset();

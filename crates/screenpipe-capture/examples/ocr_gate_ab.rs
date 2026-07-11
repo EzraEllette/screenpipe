@@ -451,12 +451,13 @@ mod macos {
                         })
                         .await?;
                         optimized_ocr_ms = Some(ocr_started.elapsed().as_millis() as u64);
-                        let toks = tokens(&text);
-                        indexed.insert(app_key.clone(), (text, toks, tick));
                         // "Durably stored" for this harness = in the index we
                         // compare against; commit like paired_capture does
-                        // post-insert.
-                        gate.ocr_indexed(&app_key);
+                        // post-insert. The probe keeps its own text index, so
+                        // the gate's cache payload is unused here.
+                        gate.ocr_indexed(&app_key, &text, "[]");
+                        let toks = tokens(&text);
+                        indexed.insert(app_key.clone(), (text, toks, tick));
                     }
                 }
             }
