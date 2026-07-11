@@ -11,20 +11,22 @@
 //! ```text
 //! screenshot -> crop to the focused app window -> detect text regions
 //!   -> crop to the padded union of the detected text
-//!   -> pixel-compare that crop to the last indexed one
+//!   -> compare that crop to the last indexed one ("basically the same?")
 //!   -> different? run OCR on that same crop
 //! ```
 //!
-//! The gate itself holds exactly one piece of state per app: the pixel
-//! signature ([`image_pixel_signature`]) of the union crop whose OCR result
-//! was last durably stored. Identical signature → skip (the text on screen
-//! is byte-for-byte what search already has). Anything else → OCR. There
-//! are deliberately NO other heuristics — earlier designs (geometry
-//! fingerprint + change-stability confirmation, then region-scoped pixel
-//! hashing, plus a detect-rate backoff) each produced wrong skips that the
-//! `ocr_gate_ab` probe caught: stability waits starved continuously
-//! -changing surfaces outright, and region-scoped hashes missed anything
-//! the region detector didn't box.
+//! The gate holds one piece of state per app: a fixed-grid luma thumbnail
+//! ([`luma_thumbnail`]) of the union crop whose OCR result was last durably
+//! stored. The current crop is "basically the same" — skip — when at most
+//! [`SAME_MAX_CHANGED_CELLS`] grid cells moved by more than
+//! [`CELL_LUMA_DELTA`]; anything more OCRs. That tolerance absorbs caret
+//! blink, antialiasing shimmer, and union-box jitter (which defeated the
+//! earlier pixel-exact signature by re-OCRing visually identical content),
+//! while a genuine text change touches far more cells. Earlier designs
+//! (geometry fingerprint + change-stability confirmation, region-scoped
+//! pixel hashing, a detect-rate backoff) each produced wrong skips the
+//! `ocr_gate_ab` probe caught — this is the whole decision, no other
+//! heuristics.
 //!
 //! Cost shape: every gated capture pays detect (~10-20ms) + hash (~1-3ms);
 //! OCR (the expensive part, hundreds of ms) runs only when the text crop
@@ -40,16 +42,27 @@
 //!
 //! Pure logic — no I/O, no platform dependencies.
 //!
-//! [`image_pixel_signature`]: screenpipe_screen::text_regions::image_pixel_signature
+//! [`luma_thumbnail`]: screenpipe_screen::text_regions::luma_thumbnail
 
 use std::collections::HashMap;
+
+/// A grid cell counts as changed when its block-averaged luma moved by more
+/// than this (out of 255). Absorbs antialiasing/capture shimmer; any real
+/// glyph change moves a cell's mean by far more.
+const CELL_LUMA_DELTA: u8 = 6;
+
+/// "Basically the same": skip when at most this many of the thumbnail's
+/// cells changed. A caret/cursor blink or a ticking colon touches 1-2
+/// cells; a changed word touches tens. Raising this trades staleness
+/// tolerance for fewer OCRs.
+const SAME_MAX_CHANGED_CELLS: usize = 2;
 
 /// What OCR should do for the current capture of a meeting-scoped window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MeetingOcrDecision {
-    /// The detected-text crop is pixel-identical to the last indexed one
-    /// (or there is no text at all): don't run OCR. The frame still gets
-    /// stored with its accessibility text.
+    /// The detected-text crop is basically the same as the last indexed
+    /// one (or there is no text at all): don't run OCR. The frame still
+    /// gets stored with its accessibility text (and the cached OCR text).
     Skip,
     /// The crop differs from the indexed state: run one OCR call on it.
     Ocr,
@@ -57,19 +70,32 @@ pub enum MeetingOcrDecision {
 
 #[derive(Debug, Default)]
 struct AppGate {
-    /// Signature of the most recent OCR decision, awaiting durable
-    /// persistence. Promoted to `last_ocr_signature` by
+    /// Thumbnail of the most recent OCR decision's crop, awaiting durable
+    /// persistence. Promoted to `indexed_thumb` by
     /// [`MeetingOcrGate::ocr_indexed`] once the caller has actually stored
     /// the OCR result; OCRs whose engine or DB write failed are simply
     /// never promoted, so the content stays unindexed and retries.
-    pending_ocr_signature: Option<u64>,
-    /// Signature of the union crop whose OCR result was durably stored.
-    last_ocr_signature: Option<u64>,
-    /// The stored OCR result for `last_ocr_signature`: flat text plus the
+    pending_thumb: Option<Vec<u8>>,
+    /// Thumbnail of the union crop whose OCR result was durably stored.
+    indexed_thumb: Option<Vec<u8>>,
+    /// The stored OCR result for `indexed_thumb`: flat text plus the
     /// crop-relative `text_json`. Skipped captures reuse this (re-mapped to
     /// the current crop position) so frames whose ONLY text source is OCR
     /// — terminals, no-a11y apps — still carry text at zero OCR cost.
     indexed_text: Option<(String, String)>,
+}
+
+/// Grid cells whose block-averaged luma differs by more than
+/// [`CELL_LUMA_DELTA`]. Thumbnails are always [`LUMA_THUMB_DIM`]²-sized
+/// (fixed grid), so a plain zip is a full comparison.
+///
+/// [`LUMA_THUMB_DIM`]: screenpipe_screen::text_regions::LUMA_THUMB_DIM
+fn changed_cells(a: &[u8], b: &[u8]) -> usize {
+    a.iter()
+        .zip(b)
+        .filter(|(x, y)| x.abs_diff(**y) > CELL_LUMA_DELTA)
+        .count()
+        + a.len().abs_diff(b.len())
 }
 
 /// Per-monitor gate. Keyed by lowercased app name, mirroring
@@ -92,22 +118,34 @@ impl MeetingOcrGate {
     }
 
     /// Decide whether this capture's detected-text crop needs OCR.
-    /// `crop_signature` is [`image_pixel_signature`] of the union-crop
-    /// image. Callers with NO detected text skip without calling this —
-    /// the indexed state must survive text disappearing and reappearing
-    /// unchanged (share stops and resumes).
+    /// `crop_thumb` is [`luma_thumbnail`] of the union-crop image. Callers
+    /// with NO detected text skip without calling this — the indexed state
+    /// must survive text disappearing and reappearing unchanged (share
+    /// stops and resumes).
     ///
-    /// [`image_pixel_signature`]: screenpipe_screen::text_regions::image_pixel_signature
-    pub fn observe(&mut self, app_key: &str, crop_signature: u64) -> MeetingOcrDecision {
+    /// [`luma_thumbnail`]: screenpipe_screen::text_regions::luma_thumbnail
+    pub fn observe(&mut self, app_key: &str, crop_thumb: Vec<u8>) -> MeetingOcrDecision {
         let gate = self.apps.entry(app_key.to_string()).or_default();
-        if gate.last_ocr_signature == Some(crop_signature) {
-            return MeetingOcrDecision::Skip;
+        if let Some(indexed) = &gate.indexed_thumb {
+            if changed_cells(indexed, &crop_thumb) <= SAME_MAX_CHANGED_CELLS {
+                return MeetingOcrDecision::Skip;
+            }
         }
-        // Deliberately NOT committed to `last_ocr_signature` here — the
-        // caller promotes it via `ocr_indexed` only after the OCR result is
+        // Deliberately NOT committed to `indexed_thumb` here — the caller
+        // promotes it via `ocr_indexed` only after the OCR result is
         // durably stored (see that method's docs).
-        gate.pending_ocr_signature = Some(crop_signature);
+        gate.pending_thumb = Some(crop_thumb);
         MeetingOcrDecision::Ocr
+    }
+
+    /// How many thumbnail cells differ from the indexed state — diagnostic
+    /// accessor for probes/telemetry; `None` before anything is indexed.
+    pub fn diff_cells(&self, app_key: &str, crop_thumb: &[u8]) -> Option<usize> {
+        self.apps
+            .get(app_key)?
+            .indexed_thumb
+            .as_ref()
+            .map(|indexed| changed_cells(indexed, crop_thumb))
     }
 
     /// The stored OCR result for the indexed crop: `(flat_text,
@@ -139,8 +177,8 @@ impl MeetingOcrGate {
     /// (json in crop-relative coordinates), cached for [`Self::indexed_text`].
     pub fn ocr_indexed(&mut self, app_key: &str, text: &str, crop_text_json: &str) {
         if let Some(gate) = self.apps.get_mut(app_key) {
-            if let Some(sig) = gate.pending_ocr_signature.take() {
-                gate.last_ocr_signature = Some(sig);
+            if let Some(thumb) = gate.pending_thumb.take() {
+                gate.indexed_thumb = Some(thumb);
                 gate.indexed_text = Some((text.to_string(), crop_text_json.to_string()));
             }
         }
@@ -150,31 +188,56 @@ impl MeetingOcrGate {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use screenpipe_screen::text_regions::LUMA_THUMB_DIM;
 
-    #[test]
-    fn first_sighting_ocrs_then_identical_crop_skips() {
-        let mut gate = MeetingOcrGate::new();
-        assert_eq!(gate.observe("zoom", 1), MeetingOcrDecision::Ocr);
-        gate.ocr_indexed("zoom", "hello world", "[]");
-        for _ in 0..5 {
-            assert_eq!(gate.observe("zoom", 1), MeetingOcrDecision::Skip);
+    fn thumb(fill: u8) -> Vec<u8> {
+        vec![fill; (LUMA_THUMB_DIM * LUMA_THUMB_DIM) as usize]
+    }
+
+    /// A thumbnail with `changed` cells moved well past CELL_LUMA_DELTA.
+    fn thumb_with(fill: u8, changed: usize) -> Vec<u8> {
+        let mut t = thumb(fill);
+        for cell in t.iter_mut().take(changed) {
+            *cell = fill.wrapping_add(60);
         }
+        t
     }
 
     #[test]
-    fn any_pixel_change_ocrs_immediately() {
+    fn first_sighting_ocrs_then_basically_same_skips() {
         let mut gate = MeetingOcrGate::new();
-        gate.observe("zoom", 1);
+        assert_eq!(gate.observe("zoom", thumb(100)), MeetingOcrDecision::Ocr);
         gate.ocr_indexed("zoom", "hello world", "[]");
-        // In-place edit, moved text, new caption — all just "different
-        // signature": OCR on this capture, no confirmation cycle.
-        assert_eq!(gate.observe("zoom", 2), MeetingOcrDecision::Ocr);
+        // Identical crop: skip.
+        assert_eq!(gate.observe("zoom", thumb(100)), MeetingOcrDecision::Skip);
+        // Caret-blink scale (2 cells): basically the same, skip.
+        assert_eq!(
+            gate.observe("zoom", thumb_with(100, SAME_MAX_CHANGED_CELLS)),
+            MeetingOcrDecision::Skip
+        );
+        // Global sub-threshold shimmer (every cell +5 <= CELL_LUMA_DELTA): skip.
+        assert_eq!(gate.observe("zoom", thumb(105)), MeetingOcrDecision::Skip);
+    }
+
+    #[test]
+    fn real_change_ocrs_immediately() {
+        let mut gate = MeetingOcrGate::new();
+        gate.observe("zoom", thumb(100));
         gate.ocr_indexed("zoom", "hello world", "[]");
-        assert_eq!(gate.observe("zoom", 2), MeetingOcrDecision::Skip);
+        // One cell past the tolerance: a real (if small) content change.
+        assert_eq!(
+            gate.observe("zoom", thumb_with(100, SAME_MAX_CHANGED_CELLS + 1)),
+            MeetingOcrDecision::Ocr
+        );
+        gate.ocr_indexed("zoom", "hello there", "[]");
+        assert_eq!(
+            gate.observe("zoom", thumb_with(100, SAME_MAX_CHANGED_CELLS + 1)),
+            MeetingOcrDecision::Skip
+        );
         // Returning to a previously-indexed state re-OCRs: only the LAST
         // indexed crop is remembered (known A→B→A limitation, bounded to
         // one OCR per sustained state switch).
-        assert_eq!(gate.observe("zoom", 1), MeetingOcrDecision::Ocr);
+        assert_eq!(gate.observe("zoom", thumb(100)), MeetingOcrDecision::Ocr);
     }
 
     #[test]
@@ -184,20 +247,21 @@ mod tests {
         // call or DB insert failed (caller never confirms) must OCR again
         // on the next capture of the same content.
         let mut gate = MeetingOcrGate::new();
-        assert_eq!(gate.observe("zoom", 1), MeetingOcrDecision::Ocr);
+        assert_eq!(gate.observe("zoom", thumb(100)), MeetingOcrDecision::Ocr);
         // No ocr_indexed() — simulates engine or DB failure. Retry fires.
-        assert_eq!(gate.observe("zoom", 1), MeetingOcrDecision::Ocr);
+        assert_eq!(gate.observe("zoom", thumb(100)), MeetingOcrDecision::Ocr);
         gate.ocr_indexed("zoom", "hello world", "[]");
-        assert_eq!(gate.observe("zoom", 1), MeetingOcrDecision::Skip);
+        assert_eq!(gate.observe("zoom", thumb(100)), MeetingOcrDecision::Skip);
         // A confirm without a pending OCR is a harmless no-op.
-        gate.ocr_indexed("zoom", "hello world", "[]");
-        assert_eq!(gate.observe("zoom", 1), MeetingOcrDecision::Skip);
+        gate.ocr_indexed("zoom", "stale", "[]");
+        assert_eq!(gate.observe("zoom", thumb(100)), MeetingOcrDecision::Skip);
+        assert_eq!(gate.indexed_text("zoom"), Some(("hello world", "[]")));
     }
 
     #[test]
     fn indexed_text_available_only_after_commit() {
         let mut gate = MeetingOcrGate::new();
-        assert_eq!(gate.observe("term", 1), MeetingOcrDecision::Ocr);
+        assert_eq!(gate.observe("term", thumb(10)), MeetingOcrDecision::Ocr);
         // Pending (uncommitted) OCR exposes no cached text — a failed
         // OCR/insert must not let later skips serve unpersisted text.
         assert!(gate.indexed_text("term").is_none());
@@ -206,20 +270,30 @@ mod tests {
             gate.indexed_text("term"),
             Some(("ls -la src", r#"[{"text":"ls"}]"#))
         );
-        // Re-commit replaces the cache alongside the signature.
-        assert_eq!(gate.observe("term", 2), MeetingOcrDecision::Ocr);
+        // Re-commit replaces the cache alongside the thumbnail.
+        assert_eq!(gate.observe("term", thumb(200)), MeetingOcrDecision::Ocr);
         gate.ocr_indexed("term", "cargo test", "[]");
         assert_eq!(gate.indexed_text("term"), Some(("cargo test", "[]")));
     }
 
     #[test]
+    fn diff_cells_reports_distance_from_indexed() {
+        let mut gate = MeetingOcrGate::new();
+        assert!(gate.diff_cells("zoom", &thumb(100)).is_none());
+        gate.observe("zoom", thumb(100));
+        gate.ocr_indexed("zoom", "x", "[]");
+        assert_eq!(gate.diff_cells("zoom", &thumb(100)), Some(0));
+        assert_eq!(gate.diff_cells("zoom", &thumb_with(100, 5)), Some(5));
+    }
+
+    #[test]
     fn apps_are_tracked_independently_and_reset_clears() {
         let mut gate = MeetingOcrGate::new();
-        assert_eq!(gate.observe("zoom", 1), MeetingOcrDecision::Ocr);
-        gate.ocr_indexed("zoom", "hello world", "[]");
-        assert_eq!(gate.observe("teams", 1), MeetingOcrDecision::Ocr);
-        assert_eq!(gate.observe("zoom", 1), MeetingOcrDecision::Skip);
+        assert_eq!(gate.observe("zoom", thumb(100)), MeetingOcrDecision::Ocr);
+        gate.ocr_indexed("zoom", "x", "[]");
+        assert_eq!(gate.observe("teams", thumb(100)), MeetingOcrDecision::Ocr);
+        assert_eq!(gate.observe("zoom", thumb(100)), MeetingOcrDecision::Skip);
         gate.reset();
-        assert_eq!(gate.observe("zoom", 1), MeetingOcrDecision::Ocr);
+        assert_eq!(gate.observe("zoom", thumb(100)), MeetingOcrDecision::Ocr);
     }
 }

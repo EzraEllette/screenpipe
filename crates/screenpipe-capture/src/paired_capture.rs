@@ -21,7 +21,7 @@ use screenpipe_core::pii_removal::remove_pii;
 use screenpipe_db::DatabaseManager;
 use screenpipe_screen::snapshot_writer::SnapshotWriter;
 use screenpipe_screen::text_regions::{
-    detect_text_regions, image_pixel_signature, union_region, TextRegion,
+    detect_text_regions, luma_thumbnail, union_region, TextRegion,
 };
 use screenpipe_screen::MeetingGateDecision;
 
@@ -332,7 +332,7 @@ pub async fn paired_capture(
                 // window → detect text → crop to the padded union of the
                 // detected text → pixel-compare that crop to the last
                 // indexed one → different? OCR that same crop. One blocking
-                // hop computes detect + union + signature.
+                // hop computes detect + union + thumbnail.
                 let detect_started = Instant::now();
                 let detect_image: Arc<DynamicImage> = match window_crop {
                     Some(w) => Arc::new(ctx.image.crop_imm(w.x, w.y, w.width, w.height)),
@@ -344,7 +344,7 @@ pub async fn paired_capture(
                     let (dw, dh) = detect_image.dimensions();
                     union_region(&regions, UNION_PAD_PX, dw, dh).map(|u| {
                         let union_img = detect_image.crop_imm(u.x, u.y, u.width, u.height);
-                        (u, image_pixel_signature(&union_img), regions.len())
+                        (u, luma_thumbnail(&union_img), regions.len())
                     })
                 })
                 .await
@@ -367,7 +367,7 @@ pub async fn paired_capture(
                         );
                         meeting_gate_decision = Some(MeetingGateDecision::Skip);
                     }
-                    Some((union, signature, region_count)) => {
+                    Some((union, crop_thumb, region_count)) => {
                         // The union is in detect-image coordinates; offset
                         // by the window origin to get frame coords. Stays
                         // in-bounds: the union is clamped to the detect
@@ -380,7 +380,7 @@ pub async fn paired_capture(
                             },
                             None => union,
                         };
-                        let decision = gate.observe(&app_key, signature);
+                        let decision = gate.observe(&app_key, crop_thumb);
                         debug!(
                             "OCR gate: {} regions, union {:?} in {:?} -> {:?} (app={}, window_crop={:?})",
                             region_count,
@@ -393,13 +393,10 @@ pub async fn paired_capture(
                         match decision {
                             MeetingOcrDecision::Skip => {
                                 meeting_gate_decision = Some(MeetingGateDecision::Skip);
-                                // Identical pixels ⇒ identical text: reuse
-                                // the indexed OCR result. Signature equality
-                                // implies equal crop dimensions (they're
-                                // hashed), so remapping the cached
-                                // crop-relative boxes to the current union
-                                // position is exact even if the window
-                                // moved.
+                                // Basically-the-same pixels ⇒ same text:
+                                // reuse the indexed OCR result, with the
+                                // cached crop-relative boxes re-mapped to
+                                // the current union position.
                                 gate_cached_text =
                                     gate.indexed_text(&app_key).map(|(text, crop_json)| {
                                         (
