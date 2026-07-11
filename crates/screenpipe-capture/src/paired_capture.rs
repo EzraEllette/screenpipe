@@ -23,9 +23,9 @@ use screenpipe_screen::snapshot_writer::SnapshotWriter;
 use screenpipe_screen::text_regions::{
     detect_text_regions, image_pixel_signature, union_region, TextRegion,
 };
-use screenpipe_screen::MeetingGateDecision;
+use screenpipe_screen::OcrGateDecision;
 
-use crate::meeting_ocr_gate::{MeetingOcrDecision, MeetingOcrGate};
+use crate::ocr_gate::{OcrDecision, OcrGate};
 use std::sync::Arc;
 #[cfg(not(target_os = "windows"))]
 use std::sync::OnceLock;
@@ -195,15 +195,15 @@ pub struct PairedCaptureResult {
     /// True when OCR ran but produced (near-)empty text — an OCR-quality
     /// failure proxy. False when OCR didn't run or returned usable text.
     pub ocr_was_empty: bool,
-    /// How the meeting OCR gate resolved this capture — `Some` only when the
-    /// capture was meeting-scoped AND a gate was wired (the engine loop).
+    /// How the OCR gate resolved this capture — `Some` only when an OCR
+    /// trigger fired AND a gate was wired (the engine loop).
     /// The capture loop feeds this to
-    /// `PipelineMetrics::record_meeting_gate_decision`.
-    pub meeting_gate_decision: Option<MeetingGateDecision>,
+    /// `PipelineMetrics::record_ocr_gate_decision`.
+    pub ocr_gate_decision: Option<OcrGateDecision>,
     /// Wall-clock of the gate's text-region detect pass — `Some` only when
     /// the detect actually ran this capture (it's rate-limited by the gate's
-    /// stability backoff). Feeds `PipelineMetrics::record_meeting_gate_detect`.
-    pub meeting_gate_detect_duration: Option<std::time::Duration>,
+    /// stability backoff). Feeds `PipelineMetrics::record_ocr_gate_detect`.
+    pub ocr_gate_detect_duration: Option<std::time::Duration>,
     /// App name from accessibility tree or OCR
     pub app_name: Option<String>,
     /// Window name from accessibility tree or OCR
@@ -219,14 +219,13 @@ pub struct PairedCaptureResult {
 /// This is the primary capture function for event-driven mode.
 /// Accepts an optional `TreeSnapshot` with structured node data.
 ///
-/// `meeting_gate` owns the OCR decision for meeting apps while
-/// `ctx.in_meeting` is true (#5054). Callers without a gate (`None`) keep
-/// the pre-gate behavior: meeting apps force full OCR whenever
-/// `ctx.in_meeting` is set.
+/// `ocr_gate` owns the OCR decision for every OCR trigger (#5060).
+/// Callers without a gate (`None`) keep the pre-gate behavior: triggers
+/// force OCR on every capture.
 pub async fn paired_capture(
     ctx: &CaptureContext<'_>,
     tree_snapshot: Option<&TreeSnapshot>,
-    meeting_gate: Option<&mut MeetingOcrGate>,
+    ocr_gate: Option<&mut OcrGate>,
 ) -> Result<PairedCaptureResult> {
     let start = Instant::now();
 
@@ -304,10 +303,10 @@ pub async fn paired_capture(
             || !has_accessibility_text
             || a11y_is_thin_generic);
 
-    let mut meeting_gate = meeting_gate;
-    let mut meeting_gate_escalated = false;
-    let mut meeting_gate_decision: Option<MeetingGateDecision> = None;
-    let mut meeting_gate_detect_duration: Option<std::time::Duration> = None;
+    let mut ocr_gate = ocr_gate;
+    let mut ocr_gate_escalated = false;
+    let mut ocr_gate_decision: Option<OcrGateDecision> = None;
+    let mut ocr_gate_detect_duration: Option<std::time::Duration> = None;
     let mut ocr_crop: Option<TextRegion> = None;
     // On a gate-skipped capture, the previously indexed OCR text re-mapped
     // to the current crop position — frames whose only text source is OCR
@@ -323,7 +322,7 @@ pub async fn paired_capture(
         .focused_window_bounds
         .and_then(|b| clamp_window_crop(b, frame_w, frame_h));
     if wants_ocr {
-        match meeting_gate.as_deref_mut() {
+        match ocr_gate.as_deref_mut() {
             Some(gate) => {
                 let app_key = ctx.app_name.unwrap_or("unknown").to_lowercase();
                 // The gated OCR pipeline (#5060) — applies to EVERY OCR
@@ -349,7 +348,7 @@ pub async fn paired_capture(
                 .await
                 .ok()
                 .flatten();
-                meeting_gate_detect_duration = Some(detect_started.elapsed());
+                ocr_gate_detect_duration = Some(detect_started.elapsed());
                 match union_and_sig {
                     // No text detected at all: nothing to OCR. The gate's
                     // indexed state is deliberately untouched — text that
@@ -364,7 +363,7 @@ pub async fn paired_capture(
                             window_crop,
                             detect_dims,
                         );
-                        meeting_gate_decision = Some(MeetingGateDecision::Skip);
+                        ocr_gate_decision = Some(OcrGateDecision::Skip);
                     }
                     Some((union, signature, region_count)) => {
                         // The union is in detect-image coordinates; offset
@@ -390,8 +389,8 @@ pub async fn paired_capture(
                             window_crop,
                         );
                         match decision {
-                            MeetingOcrDecision::Skip => {
-                                meeting_gate_decision = Some(MeetingGateDecision::Skip);
+                            OcrDecision::Skip => {
+                                ocr_gate_decision = Some(OcrGateDecision::Skip);
                                 // Identical pixels ⇒ identical text: reuse
                                 // the indexed OCR result. Signature equality
                                 // implies equal crop dimensions (they're
@@ -412,9 +411,9 @@ pub async fn paired_capture(
                                         )
                                     });
                             }
-                            MeetingOcrDecision::Ocr => {
-                                meeting_gate_escalated = true;
-                                meeting_gate_decision = Some(MeetingGateDecision::CropOcr);
+                            OcrDecision::Ocr => {
+                                ocr_gate_escalated = true;
+                                ocr_gate_decision = Some(OcrGateDecision::CropOcr);
                                 ocr_crop = Some(union_in_frame);
                             }
                         }
@@ -426,7 +425,7 @@ pub async fn paired_capture(
             // dropping OCR — scoped to the focused window when its bounds
             // are known, like the gated path.
             None => {
-                meeting_gate_escalated = true;
+                ocr_gate_escalated = true;
                 ocr_crop = window_crop;
             }
         }
@@ -437,11 +436,11 @@ pub async fn paired_capture(
     // `PipelineMetrics::record_ocr` (ocr_completed / avg_ocr_latency_ms).
     // `ocr_duration_ms` is Some only when OCR actually ran — None when
     // accessibility text was sufficient or the gate reused its cache.
-    let ocr_ran = wants_ocr && meeting_gate_escalated;
+    let ocr_ran = wants_ocr && ocr_gate_escalated;
 
     // "Thin" for hybrid-labeling below: generic canvas/density thinness, or
     // a meeting-gate escalation supplementing existing a11y chrome text.
-    let a11y_is_thin = a11y_is_thin_generic || (meeting_gate_escalated && has_accessibility_text);
+    let a11y_is_thin = a11y_is_thin_generic || (ocr_gate_escalated && has_accessibility_text);
 
     let ocr_started = Instant::now();
     // True when the OCR *engine* failed (task join error / platform OCR
@@ -677,9 +676,9 @@ pub async fn paired_capture(
     // until it changed). Legit-empty OCR results DO commit: texture the
     // detector boxed but that holds no readable text must stay marked or
     // it would re-OCR forever.
-    if meeting_gate_escalated && !ocr_engine_failed {
+    if ocr_gate_escalated && !ocr_engine_failed {
         if let (Some(gate), Some((cache_text, cache_json))) =
-            (meeting_gate.as_deref_mut(), ocr_cache_payload.as_ref())
+            (ocr_gate.as_deref_mut(), ocr_cache_payload.as_ref())
         {
             gate.ocr_indexed(
                 &ctx.app_name.unwrap_or("unknown").to_lowercase(),
@@ -705,8 +704,8 @@ pub async fn paired_capture(
         duration_ms,
         ocr_duration_ms,
         ocr_was_empty,
-        meeting_gate_decision,
-        meeting_gate_detect_duration,
+        ocr_gate_decision,
+        ocr_gate_detect_duration,
         app_name: ctx.app_name.map(String::from),
         window_name: ctx.window_name.map(String::from),
         browser_url: ctx.browser_url.map(String::from),
@@ -1585,7 +1584,7 @@ mod tests {
         ));
     }
 
-    // --- Meeting OCR gate integration (#5054) ---
+    // --- OCR gate integration (#5054/#5060) ---
 
     /// Content-dense snapshot: enough real text that the generic density
     /// heuristic does NOT flag it as thin.
@@ -1649,7 +1648,7 @@ mod tests {
             focused_window_bounds: None,
         };
         let snap = rich_meeting_snap();
-        let mut gate = MeetingOcrGate::new();
+        let mut gate = OcrGate::new();
         let result = paired_capture(&ctx, Some(&snap), Some(&mut gate))
             .await
             .unwrap();
@@ -1693,7 +1692,7 @@ mod tests {
             focused_window_bounds: None,
         };
         let snap = rich_meeting_snap();
-        let mut gate = MeetingOcrGate::new();
+        let mut gate = OcrGate::new();
         let result = paired_capture(&ctx, Some(&snap), Some(&mut gate))
             .await
             .unwrap();
@@ -1786,7 +1785,7 @@ mod tests {
             monitor_hosts_focus: false,
             focused_window_bounds: None,
         };
-        let mut gate = MeetingOcrGate::new();
+        let mut gate = OcrGate::new();
         // Text on this monitor: first sighting OCRs it.
         let ctx = make_ctx(strokes_image_at(50, 100));
         let result = paired_capture(&ctx, Some(&snap), Some(&mut gate))
@@ -1849,7 +1848,7 @@ mod tests {
             monitor_hosts_focus: true,
             focused_window_bounds: None,
         };
-        let mut gate = MeetingOcrGate::new();
+        let mut gate = OcrGate::new();
         // First capture: the detect finds the stroke region, the union crop
         // is new → OCR runs on the crop.
         let result = paired_capture(&ctx, None, Some(&mut gate)).await.unwrap();
@@ -1858,9 +1857,9 @@ mod tests {
             "new text crop must run OCR"
         );
         // Gate telemetry travels out with the result for PipelineMetrics.
-        assert_eq!(result.meeting_gate_decision, Some(MeetingGateDecision::CropOcr));
+        assert_eq!(result.ocr_gate_decision, Some(OcrGateDecision::CropOcr));
         assert!(
-            result.meeting_gate_detect_duration.is_some(),
+            result.ocr_gate_detect_duration.is_some(),
             "detect ran, so its latency must be reported"
         );
         // Second capture of the identical frame: the union crop is
@@ -1871,9 +1870,9 @@ mod tests {
             result2.ocr_duration_ms.is_none(),
             "unchanged text crop must not re-run OCR"
         );
-        assert_eq!(result2.meeting_gate_decision, Some(MeetingGateDecision::Skip));
+        assert_eq!(result2.ocr_gate_decision, Some(OcrGateDecision::Skip));
         assert!(
-            result2.meeting_gate_detect_duration.is_some(),
+            result2.ocr_gate_detect_duration.is_some(),
             "the detect+hash check runs (and is priced) on every gated capture"
         );
     }
@@ -1944,7 +1943,7 @@ mod tests {
             focused_window_bounds: bounds,
         };
 
-        let mut gate = MeetingOcrGate::new();
+        let mut gate = OcrGate::new();
         let ctx = make_ctx(Some(FocusedWindowBounds {
             x: 200,
             y: 150,
@@ -1956,11 +1955,11 @@ mod tests {
             result.ocr_duration_ms.is_none(),
             "no text inside the meeting window — the gate must skip"
         );
-        assert_eq!(result.meeting_gate_decision, Some(MeetingGateDecision::Skip));
+        assert_eq!(result.ocr_gate_decision, Some(OcrGateDecision::Skip));
 
         // Control: the identical frame WITHOUT bounds escalates on the
         // neighboring text (fresh gate — independent decision).
-        let mut gate2 = MeetingOcrGate::new();
+        let mut gate2 = OcrGate::new();
         let ctx2 = make_ctx(None);
         let result2 = paired_capture(&ctx2, None, Some(&mut gate2)).await.unwrap();
         assert!(
@@ -2002,7 +2001,7 @@ mod tests {
             focused_window_bounds: Some(bounds),
         };
 
-        let mut gate = MeetingOcrGate::new();
+        let mut gate = OcrGate::new();
         let ctx1 = make_ctx(
             strokes_image_at(120, 80),
             FocusedWindowBounds {
@@ -2034,9 +2033,9 @@ mod tests {
             moved.ocr_duration_ms.is_none(),
             "moved-but-unchanged window must not re-OCR"
         );
-        assert_eq!(moved.meeting_gate_decision, Some(MeetingGateDecision::Skip));
+        assert_eq!(moved.ocr_gate_decision, Some(OcrGateDecision::Skip));
         assert!(
-            moved.meeting_gate_detect_duration.is_some(),
+            moved.ocr_gate_detect_duration.is_some(),
             "detect ran (interval elapsed) and produced the skip"
         );
     }
@@ -2049,7 +2048,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let snapshot_writer = SnapshotWriter::new(tmp.path(), 80, 1920);
         let image = strokes_image();
-        let mut gate = MeetingOcrGate::new();
+        let mut gate = OcrGate::new();
 
         let make_ctx = |db| CaptureContext {
             db,

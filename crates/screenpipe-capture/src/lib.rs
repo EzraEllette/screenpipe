@@ -15,10 +15,10 @@
 //! snapshot to disk. Callers own the *trigger* (1 Hz tick, event-driven,
 //! cron — doesn't matter to this crate).
 
-pub mod meeting_ocr_gate;
+pub mod ocr_gate;
 pub mod paired_capture;
 
-pub use meeting_ocr_gate::{MeetingOcrDecision, MeetingOcrGate};
+pub use ocr_gate::{OcrDecision, OcrGate};
 pub use paired_capture::{
     paired_capture, walk_accessibility_tree, CaptureContext, PairedCaptureResult,
 };

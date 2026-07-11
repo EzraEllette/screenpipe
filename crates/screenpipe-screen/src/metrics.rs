@@ -42,18 +42,16 @@ impl RollingLatencyWindow {
     }
 }
 
-/// How the meeting OCR gate (#5054) resolved one gated capture. Mirrors
-/// `screenpipe_capture::meeting_ocr_gate::MeetingOcrDecision` (that crate
-/// depends on this one, so the metrics-facing kind lives here) minus the
-/// crop payload — telemetry only needs the shape of the decision.
+/// How the OCR gate (#5054/#5060) resolved one gated capture. Mirrors
+/// `screenpipe_capture::ocr_gate::OcrDecision` (that crate depends on this
+/// one, so the metrics-facing kind lives here).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MeetingGateDecision {
-    /// No OCR ran: text unchanged or the detect backoff wasn't due.
+pub enum OcrGateDecision {
+    /// No OCR ran: the detected-text crop matched the indexed state (or
+    /// there was no text at all).
     Skip,
-    /// OCR ran on the padded union of detected text regions.
+    /// OCR ran on the padded union crop of the detected text regions.
     CropOcr,
-    /// OCR ran on the full frame (dense layout).
-    FullFrameOcr,
 }
 
 /// Thread-safe pipeline metrics shared across capture, OCR, and DB writer.
@@ -79,21 +77,18 @@ pub struct PipelineMetrics {
     /// Cumulative OCR latency in microseconds (divide by ocr_completed for average)
     pub ocr_total_latency_us: AtomicU64,
 
-    // --- Meeting OCR gate (#5054) ---
-    /// Gate decisions where OCR was skipped (text unchanged or detect not
-    /// due). The fast path — `skips / (skips + crop + full)` is the ratio
-    /// that validates the gate's savings in production.
-    pub meeting_gate_skips: AtomicU64,
-    /// Gate escalations that OCR'd only the padded union of text regions.
-    pub meeting_gate_crop_ocr: AtomicU64,
-    /// Gate escalations that fell back to full-frame OCR (dense layout).
-    pub meeting_gate_full_ocr: AtomicU64,
-    /// Text-region detect passes actually run by the gate (subset of gate
-    /// decisions — skipped entirely while the detect backoff isn't due).
-    pub meeting_gate_detects: AtomicU64,
+    // --- OCR gate (#5054/#5060) ---
+    /// Gate decisions where OCR was skipped (text crop unchanged). The
+    /// fast path — `skips / (skips + crop_ocr)` is the ratio that
+    /// validates the gate's savings in production.
+    pub ocr_gate_skips: AtomicU64,
+    /// Gate decisions that OCR'd the padded union crop of detected text.
+    pub ocr_gate_crop_ocr: AtomicU64,
+    /// Detect+hash passes run by the gate (one per gated capture).
+    pub ocr_gate_detects: AtomicU64,
     /// Cumulative detect latency in microseconds (divide by
-    /// `meeting_gate_detects` for average).
-    pub meeting_gate_detect_total_latency_us: AtomicU64,
+    /// `ocr_gate_detects` for average).
+    pub ocr_gate_detect_total_latency_us: AtomicU64,
 
     // --- Video stage ---
     /// Total frames written to video files
@@ -171,11 +166,10 @@ impl PipelineMetrics {
             ocr_cache_misses: AtomicU64::new(0),
             ocr_empty: AtomicU64::new(0),
             ocr_total_latency_us: AtomicU64::new(0),
-            meeting_gate_skips: AtomicU64::new(0),
-            meeting_gate_crop_ocr: AtomicU64::new(0),
-            meeting_gate_full_ocr: AtomicU64::new(0),
-            meeting_gate_detects: AtomicU64::new(0),
-            meeting_gate_detect_total_latency_us: AtomicU64::new(0),
+            ocr_gate_skips: AtomicU64::new(0),
+            ocr_gate_crop_ocr: AtomicU64::new(0),
+            ocr_gate_detects: AtomicU64::new(0),
+            ocr_gate_detect_total_latency_us: AtomicU64::new(0),
             frames_video_written: AtomicU64::new(0),
             frames_db_written: AtomicU64::new(0),
             frames_dropped: AtomicU64::new(0),
@@ -235,24 +229,21 @@ impl PipelineMetrics {
         self.ocr_empty.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Record how the meeting OCR gate (#5054) resolved a gated capture.
-    /// Skip covers both "detect not due" and "text unchanged" — either way
-    /// no OCR ran, which is the saving the gate exists to make.
-    pub fn record_meeting_gate_decision(&self, decision: MeetingGateDecision) {
+    /// Record how the OCR gate (#5054/#5060) resolved a gated capture.
+    /// A Skip means no OCR ran — the saving the gate exists to make.
+    pub fn record_ocr_gate_decision(&self, decision: OcrGateDecision) {
         let counter = match decision {
-            MeetingGateDecision::Skip => &self.meeting_gate_skips,
-            MeetingGateDecision::CropOcr => &self.meeting_gate_crop_ocr,
-            MeetingGateDecision::FullFrameOcr => &self.meeting_gate_full_ocr,
+            OcrGateDecision::Skip => &self.ocr_gate_skips,
+            OcrGateDecision::CropOcr => &self.ocr_gate_crop_ocr,
         };
         counter.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Record one text-region detect pass run by the meeting OCR gate.
-    /// Call only when the detect actually ran (it's rate-limited by the
-    /// gate's backoff), alongside the decision it produced.
-    pub fn record_meeting_gate_detect(&self, latency: std::time::Duration) {
-        self.meeting_gate_detects.fetch_add(1, Ordering::Relaxed);
-        self.meeting_gate_detect_total_latency_us
+    /// Record one detect+hash pass run by the OCR gate, alongside the
+    /// decision it produced.
+    pub fn record_ocr_gate_detect(&self, latency: std::time::Duration) {
+        self.ocr_gate_detects.fetch_add(1, Ordering::Relaxed);
+        self.ocr_gate_detect_total_latency_us
             .fetch_add(latency.as_micros() as u64, Ordering::Relaxed);
     }
 
@@ -438,15 +429,14 @@ impl PipelineMetrics {
             } else {
                 0.0
             },
-            meeting_gate_skips: self.meeting_gate_skips.load(Ordering::Relaxed),
-            meeting_gate_crop_ocr: self.meeting_gate_crop_ocr.load(Ordering::Relaxed),
-            meeting_gate_full_ocr: self.meeting_gate_full_ocr.load(Ordering::Relaxed),
-            meeting_gate_detects: self.meeting_gate_detects.load(Ordering::Relaxed),
-            avg_meeting_gate_detect_latency_ms: {
-                let detects = self.meeting_gate_detects.load(Ordering::Relaxed);
+            ocr_gate_skips: self.ocr_gate_skips.load(Ordering::Relaxed),
+            ocr_gate_crop_ocr: self.ocr_gate_crop_ocr.load(Ordering::Relaxed),
+            ocr_gate_detects: self.ocr_gate_detects.load(Ordering::Relaxed),
+            avg_ocr_gate_detect_latency_ms: {
+                let detects = self.ocr_gate_detects.load(Ordering::Relaxed);
                 if detects > 0 {
                     (self
-                        .meeting_gate_detect_total_latency_us
+                        .ocr_gate_detect_total_latency_us
                         .load(Ordering::Relaxed) as f64
                         / detects as f64)
                         / 1000.0
@@ -538,18 +528,15 @@ pub struct MetricsSnapshot {
     /// OCR runs that produced (near-)empty text (subset of ocr_completed).
     pub ocr_empty: u64,
     pub avg_ocr_latency_ms: f64,
-    /// Meeting-gate (#5054) captures resolved without OCR — the fast path.
-    /// `skips / (skips + crop + full)` is the production fast-path ratio.
-    pub meeting_gate_skips: u64,
-    /// Meeting-gate escalations OCR'ing only the text-region union crop.
-    pub meeting_gate_crop_ocr: u64,
-    /// Meeting-gate escalations falling back to full-frame OCR (dense).
-    pub meeting_gate_full_ocr: u64,
-    /// Text-region detect passes the gate actually ran (rate-limited subset
-    /// of gated captures).
-    pub meeting_gate_detects: u64,
+    /// OCR-gate captures resolved without OCR — the fast path.
+    /// `skips / (skips + crop_ocr)` is the production fast-path ratio.
+    pub ocr_gate_skips: u64,
+    /// OCR-gate decisions that OCR'd the union crop of detected text.
+    pub ocr_gate_crop_ocr: u64,
+    /// Detect+hash passes the gate ran (one per gated capture).
+    pub ocr_gate_detects: u64,
     /// Average wall-clock of one gate detect pass, ms.
-    pub avg_meeting_gate_detect_latency_ms: f64,
+    pub avg_ocr_gate_detect_latency_ms: f64,
     pub frames_video_written: u64,
     pub frames_db_written: u64,
     pub frames_dropped: u64,
@@ -721,27 +708,25 @@ mod tests {
     }
 
     #[test]
-    fn meeting_gate_counters_track_decisions_and_detect_latency() {
+    fn ocr_gate_counters_track_decisions_and_detect_latency() {
         let m = PipelineMetrics::new();
-        // 5 gated captures: 3 fast-path skips (one of them detect-not-due,
-        // so only 4 detects ran), 1 crop escalation, 1 dense full-frame.
-        m.record_meeting_gate_decision(MeetingGateDecision::Skip);
-        m.record_meeting_gate_detect(Duration::from_millis(10));
-        m.record_meeting_gate_decision(MeetingGateDecision::Skip);
-        m.record_meeting_gate_detect(Duration::from_millis(20));
-        m.record_meeting_gate_decision(MeetingGateDecision::Skip); // detect not due
-        m.record_meeting_gate_decision(MeetingGateDecision::CropOcr);
-        m.record_meeting_gate_detect(Duration::from_millis(30));
-        m.record_meeting_gate_decision(MeetingGateDecision::FullFrameOcr);
-        m.record_meeting_gate_detect(Duration::from_millis(40));
+        // 4 gated captures: 2 fast-path skips, 2 crop OCRs; a detect+hash
+        // pass runs on every gated capture.
+        m.record_ocr_gate_decision(OcrGateDecision::Skip);
+        m.record_ocr_gate_detect(Duration::from_millis(10));
+        m.record_ocr_gate_decision(OcrGateDecision::Skip);
+        m.record_ocr_gate_detect(Duration::from_millis(20));
+        m.record_ocr_gate_decision(OcrGateDecision::CropOcr);
+        m.record_ocr_gate_detect(Duration::from_millis(30));
+        m.record_ocr_gate_decision(OcrGateDecision::CropOcr);
+        m.record_ocr_gate_detect(Duration::from_millis(40));
 
         let s = m.snapshot();
-        assert_eq!(s.meeting_gate_skips, 3);
-        assert_eq!(s.meeting_gate_crop_ocr, 1);
-        assert_eq!(s.meeting_gate_full_ocr, 1);
-        assert_eq!(s.meeting_gate_detects, 4);
+        assert_eq!(s.ocr_gate_skips, 2);
+        assert_eq!(s.ocr_gate_crop_ocr, 2);
+        assert_eq!(s.ocr_gate_detects, 4);
         // avg detect latency = (10 + 20 + 30 + 40) / 4 = 25ms
-        assert!((s.avg_meeting_gate_detect_latency_ms - 25.0).abs() < 1e-6);
+        assert!((s.avg_ocr_gate_detect_latency_ms - 25.0).abs() < 1e-6);
     }
 
     #[test]

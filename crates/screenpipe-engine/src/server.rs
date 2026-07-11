@@ -528,14 +528,13 @@ impl SCServer {
                                 "ocr_queue_depth": snap.ocr_queue_depth,
                                 "video_queue_depth": snap.video_queue_depth,
                                 "pipeline_stall_count": snap.pipeline_stall_count,
-                                // Meeting OCR gate (#5054): skip/crop/full split is
-                                // the production fast-path ratio that validates the
+                                // OCR gate (#5054/#5060): the skip/ocr split is the
+                                // production fast-path ratio that validates the
                                 // gate's savings; detect latency prices the gate.
-                                "meeting_gate_skips": snap.meeting_gate_skips,
-                                "meeting_gate_crop_ocr": snap.meeting_gate_crop_ocr,
-                                "meeting_gate_full_ocr": snap.meeting_gate_full_ocr,
-                                "meeting_gate_detects": snap.meeting_gate_detects,
-                                "avg_meeting_gate_detect_latency_ms": snap.avg_meeting_gate_detect_latency_ms,
+                                "ocr_gate_skips": snap.ocr_gate_skips,
+                                "ocr_gate_crop_ocr": snap.ocr_gate_crop_ocr,
+                                "ocr_gate_detects": snap.ocr_gate_detects,
+                                "avg_ocr_gate_detect_latency_ms": snap.avg_ocr_gate_detect_latency_ms,
                                 // Recording-coverage reliability metric.
                                 "recording_coverage_ratio": cov.coverage_ratio,
                                 "recording_secs": cov.recording_secs,

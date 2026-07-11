@@ -9,7 +9,7 @@
 //!
 //! - **baseline** — full-frame OCR on every tick, i.e. the pre-#5054
 //!   behavior for meeting apps during a call.
-//! - **optimized** — the production gate mechanics: `MeetingOcrGate`
+//! - **optimized** — the production gate mechanics: `OcrGate`
 //!   (detect backoff + text-change fingerprint) with the detect and any
 //!   escalated OCR scoped to the focused window's bounds, exactly the
 //!   plumbing `paired_capture` uses (walker `window_bounds` fractions →
@@ -62,7 +62,7 @@ mod macos {
     use anyhow::{Context, Result};
     use image::GenericImageView;
     use screenpipe_capture::paired_capture::walk_accessibility_tree;
-    use screenpipe_capture::{MeetingOcrDecision, MeetingOcrGate};
+    use screenpipe_capture::{OcrDecision, OcrGate};
     use screenpipe_screen::monitor::{get_default_monitor, get_monitor_by_id, SafeMonitor};
     use screenpipe_screen::text_regions::{
         detect_text_regions, image_pixel_signature, union_region, TextRegion,
@@ -204,7 +204,7 @@ mod macos {
         };
         walker_config.compile_patterns();
 
-        let mut gate = MeetingOcrGate::new();
+        let mut gate = OcrGate::new();
         // Optimized arm's index: last escalated OCR text per app key, plus
         // the tick it was refreshed on (staleness analysis).
         let mut indexed: HashMap<String, (String, HashSet<String>, u64)> = HashMap::new();
@@ -320,7 +320,7 @@ mod macos {
         tick: u64,
         monitor: &SafeMonitor,
         walker_config: &screenpipe_a11y::tree::TreeWalkerConfig,
-        gate: &mut MeetingOcrGate,
+        gate: &mut OcrGate,
         indexed: &mut HashMap<String, (String, HashSet<String>, u64)>,
         log: &mut impl Write,
         args: &Args,
@@ -449,10 +449,10 @@ mod macos {
                 fingerprint = Some(format!("{signature:016x}"));
                 regions_count = Some(n_regions);
                 match gate.observe(&app_key, signature) {
-                    MeetingOcrDecision::Skip => {
+                    OcrDecision::Skip => {
                         decision_label = "skip_unchanged";
                     }
-                    MeetingOcrDecision::Ocr => {
+                    OcrDecision::Ocr => {
                         decision_label = "crop_ocr";
                         // OCR the union crop in frame coordinates (window
                         // origin + union offset), like production.

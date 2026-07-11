@@ -14,7 +14,7 @@ use anyhow::Result;
 use chrono::Utc;
 use screenpipe_a11y::tree::TreeWalkerConfig;
 use screenpipe_a11y::ActivityFeed;
-use screenpipe_capture::meeting_ocr_gate::MeetingOcrGate;
+use screenpipe_capture::ocr_gate::OcrGate;
 use screenpipe_capture::paired_capture::{paired_capture, CaptureContext, PairedCaptureResult};
 use screenpipe_core::window_pattern::{self, WindowPattern};
 use screenpipe_db::DatabaseManager;
@@ -726,7 +726,7 @@ pub async fn event_driven_capture_loop(
     // Meeting OCR gate (#5054): while a meeting is detected, meeting apps'
     // OCR runs only when the on-screen text fingerprint actually changes,
     // instead of on every capture. Per-monitor, like the walk budget.
-    let mut meeting_gate = MeetingOcrGate::new();
+    let mut ocr_gate = OcrGate::new();
 
     // Frame comparer for visual change detection
     let mut frame_comparer = if visual_check_enabled {
@@ -830,7 +830,7 @@ pub async fn event_driven_capture_loop(
                 last_db_write,
                 None, // first capture — no elements ref
                 &mut walk_budget,
-                &mut meeting_gate,
+                &mut ocr_gate,
                 false, // screenshot enabled on startup
                 false, // hd not active at startup (Manual is dedup-exempt anyway)
                 false, // not in a meeting at startup
@@ -1191,7 +1191,7 @@ pub async fn event_driven_capture_loop(
             if was_in_meeting && !in_meeting {
                 // Meeting ended: clear meeting-scoped OCR-gate state so the
                 // next meeting starts from a fresh bootstrap (#5054).
-                meeting_gate.reset();
+                ocr_gate.reset();
             }
             // Cap the idle-capture interval while in a meeting so the shared
             // screen is captured on a guaranteed floor, not just when the
@@ -1535,7 +1535,7 @@ pub async fn event_driven_capture_loop(
                         last_db_write,
                         elements_ref,
                         &mut walk_budget,
-                        &mut meeting_gate,
+                        &mut ocr_gate,
                         screenshot_disabled,
                         hd_active,
                         in_meeting,
@@ -1617,14 +1617,14 @@ pub async fn event_driven_capture_loop(
                                     vision_metrics.record_ocr_empty();
                                 }
                             }
-                            // Meeting-gate telemetry (#5054): decision counters
-                            // (skip / crop / full — the fast-path ratio) plus
-                            // detect latency when the rate-limited detect ran.
-                            if let Some(decision) = result.meeting_gate_decision {
-                                vision_metrics.record_meeting_gate_decision(decision);
+                            // OCR-gate telemetry (#5054/#5060): decision counters
+                            // (skip / crop_ocr — the fast-path ratio) plus the
+                            // per-capture detect+hash latency.
+                            if let Some(decision) = result.ocr_gate_decision {
+                                vision_metrics.record_ocr_gate_decision(decision);
                             }
-                            if let Some(detect) = result.meeting_gate_detect_duration {
-                                vision_metrics.record_meeting_gate_detect(detect);
+                            if let Some(detect) = result.ocr_gate_detect_duration {
+                                vision_metrics.record_ocr_gate_detect(detect);
                             }
 
                             if let Some(ref cache) = hot_frame_cache {
@@ -2305,7 +2305,7 @@ async fn do_capture(
     last_db_write: Instant,
     elements_ref_frame_id: Option<i64>,
     walk_budget: &mut screenpipe_a11y::budget::AppWalkBudget,
-    meeting_gate: &mut MeetingOcrGate,
+    ocr_gate: &mut OcrGate,
     screenshot_disabled: bool,
     hd_active: bool,
     in_meeting: bool,
@@ -2759,7 +2759,7 @@ async fn do_capture(
         focused_window_bounds,
     };
 
-    let result = paired_capture(&ctx, tree_snapshot.as_ref(), Some(meeting_gate)).await?;
+    let result = paired_capture(&ctx, tree_snapshot.as_ref(), Some(ocr_gate)).await?;
     let deduped = elements_ref_frame_id.is_some();
     // Extract image from Arc for comparer reuse. Arc::try_unwrap succeeds
     // because paired_capture no longer retains a clone.
