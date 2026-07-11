@@ -180,56 +180,19 @@ pub fn region_fingerprint(regions: &[TextRegion]) -> u64 {
     hasher.finish()
 }
 
-/// Side length of the fixed luma grid [`luma_thumbnail`] downsamples to.
-/// 128x128 = 16384 cells: on a typical text crop a single word spans
-/// tens of cells while a caret/cursor spans one or two, so a small
-/// changed-cell threshold separates "text changed" from "UI flicker".
-pub const LUMA_THUMB_DIM: u32 = 128;
-
-/// Fixed-size luma thumbnail of an image: block-averaged BT.601 luma on a
-/// [`LUMA_THUMB_DIM`]² grid. This is the OCR gate's comparison basis for
-/// "is this crop *basically* the same as the one already indexed?" —
-/// deliberately not pixel-exact, because real screens never are: carets
-/// blink, antialiasing shimmers, and the detected union box jitters by a
-/// pixel or two, none of which changes the text. Block averaging over a
-/// fixed grid absorbs all three (including small crop-dimension jitter,
-/// since both crops are resampled onto the same grid) while a genuine text
-/// change moves the mean luma of every cell it touches.
-///
-/// Cost: one luma pass + accumulation, `O(pixels)` — ~1-4ms on a window
-/// crop, well under a single OCR call it can save.
-pub fn luma_thumbnail(image: &DynamicImage) -> Vec<u8> {
-    let gray = to_gray_bt601(image);
-    let (w, h) = (image.width() as usize, image.height() as usize);
-    let dim = LUMA_THUMB_DIM as usize;
-    let mut sums = vec![0u64; dim * dim];
-    let mut counts = vec![0u32; dim * dim];
-    if w == 0 || h == 0 {
-        return vec![0; dim * dim];
-    }
-    for y in 0..h {
-        let cy = y * dim / h;
-        let row = &gray[y * w..(y + 1) * w];
-        for (x, &px) in row.iter().enumerate() {
-            let idx = cy * dim + x * dim / w;
-            sums[idx] += px as u64;
-            counts[idx] += 1;
-        }
-    }
-    sums.iter()
-        .zip(&counts)
-        .map(|(&s, &c)| if c > 0 { (s / c as u64) as u8 } else { 0 })
-        .collect()
-}
-
 /// Content signature of a whole image: quantized luma of every pixel,
 /// hashed. Two frames produce the same signature only when they are
-/// visually identical.
+/// visually identical — any text edit, moved window, or new caption flips
+/// it, while sub-quantum capture noise does not (luma quantized to 32
+/// levels; text edits move pixels by ~full contrast). This is the meeting
+/// gate's only skip signal: "is this cropped image exactly the one whose
+/// OCR result we already stored?" — deliberately heuristic-free (#5060
+/// probe review: a region-scoped signature missed changes the region
+/// detector didn't box, and the earlier geometry-fingerprint stability
+/// gate starved continuously-changing surfaces entirely).
 ///
-/// Superseded as the OCR gate's skip signal by [`luma_thumbnail`]
-/// comparison — exact matching re-OCR'd visually-identical content
-/// whenever a caret blinked or the union box jittered a pixel. Kept for
-/// diagnostics.
+/// Cost: one BT.601 luma pass + hash, `O(pixels)` — ~1-4ms on a window
+/// crop, well under a single OCR call it can save.
 pub fn image_pixel_signature(image: &DynamicImage) -> u64 {
     let gray = to_gray_bt601(image);
     let mut hasher = DefaultHasher::new();
@@ -729,47 +692,6 @@ mod tests {
             r_dense[0],
             r_sparse[0]
         );
-    }
-
-    #[test]
-    fn luma_thumbnail_stable_under_shimmer_moved_by_text_change() {
-        let mut a = light_canvas(400, 300);
-        draw_text_like_line(&mut a, 50, 100, 10);
-        let t_a = luma_thumbnail(&DynamicImage::ImageRgb8(a.clone()));
-        assert_eq!(t_a.len(), (LUMA_THUMB_DIM * LUMA_THUMB_DIM) as usize);
-
-        // Identical image → identical thumbnail.
-        assert_eq!(t_a, luma_thumbnail(&DynamicImage::ImageRgb8(a.clone())));
-
-        // Global +2 shimmer: every cell moves by <= 1 luma — far below any
-        // sane changed-cell delta.
-        let mut noisy = a.clone();
-        for px in noisy.pixels_mut() {
-            px.0 = [
-                px.0[0].saturating_add(2),
-                px.0[1].saturating_add(2),
-                px.0[2].saturating_add(2),
-            ];
-        }
-        let t_noisy = luma_thumbnail(&DynamicImage::ImageRgb8(noisy));
-        let max_delta = t_a
-            .iter()
-            .zip(&t_noisy)
-            .map(|(x, y)| x.abs_diff(*y))
-            .max()
-            .unwrap();
-        assert!(max_delta <= 2, "shimmer must stay sub-threshold: {max_delta}");
-
-        // A second text line: many cells move hard.
-        let mut b = a.clone();
-        draw_text_like_line(&mut b, 50, 200, 10);
-        let t_b = luma_thumbnail(&DynamicImage::ImageRgb8(b));
-        let moved = t_a
-            .iter()
-            .zip(&t_b)
-            .filter(|(x, y)| x.abs_diff(**y) > 6)
-            .count();
-        assert!(moved > 10, "a new text line must move many cells: {moved}");
     }
 
     #[test]

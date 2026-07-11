@@ -65,7 +65,7 @@ mod macos {
     use screenpipe_capture::{MeetingOcrDecision, MeetingOcrGate};
     use screenpipe_screen::monitor::{get_default_monitor, get_monitor_by_id, SafeMonitor};
     use screenpipe_screen::text_regions::{
-        detect_text_regions, luma_thumbnail, union_region, TextRegion,
+        detect_text_regions, image_pixel_signature, union_region, TextRegion,
     };
     use serde_json::{json, Value};
     use std::collections::{HashMap, HashSet};
@@ -403,11 +403,9 @@ mod macos {
         let mut decision_label = "skip_no_text";
         let detect_ms: Option<u64>;
         let mut optimized_ocr_ms: Option<u64> = None;
-        // Hash of the union crop's luma thumbnail (churn diagnostics) and
-        // the changed-cell distance from the indexed state — the gate's
-        // actual decision input ("basically the same" when small).
+        // Signature of the union crop — the gate's only skip signal.
+        // Consecutive-tick signature changes are exactly what drives OCR.
         let mut fingerprint: Option<String> = None;
-        let mut changed_cells: Option<usize> = None;
         let mut regions_count: Option<usize> = None;
         {
             let detect_started = Instant::now();
@@ -421,21 +419,15 @@ mod macos {
                 let (dw, dh) = detect_for_task.dimensions();
                 union_region(&regions, UNION_PAD_PX, dw, dh).map(|u| {
                     let union_img = detect_for_task.crop_imm(u.x, u.y, u.width, u.height);
-                    (u, luma_thumbnail(&union_img), regions.len())
+                    (u, image_pixel_signature(&union_img), regions.len())
                 })
             })
             .await?;
             detect_ms = Some(detect_started.elapsed().as_millis() as u64);
-            if let Some((union, crop_thumb, n_regions)) = union_and_sig {
-                {
-                    use std::hash::{DefaultHasher, Hash, Hasher};
-                    let mut h = DefaultHasher::new();
-                    crop_thumb.hash(&mut h);
-                    fingerprint = Some(format!("{:016x}", h.finish()));
-                }
-                changed_cells = gate.diff_cells(&app_key, &crop_thumb);
+            if let Some((union, signature, n_regions)) = union_and_sig {
+                fingerprint = Some(format!("{signature:016x}"));
                 regions_count = Some(n_regions);
-                match gate.observe(&app_key, crop_thumb) {
+                match gate.observe(&app_key, signature) {
                     MeetingOcrDecision::Skip => {
                         decision_label = "skip_unchanged";
                     }
@@ -531,7 +523,6 @@ mod macos {
             "walk": walk_outcome,
             "decision": decision_label,
             "fingerprint": fingerprint,
-            "changed_cells": changed_cells,
             "regions": regions_count,
             "frame": [frame_w, frame_h],
             "window_crop": window_crop.map(|w| vec![w.x, w.y, w.width, w.height]),
