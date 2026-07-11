@@ -1935,12 +1935,16 @@ fn is_login_callback_scheme(scheme: &str) -> bool {
 }
 
 /// Open the screenpipe.com login page.
-/// macOS: ASWebAuthenticationSession (system-managed sheet, forwards callback).
-/// Windows/Linux: in-app WebView that intercepts the screenpipe:// redirect.
 ///
-/// `fresh_session` is used by "use different account": macOS asks
-/// ASWebAuthenticationSession for an ephemeral browser session instead of
-/// reusing Safari cookies, and Windows/Linux use a throwaway webview profile.
+/// Default: the user's default browser (existing website session, password
+/// manager, passkeys — least friction). The website redirects back via the
+/// `screenpipe://` deep link, which the OS routes to the app and
+/// deeplink-handler.tsx picks up (`api_key=` → loadUser).
+///
+/// `fresh_session` ("use different account") still uses the in-app flows —
+/// macOS ASWebAuthenticationSession with an ephemeral session, Windows/Linux
+/// a throwaway webview profile — because a default browser cannot be forced
+/// to drop its existing cookies.
 #[tauri::command]
 #[specta::specta]
 pub async fn open_login_window(
@@ -1948,6 +1952,17 @@ pub async fn open_login_window(
     fresh_session: Option<bool>,
 ) -> Result<(), String> {
     let fresh_session = fresh_session.unwrap_or(false);
+
+    if !fresh_session {
+        use tauri_plugin_opener::OpenerExt;
+        let login_url = format!("{}?return_scheme={}", LOGIN_URL, deep_link_scheme());
+        info!("opening login in default browser");
+        return app_handle
+            .opener()
+            .open_url(&login_url, None::<&str>)
+            .map_err(|e| e.to_string());
+    }
+
     #[cfg(target_os = "macos")]
     {
         // ASWebAuthenticationSession intercepts the redirect itself (no OS
@@ -1981,25 +1996,13 @@ pub async fn open_login_window(
     {
         use tauri::{WebviewUrl, WebviewWindowBuilder};
 
-        let label = if fresh_session {
-            let id = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis())
-                .unwrap_or(0);
-            format!("login-browser-fresh-{id}")
-        } else {
-            "login-browser".to_string()
-        };
-
-        if fresh_session {
-            if let Some(w) = app_handle.get_webview_window("login-browser") {
-                let _ = w.close();
-            }
-        } else if let Some(w) = app_handle.get_webview_window(&label) {
-            let _ = w.show();
-            let _ = w.set_focus();
-            return Ok(());
-        }
+        // Throwaway label + profile per invocation so each "use different
+        // account" attempt starts from a cookie-less webview.
+        let id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let label = format!("login-browser-fresh-{id}");
 
         let app_for_nav = app_handle.clone();
         let label_for_nav = label.clone();
@@ -2012,12 +2015,8 @@ pub async fn open_login_window(
         )
         .title("sign in to screenpipe")
         .inner_size(460.0, 700.0)
-        .focused(true);
-
-        if fresh_session {
-            let profile_dir = std::env::temp_dir().join(&label);
-            builder = builder.data_directory(profile_dir);
-        }
+        .focused(true)
+        .data_directory(std::env::temp_dir().join(&label));
 
         builder = builder.on_navigation(move |url| {
             if is_login_callback_scheme(url.scheme()) {
