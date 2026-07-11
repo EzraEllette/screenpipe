@@ -11,7 +11,7 @@ use super::{
 use crate::tree::macos_lines::{self, NormalizeRefs};
 use anyhow::Result;
 use chrono::Utc;
-use cidre::{arc::Retained, ax, cf, ns};
+use cidre::{arc, arc::Retained, ax, cf, ns};
 use screenpipe_core::window_pattern::{self, WindowPattern};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -1012,6 +1012,121 @@ fn parse_xterm_bare_desc(val: &str) -> Option<String> {
     }
 }
 
+// Fix 2: batch the per-node attribute reads.
+//
+// The walker used to issue ~6 separate cross-process AX calls per visited node
+// (role, value, title, description, AXPosition, AXSize). XPC round-trip latency
+// is what walk time is made of, so collapsing those into ONE round trip with
+// `AXUIElementCopyMultipleAttributeValues` is a ~3x per-node win (measured
+// 2026-07-10). `children()` stays separate (needed as elements for traversal)
+// and the parameterized line-bounds subsystem is left alone.
+//
+// cidre 0.13.1 does not wrap this API, so declare it here, mirroring cidre's
+// own extern pattern (see `AXUIElementGetPid` in cidre `src/ax/ui_element.rs`).
+#[link(name = "ApplicationServices", kind = "framework")]
+unsafe extern "C-unwind" {
+    fn AXUIElementCopyMultipleAttributeValues(
+        element: &ax::UiElement,
+        attributes: &cf::Array, // of cf::String attribute names
+        options: u32,           // 0 — parallel array, NOT stop-on-error (1)
+        values: *mut Option<arc::R<cf::Array>>,
+    ) -> ax::Error;
+}
+
+thread_local! {
+    /// The six attribute names, in request order, built once per walker thread.
+    /// The returned values array is parallel to this list (index-for-index).
+    static BATCH_ATTR_NAMES: arc::R<cf::Array> = {
+        let names: [&ax::Attr; 6] = [
+            ax::attr::role(),
+            ax::attr::value(),
+            ax::attr::title(),
+            ax::attr::desc(),
+            ax::attr::pos(),
+            ax::attr::size(),
+        ];
+        cf::Array::from_slice(&names).expect("batch attr name array")
+    };
+}
+
+/// The six batched attributes for one node, coerced to match the individual
+/// `get_string_attr` / `get_element_frame` / `role()` reads byte-for-byte.
+/// Missing or unsupported attributes come back as `kAXValueAXErrorType`
+/// placeholders (options=0) and map to `None`, exactly as the individual
+/// reads' `.ok()` / type-check error handling does.
+struct NodeAttrs {
+    role: Option<String>,
+    value: Option<String>,
+    title: Option<String>,
+    desc: Option<String>,
+    frame: Option<(f64, f64, f64, f64)>,
+}
+
+/// Coerce a batched entry to a `String` iff it is a `CFString` — the exact
+/// coercion `get_string_attr` applies. Non-strings (CFBoolean/CFNumber on
+/// checkboxes/sliders, and AXError placeholders) yield `None`.
+fn batch_string(entry: &cf::Type) -> Option<String> {
+    if entry.get_type_id() == cf::String::type_id() {
+        let s: &cf::String = unsafe { std::mem::transmute(entry) };
+        Some(s.to_string())
+    } else {
+        None
+    }
+}
+
+/// Unwrap a batched `AXValue`-wrapped CGPoint — same as `get_element_frame`.
+fn batch_point(entry: &cf::Type) -> Option<(f64, f64)> {
+    if entry.get_type_id() == ax::Value::type_id() {
+        let v: &ax::Value = unsafe { std::mem::transmute(entry) };
+        v.cg_point().map(|p| (p.x, p.y))
+    } else {
+        None
+    }
+}
+
+/// Unwrap a batched `AXValue`-wrapped CGSize — same as `get_element_frame`.
+fn batch_size(entry: &cf::Type) -> Option<(f64, f64)> {
+    if entry.get_type_id() == ax::Value::type_id() {
+        let v: &ax::Value = unsafe { std::mem::transmute(entry) };
+        v.cg_size().map(|s| (s.width, s.height))
+    } else {
+        None
+    }
+}
+
+/// Fetch `[role, value, title, description, position, size]` in one XPC round
+/// trip. Returns `None` only when the batch call itself fails (invalid element,
+/// messaging timeout) — the same conditions under which the old `elem.role()`
+/// read would have failed and the node been skipped without walking children.
+fn read_node_attrs(elem: &ax::UiElement) -> Option<NodeAttrs> {
+    let mut out: Option<arc::R<cf::Array>> = None;
+    // options = 0: the returned array is parallel to the request, with
+    // AXError placeholders for missing attrs. Never stop-on-error (1) — one
+    // missing attr would kill the whole batch.
+    let status = BATCH_ATTR_NAMES
+        .with(|names| unsafe { AXUIElementCopyMultipleAttributeValues(elem, names, 0, &mut out) });
+    if !status.is_ok() {
+        return None;
+    }
+    let arr = out?;
+    if arr.len() < 6 {
+        return None;
+    }
+    let pos = batch_point(&arr[4]);
+    let size = batch_size(&arr[5]);
+    let frame = match (pos, size) {
+        (Some((x, y)), Some((w, h))) => Some((x, y, w, h)),
+        _ => None,
+    };
+    Some(NodeAttrs {
+        role: batch_string(&arr[0]),
+        value: batch_string(&arr[1]),
+        title: batch_string(&arr[2]),
+        desc: batch_string(&arr[3]),
+        frame,
+    })
+}
+
 /// Recursively walk an AX element and its children.
 fn walk_element(elem: &ax::UiElement, depth: usize, state: &mut WalkState) {
     if state.should_stop() || depth >= state.max_depth {
@@ -1029,13 +1144,20 @@ fn walk_element(elem: &ax::UiElement, depth: usize, state: &mut WalkState) {
         std::thread::yield_now();
     }
 
-    // Set a per-element timeout to prevent IPC hangs
+    // Set a per-element timeout to prevent IPC hangs. The batched read below is
+    // a single message, so it lives inside this one timeout window.
     let _ = elem.set_messaging_timeout_secs(state.element_timeout_secs);
 
-    // Get the role
-    let role_str = match elem.role() {
-        Ok(role) => role.to_string(),
-        Err(_) => return,
+    // Fix 2: role, value, title, description, position and size for this node in
+    // ONE XPC round trip. A failed batch (invalid element / timeout) skips the
+    // node without walking children — identical to the old `elem.role()` failing.
+    let attrs = match read_node_attrs(elem) {
+        Some(a) => a,
+        None => return,
+    };
+    let role_str = match &attrs.role {
+        Some(r) => r.clone(),
+        None => return,
     };
 
     // Skip decorative/irrelevant roles
@@ -1083,7 +1205,7 @@ fn walk_element(elem: &ax::UiElement, depth: usize, state: &mut WalkState) {
             _ => true,
         };
         if emit {
-            extract_text(elem, &role_str, depth, state);
+            extract_text(elem, &role_str, depth, &attrs, state);
         }
     } else if role_str == "AXWebArea" {
         // Browser extension popup detection: AXWebArea nodes inside Chrome/Arc/Edge
@@ -1098,7 +1220,8 @@ fn walk_element(elem: &ax::UiElement, depth: usize, state: &mut WalkState) {
                 let lower = val.to_lowercase();
                 window_pattern::matches_any(&state.ignored_patterns, app_lc, &lower)
             };
-            if get_string_attr(elem, ax::attr::title()).is_some_and(|t| matches(&t))
+            // title comes from the batch; url is not batched (read individually).
+            if attrs.title.as_deref().is_some_and(|t| matches(t))
                 || get_string_attr(elem, ax::attr::url()).is_some_and(|u| matches(&u))
             {
                 state.hit_ignored_extension = true;
@@ -1106,16 +1229,16 @@ fn walk_element(elem: &ax::UiElement, depth: usize, state: &mut WalkState) {
             }
         }
         // Groups and web areas: only extract if they have a direct value
-        if let Some(val) = get_string_attr(elem, ax::attr::value()) {
+        if let Some(val) = attrs.value.as_deref() {
             if !val.is_empty() {
-                append_text(&mut state.text_buffer, &val);
+                append_text(&mut state.text_buffer, val);
             }
         }
     } else if role_str == "AXGroup" {
         // Groups: only extract if they have a direct value
-        if let Some(val) = get_string_attr(elem, ax::attr::value()) {
+        if let Some(val) = attrs.value.as_deref() {
             if !val.is_empty() {
-                append_text(&mut state.text_buffer, &val);
+                append_text(&mut state.text_buffer, val);
             }
         }
     }
@@ -1175,20 +1298,31 @@ fn walk_element(elem: &ax::UiElement, depth: usize, state: &mut WalkState) {
 }
 
 /// Extract text attributes from an element, append to the buffer, and collect a structured node.
-fn extract_text(elem: &ax::UiElement, role_str: &str, depth: usize, state: &mut WalkState) {
-    // Read element bounds once (used for all text extraction paths). The
-    // raw screen-absolute frame is also passed to is_on_screen() so we
-    // know whether the captured screenshot actually shows this element —
-    // see issue #2436 for the search-hits-off-screen-text bug this fixes.
-    let frame = get_element_frame(elem);
+///
+/// `attrs` carries the role/value/title/description/position/size read for this
+/// node in one batched XPC round trip (Fix 2); the remaining automation props
+/// (`fill_ax_props`) and line spans (`capture_lines_for_node`) still read `elem`
+/// individually, as before.
+fn extract_text(
+    elem: &ax::UiElement,
+    role_str: &str,
+    depth: usize,
+    attrs: &NodeAttrs,
+    state: &mut WalkState,
+) {
+    // Element bounds come from the batched AXPosition/AXSize. The raw
+    // screen-absolute frame is also passed to is_on_screen() so we know
+    // whether the captured screenshot actually shows this element — see
+    // issue #2436 for the search-hits-off-screen-text bug this fixes.
+    let frame = attrs.frame;
     let bounds = frame.and_then(|(x, y, w, h)| normalize_bounds(x, y, w, h, state));
     let on_screen = frame.and_then(|(x, y, w, h)| is_on_screen(x, y, w, h, state));
 
     // For text fields / text areas, prefer value (the actual content)
     if role_str == "AXTextField" || role_str == "AXTextArea" || role_str == "AXComboBox" {
-        if let Some(val) = get_string_attr(elem, ax::attr::value()) {
+        if let Some(val) = attrs.value.as_deref() {
             if !val.is_empty() {
-                append_text(&mut state.text_buffer, &val);
+                append_text(&mut state.text_buffer, val);
                 let trimmed = val.trim().to_string();
                 let mut node = AccessibilityTreeNode::new(
                     role_str.to_string(),
@@ -1212,9 +1346,9 @@ fn extract_text(elem: &ax::UiElement, role_str: &str, depth: usize, state: &mut 
 
     // For static text, value is the text content
     if role_str == "AXStaticText" {
-        if let Some(val) = get_string_attr(elem, ax::attr::value()) {
+        if let Some(val) = attrs.value.as_deref() {
             if !val.is_empty() {
-                append_text(&mut state.text_buffer, &val);
+                append_text(&mut state.text_buffer, val);
                 let trimmed = val.trim().to_string();
                 let mut node = AccessibilityTreeNode::new(
                     role_str.to_string(),
@@ -1232,9 +1366,9 @@ fn extract_text(elem: &ax::UiElement, role_str: &str, depth: usize, state: &mut 
     }
 
     // Fall back to title
-    if let Some(title) = get_string_attr(elem, ax::attr::title()) {
+    if let Some(title) = attrs.title.as_deref() {
         if !title.is_empty() {
-            append_text(&mut state.text_buffer, &title);
+            append_text(&mut state.text_buffer, title);
             let mut node = AccessibilityTreeNode::new(
                 role_str.to_string(),
                 title.trim().to_string(),
@@ -1249,9 +1383,9 @@ fn extract_text(elem: &ax::UiElement, role_str: &str, depth: usize, state: &mut 
     }
 
     // Fall back to description
-    if let Some(desc) = get_string_attr(elem, ax::attr::desc()) {
+    if let Some(desc) = attrs.desc.as_deref() {
         if !desc.is_empty() {
-            append_text(&mut state.text_buffer, &desc);
+            append_text(&mut state.text_buffer, desc);
             let mut node = AccessibilityTreeNode::new(
                 role_str.to_string(),
                 desc.trim().to_string(),
