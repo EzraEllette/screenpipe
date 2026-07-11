@@ -73,6 +73,11 @@ pub async fn run_pre_exit_teardown(app: &AppHandle) {
         pi::cleanup_pi(&pi_state).await;
         info!("Pre-exit: Pi sidecar stopped");
     }
+
+    // Quit paths that never reach RunEvent::Exit still go through here; the
+    // dock also self-exits via its parent-PID watchdog as a last resort.
+    crate::dock_sidecar::shutdown();
+    info!("Pre-exit: dock sidecar stopped");
 }
 
 /// Run [`run_pre_exit_teardown`] on a dedicated thread with a hard timeout.

@@ -131,10 +131,10 @@ use sentry;
 use tauri::AppHandle;
 #[cfg(target_os = "macos")]
 mod dock_menu;
+mod dock_sidecar;
 mod health;
 mod log_files;
 mod native_notification;
-mod native_shortcut_reminder;
 mod notifications;
 mod safe_icon;
 mod shortcuts;
@@ -988,8 +988,13 @@ async fn main() {
                 use tauri::menu::{MenuBuilder, SubmenuBuilder, PredefinedMenuItem, MenuItemBuilder};
                 let app_ui_hidden = crate::enterprise_policy::is_app_ui_hidden();
 
+                // Custom About item: opens the Slint about dialog (app icon,
+                // version, and the AboutSlint attribution required by the
+                // Slint Royalty-Free license). Falls back to the native panel
+                // when the dock sidecar binary is missing.
                 let mut app_submenu_builder = SubmenuBuilder::new(app, "screenpipe")
-                    .item(&PredefinedMenuItem::about(app, Some("About screenpipe"), None)?)
+                    .item(&MenuItemBuilder::with_id("about_screenpipe", "About screenpipe")
+                        .build(app)?)
                     .separator();
                 if !crate::updates::is_enterprise_build(&app_handle) {
                     app_submenu_builder = app_submenu_builder
@@ -1030,6 +1035,24 @@ async fn main() {
                 app.set_menu(menu)?;
                 app.on_menu_event(|app_handle, event| {
                     match event.id().as_ref() {
+                        "about_screenpipe" => {
+                            // Off the menu-event stack: show_about spawns the
+                            // sidecar on first use (blocking process spawn).
+                            let app_for_about = app_handle.clone();
+                            std::thread::spawn(move || {
+                                if !crate::dock_sidecar::show_about(&app_for_about) {
+                                    // Sidecar missing (e.g. stripped dev build):
+                                    // fall back to the plain native about panel.
+                                    #[cfg(target_os = "macos")]
+                                    let _ = app_for_about.run_on_main_thread(|| unsafe {
+                                        use objc::{class, msg_send, sel, sel_impl};
+                                        let ns_app: *mut objc::runtime::Object =
+                                            msg_send![class!(NSApplication), sharedApplication];
+                                        let _: () = msg_send![ns_app, orderFrontStandardAboutPanel: std::ptr::null::<objc::runtime::Object>()];
+                                    });
+                                }
+                            });
+                        }
                         "settings" => {
                             // Defer off event stack (same as tray: runs from tao::send_event).
                             let app_for_closure = app_handle.clone();
@@ -2059,6 +2082,9 @@ async fn main() {
 
                 tauri::RunEvent::Exit => {
                     info!("App exiting — running cleanup");
+
+                    // Terminate the dock sidecar so it doesn't outlive the app.
+                    crate::dock_sidecar::shutdown();
 
                     // Best-effort analytics; do not block _exit on network.
                     let app_handle_v2 = app_handle.app_handle().clone();

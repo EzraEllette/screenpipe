@@ -1078,13 +1078,20 @@ fn create_dynamic_menu(
     //             .build(app)?,
     //     );
 
-    // --- Settings + Quit ---
+    // --- Settings + About + Quit ---
     menu_builder = menu_builder.item(&PredefinedMenuItem::separator(app)?);
     if !data.app_ui_hidden && !is_tray_item_hidden("tray_settings") {
         menu_builder = menu_builder.item(
             &MenuItemBuilder::with_id("settings", "Settings...")
                 .accelerator("CmdOrCtrl+,")
                 .build(app)?,
+        );
+    }
+    // About dialog (Slint sidecar) — on Windows this is the only About surface;
+    // on macOS the app menu has an equivalent item.
+    if crate::dock_sidecar::is_available() {
+        menu_builder = menu_builder.item(
+            &MenuItemBuilder::with_id("about_screenpipe", "About screenpipe").build(app)?,
         );
     }
     menu_builder = menu_builder.item(
@@ -1596,6 +1603,23 @@ fn handle_menu_event(app_handle: &AppHandle, event: tauri::menu::MenuEvent) {
                     onboarding.reset();
                 });
                 let _ = ShowRewindWindow::Onboarding.show(&app);
+            });
+        }
+        "about_screenpipe" => {
+            // Off the menu-event stack: show_about spawns the sidecar on
+            // first use (blocking process spawn).
+            let app_for_about = app_handle.clone();
+            std::thread::spawn(move || {
+                if !crate::dock_sidecar::show_about(&app_for_about) {
+                    warn!("about dialog unavailable (dock sidecar missing)");
+                    use tauri_plugin_dialog::DialogExt;
+                    let version = app_for_about.package_info().version.to_string();
+                    app_for_about
+                        .dialog()
+                        .message(format!("screenpipe\nVersion {}", version))
+                        .title("About screenpipe")
+                        .show(|_| {});
+                }
             });
         }
         "quit" => {

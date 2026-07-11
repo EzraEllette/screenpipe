@@ -13,7 +13,8 @@
         "externalBin": [
             "bun",
             "ffmpeg",
-            "ffprobe"
+            "ffprobe",
+            "screenpipe-dock"
         ]
     }
 }

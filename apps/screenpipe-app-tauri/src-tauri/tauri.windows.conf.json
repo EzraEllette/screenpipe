@@ -10,7 +10,8 @@
             }
         },
         "externalBin": [
-            "bun"
+            "bun",
+            "screenpipe-dock"
         ],
         "targets": [
             "nsis"

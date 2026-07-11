@@ -53,5 +53,6 @@ ffprobe*
 *src-tauri/deno*
 *src-tauri/ollama*
 *src-tauri/bun*
+*src-tauri/screenpipe-dock-*
 *src-tauri/ollama*
 

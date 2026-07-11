@@ -908,8 +908,52 @@ if (process.env.GITHUB_ENV) {
 }
 
 
+
+// Build the Slint floating-dock sidecar (crates/screenpipe-dock) and stage it
+// as a Tauri externalBin: src-tauri/screenpipe-dock-<target-triple>[.exe].
+// Tauri copies it next to the app binary in dev and into the bundle on build.
+async function buildDockSidecar() {
+	console.log('building screenpipe-dock sidecar...');
+	const repoRoot = path.join(cwd, '..', '..', '..');
+	const exe = platform === 'windows' ? '.exe' : '';
+
+	// Triple selection mirrors copyBunBinary: SCREENPIPE_RELEASE_TARGET is set
+	// per-matrix-entry in CI (release-app/ci/e2e/appimage-smoke) and matters on
+	// macOS where the x86_64 release job runs on an arm64 runner. Locally on
+	// macOS build both arches so either-arch dev builds work; elsewhere use the
+	// host triple.
+	let triples;
+	const releaseTarget = process.env.SCREENPIPE_RELEASE_TARGET || process.env.CARGO_BUILD_TARGET;
+	if (releaseTarget) {
+		triples = [releaseTarget];
+	} else {
+		// Local flows only ever consume the host triple (cross builds set
+		// SCREENPIPE_RELEASE_TARGET), so don't pay for extra arch builds.
+		const rustcInfo = await $`rustc -vV`.text();
+		const host = rustcInfo.split('\n').find((l) => l.startsWith('host:'))?.split(' ')[1]?.trim();
+		if (!host) throw new Error('could not determine rust target triple for screenpipe-dock');
+		triples = [host];
+	}
+
+	for (const triple of triples) {
+		// Best-effort: needed for non-host targets, but rustup may not exist
+		// on plain-cargo toolchains — cargo will error later if truly missing.
+		await $`rustup target add ${triple}`.cwd(repoRoot).nothrow();
+		// Pin the output dir: a shell-global CARGO_TARGET_DIR (common on dev
+		// machines here) would otherwise send the binary somewhere else.
+		await $`cargo build --release -p screenpipe-dock --target ${triple}`
+			.cwd(repoRoot)
+			.env({ ...process.env, CARGO_TARGET_DIR: path.join(repoRoot, 'target') });
+		const built = path.join(repoRoot, 'target', triple, 'release', `screenpipe-dock${exe}`);
+		const dest = path.join(cwd, `screenpipe-dock-${triple}${exe}`);
+		await copyFile(built, dest);
+		console.log('staged dock sidecar:', dest);
+	}
+}
+
 // Near the end of the script, call these functions
 await copyBunBinary();
+await buildDockSidecar();
 
 // --dev or --build
 const action = process.argv?.[2]
