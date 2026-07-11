@@ -20,7 +20,9 @@ use screenpipe_a11y::tree::{create_tree_walker, TreeSnapshot, TreeWalkerConfig};
 use screenpipe_core::pii_removal::remove_pii;
 use screenpipe_db::DatabaseManager;
 use screenpipe_screen::snapshot_writer::SnapshotWriter;
-use screenpipe_screen::text_regions::{detect_text_regions, region_pixel_signature, TextRegion};
+use screenpipe_screen::text_regions::{
+    detect_text_regions, image_pixel_signature, union_region, TextRegion,
+};
 use screenpipe_screen::MeetingGateDecision;
 
 use crate::meeting_ocr_gate::{MeetingOcrDecision, MeetingOcrGate};
@@ -71,6 +73,10 @@ pub struct FocusedWindowBounds {
 /// Reject window crops smaller than this on either side — resize/move races
 /// can hand us a sliver, and no readable meeting window is this small.
 const MIN_WINDOW_CROP_PX: u32 = 64;
+
+/// Padding around the detected-text union crop, from the #5054 crop
+/// benchmarks (kept when the union moved here from the gate in #5060).
+const UNION_PAD_PX: u32 = 20;
 
 /// Clamp focused-window bounds to the frame. Returns `None` (→ full-frame
 /// behavior) when the intersection is degenerate/sliver-sized, or when the
@@ -338,71 +344,78 @@ pub async fn paired_capture(
         match meeting_gate.as_deref_mut() {
             Some(gate) => {
                 let app_key = ctx.app_name.unwrap_or("unknown").to_lowercase();
-                let now = Instant::now();
-                if gate.detection_due(&app_key, now) {
-                    let detect_started = Instant::now();
-                    let image_for_detect = match window_crop {
-                        Some(w) => Arc::new(ctx.image.crop_imm(w.x, w.y, w.width, w.height)),
-                        None => ctx.image.clone(),
-                    };
-                    // Detect + content signature in one blocking hop: the
-                    // signature (box coords + quantized pixels inside them)
-                    // is the gate's exact-match skip signal.
-                    let (regions, signature) = tokio::task::spawn_blocking(move || {
-                        let regions = detect_text_regions(&image_for_detect);
-                        let signature = region_pixel_signature(&image_for_detect, &regions);
-                        (regions, signature)
+                // The gated pipeline (#5060): screenshot → crop to the app
+                // window → detect text → crop to the padded union of the
+                // detected text → pixel-compare that crop to the last
+                // indexed one → different? OCR that same crop. One blocking
+                // hop computes detect + union + signature.
+                let detect_started = Instant::now();
+                let detect_image: Arc<DynamicImage> = match window_crop {
+                    Some(w) => Arc::new(ctx.image.crop_imm(w.x, w.y, w.width, w.height)),
+                    None => ctx.image.clone(),
+                };
+                let detect_dims = detect_image.dimensions();
+                let union_and_sig = tokio::task::spawn_blocking(move || {
+                    let regions = detect_text_regions(&detect_image);
+                    let (dw, dh) = detect_image.dimensions();
+                    union_region(&regions, UNION_PAD_PX, dw, dh).map(|u| {
+                        let union_img = detect_image.crop_imm(u.x, u.y, u.width, u.height);
+                        (u, image_pixel_signature(&union_img), regions.len())
                     })
-                    .await
-                    .unwrap_or_default();
-                    meeting_gate_detect_duration = Some(detect_started.elapsed());
-                    let (gate_w, gate_h) = window_crop
-                        .map(|w| (w.width, w.height))
-                        .unwrap_or((frame_w, frame_h));
-                    let decision =
-                        gate.observe(&app_key, now, &regions, signature, gate_w, gate_h);
-                    debug!(
-                        "meeting OCR gate: {} regions in {:?} -> {:?} (app={}, window_crop={:?})",
-                        regions.len(),
-                        detect_started.elapsed(),
-                        decision,
-                        app_key,
-                        window_crop,
-                    );
-                    match decision {
-                        MeetingOcrDecision::Skip => {
-                            meeting_gate_decision = Some(MeetingGateDecision::Skip);
-                        }
-                        MeetingOcrDecision::CropOcr(region) => {
-                            meeting_gate_escalated = true;
-                            meeting_gate_decision = Some(MeetingGateDecision::CropOcr);
-                            // The union region is in detect-image coordinates;
-                            // offset by the window origin to get frame coords.
-                            // Stays in-bounds: the region is clamped to the
-                            // detect image, which the window crop clamped to
-                            // the frame.
-                            ocr_crop = Some(match window_crop {
-                                Some(w) => TextRegion {
-                                    x: w.x + region.x,
-                                    y: w.y + region.y,
-                                    ..region
-                                },
-                                None => region,
-                            });
-                        }
-                        MeetingOcrDecision::FullFrameOcr => {
-                            meeting_gate_escalated = true;
-                            meeting_gate_decision = Some(MeetingGateDecision::FullFrameOcr);
-                            // Dense fallback: OCR the meeting window when its
-                            // bounds are known (the monitor's other pixels are
-                            // a11y territory), the whole frame otherwise.
-                            ocr_crop = window_crop;
+                })
+                .await
+                .ok()
+                .flatten();
+                meeting_gate_detect_duration = Some(detect_started.elapsed());
+                match union_and_sig {
+                    // No text detected at all: nothing to OCR. The gate's
+                    // indexed state is deliberately untouched — text that
+                    // disappears (share stops) and reappears unchanged
+                    // still matches and stays skipped.
+                    None => {
+                        debug!(
+                            "meeting OCR gate: no text regions in {:?} -> Skip (app={}, window_crop={:?}, detect_dims={:?})",
+                            detect_started.elapsed(),
+                            app_key,
+                            window_crop,
+                            detect_dims,
+                        );
+                        meeting_gate_decision = Some(MeetingGateDecision::Skip);
+                    }
+                    Some((union, signature, region_count)) => {
+                        let decision = gate.observe(&app_key, signature);
+                        debug!(
+                            "meeting OCR gate: {} regions, union {:?} in {:?} -> {:?} (app={}, window_crop={:?})",
+                            region_count,
+                            union,
+                            detect_started.elapsed(),
+                            decision,
+                            app_key,
+                            window_crop,
+                        );
+                        match decision {
+                            MeetingOcrDecision::Skip => {
+                                meeting_gate_decision = Some(MeetingGateDecision::Skip);
+                            }
+                            MeetingOcrDecision::Ocr => {
+                                meeting_gate_escalated = true;
+                                meeting_gate_decision = Some(MeetingGateDecision::CropOcr);
+                                // The union is in detect-image coordinates;
+                                // offset by the window origin to get frame
+                                // coords. Stays in-bounds: the union is
+                                // clamped to the detect image, which the
+                                // window crop clamped to the frame.
+                                ocr_crop = Some(match window_crop {
+                                    Some(w) => TextRegion {
+                                        x: w.x + union.x,
+                                        y: w.y + union.y,
+                                        ..union
+                                    },
+                                    None => union,
+                                });
+                            }
                         }
                     }
-                } else {
-                    // Detect backoff not due: implicitly Skip — this is the
-                    // density-backoff saving, counted like any other skip.
-                    meeting_gate_decision = Some(MeetingGateDecision::Skip);
                 }
             }
             // No gate wired (callers outside the engine capture loop):
@@ -1795,12 +1808,12 @@ mod tests {
             focused_window_bounds: None,
         };
         let mut gate = MeetingOcrGate::new();
-        // Bootstrap: first detect finds the stroke region → sparse →
-        // CropOcr escalation → OCR actually runs (on the crop).
+        // First capture: the detect finds the stroke region, the union crop
+        // is new → OCR runs on the crop.
         let result = paired_capture(&ctx, None, Some(&mut gate)).await.unwrap();
         assert!(
             result.ocr_duration_ms.is_some(),
-            "sparse escalation must run OCR on the cropped region"
+            "new text crop must run OCR"
         );
         // Gate telemetry travels out with the result for PipelineMetrics.
         assert_eq!(result.meeting_gate_decision, Some(MeetingGateDecision::CropOcr));
@@ -1808,17 +1821,18 @@ mod tests {
             result.meeting_gate_detect_duration.is_some(),
             "detect ran, so its latency must be reported"
         );
-        // Second capture of the identical frame: fingerprint unchanged →
-        // gate skips OCR entirely.
+        // Second capture of the identical frame: the union crop is
+        // pixel-identical to the indexed one → skip, though the detect
+        // itself runs on every gated capture (no backoff by design).
         let result2 = paired_capture(&ctx, None, Some(&mut gate)).await.unwrap();
         assert!(
             result2.ocr_duration_ms.is_none(),
-            "unchanged text must not re-run OCR"
+            "unchanged text crop must not re-run OCR"
         );
         assert_eq!(result2.meeting_gate_decision, Some(MeetingGateDecision::Skip));
         assert!(
-            result2.meeting_gate_detect_duration.is_none(),
-            "detect backoff not due — no detect latency to report"
+            result2.meeting_gate_detect_duration.is_some(),
+            "the detect+hash check runs (and is priced) on every gated capture"
         );
     }
 
@@ -1962,10 +1976,8 @@ mod tests {
             "bootstrap escalation indexes the window content"
         );
 
-        // Window dragged +60/+60; content (window-local) unchanged. Wait out
-        // the establishing detect interval so the decision comes from the
-        // fingerprint, not the rate limit.
-        tokio::time::sleep(Duration::from_millis(1100)).await;
+        // Window dragged +60/+60; content (window-local) unchanged — the
+        // union crop's pixels are identical, so the signature matches.
         let ctx2 = make_ctx(
             strokes_image_at(180, 140),
             FocusedWindowBounds {
@@ -2029,10 +2041,7 @@ mod tests {
         let failed = paired_capture(&ctx_bad, None, Some(&mut gate)).await;
         assert!(failed.is_err(), "insert on a closed pool must fail");
 
-        // Same frame, healthy DB: the layout must escalate and OCR again.
-        // (Wait out the gate's establishing detect interval so the retry
-        // decision comes from the fingerprint logic, not the rate limit.)
-        tokio::time::sleep(Duration::from_millis(1100)).await;
+        // Same frame, healthy DB: the unpersisted crop must OCR again.
         let db_ok = DatabaseManager::new("sqlite::memory:", Default::default())
             .await
             .unwrap();
@@ -2045,9 +2054,7 @@ mod tests {
             "layout unpersisted by the failed insert must be retried"
         );
 
-        // Now durably stored: the identical frame skips OCR — with detect
-        // due again, so the Skip comes from the committed fingerprint.
-        tokio::time::sleep(Duration::from_millis(1100)).await;
+        // Now durably stored: the identical frame skips OCR.
         let settled = paired_capture(&ctx_ok, None, Some(&mut gate))
             .await
             .unwrap();

@@ -180,16 +180,42 @@ pub fn region_fingerprint(regions: &[TextRegion]) -> u64 {
     hasher.finish()
 }
 
+/// Content signature of a whole image: quantized luma of every pixel,
+/// hashed. Two frames produce the same signature only when they are
+/// visually identical — any text edit, moved window, or new caption flips
+/// it, while sub-quantum capture noise does not (luma quantized to 32
+/// levels; text edits move pixels by ~full contrast). This is the meeting
+/// gate's only skip signal: "is this cropped image exactly the one whose
+/// OCR result we already stored?" — deliberately heuristic-free (#5060
+/// probe review: a region-scoped signature missed changes the region
+/// detector didn't box, and the earlier geometry-fingerprint stability
+/// gate starved continuously-changing surfaces entirely).
+///
+/// Cost: one BT.601 luma pass + hash, `O(pixels)` — ~1-4ms on a window
+/// crop, well under a single OCR call it can save.
+pub fn image_pixel_signature(image: &DynamicImage) -> u64 {
+    let gray = to_gray_bt601(image);
+    let mut hasher = DefaultHasher::new();
+    (image.width(), image.height()).hash(&mut hasher);
+    let mut row_buf: Vec<u8> = Vec::with_capacity(image.width() as usize);
+    for row in gray.chunks_exact(image.width().max(1) as usize) {
+        row_buf.clear();
+        row_buf.extend(row.iter().map(|&px| px >> 3));
+        std::hash::Hasher::write(&mut hasher, &row_buf);
+    }
+    hasher.finish()
+}
+
 /// Content signature of the detected text regions: hashes each box's
 /// coordinates plus the quantized luma of the pixels inside it. Two detects
 /// produce the same signature only when the same boxes hold visually
 /// identical content — moved boxes, in-place digit flips, and new text all
 /// change it, while sub-quantum capture noise does not (luma quantized to
-/// 32 levels; text edits flip pixels by ~full contrast). This is the
-/// meeting gate's skip signal: "is this exactly the content whose OCR
-/// result we already stored?" — replacing the earlier geometry+ink
-/// fingerprint *stability* gate, which starved continuously-changing
-/// surfaces (see `meeting_ocr_gate` docs).
+/// 32 levels; text edits flip pixels by ~full contrast).
+///
+/// Superseded by [`image_pixel_signature`] as the meeting gate's skip
+/// signal — region scoping made the skip only as good as the region
+/// detector's coverage. Kept for diagnostics/comparison tooling.
 ///
 /// Cost: one luma pass over the region pixels (`O(total box area)`), well
 /// under the detect pass that produced the regions.
@@ -666,6 +692,30 @@ mod tests {
             r_dense[0],
             r_sparse[0]
         );
+    }
+
+    #[test]
+    fn image_signature_exact_on_identity_sensitive_to_any_change() {
+        let mut a = light_canvas(400, 300);
+        draw_text_like_line(&mut a, 50, 100, 10);
+        let img_a = DynamicImage::ImageRgb8(a.clone());
+        let s_a = image_pixel_signature(&img_a);
+
+        // Identical pixels → identical signature.
+        assert_eq!(s_a, image_pixel_signature(&DynamicImage::ImageRgb8(a.clone())));
+
+        // ANY visible change flips it — including one outside anything a
+        // text detector would box (a single dark dot in a corner).
+        let mut dotted = a.clone();
+        dotted.put_pixel(390, 290, Rgb([10, 10, 10]));
+        assert_ne!(s_a, image_pixel_signature(&DynamicImage::ImageRgb8(dotted)));
+
+        // Sub-quantum luma noise does not flip it.
+        let mut noisy = a.clone();
+        for px in noisy.pixels_mut() {
+            px.0 = [px.0[0].saturating_add(2), px.0[1], px.0[2]];
+        }
+        assert_eq!(s_a, image_pixel_signature(&DynamicImage::ImageRgb8(noisy)));
     }
 
     #[test]

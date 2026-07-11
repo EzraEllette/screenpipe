@@ -65,13 +65,16 @@ mod macos {
     use screenpipe_capture::{MeetingOcrDecision, MeetingOcrGate};
     use screenpipe_screen::monitor::{get_default_monitor, get_monitor_by_id, SafeMonitor};
     use screenpipe_screen::text_regions::{
-        detect_text_regions, region_pixel_signature, TextRegion,
+        detect_text_regions, image_pixel_signature, union_region, TextRegion,
     };
     use serde_json::{json, Value};
     use std::collections::{HashMap, HashSet};
     use std::io::Write;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
+
+    /// Mirror of `paired_capture`'s union-crop padding (#5054 benchmarks).
+    const UNION_PAD_PX: u32 = 20;
 
     /// Mirror of `paired_capture`'s private clamp: reject slivers and
     /// effectively-fullscreen bounds, clip the rest to the frame.
@@ -393,78 +396,69 @@ mod macos {
         .await?;
         let baseline_ms = baseline_started.elapsed().as_millis() as u64;
 
-        // --- OPTIMIZED arm: production gate mechanics. ---
-        let now = Instant::now();
-        let mut decision_label = "skip_backoff";
-        let mut detect_ms: Option<u64> = None;
+        // --- OPTIMIZED arm: the production pipeline (#5060) ---
+        // screenshot → crop to app window → detect text → crop to the
+        // padded union of detected text → pixel-compare that crop to the
+        // last indexed one → different? OCR that same crop.
+        let mut decision_label = "skip_no_text";
+        let detect_ms: Option<u64>;
         let mut optimized_ocr_ms: Option<u64> = None;
-        // Content signature of this tick's detect (when one ran) — the
-        // gate's actual skip signal (box coords + quantized pixels inside).
-        // Logged so analysis can see signature churn: consecutive-detect
-        // signature changes are exactly what drives OCR now.
+        // Signature of the union crop — the gate's only skip signal.
+        // Consecutive-tick signature changes are exactly what drives OCR.
         let mut fingerprint: Option<String> = None;
         let mut regions_count: Option<usize> = None;
-        if gate.detection_due(&app_key, now) {
+        {
             let detect_started = Instant::now();
             let detect_image: Arc<image::DynamicImage> = match window_crop {
                 Some(w) => Arc::new(frame.crop_imm(w.x, w.y, w.width, w.height)),
                 None => frame.clone(),
             };
             let detect_for_task = detect_image.clone();
-            let (regions, signature) = tokio::task::spawn_blocking(move || {
+            let union_and_sig = tokio::task::spawn_blocking(move || {
                 let regions = detect_text_regions(&detect_for_task);
-                let signature = region_pixel_signature(&detect_for_task, &regions);
-                (regions, signature)
+                let (dw, dh) = detect_for_task.dimensions();
+                union_region(&regions, UNION_PAD_PX, dw, dh).map(|u| {
+                    let union_img = detect_for_task.crop_imm(u.x, u.y, u.width, u.height);
+                    (u, image_pixel_signature(&union_img), regions.len())
+                })
             })
             .await?;
             detect_ms = Some(detect_started.elapsed().as_millis() as u64);
-            fingerprint = Some(format!("{signature:016x}"));
-            regions_count = Some(regions.len());
-            let (gate_w, gate_h) = window_crop
-                .map(|w| (w.width, w.height))
-                .unwrap_or((frame_w, frame_h));
-            let decision = gate.observe(&app_key, now, &regions, signature, gate_w, gate_h);
-            let ocr_region: Option<TextRegion> = match decision {
-                MeetingOcrDecision::Skip => {
-                    decision_label = "skip_unchanged";
-                    None
+            if let Some((union, signature, n_regions)) = union_and_sig {
+                fingerprint = Some(format!("{signature:016x}"));
+                regions_count = Some(n_regions);
+                match gate.observe(&app_key, signature) {
+                    MeetingOcrDecision::Skip => {
+                        decision_label = "skip_unchanged";
+                    }
+                    MeetingOcrDecision::Ocr => {
+                        decision_label = "crop_ocr";
+                        // OCR the union crop in frame coordinates (window
+                        // origin + union offset), like production.
+                        let r = match window_crop {
+                            Some(w) => TextRegion {
+                                x: w.x + union.x,
+                                y: w.y + union.y,
+                                ..union
+                            },
+                            None => union,
+                        };
+                        let ocr_started = Instant::now();
+                        let ocr_input =
+                            Arc::new(frame.crop_imm(r.x, r.y, r.width, r.height));
+                        let text = tokio::task::spawn_blocking(move || {
+                            screenpipe_screen::perform_ocr_apple(&ocr_input, &[]).0
+                        })
+                        .await?;
+                        optimized_ocr_ms = Some(ocr_started.elapsed().as_millis() as u64);
+                        let toks = tokens(&text);
+                        indexed.insert(app_key.clone(), (text, toks, tick));
+                        // "Durably stored" for this harness = in the index we
+                        // compare against; commit like paired_capture does
+                        // post-insert.
+                        gate.ocr_indexed(&app_key);
+                    }
                 }
-                MeetingOcrDecision::CropOcr(r) => {
-                    decision_label = "crop_ocr";
-                    Some(match window_crop {
-                        Some(w) => TextRegion {
-                            x: w.x + r.x,
-                            y: w.y + r.y,
-                            ..r
-                        },
-                        None => r,
-                    })
-                }
-                MeetingOcrDecision::FullFrameOcr => {
-                    decision_label = if window_crop.is_some() {
-                        "full_window_ocr"
-                    } else {
-                        "full_frame_ocr"
-                    };
-                    window_crop
-                }
-            };
-            if !matches!(decision, MeetingOcrDecision::Skip) {
-                let ocr_started = Instant::now();
-                let ocr_input: Arc<image::DynamicImage> = match ocr_region {
-                    Some(r) => Arc::new(frame.crop_imm(r.x, r.y, r.width, r.height)),
-                    None => frame.clone(),
-                };
-                let text = tokio::task::spawn_blocking(move || {
-                    screenpipe_screen::perform_ocr_apple(&ocr_input, &[]).0
-                })
-                .await?;
-                optimized_ocr_ms = Some(ocr_started.elapsed().as_millis() as u64);
-                let toks = tokens(&text);
-                indexed.insert(app_key.clone(), (text, toks, tick));
-                // "Durably stored" for this harness = in the index we
-                // compare against; commit like paired_capture does post-insert.
-                gate.ocr_indexed(&app_key);
             }
         }
 
