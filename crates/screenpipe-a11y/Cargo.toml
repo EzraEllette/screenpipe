@@ -49,11 +49,17 @@ url = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 cidre = { git = "https://github.com/yury/cidre.git", rev = "8d0f7307d201d75328ed82ea0d4ca7bb0a649716", features = ["ax", "cg", "blocks", "ns", "app", "dispatch"] }
+objc2 = "0.6"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSPasteboard"] }
 # Window-server frontmost-app query (CGWindowList) — the run-loop-free
 # source of truth the focused-app resolver cross-checks AX focus against.
 core-foundation = { workspace = true }
 core-graphics = { workspace = true }
+# In-process NSAppleScript for the Arc browser-URL fallback (tree/macos.rs).
+# Replaces the per-walk `osascript` subprocess spawn — see Fix 1 in
+# ~/Screenpipe-notes/"AX Walk Speed Fixes.md". Class-gated features keep this
+# to just NSAppleScript + its Apple Event descriptor result type.
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString", "NSDictionary", "NSAppleScript", "NSAppleEventDescriptor"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 # Native Windows APIs - no rdev dependency
