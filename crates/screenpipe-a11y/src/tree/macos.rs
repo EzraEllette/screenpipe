@@ -1047,6 +1047,26 @@ thread_local! {
         ];
         cf::Array::from_slice(&names).expect("batch attr name array")
     };
+
+    /// The automation-prop attribute names read by `fill_ax_props`, in request
+    /// order. Batched separately from the primary six because `fill_ax_props`
+    /// runs only for text-emitting nodes — folding these into the per-node batch
+    /// would marshal 10 extra attrs for every container/skipped node too.
+    static FILL_ATTR_NAMES: arc::R<cf::Array> = {
+        let names: [&ax::Attr; 10] = [
+            ax::attr::id(),               // 0 automation_id
+            ax::attr::subrole(),          // 1 subrole
+            ax::attr::role_desc(),        // 2 role_description
+            ax::attr::help(),             // 3 help_text
+            ax::attr::placeholder_value(),// 4 placeholder (interactive)
+            ax::attr::url(),              // 5 url (interactive)
+            ax::attr::enabled(),          // 6 is_enabled (interactive)
+            ax::attr::focused(),          // 7 is_focused (interactive)
+            ax::attr::selected(),         // 8 is_selected (interactive)
+            ax::attr::expanded(),         // 9 is_expanded (interactive)
+        ];
+        cf::Array::from_slice(&names).expect("fill attr name array")
+    };
 }
 
 /// The six batched attributes for one node, coerced to match the individual
@@ -1094,6 +1114,17 @@ fn batch_size(entry: &cf::Type) -> Option<(f64, f64)> {
     }
 }
 
+/// Coerce a batched entry to a `bool` iff it is a `CFBoolean` — the exact
+/// coercion `get_bool_attr` applies (non-booleans / AXError placeholders → None).
+fn batch_bool(entry: &cf::Type) -> Option<bool> {
+    if entry.get_type_id() == cf::Boolean::type_id() {
+        let b: &cf::Boolean = unsafe { std::mem::transmute(entry) };
+        Some(b.value())
+    } else {
+        None
+    }
+}
+
 /// Fetch `[role, value, title, description, position, size]` in one XPC round
 /// trip. Returns `None` only when the batch call itself fails (invalid element,
 /// messaging timeout) — the same conditions under which the old `elem.role()`
@@ -1125,6 +1156,24 @@ fn read_node_attrs(elem: &ax::UiElement) -> Option<NodeAttrs> {
         desc: batch_string(&arr[3]),
         frame,
     })
+}
+
+/// Fetch the ten `fill_ax_props` automation attributes in one XPC round trip.
+/// Returns the parallel values array (indices match `FILL_ATTR_NAMES`), or
+/// `None` on a failed batch — matching the old path, where every individual
+/// read would have failed and left each prop `None`.
+fn read_fill_attrs(elem: &ax::UiElement) -> Option<arc::R<cf::Array>> {
+    let mut out: Option<arc::R<cf::Array>> = None;
+    let status = FILL_ATTR_NAMES
+        .with(|names| unsafe { AXUIElementCopyMultipleAttributeValues(elem, names, 0, &mut out) });
+    if !status.is_ok() {
+        return None;
+    }
+    let arr = out?;
+    if arr.len() < 10 {
+        return None;
+    }
+    Some(arr)
 }
 
 /// Recursively walk an AX element and its children.
@@ -1772,18 +1821,29 @@ fn capture_lines_for_node(
 /// Fill automation properties on an AccessibilityTreeNode from an AX element.
 /// Only fetches bool states for interactive elements to limit IPC overhead.
 fn fill_ax_props(node: &mut AccessibilityTreeNode, elem: &ax::UiElement, role_str: &str) {
-    node.automation_id = get_string_attr(elem, ax::attr::id());
-    node.subrole = get_string_attr(elem, ax::attr::subrole());
-    node.role_description = get_string_attr(elem, ax::attr::role_desc());
-    node.help_text = get_string_attr(elem, ax::attr::help());
-    // Bool states and extra string attrs only for interactive elements (limits IPC calls)
+    // Fix 2 (second batch): the automation props in ONE XPC round trip instead
+    // of 4 (non-interactive) / 10 (interactive) individual reads. Coercion is
+    // identical to the old `get_string_attr` / `get_bool_attr` reads. These
+    // fields are best-effort point-in-time Optionals (focus/selection/etc.) —
+    // NOT a dedup surface like text_content/content_hash — so reading them at
+    // one instant (more temporally coherent than the old sequential reads) is
+    // fine; they may legitimately differ walk-to-walk. A failed batch leaves
+    // every prop at its `None` default, exactly as the old per-read failures did.
+    let Some(vals) = read_fill_attrs(elem) else {
+        return;
+    };
+    node.automation_id = batch_string(&vals[0]);
+    node.subrole = batch_string(&vals[1]);
+    node.role_description = batch_string(&vals[2]);
+    node.help_text = batch_string(&vals[3]);
+    // Bool states and extra string attrs only for interactive elements.
     if is_interactive_role(role_str) {
-        node.placeholder = get_string_attr(elem, ax::attr::placeholder_value());
-        node.url = get_string_attr(elem, ax::attr::url());
-        node.is_enabled = get_bool_attr(elem, ax::attr::enabled());
-        node.is_focused = get_bool_attr(elem, ax::attr::focused());
-        node.is_selected = get_bool_attr(elem, ax::attr::selected());
-        node.is_expanded = get_bool_attr(elem, ax::attr::expanded());
+        node.placeholder = batch_string(&vals[4]);
+        node.url = batch_string(&vals[5]);
+        node.is_enabled = batch_bool(&vals[6]);
+        node.is_focused = batch_bool(&vals[7]);
+        node.is_selected = batch_bool(&vals[8]);
+        node.is_expanded = batch_bool(&vals[9]);
     }
 }
 
