@@ -1434,15 +1434,68 @@ fn get_bool_attr(elem: &ax::UiElement, attr: &ax::Attr) -> Option<bool> {
     })
 }
 
+/// Frontmost app pid straight from the window server: owner of the first
+/// layer-0 window in CGWindowList's front-to-back z-order. Unlike
+/// NSWorkspace's `isActive`/`frontmostApplication` (KVO/notification-driven
+/// — silently stale in processes without a pumping AppKit run loop: CLI
+/// tools, plain worker threads), the window server answers fresh on every
+/// query, and pids/layers need no extra TCC permission.
+fn frontmost_pid_via_window_server() -> Option<i32> {
+    use core_foundation::array::{CFArrayGetCount, CFArrayGetValueAtIndex};
+    use core_foundation::base::TCFType;
+    use core_foundation::dictionary::{CFDictionaryGetValueIfPresent, CFDictionaryRef};
+    use core_foundation::number::{CFNumber, CFNumberRef};
+    use core_foundation::string::CFString;
+    use core_graphics::window::{
+        copy_window_info, kCGNullWindowID, kCGWindowListExcludeDesktopElements,
+        kCGWindowListOptionOnScreenOnly,
+    };
+
+    let options = kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements;
+    let list = copy_window_info(options, kCGNullWindowID)?;
+    let count = unsafe { CFArrayGetCount(list.as_concrete_TypeRef()) };
+    for i in 0..count {
+        unsafe {
+            let dict_ref = CFArrayGetValueAtIndex(list.as_concrete_TypeRef(), i);
+            if dict_ref.is_null() {
+                continue;
+            }
+            let dict = dict_ref as CFDictionaryRef;
+            let get_i64 = |key: &str| -> Option<i64> {
+                let k = CFString::new(key);
+                let mut v = std::ptr::null();
+                if CFDictionaryGetValueIfPresent(dict, k.as_concrete_TypeRef() as *const _, &mut v)
+                    != 0
+                    && !v.is_null()
+                {
+                    CFNumber::wrap_under_get_rule(v as CFNumberRef).to_i64()
+                } else {
+                    None
+                }
+            };
+            // Layer 0 = normal app windows; menus/overlays/status items sit
+            // on higher layers and must not win "frontmost".
+            if get_i64("kCGWindowLayer") != Some(0) {
+                continue;
+            }
+            if let Some(pid) = get_i64("kCGWindowOwnerPID") {
+                return Some(pid as i32);
+            }
+        }
+    }
+    None
+}
+
 fn resolve_focused_ax_app() -> Option<(Retained<ax::UiElement>, i32, String)> {
-    // NSWorkspace's active app is the AppKit-authoritative "frontmost".
-    // Queried up front because the AX system-wide focusedApplication is not
-    // just *empty* for Chromium/Electron apps that haven't materialized
-    // their AX tree — it can go STALE, still reporting the previously
-    // focused app. A walker that trusts it keeps walking the old app (and
-    // never reaches the Electron flag-setting below that would fix the new
-    // one). Caught by the #5060 ocr_gate_ab probe: focusing an Electron app
-    // from a terminal kept resolving the terminal indefinitely.
+    // The AX system-wide focusedApplication is not just *empty* for
+    // Chromium/Electron apps that haven't materialized their AX tree — it
+    // can go STALE, still reporting the previously focused app. A walker
+    // that trusts it keeps walking the old app (and never reaches the
+    // Electron flag-setting below that would fix the new one). Caught by
+    // the #5060 ocr_gate_ab probe: focusing an Electron app from a terminal
+    // kept resolving the terminal indefinitely. Cross-check against the
+    // window server (fresh in any process); NSWorkspace's isActive scan
+    // remains as a secondary source for run-loop processes.
     let ws_active = cidre::objc::ar_pool(|| -> Option<(i32, String)> {
         let workspace = ns::Workspace::shared();
         for app in workspace.running_apps().iter() {
@@ -1458,19 +1511,20 @@ fn resolve_focused_ax_app() -> Option<(Retained<ax::UiElement>, i32, String)> {
         }
         None
     });
+    let front_pid = frontmost_pid_via_window_server()
+        .or_else(|| ws_active.as_ref().map(|(pid, _)| *pid));
 
     let sys = ax::UiElement::sys_wide();
     if let Ok(focused_app) = sys.focused_app() {
         if let Ok(pid) = focused_app.pid() {
-            match &ws_active {
-                Some((ws_pid, ws_name)) if *ws_pid != pid => {
+            match front_pid {
+                Some(fp) if fp != pid => {
                     debug!(
-                        "AX focusedApplication (pid={}, app={}) disagrees with NSWorkspace \
-                         active app (pid={}, app={}) — trusting NSWorkspace (stale AX focus)",
+                        "AX focusedApplication (pid={}, app={}) disagrees with frontmost \
+                         (pid={}) — trusting the window server (stale AX focus)",
                         pid,
                         localized_app_name_for_pid(pid),
-                        ws_pid,
-                        ws_name
+                        fp,
                     );
                 }
                 _ => {
@@ -1482,15 +1536,16 @@ fn resolve_focused_ax_app() -> Option<(Retained<ax::UiElement>, i32, String)> {
     }
 
     // AX gave nothing (Electron apps can return no AXFocusedApplication) or
-    // disagreed with AppKit. Build the app AX element from the active
-    // process pid so Obsidian/Discord/Claude can still be walked instead of
-    // falling straight to OCR.
-    if let Some((pid, app_name)) = ws_active {
+    // disagreed with the actual frontmost app. Build the app AX element
+    // from the frontmost pid so Obsidian/Discord/Claude can still be walked
+    // instead of falling straight to OCR.
+    if let Some(pid) = front_pid {
+        let app_name = match &ws_active {
+            Some((ws_pid, ws_name)) if *ws_pid == pid => ws_name.clone(),
+            _ => localized_app_name_for_pid(pid),
+        };
         let ax_app = ax::UiElement::with_app_pid(pid);
-        debug!(
-            "focused AX app via NSWorkspace: pid={} app={}",
-            pid, app_name
-        );
+        debug!("focused AX app via frontmost pid={} app={}", pid, app_name);
         return Some((ax_app, pid, app_name));
     }
 
