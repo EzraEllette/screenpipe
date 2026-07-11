@@ -616,7 +616,6 @@ mod macos {
             y: y0,
             width: w,
             height: h,
-            ink: 0,
         })
     }
 

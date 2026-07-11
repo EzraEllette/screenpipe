@@ -114,7 +114,6 @@ fn clamp_window_crop(
         y: y0,
         width: w,
         height: h,
-        ink: 0,
     })
 }
 
