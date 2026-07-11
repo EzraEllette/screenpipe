@@ -76,6 +76,19 @@ mod macos {
     /// Mirror of `paired_capture`'s union-crop padding (#5054 benchmarks).
     const UNION_PAD_PX: u32 = 20;
 
+    /// Whole-process CPU time (user + system, all threads) in milliseconds.
+    /// Deltas around a stage attribute its true CPU cost — Apple Vision
+    /// fans work out across threads, so wall-clock under-counts it. The
+    /// tick pipeline runs its stages sequentially, so deltas don't overlap.
+    fn proc_cpu_ms() -> f64 {
+        let mut ru: libc::rusage = unsafe { std::mem::zeroed() };
+        if unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut ru) } != 0 {
+            return 0.0;
+        }
+        let tv = |t: libc::timeval| t.tv_sec as f64 * 1000.0 + t.tv_usec as f64 / 1000.0;
+        tv(ru.ru_utime) + tv(ru.ru_stime)
+    }
+
     /// Mirror of `paired_capture`'s private clamp: reject slivers and
     /// effectively-fullscreen bounds, clip the rest to the frame.
     const MIN_WINDOW_CROP_PX: u32 = 64;
@@ -264,6 +277,8 @@ mod macos {
         recall_window_n: u64,
         baseline_ms: u64,
         optimized_ms: u64,
+        baseline_cpu_ms: f64,
+        optimized_cpu_ms_total: f64,
         low_recall: u64,
     }
 
@@ -278,7 +293,7 @@ mod macos {
             };
             eprintln!(
                 "[tick {tick}] decisions skip/crop/full={}/{}/{} (offtarget {}, focused: {}) | window-recall token {:.3} / \
-                 substr {:.3} ({} ticks substr<0.9) | OCR ms baseline={} optimized={} ({:.0}% saved)",
+                 substr {:.3} ({} ticks substr<0.9) | OCR ms baseline={} optimized={} ({:.0}% saved) | CPU s {:.1} vs {:.1}",
                 self.skips,
                 self.crops,
                 self.fulls,
@@ -293,7 +308,9 @@ mod macos {
                     100.0 * (1.0 - self.optimized_ms as f64 / self.baseline_ms as f64)
                 } else {
                     0.0
-                }
+                },
+                self.baseline_cpu_ms / 1000.0,
+                self.optimized_cpu_ms_total / 1000.0
             );
         }
     }
@@ -387,6 +404,7 @@ mod macos {
 
         // --- BASELINE arm: full-frame OCR every tick (pre-#5054). ---
         let baseline_started = Instant::now();
+        let baseline_cpu_start = proc_cpu_ms();
         let frame_for_baseline = frame.clone();
         let (baseline_text, baseline_json) = tokio::task::spawn_blocking(move || {
             let (text, json, _conf) =
@@ -395,6 +413,7 @@ mod macos {
         })
         .await?;
         let baseline_ms = baseline_started.elapsed().as_millis() as u64;
+        let baseline_cpu_ms = proc_cpu_ms() - baseline_cpu_start;
 
         // --- OPTIMIZED arm: the production pipeline (#5060) ---
         // screenshot → crop to app window → detect text → crop to the
@@ -403,12 +422,14 @@ mod macos {
         let mut decision_label = "skip_no_text";
         let detect_ms: Option<u64>;
         let mut optimized_ocr_ms: Option<u64> = None;
+        let optimized_cpu_ms: f64;
         // Signature of the union crop — the gate's only skip signal.
         // Consecutive-tick signature changes are exactly what drives OCR.
         let mut fingerprint: Option<String> = None;
         let mut regions_count: Option<usize> = None;
         {
             let detect_started = Instant::now();
+            let optimized_cpu_start = proc_cpu_ms();
             let detect_image: Arc<image::DynamicImage> = match window_crop {
                 Some(w) => Arc::new(frame.crop_imm(w.x, w.y, w.width, w.height)),
                 None => frame.clone(),
@@ -461,6 +482,7 @@ mod macos {
                     }
                 }
             }
+            optimized_cpu_ms = proc_cpu_ms() - optimized_cpu_start;
         }
 
         // --- Compare: what the old system sees now vs what our index holds. ---
@@ -507,6 +529,8 @@ mod macos {
         sum.recall_window_n += 1;
         sum.baseline_ms += baseline_ms;
         sum.optimized_ms += detect_ms.unwrap_or(0) + optimized_ocr_ms.unwrap_or(0);
+        sum.baseline_cpu_ms += baseline_cpu_ms;
+        sum.optimized_cpu_ms_total += optimized_cpu_ms;
         if recall_window_substr < 0.9 {
             sum.low_recall += 1;
         }
@@ -527,8 +551,10 @@ mod macos {
             "frame": [frame_w, frame_h],
             "window_crop": window_crop.map(|w| vec![w.x, w.y, w.width, w.height]),
             "baseline_ms": baseline_ms,
+            "baseline_cpu_ms": baseline_cpu_ms,
             "detect_ms": detect_ms,
             "optimized_ocr_ms": optimized_ocr_ms,
+            "optimized_cpu_ms": optimized_cpu_ms,
             "indexed_age_ticks": tick.saturating_sub(*indexed_at),
             "baseline_tokens_window": baseline_tokens_window.len(),
             "baseline_tokens_full": baseline_tokens_all.len(),
@@ -706,6 +732,7 @@ mod macos {
         let mut by_decision: HashMap<String, Vec<(f64, f64)>> = HashMap::new();
         let mut by_app: HashMap<String, (usize, usize, f64)> = HashMap::new(); // ticks, skips, substr_recall_sum
         let (mut base_ms, mut opt_ms) = (0.0, 0.0);
+        let (mut base_cpu_ms, mut opt_cpu_ms, mut cpu_rows) = (0.0, 0.0, 0u64);
         for r in &rows {
             let d = s(r, "decision");
             by_decision
@@ -720,6 +747,12 @@ mod macos {
             e.2 += f(r, "recall_window_substr");
             base_ms += f(r, "baseline_ms");
             opt_ms += f(r, "detect_ms").max(0.0) + f(r, "optimized_ocr_ms").max(0.0);
+            let bc = f(r, "baseline_cpu_ms");
+            if bc.is_finite() && bc > 0.0 {
+                base_cpu_ms += bc;
+                opt_cpu_ms += f(r, "optimized_cpu_ms").max(0.0);
+                cpu_rows += 1;
+            }
         }
 
         let dist = |key: &str| -> (f64, Vec<f64>) {
@@ -766,11 +799,20 @@ mod macos {
             );
         }
         println!(
-            "\ncost: baseline OCR {:.1}s vs optimized (detect+OCR) {:.1}s → {:.1}% saved",
+            "\ncost (wall): baseline OCR {:.1}s vs optimized (detect+OCR) {:.1}s → {:.1}% saved",
             base_ms / 1000.0,
             opt_ms / 1000.0,
             100.0 * (1.0 - opt_ms / base_ms.max(1.0))
         );
+        if cpu_rows > 0 {
+            println!(
+                "cost (CPU, getrusage over {} ticks): baseline {:.1}s vs optimized {:.1}s → {:.1}% saved",
+                cpu_rows,
+                base_cpu_ms / 1000.0,
+                opt_cpu_ms / 1000.0,
+                100.0 * (1.0 - opt_cpu_ms / base_cpu_ms.max(1.0))
+            );
+        }
         println!("\nper app (ticks, skip%, mean substr recall):");
         let mut apps: Vec<_> = by_app.iter().collect();
         apps.sort_by(|a, b| b.1 .0.cmp(&a.1 .0));
