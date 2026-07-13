@@ -44,6 +44,17 @@ const PIPE_LOG_ACTIVE_KEEP_PER_PIPE: usize = 200;
 const PIPE_LOG_ARCHIVE_AFTER_DAYS: i64 = 14;
 const PIPE_LOG_ARCHIVE_DIR: &str = "archive";
 const PIPE_EXECUTION_KEEP_PER_PIPE: i32 = 500;
+/// Max stdout/stderr bytes retained per run in the in-memory `logs` ring.
+///
+/// The full output is always persisted to the DB (`finish_execution`) and, for
+/// foreground runs, to disk (`write_log_to_disk`). The in-memory copy is only a
+/// fallback for CLI mode / DB errors (`get_logs`) and the short `last_error`
+/// snippet shown in `list_pipes`/`get_pipe`, so keeping whole (potentially
+/// MB-sized) agent transcripts here is pure RAM overhead that accumulates as
+/// pipes run and is freed only on `delete_pipe`. Bounding each entry keeps a
+/// long history of chatty pipes from pinning hundreds of MB for the whole
+/// process lifetime.
+const PIPE_LOG_INMEM_MAX_OUTPUT_BYTES: usize = 16 * 1024;
 
 // ---------------------------------------------------------------------------
 // Config & log types
@@ -3176,10 +3187,7 @@ impl PipeManager {
             let name_for_cb = log.pipe_name.clone();
             let mut l = logs_ref.lock().await;
             let entry = l.entry(log.pipe_name.clone()).or_insert_with(VecDeque::new);
-            entry.push_back(log);
-            if entry.len() > PIPE_LOG_ACTIVE_KEEP_PER_PIPE {
-                entry.pop_front();
-            }
+            push_inmem_log(entry, log);
             drop(l);
 
             if let Some(ref cb) = on_complete {
@@ -5082,10 +5090,7 @@ impl PipeManager {
                         let name_for_cb = log.pipe_name.clone();
                         let mut l = logs_ref.lock().await;
                         let entry = l.entry(log.pipe_name.clone()).or_insert_with(VecDeque::new);
-                        entry.push_back(log);
-                        if entry.len() > PIPE_LOG_ACTIVE_KEEP_PER_PIPE {
-                            entry.pop_front();
-                        }
+                        push_inmem_log(entry, log);
                         drop(l);
 
                         // Emit pipe_completed event so other pipes can chain
@@ -5415,10 +5420,7 @@ impl PipeManager {
     async fn append_log(&self, name: &str, log: &PipeRunLog) {
         let mut logs = self.logs.lock().await;
         let entry = logs.entry(name.to_string()).or_insert_with(VecDeque::new);
-        entry.push_back(log.clone());
-        if entry.len() > PIPE_LOG_ACTIVE_KEEP_PER_PIPE {
-            entry.pop_front();
-        }
+        push_inmem_log(entry, log.clone());
     }
 
     fn write_log_to_disk(&self, name: &str, log: &PipeRunLog) -> Result<()> {
@@ -6362,6 +6364,35 @@ fn parse_duration_str(s: &str) -> Option<std::time::Duration> {
 // ---------------------------------------------------------------------------
 // Utility helpers
 // ---------------------------------------------------------------------------
+
+/// Truncate a string in place to at most `max_len` bytes on a UTF-8 char
+/// boundary, appending a marker when truncation occurred. Used to bound the
+/// size of log output retained in the in-memory ring buffer without ever
+/// splitting a multi-byte character (which would corrupt the `String`).
+fn truncate_utf8_in_place(s: &mut String, max_len: usize) {
+    if s.len() <= max_len {
+        return;
+    }
+    let mut end = max_len;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s.truncate(end);
+    s.push_str("…[truncated]");
+}
+
+/// Append a run log to a pipe's in-memory ring buffer, bounding both the
+/// per-entry output size (`PIPE_LOG_INMEM_MAX_OUTPUT_BYTES`) and the number of
+/// retained runs (`PIPE_LOG_ACTIVE_KEEP_PER_PIPE`). The full, untruncated
+/// output is persisted elsewhere (DB + disk) — see the constant docs.
+fn push_inmem_log(entry: &mut VecDeque<PipeRunLog>, mut log: PipeRunLog) {
+    truncate_utf8_in_place(&mut log.stdout, PIPE_LOG_INMEM_MAX_OUTPUT_BYTES);
+    truncate_utf8_in_place(&mut log.stderr, PIPE_LOG_INMEM_MAX_OUTPUT_BYTES);
+    entry.push_back(log);
+    while entry.len() > PIPE_LOG_ACTIVE_KEEP_PER_PIPE {
+        entry.pop_front();
+    }
+}
 
 /// Filter NDJSON stdout to remove bulky streaming events before storage.
 /// `toolcall_delta` and `thinking_delta` events are only useful for live
@@ -8240,6 +8271,64 @@ mod tests {
         let result = truncate_string("hello world", 5);
         assert!(result.starts_with("hello"));
         assert!(result.contains("[truncated]"));
+    }
+
+    // -- in-memory log bounding (RAM leak guard) ----------------------------
+
+    #[test]
+    fn truncate_utf8_in_place_leaves_short_strings_untouched() {
+        let mut s = "hello".to_string();
+        truncate_utf8_in_place(&mut s, 16 * 1024);
+        assert_eq!(s, "hello");
+    }
+
+    #[test]
+    fn truncate_utf8_in_place_bounds_large_strings() {
+        let mut s = "a".repeat(1_000_000);
+        truncate_utf8_in_place(&mut s, 16 * 1024);
+        let marker = "…[truncated]";
+        assert!(s.ends_with(marker));
+        assert!(s.len() <= 16 * 1024 + marker.len());
+    }
+
+    #[test]
+    fn truncate_utf8_in_place_never_splits_a_char() {
+        // Each emoji is 4 bytes; cut at a non-multiple-of-4 offset.
+        let mut s = "😀".repeat(1000);
+        truncate_utf8_in_place(&mut s, 10);
+        let marker = "…[truncated]";
+        assert!(s.ends_with(marker));
+        // Body must contain only whole emoji (valid UTF-8, no split char).
+        let body = &s[..s.len() - marker.len()];
+        assert_eq!(body.len() % 4, 0);
+        assert!(body.chars().all(|c| c == '😀'));
+    }
+
+    #[test]
+    fn push_inmem_log_bounds_output_size_and_run_count() {
+        let mut dq: VecDeque<PipeRunLog> = VecDeque::new();
+        let now = Utc::now();
+        for _ in 0..(PIPE_LOG_ACTIVE_KEEP_PER_PIPE + 50) {
+            push_inmem_log(
+                &mut dq,
+                PipeRunLog {
+                    pipe_name: "p".to_string(),
+                    started_at: now,
+                    finished_at: now,
+                    success: true,
+                    stdout: "x".repeat(1_000_000),
+                    stderr: "y".repeat(1_000_000),
+                },
+            );
+        }
+        // Count is capped.
+        assert_eq!(dq.len(), PIPE_LOG_ACTIVE_KEEP_PER_PIPE);
+        // Every retained entry has bounded output — no unbounded RAM growth.
+        let marker_len = "…[truncated]".len();
+        for entry in &dq {
+            assert!(entry.stdout.len() <= PIPE_LOG_INMEM_MAX_OUTPUT_BYTES + marker_len);
+            assert!(entry.stderr.len() <= PIPE_LOG_INMEM_MAX_OUTPUT_BYTES + marker_len);
+        }
     }
 
     // -- url_to_pipe_name ---------------------------------------------------
