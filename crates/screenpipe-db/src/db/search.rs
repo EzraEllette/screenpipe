@@ -473,6 +473,105 @@ impl DatabaseManager {
         Ok(results)
     }
 
+    async fn search_ocr_browse_page(
+        &self,
+        limit: u32,
+        offset: u32,
+        start_time: Option<DateTime<Utc>>,
+        end_time: Option<DateTime<Utc>>,
+        order: Order,
+    ) -> Result<Vec<OCRResultRaw>, sqlx::Error> {
+        let order_dir = match order {
+            Order::Ascending => "ASC",
+            Order::Descending => "DESC",
+        };
+        let start_condition = start_time
+            .is_some()
+            .then_some("AND timestamp >= ?")
+            .unwrap_or_default();
+        let end_condition = end_time
+            .is_some()
+            .then_some("AND timestamp <= ?")
+            .unwrap_or_default();
+
+        // Select and limit frame ids before joining tag tables. The previous
+        // query grouped the entire matching history and only then applied
+        // LIMIT, which forced a full frames scan + temp sort on large customer
+        // databases. This CTE is bounded by the timestamp index and caps all
+        // downstream join/group work to one requested page.
+        let sql = format!(
+            r#"
+            WITH candidates AS MATERIALIZED (
+                SELECT id, timestamp
+                FROM frames
+                WHERE 1=1
+                    {start_condition}
+                    {end_condition}
+                ORDER BY timestamp {order_dir}, id {order_dir}
+                LIMIT ? OFFSET ?
+            )
+            SELECT
+                frames.id as frame_id,
+                COALESCE(frames.full_text, frames.accessibility_text, '') as ocr_text,
+                frames.text_json,
+                frames.timestamp,
+                frames.name as frame_name,
+                COALESCE(frames.snapshot_path, video_chunks.file_path) as file_path,
+                frames.offset_index,
+                frames.app_name,
+                '' as ocr_engine,
+                frames.window_name,
+                COALESCE(video_chunks.device_name, frames.device_name) as device_name,
+                GROUP_CONCAT(tags.name, ',') as tags,
+                frames.browser_url,
+                frames.focused,
+                frames.text_source
+            FROM candidates
+            JOIN frames ON frames.id = candidates.id
+            LEFT JOIN video_chunks ON frames.video_chunk_id = video_chunks.id
+            LEFT JOIN vision_tags ON frames.id = vision_tags.vision_id
+            LEFT JOIN tags ON vision_tags.tag_id = tags.id
+            GROUP BY frames.id
+            ORDER BY frames.timestamp {order_dir}, frames.id {order_dir}
+            "#,
+        );
+
+        let mut query = sqlx::query_as::<_, OCRResultRaw>(&sql);
+        if let Some(start) = start_time {
+            query = query.bind(start);
+        }
+        if let Some(end) = end_time {
+            query = query.bind(end);
+        }
+        query.bind(limit).bind(offset).fetch_all(&self.pool).await
+    }
+
+    fn into_ocr_results(raw_results: Vec<OCRResultRaw>) -> Vec<OCRResult> {
+        raw_results
+            .into_iter()
+            .map(|raw| OCRResult {
+                frame_id: raw.frame_id,
+                ocr_text: raw.ocr_text,
+                text_json: raw.text_json,
+                timestamp: raw.timestamp,
+                frame_name: raw.frame_name,
+                file_path: raw.file_path,
+                offset_index: raw.offset_index,
+                app_name: raw.app_name,
+                ocr_engine: raw.ocr_engine,
+                window_name: raw.window_name,
+                device_name: raw.device_name,
+                tags: raw
+                    .tags
+                    .map(|t| t.split(',').map(String::from).collect())
+                    .unwrap_or_default(),
+                browser_url: raw.browser_url,
+                focused: raw.focused,
+                text_source: raw.text_source,
+            })
+            .collect()
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn search_ocr(
         &self,
@@ -503,6 +602,24 @@ impl DatabaseManager {
             .acquire()
             .await
             .map_err(|_| SqlxError::Protocol("heavy_read_semaphore closed".to_string()))?;
+
+        let is_unfiltered_browse = query.trim().is_empty()
+            && app_name.is_none()
+            && window_name.is_none()
+            && min_length.is_none()
+            && max_length.is_none()
+            && frame_name.is_none()
+            && browser_url.is_none()
+            && focused.is_none()
+            && device_name.is_none()
+            && machine_id.is_none()
+            && tags.is_empty();
+        if is_unfiltered_browse {
+            let raw_results = self
+                .search_ocr_browse_page(limit, offset, start_time, end_time, order)
+                .await?;
+            return Ok(Self::into_ocr_results(raw_results));
+        }
 
         let mut frame_fts_parts = Vec::new();
 
@@ -542,6 +659,14 @@ impl DatabaseManager {
         let fts_query = frame_fts_parts.join(" ");
         let has_fts = !fts_query.trim().is_empty();
 
+        let start_condition = start_time
+            .is_some()
+            .then_some("AND frames.timestamp >= ?2")
+            .unwrap_or_default();
+        let end_condition = end_time
+            .is_some()
+            .then_some("AND frames.timestamp <= ?3")
+            .unwrap_or_default();
         let sql = format!(
             r#"
         SELECT
@@ -567,8 +692,8 @@ impl DatabaseManager {
         {fts_join}
         WHERE 1=1
             {fts_condition}
-            AND (?2 IS NULL OR frames.timestamp >= ?2)
-            AND (?3 IS NULL OR frames.timestamp <= ?3)
+            {start_condition}
+            {end_condition}
             AND (?4 IS NULL OR LENGTH(COALESCE(frames.full_text, '')) >= ?4)
             AND (?5 IS NULL OR LENGTH(COALESCE(frames.full_text, '')) <= ?5)
             AND (?6 IS NULL OR COALESCE(video_chunks.device_name, frames.device_name) LIKE '%' || ?6 || '%')
@@ -626,29 +751,7 @@ impl DatabaseManager {
             .fetch_all(&self.pool)
             .await?;
 
-        Ok(raw_results
-            .into_iter()
-            .map(|raw| OCRResult {
-                frame_id: raw.frame_id,
-                ocr_text: raw.ocr_text,
-                text_json: raw.text_json,
-                timestamp: raw.timestamp,
-                frame_name: raw.frame_name,
-                file_path: raw.file_path,
-                offset_index: raw.offset_index,
-                app_name: raw.app_name,
-                ocr_engine: raw.ocr_engine,
-                window_name: raw.window_name,
-                device_name: raw.device_name,
-                tags: raw
-                    .tags
-                    .map(|t| t.split(',').map(String::from).collect())
-                    .unwrap_or_default(),
-                browser_url: raw.browser_url,
-                focused: raw.focused,
-                text_source: raw.text_source,
-            })
-            .collect())
+        Ok(Self::into_ocr_results(raw_results))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1678,6 +1781,14 @@ impl DatabaseManager {
 
         let fts_query = fts_parts.join(" ");
         let has_fts = !fts_query.trim().is_empty();
+        let frame_start_condition = start_time
+            .is_some()
+            .then_some("AND frames.timestamp >= ?2")
+            .unwrap_or_default();
+        let frame_end_condition = end_time
+            .is_some()
+            .then_some("AND frames.timestamp <= ?3")
+            .unwrap_or_default();
 
         let sql = match content_type {
             ContentType::OCR | ContentType::Accessibility => format!(
@@ -1686,8 +1797,8 @@ impl DatabaseManager {
                    {fts_join}
                    WHERE 1=1
                        {fts_condition}
-                       AND (?2 IS NULL OR frames.timestamp >= ?2)
-                       AND (?3 IS NULL OR frames.timestamp <= ?3)
+                       {frame_start_condition}
+                       {frame_end_condition}
                        AND (?4 IS NULL OR LENGTH(COALESCE(frames.full_text, '')) >= ?4)
                        AND (?5 IS NULL OR LENGTH(COALESCE(frames.full_text, '')) <= ?5)
                        AND (?6 IS NULL OR frames.name LIKE '%' || ?6 || '%')
