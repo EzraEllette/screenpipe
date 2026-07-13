@@ -1289,6 +1289,7 @@ impl PiExecutor {
         }
 
         let output = child.wait_with_output().await?;
+        reap_lingering_process_group(pid);
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
@@ -1493,6 +1494,9 @@ impl PiExecutor {
         }
 
         let status = child.wait().await?;
+        // Reap grandchildren before reading stderr: one holding the stderr pipe
+        // open would otherwise block read_to_end below until the timeout.
+        reap_lingering_process_group(pid);
 
         // Read remaining stderr (lossy — same reason as stdout above)
         let mut stderr = if let Some(mut stderr_handle) = child.stderr.take() {
@@ -2700,6 +2704,31 @@ fn resolve_cmd_js_entry(cmd_path: &str) -> Option<String> {
 
 /// Kill a process group (SIGTERM → 5s → SIGKILL).
 /// On Unix, kills the entire process group so child processes are also terminated.
+/// After the agent process has exited and been reaped, kill any lingering
+/// members of its process group — e.g. a stdio MCP server or bun helper that
+/// closed its inherited stdio (so the parent saw EOF and `wait()` returned) but
+/// kept running. Without this they accumulate across pipe runs and pin RAM. The
+/// group shares the parent's pid via `setsid()` at spawn. No-op when the group
+/// is already empty, so the common clean-exit case costs one `kill(pgid, 0)`
+/// probe and never spawns the escalation thread. Unix-only; a normal-completion
+/// backstop mirroring the timeout/stop kill paths.
+fn reap_lingering_process_group(pid: Option<u32>) {
+    #[cfg(unix)]
+    {
+        if let Some(p) = pid {
+            let pgid = p as i32;
+            // Only escalate if the group still has live members.
+            if unsafe { libc::kill(-pgid, 0) } == 0 {
+                let _ = kill_process_group(p);
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+    }
+}
+
 pub fn kill_process_group(pid: u32) -> Result<()> {
     #[cfg(unix)]
     {
