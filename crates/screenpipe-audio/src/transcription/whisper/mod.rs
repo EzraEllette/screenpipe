@@ -4,5 +4,6 @@
 
 pub mod batch;
 mod detect_language;
+pub(crate) use detect_language::invalidate_language_caches;
 pub use detect_language::{detect_language, LanguageCache};
 pub mod model;
