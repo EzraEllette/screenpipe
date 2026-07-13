@@ -51,6 +51,12 @@ const PIPE_EXECUTION_KEEP_PER_PIPE: i32 = 500;
 /// across many pipes spawns one heavy agent subprocess *each*, all at once — the
 /// RAM spike behind "many pipes → high memory". This bounds the fan-out while
 /// still allowing several to run in parallel. Tunable.
+///
+/// CURRENTLY DISABLED at the permit-acquire site in the scheduler (the
+/// semaphore and this constant are kept for re-enable): a hard cap could stall
+/// legitimately bursty workflows. `event_runs_peak` on the
+/// `pipe_scheduled_run` analytics event tracks how much concurrency real
+/// users need; re-enable (and retune) once that data is in.
 const EVENT_TRIGGERED_CONCURRENCY_LIMIT: usize = 4;
 
 // ---------------------------------------------------------------------------
@@ -2034,6 +2040,12 @@ pub struct PipeManager {
     local_api_key: Option<String>,
     /// Circuit breaker registry for AI preset fallback.
     fallback_registry: Arc<preset_fallback::PresetFallbackRegistry>,
+    /// Live count of concurrently-executing event-triggered runs.
+    event_runs_active: Arc<std::sync::atomic::AtomicUsize>,
+    /// Process-lifetime peak of `event_runs_active`. Reported to analytics —
+    /// decides whether the (currently disabled) event-run concurrency cap can
+    /// be re-enabled without hurting real workflows.
+    event_runs_peak: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl PipeManager {
@@ -2074,7 +2086,23 @@ impl PipeManager {
             connections_context: None,
             local_api_key: None,
             fallback_registry: registry,
+            event_runs_active: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            event_runs_peak: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
+    }
+
+    /// (live, peak) counters of concurrent event-triggered runs, for
+    /// analytics. Peak is process-lifetime.
+    pub fn event_run_concurrency(
+        &self,
+    ) -> (
+        Arc<std::sync::atomic::AtomicUsize>,
+        Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        (
+            self.event_runs_active.clone(),
+            self.event_runs_peak.clone(),
+        )
     }
 
     /// Returns the pipes directory (e.g. `~/.screenpipe/pipes/`).
@@ -4266,6 +4294,10 @@ impl PipeManager {
         let extra_context = self.extra_context.clone();
         let connections_context = self.connections_context.clone();
         let local_api_key = self.local_api_key.clone();
+        // Live count + process-lifetime peak of concurrent event-triggered
+        // runs, surfaced to analytics via `event_run_concurrency()`.
+        let event_runs_active = self.event_runs_active.clone();
+        let event_runs_peak = self.event_runs_peak.clone();
 
         let handle = tokio::spawn(async move {
             info!("pipe scheduler started (generation {})", generation);
@@ -4279,9 +4311,12 @@ impl PipeManager {
             // avoid rate-limit stampedes when many pipes share the same cron.
             // Event-triggered pipes bypass the queue for low-latency response.
             let execution_semaphore = Arc::new(tokio::sync::Semaphore::new(1));
-            // Event-triggered runs bypass the sequential queue above, but are
-            // capped so a burst can't spawn unbounded heavy agent subprocesses
-            // at once. See EVENT_TRIGGERED_CONCURRENCY_LIMIT.
+            // Event-triggered runs bypass the sequential queue above. They were
+            // capped via this semaphore (EVENT_TRIGGERED_CONCURRENCY_LIMIT) so a
+            // burst can't spawn unbounded heavy agent subprocesses at once, but
+            // the cap is temporarily disabled at the acquire site below — it
+            // could stall legitimately bursty user workflows. `event_runs_peak`
+            // telemetry decides whether/where to re-enable it.
             let event_semaphore =
                 Arc::new(tokio::sync::Semaphore::new(EVENT_TRIGGERED_CONCURRENCY_LIMIT));
             // Track pipes that are queued (waiting for semaphore) or running,
@@ -4746,7 +4781,9 @@ impl PipeManager {
                     let mcp_session_access_ref = mcp_session_access.clone();
                     let pipe_timeout = config.timeout.unwrap_or(DEFAULT_TIMEOUT_SECS);
                     let semaphore = execution_semaphore.clone();
-                    let event_sem = event_semaphore.clone();
+                    let _event_sem = event_semaphore.clone();
+                    let event_active = event_runs_active.clone();
+                    let event_peak = event_runs_peak.clone();
                     let pipes_dir_for_mark = pipes_dir.clone();
                     let queued_ref = queued_or_running.clone();
                     let mcp_server_allowlist = selected_mcp_server_ids(config);
@@ -4754,19 +4791,35 @@ impl PipeManager {
                     tokio::spawn(async move {
                         // Scheduled pipes wait for the previous one to finish
                         // (semaphore of 1). Event-triggered pipes skip that queue
-                        // for low latency but still take a permit from a separate,
-                        // higher-capacity semaphore so a burst can't spawn
-                        // unbounded concurrent agent subprocesses.
+                        // for low latency and currently run UNCAPPED: the
+                        // concurrency cap is disabled (not removed) until
+                        // `event_runs_peak` telemetry shows how many concurrent
+                        // event runs real workflows need. To re-enable, replace
+                        // `None` with the commented acquire.
                         let _permit = if !is_event_triggered {
-                            semaphore
-                                .acquire()
-                                .await
-                                .expect("execution semaphore closed")
+                            Some(
+                                semaphore
+                                    .acquire()
+                                    .await
+                                    .expect("execution semaphore closed"),
+                            )
                         } else {
-                            event_sem
-                                .acquire()
-                                .await
-                                .expect("event semaphore closed")
+                            // Some(
+                            //     _event_sem
+                            //         .acquire()
+                            //         .await
+                            //         .expect("event semaphore closed"),
+                            // )
+                            None
+                        };
+
+                        // Count concurrent event-triggered runs (drops on every
+                        // exit path); the peak feeds the pipe_scheduled_run
+                        // analytics event.
+                        let _concurrency_guard = if is_event_triggered {
+                            Some(EventRunGuard::enter(event_active, event_peak))
+                        } else {
+                            None
                         };
 
                         let shared_pid = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
@@ -6382,6 +6435,30 @@ fn parse_duration_str(s: &str) -> Option<std::time::Duration> {
 // ---------------------------------------------------------------------------
 // Utility helpers
 // ---------------------------------------------------------------------------
+
+/// RAII counter for concurrent event-triggered runs: increments the live count
+/// and records the process-lifetime peak on enter, decrements on drop — so the
+/// count stays accurate on every exit path (success, error, timeout, stop).
+struct EventRunGuard {
+    active: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl EventRunGuard {
+    fn enter(
+        active: Arc<std::sync::atomic::AtomicUsize>,
+        peak: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> Self {
+        let now = active.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        peak.fetch_max(now, std::sync::atomic::Ordering::SeqCst);
+        Self { active }
+    }
+}
+
+impl Drop for EventRunGuard {
+    fn drop(&mut self) {
+        self.active.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
 
 /// Append a run to a pipe's in-memory ring, keeping only the fields the status
 /// APIs actually read (`stderr` for `last_error`, plus timestamps/success) and
@@ -8806,6 +8883,9 @@ mod tests {
         // Simulates a burst of event-triggered pipes all acquiring the event
         // semaphore. No more than EVENT_TRIGGERED_CONCURRENCY_LIMIT should run
         // at once — the guard against unbounded concurrent agent subprocesses.
+        // NOTE: the scheduler currently does NOT acquire this semaphore (cap
+        // disabled pending event_runs_peak telemetry); this test keeps the
+        // mechanism honest for when it's re-enabled.
         let event_semaphore =
             Arc::new(tokio::sync::Semaphore::new(EVENT_TRIGGERED_CONCURRENCY_LIMIT));
         let active_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
@@ -8836,6 +8916,29 @@ mod tests {
         );
         // With a burst larger than the cap, we should actually reach the cap.
         assert_eq!(peak, EVENT_TRIGGERED_CONCURRENCY_LIMIT);
+    }
+
+    #[tokio::test]
+    async fn test_event_run_guard_tracks_live_and_peak() {
+        // The telemetry counters behind event_runs_active/event_runs_peak:
+        // guard increments the live count and records the peak on enter,
+        // decrements on drop.
+        let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        {
+            let _g1 = EventRunGuard::enter(active.clone(), peak.clone());
+            let _g2 = EventRunGuard::enter(active.clone(), peak.clone());
+            let _g3 = EventRunGuard::enter(active.clone(), peak.clone());
+            assert_eq!(active.load(std::sync::atomic::Ordering::SeqCst), 3);
+        }
+        // All guards dropped — live count returns to zero, peak sticks.
+        assert_eq!(active.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(peak.load(std::sync::atomic::Ordering::SeqCst), 3);
+
+        // Peak never decreases on later, smaller bursts.
+        let _g = EventRunGuard::enter(active.clone(), peak.clone());
+        assert_eq!(peak.load(std::sync::atomic::Ordering::SeqCst), 3);
     }
 
     #[tokio::test]
