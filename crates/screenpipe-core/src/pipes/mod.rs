@@ -50,7 +50,8 @@ const PIPE_EXECUTION_KEEP_PER_PIPE: i32 = 500;
 /// bypass that queue for low latency, but without a ceiling a burst of triggers
 /// across many pipes spawns one heavy agent subprocess *each*, all at once — the
 /// RAM spike behind "many pipes → high memory". This bounds the fan-out while
-/// still allowing several to run in parallel. Tunable.
+/// still allowing several to run in parallel. Tunable. Live and peak usage are
+/// reported on `pipe_scheduled_run` so the limit's behavior is observable.
 const EVENT_TRIGGERED_CONCURRENCY_LIMIT: usize = 4;
 
 // ---------------------------------------------------------------------------
@@ -2034,6 +2035,10 @@ pub struct PipeManager {
     local_api_key: Option<String>,
     /// Circuit breaker registry for AI preset fallback.
     fallback_registry: Arc<preset_fallback::PresetFallbackRegistry>,
+    /// Live count of concurrently-executing event-triggered runs.
+    event_runs_active: Arc<std::sync::atomic::AtomicUsize>,
+    /// Process-lifetime peak of `event_runs_active`, reported to analytics.
+    event_runs_peak: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl PipeManager {
@@ -2074,7 +2079,20 @@ impl PipeManager {
             connections_context: None,
             local_api_key: None,
             fallback_registry: registry,
+            event_runs_active: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            event_runs_peak: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
+    }
+
+    /// (live, peak) counters of concurrent event-triggered runs, for
+    /// analytics. Peak is process-lifetime.
+    pub fn event_run_concurrency(
+        &self,
+    ) -> (
+        Arc<std::sync::atomic::AtomicUsize>,
+        Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        (self.event_runs_active.clone(), self.event_runs_peak.clone())
     }
 
     /// Returns the pipes directory (e.g. `~/.screenpipe/pipes/`).
@@ -4266,6 +4284,10 @@ impl PipeManager {
         let extra_context = self.extra_context.clone();
         let connections_context = self.connections_context.clone();
         let local_api_key = self.local_api_key.clone();
+        // Live count + process-lifetime peak of concurrent event-triggered
+        // runs, surfaced to analytics via `event_run_concurrency()`.
+        let event_runs_active = self.event_runs_active.clone();
+        let event_runs_peak = self.event_runs_peak.clone();
 
         let handle = tokio::spawn(async move {
             info!("pipe scheduler started (generation {})", generation);
@@ -4748,6 +4770,8 @@ impl PipeManager {
                     let pipe_timeout = config.timeout.unwrap_or(DEFAULT_TIMEOUT_SECS);
                     let semaphore = execution_semaphore.clone();
                     let event_sem = event_semaphore.clone();
+                    let event_active = event_runs_active.clone();
+                    let event_peak = event_runs_peak.clone();
                     let pipes_dir_for_mark = pipes_dir.clone();
                     let queued_ref = queued_or_running.clone();
                     let mcp_server_allowlist = selected_mcp_server_ids(config);
@@ -4765,6 +4789,15 @@ impl PipeManager {
                                 .expect("execution semaphore closed")
                         } else {
                             event_sem.acquire().await.expect("event semaphore closed")
+                        };
+
+                        // Count concurrent event-triggered runs (drops on every
+                        // exit path); the peak feeds the pipe_scheduled_run
+                        // analytics event.
+                        let _concurrency_guard = if is_event_triggered {
+                            Some(EventRunGuard::enter(event_active, event_peak))
+                        } else {
+                            None
                         };
 
                         let shared_pid = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
@@ -6380,6 +6413,31 @@ fn parse_duration_str(s: &str) -> Option<std::time::Duration> {
 // ---------------------------------------------------------------------------
 // Utility helpers
 // ---------------------------------------------------------------------------
+
+/// RAII counter for concurrent event-triggered runs: increments the live count
+/// and records the process-lifetime peak on enter, decrements on drop — so the
+/// count stays accurate on every exit path (success, error, timeout, stop).
+struct EventRunGuard {
+    active: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl EventRunGuard {
+    fn enter(
+        active: Arc<std::sync::atomic::AtomicUsize>,
+        peak: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> Self {
+        let now = active.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        peak.fetch_max(now, std::sync::atomic::Ordering::SeqCst);
+        Self { active }
+    }
+}
+
+impl Drop for EventRunGuard {
+    fn drop(&mut self) {
+        self.active
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
 
 /// Append a run to a pipe's in-memory ring, keeping only the fields the status
 /// APIs actually read (`stderr` for `last_error`, plus timestamps/success) and
@@ -8807,8 +8865,8 @@ mod tests {
         let event_semaphore = Arc::new(tokio::sync::Semaphore::new(
             EVENT_TRIGGERED_CONCURRENCY_LIMIT,
         ));
-        let active_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
-        let max_concurrent = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let active_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let max_concurrent = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
         let burst = EVENT_TRIGGERED_CONCURRENCY_LIMIT * 3;
         let mut handles = Vec::new();
@@ -8818,23 +8876,45 @@ mod tests {
             let max = max_concurrent.clone();
             handles.push(tokio::spawn(async move {
                 let _permit = sem.acquire().await.unwrap();
-                let current = active.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-                max.fetch_max(current, std::sync::atomic::Ordering::SeqCst);
+                let _guard = EventRunGuard::enter(active, max);
                 tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-                active.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
             }));
         }
         for h in handles {
             h.await.unwrap();
         }
 
-        let peak = max_concurrent.load(std::sync::atomic::Ordering::SeqCst) as usize;
+        let peak = max_concurrent.load(std::sync::atomic::Ordering::SeqCst);
         assert!(
             peak <= EVENT_TRIGGERED_CONCURRENCY_LIMIT,
             "event-triggered concurrency ({peak}) exceeded cap ({EVENT_TRIGGERED_CONCURRENCY_LIMIT})"
         );
         // With a burst larger than the cap, we should actually reach the cap.
         assert_eq!(peak, EVENT_TRIGGERED_CONCURRENCY_LIMIT);
+        assert_eq!(active_count.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn test_event_run_guard_tracks_live_and_peak() {
+        // The telemetry counters behind event_runs_active/event_runs_peak:
+        // guard increments the live count and records the peak on enter,
+        // decrements on drop.
+        let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        {
+            let _g1 = EventRunGuard::enter(active.clone(), peak.clone());
+            let _g2 = EventRunGuard::enter(active.clone(), peak.clone());
+            let _g3 = EventRunGuard::enter(active.clone(), peak.clone());
+            assert_eq!(active.load(std::sync::atomic::Ordering::SeqCst), 3);
+        }
+        // All guards dropped — live count returns to zero, peak sticks.
+        assert_eq!(active.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(peak.load(std::sync::atomic::Ordering::SeqCst), 3);
+
+        // Peak never decreases on later, smaller bursts.
+        let _g = EventRunGuard::enter(active.clone(), peak.clone());
+        assert_eq!(peak.load(std::sync::atomic::Ordering::SeqCst), 3);
     }
 
     #[tokio::test]
