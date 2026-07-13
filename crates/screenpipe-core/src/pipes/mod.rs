@@ -44,6 +44,14 @@ const PIPE_LOG_ACTIVE_KEEP_PER_PIPE: usize = 200;
 const PIPE_LOG_ARCHIVE_AFTER_DAYS: i64 = 14;
 const PIPE_LOG_ARCHIVE_DIR: &str = "archive";
 const PIPE_EXECUTION_KEEP_PER_PIPE: i32 = 500;
+/// Max event-triggered pipe runs allowed to execute concurrently.
+///
+/// Scheduled runs are already serialized (one at a time). Event-triggered runs
+/// bypass that queue for low latency, but without a ceiling a burst of triggers
+/// across many pipes spawns one heavy agent subprocess *each*, all at once — the
+/// RAM spike behind "many pipes → high memory". This bounds the fan-out while
+/// still allowing several to run in parallel. Tunable.
+const EVENT_TRIGGERED_CONCURRENCY_LIMIT: usize = 4;
 
 // ---------------------------------------------------------------------------
 // Config & log types
@@ -4271,6 +4279,11 @@ impl PipeManager {
             // avoid rate-limit stampedes when many pipes share the same cron.
             // Event-triggered pipes bypass the queue for low-latency response.
             let execution_semaphore = Arc::new(tokio::sync::Semaphore::new(1));
+            // Event-triggered runs bypass the sequential queue above, but are
+            // capped so a burst can't spawn unbounded heavy agent subprocesses
+            // at once. See EVENT_TRIGGERED_CONCURRENCY_LIMIT.
+            let event_semaphore =
+                Arc::new(tokio::sync::Semaphore::new(EVENT_TRIGGERED_CONCURRENCY_LIMIT));
             // Track pipes that are queued (waiting for semaphore) or running,
             // so the scheduler doesn't double-queue the same pipe.
             let queued_or_running: Arc<tokio::sync::Mutex<std::collections::HashSet<String>>> =
@@ -4733,22 +4746,27 @@ impl PipeManager {
                     let mcp_session_access_ref = mcp_session_access.clone();
                     let pipe_timeout = config.timeout.unwrap_or(DEFAULT_TIMEOUT_SECS);
                     let semaphore = execution_semaphore.clone();
+                    let event_sem = event_semaphore.clone();
                     let pipes_dir_for_mark = pipes_dir.clone();
                     let queued_ref = queued_or_running.clone();
                     let mcp_server_allowlist = selected_mcp_server_ids(config);
 
                     tokio::spawn(async move {
-                        // Event-triggered pipes skip the queue for low-latency response.
-                        // Scheduled pipes wait for the previous one to finish.
+                        // Scheduled pipes wait for the previous one to finish
+                        // (semaphore of 1). Event-triggered pipes skip that queue
+                        // for low latency but still take a permit from a separate,
+                        // higher-capacity semaphore so a burst can't spawn
+                        // unbounded concurrent agent subprocesses.
                         let _permit = if !is_event_triggered {
-                            Some(
-                                semaphore
-                                    .acquire()
-                                    .await
-                                    .expect("execution semaphore closed"),
-                            )
+                            semaphore
+                                .acquire()
+                                .await
+                                .expect("execution semaphore closed")
                         } else {
-                            None
+                            event_sem
+                                .acquire()
+                                .await
+                                .expect("event semaphore closed")
                         };
 
                         let shared_pid = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
@@ -8781,6 +8799,43 @@ mod tests {
         );
 
         scheduled.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_event_triggered_concurrency_is_capped() {
+        // Simulates a burst of event-triggered pipes all acquiring the event
+        // semaphore. No more than EVENT_TRIGGERED_CONCURRENCY_LIMIT should run
+        // at once — the guard against unbounded concurrent agent subprocesses.
+        let event_semaphore =
+            Arc::new(tokio::sync::Semaphore::new(EVENT_TRIGGERED_CONCURRENCY_LIMIT));
+        let active_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let max_concurrent = Arc::new(std::sync::atomic::AtomicU32::new(0));
+
+        let burst = EVENT_TRIGGERED_CONCURRENCY_LIMIT * 3;
+        let mut handles = Vec::new();
+        for _ in 0..burst {
+            let sem = event_semaphore.clone();
+            let active = active_count.clone();
+            let max = max_concurrent.clone();
+            handles.push(tokio::spawn(async move {
+                let _permit = sem.acquire().await.unwrap();
+                let current = active.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                max.fetch_max(current, std::sync::atomic::Ordering::SeqCst);
+                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+                active.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        let peak = max_concurrent.load(std::sync::atomic::Ordering::SeqCst) as usize;
+        assert!(
+            peak <= EVENT_TRIGGERED_CONCURRENCY_LIMIT,
+            "event-triggered concurrency ({peak}) exceeded cap ({EVENT_TRIGGERED_CONCURRENCY_LIMIT})"
+        );
+        // With a burst larger than the cap, we should actually reach the cap.
+        assert_eq!(peak, EVENT_TRIGGERED_CONCURRENCY_LIMIT);
     }
 
     #[tokio::test]
