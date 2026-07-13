@@ -158,9 +158,7 @@ mod macos {
             Some(id) => get_monitor_by_id(id)
                 .await
                 .with_context(|| format!("monitor {id} not found"))?,
-            None => get_default_monitor()
-                .await
-                .context("no default monitor")?,
+            None => get_default_monitor().await.context("no default monitor")?,
         };
         eprintln!(
             "ocr_gate_ab: monitor {} ({}x{} at {},{}) every {:?} | app filter: {} | crop pad: {}px",
@@ -388,10 +386,8 @@ mod macos {
             clamp_window_crop(
                 (b.x * frame_w as f64).round() as i32 - pad,
                 (b.y * frame_h as f64).round() as i32 - pad,
-                ((b.width * frame_w as f64).round().max(0.0) as u32)
-                    .saturating_add(2 * args.pad),
-                ((b.height * frame_h as f64).round().max(0.0) as u32)
-                    .saturating_add(2 * args.pad),
+                ((b.width * frame_w as f64).round().max(0.0) as u32).saturating_add(2 * args.pad),
+                ((b.height * frame_h as f64).round().max(0.0) as u32).saturating_add(2 * args.pad),
                 frame_w,
                 frame_h,
             )
@@ -465,8 +461,7 @@ mod macos {
                             None => union,
                         };
                         let ocr_started = Instant::now();
-                        let ocr_input =
-                            Arc::new(frame.crop_imm(r.x, r.y, r.width, r.height));
+                        let ocr_input = Arc::new(frame.crop_imm(r.x, r.y, r.width, r.height));
                         let text = tokio::task::spawn_blocking(move || {
                             screenpipe_screen::perform_ocr_apple(&ocr_input, &[]).0
                         })
@@ -487,8 +482,7 @@ mod macos {
 
         // --- Compare: what the old system sees now vs what our index holds. ---
         let empty = (String::new(), HashSet::new(), 0);
-        let (indexed_text, indexed_tokens, indexed_at) =
-            indexed.get(&app_key).unwrap_or(&empty);
+        let (indexed_text, indexed_tokens, indexed_at) = indexed.get(&app_key).unwrap_or(&empty);
         let baseline_tokens_all = tokens(&baseline_text);
         let baseline_window_text = window_crop
             .map(|w| text_of_boxes_in(&baseline_json, w, frame_w, frame_h))
@@ -537,8 +531,7 @@ mod macos {
 
         // Full texts only for real-loss incidents (substring recall — spacing
         // artifacts alone don't qualify) and a periodic calibration sample.
-        let keep_full_text =
-            recall_window_substr < args.full_text_threshold || tick % 200 == 1;
+        let keep_full_text = recall_window_substr < args.full_text_threshold || tick % 200 == 1;
         let mut record = json!({
             "ts": chrono::Utc::now().to_rfc3339(),
             "tick": tick,
@@ -566,9 +559,8 @@ mod macos {
             "recall_full": m_full.recall,
         });
         if m_window.recall < 1.0 {
-            let mut missing: Vec<&String> = baseline_tokens_window
-                .difference(indexed_tokens)
-                .collect();
+            let mut missing: Vec<&String> =
+                baseline_tokens_window.difference(indexed_tokens).collect();
             missing.sort();
             missing.truncate(20);
             record["missing_sample"] = json!(missing);
@@ -632,10 +624,7 @@ mod macos {
                 _ => None,
             }
         };
-        let (rx0, ry0) = (
-            w.x as f64 / frame_w as f64,
-            w.y as f64 / frame_h as f64,
-        );
+        let (rx0, ry0) = (w.x as f64 / frame_w as f64, w.y as f64 / frame_h as f64);
         let (rx1, ry1) = (
             (w.x + w.width) as f64 / frame_w as f64,
             (w.y + w.height) as f64 / frame_h as f64,
@@ -699,8 +688,7 @@ mod macos {
         if px.is_empty() {
             return 0.0;
         }
-        px.iter().step_by(97).map(|&v| v as f64).sum::<f64>()
-            / px.iter().step_by(97).count() as f64
+        px.iter().step_by(97).map(|&v| v as f64).sum::<f64>() / px.iter().step_by(97).count() as f64
     }
 
     // ------------------------- analysis mode -------------------------
@@ -720,12 +708,7 @@ mod macos {
             return Ok(());
         }
         let f = |v: &Value, k: &str| v.get(k).and_then(|x| x.as_f64()).unwrap_or(f64::NAN);
-        let s = |v: &Value, k: &str| {
-            v.get(k)
-                .and_then(|x| x.as_str())
-                .unwrap_or("")
-                .to_string()
-        };
+        let s = |v: &Value, k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
 
         let n = rows.len();
         let mut by_decision: HashMap<String, Vec<(f64, f64)>> = HashMap::new();
@@ -877,7 +860,9 @@ mod macos {
                 s(r, "decision"),
                 f(r, "recall_window_substr"),
                 f(r, "recall_window"),
-                r.get("indexed_age_ticks").and_then(|x| x.as_u64()).unwrap_or(0),
+                r.get("indexed_age_ticks")
+                    .and_then(|x| x.as_u64())
+                    .unwrap_or(0),
                 r.get("missing_sample")
                     .map(|m| m.to_string())
                     .unwrap_or_default()

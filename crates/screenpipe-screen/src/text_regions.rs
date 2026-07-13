@@ -544,7 +544,10 @@ mod tests {
         let s_a = image_pixel_signature(&img_a);
 
         // Identical pixels → identical signature.
-        assert_eq!(s_a, image_pixel_signature(&DynamicImage::ImageRgb8(a.clone())));
+        assert_eq!(
+            s_a,
+            image_pixel_signature(&DynamicImage::ImageRgb8(a.clone()))
+        );
 
         // ANY visible change flips it — including one outside anything a
         // text detector would box (a single dark dot in a corner).
