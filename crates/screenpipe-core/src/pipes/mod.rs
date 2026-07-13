@@ -3176,10 +3176,7 @@ impl PipeManager {
             let name_for_cb = log.pipe_name.clone();
             let mut l = logs_ref.lock().await;
             let entry = l.entry(log.pipe_name.clone()).or_insert_with(VecDeque::new);
-            entry.push_back(log);
-            if entry.len() > PIPE_LOG_ACTIVE_KEEP_PER_PIPE {
-                entry.pop_front();
-            }
+            push_run_log_status(entry, log);
             drop(l);
 
             if let Some(ref cb) = on_complete {
@@ -5082,10 +5079,7 @@ impl PipeManager {
                         let name_for_cb = log.pipe_name.clone();
                         let mut l = logs_ref.lock().await;
                         let entry = l.entry(log.pipe_name.clone()).or_insert_with(VecDeque::new);
-                        entry.push_back(log);
-                        if entry.len() > PIPE_LOG_ACTIVE_KEEP_PER_PIPE {
-                            entry.pop_front();
-                        }
+                        push_run_log_status(entry, log);
                         drop(l);
 
                         // Emit pipe_completed event so other pipes can chain
@@ -5415,10 +5409,18 @@ impl PipeManager {
     async fn append_log(&self, name: &str, log: &PipeRunLog) {
         let mut logs = self.logs.lock().await;
         let entry = logs.entry(name.to_string()).or_insert_with(VecDeque::new);
-        entry.push_back(log.clone());
-        if entry.len() > PIPE_LOG_ACTIVE_KEEP_PER_PIPE {
-            entry.pop_front();
-        }
+        // Store status only — the full stdout lives in the DB/disk, not RAM.
+        push_run_log_status(
+            entry,
+            PipeRunLog {
+                pipe_name: log.pipe_name.clone(),
+                started_at: log.started_at,
+                finished_at: log.finished_at,
+                success: log.success,
+                stdout: String::new(),
+                stderr: log.stderr.clone(),
+            },
+        );
     }
 
     fn write_log_to_disk(&self, name: &str, log: &PipeRunLog) -> Result<()> {
@@ -6362,6 +6364,23 @@ fn parse_duration_str(s: &str) -> Option<std::time::Duration> {
 // ---------------------------------------------------------------------------
 // Utility helpers
 // ---------------------------------------------------------------------------
+
+/// Append a run to a pipe's in-memory ring, keeping only the fields the status
+/// APIs actually read (`stderr` for `last_error`, plus timestamps/success) and
+/// dropping the potentially MB-sized `stdout` transcript.
+///
+/// The full output is the DB's job (`finish_execution`) — and disk's for
+/// foreground runs (`write_log_to_disk`); `get_logs` reads history from the DB.
+/// Keeping the whole transcript here too, up to 200 runs per pipe for the
+/// entire process lifetime, was pure RAM overhead that never freed after a run
+/// finished. This drops it without touching the persisted copies.
+fn push_run_log_status(entry: &mut VecDeque<PipeRunLog>, mut log: PipeRunLog) {
+    log.stdout = String::new();
+    entry.push_back(log);
+    while entry.len() > PIPE_LOG_ACTIVE_KEEP_PER_PIPE {
+        entry.pop_front();
+    }
+}
 
 /// Filter NDJSON stdout to remove bulky streaming events before storage.
 /// `toolcall_delta` and `thinking_delta` events are only useful for live
@@ -8240,6 +8259,33 @@ mod tests {
         let result = truncate_string("hello world", 5);
         assert!(result.starts_with("hello"));
         assert!(result.contains("[truncated]"));
+    }
+
+    // -- in-memory run-log ring (RAM footprint) -----------------------------
+
+    #[test]
+    fn push_run_log_status_drops_stdout_keeps_stderr_and_caps_count() {
+        let mut dq: VecDeque<PipeRunLog> = VecDeque::new();
+        let now = Utc::now();
+        for _ in 0..(PIPE_LOG_ACTIVE_KEEP_PER_PIPE + 50) {
+            push_run_log_status(
+                &mut dq,
+                PipeRunLog {
+                    pipe_name: "p".to_string(),
+                    started_at: now,
+                    finished_at: now,
+                    success: false,
+                    stdout: "x".repeat(1_000_000),
+                    stderr: "boom".to_string(),
+                },
+            );
+        }
+        // Run count is capped.
+        assert_eq!(dq.len(), PIPE_LOG_ACTIVE_KEEP_PER_PIPE);
+        // The heavy stdout transcript is not retained in memory at all…
+        assert!(dq.iter().all(|l| l.stdout.is_empty()));
+        // …but stderr (needed for `last_error`) is kept verbatim, untruncated.
+        assert!(dq.iter().all(|l| l.stderr == "boom"));
     }
 
     // -- url_to_pipe_name ---------------------------------------------------
