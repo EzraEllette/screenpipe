@@ -1566,7 +1566,12 @@ fn handle_menu_event(app_handle: &AppHandle, event: tauri::menu::MenuEvent) {
                     tauri::async_runtime::spawn(async move {
                         let state = app.state::<std::sync::Arc<crate::updates::UpdatesManager>>();
                         if state.has_update_installed().await {
-                            let _ = app.emit("update-now-clicked", ());
+                            // apply via the same backend path as the banner instead
+                            // of round-tripping through the frontend.
+                            if let Err(e) = crate::updates::restart_for_update(app.clone(), None).await
+                            {
+                                tracing::error!("tray menu: restart for update failed: {}", e);
+                            }
                         } else if let Err(e) = state.check_for_updates(true, true).await {
                             tracing::error!("tray menu: check for updates failed: {}", e);
                         }

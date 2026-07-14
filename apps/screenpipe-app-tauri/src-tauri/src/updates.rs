@@ -290,6 +290,10 @@ pub async fn await_safe_restart(timeout_secs: Option<u64>) -> String {
     }
 }
 
+/// True once a surface has committed to applying a staged update; keeps a
+/// second trigger from starting a parallel teardown+relaunch.
+static UPDATE_RESTART_STARTED: AtomicBool = AtomicBool::new(false);
+
 /// Banner-click restart. Mirror the auto-update path: gate, stop server, then
 /// spawn the replacement app and `_exit` the old process so C/C++ atexit
 /// handlers cannot abort during restart. See 2026-06-10 and 2026-07-02 reports.
@@ -303,6 +307,12 @@ pub async fn restart_for_update(
     let gate = await_restart_gate(cap, "banner-triggered restart").await;
     if !gate.should_restart() {
         return Ok(gate.as_str().to_string());
+    }
+
+    // Only the first trigger applies; later ones ride the in-flight restart.
+    if UPDATE_RESTART_STARTED.swap(true, Ordering::SeqCst) {
+        info!("banner restart: update-restart already in progress, ignoring");
+        return Ok("proceed".to_string());
     }
 
     info!("banner restart: gate passed, shutting down for update");
@@ -938,6 +948,12 @@ impl UpdatesManager {
                     .await
                     .should_restart()
                 {
+                    return Result::Ok(true);
+                }
+
+                // Only the first trigger applies; defer to an in-flight restart.
+                if UPDATE_RESTART_STARTED.swap(true, Ordering::SeqCst) {
+                    info!("auto-update: update-restart already in progress, deferring");
                     return Result::Ok(true);
                 }
 

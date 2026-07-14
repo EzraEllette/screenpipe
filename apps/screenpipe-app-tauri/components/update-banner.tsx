@@ -331,11 +331,10 @@ interface PendingUpdateSnapshot {
 // state from Rust so it can recover if the event fired before this hook
 // registered (boot-time webview race).
 export function useUpdateListener() {
-  const { setIsVisible, setUpdateInfo, setAuthRequired, resetDismissed } = useUpdateBanner();
+  const { setIsVisible, setUpdateInfo, setAuthRequired } = useUpdateBanner();
 
   useEffect(() => {
     let unlistenAvailable: (() => void) | undefined;
-    let unlistenClick: (() => void) | undefined;
     let unlistenAuth: (() => void) | undefined;
 
     // Rust re-emits update-available on every periodic check, and providers
@@ -359,13 +358,6 @@ export function useUpdateListener() {
       // when the download is complete and the app is ready to restart.
       unlistenAvailable = await listen<UpdateInfo>("update-available", (event) => {
         showIfNotDismissed(event.payload);
-      });
-
-      // Tray click is an explicit user request — clear any prior dismissal
-      // so the banner reappears even if they X'd it earlier this session.
-      unlistenClick = await listen("update-now-clicked", () => {
-        resetDismissed();
-        setIsVisible(true);
       });
 
       // Listen for auth-required (user needs to sign in to download update)
@@ -394,8 +386,7 @@ export function useUpdateListener() {
 
     return () => {
       unlistenAvailable?.();
-      unlistenClick?.();
       unlistenAuth?.();
     };
-  }, [setIsVisible, setUpdateInfo, setAuthRequired, resetDismissed]);
+  }, [setIsVisible, setUpdateInfo, setAuthRequired]);
 }
