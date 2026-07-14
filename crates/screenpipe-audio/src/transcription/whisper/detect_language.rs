@@ -11,9 +11,14 @@ use whisper_rs::get_lang_str;
 /// re-detecting. Detection costs a full encoder forward pass — roughly as
 /// expensive as the transcription itself — so paying it once every N speech
 /// segments instead of every segment cuts steady-state whisper compute nearly
-/// in half for auto-detect users. The short refresh interval limits how many
-/// turns can use a stale language after a speaker genuinely code-switches.
-const LANG_REDETECT_INTERVAL: u32 = 3;
+/// in half for auto-detect users. A speaker's language is a stable property,
+/// so a long interval is safe; the refresh exists to recover from a bad
+/// detection or a speaker who genuinely code-switches.
+const LANG_REDETECT_INTERVAL: u32 = 10;
+
+/// Cache key for audio that diarization did not attribute to a speaker
+/// (no-segmentation-model fallback, live-meeting chunks, backfill batches).
+const UNATTRIBUTED_SPEAKER: &str = "unattributed";
 
 /// Bound on tracked speakers. Embedding clustering can mint new ids over a
 /// long session; past this the whole cache resets rather than grow forever
@@ -26,7 +31,7 @@ const MAX_TRACKED_SPEAKERS: usize = 64;
 static LANGUAGE_CACHE_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) fn invalidate_language_caches() {
-    LANGUAGE_CACHE_GENERATION.fetch_add(1, Ordering::Relaxed);
+    LANGUAGE_CACHE_GENERATION.fetch_add(1, Ordering::AcqRel);
 }
 
 /// Per-speaker cache of the detected language across whisper calls (one call
@@ -48,14 +53,14 @@ impl Default for LanguageCache {
     fn default() -> Self {
         Self {
             by_speaker: std::collections::HashMap::new(),
-            generation: LANGUAGE_CACHE_GENERATION.load(Ordering::Relaxed),
+            generation: LANGUAGE_CACHE_GENERATION.load(Ordering::Acquire),
         }
     }
 }
 
 impl LanguageCache {
     fn sync_generation(&mut self) {
-        let generation = LANGUAGE_CACHE_GENERATION.load(Ordering::Relaxed);
+        let generation = LANGUAGE_CACHE_GENERATION.load(Ordering::Acquire);
         self.sync_generation_value(generation);
     }
 
@@ -71,11 +76,9 @@ impl LanguageCache {
     /// — run detection again".
     pub fn reuse(&mut self, speaker: Option<&str>) -> Option<Option<&'static str>> {
         self.sync_generation();
-        // Without a diarized identity, unrelated speakers and meetings all
-        // share this path. Detect each segment instead of leaking a language
-        // decision between them.
-        let speaker = speaker?;
-        let entry = self.by_speaker.get_mut(speaker)?;
+        let entry = self
+            .by_speaker
+            .get_mut(speaker.unwrap_or(UNATTRIBUTED_SPEAKER))?;
         if entry.reuses_left == 0 {
             return None;
         }
@@ -87,9 +90,7 @@ impl LanguageCache {
     /// reuse budget.
     pub fn store(&mut self, speaker: Option<&str>, lang: Option<&'static str>) {
         self.sync_generation();
-        let Some(key) = speaker else {
-            return;
-        };
+        let key = speaker.unwrap_or(UNATTRIBUTED_SPEAKER);
         if self.by_speaker.len() >= MAX_TRACKED_SPEAKERS && !self.by_speaker.contains_key(key) {
             self.by_speaker.clear();
         }
@@ -214,25 +215,31 @@ mod tests {
     }
 
     #[test]
-    fn unattributed_audio_is_never_cached() {
-        // Unattributed paths may contain unrelated speakers, meetings, and
-        // code switches, so one session-wide entry is not a safe cache key.
+    fn unattributed_audio_shares_one_entry() {
+        // Paths without diarization (live meeting, backfill) all key to the
+        // same fallback entry, giving them plain session-level caching. The
+        // generation still rotates this entry between meetings.
         let mut cache = LanguageCache::default();
         cache.store(None, Some("de"));
-        assert_eq!(cache.reuse(None), None);
-        assert!(cache.by_speaker.is_empty());
+        assert_eq!(cache.reuse(None), Some(Some("de")));
     }
 
     #[test]
-    fn speaker_reset_invalidates_cached_language() {
+    fn speaker_reset_reused_id_forces_fresh_detection() {
         let mut cache = LanguageCache::default();
         cache.store(Some("speaker_1"), Some("de"));
         assert_eq!(cache.reuse(Some("speaker_1")), Some(Some("de")));
 
+        // Diarization resets its namespace between meetings and may assign
+        // speaker_1 to an unrelated person. Advancing the shared generation
+        // must make that reused ID a cache miss.
         let next_generation = cache.generation.wrapping_add(1);
         cache.sync_generation_value(next_generation);
         assert_eq!(cache.reuse(Some("speaker_1")), None);
         assert!(cache.by_speaker.is_empty());
+
+        cache.store(Some("speaker_1"), Some("en"));
+        assert_eq!(cache.reuse(Some("speaker_1")), Some(Some("en")));
     }
 
     #[test]
