@@ -74,7 +74,14 @@ pub async fn process_with_whisper(
         return Ok(String::new());
     }
 
-    transcribe_sync(audio, languages, whisper_state, vocabulary)
+    transcribe_sync(
+        audio,
+        languages,
+        speaker,
+        lang_cache,
+        whisper_state,
+        vocabulary,
+    )
 }
 
 /// Sync body of [`process_with_whisper`]. Deliberately NOT async: the
@@ -84,6 +91,8 @@ pub async fn process_with_whisper(
 fn transcribe_sync(
     audio: &[f32],
     languages: Vec<Language>,
+    speaker: Option<&str>,
+    lang_cache: &mut LanguageCache,
     whisper_state: &mut WhisperState,
     vocabulary: &[VocabularyEntry],
 ) -> Result<String> {
