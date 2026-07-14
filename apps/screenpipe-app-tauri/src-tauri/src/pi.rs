@@ -293,8 +293,8 @@ fn check_package_bin(pkg_dir: std::path::PathBuf, bin_name: &str) -> Option<Stri
     }
 }
 
-const PI_PACKAGE: &str = "@earendil-works/pi-coding-agent@0.75.4";
-const PI_AI_PACKAGE: &str = "@earendil-works/pi-ai@0.75.4";
+const PI_PACKAGE: &str = "@earendil-works/pi-coding-agent@0.80.6";
+const PI_AI_PACKAGE: &str = "@earendil-works/pi-ai@0.80.6";
 const PI_NAMESPACE_DIR: &str = "@earendil-works";
 const SCREENPIPE_API_URL: &str = "https://api.screenpipe.com/v1";
 
@@ -1296,6 +1296,20 @@ fn model_supports_reasoning(provider: &str, model: &str) -> bool {
     }
 }
 
+/// Claude's newer reasoning models reject the legacy
+/// `thinking: { type: "enabled", budget_tokens: ... }` request shape. Pi needs
+/// this compatibility hint for models supplied through our generated provider
+/// config because they do not inherit Pi's built-in Anthropic model metadata.
+fn anthropic_model_requires_adaptive_thinking(model: &str) -> bool {
+    let model = model.to_ascii_lowercase();
+    model.contains("claude-fable-5")
+        || model.contains("claude-sonnet-5")
+        || model.contains("claude-sonnet-4-6")
+        || model.contains("claude-opus-4-6")
+        || model.contains("claude-opus-4-7")
+        || model.contains("claude-opus-4-8")
+}
+
 /// Build the providers to add/update in models.json for pi-coding-agent.
 ///
 /// Returns a map of provider entries to merge into the existing models.json.
@@ -1393,11 +1407,17 @@ async fn build_models_json(
                     "cost".into(),
                     json!({"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}),
                 );
+                let mut compat = serde_json::Map::new();
                 if requires_max_completion_tokens && wire_api == "openai-completions" {
-                    model_def.insert(
-                        "compat".into(),
-                        json!({"maxTokensField": "max_completion_tokens"}),
-                    );
+                    compat.insert("maxTokensField".into(), json!("max_completion_tokens"));
+                }
+                if wire_api == "anthropic-messages"
+                    && anthropic_model_requires_adaptive_thinking(&resolved_model)
+                {
+                    compat.insert("forceAdaptiveThinking".into(), json!(true));
+                }
+                if !compat.is_empty() {
+                    model_def.insert("compat".into(), serde_json::Value::Object(compat));
                 }
 
                 let user_provider = json!({
@@ -4795,6 +4815,26 @@ error: InstallFailed extracting tarball"#;
             "https://api.anthropic.com"
         );
         assert_eq!(providers["anthropic-byok"]["api"], "anthropic-messages");
+    }
+
+    #[tokio::test]
+    async fn test_build_models_json_fable_uses_adaptive_thinking() {
+        let pc = make_provider_config("anthropic", "claude-fable-5");
+        let config = build_models_json(None, Some(&pc)).await;
+        let model = &config["providers"]["anthropic-byok"]["models"][0];
+
+        assert_eq!(model["reasoning"], true);
+        assert_eq!(model["compat"]["forceAdaptiveThinking"], true);
+    }
+
+    #[tokio::test]
+    async fn test_build_models_json_legacy_claude_keeps_budget_thinking() {
+        let pc = make_provider_config("anthropic", "claude-sonnet-4-5");
+        let config = build_models_json(None, Some(&pc)).await;
+        let model = &config["providers"]["anthropic-byok"]["models"][0];
+
+        assert_eq!(model["reasoning"], true);
+        assert!(model.get("compat").is_none());
     }
 
     #[tokio::test]
