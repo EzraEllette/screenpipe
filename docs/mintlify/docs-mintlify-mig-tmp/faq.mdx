@@ -168,6 +168,32 @@ this FAQ is organized around the questions people ask support most often: what t
   if you installed something else and it does not match the screenshots on this site, you are not running the current screenpipe.
 </Expandable>
 
+<Expandable title="can I disable default-true CLI flags like --use-pii-removal or --api-auth?">
+  yes. some screenpipe CLI flags default to enabled, but you can disable them using `--flag=false` (with equals) or `--flag false` (with space).
+
+  common default-true flags:
+
+  - `--use-pii-removal`: disables PII redaction (email, phone, card numbers, etc.)
+  - `--api-auth`: requires API key for non-localhost requests
+  - `--use-all-monitors`: captures every connected display
+  - `--use-system-default-audio`: captures system audio automatically
+
+  examples:
+
+  ```bash
+  # disable PII removal
+  npx -y screenpipe@latest record --use-pii-removal=false
+
+  # disable API authentication (allow any request)
+  npx -y screenpipe@latest record --api-auth=false
+
+  # space-separated syntax also works
+  npx -y screenpipe@latest record --use-pii-removal false --api-auth false
+  ```
+
+  without the flag, the default is always enabled. a bare flag like `--use-pii-removal` still means "enable."
+</Expandable>
+
 ## billing, license, and account
 
 <Expandable title="can I try screenpipe before buying?">
