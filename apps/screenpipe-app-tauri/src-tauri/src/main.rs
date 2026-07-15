@@ -219,6 +219,10 @@ fn should_skip_onboarding() -> bool {
         .unwrap_or(false)
 }
 
+fn should_prevent_window_close(label: &str) -> bool {
+    label != "onboarding"
+}
+
 /// Flag passed by tauri-plugin-autostart when the OS launches us at login.
 /// Used to skip Home so login starts stay in the tray.
 const AUTOSTART_ARG: &str = "--autostart";
@@ -724,6 +728,15 @@ async fn main() {
                 });
             }
             tauri::WindowEvent::CloseRequested { api, .. } => {
+                // Onboarding is disposable. Let Tauri destroy its webview so
+                // page effects (notably the live-feed search poller) are torn
+                // down as soon as the user closes the window. Other app
+                // windows stay warm for fast reopen and NSPanel safety.
+                if !should_prevent_window_close(window.label()) {
+                    info!("onboarding window close requested — destroying webview");
+                    return;
+                }
+
                 let _ = window.set_always_on_top(false);
                 let _ = window.set_visible_on_all_workspaces(false);
 
@@ -2115,6 +2128,23 @@ mod autostart_arg_tests {
         assert!(!args_contain_autostart(["screenpipe"]));
         assert!(!args_contain_autostart(["screenpipe", "--check-arc-automation"]));
         assert!(!args_contain_autostart(["screenpipe", "--autostarted"]));
+    }
+}
+
+#[cfg(test)]
+mod window_close_policy_tests {
+    use super::should_prevent_window_close;
+
+    #[test]
+    fn onboarding_close_destroys_its_webview() {
+        assert!(!should_prevent_window_close("onboarding"));
+    }
+
+    #[test]
+    fn persistent_windows_keep_their_existing_close_behavior() {
+        for label in ["home", "main", "main-window", "search", "chat"] {
+            assert!(should_prevent_window_close(label), "label: {label}");
+        }
     }
 }
 
