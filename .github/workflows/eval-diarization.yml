@@ -101,6 +101,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
         with:
+          cache-on-failure: false
           key: eval-diarization
           shared-key: screenpipe-audio-eval
 

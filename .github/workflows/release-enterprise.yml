@@ -82,6 +82,7 @@ jobs:
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
         with:
+          cache-on-failure: false
           key: windows-enterprise-rust-x86_64-pc-windows-msvc-${{ hashFiles('**/Cargo.lock') }}
           cache-directories: |
             ~/.cargo/registry/index/
@@ -337,6 +338,7 @@ jobs:
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
         with:
+          cache-on-failure: false
           key: linux-enterprise-rust-x86_64-unknown-linux-gnu-${{ hashFiles('**/Cargo.lock') }}
           cache-directories: |
             ~/.cargo/registry/index/
@@ -575,6 +577,7 @@ jobs:
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
         with:
+          cache-on-failure: false
           key: macos-enterprise-rust-aarch64-apple-darwin-${{ hashFiles('**/Cargo.lock') }}
           cache-directories: |
             ~/.cargo/registry/index/

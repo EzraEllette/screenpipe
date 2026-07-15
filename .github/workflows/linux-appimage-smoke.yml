@@ -48,6 +48,7 @@ jobs:
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
         with:
+          cache-on-failure: false
           workspaces: |
             .
             apps/screenpipe-app-tauri/src-tauri

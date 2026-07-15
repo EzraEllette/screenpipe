@@ -135,6 +135,7 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
+          cache-on-failure: false
           key: sdk-release-${{ matrix.settings.target }}
           workspaces: ee/sdk -> target
           cache-bin: false

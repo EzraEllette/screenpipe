@@ -112,6 +112,7 @@ jobs:
       continue-on-error: true
       uses: Swatinem/rust-cache@v2
       with:
+        cache-on-failure: false
         workspaces: apps/screenpipe-app-tauri/src-tauri
         shared-key: screenpipe-tauri-e2e-windows
         cache-bin: false
@@ -492,6 +493,7 @@ jobs:
       continue-on-error: true
       uses: Swatinem/rust-cache@v2
       with:
+        cache-on-failure: false
         workspaces: apps/screenpipe-app-tauri/src-tauri
         shared-key: screenpipe-tauri-e2e
         cache-bin: false
@@ -617,6 +619,7 @@ jobs:
     - name: Rust cache
       uses: Swatinem/rust-cache@v2
       with:
+        cache-on-failure: false
         workspaces: .
         shared-key: linux-wayland-e2e
         cache-bin: false
@@ -770,6 +773,7 @@ jobs:
       continue-on-error: true
       uses: Swatinem/rust-cache@v2
       with:
+        cache-on-failure: false
         workspaces: apps/screenpipe-app-tauri/src-tauri
         shared-key: screenpipe-tauri-e2e
         cache-bin: false

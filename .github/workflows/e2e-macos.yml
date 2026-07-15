@@ -43,6 +43,8 @@ jobs:
         # service error must never fail the job
         continue-on-error: true
         uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: false
 
       # After rust-cache on purpose — see the action's ordering note.
       - name: Setup sccache (shared R2 compile cache)

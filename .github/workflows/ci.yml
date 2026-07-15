@@ -62,6 +62,7 @@ jobs:
         continue-on-error: true
         uses: Swatinem/rust-cache@v2
         with:
+          cache-on-failure: false
           shared-key: ci-test-ubuntu
           cache-bin: false
 
@@ -133,6 +134,7 @@ jobs:
         continue-on-error: true
         uses: Swatinem/rust-cache@v2
         with:
+          cache-on-failure: false
           shared-key: ci-test-windows
           cache-bin: false
 
@@ -363,6 +365,7 @@ jobs:
         continue-on-error: true
         uses: Swatinem/rust-cache@v2
         with:
+          cache-on-failure: false
           shared-key: ci-test-macos
           cache-bin: false
 

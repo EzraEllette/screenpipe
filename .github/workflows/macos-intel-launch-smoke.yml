@@ -132,6 +132,7 @@ jobs:
         continue-on-error: true
         uses: Swatinem/rust-cache@v2
         with:
+          cache-on-failure: false
           workspaces: apps/screenpipe-app-tauri/src-tauri
           shared-key: screenpipe-tauri-e2e-intel
           cache-bin: false
