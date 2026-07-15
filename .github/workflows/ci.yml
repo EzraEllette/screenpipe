@@ -209,17 +209,11 @@ jobs:
           mkdir -p target/debug/deps || true
           cp crates/screenpipe-screen/tests/testing_OCR.png target/debug/deps/
 
-      # ORT_STRATEGY=system tells ort to LINK against onnxruntime.lib but
-      # does NOT copy onnxruntime*.dll next to the test binary. Without
-      # the DLLs adjacent to the .exe at runtime, the Windows DLL loader
-      # exits with STATUS_DLL_NOT_FOUND (0xc0000135) on the first
-      # ort::api() call — which is exactly what test_process_ocr_task_windows
-      # hits inside accuracy_test. Stage them before any cargo test that
-      # touches ort. Run this once for all --profile release-dev/--target
-      # builds — cargo test --profile release-dev --target
-      # x86_64-pc-windows-msvc puts test binaries under
-      # target/x86_64-pc-windows-msvc/release-dev/deps/.
-      - name: Stage ONNX Runtime DLLs next to test binary
+      # Windows test binaries dynamically link both ONNX Runtime and OpenBLAS.
+      # Cargo does not copy either runtime next to the test executable, so the
+      # loader exits with STATUS_DLL_NOT_FOUND (0xc0000135) before the test
+      # harness starts. Stage both runtimes once for all release-dev tests.
+      - name: Stage Windows runtime DLLs next to test binary
         shell: pwsh
         run: |
           $src = "${{ github.workspace }}/apps/screenpipe-app-tauri/src-tauri/onnxruntime-win-x64-${{ env.ONNXRUNTIME_VERSION }}/lib"
@@ -232,6 +226,20 @@ jobs:
           # once cached, every subsequent test binary fails ORT load.
           # See e2e-test.yml for the same fix in the e2e-windows job.
           Get-ChildItem -Path $src -Filter "onnxruntime*.dll" | ForEach-Object {
+            $dest = Join-Path $dst $_.Name
+            if (Test-Path $dest) { Remove-Item -Path $dest -Force }
+            [System.IO.File]::Copy($_.FullName, $dest, $true)
+          }
+          # screenpipe-engine enables qwen3-asr by default. antirez-asr-sys
+          # links libopenblas dynamically, so its test executable cannot even
+          # enter main unless the OpenBLAS DLL is in the loader search path.
+          # The narrower screenpipe-screen/core tests above do not expose this.
+          $openblasBin = Join-Path $env:OPENBLAS_PATH "bin"
+          $openblasDlls = @(Get-ChildItem -Path $openblasBin -Filter "*.dll")
+          if ($openblasDlls.Count -eq 0) {
+            throw "No OpenBLAS runtime DLL found in $openblasBin"
+          }
+          $openblasDlls | ForEach-Object {
             $dest = Join-Path $dst $_.Name
             if (Test-Path $dest) { Remove-Item -Path $dest -Force }
             [System.IO.File]::Copy($_.FullName, $dest, $true)
@@ -261,7 +269,7 @@ jobs:
               Write-Host "WARNING: $crt not in System32 — runner image may have changed"
             }
           }
-          Get-ChildItem -Path $dst -Filter "*.dll" | Where-Object { $_.Name -match "(onnxruntime|vcruntime|msvcp)" } | ForEach-Object {
+          Get-ChildItem -Path $dst -Filter "*.dll" | Where-Object { $_.Name -match "(onnxruntime|openblas|vcruntime|msvcp)" } | ForEach-Object {
             if ($_.Length -eq 0) {
               throw "Staged DLL is 0 bytes: $($_.Name) — source likely corrupt"
             }
