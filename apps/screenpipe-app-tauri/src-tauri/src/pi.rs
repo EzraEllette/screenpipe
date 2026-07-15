@@ -4684,6 +4684,17 @@ error: InstallFailed extracting tarball"#;
 
     use super::{build_models_json, resolve_pi_model, PiProviderConfig};
 
+    #[test]
+    fn test_pi_pin_matches_models_json_auth_contract() {
+        // Pi 0.75.5 is the minimum version with forceAdaptiveThinking support and
+        // the last verified version where bare models.json values such as
+        // OPENAI_API_KEY resolve through the child process environment. Pi 0.80
+        // changed that contract to require $OPENAI_API_KEY and broke every BYOK
+        // provider. Any future pin change must update and re-verify this test.
+        assert_eq!(super::PI_PACKAGE, "@earendil-works/pi-coding-agent@0.75.5");
+        assert_eq!(super::PI_AI_PACKAGE, "@earendil-works/pi-ai@0.75.5");
+    }
+
     fn make_provider_config(provider: &str, model: &str) -> PiProviderConfig {
         PiProviderConfig {
             provider: provider.to_string(),
@@ -4767,6 +4778,10 @@ error: InstallFailed extracting tarball"#;
     async fn test_build_models_json_chatgpt_gpt55_supports_reasoning() {
         let pc = make_provider_config("openai-chatgpt", "gpt-5.5");
         let config = build_models_json(None, Some(&pc)).await;
+        assert_eq!(
+            config["providers"]["openai-chatgpt"]["apiKey"],
+            "OPENAI_CHATGPT_TOKEN"
+        );
         let model = &config["providers"]["openai-chatgpt"]["models"][0];
         assert_eq!(model["id"], "gpt-5.5");
         assert_eq!(model["reasoning"], true);
@@ -4807,6 +4822,7 @@ error: InstallFailed extracting tarball"#;
         let config = build_models_json(None, Some(&pc)).await;
         let providers = config["providers"].as_object().unwrap();
         assert!(providers.contains_key("anthropic-byok"));
+        assert_eq!(providers["anthropic-byok"]["apiKey"], "ANTHROPIC_API_KEY");
         assert_eq!(
             providers["anthropic-byok"]["baseUrl"],
             "https://api.anthropic.com"
@@ -4853,6 +4869,7 @@ error: InstallFailed extracting tarball"#;
         assert_eq!(providers.len(), 2);
         assert!(providers.contains_key("custom"));
         assert_eq!(providers["custom"]["baseUrl"], "http://my-server:8080/v1");
+        assert_eq!(providers["custom"]["apiKey"], "CUSTOM_API_KEY");
     }
 
     #[tokio::test]

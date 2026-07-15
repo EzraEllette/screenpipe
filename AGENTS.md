@@ -26,6 +26,13 @@ Use `#` for Python, `//` for Rust/TS/JS/Swift. Keep it as the first comment in t
 - Use `bun` for JS/TS (not npm or pnpm)
 - Use `cargo` for Rust
 
+## Dependency Changes
+
+- Pin the minimum dependency version that fixes the stated problem. Do not jump to a newer major or minor version without a separate, documented reason.
+- Before upgrading, read every intervening changelog and diff the dependency contracts Screenpipe relies on, including configuration formats, environment-variable resolution, persisted files, runtime requirements, and transitive dependencies.
+- Add regression tests for each relied-on contract and exercise every affected user journey before merging. A dependency upgrade is incomplete if only the original bug is tested.
+- Record the required capability, the previous version, the selected minimum version, rejected alternatives, and compatibility evidence in the pull request.
+
 ## Testing
 
 Always test your work. Verification and reviewing pull requests is the hardest thing to do for us, so you need to always make sure to do as much as possible end-to-end testing. If necessary, computer use testing and be very rigorous in your testing, and add as many visuals as possible, like screenshots or video recording, in the body of your pull request. 
