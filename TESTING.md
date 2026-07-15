@@ -86,6 +86,7 @@ commits that broke this area: `0752ea59`, `7562ec62`, `2a2bd9b5`, `f2f7f770`, `5
 - [ ] **tray upgrade button opens in-app checkout** — Verify that clicking the tray's upgrade button correctly opens the in-app checkout experience. (`078fcfb2`)
 - [ ] **modernized tray menu** — Verify the tray menu's updated layout and functionality match the modernized design. (`b6c363e5`)
 - [ ] **Recording toggle in tray** — Verify that the tray menu has a single toggle to start/stop recording (replacing separate items). (`cdc1d0fd9`)
+- [ ] **Headless webview teardown** — Enable Headless, close Home, and verify every app webview process exits while recording, scheduled pipes, and the existing tray icon remain active. Global shortcuts must do nothing while dormant; opening screenpipe from the tray must recreate Home and restore shortcuts.
 
 ### 3. monitor plug/unplug
 
