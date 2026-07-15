@@ -8871,7 +8871,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 [[package]]
 name = "permission-flow"
 version = "0.1.40"
-source = "git+https://github.com/divanshu-go/permission-flow?rev=38a64e3704aa32e692bab95cffe704859e191a51#38a64e3704aa32e692bab95cffe704859e191a51"
+source = "git+https://github.com/divanshu-go/permission-flow?rev=9f398ea22284c95c069183ced4e0352aa0075d3b#9f398ea22284c95c069183ced4e0352aa0075d3b"
 dependencies = [
  "swift-rs",
 ]
@@ -13804,7 +13804,7 @@ dependencies = [
 [[package]]
 name = "tauri-plugin-permission-flow"
 version = "0.1.40"
-source = "git+https://github.com/divanshu-go/permission-flow?rev=38a64e3704aa32e692bab95cffe704859e191a51#38a64e3704aa32e692bab95cffe704859e191a51"
+source = "git+https://github.com/divanshu-go/permission-flow?rev=9f398ea22284c95c069183ced4e0352aa0075d3b#9f398ea22284c95c069183ced4e0352aa0075d3b"
 dependencies = [
  "permission-flow",
  "serde",
