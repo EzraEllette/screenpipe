@@ -192,9 +192,40 @@ if (-not $signed) {
     exit 1
 }
 
-$signature = Get-AuthenticodeSignature $signedFile
-if ($signature.Status -ne 'Valid') {
-    Write-Host "ERROR: signed output failed Authenticode verification (status=$($signature.Status)): $signedFile"
+$signatureValid = $false
+$signatureStatus = "unknown"
+try {
+    $signature = Get-AuthenticodeSignature $signedFile -ErrorAction Stop
+    $signatureStatus = $signature.Status
+    $signatureValid = ($signature.Status -eq 'Valid')
+} catch {
+    # Windows ARM64 hosted runners can find Get-AuthenticodeSignature while
+    # failing to autoload Microsoft.PowerShell.Security. The workflow already
+    # locates signtool.exe for Tauri, so use the SDK verifier as a fallback.
+    Write-Host "WARN: Get-AuthenticodeSignature unavailable: $($_.Exception.Message)"
+    $signtoolPath = $env:TAURI_WINDOWS_SIGNTOOL_PATH
+    if (-not $signtoolPath) {
+        $signtoolCommand = Get-Command signtool.exe -ErrorAction SilentlyContinue
+        if ($signtoolCommand) {
+            $signtoolPath = $signtoolCommand.Source
+        }
+    }
+
+    if ($signtoolPath -and (Test-Path $signtoolPath)) {
+        & $signtoolPath verify /pa /all $signedFile
+        if ($LASTEXITCODE -eq 0) {
+            $signatureValid = $true
+            $signatureStatus = "Valid (signtool fallback)"
+        } else {
+            $signatureStatus = "signtool exit $LASTEXITCODE"
+        }
+    } else {
+        $signatureStatus = "PowerShell verifier unavailable and signtool.exe not found"
+    }
+}
+
+if (-not $signatureValid) {
+    Write-Host "ERROR: signed output failed Authenticode verification (status=$signatureStatus): $signedFile"
     if (Test-Path $signedDir) {
         Remove-Item $signedDir -Recurse -Force
     }
