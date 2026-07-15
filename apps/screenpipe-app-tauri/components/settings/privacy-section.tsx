@@ -60,6 +60,7 @@ import { commands } from "@/lib/utils/tauri";
 import posthog from "posthog-js";
 import * as Sentry from "@sentry/react";
 import { defaultOptions } from "tauri-plugin-sentry-api";
+import { cacheAnalyticsEnabled } from "@/lib/analytics-id";
 import {
   validateField,
   sanitizeValue,
@@ -590,6 +591,10 @@ export function PrivacySection() {
       const analyticsEnabled =
         pendingSettings.analyticsEnabled ?? settings.analyticsEnabled;
 
+      // Cache immediately so the next boot picks up the change before
+      // settings IPC resolves (see readCachedAnalyticsEnabled in providers.tsx).
+      cacheAnalyticsEnabled(analyticsEnabled);
+
       if (!analyticsEnabled) {
         posthog.capture("telemetry", { enabled: false });
         posthog.opt_out_capturing();
@@ -885,7 +890,17 @@ export function PrivacySection() {
   };
 
   const handleAnalyticsToggle = (checked: boolean) => {
-    handleSettingsChange({ analyticsEnabled: checked }, true);
+    // no restart needed — analytics is purely frontend
+    handleSettingsChange({ analyticsEnabled: checked }, false);
+    cacheAnalyticsEnabled(checked);
+    const isDebug = process.env.TAURI_ENV_DEBUG === "true";
+    if (!isDebug) {
+      if (checked) {
+        posthog.opt_in_capturing();
+      } else {
+        posthog.opt_out_capturing();
+      }
+    }
   };
 
   // Add one pattern from the WindowPicker. Reuses the MultiSelect change
