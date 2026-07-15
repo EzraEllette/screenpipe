@@ -28,6 +28,14 @@
 import { existsSync } from "node:fs";
 import { E2E_SEED_FLAGS } from "../helpers/app-launcher.js";
 import { saveScreenshot } from "../helpers/screenshot-utils.js";
+import {
+  closeWindow,
+  invokeOrThrow,
+  showWindow,
+  waitForWindowClosed,
+  waitForWindowHandle,
+  waitForWindowUrl,
+} from "../helpers/tauri.js";
 import { t, waitForAppReady } from "../helpers/test-utils.js";
 
 const seedFlags = E2E_SEED_FLAGS.split(",")
@@ -89,6 +97,30 @@ const canRun = !seedFlags.includes("onboarding");
       expect(handles).not.toContain("home");
 
       const filepath = await saveScreenshot("onboarding-redirect");
+      expect(existsSync(filepath)).toBe(true);
+    });
+
+    it("destroys a closed onboarding webview without completing onboarding", async () => {
+      await showWindow({ Home: { page: "home" } });
+      await waitForWindowHandle("home", t(10_000));
+      await browser.switchToWindow("home");
+
+      await closeWindow("Onboarding");
+      await waitForWindowClosed("onboarding", t(10_000));
+
+      const status = await invokeOrThrow<{
+        isCompleted: boolean;
+        currentStep: string | null;
+      }>("get_onboarding_status");
+      expect(status.isCompleted).toBe(false);
+      expect(status.currentStep).toBeNull();
+
+      await showWindow("Onboarding");
+      await waitForWindowHandle("onboarding", t(10_000));
+      await browser.switchToWindow("onboarding");
+      await waitForWindowUrl("/onboarding", undefined, t(15_000));
+
+      const filepath = await saveScreenshot("onboarding-recreated-after-close");
       expect(existsSync(filepath)).toBe(true);
     });
   },
