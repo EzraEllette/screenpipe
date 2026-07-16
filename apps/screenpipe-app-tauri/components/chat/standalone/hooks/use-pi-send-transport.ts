@@ -315,7 +315,10 @@ export function usePiSendTransport(options: PiSendTransportOptions) {
     setMessages((prev) => [...prev, newUserMessage]);
     // conversationId state hasn't committed yet this tick, so force the
     // immediate save under the same id explicitly.
-    void saveConversation(nextRowsAfterUserAppend, {
+    // Do not dispatch to the provider until the user turn is durable. Besides
+    // preventing message loss on an immediate quit, this avoids slow WebKit
+    // filesystem work being starved behind a long-running provider request.
+    await saveConversation(nextRowsAfterUserAppend, {
       refreshHistory: false,
       idOverride: turnSessionId,
     });
