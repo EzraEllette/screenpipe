@@ -24,6 +24,32 @@ pub fn is_dormant() -> bool {
     UI_DORMANT.load(Ordering::SeqCst)
 }
 
+#[cfg(target_os = "macos")]
+fn prepare_window_for_destroy(
+    app: &AppHandle,
+    label: &str,
+    window: &tauri::WebviewWindow,
+) -> Result<(), String> {
+    use objc::{msg_send, runtime::Class, sel, sel_impl};
+    use tauri_nspanel::cocoa::base::id;
+    use tauri_nspanel::{raw_nspanel::object_setClass, ManagerExt};
+
+    let ns_window = window.ns_window().map_err(|error| error.to_string())? as id;
+    let tao_window = Class::get("TaoWindow").ok_or("TaoWindow class is unavailable")?;
+
+    unsafe {
+        if let Ok(panel) = app.get_webview_panel(label) {
+            // The pinned plugin wraps this pointer as retained without retaining it.
+            // Balance that ownership before Tauri releases the window on destroy.
+            panel.set_released_when_closed(false);
+            let _: id = msg_send![ns_window, retain];
+        }
+        // Tauri can only destroy the object after undoing the NSPanel class swap.
+        object_setClass(ns_window, (tao_window as *const _) as id);
+    }
+    Ok(())
+}
+
 /// Leave the webview callback before tearing down every window. Destroying a
 /// window synchronously from its own CloseRequested callback can re-enter tao's
 /// event dispatcher on Windows and can invalidate an NSPanel callback on macOS.
@@ -51,7 +77,9 @@ fn enter_on_main_thread(app: &AppHandle) {
     #[cfg(target_os = "macos")]
     if app.get_window("headless-keepalive").is_none() {
         if let Err(error) = tauri::window::WindowBuilder::new(app, "headless-keepalive")
-            .visible(false).skip_taskbar(true).build()
+            .visible(false)
+            .skip_taskbar(true)
+            .build()
         {
             UI_DORMANT.store(false, Ordering::SeqCst);
             warn!("headless: native keepalive creation failed; preserving webviews: {error}");
@@ -75,10 +103,17 @@ fn enter_on_main_thread(app: &AppHandle) {
         let _ = window.hide();
     }
 
-    let count = windows.len();
+    let mut count = 0;
     for (label, window) in windows {
+        #[cfg(target_os = "macos")]
+        if let Err(error) = prepare_window_for_destroy(app, &label, &window) {
+            warn!("headless: preserving webview '{label}': {error}");
+            continue;
+        }
         if let Err(error) = window.destroy() {
             warn!("headless: failed to destroy webview '{label}': {error}");
+        } else {
+            count += 1;
         }
     }
 

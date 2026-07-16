@@ -816,6 +816,7 @@ impl ShowRewindWindow {
                                 if let Ok(panel) = window_clone.to_panel() {
                                     // Same level as overlay — above fullscreen
                                     panel.set_level(1001);
+                                    panel.released_when_closed(true);
                                     // Do NOT set NSNonactivatingPanelMask (128) for window mode.
                                     // That mask prevents the app from activating, which breaks
                                     // keyboard input in WKWebView entirely.
@@ -1195,6 +1196,8 @@ impl ShowRewindWindow {
                                 // Use a very high window level to appear above fullscreen apps
                                 // CGShieldingWindowLevel (1000) + 1 ensures it appears above everything including fullscreen
                                 panel.set_level(1001);
+
+                                panel.released_when_closed(true);
 
                                 // Keep NSNonactivatingPanelMask (128) so the panel can become
                                 // key window without activating the app — this prevents
