@@ -58,6 +58,8 @@ const saveCalls: Array<{
   lastViewedAt?: number;
   presetId?: string;
 }> = [];
+let pendingSaveGate: Promise<void> | null = null;
+let notifySaveStarted: (() => void) | null = null;
 
 vi.mock("@/lib/chat-storage", () => ({
   saveConversationFile: vi.fn(async (conv: any) => {
@@ -69,6 +71,9 @@ vi.mock("@/lib/chat-storage", () => ({
       lastViewedAt: conv.lastViewedAt,
       presetId: conv.presetId,
     });
+    notifySaveStarted?.();
+    notifySaveStarted = null;
+    await pendingSaveGate;
   }),
   loadConversationFile: vi.fn(async () => null),
   deleteConversationFile: vi.fn(async () => undefined),
@@ -154,6 +159,8 @@ function useHarness(args: {
 
 beforeEach(() => {
   saveCalls.length = 0;
+  pendingSaveGate = null;
+  notifySaveStarted = null;
   deleteCachedBrowserState("chat-A");
   deleteCachedBrowserState("fresh-sid");
   useChatStore.setState({ sessions: {}, currentId: null, panelSessionId: null });
@@ -416,6 +423,49 @@ describe("saveConversation race (PR #3600 / issue #3636 candidate)", () => {
     expect(saveCalls).toHaveLength(1);
     expect(saveCalls[0].id).toBe("dispatched-session-id");
     expect(saveCalls[0].id).not.toBe("stale-conversation-id");
+  });
+
+  it("a late first-turn save cannot restore an obsolete foreground conversation", async () => {
+    // The automation-card send owns chat A and starts by making its first user
+    // turn durable. While that disk write is pending, the user can switch to a
+    // fresh chat B. Persistence must finish writing A without navigating the
+    // panel back to A — saveConversation is storage, not foreground routing.
+    let releaseSave!: () => void;
+    pendingSaveGate = new Promise<void>((resolve) => {
+      releaseSave = resolve;
+    });
+    const saveStarted = new Promise<void>((resolve) => {
+      notifySaveStarted = resolve;
+    });
+    const firstTurn = [
+      { id: "u1", role: "user" as const, content: "summarize my day", timestamp: 1 },
+    ];
+
+    const { result } = renderHook(() =>
+      useHarness({
+        initialMessages: [],
+        // Matches a first-send render whose setConversationId(A) has not
+        // committed yet; idOverride still binds the durable write to A.
+        initialConversationId: null,
+        initialPiSessionId: "chat-A",
+      }),
+    );
+
+    const pendingSave = result.current.hook.saveConversation(firstTurn, {
+      idOverride: "chat-A",
+    });
+    await saveStarted;
+
+    // A new-chat action wins foreground ownership while A is still saving.
+    result.current.conversationIdRef.current = "chat-B";
+    releaseSave();
+    await act(async () => {
+      await pendingSave;
+    });
+
+    expect(saveCalls).toHaveLength(1);
+    expect(saveCalls[0].id).toBe("chat-A");
+    expect(result.current.conversationIdRef.current).toBe("chat-B");
   });
 
   it("writes exactly ONE file for a single first turn — no twin (#4719)", async () => {

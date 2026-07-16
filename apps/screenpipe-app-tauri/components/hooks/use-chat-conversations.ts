@@ -859,9 +859,13 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
       }
     }
 
-    if (!conversationId || conversationId !== convId) {
-      setConversationId(convId);
-    }
+    // Persistence must not claim foreground ownership. A save can outlive the
+    // chat that started it (for example, the user clicks an automation card
+    // and then opens a new chat while the first-turn write is still pending).
+    // Re-applying convId here would navigate the panel back to that obsolete
+    // session when the write completes. Session creation/loading and the send
+    // transport already publish the active id before calling this function;
+    // saveConversation only makes that session durable.
   };
 
   // ---- Auto-save conversation when a response completes (isLoading transitions from true to false) ----
