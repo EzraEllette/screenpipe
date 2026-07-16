@@ -49,6 +49,17 @@ fn enter_on_main_thread(app: &AppHandle) {
     }
 
     #[cfg(target_os = "macos")]
+    if app.get_window("headless-keepalive").is_none() {
+        if let Err(error) = tauri::window::WindowBuilder::new(app, "headless-keepalive")
+            .visible(false).skip_taskbar(true).build()
+        {
+            UI_DORMANT.store(false, Ordering::SeqCst);
+            warn!("headless: native keepalive creation failed; preserving webviews: {error}");
+            return;
+        }
+    }
+
+    #[cfg(target_os = "macos")]
     {
         crate::window::MAIN_PANEL_SHOWN.store(false, Ordering::SeqCst);
         crate::window::reset_to_regular_and_refresh_tray(app);

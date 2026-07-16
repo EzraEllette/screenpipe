@@ -725,6 +725,7 @@ async fn main() {
                 });
             }
             tauri::WindowEvent::CloseRequested { api, .. } => {
+                api.prevent_close();
                 let _ = window.set_always_on_top(false);
                 let _ = window.set_visible_on_all_workspaces(false);
 
@@ -735,7 +736,6 @@ async fn main() {
                         .map(|settings| settings.headless)
                         .unwrap_or(false);
                 if enter_headless {
-                    api.prevent_close();
                     crate::headless::request_enter(window.app_handle().clone());
                     return;
                 }
@@ -796,7 +796,6 @@ async fn main() {
                 {
                     let _ = window.hide();
                 }
-                api.prevent_close();
             }
             _ => {}
         })
@@ -2093,6 +2092,9 @@ async fn main() {
                     if let Ok(window_id) = RewindWindowId::from_str(label.as_str()) {
                         match window_id {
                             RewindWindowId::Home => {
+                                if crate::headless::is_dormant() {
+                                    return;
+                                }
                                 // Closing Settings hides the Main panel (it's always a panel now).
                                 // Defer off the event stack: run handler must stay panic-free.
                                 let app = app_handle.app_handle().clone();
