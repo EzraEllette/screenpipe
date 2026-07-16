@@ -3299,7 +3299,17 @@ uiTheme?: string;
  * Read by the CloseRequested handler in main.rs. Default off (historical
  * minimize-to-taskbar behavior).
  */
-minimizeToTrayOnClose?: boolean }
+minimizeToTrayOnClose?: boolean;
+/**
+ * When true, closing Home destroys every webview while the recording
+ * engine and tray remain alive. Tray UI actions recreate the app on demand.
+ */
+headless?: boolean;
+/**
+ * When true, headless mode skips scheduled pipe runs so only recording
+ * and the local server continue in the background.
+ */
+headlessRecordOnly?: boolean }
 export type ShowRewindWindow = "Main" | { Home: { page: string | null } } | { Search: { query: string | null } } | "Onboarding" | "Chat" | "PermissionRecovery"
 export type StartExportRecordingResponse = { jobId: string }
 export type Suggestion = { text: string;
