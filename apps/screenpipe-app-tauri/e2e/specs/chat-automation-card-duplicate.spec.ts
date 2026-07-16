@@ -13,10 +13,12 @@
  * handler upserted a SECOND row. Fix: the send saves under the dispatched
  * session id (idOverride), so one card click = one conversation file.
  *
- * This spec clicks EVERY home automation card and asserts each adds exactly ONE
- * conversation file (delta = 1), never two. Deterministic: the user turn is
- * persisted immediately on send, so no live-model reply is required — we count
- * the delta in the e2e chats dir around each click.
+ * This spec clicks EVERY home automation card and asserts its unique display
+ * label is persisted in exactly ONE conversation file, never two. Matching the
+ * saved turn instead of a global file-count delta is important because "+ new
+ * chat" may intentionally reuse an existing blank conversation. Deterministic:
+ * the user turn is persisted immediately on send, so no live-model reply is
+ * required.
  *
  * Run with:
  *   cd apps/screenpipe-app-tauri && ./e2e/run.sh
@@ -24,7 +26,7 @@
  *   bun run test:e2e -- --spec e2e/specs/chat-automation-card-duplicate.spec.ts
  */
 
-import { readdirSync } from "node:fs";
+import { readFileSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { openHomeWindow, waitForAppReady, t } from "../helpers/test-utils.js";
 import { E2E_DATA_DIR } from "../helpers/app-launcher.js";
@@ -32,12 +34,43 @@ import { E2E_DATA_DIR } from "../helpers/app-launcher.js";
 const CHATS_DIR = join(E2E_DATA_DIR, "chats");
 // The home grid slugs (summary-cards.tsx HOME_CARD_SLUGS).
 const CARD_SLUGS = ["automate-my-work", "day-recap", "time-breakdown", "missed-todos"];
+const CARD_DISPLAY_LABELS: Record<string, string> = {
+  "automate-my-work": "⚡ Automate My Work",
+  "day-recap": "📋 Day Recap",
+  "time-breakdown": "⏱ Time Breakdown",
+  "missed-todos": "✅ Missed To-Dos",
+};
 
-function chatFileCount(): number {
+function chatFilesForDisplayLabel(displayLabel: string): string[] {
+  let names: string[];
   try {
-    return readdirSync(CHATS_DIR).filter((n) => n.endsWith(".json")).length;
+    names = readdirSync(CHATS_DIR);
   } catch {
-    return 0;
+    return [];
+  }
+
+  return names.filter((name) => {
+    if (!name.endsWith(".json")) return false;
+    try {
+      const conversation = JSON.parse(readFileSync(join(CHATS_DIR, name), "utf8")) as {
+        messages?: Array<{ role?: string; displayContent?: string }>;
+      };
+      return (conversation.messages ?? []).some(
+        (message) => message.role === "user" && message.displayContent === displayLabel,
+      );
+    } catch {
+      return false;
+    }
+  });
+}
+
+function cleanupCardChats(displayLabel: string): void {
+  for (const name of chatFilesForDisplayLabel(displayLabel)) {
+    try {
+      rmSync(join(CHATS_DIR, name));
+    } catch {
+      // A concurrent atomic replacement can make the old name disappear.
+    }
   }
 }
 
@@ -69,10 +102,18 @@ async function clickCard(slug: string): Promise<void> {
 /** Stop the current turn so the Pi subprocess is free for the next card —
  *  otherwise the next send is queued (not dispatched) and never persists. */
 async function stopCurrentTurn(): Promise<void> {
-  await browser.execute(() => {
+  const stopError = await browser.executeAsync((done: (error: string | null) => void) => {
     const stop = (window as any).__e2eStopChat;
-    if (typeof stop === "function") void stop();
+    if (typeof stop !== "function") {
+      done(null);
+      return;
+    }
+
+    void Promise.resolve(stop())
+      .then(() => done(null))
+      .catch((error) => done(String(error)));
   });
+  if (stopError) throw new Error(`failed to stop current chat turn: ${stopError}`);
 }
 
 describe("Automation cards create exactly one chat each (#4719)", function () {
@@ -85,19 +126,22 @@ describe("Automation cards create exactly one chat each (#4719)", function () {
 
   for (const slug of CARD_SLUGS) {
     it(`'${slug}' card creates ONE conversation, not a duplicate`, async () => {
+      const displayLabel = CARD_DISPLAY_LABELS[slug];
       // Fresh empty chat so the summary grid renders and this card's turn is
       // isolated from the previous one. Stop any lingering turn first so this
       // send dispatches immediately instead of queuing behind a busy Pi.
       await stopCurrentTurn();
+      // WDIO retries reuse the same app/data dir. Remove only this card's prior
+      // retry artifacts so a real duplicate still reproduces on every attempt.
+      cleanupCardChats(displayLabel);
       await pressNewChat();
       await browser.pause(t(800));
       await waitForCard(slug);
 
-      const before = chatFileCount();
       await clickCard(slug);
 
       // The user turn is saved immediately on send (no model reply needed).
-      await browser.waitUntil(async () => chatFileCount() > before, {
+      await browser.waitUntil(async () => chatFilesForDisplayLabel(displayLabel).length > 0, {
         timeout: t(20_000),
         interval: 400,
         timeoutMsg: `'${slug}': no conversation persisted after the card click`,
@@ -107,13 +151,14 @@ describe("Automation cards create exactly one chat each (#4719)", function () {
       await browser.pause(t(5_000));
       await stopCurrentTurn();
 
-      const delta = chatFileCount() - before;
-      if (delta > 1) {
+      const matches = chatFilesForDisplayLabel(displayLabel);
+      if (matches.length > 1) {
         throw new Error(
-          `BUG REPRODUCED: '${slug}' card created ${delta} conversations (duplicate), expected 1`,
+          `BUG REPRODUCED: '${slug}' card created ${matches.length} conversations ` +
+            `(duplicate), expected 1 — files: ${matches.join(", ")}`,
         );
       }
-      expect(delta).toBe(1);
+      expect(matches).toHaveLength(1);
     });
   }
 });

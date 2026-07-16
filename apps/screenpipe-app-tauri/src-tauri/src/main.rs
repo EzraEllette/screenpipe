@@ -1126,6 +1126,17 @@ async fn main() {
                 info!("E2E seed: screenpipe cloud audio fallback");
             }
 
+            // The frontend reads settings from the Tauri store rather than the
+            // managed Rust copy below. Persist E2E mutations so both sides see
+            // the same seeded recording state (for example, `no-recording`
+            // must disable recent-recording actions in the Help UI too).
+            #[cfg(feature = "e2e")]
+            if !e2e_flags.is_empty() {
+                if let Err(e) = store.save(&app.handle()) {
+                    warn!("Failed to persist E2E settings seed: {}", e);
+                }
+            }
+
             app.manage(store.clone());
 
             // Set Chinese HuggingFace mirror early — before any model downloads
