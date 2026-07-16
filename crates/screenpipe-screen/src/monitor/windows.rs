@@ -39,12 +39,25 @@ impl SafeMonitor {
     // Windows: Use persistent WGC capture to avoid orange border flash.
     // Falls back to per-frame xcap capture if persistent session fails.
     pub async fn capture_image(&self) -> Result<DynamicImage> {
+        self.capture_image_inner(false).await
+    }
+
+    /// Capture a frame as part of a sustained recording loop.
+    ///
+    /// Unlike one-shot [`Self::capture_image`] calls, an explicit streaming caller
+    /// keeps the WGC session alive between frames even under RDP. The session remains
+    /// scoped to this `SafeMonitor` and is closed when the recorder drops it.
+    pub async fn capture_image_streaming(&self) -> Result<DynamicImage> {
+        self.capture_image_inner(true).await
+    }
+
+    async fn capture_image_inner(&self, streaming: bool) -> Result<DynamicImage> {
         let monitor_id = self.monitor_id;
         let persistent = self.persistent_capture.clone();
         let persistent_disabled = self.persistent_capture_disabled.clone();
         let persistent_failures = self.persistent_capture_failures.clone();
         let result = tokio::task::spawn_blocking(move || -> Result<DynamicImage> {
-            if Self::is_remote_session() {
+            if Self::should_use_request_scoped_capture(Self::is_remote_session(), streaming) {
                 RDP_CAPTURE_LOG_ONCE.call_once(|| {
                     tracing::info!(
                         "RDP session detected; using request-scoped WGC capture"
@@ -166,6 +179,10 @@ impl SafeMonitor {
         .map_err(|e| anyhow::anyhow!("capture task panicked: {}", e))??;
 
         Ok(result)
+    }
+
+    fn should_use_request_scoped_capture(is_remote_session: bool, streaming: bool) -> bool {
+        is_remote_session && !streaming
     }
 
     /// True when this process is running in a Remote Desktop / Terminal Services
@@ -406,6 +423,16 @@ mod tests {
         SafeMonitor::record_persistent_init_failure(1, &persistent, &disabled, &failures, "err 4");
         assert!(disabled.load(Ordering::Relaxed));
         assert!(persistent.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn rdp_capture_policy_keeps_only_explicit_streams_persistent() {
+        assert!(SafeMonitor::should_use_request_scoped_capture(true, false));
+        assert!(!SafeMonitor::should_use_request_scoped_capture(true, true));
+        assert!(!SafeMonitor::should_use_request_scoped_capture(
+            false, false
+        ));
+        assert!(!SafeMonitor::should_use_request_scoped_capture(false, true));
     }
 
     #[tokio::test]

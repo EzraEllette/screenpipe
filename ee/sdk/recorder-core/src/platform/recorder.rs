@@ -630,12 +630,13 @@ async fn capture_loop(
         }
 
         let t_cap = std::time::Instant::now();
-        // capture_image uses screenpipe-screen's persistent SCK stream
-        // internally (stream_manager), already ar_pool-wrapped.
-        let frame = match monitor.capture_image().await {
+        // MP4 recording is a sustained stream, so explicitly retain the native
+        // capture session between frames. In particular, Windows RDP one-shot
+        // screenshots stay request-scoped while this recorder keeps WGC alive.
+        let frame = match monitor.capture_image_streaming().await {
             Ok(img) => img,
             Err(e) => {
-                warn!("screenpipe-sdk: capture_image: {e}");
+                warn!("screenpipe-sdk: capture_image_streaming: {e}");
                 continue;
             }
         };
