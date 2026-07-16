@@ -26,6 +26,10 @@ pub fn is_dormant() -> bool {
     UI_DORMANT.load(Ordering::SeqCst)
 }
 
+pub fn should_suppress_window(dormant: bool, is_permission_recovery: bool) -> bool {
+    dormant && !is_permission_recovery
+}
+
 /// Sync dormant/record-only state to an enterprise hidden-UI policy that flipped
 /// mid-session. The enterprise enforcement path hides (not destroys) windows, so
 /// this only flips the flags that gate pipe suppression and tray wake — without
@@ -194,7 +198,7 @@ pub fn wake_from_tray(app: &AppHandle) {
 
 #[cfg(test)]
 mod tests {
-    use super::{should_start_dormant, should_suppress_pipe_runs};
+    use super::{should_start_dormant, should_suppress_pipe_runs, should_suppress_window};
 
     #[test]
     fn headless_startup_never_blocks_incomplete_onboarding() {
@@ -208,5 +212,12 @@ mod tests {
         assert!(should_suppress_pipe_runs(true, true));
         assert!(!should_suppress_pipe_runs(true, false));
         assert!(!should_suppress_pipe_runs(false, true));
+    }
+
+    #[test]
+    fn dormant_ui_still_allows_permission_recovery() {
+        assert!(should_suppress_window(true, false));
+        assert!(!should_suppress_window(true, true));
+        assert!(!should_suppress_window(false, false));
     }
 }
