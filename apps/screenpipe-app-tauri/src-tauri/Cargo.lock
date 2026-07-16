@@ -11309,6 +11309,7 @@ dependencies = [
  "screenpipe-db",
  "screenpipe-events",
  "screenpipe-redact",
+ "screenpipe-resource",
  "screenpipe-screen",
  "screenpipe-secrets",
  "screenpipe-vault",
@@ -11371,6 +11372,7 @@ dependencies = [
  "rand 0.9.2",
  "regex",
  "reqwest 0.13.3",
+ "screenpipe-resource",
  "screenpipe-rfdetr-mlx",
  "serde",
  "serde_json",
@@ -11383,6 +11385,15 @@ dependencies = [
  "tokio",
  "tracing",
  "zeroize",
+]
+
+[[package]]
+name = "screenpipe-resource"
+version = "0.4.25"
+dependencies = [
+ "serde",
+ "sysinfo",
+ "tokio",
 ]
 
 [[package]]
