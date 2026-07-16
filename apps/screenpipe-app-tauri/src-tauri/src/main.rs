@@ -220,6 +220,10 @@ fn should_skip_onboarding() -> bool {
         .unwrap_or(false)
 }
 
+fn should_prevent_window_close(label: &str) -> bool {
+    label != "onboarding"
+}
+
 /// Flag passed by tauri-plugin-autostart when the OS launches us at login.
 /// Used to skip Home so login starts stay in the tray.
 const AUTOSTART_ARG: &str = "--autostart";
@@ -725,6 +729,15 @@ async fn main() {
                 });
             }
             tauri::WindowEvent::CloseRequested { api, .. } => {
+                // Onboarding is disposable. Let Tauri destroy its webview so
+                // page effects (notably the live-feed search poller) are torn
+                // down as soon as the user closes the window. Other app
+                // windows stay warm for fast reopen and NSPanel safety.
+                if !should_prevent_window_close(window.label()) {
+                    info!("onboarding window close requested — destroying webview");
+                    return;
+                }
+
                 api.prevent_close();
                 let _ = window.set_always_on_top(false);
                 let _ = window.set_visible_on_all_workspaces(false);
@@ -2029,29 +2042,12 @@ async fn main() {
                     } else if process_exit::QUIT_REQUESTED.load(std::sync::atomic::Ordering::SeqCst)
                     {
                         info!("ExitRequested event — quit was requested, allowing exit");
-                    } else if crate::headless::is_dormant() {
-                        info!("ExitRequested event — preventing (headless tray-only mode)");
-                        api.prevent_exit();
                     } else {
-                        // Note: native terminate: (dock Quit, AppleScript quit)
-                        // never reaches this event on tao 0.35 — it is
-                        // intercepted by process_exit::setup_terminate_interceptor.
-                        // This branch only fires for unexpected programmatic
-                        // exits (e.g. a stray app.exit()), so ask instead of
-                        // silently dying or silently staying alive.
-                        #[cfg(target_os = "macos")]
-                        {
-                            info!("ExitRequested event — preventing, showing quit confirmation");
-                            api.prevent_exit();
-                            process_exit::confirm_and_request_app_quit(
-                                app_handle.app_handle().clone(),
-                            );
-                        }
-                        #[cfg(not(target_os = "macos"))]
-                        {
-                            info!("ExitRequested event — preventing (app stays in tray)");
-                            api.prevent_exit();
-                        }
+                        // Closing the last window can request process exit even after
+                        // CloseRequested was prevented. Only the explicit quit and
+                        // restart paths above may terminate this tray application.
+                        info!("ExitRequested event — preventing (app stays in tray)");
+                        api.prevent_exit();
                     }
                 }
 
@@ -2145,6 +2141,23 @@ mod autostart_arg_tests {
         assert!(!args_contain_autostart(["screenpipe"]));
         assert!(!args_contain_autostart(["screenpipe", "--check-arc-automation"]));
         assert!(!args_contain_autostart(["screenpipe", "--autostarted"]));
+    }
+}
+
+#[cfg(test)]
+mod window_close_policy_tests {
+    use super::should_prevent_window_close;
+
+    #[test]
+    fn onboarding_close_destroys_its_webview() {
+        assert!(!should_prevent_window_close("onboarding"));
+    }
+
+    #[test]
+    fn persistent_windows_keep_their_existing_close_behavior() {
+        for label in ["home", "main", "main-window", "search", "chat"] {
+            assert!(should_prevent_window_close(label), "label: {label}");
+        }
     }
 }
 

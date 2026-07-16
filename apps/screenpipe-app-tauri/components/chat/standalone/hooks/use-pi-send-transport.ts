@@ -307,20 +307,21 @@ export function usePiSendTransport(options: PiSendTransportOptions) {
     // one id.
     setConversationId(turnSessionId);
 
-    let nextRowsAfterUserAppend: Message[] | null = null;
-    setMessages((prev) => {
-      const next = [...prev, newUserMessage];
-      nextRowsAfterUserAppend = next;
-      return next;
+    // Persist from the current render snapshot instead of assigning inside the
+    // state updater. React may defer updater callbacks; when that happened, a
+    // slow provider response left a brand-new conversation without a file until
+    // the response completed (or without one at all if the app exited first).
+    const nextRowsAfterUserAppend = [...messages, newUserMessage];
+    setMessages((prev) => [...prev, newUserMessage]);
+    // conversationId state hasn't committed yet this tick, so force the
+    // immediate save under the same id explicitly.
+    // Do not dispatch to the provider until the user turn is durable. Besides
+    // preventing message loss on an immediate quit, this avoids slow WebKit
+    // filesystem work being starved behind a long-running provider request.
+    await saveConversation(nextRowsAfterUserAppend, {
+      refreshHistory: false,
+      idOverride: turnSessionId,
     });
-    if (nextRowsAfterUserAppend) {
-      // conversationId state hasn't committed yet this tick, so force the
-      // immediate save under the same id explicitly.
-      void saveConversation(nextRowsAfterUserAppend, {
-        refreshHistory: false,
-        idOverride: turnSessionId,
-      });
-    }
     setInput("");
     if (inputRef.current) inputRef.current.style.height = "auto";
     setIsLoading(true);

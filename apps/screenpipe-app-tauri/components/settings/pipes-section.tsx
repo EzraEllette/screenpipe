@@ -328,12 +328,11 @@ function buildOptimizeDisplayLabel(pipeName: string): string {
   return `Optimize pipe: ${pipeName.trim()}`;
 }
 
-// "remix" = make your own version of an existing pipe. We don't mutate the
+// "fork" = make your own version of an existing pipe. We don't mutate the
 // original — the agent reads it and creates a NEW customized pipe. Framing
-// authoring as "customize a working thing" is the lever that turns installers
-// into creators (see Replit remix / Notion duplicate).
-function buildRemixPrompt(pipeName: string): string {
-  return `i want to remix my existing pipe "${pipeName}" into a new one.
+// authoring as "customize a working thing" turns installers into creators.
+function buildForkPrompt(pipeName: string): string {
+  return `i want to fork my existing pipe "${pipeName}" into a new one.
 
 ## your task
 1. read the original pipe: ~/.screenpipe/pipes/${pipeName}/pipe.md
@@ -2555,6 +2554,48 @@ export function PipesSection() {
                 className="max-h-0 overflow-hidden opacity-0 pointer-events-none transition-[max-height,opacity] duration-150 group-hover:max-h-16 group-hover:opacity-100 group-hover:pointer-events-auto group-focus-within:max-h-16 group-focus-within:opacity-100 group-focus-within:pointer-events-auto"
               >
                 <div className="flex items-center gap-1 px-3 pb-2.5 pt-0.5">
+                  {/* Run is the primary action: keep it first and visually larger
+                      than the AI editing actions that follow. */}
+                  <div className="flex items-center shrink-0">
+                    {isRunning ? (
+                      <Button
+                        variant="outline"
+                        size="icon"
+                        className="h-9 w-9"
+                        onClick={() => stopPipe(pipe.config.name)}
+                        disabled={stoppingPipe === pipe.config.name}
+                        title="stop pipe"
+                        aria-label="stop pipe"
+                      >
+                        {stoppingPipe === pipe.config.name ? (
+                          <Loader2 className="h-5 w-5 animate-spin" />
+                        ) : (
+                          <Square className="h-5 w-5" />
+                        )}
+                      </Button>
+                    ) : (
+                      <Button
+                        variant={hasMissingConnections ? "outline" : "default"}
+                        size="icon"
+                        className={cn("h-9 w-9", hasMissingConnections && "text-destructive")}
+                        onClick={() => {
+                          if (hasMissingConnections) {
+                            setConnectionModal({ pipeName: pipe.config.name, connections: pipe.config.connections ?? [] });
+                          } else {
+                            runPipe(pipe.config.name);
+                          }
+                        }}
+                        disabled={runningPipe === pipe.config.name}
+                        title={hasMissingConnections ? "configure required connections first" : "run pipe"}
+                        aria-label={hasMissingConnections ? "configure required connections first" : "run pipe"}
+                      >
+                        {hasMissingConnections
+                          ? <AlertCircle className="h-5 w-5" />
+                          : <Play className="h-5 w-5 fill-current" />}
+                      </Button>
+                    )}
+                  </div>
+
                 {/* optimize with ai — opens a chat that reads the pipe's prompt
                     + recent run logs and suggests improvements in plain english */}
                 {!isReceivedTeamPipe(pipe) && (
@@ -2578,7 +2619,7 @@ export function PipesSection() {
                   </Button>
                 )}
 
-                {/* remix — create a NEW pipe based on this one and customize it */}
+                {/* fork — create a NEW pipe based on this one and customize it */}
                 {!isReceivedTeamPipe(pipe) && (
                   <Button
                     variant="ghost"
@@ -2587,59 +2628,21 @@ export function PipesSection() {
                     onClick={() => {
                       posthog.capture("pipe_remix_started", { source: "row_button" });
                       navigateHomeAndPrefill({
-                        context: "the user wants to remix their pipe into a new one",
-                        prompt: buildRemixPrompt(pipe.config.name),
-                        displayLabel: `Remix pipe: ${pipe.config.name}`,
+                        context: "the user wants to fork their pipe into a new one",
+                        prompt: buildForkPrompt(pipe.config.name),
+                        displayLabel: `Fork pipe: ${pipe.config.name}`,
                         autoSend: true,
                       });
                     }}
-                    title="remix — create a new pipe based on this one and customize it"
+                    title="fork — create a new pipe based on this one and customize it"
                   >
                     <GitFork className="h-3.5 w-3.5" />
-                    remix
+                    fork
                   </Button>
                 )}
 
-                {/* run + overflow */}
-                <div className="flex items-center gap-0.5 shrink-0">
-                  {/* Run / Stop button */}
-                  {isRunning ? (
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-7 w-7"
-                      onClick={() => stopPipe(pipe.config.name)}
-                      disabled={stoppingPipe === pipe.config.name}
-                      title="stop pipe"
-                    >
-                      {stoppingPipe === pipe.config.name ? (
-                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                      ) : (
-                        <Square className="h-3.5 w-3.5" />
-                      )}
-                    </Button>
-                  ) : (
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className={cn("h-7 w-7", hasMissingConnections && "text-destructive")}
-                      onClick={() => {
-                        if (hasMissingConnections) {
-                          setConnectionModal({ pipeName: pipe.config.name, connections: pipe.config.connections ?? [] });
-                        } else {
-                          runPipe(pipe.config.name);
-                        }
-                      }}
-                      disabled={runningPipe === pipe.config.name}
-                      title={hasMissingConnections ? "configure required connections first" : "run pipe"}
-                    >
-                      {hasMissingConnections
-                        ? <AlertCircle className="h-3.5 w-3.5" />
-                        : <Play className="h-3.5 w-3.5" />}
-                    </Button>
-                  )}
-
-                  {/* Overflow menu */}
+                {/* Overflow menu */}
+                <div className="flex items-center shrink-0">
                   <DropdownMenu>
                     <DropdownMenuTrigger asChild>
                       <Button variant="ghost" size="icon" className="h-7 w-7 shrink-0">
