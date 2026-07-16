@@ -11,13 +11,15 @@ use tauri_plugin_global_shortcut::GlobalShortcutExt;
 use tracing::{info, warn};
 
 static UI_DORMANT: AtomicBool = AtomicBool::new(false);
+static RECORD_ONLY: AtomicBool = AtomicBool::new(false);
 
 pub fn should_start_dormant(enabled: bool, onboarding_completed: bool) -> bool {
     enabled && onboarding_completed
 }
 
-pub fn initialize(dormant: bool) {
+pub fn initialize(dormant: bool, record_only: bool) {
     UI_DORMANT.store(dormant, Ordering::SeqCst);
+    RECORD_ONLY.store(record_only, Ordering::SeqCst);
 }
 
 pub fn is_dormant() -> bool {
@@ -50,10 +52,29 @@ fn prepare_window_for_destroy(
     Ok(())
 }
 
+pub fn should_suppress_pipe_runs(dormant: bool, record_only: bool) -> bool {
+    dormant && record_only
+}
+
+pub fn scheduled_pipe_skip_reason() -> Option<String> {
+    should_suppress_pipe_runs(
+        UI_DORMANT.load(Ordering::SeqCst),
+        RECORD_ONLY.load(Ordering::SeqCst),
+    )
+    .then(|| "headless record-only mode is enabled".to_string())
+}
+
 /// Leave the webview callback before tearing down every window. Destroying a
 /// window synchronously from its own CloseRequested callback can re-enter tao's
 /// event dispatcher on Windows and can invalidate an NSPanel callback on macOS.
 pub fn request_enter(app: AppHandle) {
+    let record_only = crate::store::SettingsStore::get(&app)
+        .ok()
+        .flatten()
+        .map(|settings| settings.headless && settings.headless_record_only)
+        .unwrap_or(false);
+    RECORD_ONLY.store(record_only, Ordering::SeqCst);
+
     // Block shortcuts and other non-tray window entry points immediately, while
     // the actual webview destruction is deferred off the close callback.
     UI_DORMANT.store(true, Ordering::SeqCst);
@@ -141,12 +162,19 @@ pub fn wake_from_tray(app: &AppHandle) {
 
 #[cfg(test)]
 mod tests {
-    use super::should_start_dormant;
+    use super::{should_start_dormant, should_suppress_pipe_runs};
 
     #[test]
     fn headless_startup_never_blocks_incomplete_onboarding() {
         assert!(should_start_dormant(true, true));
         assert!(!should_start_dormant(true, false));
         assert!(!should_start_dormant(false, true));
+    }
+
+    #[test]
+    fn record_only_suppresses_pipe_runs_only_while_dormant() {
+        assert!(should_suppress_pipe_runs(true, true));
+        assert!(!should_suppress_pipe_runs(true, false));
+        assert!(!should_suppress_pipe_runs(false, true));
     }
 }

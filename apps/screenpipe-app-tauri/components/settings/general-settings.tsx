@@ -32,6 +32,7 @@ export const searchIndex: SettingsField[] = [
   { label: "Auto-generate chat titles" },
   { label: "Reset Onboarding", keywords: ["setup"] },
   { label: "Headless", keywords: ["low resource", "tray only", "memory", "webview"] },
+  { label: "Record only", keywords: ["headless", "pipes", "scheduler", "automation"] },
 ];
 import { useIsEnterpriseBuild } from "@/lib/hooks/use-is-enterprise-build";
 import { open as openUrl } from "@tauri-apps/plugin-shell";
@@ -518,10 +519,27 @@ export default function GeneralSettings() {
               className="ml-4"
             />
           </div>
+          {settings?.headless && (
+            <div className="ml-6 mt-2 border-l border-border pl-3 pt-2 flex items-center justify-between">
+              <div>
+                <h4 className="text-xs font-medium text-foreground">Record only</h4>
+                <p className="text-[10px] text-muted-foreground mt-0.5">
+                  Skip scheduled pipe runs while the UI is headless
+                </p>
+              </div>
+              <Switch
+                id="headless-record-only-toggle"
+                checked={settings?.headlessRecordOnly ?? false}
+                onCheckedChange={(checked) =>
+                  handleSettingsChange({ headlessRecordOnly: checked })
+                }
+                className="ml-4"
+              />
+            </div>
+          )}
         </CardContent>
       </Card>
 
     </div>
   );
 }
-

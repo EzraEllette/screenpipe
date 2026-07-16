@@ -1003,6 +1003,11 @@ pub struct SettingsStore {
     /// engine and tray remain alive. Tray UI actions recreate the app on demand.
     #[serde(default)]
     pub headless: bool,
+
+    /// When true, headless mode skips scheduled pipe runs so only recording
+    /// and the local server continue in the background.
+    #[serde(rename = "headlessRecordOnly", default)]
+    pub headless_record_only: bool,
 }
 
 fn generate_device_id() -> String {
@@ -1416,6 +1421,7 @@ Rules:
             ui_theme: "system".to_string(),
             minimize_to_tray_on_close: false,
             headless: false,
+            headless_record_only: false,
             extra: std::collections::HashMap::new(),
         }
     }
@@ -2014,6 +2020,19 @@ mod tests {
         .unwrap();
 
         assert!(settings.auto_update);
+    }
+
+    #[test]
+    fn headless_record_only_defaults_off_and_respects_saved_value() {
+        assert!(!SettingsStore::default().headless_record_only);
+
+        let settings: SettingsStore = serde_json::from_value(json!({
+            "aiPresets": [],
+            "headlessRecordOnly": true
+        }))
+        .unwrap();
+
+        assert!(settings.headless_record_only);
     }
 
     #[test]

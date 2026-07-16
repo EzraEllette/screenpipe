@@ -707,6 +707,7 @@ let DEFAULT_SETTINGS: Settings = {
 			hdRecordingDefault: "ask",
 			hdRecordingIntervalMs: 100,
 			headless: false,
+			headlessRecordOnly: false,
 			fontSize: "16px",
 		};
 

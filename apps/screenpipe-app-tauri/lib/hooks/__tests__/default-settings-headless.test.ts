@@ -7,7 +7,10 @@ import { describe, expect, it } from "vitest";
 import { createDefaultSettingsObject } from "../use-settings";
 
 describe("headless default", () => {
-  it("keeps the UI enabled until the user opts in", () => {
-    expect(createDefaultSettingsObject().headless).toBe(false);
+  it("keeps the UI and pipe scheduler enabled until the user opts in", () => {
+    const settings = createDefaultSettingsObject();
+
+    expect(settings.headless).toBe(false);
+    expect(settings.headlessRecordOnly).toBe(false);
   });
 });

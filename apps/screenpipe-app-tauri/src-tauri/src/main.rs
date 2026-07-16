@@ -1339,7 +1339,10 @@ async fn main() {
                 store.headless,
                 onboarding_store.is_completed,
             );
-            crate::headless::initialize(headless_startup);
+            crate::headless::initialize(
+                headless_startup,
+                store.headless && store.headless_record_only,
+            );
             if from_autostart {
                 info!("launched from OS autostart (--autostart); starting in background");
             }
