@@ -855,6 +855,11 @@ impl DatabaseManager {
         // COALESCE(is_input_device, 1) keeps the old NULL-defaults-to-input
         // behaviour. Resolved segments drop out of the candidate set, so
         // steady-state work is just newly-mirrored segments.
+        //
+        // Calculate proximity from rounded epoch milliseconds rather than a
+        // julianday delta. Equal offsets around a timestamp can differ by one
+        // floating-point ULP in julianday(), which would bypass the documented
+        // timestamp/id tie breakers.
         const PER_PASS_LIMIT: i64 = 500;
         let mut tx = self.begin_immediate_with_retry().await?;
         let r = sqlx::query(
@@ -868,7 +873,10 @@ impl DatabaseManager {
                  SELECT c.id AS seg_id, at.speaker_id AS sid, \
                         ROW_NUMBER() OVER ( \
                             PARTITION BY c.id \
-                            ORDER BY ABS(julianday(at.timestamp) - julianday(c.captured_at)), \
+                            ORDER BY ABS( \
+                                CAST(ROUND(unixepoch(at.timestamp, 'subsec') * 1000.0) AS INTEGER) - \
+                                CAST(ROUND(unixepoch(c.captured_at, 'subsec') * 1000.0) AS INTEGER) \
+                            ), \
                                      at.timestamp, at.id \
                         ) AS rn \
                  FROM cand c \

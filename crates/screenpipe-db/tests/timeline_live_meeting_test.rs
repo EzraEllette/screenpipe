@@ -609,7 +609,11 @@ mod timeline_live_meeting_tests {
     #[tokio::test]
     async fn test_speaker_backfill_matches_reference_and_breaks_ties_deterministically() {
         let db = setup_test_db().await;
-        let base = Utc::now();
+        // This millisecond phase makes julianday() represent +2s as one ULP
+        // nearer than -2s, reproducing the old incorrect tie resolution.
+        let base = "2026-07-16T20:22:07Z"
+            .parse::<chrono::DateTime<Utc>>()
+            .unwrap();
         let meeting_id = db
             .insert_meeting("zoom.us", "test", Some("tie test"), None)
             .await
@@ -658,12 +662,19 @@ mod timeline_live_meeting_tests {
         .unwrap();
 
         // Reference implementation: the old nearest-row lookup plus explicit
-        // timestamp/id tie breakers.
+        // timestamp/id tie breakers. Use integer epoch milliseconds so equal
+        // offsets remain exactly equal before applying those tie breakers.
         let expected: i64 = sqlx::query_scalar(
             "SELECT speaker_id FROM audio_transcriptions \
              WHERE speaker_id IS NOT NULL AND COALESCE(is_input_device, 1) = 0 \
-               AND ABS(julianday(timestamp) - julianday(?1)) <= (10.0 / 86400.0) \
-             ORDER BY ABS(julianday(timestamp) - julianday(?1)), timestamp, id LIMIT 1",
+               AND ABS( \
+                   CAST(ROUND(unixepoch(timestamp, 'subsec') * 1000.0) AS INTEGER) - \
+                   CAST(ROUND(unixepoch(?1, 'subsec') * 1000.0) AS INTEGER) \
+               ) <= 10000 \
+             ORDER BY ABS( \
+                 CAST(ROUND(unixepoch(timestamp, 'subsec') * 1000.0) AS INTEGER) - \
+                 CAST(ROUND(unixepoch(?1, 'subsec') * 1000.0) AS INTEGER) \
+             ), timestamp, id LIMIT 1",
         )
         .bind(base)
         .fetch_one(&db.pool)
@@ -722,7 +733,10 @@ mod timeline_live_meeting_tests {
             "EXPLAIN QUERY PLAN SELECT id FROM audio_transcriptions \
              INDEXED BY idx_audio_transcriptions_timestamp \
              WHERE timestamp >= ?1 AND timestamp <= ?2 \
-             ORDER BY ABS(julianday(timestamp) - julianday(?3)), timestamp, id LIMIT 1",
+             ORDER BY ABS( \
+                 CAST(ROUND(unixepoch(timestamp, 'subsec') * 1000.0) AS INTEGER) - \
+                 CAST(ROUND(unixepoch(?3, 'subsec') * 1000.0) AS INTEGER) \
+             ), timestamp, id LIMIT 1",
         )
         .bind(base - Duration::seconds(15))
         .bind(base + Duration::seconds(15))
