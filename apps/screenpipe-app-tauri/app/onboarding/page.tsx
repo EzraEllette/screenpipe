@@ -4,7 +4,7 @@
 
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import { useToast } from "@/components/ui/use-toast";
 import OnboardingLogin from "@/components/onboarding/login-gate";
 import PermissionsStep from "@/components/onboarding/permissions-step";
@@ -12,7 +12,9 @@ import EngineStartup from "@/components/onboarding/engine-startup";
 import ConnectApps from "@/components/onboarding/connect-apps";
 import PickPipe from "@/components/onboarding/pick-pipe";
 import { useOnboarding } from "@/lib/hooks/use-onboarding";
-import { useIsEnterpriseBuild } from "@/lib/hooks/use-is-enterprise-build";
+import { useEnterpriseBuildStatus } from "@/lib/hooks/use-is-enterprise-build";
+import { useEnterprisePolicy } from "@/lib/hooks/use-enterprise-policy";
+import { EnterpriseLicensePrompt } from "@/components/enterprise-license-prompt";
 import posthog from "posthog-js";
 import { commands } from "@/lib/utils/tauri";
 
@@ -42,14 +44,13 @@ export default function OnboardingPage() {
   const [isVisible, setIsVisible] = useState(true);
   const [isTransitioning, setIsTransitioning] = useState(false);
   const { onboardingData, isLoading } = useOnboarding();
-  const isEnterprise = useIsEnterpriseBuild();
-
-  // Enterprise builds skip the login slide
-  useEffect(() => {
-    if (isEnterprise && currentSlide === "login") {
-      setCurrentSlide("permissions");
-    }
-  }, [isEnterprise, currentSlide]);
+  const enterpriseBuild = useEnterpriseBuildStatus();
+  const {
+    licenseStatus,
+    policy: enterprisePolicy,
+    requestOrganizationKey,
+    submitLicenseKey,
+  } = useEnterprisePolicy();
 
   // Restore saved step on mount
   useEffect(() => {
@@ -109,7 +110,7 @@ export default function OnboardingPage() {
     // nothing needed for error state currently
   }, [toast]);
 
-  const handleNextSlide = async () => {
+  const handleNextSlide = useCallback(async () => {
     if (isTransitioning) return;
     setIsTransitioning(true);
 
@@ -140,9 +141,33 @@ export default function OnboardingPage() {
       setIsVisible(true);
       setIsTransitioning(false);
     }, 300);
-  };
+  }, [currentSlide, isTransitioning]);
 
-  if (isLoading) {
+  // A managed enterprise device has exactly one activation path. A key pushed
+  // by IT advances silently; otherwise the key form owns this first step.
+  // Waiting for the build check prevents a brief consumer sign-in flash.
+  useEffect(() => {
+    if (
+      currentSlide === "login" &&
+      enterpriseBuild.resolved &&
+      enterpriseBuild.isEnterprise &&
+      licenseStatus === "active" &&
+      enterprisePolicy.enrollmentMode === "organization_key" &&
+      !isTransitioning
+    ) {
+      void handleNextSlide();
+    }
+  }, [
+    currentSlide,
+    enterpriseBuild.isEnterprise,
+    enterpriseBuild.resolved,
+    licenseStatus,
+    enterprisePolicy.enrollmentMode,
+    isTransitioning,
+    handleNextSlide,
+  ]);
+
+  if (isLoading || !enterpriseBuild.resolved) {
     return (
       <div className="flex items-center justify-center min-h-screen bg-background">
         <div className="w-6 h-6 border border-foreground border-t-transparent rounded-full animate-spin" />
@@ -163,7 +188,33 @@ export default function OnboardingPage() {
           }`}
         >
           {currentSlide === "login" && (
-            <OnboardingLogin handleNextSlide={handleNextSlide} />
+            enterpriseBuild.isEnterprise ? (
+              licenseStatus === "required" ? (
+                <EnterpriseLicensePrompt
+                  embedded
+                  onSubmit={submitLicenseKey}
+                />
+              ) : (licenseStatus === "active" &&
+                  enterprisePolicy.enrollmentMode === "member_sign_in") ||
+                licenseStatus === "member_login" ? (
+                <div className="flex flex-col items-center">
+                  <OnboardingLogin handleNextSlide={handleNextSlide} />
+                  <button
+                    type="button"
+                    onClick={requestOrganizationKey}
+                    className="mt-3 font-mono text-xs text-muted-foreground/70 underline underline-offset-4 decoration-muted-foreground/40 transition-colors hover:text-foreground hover:decoration-foreground"
+                  >
+                    use organization key
+                  </button>
+                </div>
+              ) : (
+                <div className="flex min-h-[400px] items-center justify-center">
+                  <div className="h-6 w-6 animate-spin rounded-full border border-foreground border-t-transparent" />
+                </div>
+              )
+            ) : (
+              <OnboardingLogin handleNextSlide={handleNextSlide} />
+            )
           )}
           {currentSlide === "permissions" && (
             <PermissionsStep handleNextSlide={handleNextSlide} />
