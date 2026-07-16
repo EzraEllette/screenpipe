@@ -1078,9 +1078,14 @@ async fn paired_capture_loop_for_monitor(
             languages: Vec::new(),
             elements_ref_frame_id: None,
             screenshot_disabled: false,
+            in_meeting: false,
+            // The SDK does not currently expose per-monitor focus ownership;
+            // the capture API documents `true` as the unknown-focus fallback.
+            monitor_hosts_focus: true,
+            focused_window_bounds: None,
         };
 
-        match paired_capture(&ctx, Some(&snapshot)).await {
+        match paired_capture(&ctx, Some(&snapshot), None).await {
             Ok(result) => debug!(
                 "screenpipe-sdk: paired capture frame={} trigger={} text_source={:?} duration={}ms",
                 result.frame_id, trigger_label, result.text_source, result.duration_ms

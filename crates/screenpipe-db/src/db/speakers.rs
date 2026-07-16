@@ -505,7 +505,7 @@ impl DatabaseManager {
             base_query, speaker_filter
         );
 
-        let mut db_query = sqlx::query_as::<sqlx::Sqlite, Speaker>(&query);
+        let mut db_query = sqlx::query_as::<sqlx::Sqlite, Speaker>(sqlx::AssertSqlSafe(query));
 
         // Add speaker_id bindings if present
         if let Some(ids) = speaker_ids {

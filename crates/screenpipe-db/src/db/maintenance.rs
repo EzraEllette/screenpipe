@@ -6,7 +6,11 @@ use super::*;
 
 impl DatabaseManager {
     pub async fn execute_raw_sql(&self, query: &str) -> Result<serde_json::Value, sqlx::Error> {
-        let rows = sqlx::query(query).fetch_all(&self.pool).await?;
+        // This API intentionally executes caller-supplied maintenance SQL.
+        // Keep that trust boundary explicit for SQLx 0.9's dynamic-SQL audit.
+        let rows = sqlx::query(sqlx::AssertSqlSafe(query))
+            .fetch_all(&self.pool)
+            .await?;
 
         let result: Vec<serde_json::Map<String, serde_json::Value>> = rows
             .iter()
@@ -1554,7 +1558,8 @@ impl DatabaseManager {
     /// Create an atomic backup of the database using `VACUUM INTO`.
     /// The destination path must not already exist.
     pub async fn backup_to(&self, dest: &str) -> Result<(), sqlx::Error> {
-        sqlx::query(&format!("VACUUM INTO '{}'", dest.replace('\'', "''")))
+        sqlx::query("VACUUM INTO ?1")
+            .bind(dest)
             .execute(&self.pool)
             .await?;
         Ok(())

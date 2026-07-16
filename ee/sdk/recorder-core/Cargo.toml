@@ -25,3 +25,5 @@ cpal = { git = "https://github.com/screenpipe/cpal.git", rev = "01b68e60c80a59bb
 
 [dev-dependencies]
 chrono = { workspace = true }
+screenpipe-sqlite-coordinator = { path = "../../../crates/screenpipe-sqlite-coordinator" }
+tempfile = { workspace = true }

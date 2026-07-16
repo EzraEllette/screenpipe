@@ -107,7 +107,7 @@ impl DatabaseManager {
             },
         );
 
-        sqlx::query_as(&sql)
+        sqlx::query_as(sqlx::AssertSqlSafe(sql))
             .bind(if has_fts {
                 combined_query
             } else {
@@ -227,7 +227,7 @@ impl DatabaseManager {
         );
 
         let on_screen_int: i64 = if on_screen { 1 } else { 0 };
-        let mut q = sqlx::query_as(&sql)
+        let mut q = sqlx::query_as(sqlx::AssertSqlSafe(sql))
             .bind(on_screen_int)
             .bind(start_time)
             .bind(end_time)
@@ -280,7 +280,7 @@ impl DatabaseManager {
         );
 
         let on_screen_int: i64 = if on_screen { 1 } else { 0 };
-        let mut q = sqlx::query_scalar::<_, i64>(&sql)
+        let mut q = sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(sql))
             .bind(on_screen_int)
             .bind(start_time)
             .bind(end_time)
@@ -401,7 +401,7 @@ impl DatabaseManager {
             },
         );
 
-        let mut query_builder = sqlx::query_as::<_, UiEventRow>(&sql);
+        let mut query_builder = sqlx::query_as::<_, UiEventRow>(sqlx::AssertSqlSafe(sql));
         for val in &bind_values {
             query_builder = query_builder.bind(val);
         }
@@ -634,7 +634,7 @@ impl DatabaseManager {
             where_clause
         );
 
-        let rows: Vec<UiEventRow> = sqlx::query_as(&sql)
+        let rows: Vec<UiEventRow> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
             .bind(query)
             .bind(limit)
             .fetch_all(&self.pool)

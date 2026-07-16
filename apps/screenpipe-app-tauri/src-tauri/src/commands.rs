@@ -93,7 +93,7 @@ mod tests {
 
     #[test]
     fn fallback_emits_seeded_key_with_auth_enabled() {
-        let v = fallback_local_api_config(Some("sp-cold-spawn-test".to_string()));
+        let v = fallback_local_api_config(Some("sp-cold-spawn-test".to_string()), 3030);
         assert_eq!(v["key"].as_str(), Some("sp-cold-spawn-test"));
         assert_eq!(v["port"], 3030);
         assert_eq!(v["auth_enabled"], true);
@@ -101,10 +101,16 @@ mod tests {
 
     #[test]
     fn fallback_emits_null_key_with_auth_disabled_when_unseeded() {
-        let v = fallback_local_api_config(None);
+        let v = fallback_local_api_config(None, 3030);
         assert!(v["key"].is_null());
         assert_eq!(v["port"], 3030);
         assert_eq!(v["auth_enabled"], false);
+    }
+
+    #[test]
+    fn fallback_preserves_effective_non_default_port() {
+        let v = fallback_local_api_config(Some("sp-cold-spawn-test".to_string()), 3041);
+        assert_eq!(v["port"], 3041);
     }
 }
 
@@ -156,7 +162,8 @@ pub async fn get_local_api_config(app_handle: tauri::AppHandle) -> serde_json::V
     // the privacy panel's API-key input stays empty until the user closes
     // and reopens Settings, even though the resolver already minted a key
     // that the spawning server will adopt verbatim.
-    fallback_local_api_config(crate::store::resolved_api_auth_key())
+    let effective_port = crate::recording::local_api_context_from_app(&app_handle).port;
+    fallback_local_api_config(crate::store::resolved_api_auth_key(), effective_port)
 }
 
 /// Get the app-local focus/notification server port.
@@ -173,13 +180,13 @@ pub fn get_app_server_config() -> serde_json::Value {
 
 /// Pure JSON shape used by the cold-spawn fallback. Extracted so the contract
 /// is covered by a unit test without needing a tauri::AppHandle. Port is the
-/// well-known default because the server hasn't bound yet — the UI will refresh
-/// once the server registers itself in `RecordingState`.
-fn fallback_local_api_config(cached_key: Option<String>) -> serde_json::Value {
+/// same effective port that the server config will use, including settings and
+/// the `SCREENPIPE_PORT` E2E/dev override.
+fn fallback_local_api_config(cached_key: Option<String>, effective_port: u16) -> serde_json::Value {
     let auth_enabled = cached_key.is_some();
     serde_json::json!({
         "key": cached_key,
-        "port": 3030,
+        "port": effective_port,
         "auth_enabled": auth_enabled,
     })
 }

@@ -265,7 +265,10 @@ pub async fn fetch_unredacted(
         extra = extra,
     );
 
-    let rows = sqlx::query(&q).bind(limit as i64).fetch_all(pool).await?;
+    let rows = sqlx::query(sqlx::AssertSqlSafe(q))
+        .bind(limit as i64)
+        .fetch_all(pool)
+        .await?;
     let out = rows
         .into_iter()
         .map(|r| UnredactedRow {
@@ -548,7 +551,7 @@ pub async fn write_redacted_element(
         "UPDATE elements SET {} WHERE id = ?",
         set_clauses.join(", ")
     );
-    let mut query = sqlx::query(&q);
+    let mut query = sqlx::query(sqlx::AssertSqlSafe(q));
     if let Some(t) = text {
         query = query.bind(t);
     }
@@ -586,7 +589,12 @@ pub async fn write_redacted(
         redacted_at_col = table.redacted_at_col(),
         pk = table.pk_col(),
     );
-    match sqlx::query(&q).bind(redacted).bind(id).execute(pool).await {
+    match sqlx::query(sqlx::AssertSqlSafe(q))
+        .bind(redacted)
+        .bind(id)
+        .execute(pool)
+        .await
+    {
         Ok(_) => Ok(()),
         // `audio_transcriptions` carries a UNIQUE(audio_chunk_id, transcription)
         // index (migration 20260126200000_dedupe_audio_transcriptions). When the
@@ -648,11 +656,16 @@ pub async fn fetch_unredacted_ui_events(
     cols: &[&str],
     limit: u32,
 ) -> Result<Vec<UiEventTextRow>, sqlx::Error> {
-    debug_assert!(!cols.is_empty(), "caller must pass ≥1 column (else skip)");
-    debug_assert!(
-        cols.iter().all(|c| UI_EVENT_TEXT_COLS.contains(c)),
-        "unknown ui_events column requested"
-    );
+    if cols.is_empty() {
+        return Err(sqlx::Error::Protocol(
+            "caller must pass at least one ui_events text column".to_string(),
+        ));
+    }
+    if let Some(col) = cols.iter().find(|c| !UI_EVENT_TEXT_COLS.contains(c)) {
+        return Err(sqlx::Error::Protocol(format!(
+            "unknown ui_events column requested: {col}"
+        )));
+    }
     // `col IS NOT NULL AND col != '' OR …` across every requested column.
     let any_nonempty = cols
         .iter()
@@ -667,7 +680,10 @@ pub async fn fetch_unredacted_ui_events(
          ORDER BY id DESC \
          LIMIT ?"
     );
-    let rows = sqlx::query(&q).bind(limit as i64).fetch_all(pool).await?;
+    let rows = sqlx::query(sqlx::AssertSqlSafe(q))
+        .bind(limit as i64)
+        .fetch_all(pool)
+        .await?;
     let out = rows
         .into_iter()
         .map(|r| {
@@ -701,11 +717,21 @@ pub async fn write_redacted_ui_events(
     id: i64,
     redacted: &[Option<String>],
 ) -> Result<(), sqlx::Error> {
-    debug_assert_eq!(
-        redacted.len(),
-        cols.len(),
-        "redacted vec must be parallel to cols"
-    );
+    if redacted.len() != cols.len() {
+        return Err(sqlx::Error::Protocol(
+            "redacted values must be parallel to ui_events columns".to_string(),
+        ));
+    }
+    if cols.is_empty() {
+        return Err(sqlx::Error::Protocol(
+            "caller must pass at least one ui_events text column".to_string(),
+        ));
+    }
+    if let Some(col) = cols.iter().find(|c| !UI_EVENT_TEXT_COLS.contains(c)) {
+        return Err(sqlx::Error::Protocol(format!(
+            "unknown ui_events column requested: {col}"
+        )));
+    }
     // Build `SET col = ?` only for the columns that actually changed,
     // always plus the watermark. Binding order matches the SET order.
     let mut set_clauses: Vec<String> = Vec::new();
@@ -722,7 +748,7 @@ pub async fn write_redacted_ui_events(
         "UPDATE ui_events SET {} WHERE id = ?",
         set_clauses.join(", ")
     );
-    let mut query = sqlx::query(&q);
+    let mut query = sqlx::query(sqlx::AssertSqlSafe(q));
     for v in values {
         query = query.bind(v);
     }

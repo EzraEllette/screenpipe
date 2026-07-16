@@ -439,7 +439,7 @@ impl DatabaseManager {
         let max_retries = 3;
         let mut last_error = None;
         for attempt in 1..=max_retries {
-            let mut q = sqlx::query_as::<_, MeetingRecord>(&sql);
+            let mut q = sqlx::query_as::<_, MeetingRecord>(sqlx::AssertSqlSafe(sql.as_str()));
             if let Some(st) = start_time {
                 q = q.bind(st);
             }
@@ -1164,7 +1164,7 @@ impl DatabaseManager {
             sets.len() + 1
         );
         let mut tx = self.begin_immediate_with_retry().await?;
-        let mut query = sqlx::query(&sql);
+        let mut query = sqlx::query(sqlx::AssertSqlSafe(sql));
         if let Some(v) = meeting_start {
             query = query.bind(normalize_timestamp_for_range_query(v));
         }
@@ -1218,7 +1218,7 @@ impl DatabaseManager {
              ORDER BY meeting_start ASC",
             in_clause
         );
-        let mut fetch_query = sqlx::query_as::<_, MeetingRecord>(&fetch_sql);
+        let mut fetch_query = sqlx::query_as::<_, MeetingRecord>(sqlx::AssertSqlSafe(fetch_sql));
         for id in ids.iter() {
             fetch_query = fetch_query.bind(*id);
         }
@@ -1319,7 +1319,7 @@ impl DatabaseManager {
                 "DELETE FROM meetings WHERE id IN ({})",
                 loser_placeholders.join(", ")
             );
-            let mut del_query = sqlx::query(&delete_sql);
+            let mut del_query = sqlx::query(sqlx::AssertSqlSafe(delete_sql));
             for &id in &losers {
                 del_query = del_query.bind(id);
             }

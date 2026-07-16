@@ -11,7 +11,7 @@ use chrono::{Duration, Utc};
 use screenpipe_db::DatabaseManager;
 
 async fn count(db: &DatabaseManager, sql: &str) -> i64 {
-    sqlx::query_scalar::<_, i64>(sql)
+    sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(sql))
         .fetch_one(&db.pool)
         .await
         .unwrap()

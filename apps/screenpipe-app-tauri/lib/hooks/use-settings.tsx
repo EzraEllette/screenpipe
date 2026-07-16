@@ -1195,11 +1195,15 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 				// IPC and overwrite a good key with `null` for the majority of
 				// users (who never set a custom api key) — which silently breaks
 				// every WebSocket auth path.
-				const { configureApi } = await import("@/lib/api");
+				const { configureApi, refreshApiConfig } = await import("@/lib/api");
 				configureApi({
 					port: loadedSettings.port ?? 3030,
 					authEnabled: loadedSettings.apiAuth ?? true,
 				});
+				// The running backend is the source of truth for effective overrides
+				// such as SCREENPIPE_PORT. Refresh after applying the persisted
+				// fallback so every window talks to the server that actually started.
+				await refreshApiConfig();
 
 				// Hydrate Rust's owned-browser runtime cache from persisted settings.
 				// This prevents the cookie-access prompt from reappearing after restart.

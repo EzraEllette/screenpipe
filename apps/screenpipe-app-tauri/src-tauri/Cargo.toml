@@ -9,7 +9,7 @@ license = ""
 repository = ""
 default-run = "screenpipe-app"
 edition = "2021"
-rust-version = "1.92"
+rust-version = "1.94"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -204,7 +204,7 @@ tauri-nspanel = { git = "https://github.com/ahkohd/tauri-nspanel", rev = "18ffb9
 # `encrypted_value`, then inject via `WKHTTPCookieStore.setCookie` so
 # the agent's webview ships with the user's logged-in sessions instead
 # of an empty cookie jar.
-rusqlite = { version = "0.29.0", features = ["bundled"] }
+rusqlite = { version = "=0.39.0", features = ["bundled"] }
 security-framework = "3.7.0"
 aes = "0.8.4"
 cbc = "0.1.2"
@@ -219,7 +219,7 @@ image = "0.25.5"
 windows-icons = { git = "https://github.com/tribhuwan-kumar/windows-icons.git", rev = "4dcd086b36bed286181cb87636ad6eb058ab7684" }
 base64 = "0.22.1"
 aes-gcm = "0.10"
-rusqlite = { version = "0.29.0", features = ["bundled"] }
+rusqlite = { version = "=0.39.0", features = ["bundled"] }
 raw-window-handle = "0.6"
 webview2-com = "=0.38.2"
 windows-core = "0.61.2"
@@ -319,9 +319,6 @@ ignored = ["tauri-utils", "screenpipe-redact", "thiserror", "screenpipe-sync", "
 # Pinned by commit (not branch) for reproducible builds; drop once
 # upstream tauri-apps/muda#361 merges and ships in a released muda.
 muda = { git = "https://github.com/divanshu-go/muda", rev = "327f3f8198b0ecdc3d58d7be85dfb83b2fa0d05d" }
-# This manifest is a standalone workspace, so repeat the root workspace's
-# WAL-reset-safe bundled SQLite source selection here.
-libsqlite3-sys = { path = "../../../vendor/libsqlite3-sys" }
 
 [profile.release]
 codegen-units = 1

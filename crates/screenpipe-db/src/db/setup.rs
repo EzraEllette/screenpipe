@@ -17,11 +17,23 @@ impl DatabaseManager {
         let connection_string = format!("sqlite:{}", database_path);
 
         unsafe {
-            sqlite3_auto_extension(Some(
-                std::mem::transmute::<*const (), unsafe extern "C" fn()>(
-                    sqlite3_vec_init as *const (),
-                ),
-            ));
+            // The current sqlite-vec Rust binding exposes this symbol as `fn()`, while its C
+            // implementation uses SQLite's three-argument extension ABI.
+            type SqliteExtensionInit = unsafe extern "C" fn(
+                *mut libsqlite3_sys::sqlite3,
+                *mut *mut std::ffi::c_char,
+                *const libsqlite3_sys::sqlite3_api_routines,
+            ) -> std::ffi::c_int;
+
+            let init = std::mem::transmute::<unsafe extern "C" fn(), SqliteExtensionInit>(
+                sqlite3_vec_init,
+            );
+            let rc = sqlite3_auto_extension(Some(init));
+            if rc != libsqlite3_sys::SQLITE_OK {
+                return Err(SqlxError::Protocol(format!(
+                    "failed to register sqlite-vec auto-extension: SQLite error code {rc}"
+                )));
+            }
         }
 
         // Ensure the data dir exists before opening the file — a missing parent
@@ -361,7 +373,7 @@ impl DatabaseManager {
             if row.0 == 0 {
                 tracing::info!("Adding missing column frames.{}", col_name);
                 let sql = format!("ALTER TABLE frames ADD COLUMN {} {}", col_name, col_type);
-                sqlx::query(&sql).execute(pool).await?;
+                sqlx::query(sqlx::AssertSqlSafe(sql)).execute(pool).await?;
             }
         }
 
@@ -399,7 +411,7 @@ impl DatabaseManager {
             if row.0 == 0 {
                 tracing::info!("Adding missing column memories.{}", col_name);
                 let sql = format!("ALTER TABLE memories ADD COLUMN {} {}", col_name, col_type);
-                sqlx::query(&sql).execute(pool).await?;
+                sqlx::query(sqlx::AssertSqlSafe(sql)).execute(pool).await?;
             }
         }
         sqlx::query(

@@ -279,7 +279,7 @@ async fn flush_level0_bulk(
         }
         sql.push_str("(?,'ocr','block',?,NULL,0,?,?,?,?,?,?)");
     }
-    let mut q = sqlx::query(&sql);
+    let mut q = sqlx::query(sqlx::AssertSqlSafe(sql));
     for row in chunk {
         q = q
             .bind(frame_id)
@@ -341,7 +341,7 @@ async fn flush_ax_bulk(
         }
         sql.push_str("(?,?,'accessibility',?,?,?,?,?,?,?,?,NULL,?,?,?)");
     }
-    let mut q = sqlx::query(&sql);
+    let mut q = sqlx::query(sqlx::AssertSqlSafe(sql));
     for row in chunk {
         q = q
             .bind(row.id)

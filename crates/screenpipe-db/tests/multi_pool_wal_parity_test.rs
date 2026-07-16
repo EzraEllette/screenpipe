@@ -38,7 +38,7 @@ fn temp_db() -> (tempfile::TempDir, String) {
 }
 
 async fn pragma_i64(pool: &SqlitePool, name: &str) -> i64 {
-    let row = sqlx::query(&format!("PRAGMA {name}"))
+    let row = sqlx::query(sqlx::AssertSqlSafe(format!("PRAGMA {name}")))
         .fetch_one(pool)
         .await
         .unwrap_or_else(|e| panic!("PRAGMA {name}: {e}"));
@@ -47,7 +47,7 @@ async fn pragma_i64(pool: &SqlitePool, name: &str) -> i64 {
 }
 
 async fn pragma_text(pool: &SqlitePool, name: &str) -> String {
-    let row = sqlx::query(&format!("PRAGMA {name}"))
+    let row = sqlx::query(sqlx::AssertSqlSafe(format!("PRAGMA {name}")))
         .fetch_one(pool)
         .await
         .unwrap_or_else(|e| panic!("PRAGMA {name}: {e}"));
