@@ -4535,10 +4535,7 @@ impl PipeManager {
                         continue;
                     }
 
-                    if let Some(reason) = scheduler_run_guard
-                        .as_ref()
-                        .and_then(|guard| guard())
-                    {
+                    if let Some(reason) = scheduler_run_guard.as_ref().and_then(|guard| guard()) {
                         if due {
                             let skipped_at = Utc::now();
                             last_run.insert(name.clone(), skipped_at);
