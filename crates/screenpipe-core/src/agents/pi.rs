@@ -16,9 +16,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
-const PI_PACKAGE: &str = "@earendil-works/pi-coding-agent@0.75.4";
-const PI_AI_PACKAGE: &str = "@earendil-works/pi-ai@0.75.4";
-const PI_NAMESPACE_DIR: &str = "@earendil-works";
+pub const PI_PACKAGE: &str = "@earendil-works/pi-coding-agent@0.80.6";
+pub const PI_AI_PACKAGE: &str = "@earendil-works/pi-ai@0.80.6";
+pub const PI_NAMESPACE_DIR: &str = "@earendil-works";
 pub const SCREENPIPE_API_URL: &str = "https://api.screenpipe.com/v1";
 
 /// Windows creation flags for background agent spawns: CREATE_NO_WINDOW
@@ -882,13 +882,14 @@ impl PiExecutor {
         };
 
         if should_add_screenpipe {
-            // Use actual token value in apiKey — Pi doesn't resolve env var names,
-            // so writing the literal string "SCREENPIPE_API_KEY" causes tier=anonymous.
-            // Resolve from: argument > env var > literal fallback (last resort).
+            // Use actual token value in apiKey — Pi doesn't resolve bare env var
+            // names, so writing the literal string "SCREENPIPE_API_KEY" causes
+            // tier=anonymous. Resolve from: argument > env var > `$` env-var
+            // reference (last resort; resolves at pi runtime if the var appears).
             let api_key_value = user_token
                 .map(|t| t.to_string())
                 .or_else(|| std::env::var("SCREENPIPE_API_KEY").ok())
-                .unwrap_or_else(|| "SCREENPIPE_API_KEY".to_string());
+                .unwrap_or_else(|| "$SCREENPIPE_API_KEY".to_string());
             let api_key_value = api_key_value.as_str();
             let models = screenpipe_cloud_models(api_url, user_token).await;
             // PiExecutor only runs pipes (PipeManager: scheduled / run-now),
@@ -924,22 +925,24 @@ impl PiExecutor {
                         provider_url.unwrap_or("http://localhost:11434/v1"),
                         "ollama",
                     ),
+                    // `$NAME` is pi's explicit env-var reference syntax; pi >= 0.80
+                    // sends bare names to the provider as literal API keys.
                     "openai" => (
                         "openai-byok",
                         provider_url.unwrap_or("https://api.openai.com/v1"),
-                        "OPENAI_API_KEY",
+                        "$OPENAI_API_KEY",
                     ),
                     "openai-chatgpt" => (
                         "openai-chatgpt",
                         "https://chatgpt.com/backend-api",
-                        "OPENAI_CHATGPT_TOKEN",
+                        "$OPENAI_CHATGPT_TOKEN",
                     ),
                     "anthropic" => (
                         "anthropic-byok",
                         provider_url.unwrap_or("https://api.anthropic.com"),
-                        "ANTHROPIC_API_KEY",
+                        "$ANTHROPIC_API_KEY",
                     ),
-                    other => (other, provider_url.unwrap_or(""), "CUSTOM_API_KEY"),
+                    other => (other, provider_url.unwrap_or(""), "$CUSTOM_API_KEY"),
                 };
 
                 // Pi's models.json schema requires baseUrl to have minLength: 1.
@@ -2041,6 +2044,49 @@ pub fn pi_config_dir() -> Result<PathBuf> {
     };
     seed_pi_config_from_global(&dir);
     Ok(dir)
+}
+
+fn pi_package_source_matches(source: &str, package_name: &str) -> bool {
+    let Some(spec) = source.trim().strip_prefix("npm:") else {
+        return false;
+    };
+    if spec == package_name {
+        return true;
+    }
+    spec.strip_prefix(package_name)
+        .is_some_and(|suffix| suffix.starts_with('@'))
+}
+
+fn pi_settings_enable_package(settings: &serde_json::Value, package_name: &str) -> bool {
+    settings
+        .get("packages")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|packages| {
+            packages.iter().any(|package| {
+                package
+                    .as_str()
+                    .or_else(|| package.get("source").and_then(serde_json::Value::as_str))
+                    .is_some_and(|source| pi_package_source_matches(source, package_name))
+            })
+        })
+}
+
+/// Return whether a Pi npm package is enabled in screenpipe's isolated config.
+///
+/// Packages can be strings or filtered objects and can include an npm version.
+/// Any read or parse failure is treated as disabled so prompts never advertise
+/// tools that Pi cannot actually load.
+pub fn pi_package_enabled(package_name: &str) -> bool {
+    let Ok(config_dir) = pi_config_dir() else {
+        return false;
+    };
+    let Ok(raw) = std::fs::read_to_string(config_dir.join("settings.json")) else {
+        return false;
+    };
+    let Ok(settings) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return false;
+    };
+    pi_settings_enable_package(&settings, package_name)
 }
 
 fn get_pi_config_dir() -> Result<PathBuf> {
@@ -3341,6 +3387,89 @@ mod tests {
         );
         assert!(parts.iter().any(|path| path == &existing_a));
         assert!(parts.iter().any(|path| path == &existing_b));
+    }
+
+    #[test]
+    fn pi_package_detection_handles_versions_and_filtered_objects() {
+        let settings = serde_json::json!({
+            "packages": [
+                "npm:pi-web-agent",
+                "npm:pi-subagents@0.33.1",
+                {"source": "npm:@eko24ive/pi-ask", "extensions": ["index.ts"]}
+            ]
+        });
+
+        assert!(pi_settings_enable_package(&settings, "pi-subagents"));
+        assert!(pi_settings_enable_package(&settings, "@eko24ive/pi-ask"));
+        assert!(!pi_settings_enable_package(&settings, "pi-subagent"));
+        assert!(!pi_settings_enable_package(&settings, "subagents"));
+    }
+
+    /// Live parent -> subagent -> parent smoke test.
+    ///
+    /// Run with:
+    /// SCREENPIPE_E2E_CLOUD_TOKEN=... cargo test -p screenpipe-core \
+    ///   pi_subagents_parent_child_e2e -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn pi_subagents_parent_child_e2e() {
+        let token = std::env::var("SCREENPIPE_E2E_CLOUD_TOKEN")
+            .expect("SCREENPIPE_E2E_CLOUD_TOKEN is required for this live test");
+        assert!(
+            pi_package_enabled("pi-subagents"),
+            "enable npm:pi-subagents in Settings > Pi extensions first"
+        );
+
+        let working_dir = tempfile::tempdir().expect("temp working dir");
+        let output = PiExecutor::new(Some(token))
+            .run(
+                "Use the subagent tool exactly once. Ask the child to reply with only CHILD_OK. This is read-only, so pass acceptance.level=none. After the child succeeds, reply with only PARENT_OK.",
+                "auto",
+                working_dir.path(),
+                None,
+                None,
+                None,
+                None,
+                false,
+            )
+            .await
+            .expect("run parent Pi agent");
+
+        assert!(output.success, "parent failed: {}", output.stderr);
+        assert!(
+            output.stdout.contains("PARENT_OK"),
+            "parent did not finish after its child: {}",
+            output.stdout
+        );
+
+        let artifacts_dir = working_dir.path().join(".pi-subagents").join("artifacts");
+        let child_succeeded = std::fs::read_dir(&artifacts_dir)
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().ends_with("_meta.json"))
+            .any(|entry| {
+                let Ok(raw_meta) = std::fs::read_to_string(entry.path()) else {
+                    return false;
+                };
+                let Ok(meta) = serde_json::from_str::<serde_json::Value>(&raw_meta) else {
+                    return false;
+                };
+                let output_name = entry
+                    .file_name()
+                    .to_string_lossy()
+                    .replace("_meta.json", "_output.md");
+                let output = std::fs::read_to_string(entry.path().with_file_name(output_name))
+                    .unwrap_or_default();
+                meta.get("exitCode").and_then(serde_json::Value::as_i64) == Some(0)
+                    && output.contains("CHILD_OK")
+            });
+        assert!(
+            child_succeeded,
+            "no successful CHILD_OK run found under {} (parent output: {})",
+            artifacts_dir.display(),
+            output.stdout
+        );
     }
 
     #[test]

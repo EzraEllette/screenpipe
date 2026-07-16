@@ -37,3 +37,28 @@ export function cacheAnalyticsId(id: string | undefined | null): void {
 		// best-effort and must never break app boot.
 	}
 }
+
+// Same pattern for the analytics opt-out preference: cache it in localStorage
+// so providers.tsx can read it SYNCHRONOUSLY on boot and sync PostHog
+// opt-in/out right after init — before the async settings IPC resolves.
+export const ANALYTICS_ENABLED_KEY = "screenpipe_analytics_enabled";
+
+export function readCachedAnalyticsEnabled(): boolean | undefined {
+	if (typeof window === "undefined") return undefined;
+	try {
+		const raw = localStorage.getItem(ANALYTICS_ENABLED_KEY);
+		if (raw === null) return undefined;
+		return raw === "true";
+	} catch {
+		return undefined;
+	}
+}
+
+export function cacheAnalyticsEnabled(enabled: boolean): void {
+	if (typeof window === "undefined") return;
+	try {
+		localStorage.setItem(ANALYTICS_ENABLED_KEY, String(enabled));
+	} catch {
+		// Best-effort — must never break app boot.
+	}
+}

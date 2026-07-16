@@ -12,8 +12,9 @@ use crate::tree::macos_lines::{self, NormalizeRefs};
 use anyhow::Result;
 use chrono::Utc;
 use cidre::{arc, arc::Retained, ax, cf, ns};
+use objc2::AnyThread;
+use objc2_foundation::{NSAppleScript, NSString};
 use screenpipe_core::window_pattern::{self, WindowPattern};
-use std::process::Command;
 use std::time::{Duration, Instant};
 use tracing::debug;
 
@@ -156,17 +157,35 @@ fn percent_decode_path(s: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
+/// True for an `http`/`https` URL — the only schemes that belong in the
+/// `browser_url` column. Chrome/Arc-internal (`chrome://`, `arc://`) and
+/// Electron `file://` pages are filtered out so they don't pollute it.
+fn is_http_url(url: &str) -> bool {
+    url.starts_with("http://") || url.starts_with("https://")
+}
+
 /// Extract the browser URL from the focused window using AX APIs.
-/// Tries AXDocument first (works for Safari, Chrome, etc.), then
-/// AppleScript for Arc, then falls back to shallow AXTextField walk.
+///
+/// Tier chain, cheapest/most-reliable first:
+///   1. `AXDocument` on the window — set by Safari, Chrome, Edge.
+///   2. **`AXWebArea` → `AXURL` descent** ([`find_web_area_url`]). Chromium
+///      exposes the live document URL on its web-area element even when the
+///      window skips `AXDocument` (Arc), so this covers every Chromium-family
+///      browser and Electron app in ~2ms with no subprocess. This replaced the
+///      per-walk `osascript` spawn that used to cost ~150-200ms on Arc.
+///   3. Arc-only AppleScript fallback ([`get_arc_url_cached`]) for windows with
+///      no web area yet (mid-load, Little Arc / command-bar popups). In-process
+///      and cached — never spawns `osascript`.
+///   4. Shallow `AXTextField`/`AXComboBox` walk for the address bar.
 fn extract_browser_url(
     window: &ax::UiElement,
+    pid: i32,
     app_name: &str,
     window_name: &str,
 ) -> Option<String> {
-    // Tier 1: AXDocument attribute on the window
+    // Tier 1: AXDocument attribute on the window.
     if let Some(url) = get_string_attr(window, ax::attr::document()) {
-        if url.starts_with("http://") || url.starts_with("https://") {
+        if is_http_url(&url) {
             debug!(
                 "browser_url: tier1 AXDocument hit for {}: {}",
                 app_name, url
@@ -175,19 +194,30 @@ fn extract_browser_url(
         }
     }
 
-    // Tier 2: For Arc, use AppleScript (AXDocument may not be set)
-    let app_lower = app_name.to_lowercase();
-    if app_lower.contains("arc") {
-        if let Some(url) = get_arc_url() {
-            debug!("browser_url: tier2 Arc AppleScript hit: {}", url);
+    // Tier 2: descend to the focused window's first AXWebArea and read AXURL.
+    if let Some(url) = find_web_area_url(window, WEB_AREA_DEPTH_CAP, WEB_AREA_VISIT_CAP) {
+        if is_http_url(&url) {
+            debug!(
+                "browser_url: tier2 AXWebArea AXURL hit for {}: {}",
+                app_name, url
+            );
             return Some(url);
         }
     }
 
-    // Tier 3: Shallow walk for AXTextField with URL-like value
+    // Tier 3: Arc-only in-process AppleScript fallback (no web area found yet).
+    let app_lower = app_name.to_lowercase();
+    if app_lower.contains("arc") {
+        if let Some(url) = get_arc_url_cached(pid, window_name) {
+            debug!("browser_url: tier3 Arc AppleScript hit: {}", url);
+            return Some(url);
+        }
+    }
+
+    // Tier 4: shallow walk for an AXTextField with a URL-like value.
     if let Some(url) = find_url_in_children(window, 0, 5) {
         debug!(
-            "browser_url: tier3 AXTextField hit for {}: {}",
+            "browser_url: tier4 AXTextField hit for {}: {}",
             app_name, url
         );
         return Some(url);
@@ -200,36 +230,231 @@ fn extract_browser_url(
     None
 }
 
-/// Get Arc browser's current URL via AppleScript.
-fn get_arc_url() -> Option<String> {
-    let script = r#"tell application "Arc" to return URL of active tab of front window"#;
+/// Depth/visit caps for the [`find_web_area_url`] descent.
+///
+/// Measured need on real windows is depth 2-7 / 3-8 visits (Arc, Claude); these
+/// caps give ~10x margin. The **visit** cap is the load-bearing one: a depth cap
+/// alone does not bound a miss on a slow, wide native AX provider — a depth-12
+/// descent on System Settings visited 220 nodes and burned 0.7-2.0s. In practice
+/// the URL path is browser-gated at the call site (fast providers, ~0.5-1ms per
+/// visit), but the cap makes the worst case provable.
+const WEB_AREA_DEPTH_CAP: usize = 12;
+const WEB_AREA_VISIT_CAP: usize = 75;
 
-    let output = match Command::new("osascript").arg("-e").arg(script).output() {
-        Ok(o) => o,
-        Err(e) => {
-            debug!("get_arc_url: osascript spawn failed: {}", e);
-            return None;
+/// Read `AXURL` off an element, coercing either a `CFString` or a `CFURL`
+/// (Chromium can return either) to a `String`. Returns `None` for any other
+/// type or a read failure.
+fn get_url_attr(elem: &ax::UiElement) -> Option<String> {
+    let v = elem.attr_value(ax::attr::url()).ok()?;
+    let tid = v.get_type_id();
+    if tid == cf::String::type_id() {
+        let s: &cf::String = unsafe { std::mem::transmute(&*v) };
+        Some(s.to_string())
+    } else if tid == cf::Url::type_id() {
+        let u: &cf::Url = unsafe { std::mem::transmute(&*v) };
+        Some(u.cf_string().to_string())
+    } else {
+        None
+    }
+}
+
+/// Abstraction over the traversal a [`find_web_area_url`] descent needs, so the
+/// depth/visit-cap logic can be unit-tested against a synthetic tree without a
+/// live `ax::UiElement` (implemented for `Retained<ax::UiElement>` below and for
+/// a fake node in the tests).
+trait WebAreaDfsNode: Sized {
+    fn role_name(&self) -> Option<String>;
+    fn read_url(&self) -> Option<String>;
+    fn dfs_children(&self) -> Vec<Self>;
+}
+
+impl WebAreaDfsNode for Retained<ax::UiElement> {
+    fn role_name(&self) -> Option<String> {
+        self.role().ok().map(|r| r.to_string())
+    }
+    fn read_url(&self) -> Option<String> {
+        get_url_attr(self)
+    }
+    fn dfs_children(&self) -> Vec<Self> {
+        match self.children() {
+            Ok(children) => (0..children.len())
+                .map(|i| children[i].retained())
+                .collect(),
+            Err(_) => Vec::new(),
         }
-    };
+    }
+}
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        debug!(
-            "get_arc_url: osascript failed (exit={}): {}",
-            output.status,
-            stderr.trim()
-        );
+/// Descend (children only) to the focused window's first `AXWebArea` and return
+/// its `AXURL`. Only the visible/active tab has a web area in the AX tree, so
+/// the first web area found IS the active tab; split view keeps today's
+/// one-URL-per-window semantics. The descent stops at the first web area even
+/// if its `AXURL` is empty (that becomes `None` and the caller falls through).
+///
+/// The scheme filter (`http(s)://`) is applied by the caller.
+fn find_web_area_url(window: &ax::UiElement, depth_cap: usize, visit_cap: usize) -> Option<String> {
+    let mut visited = 0usize;
+    web_area_dfs(&window.retained(), 0, depth_cap, visit_cap, &mut visited).flatten()
+}
+
+/// Generic depth/visit-capped DFS backing [`find_web_area_url`].
+///
+/// Returns `Some(url_opt)` once a web area is reached — `url_opt` is its `AXURL`
+/// (possibly `None`) and the whole search stops — or `None` if no web area was
+/// found within the caps. Both caps are hard stops; `visited` is checked before
+/// every node so a wide tree cannot exceed `visit_cap` reads.
+fn web_area_dfs<N: WebAreaDfsNode>(
+    node: &N,
+    depth: usize,
+    depth_cap: usize,
+    visit_cap: usize,
+    visited: &mut usize,
+) -> Option<Option<String>> {
+    if *visited >= visit_cap {
+        return None;
+    }
+    *visited += 1;
+
+    if node.role_name().as_deref() == Some("AXWebArea") {
+        return Some(node.read_url());
+    }
+
+    if depth >= depth_cap {
         return None;
     }
 
-    let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
-
-    if url.starts_with("http://") || url.starts_with("https://") {
-        Some(url)
-    } else {
-        debug!("get_arc_url: URL not http(s): {}", url);
-        None
+    for child in node.dfs_children() {
+        if *visited >= visit_cap {
+            break;
+        }
+        if let Some(found) = web_area_dfs(&child, depth + 1, depth_cap, visit_cap, visited) {
+            return Some(found);
+        }
     }
+    None
+}
+
+/// TTLs for the Arc AppleScript fallback cache. A positive result (a URL)
+/// expires faster than a negative one — a window sitting mid-load / on a popup
+/// shouldn't re-run the script every walk.
+const ARC_URL_POSITIVE_TTL: Duration = Duration::from_secs(12);
+const ARC_URL_NEGATIVE_TTL: Duration = Duration::from_secs(30);
+
+/// Single-entry, process-global cache for the Arc AppleScript fallback, keyed on
+/// `(pid, window_name)`.
+///
+/// It cannot live on `MacosTreeWalker`: the vision pipeline recreates the walker
+/// on every frame (see the `CRITICAL:` note by [`ENHANCED_MODE_CACHE`]), so a
+/// per-walker cache would re-run the script on every walk. Split from the
+/// AppleScript transport so the TTL logic is unit-testable with an injected
+/// `now: Instant`.
+#[derive(Default)]
+struct ArcUrlCache {
+    entry: Option<ArcUrlEntry>,
+}
+
+struct ArcUrlEntry {
+    key: (i32, String),
+    /// `Some` = cached URL; `None` = cached negative (Arc returned nothing).
+    value: Option<String>,
+    stamped: Instant,
+}
+
+impl ArcUrlCache {
+    /// Fresh cached value for `key`, or `None` if the entry is absent, for a
+    /// different key, or stale under its value-dependent TTL. On a hit the inner
+    /// `Option<String>` is the cached value itself (which may be a negative
+    /// `None`); on a miss the caller must recompute.
+    fn get(&self, key: &(i32, String), now: Instant) -> Option<Option<String>> {
+        let entry = self.entry.as_ref()?;
+        if &entry.key != key {
+            return None;
+        }
+        let ttl = if entry.value.is_some() {
+            ARC_URL_POSITIVE_TTL
+        } else {
+            ARC_URL_NEGATIVE_TTL
+        };
+        if now.saturating_duration_since(entry.stamped) < ttl {
+            Some(entry.value.clone())
+        } else {
+            None
+        }
+    }
+
+    fn put(&mut self, key: (i32, String), value: Option<String>, now: Instant) {
+        self.entry = Some(ArcUrlEntry {
+            key,
+            value,
+            stamped: now,
+        });
+    }
+}
+
+static ARC_URL_CACHE: std::sync::LazyLock<parking_lot::Mutex<ArcUrlCache>> =
+    std::sync::LazyLock::new(|| parking_lot::Mutex::new(ArcUrlCache::default()));
+
+/// Arc-only fallback: current active-tab URL via a compiled-once, in-process
+/// AppleScript, wrapped in [`ARC_URL_CACHE`]. Used only when the `AXWebArea`
+/// descent (tier 2) found no web area. Never spawns `osascript`.
+fn get_arc_url_cached(pid: i32, window_name: &str) -> Option<String> {
+    let key = (pid, window_name.to_string());
+    let now = Instant::now();
+    if let Some(cached) = ARC_URL_CACHE.lock().get(&key, now) {
+        return cached;
+    }
+    let url = run_arc_url_applescript();
+    ARC_URL_CACHE.lock().put(key, url.clone(), now);
+    url
+}
+
+thread_local! {
+    /// Compiled-once `NSAppleScript` for the Arc URL query. Held per-thread
+    /// because the walker runs on pooled tokio blocking threads and an
+    /// `NSAppleScript` is not `Send`; the one-time compile cost (~120ms) is paid
+    /// at most once per thread, and the process-global result cache means it's
+    /// re-executed rarely regardless. Compiling once turns each call into just
+    /// the Apple Event round trip (~5-13ms warm), versus the ~160-180ms a fresh
+    /// `osascript` spawn re-paid every time.
+    static ARC_URL_SCRIPT: std::cell::RefCell<Option<objc2::rc::Retained<NSAppleScript>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Execute the compiled Arc URL AppleScript in-process and return an `http(s)`
+/// URL if the front window has an active tab. Sends the Apple Event directly
+/// (no subprocess); relies on the same Apple-Events automation TCC grant the old
+/// `osascript` path used.
+fn run_arc_url_applescript() -> Option<String> {
+    ARC_URL_SCRIPT.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        if slot.is_none() {
+            let source = NSString::from_str(
+                r#"tell application "Arc" to return URL of active tab of front window"#,
+            );
+            let Some(script) = NSAppleScript::initWithSource(NSAppleScript::alloc(), &source)
+            else {
+                debug!("get_arc_url: NSAppleScript init failed");
+                return None;
+            };
+            // Compile eagerly so per-call cost is just the Apple Event round trip.
+            let compiled = unsafe { script.compileAndReturnError(None) };
+            if !compiled {
+                debug!("get_arc_url: NSAppleScript compile failed");
+                return None;
+            }
+            *slot = Some(script);
+        }
+        let script = slot.as_ref()?;
+        let descriptor = unsafe { script.executeAndReturnError(None) };
+        let value = descriptor.stringValue()?;
+        let url = value.to_string();
+        if is_http_url(&url) {
+            Some(url)
+        } else {
+            debug!("get_arc_url: AppleScript URL not http(s): {}", url);
+            None
+        }
+    })
 }
 
 /// Shallow walk of AX children to find a text field containing a URL.
@@ -542,7 +767,7 @@ impl MacosTreeWalker {
 
         // Extract browser URL (runs after tree walk to avoid affecting walk timeout)
         let browser_url = if is_browser(&app_lower) {
-            extract_browser_url(window, &app_name, &window_name)
+            extract_browser_url(window, pid, &app_name, &window_name)
         } else {
             None
         };
@@ -2378,5 +2603,170 @@ mod tests {
         assert!(!is_vscode_terminal_list_role("AXGroup", 30, &app));
         assert!(!is_vscode_terminal_list_role("AXStaticText", 30, &app));
         assert!(!is_vscode_terminal_list_role("AXWebArea", 30, &app));
+    }
+
+    // ---- Fix 1: AXWebArea → AXURL descent caps ----
+
+    /// Synthetic tree implementing [`WebAreaDfsNode`] so the descent's
+    /// depth/visit-cap logic is testable without a live `ax::UiElement`.
+    #[derive(Clone)]
+    struct FakeNode {
+        role: &'static str,
+        url: Option<String>,
+        children: Vec<FakeNode>,
+    }
+
+    impl FakeNode {
+        fn group(children: Vec<FakeNode>) -> Self {
+            FakeNode {
+                role: "AXGroup",
+                url: None,
+                children,
+            }
+        }
+        fn web_area(url: Option<&str>) -> Self {
+            FakeNode {
+                role: "AXWebArea",
+                url: url.map(String::from),
+                children: vec![],
+            }
+        }
+    }
+
+    impl WebAreaDfsNode for FakeNode {
+        fn role_name(&self) -> Option<String> {
+            Some(self.role.to_string())
+        }
+        fn read_url(&self) -> Option<String> {
+            self.url.clone()
+        }
+        fn dfs_children(&self) -> Vec<Self> {
+            self.children.clone()
+        }
+    }
+
+    fn descend(
+        root: &FakeNode,
+        depth_cap: usize,
+        visit_cap: usize,
+    ) -> (Option<Option<String>>, usize) {
+        let mut visited = 0usize;
+        let out = web_area_dfs(root, 0, depth_cap, visit_cap, &mut visited);
+        (out, visited)
+    }
+
+    #[test]
+    fn test_web_area_dfs_finds_first_url() {
+        // AXGroup > AXGroup > AXWebArea(url) — mirrors Arc's depth-2 web area.
+        let tree = FakeNode::group(vec![FakeNode::group(vec![FakeNode::web_area(Some(
+            "https://mail.google.com/mail/u/0/#inbox",
+        ))])]);
+        let (out, visited) = descend(&tree, WEB_AREA_DEPTH_CAP, WEB_AREA_VISIT_CAP);
+        assert_eq!(
+            out.flatten().as_deref(),
+            Some("https://mail.google.com/mail/u/0/#inbox")
+        );
+        assert_eq!(visited, 3);
+    }
+
+    #[test]
+    fn test_web_area_dfs_web_area_without_url_stops() {
+        // First web area has no AXURL: descent stops there (returns Some(None)),
+        // it does NOT keep searching a later web area.
+        let tree = FakeNode::group(vec![
+            FakeNode::web_area(None),
+            FakeNode::web_area(Some("https://example.com")),
+        ]);
+        let (out, _) = descend(&tree, WEB_AREA_DEPTH_CAP, WEB_AREA_VISIT_CAP);
+        assert_eq!(out, Some(None));
+    }
+
+    #[test]
+    fn test_web_area_dfs_visit_cap_bounds_wide_tree() {
+        // A wide, web-area-free tree (like System Settings) must stop at
+        // visit_cap — the depth cap alone would not bound this.
+        let wide: Vec<FakeNode> = (0..500).map(|_| FakeNode::group(vec![])).collect();
+        let tree = FakeNode::group(wide);
+        let (out, visited) = descend(&tree, WEB_AREA_DEPTH_CAP, 75);
+        assert_eq!(out, None);
+        assert!(visited <= 75, "visited {visited} exceeded cap");
+    }
+
+    #[test]
+    fn test_web_area_dfs_depth_cap_bounds_deep_tree() {
+        // A single deep chain with the web area buried below the depth cap:
+        // the descent gives up without finding it and without error.
+        let mut node = FakeNode::web_area(Some("https://buried.example"));
+        for _ in 0..50 {
+            node = FakeNode::group(vec![node]);
+        }
+        let (out, _) = descend(&node, 12, WEB_AREA_VISIT_CAP);
+        assert_eq!(out, None);
+    }
+
+    // ---- Fix 1: Arc AppleScript fallback cache ----
+
+    fn key() -> (i32, String) {
+        (1234, "Arc — Inbox".to_string())
+    }
+
+    #[test]
+    fn test_arc_cache_miss_then_hit() {
+        let mut cache = ArcUrlCache::default();
+        let t0 = Instant::now();
+        assert_eq!(cache.get(&key(), t0), None, "empty cache is a miss");
+
+        cache.put(key(), Some("https://a.example".into()), t0);
+        assert_eq!(
+            cache.get(&key(), t0),
+            Some(Some("https://a.example".into())),
+            "fresh positive entry hits"
+        );
+    }
+
+    #[test]
+    fn test_arc_cache_positive_expiry() {
+        let mut cache = ArcUrlCache::default();
+        let t0 = Instant::now();
+        cache.put(key(), Some("https://a.example".into()), t0);
+
+        let before = t0 + ARC_URL_POSITIVE_TTL - Duration::from_millis(1);
+        assert!(cache.get(&key(), before).is_some(), "hit just before TTL");
+
+        let after = t0 + ARC_URL_POSITIVE_TTL + Duration::from_millis(1);
+        assert_eq!(cache.get(&key(), after), None, "miss past positive TTL");
+    }
+
+    #[test]
+    fn test_arc_cache_negative_cached_longer() {
+        // A negative result is cached, and for longer than a positive one.
+        let mut cache = ArcUrlCache::default();
+        let t0 = Instant::now();
+        cache.put(key(), None, t0);
+
+        // Still a hit at a point where a positive entry would already be stale.
+        let mid = t0 + ARC_URL_POSITIVE_TTL + Duration::from_secs(1);
+        assert!(mid < t0 + ARC_URL_NEGATIVE_TTL);
+        assert_eq!(
+            cache.get(&key(), mid),
+            Some(None),
+            "negative entry still fresh under negative TTL"
+        );
+
+        let after = t0 + ARC_URL_NEGATIVE_TTL + Duration::from_millis(1);
+        assert_eq!(cache.get(&key(), after), None, "miss past negative TTL");
+    }
+
+    #[test]
+    fn test_arc_cache_different_key_misses() {
+        let mut cache = ArcUrlCache::default();
+        let t0 = Instant::now();
+        cache.put(key(), Some("https://a.example".into()), t0);
+
+        let other = (1234, "Arc — Other window".to_string());
+        assert_eq!(cache.get(&other, t0), None, "different window_name misses");
+
+        let other_pid = (9999, "Arc — Inbox".to_string());
+        assert_eq!(cache.get(&other_pid, t0), None, "different pid misses");
     }
 }

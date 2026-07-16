@@ -19,6 +19,7 @@ import { useSettings } from "@/lib/hooks/use-settings";
 import { useToast } from "@/components/ui/use-toast";
 import { ensureChatGptPreset } from "@/lib/utils/chatgpt-preset";
 import { notifyConnectionsUpdated } from "@/lib/connections-events";
+import { searchInputBehaviorProps } from "@/lib/search-input-behavior";
 import {
   CONNECTION_CATEGORY_BY_ID,
   CONNECTION_HARDCODED_DESCRIPTIONS,
@@ -4497,6 +4498,7 @@ export function ConnectionsSection({
         <div className="relative w-52 shrink-0">
           <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
           <Input
+            {...searchInputBehaviorProps}
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Search..."

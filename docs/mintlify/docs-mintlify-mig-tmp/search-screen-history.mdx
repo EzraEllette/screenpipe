@@ -102,6 +102,25 @@ combine mentions: `@audio @last-hour` shows only voice data from the past hour. 
 - **use time context**: combine `start_time` and `end_time` for precision
 - **combine filters**: app name + time range + keywords
 
+## thumbnails show "unavailable"?
+
+if frame thumbnails in the search results or timeline show as "unavailable", it's likely because **API authentication is enabled** and the app doesn't have your API key.
+
+**in the desktop app**: this is handled automatically. no action needed.
+
+**via API (CLI, external tools, remote instances)**: when `--api-auth` is enabled (the default for security), thumbnail requests require an `Authorization` header:
+
+```bash
+# get your API key
+API_KEY=$(npx -y screenpipe@latest auth token)
+
+# now thumbnails load with the key
+curl "http://localhost:3030/frames?id=12345" \
+  -H "Authorization: Bearer $API_KEY"
+```
+
+if you're accessing screenpipe from another device on your network (with `--listen-on-lan`), always include the auth header in image requests to prevent 403 errors.
+
 ## AI chat vs. search API — when to use each
 
 the desktop app offers two ways to find content:

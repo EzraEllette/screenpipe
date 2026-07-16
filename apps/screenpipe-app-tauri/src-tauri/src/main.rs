@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tauri::Emitter;
 use tauri::Manager;
+#[cfg(target_os = "macos")]
 use tauri_plugin_autostart::MacosLauncher;
 use tauri_plugin_autostart::ManagerExt as AutostartManagerExt;
 #[allow(unused_imports)]
@@ -216,6 +217,28 @@ fn should_skip_onboarding() -> bool {
         .ok()
         .map(|s| matches!(s.trim().to_lowercase().as_str(), "1" | "true" | "yes"))
         .unwrap_or(false)
+}
+
+fn should_prevent_window_close(label: &str) -> bool {
+    label != "onboarding"
+}
+
+/// Flag passed by tauri-plugin-autostart when the OS launches us at login.
+/// Used to skip Home so login starts stay in the tray.
+const AUTOSTART_ARG: &str = "--autostart";
+
+/// True when this process was started by the OS login/autostart entry
+/// (LaunchAgent / Run registry), not a manual user launch.
+fn launched_from_autostart() -> bool {
+    args_contain_autostart(std::env::args())
+}
+
+fn args_contain_autostart<I, S>(args: I) -> bool
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    args.into_iter().any(|a| a.as_ref() == AUTOSTART_ARG)
 }
 
 // check if the server is running
@@ -705,6 +728,15 @@ async fn main() {
                 });
             }
             tauri::WindowEvent::CloseRequested { api, .. } => {
+                // Onboarding is disposable. Let Tauri destroy its webview so
+                // page effects (notably the live-feed search poller) are torn
+                // down as soon as the user closes the window. Other app
+                // windows stay warm for fast reopen and NSPanel safety.
+                if !should_prevent_window_close(window.label()) {
+                    info!("onboarding window close requested — destroying webview");
+                    return;
+                }
+
                 let _ = window.set_always_on_top(false);
                 let _ = window.set_visible_on_all_workspaces(false);
 
@@ -777,10 +809,14 @@ async fn main() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_permission_flow::init())
         .plugin(tauri_plugin_process::init())
-        .plugin(tauri_plugin_autostart::init(
-            MacosLauncher::LaunchAgent,
-            None,
-        ))
+        .plugin({
+            // LaunchAgent on macOS so ProgramArguments can include --autostart
+            // (SMAppService MainApp cannot pass custom args).
+            let builder = tauri_plugin_autostart::Builder::new().args([AUTOSTART_ARG]);
+            #[cfg(target_os = "macos")]
+            let builder = builder.macos_launcher(MacosLauncher::LaunchAgent);
+            builder.build()
+        })
         // single-instance plugin uses zbus::blocking on Linux which panics
         // inside an existing tokio runtime (nested block_on), so skip it on Linux
         ;
@@ -1286,13 +1322,20 @@ async fn main() {
             }
 
             let app_ui_hidden = crate::enterprise_policy::is_app_ui_hidden();
+            let from_autostart = launched_from_autostart();
+            if from_autostart {
+                info!("launched from OS autostart (--autostart); starting in background");
+            }
 
-            // Show onboarding/home unless this device is deployed as a managed
-            // background agent. Permission recovery is handled separately below.
+            // Show onboarding/home unless managed background agent, or login
+            // autostart (tray + server only; UI via tray/dock/shortcut).
+            // Incomplete onboarding still shows so setup can finish.
             if app_ui_hidden {
                 info!("enterprise: hidden UI mode active, skipping startup app windows");
             } else if !onboarding_store.is_completed {
                 let _ = ShowRewindWindow::Onboarding.show(&app.handle());
+            } else if from_autostart {
+                info!("autostart: skipping Home window (background login launch)");
             } else {
                 let _ = ShowRewindWindow::Home { page: None }.show(&app.handle());
             }
@@ -2068,6 +2111,41 @@ async fn main() {
             error!("panic in run event handler: {:?}", e);
         }
     });
+}
+
+#[cfg(test)]
+mod autostart_arg_tests {
+    use super::{args_contain_autostart, AUTOSTART_ARG};
+
+    #[test]
+    fn detects_autostart_flag() {
+        assert!(args_contain_autostart(["screenpipe", AUTOSTART_ARG]));
+        assert!(args_contain_autostart([AUTOSTART_ARG]));
+    }
+
+    #[test]
+    fn ignores_unrelated_args() {
+        assert!(!args_contain_autostart(["screenpipe"]));
+        assert!(!args_contain_autostart(["screenpipe", "--check-arc-automation"]));
+        assert!(!args_contain_autostart(["screenpipe", "--autostarted"]));
+    }
+}
+
+#[cfg(test)]
+mod window_close_policy_tests {
+    use super::should_prevent_window_close;
+
+    #[test]
+    fn onboarding_close_destroys_its_webview() {
+        assert!(!should_prevent_window_close("onboarding"));
+    }
+
+    #[test]
+    fn persistent_windows_keep_their_existing_close_behavior() {
+        for label in ["home", "main", "main-window", "search", "chat"] {
+            assert!(should_prevent_window_close(label), "label: {label}");
+        }
+    }
 }
 
 #[cfg(all(test, target_os = "macos"))]
