@@ -155,6 +155,10 @@ uiautomation = "0.16.1"
 [patch.crates-io]
 # enables chinese mirror (hf is banned in china) and rustls-tls
 hf-hub = { git = "https://github.com/neo773/hf-hub", rev = "437dcf4049233f4a0e0cfc4e1c1dbf5ed2c57760" }
+# SQLx 0.7 and rusqlite 0.29 both require the libsqlite3-sys 0.26 API.
+# Keep that Rust API while bundling SQLite 3.51.3, which fixes the WAL-reset
+# database-corruption race present in SQLite 3.7.0 through 3.51.2.
+libsqlite3-sys = { path = "vendor/libsqlite3-sys" }
 
 [profile.release]
 codegen-units = 1

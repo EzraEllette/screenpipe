@@ -6,6 +6,7 @@ use super::*;
 
 impl DatabaseManager {
     pub async fn new(database_path: &str, config: DbConfig) -> Result<Self, sqlx::Error> {
+        screenpipe_sqlite_coordinator::verify_sqlite_runtime().map_err(SqlxError::Protocol)?;
         debug!(
             "Initializing DatabaseManager with database path: {} (mmap={}MB, cache={}KB, read_pool={})",
             database_path,
@@ -34,6 +35,11 @@ impl DatabaseManager {
             sqlx::Sqlite::create_database(&connection_string).await?;
         }
 
+        // This process-wide coordinator is also used by the standalone
+        // SecretStore pool. It keeps screenpipe-controlled writes and explicit
+        // checkpoints from overlapping on independent SQLite connections.
+        let write_semaphore = screenpipe_sqlite_coordinator::sqlite_write_lock(database_path);
+
         // busy_timeout is per-connection; setting it here ensures ALL pooled
         // connections wait before returning SQLITE_BUSY ("database is locked").
         // Keep this short (5s) so pool connections aren't held for ages waiting
@@ -43,8 +49,7 @@ impl DatabaseManager {
         // cache_size + mmap_size are tier-configurable and applied here; the
         // WAL-safety pragmas that MUST be identical on every other pool over this
         // file (the secret-store pool in screenpipe-secrets) come from the single
-        // source of truth `WAL_SAFETY_PRAGMAS` so the two pools can never diverge
-        // and race checkpoints on the shared -shm into code-11 corruption.
+        // source of truth `WAL_SAFETY_PRAGMAS` so the two pools cannot drift.
         let mut connect_options: SqliteConnectOptions = connection_string
             .parse::<SqliteConnectOptions>()?
             .busy_timeout(Duration::from_secs(5))
@@ -62,6 +67,10 @@ impl DatabaseManager {
         // connection before pool creation makes pool connections see a WAL'd
         // DB and skip conversion entirely — no race.
         {
+            let _write_guard = Arc::clone(&write_semaphore)
+                .acquire_owned()
+                .await
+                .map_err(|_| SqlxError::PoolClosed)?;
             let mut conn = connect_options.connect().await?;
             sqlx::query("PRAGMA journal_mode=WAL")
                 .execute(&mut conn)
@@ -87,7 +96,6 @@ impl DatabaseManager {
             .connect_with(connect_options.clone())
             .await?;
 
-        let write_semaphore = Arc::new(Semaphore::new(1));
         // Recovery wiring: let the drain loop reopen its write pool in-process on a
         // persistent disk-I/O wedge, surface degradation via `write_queue_health`,
         // and (via the hook, set by the app) request an engine restart — the only
@@ -127,6 +135,10 @@ impl DatabaseManager {
         // Checkpoint any stale WAL before running migrations or starting captures.
         // A large WAL (500MB+) from a previous crash slows every read/write until
         // checkpointed. TRUNCATE mode resets it to zero bytes.
+        let _checkpoint_guard = Arc::clone(&db_manager.write_semaphore)
+            .acquire_owned()
+            .await
+            .map_err(|_| SqlxError::PoolClosed)?;
         match sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
             .fetch_one(&db_manager.pool)
             .await
@@ -144,6 +156,7 @@ impl DatabaseManager {
             }
             Err(e) => warn!("startup wal checkpoint failed (continuing): {}", e),
         }
+        drop(_checkpoint_guard);
 
         // Run migrations after establishing the connection
         Self::run_migrations(&db_manager.pool).await?;

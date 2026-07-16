@@ -1266,6 +1266,10 @@ impl DatabaseManager {
     }
 
     pub async fn repair_database(&self) -> Result<(), anyhow::Error> {
+        let _write_guard = Arc::clone(&self.write_semaphore)
+            .acquire_owned()
+            .await
+            .map_err(|_| anyhow::anyhow!("SQLite write coordinator closed"))?;
         debug!("starting aggressive database repair process");
 
         // Force close any pending transactions
@@ -1357,18 +1361,17 @@ impl DatabaseManager {
 
     /// Spawn the background task that owns ALL WAL checkpointing.
     ///
-    /// Since `wal_autocheckpoint = 0` (see [`WAL_SAFETY_PRAGMAS`]) no committing
-    /// connection ever checkpoints inline — that under-load path could copy a
-    /// desynced `-shm` frame onto the wrong main-DB page. This task is therefore
-    /// the SOLE checkpointer, and it must (a) run often enough to keep the WAL
-    /// small and (b) never let the WAL grow without bound when readers keep a
-    /// plain `TRUNCATE` busy. It does a normal `TRUNCATE` each tick, and if the
-    /// WAL is over a hard page cap while still busy it escalates to the
-    /// serialized exclusive checkpoint (hold the single write permit so writers
-    /// queue, bump `busy_timeout` to wait out short-lived readers) — the same
-    /// reliable mechanism `compact()` uses. That escalation is the ceiling that
-    /// keeps `autocheckpoint = 0` from trading the corruption cliff for an
-    /// unbounded-WAL cliff on the heaviest install.
+    /// Since `wal_autocheckpoint = 0` (see [`WAL_SAFETY_PRAGMAS`]), committing
+    /// connections do not checkpoint inline. This task therefore owns routine
+    /// checkpointing: it must (a) run often enough to keep the WAL small and
+    /// (b) never let the WAL grow without bound when readers keep a plain
+    /// `TRUNCATE` busy. It does a normal `TRUNCATE` each tick, and if the WAL is
+    /// over a hard page cap while still busy it escalates to the
+    /// serialized exclusive checkpoint (the routine pass already holds the
+    /// process-wide write permit, then bumps `busy_timeout` to wait out
+    /// short-lived readers) — the same reliable mechanism `compact()` uses.
+    /// That escalation is the ceiling that keeps `autocheckpoint = 0` from
+    /// trading one failure mode for an unbounded WAL on the heaviest install.
     pub fn start_wal_maintenance(&self) {
         let pool = self.pool.clone();
         let shutdown = self.close_token.clone();
@@ -1393,6 +1396,26 @@ impl DatabaseManager {
                         return;
                     }
                 }
+
+                // The upstream WAL-reset race requires a checkpoint and write
+                // to overlap on independent connections. Every routine pass,
+                // including the common below-cap path, shares the same
+                // process-wide coordinator as the write queue and SecretStore.
+                let _write_guard = tokio::select! {
+                    permit = Arc::clone(&write_semaphore).acquire_owned() => {
+                        match permit {
+                            Ok(permit) => permit,
+                            Err(_) => {
+                                debug!("wal maintenance: write coordinator closed");
+                                return;
+                            }
+                        }
+                    }
+                    _ = shutdown.cancelled() => {
+                        debug!("wal maintenance: shutting down while waiting for write coordinator");
+                        return;
+                    }
+                };
                 match sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
                     .fetch_one(&pool)
                     .await
@@ -1403,14 +1426,12 @@ impl DatabaseManager {
                         let checkpointed: i32 = row.get(2);
                         if busy == 1 && log_pages > WAL_HARD_CAP_PAGES {
                             // Readers kept the plain TRUNCATE busy and the WAL is
-                            // over the cap. Force it: hold the single write
-                            // permit (writers queue — a brief pause, like the
-                            // compact path) and wait out short-lived readers.
+                            // over the cap. The routine pass already holds the
+                            // single write permit; wait out short-lived readers.
                             warn!(
                                 "wal checkpoint: busy with {} pages (> {} cap) — forcing exclusive checkpoint",
                                 log_pages, WAL_HARD_CAP_PAGES
                             );
-                            let _write_guard = write_semaphore.acquire().await.ok();
                             match pool.acquire().await {
                                 Ok(mut conn) => {
                                     let _ = sqlx::query("PRAGMA busy_timeout = 60000")
@@ -1520,6 +1541,10 @@ impl DatabaseManager {
     /// main database file so it can be safely copied.
     /// Returns (busy, log_pages, checkpointed_pages).
     pub async fn wal_checkpoint(&self) -> Result<(i32, i32, i32), sqlx::Error> {
+        let _write_guard = Arc::clone(&self.write_semaphore)
+            .acquire_owned()
+            .await
+            .map_err(|_| SqlxError::PoolClosed)?;
         let row = sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
             .fetch_one(&self.pool)
             .await?;

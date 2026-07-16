@@ -1,0 +1,16 @@
+[package]
+name = "screenpipe-sqlite-coordinator"
+version.workspace = true
+authors.workspace = true
+description = "Process-wide SQLite write/checkpoint coordination and runtime safety gate"
+repository.workspace = true
+license-file.workspace = true
+edition.workspace = true
+
+[dependencies]
+libsqlite3-sys = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
