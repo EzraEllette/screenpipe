@@ -2438,6 +2438,17 @@ mod tests {
             // tx is dropped here without commit — should rollback
         }
 
+        // Dropping ImmediateTx schedules its rollback asynchronously. A subsequent
+        // serialized write is the completion barrier: the rollback task holds the
+        // write permit until the transaction is rolled back and its connection is
+        // returned to the pool. This matters for the shared-cache in-memory test DB,
+        // where reading sooner can race the rollback and return SQLITE_LOCKED_SHAREDCACHE.
+        let id = db
+            .insert_audio_chunk("pool_health_0.mp4", None)
+            .await
+            .unwrap();
+        assert!(id > 0, "Pool should be healthy after rollback");
+
         // Verify the uncommitted row was rolled back
         let row: (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM audio_chunks WHERE file_path = 'should_not_exist.mp4'",
@@ -2449,7 +2460,7 @@ mod tests {
 
         // Verify the pool is still healthy — we can acquire connections and do work.
         // If the connection was leaked (detached), the pool would eventually exhaust.
-        for i in 0..5 {
+        for i in 1..5 {
             let id = db
                 .insert_audio_chunk(&format!("pool_health_{}.mp4", i), None)
                 .await

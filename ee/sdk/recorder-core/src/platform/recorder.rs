@@ -1182,11 +1182,15 @@ mod tests {
         // tools that rely on `.mp4` still recognize the file.
         assert_eq!(
             derive_mp4_output_path("/tmp/session.mp4", 1, true),
-            "/tmp/session-monitor-1.mp4"
+            std::path::Path::new("/tmp")
+                .join("session-monitor-1.mp4")
+                .to_string_lossy()
         );
         assert_eq!(
             derive_mp4_output_path("/tmp/session.mp4", 2, true),
-            "/tmp/session-monitor-2.mp4"
+            std::path::Path::new("/tmp")
+                .join("session-monitor-2.mp4")
+                .to_string_lossy()
         );
     }
 
@@ -1208,7 +1212,9 @@ mod tests {
         // `session-monitor-1.` (trailing dot).
         assert_eq!(
             derive_mp4_output_path("/tmp/session", 1, true),
-            "/tmp/session-monitor-1.mp4"
+            std::path::Path::new("/tmp")
+                .join("session-monitor-1.mp4")
+                .to_string_lossy()
         );
     }
 
