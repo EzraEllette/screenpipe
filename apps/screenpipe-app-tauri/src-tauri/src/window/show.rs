@@ -445,8 +445,14 @@ impl ShowRewindWindow {
             )));
         }
 
-        if crate::headless::is_dormant() {
-            info!("headless: suppressed '{}' window while UI is dormant", id.label());
+        if crate::headless::should_suppress_window(
+            crate::headless::is_dormant(),
+            id == RewindWindowId::PermissionRecovery,
+        ) {
+            info!(
+                "headless: suppressed '{}' window while UI is dormant",
+                id.label()
+            );
             return Err(tauri::Error::Anyhow(anyhow::anyhow!(
                 "window suppressed while headless UI is dormant: {}",
                 id.label()
