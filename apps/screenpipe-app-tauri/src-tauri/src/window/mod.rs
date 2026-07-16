@@ -68,6 +68,11 @@ pub fn enforce_enterprise_ui_visibility(app: &tauri::AppHandle) {
         return;
     }
 
+    // Flip the headless dormant/record-only flags so scheduled pipes are
+    // suppressed and the tray wake path stays closed the moment the policy
+    // changes — the startup gate only ran once, so a mid-session flip needs this.
+    crate::headless::set_enterprise_hidden(app, hidden);
+
     if hidden {
         let recovery = show::RewindWindowId::PermissionRecovery.label();
         for (label, window) in app.webview_windows() {

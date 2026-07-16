@@ -26,6 +26,30 @@ pub fn is_dormant() -> bool {
     UI_DORMANT.load(Ordering::SeqCst)
 }
 
+/// Sync dormant/record-only state to an enterprise hidden-UI policy that flipped
+/// mid-session. The enterprise enforcement path hides (not destroys) windows, so
+/// this only flips the flags that gate pipe suppression and tray wake — without
+/// re-entering the NSPanel teardown. On un-hide, fall back to whatever the user's
+/// own headless settings dictate so a non-enterprise headless user isn't cleared.
+pub fn set_enterprise_hidden(app: &AppHandle, hidden: bool) {
+    if hidden {
+        initialize(true, true);
+        return;
+    }
+
+    let (dormant, record_only) = crate::store::SettingsStore::get(app)
+        .ok()
+        .flatten()
+        .map(|settings| {
+            (
+                settings.headless,
+                settings.headless && settings.headless_record_only,
+            )
+        })
+        .unwrap_or((false, false));
+    initialize(dormant, record_only);
+}
+
 #[cfg(target_os = "macos")]
 fn prepare_window_for_destroy(
     app: &AppHandle,
