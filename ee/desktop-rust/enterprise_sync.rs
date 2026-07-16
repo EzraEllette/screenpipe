@@ -56,6 +56,11 @@ pub const SAFE_BACKFILL: Duration = Duration::from_secs(15 * 60);
 /// POST under a few hundred KB even on busy machines.
 pub const PAGE_LIMIT: u32 = 500;
 
+/// Keep hosted-ingest requests comfortably below Vercel's 4.5 MB function
+/// body limit. This is a transport envelope, not a data cap: every JSONL line
+/// is sent, across as many requests as necessary.
+pub const HOSTED_INGEST_REQUEST_BYTES: usize = 3 * 1024 * 1024;
+
 /// Initial backoff after a transient failure. Doubles up to BACKOFF_MAX.
 const BACKOFF_INITIAL: Duration = Duration::from_secs(60);
 const BACKOFF_MAX: Duration = Duration::from_secs(60 * 60);
@@ -614,6 +619,35 @@ pub fn build_jsonl(
     out
 }
 
+/// Split JSONL on record boundaries for hosted ingest. Concatenating the
+/// returned chunks always reproduces `body` byte-for-byte; no record is
+/// truncated or discarded. A single record larger than the target travels in
+/// its own request.
+pub fn split_jsonl_requests(body: Vec<u8>, target_bytes: usize) -> Vec<Vec<u8>> {
+    if body.is_empty() {
+        return Vec::new();
+    }
+    if target_bytes == 0 || body.len() <= target_bytes {
+        return vec![body];
+    }
+
+    let mut chunks = Vec::new();
+    let mut current = Vec::with_capacity(target_bytes);
+    for line in body.split_inclusive(|byte| *byte == b'\n') {
+        if !current.is_empty() && current.len() + line.len() > target_bytes {
+            chunks.push(std::mem::replace(
+                &mut current,
+                Vec::with_capacity(target_bytes),
+            ));
+        }
+        current.extend_from_slice(line);
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+    chunks
+}
+
 // ─── Ingest HTTP ────────────────────────────────────────────────────────────
 
 /// POST a JSONL body to the ingest endpoint. Returns `Ok(())` on 2xx.
@@ -800,7 +834,9 @@ pub async fn run_one_sync(
 
     match &cfg.upload_mode {
         EnterpriseUploadMode::HostedIngest => {
-            post_jsonl(http, &cfg.ingest_url, &cfg.license_key, body).await?;
+            for request_body in split_jsonl_requests(body, HOSTED_INGEST_REQUEST_BYTES) {
+                post_jsonl(http, &cfg.ingest_url, &cfg.license_key, request_body).await?;
+            }
         }
         EnterpriseUploadMode::DirectEncrypted(direct) => {
             let counts = DirectUploadRecordCounts {
@@ -887,6 +923,10 @@ const FRAME_BATCH_MAX_CITED: usize = 20;
 /// so the device drains its (server-auto-cited) manifest much faster:
 /// 200/tick x ~288 ticks/day far exceeds a busy device's daily frame count.
 const FRAME_BATCH_MAX_ALL: usize = 200;
+/// The frame-upload route accepts at most 20 entries and Vercel accepts at
+/// most 4.5 MB. Split the 200-frame drain into lossless request envelopes.
+const FRAME_UPLOAD_ENTRIES_PER_REQUEST: usize = 20;
+const FRAME_UPLOAD_REQUEST_BYTES: usize = 3 * 1024 * 1024;
 
 /// Per-tick frame batch for the org's chosen mode. Off never reaches the
 /// fetch loop (the gate returns first) but maps to 0 for totality.
@@ -962,6 +1002,36 @@ impl FrameUploadEntry {
             error: Some(reason),
         }
     }
+}
+
+fn split_frame_upload_requests(entries: Vec<FrameUploadEntry>) -> Vec<Vec<FrameUploadEntry>> {
+    let mut batches = Vec::new();
+    let mut current = Vec::new();
+    // Exact size of {"frames":[]} before entries and comma separators.
+    let wrapper_bytes = serde_json::to_vec(&serde_json::json!({ "frames": [] }))
+        .map(|body| body.len())
+        .unwrap_or(13);
+    let mut current_bytes = wrapper_bytes;
+
+    for entry in entries {
+        let entry_bytes = serde_json::to_vec(&entry)
+            .map(|body| body.len())
+            .unwrap_or(0);
+        let separator_bytes = usize::from(!current.is_empty());
+        if !current.is_empty()
+            && (current.len() >= FRAME_UPLOAD_ENTRIES_PER_REQUEST
+                || current_bytes + separator_bytes + entry_bytes > FRAME_UPLOAD_REQUEST_BYTES)
+        {
+            batches.push(std::mem::take(&mut current));
+            current_bytes = wrapper_bytes;
+        }
+        current_bytes += usize::from(!current.is_empty()) + entry_bytes;
+        current.push(entry);
+    }
+    if !current.is_empty() {
+        batches.push(current);
+    }
+    batches
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -1107,41 +1177,45 @@ pub async fn fulfill_frame_requests(
 
     let requested = entries.len();
     let uploads_url = format!("{base}/api/enterprise/frame-uploads");
-    let resp = match http
-        .post(&uploads_url)
-        .header("X-License-Key", &cfg.license_key)
-        .header("X-Device-Id", &cfg.device_id)
-        .json(&serde_json::json!({ "frames": entries }))
-        .send()
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            warn!("frame fulfillment: upload failed: {e}");
+    let mut uploaded = 0usize;
+    for batch in split_frame_upload_requests(entries) {
+        let resp = match http
+            .post(&uploads_url)
+            .header("X-License-Key", &cfg.license_key)
+            .header("X-Device-Id", &cfg.device_id)
+            .json(&serde_json::json!({ "frames": batch }))
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("frame fulfillment: upload failed: {e}");
+                return FrameFulfillReport {
+                    requested,
+                    uploaded,
+                    failed: requested.saturating_sub(uploaded),
+                };
+            }
+        };
+        if !resp.status().is_success() {
+            warn!(
+                "frame fulfillment: POST {} -> {}",
+                uploads_url,
+                resp.status()
+            );
             return FrameFulfillReport {
                 requested,
-                uploaded: 0,
-                failed: requested,
+                uploaded,
+                failed: requested.saturating_sub(uploaded),
             };
         }
-    };
-    if !resp.status().is_success() {
-        warn!(
-            "frame fulfillment: POST {} -> {}",
-            uploads_url,
-            resp.status()
-        );
-        return FrameFulfillReport {
-            requested,
-            uploaded: 0,
-            failed: requested,
-        };
+        let ack: FrameUploadAck = resp.json().await.unwrap_or_default();
+        uploaded += ack.stored.len();
     }
-    let ack: FrameUploadAck = resp.json().await.unwrap_or_default();
     FrameFulfillReport {
         requested,
-        uploaded: ack.stored.len(),
-        failed: requested.saturating_sub(ack.stored.len()),
+        uploaded,
+        failed: requested.saturating_sub(uploaded),
     }
 }
 
@@ -2129,6 +2203,20 @@ mod tests {
     }
 
     #[test]
+    fn hosted_ingest_split_is_byte_for_byte_lossless() {
+        let body = b"one\ntwo-two\nthree\n".to_vec();
+        let chunks = split_jsonl_requests(body.clone(), 8);
+
+        assert_eq!(chunks.concat(), body);
+        assert!(chunks.iter().all(|chunk| chunk.ends_with(b"\n")));
+        assert_eq!(chunks.len(), 3);
+
+        // A single record over the target is preserved whole, never truncated.
+        let oversized = b"one-record-larger-than-target\n".to_vec();
+        assert_eq!(split_jsonl_requests(oversized.clone(), 4), vec![oversized]);
+    }
+
+    #[test]
     fn jsonl_preserves_order() {
         let body = build_jsonl(
             "dev-1",
@@ -2680,6 +2768,104 @@ mod tests {
         // Cursor is also persisted.
         let loaded = Cursor::load(&cfg.cursor_path);
         assert_eq!(loaded.last_frame_ts, cursor.last_frame_ts);
+    }
+
+    #[tokio::test]
+    async fn hosted_ingest_sends_large_payload_across_multiple_requests() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/ingest"))
+            .respond_with(wiremock::ResponseTemplate::new(200))
+            .expect(3)
+            .mount(&server)
+            .await;
+
+        let dir = TempDir::new().unwrap();
+        let cfg = test_cfg(&dir, format!("{}/ingest", server.uri()));
+        let original_cursor = Cursor {
+            last_frame_ts: Some("2026-05-07T09:00:00Z".to_string()),
+            last_audio_ts: Some("2026-05-07T09:00:00Z".to_string()),
+            last_ui_ts: Some("2026-05-07T09:00:00Z".to_string()),
+            last_memory_ts: None,
+        };
+        let mut cursor = original_cursor.clone();
+        let large_text = "x".repeat(2 * 1024 * 1024);
+        let local = MockLocal::new(
+            vec![vec![
+                frame(1, "2026-05-07T10:00:00Z", "Arc", &large_text),
+                frame(2, "2026-05-07T10:00:30Z", "Arc", &large_text),
+                frame(3, "2026-05-07T10:01:00Z", "Arc", &large_text),
+            ]],
+            vec![vec![]],
+        );
+
+        let report = run_one_sync(&cfg, &mut cursor, &local, &reqwest::Client::new())
+            .await
+            .unwrap();
+
+        assert!(report.bytes > 4_500_000);
+        assert_eq!(
+            cursor.last_frame_ts.as_deref(),
+            Some("2026-05-07T10:01:00Z")
+        );
+        let requests = server.received_requests().await.unwrap();
+        let uploaded: Vec<u8> = requests
+            .iter()
+            .filter(|request| request.url.path() == "/ingest")
+            .flat_map(|request| request.body.iter().copied())
+            .collect();
+        let expected = build_jsonl(
+            &cfg.device_id,
+            &cfg.device_label,
+            &[
+                frame(1, "2026-05-07T10:00:00Z", "Arc", &large_text),
+                frame(2, "2026-05-07T10:00:30Z", "Arc", &large_text),
+                frame(3, "2026-05-07T10:01:00Z", "Arc", &large_text),
+            ],
+            &[],
+            &[],
+            &[],
+            &[],
+        );
+        assert_eq!(uploaded, expected);
+    }
+
+    #[tokio::test]
+    async fn hosted_ingest_chunk_failure_keeps_cursor_pinned() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/ingest"))
+            .respond_with(wiremock::ResponseTemplate::new(503))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let dir = TempDir::new().unwrap();
+        let cfg = test_cfg(&dir, format!("{}/ingest", server.uri()));
+        let mut cursor = Cursor {
+            last_frame_ts: Some("2026-05-07T09:00:00Z".to_string()),
+            last_audio_ts: Some("2026-05-07T09:00:00Z".to_string()),
+            last_ui_ts: Some("2026-05-07T09:00:00Z".to_string()),
+            last_memory_ts: None,
+        };
+        let before = cursor.clone();
+        let large_text = "x".repeat(2 * 1024 * 1024);
+        let local = MockLocal::new(
+            vec![vec![
+                frame(1, "2026-05-07T10:00:00Z", "Arc", &large_text),
+                frame(2, "2026-05-07T10:00:30Z", "Arc", &large_text),
+                frame(3, "2026-05-07T10:01:00Z", "Arc", &large_text),
+            ]],
+            vec![vec![]],
+        );
+
+        let err = run_one_sync(&cfg, &mut cursor, &local, &reqwest::Client::new())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, EnterpriseSyncError::IngestServerError(503)));
+        assert_eq!(cursor.last_frame_ts, before.last_frame_ts);
+        assert!(!cfg.cursor_path.exists());
     }
 
     #[tokio::test]
@@ -3341,6 +3527,31 @@ mod tests {
         assert!(err.get("mime").is_none());
     }
 
+    #[test]
+    fn frame_upload_requests_obey_server_count_and_body_limits() {
+        let entries: Vec<FrameUploadEntry> = (1..=200)
+            .map(|id| FrameUploadEntry::image(id, &[7u8; 20_000]))
+            .collect();
+        let batches = split_frame_upload_requests(entries.clone());
+
+        assert_eq!(batches.len(), 10);
+        assert!(batches
+            .iter()
+            .all(|batch| batch.len() <= FRAME_UPLOAD_ENTRIES_PER_REQUEST));
+        assert!(batches.iter().all(|batch| {
+            serde_json::to_vec(&serde_json::json!({ "frames": batch }))
+                .unwrap()
+                .len()
+                <= FRAME_UPLOAD_REQUEST_BYTES
+        }));
+        let ids: Vec<i64> = batches
+            .into_iter()
+            .flatten()
+            .map(|entry| entry.frame_id)
+            .collect();
+        assert_eq!(ids, (1..=200).collect::<Vec<_>>());
+    }
+
     #[tokio::test]
     async fn fulfill_frame_requests_end_to_end() {
         let _guard = crate::enterprise_policy::sync_streams_test_lock();
@@ -3411,6 +3622,60 @@ mod tests {
         assert_eq!(image::load_from_memory(&jpeg).unwrap().width(), 1280);
         assert_eq!(frames[1]["error"], "not_found");
         assert_eq!(frames[2]["error"], "fetch_failed");
+
+        crate::enterprise_policy::set_sync_streams(true, true, true, true, true, "off".to_string());
+    }
+
+    #[tokio::test]
+    async fn fulfill_frame_requests_splits_large_manifest_without_dropping_ids() {
+        let _guard = crate::enterprise_policy::sync_streams_test_lock();
+        crate::enterprise_policy::set_sync_streams(true, true, true, true, true, "all".to_string());
+
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/api/enterprise/frame-requests"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(
+                    serde_json::json!({ "frame_ids": (1..=21).collect::<Vec<i64>>() }),
+                ),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/api/enterprise/frame-uploads"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "stored": [], "failed": [] })),
+            )
+            .expect(2)
+            .mount(&server)
+            .await;
+
+        let tmp = TempDir::new().unwrap();
+        let cfg = frame_test_cfg(&server.uri(), &tmp);
+        let report = fulfill_frame_requests(&cfg, &FrameMock, &reqwest::Client::new()).await;
+        assert_eq!(report.requested, 21);
+
+        let requests = server.received_requests().await.unwrap();
+        let uploads: Vec<&wiremock::Request> = requests
+            .iter()
+            .filter(|request| request.url.path() == "/api/enterprise/frame-uploads")
+            .collect();
+        assert_eq!(uploads.len(), 2);
+        let mut uploaded_ids = Vec::new();
+        for request in uploads {
+            assert!(request.body.len() <= FRAME_UPLOAD_REQUEST_BYTES);
+            let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+            let frames = body["frames"].as_array().unwrap();
+            assert!(frames.len() <= FRAME_UPLOAD_ENTRIES_PER_REQUEST);
+            uploaded_ids.extend(
+                frames
+                    .iter()
+                    .map(|frame| frame["frame_id"].as_i64().unwrap()),
+            );
+        }
+        assert_eq!(uploaded_ids, (1..=21).collect::<Vec<_>>());
 
         crate::enterprise_policy::set_sync_streams(true, true, true, true, true, "off".to_string());
     }
