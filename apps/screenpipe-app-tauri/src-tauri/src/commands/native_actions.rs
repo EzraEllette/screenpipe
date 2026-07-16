@@ -138,7 +138,7 @@ fn native_notif_action_callback_inner(json_ptr: *const std::os::raw::c_char) {
             if is_in_app {
                 let target = if is_meeting_deeplink(&url) {
                     ShowRewindWindow::Home {
-                        page: Some("meetings".to_string()),
+                        page: Some(meeting_page_with_id(&url)),
                     }
                 } else {
                     ShowRewindWindow::Main
@@ -205,10 +205,11 @@ fn native_notif_action_callback_inner(json_ptr: *const std::os::raw::c_char) {
                 return;
             }
 
+            let meeting_page = meeting_page_with_id(&deeplink_url);
             let app_for_show = app_clone.clone();
             let _ = app_clone.run_on_main_thread(move || {
                 if let Err(e) = (ShowRewindWindow::Home {
-                    page: Some("meetings".to_string()),
+                    page: Some(meeting_page),
                 })
                 .show(&app_for_show)
                 {
@@ -255,7 +256,7 @@ fn native_notif_action_callback_inner(json_ptr: *const std::os::raw::c_char) {
             if is_in_app {
                 let target = if is_meeting_deeplink(&url) {
                     ShowRewindWindow::Home {
-                        page: Some("meetings".to_string()),
+                        page: Some(meeting_page_with_id(&url)),
                     }
                 } else {
                     ShowRewindWindow::Main
@@ -285,7 +286,89 @@ fn native_notif_action_callback_inner(json_ptr: *const std::os::raw::c_char) {
         return;
     }
 
-    // Everything else (pipe, api, mute, dismiss, auto_dismiss, legacy string
+    // HD-recording API action. Handled in Rust (like deeplink/meeting_join
+    // above) so native notification clicks work even when no webview is
+    // mounted. The JS handler in notification-handler.tsx remains the path
+    // for in-app notification panel clicks.
+    if action_type == Some("api")
+        && parsed
+            .as_ref()
+            .and_then(|v| v.get("action"))
+            .and_then(|v| v.as_str())
+            == Some("record-hd")
+    {
+        let body = parsed
+            .as_ref()
+            .and_then(|v| v.get("body"))
+            .cloned();
+        let deeplink_url = parsed
+            .as_ref()
+            .and_then(|v| v.get("deeplinkUrl").or_else(|| v.get("deeplink_url")))
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+
+        let app_clone = app.clone();
+        std::thread::spawn(move || {
+            use crate::recording::local_api_context_from_app;
+            let api = local_api_context_from_app(&app_clone);
+            let client = reqwest::blocking::Client::new();
+
+            let req = api.apply_auth_blocking(
+                client
+                    .post(api.url("/capture/hd/start"))
+                    .header("Content-Type", "application/json")
+                    .body(
+                        body.map(|b| b.to_string())
+                            .unwrap_or_else(|| "{}".to_string()),
+                    ),
+            );
+
+            let ok = match req.send() {
+                Ok(res) => res.status().is_success(),
+                Err(e) => {
+                    error!("record-hd api call failed: {}", e);
+                    false
+                }
+            };
+
+            if ok {
+                // Confirmation toast — mirrors the JS handler in
+                // notification-handler.tsx.
+                let _ = client
+                    .post(api.url("/notify"))
+                    .header("Content-Type", "application/json")
+                    .body(
+                        serde_json::json!({
+                            "title": "HD recording started",
+                            "body": "Capturing this meeting at high frame rate. Stops automatically when the call ends.",
+                        })
+                        .to_string(),
+                    )
+                    .send();
+
+                // "open note + HD": also navigate to the live meeting note.
+                if let Some(ref url) = deeplink_url {
+                    if is_meeting_deeplink(url) {
+                        let meeting_page = meeting_page_with_id(url);
+                        let app_for_show = app_clone.clone();
+                        let _ = app_clone.run_on_main_thread(move || {
+                            if let Err(e) = (ShowRewindWindow::Home {
+                                page: Some(meeting_page),
+                            })
+                            .show(&app_for_show)
+                            {
+                                error!("failed to show window for record-hd deeplink: {}", e);
+                            }
+                        });
+                        emit_meeting_note_route_with_retries(&app_clone, url);
+                    }
+                }
+            }
+        });
+        return;
+    }
+
+    // Everything else (pipe, mute, dismiss, auto_dismiss, legacy string
     // actions) still goes to the JS handler. The overlay window owns those
     // because they need access to posthog / localforage / chat prefill.
     let _ = app.emit("native-notification-action", &json);
@@ -321,6 +404,18 @@ fn parse_meeting_deeplink(url: &str) -> Option<(u64, bool)> {
     Some((meeting_id, transcript))
 }
 
+/// Build the `page` string for `ShowRewindWindow::Home` that encodes the
+/// meeting ID into the URL query string. When `show.rs` formats this into
+/// `/home?section={page}`, the result becomes
+/// `/home?section=meetings&meetingId=42&transcript=true` which the React
+/// page reads on initial mount — surviving full-page navigations.
+fn meeting_page_with_id(deeplink_url: &str) -> String {
+    match parse_meeting_deeplink(deeplink_url) {
+        Some((id, transcript)) => format!("meetings&meetingId={}&transcript={}", id, transcript),
+        None => "meetings".to_string(),
+    }
+}
+
 fn emit_meeting_note_route_with_retries(app: &tauri::AppHandle, deeplink_url: &str) {
     let Some((meeting_id, transcript)) = parse_meeting_deeplink(deeplink_url) else {
         warn!(
@@ -334,7 +429,11 @@ fn emit_meeting_note_route_with_retries(app: &tauri::AppHandle, deeplink_url: &s
         "meetingId": meeting_id,
         "transcript": transcript,
     });
-    let nav = serde_json::json!({ "url": "/home?section=meetings" });
+    let nav_url = format!(
+        "/home?section=meetings&meetingId={}&transcript={}",
+        meeting_id, transcript
+    );
+    let nav = serde_json::json!({ "url": nav_url });
 
     // A notification click can cold-open the Home webview. React listeners are
     // not guaranteed to be mounted when `show()` returns, so a single emit is
