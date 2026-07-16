@@ -1335,13 +1335,16 @@ async fn main() {
 
             let app_ui_hidden = crate::enterprise_policy::is_app_ui_hidden();
             let from_autostart = launched_from_autostart();
-            let headless_startup = crate::headless::should_start_dormant(
-                store.headless,
-                onboarding_store.is_completed,
-            );
+            // Enterprise hidden-UI deployments always run headless with the
+            // recorder only, regardless of user settings or onboarding state.
+            let headless_startup = app_ui_hidden
+                || crate::headless::should_start_dormant(
+                    store.headless,
+                    onboarding_store.is_completed,
+                );
             crate::headless::initialize(
                 headless_startup,
-                store.headless && store.headless_record_only,
+                app_ui_hidden || (store.headless && store.headless_record_only),
             );
             if from_autostart {
                 info!("launched from OS autostart (--autostart); starting in background");

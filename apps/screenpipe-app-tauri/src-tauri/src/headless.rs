@@ -68,11 +68,12 @@ pub fn scheduled_pipe_skip_reason() -> Option<String> {
 /// window synchronously from its own CloseRequested callback can re-enter tao's
 /// event dispatcher on Windows and can invalidate an NSPanel callback on macOS.
 pub fn request_enter(app: AppHandle) {
-    let record_only = crate::store::SettingsStore::get(&app)
-        .ok()
-        .flatten()
-        .map(|settings| settings.headless && settings.headless_record_only)
-        .unwrap_or(false);
+    let record_only = crate::enterprise_policy::is_app_ui_hidden()
+        || crate::store::SettingsStore::get(&app)
+            .ok()
+            .flatten()
+            .map(|settings| settings.headless && settings.headless_record_only)
+            .unwrap_or(false);
     RECORD_ONLY.store(record_only, Ordering::SeqCst);
 
     // Block shortcuts and other non-tray window entry points immediately, while
@@ -143,6 +144,10 @@ fn enter_on_main_thread(app: &AppHandle) {
 
 /// Tray UI actions are the sole wake path while dormant.
 pub fn wake_from_tray(app: &AppHandle) {
+    // Enterprise hidden-UI mode has no wake path; the UI stays dormant.
+    if crate::enterprise_policy::is_app_ui_hidden() {
+        return;
+    }
     if !UI_DORMANT.swap(false, Ordering::SeqCst) {
         return;
     }
