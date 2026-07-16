@@ -142,14 +142,10 @@ fn enter_on_main_thread(app: &AppHandle) {
     // Hide first so teardown is visually immediate, then destroy Home last.
     // Destroying all labels also releases retained search/chat webviews and any
     // auxiliary browser hosts, which is the memory saving this mode promises.
-    // Permission recovery is preserved: a managed/enterprise device may still
-    // need the macOS permission flow to surface even while otherwise dormant.
-    let recovery = crate::window::RewindWindowId::PermissionRecovery.label();
-    let mut windows: Vec<_> = app
-        .webview_windows()
-        .into_iter()
-        .filter(|(label, _)| label != recovery)
-        .collect();
+    // Permission recovery is destroyed too (not kept warm): the startup gate
+    // re-shows it on the next launch whenever screen/mic are still missing —
+    // even on enterprise-hidden devices — so there's no reason to preserve it.
+    let mut windows: Vec<_> = app.webview_windows().into_iter().collect();
     windows.sort_by_key(|(label, _)| label == "home");
 
     for (_, window) in &windows {
