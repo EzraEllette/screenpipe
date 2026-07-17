@@ -442,7 +442,9 @@ const OnboardingLogin: React.FC<OnboardingLoginProps> = ({
               animate={{ opacity: 1 }}
               transition={{ duration: 0.5, delay: 1.0 }}
             >
-              sign in to activate your plan
+              {suppressAutoAdvance
+                ? "sign in with your enterprise account"
+                : "sign in to activate your plan"}
             </motion.p>
           </>
         )}

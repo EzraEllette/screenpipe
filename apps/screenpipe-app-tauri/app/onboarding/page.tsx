@@ -49,7 +49,7 @@ export default function OnboardingPage() {
     authenticationState,
     authenticationError,
     isEnterpriseAuthenticated,
-    selectAuthenticationMode,
+    selectAuthenticationMethod,
     submitLicenseKey,
   } = useEnterprisePolicy();
 
@@ -196,7 +196,7 @@ export default function OnboardingPage() {
                   <EnterpriseLicensePrompt
                     embedded
                     onSubmit={submitLicenseKey}
-                    onSignIn={() => selectAuthenticationMode("account")}
+                    onSignIn={() => selectAuthenticationMethod("account")}
                   />
                 </div>
               ) : authenticationState === "choice" ||
@@ -213,7 +213,7 @@ export default function OnboardingPage() {
                   />
                   <button
                     type="button"
-                    onClick={() => selectAuthenticationMode("license_key")}
+                    onClick={() => selectAuthenticationMethod("license_key")}
                     className="mt-3 font-mono text-xs text-muted-foreground/70 underline underline-offset-4 decoration-muted-foreground/40 transition-colors hover:text-foreground hover:decoration-foreground"
                   >
                     use enterprise key

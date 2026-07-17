@@ -28,7 +28,7 @@ import {
   normalizeEnterpriseAppUpdatePolicy,
 } from "@ee/lib/app-update-policy";
 
-export type EnterpriseAuthenticationMode = "account" | "license_key";
+export type EnterpriseAuthenticationMethod = "account" | "license_key";
 export type EnterpriseAuthenticationState =
   | "checking"
   | "choice"
@@ -44,7 +44,6 @@ interface EnterprisePolicy {
   appUpdatePolicy: EnterpriseAppUpdatePolicy;
   managedPipes: ManagedPipe[];
   orgName: string;
-  authenticationMode: EnterpriseAuthenticationMode | null;
 }
 
 const EMPTY_POLICY: EnterprisePolicy = {
@@ -55,14 +54,7 @@ const EMPTY_POLICY: EnterprisePolicy = {
   appUpdatePolicy: DEFAULT_ENTERPRISE_APP_UPDATE_POLICY,
   managedPipes: [],
   orgName: "",
-  authenticationMode: null,
 };
-
-function normalizeAuthenticationMode(value: unknown): EnterpriseAuthenticationMode {
-  return value === "account" || value === "member_sign_in"
-    ? "account"
-    : "license_key";
-}
 
 // Sections always hidden in enterprise builds (regardless of policy).
 // "account" is deliberately NOT here: authentication is handled by onboarding
@@ -90,7 +82,7 @@ function enterpriseE2eMocksEnabled(): boolean {
 type E2ePolicyMockResult =
   | { present: false }
   | { present: true; ok: true; data: Record<string, unknown> }
-  | { present: true; ok: false; reason: "invalid_key" | "network_error" };
+  | { present: true; ok: false; reason: "invalid_key" | "expired_key" | "network_error" };
 
 function readE2ePolicyMock(licenseKey: string): E2ePolicyMockResult {
   if (!enterpriseE2eMocksEnabled()) return { present: false };
@@ -109,9 +101,8 @@ function readE2ePolicyMock(licenseKey: string): E2ePolicyMockResult {
     }
 
     const status = typeof parsed.status === "number" ? parsed.status : 200;
-    if (status === 401 || status === 402) {
-      return { present: true, ok: false, reason: "invalid_key" };
-    }
+    if (status === 401) return { present: true, ok: false, reason: "invalid_key" };
+    if (status === 402) return { present: true, ok: false, reason: "expired_key" };
     if (status < 200 || status >= 300) {
       return { present: true, ok: false, reason: "network_error" };
     }
@@ -132,7 +123,6 @@ function readE2ePolicyMock(licenseKey: string): E2ePolicyMockResult {
         appUpdatePolicy: DEFAULT_ENTERPRISE_APP_UPDATE_POLICY,
         managedPipes: [],
         orgName: "E2E Enterprise",
-        authenticationMode: "license_key",
         ...policy,
       },
     };
@@ -151,8 +141,11 @@ function readE2eHeartbeatMock(): HeartbeatResult | null {
     if (status === 403) {
       return { ok: false, reason: "seat_limit", error: "license seat limit reached" };
     }
-    if (status === 401 || status === 402) {
-      return { ok: false, reason: "invalid_license", error: "invalid or expired license key" };
+    if (status === 401) {
+      return { ok: false, reason: "invalid_credential", error: "invalid enterprise credential" };
+    }
+    if (status === 402) {
+      return { ok: false, reason: "expired_key", error: "enterprise key has expired" };
     }
     if (status >= 200 && status < 300) {
       return { ok: true };
@@ -355,7 +348,11 @@ async function applyManagedDeviceSettings(lockedSettings: Record<string, unknown
  */
 type HeartbeatResult =
   | { ok: true }
-  | { ok: false; reason: "seat_limit" | "invalid_license" | "network_error"; error?: string };
+  | {
+      ok: false;
+      reason: "seat_limit" | "invalid_credential" | "expired_key" | "network_error";
+      error?: string;
+    };
 
 type EnterpriseCredential =
   | { type: "license_key"; value: string }
@@ -429,8 +426,18 @@ async function sendHeartbeat(credential: EnterpriseCredential): Promise<Heartbea
     if (res.status === 403) {
       return { ok: false, reason: "seat_limit", error: "license seat limit reached" };
     }
-    if (res.status === 401 || res.status === 402) {
-      return { ok: false, reason: "invalid_license", error: "invalid or expired license key" };
+    if (res.status === 401) {
+      return {
+        ok: false,
+        reason: "invalid_credential",
+        error:
+          credential.type === "account"
+            ? "enterprise account is no longer authorized"
+            : "invalid enterprise key",
+      };
+    }
+    if (res.status === 402) {
+      return { ok: false, reason: "expired_key", error: "enterprise key has expired" };
     }
     if (!res.ok) {
       return {
@@ -455,17 +462,20 @@ function loadCachedPolicy(): EnterprisePolicy | null {
   try {
     const raw = localStorage.getItem(CACHE_KEY);
     if (raw) {
-      const policy = JSON.parse(raw);
+      const policy = JSON.parse(raw) as Record<string, any>;
       return {
-        ...EMPTY_POLICY,
-        ...policy,
-        authenticationMode: normalizeAuthenticationMode(
-          policy.authenticationMode ??
-            policy.authentication_mode ??
-            policy.enrollmentMode ??
-            policy.device_enrollment_mode
+        hiddenSections: Array.isArray(policy.hiddenSections) ? policy.hiddenSections : [],
+        lockedSettings:
+          policy.lockedSettings && typeof policy.lockedSettings === "object"
+            ? policy.lockedSettings
+            : {},
+        managedAiPreset: policy.managedAiPreset || null,
+        aiPresetPolicy: normalizeEnterpriseAiPresetPolicy(
+          policy.aiPresetPolicy ?? policy.managedAiPreset ?? null
         ),
         appUpdatePolicy: normalizeEnterpriseAppUpdatePolicy(policy.appUpdatePolicy),
+        managedPipes: Array.isArray(policy.managedPipes) ? policy.managedPipes : [],
+        orgName: typeof policy.orgName === "string" ? policy.orgName : "",
       };
     }
   } catch {}
@@ -476,13 +486,7 @@ type FetchResult =
   | { ok: true; policy: EnterprisePolicy }
   | {
       ok: false;
-      reason:
-        | "invalid_key"
-        | "network_error"
-        | "not_member"
-        | "account_required"
-        | "license_key_required";
-      policy?: EnterprisePolicy;
+      reason: "invalid_key" | "expired_key" | "network_error" | "not_member";
     };
 
 interface FetchPolicyOptions {
@@ -495,14 +499,10 @@ interface FetchPolicyOptions {
  * Consumer builds: returns a no-op — isSectionHidden always returns false,
  * no Rust commands or network calls are made.
  *
- * Enterprise builds: accepts either a screenpipe account or a license key,
- * fetches the policy, then enforces the policy's `authenticationMode`. A
- * credential may discover which mode the organization requires, but policy is
- * not applied until the required credential is present. A successful policy
- * response to an account credential confirms organization membership.
+ * Enterprise builds: accepts either a Clerk account session or an enterprise key.
+ * The user chooses either method and any successful policy response authenticates
+ * the build. A successful account response confirms organization membership.
  * Re-fetches every 5 minutes. Caches in localStorage for offline resilience.
- *
- * Existing policies without `authenticationMode` remain license-key based.
  */
 export function useEnterprisePolicy() {
   const {
@@ -581,29 +581,17 @@ export function useEnterprisePolicy() {
           method: "GET",
           headers,
         });
-        let errorBody: { code?: unknown } | null = null;
-        if (!res.ok) {
-          try {
-            errorBody = await res.json();
-          } catch {}
-        }
-        if (
-          credential.type === "account" &&
-          res.status === 403 &&
-          errorBody?.code === "organization_key_required"
-        ) {
-          return { ok: false, reason: "license_key_required" };
-        }
-        if (
-          (credential.type === "account" && [401, 403, 404].includes(res.status)) ||
-          (credential.type === "license_key" && [401, 402, 403].includes(res.status))
-        ) {
+        if (res.status === 401) {
           if (credential.type === "account") {
-            console.error(`[enterprise] policy fetch: account is not an organization member (${res.status})`);
+            console.error("[enterprise] policy fetch: account is not an enterprise member");
             return { ok: false, reason: "not_member" };
           }
-          console.error(`[enterprise] policy fetch: key rejected (${res.status})`);
+          console.error("[enterprise] policy fetch: key rejected");
           return { ok: false, reason: "invalid_key" };
+        }
+        if (credential.type === "license_key" && res.status === 402) {
+          console.error("[enterprise] policy fetch: key expired");
+          return { ok: false, reason: "expired_key" };
         }
         if (!res.ok) {
           console.error(`[enterprise] policy fetch failed: ${res.status} ${res.statusText}`);
@@ -618,12 +606,6 @@ export function useEnterprisePolicy() {
         data.appUpdatePolicy ?? data.lockedSettings?.app_update_policy
       );
       const lockedKeys = Object.keys(data.lockedSettings || {});
-      const authenticationMode = normalizeAuthenticationMode(
-        data.authenticationMode ??
-          data.authentication_mode ??
-          data.enrollmentMode ??
-          data.device_enrollment_mode
-      );
       const allHidden = [
         ...ENTERPRISE_DEFAULT_HIDDEN,
         ...(data.hiddenSections || []),
@@ -637,19 +619,7 @@ export function useEnterprisePolicy() {
         appUpdatePolicy,
         managedPipes: data.managedPipes || [],
         orgName: data.orgName || "",
-        authenticationMode,
       };
-
-      if (authenticationMode !== credential.type) {
-        return {
-          ok: false,
-          reason:
-            authenticationMode === "account"
-              ? "account_required"
-              : "license_key_required",
-          policy: result,
-        };
-      }
 
       console.log(
         `[enterprise] policy loaded: org=${result.orgName}, hidden=[${result.hiddenSections.join(",")}], locked=[${lockedKeys.join(",")}]`
@@ -813,22 +783,17 @@ export function useEnterprisePolicy() {
         console.warn("[enterprise] saved key is no longer valid, prompting for a new one");
         stopPolling();
         setAuthenticationState("license_key");
-        setAuthenticationError("invalid or expired license key");
+        setAuthenticationError("invalid enterprise key");
+      } else if (result.reason === "expired_key") {
+        console.warn("[enterprise] saved key has expired, prompting for a new one");
+        stopPolling();
+        setAuthenticationState("license_key");
+        setAuthenticationError("enterprise key has expired - contact your admin");
       } else if (result.reason === "not_member") {
         console.warn("[enterprise] signed-in account is no longer an organization member");
         stopPolling();
         setAuthenticationState("account");
         setAuthenticationError("this account is not associated with the enterprise organization");
-      } else if (result.reason === "account_required") {
-        stopPolling();
-        setPolicy(result.policy ?? EMPTY_POLICY);
-        setAuthenticationState("account");
-        setAuthenticationError("this organization requires sign-in");
-      } else if (result.reason === "license_key_required") {
-        stopPolling();
-        setPolicy(result.policy ?? EMPTY_POLICY);
-        setAuthenticationState("license_key");
-        setAuthenticationError("this organization requires an enterprise key");
       }
       // network_error: silently keep polling, use cached policy
     }, POLL_INTERVAL_MS);
@@ -836,7 +801,6 @@ export function useEnterprisePolicy() {
 
   const authenticateCredential = useCallback(async (
     credential: EnterpriseCredential,
-    allowCachedKey = false,
   ): Promise<boolean> => {
     const result = await fetchPolicy(credential);
     if (result.ok) {
@@ -847,38 +811,20 @@ export function useEnterprisePolicy() {
       return true;
     }
 
-    if (result.reason === "account_required") {
-      setPolicy(result.policy ?? EMPTY_POLICY);
-      setAuthenticationState("account");
-      setAuthenticationError("this organization requires sign-in");
-      return false;
-    }
-    if (result.reason === "license_key_required") {
-      setPolicy(result.policy ?? EMPTY_POLICY);
-      setAuthenticationState("license_key");
-      setAuthenticationError("this organization requires an enterprise key");
-      return false;
-    }
     if (result.reason === "invalid_key") {
       setAuthenticationState("license_key");
-      setAuthenticationError("invalid or expired license key");
+      setAuthenticationError("invalid enterprise key");
+      return false;
+    }
+    if (result.reason === "expired_key") {
+      setAuthenticationState("license_key");
+      setAuthenticationError("enterprise key has expired - contact your admin");
       return false;
     }
     if (result.reason === "not_member") {
       setAuthenticationState("account");
       setAuthenticationError("this account is not associated with the enterprise organization");
       return false;
-    }
-
-    if (allowCachedKey && credential.type === "license_key") {
-      const cached = loadCachedPolicy();
-      if (cached && normalizeAuthenticationMode(cached.authenticationMode) === "license_key") {
-        setPolicy(cached);
-        setAuthenticationError(null);
-        setAuthenticationState("authenticated");
-        startPolling(credential);
-        return true;
-      }
     }
 
     setAuthenticationState(credential.type);
@@ -896,17 +842,13 @@ export function useEnterprisePolicy() {
     const credential: EnterpriseCredential = { type: "license_key", value: key };
     const result = await fetchPolicy(credential, { applyLocalPolicy: false });
     if (!result.ok) {
-      if (result.reason === "account_required") {
-        setPolicy(result.policy ?? EMPTY_POLICY);
-        setAuthenticationState("account");
-        setAuthenticationError("this organization requires sign-in");
-        return { ok: true };
-      }
       return {
         ok: false,
         error: result.reason === "invalid_key"
-          ? "invalid or expired license key"
-          : "could not validate license - check your connection and try again",
+          ? "invalid enterprise key"
+          : result.reason === "expired_key"
+            ? "enterprise key has expired - contact your admin"
+            : "could not validate license - check your connection and try again",
       };
     }
 
@@ -925,8 +867,11 @@ export function useEnterprisePolicy() {
         error: "license seat limit reached - contact your admin to add seats",
       };
     }
-    if (!heartbeat.ok && heartbeat.reason === "invalid_license") {
-      return { ok: false, error: "invalid or expired license key" };
+    if (!heartbeat.ok && heartbeat.reason === "invalid_credential") {
+      return { ok: false, error: "invalid enterprise key" };
+    }
+    if (!heartbeat.ok && heartbeat.reason === "expired_key") {
+      return { ok: false, error: "enterprise key has expired - contact your admin" };
     }
 
     // Save only after the server accepts this device. Otherwise a full-seat
@@ -964,10 +909,10 @@ export function useEnterprisePolicy() {
     return { ok: true };
   }, [fetchPolicy, startPolling]);
 
-  const selectAuthenticationMode = useCallback((mode: EnterpriseAuthenticationMode) => {
+  const selectAuthenticationMethod = useCallback((method: EnterpriseAuthenticationMethod) => {
     setAuthenticationError(null);
-    setAuthenticationState(mode);
-    if (mode === "account" && accountToken) {
+    setAuthenticationState(method);
+    if (method === "account" && accountToken) {
       void authenticateCredential({ type: "account", value: accountToken });
     }
   }, [accountToken, authenticateCredential]);
@@ -998,10 +943,7 @@ export function useEnterprisePolicy() {
       if (cancelled) return;
 
       if (key) {
-        const authenticated = await authenticateCredential(
-          { type: "license_key", value: key },
-          true,
-        );
+        const authenticated = await authenticateCredential({ type: "license_key", value: key });
         if (cancelled || authenticated) return;
       }
 
@@ -1048,16 +990,12 @@ export function useEnterprisePolicy() {
     isEnterprise,
     isEnterpriseBuildResolved,
     authenticationState: isEnterprise ? authenticationState : "authenticated",
-    authenticationMode: isEnterprise ? policy.authenticationMode : null,
     authenticationError: isEnterprise ? authenticationError : null,
     isEnterpriseAuthenticated: !isEnterprise || authenticationState === "authenticated",
-    needsEnterpriseAuthentication: isEnterprise && authenticationState !== "authenticated",
     isSectionHidden: isEnterprise ? checkHidden : noop,
     isSettingLocked: isEnterprise ? checkLocked : noop,
     getManagedValue: isEnterprise ? getManagedValue : noopGet,
-    needsLicenseKey: isEnterprise && authenticationState === "license_key",
-    needsAccountLogin: isEnterprise && authenticationState === "account",
-    selectAuthenticationMode,
+    selectAuthenticationMethod,
     submitLicenseKey,
   };
 }

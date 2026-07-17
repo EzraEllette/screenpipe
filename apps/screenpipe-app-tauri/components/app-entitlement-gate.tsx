@@ -111,7 +111,7 @@ export function AppEntitlementGate({ children }: { children: React.ReactNode }) 
     authenticationState,
     authenticationError,
     isEnterpriseAuthenticated,
-    selectAuthenticationMode,
+    selectAuthenticationMethod,
     submitLicenseKey,
   } = useEnterprisePolicy();
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -549,16 +549,16 @@ export function AppEntitlementGate({ children }: { children: React.ReactNode }) 
         <div className="flex flex-col gap-3">
           <Button
             onClick={() => {
-              selectAuthenticationMode("account");
+              selectAuthenticationMethod("account");
               openLogin();
             }}
             className="w-full gap-2"
           >
             <LogIn className="h-4 w-4" />
-            sign in
+            sign in with enterprise account
           </Button>
           <Button
-            onClick={() => selectAuthenticationMode("license_key")}
+            onClick={() => selectAuthenticationMethod("license_key")}
             variant="outline"
             className="w-full gap-2"
           >
@@ -581,7 +581,7 @@ export function AppEntitlementGate({ children }: { children: React.ReactNode }) 
           embedded
           onSubmit={submitLicenseKey}
           onSignIn={() => {
-            selectAuthenticationMode("account");
+            selectAuthenticationMethod("account");
             openLogin();
           }}
         />
@@ -608,7 +608,7 @@ export function AppEntitlementGate({ children }: { children: React.ReactNode }) 
             {signedIn ? "use different account" : "sign in"}
           </Button>
           <Button
-            onClick={() => selectAuthenticationMode("license_key")}
+            onClick={() => selectAuthenticationMethod("license_key")}
             variant="outline"
             className="w-full gap-2"
           >

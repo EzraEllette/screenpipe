@@ -49,7 +49,6 @@ async function configureEnterpriseMocks(heartbeatStatus: number): Promise<void> 
             managedAiPreset: null,
             managedPipes: [],
             orgName: 'Bungalow',
-            authenticationMode: 'license_key',
             syncStreams: {
               frames: true,
               audio: true,
@@ -167,7 +166,7 @@ describe('Enterprise onboarding activation', () => {
     expect(initialText).not.toContain('sign in to activate your plan');
 
     await submitLicense(WRONG_LICENSE);
-    await waitForBodyText('invalid or expired license key');
+    await waitForBodyText('invalid enterprise key');
 
     await setHeartbeatStatus(403);
     await submitLicense(VALID_LICENSE);

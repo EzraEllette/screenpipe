@@ -14,8 +14,9 @@ interface EnterpriseLicensePromptProps {
   embedded?: boolean;
 }
 
-const LICENSE_KEY_PATTERN = /^ENT-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$/;
-const LICENSE_KEY_FORMAT_ERROR = "enter a license key like ENT-XXXX-XXXX-XXXX-XXXX";
+const ENTERPRISE_KEY_PATTERN = /^ENT-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$/;
+const ENTERPRISE_KEY_FORMAT_ERROR = "enter an enterprise key like ENT-XXXX-XXXX-XXXX-XXXX";
+const ENTERPRISE_WORKSPACE_URL = "https://screenpipe.com/account/workspace";
 
 function normalizeLicenseKey(value: string): string {
   return value.trim().toUpperCase();
@@ -35,8 +36,8 @@ export function EnterpriseLicensePrompt({
     e.preventDefault();
     const normalized = normalizeLicenseKey(key);
     if (!normalized) return;
-    if (!LICENSE_KEY_PATTERN.test(normalized)) {
-      setError(LICENSE_KEY_FORMAT_ERROR);
+    if (!ENTERPRISE_KEY_PATTERN.test(normalized)) {
+      setError(ENTERPRISE_KEY_FORMAT_ERROR);
       return;
     }
 
@@ -46,13 +47,13 @@ export function EnterpriseLicensePrompt({
     try {
       const result = await onSubmit(normalized);
       if (!result.ok) {
-        setError(result.error || "failed to validate license key");
+        setError(result.error || "failed to validate enterprise key");
       } else {
         onActivated?.();
       }
     } catch (e) {
       console.error("[enterprise] license activation failed:", e);
-      setError("failed to validate license key");
+      setError("failed to validate enterprise key");
     } finally {
       setLoading(false);
     }
@@ -84,6 +85,18 @@ export function EnterpriseLicensePrompt({
             autoComplete="off"
             disabled={loading}
           />
+
+          <p className="font-mono text-[11px] text-muted-foreground">
+            don&apos;t know your enterprise key?{" "}
+            <a
+              href={ENTERPRISE_WORKSPACE_URL}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="underline underline-offset-4 transition-colors hover:text-foreground"
+            >
+              find it in your workspace
+            </a>
+          </p>
 
           {error && (
             <p className="text-sm text-destructive">{error}</p>

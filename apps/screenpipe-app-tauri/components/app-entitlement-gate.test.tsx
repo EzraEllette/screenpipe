@@ -28,7 +28,7 @@ const mocks = vi.hoisted(() => ({
     authenticationError: null as string | null,
     isEnterpriseAuthenticated: true,
   },
-  selectAuthenticationMode: vi.fn(),
+  selectAuthenticationMethod: vi.fn(),
   submitLicenseKey: vi.fn(async () => ({ ok: true })),
 }));
 
@@ -59,7 +59,7 @@ vi.mock("@/lib/hooks/use-enterprise-policy", () => ({
     authenticationState: mocks.enterprise.authenticationState,
     authenticationError: mocks.enterprise.authenticationError,
     isEnterpriseAuthenticated: mocks.enterprise.isEnterpriseAuthenticated,
-    selectAuthenticationMode: mocks.selectAuthenticationMode,
+    selectAuthenticationMethod: mocks.selectAuthenticationMethod,
     submitLicenseKey: mocks.submitLicenseKey,
   }),
 }));
@@ -148,7 +148,7 @@ describe("AppEntitlementGate", () => {
     expect(mocks.openLoginWindow).toHaveBeenCalled();
   });
 
-  it("offers account and enterprise-key routes before the organization mode is known", () => {
+  it("offers account and enterprise-key routes in the fallback gate", () => {
     mocks.enterprise = {
       isEnterprise: true,
       authenticationState: "choice",
@@ -159,14 +159,16 @@ describe("AppEntitlementGate", () => {
     render(<AppEntitlementGate>{protectedApp}</AppEntitlementGate>);
 
     fireEvent.click(screen.getByRole("button", { name: /use enterprise key/i }));
-    expect(mocks.selectAuthenticationMode).toHaveBeenCalledWith("license_key");
+    expect(mocks.selectAuthenticationMethod).toHaveBeenCalledWith("license_key");
 
-    fireEvent.click(screen.getByRole("button", { name: /^sign in$/i }));
-    expect(mocks.selectAuthenticationMode).toHaveBeenCalledWith("account");
+    fireEvent.click(
+      screen.getByRole("button", { name: /sign in with enterprise account/i })
+    );
+    expect(mocks.selectAuthenticationMethod).toHaveBeenCalledWith("account");
     expect(mocks.openLoginWindow).toHaveBeenCalled();
   });
 
-  it("forces enterprise sign-in when account authentication is required even if billing is bypassed", async () => {
+  it("keeps the selected account route gated until the account is accepted", async () => {
     vi.stubEnv("TAURI_ENV_DEBUG", "true");
     mocks.enterprise = {
       isEnterprise: true,

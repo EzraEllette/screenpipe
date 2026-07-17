@@ -122,6 +122,16 @@ describe("onboarding login gate", () => {
     expect(screen.getByText(/^sign in$/i)).toBeInTheDocument();
   });
 
+  it("labels sign-in as the enterprise-account option during enterprise onboarding", () => {
+    mocks.settings = { user: null };
+    mocks.hasAppEntitlement.mockReturnValue(false);
+
+    render(<OnboardingLogin handleNextSlide={vi.fn()} suppressAutoAdvance />);
+
+    expect(screen.getByText(/^sign in$/i)).toBeInTheDocument();
+    expect(screen.getByText(/sign in with your enterprise account/i)).toBeInTheDocument();
+  });
+
   it("lets the enterprise onboarding parent own advancement", () => {
     vi.useFakeTimers();
     mocks.settings = { user: { token: "enterprise-token", email: "member@work.com" } };
