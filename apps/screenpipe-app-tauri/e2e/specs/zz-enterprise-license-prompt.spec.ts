@@ -88,6 +88,11 @@ async function setHeartbeatStatus(status: number): Promise<void> {
 }
 
 async function clearEnterpriseMocks(): Promise<void> {
+  // A successful activation destroys the onboarding webview. Move back to the
+  // persistent Home window before invoking Tauri or touching localStorage, or
+  // cleanup runs against a dead WebDriver context and leaks enterprise mode
+  // into the remaining zz-* specs.
+  await browser.switchToWindow('home').catch(() => {});
   await invokeOrThrow('complete_onboarding').catch(() => {});
   await browser.execute(
     (keys: string[], policyCacheKey: string) => {
@@ -102,7 +107,6 @@ async function clearEnterpriseMocks(): Promise<void> {
   ).catch(() => {});
 
   await browser.pause(t(2000));
-  await browser.switchToWindow('home').catch(() => {});
   await closeWindow('Onboarding').catch(() => {});
 }
 
