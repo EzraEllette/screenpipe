@@ -142,7 +142,11 @@ export default function PermissionsStep({
   const { isMac, isLoading: isPlatformLoading } = usePlatform();
   const [statuses, setStatuses] = useState<Record<string, boolean>>({});
   const [skippedIds, setSkippedIds] = useState<string[]>([]);
-  const [installedBrowsers, setInstalledBrowsers] = useState<string[]>([]);
+  // Browsers that are installed AND running at mount. Only running browsers
+  // can be prompted for Automation (we never force-launch, #2510), so a row
+  // for a closed browser would be a dead click. Resolved once so the wheel
+  // doesn't reshuffle mid-flow.
+  const [promptableBrowsers, setPromptableBrowsers] = useState<string[]>([]);
   const [requesting, setRequesting] = useState(false);
   const [showSkip, setShowSkip] = useState(false);
   const hasAdvancedRef = useRef(false);
@@ -164,12 +168,24 @@ export default function PermissionsStep({
       icon: <Globe className="w-3.5 h-3.5" strokeWidth={1.5} />,
       title: "Capture browser URLs",
       subtitle: "So Screenpipe knows what you were reading, not just what the pixels say",
+      // Scoped to RUNNING browsers: installed-but-closed ones can't be
+      // prompted, so counting them would leave this row permanently denied.
       check: async () => {
-        const granted = await commands.checkBrowsersAutomationPermission();
-        return granted ? "granted" : "denied";
+        const browsers = await commands.getBrowsersAutomationStatus();
+        const running = browsers.filter((b) => b.running);
+        if (running.length === 0) return "granted";
+        return running.every((b) => b.status === "granted")
+          ? "granted"
+          : "denied";
       },
       request: async () => {
         await commands.requestBrowsersAutomationPermission();
+        // macOS never re-prompts a browser the user previously denied — that
+        // click would be a silent no-op, so escalate to the Automation pane.
+        const browsers = await commands.getBrowsersAutomationStatus();
+        if (browsers.some((b) => b.running && b.status === "denied")) {
+          await commands.openPermissionSettings("automation");
+        }
       },
       macOnly: true,
       optional: true,
@@ -198,7 +214,7 @@ export default function PermissionsStep({
   // Filter permissions for this platform
   const activePermissions = permissions.filter((p) => {
     if (p.macOnly && !isMac) return false;
-    if (p.id === "browsers" && installedBrowsers.length === 0) return false;
+    if (p.id === "browsers" && promptableBrowsers.length === 0) return false;
     return true;
   });
 
@@ -254,13 +270,20 @@ export default function PermissionsStep({
       return changed ? { ...prev, ...results } : prev;
     });
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isMac, installedBrowsers.length]);
+  }, [isMac, promptableBrowsers.length]);
 
-  // Check installed browsers once
+  // Resolve promptable (running) browsers once
   useEffect(() => {
-    if (isPlatformLoading) return;
-    commands.getInstalledBrowsers().then(setInstalledBrowsers).catch(() => {});
-  }, [isPlatformLoading]);
+    if (isPlatformLoading || !isMac) return;
+    commands
+      .getBrowsersAutomationStatus()
+      .then((browsers) =>
+        setPromptableBrowsers(
+          browsers.filter((b) => b.running).map((b) => b.name)
+        )
+      )
+      .catch(() => {});
+  }, [isPlatformLoading, isMac]);
 
   useEffect(() => {
     if (isPlatformLoading) return;
