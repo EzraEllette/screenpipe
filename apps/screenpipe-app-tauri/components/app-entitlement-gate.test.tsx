@@ -24,6 +24,7 @@ const mocks = vi.hoisted(() => ({
   state: { isSettingsLoaded: true, user: null as any },
   enterprise: {
     isEnterprise: false,
+    isEnterpriseBuildResolved: true,
     authenticationState: "authenticated",
     authenticationError: null as string | null,
     isEnterpriseAuthenticated: true,
@@ -55,7 +56,7 @@ vi.mock("@/lib/utils/tauri", () => ({
 vi.mock("@/lib/hooks/use-enterprise-policy", () => ({
   useEnterprisePolicy: () => ({
     isEnterprise: mocks.enterprise.isEnterprise,
-    isEnterpriseBuildResolved: true,
+    isEnterpriseBuildResolved: mocks.enterprise.isEnterpriseBuildResolved,
     authenticationState: mocks.enterprise.authenticationState,
     authenticationError: mocks.enterprise.authenticationError,
     isEnterpriseAuthenticated: mocks.enterprise.isEnterpriseAuthenticated,
@@ -110,6 +111,7 @@ describe("AppEntitlementGate", () => {
     mocks.state = { isSettingsLoaded: true, user: null };
     mocks.enterprise = {
       isEnterprise: false,
+      isEnterpriseBuildResolved: true,
       authenticationState: "authenticated",
       authenticationError: null,
       isEnterpriseAuthenticated: true,
@@ -126,6 +128,7 @@ describe("AppEntitlementGate", () => {
     window.history.replaceState({}, "", "/onboarding");
     mocks.enterprise = {
       isEnterprise: true,
+      isEnterpriseBuildResolved: true,
       authenticationState: "choice",
       authenticationError: null,
       isEnterpriseAuthenticated: false,
@@ -135,6 +138,16 @@ describe("AppEntitlementGate", () => {
 
     expect(screen.getByTestId("protected-app")).toBeInTheDocument();
     expect(screen.queryByText(/enterprise access/i)).not.toBeInTheDocument();
+  });
+
+  it("does not stop recording while build detection is unresolved", async () => {
+    mocks.enterprise.isEnterpriseBuildResolved = false;
+
+    render(<AppEntitlementGate>{protectedApp}</AppEntitlementGate>);
+
+    expect(screen.getByText(/checking access/i)).toBeInTheDocument();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(mocks.stopScreenpipe).not.toHaveBeenCalled();
   });
 
   it("asks a signed-out user to sign in and never reveals the app", () => {
@@ -151,6 +164,7 @@ describe("AppEntitlementGate", () => {
   it("offers account and enterprise-key routes in the fallback gate", () => {
     mocks.enterprise = {
       isEnterprise: true,
+      isEnterpriseBuildResolved: true,
       authenticationState: "choice",
       authenticationError: null,
       isEnterpriseAuthenticated: false,
@@ -172,6 +186,7 @@ describe("AppEntitlementGate", () => {
     vi.stubEnv("TAURI_ENV_DEBUG", "true");
     mocks.enterprise = {
       isEnterprise: true,
+      isEnterpriseBuildResolved: true,
       authenticationState: "account",
       authenticationError: null,
       isEnterpriseAuthenticated: false,
@@ -192,6 +207,7 @@ describe("AppEntitlementGate", () => {
     vi.stubEnv("TAURI_ENV_DEBUG", "true");
     mocks.enterprise = {
       isEnterprise: true,
+      isEnterpriseBuildResolved: true,
       authenticationState: "authenticated",
       authenticationError: null,
       isEnterpriseAuthenticated: true,
@@ -469,6 +485,7 @@ describe("AppEntitlementGate", () => {
     try {
       mocks.enterprise = {
         isEnterprise: true,
+        isEnterpriseBuildResolved: true,
         authenticationState: "account",
         authenticationError: null,
         isEnterpriseAuthenticated: false,

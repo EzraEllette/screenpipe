@@ -274,7 +274,12 @@ export function AppEntitlementGate({ children }: { children: React.ReactNode }) 
   }, [devBypass, failOpenForTransientAccessLoss, tokenPending, loadUser]);
 
   useEffect(() => {
-    if (!isSettingsLoaded || !shouldGate) {
+    // Build detection is asynchronous in newly-created webviews. `shouldGate`
+    // deliberately stays true while it is unresolved so we render the neutral
+    // "checking access" shell, but that transient state must never stop the
+    // recorder. Otherwise opening the overlay can tear down the local API just
+    // before the consumer/enterprise result arrives.
+    if (!isSettingsLoaded || !isEnterpriseBuildResolved || !shouldGate) {
       stoppedForGateRef.current = false;
       return;
     }
@@ -283,7 +288,7 @@ export function AppEntitlementGate({ children }: { children: React.ReactNode }) 
     commands.stopScreenpipe().catch((err) => {
       console.warn("failed to stop screenpipe after entitlement gate:", err);
     });
-  }, [isSettingsLoaded, shouldGate]);
+  }, [isSettingsLoaded, isEnterpriseBuildResolved, shouldGate]);
 
   const openPricing = useCallback(() => {
     posthog.capture("app_entitlement_choose_plan_clicked", {
