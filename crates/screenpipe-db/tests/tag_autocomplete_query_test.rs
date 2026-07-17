@@ -12,14 +12,30 @@
 //! - audio tags through `tags` + `audio_tags`
 //! - memory tags through `json_each(memories.tags)`
 
-use std::{collections::HashMap, time::Instant};
+use std::{
+    collections::HashMap,
+    sync::atomic::{AtomicU64, Ordering},
+    time::Instant,
+};
 
 use screenpipe_db::DatabaseManager;
 
 type TagRow = (String, i64, i64, i64, i64);
 
+static NEXT_DB_ID: AtomicU64 = AtomicU64::new(0);
+
 async fn migrated_db() -> DatabaseManager {
-    let db = DatabaseManager::new("sqlite::memory:", Default::default())
+    // Each test needs its own coordinator key. Plain `sqlite::memory:` creates
+    // independent SQLx databases, but the process-wide SQLite write coordinator
+    // sees the same raw path and serializes every test (including background
+    // WAL maintenance) behind one semaphore. The large benchmark can otherwise
+    // leave smaller tests waiting forever while its `PRAGMA optimize` runs.
+    let db_name = format!(
+        "file:tag-autocomplete-{}-{}?mode=memory&cache=shared",
+        std::process::id(),
+        NEXT_DB_ID.fetch_add(1, Ordering::Relaxed)
+    );
+    let db = DatabaseManager::new(&db_name, Default::default())
         .await
         .unwrap();
     sqlx::migrate!("./src/migrations")
@@ -143,6 +159,8 @@ async fn tag_autocomplete_query_counts_tags_across_screen_audio_and_memories() {
     assert_eq!(rows["memory-only"].2, 0);
     assert_eq!(rows["memory-only"].3, 0);
     assert_eq!(rows["memory-only"].4, 2);
+
+    db.close().await;
 }
 
 /// Regression: a memory row whose `tags` column is empty (`''`), NULL, or
@@ -182,6 +200,8 @@ async fn tag_autocomplete_query_tolerates_malformed_memory_tags() {
     let tag_list = db.list_memory_tags().await.unwrap();
     assert!(tag_list.iter().any(|t| t == "memory-only"));
     assert!(tag_list.iter().any(|t| t == "shared"));
+
+    db.close().await;
 }
 
 /// The exact-match tag filter in `list_memories` / `count_memories` runs the
@@ -224,6 +244,8 @@ async fn memory_tag_filter_tolerates_malformed_memory_tags() {
     assert!(rows
         .iter()
         .all(|m| m.tags.as_deref().unwrap_or("").contains("keep")));
+
+    db.close().await;
 }
 
 #[tokio::test]
@@ -239,6 +261,8 @@ async fn tag_autocomplete_query_survives_large_mixed_sources() {
     assert_eq!(rows["bucket:0"].2, 0);
     assert_eq!(rows["bucket:0"].3, 0);
     assert_eq!(rows["bucket:0"].4, 1_000);
+
+    db.close().await;
 }
 
 #[tokio::test]
@@ -266,9 +290,12 @@ async fn tag_autocomplete_query_is_bounded_and_searchable_at_scale() {
     assert_eq!(targeted.len(), 1);
     assert_eq!(targeted[0].name, "tag:4999");
     assert!(targeted[0].count > 0);
+
+    db.close().await;
 }
 
 #[tokio::test]
+#[ignore = "large performance benchmark; run explicitly with --ignored"]
 async fn bench_tag_autocomplete_query_large_db() {
     let db = migrated_db().await;
     let seed_start = Instant::now();
@@ -287,6 +314,8 @@ async fn bench_tag_autocomplete_query_large_db() {
     println!(
         "tag autocomplete query over 1M vision_tags / 300k audio_tags / 200k memories -> {rows} rows, best {best:?}",
     );
+
+    db.close().await;
 }
 
 async fn seed_large_autocomplete_db(
