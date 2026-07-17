@@ -9,7 +9,7 @@ import os from 'os'
 import path from 'path'
 import { setupOpenBlas } from './setup_openblas.js'
 import { downloadFile, find7z } from './find_tools.js'
-import { ensureCachedDirectory } from './native_dependency_cache.js'
+import { ensureCachedDirectory, ensureCachedFile } from './native_dependency_cache.js'
 
 const originalCWD = process.cwd()
 // Change CWD to src-tauri
@@ -219,8 +219,8 @@ async function copyBunBinary() {
 		const releaseTarget = process.env.SCREENPIPE_RELEASE_TARGET;
 
 		const archMap = [
-			{ target: 'aarch64-apple-darwin', url: `https://github.com/oven-sh/bun/releases/download/bun-v${bunVersion}/bun-darwin-aarch64.zip`, dest: bunDest1, label: 'aarch64' },
-			{ target: 'x86_64-apple-darwin',  url: `https://github.com/oven-sh/bun/releases/download/bun-v${bunVersion}/bun-darwin-x64.zip`,     dest: bunDest2, label: 'x64' },
+			{ target: 'aarch64-apple-darwin', expectedArch: 'arm64', url: `https://github.com/oven-sh/bun/releases/download/bun-v${bunVersion}/bun-darwin-aarch64.zip`, dest: bunDest1, label: 'aarch64' },
+			{ target: 'x86_64-apple-darwin', expectedArch: 'x86_64', url: `https://github.com/oven-sh/bun/releases/download/bun-v${bunVersion}/bun-darwin-x64.zip`,     dest: bunDest2, label: 'x64' },
 		];
 
 		// In CI we set SCREENPIPE_RELEASE_TARGET per-matrix-entry and only need
@@ -234,28 +234,15 @@ async function copyBunBinary() {
 			throw new Error(`unknown SCREENPIPE_RELEASE_TARGET for macOS: ${releaseTarget}`);
 		}
 
-		for (const { url, dest, label } of wanted) {
-			if (await fs.exists(dest)) {
-				console.log(`bun ${label} binary already exists, skipping download.`);
-				continue;
-			}
-			console.log(`downloading bun v${bunVersion} for macOS ${label}...`);
-			const tmpZip = path.join(cwd, `bun-darwin-${label}.zip`);
-			const tmpDir = path.join(cwd, `bun-darwin-${label}-tmp`);
-			try {
-				await downloadFile(url, tmpZip, { retries: 10, timeoutMs: 120000 });
-				await $`unzip -o ${tmpZip} -d ${tmpDir}`;
-				// The zip contains a folder like bun-darwin-aarch64/bun or bun-darwin-x64/bun
-				const entries = await fs.readdir(tmpDir);
-				const extractedBun = path.join(tmpDir, entries[0], 'bun');
-				await copyFile(extractedBun, dest);
-				console.log(`bun ${label} binary installed to ${dest}`);
-				await fs.rm(tmpZip, { force: true });
-				await fs.rm(tmpDir, { recursive: true, force: true });
-			} catch (error) {
-				console.error(`failed to download bun ${label}:`, error);
-				process.exit(1);
-			}
+		for (const { url, dest, label, target, expectedArch } of wanted) {
+			await ensureCachedFile({
+				cacheKey: `bun-macos-${target}-v${bunVersion}`,
+				destination: dest,
+				validate: (filePath) => validateMacosBinary(filePath, expectedArch),
+				populate: (filePath) => populateZipBinary(url, filePath, 'bun'),
+			})
+			await fs.chmod(dest, 0o755)
+			console.log(`bun ${label} binary ready at ${dest}`)
 		}
 		return;
 	}
@@ -283,46 +270,79 @@ async function copyFile(src, dest) {
 	await fs.chmod(dest, 0o755); // ensure the binary is executable
 }
 
+async function validateFileSize(filePath, minSize) {
+	try {
+		const stat = await fs.stat(filePath)
+		return stat.isFile() && stat.size >= minSize
+	} catch {
+		return false
+	}
+}
+
+async function validateMacosBinary(filePath, expectedArch) {
+	if (!(await validateFileSize(filePath, 1_000_000))) return false
+	try {
+		const fileOutput = await runWithTimeout(['file', filePath], { label: `file ${path.basename(filePath)}` })
+		return new RegExp(`\\b${expectedArch}\\b`).test(fileOutput)
+	} catch {
+		return false
+	}
+}
+
+async function findFileByName(root, fileName) {
+	const pending = [root]
+	while (pending.length > 0) {
+		const directory = pending.pop()
+		for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
+			const entryPath = path.join(directory, entry.name)
+			if (entry.isDirectory()) pending.push(entryPath)
+			else if (entry.isFile() && entry.name === fileName) return entryPath
+		}
+	}
+	return null
+}
+
+async function populateZipBinary(url, destination, binaryName) {
+	const archive = `${destination}.zip`
+	const extractDirectory = `${destination}.extract`
+	try {
+		await downloadFile(url, archive, { retries: 10, timeoutMs: 900000 })
+		await fs.mkdir(extractDirectory, { recursive: true })
+		await $`unzip -o ${archive} -d ${extractDirectory}`
+		const extractedBinary = await findFileByName(extractDirectory, binaryName)
+		if (!extractedBinary) throw new Error(`${binaryName} was not found in ${url}`)
+		await copyFile(extractedBinary, destination)
+	} finally {
+		await fs.rm(archive, { force: true })
+		await fs.rm(extractDirectory, { recursive: true, force: true })
+	}
+}
+
 async function ensureMacosMlxMetallibSidecar() {
-	const releaseTarget = process.env.SCREENPIPE_RELEASE_TARGET;
-	if (releaseTarget !== 'aarch64-apple-darwin') return;
+	const releaseTarget = process.env.SCREENPIPE_RELEASE_TARGET
+	const target = releaseTarget || (process.arch === 'arm64' ? 'aarch64-apple-darwin' : 'x86_64-apple-darwin')
+	if (target !== 'aarch64-apple-darwin') return
 
-	const minSize = 1_000_000; // real metallib is ~84MB
-	const baseMetallib = path.join(cwd, 'mlx.metallib');
-	const sidecarMetallib = path.join(cwd, 'mlx.metallib-aarch64-apple-darwin');
+	const minSize = 1_000_000 // real metallib is ~84MB
+	const baseMetallib = path.join(cwd, 'mlx.metallib')
+	const sidecarMetallib = path.join(cwd, 'mlx.metallib-aarch64-apple-darwin')
 
-	const fileSize = async (filePath) => {
-		try {
-			return (await fs.stat(filePath)).size;
-		} catch {
-			return 0;
-		}
-	};
-
-	if ((await fileSize(sidecarMetallib)) >= minSize) {
-		if ((await fileSize(baseMetallib)) < minSize) {
-			await fs.copyFile(sidecarMetallib, baseMetallib);
-		}
-		console.log('mlx.metallib sidecar already exists for tauri externalBin.');
-		return;
+	// Cargo's build script may already have downloaded the unsuffixed copy in an
+	// older worktree. Promote it first so ensureCachedFile can seed the shared cache.
+	if (!(await validateFileSize(sidecarMetallib, minSize)) && (await validateFileSize(baseMetallib, minSize))) {
+		await fs.copyFile(baseMetallib, sidecarMetallib)
 	}
 
-	if ((await fileSize(baseMetallib)) >= minSize) {
-		await fs.copyFile(baseMetallib, sidecarMetallib);
-		await fs.chmod(sidecarMetallib, 0o755);
-		console.log('copied mlx.metallib to aarch64 tauri externalBin sidecar.');
-		return;
-	}
-
-	console.log('downloading mlx.metallib for macOS aarch64 tauri externalBin...');
-	await downloadFile(config.macos.mlxMetallibUrl, sidecarMetallib, { retries: 10, timeoutMs: 900000 });
-	await fs.chmod(sidecarMetallib, 0o755);
-	await fs.copyFile(sidecarMetallib, baseMetallib);
-	const size = await fileSize(sidecarMetallib);
-	if (size < minSize) {
-		throw new Error(`downloaded mlx.metallib sidecar is too small: ${size} bytes`);
-	}
-	console.log(`mlx.metallib sidecar installed to ${sidecarMetallib}`);
+	await ensureCachedFile({
+		cacheKey: 'mlx-metallib-macos-aarch64-v0.2.0',
+		destination: sidecarMetallib,
+		validate: (filePath) => validateFileSize(filePath, minSize),
+		populate: (filePath) =>
+			downloadFile(config.macos.mlxMetallibUrl, filePath, { retries: 10, timeoutMs: 900000 }),
+	})
+	await fs.chmod(sidecarMetallib, 0o755)
+	await fs.copyFile(sidecarMetallib, baseMetallib)
+	console.log(`mlx.metallib sidecar ready at ${sidecarMetallib}`)
 }
 
 async function linkSystemBinary(binaryName, destination) {
@@ -866,6 +886,50 @@ async function setupWindowsFfmpeg(sevenZ) {
 	})
 }
 
+async function setupMacosFfmpegSidecars() {
+	const sidecars = [
+		{
+			name: 'ffmpeg-aarch64-apple-darwin',
+			binaryName: 'ffmpeg',
+			expectedArch: 'arm64',
+			url: config.macos.ffmpegUrlArm,
+			cacheKey: 'ffmpeg-macos-aarch64-osxexperts-7',
+		},
+		{
+			name: 'ffprobe-aarch64-apple-darwin',
+			binaryName: 'ffprobe',
+			expectedArch: 'arm64',
+			url: config.macos.ffprobeUrlArm,
+			cacheKey: 'ffprobe-macos-aarch64-osxexperts-7.1',
+		},
+		{
+			name: 'ffmpeg-x86_64-apple-darwin',
+			binaryName: 'ffmpeg',
+			expectedArch: 'x86_64',
+			url: config.macos.ffmpegUrlx86_64,
+			cacheKey: 'ffmpeg-macos-x86_64-osxexperts-8.0',
+		},
+		{
+			name: 'ffprobe-x86_64-apple-darwin',
+			binaryName: 'ffprobe',
+			expectedArch: 'x86_64',
+			url: config.macos.ffprobeUrlx86_64,
+			cacheKey: 'ffprobe-macos-x86_64-osxexperts-7.1',
+		},
+	]
+
+	for (const sidecar of sidecars) {
+		const destination = path.join(cwd, sidecar.name)
+		await ensureCachedFile({
+			cacheKey: sidecar.cacheKey,
+			destination,
+			validate: (filePath) => validateMacosBinary(filePath, sidecar.expectedArch),
+			populate: (filePath) => populateZipBinary(sidecar.url, filePath, sidecar.binaryName),
+		})
+		await fs.chmod(destination, 0o755)
+	}
+}
+
 /* ########## Windows ########## */
 if (platform == 'windows') {
 	const sevenZ = await find7z();
@@ -910,37 +974,7 @@ if (platform == 'macos') {
 	// and ffmpeg SIGABRTs on every invocation. osxexperts.net binaries
 	// are statically linked and have zero external deps — safe to copy
 	// into any .app.
-	if (!(await fs.exists(`ffmpeg-aarch64-apple-darwin`))) {
-		await $`wget --no-config ${config.macos.ffmpegUrlArm} -O ffmpeg-aarch64.zip`;
-		await $`unzip -o ffmpeg-aarch64.zip -d ffmpeg-aarch64`;
-		await $`cp ffmpeg-aarch64/ffmpeg ffmpeg-aarch64-apple-darwin`;
-		await $`rm ffmpeg-aarch64.zip`;
-		await $`rm -rf ffmpeg-aarch64`;
-	}
-
-	if (!(await fs.exists(`ffprobe-aarch64-apple-darwin`))) {
-		await $`wget --no-config ${config.macos.ffprobeUrlArm} -O ffprobe-aarch64.zip`;
-		await $`unzip -o ffprobe-aarch64.zip -d ffprobe-aarch64`;
-		await $`cp ffprobe-aarch64/ffprobe ffprobe-aarch64-apple-darwin`;
-		await $`rm ffprobe-aarch64.zip`;
-		await $`rm -rf ffprobe-aarch64`;
-	}
-
-	if (!(await fs.exists(`ffmpeg-x86_64-apple-darwin`))) {
-		await $`wget --no-config ${config.macos.ffmpegUrlx86_64} -O ffmpeg-x86_64.zip`;
-		await $`unzip -o ffmpeg-x86_64.zip -d ffmpeg-x86_64`;
-		await $`cp ffmpeg-x86_64/ffmpeg ffmpeg-x86_64-apple-darwin`;
-		await $`rm ffmpeg-x86_64.zip`;
-		await $`rm -rf ffmpeg-x86_64`;
-	}
-
-	if (!(await fs.exists(`ffprobe-x86_64-apple-darwin`))) {
-		await $`wget --no-config ${config.macos.ffprobeUrlx86_64} -O ffprobe-x86_64.zip`;
-		await $`unzip -o ffprobe-x86_64.zip -d ffprobe-x86_64`;
-		await $`cp ffprobe-x86_64/ffprobe ffprobe-x86_64-apple-darwin`;
-		await $`rm ffprobe-x86_64.zip`;
-		await $`rm -rf ffprobe-x86_64`;
-	}
+	await setupMacosFfmpegSidecars()
 
 	await ensureMacosMlxMetallibSidecar();
 
