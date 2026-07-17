@@ -14,7 +14,7 @@
 
 
 <p align="center">screenpipe remembers how you actually work</p>
-<p align="center">It captures what you see, say, and do, locally, then turns real work into searchable memory, SOPs, and automations for AI agents.</p>
+<p align="center">It captures what you see, say, and do, locally, 24/7, then turns real work into searchable memory, SOPs, and automations for AI agents.</p>
 
 
 
