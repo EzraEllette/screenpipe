@@ -81,7 +81,7 @@ export function usePiSendTransport(options: PiSendTransportOptions) {
     options,
     (message, displayLabel, imageDataUrls) => sendPiMessage(message, displayLabel, imageDataUrls),
   );
-  const { handleStop, openConnectionSetup } = usePiLiveSendControls({
+  const { handleStop: stopLiveSend, openConnectionSetup } = usePiLiveSendControls({
     abortControllerRef,
     activePipeExecution,
     cancelStreamingMessageRender,
@@ -112,6 +112,22 @@ export function usePiSendTransport(options: PiSendTransportOptions) {
     forceQueueModeRef.current = false;
     setIsLoading(false);
     setIsStreaming(false);
+  }
+
+  async function handleStop() {
+    try {
+      await stopLiveSend();
+    } finally {
+      // The low-level stop control owns the visible streaming state, while
+      // this transport owns the dispatch guards. Leaving forceQueueMode set
+      // after a user stop makes every later send enqueue behind a turn that no
+      // longer exists. Clear the complete transport state together so Stop is
+      // also a reliable boundary for the next message.
+      if (!activePipeExecution) {
+        clearActivePiTurnState();
+        sendDispatchInFlightRef.current = false;
+      }
+    }
   }
 
   async function interruptActivePiTurn() {

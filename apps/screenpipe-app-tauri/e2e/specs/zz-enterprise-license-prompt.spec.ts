@@ -159,6 +159,13 @@ describe('Enterprise onboarding activation', () => {
   });
 
   it('handles invalid key, seat-limit, and retry success without sticking on validating', async () => {
+    // Enterprise onboarding now lets the user choose account sign-in or an
+    // organization key. Enter the key path explicitly before exercising the
+    // activation form so this remains deterministic from a clean install.
+    await waitForBodyText('use enterprise key');
+    const useEnterpriseKey = await $('button*=use enterprise key');
+    await useEnterpriseKey.waitForEnabled({ timeout: t(10_000) });
+    await useEnterpriseKey.click();
     await waitForBodyText('activate this device');
     const initialText = ((await browser.execute(
       () => document.body.innerText.toLowerCase(),
