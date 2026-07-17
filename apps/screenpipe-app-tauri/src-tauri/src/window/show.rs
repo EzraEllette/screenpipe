@@ -140,6 +140,11 @@ impl RewindWindowId {
     }
 }
 
+fn allowed_while_hidden_ui(id: &RewindWindowId, onboarding_completed: bool) -> bool {
+    *id == RewindWindowId::PermissionRecovery
+        || (*id == RewindWindowId::Onboarding && !onboarding_completed)
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, specta::Type)]
 pub enum ShowRewindWindow {
     Main,
@@ -433,8 +438,12 @@ impl ShowRewindWindow {
 
     pub fn show(&self, app: &AppHandle) -> tauri::Result<WebviewWindow> {
         let id = self.id();
-        if crate::enterprise_policy::is_app_ui_hidden() && id != RewindWindowId::PermissionRecovery
-        {
+        let onboarding_store = OnboardingStore::get(app)
+            .unwrap_or_else(|_| None)
+            .unwrap_or_default();
+        let allowed_while_hidden = allowed_while_hidden_ui(&id, onboarding_store.is_completed);
+
+        if crate::enterprise_policy::is_app_ui_hidden() && !allowed_while_hidden {
             info!(
                 "enterprise: suppressed {} window in hidden UI mode",
                 id.label()
@@ -447,7 +456,7 @@ impl ShowRewindWindow {
 
         if crate::headless::should_suppress_window(
             crate::headless::is_dormant(),
-            id == RewindWindowId::PermissionRecovery,
+            allowed_while_hidden,
         ) {
             info!(
                 "headless: suppressed '{}' window while UI is dormant",
@@ -458,10 +467,6 @@ impl ShowRewindWindow {
                 id.label()
             )));
         }
-
-        let onboarding_store = OnboardingStore::get(app)
-            .unwrap_or_else(|_| None)
-            .unwrap_or_default();
 
         // === Main window: use mode-specific labels to avoid NSPanel reconfiguration ===
         if id.label() == RewindWindowId::Main.label() {
@@ -1981,5 +1986,26 @@ impl ShowRewindWindow {
             window.set_size(size).ok();
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{allowed_while_hidden_ui, RewindWindowId};
+
+    #[test]
+    fn hidden_ui_only_allows_incomplete_onboarding_and_permission_recovery() {
+        assert!(allowed_while_hidden_ui(&RewindWindowId::Onboarding, false));
+        assert!(!allowed_while_hidden_ui(&RewindWindowId::Onboarding, true));
+        assert!(allowed_while_hidden_ui(
+            &RewindWindowId::PermissionRecovery,
+            false
+        ));
+        assert!(allowed_while_hidden_ui(
+            &RewindWindowId::PermissionRecovery,
+            true
+        ));
+        assert!(!allowed_while_hidden_ui(&RewindWindowId::Home, false));
+        assert!(!allowed_while_hidden_ui(&RewindWindowId::Main, false));
     }
 }

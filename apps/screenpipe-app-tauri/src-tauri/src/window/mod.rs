@@ -40,9 +40,10 @@ pub fn finalize_webview_window(window: tauri::WebviewWindow) -> tauri::WebviewWi
 /// retracts the ones already on screen, so the UI stayed visible.
 ///
 /// This reconciles the running session with the current policy:
-///   * hidden  → order every user-facing window off-screen (so nothing is left
-///     visible) and drop the dock icon (macOS Accessory), then rebuild the tray
-///     so its "open app" entries disappear.
+///   * hidden  → order main app windows off-screen and drop the dock icon
+///     (macOS Accessory), then rebuild the tray so its "open app" entries
+///     disappear. Incomplete onboarding remains visible until permissions are
+///     finished.
 ///   * visible → restore the normal activation policy + full tray menu; windows
 ///     reopen on demand via the tray/shortcut.
 ///
@@ -71,7 +72,7 @@ pub fn enforce_enterprise_ui_visibility(app: &tauri::AppHandle) {
         // destroy (not merely hide) the webviews so their memory is freed, exactly
         // like the tray-driven headless close. request_enter also flips the
         // dormant + record-only flags and defers the destroy off this callback so
-        // we don't re-enter the event loop. Permission recovery is preserved.
+        // we don't re-enter the event loop. Incomplete onboarding is preserved.
         crate::headless::request_enter(app.clone());
         tracing::info!("enterprise: hidden-UI policy enforced — headless teardown");
     } else {

@@ -26,8 +26,12 @@ pub fn is_dormant() -> bool {
     UI_DORMANT.load(Ordering::SeqCst)
 }
 
-pub fn should_suppress_window(dormant: bool, is_permission_recovery: bool) -> bool {
-    dormant && !is_permission_recovery
+pub fn should_suppress_window(dormant: bool, allowed_while_dormant: bool) -> bool {
+    dormant && !allowed_while_dormant
+}
+
+fn preserve_window_during_dormancy(label: &str, onboarding_completed: bool) -> bool {
+    label == "onboarding" && !onboarding_completed
 }
 
 /// Sync dormant/record-only state to an enterprise hidden-UI policy that flipped
@@ -144,20 +148,33 @@ fn enter_on_main_thread(app: &AppHandle) {
     }
 
     // Hide first so teardown is visually immediate, then destroy Home last.
-    // Destroying all labels also releases retained search/chat webviews and any
-    // auxiliary browser hosts, which is the memory saving this mode promises.
+    // Preserve only incomplete onboarding so an enterprise policy received
+    // after account sign-in cannot remove the permissions step. Main app
+    // surfaces and auxiliary browser hosts are still destroyed.
     // Permission recovery is destroyed too (not kept warm): the startup gate
     // re-shows it on the next launch whenever screen/mic are still missing —
     // even on enterprise-hidden devices — so there's no reason to preserve it.
+    let onboarding_completed = crate::store::OnboardingStore::get(app)
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+        .is_completed;
     let mut windows: Vec<_> = app.webview_windows().into_iter().collect();
     windows.sort_by_key(|(label, _)| label == "home");
 
-    for (_, window) in &windows {
+    for (label, window) in &windows {
+        if preserve_window_during_dormancy(label, onboarding_completed) {
+            continue;
+        }
         let _ = window.hide();
     }
 
     let mut count = 0;
     for (label, window) in windows {
+        if preserve_window_during_dormancy(&label, onboarding_completed) {
+            info!("headless: preserving incomplete onboarding webview");
+            continue;
+        }
         #[cfg(target_os = "macos")]
         if let Err(error) = prepare_window_for_destroy(app, &label, &window) {
             warn!("headless: preserving webview '{label}': {error}");
@@ -188,7 +205,8 @@ pub fn wake_from_tray(app: &AppHandle) {
 
     let app_for_shortcuts = app.clone();
     tauri::async_runtime::spawn(async move {
-        if let Err(error) = crate::shortcuts::initialize_global_shortcuts(&app_for_shortcuts).await {
+        if let Err(error) = crate::shortcuts::initialize_global_shortcuts(&app_for_shortcuts).await
+        {
             warn!("headless: failed to restore global shortcuts: {error}");
         }
     });
@@ -198,7 +216,10 @@ pub fn wake_from_tray(app: &AppHandle) {
 
 #[cfg(test)]
 mod tests {
-    use super::{should_start_dormant, should_suppress_pipe_runs, should_suppress_window};
+    use super::{
+        preserve_window_during_dormancy, should_start_dormant, should_suppress_pipe_runs,
+        should_suppress_window,
+    };
 
     #[test]
     fn headless_startup_never_blocks_incomplete_onboarding() {
@@ -219,5 +240,17 @@ mod tests {
         assert!(should_suppress_window(true, false));
         assert!(!should_suppress_window(true, true));
         assert!(!should_suppress_window(false, false));
+    }
+
+    #[test]
+    fn dormancy_preserves_only_incomplete_onboarding() {
+        assert!(preserve_window_during_dormancy("onboarding", false));
+        assert!(!preserve_window_during_dormancy("onboarding", true));
+        assert!(!preserve_window_during_dormancy("home", false));
+        assert!(!preserve_window_during_dormancy("main", false));
+        assert!(!preserve_window_during_dormancy(
+            "permission-recovery",
+            false
+        ));
     }
 }
