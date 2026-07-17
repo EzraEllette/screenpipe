@@ -503,12 +503,15 @@ fn persist_enterprise_hide_app(hidden: bool) {
 /// fetched policy via `set_enterprise_policy`, so the moment an admin turns on
 /// "hide app", the windows already on screen are retracted and the dock icon
 /// drops — without waiting for a restart. Best-effort: never returns an error.
+/// Returns the resolved visibility so onboarding can stop after permissions
+/// instead of entering UI-only setup steps on a managed-background device.
 #[tauri::command]
 #[specta::specta]
-pub fn apply_enterprise_ui_visibility(app: tauri::AppHandle) {
+pub fn apply_enterprise_ui_visibility(app: tauri::AppHandle) -> bool {
     let hidden = crate::enterprise_policy::is_app_ui_hidden();
     persist_enterprise_hide_app(hidden);
     crate::window::enforce_enterprise_ui_visibility(&app);
+    hidden
 }
 
 /// Read the enterprise admin API token (`team_api_token`) from

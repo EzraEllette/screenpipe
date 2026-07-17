@@ -31,7 +31,7 @@ pub fn should_suppress_window(dormant: bool, allowed_while_dormant: bool) -> boo
 }
 
 fn preserve_window_during_dormancy(label: &str, onboarding_completed: bool) -> bool {
-    label == "onboarding" && !onboarding_completed
+    label == "permission-recovery" || (label == "onboarding" && !onboarding_completed)
 }
 
 /// Sync dormant/record-only state to an enterprise hidden-UI policy that flipped
@@ -148,12 +148,13 @@ fn enter_on_main_thread(app: &AppHandle) {
     }
 
     // Hide first so teardown is visually immediate, then destroy Home last.
-    // Preserve only incomplete onboarding so an enterprise policy received
-    // after account sign-in cannot remove the permissions step. Main app
-    // surfaces and auxiliary browser hosts are still destroyed.
-    // Permission recovery is destroyed too (not kept warm): the startup gate
-    // re-shows it on the next launch whenever screen/mic are still missing —
-    // even on enterprise-hidden devices — so there's no reason to preserve it.
+    // Preserve incomplete onboarding so an enterprise policy received after
+    // account sign-in cannot remove the permissions step. Preserve permission
+    // recovery too: that webview loads the enterprise policy, whose hidden-UI
+    // reconciliation can invoke this teardown from inside the recovery page.
+    // Destroying it here makes the startup permission window disappear as soon
+    // as its own policy fetch completes. Main app surfaces and auxiliary browser
+    // hosts are still destroyed.
     let onboarding_completed = crate::store::OnboardingStore::get(app)
         .ok()
         .flatten()
@@ -243,14 +244,15 @@ mod tests {
     }
 
     #[test]
-    fn dormancy_preserves_only_incomplete_onboarding() {
+    fn dormancy_preserves_permission_surfaces() {
         assert!(preserve_window_during_dormancy("onboarding", false));
         assert!(!preserve_window_during_dormancy("onboarding", true));
-        assert!(!preserve_window_during_dormancy("home", false));
-        assert!(!preserve_window_during_dormancy("main", false));
-        assert!(!preserve_window_during_dormancy(
+        assert!(preserve_window_during_dormancy(
             "permission-recovery",
             false
         ));
+        assert!(preserve_window_during_dormancy("permission-recovery", true));
+        assert!(!preserve_window_during_dormancy("home", false));
+        assert!(!preserve_window_during_dormancy("main", false));
     }
 }
