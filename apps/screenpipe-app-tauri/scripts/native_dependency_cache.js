@@ -19,9 +19,9 @@ async function exists(filePath) {
 	}
 }
 
-async function isValid(directory, validate) {
+async function isValid(artifactPath, validate) {
 	try {
-		return (await exists(directory)) && (await validate(directory))
+		return (await exists(artifactPath)) && (await validate(artifactPath))
 	} catch {
 		return false
 	}
@@ -31,14 +31,14 @@ function temporarySibling(destination, label) {
 	return `${destination}.${label}-${process.pid}-${randomUUID()}`
 }
 
-async function publishDirectory(source, destination, validate) {
+async function publishArtifact(source, destination, validate, artifactType) {
 	const stage = temporarySibling(destination, 'tmp')
 	await fs.rm(stage, { recursive: true, force: true })
 	try {
 		await fs.mkdir(path.dirname(destination), { recursive: true })
-		await fs.cp(source, stage, { recursive: true })
+		await fs.cp(source, stage, { recursive: artifactType === 'directory' })
 		if (!(await isValid(stage, validate))) {
-			throw new Error(`native dependency staging directory failed validation: ${stage}`)
+			throw new Error(`native dependency staging artifact failed validation: ${stage}`)
 		}
 		await fs.rm(destination, { recursive: true, force: true })
 		await fs.rename(stage, destination)
@@ -88,17 +88,18 @@ export function getNativeDependencyCacheRoot() {
  * @param {{
  *   cacheKey: string,
  *   destination: string,
- *   validate: (directory: string) => Promise<boolean>,
- *   populate: (directory: string) => Promise<void>,
+ *   validate: (artifactPath: string) => Promise<boolean>,
+ *   populate: (artifactPath: string) => Promise<void>,
  *   cacheRoot?: string | null,
  * }} options
  * @returns {Promise<string>}
  */
-export async function ensureCachedDirectory({
+async function ensureCachedArtifact({
 	cacheKey,
 	destination,
 	validate,
 	populate,
+	artifactType,
 	cacheRoot = getNativeDependencyCacheRoot(),
 }) {
 	const destinationValid = await isValid(destination, validate)
@@ -108,7 +109,8 @@ export async function ensureCachedDirectory({
 		const stage = temporarySibling(destination, 'populate')
 		await fs.rm(stage, { recursive: true, force: true })
 		try {
-			await fs.mkdir(stage, { recursive: true })
+			if (artifactType === 'directory') await fs.mkdir(stage, { recursive: true })
+			else await fs.mkdir(path.dirname(stage), { recursive: true })
 			await populate(stage)
 			if (!(await isValid(stage, validate))) {
 				throw new Error(`native dependency population failed validation: ${cacheKey}`)
@@ -135,13 +137,14 @@ export async function ensureCachedDirectory({
 			if (!(await isValid(cacheDirectory, validate))) {
 				if (destinationValid) {
 					console.log(`seeding native dependency cache from worktree: ${cacheKey}`)
-					await publishDirectory(destination, cacheDirectory, validate)
+					await publishArtifact(destination, cacheDirectory, validate, artifactType)
 				} else {
 					console.log(`populating native dependency cache: ${cacheKey}`)
 					const stage = temporarySibling(cacheDirectory, 'populate')
 					await fs.rm(stage, { recursive: true, force: true })
 					try {
-						await fs.mkdir(stage, { recursive: true })
+						if (artifactType === 'directory') await fs.mkdir(stage, { recursive: true })
+						else await fs.mkdir(path.dirname(stage), { recursive: true })
 						await populate(stage)
 						if (!(await isValid(stage, validate))) {
 							throw new Error(`native dependency population failed validation: ${cacheKey}`)
@@ -160,7 +163,39 @@ export async function ensureCachedDirectory({
 
 	if (!destinationValid) {
 		console.log(`restoring native dependency from cache: ${cacheKey}`)
-		await publishDirectory(cacheDirectory, destination, validate)
+		await publishArtifact(cacheDirectory, destination, validate, artifactType)
 	}
 	return destination
+}
+
+/**
+ * Materialize a versioned native dependency directory into a worktree.
+ *
+ * @param {{
+ *   cacheKey: string,
+ *   destination: string,
+ *   validate: (directory: string) => Promise<boolean>,
+ *   populate: (directory: string) => Promise<void>,
+ *   cacheRoot?: string | null,
+ * }} options
+ * @returns {Promise<string>}
+ */
+export async function ensureCachedDirectory(options) {
+	return ensureCachedArtifact({ ...options, artifactType: 'directory' })
+}
+
+/**
+ * Materialize a versioned native dependency file into a worktree.
+ *
+ * @param {{
+ *   cacheKey: string,
+ *   destination: string,
+ *   validate: (filePath: string) => Promise<boolean>,
+ *   populate: (filePath: string) => Promise<void>,
+ *   cacheRoot?: string | null,
+ * }} options
+ * @returns {Promise<string>}
+ */
+export async function ensureCachedFile(options) {
+	return ensureCachedArtifact({ ...options, artifactType: 'file' })
 }
