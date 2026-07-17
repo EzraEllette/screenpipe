@@ -14,9 +14,11 @@ export const commands = {
  * fetched policy via `set_enterprise_policy`, so the moment an admin turns on
  * "hide app", the windows already on screen are retracted and the dock icon
  * drops — without waiting for a restart. Best-effort: never returns an error.
+ * Returns the resolved visibility so onboarding can stop after permissions
+ * instead of entering UI-only setup steps on a managed-background device.
  */
-async applyEnterpriseUiVisibility() : Promise<void> {
-    await TAURI_INVOKE("apply_enterprise_ui_visibility");
+async applyEnterpriseUiVisibility() : Promise<boolean> {
+    return await TAURI_INVOKE("apply_enterprise_ui_visibility");
 },
 /**
  * Frontend-callable gate. The banner awaits this before calling
@@ -1031,7 +1033,7 @@ async lockSync() : Promise<Result<null, string>> {
  * Cancel any in-flight OAuth flow(s) for the given integration.
  * Dropping the stored sender makes the awaiting `oauth_connect` call fail fast
  * with "OAuth channel closed before code was received" instead of hanging for
- * the full 120s timeout.
+ * the full callback timeout.
  */
 async oauthCancel(integrationId: string) : Promise<Result<null, string>> {
     try {

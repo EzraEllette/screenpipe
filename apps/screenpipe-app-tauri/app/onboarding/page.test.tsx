@@ -17,6 +17,8 @@ const mocks = vi.hoisted(() => ({
   setOnboardingStep: vi.fn(async () => undefined),
   setWindowSize: vi.fn(async () => undefined),
   showWindow: vi.fn(async () => undefined),
+  applyEnterpriseUiVisibility: vi.fn(async () => false),
+  completeOnboarding: vi.fn(async () => undefined),
   capture: vi.fn(),
 }));
 
@@ -26,7 +28,11 @@ vi.mock("@/components/ui/use-toast", () => ({
   useToast: () => ({ toast: vi.fn() }),
 }));
 vi.mock("@/lib/hooks/use-onboarding", () => {
-  const useOnboarding = () => ({ onboardingData, isLoading: false });
+  const useOnboarding = () => ({
+    onboardingData,
+    isLoading: false,
+    completeOnboarding: mocks.completeOnboarding,
+  });
   useOnboarding.getState = () => ({
     onboardingData,
     loadOnboardingStatus: vi.fn(async () => undefined),
@@ -55,7 +61,9 @@ vi.mock("@/components/enterprise-license-prompt", () => ({
   ),
 }));
 vi.mock("@/components/onboarding/permissions-step", () => ({
-  default: () => <div>permissions</div>,
+  default: ({ handleNextSlide }: { handleNextSlide: () => void }) => (
+    <button onClick={handleNextSlide}>finish permissions</button>
+  ),
 }));
 vi.mock("@/components/onboarding/engine-startup", () => ({
   default: () => <div>engine</div>,
@@ -71,6 +79,7 @@ vi.mock("@/lib/utils/tauri", () => ({
     setOnboardingStep: mocks.setOnboardingStep,
     setWindowSize: mocks.setWindowSize,
     showWindow: mocks.showWindow,
+    applyEnterpriseUiVisibility: mocks.applyEnterpriseUiVisibility,
   },
 }));
 vi.mock("posthog-js", () => ({ default: { capture: mocks.capture } }));
@@ -86,6 +95,9 @@ describe("enterprise onboarding authentication", () => {
       authenticationError: null,
       isEnterpriseAuthenticated: false,
     };
+    onboardingData.currentStep = "login";
+    onboardingData.isCompleted = false;
+    mocks.applyEnterpriseUiVisibility.mockResolvedValue(false);
   });
 
   it("offers regular sign-in and Enterprise Key on the login step", () => {
@@ -133,5 +145,56 @@ describe("enterprise onboarding authentication", () => {
     expect(screen.getByText(/not associated with the enterprise organization/i)).toBeInTheDocument();
     expect(screen.getByText("regular sign in")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /use enterprise key/i })).toBeInTheDocument();
+  });
+
+  it("completes onboarding after permissions when enterprise app UI is hidden", async () => {
+    onboardingData.currentStep = "permissions";
+    mocks.applyEnterpriseUiVisibility.mockResolvedValue(true);
+
+    render(<OnboardingPage />);
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: /finish permissions/i })
+    );
+
+    await waitFor(() => expect(mocks.completeOnboarding).toHaveBeenCalledTimes(1));
+    expect(mocks.setOnboardingStep).not.toHaveBeenCalledWith("engine");
+    expect(screen.queryByText("engine")).not.toBeInTheDocument();
+  });
+
+  it("continues onboarding after permissions when enterprise app UI is visible", async () => {
+    onboardingData.currentStep = "permissions";
+
+    render(<OnboardingPage />);
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: /finish permissions/i })
+    );
+
+    await waitFor(() =>
+      expect(mocks.setOnboardingStep).toHaveBeenCalledWith("engine")
+    );
+    expect(mocks.completeOnboarding).not.toHaveBeenCalled();
+  });
+
+  it("never enters UI-only steps when hidden onboarding completion fails", async () => {
+    onboardingData.currentStep = "permissions";
+    mocks.applyEnterpriseUiVisibility.mockResolvedValue(true);
+    mocks.completeOnboarding.mockRejectedValueOnce(new Error("store unavailable"));
+    const closeWindow = vi.spyOn(window, "close").mockImplementation(() => {});
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    render(<OnboardingPage />);
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: /finish permissions/i })
+    );
+
+    await waitFor(() => expect(closeWindow).toHaveBeenCalledTimes(1));
+    expect(mocks.setOnboardingStep).not.toHaveBeenCalledWith("engine");
+    expect(screen.queryByText("engine")).not.toBeInTheDocument();
+
+    closeWindow.mockRestore();
+    consoleError.mockRestore();
   });
 });

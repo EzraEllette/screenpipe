@@ -43,7 +43,8 @@ export default function OnboardingPage() {
   const [currentSlide, setCurrentSlide] = useState<SlideKey>("login");
   const [isVisible, setIsVisible] = useState(true);
   const [isTransitioning, setIsTransitioning] = useState(false);
-  const { onboardingData, isLoading } = useOnboarding();
+  const { onboardingData, isLoading, completeOnboarding } = useOnboarding();
+  const completedForHiddenUiRef = React.useRef(false);
   const enterpriseBuild = useEnterpriseBuildStatus();
   const {
     authenticationState,
@@ -100,6 +101,10 @@ export default function OnboardingPage() {
   // Redirect if already completed
   useEffect(() => {
     if (onboardingData.isCompleted) {
+      if (completedForHiddenUiRef.current) {
+        window.close();
+        return;
+      }
       commands
         .showWindow({ Home: { page: null } })
         .then(() => window.close())
@@ -129,6 +134,36 @@ export default function OnboardingPage() {
       step_index: currentIdx + 1,
     });
 
+    // Hidden enterprise deployments only need authentication + permissions.
+    // Their engine and integration screens depend on app UI that headless mode
+    // has already disabled, so finish onboarding at this boundary instead.
+    if (currentSlide === "permissions" && enterpriseBuild.isEnterprise) {
+      let appUiHidden = false;
+      try {
+        appUiHidden = await commands.applyEnterpriseUiVisibility();
+      } catch (error) {
+        console.warn(
+          "failed to resolve enterprise UI visibility after permissions:",
+          error
+        );
+      }
+
+      if (appUiHidden) {
+        completedForHiddenUiRef.current = true;
+        posthog.capture("onboarding_hidden_ui_completed_after_permissions");
+        try {
+          await completeOnboarding();
+        } catch (error) {
+          // Never fall through to UI-only onboarding on a hidden deployment.
+          // Closing lets the persisted permission state be recovered on the
+          // next launch if the completion write itself failed.
+          console.error("failed to complete hidden UI onboarding:", error);
+          window.close();
+        }
+        return;
+      }
+    }
+
     const nextSlide = stepOrder[currentIdx + 1] || "pipe";
     try {
       await commands.setOnboardingStep(nextSlide);
@@ -142,7 +177,12 @@ export default function OnboardingPage() {
       setIsVisible(true);
       setIsTransitioning(false);
     }, 300);
-  }, [currentSlide, isTransitioning]);
+  }, [
+    completeOnboarding,
+    currentSlide,
+    enterpriseBuild.isEnterprise,
+    isTransitioning,
+  ]);
 
   // Enterprise authentication owns the onboarding login step. Existing saved
   // keys and accepted workspace accounts advance silently once verified.
