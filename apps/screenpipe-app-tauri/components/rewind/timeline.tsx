@@ -5,7 +5,7 @@
 
 import { useEffect, useState, useRef, useCallback, useMemo } from "react";
 
-import { Loader2, RotateCcw, AlertCircle, X, Sparkles, Globe, Lock, ExternalLink, MonitorOff, Settings } from "lucide-react";
+import { Loader2, RotateCcw, AlertCircle, X, Sparkles, ExternalLink, MonitorOff, Settings } from "lucide-react";
 import { SearchModal } from "@/components/rewind/search-modal";
 import { commands } from "@/lib/utils/tauri";
 import { listen, emit } from "@tauri-apps/api/event";
@@ -1304,7 +1304,6 @@ export default function Timeline({ embedded = false }: { embedded?: boolean }) {
 					// browser_url from screenpipe often lacks a protocol (e.g. "github.com/foo");
 					// both tauri shell.open and window.open reject/misroute schemeless inputs.
 					const openableUrl = browserUrl.includes("://") ? browserUrl : `https://${browserUrl}`;
-					const isHttps = openableUrl.startsWith("https://");
 					return (
 						<div className={`absolute ${embedded ? "top-[56px]" : "top-[calc(env(safe-area-inset-top)+4px)]"} left-0 right-0 z-[45] flex justify-center pointer-events-none`}>
 							<button
@@ -1324,11 +1323,6 @@ export default function Timeline({ embedded = false }: { embedded?: boolean }) {
 									}
 								}}
 							>
-								{isHttps ? (
-									<Lock className="w-3 h-3 text-green-400/80 shrink-0" />
-								) : (
-									<Globe className="w-3 h-3 text-white/40 shrink-0" />
-								)}
 								<span className="text-[12px] font-mono text-white/80 truncate">
 									{openableUrl.replace(/^https?:\/\/(www\.)?/, "")}
 								</span>
