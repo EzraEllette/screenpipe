@@ -29,6 +29,41 @@ const SLIDE_WINDOW_SIZES: Record<SlideKey, { width: number; height: number }> =
     pipe: { width: 500, height: 500 },
   };
 
+const SLIDE_ORDER: SlideKey[] = [
+  "login",
+  "permissions",
+  "engine",
+  "connect-apps",
+  "pipe",
+];
+
+// endowed progress: the bar first renders on permissions with login already
+// counted done, so it always starts above zero
+const EndowedProgress = ({ step, total }: { step: number; total: number }) => (
+  <div className="w-full max-w-sm mx-auto mb-[22px]">
+    <div className="flex justify-between font-mono text-[9px] lowercase tracking-[0.04em] text-muted-foreground mb-[5px]">
+      <span>setup</span>
+      <span>
+        {step} of {total}
+      </span>
+    </div>
+    <div className="flex gap-[3px]">
+      {Array.from({ length: total }, (_, i) => (
+        <div
+          key={i}
+          className={`h-[3px] flex-1 ${
+            i + 1 < step
+              ? "bg-foreground"
+              : i + 1 === step
+                ? "bg-foreground opacity-[0.45]"
+                : "bg-border"
+          }`}
+        />
+      ))}
+    </div>
+  </div>
+);
+
 const setWindowSizeForSlide = async (slide: SlideKey) => {
   try {
     const { width, height } = SLIDE_WINDOW_SIZES[slide];
@@ -121,14 +156,7 @@ export default function OnboardingPage() {
     setIsTransitioning(true);
 
     posthog.capture(`onboarding_${currentSlide}_completed`);
-    const stepOrder: SlideKey[] = [
-      "login",
-      "permissions",
-      "engine",
-      "connect-apps",
-      "pipe",
-    ];
-    const currentIdx = stepOrder.indexOf(currentSlide);
+    const currentIdx = SLIDE_ORDER.indexOf(currentSlide);
     posthog.capture("onboarding_step_reached", {
       step_name: `${currentSlide}_completed`,
       step_index: currentIdx + 1,
@@ -164,7 +192,7 @@ export default function OnboardingPage() {
       }
     }
 
-    const nextSlide = stepOrder[currentIdx + 1] || "pipe";
+    const nextSlide = SLIDE_ORDER[currentIdx + 1] || "pipe";
     try {
       await commands.setOnboardingStep(nextSlide);
     } catch {
@@ -225,6 +253,12 @@ export default function OnboardingPage() {
             isVisible ? "opacity-100" : "opacity-0"
           }`}
         >
+          {currentSlide !== "login" && (
+            <EndowedProgress
+              step={SLIDE_ORDER.indexOf(currentSlide) + 1}
+              total={SLIDE_ORDER.length}
+            />
+          )}
           {currentSlide === "login" && (
             enterpriseBuild.isEnterprise ? (
               authenticationState === "license_key" ? (
