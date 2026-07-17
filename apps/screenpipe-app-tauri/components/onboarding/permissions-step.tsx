@@ -180,10 +180,16 @@ export default function PermissionsStep({
       },
       request: async () => {
         await commands.requestBrowsersAutomationPermission();
-        // macOS never re-prompts a browser the user previously denied — that
-        // click would be a silent no-op, so escalate to the Automation pane.
+        // macOS never re-prompts after a deny, and unsigned/adhoc dev builds
+        // can have the prompt swallowed by tccd entirely — either way the
+        // click would be a silent no-op, so if the running browsers still
+        // aren't granted, escalate to the Automation settings pane.
         const browsers = await commands.getBrowsersAutomationStatus();
-        if (browsers.some((b) => b.running && b.status === "denied")) {
+        const running = browsers.filter((b) => b.running);
+        if (
+          running.length > 0 &&
+          !running.every((b) => b.status === "granted")
+        ) {
           await commands.openPermissionSettings("automation");
         }
       },

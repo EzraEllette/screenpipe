@@ -197,11 +197,12 @@ describe("onboarding permission wheel", () => {
     expect(browsersRow().textContent).toContain("granted");
   });
 
-  it("escalates to the Automation settings pane when a running browser stays denied", async () => {
-    // macOS never re-prompts after deny — without escalation the grant
-    // click would be a silent no-op
+  it("escalates to the Automation settings pane when a running browser stays ungranted", async () => {
+    // macOS never re-prompts after deny, and adhoc dev builds can have the
+    // prompt swallowed by tccd while the status stays not_asked — without
+    // escalation the grant click would be a silent no-op either way
     mocks.getBrowsersAutomationStatus.mockResolvedValue([
-      { name: "Arc", status: "denied", running: true },
+      { name: "Arc", status: "not_asked", running: true },
     ]);
     mocks.checkMicrophonePermission.mockResolvedValue("granted");
     mocks.checkAccessibilityPermissionCmd.mockResolvedValue("granted");
