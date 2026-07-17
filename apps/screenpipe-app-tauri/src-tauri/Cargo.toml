@@ -346,6 +346,18 @@ debug = false
 # Faster dev builds
 [profile.dev]
 opt-level = 0
+debug = false
+# Per-worktree incremental state cannot help a cold target and prevents the
+# shared compiler cache from reusing screenpipe's path crates across worktrees.
+incremental = false
 
 [profile.dev.package."*"]
 opt-level = 2
+debug = false
+
+# Proc macros and build scripts do not ship in the application. Compiling them
+# with the dependency-wide opt-level=2 only slows the build and cannot improve
+# app runtime performance.
+[profile.dev.build-override]
+opt-level = 0
+debug = false
