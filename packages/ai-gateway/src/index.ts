@@ -197,7 +197,13 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 			// (Date.now advances across the upstream fetch I/O) — ≈ TTFB for stream,
 			// total for non-stream. Includes any router/embed overhead.
 			const reqStart = Date.now();
-			let response = await handleChatCompletions(body, env, latency, authResult.deviceId);
+			let response = await handleChatCompletions(
+				body,
+				env,
+				latency,
+				authResult.deviceId,
+				authResult.service === true,
+			);
 			const latencyMs = Date.now() - reqStart;
 			// Difficulty-router decision (null unless the router ran) for A/B measurement.
 			const routerTier = response.headers.get('x-screenpipe-router-tier');

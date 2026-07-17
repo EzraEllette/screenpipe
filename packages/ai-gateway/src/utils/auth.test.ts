@@ -82,6 +82,21 @@ describe('validateAuth — verified identities only', () => {
     });
   });
 
+  it('authenticates the dedicated backend runner bearer without Clerk', async () => {
+    const serviceEnv = {
+      ...env,
+      AI_GATEWAY_SERVICE_TOKEN: 'runner-service-secret',
+    } as Env;
+
+    expect(await validateAuth(requestFor('runner-service-secret'), serviceEnv)).toEqual({
+      isValid: true,
+      tier: 'subscribed',
+      deviceId: 'device-from-header',
+      service: true,
+    });
+    expect(verifyTokenMock).toHaveBeenCalledTimes(0);
+  });
+
   it('does not authenticate an arbitrary UUID, even if it names an account', async () => {
     const fetchMock = mock(async () => new Response(JSON.stringify([{ id: 'active-subscription' }])));
     globalThis.fetch = fetchMock as typeof fetch;

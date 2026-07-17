@@ -140,6 +140,8 @@ export interface GeminiResponse {
 
 export interface Env {
 	OPENAI_API_KEY: string;
+	/** Runner-only bearer for trusted backend jobs. Stored as a Worker secret. */
+	AI_GATEWAY_SERVICE_TOKEN?: string;
 	OPENAI_REALTIME_TRANSCRIPTION_COST_PER_HOUR?: string;
 	ANTHROPIC_API_KEY: string;
 	DEEPGRAM_API_KEY: string;
@@ -223,6 +225,8 @@ export interface AuthResult {
 	tier: UserTier;
 	deviceId: string;
 	userId?: string;
+	/** True only for the dedicated backend service bearer. */
+	service?: boolean;
 	error?: string;
 }
 

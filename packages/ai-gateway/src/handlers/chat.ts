@@ -459,6 +459,7 @@ export async function handleChatCompletions(
   env: Env,
   latency: 'interactive' | 'background' = 'interactive',
   deviceId: string = '',
+  allowFrontierBackground: boolean = false,
 ): Promise<Response> {
   // A request with no messages at all can never complete: OpenAI would
   // answer the injected system hint below, and Anthropic 400s outright once
@@ -474,7 +475,12 @@ export async function handleChatCompletions(
   // chain) by default, or hard-reject via PIPE_FRONTIER_POLICY=reject. The client
   // also hides frontier models from pipe presets; this is the worker backstop that
   // catches old pipes / custom integrations / the passthrough that slip through.
-  if (latency === 'background' && body.model !== 'auto' && isFrontierModel(body.model)) {
+  if (
+    latency === 'background' &&
+    !allowFrontierBackground &&
+    body.model !== 'auto' &&
+    isFrontierModel(body.model)
+  ) {
     if (String((env as any)?.PIPE_FRONTIER_POLICY ?? 'downgrade').toLowerCase() === 'reject') {
       return errorResponse(body, 403, `"${body.model}" (a frontier model) isn't available for scheduled pipes / background tasks. Use "auto" or a fast model (glm-5, gemini, sonnet, haiku).`);
     }
