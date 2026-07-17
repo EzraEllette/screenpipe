@@ -101,7 +101,12 @@ impl SafeMonitor {
                     .lock()
                     .map_err(|e| anyhow::anyhow!("persistent capture mutex poisoned: {}", e))?;
                 if let Some(ref capture) = *guard {
-                    match capture.get_latest_image(std::time::Duration::from_millis(200)) {
+                    let image = if streaming {
+                        capture.get_latest_image_streaming(std::time::Duration::from_millis(200))
+                    } else {
+                        capture.get_latest_image(std::time::Duration::from_millis(200))
+                    };
+                    match image {
                         Ok(img) => {
                             persistent_failures.store(0, Ordering::Relaxed);
                             return Ok(img);
@@ -130,7 +135,12 @@ impl SafeMonitor {
             match crate::wgc_capture::PersistentCapture::new(monitor_id) {
                 Ok(mut capture) => {
                     // First frame — allow longer timeout for WGC to deliver
-                    match capture.get_latest_image(std::time::Duration::from_millis(500)) {
+                    let image = if streaming {
+                        capture.get_latest_image_streaming(std::time::Duration::from_millis(500))
+                    } else {
+                        capture.get_latest_image(std::time::Duration::from_millis(500))
+                    };
+                    match image {
                         Ok(img) => {
                             let mut guard = persistent.lock().map_err(|e| {
                                 anyhow::anyhow!("persistent capture mutex poisoned: {}", e)

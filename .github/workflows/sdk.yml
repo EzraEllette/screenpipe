@@ -186,6 +186,9 @@ jobs:
         run: ls *.node
       - name: Run integration tests
         shell: bash
+        env:
+          # Keep Windows capture timing visible when the live FPS assertion regresses.
+          SCREENPIPE_SDK_PERF: ${{ runner.os == 'Windows' && '1' || '0' }}
         run: |
           set -eo pipefail
           files=$(find __test__ -name '*.test.mjs' | sort)
