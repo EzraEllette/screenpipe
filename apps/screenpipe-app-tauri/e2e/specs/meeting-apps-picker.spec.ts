@@ -45,6 +45,51 @@ const WEBEX_TOGGLE_TESTID = 'meeting-apps-picker-toggle-webex';
 const OPEN_BUTTON_TESTID = 'settings-ignore-meeting-apps-button';
 const COUNT_BADGE_TESTID = 'settings-ignore-meeting-apps-count';
 const DIALOG_TESTID = 'meeting-apps-picker-dialog';
+let restoreAudioDisabled = false;
+let restoreMeetingDetectorDisabled = false;
+
+async function switchEnabled(id: string): Promise<boolean> {
+  const element = await $(`#${id}`);
+  await element.waitForExist({ timeout: t(8_000) });
+  return (await element.getAttribute('aria-checked')) === 'true';
+}
+
+async function ensureMeetingControlsEnabled(): Promise<void> {
+  restoreAudioDisabled = !(await switchEnabled('disableAudio'));
+  if (restoreAudioDisabled) {
+    await (await $('#disableAudio')).click();
+    await browser.waitUntil(() => switchEnabled('disableAudio'), {
+      timeout: t(5_000),
+      timeoutMsg: 'audio settings did not enable for the meeting picker test',
+    });
+  }
+
+  restoreMeetingDetectorDisabled = !(await switchEnabled('disableMeetingDetector'));
+  if (restoreMeetingDetectorDisabled) {
+    await (await $('#disableMeetingDetector')).click();
+    await browser.waitUntil(() => switchEnabled('disableMeetingDetector'), {
+      timeout: t(5_000),
+      timeoutMsg: 'meeting detection did not enable for the picker test',
+    });
+  }
+}
+
+async function restoreRecordingControls(): Promise<void> {
+  if (restoreMeetingDetectorDisabled && await switchEnabled('disableMeetingDetector')) {
+    await (await $('#disableMeetingDetector')).click();
+    await browser.waitUntil(async () => !(await switchEnabled('disableMeetingDetector')), {
+      timeout: t(5_000),
+      timeoutMsg: 'meeting detection setting did not restore after the picker test',
+    });
+  }
+  if (restoreAudioDisabled && await switchEnabled('disableAudio')) {
+    await (await $('#disableAudio')).click();
+    await browser.waitUntil(async () => !(await switchEnabled('disableAudio')), {
+      timeout: t(5_000),
+      timeoutMsg: 'audio setting did not restore after the meeting picker test',
+    });
+  }
+}
 
 async function openRecordingSettings(): Promise<void> {
   const navSettings = await $('[data-testid="nav-settings"]');
@@ -87,6 +132,14 @@ describe('Meeting-apps ignore picker', () => {
     await waitForAppReady();
     await openHomeWindow();
     await openRecordingSettings();
+    // The broad E2E job intentionally boots with `no-recording`, which
+    // persists disableAudio=true. This UI spec owns the state it needs instead
+    // of depending on an earlier spec to have enabled recording by chance.
+    await ensureMeetingControlsEnabled();
+  });
+
+  after(async () => {
+    await restoreRecordingControls();
   });
 
   // Make the spec self-contained even if a previous run left Webex ignored

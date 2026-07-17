@@ -93,7 +93,7 @@ mod tests {
 
     #[test]
     fn fallback_emits_seeded_key_with_auth_enabled() {
-        let v = fallback_local_api_config(Some("sp-cold-spawn-test".to_string()));
+        let v = fallback_local_api_config(Some("sp-cold-spawn-test".to_string()), 3030);
         assert_eq!(v["key"].as_str(), Some("sp-cold-spawn-test"));
         assert_eq!(v["port"], 3030);
         assert_eq!(v["auth_enabled"], true);
@@ -101,10 +101,16 @@ mod tests {
 
     #[test]
     fn fallback_emits_null_key_with_auth_disabled_when_unseeded() {
-        let v = fallback_local_api_config(None);
+        let v = fallback_local_api_config(None, 3030);
         assert!(v["key"].is_null());
         assert_eq!(v["port"], 3030);
         assert_eq!(v["auth_enabled"], false);
+    }
+
+    #[test]
+    fn fallback_preserves_effective_non_default_port() {
+        let v = fallback_local_api_config(Some("sp-cold-spawn-test".to_string()), 3041);
+        assert_eq!(v["port"], 3041);
     }
 }
 
@@ -156,7 +162,8 @@ pub async fn get_local_api_config(app_handle: tauri::AppHandle) -> serde_json::V
     // the privacy panel's API-key input stays empty until the user closes
     // and reopens Settings, even though the resolver already minted a key
     // that the spawning server will adopt verbatim.
-    fallback_local_api_config(crate::store::resolved_api_auth_key())
+    let effective_port = crate::recording::local_api_context_from_app(&app_handle).port;
+    fallback_local_api_config(crate::store::resolved_api_auth_key(), effective_port)
 }
 
 /// Get the app-local focus/notification server port.
@@ -173,13 +180,13 @@ pub fn get_app_server_config() -> serde_json::Value {
 
 /// Pure JSON shape used by the cold-spawn fallback. Extracted so the contract
 /// is covered by a unit test without needing a tauri::AppHandle. Port is the
-/// well-known default because the server hasn't bound yet — the UI will refresh
-/// once the server registers itself in `RecordingState`.
-fn fallback_local_api_config(cached_key: Option<String>) -> serde_json::Value {
+/// same effective port that the server config will use, including settings and
+/// the `SCREENPIPE_PORT` E2E/dev override.
+fn fallback_local_api_config(cached_key: Option<String>, effective_port: u16) -> serde_json::Value {
     let auth_enabled = cached_key.is_some();
     serde_json::json!({
         "key": cached_key,
-        "port": 3030,
+        "port": effective_port,
         "auth_enabled": auth_enabled,
     })
 }
@@ -496,12 +503,15 @@ fn persist_enterprise_hide_app(hidden: bool) {
 /// fetched policy via `set_enterprise_policy`, so the moment an admin turns on
 /// "hide app", the windows already on screen are retracted and the dock icon
 /// drops — without waiting for a restart. Best-effort: never returns an error.
+/// Returns the resolved visibility so onboarding can stop after permissions
+/// instead of entering UI-only setup steps on a managed-background device.
 #[tauri::command]
 #[specta::specta]
-pub fn apply_enterprise_ui_visibility(app: tauri::AppHandle) {
+pub fn apply_enterprise_ui_visibility(app: tauri::AppHandle) -> bool {
     let hidden = crate::enterprise_policy::is_app_ui_hidden();
     persist_enterprise_hide_app(hidden);
     crate::window::enforce_enterprise_ui_visibility(&app);
+    hidden
 }
 
 /// Read the enterprise admin API token (`team_api_token`) from
@@ -1048,6 +1058,69 @@ pub async fn e2e_emit_agent_stream(
         emitted_deltas: delta_count,
         emit_ms: start.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
     })
+}
+
+/// E2E helper for an extension-triggered turn that begins after the original
+/// assistant response has settled. This matches pi-subagents async completion:
+/// Pi persists a visible custom message, then `triggerTurn: true` starts a new
+/// assistant turn without a new user `message_start` event.
+#[tauri::command]
+#[specta::specta]
+pub async fn e2e_emit_settled_agent_follow_up(
+    app_handle: tauri::AppHandle,
+    session_id: String,
+) -> Result<(), String> {
+    if !cfg!(feature = "e2e") {
+        return Err("e2e_emit_settled_agent_follow_up is only available in e2e builds".to_string());
+    }
+
+    let emit_event = |event: serde_json::Value| -> Result<(), String> {
+        app_handle
+            .emit(
+                "agent_event",
+                serde_json::json!({
+                    "source": "pi",
+                    "sessionId": &session_id,
+                    "event": event,
+                }),
+            )
+            .map_err(|e| e.to_string())
+    };
+
+    emit_event(serde_json::json!({
+        "type": "message_start",
+        "message": { "role": "assistant" },
+    }))?;
+    emit_event(serde_json::json!({
+        "type": "message_update",
+        "assistantMessageEvent": {
+            "type": "text_delta",
+            "delta": "INITIAL_RESPONSE_SETTLED",
+        },
+    }))?;
+    emit_event(serde_json::json!({ "type": "agent_end" }))?;
+
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    emit_event(serde_json::json!({
+        "type": "custom_message",
+        "customType": "subagent-notify",
+        "content": "Background task completed: scout",
+        "display": true,
+    }))?;
+    emit_event(serde_json::json!({ "type": "agent_start" }))?;
+    emit_event(serde_json::json!({
+        "type": "message_start",
+        "message": { "role": "assistant" },
+    }))?;
+    emit_event(serde_json::json!({
+        "type": "message_update",
+        "assistantMessageEvent": {
+            "type": "text_delta",
+            "delta": "SUBAGENT_FOLLOW_UP_VISIBLE",
+        },
+    }))?;
+    emit_event(serde_json::json!({ "type": "agent_end" }))?;
+    Ok(())
 }
 
 /// E2E helper for the scheduled-pipe path: feed synthetic pipe stdout
@@ -1986,6 +2059,15 @@ pub async fn complete_onboarding(app_handle: tauri::AppHandle) -> Result<(), Str
 
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
     close_window(app_handle.clone(), ShowRewindWindow::Onboarding).await?;
+
+    // Hidden UI applies to the main app, but incomplete onboarding remains
+    // visible long enough to finish permissions. Once onboarding completes,
+    // close that sole exemption without trying to open Home.
+    if crate::enterprise_policy::is_app_ui_hidden() {
+        info!("enterprise: onboarding completed; keeping main UI hidden");
+        return Ok(());
+    }
+
     show_window(app_handle.clone(), ShowRewindWindow::Home { page: None }).await?;
 
     Ok(())

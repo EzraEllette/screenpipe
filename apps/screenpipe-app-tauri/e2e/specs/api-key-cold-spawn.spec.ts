@@ -72,15 +72,13 @@ describe("get_local_api_config: cold-spawn fallback", function () {
     expect(observed).not.toBeNull();
   });
 
-  it("returns the well-known default port (3030) regardless of branch", async () => {
-    // Both branches of `get_local_api_config` return port 3030. The cold-
-    // spawn fallback can't read the real port (the server isn't bound yet),
-    // and the post-spawn branch reads the actual `core.port`. Defaulting to
-    // 3030 matches what the resolver hands the server at spawn time. If
-    // these ever diverge we have a fragmentation bug to fix — assert the
-    // value the frontend's WebSocket reconnect logic depends on.
+  it("returns the effective server port regardless of branch", async () => {
+    // The cold-spawn fallback and post-spawn core must agree, including the
+    // SCREENPIPE_PORT override used by isolated E2E instances. Otherwise a
+    // window can latch 3030 and accidentally talk to another running app.
     const config = await getLocalApiConfig();
-    expect(config.port).toBe(3030);
+    const expectedPort = Number.parseInt(process.env.SCREENPIPE_PORT ?? "3030", 10);
+    expect(config.port).toBe(expectedPort);
 
     const filepath = await saveScreenshot("api-key-cold-spawn");
     expect(existsSync(filepath)).toBe(true);

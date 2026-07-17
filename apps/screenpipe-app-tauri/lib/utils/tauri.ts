@@ -14,9 +14,11 @@ export const commands = {
  * fetched policy via `set_enterprise_policy`, so the moment an admin turns on
  * "hide app", the windows already on screen are retracted and the dock icon
  * drops — without waiting for a restart. Best-effort: never returns an error.
+ * Returns the resolved visibility so onboarding can stop after permissions
+ * instead of entering UI-only setup steps on a managed-background device.
  */
-async applyEnterpriseUiVisibility() : Promise<void> {
-    await TAURI_INVOKE("apply_enterprise_ui_visibility");
+async applyEnterpriseUiVisibility() : Promise<boolean> {
+    return await TAURI_INVOKE("apply_enterprise_ui_visibility");
 },
 /**
  * Frontend-callable gate. The banner awaits this before calling
@@ -373,6 +375,20 @@ async e2eEmitAgentStream(sessionId: string, deltaCount: number) : Promise<Result
 async e2eEmitPipeStream(pipeName: string, executionId: number, deltaCount: number) : Promise<Result<E2eAgentStreamResult, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("e2e_emit_pipe_stream", { pipeName, executionId, deltaCount }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * E2E helper for an extension-triggered turn that begins after the original
+ * assistant response has settled. This matches pi-subagents async completion:
+ * Pi persists a visible custom message, then `triggerTurn: true` starts a new
+ * assistant turn without a new user `message_start` event.
+ */
+async e2eEmitSettledAgentFollowUp(sessionId: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("e2e_emit_settled_agent_follow_up", { sessionId }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1017,7 +1033,7 @@ async lockSync() : Promise<Result<null, string>> {
  * Cancel any in-flight OAuth flow(s) for the given integration.
  * Dropping the stored sender makes the awaiting `oauth_connect` call fail fast
  * with "OAuth channel closed before code was received" instead of hanging for
- * the full 120s timeout.
+ * the full callback timeout.
  */
 async oauthCancel(integrationId: string) : Promise<Result<null, string>> {
     try {
@@ -3299,7 +3315,17 @@ uiTheme?: string;
  * Read by the CloseRequested handler in main.rs. Default off (historical
  * minimize-to-taskbar behavior).
  */
-minimizeToTrayOnClose?: boolean }
+minimizeToTrayOnClose?: boolean;
+/**
+ * When true, closing Home destroys every webview while the recording
+ * engine and tray remain alive. Tray UI actions recreate the app on demand.
+ */
+headless?: boolean;
+/**
+ * When true, headless mode skips scheduled pipe runs so only recording
+ * and the local server continue in the background.
+ */
+headlessRecordOnly?: boolean }
 export type ShowRewindWindow = "Main" | { Home: { page: string | null } } | { Search: { query: string | null } } | "Onboarding" | "Chat" | "PermissionRecovery"
 export type StartExportRecordingResponse = { jobId: string }
 export type Suggestion = { text: string;

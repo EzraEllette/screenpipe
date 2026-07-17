@@ -133,7 +133,7 @@ impl DatabaseManager {
             binds.len() + 2,
         ));
 
-        let mut query = sqlx::query_as::<_, crate::types::OutputRecord>(&sql);
+        let mut query = sqlx::query_as::<_, crate::types::OutputRecord>(sqlx::AssertSqlSafe(sql));
         for b in &binds {
             query = query.bind(b);
         }
@@ -162,7 +162,7 @@ impl DatabaseManager {
             sql.push_str(&format!(" AND kind = ?{}", binds.len()));
         }
 
-        let mut query = sqlx::query_scalar::<_, i64>(&sql);
+        let mut query = sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(sql));
         for b in &binds {
             query = query.bind(b);
         }
@@ -344,7 +344,8 @@ impl DatabaseManager {
             binds.len() + 2
         ));
 
-        let mut rows_query = sqlx::query_as::<_, crate::types::OutputRecord>(&sql);
+        let mut rows_query =
+            sqlx::query_as::<_, crate::types::OutputRecord>(sqlx::AssertSqlSafe(sql));
         for b in &binds {
             rows_query = rows_query.bind(b);
         }
@@ -362,7 +363,7 @@ impl DatabaseManager {
         );
         let mut count_binds: Vec<String> = vec![fts_query];
         append_artifact_output_filters(&mut count_sql, &mut count_binds, source, saf_kind);
-        let mut count_query = sqlx::query_scalar::<_, i64>(&count_sql);
+        let mut count_query = sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(count_sql));
         for b in &count_binds {
             count_query = count_query.bind(b);
         }
@@ -391,7 +392,8 @@ impl DatabaseManager {
             binds.len() + 1,
             binds.len() + 2
         ));
-        let mut rows_query = sqlx::query_as::<_, crate::types::OutputRecord>(&sql);
+        let mut rows_query =
+            sqlx::query_as::<_, crate::types::OutputRecord>(sqlx::AssertSqlSafe(sql));
         for b in &binds {
             rows_query = rows_query.bind(b);
         }
@@ -404,7 +406,7 @@ impl DatabaseManager {
         let mut count_sql = String::from("SELECT COUNT(*) FROM outputs o WHERE 1=1");
         let mut count_binds: Vec<String> = Vec::new();
         append_artifact_output_filters(&mut count_sql, &mut count_binds, source, saf_kind);
-        let mut count_query = sqlx::query_scalar::<_, i64>(&count_sql);
+        let mut count_query = sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(count_sql));
         for b in &count_binds {
             count_query = count_query.bind(b);
         }

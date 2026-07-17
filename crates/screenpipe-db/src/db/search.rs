@@ -536,7 +536,7 @@ impl DatabaseManager {
             "#,
         );
 
-        let mut query = sqlx::query_as::<_, OCRResultRaw>(&sql);
+        let mut query = sqlx::query_as::<_, OCRResultRaw>(sqlx::AssertSqlSafe(sql));
         if let Some(start) = start_time {
             query = query.bind(start);
         }
@@ -733,7 +733,7 @@ impl DatabaseManager {
         // filter via the `json_array_length(?12) = 0` guard above.
         let tags_json = serde_json::to_string(tags).unwrap_or_else(|_| "[]".to_string());
 
-        let query_builder = sqlx::query_as(&sql);
+        let query_builder = sqlx::query_as(sqlx::AssertSqlSafe(sql));
 
         let raw_results: Vec<OCRResultRaw> = query_builder
             .bind(if has_fts { Some(&fts_query) } else { None })
@@ -1030,7 +1030,7 @@ impl DatabaseManager {
             |ids| serde_json::to_string(&ids).unwrap_or_else(|_| "[]".to_string()),
         );
 
-        let mut query_builder = sqlx::query_as::<_, AudioResultRaw>(&sql);
+        let mut query_builder = sqlx::query_as::<_, AudioResultRaw>(sqlx::AssertSqlSafe(sql));
 
         // bind parameters in the same order as added to the where clause
         if !query.is_empty() {
@@ -1202,7 +1202,7 @@ impl DatabaseManager {
                 Order::Descending => "DESC",
             },
         );
-        let rows = sqlx::query_as::<_, LiveAudioResultRaw>(&sql)
+        let rows = sqlx::query_as::<_, LiveAudioResultRaw>(sqlx::AssertSqlSafe(sql))
             .bind(query)
             .bind(start_time)
             .bind(end_time)
@@ -1940,7 +1940,7 @@ impl DatabaseManager {
                     "SELECT COUNT(*) FROM ui_events WHERE {} AND (? IS NULL OR timestamp >= ?) AND (? IS NULL OR timestamp <= ?)",
                     where_part
                 );
-                let mut qb = sqlx::query_scalar::<_, i64>(&input_sql);
+                let mut qb = sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(input_sql));
                 for val in &bind_values {
                     qb = qb.bind(val);
                 }
@@ -1962,7 +1962,7 @@ impl DatabaseManager {
 
         let count: i64 = match content_type {
             ContentType::OCR | ContentType::Accessibility => {
-                sqlx::query_scalar(&sql)
+                sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
                     .bind(if has_fts { fts_query } else { "*".to_owned() })
                     .bind(start_time)
                     .bind(end_time)
@@ -1980,7 +1980,7 @@ impl DatabaseManager {
                 } else {
                     crate::text_normalizer::sanitize_fts5_query(query)
                 };
-                let mut query_builder = sqlx::query_scalar(&sql)
+                let mut query_builder = sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
                     .bind(&sanitized_audio)
                     .bind(start_time)
                     .bind(end_time)

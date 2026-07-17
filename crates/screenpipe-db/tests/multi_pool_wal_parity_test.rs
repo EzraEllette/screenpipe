@@ -5,25 +5,23 @@
 //! Regression coverage for the recurring `db.sqlite` corruption
 //! ("database disk image is malformed", `SQLITE_CORRUPT` / code 11).
 //!
-//! Root cause: the desktop app runs the engine in-process, so the engine
-//! `DatabaseManager` read/write pools AND the `screenpipe-secrets` secret-store
-//! pool are two long-lived pools over the SAME `db.sqlite` (and its shared `-shm`
-//! WAL-index). They must agree on every WAL-affecting pragma. The secret pool's
-//! pragma list used to be an *incomplete* "safe subset" that omitted
-//! `wal_autocheckpoint`, so it inherited SQLite's default `1000` while the engine
-//! used `4000` — the two pools checkpointed the same WAL on different thresholds,
-//! racing the `-shm` into corruption. The fix routes BOTH pools through the single
-//! source of truth `screenpipe_config::WAL_SAFETY_PRAGMAS`.
+//! Root cause: SQLite versions before 3.51.3 can corrupt a WAL database when a
+//! connection resets the WAL while another connection begins a write. The
+//! desktop app has independent engine and secret-store pools over the same file,
+//! plus routine `TRUNCATE` checkpoints, so it satisfies that upstream race's
+//! prerequisites. The primary fix is SQLite 3.51.3; matching WAL pragmas and one
+//! process-wide write/checkpoint coordinator are defense in depth.
 //!
 //! - `engine_and_secret_pools_agree_on_wal_safety_pragmas` is the DETERMINISTIC
 //!   guarantee: it reads the live pragmas back from both real pools and asserts
 //!   they are identical. Revert the `store.rs` fix and this test fails on
 //!   `wal_autocheckpoint` (1000 vs 4000).
-//! - `concurrent_engine_and_secret_writes_keep_integrity_ok` is the stress proof:
-//!   it hammers both real pools with concurrent writes while a checkpointer runs,
-//!   then asserts `PRAGMA integrity_check == ok`.
+//! - `explicit_checkpoint_waits_for_shared_writer_coordinator` proves the real
+//!   DatabaseManager checkpoint path cannot overlap a coordinated write.
+//! - `coordinated_engine_secret_writes_and_checkpoints_keep_integrity_ok` drives
+//!   the production write/checkpoint wrappers concurrently, requires every
+//!   operation to succeed, then asserts `PRAGMA integrity_check == ok`.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -40,7 +38,7 @@ fn temp_db() -> (tempfile::TempDir, String) {
 }
 
 async fn pragma_i64(pool: &SqlitePool, name: &str) -> i64 {
-    let row = sqlx::query(&format!("PRAGMA {name}"))
+    let row = sqlx::query(sqlx::AssertSqlSafe(format!("PRAGMA {name}")))
         .fetch_one(pool)
         .await
         .unwrap_or_else(|e| panic!("PRAGMA {name}: {e}"));
@@ -49,7 +47,7 @@ async fn pragma_i64(pool: &SqlitePool, name: &str) -> i64 {
 }
 
 async fn pragma_text(pool: &SqlitePool, name: &str) -> String {
-    let row = sqlx::query(&format!("PRAGMA {name}"))
+    let row = sqlx::query(sqlx::AssertSqlSafe(format!("PRAGMA {name}")))
         .fetch_one(pool)
         .await
         .unwrap_or_else(|e| panic!("PRAGMA {name}: {e}"));
@@ -58,11 +56,9 @@ async fn pragma_text(pool: &SqlitePool, name: &str) -> String {
 }
 
 /// THE GUARANTEE. The engine pool and the secret-store pool, opened over the same
-/// file, must report byte-for-byte identical WAL-affecting pragmas. Any drift is a
-/// `-shm` WAL-index desync waiting to happen (the code-11 corruption). Both must
-/// now report `wal_autocheckpoint = 0` (inline auto-checkpoint disabled; the
-/// maintenance task owns checkpointing). The original bug was one side inheriting
-/// SQLite's default 1000 while the engine used a non-zero threshold.
+/// file, must report byte-for-byte identical WAL-affecting pragmas. Both report
+/// `wal_autocheckpoint = 0`, so only the coordinated maintenance path resets the
+/// WAL; no committing connection starts an uncoordinated inline checkpoint.
 #[tokio::test]
 async fn engine_and_secret_pools_agree_on_wal_safety_pragmas() {
     let (_guard, path) = temp_db();
@@ -81,8 +77,7 @@ async fn engine_and_secret_pools_agree_on_wal_safety_pragmas() {
         "engine and secret pools disagree on journal_mode",
     );
 
-    // The numeric WAL-safety pragmas. A mismatch on ANY of these lets the two
-    // pools desync the shared -shm WAL-index into 'database disk image is malformed'.
+    // Numeric WAL-safety pragmas must not drift between independent pools.
     for name in [
         "wal_autocheckpoint",
         "synchronous",
@@ -94,18 +89,12 @@ async fn engine_and_secret_pools_agree_on_wal_safety_pragmas() {
         let secret = pragma_i64(&secret_pool, name).await;
         assert_eq!(
             engine, secret,
-            "pool pragma '{name}' disagrees (engine={engine}, secret={secret}) — \
-             mismatched pragmas race the shared -shm WAL-index into code-11 corruption",
+            "pool pragma '{name}' disagrees (engine={engine}, secret={secret})",
         );
     }
 
-    // Pin the exact value so a future change can't silently re-open the gap on
-    // only one side. 0 = inline auto-checkpoint DISABLED on every pool; the
-    // single maintenance task owns all checkpointing (inline auto-checkpoint on
-    // a committing connection under load could copy a desynced -shm frame onto
-    // the wrong page). The historical bug was one side inheriting SQLite's
-    // default 1000 while the other used a different value; pinning 0 on both
-    // keeps them from ever racing the shared -shm WAL-index.
+    // 0 = inline auto-checkpoint disabled on every pool; the coordinated
+    // maintenance task owns checkpointing.
     assert_eq!(
         pragma_i64(&secret_pool, "wal_autocheckpoint").await,
         0,
@@ -119,113 +108,164 @@ async fn engine_and_secret_pools_agree_on_wal_safety_pragmas() {
     );
 }
 
-/// Stress proof: sustained concurrent writes from BOTH the engine pool and the
-/// secret pool, with a TRUNCATE-checkpointer racing the auto-checkpoints, must
-/// leave the database structurally intact (`integrity_check == ok`).
+/// Deterministic exclusion proof: the production on-demand checkpoint path
+/// waits while the same coordinator used by engine/secret writers is held.
+#[tokio::test]
+async fn explicit_checkpoint_waits_for_shared_writer_coordinator() {
+    let (_guard, path) = temp_db();
+    let db = Arc::new(
+        DatabaseManager::new(&path, Default::default())
+            .await
+            .expect("engine DatabaseManager"),
+    );
+    let coordinator = screenpipe_secrets::sqlite_write_lock(&path);
+    let permit = coordinator.acquire_owned().await.expect("write permit");
+
+    let checkpoint_db = Arc::clone(&db);
+    let mut checkpoint = tokio::spawn(async move { checkpoint_db.wal_checkpoint().await });
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut checkpoint)
+            .await
+            .is_err(),
+        "checkpoint must wait while the shared writer coordinator is held"
+    );
+
+    drop(permit);
+    let (busy, _, _) = tokio::time::timeout(Duration::from_secs(2), checkpoint)
+        .await
+        .expect("checkpoint did not resume")
+        .expect("checkpoint task panicked")
+        .expect("checkpoint failed after coordinator released");
+    assert_eq!(
+        busy, 0,
+        "checkpoint remained busy after coordinator released"
+    );
+}
+
+/// Production-path stress proof: independent engine and secret writers queue
+/// concurrently with explicit checkpoints. Every operation must succeed and
+/// the database must remain structurally intact.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn concurrent_engine_and_secret_writes_keep_integrity_ok() {
+async fn coordinated_engine_secret_writes_and_checkpoints_keep_integrity_ok() {
     let (_guard, path) = temp_db();
 
-    let db = DatabaseManager::new(&path, Default::default())
-        .await
-        .expect("engine DatabaseManager");
-    let secret_pool = screenpipe_secrets::shared_secret_pool(&path)
-        .await
-        .expect("secret pool");
+    let db = Arc::new(
+        DatabaseManager::new(&path, Default::default())
+            .await
+            .expect("engine DatabaseManager"),
+    );
+    let secret_store = Arc::new(
+        screenpipe_secrets::SecretStore::open(&path, None)
+            .await
+            .expect("secret store"),
+    );
 
-    // Two independent tables, each written through a different pool — both land in
-    // the same WAL and the same -shm.
     sqlx::query("CREATE TABLE IF NOT EXISTS chaos_engine (id INTEGER PRIMARY KEY, v TEXT)")
         .execute(&db.pool)
         .await
         .unwrap();
-    sqlx::query("CREATE TABLE IF NOT EXISTS chaos_secret (id INTEGER PRIMARY KEY, v TEXT)")
-        .execute(&secret_pool)
-        .await
-        .unwrap();
-
-    let stop = Arc::new(AtomicBool::new(false));
     let mut tasks = Vec::new();
 
-    // Engine-pool writers.
-    for w in 0..3 {
-        let pool = db.pool.clone();
-        let stop = stop.clone();
+    const WRITERS_PER_POOL: usize = 2;
+    const WRITES_PER_TASK: usize = 50;
+    const CHECKPOINTS: usize = 20;
+
+    for writer in 0..WRITERS_PER_POOL {
+        let db = Arc::clone(&db);
         tasks.push(tokio::spawn(async move {
-            let mut n = 0u64;
-            while !stop.load(Ordering::Relaxed) {
-                // Ignore SQLITE_BUSY: with busy_timeout the loser waits; the point
-                // is sustained write pressure, not every insert succeeding.
-                let _ = sqlx::query("INSERT INTO chaos_engine (v) VALUES (?)")
-                    .bind(format!("engine-{w}-{n}"))
-                    .execute(&pool)
-                    .await;
-                n += 1;
+            for operation in 0..WRITES_PER_TASK {
+                let mut tx = db
+                    .begin_immediate_with_retry()
+                    .await
+                    .map_err(|error| format!("engine writer {writer} begin: {error}"))?;
+                sqlx::query("INSERT INTO chaos_engine (v) VALUES (?)")
+                    .bind(format!("engine-{writer}-{operation}"))
+                    .execute(&mut **tx.conn())
+                    .await
+                    .map_err(|error| format!("engine writer {writer} insert: {error}"))?;
+                tx.commit()
+                    .await
+                    .map_err(|error| format!("engine writer {writer} commit: {error}"))?;
             }
+            Ok::<usize, String>(WRITES_PER_TASK)
         }));
     }
 
-    // Secret-pool writers.
-    for w in 0..3 {
-        let pool = secret_pool.clone();
-        let stop = stop.clone();
+    for writer in 0..WRITERS_PER_POOL {
+        let store = Arc::clone(&secret_store);
         tasks.push(tokio::spawn(async move {
-            let mut n = 0u64;
-            while !stop.load(Ordering::Relaxed) {
-                let _ = sqlx::query("INSERT INTO chaos_secret (v) VALUES (?)")
-                    .bind(format!("secret-{w}-{n}"))
-                    .execute(&pool)
-                    .await;
-                n += 1;
+            for operation in 0..WRITES_PER_TASK {
+                store
+                    .set(
+                        &format!("chaos:{writer}:{operation}"),
+                        format!("secret-{writer}-{operation}").as_bytes(),
+                    )
+                    .await
+                    .map_err(|error| format!("secret writer {writer}: {error:#}"))?;
             }
+            Ok::<usize, String>(WRITES_PER_TASK)
         }));
     }
 
-    // A TRUNCATE checkpointer racing the pools' auto-checkpoints — exactly the
-    // contention on the shared -shm that mismatched thresholds used to corrupt.
-    {
-        let pool = secret_pool.clone();
-        let stop = stop.clone();
-        tasks.push(tokio::spawn(async move {
-            while !stop.load(Ordering::Relaxed) {
-                let _ = sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
-                    .execute(&pool)
-                    .await;
-                tokio::time::sleep(Duration::from_millis(15)).await;
+    let checkpoint_db = Arc::clone(&db);
+    tasks.push(tokio::spawn(async move {
+        for _ in 0..CHECKPOINTS {
+            let (busy, _, _) = checkpoint_db
+                .wal_checkpoint()
+                .await
+                .map_err(|error| format!("checkpoint: {error}"))?;
+            if busy != 0 {
+                return Err(format!("checkpoint unexpectedly busy: {busy}"));
             }
-        }));
-    }
+            tokio::task::yield_now().await;
+        }
+        Ok::<usize, String>(CHECKPOINTS)
+    }));
 
-    tokio::time::sleep(Duration::from_secs(6)).await;
-    stop.store(true, Ordering::Relaxed);
-    for t in tasks {
-        let _ = t.await;
-    }
+    let completed = tokio::time::timeout(Duration::from_secs(30), async move {
+        let mut total = 0usize;
+        for task in tasks {
+            total += task.await.map_err(|error| error.to_string())??;
+        }
+        Ok::<usize, String>(total)
+    })
+    .await
+    .expect("coordinated SQLite stress timed out")
+    .expect("coordinated SQLite operation failed");
+    assert_eq!(
+        completed,
+        WRITERS_PER_POOL * WRITES_PER_TASK * 2 + CHECKPOINTS,
+        "not every stress operation completed"
+    );
 
-    // Both pools actually wrote (sanity: the stress really happened).
     let engine_rows: i64 = sqlx::query("SELECT COUNT(*) FROM chaos_engine")
         .fetch_one(&db.pool)
         .await
         .unwrap()
         .get(0);
-    let secret_rows: i64 = sqlx::query("SELECT COUNT(*) FROM chaos_secret")
-        .fetch_one(&secret_pool)
+    let secret_rows: i64 = sqlx::query("SELECT COUNT(*) FROM secrets WHERE key LIKE 'chaos:%'")
+        .fetch_one(&db.pool)
         .await
         .unwrap()
         .get(0);
-    assert!(
-        engine_rows > 0 && secret_rows > 0,
-        "expected writes from both pools (engine={engine_rows}, secret={secret_rows})",
+    assert_eq!(
+        engine_rows as usize,
+        WRITERS_PER_POOL * WRITES_PER_TASK,
+        "missing engine writes"
+    );
+    assert_eq!(
+        secret_rows as usize,
+        WRITERS_PER_POOL * WRITES_PER_TASK,
+        "missing secret writes"
     );
 
-    // THE PROOF: after the two-pool concurrent write + checkpoint storm, the file
-    // is not corrupt.
     let (result,): (String,) = sqlx::query_as("PRAGMA integrity_check")
         .fetch_one(&db.pool)
         .await
         .unwrap();
     assert_eq!(
         result, "ok",
-        "integrity_check failed after concurrent two-pool load — corruption: {result}",
+        "integrity_check failed after coordinated two-pool load: {result}",
     );
 }

@@ -12,10 +12,36 @@ on:
     branches: [main]
     paths:
       - "ee/sdk/**"
+      - "Cargo.toml"
+      - "rust-toolchain.toml"
+      - "crates/screenpipe-a11y/**"
+      - "crates/screenpipe-capture/**"
+      - "crates/screenpipe-config/**"
+      - "crates/screenpipe-connect/**"
+      - "crates/screenpipe-core/**"
+      - "crates/screenpipe-db/**"
+      - "crates/screenpipe-events/**"
+      - "crates/screenpipe-screen/**"
+      - "crates/screenpipe-secrets/**"
+      - "crates/screenpipe-sqlite-coordinator/**"
+      - "crates/screenpipe-vault/**"
       - ".github/workflows/sdk.yml"
   pull_request:
     paths:
       - "ee/sdk/**"
+      - "Cargo.toml"
+      - "rust-toolchain.toml"
+      - "crates/screenpipe-a11y/**"
+      - "crates/screenpipe-capture/**"
+      - "crates/screenpipe-config/**"
+      - "crates/screenpipe-connect/**"
+      - "crates/screenpipe-core/**"
+      - "crates/screenpipe-db/**"
+      - "crates/screenpipe-events/**"
+      - "crates/screenpipe-screen/**"
+      - "crates/screenpipe-secrets/**"
+      - "crates/screenpipe-sqlite-coordinator/**"
+      - "crates/screenpipe-vault/**"
       - ".github/workflows/sdk.yml"
   workflow_dispatch:
 
@@ -59,7 +85,9 @@ jobs:
           workspaces: ee/sdk -> target
           cache-bin: false
       - name: Test Rust library
-        run: cargo test --lib --target ${{ matrix.settings.target }}
+        run: cargo test --locked --workspace --lib --target ${{ matrix.settings.target }}
+      - name: Test SQLite runtime and coordinator
+        run: cargo test --locked -p screenpipe-recorder --test sqlite_coordinator --target ${{ matrix.settings.target }}
 
   build:
     name: build ${{ matrix.settings.target }}
@@ -101,7 +129,7 @@ jobs:
       - name: Install deps
         run: bun install --frozen-lockfile
       - name: Build
-        run: bun run build --target ${{ matrix.settings.target }}
+        run: bun run build --target ${{ matrix.settings.target }} --cargo-flags="--locked"
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -158,6 +186,9 @@ jobs:
         run: ls *.node
       - name: Run integration tests
         shell: bash
+        env:
+          # Keep Windows capture timing visible when the live FPS assertion regresses.
+          SCREENPIPE_SDK_PERF: ${{ runner.os == 'Windows' && '1' || '0' }}
         run: |
           set -eo pipefail
           files=$(find __test__ -name '*.test.mjs' | sort)

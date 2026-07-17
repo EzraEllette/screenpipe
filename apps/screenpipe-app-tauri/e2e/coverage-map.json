@@ -173,6 +173,16 @@
       "notes": "AuthGuard re-verifies cloud entitlement on window focus so a freshly-subscribed user gets cloud transcription without restart (#4339)."
     },
     {
+      "spec": "capture-frequency-floor.spec.ts",
+      "platforms": ["macos"],
+      "layers": ["capture-ocr", "settings", "real-ui-e2e"],
+      "features": ["capture-ocr", "settings-recording", "restart-flow"],
+      "criticality": "high",
+      "confidence": "conditional",
+      "ux": "real-user-flow",
+      "notes": "macOS fixed screenshot cadence regression: persists the 1s setting before immediate Apply & Restart, then verifies real capture attempts and frame writes."
+    },
+    {
       "spec": "chat-composer-isolation.spec.ts",
       "platforms": ["windows", "macos", "linux"],
       "layers": ["chat-ai", "real-ui-e2e"],

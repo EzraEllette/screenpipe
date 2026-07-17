@@ -53,7 +53,9 @@ impl DatabaseManager {
             String::new()
         };
 
-        // Build relevance scoring: prioritize results where search term appears in window_name/app_name
+        // Build relevance scoring: prioritize results where search term appears in window_name/app_name.
+        // SQLite string literals escape a quote by doubling it; all other
+        // structural fragments below come from enums, integers, or fixed SQL.
         let relevance_case = if !query.is_empty() {
             let query_lower = query.to_lowercase();
             format!(
@@ -135,7 +137,7 @@ LIMIT ? OFFSET ?
             )
         };
 
-        let mut query_builder = sqlx::query_as::<_, FrameRow>(&sql);
+        let mut query_builder = sqlx::query_as::<_, FrameRow>(sqlx::AssertSqlSafe(sql));
 
         // Bind timestamp parameters first
         if let Some(start) = start_time {
@@ -288,8 +290,8 @@ LIMIT ? OFFSET ?
         );
 
         // Build the data query
-        let mut data_query = sqlx::query_as::<_, ElementRow>(&sql);
-        let mut count_query = sqlx::query_scalar::<_, i64>(&count_sql);
+        let mut data_query = sqlx::query_as::<_, ElementRow>(sqlx::AssertSqlSafe(sql));
+        let mut count_query = sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(count_sql));
 
         // Bind parameters in the same order as conditions
         if use_fts {
@@ -480,7 +482,7 @@ LIMIT ? OFFSET ?
             )
         };
 
-        let mut query_builder = sqlx::query_as::<_, FrameRowLight>(&sql);
+        let mut query_builder = sqlx::query_as::<_, FrameRowLight>(sqlx::AssertSqlSafe(sql));
 
         if let Some(start) = start_time {
             query_builder = query_builder.bind(start);
@@ -625,7 +627,7 @@ mod tests {
         seed_frame(&db).await;
 
         // accessibility element WITH state properties
-        sqlx::query(INSERT_EL)
+        sqlx::query(sqlx::AssertSqlSafe(INSERT_EL))
             .bind("accessibility")
             .bind("AXButton")
             .bind("Save")
@@ -635,7 +637,7 @@ mod tests {
             .await
             .unwrap();
         // accessibility element with NULL properties
-        sqlx::query(INSERT_EL)
+        sqlx::query(sqlx::AssertSqlSafe(INSERT_EL))
             .bind("accessibility")
             .bind("AXStaticText")
             .bind("Welcome")

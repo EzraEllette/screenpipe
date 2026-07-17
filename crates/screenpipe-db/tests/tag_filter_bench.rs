@@ -53,18 +53,22 @@ async fn migrated_db() -> DatabaseManager {
 }
 
 async fn exec(db: &DatabaseManager, sql: &str) {
-    if let Err(e) = sqlx::query(sql).execute(&db.pool).await {
+    if let Err(e) = sqlx::query(sqlx::AssertSqlSafe(sql))
+        .execute(&db.pool)
+        .await
+    {
         let head: String = sql.chars().take(90).collect();
         panic!("exec failed: {e}\n  sql: {head}...");
     }
 }
 
 async fn explain(db: &DatabaseManager, label: &str, sql: &str) {
-    let rows: Vec<(i64, i64, i64, String)> = sqlx::query_as(&format!("EXPLAIN QUERY PLAN {sql}"))
-        .bind("[\"person:ada\"]")
-        .fetch_all(&db.pool)
-        .await
-        .unwrap();
+    let rows: Vec<(i64, i64, i64, String)> =
+        sqlx::query_as(sqlx::AssertSqlSafe(format!("EXPLAIN QUERY PLAN {sql}")))
+            .bind("[\"person:ada\"]")
+            .fetch_all(&db.pool)
+            .await
+            .unwrap();
     println!("\n--- PLAN: {label} ---");
     for (_, _, _, detail) in rows {
         println!("  {detail}");
@@ -495,13 +499,14 @@ async fn bench_related_tags_scaling() {
         SELECT name, COUNT(*) AS count FROM co
         WHERE name IS NOT NULL AND name != '' AND name NOT IN (SELECT name FROM input)
         GROUP BY name ORDER BY count DESC, name ASC LIMIT ?2"#;
-    let plan: Vec<(i64, i64, i64, String)> =
-        sqlx::query_as(&format!("EXPLAIN QUERY PLAN {related_sql}"))
-            .bind("[\"person:hot\"]")
-            .bind(30i64)
-            .fetch_all(&db.pool)
-            .await
-            .unwrap();
+    let plan: Vec<(i64, i64, i64, String)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "EXPLAIN QUERY PLAN {related_sql}"
+    )))
+    .bind("[\"person:hot\"]")
+    .bind(30i64)
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
     println!("\n--- PLAN: related_tags(person:hot) ---");
     for (_, _, _, detail) in plan {
         println!("  {detail}");

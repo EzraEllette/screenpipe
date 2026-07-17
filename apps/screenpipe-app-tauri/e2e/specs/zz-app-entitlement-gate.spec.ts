@@ -161,6 +161,22 @@ async function restoreFetch(): Promise<void> {
   });
 }
 
+/** Apply or restore account mocks in every open webview. Setting the cloud
+ * token wakes auth refresh in peer windows too; leaving any peer unmocked lets
+ * a real 401 race stale account state back into the shared settings store. */
+async function forEachWindow(fn: () => Promise<void>): Promise<void> {
+  const start = await browser.getWindowHandle().catch(() => null);
+  for (const handle of await browser.getWindowHandles().catch(() => [] as string[])) {
+    try {
+      await browser.switchToWindow(handle);
+      await fn();
+    } catch {
+      // A window can close while iterating; the remaining windows still need cleanup.
+    }
+  }
+  if (start) await browser.switchToWindow(start).catch(() => {});
+}
+
 describe('App entitlement gate', () => {
   before(async () => {
     await waitForAppReady();
@@ -172,7 +188,7 @@ describe('App entitlement gate', () => {
   });
 
   after(async () => {
-    await restoreFetch().catch(() => {});
+    await forEachWindow(restoreFetch).catch(() => {});
 
     // Never leave the gate forced on for a trailing spec.
     await browser.execute((key: string) => {
@@ -214,7 +230,7 @@ describe('App entitlement gate', () => {
   it('blocks a cloud_subscribed account when the server denies app entitlement', async () => {
     try {
       await setForceGate(true);
-      await patchFetchForCloudSubscribedAppDeniedUser();
+      await forEachWindow(patchFetchForCloudSubscribedAppDeniedUser);
       await emitDeepLink(`screenpipe://login?api_key=${FAKE_DENIED_TOKEN}`);
 
       await browser.waitUntil(
@@ -241,7 +257,7 @@ describe('App entitlement gate', () => {
         },
       );
     } finally {
-      await restoreFetch().catch(() => {});
+      await forEachWindow(restoreFetch).catch(() => {});
       await setForceGate(false).catch(() => {});
     }
   });

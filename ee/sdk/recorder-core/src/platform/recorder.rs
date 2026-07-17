@@ -630,12 +630,13 @@ async fn capture_loop(
         }
 
         let t_cap = std::time::Instant::now();
-        // capture_image uses screenpipe-screen's persistent SCK stream
-        // internally (stream_manager), already ar_pool-wrapped.
-        let frame = match monitor.capture_image().await {
+        // MP4 recording is a sustained stream, so explicitly retain the native
+        // capture session between frames. In particular, Windows RDP one-shot
+        // screenshots stay request-scoped while this recorder keeps WGC alive.
+        let frame = match monitor.capture_image_streaming().await {
             Ok(img) => img,
             Err(e) => {
-                warn!("screenpipe-sdk: capture_image: {e}");
+                warn!("screenpipe-sdk: capture_image_streaming: {e}");
                 continue;
             }
         };
@@ -1078,9 +1079,14 @@ async fn paired_capture_loop_for_monitor(
             languages: Vec::new(),
             elements_ref_frame_id: None,
             screenshot_disabled: false,
+            in_meeting: false,
+            // The SDK does not currently expose per-monitor focus ownership;
+            // the capture API documents `true` as the unknown-focus fallback.
+            monitor_hosts_focus: true,
+            focused_window_bounds: None,
         };
 
-        match paired_capture(&ctx, Some(&snapshot)).await {
+        match paired_capture(&ctx, Some(&snapshot), None).await {
             Ok(result) => debug!(
                 "screenpipe-sdk: paired capture frame={} trigger={} text_source={:?} duration={}ms",
                 result.frame_id, trigger_label, result.text_source, result.duration_ms
@@ -1177,11 +1183,15 @@ mod tests {
         // tools that rely on `.mp4` still recognize the file.
         assert_eq!(
             derive_mp4_output_path("/tmp/session.mp4", 1, true),
-            "/tmp/session-monitor-1.mp4"
+            std::path::Path::new("/tmp")
+                .join("session-monitor-1.mp4")
+                .to_string_lossy()
         );
         assert_eq!(
             derive_mp4_output_path("/tmp/session.mp4", 2, true),
-            "/tmp/session-monitor-2.mp4"
+            std::path::Path::new("/tmp")
+                .join("session-monitor-2.mp4")
+                .to_string_lossy()
         );
     }
 
@@ -1203,7 +1213,9 @@ mod tests {
         // `session-monitor-1.` (trailing dot).
         assert_eq!(
             derive_mp4_output_path("/tmp/session", 1, true),
-            "/tmp/session-monitor-1.mp4"
+            std::path::Path::new("/tmp")
+                .join("session-monitor-1.mp4")
+                .to_string_lossy()
         );
     }
 

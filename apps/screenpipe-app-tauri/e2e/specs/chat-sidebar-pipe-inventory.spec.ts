@@ -28,6 +28,11 @@ import {
   t,
   waitForAppReady,
 } from "../helpers/test-utils.js";
+import {
+  authHeaders,
+  fetchJson,
+  getLocalApiConfig,
+} from "../helpers/api-utils.js";
 
 const PIPE_NAME = "e2e-sidebar-lazy-inventory";
 const PIPE_DIR = join(E2E_DATA_DIR, "pipes", PIPE_NAME);
@@ -116,33 +121,49 @@ function writeConversation(
 }
 
 async function clickSection(title: string): Promise<void> {
-  await browser.execute((wanted: string) => {
+  const clicked = await browser.execute((wanted: string) => {
     const sidebar = document.querySelector('[data-testid="chat-sidebar"]');
     const buttons = Array.from(sidebar?.querySelectorAll<HTMLButtonElement>("button") ?? []);
-    buttons.find((button) => button.textContent?.trim().toLowerCase() === wanted)?.click();
+    const button = buttons.find((candidate) =>
+      candidate.textContent?.trim().toLowerCase() === wanted,
+    );
+    button?.click();
+    return Boolean(button);
   }, title.toLowerCase());
+  if (!clicked) throw new Error(`sidebar section '${title}' was not found`);
+
+  await browser.waitUntil(
+    async () => await browser.execute((wanted: string) => {
+      const sidebar = document.querySelector('[data-testid="chat-sidebar"]');
+      const buttons = Array.from(sidebar?.querySelectorAll<HTMLButtonElement>("button") ?? []);
+      const button = buttons.find((candidate) =>
+        candidate.textContent?.trim().toLowerCase() === wanted,
+      );
+      return button?.getAttribute("aria-expanded") === "true";
+    }, title.toLowerCase()),
+    {
+      timeout: t(5_000),
+      interval: 100,
+      timeoutMsg: `sidebar section '${title}' did not expand`,
+    },
+  );
 }
 
-async function mockPipeInventory(): Promise<void> {
-  await browser.execute((pipeName: string) => {
-    const originalFetch = window.fetch.bind(window);
-    window.fetch = (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = typeof input === "string" ? input : (input as Request)?.url ?? String(input);
-      if (url.includes("/pipes?include_execution_counts=true")) {
-        return Promise.resolve(new Response(JSON.stringify({
-          data: [{
-            config: { name: pipeName },
-            execution_count: 12,
-            last_run: new Date().toISOString(),
-          }],
-        }), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        }));
-      }
-      return originalFetch(input, init);
-    };
-  }, PIPE_NAME);
+async function waitForBackendPipe(): Promise<void> {
+  const config = await getLocalApiConfig();
+  await browser.waitUntil(async () => {
+    const result = await fetchJson(
+      `http://127.0.0.1:${config.port}/pipes?include_execution_counts=true`,
+      authHeaders(config.key),
+    );
+    if (!result.ok || !result.body || typeof result.body !== "object") return false;
+    const data = (result.body as { data?: Array<{ config?: { name?: string } }> }).data ?? [];
+    return data.some((pipe) => pipe.config?.name === PIPE_NAME);
+  }, {
+    timeout: t(15_000),
+    interval: 250,
+    timeoutMsg: "installed pipe missing from backend inventory",
+  });
 }
 
 describe("chat sidebar pipe inventory", function () {
@@ -150,7 +171,6 @@ describe("chat sidebar pipe inventory", function () {
 
   before(async () => {
     await waitForAppReady();
-    await seedEntitledAccount();
     await openHomeWindow();
     mkdirSync(PIPE_DIR, { recursive: true });
     mkdirSync(CHATS_DIR, { recursive: true });
@@ -174,7 +194,13 @@ describe("chat sidebar pipe inventory", function () {
       localStorage.removeItem(`screenpipe:group-expanded:pipe:${pipeName}`);
     }, PIPE_NAME);
     await reloadAndWaitForHome();
-    await mockPipeInventory();
+    // Apply the fake entitlement only after reload. Seeding it before reload
+    // lets the normal account refresh reject the deliberately fake token and
+    // put the entitlement gate back over the sidebar on slower lanes.
+    await seedEntitledAccount();
+    const sidebar = await $('[data-testid="chat-sidebar"]');
+    await sidebar.waitForExist({ timeout: t(10_000) });
+    await waitForBackendPipe();
   });
 
   after(() => {

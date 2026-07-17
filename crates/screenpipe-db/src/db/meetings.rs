@@ -431,7 +431,8 @@ impl DatabaseManager {
             sql.push_str(
                 " AND (LOWER(IFNULL(title, '')) LIKE ? \
                  OR LOWER(IFNULL(attendees, '')) LIKE ? \
-                 OR LOWER(IFNULL(note, '')) LIKE ?)",
+                 OR LOWER(IFNULL(note, '')) LIKE ? \
+                 OR LOWER(IFNULL(meeting_app, '')) LIKE ?)",
             );
         }
         sql.push_str(" ORDER BY meeting_start DESC LIMIT ? OFFSET ?");
@@ -439,7 +440,7 @@ impl DatabaseManager {
         let max_retries = 3;
         let mut last_error = None;
         for attempt in 1..=max_retries {
-            let mut q = sqlx::query_as::<_, MeetingRecord>(&sql);
+            let mut q = sqlx::query_as::<_, MeetingRecord>(sqlx::AssertSqlSafe(sql.as_str()));
             if let Some(st) = start_time {
                 q = q.bind(st);
             }
@@ -448,7 +449,11 @@ impl DatabaseManager {
             }
             if let Some(qs) = query {
                 let pattern = format!("%{}%", qs.to_lowercase());
-                q = q.bind(pattern.clone()).bind(pattern.clone()).bind(pattern);
+                q = q
+                    .bind(pattern.clone())
+                    .bind(pattern.clone())
+                    .bind(pattern.clone())
+                    .bind(pattern);
             }
             q = q.bind(limit).bind(offset);
 
@@ -855,6 +860,11 @@ impl DatabaseManager {
         // COALESCE(is_input_device, 1) keeps the old NULL-defaults-to-input
         // behaviour. Resolved segments drop out of the candidate set, so
         // steady-state work is just newly-mirrored segments.
+        //
+        // Calculate proximity from rounded epoch milliseconds rather than a
+        // julianday delta. Equal offsets around a timestamp can differ by one
+        // floating-point ULP in julianday(), which would bypass the documented
+        // timestamp/id tie breakers.
         const PER_PASS_LIMIT: i64 = 500;
         let mut tx = self.begin_immediate_with_retry().await?;
         let r = sqlx::query(
@@ -868,7 +878,10 @@ impl DatabaseManager {
                  SELECT c.id AS seg_id, at.speaker_id AS sid, \
                         ROW_NUMBER() OVER ( \
                             PARTITION BY c.id \
-                            ORDER BY ABS(julianday(at.timestamp) - julianday(c.captured_at)), \
+                            ORDER BY ABS( \
+                                CAST(ROUND(unixepoch(at.timestamp, 'subsec') * 1000.0) AS INTEGER) - \
+                                CAST(ROUND(unixepoch(c.captured_at, 'subsec') * 1000.0) AS INTEGER) \
+                            ), \
                                      at.timestamp, at.id \
                         ) AS rn \
                  FROM cand c \
@@ -1164,7 +1177,7 @@ impl DatabaseManager {
             sets.len() + 1
         );
         let mut tx = self.begin_immediate_with_retry().await?;
-        let mut query = sqlx::query(&sql);
+        let mut query = sqlx::query(sqlx::AssertSqlSafe(sql));
         if let Some(v) = meeting_start {
             query = query.bind(normalize_timestamp_for_range_query(v));
         }
@@ -1218,7 +1231,7 @@ impl DatabaseManager {
              ORDER BY meeting_start ASC",
             in_clause
         );
-        let mut fetch_query = sqlx::query_as::<_, MeetingRecord>(&fetch_sql);
+        let mut fetch_query = sqlx::query_as::<_, MeetingRecord>(sqlx::AssertSqlSafe(fetch_sql));
         for id in ids.iter() {
             fetch_query = fetch_query.bind(*id);
         }
@@ -1319,7 +1332,7 @@ impl DatabaseManager {
                 "DELETE FROM meetings WHERE id IN ({})",
                 loser_placeholders.join(", ")
             );
-            let mut del_query = sqlx::query(&delete_sql);
+            let mut del_query = sqlx::query(sqlx::AssertSqlSafe(delete_sql));
             for &id in &losers {
                 del_query = del_query.bind(id);
             }

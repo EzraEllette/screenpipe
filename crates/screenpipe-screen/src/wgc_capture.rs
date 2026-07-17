@@ -139,6 +139,24 @@ impl CopyDemand {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FrameReadPolicy {
+    /// One-shot screenshots wait for compositor pixels newer than the request.
+    Fresh,
+    /// Sustained recording may reuse the last pixels while a refresh stays pending.
+    CachedWhileRefreshing,
+}
+
+impl FrameReadPolicy {
+    fn can_read(self, has_texture: bool, request_complete: bool) -> bool {
+        has_texture
+            && match self {
+                Self::Fresh => request_complete,
+                Self::CachedWhileRefreshing => true,
+            }
+    }
+}
+
 /// Shared D3D11 device state for all persistent captures. One device serves every
 /// monitor's session; it lives in `SHARED_D3D` so it can be dropped and recreated
 /// after device removal, unlike a `LazyLock` (which would also poison forever if the
@@ -680,6 +698,21 @@ impl PersistentCapture {
     /// BGRA->RGBA swizzle happen here, lazily, only when a frame is actually needed —
     /// not on every compositor frame `FrameArrived` delivers.
     pub fn get_latest_image(&self, timeout: Duration) -> Result<DynamicImage> {
+        self.get_image(timeout, FrameReadPolicy::Fresh)
+    }
+
+    /// Read at recording cadence while still requesting the next changed frame.
+    ///
+    /// WGC only emits compositor frames when the desktop changes. A sustained video
+    /// stream must nevertheless keep its timeline moving, so after the first frame we
+    /// may reuse the cached texture immediately. The request generation remains
+    /// pending, allowing the next compositor update to replace that texture without
+    /// continuously copying unchanged GPU frames.
+    pub fn get_latest_image_streaming(&self, timeout: Duration) -> Result<DynamicImage> {
+        self.get_image(timeout, FrameReadPolicy::CachedWhileRefreshing)
+    }
+
+    fn get_image(&self, timeout: Duration, policy: FrameReadPolicy) -> Result<DynamicImage> {
         let deadline = Instant::now() + timeout;
         let (frame_lock, frame_ready) = &*self.latest;
         let mut slot = frame_lock
@@ -702,7 +735,10 @@ impl PersistentCapture {
                     "WGC session closed (capture item closed or stopped)"
                 ));
             }
-            if slot.demand.is_complete(request_generation) && slot.texture.is_some() {
+            if policy.can_read(
+                slot.texture.is_some(),
+                slot.demand.is_complete(request_generation),
+            ) {
                 break;
             }
             let now = Instant::now();
@@ -905,6 +941,20 @@ mod tests {
         assert!(demand.is_complete(first));
         assert!(demand.is_complete(second));
         assert!(!deliver_frame(&mut demand));
+    }
+
+    #[test]
+    fn streaming_reuses_cached_texture_while_refresh_remains_pending() {
+        let mut demand = CopyDemand::default();
+        let first = demand.request();
+        assert!(deliver_frame(&mut demand));
+        assert!(demand.is_complete(first));
+
+        let refresh = demand.request();
+        assert!(!demand.is_complete(refresh));
+        assert!(FrameReadPolicy::CachedWhileRefreshing.can_read(true, false));
+        assert!(!FrameReadPolicy::Fresh.can_read(true, false));
+        assert!(demand.pending_generation().is_some());
     }
 
     #[test]

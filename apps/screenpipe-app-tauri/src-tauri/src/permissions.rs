@@ -368,12 +368,34 @@ pub fn check_microphone_permission() -> OSPermissionStatus {
     core_to_os_status(screenpipe_core::permissions::check_microphone())
 }
 
-/// Check only screen recording permission (no dialog trigger)
-/// Uses CGPreflightScreenCaptureAccess which is safe to poll repeatedly
+#[cfg(any(target_os = "macos", test))]
+fn screen_recording_preflight_status(granted: bool) -> OSPermissionStatus {
+    if granted {
+        OSPermissionStatus::Granted
+    } else {
+        OSPermissionStatus::Denied
+    }
+}
+
+/// Check only screen recording permission without triggering a dialog.
+///
+/// This command is polled as soon as onboarding renders, before the user has
+/// clicked anything. It must use preflight directly: the broader core Tauri
+/// check may perform a real capture probe in debug builds, which macOS treats
+/// as a permission request.
 #[tauri::command(async)]
 #[specta::specta]
 pub fn check_screen_recording_permission() -> OSPermissionStatus {
-    core_to_os_status(screenpipe_core::permissions::check_screen_recording_tauri())
+    #[cfg(target_os = "macos")]
+    {
+        use core_graphics_helmer_fork::access::ScreenCaptureAccess;
+        screen_recording_preflight_status(ScreenCaptureAccess.preflight())
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        OSPermissionStatus::NotNeeded
+    }
 }
 
 /// Check only accessibility permission
@@ -1245,6 +1267,23 @@ pub fn request_arc_automation_permission(_app: tauri::AppHandle) -> bool {
 // subscribes via `crate::engine_events::permission` over /ws/events. This module
 // keeps the synchronous TCC/AV check helpers used by the onboarding UI
 // and the preflight startup check.
+
+#[cfg(test)]
+mod screen_recording_preflight_tests {
+    use super::*;
+
+    #[test]
+    fn maps_silent_preflight_result_without_needing_a_capture_probe() {
+        assert_eq!(
+            screen_recording_preflight_status(true),
+            OSPermissionStatus::Granted
+        );
+        assert_eq!(
+            screen_recording_preflight_status(false),
+            OSPermissionStatus::Denied
+        );
+    }
+}
 
 #[cfg(all(test, target_os = "macos"))]
 mod mic_grant_restart_tests {
