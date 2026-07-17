@@ -9,13 +9,17 @@ import path from 'path'
 
 import { computeInputHash } from './build-frontend.js'
 
-test('Cargo target artifacts do not invalidate the frontend input hash', async () => {
+test('native backend changes do not invalidate the frontend input hash', async () => {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), 'screenpipe-frontend-hash-'))
 	try {
 		await fs.mkdir(path.join(root, 'app'), { recursive: true })
 		await fs.writeFile(path.join(root, 'app', 'page.txt'), 'frontend source')
 
 		const initial = await computeInputHash(root)
+
+		await fs.mkdir(path.join(root, 'src-tauri'), { recursive: true })
+		await fs.writeFile(path.join(root, 'src-tauri', 'Cargo.toml'), '[package]\nname = "native"\n')
+		expect(await computeInputHash(root)).toBe(initial)
 
 		const cargoTarget = path.join(root, 'src-tauri', 'target', 'debug')
 		await fs.mkdir(cargoTarget, { recursive: true })

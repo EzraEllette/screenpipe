@@ -19,6 +19,7 @@ rustflags = "-lc++ -l framework=Accelerate"
 AWS_LC_SYS_PREBUILT_NASM = "1"
 CMAKE_POLICY_VERSION_MINIMUM = "3.5"
 
-# Faster builds - use more threads for codegen
-[build]
-jobs = 16  # Parallel compilation jobs (adjust to your CPU cores)
+# Cargo already uses the machine's available parallelism. A fixed value made
+# 10-core developer machines run 16 compiler processes at once, increasing
+# memory pressure and making cold builds slower. Keep this adaptive so
+# concurrent worktrees also divide the machine's resources more gracefully.
