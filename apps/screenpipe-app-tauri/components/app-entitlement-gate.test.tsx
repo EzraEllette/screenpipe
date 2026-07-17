@@ -140,14 +140,22 @@ describe("AppEntitlementGate", () => {
     expect(screen.queryByText(/enterprise access/i)).not.toBeInTheDocument();
   });
 
-  it("does not stop recording while build detection is unresolved", async () => {
+  it("waits for build detection before stopping a gated session", async () => {
     mocks.enterprise.isEnterpriseBuildResolved = false;
 
-    render(<AppEntitlementGate>{protectedApp}</AppEntitlementGate>);
+    const { rerender } = render(
+      <AppEntitlementGate>{protectedApp}</AppEntitlementGate>,
+    );
 
     expect(screen.getByText(/checking access/i)).toBeInTheDocument();
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(mocks.stopScreenpipe).not.toHaveBeenCalled();
+
+    // The session is still gated after resolution. The effect must now stop
+    // recording, proving the resolution flag is both a guard and a dependency.
+    mocks.enterprise.isEnterpriseBuildResolved = true;
+    rerender(<AppEntitlementGate>{protectedApp}</AppEntitlementGate>);
+    await waitFor(() => expect(mocks.stopScreenpipe).toHaveBeenCalled());
   });
 
   it("asks a signed-out user to sign in and never reveals the app", () => {
