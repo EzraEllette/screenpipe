@@ -48,7 +48,7 @@ tauri-plugin-autostart = "=2.5.1"
 tauri-plugin-shell = "=2.3.5"
 tauri-plugin-store = "=2.4.2"
 tauri-plugin-http = "=2.5.7"
-tauri-plugin-permission-flow = { git = "https://github.com/divanshu-go/permission-flow", rev = "f3fb7a5ab2f551ac2392c18749b70c9976f56f4d", package = "tauri-plugin-permission-flow" }
+tauri-plugin-permission-flow = { git = "https://github.com/EzraEllette/permission-flow", rev = "1a114ff3e9526d815b98201cd2ba35e91f2b4bd3", package = "tauri-plugin-permission-flow" }
 
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
