@@ -13,7 +13,7 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const coverageDir = resolve(__dirname, "..");
-const repoRoot = resolve(coverageDir, "..");
+const repoRoot = resolve(coverageDir, "../..");
 const e2eReportPath = join(repoRoot, "apps", "screenpipe-app-tauri", "e2e", "COVERAGE.md");
 const coreReportPath = join(coverageDir, "CORE.md");
 const defaultOutputPath = join(repoRoot, "COVERAGE.md");
@@ -147,7 +147,7 @@ function main(): void {
     const current = readFileSync(args.outPath, "utf8");
     if (current !== report) {
       throw new Error(
-        "Unified coverage report is stale. Run: bun ../../coverage/scripts/generate-unified-coverage-report.ts",
+        "Unified coverage report is stale. Run: bun ../../docs/coverage/scripts/generate-unified-coverage-report.ts",
       );
     }
     console.log(`Unified coverage report is up to date: ${normalizeRel(relative(process.cwd(), args.outPath))}`);

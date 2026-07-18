@@ -7,14 +7,14 @@
 </p>
 
 <p align="center">
-   <a href="../README.md">English</a> | <a href="README-zh_CN.md">简体中文</a> | <a href="README-ja.md">日本語</a> | <a href="README-fr.md">Français</a> | <a href="README-es.md">Español</a> | <a href="README-pt_BR.md">Português (BR)</a> | <a href="README-de.md">Deutsch</a> | <a href="README-uk.md">Українська</a>
+   <a href="../../README.md">English</a> | <a href="README-zh_CN.md">简体中文</a> | <a href="README-ja.md">日本語</a> | <a href="README-fr.md">Français</a> | <a href="README-es.md">Español</a> | <a href="README-pt_BR.md">Português (BR)</a> | <a href="README-de.md">Deutsch</a> | <a href="README-uk.md">Українська</a>
 </p>
 
 <h1 align="center">[ screenpipe ]</h1>
 
 
-<p align="center">la memoria 24/7 de tu computadora</p>
-<p align="center">rewind de código abierto. 100% local. tus datos son tuyos.</p>
+<p align="center">a memória 24/7 do seu computador</p>
+<p align="center">rewind open source. 100% local. seus dados são seus.</p>
 
 
 
@@ -26,10 +26,10 @@
 
 <p align="center">
     <a href="https://screenpi.pe" target="_blank">
-        <img src="https://img.shields.io/badge/descargar-aplicaci%C3%B3n%20de%20escritorio-black?style=for-the-badge" alt="descargar">
+        <img src="https://img.shields.io/badge/baixar-aplicativo%20desktop-black?style=for-the-badge" alt="baixar">
     </a>
     <a href="https://github.com/screenpipe/screenpipe/releases?q=mcp-v&expanded=true" target="_blank">
-        <img src="https://img.shields.io/badge/instalar-extensi%C3%B3n%20Claude-D97706?style=for-the-badge&logo=anthropic&logoColor=white" alt="instalar extensión claude">
+        <img src="https://img.shields.io/badge/instalar-extens%C3%A3o%20Claude-D97706?style=for-the-badge&logo=anthropic&logoColor=white" alt="instalar extensão claude">
     </a>
 </p>
 
@@ -50,36 +50,36 @@
 
 ---
 
-## ¿qué es esto?
+## o que é isso?
 
-screenpipe graba tu pantalla y audio 24/7, almacena todo localmente y te permite conectar tu historial digital a la IA.
+screenpipe grava sua tela e áudio 24/7, armazena tudo localmente e permite que você conecte seu histórico digital à IA.
 
 ```
 ┌─────────────────────────────────────────┐
-│  pantalla + audio → local → ia          │
+│  tela + áudio → local → ia              │
 └─────────────────────────────────────────┘
 ```
 
-- **recuerda todo** — nunca olvides lo que viste, escuchaste o hiciste
-- **búsqueda con IA** — encuentra cualquier cosa en lenguaje natural
-- **100% local** — tus datos nunca salen de tu máquina
-- **código abierto** — inspeccionable, modificable, tuyo
+- **lembre-se de tudo** — nunca esqueça o que você viu, ouviu ou fez
+- **busca com IA** — encontre qualquer coisa em linguagem natural
+- **100% local** — seus dados nunca saem da sua máquina
+- **open source** — inspecionável, modificável, seu
 
-## instalación
+## instalação
 
-[descargar la aplicación de escritorio](https://screenpi.pe) — macOS, Windows, Linux
+[baixar o aplicativo desktop](https://screenpi.pe) — macOS, Windows, Linux
 
 ## requisitos
 
 - 10% de CPU
 - 4 GB de RAM
-- ~15 GB de almacenamiento al mes
-- funciona sin conexión
+- ~15 GB de armazenamento por mês
+- funciona offline
 
 ---
 
 <p align="center">
-    <a href="https://docs.screenpi.pe">documentación</a> ·
+    <a href="https://docs.screenpi.pe">documentação</a> ·
     <a href="https://discord.gg/screenpipe">discord</a> ·
     <a href="https://twitter.com/screenpipe">x</a>
 </p>

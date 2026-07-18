@@ -15,7 +15,7 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const coverageDir = resolve(__dirname, "..");
-const repoRoot = resolve(coverageDir, "..");
+const repoRoot = resolve(coverageDir, "../..");
 const manifestPath = join(coverageDir, "core-engine-map.json");
 const defaultOutputPath = join(coverageDir, "CORE.md");
 
@@ -705,14 +705,14 @@ function parseLlvmCovSummary(path: string | null): string {
       "Suggested command from the repo root:",
       "",
       "```bash",
-      "cargo llvm-cov --workspace --summary-only --output-format json > coverage/core-llvm-cov-summary.json",
+      "cargo llvm-cov --workspace --summary-only --output-format json > docs/coverage/core-llvm-cov-summary.json",
       "```",
       "",
       "Then regenerate with:",
       "",
       "```bash",
       "cd apps/screenpipe-app-tauri",
-      "bun run coverage:core -- --llvm-cov-summary ../../coverage/core-llvm-cov-summary.json",
+      "bun run coverage:core -- --llvm-cov-summary ../../docs/coverage/core-llvm-cov-summary.json",
       "```",
     ].join("\n");
   }
@@ -935,7 +935,7 @@ function main(): void {
     const current = readFileSync(args.outPath, "utf8");
     if (current !== report) {
       throw new Error(
-        "Core coverage report is stale. Run: bun ../../coverage/scripts/generate-core-engine-coverage-report.ts",
+        "Core coverage report is stale. Run: bun ../../docs/coverage/scripts/generate-core-engine-coverage-report.ts",
       );
     }
     console.log(`Core coverage report is up to date: ${normalizeRel(relative(process.cwd(), args.outPath))}`);

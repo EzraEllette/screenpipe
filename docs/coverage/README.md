@@ -25,7 +25,7 @@ bun run coverage:all:check
 
 - `core-engine-map.json`: declarative map of core Rust test suites to flows.
 - `CORE.md`: generated core Rust flow coverage report.
-- `../COVERAGE.md`: generated top-level summary combining E2E and core reports.
+- `../../COVERAGE.md`: generated top-level summary combining E2E and core reports.
 - `scripts/generate-core-engine-coverage-report.ts`: validates the core map,
   counts Rust test blocks, and writes `CORE.md`.
 - `scripts/generate-unified-coverage-report.ts`: writes the top-level summary.
@@ -35,9 +35,9 @@ bun run coverage:all:check
 Use `cargo llvm-cov` when you need line or branch coverage:
 
 ```bash
-cargo llvm-cov --workspace --summary-only --output-format json > coverage/core-llvm-cov-summary.json
+cargo llvm-cov --workspace --summary-only --output-format json > docs/coverage/core-llvm-cov-summary.json
 cd apps/screenpipe-app-tauri
-bun run coverage:core -- --llvm-cov-summary ../../coverage/core-llvm-cov-summary.json
+bun run coverage:core -- --llvm-cov-summary ../../docs/coverage/core-llvm-cov-summary.json
 ```
 
 The generated core report will include the supplied line/function/branch/region

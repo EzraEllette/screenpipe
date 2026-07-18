@@ -5,7 +5,7 @@ It is not line or branch coverage. A mapped suite contributes coverage to
 each declared platform and layer based on non-ignored Rust test blocks,
 confidence, and criticality.
 
-- Manifest: `coverage/core-engine-map.json`
+- Manifest: `docs/coverage/core-engine-map.json`
 - Tracked crates: screenpipe-engine, screenpipe-db, screenpipe-audio, screenpipe-screen, screenpipe-a11y
 - Mapped suites: 24
 - Mapped Rust files: 191
@@ -46,14 +46,14 @@ measured separately with `cargo llvm-cov` when the Rust toolchain is available.
 Suggested command from the repo root:
 
 ```bash
-cargo llvm-cov --workspace --summary-only --output-format json > coverage/core-llvm-cov-summary.json
+cargo llvm-cov --workspace --summary-only --output-format json > docs/coverage/core-llvm-cov-summary.json
 ```
 
 Then regenerate with:
 
 ```bash
 cd apps/screenpipe-app-tauri
-bun run coverage:core -- --llvm-cov-summary ../../coverage/core-llvm-cov-summary.json
+bun run coverage:core -- --llvm-cov-summary ../../docs/coverage/core-llvm-cov-summary.json
 ```
 
 ## Layer Matrix
