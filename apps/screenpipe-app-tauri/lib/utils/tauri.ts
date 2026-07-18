@@ -225,8 +225,12 @@ async checkPermission(permission: OSPermission) : Promise<OSPermissionStatus> {
     return await TAURI_INVOKE("check_permission", { permission });
 },
 /**
- * Check only screen recording permission (no dialog trigger)
- * Uses CGPreflightScreenCaptureAccess which is safe to poll repeatedly
+ * Check only screen recording permission without triggering a dialog.
+ *
+ * This command is polled as soon as onboarding renders, before the user has
+ * clicked anything. It must use preflight directly: the broader core Tauri
+ * check may perform a real capture probe in debug builds, which macOS treats
+ * as a permission request.
  */
 async checkScreenRecordingPermission() : Promise<OSPermissionStatus> {
     return await TAURI_INVOKE("check_screen_recording_permission");
