@@ -123,10 +123,33 @@ function HomeContent() {
 
   const { settings, updateSettings, isSettingsLoaded } = useSettings();
   const { isTranslucent } = useSidebarContext();
+  const [e2eSeedFlags, setE2eSeedFlags] = useState<string[] | null>(null);
+
+  useEffect(() => {
+    let mounted = true;
+    void commands
+      .getE2eSeedFlags()
+      .then((flags) => {
+        if (mounted) setE2eSeedFlags(flags);
+      })
+      .catch(() => {
+        if (mounted) setE2eSeedFlags([]);
+      });
+    return () => {
+      mounted = false;
+    };
+  }, []);
 
   // One-time in-app first-run guide. Gate on isSettingsLoaded so the overlay
-  // never flashes before the store hydrates the (already-done) flag.
-  const showFirstRunGuide = isSettingsLoaded && !settings.firstRunGuideDone;
+  // never flashes before the store hydrates the (already-done) flag. The
+  // `onboarding` E2E seed represents an app that has already completed every
+  // first-run surface; showing this click-blocking guide breaks otherwise
+  // unrelated regression specs that start from the seeded home screen.
+  const showFirstRunGuide =
+    isSettingsLoaded &&
+    e2eSeedFlags !== null &&
+    !e2eSeedFlags.includes("onboarding") &&
+    !settings.firstRunGuideDone;
   const markFirstRunGuideDone = useCallback(() => {
     void updateSettings({ firstRunGuideDone: true });
   }, [updateSettings]);
