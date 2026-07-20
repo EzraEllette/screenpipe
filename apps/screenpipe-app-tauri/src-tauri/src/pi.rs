@@ -1485,12 +1485,6 @@ async fn ensure_pi_config(
         .map_err(|e| format!("Failed to write pi models config: {}", e))?;
     harden_secret_file(&models_path);
 
-    // Subagents are a baseline Screenpipe capability, not an optional Pi
-    // extension. Keep the package in the isolated settings for every user;
-    // `ensure_required_pi_extension_package` repairs the physical install
-    // before a chat process starts.
-    ensure_required_pi_extension_setting()?;
-
     // -- auth.json: merge screenpipe token, preserve other providers --
     let auth_path = config_dir.join("auth.json");
     if let Some(token) = user_token.filter(|token| !token.is_empty()) {
@@ -3093,6 +3087,28 @@ fn ensure_required_pi_extension_setting() -> Result<(), String> {
     Ok(())
 }
 
+fn remove_required_pi_extension_setting(settings: &mut serde_json::Value) -> bool {
+    let Some(packages) = settings
+        .get_mut("packages")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return false;
+    };
+    let previous_len = packages.len();
+    packages.retain(|package| {
+        !package_source_string(package).is_some_and(is_required_pi_extension_package_source)
+    });
+    packages.len() != previous_len
+}
+
+fn clear_required_pi_extension_setting_before_install() -> Result<(), String> {
+    let mut settings = read_pi_settings()?;
+    if remove_required_pi_extension_setting(&mut settings) {
+        write_pi_settings(&settings)?;
+    }
+    Ok(())
+}
+
 fn read_pi_settings() -> Result<serde_json::Value, String> {
     let settings_path = get_pi_config_dir()?.join("settings.json");
     if !settings_path.exists() {
@@ -3319,21 +3335,34 @@ fn pi_package_source_looks_installed(source: &str) -> bool {
     true
 }
 
-fn ensure_pi_package_manager_settings(bun: &str) -> Result<(), String> {
-    let mut settings = read_pi_settings()?;
+fn normalize_pi_package_manager_settings(
+    settings: &mut serde_json::Value,
+    bun: &str,
+) -> Result<bool, String> {
     if !settings.is_object() {
-        settings = json!({});
+        *settings = json!({});
     }
 
     let obj = settings
         .as_object_mut()
         .ok_or_else(|| "Pi settings must be a JSON object".to_string())?;
-
-    if !obj.contains_key("npmCommand") {
-        obj.insert("npmCommand".to_string(), json!([bun]));
-        write_pi_settings(&settings)?;
+    let expected = json!([bun]);
+    if obj.get("npmCommand") == Some(&expected) {
+        return Ok(false);
     }
 
+    // This is screenpipe's isolated Pi config, so package commands must use
+    // the Bun binary shipped with the running app. Inherited `npm`, bare
+    // commands, and absolute paths from another Mac are not reliable here.
+    obj.insert("npmCommand".to_string(), expected);
+    Ok(true)
+}
+
+fn ensure_pi_package_manager_settings(bun: &str) -> Result<(), String> {
+    let mut settings = read_pi_settings()?;
+    if normalize_pi_package_manager_settings(&mut settings, bun)? {
+        write_pi_settings(&settings)?;
+    }
     Ok(())
 }
 
@@ -3427,15 +3456,22 @@ async fn run_pi_package_command(args: Vec<String>) -> Result<(), String> {
 async fn ensure_required_pi_extension_package() -> Result<(), String> {
     let lock = REQUIRED_PI_PACKAGE_INSTALL_LOCK.get_or_init(|| Mutex::new(()));
     let _guard = lock.lock().await;
-    ensure_required_pi_extension_setting()?;
     if pi_package_source_looks_installed(REQUIRED_PI_EXTENSION_PACKAGE) {
-        return Ok(());
+        return ensure_required_pi_extension_setting();
     }
+
+    // Do not advertise a missing package while invoking `pi install`. Pi
+    // resolves configured packages while initializing project trust, before
+    // its package-command error handler is active. Leaving the missing entry
+    // here makes it auto-install early, can run the install twice, and turns a
+    // stale npmCommand into an uncaught stack trace instead of a useful error.
+    clear_required_pi_extension_setting_before_install()?;
     run_pi_package_command(vec![
         "install".to_string(),
         REQUIRED_PI_EXTENSION_PACKAGE.to_string(),
     ])
-    .await
+    .await?;
+    ensure_required_pi_extension_setting()
 }
 
 async fn stop_idle_pi_sessions_for_package_change(state: &PiState) -> Result<(), String> {
@@ -4065,6 +4101,44 @@ mod tests {
             json!(["npm:other-tool", "npm:pi-subagents"])
         );
         assert!(!super::normalize_required_pi_extension_setting(&mut settings).unwrap());
+    }
+
+    #[test]
+    fn removes_required_subagents_before_install_without_touching_other_packages() {
+        let mut settings = json!({
+            "packages": [
+                "npm:other-tool",
+                {"source": "npm:pi-subagents@0.33.1"}
+            ]
+        });
+
+        assert!(super::remove_required_pi_extension_setting(&mut settings));
+        assert_eq!(settings["packages"], json!(["npm:other-tool"]));
+        assert!(!super::remove_required_pi_extension_setting(&mut settings));
+    }
+
+    #[test]
+    fn package_manager_settings_replace_migrated_paths_with_bundled_bun() {
+        let mut settings = json!({
+            "theme": "dark",
+            "npmCommand": ["/Users/old-user/.bun/bin/bun"]
+        });
+
+        assert!(super::normalize_pi_package_manager_settings(
+            &mut settings,
+            "/Applications/screenpipe.app/Contents/MacOS/bun"
+        )
+        .unwrap());
+        assert_eq!(
+            settings["npmCommand"],
+            json!(["/Applications/screenpipe.app/Contents/MacOS/bun"])
+        );
+        assert_eq!(settings["theme"], "dark");
+        assert!(!super::normalize_pi_package_manager_settings(
+            &mut settings,
+            "/Applications/screenpipe.app/Contents/MacOS/bun"
+        )
+        .unwrap());
     }
 
     #[test]

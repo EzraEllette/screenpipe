@@ -2224,6 +2224,9 @@ fn seed_from_global(global: &Path, dest: &Path, data_dir: &Path) -> bool {
     // compaction, …) so behavior matches pre-isolation, but drop:
     // - `packages`: global pi packages are the conflict vector from
     //   https://github.com/screenpipe/screenpipe/issues/3812;
+    // - `npmCommand`: absolute package-manager paths commonly become stale
+    //   after Migration Assistant or a machine/account change. The desktop
+    //   app writes its bundled Bun path before running package commands;
     // - `defaultProvider`/`defaultModel`: those are the *user's* personal pi
     //   defaults. Screenpipe passes --provider/--model on every spawn, so
     //   they'd never be read — except by a future flagless spawn, which must
@@ -2238,6 +2241,7 @@ fn seed_from_global(global: &Path, dest: &Path, data_dir: &Path) -> bool {
         .unwrap_or_else(|| json!({}));
     if let Some(obj) = settings.as_object_mut() {
         obj.remove("packages");
+        obj.remove("npmCommand");
         obj.insert("defaultProvider".to_string(), json!("screenpipe"));
         obj.insert("defaultModel".to_string(), json!("auto"));
     }
@@ -3630,7 +3634,7 @@ mod tests {
             global.join("settings.json"),
             // The user's personal pi defaults must NOT leak into screenpipe's
             // config; run-affecting settings (theme, thinking, …) must.
-            r#"{"theme":"dark","packages":["npm:pi-web-access"],"defaultProvider":"anthropic","defaultModel":"claude-opus-4-8"}"#,
+            r#"{"theme":"dark","packages":["npm:pi-web-access"],"npmCommand":["/Users/old-user/.bun/bin/bun"],"defaultProvider":"anthropic","defaultModel":"claude-opus-4-8"}"#,
         )
         .unwrap();
 
@@ -3661,6 +3665,7 @@ mod tests {
                 .unwrap();
         assert_eq!(settings["theme"], "dark");
         assert!(settings.get("packages").is_none());
+        assert!(settings.get("npmCommand").is_none());
         // Personal defaults replaced by screenpipe's safe fallback: a future
         // flagless spawn must never silently run on the user's BYOK provider.
         assert_eq!(settings["defaultProvider"], "screenpipe");
