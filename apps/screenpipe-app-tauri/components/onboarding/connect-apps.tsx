@@ -16,14 +16,11 @@ import {
   humanizeConnectError,
 } from "@/lib/connect-errors";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { readTextFile, writeFile, mkdir } from "@tauri-apps/plugin-fs";
-import { homeDir, join, dirname } from "@tauri-apps/api/path";
+import { readTextFile } from "@tauri-apps/plugin-fs";
+import { homeDir, join } from "@tauri-apps/api/path";
 import { platform } from "@tauri-apps/plugin-os";
 import posthog from "posthog-js";
-import {
-  areExternalAgentSkillsInstalled,
-  installExternalAgentSkills,
-} from "@/lib/external-agent-skills";
+import { areExternalAgentSkillsInstalled } from "@/lib/external-agent-skills";
 // Connect-all: one click wires every DETECTED tool through the same per-tool
 // connect path the individual cards use (bundled-bun MCP with the local API
 // key, plus both skills where supported). Tools that are not detected are
@@ -31,13 +28,11 @@ import {
 import {
   CONNECT_ALL_TOOL_NAMES,
   type ConnectAllToolId,
+  connectAiTool,
   detectAiTools,
-  buildMcpConfig,
-  installOpenclawMcp,
+  isToolConfigHealthy,
   isOpenclawMcpInstalled,
-  installHermesMcp,
   isHermesMcpInstalled,
-  installWindsurfMcp,
   isWindsurfMcpInstalled,
 } from "@/lib/ai-tools-mcp";
 
@@ -98,22 +93,6 @@ function CursorIcon({ className = "w-5 h-5" }: { className?: string }) {
 
 // ─── MCP helpers (shared pattern for Claude Desktop & Cursor) ────────────────
 
-async function readMcpConfig(configPath: string): Promise<Record<string, unknown>> {
-  try {
-    return JSON.parse(await readTextFile(configPath));
-  } catch {
-    return {};
-  }
-}
-
-async function writeMcpConfig(configPath: string, config: Record<string, unknown>): Promise<void> {
-  if (!config.mcpServers || typeof config.mcpServers !== "object") config.mcpServers = {};
-  (config.mcpServers as Record<string, unknown>).screenpipe = await buildMcpConfig();
-  // Ensure parent directory exists (Claude Desktop may not have created it yet)
-  await mkdir(await dirname(configPath), { recursive: true });
-  await writeFile(configPath, new TextEncoder().encode(JSON.stringify(config, null, 2)));
-}
-
 // Cursor
 async function getCursorMcpConfigPath(): Promise<string> {
   const home = await homeDir();
@@ -127,12 +106,6 @@ async function isCursorMcpInstalled(): Promise<boolean> {
   } catch { return false; }
 }
 
-async function installCursorMcp(): Promise<void> {
-  const configPath = await getCursorMcpConfigPath();
-  const config = await readMcpConfig(configPath);
-  await writeMcpConfig(configPath, config);
-}
-
 // Claude Desktop
 async function isClaudeMcpInstalled(): Promise<boolean> {
   try {
@@ -144,21 +117,6 @@ async function isClaudeMcpInstalled(): Promise<boolean> {
   } catch (e) {
     console.log("[claude-mcp] isInstalled check failed:", e);
     return false;
-  }
-}
-
-async function installClaudeMcp(): Promise<void> {
-  const configPath = await getClaudeConfigPath();
-  if (!configPath) throw new Error("unsupported platform");
-  console.log("[claude-mcp] installing to:", configPath);
-  const config = await readMcpConfig(configPath);
-  console.log("[claude-mcp] existing config:", JSON.stringify(config));
-  try {
-    await writeMcpConfig(configPath, config);
-    console.log("[claude-mcp] write succeeded");
-  } catch (e) {
-    console.error("[claude-mcp] write failed:", e);
-    throw e;
   }
 }
 
@@ -178,40 +136,6 @@ async function isCodexMcpInstalled(): Promise<boolean> {
   } catch { return false; }
 }
 
-async function installCodexMcp(): Promise<void> {
-  const configPath = await getCodexConfigPath();
-  const { command, args, env } = await buildMcpConfig();
-  let existing = "";
-  try { existing = await readTextFile(configPath); } catch { /* fresh */ }
-
-  const withoutScreenpipe = existing
-    .replace(CODEX_SCREENPIPE_TABLE, "")
-    .replace(/^\n+/, "")
-    .replace(/\n{3,}/g, "\n\n")
-    .trimEnd();
-
-  // Keep this in sync with buildCodexMcpToml in settings/connections-section.tsx
-  // — the env table carries the local API key; without it the MCP server 403s
-  // on every call.
-  const lines = [
-    "[mcp_servers.screenpipe]",
-    `command = ${JSON.stringify(command)}`,
-    `args = [${args.map(a => JSON.stringify(a)).join(", ")}]`,
-    "enabled = true",
-  ];
-  const envEntries = Object.entries(env ?? {});
-  if (envEntries.length > 0) {
-    lines.push("", "[mcp_servers.screenpipe.env]");
-    for (const [key, value] of envEntries) {
-      lines.push(`${key} = ${JSON.stringify(value)}`);
-    }
-  }
-  const block = lines.join("\n");
-
-  const next = `${withoutScreenpipe}${withoutScreenpipe ? "\n\n" : ""}${block}\n`;
-  await mkdir(await dirname(configPath), { recursive: true });
-  await writeFile(configPath, new TextEncoder().encode(next));
-}
 
 // Obsidian — auto-discover vaults from obsidian.json, save first one to local API
 async function getObsidianConfigPath(): Promise<string | null> {
@@ -398,6 +322,8 @@ function IntegrationCard({
       className={`relative flex flex-col gap-1.5 border p-3 transition-colors duration-500 overflow-hidden h-full ${
         isConnected
           ? "border-foreground/50 bg-foreground/[0.03]"
+          : isError
+          ? "border-red-500/35"
           : "border-border/50"
       }`}
     >
@@ -473,9 +399,31 @@ function IntegrationCard({
             null
           ) : isError ? (
             (() => {
-              // Never show the raw error string to a non-technical user —
-              // map it to a short, plain-language retry line. The full line is
-              // the tooltip so a truncated card is still readable on hover.
+              // Never show the raw error string to a non-technical user.
+              // Local AI tools (claude/codex/cursor) get the C1 deferral
+              // footer: a short badge line + a quiet action line — designed
+              // to fit the card, no truncation, no tooltip. The repair home
+              // is settings → AI tools, not this card.
+              const isLocalAiTool = ["claude", "codex", "mcp"].includes(integration.type);
+              if (isLocalAiTool) {
+                return (
+                  <div className="font-mono">
+                    <span className="flex items-center gap-1.5 text-[10px] text-red-400">
+                      <span className="inline-flex h-3 w-3 items-center justify-center rounded-full bg-red-500/15 text-[8px] font-bold shrink-0">
+                        !
+                      </span>
+                      couldn&apos;t connect
+                    </span>
+                    <button
+                      onClick={onConnect}
+                      className="block text-[10px] text-muted-foreground underline hover:text-foreground transition-colors mt-0.5"
+                    >
+                      retry →
+                    </button>
+                  </div>
+                );
+              }
+              // Other integrations keep the classified single-line retry.
               const friendly = humanizeConnectError(
                 { name: integration.name, type: integration.type },
                 errorMessage,
@@ -525,7 +473,17 @@ export default function ConnectApps({ handleNextSlide }: ConnectAppsProps) {
   // Check existing connections on mount
   useEffect(() => {
     const check = async () => {
-      detectAiTools().then(setDetectedAiTools).catch(() => {});
+      // Only promise tools whose config we can safely write into — a broken
+      // config is excluded from the one-click list (its own card and settings
+      // still carry it). Lazy error disclosure: errors only follow clicks.
+      detectAiTools()
+        .then(async (tools) => {
+          const healthy = await Promise.all(
+            tools.map((id) => isToolConfigHealthy(id).catch(() => false))
+          );
+          setDetectedAiTools(tools.filter((_, i) => healthy[i]));
+        })
+        .catch(() => {});
 
       const stateUpdates: Record<string, CardState> = {};
       const nameUpdates: Record<string, string> = {};
@@ -716,24 +674,21 @@ export default function ConnectApps({ handleNextSlide }: ConnectAppsProps) {
         }
 
         if (integration.type === "mcp") {
-          await installCursorMcp();
-          await installExternalAgentSkills("cursor");
+          await connectAiTool("cursor");
           setCardState(integration.cardKey, "connected");
           posthog.capture("onboarding_integration_connected", { integration: integration.id });
           return;
         }
 
         if (integration.type === "claude") {
-          await installClaudeMcp();
-          await installExternalAgentSkills("claude");
+          await connectAiTool("claude");
           setCardState(integration.cardKey, "connected");
           posthog.capture("onboarding_integration_connected", { integration: integration.id });
           return;
         }
 
         if (integration.type === "codex") {
-          await installCodexMcp();
-          await installExternalAgentSkills("codex");
+          await connectAiTool("codex");
           setCardState(integration.cardKey, "connected");
           posthog.capture("onboarding_integration_connected", { integration: integration.id });
           return;
@@ -788,6 +743,10 @@ export default function ConnectApps({ handleNextSlide }: ConnectAppsProps) {
           });
           setErrorMessages((prev) => ({ ...prev, [integration.cardKey]: msg }));
           setCardState(integration.cardKey, "error");
+          // Onboarding card errors are action feedback, not managed state —
+          // show, then return to a retryable "connect →". Clicking again
+          // honestly re-surfaces the error; the persistent version lives in
+          // settings, where errors are conditions to manage.
           setTimeout(() => setCardState(integration.cardKey, "idle"), 4000);
         }
       }
@@ -801,6 +760,7 @@ export default function ConnectApps({ handleNextSlide }: ConnectAppsProps) {
   // install is fast local file IO and the per-tool chips animate in order.
   const handleConnectAll = useCallback(async () => {
     setConnectAllRunning(true);
+    try {
     posthog.capture("onboarding_connect_all_clicked", { tools: detectedAiTools });
     for (const id of detectedAiTools) {
       // cardKey === id for every connect-all tool, so this covers both kinds.
@@ -814,17 +774,10 @@ export default function ConnectApps({ handleNextSlide }: ConnectAppsProps) {
 
       // Tools without an onboarding card (openclaw, hermes) — same
       // connect/error contract as handleConnect, inline.
+      setErrorMessages((prev) => { const next = { ...prev }; delete next[id]; return next; });
       setCardState(id, "connecting");
       try {
-        if (id === "openclaw") {
-          await installOpenclawMcp();
-          await installExternalAgentSkills("openclaw");
-        } else if (id === "hermes") {
-          await installHermesMcp();
-          await installExternalAgentSkills("hermes");
-        } else if (id === "windsurf") {
-          await installWindsurfMcp(); // MCP-only, no skills dir
-        }
+        await connectAiTool(id);
         setCardState(id, "connected");
         posthog.capture("onboarding_integration_connected", { integration: id });
       } catch (err) {
@@ -838,10 +791,13 @@ export default function ConnectApps({ handleNextSlide }: ConnectAppsProps) {
         setTimeout(() => setCardState(id, "idle"), 4000);
       }
     }
-    setConnectAllRunning(false);
+    } finally {
+      setConnectAllRunning(false);
+    }
   }, [detectedAiTools, cardStates, handleConnect, setCardState]);
 
   const handleContinue = useCallback(() => {
+    setErrorMessages({}); // leaving the step: settings owns error truth now
     posthog.capture("onboarding_connect_apps_completed", {
       num_connected: numConnected,
       integrations_connected: connectedKeys,
@@ -851,6 +807,7 @@ export default function ConnectApps({ handleNextSlide }: ConnectAppsProps) {
   }, [numConnected, connectedKeys, handleNextSlide]);
 
   const handleSkip = useCallback(() => {
+    setErrorMessages({}); // leaving the step: settings owns error truth now
     posthog.capture("onboarding_connect_apps_skipped", {
       num_connected: numConnected,
       integrations_connected: connectedKeys,
@@ -903,6 +860,36 @@ export default function ConnectApps({ handleNextSlide }: ConnectAppsProps) {
         const allConnected = detectedAiTools.every(
           (id) => (cardStates[id] ?? "idle") === "connected"
         );
+        const failedIds = detectedAiTools.filter((id) => !!errorMessages[id]);
+        const engineStarting = failedIds.some((id) =>
+          (errorMessages[id] ?? "").includes("local API key isn't available")
+        );
+        const okCount = detectedAiTools.filter(
+          (id) => (cardStates[id] ?? "idle") === "connected"
+        ).length;
+        const failedNames = failedIds.map((id) => CONNECT_ALL_TOOL_NAMES[id].toLowerCase());
+        const failedList =
+          failedNames.length <= 1
+            ? failedNames[0]
+            : `${failedNames.slice(0, -1).join(", ")} and ${failedNames[failedNames.length - 1]}`;
+        // Deferral framing: honest, but never a fix-it-now demand. The only
+        // "try again" wording is engine-not-ready, where retrying really works.
+        const deferralLine = engineStarting
+          ? "screenpipe isn't responding — give it a few seconds and try again."
+          : failedIds.length === 1
+          ? `${failedList} couldn't connect — its config file has an error. ${
+              okCount > 0 ? "everything else is set; " : ""
+            }fix it anytime in settings → ai tools.`
+          : `${failedList} couldn't connect — ${okCount} of ${detectedAiTools.length} are set. fix the rest anytime in settings → ai tools.`;
+        const buttonLabel = connectAllRunning
+          ? "connecting..."
+          : engineStarting
+          ? "try again"
+          : failedIds.length === 1
+          ? `retry ${failedNames[0]}`
+          : failedIds.length > 1
+          ? "retry failed"
+          : "connect all";
         return (
           <motion.div
             className="w-full mb-3 p-3 rounded-lg border border-border/40 bg-card/40"
@@ -946,11 +933,21 @@ export default function ConnectApps({ handleNextSlide }: ConnectAppsProps) {
                     );
                   })}
                 </div>
+                {/* One combined deferral line — never a stack of red rows.
+                    Persists until retry or until the user leaves the step. */}
+                {failedIds.length > 0 && (
+                  <p className="font-mono text-[10px] mt-1.5 flex items-start gap-1.5">
+                    <span className="inline-flex h-3 w-3 items-center justify-center rounded-full bg-red-500/15 text-red-500 text-[8px] font-bold shrink-0 mt-px">
+                      !
+                    </span>
+                    <span className="text-muted-foreground">{deferralLine}</span>
+                  </p>
+                )}
               </div>
               {allConnected ? (
                 <span className="font-mono text-[11px] text-muted-foreground inline-flex items-center gap-1.5 shrink-0">
                   <Check className="h-3 w-3" />
-                  all connected
+                  {detectedAiTools.length} connected
                 </span>
               ) : (
                 <button
@@ -958,7 +955,7 @@ export default function ConnectApps({ handleNextSlide }: ConnectAppsProps) {
                   disabled={connectAllRunning}
                   className="font-mono text-[11px] px-3 py-1 rounded bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50 transition-all shrink-0"
                 >
-                  {connectAllRunning ? "connecting..." : "connect all"}
+                  {buttonLabel}
                 </button>
               )}
             </div>

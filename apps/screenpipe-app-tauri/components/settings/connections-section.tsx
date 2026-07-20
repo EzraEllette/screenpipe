@@ -12,7 +12,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogClose, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { Download, ExternalLink, Check, Loader2, Copy, Terminal, Lock, LogIn, LogOut, Send, X, HelpCircle, Search, Calendar as CalendarIcon, Eye, EyeOff, FolderOpen, Plus, AlertCircle, MessageSquare } from "lucide-react";
+import { Download, ExternalLink, Check, Loader2, Copy, Terminal, Lock, LogIn, LogOut, RotateCw, Send, X, HelpCircle, Search, Calendar as CalendarIcon, Eye, EyeOff, FolderOpen, Plus, AlertCircle, MessageSquare } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { commands } from "@/lib/utils/tauri";
 import { useSettings } from "@/lib/hooks/use-settings";
@@ -49,21 +49,17 @@ import { SkillsCard } from "./skills-card";
 import { PiExtensionsCard } from "./pi-extensions-card";
 import { WhatsAppPanel } from "./whatsapp-panel";
 import posthog from "posthog-js";
-import {
-  areExternalAgentSkillsInstalled,
-  installExternalAgentSkills,
-  removeExternalAgentSkills,
-} from "@/lib/external-agent-skills";
+import { areExternalAgentSkillsInstalled } from "@/lib/external-agent-skills";
 // Shared MCP matrix (build/install/uninstall per tool) — same module the
 // onboarding connect-all uses, so connect and disconnect can never drift.
 import {
   buildMcpConfig,
   buildCodexMcpToml,
-  installCursorMcp,
-  installCodexMcp,
-  uninstallClaudeMcp,
-  uninstallCursorMcp,
-  uninstallCodexMcp,
+  connectAiTool,
+  disconnectAiTool,
+  installClaudeMcp,
+  friendlyToolError,
+  type FriendlyToolError,
 } from "@/lib/ai-tools-mcp";
 import { AiToolsCard } from "./ai-tools-card";
 import { CursorLogo } from "./tool-logos";
@@ -197,9 +193,7 @@ async function openWindowsShellTarget(target: string): Promise<void> {
 }
 
 import {
-  getClaudeConfigPath,
   getCodexConfigPath,
-  getCursorMcpConfigPath,
   getGrokConfigPath,
   getInstalledMcpVersion,
   getInstalledClaudeScreenpipeEntry,
@@ -1011,8 +1005,44 @@ function PiExtensionsSpotlight({
 // ---------------------------------------------------------------------------
 
 
+// Inline panel error for config-write failures — replaces the old native OS
+// alerts. Headline names the cause, body leads with the reassurance ("your
+// file wasn't changed" — true since all writes are strict + atomic), and the
+// offending file is one click away. Persistent until retry: settings is a
+// management surface, errors here are conditions, not toasts.
+function PanelConfigError({ err }: { err: FriendlyToolError }) {
+  const revealPath = async (path: string) => {
+    try {
+      if (platform() === "macos") await Command.create("open", ["-R", path]).execute();
+    } catch (e) {
+      console.warn("[connections] reveal failed:", e);
+    }
+  };
+  return (
+    // App error grammar: one line, one red accent (the badge). Cause only —
+    // the retry button and open-file action ARE the instructions. The panel
+    // provides the tool context, so the message never restates it.
+    <div className="flex items-center gap-2 text-xs">
+      <span className="inline-flex h-3.5 w-3.5 items-center justify-center rounded-full bg-red-500/15 text-red-500 text-[9px] font-bold shrink-0">
+        !
+      </span>
+      <span className="text-muted-foreground min-w-0">{err.message}</span>
+      {err.path && platform() === "macos" && (
+        <button
+          type="button"
+          onClick={() => revealPath(err.path!)}
+          className="underline text-foreground/80 hover:text-foreground transition-colors shrink-0"
+        >
+          open file
+        </button>
+      )}
+    </div>
+  );
+}
+
 function ClaudePanel({ onConnected, onDisconnected }: { onConnected?: () => void; onDisconnected?: () => void }) {
   const [state, setState] = useState<"idle" | "connecting" | "connected">("idle");
+  const [connectError, setConnectError] = useState<FriendlyToolError | null>(null);
   const [claudeAppInstalled, setClaudeAppInstalled] = useState<boolean | null>(null);
 
   useEffect(() => {
@@ -1029,7 +1059,7 @@ function ClaudePanel({ onConnected, onDisconnected }: { onConnected?: () => void
         try {
           const next = await buildMcpConfig();
           if (next.env?.SCREENPIPE_LOCAL_API_KEY) {
-            await writeClaudeScreenpipeConfig();
+            await installClaudeMcp();
           }
         } catch (e) {
           console.warn("claude mcp auto-repair skipped:", e);
@@ -1047,7 +1077,7 @@ function ClaudePanel({ onConnected, onDisconnected }: { onConnected?: () => void
         })
         .catch(() => setClaudeAppInstalled(false));
     } else if (os === "macos") {
-      Command.create("sh", ["-c", "ls /Applications/Claude.app"]).execute()
+      Command.create("exec-sh", ["-c", "ls /Applications/Claude.app"]).execute()
         .then(r => setClaudeAppInstalled(r.code === 0))
         .catch(() => setClaudeAppInstalled(false));
     } else {
@@ -1055,27 +1085,11 @@ function ClaudePanel({ onConnected, onDisconnected }: { onConnected?: () => void
     }
   }, []);
 
-  // Write the screenpipe entry into Claude's config with the reliable, current
-  // shape (bundled-bun path + injected key). Used by both the explicit connect
-  // action and the on-mount auto-repair of stale/keyless configs.
-  const writeClaudeScreenpipeConfig = async (): Promise<McpCommand> => {
-    const configPath = await getClaudeConfigPath();
-    if (!configPath) throw new Error("unsupported platform");
-    let config: Record<string, unknown> = {};
-    try { config = JSON.parse(await readTextFile(configPath)); } catch { /* fresh */ }
-    if (!config.mcpServers || typeof config.mcpServers !== "object") config.mcpServers = {};
-    const mcp = await buildMcpConfig();
-    (config.mcpServers as Record<string, unknown>).screenpipe = mcp;
-    await mkdir(await dirname(configPath), { recursive: true });
-    await writeFile(configPath, new TextEncoder().encode(JSON.stringify(config, null, 2)));
-    return mcp;
-  };
-
   const handleConnect = async () => {
     try {
       setState("connecting");
-      const mcp = await writeClaudeScreenpipeConfig();
-      await installExternalAgentSkills("claude");
+      setConnectError(null);
+      const mcp = await connectAiTool("claude");
       setState("connected");
       onConnected?.();
       // The desktop app ships a bundled `bun`, so an npx fallback here means bun
@@ -1089,17 +1103,13 @@ function ClaudePanel({ onConnected, onDisconnected }: { onConnected?: () => void
       }
     } catch (error) {
       console.error("failed to install claude mcp:", error instanceof Error ? error.message : String(error));
-      await message(
-        "could not write Claude Desktop config.\n\nmake sure claude desktop is installed and has been opened at least once, then try again.\n\ndownload: https://claude.ai/download",
-        { title: "claude mcp setup", kind: "error" }
-      );
+      setConnectError(friendlyToolError(error));
       setState("idle");
     }
   };
 
   const handleDisconnect = async () => {
-    try { await uninstallClaudeMcp(); } catch (e) { console.warn("claude config remove failed:", e); }
-    try { await removeExternalAgentSkills("claude"); } catch (e) { console.warn("claude skills remove failed:", e); }
+    try { await disconnectAiTool("claude"); } catch (e) { console.warn("claude disconnect failed:", e); }
     setState("idle");
     onDisconnected?.();
   };
@@ -1134,7 +1144,7 @@ function ClaudePanel({ onConnected, onDisconnected }: { onConnected?: () => void
           </Button>
         ) : (
           <Button onClick={handleConnect} disabled={state === "connecting"} size="sm" className="gap-1.5 h-7 text-xs normal-case font-sans tracking-normal">
-            {state === "connecting" ? (<><Loader2 className="h-3 w-3 animate-spin" />connecting...</>) : (<><Download className="h-3 w-3" />connect</>)}
+            {state === "connecting" ? (<><Loader2 className="h-3 w-3 animate-spin" />connecting...</>) : connectError ? (<><RotateCw className="h-3 w-3" />retry</>) : (<><Download className="h-3 w-3" />connect</>)}
           </Button>
         )}
         {claudeAppInstalled === false ? (
@@ -1147,6 +1157,7 @@ function ClaudePanel({ onConnected, onDisconnected }: { onConnected?: () => void
           </Button>
         )}
       </div>
+      {connectError && <PanelConfigError err={connectError} />}
       {state === "connected" && (
         <p className="text-xs text-muted-foreground">
           <strong>connected!</strong> MCP + both skills installed. Restart Claude and ask: &quot;what did I do in the last 5 minutes?&quot;
@@ -1158,6 +1169,7 @@ function ClaudePanel({ onConnected, onDisconnected }: { onConnected?: () => void
 
 function CursorPanel({ onConnected, onDisconnected }: { onConnected?: () => void; onDisconnected?: () => void }) {
   const [state, setState] = useState<"idle" | "installing" | "installed">("idle");
+  const [connectError, setConnectError] = useState<FriendlyToolError | null>(null);
   const [cursorAppInstalled, setCursorAppInstalled] = useState<boolean | null>(null);
 
   useEffect(() => {
@@ -1176,7 +1188,7 @@ function CursorPanel({ onConnected, onDisconnected }: { onConnected?: () => void
         .then((exe) => setCursorAppInstalled(!!exe))
         .catch(() => setCursorAppInstalled(false));
     } else if (os === "macos") {
-      Command.create("sh", ["-c", "test -d '/Applications/Cursor.app' || test -d \"$HOME/Applications/Cursor.app\""]).execute()
+      Command.create("exec-sh", ["-c", "test -d '/Applications/Cursor.app' || test -d \"$HOME/Applications/Cursor.app\""]).execute()
         .then((r) => setCursorAppInstalled(r.code === 0))
         .catch(() => setCursorAppInstalled(false));
     } else {
@@ -1187,24 +1199,19 @@ function CursorPanel({ onConnected, onDisconnected }: { onConnected?: () => void
   const handleConnect = async () => {
     try {
       setState("installing");
-      await installCursorMcp();
-      await installExternalAgentSkills("cursor");
+      setConnectError(null);
+      await connectAiTool("cursor");
       setState("installed");
       onConnected?.();
     } catch (error) {
       console.error("failed to install cursor mcp:", error);
-      await message(
-        "Failed to write Cursor MCP config.\n\nManually add to ~/.cursor/mcp.json:\n\n" +
-        JSON.stringify({ mcpServers: { screenpipe: { command: "npx", args: ["-y", "screenpipe-mcp@latest"] } } }, null, 2),
-        { title: "Cursor MCP Setup", kind: "error" }
-      );
+      setConnectError(friendlyToolError(error));
       setState("idle");
     }
   };
 
   const handleDisconnect = async () => {
-    try { await uninstallCursorMcp(); } catch (e) { console.warn("cursor config remove failed:", e); }
-    try { await removeExternalAgentSkills("cursor"); } catch (e) { console.warn("cursor skills remove failed:", e); }
+    try { await disconnectAiTool("cursor"); } catch (e) { console.warn("cursor disconnect failed:", e); }
     setState("idle");
     onDisconnected?.();
   };
@@ -1228,7 +1235,7 @@ function CursorPanel({ onConnected, onDisconnected }: { onConnected?: () => void
           </Button>
         ) : (
           <Button onClick={handleConnect} disabled={state === "installing"} size="sm" className="gap-1.5 h-7 text-xs normal-case font-sans tracking-normal">
-            {state === "installing" ? (<><Loader2 className="h-3 w-3 animate-spin" />installing...</>) : (<><Download className="h-3 w-3" />connect</>)}
+            {state === "installing" ? (<><Loader2 className="h-3 w-3 animate-spin" />installing...</>) : connectError ? (<><RotateCw className="h-3 w-3" />retry</>) : (<><Download className="h-3 w-3" />connect</>)}
           </Button>
         )}
         {cursorAppInstalled === false ? (
@@ -1241,12 +1248,18 @@ function CursorPanel({ onConnected, onDisconnected }: { onConnected?: () => void
           </Button>
         )}
       </div>
+      {connectError && <PanelConfigError err={connectError} />}
+      <details className="text-xs text-muted-foreground">
+        <summary className="cursor-pointer">manual config</summary>
+        <pre className="mt-2 bg-muted border border-border rounded-lg p-3 text-xs font-mono text-foreground overflow-x-auto whitespace-pre-wrap">{`add to ~/.cursor/mcp.json:\n\n${JSON.stringify({ mcpServers: { screenpipe: { command: "npx", args: ["-y", "screenpipe-mcp@latest"] } } }, null, 2)}`}</pre>
+      </details>
     </div>
   );
 }
 
 function CodexPanel({ onConnected, onDisconnected }: { onConnected?: () => void; onDisconnected?: () => void }) {
   const [state, setState] = useState<"idle" | "installing" | "installed">("idle");
+  const [connectError, setConnectError] = useState<FriendlyToolError | null>(null);
   useEffect(() => {
     Promise.all([isCodexMcpInstalled(), areExternalAgentSkillsInstalled("codex")])
       .then(([hasMcp, hasSkills]) => {
@@ -1265,23 +1278,19 @@ function CodexPanel({ onConnected, onDisconnected }: { onConnected?: () => void;
   const handleConnect = async () => {
     try {
       setState("installing");
-      await installCodexMcp();
-      await installExternalAgentSkills("codex");
+      setConnectError(null);
+      await connectAiTool("codex");
       setState("installed");
       onConnected?.();
     } catch (error) {
       console.error("failed to install codex mcp:", error);
-      await message(
-        "Failed to write Codex MCP config.\n\nManually add a [mcp_servers.screenpipe] block to ~/.codex/config.toml with command npx and args [\"-y\", \"screenpipe-mcp@latest\"].",
-        { title: "Codex MCP Setup", kind: "error" }
-      );
+      setConnectError(friendlyToolError(error));
       setState("idle");
     }
   };
 
   const handleDisconnect = async () => {
-    try { await uninstallCodexMcp(); } catch (e) { console.warn("codex config remove failed:", e); }
-    try { await removeExternalAgentSkills("codex"); } catch (e) { console.warn("codex skills remove failed:", e); }
+    try { await disconnectAiTool("codex"); } catch (e) { console.warn("codex disconnect failed:", e); }
     setState("idle");
     onDisconnected?.();
   };
@@ -1305,13 +1314,14 @@ function CodexPanel({ onConnected, onDisconnected }: { onConnected?: () => void;
           </Button>
         ) : (
           <Button onClick={handleConnect} disabled={state === "installing"} size="sm" className="gap-1.5 h-7 text-xs normal-case font-sans tracking-normal">
-            {state === "installing" ? (<><Loader2 className="h-3 w-3 animate-spin" />connecting...</>) : (<><Download className="h-3 w-3" />connect</>)}
+            {state === "installing" ? (<><Loader2 className="h-3 w-3 animate-spin" />connecting...</>) : connectError ? (<><RotateCw className="h-3 w-3" />retry</>) : (<><Download className="h-3 w-3" />connect</>)}
           </Button>
         )}
         <Button variant="outline" onClick={openCodex} size="sm" className="gap-1.5 h-7 text-xs normal-case font-sans tracking-normal">
           <ExternalLink className="h-3 w-3" />open codex
         </Button>
       </div>
+      {connectError && <PanelConfigError err={connectError} />}
       {state === "installed" && (
         <p className="text-xs text-muted-foreground">
           <strong>connected!</strong> MCP + both skills installed. Open a new Codex session and ask: &quot;what did I do in the last 5 minutes?&quot;
@@ -1332,6 +1342,7 @@ function CodexPanel({ onConnected, onDisconnected }: { onConnected?: () => void;
 
 function GrokPanel({ onConnected, onDisconnected }: { onConnected?: () => void; onDisconnected?: () => void }) {
   const [state, setState] = useState<"idle" | "installing" | "installed">("idle");
+  const [connectError, setConnectError] = useState<FriendlyToolError | null>(null);
   useEffect(() => { isGrokMcpInstalled().then(ok => { if (ok) { setState("installed"); onConnected?.(); } }); }, []);
 
   const manualConfig = useMemo(() => buildGrokMcpJson({
@@ -1342,15 +1353,13 @@ function GrokPanel({ onConnected, onDisconnected }: { onConnected?: () => void; 
   const handleConnect = async () => {
     try {
       setState("installing");
+      setConnectError(null);
       await installGrokMcp();
       setState("installed");
       onConnected?.();
     } catch (error) {
       console.error("failed to install grok mcp:", error);
-      await message(
-        "Failed to write Grok CLI MCP config.\n\nManually add a screenpipe entry to the mcp.servers array in ~/.grok/user-settings.json with command npx and args [\"-y\", \"screenpipe-mcp@latest\"].",
-        { title: "Grok CLI MCP Setup", kind: "error" }
-      );
+      setConnectError(friendlyToolError(error));
       setState("idle");
     }
   };
@@ -1371,13 +1380,14 @@ function GrokPanel({ onConnected, onDisconnected }: { onConnected?: () => void; 
           </Button>
         ) : (
           <Button onClick={handleConnect} disabled={state === "installing"} size="sm" className="gap-1.5 h-7 text-xs normal-case font-sans tracking-normal">
-            {state === "installing" ? (<><Loader2 className="h-3 w-3 animate-spin" />connecting...</>) : (<><Download className="h-3 w-3" />connect</>)}
+            {state === "installing" ? (<><Loader2 className="h-3 w-3 animate-spin" />connecting...</>) : connectError ? (<><RotateCw className="h-3 w-3" />retry</>) : (<><Download className="h-3 w-3" />connect</>)}
           </Button>
         )}
         <Button variant="outline" onClick={() => openUrl("https://github.com/superagent-ai/grok-cli")} size="sm" className="gap-1.5 h-7 text-xs normal-case font-sans tracking-normal">
           <ExternalLink className="h-3 w-3" />grok cli
         </Button>
       </div>
+      {connectError && <PanelConfigError err={connectError} />}
       {state === "installed" && (
         <p className="text-xs text-muted-foreground">
           <strong>connected!</strong> start a new <code>grok</code> session and ask: &quot;what did I do in the last 5 minutes?&quot;

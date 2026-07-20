@@ -12,36 +12,26 @@
 // this card and the onboarding connect-all can never drift.
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { Bot, Check, Loader2, Plus } from "lucide-react";
+import { Bot, Check, Loader2, Plus, RotateCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import posthog from "posthog-js";
 import { CursorLogo } from "./tool-logos";
+import { Command } from "@tauri-apps/plugin-shell";
+import { platform } from "@tauri-apps/plugin-os";
 import {
   CONNECT_ALL_TOOL_NAMES,
   type ConnectAllToolId,
+  SKILLS_TARGET,
+  connectAiTool,
+  disconnectAiTool,
   detectAiTools,
-  installClaudeMcp,
-  installCodexMcp,
-  installCursorMcp,
-  installOpenclawMcp,
-  installHermesMcp,
-  installWindsurfMcp,
+  friendlyToolError,
+  type FriendlyToolError,
   isOpenclawMcpInstalled,
   isHermesMcpInstalled,
   isWindsurfMcpInstalled,
-  uninstallClaudeMcp,
-  uninstallCodexMcp,
-  uninstallCursorMcp,
-  uninstallOpenclawMcp,
-  uninstallHermesMcp,
-  uninstallWindsurfMcp,
 } from "@/lib/ai-tools-mcp";
-import {
-  areExternalAgentSkillsInstalled,
-  installExternalAgentSkills,
-  removeExternalAgentSkills,
-  type ExternalAgentWithSkills,
-} from "@/lib/external-agent-skills";
+import { areExternalAgentSkillsInstalled } from "@/lib/external-agent-skills";
 import {
   getInstalledMcpVersion,
   isCodexMcpInstalled,
@@ -51,35 +41,6 @@ import {
 const DISPLAY_NAMES: Record<ConnectAllToolId, string> = {
   ...CONNECT_ALL_TOOL_NAMES,
   claude: "Claude Desktop",
-};
-
-const INSTALL_MCP: Record<ConnectAllToolId, () => Promise<void>> = {
-  claude: installClaudeMcp,
-  codex: installCodexMcp,
-  cursor: installCursorMcp,
-  openclaw: installOpenclawMcp,
-  hermes: installHermesMcp,
-  windsurf: installWindsurfMcp,
-};
-
-const UNINSTALL_MCP: Record<ConnectAllToolId, () => Promise<void>> = {
-  claude: uninstallClaudeMcp,
-  codex: uninstallCodexMcp,
-  cursor: uninstallCursorMcp,
-  openclaw: uninstallOpenclawMcp,
-  hermes: uninstallHermesMcp,
-  windsurf: uninstallWindsurfMcp,
-};
-
-// Every tool with a global skills dir gets both skills. Windsurf (Devin
-// Desktop) only discovers skills per-project, so it stays MCP-only:
-// https://docs.devin.ai/product-guides/skills
-const SKILLS_TARGET: Partial<Record<ConnectAllToolId, ExternalAgentWithSkills>> = {
-  claude: "claude",
-  codex: "codex",
-  cursor: "cursor",
-  openclaw: "openclaw",
-  hermes: "hermes",
 };
 
 // Connected = MCP entry AND both skills where supported — same rule as tiles.
@@ -126,7 +87,7 @@ export function AiToolsCard({ onChanged }: { onChanged?: () => void }) {
   const [detected, setDetected] = useState<ConnectAllToolId[]>([]);
   const [connected, setConnected] = useState<Partial<Record<ConnectAllToolId, boolean>>>({});
   const [busy, setBusy] = useState<Partial<Record<ConnectAllToolId, ToolBusy>>>({});
-  const [errors, setErrors] = useState<Partial<Record<ConnectAllToolId, string>>>({});
+  const [errors, setErrors] = useState<Partial<Record<ConnectAllToolId, FriendlyToolError>>>({});
   const [expanded, setExpanded] = useState(false);
   const [bulkRunning, setBulkRunning] = useState(false);
   const [confirmingDisconnect, setConfirmingDisconnect] = useState(false);
@@ -161,15 +122,12 @@ export function AiToolsCard({ onChanged }: { onChanged?: () => void }) {
       setBusy((prev) => ({ ...prev, [id]: "connecting" }));
       setErrors((prev) => ({ ...prev, [id]: undefined }));
       try {
-        await INSTALL_MCP[id]();
-        const skillsTarget = SKILLS_TARGET[id];
-        if (skillsTarget) await installExternalAgentSkills(skillsTarget);
+        await connectAiTool(id);
         setConnected((prev) => ({ ...prev, [id]: true }));
         posthog.capture("settings_ai_tool_connected", { tool: id });
       } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
         console.warn(`[ai-tools] ${id} connect failed:`, e);
-        setErrors((prev) => ({ ...prev, [id]: msg }));
+        setErrors((prev) => ({ ...prev, [id]: friendlyToolError(e) }));
       } finally {
         setBusy((prev) => ({ ...prev, [id]: undefined }));
       }
@@ -180,44 +138,32 @@ export function AiToolsCard({ onChanged }: { onChanged?: () => void }) {
   const removeTool = useCallback(async (id: ConnectAllToolId) => {
     setBusy((prev) => ({ ...prev, [id]: "removing" }));
     setErrors((prev) => ({ ...prev, [id]: undefined }));
-    let mcpFailed = false;
     try {
-      await UNINSTALL_MCP[id]();
-    } catch (e) {
-      console.warn(`[ai-tools] ${id} mcp remove failed:`, e);
-      mcpFailed = true;
-      setErrors((prev) => ({
-        ...prev,
-        [id]: e instanceof Error ? e.message : String(e),
-      }));
-    }
-    // Skill removal runs even when the MCP step failed and vice versa.
-    const skillsTarget = SKILLS_TARGET[id];
-    if (skillsTarget) {
-      try {
-        await removeExternalAgentSkills(skillsTarget);
-      } catch (e) {
-        console.warn(`[ai-tools] ${id} skills remove failed:`, e);
-      }
-    }
-    if (!mcpFailed) {
+      await disconnectAiTool(id);
       setConnected((prev) => ({ ...prev, [id]: false }));
       posthog.capture("settings_ai_tool_removed", { tool: id });
+    } catch (e) {
+      console.warn(`[ai-tools] ${id} remove failed:`, e);
+      setErrors((prev) => ({ ...prev, [id]: friendlyToolError(e) }));
+    } finally {
+      setBusy((prev) => ({ ...prev, [id]: undefined }));
     }
-    setBusy((prev) => ({ ...prev, [id]: undefined }));
   }, []);
 
   const handleConnectAll = useCallback(async () => {
     setExpanded(true);
     setBulkRunning(true);
-    const targets = detected.filter((id) => !connected[id]);
-    posthog.capture("settings_ai_tools_connect_all_clicked", { tools: targets });
-    for (const id of targets) {
-      await connectTool(id);
+    try {
+      const targets = detected.filter((id) => !connected[id]);
+      posthog.capture("settings_ai_tools_connect_all_clicked", { tools: targets });
+      for (const id of targets) {
+        await connectTool(id);
+      }
+      await refresh();
+      onChanged?.();
+    } finally {
+      setBulkRunning(false);
     }
-    setBulkRunning(false);
-    await refresh();
-    onChanged?.();
   }, [detected, connected, connectTool, refresh, onChanged]);
 
   const handleDisconnectAll = useCallback(async () => {
@@ -230,15 +176,29 @@ export function AiToolsCard({ onChanged }: { onChanged?: () => void }) {
     if (confirmTimer.current) clearTimeout(confirmTimer.current);
     setConfirmingDisconnect(false);
     setBulkRunning(true);
-    const targets = detected.filter((id) => connected[id]);
-    posthog.capture("settings_ai_tools_disconnect_all_clicked", { tools: targets });
-    for (const id of targets) {
-      await removeTool(id);
+    try {
+      const targets = detected.filter((id) => connected[id]);
+      posthog.capture("settings_ai_tools_disconnect_all_clicked", { tools: targets });
+      for (const id of targets) {
+        await removeTool(id);
+      }
+      await refresh();
+      onChanged?.();
+    } finally {
+      setBulkRunning(false);
     }
-    setBulkRunning(false);
-    await refresh();
-    onChanged?.();
   }, [confirmingDisconnect, detected, connected, removeTool, refresh, onChanged]);
+
+  // Reveal the offending config next to the error so the fix is one click
+  // away. macOS `open -R` selects the file in Finder (the shell "open" command
+  // is already in the app's allowlist); other platforms fall back silently.
+  const revealPath = async (path: string) => {
+    try {
+      if (platform() === "macos") await Command.create("open", ["-R", path]).execute();
+    } catch (e) {
+      console.warn("[ai-tools] reveal failed:", e);
+    }
+  };
 
   // Machines with zero AI tools never see this card.
   if (detected.length === 0) return null;
@@ -322,7 +282,21 @@ export function AiToolsCard({ onChanged }: { onChanged?: () => void }) {
                       {SKILLS_TARGET[id] ? "MCP + skills" : "MCP"}
                     </span>
                     {err && (
-                      <p className="text-[11px] text-destructive mt-0.5 break-words">{err}</p>
+                      <p className="text-[11px] mt-1 flex items-center gap-1.5 flex-wrap">
+                        <span className="inline-flex h-3.5 w-3.5 items-center justify-center rounded-full bg-red-500/15 text-red-500 text-[9px] font-bold shrink-0">
+                          !
+                        </span>
+                        <span className="text-muted-foreground">{err.message}</span>
+                        {err.path && platform() === "macos" && (
+                          <button
+                            type="button"
+                            onClick={() => revealPath(err.path!)}
+                            className="underline text-foreground/80 hover:text-foreground"
+                          >
+                            open file
+                          </button>
+                        )}
+                      </p>
                     )}
                   </div>
                   {toolBusy ? (
@@ -352,11 +326,11 @@ export function AiToolsCard({ onChanged }: { onChanged?: () => void }) {
                       variant="outline"
                       onClick={() => connectTool(id)}
                       disabled={bulkRunning}
-                      aria-label={`Connect ${DISPLAY_NAMES[id]}`}
-                      title={`Connect ${DISPLAY_NAMES[id]}`}
+                      aria-label={`${err ? "Retry" : "Connect"} ${DISPLAY_NAMES[id]}`}
+                      title={`${err ? "Retry" : "Connect"} ${DISPLAY_NAMES[id]}`}
                       className="h-7 w-7 p-0 shrink-0"
                     >
-                      <Plus className="h-3.5 w-3.5" />
+                      {err ? <RotateCw className="h-3.5 w-3.5" /> : <Plus className="h-3.5 w-3.5" />}
                     </Button>
                   )}
                 </div>
