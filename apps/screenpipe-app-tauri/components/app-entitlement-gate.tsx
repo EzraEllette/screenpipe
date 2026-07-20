@@ -120,7 +120,9 @@ export function AppEntitlementGate({ children }: { children: React.ReactNode }) 
   const [devSubmitting, setDevSubmitting] = useState(false);
   const [devError, setDevError] = useState<string | null>(null);
   const stoppedForGateRef = useRef(false);
+  const recorderStoppedByGateRef = useRef(false);
   const prevEntitledRef = useRef<boolean | null>(null);
+  const prevEnterpriseAuthenticatedRef = useRef<boolean | null>(null);
   const skipNextResumeForE2ESeedRef = useRef(false);
   const resumingRef = useRef(false);
   const everEntitledRef = useRef(false);
@@ -184,6 +186,8 @@ export function AppEntitlementGate({ children }: { children: React.ReactNode }) 
       : isEnterprise
         ? !isEnterpriseAuthenticated
         : shouldGateForEnterpriseApp || shouldGateForEntitlement;
+  const enterpriseAuthenticationPending =
+    isEnterprise && authenticationState === "checking";
   const email = user?.email || "this account";
   const enterpriseOrgName = enterpriseAccount?.org_name || "your workspace";
   const planLabel = useMemo(
@@ -218,7 +222,7 @@ export function AppEntitlementGate({ children }: { children: React.ReactNode }) 
   // re-fire this on every settings broadcast — 33k events from 36 users in 30d.
   // Reset the latch only when the gate clears so a genuine re-gate still counts.
   useEffect(() => {
-    if (!isSettingsLoaded || !shouldGate) {
+    if (!isSettingsLoaded || !shouldGate || enterpriseAuthenticationPending) {
       gateReportedRef.current = false;
       return;
     }
@@ -242,7 +246,7 @@ export function AppEntitlementGate({ children }: { children: React.ReactNode }) 
           ? "enterprise_app"
           : "entitlement",
     });
-  }, [isSettingsLoaded, shouldGate, shouldGateForEnterpriseLogin, shouldGateForEnterpriseApp, isEnterprise, tokenPending, failOpenForTransientAccessLoss, user?.app_entitled, user?.subscription_plan, user?.token]);
+  }, [isSettingsLoaded, shouldGate, shouldGateForEnterpriseLogin, shouldGateForEnterpriseApp, isEnterprise, enterpriseAuthenticationPending, tokenPending, failOpenForTransientAccessLoss, user?.app_entitled, user?.subscription_plan, user?.token]);
 
   // When failing open on a pending token, keep trying to re-read it from the
   // secret store. Once the store heals (the periodic WAL checkpoint clears the
@@ -279,16 +283,33 @@ export function AppEntitlementGate({ children }: { children: React.ReactNode }) 
     // "checking access" shell, but that transient state must never stop the
     // recorder. Otherwise opening the overlay can tear down the local API just
     // before the consumer/enterprise result arrives.
-    if (!isSettingsLoaded || !isEnterpriseBuildResolved || !shouldGate) {
+    if (!isSettingsLoaded || !isEnterpriseBuildResolved) return;
+    if (!shouldGate) {
       stoppedForGateRef.current = false;
       return;
     }
+    // Enterprise credentials are restored asynchronously in every webview.
+    // `checking` means "verification in progress", not "access denied". The
+    // old behavior stopped the recorder here, then failed to resume because an
+    // already-entitled enterprise account never flips `isEntitled` false→true.
+    if (enterpriseAuthenticationPending) return;
+    // Only the primary content window owns recorder lifecycle. Search, overlay,
+    // notification, and settings webviews still render the gate but must never
+    // tear down the shared localhost engine.
+    if (!isPrimaryWindow()) return;
     if (stoppedForGateRef.current) return;
     stoppedForGateRef.current = true;
+    recorderStoppedByGateRef.current = true;
     commands.stopScreenpipe().catch((err) => {
       console.warn("failed to stop screenpipe after entitlement gate:", err);
     });
-  }, [isSettingsLoaded, isEnterpriseBuildResolved, shouldGate]);
+  }, [
+    enterpriseAuthenticationPending,
+    isEnterprise,
+    isEnterpriseBuildResolved,
+    isSettingsLoaded,
+    shouldGate,
+  ]);
 
   const openPricing = useCallback(() => {
     posthog.capture("app_entitlement_choose_plan_clicked", {
@@ -444,6 +465,48 @@ export function AppEntitlementGate({ children }: { children: React.ReactNode }) 
   // raced a reconnect's in-flight teardown and wedged the engine at "Starting
   // capture session" (port never rebound). See the recording-settings
   // "Apply & Restart" path for the canonical sequence.
+  const resumeRecordingAfterGate = useCallback((requireGateStop: boolean) => {
+    if (requireGateStop && !recorderStoppedByGateRef.current) return;
+    if (!isPrimaryWindow() || resumingRef.current) return;
+    resumingRef.current = true;
+    void (async () => {
+      try {
+        await commands.stopScreenpipe();
+        await new Promise((r) => setTimeout(r, 500));
+        await commands.spawnScreenpipe(null);
+        recorderStoppedByGateRef.current = false;
+      } catch (err) {
+        console.warn("failed to restart screenpipe after access restored:", err);
+      } finally {
+        resumingRef.current = false;
+      }
+    })();
+  }, []);
+
+  // A genuine enterprise gate (missing/invalid account or key) is allowed to
+  // stop capture. If the user then authenticates successfully, resume even
+  // though their paid entitlement was already true before the gate appeared.
+  useEffect(() => {
+    if (!isSettingsLoaded || !isEnterprise) {
+      prevEnterpriseAuthenticatedRef.current = null;
+      return;
+    }
+    const previouslyAuthenticated = prevEnterpriseAuthenticatedRef.current;
+    prevEnterpriseAuthenticatedRef.current = isEnterpriseAuthenticated;
+    if (previouslyAuthenticated !== false || !isEnterpriseAuthenticated) return;
+    if (!recorderStoppedByGateRef.current) return;
+    posthog.capture("enterprise_auth_recording_restored", {
+      authentication_state: authenticationState,
+    });
+    resumeRecordingAfterGate(true);
+  }, [
+    authenticationState,
+    isEnterprise,
+    isEnterpriseAuthenticated,
+    isSettingsLoaded,
+    resumeRecordingAfterGate,
+  ]);
+
   useEffect(() => {
     if (!isSettingsLoaded || devBypass) return;
     if (skipNextResumeForE2ESeedRef.current) {
@@ -460,24 +523,8 @@ export function AppEntitlementGate({ children }: { children: React.ReactNode }) 
     posthog.capture("app_entitlement_restored", {
       plan: user?.subscription_plan ?? null,
     });
-    // Single owner: only the primary window restarts the engine, so secondary
-    // webviews don't fire overlapping spawns that race each other.
-    if (!isPrimaryWindow()) return;
-    // Collapse rapid re-fires into one restart in flight.
-    if (resumingRef.current) return;
-    resumingRef.current = true;
-    void (async () => {
-      try {
-        await commands.stopScreenpipe();
-        await new Promise((r) => setTimeout(r, 500));
-        await commands.spawnScreenpipe(null);
-      } catch (err) {
-        console.warn("failed to restart screenpipe after entitlement restored:", err);
-      } finally {
-        resumingRef.current = false;
-      }
-    })();
-  }, [devBypass, isEntitled, isSettingsLoaded]);
+    resumeRecordingAfterGate(false);
+  }, [devBypass, isEntitled, isSettingsLoaded, resumeRecordingAfterGate]);
 
   const devLoginBlock = isDevLoginEnabled() ? (
     <div className="mt-5 border-t border-border pt-4">

@@ -19,6 +19,7 @@ const mocks = vi.hoisted(() => ({
   piUpdateConfig: vi.fn().mockResolvedValue(undefined),
   platform: vi.fn(() => "windows"),
   arch: vi.fn(() => "x86_64"),
+  windowLabel: "main",
   loadUser: vi.fn().mockResolvedValue(undefined),
   updateSettings: vi.fn().mockResolvedValue(undefined),
   state: { isSettingsLoaded: true, user: null as any },
@@ -76,7 +77,7 @@ vi.mock("@tauri-apps/plugin-os", () => ({
 // detects via getCurrentWindow().label. Stand in as the primary "main" window so
 // the sequenced stop -> settle -> spawn actually runs under test.
 vi.mock("@tauri-apps/api/window", () => ({
-  getCurrentWindow: () => ({ label: "main" }),
+  getCurrentWindow: () => ({ label: mocks.windowLabel }),
 }));
 
 import { AppEntitlementGate } from "./app-entitlement-gate";
@@ -109,6 +110,7 @@ describe("AppEntitlementGate", () => {
     vi.stubEnv("TAURI_ENV_DEBUG", "false");
     vi.stubEnv("NEXT_PUBLIC_SCREENPIPE_DEV_BILLING_BYPASS", "false");
     mocks.state = { isSettingsLoaded: true, user: null };
+    mocks.windowLabel = "main";
     mocks.enterprise = {
       isEnterprise: false,
       isEnterpriseBuildResolved: true,
@@ -156,6 +158,91 @@ describe("AppEntitlementGate", () => {
     mocks.enterprise.isEnterpriseBuildResolved = true;
     rerender(<AppEntitlementGate>{protectedApp}</AppEntitlementGate>);
     await waitFor(() => expect(mocks.stopScreenpipe).toHaveBeenCalled());
+  });
+
+  it("keeps recording while enterprise authentication is still checking", async () => {
+    mocks.state.user = baseUser({
+      app_entitled: true,
+      subscription_plan: "enterprise",
+      entitlement: {
+        active: true,
+        plan: "enterprise",
+        source: "enterprise",
+        checked_at: minsAgo(1),
+        features: { app: true },
+      },
+    });
+    mocks.enterprise = {
+      isEnterprise: true,
+      isEnterpriseBuildResolved: true,
+      authenticationState: "checking",
+      authenticationError: null,
+      isEnterpriseAuthenticated: false,
+    };
+
+    const { rerender } = render(
+      <AppEntitlementGate>{protectedApp}</AppEntitlementGate>,
+    );
+
+    expect(screen.getByText(/checking enterprise access/i)).toBeInTheDocument();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(mocks.stopScreenpipe).not.toHaveBeenCalled();
+    expect(mocks.capture).not.toHaveBeenCalledWith(
+      "app_entitlement_gate_shown",
+      expect.anything(),
+    );
+
+    mocks.enterprise.authenticationState = "authenticated";
+    mocks.enterprise.isEnterpriseAuthenticated = true;
+    rerender(<AppEntitlementGate>{protectedApp}</AppEntitlementGate>);
+
+    expect(screen.getByTestId("protected-app")).toBeInTheDocument();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(mocks.stopScreenpipe).not.toHaveBeenCalled();
+    expect(mocks.spawnScreenpipe).not.toHaveBeenCalled();
+  });
+
+  it("never lets a secondary enterprise webview stop the shared recorder", async () => {
+    mocks.windowLabel = "search";
+    mocks.enterprise = {
+      isEnterprise: true,
+      isEnterpriseBuildResolved: true,
+      authenticationState: "account",
+      authenticationError: null,
+      isEnterpriseAuthenticated: false,
+    };
+
+    render(<AppEntitlementGate>{protectedApp}</AppEntitlementGate>);
+
+    expect(screen.queryByTestId("protected-app")).not.toBeInTheDocument();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(mocks.stopScreenpipe).not.toHaveBeenCalled();
+  });
+
+  it("resumes recording when a real enterprise gate authenticates", async () => {
+    mocks.enterprise = {
+      isEnterprise: true,
+      isEnterpriseBuildResolved: true,
+      authenticationState: "account",
+      authenticationError: null,
+      isEnterpriseAuthenticated: false,
+    };
+
+    const { rerender } = render(
+      <AppEntitlementGate>{protectedApp}</AppEntitlementGate>,
+    );
+    await waitFor(() => expect(mocks.stopScreenpipe).toHaveBeenCalledTimes(1));
+
+    mocks.enterprise.authenticationState = "authenticated";
+    mocks.enterprise.isEnterpriseAuthenticated = true;
+    rerender(<AppEntitlementGate>{protectedApp}</AppEntitlementGate>);
+
+    await waitFor(() => expect(mocks.spawnScreenpipe).toHaveBeenCalledWith(null));
+    expect(mocks.capture).toHaveBeenCalledWith(
+      "enterprise_auth_recording_restored",
+      { authentication_state: "authenticated" },
+    );
+    expect(screen.getByTestId("protected-app")).toBeInTheDocument();
   });
 
   it("asks a signed-out user to sign in and never reveals the app", () => {
