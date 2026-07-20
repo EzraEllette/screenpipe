@@ -6,11 +6,8 @@ use std::ffi::CStr;
 
 const FIRST_WAL_RESET_SAFE_SQLITE: i32 = 3_051_003;
 
-fn binding_string(bytes: &'static [u8]) -> &'static str {
-    CStr::from_bytes_with_nul(bytes)
-        .expect("SQLite binding constant is NUL terminated")
-        .to_str()
-        .expect("SQLite binding constant is UTF-8")
+fn binding_string(value: &'static CStr) -> &'static str {
+    value.to_str().expect("SQLite binding constant is UTF-8")
 }
 
 #[test]

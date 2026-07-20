@@ -170,14 +170,26 @@ fn relaunch_binary(app: &AppHandle) -> Option<PathBuf> {
 /// running C/C++ atexit handlers. Tauri's built-in restart uses
 /// `std::process::exit`, which can abort in ORT/ggml teardown after the new app
 /// has already launched.
+///
+/// The replacement gets its own process group: launchd kills a job's whole
+/// process group when the job exits, so an inherited group dies with us.
 pub fn force_app_relaunch(app: AppHandle, status: i32) -> ! {
     let env = app.env();
     if let Some(binary) = relaunch_binary(&app) {
-        if let Err(err) = Command::new(&binary)
-            .args(env.args_os.iter().skip(1))
-            .spawn()
+        let mut command = Command::new(&binary);
+        command.args(env.args_os.iter().skip(1));
+        #[cfg(unix)]
         {
-            warn!("safe relaunch: failed to spawn {}: {err}", binary.display());
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
+        match command.spawn() {
+            Ok(child) => info!(
+                "safe relaunch: spawned replacement {} (pid {})",
+                binary.display(),
+                child.id()
+            ),
+            Err(err) => warn!("safe relaunch: failed to spawn {}: {err}", binary.display()),
         }
     }
 

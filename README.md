@@ -14,7 +14,7 @@
 
 
 <p align="center">screenpipe remembers how you actually work</p>
-<p align="center">It captures what you see, say, and do, locally, then turns real work into searchable memory, SOPs, and automations for AI agents.</p>
+<p align="center">It captures what you see, say, and do, locally, 24/7, then turns real work into searchable memory, SOPs, and automations for AI agents.</p>
 
 
 
@@ -45,9 +45,13 @@
 
 
 
-![image](https://github.com/user-attachments/assets/5b977f48-0355-498f-a3ba-37e5de3b6c62)
-![image](https://github.com/user-attachments/assets/dec2e07c-b3d5-46dd-9f36-c0c26a82c9fb)
 
+
+https://github.com/user-attachments/assets/70fe94eb-6d2a-47ca-b7c3-c8ead13a5b7f
+
+<img width="1312" height="947" alt="Screenshot 2026-07-16 at 1 57 50 PM" src="https://github.com/user-attachments/assets/e8de9f45-1f08-4157-ab52-10e3c31822db" />
+
+<img width="1312" height="947" alt="Screenshot 2026-07-16 at 1 58 37 PM" src="https://github.com/user-attachments/assets/4448a90b-6113-46e5-80e4-244c24bb9ba8" />
 
 ---
 
@@ -138,15 +142,15 @@ Thanks to all contributors:
 
 ## Translations
 
-- [日本語 (Japanese)](translated_readmes/README-ja.md)
-- [简体中文 (Simplified Chinese)](translated_readmes/README-zh_CN.md)
-- [Français (French)](translated_readmes/README-fr.md)
-- [Español (Spanish)](translated_readmes/README-es.md)
-- [Português BR (Brazilian Portuguese)](translated_readmes/README-pt_BR.md)
-- [Deutsch (German)](translated_readmes/README-de.md)
-- [Українська (Ukrainian)](translated_readmes/README-uk.md)
+- [日本語 (Japanese)](docs/translations/README-ja.md)
+- [简体中文 (Simplified Chinese)](docs/translations/README-zh_CN.md)
+- [Français (French)](docs/translations/README-fr.md)
+- [Español (Spanish)](docs/translations/README-es.md)
+- [Português BR (Brazilian Portuguese)](docs/translations/README-pt_BR.md)
+- [Deutsch (German)](docs/translations/README-de.md)
+- [Українська (Ukrainian)](docs/translations/README-uk.md)
 
-Want to translate screenpipe into another language? See [`translated_readmes/`](translated_readmes/README.md).
+Want to translate screenpipe into another language? See [`docs/translations/`](docs/translations/README.md).
 
 <details>
 <summary>📖 LLM reference</summary>

@@ -64,11 +64,32 @@ fn click_event() -> InsertUiEvent {
 }
 
 async fn read_frame_id(db: &Arc<DatabaseManager>, row_id: i64) -> Option<i64> {
-    sqlx::query_scalar("SELECT frame_id FROM ui_events WHERE id = ?1")
-        .bind(row_id)
-        .fetch_one(&db.pool)
-        .await
-        .unwrap()
+    let started = std::time::Instant::now();
+    loop {
+        match sqlx::query_scalar("SELECT frame_id FROM ui_events WHERE id = ?1")
+            .bind(row_id)
+            .fetch_one(&db.pool)
+            .await
+        {
+            Ok(frame_id) => return frame_id,
+            Err(error)
+                if started.elapsed() < Duration::from_secs(2)
+                    && matches!(&error, sqlx::Error::Database(db_error) if {
+                        let message = db_error.message().to_ascii_lowercase();
+                        message.contains("database is locked")
+                            || message.contains("database table is locked")
+                            || message.contains("busy")
+                    }) =>
+            {
+                // The linker writes through another pooled connection. SQLite
+                // shared-cache table locks return immediately instead of
+                // honoring busy_timeout, so retry the observation just like the
+                // surrounding actor poll does.
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            Err(error) => panic!("failed to read ui_events.frame_id: {error}"),
+        }
+    }
 }
 
 /// Spin until `read_frame_id` returns Some, up to `max_wait`. The actor

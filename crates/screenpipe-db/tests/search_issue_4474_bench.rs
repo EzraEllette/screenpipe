@@ -463,7 +463,7 @@ async fn run_ocr(
     offset: u32,
 ) -> Result<TimedOcrRun> {
     let started = Instant::now();
-    let rows = sqlx::query(sql)
+    let rows = sqlx::query(sqlx::AssertSqlSafe(sql.to_owned()))
         .bind(selector)
         .bind(Option::<String>::None)
         .bind(Option::<String>::None)
@@ -527,7 +527,7 @@ async fn run_accessibility(
     offset: u32,
 ) -> Result<TimedRun> {
     let started = Instant::now();
-    let rows = sqlx::query(sql)
+    let rows = sqlx::query(sqlx::AssertSqlSafe(sql.to_owned()))
         .bind(selector)
         .bind(Option::<String>::None)
         .bind(Option::<String>::None)

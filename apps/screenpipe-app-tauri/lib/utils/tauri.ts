@@ -14,9 +14,11 @@ export const commands = {
  * fetched policy via `set_enterprise_policy`, so the moment an admin turns on
  * "hide app", the windows already on screen are retracted and the dock icon
  * drops — without waiting for a restart. Best-effort: never returns an error.
+ * Returns the resolved visibility so onboarding can stop after permissions
+ * instead of entering UI-only setup steps on a managed-background device.
  */
-async applyEnterpriseUiVisibility() : Promise<void> {
-    await TAURI_INVOKE("apply_enterprise_ui_visibility");
+async applyEnterpriseUiVisibility() : Promise<boolean> {
+    return await TAURI_INVOKE("apply_enterprise_ui_visibility");
 },
 /**
  * Frontend-callable gate. The banner awaits this before calling
@@ -223,8 +225,12 @@ async checkPermission(permission: OSPermission) : Promise<OSPermissionStatus> {
     return await TAURI_INVOKE("check_permission", { permission });
 },
 /**
- * Check only screen recording permission (no dialog trigger)
- * Uses CGPreflightScreenCaptureAccess which is safe to poll repeatedly
+ * Check only screen recording permission without triggering a dialog.
+ *
+ * This command is polled as soon as onboarding renders, before the user has
+ * clicked anything. It must use preflight directly: the broader core Tauri
+ * check may perform a real capture probe in debug builds, which macOS treats
+ * as a permission request.
  */
 async checkScreenRecordingPermission() : Promise<OSPermissionStatus> {
     return await TAURI_INVOKE("check_screen_recording_permission");
@@ -379,6 +385,32 @@ async e2eEmitPipeStream(pipeName: string, executionId: number, deltaCount: numbe
 }
 },
 /**
+ * E2E helper for an extension-triggered turn that begins after the original
+ * assistant response has settled. This matches pi-subagents async completion:
+ * Pi persists a visible custom message, then `triggerTurn: true` starts a new
+ * assistant turn without a new user `message_start` event.
+ */
+async e2eEmitSettledAgentFollowUp(sessionId: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("e2e_emit_settled_agent_follow_up", { sessionId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * E2E helper: read the status text from the menu that was successfully
+ * installed into the native tray, not merely the desired health state.
+ */
+async e2eInstalledTrayRecordingStatus() : Promise<Result<string | null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("e2e_installed_tray_recording_status") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * E2E helper: report whether the main overlay is logically visible.
  *
  * The main window uses platform-specific "hide" semantics (macOS NSPanel with
@@ -414,6 +446,17 @@ async e2eOwnedBrowserDetach() : Promise<Result<null, string>> {
  */
 async e2eOwnedBrowserVisible() : Promise<boolean> {
     return await TAURI_INVOKE("e2e_owned_browser_visible");
+},
+/**
+ * E2E helper: drive the health-to-native-tray status transition.
+ */
+async e2eSetTrayRecordingStatus(status: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("e2e_set_tray_recording_status", { status }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
 },
 /**
  * E2E helper: report whether the shortcut reminder overlay is visibly shown.
@@ -720,6 +763,15 @@ async getPendingUpdate() : Promise<Result<PendingUpdateSnapshot | null, null>> {
 }
 },
 /**
+ * Current recording-health overlay state: "normal" | "failure" | "fixing" |
+ * "recovered", optionally suffixed "|<detail>" (boot-phase label while
+ * fixing). The shortcut-reminder webview pulls this on mount, then stays
+ * current via the "recording-health-state" event.
+ */
+async getRecordingHealthState() : Promise<string> {
+    return await TAURI_INVOKE("get_recording_health_state");
+},
+/**
  * Tauri command: absolute path of the screenpipe base dir (where store.bin
  * lives). Honors SCREENPIPE_DATA_DIR; the webview must use this instead of
  * hardcoding ~/.screenpipe, or it reads/writes a different settings file
@@ -838,6 +890,19 @@ async importSkill(sourcePath: string) : Promise<Result<ImportedSkill, string>> {
 async initSync(password: string) : Promise<Result<boolean, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("init_sync", { password }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Install the two built-in screenpipe skills into a supported external agent.
+ * MCP registration stays in the frontend because that path uses the app's
+ * bundled bun binary and injects the current local API key.
+ */
+async installExternalAgentSkills(target: string) : Promise<Result<string[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("install_external_agent_skills", { target }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1017,7 +1082,7 @@ async lockSync() : Promise<Result<null, string>> {
  * Cancel any in-flight OAuth flow(s) for the given integration.
  * Dropping the stored sender makes the awaiting `oauth_connect` call fail fast
  * with "OAuth channel closed before code was received" instead of hanging for
- * the full 120s timeout.
+ * the full callback timeout.
  */
 async oauthCancel(integrationId: string) : Promise<Result<null, string>> {
     try {
@@ -1148,6 +1213,30 @@ async openViewerWindow(path: string) : Promise<Result<null, string>> {
 async openWindowsShellTarget(target: string) : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("open_windows_shell_target", { target }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Dismiss the current recording incident shown in the overlay.
+ */
+async overlayDismissIncident() : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("overlay_dismiss_incident") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Restart the recording engine from the overlay's failure state. Runs the
+ * same stop → settle → spawn sequence as the native panel's restart action;
+ * the health loop confirms recovery and pushes "recovered" to the overlay.
+ */
+async overlayRestartRecording() : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("overlay_restart_recording") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1492,28 +1581,6 @@ async piUpdateConfig(userToken: string | null, providerConfig: PiProviderConfig 
 }
 },
 /**
- * Get current pipe suggestions settings.
- */
-async pipeSuggestionsGetSettings() : Promise<Result<PipeSuggestionsSettings, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("pipe_suggestions_get_settings") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Update pipe suggestions settings and restart the scheduler.
- */
-async pipeSuggestionsUpdateSettings(enabled: boolean, frequencyHours: number) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("pipe_suggestions_update_settings", { enabled, frequencyHours }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
  * Read bundle ID, display name, and icon from a `.app` bundle selected in Finder.
  */
 async readAppBundleMetadata(path: string) : Promise<Result<ExcludedApp, string>> {
@@ -1678,6 +1745,19 @@ async remoteSyncStopScheduler() : Promise<Result<null, string>> {
 async remoteSyncTest(config: RemoteSyncConfig) : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("remote_sync_test", { config }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Remove the two built-in screenpipe skills from a supported external agent.
+ * Mirror of `install_external_agent_skills`; MCP entry removal stays in the
+ * frontend, next to the code that wrote it.
+ */
+async removeExternalAgentSkills(target: string) : Promise<Result<string[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("remove_external_agent_skills", { target }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2105,6 +2185,19 @@ async setWindowSize(window: ShowRewindWindow, width: number, height: number) : P
 },
 async showMainWindow() : Promise<void> {
     await TAURI_INVOKE("show_main_window");
+},
+/**
+ * Toggle the standalone notification inbox opened from the shortcut
+ * overlay's bell: a small always-on-top window just below the pill,
+ * rendering the same list as the pipes-store bell. Hides itself on blur.
+ */
+async showNotificationInbox() : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("show_notification_inbox") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
 },
 async showNotificationPanel(payload: string) : Promise<Result<null, string>> {
     try {
@@ -2615,7 +2708,6 @@ preview: string;
  * label in the UI ("queued 4s ago").
  */
 queuedAtMs: number }
-export type PipeSuggestionsSettings = { enabled: boolean; frequencyHours: number }
 /**
  * A skill offered by the curated registry. Installing one downloads its folder
  * (the directory containing `SKILL.md`) from a public GitHub repo into the
@@ -3299,7 +3391,17 @@ uiTheme?: string;
  * Read by the CloseRequested handler in main.rs. Default off (historical
  * minimize-to-taskbar behavior).
  */
-minimizeToTrayOnClose?: boolean }
+minimizeToTrayOnClose?: boolean;
+/**
+ * When true, closing Home destroys every webview while the recording
+ * engine and tray remain alive. Tray UI actions recreate the app on demand.
+ */
+headless?: boolean;
+/**
+ * When true, headless mode skips scheduled pipe runs so only recording
+ * and the local server continue in the background.
+ */
+headlessRecordOnly?: boolean }
 export type ShowRewindWindow = "Main" | { Home: { page: string | null } } | { Search: { query: string | null } } | "Onboarding" | "Chat" | "PermissionRecovery"
 export type StartExportRecordingResponse = { jobId: string }
 export type Suggestion = { text: string;

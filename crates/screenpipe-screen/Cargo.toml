@@ -109,6 +109,9 @@ windows = { workspace = true, features = [
   "Win32_System_WinRT_Graphics_Capture",
   # CPU-time sampling in examples/wgc_cpu_probe.rs (issue #4840 before/after tool).
   "Win32_System_Threading",
+  # Detect Remote Desktop / Terminal Services sessions so WGC can be scoped to
+  # individual screenshot requests instead of loading the remote compositor.
+  "Win32_UI_WindowsAndMessaging",
 ] }
 
 [target.'cfg(target_os = "linux")'.dependencies]

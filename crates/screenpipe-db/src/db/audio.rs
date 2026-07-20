@@ -297,14 +297,14 @@ impl DatabaseManager {
             let del_transcriptions = format!(
                 "DELETE FROM audio_transcriptions WHERE audio_chunk_id IN ({placeholders})"
             );
-            let mut q = sqlx::query(&del_transcriptions);
+            let mut q = sqlx::query(sqlx::AssertSqlSafe(del_transcriptions));
             for &id in group {
                 q = q.bind(id);
             }
             q.execute(&mut **tx.conn()).await?;
 
             let del_chunks = format!("DELETE FROM audio_chunks WHERE id IN ({placeholders})");
-            let mut q = sqlx::query(&del_chunks);
+            let mut q = sqlx::query(sqlx::AssertSqlSafe(del_chunks));
             for &id in group {
                 q = q.bind(id);
             }
@@ -941,7 +941,7 @@ impl DatabaseManager {
                ORDER BY ac.timestamp ASC"#,
             placeholders.join(", ")
         );
-        let mut query = sqlx::query_as::<_, AudioChunkInfo>(&sql);
+        let mut query = sqlx::query_as::<_, AudioChunkInfo>(sqlx::AssertSqlSafe(sql));
         for id in ids {
             query = query.bind(id);
         }

@@ -1164,17 +1164,17 @@ impl DatabaseManager {
 
         // Execute queries in parallel
         let (frame_rows, audio_rows, live_rows) = tokio::try_join!(
-            sqlx::query(&frames_query)
+            sqlx::query(sqlx::AssertSqlSafe(frames_query))
                 .bind(start)
                 .bind(end)
                 .bind(frame_limit)
                 .fetch_all(&self.pool),
-            sqlx::query(&audio_query)
+            sqlx::query(sqlx::AssertSqlSafe(audio_query))
                 .bind(start)
                 .bind(end)
                 .bind(aux_limit)
                 .fetch_all(&self.pool),
-            sqlx::query(&live_query)
+            sqlx::query(sqlx::AssertSqlSafe(live_query))
                 .bind(start)
                 .bind(end)
                 .bind(aux_limit)

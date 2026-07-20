@@ -789,19 +789,21 @@ mod runtime {
                 #[allow(unused_mut)]
                 let mut builder = Session::builder()?
                     .with_optimization_level(GraphOptimizationLevel::Level3)?
+                    // Every captured row produces a different sequence length.
+                    // ORT documents its memory-pattern planner for stable input
+                    // shapes and recommends disabling it when input sizes vary.
+                    .with_memory_pattern(false)?
                     // This session serves a background batch worker — never let the
                     // intra-op pool busy-spin between ops. A spinning full-width
                     // pool burned ~4 cores in ThreadPoolTempl::WorkerLoop while the
                     // redaction backlog drained (340% CPU regression after 3b9a1a105).
                     .with_intra_op_spinning(false)?
-                    // A quarter of the cores (min 1) is plenty for this
-                    // background batch worker and caps the height of each CPU
-                    // burst — combined with the worker's per-batch duty-cycle
-                    // cooldown the redaction backlog drains as a low flat band
-                    // instead of pinning half the machine. Latency is a
-                    // non-goal here: nothing waits on this redactor
-                    // synchronously.
-                    .with_intra_threads((num_cpus_physical() / 4).max(1))?;
+                    .with_inter_op_spinning(false)?
+                    // This is background reconciliation, so latency is a
+                    // non-goal. A single ORT thread prevents one inference from
+                    // fanning out to 100-300% CPU before the worker's adaptive
+                    // process-level cooldown can react.
+                    .with_intra_threads(1)?;
                 // NO CoreML EP here, deliberately: this text model is int8-quantized
                 // RoBERTa with dynamic sequence lengths, and the ANE compiler rejects
                 // every layer ("E5RT: unbounded dimension is not supported"), so
@@ -811,7 +813,16 @@ mod runtime {
                 #[cfg(feature = "onnx-directml")]
                 let mut builder = builder.with_execution_providers([
                     ort::ep::DirectML::default().with_device_id(0).build(),
-                    ort::ep::CPU::default().build(),
+                    ort::ep::CPU::default().with_arena_allocator(false).build(),
+                ])?;
+                #[cfg(not(feature = "onnx-directml"))]
+                let mut builder = builder.with_execution_providers([
+                    // The default CPU BFC arena pre-allocates and retains tensor
+                    // buffers for future runs. That is useful for fixed-shape,
+                    // latency-sensitive inference, but this background redactor
+                    // sees dynamic text lengths and reached a 5 GB retained
+                    // activation high-water mark in a live 2.5.117 process.
+                    ort::ep::CPU::default().with_arena_allocator(false).build(),
                 ])?;
                 builder.commit_from_file(model_path)
             },
@@ -829,14 +840,6 @@ mod runtime {
                 )))
             }
         }
-    }
-
-    /// Best-effort physical core count for ORT intra-op threads.
-    /// Pinned to a small max to avoid oversubscribing on big servers.
-    fn num_cpus_physical() -> usize {
-        std::thread::available_parallelism()
-            .map(|n| n.get().clamp(1, 8))
-            .unwrap_or(4)
     }
 
     #[cfg(test)]

@@ -176,6 +176,16 @@ impl SafeMonitor {
     pub fn get_info(&self) -> MonitorData {
         (*self.monitor_data).clone()
     }
+
+    /// Capture a frame for a sustained recording loop.
+    ///
+    /// Most platforms use the same capture path as [`Self::capture_image`]. Windows
+    /// overrides this method so an explicitly long-lived recorder can keep its WGC
+    /// session between frames, including inside Remote Desktop sessions.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub async fn capture_image_streaming(&self) -> anyhow::Result<image::DynamicImage> {
+        self.capture_image().await
+    }
 }
 
 /// Update the cached monitor descriptions from a successful monitor list.

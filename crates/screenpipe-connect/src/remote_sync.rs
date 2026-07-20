@@ -648,10 +648,11 @@ async fn snapshot_db(live_db: &Path, dest: &Path) -> Result<()> {
     // VACUUM INTO is a single statement that takes a transactional read
     // snapshot and writes the entire DB to `dest`. The destination must
     // not already exist (the caller removes any stale file beforehand).
-    // We escape single quotes by doubling them — SQLite's standard escape.
     let dest_str = dest.to_string_lossy();
-    let stmt = format!("VACUUM INTO '{}'", dest_str.replace('\'', "''"));
-    let result = sqlx::query(&stmt).execute(&pool).await;
+    let result = sqlx::query("VACUUM INTO ?1")
+        .bind(dest_str.as_ref())
+        .execute(&pool)
+        .await;
 
     pool.close().await;
 

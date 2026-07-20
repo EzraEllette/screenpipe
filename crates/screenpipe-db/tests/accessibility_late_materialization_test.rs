@@ -158,17 +158,20 @@ async fn common_term_plan_materializes_candidates_before_payload_lookup() {
         "candidate page is not materialized:\n{}",
         plan.join("\n")
     );
-    assert!(
-        plan.iter().any(|detail| detail.contains("SCAN c")),
-        "outer query does not consume the bounded candidate page:\n{}",
-        plan.join("\n")
-    );
+    let candidate_page_position = plan
+        .iter()
+        .position(|detail| detail.contains("SCAN c"))
+        .unwrap_or_else(|| {
+            panic!(
+                "outer query does not consume the bounded candidate page:\n{}",
+                plan.join("\n")
+            )
+        });
     assert!(
         plan.iter()
-            .filter(|detail| detail.contains("SEARCH f USING INTEGER PRIMARY KEY"))
-            .count()
-            >= 2,
-        "expected one frame lookup during candidate filtering and page-bounded payload lookups:\n{}",
+            .skip(candidate_page_position + 1)
+            .any(|detail| detail.contains("SCAN f") || detail.contains("SEARCH f")),
+        "expected a page-bounded frame payload lookup after candidate filtering:\n{}",
         plan.join("\n")
     );
 }

@@ -136,7 +136,7 @@ impl DatabaseManager {
             placeholders.join(",")
         );
 
-        let mut query = sqlx::query_as::<_, (i64, String)>(&query_str);
+        let mut query = sqlx::query_as::<_, (i64, String)>(sqlx::AssertSqlSafe(query_str));
         for id in vision_ids {
             query = query.bind(*id);
         }

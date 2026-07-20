@@ -93,7 +93,9 @@ async fn pool(max_connections: u32) -> Result<SqlitePool> {
 }
 
 async fn raw_query(pool: &SqlitePool, sql: &str) -> Result<i64> {
-    Ok(sqlx::query_scalar(sql).fetch_one(pool).await?)
+    Ok(sqlx::query_scalar(sqlx::AssertSqlSafe(sql.to_owned()))
+        .fetch_one(pool)
+        .await?)
 }
 
 async fn guarded_query(pool: &SqlitePool, sql: &str) -> Result<i64> {
@@ -103,7 +105,9 @@ async fn guarded_query(pool: &SqlitePool, sql: &str) -> Result<i64> {
         CancellationToken::new(),
     )
     .await?;
-    let value = sqlx::query_scalar(sql).fetch_one(&mut *connection).await?;
+    let value = sqlx::query_scalar(sqlx::AssertSqlSafe(sql.to_owned()))
+        .fetch_one(&mut *connection)
+        .await?;
     connection.release().await?;
     Ok(value)
 }

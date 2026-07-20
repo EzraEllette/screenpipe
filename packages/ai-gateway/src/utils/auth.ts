@@ -73,6 +73,21 @@ export async function validateAuth(request: Request, env: Env): Promise<AuthResu
     };
   }
 
+  // Dedicated cloud runners need a long-lived machine credential: Clerk
+  // session JWTs expire quickly and provider keys must not be copied to
+  // employee devices. This bearer lives only in the Worker secret store and
+  // the org runner row. It receives subscribed limits and is explicitly
+  // marked so the chat handler can allow a requested frontier model on the
+  // otherwise-downgraded background lane.
+  if (env.AI_GATEWAY_SERVICE_TOKEN && token === env.AI_GATEWAY_SERVICE_TOKEN) {
+    return {
+      isValid: true,
+      tier: 'subscribed',
+      deviceId: headerDeviceId,
+      service: true,
+    };
+  }
+
   // Authenticate the caller before trusting any user identifier. A Supabase
   // UUID or Clerk `user_*` ID names an account, but it is not proof that the
   // caller owns that account. Treating those public identifiers as bearer

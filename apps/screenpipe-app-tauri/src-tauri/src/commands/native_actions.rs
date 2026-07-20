@@ -53,6 +53,23 @@ extern "C" fn native_notif_action_callback(json_ptr: *const std::os::raw::c_char
     }));
 }
 
+/// Fire-and-forget product analytics for native inbox interactions, tagged
+/// with surface="native_overlay" so PostHog funnels line up with the webview
+/// bell's identically-named events.
+fn track_inbox_event(app: &tauri::AppHandle, event: &'static str, mut props: serde_json::Value) {
+    if let Some(analytics) =
+        app.try_state::<std::sync::Arc<crate::analytics::AnalyticsManager>>()
+    {
+        let analytics = std::sync::Arc::clone(&analytics);
+        if let Some(obj) = props.as_object_mut() {
+            obj.insert("surface".into(), serde_json::json!("native_overlay"));
+        }
+        tauri::async_runtime::spawn(async move {
+            let _ = analytics.send_event(event, Some(props)).await;
+        });
+    }
+}
+
 fn native_notif_action_callback_inner(json_ptr: *const std::os::raw::c_char) {
     if json_ptr.is_null() {
         return;
@@ -73,6 +90,79 @@ fn native_notif_action_callback_inner(json_ptr: *const std::os::raw::c_char) {
         .as_ref()
         .and_then(|v| v.get("type"))
         .and_then(|v| v.as_str());
+
+    // Native inbox housekeeping (mark read / remove / clear) + product
+    // analytics. Internal to the inbox panel — handled before the JS emit so
+    // React handlers never see them. Event names mirror the webview bell's
+    // (notification_bell_*) with surface="native_overlay", so PostHog funnels
+    // unify across surfaces. The store's write_all pushes the updated list +
+    // bell dot back.
+    if let Some(inbox_op) = action_type.and_then(|t| t.strip_prefix("inbox_")) {
+        let id = parsed
+            .as_ref()
+            .and_then(|v| v.get("id"))
+            .and_then(|v| v.as_str());
+        // Look up before mutating — a removed entry can't be described after.
+        let entry_props = |id: Option<&str>| -> serde_json::Value {
+            let Some(id) = id else {
+                return serde_json::json!({});
+            };
+            match crate::notifications::store::read_all()
+                .into_iter()
+                .find(|e| e.id == id)
+            {
+                Some(e) => serde_json::json!({
+                    "notification_type": e.notification_type,
+                    "pipe_name": e.pipe_name,
+                }),
+                None => serde_json::json!({}),
+            }
+        };
+        match inbox_op {
+            "mark_read" => {
+                let props = entry_props(id);
+                if let Some(id) = id {
+                    crate::notifications::store::mark_read_by_id(id);
+                }
+                track_inbox_event(app, "notification_bell_expand", props);
+            }
+            "remove" => {
+                let props = entry_props(id);
+                if let Some(id) = id {
+                    crate::notifications::store::remove_by_id(id);
+                }
+                track_inbox_event(app, "notification_bell_dismiss", props);
+            }
+            "clear_all" => {
+                let count = crate::notifications::store::read_all().len();
+                crate::notifications::store::clear();
+                track_inbox_event(
+                    app,
+                    "notification_bell_clear_all",
+                    serde_json::json!({ "count": count }),
+                );
+            }
+            "copy" => {
+                track_inbox_event(app, "notification_bell_copy", entry_props(id));
+            }
+            "action_clicked" => {
+                let mut props = entry_props(id);
+                if let (Some(obj), Some(label)) = (
+                    props.as_object_mut(),
+                    parsed
+                        .as_ref()
+                        .and_then(|v| v.get("label"))
+                        .and_then(|v| v.as_str()),
+                ) {
+                    obj.insert("action_label".into(), serde_json::json!(label));
+                }
+                track_inbox_event(app, "notification_bell_action", props);
+            }
+            _ => {}
+        }
+        return;
+    }
+
     crate::events::emit_notification_action(
         app,
         crate::events::NotificationActionEvent {
@@ -138,7 +228,7 @@ fn native_notif_action_callback_inner(json_ptr: *const std::os::raw::c_char) {
             if is_in_app {
                 let target = if is_meeting_deeplink(&url) {
                     ShowRewindWindow::Home {
-                        page: Some("meetings".to_string()),
+                        page: Some(meeting_page_with_id(&url)),
                     }
                 } else {
                     ShowRewindWindow::Main
@@ -205,10 +295,11 @@ fn native_notif_action_callback_inner(json_ptr: *const std::os::raw::c_char) {
                 return;
             }
 
+            let meeting_page = meeting_page_with_id(&deeplink_url);
             let app_for_show = app_clone.clone();
             let _ = app_clone.run_on_main_thread(move || {
                 if let Err(e) = (ShowRewindWindow::Home {
-                    page: Some("meetings".to_string()),
+                    page: Some(meeting_page),
                 })
                 .show(&app_for_show)
                 {
@@ -255,7 +346,7 @@ fn native_notif_action_callback_inner(json_ptr: *const std::os::raw::c_char) {
             if is_in_app {
                 let target = if is_meeting_deeplink(&url) {
                     ShowRewindWindow::Home {
-                        page: Some("meetings".to_string()),
+                        page: Some(meeting_page_with_id(&url)),
                     }
                 } else {
                     ShowRewindWindow::Main
@@ -285,7 +376,89 @@ fn native_notif_action_callback_inner(json_ptr: *const std::os::raw::c_char) {
         return;
     }
 
-    // Everything else (pipe, api, mute, dismiss, auto_dismiss, legacy string
+    // HD-recording API action. Handled in Rust (like deeplink/meeting_join
+    // above) so native notification clicks work even when no webview is
+    // mounted. The JS handler in notification-handler.tsx remains the path
+    // for in-app notification panel clicks.
+    if action_type == Some("api")
+        && parsed
+            .as_ref()
+            .and_then(|v| v.get("action"))
+            .and_then(|v| v.as_str())
+            == Some("record-hd")
+    {
+        let body = parsed
+            .as_ref()
+            .and_then(|v| v.get("body"))
+            .cloned();
+        let deeplink_url = parsed
+            .as_ref()
+            .and_then(|v| v.get("deeplinkUrl").or_else(|| v.get("deeplink_url")))
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+
+        let app_clone = app.clone();
+        std::thread::spawn(move || {
+            use crate::recording::local_api_context_from_app;
+            let api = local_api_context_from_app(&app_clone);
+            let client = reqwest::blocking::Client::new();
+
+            let req = api.apply_auth_blocking(
+                client
+                    .post(api.url("/capture/hd/start"))
+                    .header("Content-Type", "application/json")
+                    .body(
+                        body.map(|b| b.to_string())
+                            .unwrap_or_else(|| "{}".to_string()),
+                    ),
+            );
+
+            let ok = match req.send() {
+                Ok(res) => res.status().is_success(),
+                Err(e) => {
+                    error!("record-hd api call failed: {}", e);
+                    false
+                }
+            };
+
+            if ok {
+                // Confirmation toast — mirrors the JS handler in
+                // notification-handler.tsx.
+                let _ = client
+                    .post(api.url("/notify"))
+                    .header("Content-Type", "application/json")
+                    .body(
+                        serde_json::json!({
+                            "title": "HD recording started",
+                            "body": "Capturing this meeting at high frame rate. Stops automatically when the call ends.",
+                        })
+                        .to_string(),
+                    )
+                    .send();
+
+                // "open note + HD": also navigate to the live meeting note.
+                if let Some(ref url) = deeplink_url {
+                    if is_meeting_deeplink(url) {
+                        let meeting_page = meeting_page_with_id(url);
+                        let app_for_show = app_clone.clone();
+                        let _ = app_clone.run_on_main_thread(move || {
+                            if let Err(e) = (ShowRewindWindow::Home {
+                                page: Some(meeting_page),
+                            })
+                            .show(&app_for_show)
+                            {
+                                error!("failed to show window for record-hd deeplink: {}", e);
+                            }
+                        });
+                        emit_meeting_note_route_with_retries(&app_clone, url);
+                    }
+                }
+            }
+        });
+        return;
+    }
+
+    // Everything else (pipe, mute, dismiss, auto_dismiss, legacy string
     // actions) still goes to the JS handler. The overlay window owns those
     // because they need access to posthog / localforage / chat prefill.
     let _ = app.emit("native-notification-action", &json);
@@ -321,6 +494,18 @@ fn parse_meeting_deeplink(url: &str) -> Option<(u64, bool)> {
     Some((meeting_id, transcript))
 }
 
+/// Build the `page` string for `ShowRewindWindow::Home` that encodes the
+/// meeting ID into the URL query string. When `show.rs` formats this into
+/// `/home?section={page}`, the result becomes
+/// `/home?section=meetings&meetingId=42&transcript=true` which the React
+/// page reads on initial mount — surviving full-page navigations.
+fn meeting_page_with_id(deeplink_url: &str) -> String {
+    match parse_meeting_deeplink(deeplink_url) {
+        Some((id, transcript)) => format!("meetings&meetingId={}&transcript={}", id, transcript),
+        None => "meetings".to_string(),
+    }
+}
+
 fn emit_meeting_note_route_with_retries(app: &tauri::AppHandle, deeplink_url: &str) {
     let Some((meeting_id, transcript)) = parse_meeting_deeplink(deeplink_url) else {
         warn!(
@@ -334,7 +519,11 @@ fn emit_meeting_note_route_with_retries(app: &tauri::AppHandle, deeplink_url: &s
         "meetingId": meeting_id,
         "transcript": transcript,
     });
-    let nav = serde_json::json!({ "url": "/home?section=meetings" });
+    let nav_url = format!(
+        "/home?section=meetings&meetingId={}&transcript={}",
+        meeting_id, transcript
+    );
+    let nav = serde_json::json!({ "url": nav_url });
 
     // A notification click can cold-open the Home webview. React listeners are
     // not guaranteed to be mounted when `show()` returns, so a single emit is
@@ -391,6 +580,30 @@ fn native_shortcut_action_callback_inner(action_ptr: *const std::os::raw::c_char
                     // Emit to JS so it can persist the setting, then hide
                     let _ = app_clone.emit("native-shortcut-close", "");
                     native_shortcut_reminder::hide();
+                }
+                "restart_recording" => {
+                    // Recording-health overlay: restart the engine in place.
+                    // Same flow as the webview's overlay_restart_recording
+                    // command; the health loop confirms the recovery.
+                    tauri::async_runtime::spawn(crate::overlay_health::restart_recording(
+                        app_clone.clone(),
+                    ));
+                }
+                "dismiss_incident" => {
+                    tauri::async_runtime::spawn(crate::overlay_health::dismiss_incident(
+                        app_clone.clone(),
+                    ));
+                }
+                "open_inbox" => {
+                    track_inbox_event(
+                        &app_clone,
+                        "shortcut_reminder_inbox_clicked",
+                        serde_json::json!({}),
+                    );
+                    let app = app_clone.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let _ = crate::commands::show_notification_inbox(app).await;
+                    });
                 }
                 "toggle_meeting" => {
                     // Directly call the meetings API instead of relying on JS

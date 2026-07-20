@@ -62,7 +62,7 @@ mod tests {
             if trimmed.is_empty() {
                 continue;
             }
-            sqlx::query(trimmed)
+            sqlx::query(sqlx::AssertSqlSafe(trimmed))
                 .execute(&db.pool)
                 .await
                 .unwrap_or_else(|e| panic!("stmt failed: {}\n{}", e, trimmed));
@@ -167,6 +167,14 @@ mod tests {
             "expected UNIQUE constraint failure, got: {}",
             err
         );
+
+        // The failed INSERT drops ImmediateTx, which schedules its rollback
+        // asynchronously while retaining the serialized write permit. Acquiring
+        // and committing the next transaction is the completion barrier: it can
+        // only begin after that rollback has released SQLite's shared-cache lock.
+        let tx = db.begin_immediate_with_retry().await.unwrap();
+        tx.commit().await.unwrap();
+
         assert_eq!(count_open_meetings(&db).await, 1);
     }
 

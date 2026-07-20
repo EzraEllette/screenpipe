@@ -93,7 +93,7 @@ mod tests {
 
     #[test]
     fn fallback_emits_seeded_key_with_auth_enabled() {
-        let v = fallback_local_api_config(Some("sp-cold-spawn-test".to_string()));
+        let v = fallback_local_api_config(Some("sp-cold-spawn-test".to_string()), 3030);
         assert_eq!(v["key"].as_str(), Some("sp-cold-spawn-test"));
         assert_eq!(v["port"], 3030);
         assert_eq!(v["auth_enabled"], true);
@@ -101,10 +101,16 @@ mod tests {
 
     #[test]
     fn fallback_emits_null_key_with_auth_disabled_when_unseeded() {
-        let v = fallback_local_api_config(None);
+        let v = fallback_local_api_config(None, 3030);
         assert!(v["key"].is_null());
         assert_eq!(v["port"], 3030);
         assert_eq!(v["auth_enabled"], false);
+    }
+
+    #[test]
+    fn fallback_preserves_effective_non_default_port() {
+        let v = fallback_local_api_config(Some("sp-cold-spawn-test".to_string()), 3041);
+        assert_eq!(v["port"], 3041);
     }
 }
 
@@ -156,7 +162,8 @@ pub async fn get_local_api_config(app_handle: tauri::AppHandle) -> serde_json::V
     // the privacy panel's API-key input stays empty until the user closes
     // and reopens Settings, even though the resolver already minted a key
     // that the spawning server will adopt verbatim.
-    fallback_local_api_config(crate::store::resolved_api_auth_key())
+    let effective_port = crate::recording::local_api_context_from_app(&app_handle).port;
+    fallback_local_api_config(crate::store::resolved_api_auth_key(), effective_port)
 }
 
 /// Get the app-local focus/notification server port.
@@ -173,13 +180,13 @@ pub fn get_app_server_config() -> serde_json::Value {
 
 /// Pure JSON shape used by the cold-spawn fallback. Extracted so the contract
 /// is covered by a unit test without needing a tauri::AppHandle. Port is the
-/// well-known default because the server hasn't bound yet — the UI will refresh
-/// once the server registers itself in `RecordingState`.
-fn fallback_local_api_config(cached_key: Option<String>) -> serde_json::Value {
+/// same effective port that the server config will use, including settings and
+/// the `SCREENPIPE_PORT` E2E/dev override.
+fn fallback_local_api_config(cached_key: Option<String>, effective_port: u16) -> serde_json::Value {
     let auth_enabled = cached_key.is_some();
     serde_json::json!({
         "key": cached_key,
-        "port": 3030,
+        "port": effective_port,
         "auth_enabled": auth_enabled,
     })
 }
@@ -496,12 +503,15 @@ fn persist_enterprise_hide_app(hidden: bool) {
 /// fetched policy via `set_enterprise_policy`, so the moment an admin turns on
 /// "hide app", the windows already on screen are retracted and the dock icon
 /// drops — without waiting for a restart. Best-effort: never returns an error.
+/// Returns the resolved visibility so onboarding can stop after permissions
+/// instead of entering UI-only setup steps on a managed-background device.
 #[tauri::command]
 #[specta::specta]
-pub fn apply_enterprise_ui_visibility(app: tauri::AppHandle) {
+pub fn apply_enterprise_ui_visibility(app: tauri::AppHandle) -> bool {
     let hidden = crate::enterprise_policy::is_app_ui_hidden();
     persist_enterprise_hide_app(hidden);
     crate::window::enforce_enterprise_ui_visibility(&app);
+    hidden
 }
 
 /// Read the enterprise admin API token (`team_api_token`) from
@@ -957,6 +967,42 @@ pub fn e2e_main_overlay_visible(app_handle: tauri::AppHandle) -> bool {
     }
 }
 
+/// E2E helper: drive the health-to-native-tray status transition.
+#[tauri::command]
+#[specta::specta]
+pub async fn e2e_set_tray_recording_status(
+    app_handle: tauri::AppHandle,
+    status: String,
+) -> Result<(), String> {
+    if !cfg!(feature = "e2e") {
+        return Err("E2E feature is disabled".to_string());
+    }
+
+    let status = match status.as_str() {
+        "starting" => crate::health::RecordingStatus::Starting,
+        "recording" => crate::health::RecordingStatus::Recording,
+        "paused" => crate::health::RecordingStatus::Paused,
+        "stopped" => crate::health::RecordingStatus::Stopped,
+        "error" => crate::health::RecordingStatus::Error,
+        other => return Err(format!("unsupported E2E tray status: {other}")),
+    };
+
+    crate::tray::set_tray_recording_status_for_e2e(&app_handle, status)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// E2E helper: read the status text from the menu that was successfully
+/// installed into the native tray, not merely the desired health state.
+#[tauri::command]
+#[specta::specta]
+pub fn e2e_installed_tray_recording_status() -> Result<Option<String>, String> {
+    if !cfg!(feature = "e2e") {
+        return Err("E2E feature is disabled".to_string());
+    }
+    crate::tray::installed_recording_status_text().map_err(|e| e.to_string())
+}
+
 /// E2E helper: report whether the shortcut reminder overlay is visibly shown.
 ///
 /// The reminder window is hidden rather than destroyed, so WebDriver can keep a
@@ -1048,6 +1094,69 @@ pub async fn e2e_emit_agent_stream(
         emitted_deltas: delta_count,
         emit_ms: start.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
     })
+}
+
+/// E2E helper for an extension-triggered turn that begins after the original
+/// assistant response has settled. This matches pi-subagents async completion:
+/// Pi persists a visible custom message, then `triggerTurn: true` starts a new
+/// assistant turn without a new user `message_start` event.
+#[tauri::command]
+#[specta::specta]
+pub async fn e2e_emit_settled_agent_follow_up(
+    app_handle: tauri::AppHandle,
+    session_id: String,
+) -> Result<(), String> {
+    if !cfg!(feature = "e2e") {
+        return Err("e2e_emit_settled_agent_follow_up is only available in e2e builds".to_string());
+    }
+
+    let emit_event = |event: serde_json::Value| -> Result<(), String> {
+        app_handle
+            .emit(
+                "agent_event",
+                serde_json::json!({
+                    "source": "pi",
+                    "sessionId": &session_id,
+                    "event": event,
+                }),
+            )
+            .map_err(|e| e.to_string())
+    };
+
+    emit_event(serde_json::json!({
+        "type": "message_start",
+        "message": { "role": "assistant" },
+    }))?;
+    emit_event(serde_json::json!({
+        "type": "message_update",
+        "assistantMessageEvent": {
+            "type": "text_delta",
+            "delta": "INITIAL_RESPONSE_SETTLED",
+        },
+    }))?;
+    emit_event(serde_json::json!({ "type": "agent_end" }))?;
+
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    emit_event(serde_json::json!({
+        "type": "custom_message",
+        "customType": "subagent-notify",
+        "content": "Background task completed: scout",
+        "display": true,
+    }))?;
+    emit_event(serde_json::json!({ "type": "agent_start" }))?;
+    emit_event(serde_json::json!({
+        "type": "message_start",
+        "message": { "role": "assistant" },
+    }))?;
+    emit_event(serde_json::json!({
+        "type": "message_update",
+        "assistantMessageEvent": {
+            "type": "text_delta",
+            "delta": "SUBAGENT_FOLLOW_UP_VISIBLE",
+        },
+    }))?;
+    emit_event(serde_json::json!({ "type": "agent_end" }))?;
+    Ok(())
 }
 
 /// E2E helper for the scheduled-pipe path: feed synthetic pipe stdout
@@ -1986,6 +2095,15 @@ pub async fn complete_onboarding(app_handle: tauri::AppHandle) -> Result<(), Str
 
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
     close_window(app_handle.clone(), ShowRewindWindow::Onboarding).await?;
+
+    // Hidden UI applies to the main app, but incomplete onboarding remains
+    // visible long enough to finish permissions. Once onboarding completes,
+    // close that sole exemption without trying to open Home.
+    if crate::enterprise_policy::is_app_ui_hidden() {
+        info!("enterprise: onboarding completed; keeping main UI hidden");
+        return Ok(());
+    }
+
     show_window(app_handle.clone(), ShowRewindWindow::Home { page: None }).await?;
 
     Ok(())
@@ -2325,6 +2443,20 @@ pub async fn show_shortcut_reminder(
     app_handle: tauri::AppHandle,
     _shortcut: String,
 ) -> Result<(), String> {
+    show_shortcut_reminder_impl(app_handle, true, true).await
+}
+
+/// Shared body of `show_shortcut_reminder`.
+///
+/// The recording-health incident path (overlay_health.rs) calls this with both
+/// flags false: a confirmed incident must surface even when the timeline (and
+/// thus the normal reminder) is disabled, and it must not block on the
+/// wait-for-server handshake — the server being down is often the incident.
+pub(crate) async fn show_shortcut_reminder_impl(
+    app_handle: tauri::AppHandle,
+    respect_timeline_disabled: bool,
+    wait_for_server: bool,
+) -> Result<(), String> {
     use tauri::{Emitter, WebviewWindowBuilder};
 
     let label = "shortcut-reminder";
@@ -2337,7 +2469,7 @@ pub async fn show_shortcut_reminder(
     let store = crate::store::SettingsStore::get(&app_handle)
         .unwrap_or_default()
         .unwrap_or_default();
-    if store.recording.disable_timeline {
+    if respect_timeline_disabled && store.recording.disable_timeline {
         info!("timeline disabled: skipping shortcut reminder overlay");
         return Ok(());
     }
@@ -2359,7 +2491,7 @@ pub async fn show_shortcut_reminder(
             // `metrics_ws_url` and retries /ws/metrics without ?token= when API auth is on.
             // Wait for server **core** (not only API key): when auth is disabled, key may stay
             // None and we must not spin until the 90s timeout.
-            {
+            if wait_for_server {
                 const MAX_WAIT: Duration = Duration::from_secs(90);
                 const STEP: Duration = Duration::from_millis(250);
                 let mut waited = Duration::ZERO;
@@ -2409,6 +2541,16 @@ pub async fn show_shortcut_reminder(
             }
             let native_payload = serde_json::Value::Object(map).to_string();
             if native_shortcut_reminder::show(Some(&native_payload)) {
+                // A recording incident may already be active (e.g. this show IS
+                // the incident reveal) — sync the panel's health state. Same
+                // for the bell's unread dot, which is otherwise only pushed on
+                // notification-store writes.
+                native_shortcut_reminder::set_health_state(
+                    &crate::overlay_health::current_state_payload(),
+                );
+                native_shortcut_reminder::set_inbox_unread(
+                    crate::notifications::store::unread_count() as i32,
+                );
                 return Ok(());
             }
             warn!("Native shortcut reminder failed, falling back to webview");
@@ -2654,6 +2796,175 @@ pub async fn hide_shortcut_reminder(app_handle: tauri::AppHandle) -> Result<(), 
     Ok(())
 }
 
+/// Current recording-health overlay state: "normal" | "failure" | "fixing" |
+/// "recovered", optionally suffixed "|<detail>" (boot-phase label while
+/// fixing). The shortcut-reminder webview pulls this on mount, then stays
+/// current via the "recording-health-state" event.
+#[tauri::command]
+#[specta::specta]
+pub async fn get_recording_health_state() -> String {
+    crate::overlay_health::current_state_payload()
+}
+
+/// Restart the recording engine from the overlay's failure state. Runs the
+/// same stop → settle → spawn sequence as the native panel's restart action;
+/// the health loop confirms recovery and pushes "recovered" to the overlay.
+#[tauri::command]
+#[specta::specta]
+pub async fn overlay_restart_recording(app_handle: tauri::AppHandle) -> Result<(), String> {
+    crate::overlay_health::restart_recording(app_handle).await;
+    Ok(())
+}
+
+/// Dismiss the current recording incident shown in the overlay.
+#[tauri::command]
+#[specta::specta]
+pub async fn overlay_dismiss_incident(app_handle: tauri::AppHandle) -> Result<(), String> {
+    crate::overlay_health::dismiss_incident(app_handle).await;
+    Ok(())
+}
+
+/// Toggle the standalone notification inbox opened from the shortcut
+/// overlay's bell: a small always-on-top window just below the pill,
+/// rendering the same list as the pipes-store bell. Hides itself on blur.
+#[tauri::command]
+#[specta::specta]
+pub async fn show_notification_inbox(app_handle: tauri::AppHandle) -> Result<(), String> {
+    use tauri::WebviewWindowBuilder;
+
+    // macOS renders the inbox as a native SwiftUI panel (same file/plumbing
+    // as the native toast). The webview window below stays as the
+    // Windows/Linux implementation and the macOS fallback.
+    #[cfg(target_os = "macos")]
+    {
+        native_actions::install_notification_action_callback(&app_handle);
+        if native_notification::is_available() {
+            let entries = crate::notifications::store::read_all();
+            // Anchor under the pill's live frame — it's draggable, so a fixed
+            // top-center would detach the inbox from its trigger.
+            let anchor = native_shortcut_reminder::get_frame()
+                .map(|(x, y, w, h)| serde_json::json!({ "x": x, "y": y, "w": w, "h": h }));
+            let payload = serde_json::json!({ "entries": entries, "anchor": anchor });
+            let visible = native_notification::toggle_inbox(&payload.to_string());
+            info!("native notification inbox toggled (visible: {})", visible);
+            if visible {
+                if let Some(analytics) =
+                    app_handle.try_state::<std::sync::Arc<crate::analytics::AnalyticsManager>>()
+                {
+                    let analytics = std::sync::Arc::clone(&analytics);
+                    let unread = entries.iter().filter(|e| !e.read).count();
+                    let total = entries.len();
+                    tauri::async_runtime::spawn(async move {
+                        let _ = analytics
+                            .send_event(
+                                "notification_bell_opened",
+                                Some(serde_json::json!({
+                                    "unread_count": unread,
+                                    "total_count": total,
+                                    "surface": "native_overlay",
+                                })),
+                            )
+                            .await;
+                    });
+                }
+            }
+            return Ok(());
+        }
+    }
+
+    let label = "notification-inbox";
+    let window_width = 340.0_f64;
+    let window_height = 420.0_f64;
+    // Sit just below the shortcut overlay pill (y=12, ~26 logical tall).
+    let y = 46.0_f64;
+
+    // Top-center of the screen the overlay lives on: screen under the mouse
+    // on macOS (matches the pill), primary monitor elsewhere.
+    let x = {
+        #[cfg(target_os = "macos")]
+        {
+            use tauri_nspanel::cocoa::appkit::{NSEvent, NSScreen};
+            use tauri_nspanel::cocoa::base::{id, nil};
+            use tauri_nspanel::cocoa::foundation::{NSArray, NSPoint, NSRect};
+            unsafe {
+                let mouse: NSPoint = NSEvent::mouseLocation(nil);
+                let screens: id = NSScreen::screens(nil);
+                let count: u64 = NSArray::count(screens);
+                let mut x = 0.0_f64;
+                for i in 0..count {
+                    let screen: id = NSArray::objectAtIndex(screens, i);
+                    let frame: NSRect = NSScreen::frame(screen);
+                    if mouse.x >= frame.origin.x
+                        && mouse.x < frame.origin.x + frame.size.width
+                        && mouse.y >= frame.origin.y
+                        && mouse.y < frame.origin.y + frame.size.height
+                    {
+                        x = frame.origin.x + (frame.size.width - window_width) / 2.0;
+                        break;
+                    }
+                }
+                x
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let monitor = app_handle
+                .primary_monitor()
+                .map_err(|e| e.to_string())?
+                .ok_or("No primary monitor found")?;
+            let screen_size = monitor.size();
+            let scale_factor = monitor.scale_factor();
+            ((screen_size.width as f64 / scale_factor) - window_width) / 2.0
+        }
+    };
+
+    if let Some(window) = app_handle.get_webview_window(label) {
+        if window.is_visible().unwrap_or(false) {
+            let _ = window.hide();
+            return Ok(());
+        }
+        let _ = window.set_position(tauri::Position::Logical(tauri::LogicalPosition::new(x, y)));
+        let _ = window.show();
+        let _ = window.set_focus();
+        return Ok(());
+    }
+
+    let window = WebviewWindowBuilder::new(
+        &app_handle,
+        label,
+        tauri::WebviewUrl::App("notification-inbox".into()),
+    )
+    .title("")
+    .inner_size(window_width, window_height)
+    .position(x, y)
+    .visible_on_all_workspaces(true)
+    .always_on_top(true)
+    .decorations(false)
+    .skip_taskbar(true)
+    .transparent(true)
+    .shadow(false)
+    .resizable(false)
+    .focused(true)
+    .build()
+    .map(crate::window::finalize_webview_window)
+    .map_err(|e| {
+        log_webview_build_failure(label, "notification-inbox", &e);
+        format!("Failed to create notification inbox window: {}", e)
+    })?;
+
+    // Click-away dismiss: the inbox is a transient popover, not a window the
+    // user manages. (The overlay pill itself is non-activating, so clicking
+    // the bell again still reaches the toggle branch above.)
+    let window_clone = window.clone();
+    window.on_window_event(move |event| {
+        if let tauri::WindowEvent::Focused(false) = event {
+            let _ = window_clone.hide();
+        }
+    });
+
+    Ok(())
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn show_notification_panel(
@@ -2667,7 +2978,7 @@ pub async fn show_notification_panel(
     info!("show_notification_panel called");
 
     // Delivery gate — the single choke point that catches both `/notify` and
-    // the direct callers (pipe suggestions, audio device/health toasts,
+    // the direct callers (audio device/health toasts,
     // capture-stall). Honors master-off, snooze, and quiet hours. The critical
     // `capture_stall` recording-stopped alert is exempt so we never silently
     // hide it.

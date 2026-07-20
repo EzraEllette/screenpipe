@@ -459,6 +459,7 @@ export async function handleChatCompletions(
   env: Env,
   latency: 'interactive' | 'background' = 'interactive',
   deviceId: string = '',
+  allowFrontierBackground: boolean = false,
 ): Promise<Response> {
   // A request with no messages at all can never complete: OpenAI would
   // answer the injected system hint below, and Anthropic 400s outright once
@@ -474,7 +475,12 @@ export async function handleChatCompletions(
   // chain) by default, or hard-reject via PIPE_FRONTIER_POLICY=reject. The client
   // also hides frontier models from pipe presets; this is the worker backstop that
   // catches old pipes / custom integrations / the passthrough that slip through.
-  if (latency === 'background' && body.model !== 'auto' && isFrontierModel(body.model)) {
+  if (
+    latency === 'background' &&
+    !allowFrontierBackground &&
+    body.model !== 'auto' &&
+    isFrontierModel(body.model)
+  ) {
     if (String((env as any)?.PIPE_FRONTIER_POLICY ?? 'downgrade').toLowerCase() === 'reject') {
       return errorResponse(body, 403, `"${body.model}" (a frontier model) isn't available for scheduled pipes / background tasks. Use "auto" or a fast model (glm-5, gemini, sonnet, haiku).`);
     }
@@ -500,9 +506,9 @@ export async function handleChatCompletions(
     let chain = hasImages(body)
       ? AUTO_WATERFALL_VISION
       : (useBackgroundChain ? AUTO_WATERFALL_BACKGROUND : AUTO_WATERFALL);
-    // Difficulty router (interactive text only). A/B by device: arm 'on' runs the
-    // router and promotes a tier head (opus for hard, gpt-5-nano for trivial), arm
-    // 'off' is the control baseline (chain unchanged = today's behavior). We tag
+    // Difficulty router (interactive text only). A/B by device: arm 'on' keeps
+    // trivial/normal requests on Luna and promotes hard requests to GPT-5.6 Sol;
+    // arm 'off' is the control baseline (chain unchanged = today's behavior). We tag
     // router_tier on the response so the cost log can measure ON vs control.
     let routerTier: string | null = null;
     if (!hasImages(body) && !useBackgroundChain) {

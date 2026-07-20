@@ -8,7 +8,7 @@ btw, we prefer that you don't contribute if you are not using or will use the pr
 
 before you begin:
 - try to run the [pre-built app](https://docs.screenpi.pe) to get familiar with the project
-- familiarize yourself with the project structure and architecture.
+- familiarize yourself with the repository structure and architecture.
 - new to contributing? the [beginner's onboarding guide](ONBOARDING.md) walks you from zero to a merged pr step by step (this file is the reference; that one is the walkthrough).
 
 ## installation and build guide
@@ -53,6 +53,24 @@ before you begin:
    bun install
    bun tauri build --features metal
    ```
+
+#### sharing downloaded dependencies across worktrees
+
+The desktop prebuild keeps immutable native downloads such as FFmpeg, FFprobe,
+the Bun sidecars, MLX metallib, and Windows OpenBLAS in a machine-wide cache.
+The default is `~/.cache/screenpipe/native-deps`. To put it elsewhere, set the
+same absolute path in every worktree environment:
+
+```bash
+export SCREENPIPE_NATIVE_CACHE_DIR="$HOME/.cache/screenpipe/native-deps"
+export SCREENPIPE_FRONTEND_CACHE_DIR="$HOME/.cache/screenpipe/frontend-out"
+```
+
+Cache entries are versioned, validated, and protected by per-artifact locks, so
+concurrent worktree builds download each artifact at most once. Set either
+variable to `off` to disable that cache. Keep Cargo's `target` directory local
+to each worktree when running concurrent builds; do not set a shared
+`CARGO_TARGET_DIR`.
 
 ### windows
 
@@ -136,11 +154,11 @@ next to the released app without taking over its identity or updater settings.
 - Plan for at least 10 GB of free disk space. In a clean x64 worktree the app-local
   Cargo target alone can exceed 5 GB; `node_modules`, sidecars, and global Cargo
   caches need additional space.
-- A fresh Git worktree shares Git objects and the global Cargo registry, but not
-  `node_modules`, downloaded sidecars, or `src-tauri/target`. A first installer
-  build can therefore take tens of minutes. Rebuilds in the same worktree reuse
-  dependency caches, but regenerating source, relinking the app, and compressing
-  the installer can still take several minutes.
+- A fresh Git worktree shares Git objects, the global Cargo registry, and the
+  machine-wide native/frontend caches, but not `node_modules` or
+  `src-tauri/target`. The native files are restored from cache without another
+  download. Cargo compilation, relinking, and installer compression remain
+  worktree-local and can still take several minutes.
 - `failed to get npm global prefix` is a non-fatal Bun-discovery fallback when it
   is immediately followed by `found bun` and `bun binary copied successfully`.
 - The local development installer is unsigned. Official Windows release builds

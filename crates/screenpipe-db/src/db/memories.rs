@@ -76,7 +76,7 @@ impl DatabaseManager {
 
         let sql = format!("UPDATE memories SET {} WHERE id = ?6", sets.join(", "));
 
-        sqlx::query(&sql)
+        sqlx::query(sqlx::AssertSqlSafe(sql))
             .bind(&now)
             .bind(content)
             .bind(tags)
@@ -384,7 +384,7 @@ impl DatabaseManager {
 
         let fts_query = query.map(crate::text_normalizer::sanitize_fts5_query);
 
-        let query = sqlx::query_as::<_, MemoryRecord>(&sql)
+        let query = sqlx::query_as::<_, MemoryRecord>(sqlx::AssertSqlSafe(sql))
             .bind(fts_query.as_deref())
             .bind(source)
             .bind(tags_filter)
@@ -505,7 +505,7 @@ impl DatabaseManager {
 
         let fts_query = query.map(crate::text_normalizer::sanitize_fts5_query);
 
-        let query = sqlx::query_scalar::<_, i64>(&sql)
+        let query = sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(sql))
             .bind(fts_query.as_deref())
             .bind(source)
             .bind(tags_filter)
