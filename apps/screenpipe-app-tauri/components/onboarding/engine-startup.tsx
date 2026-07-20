@@ -108,6 +108,7 @@ export default function EngineStartup({ handleNextSlide }: EngineStartupProps) {
   const [bootPhase, setBootPhase] = useState<BootPhaseSnapshot | null>(null);
 
   const hasAdvancedRef = useRef(false);
+  const hasReportedReadyRef = useRef(false);
   const mountTimeRef = useRef(Date.now());
 
   // The preceding permissions screen checks macOS TCC directly before it
@@ -279,16 +280,24 @@ export default function EngineStartup({ handleNextSlide }: EngineStartupProps) {
   // follow this screen added another wait before users could finish setup.
   useEffect(() => {
     if (state !== "running" || hasAdvancedRef.current) return;
-    hasAdvancedRef.current = true;
 
-    posthog.capture("onboarding_engine_started", {
-      time_spent_ms: Date.now() - mountTimeRef.current,
-    });
+    if (!hasReportedReadyRef.current) {
+      hasReportedReadyRef.current = true;
+      posthog.capture("onboarding_engine_started", {
+        time_spent_ms: Date.now() - mountTimeRef.current,
+      });
+    }
 
     // Keep the completed progress visible briefly before advancing.
+    // Dependencies can change while this timer is pending (for example when
+    // settings finish hydrating). React then cancels this timer and re-runs the
+    // effect. Do not mark the transition complete until the replacement timer
+    // actually fires, or the completed engine screen can remain forever.
     const elapsed = Date.now() - mountTimeRef.current;
     const delay = Math.max(0, 1200 - elapsed);
     const timer = setTimeout(async () => {
+      if (hasAdvancedRef.current) return;
+      hasAdvancedRef.current = true;
       try {
         await ensureDefaultPreset();
       } catch {}
