@@ -83,7 +83,7 @@ pub fn enforce_enterprise_ui_visibility(app: &tauri::AppHandle) {
         if crate::headless::set_enterprise_hidden(app, false) {
             let app_for_show = app.clone();
             if let Err(error) = app.run_on_main_thread(move || {
-                match ShowRewindWindow::Home { page: None }.show(&app_for_show) {
+                match ( ShowRewindWindow::Home { page: None } ).show(&app_for_show) {
                     Ok(_) => tracing::info!(
                         "enterprise: hidden-UI policy disabled — Home window restored"
                     ),
