@@ -310,9 +310,6 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 					tier: authResult.tier,
 					credits_remaining: usage.creditsRemaining ?? 0,
 					upgrade_options: {
-						...(authResult.tier === 'anonymous'
-							? { login: { benefit: '+25 daily queries, more models' } }
-							: {}),
 						buy_credits: {
 							url: 'https://screenpi.pe/onboarding',
 							benefit: 'Credits extend your daily limit — use anytime',

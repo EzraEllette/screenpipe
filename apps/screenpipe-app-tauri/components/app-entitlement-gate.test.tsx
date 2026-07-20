@@ -661,44 +661,37 @@ describe("AppEntitlementGate", () => {
     }
   });
 
-  it("keeps the paid-entitlement gate inside enterprise builds", async () => {
+  it("uses enterprise authentication instead of consumer subscription gating", () => {
     mocks.enterprise = {
       isEnterprise: true,
-      hiddenSections: [],
-      needsLicenseKey: false,
-      orgName: "Acme",
+      isEnterpriseBuildResolved: true,
+      authenticationState: "authenticated",
+      authenticationError: null,
+      isEnterpriseAuthenticated: true,
     };
     mocks.state.user = baseUser();
 
     render(<AppEntitlementGate>{protectedApp}</AppEntitlementGate>);
 
-    expect(screen.queryByTestId("protected-app")).not.toBeInTheDocument();
-    expect(screen.getByText(/subscription required/i)).toBeInTheDocument();
-    await waitFor(() =>
-      expect(mocks.loadUser).toHaveBeenCalledWith("tok", true),
-    );
+    expect(screen.getByTestId("protected-app")).toBeInTheDocument();
+    expect(mocks.loadUser).not.toHaveBeenCalled();
   });
 
-  it("keeps enterprise entitlement rechecks bounded", async () => {
+  it("does not run consumer entitlement rechecks inside enterprise builds", async () => {
     fakeTimersNoDate();
     try {
       mocks.enterprise = {
         isEnterprise: true,
-        hiddenSections: [],
-        needsLicenseKey: false,
-        orgName: "Acme",
+        isEnterpriseBuildResolved: true,
+        authenticationState: "authenticated",
+        authenticationError: null,
+        isEnterpriseAuthenticated: true,
       };
       mocks.state.user = baseUser();
       render(<AppEntitlementGate>{protectedApp}</AppEntitlementGate>);
 
       await vi.advanceTimersByTimeAsync(30 * 60_000);
-      const total = mocks.loadUser.mock.calls.length;
-      expect(total).toBe(12);
-      expect(mocks.loadUser).toHaveBeenNthCalledWith(1, "tok", true);
-      expect(mocks.loadUser).toHaveBeenNthCalledWith(2, "tok", false);
-
-      await vi.advanceTimersByTimeAsync(30 * 60_000);
-      expect(mocks.loadUser).toHaveBeenCalledTimes(total);
+      expect(mocks.loadUser).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
     }

@@ -2402,7 +2402,9 @@ mod tests {
         store.user.token = None;
         store.user.cloud_subscribed = Some(true);
 
-        let resolution = store.audio_engine_resolution();
+        // Keep this assertion independent of the process-global auth-token
+        // cache, which other tests intentionally populate in parallel.
+        let resolution = store.audio_engine_resolution_with_cloud_auth(false);
 
         assert_eq!(resolution.requested, "screenpipe-cloud");
         assert_eq!(resolution.active, FALLBACK_ENGINE);

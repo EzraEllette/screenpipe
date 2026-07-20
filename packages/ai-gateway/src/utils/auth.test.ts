@@ -96,6 +96,7 @@ describe('validateAuth — verified identities only', () => {
     expect(await validateAuth(requestFor('runner-service-secret'), serviceEnv)).toEqual({
       isValid: true,
       tier: 'subscribed',
+      accountPlan: 'business',
       deviceId: 'device-from-header',
       service: true,
     });
