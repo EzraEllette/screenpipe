@@ -17,8 +17,8 @@ import {
 	FREE_CHAT_MAX_RESPONSE_FORMAT_BYTES,
 	FREE_CHAT_MAX_STRUCTURE_DEPTH,
 	FREE_CHAT_MAX_TEXT_BYTES,
-	FREE_CHAT_MAX_TOOL_BYTES,
 	FREE_CHAT_MAX_TOOLS,
+	FREE_CHAT_MAX_TOOLS_BYTES,
 	acquireFreeChatLease,
 	applyFreeChatRequestLimits,
 	prepareFreeChatTurn,
@@ -546,7 +546,7 @@ describe('validateFreeChatRequestLimits', () => {
 		expect(disguisedFile?.code).toBe('free_chat_image_unverifiable');
 	});
 
-	it('caps tool count and each serialized schema', () => {
+	it('caps tool count and aggregate schema bytes without rejecting one verbose tool', () => {
 		const tool = { type: 'function', function: { name: 'tool', description: 'x', parameters: { type: 'object', properties: {} } } };
 		const tooMany = validateFreeChatRequestLimits({
 			...bodyWith([{ role: 'user', content: 'hello' }]),
@@ -554,11 +554,17 @@ describe('validateFreeChatRequestLimits', () => {
 		}, preview);
 		expect(tooMany?.code).toBe('free_chat_too_many_tools');
 
-		const oversized = validateFreeChatRequestLimits({
+		const verboseTool = validateFreeChatRequestLimits({
 			...bodyWith([{ role: 'user', content: 'hello' }]),
-			tools: [{ ...tool, function: { ...tool.function, description: 'x'.repeat(FREE_CHAT_MAX_TOOL_BYTES) } }],
+			tools: [{ ...tool, function: { ...tool.function, description: 'x'.repeat(32 * 1024) } }],
 		}, preview);
-		expect(oversized?.code).toBe('free_chat_tool_too_large');
+		expect(verboseTool).toBeNull();
+
+		const oversizedTotal = validateFreeChatRequestLimits({
+			...bodyWith([{ role: 'user', content: 'hello' }]),
+			tools: [{ ...tool, function: { ...tool.function, description: 'x'.repeat(FREE_CHAT_MAX_TOOLS_BYTES) } }],
+		}, preview);
+		expect(oversizedTotal?.code).toBe('free_chat_tools_too_large');
 	});
 
 	it('rejects malformed tools and assistant tool calls before provider dispatch', () => {

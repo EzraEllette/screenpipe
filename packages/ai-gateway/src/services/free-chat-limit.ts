@@ -15,7 +15,6 @@ export const FREE_CHAT_MAX_TEXT_BYTES = 64 * 1024;
 export const FREE_CHAT_MAX_IMAGES = 4;
 export const FREE_CHAT_MAX_IMAGE_BYTES = 2 * 1024 * 1024;
 export const FREE_CHAT_MAX_TOOLS = 48;
-export const FREE_CHAT_MAX_TOOL_BYTES = 16 * 1024;
 export const FREE_CHAT_MAX_TOOLS_BYTES = 96 * 1024;
 export const FREE_CHAT_MAX_RESPONSE_FORMAT_BYTES = 16 * 1024;
 export const FREE_CHAT_MAX_STRUCTURE_DEPTH = 32;
@@ -321,12 +320,6 @@ export function validateFreeChatRequestBodyLimits(
 		return requestTooLarge(
 			'free_chat_tools_too_large',
 			`Free hosted chat tool definitions are limited to ${FREE_CHAT_MAX_TOOLS_BYTES} bytes per request.`,
-		);
-	}
-	if (tools.some((tool) => jsonByteLength(tool) > FREE_CHAT_MAX_TOOL_BYTES)) {
-		return requestTooLarge(
-			'free_chat_tool_too_large',
-			`Each free hosted chat tool definition is limited to ${FREE_CHAT_MAX_TOOL_BYTES} bytes.`,
 		);
 	}
 	if (
