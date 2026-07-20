@@ -113,6 +113,44 @@ describe("onboarding engine startup", () => {
     );
   });
 
+  it("reschedules the advance when dependencies change during the ready delay", async () => {
+    mocks.localFetch.mockImplementation(async () =>
+      new Response(
+        JSON.stringify({
+          status: "healthy",
+          status_code: 200,
+          frame_status: "ok",
+          audio_status: "ok",
+        }),
+        { status: 200 },
+      ),
+    );
+    const initialNextSlide = vi.fn();
+    const replacementNextSlide = vi.fn();
+
+    const { rerender } = render(
+      <EngineStartup handleNextSlide={initialNextSlide} />,
+    );
+
+    await waitFor(() =>
+      expect(mocks.capture).toHaveBeenCalledWith(
+        "onboarding_engine_started",
+        expect.any(Object),
+      ),
+    );
+
+    // A settings/context update changes the callback identity while the
+    // completed-state delay is pending. The cleanup cancels the first timer;
+    // the replacement effect must still be allowed to schedule another one.
+    rerender(<EngineStartup handleNextSlide={replacementNextSlide} />);
+
+    await waitFor(
+      () => expect(replacementNextSlide).toHaveBeenCalledTimes(1),
+      { timeout: 2000 },
+    );
+    expect(initialNextSlide).not.toHaveBeenCalled();
+  });
+
   it("does not advance when the startup command reports an error", async () => {
     mocks.localFetch.mockRejectedValue(new Error("engine not listening yet"));
     mocks.spawnScreenpipe.mockResolvedValue({
