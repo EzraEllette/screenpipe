@@ -161,6 +161,11 @@ describe("onboarding permission wheel", () => {
 
     // screen recording is last on the wheel — focused once the rest granted
     await waitFor(() => expect(screenRow()).toBeEnabled());
+    const restartWarning = screen.getByText(
+      "restart after granting this permission."
+    );
+    expect(restartWarning.tagName).toBe("STRONG");
+    expect(restartWarning).toHaveClass("font-bold");
     expect(mocks.requestPermissionWithFlow).not.toHaveBeenCalled();
     expect(mocks.requestPermission).not.toHaveBeenCalled();
 

@@ -22,7 +22,7 @@ interface PermissionDef {
   id: string;
   icon: React.ReactNode;
   title: string;
-  subtitle: string;
+  subtitle: React.ReactNode;
   check: () => Promise<string | boolean>;
   request: () => Promise<void>;
   macOnly?: boolean;
@@ -62,7 +62,7 @@ function PermissionRow({
 }: {
   icon: React.ReactNode;
   title: string;
-  subtitle: string;
+  subtitle: React.ReactNode;
   granted: boolean;
   skipped: boolean;
   focused: boolean;
@@ -211,7 +211,15 @@ export default function PermissionsStep({
       id: "screen",
       icon: <Monitor className="w-3.5 h-3.5" strokeWidth={1.5} />,
       title: "Capture your screen",
-      subtitle: "Lets Screenpipe index what's on your screen — windows, docs, chats, code",
+      subtitle: (
+        <>
+          Lets Screenpipe index what&apos;s on your screen — windows, docs,
+          chats, code. {" "}
+          <strong className="font-bold">
+            restart after granting this permission.
+          </strong>
+        </>
+      ),
       // requested last: granting this requires an app restart to take effect,
       // so asking earlier just sends the user back into settings again mid-flow
       check: () => commands.checkScreenRecordingPermission(),
