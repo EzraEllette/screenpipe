@@ -3088,17 +3088,30 @@ fn ensure_required_pi_extension_setting() -> Result<(), String> {
 }
 
 fn remove_required_pi_extension_setting(settings: &mut serde_json::Value) -> bool {
-    let Some(packages) = settings
-        .get_mut("packages")
-        .and_then(serde_json::Value::as_array_mut)
-    else {
-        return false;
-    };
+    let mut changed = false;
+    if !settings.is_object() {
+        *settings = json!({});
+        changed = true;
+    }
+    let obj = settings
+        .as_object_mut()
+        .expect("Pi settings were normalized to a JSON object");
+    let packages = obj.entry("packages".to_string()).or_insert_with(|| {
+        changed = true;
+        json!([])
+    });
+    if !packages.is_array() {
+        *packages = json!([]);
+        changed = true;
+    }
+    let packages = packages
+        .as_array_mut()
+        .expect("Pi packages were normalized to a JSON array");
     let previous_len = packages.len();
     packages.retain(|package| {
         !package_source_string(package).is_some_and(is_required_pi_extension_package_source)
     });
-    packages.len() != previous_len
+    changed || packages.len() != previous_len
 }
 
 fn clear_required_pi_extension_setting_before_install() -> Result<(), String> {
@@ -4114,6 +4127,19 @@ mod tests {
 
         assert!(super::remove_required_pi_extension_setting(&mut settings));
         assert_eq!(settings["packages"], json!(["npm:other-tool"]));
+        assert!(!super::remove_required_pi_extension_setting(&mut settings));
+    }
+
+    #[test]
+    fn repairs_legacy_non_array_packages_before_install() {
+        let mut settings = json!({
+            "theme": "dark",
+            "packages": "npm:pi-subagents"
+        });
+
+        assert!(super::remove_required_pi_extension_setting(&mut settings));
+        assert_eq!(settings["packages"], json!([]));
+        assert_eq!(settings["theme"], "dark");
         assert!(!super::remove_required_pi_extension_setting(&mut settings));
     }
 
