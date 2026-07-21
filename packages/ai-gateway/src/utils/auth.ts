@@ -322,7 +322,7 @@ function resolveAccountPlan(user: ScreenpipeUserData): AccountPlan {
 
   // Plan labels alone are stale advisory data in older rows. Require the fresh
   // /api/user entitlement tuple to agree end-to-end so a refunded account with
-  // users.plan=standard/pro cannot bypass the lifetime Free limit.
+  // users.plan=standard/pro cannot bypass the daily Free limit.
   if (!accountPlan || !entitlementPlan || accountPlan !== entitlementPlan) {
     return 'unknown';
   }

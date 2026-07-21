@@ -105,7 +105,7 @@ function paidHostedAiRouteError(auth: AuthResult): Response | null {
 			: 'free_plan_alternate_hosted_ai_disabled',
 		message: auth.tier === 'anonymous'
 			? 'Sign in to use screenpipe hosted AI.'
-			: 'The two-message free preview is available in screenpipe chat. Use your own Claude, Codex, Ollama, or provider credentials for unlimited local/BYOK use.',
+			: 'The daily two-message free allowance is available in screenpipe chat. Use your own Claude, Codex, Ollama, or provider credentials for unlimited local/BYOK use.',
 	});
 }
 
@@ -324,8 +324,8 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 			}
 
 			// Reserve only after every other request gate has passed, but before the
-			// first upstream byte can incur cost. D1 failures fail closed for free
-			// hosted chat; subscribed users never enter this branch.
+			// first upstream byte can incur cost. Metering storage failures fail open;
+			// the durable-object RPM limiter and daily cost cap remain in force.
 			let freeChatLease: FreeChatLease | null = null;
 			if (freeChat.mode === 'metered') {
 				const reservation = await reserveFreeChatRequest(env, freeChat);

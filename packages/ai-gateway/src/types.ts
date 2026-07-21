@@ -221,7 +221,7 @@ export type UserTier = 'anonymous' | 'logged_in' | 'subscribed';
 
 // Server-verified commercial plan. This is intentionally separate from
 // UserTier: Free and paid Basic both keep the existing `logged_in` model/rate
-// tier, but only Free receives the two-message hosted-AI preview.
+// tier, but only Free receives the daily two-message hosted-AI allowance.
 export type AccountPlan =
 	| 'free'
 	| 'basic'
