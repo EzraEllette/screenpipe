@@ -1408,13 +1408,14 @@ async fn fulfill_log_requests(
     http: &reqwest::Client,
     already_handled: Option<&str>,
 ) -> Option<String> {
-    // Customer-storage modes promise that telemetry bodies stay out of
-    // Screenpipe Cloud. Diagnostic logs are bodies too, so remote support-log
-    // collection is disabled unless the resolved policy explicitly uses
-    // hosted ingest. The server applies the same gate before queuing/serving a
-    // request.
-    if !matches!(cfg.upload_mode, EnterpriseUploadMode::HostedIngest) {
-        debug!("log-requests: disabled for customer-storage or unresolved mode");
+    // Only strict encrypted/no-read storage disables remote support logs.
+    // Existing readable customer-storage orgs deliberately grant Screenpipe
+    // read access so cloud pipes and support workflows continue to work.
+    if matches!(
+        cfg.upload_mode,
+        EnterpriseUploadMode::DirectEncrypted(_) | EnterpriseUploadMode::Blocked(_)
+    ) {
+        debug!("log-requests: disabled for strict no-read or unresolved mode");
         return None;
     }
 
@@ -1727,13 +1728,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn customer_storage_mode_never_collects_remote_diagnostic_logs() {
+    async fn strict_customer_storage_never_collects_remote_diagnostic_logs() {
         let dir = TempDir::new().unwrap();
         let cfg = direct_test_cfg(
             &dir,
             "http://should-not-be-called/ticket".to_string(),
             "http://should-not-be-called/complete".to_string(),
         );
+
+        let handled = fulfill_log_requests(&cfg, &reqwest::Client::new(), None).await;
+
+        assert!(handled.is_none());
+    }
+
+    #[tokio::test]
+    async fn readable_customer_storage_keeps_remote_diagnostic_logs_available() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/api/enterprise/log-requests"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "requested": false })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let dir = TempDir::new().unwrap();
+        let mut cfg = readable_direct_test_cfg(
+            &dir,
+            "http://should-not-be-called/ticket".to_string(),
+            "http://should-not-be-called/complete".to_string(),
+        );
+        cfg.ingest_url = format!("{}/api/enterprise/ingest", server.uri());
 
         let handled = fulfill_log_requests(&cfg, &reqwest::Client::new(), None).await;
 
