@@ -54,6 +54,7 @@ export type AppEnterpriseAccount = {
 export type AppUser = User & {
   app_entitled?: boolean | null;
   subscription_plan?: string | null;
+  plan_expires_at?: string | null;
   entitlement?: AppEntitlement | JsonValue | null;
   enterprise_account?: AppEnterpriseAccount | JsonValue | null;
 };
