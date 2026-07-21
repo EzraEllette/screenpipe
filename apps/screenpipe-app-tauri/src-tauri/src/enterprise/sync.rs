@@ -41,8 +41,9 @@ use tracing::{debug, error, info, warn};
 #[path = "upload.rs"]
 mod enterprise_upload;
 use enterprise_upload::{
-    upload_direct_encrypted_batch, upload_direct_readable_batch, DirectUploadCursors,
-    DirectUploadRecordCounts, EnterpriseUploadMode,
+    scrub_direct_upload_secrets_from_environment, upload_direct_encrypted_batch,
+    upload_direct_readable_batch, DirectUploadCursors, DirectUploadRecordCounts,
+    EnterpriseUploadMode,
 };
 
 /// How often we wake up and try to sync.
@@ -142,21 +143,27 @@ impl EnterpriseSyncConfig {
             .ok()
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| DEFAULT_INGEST_URL.to_string());
-        // Honor an explicit env override at boot for MDM / dev / test flows.
-        // Fail-closed semantics: if the operator explicitly set a mode and
-        // it can't be honored (invalid keys etc.), refuse to start sync — a
-        // silent fallback to plaintext could leak data. When no override is
-        // set we start in HostedIngest and let `resolve_upload_mode` ask
-        // the control plane what this license is actually configured for.
+        // Honor only an enforceable non-default env override at boot for MDM /
+        // dev / test flows. Otherwise start blocked until the control plane
+        // positively resolves the license policy. Starting in HostedIngest
+        // could transmit plaintext during a policy-lookup outage before the
+        // hosted route has a chance to reject the request.
         let explicit_mode = std::env::var("SCREENPIPE_ENTERPRISE_UPLOAD_MODE")
             .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty() && s != "auto");
+            .map(|s| s.trim().to_ascii_lowercase())
+            .filter(|s| {
+                !s.is_empty() && s != "auto" && s != "screenpipe_write" && s != "hosted_ingest"
+            });
         let upload_mode = if explicit_mode.is_some() {
             EnterpriseUploadMode::from_env(&ingest_url)?
         } else {
-            EnterpriseUploadMode::HostedIngest
+            EnterpriseUploadMode::Blocked(
+                "enterprise upload mode has not been resolved by the control plane".to_string(),
+            )
         };
+        if matches!(&upload_mode, EnterpriseUploadMode::DirectEncrypted(_)) {
+            scrub_direct_upload_secrets_from_environment();
+        }
         let cursor_path = app_data_dir.join(CURSOR_FILENAME);
         Some(Self {
             license_key,
@@ -179,8 +186,28 @@ impl EnterpriseSyncConfig {
     /// → uploads start" flow possible without any env-var setup on the
     /// customer's machine.
     pub async fn resolve_upload_mode(&mut self) {
-        let resolved = EnterpriseUploadMode::resolve(&self.license_key, &self.ingest_url).await;
-        self.upload_mode = resolved;
+        if let Some(resolved) =
+            EnterpriseUploadMode::resolve(&self.license_key, &self.ingest_url).await
+        {
+            if matches!(
+                &self.upload_mode,
+                EnterpriseUploadMode::DirectEncrypted(_)
+            ) && matches!(&resolved, EnterpriseUploadMode::Blocked(_))
+            {
+                // Root keys are deliberately scrubbed from the process
+                // environment after first load so child agents cannot inherit
+                // them. Keep the already-loaded encrypted config instead of
+                // treating the scrubbed env as a downgrade or outage.
+                return;
+            }
+            self.upload_mode = resolved;
+            if matches!(
+                &self.upload_mode,
+                EnterpriseUploadMode::DirectEncrypted(_)
+            ) {
+                scrub_direct_upload_secrets_from_environment();
+            }
+        }
     }
 }
 
@@ -466,6 +493,8 @@ pub enum EnterpriseSyncError {
     IngestServerError(u16),
     #[error("control-plane network error: {0}")]
     Network(String),
+    #[error("enterprise upload configuration blocked: {0}")]
+    Configuration(String),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -696,6 +725,10 @@ pub async fn run_one_sync(
     local: &dyn LocalApiClient,
     http: &reqwest::Client,
 ) -> Result<SyncTickReport, EnterpriseSyncError> {
+    if let EnterpriseUploadMode::Blocked(reason) = &cfg.upload_mode {
+        return Err(EnterpriseSyncError::Configuration(reason.clone()));
+    }
+
     // First-run safeguard: if cursor is empty, backfill SAFE_BACKFILL only —
     // not the entire DB. An enterprise customer enrolling a long-running
     // device shouldn't dump 6 months of personal history upstream.
@@ -863,6 +896,9 @@ pub async fn run_one_sync(
                 DirectUploadCursors::from_cursor(&next_cursor),
             )
             .await?;
+        }
+        EnterpriseUploadMode::Blocked(reason) => {
+            return Err(EnterpriseSyncError::Configuration(reason.clone()));
         }
     }
 
@@ -1372,6 +1408,16 @@ async fn fulfill_log_requests(
     http: &reqwest::Client,
     already_handled: Option<&str>,
 ) -> Option<String> {
+    // Customer-storage modes promise that telemetry bodies stay out of
+    // Screenpipe Cloud. Diagnostic logs are bodies too, so remote support-log
+    // collection is disabled unless the resolved policy explicitly uses
+    // hosted ingest. The server applies the same gate before queuing/serving a
+    // request.
+    if !matches!(cfg.upload_mode, EnterpriseUploadMode::HostedIngest) {
+        debug!("log-requests: disabled for customer-storage or unresolved mode");
+        return None;
+    }
+
     let base = control_plane_base(&cfg.ingest_url)?;
     let url = format!("{base}/api/enterprise/log-requests");
 
@@ -1454,7 +1500,7 @@ fn enterprise_http_client() -> reqwest::Client {
 }
 
 pub async fn run(
-    cfg: EnterpriseSyncConfig,
+    mut cfg: EnterpriseSyncConfig,
     local: Arc<dyn LocalApiClient>,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) {
@@ -1474,6 +1520,10 @@ pub async fn run(
     ));
 
     loop {
+        // Re-resolve before touching local telemetry. This picks up a live
+        // hosted-to-customer-storage policy change without requiring an app
+        // restart, and preserves the last safe mode on lookup failure.
+        cfg.resolve_upload_mode().await;
         let result = run_one_sync(&cfg, &mut cursor, local.as_ref(), &http).await;
 
         match &result {
@@ -1674,6 +1724,20 @@ mod tests {
         let empty: LogRequestsResponse = serde_json::from_str(r#"{}"#).unwrap();
         assert!(!empty.requested);
         assert!(empty.requested_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn customer_storage_mode_never_collects_remote_diagnostic_logs() {
+        let dir = TempDir::new().unwrap();
+        let cfg = direct_test_cfg(
+            &dir,
+            "http://should-not-be-called/ticket".to_string(),
+            "http://should-not-be-called/complete".to_string(),
+        );
+
+        let handled = fulfill_log_requests(&cfg, &reqwest::Client::new(), None).await;
+
+        assert!(handled.is_none());
     }
 
     #[tokio::test]
@@ -2126,10 +2190,7 @@ mod tests {
                 .expect("license set, must yield Some");
         assert_eq!(cfg.ingest_url, DEFAULT_INGEST_URL);
         assert_eq!(cfg.license_key, "sek_test");
-        assert!(matches!(
-            cfg.upload_mode,
-            EnterpriseUploadMode::HostedIngest
-        ));
+        assert!(matches!(cfg.upload_mode, EnterpriseUploadMode::Blocked(_)));
 
         // Case 4: ingest url override is respected.
         std::env::set_var("SCREENPIPE_ENTERPRISE_INGEST_URL", "https://staging/ingest");
@@ -2181,7 +2242,12 @@ mod tests {
             EnterpriseUploadMode::DirectReadable(_) => {
                 panic!("expected encrypted direct upload mode")
             }
+            EnterpriseUploadMode::Blocked(reason) => panic!("unexpected blocked mode: {reason}"),
         }
+        assert!(std::env::var("SCREENPIPE_ENTERPRISE_DIRECT_UPLOAD_ROOT_KEY_B64").is_err());
+        assert!(
+            std::env::var("SCREENPIPE_ENTERPRISE_DIRECT_UPLOAD_RECOVERY_ROOT_KEY_B64").is_err()
+        );
 
         // Case 6: readable direct upload does not require customer-held root keys.
         std::env::set_var(
@@ -2204,6 +2270,7 @@ mod tests {
             EnterpriseUploadMode::DirectEncrypted(_) => {
                 panic!("expected readable direct upload mode")
             }
+            EnterpriseUploadMode::Blocked(reason) => panic!("unexpected blocked mode: {reason}"),
         }
 
         // Case 7: encrypted direct upload without a valid root key fails closed.
@@ -2356,6 +2423,23 @@ mod tests {
             upload_mode: EnterpriseUploadMode::HostedIngest,
             log_dirs: vec![dir.path().to_path_buf()],
         }
+    }
+
+    #[tokio::test]
+    async fn unresolved_mode_blocks_before_reading_local_telemetry() {
+        let dir = TempDir::new().unwrap();
+        let mut cfg = test_cfg(&dir, "http://should-not-be-called".to_string());
+        cfg.upload_mode = EnterpriseUploadMode::Blocked("policy unresolved".to_string());
+        let local = MockLocal::new(Vec::new(), Vec::new());
+        let mut cursor = Cursor::default();
+
+        let error = run_one_sync(&cfg, &mut cursor, &local, &reqwest::Client::new())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, EnterpriseSyncError::Configuration(_)));
+        assert!(cursor.last_frame_ts.is_none());
+        assert!(local.last_frames_since.lock().unwrap().is_none());
     }
 
     fn direct_test_cfg(

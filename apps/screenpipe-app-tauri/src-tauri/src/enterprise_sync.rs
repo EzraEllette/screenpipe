@@ -811,10 +811,6 @@ mod imp {
 
         let (tx, rx) = tokio::sync::watch::channel(false);
         tauri::async_runtime::spawn(async move {
-            // Small startup delay so the local screenpipe server is up before
-            // we hammer it. Mirrors calendar publisher's `sleep(10)`.
-            tokio::time::sleep(std::time::Duration::from_secs(15)).await;
-
             // Ask the control plane what upload mode this license should run
             // in. Replaces the old "set SCREENPIPE_ENTERPRISE_UPLOAD_MODE on
             // every customer machine" UX — the dashboard binding is now the
@@ -826,6 +822,12 @@ mod imp {
                 "enterprise sync: resolved upload mode = {}",
                 cfg.upload_mode.label()
             );
+
+            // Small startup delay so the local screenpipe server is up before
+            // we hammer it. Mode resolution runs first so customer root keys
+            // are removed from the process environment before child agents
+            // can inherit them.
+            tokio::time::sleep(std::time::Duration::from_secs(15)).await;
 
             ee_sync::run(cfg, local, rx).await;
         });
