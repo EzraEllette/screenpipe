@@ -33,10 +33,13 @@ vi.mock("posthog-js", () => ({ default: { capture: mocks.capture } }));
 
 vi.mock("@/components/ui/use-toast", () => ({ toast: mocks.toast }));
 vi.mock("@/components/ui/toast", () => ({ ToastAction: () => null }));
-vi.mock("@/lib/web-url", () => ({ screenpipeWebUrl: () => "https://screenpipe.com/login" }));
+vi.mock("@/lib/web-url", () => ({
+  screenpipeWebUrl: (path: string) => `https://screenpipe.com${path}`,
+}));
 
 import {
   AuthGuard,
+  appLoginUrl,
   installAuthInterceptor,
   isScreenpipeApi,
   isScreenpipeAuthApi,
@@ -44,6 +47,12 @@ import {
 } from "./auth-guard";
 
 const LOGGED_IN = { token: "tok-123", cloud_subscribed: false };
+
+describe("appLoginUrl", () => {
+  it("marks direct web login as app initiated", () => {
+    expect(appLoginUrl()).toBe("https://screenpipe.com/login?source=app");
+  });
+});
 
 function renderGuard() {
   return render(
