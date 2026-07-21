@@ -250,17 +250,16 @@ describe("AuthGuard session-expiry handling", () => {
     );
   });
 
-  it("clears the full account when a focus re-verify returns 403", async () => {
+  it("keeps the session when a focus re-verify returns 403", async () => {
     mocks.loadUser.mockRejectedValueOnce(
       new Error("failed to verify token: 403 Forbidden")
     );
     renderGuard();
     fireEvent(window, new Event("focus"));
 
-    await waitFor(() => expect(mocks.updateSettings).toHaveBeenCalled());
-    const arg = mocks.updateSettings.mock.calls[0][0];
-    expect(arg.user).toBeNull();
-    expect(mocks.setCloudToken).toHaveBeenCalledWith(null);
+    await waitFor(() => expect(mocks.loadUser).toHaveBeenCalled());
+    expect(mocks.updateSettings).not.toHaveBeenCalled();
+    expect(mocks.setCloudToken).not.toHaveBeenCalled();
   });
 
   it("keeps the session on a transient network / 5xx error", async () => {
@@ -269,7 +268,7 @@ describe("AuthGuard session-expiry handling", () => {
     fireEvent(window, new Event("focus"));
 
     await waitFor(() => expect(mocks.loadUser).toHaveBeenCalled());
-    // a network blip must NOT clear the session — only 401/403 do
+    // a network blip must NOT clear the session — only a verified 401 does
     expect(mocks.updateSettings).not.toHaveBeenCalled();
     expect(mocks.setCloudToken).not.toHaveBeenCalled();
   });
@@ -314,6 +313,13 @@ describe("installAuthInterceptor sign-out scoping", () => {
       "session_expired",
       expect.objectContaining({ source: "fetch_interceptor", status: 401 }),
     );
+  });
+
+  it("does NOT sign out on a 403 from the website auth surface", async () => {
+    originalFetch.mockResolvedValue({ status: 403 });
+    await (window as any).fetch("https://screenpipe.com/api/composio/authorize");
+    expect(clearSession).not.toHaveBeenCalled();
+    expect(mocks.capture).not.toHaveBeenCalled();
   });
 
   it("ignores a 200 from the auth surface", async () => {
