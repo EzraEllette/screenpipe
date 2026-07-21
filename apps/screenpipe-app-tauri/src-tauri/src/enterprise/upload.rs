@@ -168,6 +168,14 @@ impl EnterpriseUploadMode {
                     ))
                 }
             }
+            Ok(ServerModeHint::DirectUploadReadable) => {
+                tracing::info!(
+                    "enterprise sync: server requires readable customer storage for cloud processing"
+                );
+                Some(Self::DirectReadable(
+                    DirectUploadConfig::without_recipients(ingest_url),
+                ))
+            }
             Ok(ServerModeHint::DirectUpload) => {
                 // Encrypted if MDM root keys are present, readable
                 // otherwise. Same logic the env path uses; just gated by
@@ -323,6 +331,7 @@ impl EnterpriseUploadMode {
 enum ServerModeHint {
     DirectUpload,
     DirectUploadEncrypted,
+    DirectUploadReadable,
     HostedIngest,
 }
 
@@ -368,6 +377,7 @@ fn parse_server_mode_hint(raw: &str) -> Result<ServerModeHint, EnterpriseSyncErr
     match raw.trim().to_ascii_lowercase().as_str() {
         "direct_upload" => Ok(ServerModeHint::DirectUpload),
         "direct_upload_encrypted" => Ok(ServerModeHint::DirectUploadEncrypted),
+        "direct_upload_readable" => Ok(ServerModeHint::DirectUploadReadable),
         "hosted_ingest" | "screenpipe_write" | "" => Ok(ServerModeHint::HostedIngest),
         other => Err(EnterpriseSyncError::Network(format!(
             "unknown desired_mode '{other}' from control plane"
@@ -759,6 +769,10 @@ mod tests {
         assert_eq!(
             parse_server_mode_hint("direct_upload").unwrap(),
             ServerModeHint::DirectUpload
+        );
+        assert_eq!(
+            parse_server_mode_hint("direct_upload_readable").unwrap(),
+            ServerModeHint::DirectUploadReadable
         );
     }
 
