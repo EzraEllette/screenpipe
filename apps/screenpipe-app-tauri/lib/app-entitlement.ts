@@ -16,6 +16,7 @@ export type AppEntitlementPlan =
 export type AppEntitlementSource =
   | "none"
   | "subscription"
+  | "signup_trial"
   | "manual"
   | "enterprise"
   | "lifetime"
@@ -141,6 +142,38 @@ function parseEntitlementTime(value: string | null | undefined) {
   return Number.isFinite(time) ? time : null;
 }
 
+function entitlementSource(entitlement: AppEntitlement | null): string | null {
+  return typeof entitlement?.source === "string"
+    ? entitlement.source.trim().toLowerCase()
+    : null;
+}
+
+function isSignupTrial(entitlement: AppEntitlement | null): boolean {
+  return entitlementSource(entitlement) === "signup_trial";
+}
+
+// Signup trials are non-renewable and have no offline grace. The website
+// returns both fields with the same ends_at. Requiring both means a partial or
+// malformed cache cannot extend the trial; the earlier value fails closed if
+// the fields ever disagree.
+function getSignupTrialHardExpiryMs(
+  entitlement: AppEntitlement | null,
+): number | null {
+  if (!isSignupTrial(entitlement)) return null;
+  const expiresAt = parseEntitlementTime(entitlement?.expires_at);
+  const currentPeriodEnd = parseEntitlementTime(entitlement?.current_period_end);
+  if (expiresAt === null || currentPeriodEnd === null) return null;
+  return Math.min(expiresAt, currentPeriodEnd);
+}
+
+function isSignupTrialActiveAt(
+  entitlement: AppEntitlement | null,
+  nowMs: number,
+): boolean {
+  const hardExpiryMs = getSignupTrialHardExpiryMs(entitlement);
+  return hardExpiryMs !== null && nowMs < hardExpiryMs && entitlement?.active === true;
+}
+
 function getStableAccountId(
   user: AppUser | null | undefined,
 ): string | null {
@@ -175,9 +208,29 @@ function isEntitlementFresh(entitlement: AppEntitlement | null) {
  */
 function hasVerifiedFreePlan(user: AppUser | null | undefined): boolean {
   const stableAccountId = getStableAccountId(user);
-  if (!user || !stableAccountId || user.cloud_subscribed === true) return false;
+  if (!user || !stableAccountId) return false;
 
   const entitlement = asEntitlement(user.entitlement);
+  if (isSignupTrial(entitlement)) {
+    const nowMs = Date.now();
+    const checkedAt = parseEntitlementTime(entitlement?.checked_at);
+    const hardExpiryMs = getSignupTrialHardExpiryMs(entitlement);
+    const accountPlan = user.subscription_plan?.trim().toLowerCase();
+    const entitlementPlan =
+      typeof entitlement?.plan === "string"
+        ? entitlement.plan.trim().toLowerCase()
+        : null;
+    return (
+      accountPlan === "pro" &&
+      entitlementPlan === "pro" &&
+      checkedAt !== null &&
+      checkedAt <= nowMs + APP_ENTITLEMENT_CLOCK_SKEW_MS &&
+      hardExpiryMs !== null &&
+      nowMs >= hardExpiryMs
+    );
+  }
+
+  if (user.cloud_subscribed === true) return false;
   // Once verified, free limits persist offline; merely waiting 72 hours must
   // not silently unlock pipes or retention controls.
   const checkedAt = parseEntitlementTime(entitlement?.checked_at);
@@ -203,6 +256,7 @@ function hasVerifiedFreePlan(user: AppUser | null | undefined): boolean {
     source === "manual" ||
     source === "enterprise" ||
     source === "lifetime" ||
+    source === "signup_trial" ||
     source === "dev" ||
     hasFutureGrace(entitlement)
   ) {
@@ -271,6 +325,15 @@ function hasVerifiedPaidPlanAt(
     (user.app_entitled === true || entitlement.features?.app === true);
   if (!hasAppFeature) return false;
 
+  // active:true, grace, and a fresh check must never carry this fixed trial
+  // through the server-issued ends_at instant.
+  if (isSignupTrial(entitlement)) {
+    return (
+      isEntitlementFreshAt(entitlement, nowMs) &&
+      isSignupTrialActiveAt(entitlement, nowMs)
+    );
+  }
+
   if (
     isLifetimeEntitlement(entitlement) ||
     hasFutureGraceAt(entitlement, nowMs)
@@ -330,6 +393,10 @@ export function getPaidPlanPolicyDeadlineMs(
   if (!entitlement || isLifetimeEntitlement(entitlement)) return null;
 
   const deadlines: number[] = [];
+  const signupTrialDeadline = getSignupTrialHardExpiryMs(entitlement);
+  if (signupTrialDeadline !== null && signupTrialDeadline > nowMs) {
+    deadlines.push(signupTrialDeadline);
+  }
   const checkedAt = parseEntitlementTime(entitlement.checked_at);
   if (entitlement.active === true && checkedAt !== null) {
     const freshnessDeadline = checkedAt + APP_ENTITLEMENT_MAX_STALE_MS;
@@ -364,6 +431,13 @@ export function hasLegacyPaidAccess(user: AppUser | null | undefined) {
     (user.app_entitled === true || entitlement.features?.app === true);
   if (!hasAppFeature) return false;
 
+  if (isSignupTrial(entitlement)) {
+    return (
+      isEntitlementFresh(entitlement) &&
+      isSignupTrialActiveAt(entitlement, Date.now())
+    );
+  }
+
   if (isLifetimeEntitlement(entitlement) || hasFutureGrace(entitlement)) return true;
 
   return isEntitlementFresh(entitlement) && entitlement.active === true;
@@ -383,7 +457,12 @@ export function hasConsumerAppSubscription(user: AppUser | null | undefined) {
     : null;
 
   if (source === "enterprise") return false;
-  if (source === "subscription" || source === "manual" || source === "lifetime") {
+  if (
+    source === "subscription" ||
+    source === "signup_trial" ||
+    source === "manual" ||
+    source === "lifetime"
+  ) {
     return hasAppEntitlement(user);
   }
 
@@ -455,7 +534,10 @@ export function needsAppEntitlementRefresh(user: AppUser | null | undefined) {
   // they never need a re-verification prompt.
   if (isLifetimeEntitlement(entitlement) || hasFutureGrace(entitlement)) return false;
   const appearsEntitled = user.app_entitled === true || entitlement?.features?.app === true;
-  return appearsEntitled && !isEntitlementFresh(entitlement);
+  const signupTrialExpiredOrInvalid =
+    isSignupTrial(entitlement) &&
+    !isSignupTrialActiveAt(entitlement, Date.now());
+  return appearsEntitled && (!isEntitlementFresh(entitlement) || signupTrialExpiredOrInvalid);
 }
 
 export function normalizePlanLabel(plan: string | null | undefined) {

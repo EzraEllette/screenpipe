@@ -20,6 +20,10 @@ const FOCUS_REVERIFY_COOLDOWN_MS = 30 * 1000;
 
 let lastToastTime = 0;
 
+export function appLoginUrl() {
+  return screenpipeWebUrl("/login?source=app", "https://screenpipe.com");
+}
+
 // Decide whether a window-focus / visibility change should trigger an eager
 // entitlement re-verify. Exported for unit testing. We skip while the window is
 // hidden (a `visibilitychange` to hidden shouldn't fetch) and debounce against
@@ -38,7 +42,7 @@ export function shouldReverifyOnFocus(
 
 function openLogin() {
   // dynamic import to avoid SSR/test crashes from tauri plugins
-  const loginUrl = screenpipeWebUrl("/login", "https://screenpipe.com");
+  const loginUrl = appLoginUrl();
   import("@tauri-apps/plugin-shell").then(({ open }) => {
     open(loginUrl);
   }).catch(() => {
