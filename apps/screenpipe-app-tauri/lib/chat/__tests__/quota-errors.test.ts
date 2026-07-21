@@ -46,9 +46,10 @@ describe("classifyQuotaError", () => {
 });
 
 describe("buildDailyLimitMessage", () => {
-  it("shows the lifetime free message wall without retry copy", () => {
+  it("shows the daily free message wall without immediate retry copy", () => {
     const message = buildDailyLimitMessage("free_chat_limit_exceeded");
     expect(message).toContain("2 free hosted AI messages");
+    expect(message).toContain("tomorrow");
     expect(message).toContain("Claude");
     expect(message).toContain("Codex");
   });

@@ -127,7 +127,7 @@ describe('/anthropic/v1/messages authentication and model policy', () => {
 		const outer = await response.json() as { error: string };
 		const error = JSON.parse(outer.error);
 		expect(error.error).toBe('free_plan_alternate_hosted_ai_disabled');
-		expect(error.message).toContain('two-message free preview');
+		expect(error.message).toContain('daily two-message free allowance');
 		expect(upstreamFetch).toHaveBeenCalledTimes(1);
 	});
 });

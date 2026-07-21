@@ -27,12 +27,11 @@ export const FREE_CHAT_IN_FLIGHT_LEASE_SECONDS = 10 * 60;
 // check. Keep this in sync with FREE_PREVIEW_WATERFALL in handlers/chat.ts.
 export const FREE_CHAT_COST_RESERVATION_MICRO_USD = 75_000;
 // Deliberately independent from the turn/call constants: increasing those
-// later cannot silently raise the lifetime cash ceiling.
-export const FREE_CHAT_LIFETIME_BUDGET_MICRO_USD = 1_200_000;
+// later cannot silently raise the daily cash ceiling.
+export const FREE_CHAT_DAILY_BUDGET_MICRO_USD = 1_200_000;
 
-const FREE_CHAT_USAGE_TIER = 'free_chat_turn_v1';
-const FREE_CHAT_LAST_RESET = 'lifetime';
-const FREE_CHAT_BUDGET_TIER = 'free_chat_budget_v1';
+const FREE_CHAT_USAGE_TIER_PREFIX = 'free_chat_turn_v2';
+const FREE_CHAT_BUDGET_TIER_PREFIX = 'free_chat_budget_v2';
 const FREE_CHAT_LEASE_TIER = 'free_chat_in_flight_v1';
 const INTERNAL_TITLE_SESSION_PREFIX = '__title:';
 
@@ -58,7 +57,7 @@ export type FreeChatLease = {
 };
 
 export type FreeChatLeaseReservation =
-	| { allowed: true; lease: FreeChatLease }
+	| { allowed: true; lease: FreeChatLease | null }
 	| { allowed: false; error: FreeChatLimitError };
 
 export function hasPaidHostedAiPlan(auth: AuthResult): boolean {
@@ -75,6 +74,10 @@ function blocked(status: number, code: string, message: string): FreeChatPreflig
 
 function getSessionAffinity(request: Request): string | null {
 	return request.headers.get('x-session-affinity')?.trim() || null;
+}
+
+function utcDay(now: Date): string {
+	return now.toISOString().slice(0, 10);
 }
 
 function stableStringify(value: unknown): string {
@@ -389,7 +392,7 @@ export async function prepareFreeChatTurn(
 
 	// Free and paid Basic deliberately share the `logged_in` model/rate tier.
 	// The server-verified commercial plan is the only safe discriminator for the
-	// lifetime preview. Missing/conflicting plan truth fails closed instead of
+	// daily allowance. Missing/conflicting plan truth fails closed instead of
 	// either granting free inference or accidentally charging a paid customer.
 	if (hasPaidHostedAiPlan(auth)) return { mode: 'bypass' };
 	if (auth.accountPlan !== 'free') {
@@ -507,8 +510,12 @@ function providerCallLimitError(): FreeChatReservation {
 export async function reserveFreeChatTurn(
 	env: Env,
 	preflight: Extract<FreeChatPreflight, { mode: 'metered' }>,
+	now: Date = new Date(),
 ): Promise<FreeChatReservation> {
 	const { turnKey, userId } = preflight;
+	const day = utcDay(now);
+	const dailyTurnKey = `${turnKey}:${day}`;
+	const usageTier = `${FREE_CHAT_USAGE_TIER_PREFIX}:${day}`;
 
 	try {
 		const increment = async () => env.DB.prepare(`
@@ -516,9 +523,9 @@ export async function reserveFreeChatTurn(
 			SET daily_count = daily_count + 1, updated_at = CURRENT_TIMESTAMP
 			WHERE device_id = ? AND user_id = ? AND tier = ? AND daily_count < ?
 		`).bind(
-			turnKey,
+			dailyTurnKey,
 			userId,
-			FREE_CHAT_USAGE_TIER,
+			usageTier,
 			FREE_CHAT_MAX_PROVIDER_CALLS_PER_MESSAGE,
 		).run();
 
@@ -527,7 +534,7 @@ export async function reserveFreeChatTurn(
 		const existing = await env.DB.prepare(`
 			SELECT daily_count FROM usage
 			WHERE device_id = ? AND user_id = ? AND tier = ?
-		`).bind(turnKey, userId, FREE_CHAT_USAGE_TIER)
+		`).bind(dailyTurnKey, userId, usageTier)
 			.first<{ daily_count: number }>();
 		if (existing) {
 			if (existing.daily_count >= FREE_CHAT_MAX_PROVIDER_CALLS_PER_MESSAGE) {
@@ -548,12 +555,12 @@ export async function reserveFreeChatTurn(
 				SELECT COUNT(*) FROM usage WHERE user_id = ? AND tier = ?
 			) < ?
 		`).bind(
-			turnKey,
+			dailyTurnKey,
 			userId,
-			FREE_CHAT_LAST_RESET,
-			FREE_CHAT_USAGE_TIER,
+			day,
+			usageTier,
 			userId,
-			FREE_CHAT_USAGE_TIER,
+			usageTier,
 			FREE_CHAT_MESSAGE_LIMIT,
 		).run();
 
@@ -566,7 +573,7 @@ export async function reserveFreeChatTurn(
 		const racedExisting = await env.DB.prepare(`
 			SELECT daily_count FROM usage
 			WHERE device_id = ? AND user_id = ? AND tier = ?
-		`).bind(turnKey, userId, FREE_CHAT_USAGE_TIER)
+		`).bind(dailyTurnKey, userId, usageTier)
 			.first<{ daily_count: number }>();
 		if (racedExisting) return providerCallLimitError();
 
@@ -575,37 +582,19 @@ export async function reserveFreeChatTurn(
 			error: {
 				status: 429,
 				code: 'free_chat_limit_exceeded',
-				message: `You've used your ${FREE_CHAT_MESSAGE_LIMIT} free hosted AI messages. Upgrade to keep chatting, or use your own AI provider.`,
+				message: `You've used today's ${FREE_CHAT_MESSAGE_LIMIT} free hosted AI messages. Try again tomorrow, upgrade, or use your own AI provider.`,
 			},
 		};
 	} catch (error) {
 		console.error('free chat limit unavailable', error);
-		// This gate protects a lifetime cost boundary. Free hosted requests fail
-		// closed when D1 is unavailable; paid users bypass this function entirely.
-		return {
-			allowed: false,
-			error: {
-				status: 503,
-				code: 'free_chat_limit_unavailable',
-				message: 'Free hosted chat is temporarily unavailable. Try again shortly.',
-			},
-		};
+		// Availability wins over metering during a D1 incident. The durable-object
+		// RPM limiter and normal daily cost cap still run before this gate.
+		return { allowed: true };
 	}
 }
 
 async function accountResourceKey(kind: 'budget' | 'lease', userId: string): Promise<string> {
 	return `free-chat:${kind}:v1:${await sha256Hex(userId)}`;
-}
-
-function capacityUnavailable(): { allowed: false; error: FreeChatLimitError } {
-	return {
-		allowed: false,
-		error: {
-			status: 503,
-			code: 'free_chat_capacity_unavailable',
-			message: 'Free hosted chat is temporarily unavailable. Try again shortly.',
-		},
-	};
 }
 
 /** Release only the exact lease generation held by this response. */
@@ -684,19 +673,22 @@ export async function acquireFreeChatLease(
 		}
 		return { allowed: true, lease: { key: leaseKey, userId, expiresAt } };
 	} catch (error) {
-		console.error('free chat lease unavailable', error);
-		return capacityUnavailable();
+		console.error('free chat lease unavailable, failing open', error);
+		return { allowed: true, lease: null };
 	}
 }
 
-/** Atomically reserve conservative lifetime spend before upstream work. */
+/** Atomically reserve conservative daily spend before upstream work. */
 export async function reserveFreeChatBudget(
 	env: Env,
 	preflight: Extract<FreeChatPreflight, { mode: 'metered' }>,
+	now: Date = new Date(),
 ): Promise<FreeChatReservation> {
 	const { userId } = preflight;
+	const day = utcDay(now);
 	try {
-		const budgetKey = await accountResourceKey('budget', userId);
+		const budgetKey = await accountResourceKey('budget', `${userId}:${day}`);
+		const budgetTier = `${FREE_CHAT_BUDGET_TIER_PREFIX}:${day}`;
 		const incrementBudget = async () => env.DB.prepare(`
 			UPDATE usage
 			SET daily_count = daily_count + ?, updated_at = CURRENT_TIMESTAMP
@@ -706,8 +698,8 @@ export async function reserveFreeChatBudget(
 			FREE_CHAT_COST_RESERVATION_MICRO_USD,
 			budgetKey,
 			userId,
-			FREE_CHAT_BUDGET_TIER,
-			FREE_CHAT_LIFETIME_BUDGET_MICRO_USD,
+			budgetTier,
+			FREE_CHAT_DAILY_BUDGET_MICRO_USD,
 			FREE_CHAT_COST_RESERVATION_MICRO_USD,
 		).run();
 
@@ -721,10 +713,10 @@ export async function reserveFreeChatBudget(
 				budgetKey,
 				userId,
 				FREE_CHAT_COST_RESERVATION_MICRO_USD,
-				FREE_CHAT_LAST_RESET,
-				FREE_CHAT_BUDGET_TIER,
+				day,
+				budgetTier,
 				FREE_CHAT_COST_RESERVATION_MICRO_USD,
-				FREE_CHAT_LIFETIME_BUDGET_MICRO_USD,
+				FREE_CHAT_DAILY_BUDGET_MICRO_USD,
 			).run();
 			budgetClaimed = changed(insert);
 		}
@@ -737,16 +729,16 @@ export async function reserveFreeChatBudget(
 				allowed: false,
 				error: {
 					status: 429,
-					code: 'free_chat_budget_exceeded',
-					message: 'The free hosted AI preview budget has been used. Upgrade to keep chatting, or use your own AI provider.',
+					code: 'free_chat_daily_budget_exceeded',
+					message: "Today's free hosted AI budget has been used. Try again tomorrow, upgrade, or use your own AI provider.",
 				},
 			};
 		}
 
 		return { allowed: true };
 	} catch (error) {
-		console.error('free chat budget unavailable', error);
-		return capacityUnavailable();
+		console.error('free chat budget unavailable, failing open', error);
+		return { allowed: true };
 	}
 }
 
@@ -762,14 +754,15 @@ export async function reserveFreeChatRequest(
 ): Promise<FreeChatLeaseReservation> {
 	const leaseReservation = await acquireFreeChatLease(env, preflight, now);
 	if (!leaseReservation.allowed) return leaseReservation;
+	if (!leaseReservation.lease) return leaseReservation;
 
-	const turnReservation = await reserveFreeChatTurn(env, preflight);
+	const turnReservation = await reserveFreeChatTurn(env, preflight, now);
 	if (!turnReservation.allowed) {
 		await releaseFreeChatLease(env, leaseReservation.lease);
 		return turnReservation;
 	}
 
-	const budgetReservation = await reserveFreeChatBudget(env, preflight);
+	const budgetReservation = await reserveFreeChatBudget(env, preflight, now);
 	if (!budgetReservation.allowed) {
 		await releaseFreeChatLease(env, leaseReservation.lease);
 		return budgetReservation;

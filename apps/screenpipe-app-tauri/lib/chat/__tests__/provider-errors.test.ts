@@ -56,13 +56,14 @@ describe("provider error copy", () => {
     }
   });
 
-  it("maps the lifetime free-chat wall to upgrade-or-BYOK copy", () => {
+  it("maps the daily free-chat wall to tomorrow-or-BYOK copy", () => {
     const msg = buildProviderErrorMessage(
       '{"error":"free_chat_limit_exceeded","limit":2}',
       { provider: "screenpipe-cloud", model: "auto" },
     );
     expect(msg).toContain("2 free hosted AI messages");
-    expect(msg).toContain("Upgrade");
+    expect(msg).toContain("tomorrow");
+    expect(msg).toContain("upgrade");
     expect(msg).toContain("Ollama");
     expect(msg).toContain("Claude");
     expect(msg).toContain("Codex");

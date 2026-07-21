@@ -7,8 +7,8 @@ import { Miniflare } from 'miniflare';
 import type { Env } from '../types';
 import {
 	FREE_CHAT_COST_RESERVATION_MICRO_USD,
+	FREE_CHAT_DAILY_BUDGET_MICRO_USD,
 	FREE_CHAT_IN_FLIGHT_LEASE_SECONDS,
-	FREE_CHAT_LIFETIME_BUDGET_MICRO_USD,
 	FREE_CHAT_MAX_PROVIDER_CALLS_PER_MESSAGE,
 	acquireFreeChatLease,
 	releaseFreeChatLease,
@@ -61,15 +61,18 @@ describe('free chat reservation against workerd D1', () => {
 		await miniflare.dispose();
 	});
 
-	it('atomically grants only two distinct lifetime turns', async () => {
+	it('atomically grants only two distinct turns per UTC day', async () => {
+		const dayOne = new Date('2026-07-14T12:00:00.000Z');
+		const dayTwo = new Date('2026-07-15T12:00:00.000Z');
 		const results = await Promise.all(
 			Array.from({ length: 12 }, (_, index) =>
-				reserveFreeChatTurn(env, metered('user-d1-turns', `turn-${index}`)),
+				reserveFreeChatTurn(env, metered('user-d1-turns', `turn-${index}`), dayOne),
 			),
 		);
 
 		expect(results.filter((result) => result.allowed)).toHaveLength(2);
 		expect(results.filter((result) => !result.allowed)).toHaveLength(10);
+		expect(await reserveFreeChatTurn(env, metered('user-d1-turns', 'turn-next-day'), dayTwo)).toEqual({ allowed: true });
 	});
 
 	it('atomically bounds parallel requests for one existing turn', async () => {
@@ -97,7 +100,7 @@ describe('free chat reservation against workerd D1', () => {
 		expect(results.filter((result) => result.allowed)).toHaveLength(1);
 		expect(results.filter((result) => !result.allowed)).toHaveLength(11);
 		const winner = results.find((result) => result.allowed);
-		if (winner?.allowed) await releaseFreeChatLease(env, winner.lease);
+		if (winner?.allowed && winner.lease) await releaseFreeChatLease(env, winner.lease);
 		expect((await acquireFreeChatLease(env, turn, now)).allowed).toBe(true);
 	});
 
@@ -110,40 +113,41 @@ describe('free chat reservation against workerd D1', () => {
 
 		const db = env.DB;
 		const turnRow = await db.prepare(
-			'SELECT daily_count FROM usage WHERE device_id = ?',
-		).bind('turn-ordered').first<{ daily_count: number }>();
+			'SELECT daily_count FROM usage WHERE device_id LIKE ?',
+		).bind('turn-ordered:%').first<{ daily_count: number }>();
 		expect(turnRow?.daily_count).toBe(1);
 		const budgetRow = await db.prepare(
-			"SELECT daily_count FROM usage WHERE user_id = ? AND tier = 'free_chat_budget_v1'",
+			"SELECT daily_count FROM usage WHERE user_id = ? AND tier LIKE 'free_chat_budget_v2:%'",
 		).bind('user-d1-ordered').first<{ daily_count: number }>();
 		expect(budgetRow?.daily_count).toBe(FREE_CHAT_COST_RESERVATION_MICRO_USD);
-		if (first.allowed) await releaseFreeChatLease(env, first.lease);
+		if (first.allowed && first.lease) await releaseFreeChatLease(env, first.lease);
 	});
 
-	it('releases the lease and skips budget when the lifetime turn claim fails', async () => {
+	it('releases the lease and skips budget when the daily turn claim fails', async () => {
 		const userId = 'user-d1-exhausted';
-		await reserveFreeChatTurn(env, metered(userId, 'turn-used-1'));
-		await reserveFreeChatTurn(env, metered(userId, 'turn-used-2'));
+		const now = new Date('2026-07-14T12:00:00.000Z');
+		await reserveFreeChatTurn(env, metered(userId, 'turn-used-1'), now);
+		await reserveFreeChatTurn(env, metered(userId, 'turn-used-2'), now);
 
 		const rejected = await reserveFreeChatRequest(
 			env,
 			metered(userId, 'turn-rejected-3'),
-			new Date('2026-07-14T12:00:00.000Z'),
+			now,
 		);
 		expect(rejected.allowed).toBe(false);
 		if (!rejected.allowed) expect(rejected.error.code).toBe('free_chat_limit_exceeded');
 
 		const budgetRow = await env.DB.prepare(
-			"SELECT daily_count FROM usage WHERE user_id = ? AND tier = 'free_chat_budget_v1'",
+			"SELECT daily_count FROM usage WHERE user_id = ? AND tier LIKE 'free_chat_budget_v2:%'",
 		).bind(userId).first<{ daily_count: number }>();
 		expect(budgetRow).toBeNull();
 		const nextLease = await acquireFreeChatLease(
 			env,
 			metered(userId, 'turn-rejected-3'),
-			new Date('2026-07-14T12:00:00.000Z'),
+			now,
 		);
 		expect(nextLease.allowed).toBe(true);
-		if (nextLease.allowed) await releaseFreeChatLease(env, nextLease.lease);
+		if (nextLease.allowed && nextLease.lease) await releaseFreeChatLease(env, nextLease.lease);
 	});
 
 	it('reclaims an expired lease and ignores the stale generation release', async () => {
@@ -155,19 +159,20 @@ describe('free chat reservation against workerd D1', () => {
 		const afterExpiry = new Date(start.getTime() + (FREE_CHAT_IN_FLIGHT_LEASE_SECONDS + 1) * 1000);
 		const replacement = await acquireFreeChatLease(env, turn, afterExpiry);
 		expect(replacement.allowed).toBe(true);
-		if (first.allowed) await releaseFreeChatLease(env, first.lease);
+		if (first.allowed && first.lease) await releaseFreeChatLease(env, first.lease);
 
 		const overlapping = await acquireFreeChatLease(env, turn, afterExpiry);
 		expect(overlapping.allowed).toBe(false);
-		if (replacement.allowed) await releaseFreeChatLease(env, replacement.lease);
+		if (replacement.allowed && replacement.lease) await releaseFreeChatLease(env, replacement.lease);
 	});
 
-	it('atomically caps conservative lifetime spend reservations', async () => {
+	it('atomically caps conservative daily spend reservations', async () => {
 		const turn = metered('user-d1-budget', 'turn-budget');
-		const reservationLimit = FREE_CHAT_LIFETIME_BUDGET_MICRO_USD
+		const now = new Date('2026-07-14T12:00:00.000Z');
+		const reservationLimit = FREE_CHAT_DAILY_BUDGET_MICRO_USD
 			/ FREE_CHAT_COST_RESERVATION_MICRO_USD;
 		const results = await Promise.all(
-			Array.from({ length: reservationLimit + 8 }, () => reserveFreeChatBudget(env, turn)),
+			Array.from({ length: reservationLimit + 8 }, () => reserveFreeChatBudget(env, turn, now)),
 		);
 
 		expect(results.filter((result) => result.allowed)).toHaveLength(reservationLimit);

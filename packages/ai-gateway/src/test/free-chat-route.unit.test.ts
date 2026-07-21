@@ -228,7 +228,7 @@ describe('/v1/chat/completions free-plan route policy', () => {
 		const textToSpeech = await handleRequest(request(auth, '/v1/text-to-speech'), env, ctx);
 
 		// These are speech features with their own quotas/input validation. They
-		// deliberately do not consume or bypass hosted-chat lifetime turns.
+		// deliberately do not consume or bypass hosted-chat daily turns.
 		expect(listen.status).toBe(200);
 		expect(realtime.status).toBe(426);
 		expect(transcribe.status).toBe(400);

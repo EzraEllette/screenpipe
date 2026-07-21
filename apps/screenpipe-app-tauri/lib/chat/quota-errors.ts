@@ -8,7 +8,7 @@
 export function buildDailyLimitMessage(errorStr: string): string {
   try {
     if (errorStr.includes("free_chat_limit_exceeded")) {
-      return "You've used your 2 free hosted AI messages. Upgrade to keep chatting, or switch your AI preset to Ollama, Claude, Codex, or your own provider key.";
+      return "You've used today's 2 free hosted AI messages. Try again tomorrow, upgrade, or switch your AI preset to Ollama, Claude, Codex, or your own provider key.";
     }
     if (errorStr.includes("free_chat_turn_request_limit_exceeded")) {
       return "This free message reached its 8-step agent limit. Upgrade for longer agent runs, or switch your AI preset to your own provider.";
