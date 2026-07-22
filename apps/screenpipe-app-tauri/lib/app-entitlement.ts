@@ -127,9 +127,10 @@ function asEntitlement(entitlement: AppUser["entitlement"] | undefined): AppEnti
 }
 
 /**
- * Whether billing has superseded a profile-granted plan such as a signup
- * trial. The profile's plan_expires_at metadata can linger after checkout, but
- * the selected entitlement source switches to subscription.
+ * Whether billing has superseded a profile-granted plan such as the signup
+ * trial (which the server resolves as source "manual"). The profile's
+ * plan_expires_at metadata can linger after checkout, but the selected
+ * entitlement source switches to subscription.
  */
 export function hasBillingSubscriptionEntitlement(
   user: AppUser | null | undefined,

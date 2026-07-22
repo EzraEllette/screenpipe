@@ -39,7 +39,29 @@ describe("PlanExpirationNotice", () => {
     expect(getPlanExpiration("2026-07-21T11:59:59.000Z", now)).toBeNull();
   });
 
-  it("hides a stale signup-trial expiration after billing takes over", () => {
+  it("shows the countdown for a profile-granted trial (server source: manual)", () => {
+    // Mirrors the exact /api/user shape for the 14-day signup Business trial:
+    // resolveAppEntitlement resolves profile grants as source "manual" —
+    // there is no "signup_trial" source in the server vocabulary.
+    const expiration = getUserPlanExpiration(
+      {
+        plan_expires_at: "2026-08-04T12:00:00.000Z",
+        subscription_plan: "pro",
+        entitlement: {
+          active: true,
+          plan: "pro",
+          source: "manual",
+          status: "active",
+          expires_at: "2026-08-04T12:00:00.000Z",
+        },
+      } as AppUser,
+      Date.parse("2026-07-21T12:00:00.000Z"),
+    );
+
+    expect(expiration?.daysRemaining).toBe(14);
+  });
+
+  it("hides a stale profile-grant trial expiration after billing takes over", () => {
     const expiration = getUserPlanExpiration(
       {
         plan_expires_at: "2026-08-04T12:00:00.000Z",
@@ -67,7 +89,7 @@ describe("PlanExpirationNotice", () => {
         user={{
           plan_expires_at: "2026-07-24T12:00:00.000Z",
           subscription_plan: "pro",
-          entitlement: { source: "signup_trial" },
+          entitlement: { source: "manual" },
         } as AppUser}
         onClick={onClick}
       />,

@@ -254,7 +254,8 @@ export function AccountSection() {
                       } as AppUser,
                     });
                     // Refresh the complete entitlement so its source changes
-                    // from signup_trial to subscription in this session.
+                    // from manual (the profile trial grant) to subscription
+                    // in this session.
                     await loadUser(settings.user.token, true);
                   }
                   toast({

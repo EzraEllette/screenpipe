@@ -159,8 +159,8 @@ describe("AccountSection subscription/login gating", () => {
       entitlement: {
         active: true,
         plan: "pro",
-        source: "signup_trial",
-        status: "trialing",
+        source: "manual",
+        status: "active",
       },
     };
 
@@ -211,8 +211,8 @@ describe("AccountSection subscription/login gating", () => {
       entitlement: {
         active: true,
         plan: "pro",
-        source: "signup_trial",
-        status: "trialing",
+        source: "manual",
+        status: "active",
       },
     };
     vi.stubGlobal(
