@@ -253,10 +253,84 @@ pub fn check_accessibility() -> PermissionStatus {
     extern "C" {
         fn AXIsProcessTrusted() -> bool;
     }
-    if unsafe { AXIsProcessTrusted() } {
+    // AXIsProcessTrusted caches its answer in-process (macOS 13+), so a grant
+    // made while the app is running keeps reading as denied until relaunch.
+    // The event-tap probe asks tccd live; keep AXIsProcessTrusted as a cheap
+    // first-line check and to cover the tap probe's own false negatives
+    // (LSBackgroundOnly helpers, dev-build signature churn).
+    if unsafe { AXIsProcessTrusted() } || macos_accessibility::event_tap_probe() {
         PermissionStatus::Granted
     } else {
         PermissionStatus::Denied
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod macos_accessibility {
+    use std::ffi::c_void;
+
+    type CGEventTapProxy = *mut c_void;
+    type CGEventRef = *mut c_void;
+    type CFMachPortRef = *mut c_void;
+
+    extern "C" fn noop_callback(
+        _proxy: CGEventTapProxy,
+        _event_type: u32,
+        event: CGEventRef,
+        _user_info: *mut c_void,
+    ) -> CGEventRef {
+        event
+    }
+
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGEventTapCreate(
+            tap: u32,
+            place: u32,
+            options: u32,
+            events_of_interest: u64,
+            callback: extern "C" fn(CGEventTapProxy, u32, CGEventRef, *mut c_void) -> CGEventRef,
+            user_info: *mut c_void,
+        ) -> CFMachPortRef;
+        fn CGEventTapEnable(tap: CFMachPortRef, enable: bool);
+    }
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        fn CFRelease(cf: *const c_void);
+        fn CFMachPortInvalidate(port: CFMachPortRef);
+    }
+
+    const K_CG_SESSION_EVENT_TAP: u32 = 1;
+    const K_CG_HEAD_INSERT_EVENT_TAP: u32 = 0;
+    // MUST stay Default (active). Creating an active tap requires
+    // kTCCServiceAccessibility specifically; a listen-only tap succeeds with
+    // Input Monitoring alone and would report a false grant.
+    const K_CG_EVENT_TAP_OPTION_DEFAULT: u32 = 0;
+    const K_CG_EVENT_KEY_DOWN: u64 = 10;
+
+    /// Live Accessibility check: an active CGEventTap can only be created
+    /// when tccd grants kTCCServiceAccessibility *right now*. The tap is
+    /// disabled and released before it is ever attached to a run loop, so it
+    /// never sits in the event path (no input lag, no prompt).
+    pub(super) fn event_tap_probe() -> bool {
+        unsafe {
+            let tap = CGEventTapCreate(
+                K_CG_SESSION_EVENT_TAP,
+                K_CG_HEAD_INSERT_EVENT_TAP,
+                K_CG_EVENT_TAP_OPTION_DEFAULT,
+                1u64 << K_CG_EVENT_KEY_DOWN,
+                noop_callback,
+                std::ptr::null_mut(),
+            );
+            if tap.is_null() {
+                return false;
+            }
+            CGEventTapEnable(tap, false);
+            CFMachPortInvalidate(tap);
+            CFRelease(tap as *const c_void);
+            true
+        }
     }
 }
 
