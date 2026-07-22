@@ -9,6 +9,7 @@
 
 import { readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
+import { authHeaders, getLocalApiConfig } from '../helpers/api-utils.js';
 import { E2E_DATA_DIR } from '../helpers/app-launcher.js';
 import { saveScreenshot } from '../helpers/screenshot-utils.js';
 import { openHomeWindow, waitForAppReady, t } from '../helpers/test-utils.js';
@@ -29,11 +30,9 @@ const VALID_LICENSE = 'ENT-GWXX-RNUB-LW9F-3YA6';
 const WRONG_LICENSE = 'ENT-WRNG-WRNG-WRNG-WRNG';
 const MANAGED_PIPE_NAME = 'e2e-managed-review';
 const MANAGED_PRESET_ID = 'e2e-org-private-ai';
-const LOCAL_API_PORT = Number(process.env.SCREENPIPE_PORT ?? '3030');
-const LOCAL_API_BASE = `http://127.0.0.1:${LOCAL_API_PORT}`;
-const LOCAL_API_AUTH_HEADERS: Record<string, string> = process.env.SCREENPIPE_API_KEY
-  ? { Authorization: `Bearer ${process.env.SCREENPIPE_API_KEY}` }
-  : {};
+let localApiPort = Number(process.env.SCREENPIPE_PORT ?? '3030');
+let localApiAuthHeaders = authHeaders(process.env.SCREENPIPE_API_KEY ?? null);
+const localApiBase = () => `http://127.0.0.1:${localApiPort}`;
 const MANAGED_PIPE_SCHEDULE = 'at 2099-01-01T00:00:00Z';
 const MANAGED_PIPE_DIR = join(E2E_DATA_DIR, 'pipes', MANAGED_PIPE_NAME);
 const MANAGED_PIPE_PATH = join(MANAGED_PIPE_DIR, 'pipe.md');
@@ -196,10 +195,20 @@ async function openHomeReliably(): Promise<void> {
 }
 
 async function ensureLocalApi(): Promise<void> {
+  await browser.switchToWindow('home').catch(() => {});
+  try {
+    const config = await getLocalApiConfig();
+    localApiPort = config.port;
+    localApiAuthHeaders = authHeaders(config.key);
+  } catch {
+    // The API may not be spawned yet. Keep the environment/default config for
+    // the health probe, then refresh the authenticated config after recovery.
+  }
+
   const healthy = async () => {
     try {
-      const response = await fetch(`${LOCAL_API_BASE}/health`, {
-        headers: LOCAL_API_AUTH_HEADERS,
+      const response = await fetch(`${localApiBase()}/health`, {
+        headers: localApiAuthHeaders,
       });
       return response.ok;
     } catch {
@@ -208,13 +217,16 @@ async function ensureLocalApi(): Promise<void> {
   };
 
   if (await healthy()) return;
-  await browser.switchToWindow('home').catch(() => {});
   await invokeOrThrow('spawn_screenpipe', { overrideArgs: null });
   await browser.waitUntil(healthy, {
     timeout: t(45_000),
     interval: 500,
-    timeoutMsg: `local API did not recover on port ${LOCAL_API_PORT}`,
+    timeoutMsg: `local API did not recover on port ${localApiPort}`,
   });
+
+  const config = await getLocalApiConfig();
+  localApiPort = config.port;
+  localApiAuthHeaders = authHeaders(config.key);
 }
 
 async function setHeartbeatStatus(status: number): Promise<void> {
@@ -248,15 +260,21 @@ async function clearEnterpriseMocks(): Promise<void> {
   await closeWindow('Onboarding').catch(() => {});
 
   rmSync(MANAGED_PIPE_DIR, { recursive: true, force: true });
-  await fetch(`${LOCAL_API_BASE}/pipes`, { headers: LOCAL_API_AUTH_HEADERS }).catch(() => {});
+  await fetch(`${localApiBase()}/pipes`, { headers: localApiAuthHeaders }).catch(() => {});
 }
 
 async function getManagedPipe(): Promise<any> {
   const response = await fetch(
-    `${LOCAL_API_BASE}/pipes/${encodeURIComponent(MANAGED_PIPE_NAME)}`,
-    { headers: LOCAL_API_AUTH_HEADERS },
+    `${localApiBase()}/pipes/${encodeURIComponent(MANAGED_PIPE_NAME)}`,
+    { headers: localApiAuthHeaders },
   );
-  return (await response.json()).data;
+  const payload = await response.json();
+  if (!response.ok || payload?.error) {
+    throw new Error(
+      `managed pipe API failed status=${response.status}: ${JSON.stringify(payload)}`,
+    );
+  }
+  return payload.data;
 }
 
 async function waitForManagedPipe(): Promise<any> {
@@ -382,17 +400,17 @@ describe('Enterprise managed pipe enforcement', () => {
     );
     await saveScreenshot('enterprise-managed-pipe-locked');
 
-    const pipeUrl = `${LOCAL_API_BASE}/pipes/${encodeURIComponent(MANAGED_PIPE_NAME)}`;
+    const pipeUrl = `${localApiBase()}/pipes/${encodeURIComponent(MANAGED_PIPE_NAME)}`;
     const disable = await fetch(`${pipeUrl}/enable`, {
       method: 'POST',
-      headers: { ...LOCAL_API_AUTH_HEADERS, 'Content-Type': 'application/json' },
+      headers: { ...localApiAuthHeaders, 'Content-Type': 'application/json' },
       body: JSON.stringify({ enabled: false }),
     }).then((response) => response.json());
     expect(disable.error).toContain('managed by your organization');
 
     const editResponse = await fetch(`${pipeUrl}/config`, {
       method: 'POST',
-      headers: { ...LOCAL_API_AUTH_HEADERS, 'Content-Type': 'application/json' },
+      headers: { ...localApiAuthHeaders, 'Content-Type': 'application/json' },
       body: JSON.stringify({ config: { schedule: 'daily' } }),
     });
     expect(editResponse.status).toBe(400);
@@ -400,7 +418,7 @@ describe('Enterprise managed pipe enforcement', () => {
 
     const remove = await fetch(pipeUrl, {
       method: 'DELETE',
-      headers: LOCAL_API_AUTH_HEADERS,
+      headers: localApiAuthHeaders,
     }).then((response) => response.json());
     expect(remove.error).toContain('managed by your organization');
 
