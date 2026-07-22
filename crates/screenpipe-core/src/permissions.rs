@@ -247,22 +247,53 @@ pub fn check_screen_recording_tauri() -> PermissionStatus {
     PermissionStatus::NotNeeded
 }
 
+/// Silent, side-effect-free accessibility check.
+///
+/// Uses only `AXIsProcessTrusted()`, which never prompts and never enrolls the
+/// app in the Accessibility list. Safe for launch-time capability gates and
+/// passive snapshots. On a cold process this returns the true current value;
+/// its only weakness is not seeing a grant made *after* the process started
+/// (the in-process cache never refreshes). Use [`check_accessibility_live`]
+/// where detecting an in-flight grant matters.
 #[cfg(target_os = "macos")]
 pub fn check_accessibility() -> PermissionStatus {
     #[link(name = "ApplicationServices", kind = "framework")]
     extern "C" {
         fn AXIsProcessTrusted() -> bool;
     }
-    // AXIsProcessTrusted caches its answer in-process (macOS 13+), so a grant
-    // made while the app is running keeps reading as denied until relaunch.
-    // The event-tap probe asks tccd live; keep AXIsProcessTrusted as a cheap
-    // first-line check and to cover the tap probe's own false negatives
-    // (LSBackgroundOnly helpers, dev-build signature churn).
-    if unsafe { AXIsProcessTrusted() } || macos_accessibility::event_tap_probe() {
+    if unsafe { AXIsProcessTrusted() } {
         PermissionStatus::Granted
     } else {
         PermissionStatus::Denied
     }
+}
+
+/// Live accessibility check for the onboarding/settings poll loop.
+///
+/// `AXIsProcessTrusted()` caches its answer in-process (macOS 13+), so a grant
+/// made while the app is running keeps reading as denied until relaunch. The
+/// event-tap probe asks tccd at call time and catches that transition;
+/// `AXIsProcessTrusted()` stays as the cheap first-line check and covers the
+/// probe's own false negatives (LSBackgroundOnly helpers, dev-build signature
+/// churn).
+///
+/// NOT side-effect-free: creating an active event tap while denied enrolls the
+/// app in the Accessibility pane and can surface the system prompt. Only call
+/// this from a context where the user is actively being asked for the
+/// permission (the onboarding/settings grant flow) — never from a passive
+/// launch-time gate.
+#[cfg(target_os = "macos")]
+pub fn check_accessibility_live() -> PermissionStatus {
+    if check_accessibility().is_granted() || macos_accessibility::event_tap_probe() {
+        PermissionStatus::Granted
+    } else {
+        PermissionStatus::Denied
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn check_accessibility_live() -> PermissionStatus {
+    PermissionStatus::NotNeeded
 }
 
 #[cfg(target_os = "macos")]
