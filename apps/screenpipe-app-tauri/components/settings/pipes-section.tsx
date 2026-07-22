@@ -75,7 +75,7 @@ import {
 import { getApiBaseUrl, localFetch } from "@/lib/api";
 import { parsePipeError } from "@/lib/pipe-errors";
 import { useTeam } from "@/lib/hooks/use-team";
-import { useIsEnterpriseBuild } from "@/lib/hooks/use-is-enterprise-build";
+import { useManagedPolicy } from "@/lib/hooks/use-managed-policy";
 import { CloudPipesTab } from "./cloud-pipes-tab";
 import {
   writeTextFile,
@@ -1059,8 +1059,8 @@ export function PipesSection() {
   const [publishPipeName, setPublishPipeName] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [pipeTypeFilter, setPipeTypeFilter] = useState<"automated" | "cloud">("automated");
-  // "cloud" (the org's cloud runner) is an enterprise-build-only surface
-  const isEnterpriseBuild = useIsEnterpriseBuild();
+  // "cloud" (the org's cloud runner) is a managed-deployment-only surface.
+  const { isManagedDeployment } = useManagedPolicy();
   // Favorites — per-machine preference persisted via /pipes/favorites.
   // `showOnly` toggles a filter that hides non-starred pipes.
   const pipeFavorites = usePipeFavorites();
@@ -2156,7 +2156,7 @@ export function PipesSection() {
               autoCorrect="off"
             />
           </div>
-          {isEnterpriseBuild && (
+          {isManagedDeployment && (
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button variant="outline" size="sm" className="gap-1.5 h-8 text-xs capitalize">

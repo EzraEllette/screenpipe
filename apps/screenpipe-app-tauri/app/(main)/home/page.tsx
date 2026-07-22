@@ -61,7 +61,7 @@ import {
   shouldActivateHomeSectionForChatLoadConversation,
 } from "@/lib/chat-utils";
 import { useTeam } from "@/lib/hooks/use-team";
-import { useEnterprisePolicy } from "@/lib/hooks/use-enterprise-policy";
+import { useManagedPolicy } from "@/lib/hooks/use-managed-policy";
 import { useTauriEvent } from "@/lib/hooks/use-tauri-event";
 import { PipeActivityIndicator } from "@/components/pipe-activity-indicator";
 import FirstRunGuide from "@/components/onboarding/first-run-guide";
@@ -167,7 +167,7 @@ function HomeContent() {
   }, [updateSettings]);
 
   const teamState = useTeam();
-  const { isSectionHidden, isSettingLocked } = useEnterprisePolicy();
+  const { isSectionHidden, isSettingLocked } = useManagedPolicy();
   const runningPipes = useRunningPipes();
   const runningPipeCount = runningPipes.length;
   const selectChatConversation = useCallback((id: string) => {

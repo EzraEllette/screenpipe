@@ -494,7 +494,9 @@ interface FetchPolicyOptions {
 }
 
 /**
- * Enterprise UI policy hook.
+ * Internal enterprise policy runtime. Mount this only through
+ * ManagedPolicyProvider so polling and device-side enforcement have a single
+ * owner per webview.
  *
  * Consumer builds: returns a no-op — isSectionHidden always returns false,
  * no Rust commands or network calls are made.
@@ -504,10 +506,11 @@ interface FetchPolicyOptions {
  * the build. A successful account response confirms organization membership.
  * Re-fetches every 5 minutes. Caches in localStorage for offline resilience.
  */
-export function useEnterprisePolicy() {
+export function useEnterprisePolicyRuntime() {
   const {
     isEnterprise,
     resolved: isEnterpriseBuildResolved,
+    error: isEnterpriseBuildResolutionError,
   } = useEnterpriseBuildStatus();
   const { settings } = useSettings();
   const accountToken = settings.user?.token || null;
@@ -989,6 +992,7 @@ export function useEnterprisePolicy() {
     policy: isEnterprise ? policy : EMPTY_POLICY,
     isEnterprise,
     isEnterpriseBuildResolved,
+    isEnterpriseBuildResolutionError,
     authenticationState: isEnterprise ? authenticationState : "authenticated",
     authenticationError: isEnterprise ? authenticationError : null,
     isEnterpriseAuthenticated: !isEnterprise || authenticationState === "authenticated",
