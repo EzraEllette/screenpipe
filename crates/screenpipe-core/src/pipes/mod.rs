@@ -547,6 +547,22 @@ fn is_default_model(s: &String) -> bool {
 fn is_false(b: &bool) -> bool {
     !b
 }
+fn is_enterprise_managed(config: &PipeConfig) -> bool {
+    config
+        .config
+        .get("enterprise_managed")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+}
+fn content_is_enterprise_managed(content: &str) -> bool {
+    parse_frontmatter(content)
+        .map(|(config, _)| is_enterprise_managed(&config))
+        .unwrap_or_else(|_| {
+            content
+                .lines()
+                .any(|line| line.trim() == "enterprise_managed: true")
+        })
+}
 /// Simple FNV-1a 64-bit hash, sufficient for change detection.
 fn simple_hash(content: &str) -> String {
     let mut hash: u64 = 0xcbf29ce484222325;
@@ -2943,43 +2959,56 @@ impl PipeManager {
         write_pid_file(&self.pipes_dir, name, 0);
 
         // Resolve preset
-        let (run_model, run_provider, run_provider_url, run_api_key, preset_prompt) =
-            if let Some(preset_id) = config.preset.first() {
-                match resolve_preset(&self.pipes_dir, preset_id) {
-                    Some(resolved) => (
-                        resolved.model,
-                        resolved.provider,
-                        resolved.url,
-                        resolved.api_key,
-                        resolved.prompt,
-                    ),
-                    None => (
-                        config.model.clone(),
-                        config.provider.clone(),
-                        None,
-                        None,
-                        None,
-                    ),
+        let (run_model, run_provider, run_provider_url, run_api_key, preset_prompt) = if let Some(
+            preset_id,
+        ) =
+            config.preset.first()
+        {
+            match resolve_preset(&self.pipes_dir, preset_id) {
+                Some(resolved) => (
+                    resolved.model,
+                    resolved.provider,
+                    resolved.url,
+                    resolved.api_key,
+                    resolved.prompt,
+                ),
+                None if is_enterprise_managed(&config) => {
+                    remove_pid_file(&self.pipes_dir, name);
+                    let mut running = self.running.lock().await;
+                    running.remove(name);
+                    return Err(anyhow!(
+                            "pipe '{}': configured preset '{}' is unavailable; refusing to fall back to another AI provider",
+                            name,
+                            preset_id
+                        ));
                 }
-            } else {
-                // No preset — use user's default preset
-                match resolve_preset(&self.pipes_dir, "default") {
-                    Some(resolved) => (
-                        resolved.model,
-                        resolved.provider,
-                        resolved.url,
-                        resolved.api_key,
-                        resolved.prompt,
-                    ),
-                    None => (
-                        config.model.clone(),
-                        config.provider.clone(),
-                        None,
-                        None,
-                        None,
-                    ),
-                }
-            };
+                None => (
+                    config.model.clone(),
+                    config.provider.clone(),
+                    None,
+                    None,
+                    None,
+                ),
+            }
+        } else {
+            // No preset — use user's default preset
+            match resolve_preset(&self.pipes_dir, "default") {
+                Some(resolved) => (
+                    resolved.model,
+                    resolved.provider,
+                    resolved.url,
+                    resolved.api_key,
+                    resolved.prompt,
+                ),
+                None => (
+                    config.model.clone(),
+                    config.provider.clone(),
+                    None,
+                    None,
+                    None,
+                ),
+            }
+        };
 
         // Create DB execution row
         let exec_id = if let Some(ref store) = self.store {
@@ -3912,6 +3941,12 @@ impl PipeManager {
 
         let content = std::fs::read_to_string(&pipe_md)?;
         let (mut config, body) = parse_frontmatter(&content)?;
+        if is_enterprise_managed(&config) {
+            return Err(anyhow!(
+                "pipe '{}' is managed by your organization and cannot be enabled or disabled locally",
+                name
+            ));
+        }
         // Block enabling a stale one-off — would either silently no-op
         // (caught by the scheduler's stale guard) or fire a confusingly
         // old reminder. User must set a new `at <iso>` first.
@@ -3957,6 +3992,14 @@ impl PipeManager {
             return Err(anyhow!("pipe '{}' not found", name));
         }
 
+        let content = std::fs::read_to_string(&pipe_md)?;
+        if content_is_enterprise_managed(&content) {
+            return Err(anyhow!(
+                "pipe '{}' is managed by your organization and cannot be edited locally",
+                name
+            ));
+        }
+
         // If raw_content is provided, write the full file directly and re-parse
         if let Some(raw) = updates.get("raw_content").and_then(|v| v.as_str()) {
             // Validate it parses correctly
@@ -3974,7 +4017,6 @@ impl PipeManager {
             return Ok(());
         }
 
-        let content = std::fs::read_to_string(&pipe_md)?;
         let (mut config, body) = parse_frontmatter(&content)?;
         config.name = name.to_string(); // preserve directory name
 
@@ -4324,6 +4366,16 @@ impl PipeManager {
         let dir = self.pipes_dir.join(name);
         if !dir.exists() {
             return Err(self.pipe_not_found_error(name));
+        }
+
+        let pipe_md = dir.join("pipe.md");
+        if let Ok(content) = std::fs::read_to_string(&pipe_md) {
+            if content_is_enterprise_managed(&content) {
+                return Err(anyhow!(
+                    "pipe '{}' is managed by your organization and cannot be deleted locally",
+                    name
+                ));
+            }
         }
 
         // Stop if running
@@ -4896,6 +4948,68 @@ impl PipeManager {
                                     resolved.api_key,
                                     resolved.prompt,
                                 )
+                            }
+                            None if is_enterprise_managed(config) => {
+                                let message = format!(
+                                    "configured preset '{}' is unavailable; refusing to fall back to another AI provider",
+                                    preset_id
+                                );
+                                warn!("scheduler: pipe '{}': {}", name, message);
+                                let failed_at = Utc::now();
+                                if let Some(ref store) = store {
+                                    if let Ok(id) = store
+                                        .create_execution(
+                                            name,
+                                            if triggered_by_event {
+                                                "event"
+                                            } else {
+                                                "scheduled"
+                                            },
+                                            &config.model,
+                                            config.provider.as_deref(),
+                                        )
+                                        .await
+                                    {
+                                        let _ = store
+                                            .finish_execution(
+                                                id,
+                                                "failed",
+                                                "",
+                                                &message,
+                                                None,
+                                                Some("ai_preset_unavailable"),
+                                                Some(&message),
+                                                None,
+                                            )
+                                            .await;
+                                    }
+                                    let _ = store.upsert_scheduler_state(name, false).await;
+                                }
+                                {
+                                    let mut logs_guard = logs.lock().await;
+                                    let entry = logs_guard
+                                        .entry(name.clone())
+                                        .or_insert_with(VecDeque::new);
+                                    entry.push_front(PipeRunLog {
+                                        pipe_name: name.clone(),
+                                        started_at: failed_at,
+                                        finished_at: failed_at,
+                                        success: false,
+                                        stdout: String::new(),
+                                        stderr: message,
+                                    });
+                                    if entry.len() > PIPE_LOG_ACTIVE_KEEP_PER_PIPE {
+                                        entry.pop_back();
+                                    }
+                                }
+                                {
+                                    let mut qr = queued_or_running.lock().await;
+                                    qr.remove(name);
+                                }
+                                if let Some(ref cb) = on_run_complete {
+                                    cb(name, None, false, 0.0, Some("ai_preset_unavailable"));
+                                }
+                                continue;
                             }
                             None => (
                                 config.model.clone(),
@@ -7677,6 +7791,51 @@ mod tests {
         let (config, body) = parse_frontmatter(content).unwrap();
         assert_eq!(config.preset, vec!["primary", "fallback"]);
         assert_eq!(body, "Body");
+    }
+
+    #[test]
+    fn test_parse_frontmatter_marks_enterprise_managed_pipe() {
+        let content = "---\nschedule: every 1h\nenabled: true\npreset: [\"org-ai\"]\nenterprise_managed: true\n---\n\nBody";
+        let (config, _) = parse_frontmatter(content).unwrap();
+        assert!(is_enterprise_managed(&config));
+        assert_eq!(config.preset, vec!["org-ai"]);
+    }
+
+    #[tokio::test]
+    async fn enterprise_managed_pipe_rejects_local_mutations() {
+        let temp = tempfile::tempdir().unwrap();
+        let pipes_dir = temp.path().join("pipes");
+        let pipe_dir = pipes_dir.join("managed-review");
+        std::fs::create_dir_all(&pipe_dir).unwrap();
+        std::fs::write(
+            pipe_dir.join("pipe.md"),
+            "---\nschedule: every 1h\nenabled: true\npreset: [\"org-ai\"]\nenterprise_managed: true\n---\n\nReview work",
+        )
+        .unwrap();
+
+        let manager = PipeManager::new(pipes_dir, HashMap::new(), None, 0);
+        assert!(manager
+            .enable_pipe("managed-review", false)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("managed by your organization"));
+        assert!(manager
+            .update_config(
+                "managed-review",
+                HashMap::from([("schedule".to_string(), serde_json::json!("daily"))]),
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("managed by your organization"));
+        assert!(manager
+            .delete_pipe("managed-review")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("managed by your organization"));
+        assert!(pipe_dir.exists());
     }
 
     #[test]
