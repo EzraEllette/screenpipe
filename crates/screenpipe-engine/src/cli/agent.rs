@@ -611,6 +611,14 @@ mod tests {
     }
 
     #[test]
+    fn test_api_skill_routes_learning_to_user_owned_skills() {
+        assert!(!API_SKILL_MD.contains("improve the most relevant existing skill"));
+        assert!(API_SKILL_MD.contains("Store that learning in a separate user-owned skill"));
+        assert!(API_SKILL_MD.contains("Never modify this `screenpipe-api` skill"));
+        assert!(API_SKILL_MD.contains("bundled, vendor-installed, or externally managed skill"));
+    }
+
+    #[test]
     fn test_codex_and_claude_code_have_skill_directories() {
         let codex = layout("codex").unwrap();
         assert!(codex
