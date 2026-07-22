@@ -123,6 +123,7 @@ export default function OnboardingPage() {
     isManagedAuthenticated,
     selectAuthenticationMethod,
     submitLicenseKey,
+    policy: managedPolicy,
   } = useManagedPolicy();
 
   // Restore saved step on mount
@@ -323,13 +324,15 @@ export default function OnboardingPage() {
                     handleNextSlide={handleNextSlide}
                     suppressAutoAdvance
                   />
-                  <button
-                    type="button"
-                    onClick={() => selectAuthenticationMethod("license_key")}
-                    className="mt-3 font-mono text-xs text-muted-foreground/70 underline underline-offset-4 decoration-muted-foreground/40 transition-colors hover:text-foreground hover:decoration-foreground"
-                  >
-                    use enterprise key
-                  </button>
+                  {!managedPolicy?.requireAccountLogin && (
+                    <button
+                      type="button"
+                      onClick={() => selectAuthenticationMethod("license_key")}
+                      className="mt-3 font-mono text-xs text-muted-foreground/70 underline underline-offset-4 decoration-muted-foreground/40 transition-colors hover:text-foreground hover:decoration-foreground"
+                    >
+                      use enterprise key
+                    </button>
+                  )}
                 </div>
               ) : (
                 <div className="flex min-h-[400px] items-center justify-center">
