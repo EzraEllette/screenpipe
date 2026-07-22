@@ -39,6 +39,7 @@
   "exclude": [
     "node_modules",
     "src-tauri",
+    "target",
     "scripts",
     "e2e",
     "vitest.config.ts",
