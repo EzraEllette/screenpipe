@@ -611,9 +611,11 @@ mod tests {
     }
 
     #[test]
-    fn test_api_skill_does_not_instruct_agents_to_modify_skills() {
+    fn test_api_skill_routes_learning_to_user_owned_skills() {
         assert!(!API_SKILL_MD.contains("improve the most relevant existing skill"));
-        assert!(!API_SKILL_MD.contains("Create a new skill only when no existing skill fits"));
+        assert!(API_SKILL_MD.contains("Store that learning in a separate user-owned skill"));
+        assert!(API_SKILL_MD.contains("Never modify this `screenpipe-api` skill"));
+        assert!(API_SKILL_MD.contains("bundled, vendor-installed, or externally managed skill"));
     }
 
     #[test]
