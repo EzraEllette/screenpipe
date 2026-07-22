@@ -38,7 +38,7 @@ export const useOnboarding = create<OnboardingState>((set, get) => ({
     completedAt: null,
     currentStep: null,
   },
-  isLoading: false,
+  isLoading: true,
   error: null,
 
   loadOnboardingStatus: async () => {
