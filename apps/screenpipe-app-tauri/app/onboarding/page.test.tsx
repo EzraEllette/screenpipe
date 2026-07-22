@@ -6,11 +6,12 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
-  enterpriseBuild: { isEnterprise: true, resolved: true, error: false },
   enterprisePolicy: {
+    isManagedDeployment: true,
+    isManagedDeploymentResolved: true,
     authenticationState: "choice",
     authenticationError: null as string | null,
-    isEnterpriseAuthenticated: false,
+    isManagedAuthenticated: false,
   },
   selectAuthenticationMethod: vi.fn(),
   submitLicenseKey: vi.fn(async () => ({ ok: true })),
@@ -39,11 +40,8 @@ vi.mock("@/lib/hooks/use-onboarding", () => {
   });
   return { useOnboarding };
 });
-vi.mock("@/lib/hooks/use-is-enterprise-build", () => ({
-  useEnterpriseBuildStatus: () => mocks.enterpriseBuild,
-}));
-vi.mock("@/lib/hooks/use-enterprise-policy", () => ({
-  useEnterprisePolicy: () => ({
+vi.mock("@/lib/hooks/use-managed-policy", () => ({
+  useManagedPolicy: () => ({
     ...mocks.enterprisePolicy,
     selectAuthenticationMethod: mocks.selectAuthenticationMethod,
     submitLicenseKey: mocks.submitLicenseKey,
@@ -89,11 +87,12 @@ import OnboardingPage from "./page";
 describe("enterprise onboarding authentication", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mocks.enterpriseBuild = { isEnterprise: true, resolved: true, error: false };
     mocks.enterprisePolicy = {
+      isManagedDeployment: true,
+      isManagedDeploymentResolved: true,
       authenticationState: "choice",
       authenticationError: null,
-      isEnterpriseAuthenticated: false,
+      isManagedAuthenticated: false,
     };
     onboardingData.currentStep = "login";
     onboardingData.isCompleted = false;
@@ -119,7 +118,7 @@ describe("enterprise onboarding authentication", () => {
   });
 
   it("keeps non-enterprise onboarding on regular sign-in", () => {
-    mocks.enterpriseBuild.isEnterprise = false;
+    mocks.enterprisePolicy.isManagedDeployment = false;
     render(<OnboardingPage />);
 
     expect(screen.getByText("regular sign in")).toBeInTheDocument();
@@ -128,7 +127,7 @@ describe("enterprise onboarding authentication", () => {
 
   it("advances after either enterprise credential is verified", async () => {
     mocks.enterprisePolicy.authenticationState = "authenticated";
-    mocks.enterprisePolicy.isEnterpriseAuthenticated = true;
+    mocks.enterprisePolicy.isManagedAuthenticated = true;
 
     render(<OnboardingPage />);
 

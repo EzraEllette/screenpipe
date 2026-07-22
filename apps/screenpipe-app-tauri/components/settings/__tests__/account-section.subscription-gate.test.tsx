@@ -49,6 +49,10 @@ vi.mock("@/lib/hooks/use-health-check", () => ({
   useHealthCheck: () => ({ isServerDown: false }),
 }));
 
+vi.mock("@/lib/hooks/use-managed-policy", () => ({
+  useManagedPolicy: () => ({ isManagedDeployment: false }),
+}));
+
 vi.mock("@/lib/utils/tauri", () => ({
   commands: {
     openLoginWindow: mocks.openLoginWindow,

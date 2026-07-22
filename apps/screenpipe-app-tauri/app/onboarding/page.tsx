@@ -12,8 +12,7 @@ import EngineStartup from "@/components/onboarding/engine-startup";
 import ConnectApps from "@/components/onboarding/connect-apps";
 import PickPipe from "@/components/onboarding/pick-pipe";
 import { useOnboarding } from "@/lib/hooks/use-onboarding";
-import { useEnterpriseBuildStatus } from "@/lib/hooks/use-is-enterprise-build";
-import { useEnterprisePolicy } from "@/lib/hooks/use-enterprise-policy";
+import { useManagedPolicy } from "@/lib/hooks/use-managed-policy";
 import { EnterpriseLicensePrompt } from "@/components/enterprise-license-prompt";
 import posthog from "posthog-js";
 import { commands } from "@/lib/utils/tauri";
@@ -115,14 +114,15 @@ export default function OnboardingPage() {
   );
   const { onboardingData, isLoading, completeOnboarding } = useOnboarding();
   const completedForHiddenUiRef = React.useRef(false);
-  const enterpriseBuild = useEnterpriseBuildStatus();
   const {
+    isManagedDeployment,
+    isManagedDeploymentResolved,
     authenticationState,
     authenticationError,
-    isEnterpriseAuthenticated,
+    isManagedAuthenticated,
     selectAuthenticationMethod,
     submitLicenseKey,
-  } = useEnterprisePolicy();
+  } = useManagedPolicy();
 
   // Restore saved step on mount
   useEffect(() => {
@@ -200,7 +200,7 @@ export default function OnboardingPage() {
     // Hidden enterprise deployments only need authentication + permissions.
     // Their engine and integration screens depend on app UI that headless mode
     // has already disabled, so finish onboarding at this boundary instead.
-    if (currentSlide === "permissions" && enterpriseBuild.isEnterprise) {
+    if (currentSlide === "permissions" && isManagedDeployment) {
       let appUiHidden = false;
       try {
         appUiHidden = await commands.applyEnterpriseUiVisibility();
@@ -243,7 +243,7 @@ export default function OnboardingPage() {
   }, [
     completeOnboarding,
     currentSlide,
-    enterpriseBuild.isEnterprise,
+    isManagedDeployment,
     isTransitioning,
   ]);
 
@@ -252,23 +252,23 @@ export default function OnboardingPage() {
   useEffect(() => {
     if (
       currentSlide === "login" &&
-      enterpriseBuild.resolved &&
-      enterpriseBuild.isEnterprise &&
-      isEnterpriseAuthenticated &&
+      isManagedDeploymentResolved &&
+      isManagedDeployment &&
+      isManagedAuthenticated &&
       !isTransitioning
     ) {
       void handleNextSlide();
     }
   }, [
     currentSlide,
-    enterpriseBuild.isEnterprise,
-    enterpriseBuild.resolved,
-    isEnterpriseAuthenticated,
+    isManagedDeployment,
+    isManagedDeploymentResolved,
+    isManagedAuthenticated,
     isTransitioning,
     handleNextSlide,
   ]);
 
-  if (isLoading || !enterpriseBuild.resolved) {
+  if (isLoading || !isManagedDeploymentResolved) {
     return (
       <div className="flex items-center justify-center min-h-screen bg-background">
         <div className="w-6 h-6 border border-foreground border-t-transparent rounded-full animate-spin" />
@@ -296,7 +296,7 @@ export default function OnboardingPage() {
             />
           )}
           {currentSlide === "login" && (
-            enterpriseBuild.isEnterprise ? (
+            isManagedDeployment ? (
               authenticationState === "license_key" ? (
                 <div className="mx-auto w-full max-w-sm">
                   <h2 className="mb-1 text-lg font-semibold">activate this device</h2>
