@@ -280,12 +280,14 @@ export default function FirstRunGuide({
       `}} />
       {/* Clicking anywhere outside the lifted elements dismisses the guide. */}
       <div
+        data-testid="firstrun-scrim"
         className="fixed inset-0 z-40 bg-background/55"
         onClick={() => dismiss("click_away")}
       />
     </>
   ) : (
     <div
+      data-testid="firstrun-scrim"
       className="fixed inset-0 z-40 bg-background/70"
       onClick={() => dismiss("click_away")}
     />
