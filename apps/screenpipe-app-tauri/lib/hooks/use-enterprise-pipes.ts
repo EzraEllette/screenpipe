@@ -19,6 +19,7 @@ import {
 } from "@tauri-apps/plugin-fs";
 import { homeDir, join } from "@tauri-apps/api/path";
 import { localFetch } from "@/lib/api";
+import { commands } from "@/lib/utils/tauri";
 
 export interface ManagedPipe {
   name: string;
@@ -46,6 +47,26 @@ export interface PipeStatus {
 }
 
 const MARKER_PREFIX = "# enterprise-managed:v";
+
+async function enterprisePipesDir(): Promise<string> {
+  try {
+    const result = await commands.getActiveDataDir();
+    if (result.status === "ok") {
+      return await join(result.data, "pipes");
+    }
+    console.warn(
+      "[enterprise-pipes] failed to resolve active data dir, using ~/.screenpipe:",
+      result.error,
+    );
+  } catch (error) {
+    console.warn(
+      "[enterprise-pipes] active data dir command unavailable, using ~/.screenpipe:",
+      error,
+    );
+  }
+
+  return await join(await homeDir(), ".screenpipe", "pipes");
+}
 
 export function buildEnterpriseManagedPipeMd(pipe: ManagedPipe): string {
   const frontmatter = [
@@ -89,8 +110,7 @@ export async function syncManagedPipes(
   const pipesToSync = managedPipes || [];
 
   try {
-    const home = await homeDir();
-    const pipesDir = await join(home, ".screenpipe", "pipes");
+    const pipesDir = await enterprisePipesDir();
 
     for (const pipe of pipesToSync) {
       try {
@@ -184,8 +204,7 @@ export async function gatherPipeStatuses(): Promise<PipeStatus[]> {
   const statuses: PipeStatus[] = [];
 
   try {
-    const home = await homeDir();
-    const pipesDir = await join(home, ".screenpipe", "pipes");
+    const pipesDir = await enterprisePipesDir();
 
     // Fetch all pipe statuses from local API
     const res = await localFetch("/pipes", {

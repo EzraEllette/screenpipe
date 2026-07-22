@@ -29,6 +29,17 @@ pub async fn get_log_files(app: AppHandle) -> Result<Vec<LogFile>, String> {
     Ok(collect_log_files(&[data_dir, screenpipe_data_dir]).await)
 }
 
+/// Absolute path of the data directory used by the running engine. This is
+/// distinct from the app base directory when the user selected a custom
+/// `dataDir`, and it also honors `SCREENPIPE_DATA_DIR` in isolated E2E runs.
+#[tauri::command]
+#[specta::specta]
+pub async fn get_active_data_dir(app: AppHandle) -> Result<String, String> {
+    get_data_dir(&app)
+        .map(|path| path.to_string_lossy().into_owned())
+        .map_err(|error| error.to_string())
+}
+
 /// Gather `.log` files from the given directories, newest first.
 ///
 /// Resilience is the whole point of this helper: a directory that can't be read
