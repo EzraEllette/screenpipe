@@ -133,7 +133,28 @@ function HomeContent() {
   const [e2eSeedFlags, setE2eSeedFlags] = useState<string[] | null>(null);
   // Consume the handoff on first display so closing/reloading the window can
   // never resurrect the guide. This window retains the value for its lifetime.
-  const [firstRunGuidePending] = useState(consumeFirstRunGuidePending);
+  // Consumed in an effect (not a useState initializer) because the read is
+  // side-effectful, and re-checked on the onboarding-completion event: Rust
+  // reuses an already-open Home window (show, not reload), so a Home created
+  // before onboarding finished would otherwise never see the handoff.
+  const [firstRunGuidePending, setFirstRunGuidePendingState] = useState(false);
+  useEffect(() => {
+    if (consumeFirstRunGuidePending()) setFirstRunGuidePendingState(true);
+    let unlisten: (() => void) | undefined;
+    let unmounted = false;
+    void listen("first-run-guide-pending", () => {
+      if (consumeFirstRunGuidePending()) setFirstRunGuidePendingState(true);
+    })
+      .then((fn) => {
+        if (unmounted) fn();
+        else unlisten = fn;
+      })
+      .catch(() => {});
+    return () => {
+      unmounted = true;
+      unlisten?.();
+    };
+  }, []);
 
   useEffect(() => {
     let mounted = true;
