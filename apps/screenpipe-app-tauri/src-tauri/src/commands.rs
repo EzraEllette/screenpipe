@@ -1626,7 +1626,13 @@ pub async fn get_disk_usage(
     }
 }
 
-const LOGIN_URL: &str = "https://screenpipe.com/login";
+/// Login page on the baked control-plane base (crate::web_base): a build
+/// produced with NEXT_PUBLIC_SCREENPIPE_WEB_URL signs in against that
+/// deployment, so its session token verifies on the same control plane
+/// the rest of the app talks to.
+fn login_url() -> String {
+    crate::web_base::screenpipe_web_url("/login")
+}
 
 /// The custom URL scheme this build registers for deep links. The enterprise
 /// build uses a distinct scheme so it does not collide with the consumer app's
@@ -1667,7 +1673,7 @@ pub async fn open_login_window(
         // with another installed build here (#3890) and stays correct until
         // the website honours `return_scheme`.
         let callback_url = match crate::auth_session::start_session(
-            LOGIN_URL.to_string(),
+            login_url(),
             "screenpipe".to_string(),
             fresh_session,
         )
@@ -1716,7 +1722,7 @@ pub async fn open_login_window(
         let app_for_nav = app_handle.clone();
         let label_for_nav = label.clone();
 
-        let login_url = format!("{}?return_scheme={}", LOGIN_URL, deep_link_scheme());
+        let login_url = format!("{}?return_scheme={}", login_url(), deep_link_scheme());
         let mut builder = WebviewWindowBuilder::new(
             &app_handle,
             label.clone(),

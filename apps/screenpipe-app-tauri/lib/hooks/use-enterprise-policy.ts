@@ -10,6 +10,7 @@ import { getStore, useSettings } from "./use-settings";
 import { computeManagedSettingUpdates } from "./managed-settings";
 import { getVersion } from "@tauri-apps/api/app";
 import { localFetch } from "@/lib/api";
+import { screenpipeWebUrl } from "@/lib/web-url";
 import { platform as getPlatform } from "@tauri-apps/plugin-os";
 
 import { syncManagedPipes, gatherPipeStatuses, type ManagedPipe } from "./use-enterprise-pipes";
@@ -405,7 +406,7 @@ async function sendHeartbeat(credential: EnterpriseCredential): Promise<Heartbea
     const credentialHeaders: Record<string, string> = credential.type === "license_key"
       ? { "X-License-Key": credential.value }
       : { Authorization: `Bearer ${credential.value}` };
-    const res = await tauriFetch("https://screenpipe.com/api/enterprise/heartbeat", {
+    const res = await tauriFetch(screenpipeWebUrl("/api/enterprise/heartbeat", "https://screenpipe.com"), {
       method: "POST",
       headers: {
         ...credentialHeaders,
@@ -596,7 +597,7 @@ export function useEnterprisePolicyRuntime() {
         }
         data = e2ePolicy.data;
       } else {
-        const res = await tauriFetch("https://screenpipe.com/api/enterprise/policy", {
+        const res = await tauriFetch(screenpipeWebUrl("/api/enterprise/policy", "https://screenpipe.com"), {
           method: "GET",
           headers,
         });

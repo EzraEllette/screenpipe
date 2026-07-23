@@ -21,7 +21,7 @@
 use serde::Deserialize;
 use tracing::debug;
 
-use super::sync::{control_plane_base, DEFAULT_INGEST_URL};
+use super::sync::{control_plane_base, default_ingest_url};
 
 /// The control plane's device-config response. Extra fields tolerated.
 #[derive(Debug, Clone, Deserialize)]
@@ -55,14 +55,14 @@ pub fn device_config_url(file_ingest_url: Option<&str>) -> String {
         .ok()
         .filter(|s| !s.trim().is_empty())
         .or_else(|| file_ingest_url.map(|s| s.to_string()))
-        .unwrap_or_else(|| DEFAULT_INGEST_URL.to_string());
+        .unwrap_or_else(default_ingest_url);
     match control_plane_base(&ingest_url) {
         Some(base) => format!("{base}/api/enterprise/device-config"),
         None => {
-            // Malformed override — fall back to the production control
-            // plane rather than never attempting auto-config at all.
-            let base = control_plane_base(DEFAULT_INGEST_URL)
-                .expect("DEFAULT_INGEST_URL parses");
+            // Malformed override — fall back to the baked control plane
+            // rather than never attempting auto-config at all.
+            let base = control_plane_base(&default_ingest_url())
+                .expect("default ingest url parses");
             format!("{base}/api/enterprise/device-config")
         }
     }
@@ -118,11 +118,11 @@ mod tests {
         std::env::remove_var("SCREENPIPE_ENTERPRISE_DEVICE_CONFIG_URL");
         std::env::remove_var("SCREENPIPE_ENTERPRISE_INGEST_URL");
 
-        // default
-        assert_eq!(
-            device_config_url(None),
-            "https://screenpipe.com/api/enterprise/device-config"
-        );
+        // default = the baked control-plane base (prod unless the build
+        // set NEXT_PUBLIC_SCREENPIPE_WEB_URL — assert against the helper
+        // so the test holds for dev builds too)
+        let baked_default = crate::web_base::screenpipe_web_url("/api/enterprise/device-config");
+        assert_eq!(device_config_url(None), baked_default);
         // derived from enterprise.json ingest_url
         assert_eq!(
             device_config_url(Some("http://192.168.10.161:3000/api/enterprise/ingest")),
@@ -146,13 +146,10 @@ mod tests {
             device_config_url(None),
             "https://direct.example.com/api/enterprise/device-config"
         );
-        // malformed file URL falls back to production, not to a panic
+        // malformed file URL falls back to the baked base, not to a panic
         std::env::remove_var("SCREENPIPE_ENTERPRISE_DEVICE_CONFIG_URL");
         std::env::remove_var("SCREENPIPE_ENTERPRISE_INGEST_URL");
-        assert_eq!(
-            device_config_url(Some("not a url")),
-            "https://screenpipe.com/api/enterprise/device-config"
-        );
+        assert_eq!(device_config_url(Some("not a url")), baked_default);
 
         match prior {
             Some(v) => std::env::set_var("SCREENPIPE_ENTERPRISE_DEVICE_CONFIG_URL", v),

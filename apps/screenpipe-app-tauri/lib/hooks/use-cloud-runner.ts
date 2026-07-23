@@ -19,8 +19,9 @@ import { useInterval } from "@/lib/hooks/use-interval";
 import { fetch as tauriFetch } from "@tauri-apps/plugin-http";
 import { useSettings } from "./use-settings";
 import { commands } from "@/lib/utils/tauri";
+import { screenpipeWebUrl } from "@/lib/web-url";
 
-const API = "https://screenpipe.com/api/enterprise/cloud-runner";
+const API = screenpipeWebUrl("/api/enterprise/cloud-runner", "https://screenpipe.com");
 
 export interface CloudRunnerInfo {
   desired_state: "running" | "stopped" | "deleted";
