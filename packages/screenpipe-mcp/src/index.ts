@@ -26,6 +26,7 @@ import {
   flushMcpTelemetry,
   initMcpTelemetry,
 } from "./telemetry";
+import { discoverTeamApiBase, discoverTeamToken } from "./team-config";
 
 initMcpTelemetry({ transport: "stdio" });
 
@@ -34,6 +35,7 @@ const args = process.argv.slice(2);
 let port = 3030;
 let host = "localhost";
 let baseOverride: string | undefined;
+let teamApiOverride: string | undefined;
 for (let i = 0; i < args.length; i++) {
   if (args[i] === "--port" && args[i + 1]) {
     port = parseInt(args[i + 1], 10);
@@ -44,6 +46,8 @@ for (let i = 0; i < args.length; i++) {
     args[i + 1]
   ) {
     baseOverride = args[i + 1];
+  } else if (args[i] === "--team-api-url" && args[i + 1]) {
+    teamApiOverride = args[i + 1];
   }
 }
 
@@ -325,23 +329,8 @@ function ensureApiKey(): Promise<string> {
 // Token format is `sk_ent_…`. Empty / missing → team tools are not
 // registered; non-admin users of screenpipe-mcp see exactly what they
 // see today.
-function discoverTeamToken(): string {
-  const envTok = process.env.SCREENPIPE_ENTERPRISE_TOKEN;
-  if (envTok && envTok.startsWith("sk_ent_")) return envTok;
-  try {
-    const entPath = path.join(os.homedir(), ".screenpipe", "enterprise.json");
-    if (fs.existsSync(entPath)) {
-      const raw = fs.readFileSync(entPath, "utf-8");
-      const parsed = JSON.parse(raw);
-      const tok = typeof parsed?.team_api_token === "string" ? parsed.team_api_token : "";
-      if (tok && tok.startsWith("sk_ent_")) return tok;
-    }
-  } catch {}
-  return "";
-}
-
 const TEAM_TOKEN = discoverTeamToken();
-const TEAM_API = "https://screenpi.pe/api/enterprise/v1";
+const TEAM_API = discoverTeamApiBase(teamApiOverride);
 
 async function fetchTeam(p: string, init: RequestInit = {}): Promise<Response> {
   return fetch(`${TEAM_API}${p}`, {
