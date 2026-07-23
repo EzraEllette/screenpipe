@@ -127,10 +127,20 @@ export default function PermissionRecoveryPage() {
   const [keychainStatus, setKeychainStatus] = useState<"granted" | "denied" | "checking">("checking");
   const { isMac: isMacOS } = usePlatform();
   const restartTriggeredRef = useRef(false);
+  // Whether screen recording was ever seen denied by THIS window. A grant that
+  // repairs it only takes effect in a new process (macOS TCC), so recovery must
+  // relaunch the app — respawning the in-process engine re-fails the check.
+  const screenWasDeniedRef = useRef(false);
 
   const checkPermissions = useCallback(async () => {
     try {
       const perms = await commands.doPermissionsCheck(false);
+      if (
+        perms.screenRecording !== "granted" &&
+        perms.screenRecording !== "notNeeded"
+      ) {
+        screenWasDeniedRef.current = true;
+      }
       setPermissions(perms);
       return perms;
     } catch (error) {
@@ -183,6 +193,20 @@ export default function PermissionRecoveryPage() {
     if (screenOk && micOk && accessibilityOk) {
       restartTriggeredRef.current = true;
       setTimeout(async () => {
+        // A freshly-granted screen-recording (TCC) permission only applies to
+        // a NEW process — relaunch the app. Mic/accessibility repairs work
+        // with an in-process engine restart.
+        if (isMacOS && screenWasDeniedRef.current) {
+          try {
+            const restart = await commands.restartApp();
+            if (restart.status === "ok" && restart.data === "proceed") {
+              return; // the process is going away; window closes with it
+            }
+            console.error("app relaunch declined, falling back to engine restart:", restart);
+          } catch (error) {
+            console.error("app relaunch failed, falling back to engine restart:", error);
+          }
+        }
         try {
           await commands.stopScreenpipe();
           await commands.spawnScreenpipe(null);

@@ -316,7 +316,19 @@ const NotificationHandler: React.FC = () => {
           try {
             try { await commands.stopScreenpipe(); } catch {}
             await new Promise((r) => setTimeout(r, 2000));
-            await commands.spawnScreenpipe(null);
+            const spawnResult = await commands.spawnScreenpipe(null);
+            if (spawnResult.status === "error") {
+              // A freshly-granted screen-recording (TCC) permission only
+              // applies to a NEW process — an in-process engine respawn keeps
+              // failing the permission check. Escalate to a full app restart.
+              if (String(spawnResult.error).toLowerCase().includes("screen recording permission")) {
+                const restart = await commands.restartApp();
+                if (restart.status === "ok" && restart.data === "proceed") {
+                  return; // process is relaunching
+                }
+              }
+              throw new Error(String(spawnResult.error));
+            }
             // Poll health endpoint to confirm restart
             for (let i = 0; i < 15; i++) {
               await new Promise((r) => setTimeout(r, 1000));

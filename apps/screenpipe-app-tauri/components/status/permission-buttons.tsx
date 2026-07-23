@@ -3,6 +3,7 @@ import { useInterval } from "@/lib/hooks/use-interval";
 import { Button } from "@/components/ui/button";
 import { Check, Lock, Settings, X } from "lucide-react";
 import { toast } from "@/components/ui/use-toast";
+import { ToastAction } from "@/components/ui/toast";
 import { commands, OSPermissionsCheck, OSPermissionStatus } from "@/lib/utils/tauri";
 import { openPermissionSettingsWithFlow, requestPermissionWithFlow } from "@/lib/utils/permission-flow";
 import { usePlatform } from "@/lib/hooks/use-platform";
@@ -72,7 +73,10 @@ export const PermissionButtons: React.FC<PermissionButtonsProps> = ({
       const perms = await commands.doPermissionsCheck(false);
       setPermissions(perms);
 
-      // If screen recording permission was requested, set flag and prompt for restart
+      // If screen recording permission was requested, set flag and prompt for
+      // restart. macOS TCC only applies the grant to a NEW process, so the
+      // button must relaunch the whole app — restarting the recording engine
+      // in-process re-fails the same permission check.
       if (type === "screen") {
         await localforage.setItem("screenPermissionRestartPending", true);
 
@@ -80,7 +84,26 @@ export const PermissionButtons: React.FC<PermissionButtonsProps> = ({
           title: "restart required",
           description:
             "please restart the app to apply screen recording permission",
-          duration: 5000,
+          duration: 30000,
+          action: (
+            <ToastAction
+              altText="Restart app now"
+              onClick={() => {
+                commands
+                  .restartApp()
+                  .then((result) => {
+                    if (result.status !== "ok" || result.data !== "proceed") {
+                      console.error("app restart did not proceed:", result);
+                    }
+                  })
+                  .catch((error) => {
+                    console.error("failed to restart app:", error);
+                  });
+              }}
+            >
+              restart now
+            </ToastAction>
+          ),
         });
       }
     } catch (error) {

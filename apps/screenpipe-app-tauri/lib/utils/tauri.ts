@@ -1910,6 +1910,25 @@ async resizeSearchWindow(width: number, height: number) : Promise<Result<null, s
 }
 },
 /**
+ * Full app relaunch for surfaces that need the *process* to restart — most
+ * importantly applying a macOS screen-recording (TCC) grant, which only takes
+ * effect in a new process. Restarting the embedded recording engine is not
+ * enough there: the respawn re-runs the same in-process permission check and
+ * fails again, which is exactly the "clicked restart, nothing happened" bug.
+ *
+ * Same safe path as [`restart_for_update`]: gate, bounded teardown, then
+ * spawn a replacement process and `_exit` (never `std::process::exit`, which
+ * can abort in ORT/ggml atexit teardown).
+ */
+async restartApp() : Promise<Result<string, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("restart_app") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Banner-click restart. Mirror the auto-update path: gate, stop server, then
  * spawn the replacement app and `_exit` the old process so C/C++ atexit
  * handlers cannot abort during restart. See 2026-06-10 and 2026-07-02 reports.
@@ -3408,8 +3427,9 @@ showOverlayInScreenRecording?: boolean;
  */
 chatAlwaysOnTop?: boolean;
 /**
- * Show restart notifications when audio/vision capture stalls.
- * Disabled by default for now until the stall detector is more reliable.
+ * Show recording-health overlay alerts and restart notifications when
+ * audio/vision capture stalls. Disabled by default for now until the
+ * detector is more reliable.
  */
 showRestartNotifications?: boolean;
 /**
