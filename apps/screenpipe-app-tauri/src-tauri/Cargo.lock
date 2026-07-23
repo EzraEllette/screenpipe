@@ -11125,6 +11125,7 @@ dependencies = [
  "screenpipe-screen",
  "screenpipe-secrets",
  "screenpipe-sync",
+ "screenpipe-telemetry-wire",
  "screenpipe-vault",
  "security-framework",
  "sentry 0.42.0",
@@ -11618,6 +11619,16 @@ dependencies = [
  "tokio",
  "tracing",
  "zeroize",
+]
+
+[[package]]
+name = "screenpipe-telemetry-wire"
+version = "0.4.30"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tracing",
 ]
 
 [[package]]
