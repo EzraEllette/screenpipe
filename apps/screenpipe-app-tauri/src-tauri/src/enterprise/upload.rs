@@ -35,6 +35,19 @@ const DIRECT_UPLOAD_MODE: &str = "direct_upload_encrypted";
 const DIRECT_UPLOAD_READABLE_MODE: &str = "direct_upload_readable";
 const DIRECT_UPLOAD_MAX_RETRIES: u32 = 3;
 const DIRECT_UPLOAD_INITIAL_BACKOFF: Duration = Duration::from_secs(2);
+const DIRECT_UPLOAD_SECRET_ENV_VARS: [&str; 2] = [
+    "SCREENPIPE_ENTERPRISE_DIRECT_UPLOAD_ROOT_KEY_B64",
+    "SCREENPIPE_ENTERPRISE_DIRECT_UPLOAD_RECOVERY_ROOT_KEY_B64",
+];
+
+/// Remove customer root keys after loading them into the in-memory upload
+/// config. Child agents inherit the app environment by default; leaving these
+/// values there would let an unrelated pipe or agent read the decryption keys.
+pub fn scrub_direct_upload_secrets_from_environment() {
+    for name in DIRECT_UPLOAD_SECRET_ENV_VARS {
+        std::env::remove_var(name);
+    }
+}
 
 impl From<SyncError> for EnterpriseSyncError {
     fn from(value: SyncError) -> Self {
@@ -68,6 +81,10 @@ pub enum EnterpriseUploadMode {
     HostedIngest,
     DirectEncrypted(DirectUploadConfig),
     DirectReadable(DirectUploadConfig),
+    /// The control plane requires customer-held encryption, but this device
+    /// cannot satisfy that contract. Keep sync alive so policy can recover,
+    /// while refusing every telemetry upload until the configuration is fixed.
+    Blocked(String),
 }
 
 impl EnterpriseUploadMode {
@@ -78,6 +95,7 @@ impl EnterpriseUploadMode {
             Self::HostedIngest => "hosted_ingest",
             Self::DirectEncrypted(_) => "direct_encrypted",
             Self::DirectReadable(_) => "direct_readable",
+            Self::Blocked(_) => "blocked",
         }
     }
 }
@@ -104,11 +122,10 @@ impl EnterpriseUploadMode {
     /// on every device — the storage binding in the dashboard is the
     /// single source of truth.
     ///
-    /// Fails open to `HostedIngest` on any error (network down, license
-    /// invalid, server flake). The legacy env-var override is still
-    /// honored for advanced/test scenarios when explicitly set to
-    /// anything other than the default `screenpipe_write`.
-    pub async fn resolve(license_key: &str, ingest_url: &str) -> Self {
+    /// Returns `None` on a transient control-plane failure so the caller can
+    /// preserve its last known mode. A strict encrypted response never
+    /// downgrades: missing or invalid customer keys produce `Blocked`.
+    pub async fn resolve(license_key: &str, ingest_url: &str) -> Option<Self> {
         // Explicit env override — for MDM rollouts and local testing.
         // Only takes effect when set to a non-default value; the empty /
         // default case falls through to server resolution.
@@ -125,12 +142,40 @@ impl EnterpriseUploadMode {
                          SCREENPIPE_ENTERPRISE_UPLOAD_MODE env override ({})",
                         normalized
                     );
-                    return mode;
+                    return Some(mode);
                 }
+                return Some(Self::Blocked(format!(
+                    "explicit enterprise upload mode '{normalized}' could not be configured"
+                )));
             }
         }
 
         match fetch_desired_mode_from_server(license_key, ingest_url).await {
+            Ok(ServerModeHint::DirectUploadEncrypted) => {
+                if let Some(mode) = Self::build_direct_encrypted(ingest_url) {
+                    tracing::info!(
+                        "enterprise sync: server requires customer-encrypted direct upload"
+                    );
+                    Some(mode)
+                } else {
+                    tracing::error!(
+                        "enterprise sync: strict encrypted direct upload is active, but the \
+                         customer-held primary or recovery key is missing or invalid; uploads blocked"
+                    );
+                    Some(Self::Blocked(
+                        "strict encrypted direct upload requires valid customer-held primary and recovery keys"
+                            .to_string(),
+                    ))
+                }
+            }
+            Ok(ServerModeHint::DirectUploadReadable) => {
+                tracing::info!(
+                    "enterprise sync: server requires readable customer storage for cloud processing"
+                );
+                Some(Self::DirectReadable(
+                    DirectUploadConfig::without_recipients(ingest_url),
+                ))
+            }
             Ok(ServerModeHint::DirectUpload) => {
                 // Encrypted if MDM root keys are present, readable
                 // otherwise. Same logic the env path uses; just gated by
@@ -141,7 +186,7 @@ impl EnterpriseUploadMode {
                             "enterprise sync: server requested direct upload + MDM keys \
                              present → direct_upload_encrypted"
                         );
-                        return mode;
+                        return Some(mode);
                     }
                     tracing::warn!(
                         "enterprise sync: server requested direct upload + MDM keys present \
@@ -151,19 +196,21 @@ impl EnterpriseUploadMode {
                 tracing::info!(
                     "enterprise sync: server requested direct upload → direct_upload_readable"
                 );
-                Self::DirectReadable(DirectUploadConfig::without_recipients(ingest_url))
+                Some(Self::DirectReadable(
+                    DirectUploadConfig::without_recipients(ingest_url),
+                ))
             }
             Ok(ServerModeHint::HostedIngest) => {
                 tracing::info!("enterprise sync: server requested hosted_ingest");
-                Self::HostedIngest
+                Some(Self::HostedIngest)
             }
             Err(e) => {
                 tracing::warn!(
                     error = %e,
                     "enterprise sync: control-plane mode lookup failed; \
-                     defaulting to hosted_ingest (will retry next batch)"
+                     preserving the last known upload mode (will retry next batch)"
                 );
-                Self::HostedIngest
+                None
             }
         }
     }
@@ -283,6 +330,8 @@ impl EnterpriseUploadMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ServerModeHint {
     DirectUpload,
+    DirectUploadEncrypted,
+    DirectUploadReadable,
     HostedIngest,
 }
 
@@ -321,8 +370,14 @@ async fn fetch_desired_mode_from_server(
         .json()
         .await
         .map_err(|e| EnterpriseSyncError::Network(format!("mode response parse failed: {e}")))?;
-    match parsed.desired_mode.trim().to_ascii_lowercase().as_str() {
+    parse_server_mode_hint(&parsed.desired_mode)
+}
+
+fn parse_server_mode_hint(raw: &str) -> Result<ServerModeHint, EnterpriseSyncError> {
+    match raw.trim().to_ascii_lowercase().as_str() {
         "direct_upload" => Ok(ServerModeHint::DirectUpload),
+        "direct_upload_encrypted" => Ok(ServerModeHint::DirectUploadEncrypted),
+        "direct_upload_readable" => Ok(ServerModeHint::DirectUploadReadable),
         "hosted_ingest" | "screenpipe_write" | "" => Ok(ServerModeHint::HostedIngest),
         other => Err(EnterpriseSyncError::Network(format!(
             "unknown desired_mode '{other}' from control plane"
@@ -698,6 +753,26 @@ mod tests {
         assert_eq!(
             EnterpriseUploadMode::DirectEncrypted(direct_cfg()).label(),
             "direct_encrypted"
+        );
+        assert_eq!(
+            EnterpriseUploadMode::Blocked("missing customer key".to_string()).label(),
+            "blocked"
+        );
+    }
+
+    #[test]
+    fn strict_server_mode_is_distinct_from_legacy_direct_upload() {
+        assert_eq!(
+            parse_server_mode_hint("direct_upload_encrypted").unwrap(),
+            ServerModeHint::DirectUploadEncrypted
+        );
+        assert_eq!(
+            parse_server_mode_hint("direct_upload").unwrap(),
+            ServerModeHint::DirectUpload
+        );
+        assert_eq!(
+            parse_server_mode_hint("direct_upload_readable").unwrap(),
+            ServerModeHint::DirectUploadReadable
         );
     }
 
