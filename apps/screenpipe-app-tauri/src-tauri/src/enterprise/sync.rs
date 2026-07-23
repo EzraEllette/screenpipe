@@ -119,21 +119,23 @@ impl EnterpriseSyncConfig {
         device_id: String,
         device_label: String,
     ) -> Option<Self> {
-        Self::from_env_with_fallback(app_data_dir, device_id, device_label, None)
+        Self::from_env_with_fallback(app_data_dir, device_id, device_label, None, None)
     }
 
-    /// Same as `from_env` but lets the caller pass a license key resolved
-    /// from somewhere else (e.g. `~/.screenpipe/enterprise.json` populated
-    /// by the desktop's in-app prompt). Env var still wins when set — that
-    /// keeps MDM rollouts working — but a missing env no longer disables
-    /// enterprise sync when the user has signed in normally through the
-    /// app. Without this fallback the entire telemetry pipeline silently
-    /// no-ops because the license key lives in the file, not the shell.
+    /// Same as `from_env` but lets the caller pass a license key and ingest
+    /// URL resolved from somewhere else (`~/.screenpipe/enterprise.json`,
+    /// populated by the desktop's in-app prompt or the sign-in-driven
+    /// device-config fetch). Env vars still win when set — that keeps MDM
+    /// rollouts working — but a missing env no longer disables enterprise
+    /// sync when the user has signed in normally through the app. Without
+    /// this fallback the entire telemetry pipeline silently no-ops because
+    /// the config lives in the file, not the shell.
     pub fn from_env_with_fallback(
         app_data_dir: PathBuf,
         device_id: String,
         device_label: String,
         license_key_fallback: Option<String>,
+        ingest_url_fallback: Option<String>,
     ) -> Option<Self> {
         let license_key = std::env::var("SCREENPIPE_ENTERPRISE_LICENSE_KEY")
             .ok()
@@ -142,6 +144,7 @@ impl EnterpriseSyncConfig {
         let ingest_url = std::env::var("SCREENPIPE_ENTERPRISE_INGEST_URL")
             .ok()
             .filter(|s| !s.trim().is_empty())
+            .or_else(|| ingest_url_fallback.filter(|s| !s.trim().is_empty()))
             .unwrap_or_else(|| DEFAULT_INGEST_URL.to_string());
         // Honor only an enforceable non-default env override at boot for MDM /
         // dev / test flows. Otherwise start blocked until the control plane
@@ -1379,7 +1382,7 @@ pub async fn run(
 /// Trade-off: tests that signal shutdown have to wait up to one `dur` before
 /// the loop notices. That's fine — production `dur` is 5min, tests can use
 /// short intervals.
-async fn sleep_or_shutdown(
+pub(crate) async fn sleep_or_shutdown(
     dur: Duration,
     shutdown: &mut tokio::sync::watch::Receiver<bool>,
 ) -> bool {

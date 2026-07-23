@@ -41,7 +41,51 @@ fn log_webview_build_failure(label: &str, url_hint: &str, err: &(impl std::fmt::
 
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
-    use super::{fallback_local_api_config, is_login_callback_scheme, scan_chat_entries_by_mtime};
+    use super::{
+        fallback_local_api_config, is_login_callback_scheme, read_enterprise_config_from_path,
+        scan_chat_entries_by_mtime,
+    };
+
+    #[test]
+    fn enterprise_json_parses_license_and_ingest_url() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("enterprise.json");
+
+        // Both fields (sign-in auto-config or full MDM drop).
+        std::fs::write(
+            &path,
+            r#"{"license_key":"ENT-AAAA-BBBB-CCCC-DDDD","ingest_url":"http://192.168.10.161:3000/api/enterprise/ingest"}"#,
+        )
+        .unwrap();
+        let cfg = read_enterprise_config_from_path(&path).unwrap();
+        assert_eq!(cfg.license_key.as_deref(), Some("ENT-AAAA-BBBB-CCCC-DDDD"));
+        assert_eq!(
+            cfg.ingest_url.as_deref(),
+            Some("http://192.168.10.161:3000/api/enterprise/ingest")
+        );
+
+        // Legacy file: license only — ingest stays None (default base applies).
+        std::fs::write(&path, r#"{"license_key":"ENT-AAAA-BBBB-CCCC-DDDD"}"#).unwrap();
+        let cfg = read_enterprise_config_from_path(&path).unwrap();
+        assert!(cfg.ingest_url.is_none());
+        assert!(!cfg.is_empty());
+
+        // URL-only file: valid "MDM points at the control plane, sign-in
+        // supplies the license" deployment.
+        std::fs::write(&path, r#"{"ingest_url":"https://cp.acme.com/api/enterprise/ingest"}"#)
+            .unwrap();
+        let cfg = read_enterprise_config_from_path(&path).unwrap();
+        assert!(cfg.license_key.is_none());
+        assert_eq!(
+            cfg.ingest_url.as_deref(),
+            Some("https://cp.acme.com/api/enterprise/ingest")
+        );
+
+        // Blank/whitespace values are treated as absent, not empty strings.
+        std::fs::write(&path, r#"{"license_key":"  ","ingest_url":""}"#).unwrap();
+        let cfg = read_enterprise_config_from_path(&path).unwrap();
+        assert!(cfg.is_empty());
+    }
 
     #[test]
     fn chat_entries_missing_dir_is_empty() {
@@ -324,34 +368,55 @@ pub fn set_cloud_media_analysis_skill(enabled: bool) -> Result<(), String> {
     Ok(())
 }
 
-/// Read the enterprise license key from `enterprise.json`.
-/// Checks in order:
-/// 1. Next to executable (pushed via Intune/MDM to Program Files / .app bundle)
-/// 2. `~/.screenpipe/enterprise.json` (entered manually by employee via in-app prompt)
-/// Returns None if no file is found or is invalid.
-#[tauri::command]
-#[specta::specta]
-pub fn get_enterprise_license_key() -> Option<String> {
-    // Try MDM-deployed location first (next to executable)
-    if let Some(key) = read_enterprise_key_from_exe_dir() {
-        return Some(key);
-    }
+/// Everything `enterprise.json` can carry. `license_key` activates the
+/// telemetry pipeline; `ingest_url` re-bases every enterprise endpoint
+/// (control_plane_base derives the origin), which is how on-prem / staging
+/// control planes work without env vars. Both optional — a file with only
+/// `ingest_url` is a valid "MDM points the device at the control plane,
+/// sign-in supplies the license" deployment.
+#[derive(Debug, Clone, Default)]
+pub struct EnterpriseFileConfig {
+    pub license_key: Option<String>,
+    pub ingest_url: Option<String>,
+}
 
-    // Fallback: ~/.screenpipe/enterprise.json (manually entered by employee)
+impl EnterpriseFileConfig {
+    pub fn is_empty(&self) -> bool {
+        self.license_key.is_none() && self.ingest_url.is_none()
+    }
+}
+
+/// Read the full enterprise device config from `enterprise.json`.
+/// Checks in order (first file found wins entirely):
+/// 1. Next to executable (pushed via Intune/MDM to Program Files / .app bundle)
+/// 2. `~/.screenpipe/enterprise.json` (in-app prompt or sign-in auto-config)
+pub fn get_enterprise_file_config() -> EnterpriseFileConfig {
+    if let Some(cfg) = read_enterprise_config_from_exe_dir() {
+        return cfg;
+    }
     let user_path = screenpipe_core::paths::default_screenpipe_data_dir().join("enterprise.json");
     if user_path.exists() {
         info!(
             "enterprise: checking user config at {}",
             user_path.display()
         );
-        return read_enterprise_key_from_path(&user_path);
+        if let Some(cfg) = read_enterprise_config_from_path(&user_path) {
+            return cfg;
+        }
     }
-
     info!("enterprise: no enterprise.json found in any location");
-    None
+    EnterpriseFileConfig::default()
 }
 
-fn read_enterprise_key_from_exe_dir() -> Option<String> {
+/// Read the enterprise license key from `enterprise.json`.
+/// Returns None if no file is found or is invalid.
+#[tauri::command]
+#[specta::specta]
+pub fn get_enterprise_license_key() -> Option<String> {
+    get_enterprise_file_config().license_key
+}
+
+fn read_enterprise_config_from_exe_dir() -> Option<EnterpriseFileConfig> {
     let exe = match std::env::current_exe() {
         Ok(e) => e,
         Err(e) => {
@@ -378,10 +443,10 @@ fn read_enterprise_key_from_exe_dir() -> Option<String> {
         return None;
     }
 
-    read_enterprise_key_from_path(&config_path)
+    read_enterprise_config_from_path(&config_path)
 }
 
-fn read_enterprise_key_from_path(path: &std::path::Path) -> Option<String> {
+fn read_enterprise_config_from_path(path: &std::path::Path) -> Option<EnterpriseFileConfig> {
     info!("enterprise: found enterprise.json at {}", path.display());
 
     let contents = match std::fs::read_to_string(path) {
@@ -398,27 +463,40 @@ fn read_enterprise_key_from_path(path: &std::path::Path) -> Option<String> {
             return None;
         }
     };
-    let key = parsed
-        .get("license_key")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
+    let string_field = |name: &str| {
+        parsed
+            .get(name)
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    };
+    let cfg = EnterpriseFileConfig {
+        license_key: string_field("license_key"),
+        ingest_url: string_field("ingest_url"),
+    };
 
-    match &key {
+    match &cfg.license_key {
         Some(k) => info!(
             "enterprise: license key loaded ({}...)",
             &k[..k.len().min(8)]
         ),
-        None => warn!("enterprise: enterprise.json missing 'license_key' field"),
+        None => info!("enterprise: enterprise.json has no 'license_key' field"),
+    }
+    if let Some(url) = &cfg.ingest_url {
+        info!("enterprise: ingest url from enterprise.json: {}", url);
     }
 
-    key
+    Some(cfg)
 }
 
-/// Save the enterprise license key to `~/.screenpipe/enterprise.json`.
-/// Used by the in-app prompt when enterprise.json is not deployed via MDM.
-#[tauri::command]
-#[specta::specta]
-pub fn save_enterprise_license_key(license_key: String) -> Result<(), String> {
+/// Merge-write device config fields into `~/.screenpipe/enterprise.json`,
+/// preserving any other keys already in the file. Used by the in-app
+/// license prompt and by the sign-in-driven auto-config
+/// (enterprise/device_config.rs).
+pub fn persist_enterprise_device_config(
+    license_key: Option<&str>,
+    ingest_url: Option<&str>,
+) -> Result<(), String> {
     let dir = screenpipe_core::paths::default_screenpipe_data_dir();
     std::fs::create_dir_all(&dir).map_err(|e| format!("failed to create dir: {}", e))?;
 
@@ -427,12 +505,25 @@ pub fn save_enterprise_license_key(license_key: String) -> Result<(), String> {
         .ok()
         .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
         .unwrap_or_else(|| serde_json::json!({}));
-    json["license_key"] = serde_json::Value::String(license_key);
+    if let Some(key) = license_key {
+        json["license_key"] = serde_json::Value::String(key.to_string());
+    }
+    if let Some(url) = ingest_url {
+        json["ingest_url"] = serde_json::Value::String(url.to_string());
+    }
     std::fs::write(&path, serde_json::to_string_pretty(&json).unwrap())
         .map_err(|e| format!("failed to write {}: {}", path.display(), e))?;
 
-    info!("enterprise: license key saved to {}", path.display());
+    info!("enterprise: device config saved to {}", path.display());
     Ok(())
+}
+
+/// Save the enterprise license key to `~/.screenpipe/enterprise.json`.
+/// Used by the in-app prompt when enterprise.json is not deployed via MDM.
+#[tauri::command]
+#[specta::specta]
+pub fn save_enterprise_license_key(license_key: String) -> Result<(), String> {
+    persist_enterprise_device_config(Some(&license_key), None)
 }
 
 /// Persist the resolved "hide app UI" decision into `~/.screenpipe/enterprise.json`
