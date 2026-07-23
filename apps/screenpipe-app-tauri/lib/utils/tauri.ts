@@ -1632,6 +1632,14 @@ async readAudioExclusions() : Promise<Result<ExcludedApp[], string>> {
     else return { status: "error", error: e  as any };
 }
 },
+async readLogTail(path: string, maxBytes: number) : Promise<Result<string, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("read_log_tail", { path, maxBytes }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 /**
  * Read a file for the viewer. Returns text for text-like files, a
  * base64 data URL for images. Files larger than `MAX_VIEWER_FILE_BYTES`
