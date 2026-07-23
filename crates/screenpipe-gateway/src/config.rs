@@ -38,6 +38,15 @@ pub struct GatewayConfig {
     pub bind: String,
     /// Ingest poll interval.
     pub poll_interval: std::time::Duration,
+    /// Base64 ed25519 public key pinning the policy signer. Setting it
+    /// turns bearer auth ON for the v1 surface (SCR-291): the gateway then
+    /// requires a signed policy (see `policy_path`) and fails closed
+    /// without one. Unset = M1 posture (unauthenticated, private network).
+    pub policy_pubkey_b64: Option<String>,
+    /// Path to the signed policy envelope JSON. Re-read on the poll
+    /// interval so a refreshed file (or the SCR-295 control-plane pull
+    /// writing it) lands without a restart.
+    pub policy_path: Option<std::path::PathBuf>,
 }
 
 fn env_opt(name: &str) -> Option<String> {
@@ -77,6 +86,8 @@ impl GatewayConfig {
                 .into(),
             bind: env_opt("SCREENPIPE_GATEWAY_BIND").unwrap_or_else(|| "0.0.0.0:3040".into()),
             poll_interval: std::time::Duration::from_secs(poll_secs),
+            policy_pubkey_b64: env_opt("SCREENPIPE_GATEWAY_POLICY_PUBKEY_B64"),
+            policy_path: env_opt("SCREENPIPE_GATEWAY_POLICY_PATH").map(Into::into),
         })
     }
 

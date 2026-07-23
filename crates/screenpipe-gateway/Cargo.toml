@@ -15,6 +15,11 @@ edition = { workspace = true }
 name = "screenpipe-gateway"
 path = "src/main.rs"
 
+[[bin]]
+# The compose e2e's synthetic-device seeder — never shipped to customers.
+name = "screenpipe-gateway-seed"
+path = "src/bin/seed.rs"
+
 [dependencies]
 async-trait = { workspace = true }
 axum = { workspace = true }
@@ -49,9 +54,18 @@ screenpipe-sync = { path = "../screenpipe-sync", default-features = false }
 # tree is untouched.
 object_store = { version = "0.14", features = ["aws"] }
 
+# Signed-policy verification (offline sk_ent_ token auth, SCR-291). The
+# gateway only ever VERIFIES; signing lives in the website control plane
+# (and in this crate's fixture helper for tests/demos).
+ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
+
+# Control-plane client (enroll / policy pull / heartbeats, SCR-295).
+reqwest = { workspace = true }
+
 [dev-dependencies]
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 # Router-level tests (ServiceExt::oneshot + body collection).
 tower = { version = "0.4", features = ["util"] }
 http-body-util = "0.1"
+wiremock = { workspace = true }
