@@ -240,10 +240,8 @@ mod tests {
             lines_unparseable: 1,
             cursor: Some("2026-07-22T10:00:00.000Z".to_string()),
         };
-        let hb = GatewayHeartbeat::from_report(
-            &report,
-            vec![ErrorCode::ES3Get, ErrorCode::EBatchParse],
-        );
+        let hb =
+            GatewayHeartbeat::from_report(&report, vec![ErrorCode::ES3Get, ErrorCode::EBatchParse]);
         let wire = serde_json::to_value(&hb).unwrap();
 
         let expected = serde_json::json!({
@@ -323,8 +321,7 @@ mod tests {
         assert_eq!(reloaded.gateway_token, "gwt-secret");
 
         let envelope_bytes = client.fetch_policy(&reloaded).await.unwrap();
-        let verified =
-            crate::policy::verify_policy_envelope(&envelope_bytes, &pubkey).unwrap();
+        let verified = crate::policy::verify_policy_envelope(&envelope_bytes, &pubkey).unwrap();
         assert_eq!(verified.license_id, "lic-1");
 
         let hb = GatewayHeartbeat::from_report(&IngestReport::default(), vec![]);

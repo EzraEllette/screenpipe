@@ -106,12 +106,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // REST surface (v1-compatible) — served until shutdown.
-    let app = screenpipe_gateway::api::router(
-        db.clone(),
-        source,
-        cfg.license_id.clone(),
-        policy_store,
-    );
+    let app =
+        screenpipe_gateway::api::router(db.clone(), source, cfg.license_id.clone(), policy_store);
     let listener = tokio::net::TcpListener::bind(&cfg.bind).await?;
     info!(bind = %cfg.bind, "gateway REST listening");
     axum::serve(listener, app)

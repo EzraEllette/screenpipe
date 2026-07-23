@@ -65,7 +65,9 @@ impl GatewayConfig {
         let poll_secs: u64 = env_opt("SCREENPIPE_GATEWAY_POLL_SECONDS")
             .map(|s| {
                 s.parse().map_err(|_| {
-                    GatewayError::Config("SCREENPIPE_GATEWAY_POLL_SECONDS must be an integer".into())
+                    GatewayError::Config(
+                        "SCREENPIPE_GATEWAY_POLL_SECONDS must be an integer".into(),
+                    )
                 })
             })
             .transpose()?
@@ -74,7 +76,8 @@ impl GatewayConfig {
             license_id: env_required("SCREENPIPE_GATEWAY_LICENSE_ID")?,
             s3_bucket: env_required("SCREENPIPE_GATEWAY_S3_BUCKET")?,
             s3_endpoint: env_opt("SCREENPIPE_GATEWAY_S3_ENDPOINT"),
-            s3_region: env_opt("SCREENPIPE_GATEWAY_S3_REGION").unwrap_or_else(|| "us-east-1".into()),
+            s3_region: env_opt("SCREENPIPE_GATEWAY_S3_REGION")
+                .unwrap_or_else(|| "us-east-1".into()),
             s3_access_key_id: env_opt("SCREENPIPE_GATEWAY_S3_ACCESS_KEY_ID"),
             s3_secret_access_key: env_opt("SCREENPIPE_GATEWAY_S3_SECRET_ACCESS_KEY"),
             s3_allow_http: env_opt("SCREENPIPE_GATEWAY_S3_ALLOW_HTTP")

@@ -67,7 +67,10 @@ fn batch_for(device: &Device) -> Vec<u8> {
                 app_name: Some("Slack".to_string()),
                 window_name: Some("#eng".to_string()),
                 browser_url: None,
-                text: Some(format!("standup notes {} for the archive demo", device.marker)),
+                text: Some(format!(
+                    "standup notes {} for the archive demo",
+                    device.marker
+                )),
             },
         ],
         &[AudioRow {

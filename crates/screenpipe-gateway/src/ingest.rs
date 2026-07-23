@@ -177,7 +177,11 @@ impl Ingestor {
             }
 
             match self
-                .ingest_object(&entry.key, &parsed_key.device_id, entry.last_modified.clone())
+                .ingest_object(
+                    &entry.key,
+                    &parsed_key.device_id,
+                    entry.last_modified.clone(),
+                )
                 .await
             {
                 Ok((inserted, deduped, unparseable)) => {
@@ -186,7 +190,12 @@ impl Ingestor {
                     report.records_deduped += deduped;
                     report.lines_unparseable += unparseable;
                     if let Some(lm) = entry.last_modified {
-                        if report.cursor.as_deref().map(|c| lm.as_str() > c).unwrap_or(true) {
+                        if report
+                            .cursor
+                            .as_deref()
+                            .map(|c| lm.as_str() > c)
+                            .unwrap_or(true)
+                        {
                             report.cursor = Some(lm);
                         }
                     }
@@ -317,9 +326,7 @@ impl Ingestor {
                     device_id,
                     snapshot,
                     ..
-                } => {
-                    insert_snapshot(conn, device_id, snapshot, &self.snapshots_dir).await?
-                }
+                } => insert_snapshot(conn, device_id, snapshot, &self.snapshots_dir).await?,
                 TelemetryRecord::Memory {
                     device_id, memory, ..
                 } => insert_memory(conn, device_id, memory).await?,
@@ -357,10 +364,7 @@ fn sync_id(device_id: &str, kind: &str, local_id: i64) -> String {
     format!("{device_id}:{kind}:{local_id}")
 }
 
-async fn frame_row_id_by_sync_id(
-    conn: &mut Conn,
-    sid: &str,
-) -> Result<Option<i64>, GatewayError> {
+async fn frame_row_id_by_sync_id(conn: &mut Conn, sid: &str) -> Result<Option<i64>, GatewayError> {
     let row: Option<(i64,)> = sqlx::query_as("SELECT id FROM frames WHERE sync_id = ?1 LIMIT 1")
         .bind(sid)
         .fetch_optional(&mut **conn)
@@ -573,8 +577,7 @@ async fn insert_memory(
     memory: &MemoryRow,
 ) -> Result<bool, GatewayError> {
     let sid = sync_id(device_id, "memory", memory.memory_id);
-    let tags_json =
-        serde_json::to_string(&memory.tags).unwrap_or_else(|_| "[]".to_string());
+    let tags_json = serde_json::to_string(&memory.tags).unwrap_or_else(|_| "[]".to_string());
     let result = sqlx::query(
         r#"INSERT INTO memories
            (content, source, tags, importance, created_at, updated_at, sync_uuid, sync_modified_by)
@@ -887,12 +890,11 @@ mod tests {
         let report = ingestor.run_once().await.unwrap();
         assert_eq!(report.records_inserted, 2);
 
-        let (path,): (String,) = sqlx::query_as(
-            "SELECT snapshot_path FROM frames WHERE sync_id = 'dev-a:frame:7'",
-        )
-        .fetch_one(&db.pool)
-        .await
-        .unwrap();
+        let (path,): (String,) =
+            sqlx::query_as("SELECT snapshot_path FROM frames WHERE sync_id = 'dev-a:frame:7'")
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
         assert!(std::path::Path::new(&path).exists());
         assert_eq!(std::fs::read(&path).unwrap(), b"not-really-a-jpeg");
     }
