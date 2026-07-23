@@ -24,7 +24,7 @@ use thiserror::Error;
 /// (and the serializer's shape test in the control-plane client). Codes are
 /// explicit `rename`s, not derived case conversion, so the wire strings are
 /// immune to variant renames and case-conversion edge cases.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum ErrorCode {
     #[serde(rename = "E_S3_ACCESS_DENIED")]
     ES3AccessDenied,
