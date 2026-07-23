@@ -76,7 +76,12 @@ const LOG_REQUEST_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Default endpoint. Overridable via `SCREENPIPE_ENTERPRISE_INGEST_URL` for
 /// staging / on-prem.
-pub const DEFAULT_INGEST_URL: &str = "https://screenpipe.com/api/enterprise/ingest";
+pub fn default_ingest_url() -> String {
+    // Baked control-plane base (crate::web_base): a build produced with
+    // NEXT_PUBLIC_SCREENPIPE_WEB_URL targets that deployment app-wide,
+    // exactly like a prod build targets screenpipe.com.
+    crate::web_base::screenpipe_web_url("/api/enterprise/ingest")
+}
 
 /// Cursor file in app data dir.
 pub const CURSOR_FILENAME: &str = "enterprise_sync_cursor.json";
@@ -145,7 +150,7 @@ impl EnterpriseSyncConfig {
             .ok()
             .filter(|s| !s.trim().is_empty())
             .or_else(|| ingest_url_fallback.filter(|s| !s.trim().is_empty()))
-            .unwrap_or_else(|| DEFAULT_INGEST_URL.to_string());
+            .unwrap_or_else(default_ingest_url);
         // Honor only an enforceable non-default env override at boot for MDM /
         // dev / test flows. Otherwise start blocked until the control plane
         // positively resolves the license policy. Starting in HostedIngest
@@ -1969,7 +1974,7 @@ mod tests {
         let cfg =
             EnterpriseSyncConfig::from_env(dir.path().to_path_buf(), "dev".into(), "host".into())
                 .expect("license set, must yield Some");
-        assert_eq!(cfg.ingest_url, DEFAULT_INGEST_URL);
+        assert_eq!(cfg.ingest_url, default_ingest_url());
         assert_eq!(cfg.license_key, "sek_test");
         assert!(matches!(cfg.upload_mode, EnterpriseUploadMode::Blocked(_)));
 

@@ -554,7 +554,11 @@ mod imp {
             .or_else(crate::commands::get_enterprise_license_key)
     }
 
-    const DEFAULT_POLICY_URL: &str = "https://screenpipe.com/api/enterprise/policy";
+    /// Default policy endpoint on the baked control-plane base
+    /// (crate::web_base — `NEXT_PUBLIC_SCREENPIPE_WEB_URL` at build time).
+    fn default_policy_url() -> String {
+        crate::web_base::screenpipe_web_url("/api/enterprise/policy")
+    }
     const HIDDEN_UI_POLICY_POLL_INTERVAL: std::time::Duration =
         std::time::Duration::from_secs(5 * 60);
 
@@ -623,7 +627,7 @@ mod imp {
             let policy_url = std::env::var("SCREENPIPE_ENTERPRISE_POLICY_URL")
                 .ok()
                 .filter(|url| !url.trim().is_empty())
-                .unwrap_or_else(|| DEFAULT_POLICY_URL.to_string());
+                .unwrap_or_else(default_policy_url);
             let http = reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
                 .redirect(reqwest::redirect::Policy::none())
