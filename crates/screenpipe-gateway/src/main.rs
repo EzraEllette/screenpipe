@@ -58,8 +58,60 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tokio::spawn(async move { ingestor.run(interval, shutdown_rx).await })
     };
 
+    // Offline token auth (SCR-291): pinning a policy-signer public key
+    // turns bearer verification ON; the signed policy file is re-read on
+    // the poll interval so refreshes (or the future control-plane pull
+    // writing it) land without a restart. No pubkey = M1 posture:
+    // unauthenticated on a private network, loudly.
+    let policy_store = match (&cfg.policy_pubkey_b64, &cfg.policy_path) {
+        (Some(pubkey_b64), Some(path)) => {
+            let pubkey = screenpipe_gateway::policy::parse_pubkey_b64(pubkey_b64)
+                .map_err(|e| format!("SCREENPIPE_GATEWAY_POLICY_PUBKEY_B64: {e}"))?;
+            let store = screenpipe_gateway::PolicyStore::new();
+            let refresh_store = store.clone();
+            let path = path.clone();
+            let interval = cfg.poll_interval;
+            tokio::spawn(async move {
+                loop {
+                    match tokio::fs::read(&path).await {
+                        Ok(bytes) => {
+                            match screenpipe_gateway::policy::verify_policy_envelope(
+                                &bytes, &pubkey,
+                            ) {
+                                Ok(doc) => refresh_store.replace(doc),
+                                Err(e) => tracing::warn!(error = %e, "policy file rejected"),
+                            }
+                        }
+                        Err(e) => tracing::warn!(error = %e, "policy file unreadable"),
+                    }
+                    tokio::time::sleep(interval).await;
+                }
+            });
+            Some(store)
+        }
+        (Some(_), None) => {
+            return Err(
+                "SCREENPIPE_GATEWAY_POLICY_PUBKEY_B64 is set but SCREENPIPE_GATEWAY_POLICY_PATH \
+                 is not — refusing to guess an auth posture"
+                    .into(),
+            );
+        }
+        (None, _) => {
+            tracing::warn!(
+                "no policy-signer public key configured — serving the v1 surface \
+                 UNAUTHENTICATED (acceptable only on a private network)"
+            );
+            None
+        }
+    };
+
     // REST surface (v1-compatible) — served until shutdown.
-    let app = screenpipe_gateway::api::router(db.clone(), source, cfg.license_id.clone());
+    let app = screenpipe_gateway::api::router(
+        db.clone(),
+        source,
+        cfg.license_id.clone(),
+        policy_store,
+    );
     let listener = tokio::net::TcpListener::bind(&cfg.bind).await?;
     info!(bind = %cfg.bind, "gateway REST listening");
     axum::serve(listener, app)

@@ -37,11 +37,15 @@
 //!   atomically with the batch's records) rather than a key cursor.
 
 pub mod api;
+pub mod auth;
 pub mod config;
+pub mod control_plane;
 pub mod error;
 pub mod ingest;
+pub mod policy;
 pub mod source;
 
+pub use auth::PolicyStore;
 pub use config::GatewayConfig;
 pub use error::{ErrorCode, GatewayError};
 pub use ingest::{IngestReport, Ingestor};

@@ -54,13 +54,21 @@ pub struct ApiState {
     pub license_id: String,
 }
 
-pub fn router(db: Arc<DatabaseManager>, source: Arc<dyn BlobSource>, license_id: String) -> Router {
+/// Build the v1 router. `policy` enables offline bearer verification
+/// (SCR-291) over every `/api/enterprise/v1/*` route; `None` serves
+/// unauthenticated (the M1 compose posture — private network only).
+pub fn router(
+    db: Arc<DatabaseManager>,
+    source: Arc<dyn BlobSource>,
+    license_id: String,
+    policy: Option<crate::auth::PolicyStore>,
+) -> Router {
     let state = ApiState {
         db,
         source,
         license_id,
     };
-    Router::new()
+    let mut router = Router::new()
         .route("/health", get(health))
         .route("/version", get(version))
         .route("/api/enterprise/v1/devices", get(devices))
@@ -73,7 +81,14 @@ pub fn router(db: Arc<DatabaseManager>, source: Arc<dyn BlobSource>, license_id:
             get(frame_image),
         )
         .route("/api/enterprise/v1/rollups", get(rollups))
-        .with_state(state)
+        .with_state(state);
+    if let Some(store) = policy {
+        router = router.layer(axum::middleware::from_fn_with_state(
+            crate::auth::AuthLayerState { store },
+            crate::auth::require_bearer,
+        ));
+    }
+    router
 }
 
 async fn health() -> Json<Value> {
@@ -960,7 +975,7 @@ mod tests {
         .await
         .unwrap();
         ingestor.run_once().await.unwrap();
-        router(db, src, "lic-1".to_string())
+        router(db, src, "lic-1".to_string(), None)
     }
 
     async fn get_json(router: &Router, uri: &str) -> (StatusCode, Value) {
@@ -1120,6 +1135,114 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bearer_auth_enforces_grants_scopes_and_policy_freshness() {
+        use crate::auth::PolicyStore;
+        use crate::policy::{sign_policy_for_fixture, PolicyDocument, TokenGrant};
+        use chrono::Duration;
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(
+            DatabaseManager::new(
+                dir.path().join("gateway.db").to_str().unwrap(),
+                DbConfig::default(),
+            )
+            .await
+            .unwrap(),
+        );
+        let src = Arc::new(S3BlobSource::from_store(
+            Arc::new(InMemory::new()),
+            None,
+        ));
+        crate::ingest::ensure_gateway_schema(&db).await.unwrap();
+        let now = Utc::now();
+        let policy = PolicyDocument {
+            license_id: "lic-1".to_string(),
+            issued_at: now,
+            valid_until: now + Duration::minutes(30),
+            token_grants: vec![
+                TokenGrant {
+                    digest: crate::policy::token_digest("sk_ent_search_only_1234"),
+                    scopes: vec!["read:search".to_string()],
+                    expires_at: None,
+                },
+            ],
+        };
+        // Fixture-sign to prove the full envelope path, then load the store.
+        let (envelope, pubkey) = sign_policy_for_fixture(&policy, &[3u8; 32], "test-v1");
+        let verified =
+            crate::policy::verify_policy_envelope(envelope.as_bytes(), &pubkey).unwrap();
+        let store = PolicyStore::new();
+        store.replace(verified);
+        let router = router(db, src, "lic-1".to_string(), Some(store.clone()));
+
+        let call = |auth: Option<&'static str>, uri: &'static str| {
+            let router = router.clone();
+            async move {
+                let mut req = Request::builder().uri(uri);
+                if let Some(a) = auth {
+                    req = req.header("authorization", a);
+                }
+                router
+                    .oneshot(req.body(Body::empty()).unwrap())
+                    .await
+                    .unwrap()
+                    .status()
+            }
+        };
+
+        // Anonymous → 401; garbage shape → 401; unknown token → 401.
+        assert_eq!(
+            call(None, "/api/enterprise/v1/search?q=x").await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            call(Some("Bearer short"), "/api/enterprise/v1/search?q=x").await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            call(
+                Some("Bearer sk_ent_never_minted_9999"),
+                "/api/enterprise/v1/search?q=x"
+            )
+            .await,
+            StatusCode::UNAUTHORIZED
+        );
+        // Valid token, in-scope route → 200.
+        assert_eq!(
+            call(
+                Some("Bearer sk_ent_search_only_1234"),
+                "/api/enterprise/v1/search?q=x"
+            )
+            .await,
+            StatusCode::OK
+        );
+        // Valid token, out-of-scope route → 403.
+        assert_eq!(
+            call(
+                Some("Bearer sk_ent_search_only_1234"),
+                "/api/enterprise/v1/devices"
+            )
+            .await,
+            StatusCode::FORBIDDEN
+        );
+        // /health carries no content — no auth required.
+        assert_eq!(call(None, "/health").await, StatusCode::OK);
+
+        // Stale policy → fail closed for everyone (503), even valid tokens.
+        let mut stale = policy.clone();
+        stale.valid_until = now - Duration::minutes(1);
+        store.replace(stale);
+        assert_eq!(
+            call(
+                Some("Bearer sk_ent_search_only_1234"),
+                "/api/enterprise/v1/search?q=x"
+            )
+            .await,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    #[tokio::test]
     async fn frame_image_falls_back_to_ingested_snapshot() {
         use base64::engine::general_purpose::STANDARD as B64;
         use base64::Engine as _;
@@ -1168,7 +1291,7 @@ mod tests {
         .await
         .unwrap();
         ingestor.run_once().await.unwrap();
-        let router = router(db, src, "lic-1".to_string());
+        let router = router(db, src, "lic-1".to_string(), None);
 
         let resp = router
             .clone()

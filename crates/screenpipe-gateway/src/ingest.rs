@@ -78,6 +78,43 @@ pub struct Ingestor {
     snapshots_dir: PathBuf,
 }
 
+/// Create the gateway-owned tables. Outside screenpipe-db's migration set
+/// on purpose: the schema belongs to this crate, and CREATE TABLE IF NOT
+/// EXISTS keeps it self-healing without forking the shared migration
+/// history. Every gateway entry point that touches these tables (ingest,
+/// the v1 API's device/label joins) must be able to assume they exist —
+/// call this once at DB open.
+pub async fn ensure_gateway_schema(db: &DatabaseManager) -> Result<(), GatewayError> {
+    let mut tx = db.begin_immediate_with_retry().await?;
+    sqlx::query(
+        r#"CREATE TABLE IF NOT EXISTS gateway_ingested_objects (
+            key TEXT PRIMARY KEY,
+            device_id TEXT NOT NULL,
+            last_modified TEXT,
+            records_inserted INTEGER NOT NULL,
+            records_deduped INTEGER NOT NULL,
+            lines_unparseable INTEGER NOT NULL,
+            ingested_at TEXT NOT NULL
+        )"#,
+    )
+    .execute(&mut **tx.conn())
+    .await?;
+    // Device registry: backs /v1/devices and supplies device_label for
+    // record kinds whose base tables don't carry one (audio, ui, memory).
+    sqlx::query(
+        r#"CREATE TABLE IF NOT EXISTS gateway_devices (
+            device_id TEXT PRIMARY KEY,
+            device_label TEXT NOT NULL,
+            enrolled_at TEXT NOT NULL,
+            last_seen TEXT NOT NULL
+        )"#,
+    )
+    .execute(&mut **tx.conn())
+    .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
 impl Ingestor {
     pub async fn new(
         source: Arc<dyn BlobSource>,
@@ -85,37 +122,7 @@ impl Ingestor {
         license_id: String,
         snapshots_dir: PathBuf,
     ) -> Result<Self, GatewayError> {
-        // Gateway-owned bookkeeping table, outside screenpipe-db's migration
-        // set on purpose: the schema belongs to this crate, and CREATE TABLE
-        // IF NOT EXISTS keeps it self-healing without forking the shared
-        // migration history.
-        let mut tx = db.begin_immediate_with_retry().await?;
-        sqlx::query(
-            r#"CREATE TABLE IF NOT EXISTS gateway_ingested_objects (
-                key TEXT PRIMARY KEY,
-                device_id TEXT NOT NULL,
-                last_modified TEXT,
-                records_inserted INTEGER NOT NULL,
-                records_deduped INTEGER NOT NULL,
-                lines_unparseable INTEGER NOT NULL,
-                ingested_at TEXT NOT NULL
-            )"#,
-        )
-        .execute(&mut **tx.conn())
-        .await?;
-        // Device registry: backs /v1/devices and supplies device_label for
-        // record kinds whose base tables don't carry one (audio, ui, memory).
-        sqlx::query(
-            r#"CREATE TABLE IF NOT EXISTS gateway_devices (
-                device_id TEXT PRIMARY KEY,
-                device_label TEXT NOT NULL,
-                enrolled_at TEXT NOT NULL,
-                last_seen TEXT NOT NULL
-            )"#,
-        )
-        .execute(&mut **tx.conn())
-        .await?;
-        tx.commit().await?;
+        ensure_gateway_schema(&db).await?;
         Ok(Self {
             source,
             db,
