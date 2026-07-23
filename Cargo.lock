@@ -8533,7 +8533,7 @@ dependencies = [
 
 [[package]]
 name = "screenpipe-gateway"
-version = "0.4.28"
+version = "0.4.29"
 dependencies = [
  "async-trait",
  "axum",
@@ -8735,7 +8735,7 @@ dependencies = [
 
 [[package]]
 name = "screenpipe-telemetry-wire"
-version = "0.4.28"
+version = "0.4.29"
 dependencies = [
  "serde",
  "serde_json",
