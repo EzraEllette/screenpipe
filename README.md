@@ -102,6 +102,8 @@ npx screenpipe record
 then 
 
 ```bash
+npx screenpipe setup
+# or
 claude mcp add screenpipe -- npx -y screenpipe-mcp@latest
 ```
 
