@@ -5,7 +5,7 @@
 //! v1-compatible REST surface.
 //!
 //! Response **shapes** mirror the hosted routes (`app/api/enterprise/v1/*`
-//! + `lib/enterprise/v1-helpers.ts`) so existing consumers — the generated
+//! plus `lib/enterprise/v1-helpers.ts`) so existing consumers — the generated
 //! agent skill, `packages/screenpipe-mcp`'s `team-*` tools, curl scripts —
 //! work against the gateway unchanged. Documented behavioral divergences
 //! (all improvements the ingest-once design makes possible):
@@ -18,7 +18,7 @@
 //!   (the hosted filter is an artifact of scanning storage objects).
 //! - **Duplicates are collapsed at ingest** (hosted returns them).
 //! - `/records?kind=snapshot` returns none: snapshots land as image files
-//!   + `frames.snapshot_path`, served via `/frames/{device}/{frame}`
+//!   plus `frames.snapshot_path`, served via `/frames/{device}/{frame}`
 //!   (which falls back to the ingested thumbnail when the org never
 //!   uploads full frames — true for every write-only org).
 //! - `workflows/generated` and `pipes` are not served: Workflow Studio
@@ -353,26 +353,28 @@ async fn query_audio(db: &DatabaseManager, kq: &KindQuery<'_>) -> Result<Vec<Val
     let rows = query.fetch_all(&db.pool).await?;
     Ok(rows
         .into_iter()
-        .map(|(_sync_id, machine_id, label, ts, transcription, speaker)| {
-            record_summary(
-                "audio",
-                Some(ts),
-                label,
-                machine_id,
-                None,
-                None,
-                None,
-                None,
-                Some(transcription),
-                speaker,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            )
-        })
+        .map(
+            |(_sync_id, machine_id, label, ts, transcription, speaker)| {
+                record_summary(
+                    "audio",
+                    Some(ts),
+                    label,
+                    machine_id,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(transcription),
+                    speaker,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+            },
+        )
         .collect())
 }
 
@@ -424,8 +426,22 @@ async fn query_ui(db: &DatabaseManager, kq: &KindQuery<'_>) -> Result<Vec<Value>
         .into_iter()
         .map(|(_sync_id, machine_id, label, ts, app, url)| {
             record_summary(
-                "ui", Some(ts), label, machine_id, app, None, url, None, None, None, None, None,
-                None, None, None, None,
+                "ui",
+                Some(ts),
+                label,
+                machine_id,
+                app,
+                None,
+                url,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
             )
         })
         .collect())
@@ -479,8 +495,7 @@ async fn query_memories(
         .into_iter()
         .map(
             |(sync_uuid, machine_id, label, created_at, content, importance, tags, source)| {
-                let tags: Option<Vec<String>> =
-                    tags.and_then(|t| serde_json::from_str(&t).ok());
+                let tags: Option<Vec<String>> = tags.and_then(|t| serde_json::from_str(&t).ok());
                 record_summary(
                     "memory",
                     Some(created_at),
@@ -578,13 +593,10 @@ async fn search(
         limit,
         newest_first: true,
     };
-    let mut results =
-        match query_kinds(&state.db, &["frame", "audio", "ui", "memory"], &kq).await {
-            Ok(r) => r,
-            Err(e) => {
-                return err_json(StatusCode::INTERNAL_SERVER_ERROR, &format!("search: {e}"))
-            }
-        };
+    let mut results = match query_kinds(&state.db, &["frame", "audio", "ui", "memory"], &kq).await {
+        Ok(r) => r,
+        Err(e) => return err_json(StatusCode::INTERNAL_SERVER_ERROR, &format!("search: {e}")),
+    };
     let records_scanned = results.len();
     results.sort_by(|a, b| t_of(b).cmp(t_of(a)));
     results.truncate(limit as usize);
@@ -855,11 +867,7 @@ async fn rollups(
         .map(|v| v.clamp(1, 100))
         .unwrap_or(35);
 
-    let prefix = format!(
-        "rollups/{}/{}/",
-        sanitize_id(&state.license_id, 64),
-        device
-    );
+    let prefix = format!("rollups/{}/{}/", sanitize_id(&state.license_id, 64), device);
     let listed = match state.source.list(&ListRequest::new(&prefix)).await {
         Ok(l) => l,
         Err(e) => return err_json(StatusCode::INTERNAL_SERVER_ERROR, &format!("list: {e}")),
@@ -1011,9 +1019,22 @@ mod tests {
         // Every summary carries all 16 keys.
         let first = results[0].as_object().unwrap();
         for key in [
-            "kind", "t", "device", "device_id", "app", "window", "url", "text",
-            "transcription", "speaker", "content", "importance", "tags", "source",
-            "frame_id", "memory_id",
+            "kind",
+            "t",
+            "device",
+            "device_id",
+            "app",
+            "window",
+            "url",
+            "text",
+            "transcription",
+            "speaker",
+            "content",
+            "importance",
+            "tags",
+            "source",
+            "frame_id",
+            "memory_id",
         ] {
             assert!(first.contains_key(key), "summary missing {key}");
         }
@@ -1149,28 +1170,22 @@ mod tests {
             .await
             .unwrap(),
         );
-        let src = Arc::new(S3BlobSource::from_store(
-            Arc::new(InMemory::new()),
-            None,
-        ));
+        let src = Arc::new(S3BlobSource::from_store(Arc::new(InMemory::new()), None));
         crate::ingest::ensure_gateway_schema(&db).await.unwrap();
         let now = Utc::now();
         let policy = PolicyDocument {
             license_id: "lic-1".to_string(),
             issued_at: now,
             valid_until: now + Duration::minutes(30),
-            token_grants: vec![
-                TokenGrant {
-                    digest: crate::policy::token_digest("sk_ent_search_only_1234"),
-                    scopes: vec!["read:search".to_string()],
-                    expires_at: None,
-                },
-            ],
+            token_grants: vec![TokenGrant {
+                digest: crate::policy::token_digest("sk_ent_search_only_1234"),
+                scopes: vec!["read:search".to_string()],
+                expires_at: None,
+            }],
         };
         // Fixture-sign to prove the full envelope path, then load the store.
         let (envelope, pubkey) = sign_policy_for_fixture(&policy, &[3u8; 32], "test-v1");
-        let verified =
-            crate::policy::verify_policy_envelope(envelope.as_bytes(), &pubkey).unwrap();
+        let verified = crate::policy::verify_policy_envelope(envelope.as_bytes(), &pubkey).unwrap();
         let store = PolicyStore::new();
         store.replace(verified);
         let router = router(db, src, "lic-1".to_string(), Some(store.clone()));
@@ -1304,7 +1319,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        assert_eq!(resp.headers().get(header::CONTENT_TYPE).unwrap(), "image/jpeg");
+        assert_eq!(
+            resp.headers().get(header::CONTENT_TYPE).unwrap(),
+            "image/jpeg"
+        );
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(&bytes[..], b"jpegish");
 

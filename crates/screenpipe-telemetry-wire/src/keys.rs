@@ -128,7 +128,10 @@ mod tests {
         let key = direct_batch_key("lic-1", "dev-a", &"c".repeat(64));
         assert_eq!(
             key,
-            format!("enterprise-telemetry/lic-1/dev-a/direct/{}.jsonl", "c".repeat(64))
+            format!(
+                "enterprise-telemetry/lic-1/dev-a/direct/{}.jsonl",
+                "c".repeat(64)
+            )
         );
         let parsed = parse_telemetry_key(&key).unwrap();
         assert_eq!(parsed.license_id, "lic-1");

@@ -71,7 +71,7 @@ impl S3BlobSource {
         }
     }
 
-    fn from_backend_key(&self, key: &str) -> String {
+    fn strip_backend_prefix(&self, key: &str) -> String {
         match &self.key_prefix {
             Some(p) => key
                 .strip_prefix(&format!("{}/", p.trim_matches('/')))
@@ -115,7 +115,7 @@ impl BlobSource for S3BlobSource {
             .store
             .list(Some(&prefix))
             .map_ok(|meta| BlobEntry {
-                key: self.from_backend_key(meta.location.as_ref()),
+                key: self.strip_backend_prefix(meta.location.as_ref()),
                 size: Some(meta.size),
                 // Millis + 'Z' always: mixed "+00:00"/"Z" suffixes break the
                 // lexicographic time comparisons callers do on these strings.
@@ -144,7 +144,8 @@ impl BlobSource for S3BlobSource {
             .get(&path)
             .await
             .map_err(|e| classify(e, "get"))?;
-        let content_type = result.attributes
+        let content_type = result
+            .attributes
             .get(&object_store::Attribute::ContentType)
             .map(|v| v.to_string());
         let last_modified = Some(
@@ -175,12 +176,18 @@ mod tests {
     async fn lists_sorted_and_strips_customer_prefix() {
         let mem = Arc::new(InMemory::new());
         let src = S3BlobSource::from_store(mem, Some("customer-x".to_string()));
-        src.put_for_tests("enterprise-telemetry/lic/dev-b/direct/b2.jsonl", b"b".to_vec())
-            .await
-            .unwrap();
-        src.put_for_tests("enterprise-telemetry/lic/dev-a/direct/b1.jsonl", b"a".to_vec())
-            .await
-            .unwrap();
+        src.put_for_tests(
+            "enterprise-telemetry/lic/dev-b/direct/b2.jsonl",
+            b"b".to_vec(),
+        )
+        .await
+        .unwrap();
+        src.put_for_tests(
+            "enterprise-telemetry/lic/dev-a/direct/b1.jsonl",
+            b"a".to_vec(),
+        )
+        .await
+        .unwrap();
 
         let listed = src
             .list(&ListRequest::new("enterprise-telemetry/lic/"))

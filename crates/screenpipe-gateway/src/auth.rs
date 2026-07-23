@@ -105,7 +105,7 @@ pub async fn require_bearer(
         .unwrap_or("");
     let token = match parse_bearer(header) {
         Ok(t) => t,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
 
     let Some(policy) = state.store.current() else {
@@ -144,7 +144,8 @@ pub async fn require_bearer(
     }
 }
 
-fn parse_bearer(header: &str) -> Result<&str, Response> {
+// Boxed Err: axum's Response is large and the deny path is cold.
+fn parse_bearer(header: &str) -> Result<&str, Box<Response>> {
     let trimmed = header.trim();
     let token = trimmed
         .strip_prefix("Bearer ")
@@ -152,13 +153,16 @@ fn parse_bearer(header: &str) -> Result<&str, Response> {
         .map(str::trim)
         .filter(|t| !t.is_empty());
     let Some(token) = token else {
-        return Err(deny(
+        return Err(Box::new(deny(
             StatusCode::UNAUTHORIZED,
             "missing or malformed Authorization header (Bearer required)",
-        ));
+        )));
     };
     if token.len() < 16 || token.len() > 4096 {
-        return Err(deny(StatusCode::UNAUTHORIZED, "invalid token shape"));
+        return Err(Box::new(deny(
+            StatusCode::UNAUTHORIZED,
+            "invalid token shape",
+        )));
     }
     Ok(token)
 }

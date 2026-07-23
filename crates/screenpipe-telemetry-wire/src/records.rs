@@ -358,14 +358,18 @@ mod tests {
     #[test]
     fn wire_shape_is_flat_and_kind_tagged() {
         let body = build_jsonl("dev-a", "alice-mbp", &[frame(42, "x")], &[], &[], &[], &[]);
-        let line: serde_json::Value = serde_json::from_slice(body.split(|b| *b == b'\n').next().unwrap()).unwrap();
+        let line: serde_json::Value =
+            serde_json::from_slice(body.split(|b| *b == b'\n').next().unwrap()).unwrap();
         // Flattened: kind + identity + row fields all at the top level. The
         // hosted reader and the gateway both rely on this exact shape.
         assert_eq!(line["kind"], "frame");
         assert_eq!(line["device_id"], "dev-a");
         assert_eq!(line["device_label"], "alice-mbp");
         assert_eq!(line["frame_id"], 42);
-        assert!(line.get("frame").is_none(), "row must be flattened, not nested");
+        assert!(
+            line.get("frame").is_none(),
+            "row must be flattened, not nested"
+        );
     }
 
     #[test]

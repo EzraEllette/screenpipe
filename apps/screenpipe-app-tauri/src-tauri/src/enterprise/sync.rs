@@ -337,7 +337,6 @@ pub use screenpipe_telemetry_wire::{
     AudioRow, FrameRow, MemoryRow, SnapshotRow, TelemetryRecord, UiEventRow,
 };
 
-
 // ─── Errors ─────────────────────────────────────────────────────────────────
 
 #[derive(Debug, thiserror::Error)]
@@ -1994,7 +1993,10 @@ mod tests {
                 assert_eq!(direct.ticket_url, "https://staging/upload-ticket");
                 assert_eq!(direct.complete_url, "https://staging/upload-complete");
             }
-            other => panic!("expected write-only direct upload mode, got {}", other.label()),
+            other => panic!(
+                "expected write-only direct upload mode, got {}",
+                other.label()
+            ),
         }
 
         // Case 6: readable direct upload derives the same sibling URLs.
@@ -2011,7 +2013,10 @@ mod tests {
                 assert_eq!(direct.ticket_url, "https://staging/upload-ticket");
                 assert_eq!(direct.complete_url, "https://staging/upload-complete");
             }
-            other => panic!("expected readable direct upload mode, got {}", other.label()),
+            other => panic!(
+                "expected readable direct upload mode, got {}",
+                other.label()
+            ),
         }
 
         // Case 7: the legacy encrypted-era spelling still selects write-only,

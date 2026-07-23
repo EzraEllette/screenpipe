@@ -388,7 +388,13 @@ pub fn write_only_direct_upload_manifest(
     counts: DirectUploadRecordCounts,
     cursors: DirectUploadCursors,
 ) -> Result<DirectUploadManifest, EnterpriseSyncError> {
-    direct_upload_manifest(cfg, DIRECT_UPLOAD_WRITE_ONLY_MODE, plaintext, counts, cursors)
+    direct_upload_manifest(
+        cfg,
+        DIRECT_UPLOAD_WRITE_ONLY_MODE,
+        plaintext,
+        counts,
+        cursors,
+    )
 }
 
 pub fn readable_direct_upload_manifest(
