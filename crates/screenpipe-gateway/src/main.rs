@@ -40,10 +40,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?,
     );
 
-    let source = Arc::new(S3BlobSource::from_config(&cfg)?);
+    let source: Arc<S3BlobSource> = Arc::new(S3BlobSource::from_config(&cfg)?);
     let ingestor = Arc::new(
         Ingestor::new(
-            source,
+            source.clone(),
             db.clone(),
             cfg.license_id.clone(),
             cfg.snapshots_dir(),
@@ -59,7 +59,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // REST surface (v1-compatible) — served until shutdown.
-    let app = screenpipe_gateway::api::router(db.clone());
+    let app = screenpipe_gateway::api::router(db.clone(), source, cfg.license_id.clone());
     let listener = tokio::net::TcpListener::bind(&cfg.bind).await?;
     info!(bind = %cfg.bind, "gateway REST listening");
     axum::serve(listener, app)

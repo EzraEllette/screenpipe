@@ -8689,6 +8689,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "futures",
+ "http-body-util",
  "object_store",
  "screenpipe-config",
  "screenpipe-db",
@@ -8701,6 +8702,7 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
+ "tower 0.4.13",
  "tracing",
  "tracing-subscriber",
 ]
