@@ -356,6 +356,12 @@ pub enum EnterpriseSyncError {
     Network(String),
     #[error("enterprise upload configuration blocked: {0}")]
     Configuration(String),
+    /// The control plane's upload ticket pointed at a host outside the
+    /// MDM-pinned destination list (`SCREENPIPE_ENTERPRISE_UPLOAD_PINNED_HOSTS`).
+    /// This is the destination-pin tamper signal — permanent, loud, never
+    /// retried into compliance. Enumerated code: `E_DESTINATION_NOT_PINNED`.
+    #[error("E_DESTINATION_NOT_PINNED: upload refused, ticket host not pinned: {0}")]
+    DestinationNotPinned(String),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -2162,6 +2168,7 @@ mod tests {
         cfg.upload_mode = EnterpriseUploadMode::DirectWriteOnly(DirectUploadConfig {
             ticket_url,
             complete_url,
+            pinned_hosts: Vec::new(),
         });
         cfg
     }
@@ -2175,6 +2182,7 @@ mod tests {
         cfg.upload_mode = EnterpriseUploadMode::DirectReadable(DirectUploadConfig {
             ticket_url,
             complete_url,
+            pinned_hosts: Vec::new(),
         });
         cfg
     }
@@ -3232,6 +3240,7 @@ mod tests {
         cfg.upload_mode = EnterpriseUploadMode::DirectReadable(DirectUploadConfig {
             ticket_url: format!("{}/ticket", server.uri()),
             complete_url: format!("{}/complete", server.uri()),
+            pinned_hosts: Vec::new(),
         });
         let http = reqwest::Client::new();
         let report = fulfill_frame_requests(&cfg, &FrameMock, &http).await;

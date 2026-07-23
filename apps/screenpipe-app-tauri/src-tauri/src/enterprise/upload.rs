@@ -69,6 +69,7 @@ impl From<SyncError> for EnterpriseSyncError {
             // upload data plane.
             SyncError::Network(s) => Self::Ingest(s),
             SyncError::Serde(s) => Self::Ingest(format!("serde: {s}")),
+            SyncError::DestinationNotPinned(host) => Self::DestinationNotPinned(host),
         }
     }
 }
@@ -104,6 +105,14 @@ impl EnterpriseUploadMode {
 pub struct DirectUploadConfig {
     pub ticket_url: String,
     pub complete_url: String,
+    /// MDM-pinned upload destinations
+    /// (`SCREENPIPE_ENTERPRISE_UPLOAD_PINNED_HOSTS`, comma-separated
+    /// `host` / `host:port` entries). When non-empty, a ticket whose
+    /// presigned `upload_url` points anywhere else is refused before any
+    /// byte is uploaded — the device-side check that a compromised control
+    /// plane cannot silently redirect plaintext batches to a bucket it can
+    /// read. Empty = pin not deployed (opt-in hardening).
+    pub pinned_hosts: Vec<String>,
 }
 
 impl EnterpriseUploadMode {
@@ -289,11 +298,36 @@ impl DirectUploadConfig {
             .ok()
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| sibling_enterprise_endpoint(ingest_url, "upload-complete"));
+        let pinned_hosts = pinned_hosts_from_env();
+        if pinned_hosts.is_empty() {
+            tracing::info!(
+                "enterprise sync: no upload destination pin configured \
+                 (SCREENPIPE_ENTERPRISE_UPLOAD_PINNED_HOSTS unset) — tickets \
+                 may point at any host"
+            );
+        }
         Self {
             ticket_url,
             complete_url,
+            pinned_hosts,
         }
     }
+}
+
+/// Parse the MDM-deployed destination pin. Comma-separated `host` or
+/// `host:port` entries; whitespace and empty entries ignored. This
+/// repurposes the env-var channel the (dropped) encryption root keys used —
+/// customers already deploy MDM env vars to enterprise fleets.
+fn pinned_hosts_from_env() -> Vec<String> {
+    std::env::var("SCREENPIPE_ENTERPRISE_UPLOAD_PINNED_HOSTS")
+        .ok()
+        .map(|raw| {
+            raw.split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Wire cursors from the app's persisted sync cursor. (A free function
@@ -415,7 +449,8 @@ async fn run_ticketed_upload(
     let pipeline_cfg = TicketedConfig::new(direct.ticket_url.clone(), direct.complete_url.clone())
         .with_control_headers(control_headers)
         .with_http(http.clone())
-        .with_put_retries(DIRECT_UPLOAD_MAX_RETRIES, DIRECT_UPLOAD_INITIAL_BACKOFF);
+        .with_put_retries(DIRECT_UPLOAD_MAX_RETRIES, DIRECT_UPLOAD_INITIAL_BACKOFF)
+        .with_pinned_upload_hosts(direct.pinned_hosts.clone());
 
     let complete_req = DirectUploadCompleteRequest {
         mode: manifest.mode.clone(),
@@ -491,6 +526,7 @@ mod tests {
         DirectUploadConfig {
             ticket_url: "https://screenpipe.com/api/enterprise/upload-ticket".to_string(),
             complete_url: "https://screenpipe.com/api/enterprise/upload-complete".to_string(),
+            pinned_hosts: Vec::new(),
         }
     }
 
@@ -594,6 +630,31 @@ mod tests {
         assert_eq!(manifest.plaintext_sha256, compute_checksum(plaintext));
         assert_eq!(manifest.record_counts, counts);
         assert_eq!(manifest.cursors, cursors);
+    }
+
+    #[test]
+    fn pinned_hosts_env_parsing_handles_lists_and_absence() {
+        let prior = std::env::var("SCREENPIPE_ENTERPRISE_UPLOAD_PINNED_HOSTS").ok();
+
+        std::env::remove_var("SCREENPIPE_ENTERPRISE_UPLOAD_PINNED_HOSTS");
+        assert!(pinned_hosts_from_env().is_empty());
+
+        std::env::set_var(
+            "SCREENPIPE_ENTERPRISE_UPLOAD_PINNED_HOSTS",
+            " bucket.s3.amazonaws.com , minio.internal:9000 ,, ",
+        );
+        assert_eq!(
+            pinned_hosts_from_env(),
+            vec![
+                "bucket.s3.amazonaws.com".to_string(),
+                "minio.internal:9000".to_string()
+            ]
+        );
+
+        match prior {
+            Some(v) => std::env::set_var("SCREENPIPE_ENTERPRISE_UPLOAD_PINNED_HOSTS", v),
+            None => std::env::remove_var("SCREENPIPE_ENTERPRISE_UPLOAD_PINNED_HOSTS"),
+        }
     }
 
     #[test]
