@@ -46,6 +46,12 @@ const PIPE_LOG_ARCHIVE_DIR: &str = "archive";
 const PIPE_EXECUTION_KEEP_PER_PIPE: i32 = 500;
 /// Stable prefix returned when an install would exceed the configured pipe cap.
 pub const PIPE_LIMIT_ERROR_CODE: &str = "free_pipe_limit_reached";
+const AUTOMATE_MY_WORK_LEGACY_PROMPT_HASHES: &[&str] = &[
+    // v2.5.52: always created and enabled exactly three hourly pipes.
+    "2d4dde284dafc774",
+    // v2.5.103: allowed zero-to-three pipes but kept the broken discovery flow.
+    "c2c3b9e35495fd5b",
+];
 const BUNDLED_BUILTIN_PIPES: &[(&str, &str)] = &[
     (
         "automate-my-work",
@@ -5819,6 +5825,17 @@ pub fn parse_frontmatter(content: &str) -> Result<(PipeConfig, String)> {
 /// caller can skip the disk write otherwise. Idempotent: running it on
 /// already-fixed content is a no-op.
 fn migrate_builtin_pipe_text(name: &str, original: &str) -> Option<String> {
+    if name == "automate-my-work" {
+        let replacement = BUNDLED_BUILTIN_PIPES
+            .iter()
+            .find_map(|(builtin_name, content)| (*builtin_name == name).then_some(*content))?;
+        return replace_prompt_body_when_hash_matches(
+            original,
+            replacement,
+            AUTOMATE_MY_WORK_LEGACY_PROMPT_HASHES,
+        );
+    }
+
     // (old, new) fragment swaps per builtin pipe.
     let replacements: &[(&str, &str)] = match name {
         // the meeting-summary pipe shipped instructions to PATCH
@@ -5838,6 +5855,33 @@ fn migrate_builtin_pipe_text(name: &str, original: &str) -> Option<String> {
     }
 
     (updated != original).then_some(updated)
+}
+
+/// Replace only the instruction body of a known built-in prompt version.
+/// Frontmatter and the self-improving memory section stay untouched. Any user
+/// edit inside the instruction body changes the hash and opts out of migration.
+fn replace_prompt_body_when_hash_matches(
+    original: &str,
+    replacement: &str,
+    legacy_hashes: &[&str],
+) -> Option<String> {
+    let original_prompt_start = original.find("<role>")?;
+    let replacement_prompt_start = replacement.find("<role>")?;
+    let original_prompt = &original[original_prompt_start..];
+    let original_hash = simple_hash(original_prompt);
+    if !legacy_hashes.contains(&original_hash.as_str()) {
+        return None;
+    }
+
+    let prefix = original[..original_prompt_start].replace(
+        "description: \"Find genuinely new, low-risk automations tailored to your workflow\"",
+        "description: \"Find one repeated workflow and propose a testable automation\"",
+    );
+    Some(format!(
+        "{}{}",
+        prefix,
+        &replacement[replacement_prompt_start..]
+    ))
 }
 
 /// Atomic file write: write to a temp file in the same directory, then rename.
@@ -7228,6 +7272,60 @@ mod tests {
         // other builtins and unrelated content are left alone.
         assert!(migrate_builtin_pipe_text("day-recap", stale).is_none());
         assert!(migrate_builtin_pipe_text("meeting-summary", "no api calls here").is_none());
+    }
+
+    #[test]
+    fn migrate_builtin_pipe_replaces_only_a_known_prompt_body() {
+        let stale = concat!(
+            "---\nschedule: manual\n",
+            "description: \"Find genuinely new, low-risk automations tailored to your workflow\"\n",
+            "---\n\n# memory\n- user lesson\n\n",
+            "<role>\nlegacy automation instructions\n</role>\n",
+        );
+        let replacement = concat!(
+            "---\nschedule: manual\n---\n\n",
+            "<role>\nnew evidence-first instructions\n</role>\n",
+        );
+        let prompt_start = stale.find("<role>").unwrap();
+        let legacy_hash = simple_hash(&stale[prompt_start..]);
+
+        let fixed =
+            replace_prompt_body_when_hash_matches(stale, replacement, &[legacy_hash.as_str()])
+                .expect("known legacy prompt should migrate");
+
+        assert!(fixed.contains("# memory\n- user lesson"));
+        assert!(fixed.contains(
+            "description: \"Find one repeated workflow and propose a testable automation\""
+        ));
+        assert!(fixed.contains("new evidence-first instructions"));
+        assert!(!fixed.contains("legacy automation instructions"));
+        assert!(replace_prompt_body_when_hash_matches(
+            &fixed,
+            replacement,
+            &[legacy_hash.as_str()],
+        )
+        .is_none());
+
+        let customized = stale.replace(
+            "legacy automation instructions",
+            "legacy automation instructions with my customization",
+        );
+        assert!(replace_prompt_body_when_hash_matches(
+            &customized,
+            replacement,
+            &[legacy_hash.as_str()],
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn current_automate_my_work_builtin_does_not_migrate_again() {
+        let current = BUNDLED_BUILTIN_PIPES
+            .iter()
+            .find_map(|(name, content)| (*name == "automate-my-work").then_some(*content))
+            .unwrap();
+
+        assert!(migrate_builtin_pipe_text("automate-my-work", current).is_none());
     }
 
     #[test]
