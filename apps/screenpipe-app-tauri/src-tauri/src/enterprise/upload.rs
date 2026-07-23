@@ -30,18 +30,19 @@ use screenpipe_core::sync::crypto::compute_checksum;
 use screenpipe_sync::pipeline::{TicketedConfig, TicketedPipeline};
 use screenpipe_sync::SyncError;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::time::Duration;
 use tracing::warn;
 
+// The manifest shapes, mode strings, and batch-id derivation are the shared
+// wire contract (also parsed by the customer query gateway) — they live in
+// `screenpipe-telemetry-wire`, not here.
+pub use screenpipe_telemetry_wire::{
+    compute_batch_id, DirectUploadCursors, DirectUploadManifest, DirectUploadRecordCounts,
+    DIRECT_UPLOAD_CONTENT_TYPE, DIRECT_UPLOAD_READABLE_MODE, DIRECT_UPLOAD_WRITE_ONLY_MODE,
+};
+
 use super::{Cursor, EnterpriseSyncConfig, EnterpriseSyncError};
 
-/// Content type for direct-upload telemetry batches. Plaintext JSONL for
-/// both write-only and readable modes — the storage binding's mode, not the
-/// payload encoding, is what gates hosted reads.
-pub const DIRECT_UPLOAD_CONTENT_TYPE: &str = "application/vnd.screenpipe.telemetry+jsonl";
-const DIRECT_UPLOAD_WRITE_ONLY_MODE: &str = "direct_upload_write_only";
-const DIRECT_UPLOAD_READABLE_MODE: &str = "direct_upload_readable";
 const DIRECT_UPLOAD_MAX_RETRIES: u32 = 3;
 const DIRECT_UPLOAD_INITIAL_BACKOFF: Duration = Duration::from_secs(2);
 
@@ -295,48 +296,16 @@ impl DirectUploadConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct DirectUploadRecordCounts {
-    pub frames: usize,
-    pub audio: usize,
-    pub ui: usize,
-    pub snapshots: usize,
-    #[serde(default)]
-    pub memories: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct DirectUploadCursors {
-    pub last_frame_ts: Option<String>,
-    pub last_audio_ts: Option<String>,
-    pub last_ui_ts: Option<String>,
-    #[serde(default)]
-    pub last_memory_ts: Option<String>,
-}
-
-impl DirectUploadCursors {
-    pub fn from_cursor(cursor: &Cursor) -> Self {
-        Self {
-            last_frame_ts: cursor.last_frame_ts.clone(),
-            last_audio_ts: cursor.last_audio_ts.clone(),
-            last_ui_ts: cursor.last_ui_ts.clone(),
-            last_memory_ts: cursor.last_memory_ts.clone(),
-        }
+/// Wire cursors from the app's persisted sync cursor. (A free function
+/// because `DirectUploadCursors` now lives in the wire crate — the orphan
+/// rule forbids an inherent impl here.)
+pub fn direct_upload_cursors(cursor: &Cursor) -> DirectUploadCursors {
+    DirectUploadCursors {
+        last_frame_ts: cursor.last_frame_ts.clone(),
+        last_audio_ts: cursor.last_audio_ts.clone(),
+        last_ui_ts: cursor.last_ui_ts.clone(),
+        last_memory_ts: cursor.last_memory_ts.clone(),
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct DirectUploadManifest {
-    pub version: u8,
-    pub mode: String,
-    pub device_id: String,
-    pub device_label: String,
-    pub batch_id: String,
-    pub content_type: String,
-    pub content_length: usize,
-    pub plaintext_sha256: String,
-    pub record_counts: DirectUploadRecordCounts,
-    pub cursors: DirectUploadCursors,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -468,39 +437,12 @@ async fn run_ticketed_upload(
     Ok(())
 }
 
-fn compute_batch_id(
-    device_id: &str,
-    plaintext_sha256: &str,
-    counts: &DirectUploadRecordCounts,
-    cursors: &DirectUploadCursors,
-) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(device_id.as_bytes());
-    hasher.update(b"\n");
-    hasher.update(plaintext_sha256.as_bytes());
-    hasher.update(b"\n");
-    hasher.update(serde_json::to_vec(counts).unwrap_or_default());
-    hasher.update(b"\n");
-    hasher.update(serde_json::to_vec(cursors).unwrap_or_default());
-    hex_lower(hasher.finalize().as_slice())
-}
-
 fn sibling_enterprise_endpoint(ingest_url: &str, endpoint: &str) -> String {
     let trimmed = ingest_url.trim_end_matches('/');
     if let Some(base) = trimmed.strip_suffix("/ingest") {
         return format!("{}/{}", base, endpoint);
     }
     format!("{}/{}", trimmed, endpoint)
-}
-
-fn hex_lower(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        out.push(HEX[(b >> 4) as usize] as char);
-        out.push(HEX[(b & 0x0f) as usize] as char);
-    }
-    out
 }
 
 #[cfg(test)]

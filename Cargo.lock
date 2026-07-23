@@ -8632,6 +8632,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "screenpipe-telemetry-wire"
+version = "0.4.28"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tracing",
+]
+
+[[package]]
 name = "screenpipe-vault"
 version = "0.4.28"
 dependencies = [

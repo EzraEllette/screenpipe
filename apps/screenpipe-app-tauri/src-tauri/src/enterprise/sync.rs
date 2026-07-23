@@ -41,8 +41,8 @@ use tracing::{debug, error, info, warn};
 #[path = "upload.rs"]
 mod enterprise_upload;
 use enterprise_upload::{
-    upload_direct_readable_batch, upload_direct_write_only_batch, DirectUploadCursors,
-    DirectUploadRecordCounts, EnterpriseUploadMode,
+    upload_direct_readable_batch, upload_direct_write_only_batch, DirectUploadRecordCounts,
+    EnterpriseUploadMode,
 };
 
 /// How often we wake up and try to sync.
@@ -328,134 +328,15 @@ pub trait LocalApiClient: Send + Sync {
 }
 
 // ─── Wire types — what we POST upstream ─────────────────────────────────────
+//
+// The record schema (`TelemetryRecord` + the `*Row` flattenings) is the
+// shared wire contract — the customer query gateway parses batches with the
+// same types — so it lives in `screenpipe-telemetry-wire`. Re-exported here
+// so the desktop shim keeps importing everything from `ee_sync::`.
+pub use screenpipe_telemetry_wire::{
+    AudioRow, FrameRow, MemoryRow, SnapshotRow, TelemetryRecord, UiEventRow,
+};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct FrameRow {
-    /// Local DB id — stable across restarts of this device. Server uses
-    /// `(device_id, frame_id)` as idempotency key.
-    pub frame_id: i64,
-    /// RFC3339 UTC.
-    pub timestamp: String,
-    pub app_name: Option<String>,
-    pub window_name: Option<String>,
-    pub browser_url: Option<String>,
-    /// Merged accessibility + OCR text (from `frames.full_text`). Already
-    /// PII-sanitized on the device if PII removal is enabled.
-    pub text: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct AudioRow {
-    pub transcription_id: i64,
-    pub timestamp: String,
-    pub transcription: String,
-    pub speaker: Option<String>,
-    pub device: Option<String>,
-}
-
-/// One UI event — click, keystroke, focus change, clipboard. The verbs
-/// of any workflow. Coordinates and key codes are deliberately omitted
-/// from sync (privacy + token cost) — what the model actually needs is
-/// "what kind of action, on what element, in what app".
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct UiEventRow {
-    pub event_id: i64,
-    pub timestamp: String,
-    /// e.g. "click", "keypress", "clipboard_copy", "clipboard_paste",
-    /// "text_input", "focus_change". Free-form on the device side.
-    pub event_type: String,
-    pub app_name: Option<String>,
-    pub window_title: Option<String>,
-    pub browser_url: Option<String>,
-    /// Element name from the accessibility tree (e.g. "Submit", "Subject"
-    /// field). Most useful field by far for SOP synthesis.
-    pub element_name: Option<String>,
-    /// Element role from the accessibility tree (e.g. "button", "textfield").
-    pub element_role: Option<String>,
-    /// Text content for text/clipboard events. Truncated upstream.
-    pub text_content: Option<String>,
-}
-
-/// A downsized screenshot thumbnail. JPEG @ Q60, 320×180 — small enough to
-/// embed inline as base64 in the JSONL stream (~30KB per record after
-/// base64). The model uses these to anchor SOP steps to actual UI shots
-/// the way Tango / Scribe do, except continuous instead of explicit-record.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct SnapshotRow {
-    /// Frame id this thumbnail is derived from. Lets downstream link
-    /// the snapshot back to the OCR/AX text record by `frame_id`.
-    pub frame_id: i64,
-    pub timestamp: String,
-    /// Always "image/jpeg" today; the field is here so we can switch
-    /// to webp later without breaking the wire format.
-    pub mime: String,
-    /// Base64 (no data: prefix). Caller decodes by `Buffer.from(b64,'base64')`.
-    pub image_b64: String,
-    pub width: u32,
-    pub height: u32,
-}
-
-/// One memory row — a user- or AI-curated fact, preference, decision, or
-/// insight. The `memories` table is screenpipe's *distilled* layer above raw
-/// frame/audio — small (10s–1000s of rows), high-signal, and the unit of
-/// institutional knowledge that should follow a person across machines and
-/// (for enterprise) into the org's dashboard. Frame provenance is preserved
-/// via `frame_id` so downstream can link back to the source moment.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct MemoryRow {
-    /// Local DB id — stable across restarts of this device. Server dedups by
-    /// `(device_id, memory_id)`.
-    pub memory_id: i64,
-    /// RFC3339 UTC. Set when the memory was first created locally.
-    pub created_at: String,
-    /// RFC3339 UTC. Updated when the memory body/tags/importance change.
-    pub updated_at: String,
-    pub content: String,
-    /// "user" (manually saved) or the agent/source that wrote it.
-    pub source: String,
-    pub tags: Vec<String>,
-    /// 0.0 (trivial) – 1.0 (critical). Drives dashboard ranking.
-    pub importance: f64,
-    /// Optional link back to the frame this memory was distilled from.
-    pub frame_id: Option<i64>,
-}
-
-/// One JSONL line. Tagged enum keeps mixed streams trivially parseable on the
-/// server side — `kind: "frame" | "audio" | "ui" | "snapshot" | "memory"`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "lowercase")]
-pub enum TelemetryRecord {
-    Frame {
-        device_id: String,
-        device_label: String,
-        #[serde(flatten)]
-        frame: FrameRow,
-    },
-    Audio {
-        device_id: String,
-        device_label: String,
-        #[serde(flatten)]
-        audio: AudioRow,
-    },
-    Ui {
-        device_id: String,
-        device_label: String,
-        #[serde(flatten)]
-        ui: UiEventRow,
-    },
-    Snapshot {
-        device_id: String,
-        device_label: String,
-        #[serde(flatten)]
-        snapshot: SnapshotRow,
-    },
-    Memory {
-        device_id: String,
-        device_label: String,
-        #[serde(flatten)]
-        memory: MemoryRow,
-    },
-}
 
 // ─── Errors ─────────────────────────────────────────────────────────────────
 
@@ -505,118 +386,9 @@ pub fn truncate_on_char_boundary(s: &str, max_bytes: usize) -> &str {
 
 // ─── Pure logic: build the JSONL payload ────────────────────────────────────
 
-/// Serialize a batch of frames + audio + UI rows + snapshots + memories into
-/// JSONL bytes, tagged with the device's identity. Public for unit tests.
-pub fn build_jsonl(
-    device_id: &str,
-    device_label: &str,
-    frames: &[FrameRow],
-    audio: &[AudioRow],
-    ui: &[UiEventRow],
-    snapshots: &[SnapshotRow],
-    memories: &[MemoryRow],
-) -> Vec<u8> {
-    let mut out = Vec::with_capacity(
-        (frames.len() + audio.len() + ui.len() + memories.len()) * 256 + snapshots.len() * 50_000,
-    );
-    for f in frames {
-        let rec = TelemetryRecord::Frame {
-            device_id: device_id.to_string(),
-            device_label: device_label.to_string(),
-            frame: f.clone(),
-        };
-        // Per-record write — one bad row never poisons the whole batch.
-        match serde_json::to_vec(&rec) {
-            Ok(line) => {
-                out.extend_from_slice(&line);
-                out.push(b'\n');
-            }
-            Err(e) => {
-                warn!(
-                    "enterprise sync: failed to serialize frame {}: {}",
-                    f.frame_id, e
-                );
-            }
-        }
-    }
-    for a in audio {
-        let rec = TelemetryRecord::Audio {
-            device_id: device_id.to_string(),
-            device_label: device_label.to_string(),
-            audio: a.clone(),
-        };
-        match serde_json::to_vec(&rec) {
-            Ok(line) => {
-                out.extend_from_slice(&line);
-                out.push(b'\n');
-            }
-            Err(e) => {
-                warn!(
-                    "enterprise sync: failed to serialize audio {}: {}",
-                    a.transcription_id, e
-                );
-            }
-        }
-    }
-    for u in ui {
-        let rec = TelemetryRecord::Ui {
-            device_id: device_id.to_string(),
-            device_label: device_label.to_string(),
-            ui: u.clone(),
-        };
-        match serde_json::to_vec(&rec) {
-            Ok(line) => {
-                out.extend_from_slice(&line);
-                out.push(b'\n');
-            }
-            Err(e) => {
-                warn!(
-                    "enterprise sync: failed to serialize ui event {}: {}",
-                    u.event_id, e
-                );
-            }
-        }
-    }
-    for s in snapshots {
-        let rec = TelemetryRecord::Snapshot {
-            device_id: device_id.to_string(),
-            device_label: device_label.to_string(),
-            snapshot: s.clone(),
-        };
-        match serde_json::to_vec(&rec) {
-            Ok(line) => {
-                out.extend_from_slice(&line);
-                out.push(b'\n');
-            }
-            Err(e) => {
-                warn!(
-                    "enterprise sync: failed to serialize snapshot {}: {}",
-                    s.frame_id, e
-                );
-            }
-        }
-    }
-    for m in memories {
-        let rec = TelemetryRecord::Memory {
-            device_id: device_id.to_string(),
-            device_label: device_label.to_string(),
-            memory: m.clone(),
-        };
-        match serde_json::to_vec(&rec) {
-            Ok(line) => {
-                out.extend_from_slice(&line);
-                out.push(b'\n');
-            }
-            Err(e) => {
-                warn!(
-                    "enterprise sync: failed to serialize memory {}: {}",
-                    m.memory_id, e
-                );
-            }
-        }
-    }
-    out
-}
+// `build_jsonl` moved to the wire crate with the record types (the gateway
+// uses it to synthesize test fixtures byte-identical to real batches).
+pub use screenpipe_telemetry_wire::build_jsonl;
 
 /// Split JSONL on record boundaries for hosted ingest. Concatenating the
 /// returned chunks always reproduces `body` byte-for-byte; no record is
@@ -855,7 +627,7 @@ pub async fn run_one_sync(
                 direct,
                 body,
                 counts,
-                DirectUploadCursors::from_cursor(&next_cursor),
+                enterprise_upload::direct_upload_cursors(&next_cursor),
             )
             .await?;
         }
@@ -873,7 +645,7 @@ pub async fn run_one_sync(
                 direct,
                 body,
                 counts,
-                DirectUploadCursors::from_cursor(&next_cursor),
+                enterprise_upload::direct_upload_cursors(&next_cursor),
             )
             .await?;
         }
