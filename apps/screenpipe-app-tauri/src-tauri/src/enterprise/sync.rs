@@ -41,9 +41,8 @@ use tracing::{debug, error, info, warn};
 #[path = "upload.rs"]
 mod enterprise_upload;
 use enterprise_upload::{
-    scrub_direct_upload_secrets_from_environment, upload_direct_encrypted_batch,
-    upload_direct_readable_batch, DirectUploadCursors, DirectUploadRecordCounts,
-    EnterpriseUploadMode,
+    upload_direct_readable_batch, upload_direct_write_only_batch, DirectUploadCursors,
+    DirectUploadRecordCounts, EnterpriseUploadMode,
 };
 
 /// How often we wake up and try to sync.
@@ -96,7 +95,8 @@ pub struct EnterpriseSyncConfig {
     pub ingest_url: String,
     /// Where to persist the cursor (typically the app data dir).
     pub cursor_path: PathBuf,
-    /// Hosted plaintext ingest or direct encrypted customer-storage upload.
+    /// Hosted plaintext ingest or direct customer-storage upload
+    /// (write-only or readable).
     pub upload_mode: EnterpriseUploadMode,
     /// Directories to scan for `*.log` files when an admin requests diagnostics.
     /// Set by the caller to the app's log dirs.
@@ -108,9 +108,9 @@ impl EnterpriseSyncConfig {
     /// required env (`SCREENPIPE_ENTERPRISE_LICENSE_KEY`) is missing — caller
     /// should silently skip sync in that case.
     ///
-    /// `upload_mode` is initialized to `HostedIngest` as a safe default. The
-    /// caller should run [`Self::resolve_upload_mode`] once the async runtime
-    /// is up to upgrade to `DirectReadable` / `DirectEncrypted` based on the
+    /// `upload_mode` starts `Blocked` (fail closed). The caller should run
+    /// [`Self::resolve_upload_mode`] once the async runtime is up to switch
+    /// to `HostedIngest` / `DirectReadable` / `DirectWriteOnly` based on the
     /// customer's storage binding in the control plane. This replaces the
     /// old "set `SCREENPIPE_ENTERPRISE_UPLOAD_MODE` on every device" UX —
     /// the dashboard binding is now the single source of truth.
@@ -161,9 +161,6 @@ impl EnterpriseSyncConfig {
                 "enterprise upload mode has not been resolved by the control plane".to_string(),
             )
         };
-        if matches!(&upload_mode, EnterpriseUploadMode::DirectEncrypted(_)) {
-            scrub_direct_upload_secrets_from_environment();
-        }
         let cursor_path = app_data_dir.join(CURSOR_FILENAME);
         Some(Self {
             license_key,
@@ -189,24 +186,7 @@ impl EnterpriseSyncConfig {
         if let Some(resolved) =
             EnterpriseUploadMode::resolve(&self.license_key, &self.ingest_url).await
         {
-            if matches!(
-                &self.upload_mode,
-                EnterpriseUploadMode::DirectEncrypted(_)
-            ) && matches!(&resolved, EnterpriseUploadMode::Blocked(_))
-            {
-                // Root keys are deliberately scrubbed from the process
-                // environment after first load so child agents cannot inherit
-                // them. Keep the already-loaded encrypted config instead of
-                // treating the scrubbed env as a downgrade or outage.
-                return;
-            }
             self.upload_mode = resolved;
-            if matches!(
-                &self.upload_mode,
-                EnterpriseUploadMode::DirectEncrypted(_)
-            ) {
-                scrub_direct_upload_secrets_from_environment();
-            }
         }
     }
 }
@@ -861,7 +841,7 @@ pub async fn run_one_sync(
                 post_jsonl(http, &cfg.ingest_url, &cfg.license_key, request_body).await?;
             }
         }
-        EnterpriseUploadMode::DirectEncrypted(direct) => {
+        EnterpriseUploadMode::DirectWriteOnly(direct) => {
             let counts = DirectUploadRecordCounts {
                 frames: frames.len(),
                 audio: audio.len(),
@@ -869,7 +849,7 @@ pub async fn run_one_sync(
                 snapshots: snapshots.len(),
                 memories: memories.len(),
             };
-            upload_direct_encrypted_batch(
+            upload_direct_write_only_batch(
                 http,
                 cfg,
                 direct,
@@ -1408,14 +1388,14 @@ async fn fulfill_log_requests(
     http: &reqwest::Client,
     already_handled: Option<&str>,
 ) -> Option<String> {
-    // Only strict encrypted/no-read storage disables remote support logs.
+    // Only strict write-only storage disables remote support logs.
     // Existing readable customer-storage orgs deliberately grant Screenpipe
     // read access so cloud pipes and support workflows continue to work.
     if matches!(
         cfg.upload_mode,
-        EnterpriseUploadMode::DirectEncrypted(_) | EnterpriseUploadMode::Blocked(_)
+        EnterpriseUploadMode::DirectWriteOnly(_) | EnterpriseUploadMode::Blocked(_)
     ) {
-        debug!("log-requests: disabled for strict no-read or unresolved mode");
+        debug!("log-requests: disabled for write-only or unresolved mode");
         return None;
     }
 
@@ -2182,12 +2162,6 @@ mod tests {
         let prior_license = std::env::var("SCREENPIPE_ENTERPRISE_LICENSE_KEY").ok();
         let prior_url = std::env::var("SCREENPIPE_ENTERPRISE_INGEST_URL").ok();
         let prior_mode = std::env::var("SCREENPIPE_ENTERPRISE_UPLOAD_MODE").ok();
-        let prior_root_key = std::env::var("SCREENPIPE_ENTERPRISE_DIRECT_UPLOAD_ROOT_KEY_B64").ok();
-        let prior_key_id = std::env::var("SCREENPIPE_ENTERPRISE_DIRECT_UPLOAD_KEY_ID").ok();
-        let prior_recovery_root_key =
-            std::env::var("SCREENPIPE_ENTERPRISE_DIRECT_UPLOAD_RECOVERY_ROOT_KEY_B64").ok();
-        let prior_recovery_key_id =
-            std::env::var("SCREENPIPE_ENTERPRISE_DIRECT_UPLOAD_RECOVERY_KEY_ID").ok();
 
         // Case 1: no license env → None.
         std::env::remove_var("SCREENPIPE_ENTERPRISE_LICENSE_KEY");
@@ -2227,99 +2201,58 @@ mod tests {
                 .unwrap();
         assert_eq!(cfg.ingest_url, "https://staging/ingest");
 
-        // Case 5: direct upload requires an MDM-provisioned root key and
+        // Case 5: write-only direct upload needs no local key material and
         // derives sibling control-plane URLs from the ingest URL.
         std::env::set_var(
             "SCREENPIPE_ENTERPRISE_UPLOAD_MODE",
-            "direct_upload_encrypted",
-        );
-        std::env::set_var(
-            "SCREENPIPE_ENTERPRISE_DIRECT_UPLOAD_ROOT_KEY_B64",
-            base64::engine::general_purpose::STANDARD.encode([9u8; 32]),
-        );
-        std::env::set_var(
-            "SCREENPIPE_ENTERPRISE_DIRECT_UPLOAD_KEY_ID",
-            "tenant-root-v1",
-        );
-        std::env::set_var(
-            "SCREENPIPE_ENTERPRISE_DIRECT_UPLOAD_RECOVERY_ROOT_KEY_B64",
-            base64::engine::general_purpose::STANDARD.encode([8u8; 32]),
-        );
-        std::env::set_var(
-            "SCREENPIPE_ENTERPRISE_DIRECT_UPLOAD_RECOVERY_KEY_ID",
-            "tenant-recovery-v1",
+            "direct_upload_write_only",
         );
         let dir = TempDir::new().unwrap();
         let cfg =
             EnterpriseSyncConfig::from_env(dir.path().to_path_buf(), "dev".into(), "host".into())
                 .unwrap();
         match cfg.upload_mode {
-            EnterpriseUploadMode::DirectEncrypted(direct) => {
-                assert_eq!(direct.recipients.len(), 2);
-                assert_eq!(direct.recipients[0].purpose, "primary");
-                assert_eq!(direct.recipients[0].key_id, "tenant-root-v1");
-                assert_eq!(direct.recipients[0].root_key, [9u8; 32]);
-                assert_eq!(direct.recipients[1].purpose, "recovery");
-                assert_eq!(direct.recipients[1].key_id, "tenant-recovery-v1");
-                assert_eq!(direct.recipients[1].root_key, [8u8; 32]);
+            EnterpriseUploadMode::DirectWriteOnly(direct) => {
                 assert_eq!(direct.ticket_url, "https://staging/upload-ticket");
                 assert_eq!(direct.complete_url, "https://staging/upload-complete");
             }
-            EnterpriseUploadMode::HostedIngest => panic!("expected direct upload mode"),
-            EnterpriseUploadMode::DirectReadable(_) => {
-                panic!("expected encrypted direct upload mode")
-            }
-            EnterpriseUploadMode::Blocked(reason) => panic!("unexpected blocked mode: {reason}"),
+            other => panic!("expected write-only direct upload mode, got {}", other.label()),
         }
-        assert!(std::env::var("SCREENPIPE_ENTERPRISE_DIRECT_UPLOAD_ROOT_KEY_B64").is_err());
-        assert!(
-            std::env::var("SCREENPIPE_ENTERPRISE_DIRECT_UPLOAD_RECOVERY_ROOT_KEY_B64").is_err()
-        );
 
-        // Case 6: readable direct upload does not require customer-held root keys.
+        // Case 6: readable direct upload derives the same sibling URLs.
         std::env::set_var(
             "SCREENPIPE_ENTERPRISE_UPLOAD_MODE",
             "direct_upload_readable",
         );
-        std::env::remove_var("SCREENPIPE_ENTERPRISE_DIRECT_UPLOAD_ROOT_KEY_B64");
-        std::env::remove_var("SCREENPIPE_ENTERPRISE_DIRECT_UPLOAD_RECOVERY_ROOT_KEY_B64");
         let dir = TempDir::new().unwrap();
         let cfg =
             EnterpriseSyncConfig::from_env(dir.path().to_path_buf(), "dev".into(), "host".into())
                 .unwrap();
         match cfg.upload_mode {
             EnterpriseUploadMode::DirectReadable(direct) => {
-                assert!(direct.recipients.is_empty());
                 assert_eq!(direct.ticket_url, "https://staging/upload-ticket");
                 assert_eq!(direct.complete_url, "https://staging/upload-complete");
             }
-            EnterpriseUploadMode::HostedIngest => panic!("expected readable direct upload mode"),
-            EnterpriseUploadMode::DirectEncrypted(_) => {
-                panic!("expected readable direct upload mode")
-            }
-            EnterpriseUploadMode::Blocked(reason) => panic!("unexpected blocked mode: {reason}"),
+            other => panic!("expected readable direct upload mode, got {}", other.label()),
         }
 
-        // Case 7: encrypted direct upload without a valid root key fails closed.
+        // Case 7: the legacy encrypted-era spelling still selects write-only,
+        // so MDM fleets configured before the rename keep uploading.
         std::env::set_var(
             "SCREENPIPE_ENTERPRISE_UPLOAD_MODE",
             "direct_upload_encrypted",
         );
-        std::env::set_var("SCREENPIPE_ENTERPRISE_DIRECT_UPLOAD_ROOT_KEY_B64", "bad");
         let dir = TempDir::new().unwrap();
-        assert!(EnterpriseSyncConfig::from_env(
-            dir.path().to_path_buf(),
-            "dev".into(),
-            "host".into(),
-        )
-        .is_none());
+        let cfg =
+            EnterpriseSyncConfig::from_env(dir.path().to_path_buf(), "dev".into(), "host".into())
+                .unwrap();
+        assert!(matches!(
+            cfg.upload_mode,
+            EnterpriseUploadMode::DirectWriteOnly(_)
+        ));
 
-        // Case 8: encrypted direct upload without a recovery key also fails closed.
-        std::env::set_var(
-            "SCREENPIPE_ENTERPRISE_DIRECT_UPLOAD_ROOT_KEY_B64",
-            base64::engine::general_purpose::STANDARD.encode([9u8; 32]),
-        );
-        std::env::remove_var("SCREENPIPE_ENTERPRISE_DIRECT_UPLOAD_RECOVERY_ROOT_KEY_B64");
+        // Case 8: an unknown explicit mode refuses to start sync.
+        std::env::set_var("SCREENPIPE_ENTERPRISE_UPLOAD_MODE", "carrier_pigeon");
         let dir = TempDir::new().unwrap();
         assert!(EnterpriseSyncConfig::from_env(
             dir.path().to_path_buf(),
@@ -2340,27 +2273,6 @@ mod tests {
         match prior_mode {
             Some(v) => std::env::set_var("SCREENPIPE_ENTERPRISE_UPLOAD_MODE", v),
             None => std::env::remove_var("SCREENPIPE_ENTERPRISE_UPLOAD_MODE"),
-        }
-        match prior_root_key {
-            Some(v) => std::env::set_var("SCREENPIPE_ENTERPRISE_DIRECT_UPLOAD_ROOT_KEY_B64", v),
-            None => std::env::remove_var("SCREENPIPE_ENTERPRISE_DIRECT_UPLOAD_ROOT_KEY_B64"),
-        }
-        match prior_key_id {
-            Some(v) => std::env::set_var("SCREENPIPE_ENTERPRISE_DIRECT_UPLOAD_KEY_ID", v),
-            None => std::env::remove_var("SCREENPIPE_ENTERPRISE_DIRECT_UPLOAD_KEY_ID"),
-        }
-        match prior_recovery_root_key {
-            Some(v) => std::env::set_var(
-                "SCREENPIPE_ENTERPRISE_DIRECT_UPLOAD_RECOVERY_ROOT_KEY_B64",
-                v,
-            ),
-            None => {
-                std::env::remove_var("SCREENPIPE_ENTERPRISE_DIRECT_UPLOAD_RECOVERY_ROOT_KEY_B64")
-            }
-        }
-        match prior_recovery_key_id {
-            Some(v) => std::env::set_var("SCREENPIPE_ENTERPRISE_DIRECT_UPLOAD_RECOVERY_KEY_ID", v),
-            None => std::env::remove_var("SCREENPIPE_ENTERPRISE_DIRECT_UPLOAD_RECOVERY_KEY_ID"),
         }
     }
 
@@ -2475,23 +2387,9 @@ mod tests {
         complete_url: String,
     ) -> EnterpriseSyncConfig {
         let mut cfg = test_cfg(dir, "http://host/ingest".to_string());
-        cfg.upload_mode = EnterpriseUploadMode::DirectEncrypted(DirectUploadConfig {
+        cfg.upload_mode = EnterpriseUploadMode::DirectWriteOnly(DirectUploadConfig {
             ticket_url,
             complete_url,
-            recipients: vec![
-                enterprise_upload::DirectUploadKeyRecipientConfig {
-                    purpose: "primary".to_string(),
-                    key_provider: "mdm_symmetric_v1".to_string(),
-                    key_id: "tenant-root-v1".to_string(),
-                    root_key: [3u8; 32],
-                },
-                enterprise_upload::DirectUploadKeyRecipientConfig {
-                    purpose: "recovery".to_string(),
-                    key_provider: "mdm_symmetric_v1".to_string(),
-                    key_id: "tenant-recovery-v1".to_string(),
-                    root_key: [4u8; 32],
-                },
-            ],
         });
         cfg
     }
@@ -2505,7 +2403,6 @@ mod tests {
         cfg.upload_mode = EnterpriseUploadMode::DirectReadable(DirectUploadConfig {
             ticket_url,
             complete_url,
-            recipients: Vec::new(),
         });
         cfg
     }
@@ -2750,6 +2647,9 @@ mod tests {
         wiremock::Mock::given(wiremock::matchers::method("POST"))
             .and(wiremock::matchers::path("/ticket"))
             .and(wiremock::matchers::header("X-License-Key", "sek_test"))
+            .and(wiremock::matchers::body_string_contains(
+                "\"mode\":\"direct_upload_write_only\"",
+            ))
             .respond_with(
                 wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
                     "ok": true,
@@ -2764,8 +2664,12 @@ mod tests {
             .expect(1)
             .mount(&server)
             .await;
+        // Write-only mode is plaintext JSONL on the wire — the trust model is
+        // IAM (no Screenpipe read principal), not ciphertext. The PUT body
+        // must therefore carry the record text as-is.
         wiremock::Mock::given(wiremock::matchers::method("PUT"))
             .and(wiremock::matchers::path("/blob"))
+            .and(wiremock::matchers::body_string_contains("secret"))
             .respond_with(wiremock::ResponseTemplate::new(201))
             .expect(1)
             .mount(&server)
@@ -2822,7 +2726,7 @@ mod tests {
                     "method": "PUT",
                     "upload_url": format!("{}/blob", server.uri()),
                     "headers": {
-                        "Content-Type": enterprise_upload::DIRECT_UPLOAD_READABLE_CONTENT_TYPE,
+                        "Content-Type": enterprise_upload::DIRECT_UPLOAD_CONTENT_TYPE,
                         "x-ms-blob-type": "BlockBlob"
                     }
                 })),
@@ -3556,7 +3460,6 @@ mod tests {
         cfg.upload_mode = EnterpriseUploadMode::DirectReadable(DirectUploadConfig {
             ticket_url: format!("{}/ticket", server.uri()),
             complete_url: format!("{}/complete", server.uri()),
-            recipients: Vec::new(),
         });
         let http = reqwest::Client::new();
         let report = fulfill_frame_requests(&cfg, &FrameMock, &http).await;
