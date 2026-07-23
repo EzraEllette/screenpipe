@@ -117,7 +117,12 @@ impl BlobSource for S3BlobSource {
             .map_ok(|meta| BlobEntry {
                 key: self.from_backend_key(meta.location.as_ref()),
                 size: Some(meta.size),
-                last_modified: Some(meta.last_modified.to_rfc3339()),
+                // Millis + 'Z' always: mixed "+00:00"/"Z" suffixes break the
+                // lexicographic time comparisons callers do on these strings.
+                last_modified: Some(
+                    meta.last_modified
+                        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                ),
             })
             .try_collect()
             .await
@@ -142,7 +147,12 @@ impl BlobSource for S3BlobSource {
         let content_type = result.attributes
             .get(&object_store::Attribute::ContentType)
             .map(|v| v.to_string());
-        let last_modified = Some(result.meta.last_modified.to_rfc3339());
+        let last_modified = Some(
+            result
+                .meta
+                .last_modified
+                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        );
         let body = result
             .bytes()
             .await
