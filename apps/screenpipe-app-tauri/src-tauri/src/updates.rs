@@ -290,61 +290,9 @@ pub async fn await_safe_restart(timeout_secs: Option<u64>) -> String {
     }
 }
 
-/// True once a surface has committed to a teardown+relaunch (update banner or
-/// permission restart); keeps a second trigger from starting a parallel one.
+/// True once a surface has committed to applying a staged update; keeps a
+/// second trigger from starting a parallel teardown+relaunch.
 static UPDATE_RESTART_STARTED: AtomicBool = AtomicBool::new(false);
-
-/// Full app relaunch for surfaces that need the *process* to restart — most
-/// importantly applying a macOS screen-recording (TCC) grant, which only takes
-/// effect in a new process. Restarting the embedded recording engine is not
-/// enough there: the respawn re-runs the same in-process permission check and
-/// fails again, which is exactly the "clicked restart, nothing happened" bug.
-///
-/// Same safe path as [`restart_for_update`]: gate, bounded teardown, then
-/// spawn a replacement process and `_exit` (never `std::process::exit`, which
-/// can abort in ORT/ggml atexit teardown).
-#[tauri::command]
-#[specta::specta]
-pub async fn restart_app(app: tauri::AppHandle) -> Result<String, String> {
-    let cap = Duration::from_secs(BANNER_GATE_TIMEOUT_SECS);
-    let gate = await_restart_gate(cap, "app restart requested").await;
-    if !gate.should_restart() {
-        return Ok(gate.as_str().to_string());
-    }
-
-    // Only the first trigger applies; later ones ride the in-flight restart.
-    if UPDATE_RESTART_STARTED.swap(true, Ordering::SeqCst) {
-        info!("restart_app: a restart is already in progress, ignoring");
-        return Ok("proceed".to_string());
-    }
-
-    info!("restart_app: gate passed, shutting down for relaunch");
-
-    match bounded_teardown(
-        PRE_EXIT_TEARDOWN_TIMEOUT,
-        stop_screenpipe(app.state::<RecordingState>(), app.clone()),
-    )
-    .await
-    {
-        TeardownOutcome::Completed => {}
-        TeardownOutcome::Failed(err) => {
-            warn!("restart_app: stop_screenpipe failed (continuing): {}", err)
-        }
-        TeardownOutcome::TimedOut => warn!(
-            "restart_app: teardown exceeded {}s (capture shutdown wedged) — relaunching anyway",
-            PRE_EXIT_TEARDOWN_TIMEOUT.as_secs()
-        ),
-    }
-
-    // Off-thread so the IPC reply flushes before runtime teardown.
-    crate::process_exit::request_app_relaunch(
-        app.clone(),
-        "user-requested app restart",
-        Duration::from_millis(250),
-    );
-
-    Ok("proceed".to_string())
-}
 
 /// Banner-click restart. Mirror the auto-update path: gate, stop server, then
 /// spawn the replacement app and `_exit` the old process so C/C++ atexit
