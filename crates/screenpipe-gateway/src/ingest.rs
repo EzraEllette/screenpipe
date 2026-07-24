@@ -51,7 +51,7 @@ use screenpipe_telemetry_wire::{
 };
 use tracing::{debug, info, warn};
 
-use crate::error::{ErrorCodeSink, GatewayError};
+use crate::error::{ErrorCode, ErrorCodeSink, GatewayError};
 
 /// Outcome of one poll cycle. Counters only — safe to log and to project
 /// into content-free telemetry.
@@ -259,6 +259,22 @@ impl Ingestor {
                     report.records_inserted += inserted;
                     report.records_deduped += deduped;
                     report.lines_unparseable += unparseable;
+                    if unparseable > 0 {
+                        // The counter alone carried this signal, so E_BATCH_PARSE
+                        // was in BOTH repos' allowlists with no producer anywhere
+                        // — a code the gateway could never emit. An unparseable
+                        // line is silent data loss (the batch is accepted, some
+                        // records are dropped) and it is the one ingest failure
+                        // that does NOT come through a GatewayError, so it has to
+                        // be recorded here rather than via record_error.
+                        self.errors.record(ErrorCode::EBatchParse);
+                        warn!(
+                            key = %entry.key,
+                            unparseable,
+                            "gateway ingest: object had unparseable JSONL lines; those records are \
+                             lost (the rest of the batch was ingested)"
+                        );
+                    }
                     if let Some(lm) = entry.last_modified {
                         if report
                             .cursor
@@ -990,6 +1006,110 @@ mod tests {
             vec![crate::error::ErrorCode::ESnapshotStore],
             "the failure must be projected onto the closed code the heartbeat \
              carries — the message never travels, only the code"
+        );
+    }
+
+    /// `E_BATCH_PARSE` must be EMITTABLE. It was in both repos' allowlists with
+    /// zero production constructors: `GatewayError` has no `BatchParse` variant,
+    /// so `parse_jsonl`'s `skipped_lines` only ever became the
+    /// `lines_unparseable` counter and never projected onto a code. One of the
+    /// eleven codes the two-repo contract promises was therefore unreachable.
+    ///
+    /// This is a real signal, not bookkeeping: the object is ACCEPTED (the rest
+    /// of the batch ingests, `objects_failed` stays 0) while some records are
+    /// silently dropped, so nothing else in the health channel says so.
+    #[tokio::test]
+    async fn unparseable_lines_reach_the_heartbeats_error_codes() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = test_db(&dir).await;
+        let src = Arc::new(S3BlobSource::from_store(Arc::new(InMemory::new()), None));
+        // One good frame plus two lines the tolerant parser cannot use — the
+        // shape screenpipe-telemetry-wire's own `corrupt_lines_are_counted_not_fatal`
+        // pins.
+        let mut body = build_jsonl(
+            "dev-a",
+            "alice-mbp",
+            &[FrameRow {
+                frame_id: 1,
+                timestamp: "2026-07-22T10:00:00Z".to_string(),
+                app_name: None,
+                window_name: None,
+                browser_url: None,
+                text: Some("good line".to_string()),
+            }],
+            &[],
+            &[],
+            &[],
+            &[],
+        );
+        body.extend_from_slice(b"{not json at all\n");
+        body.extend_from_slice(b"{\"kind\":\"unknown_kind\",\"device_id\":\"dev-a\"}\n");
+        src.put_for_tests(&direct_batch_key("lic-1", "dev-a", "b-partial"), body)
+            .await
+            .unwrap();
+        let ingestor = Ingestor::new(
+            src as Arc<dyn BlobSource>,
+            db,
+            "lic-1".to_string(),
+            dir.path().join("snapshots"),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            ingestor.errors().drain().is_empty(),
+            "nothing observed yet — proves the assertion below is about THIS cycle"
+        );
+        let report = ingestor.run_once().await.unwrap();
+        assert_eq!(report.lines_unparseable, 2, "report: {report:?}");
+        assert_eq!(
+            report.objects_ingested, 1,
+            "the object itself succeeded — that is exactly why the counter needs a code"
+        );
+        assert_eq!(report.objects_failed, 0);
+        assert_eq!(
+            ingestor.errors().drain(),
+            vec![crate::error::ErrorCode::EBatchParse],
+            "silent record loss must be reportable, not counter-only"
+        );
+
+        // A clean batch must NOT raise it, or the code is noise and operators
+        // learn to ignore the whole field.
+        let src2 = Arc::new(S3BlobSource::from_store(Arc::new(InMemory::new()), None));
+        src2.put_for_tests(
+            &direct_batch_key("lic-1", "dev-a", "b-clean"),
+            build_jsonl(
+                "dev-a",
+                "alice-mbp",
+                &[FrameRow {
+                    frame_id: 2,
+                    timestamp: "2026-07-22T10:01:00Z".to_string(),
+                    app_name: None,
+                    window_name: None,
+                    browser_url: None,
+                    text: Some("all good".to_string()),
+                }],
+                &[],
+                &[],
+                &[],
+                &[],
+            ),
+        )
+        .await
+        .unwrap();
+        let clean = Ingestor::new(
+            src2 as Arc<dyn BlobSource>,
+            test_db(&dir).await,
+            "lic-1".to_string(),
+            dir.path().join("snapshots2"),
+        )
+        .await
+        .unwrap();
+        let report = clean.run_once().await.unwrap();
+        assert_eq!(report.lines_unparseable, 0);
+        assert!(
+            clean.errors().drain().is_empty(),
+            "a clean batch must raise nothing"
         );
     }
 
