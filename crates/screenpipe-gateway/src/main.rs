@@ -8,7 +8,8 @@ use std::sync::Arc;
 
 use screenpipe_config::DbConfig;
 use screenpipe_db::DatabaseManager;
-use screenpipe_gateway::{GatewayConfig, Ingestor, S3BlobSource};
+use screenpipe_gateway::control_plane::ControlPlaneTask;
+use screenpipe_gateway::{GatewayConfig, Ingestor, PolicyStore, S3BlobSource};
 use tracing::info;
 
 #[tokio::main]
@@ -58,50 +59,102 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tokio::spawn(async move { ingestor.run(interval, shutdown_rx).await })
     };
 
-    // Offline token auth (SCR-291): pinning a policy-signer public key
-    // turns bearer verification ON; the signed policy file is re-read on
-    // the poll interval so refreshes (or the future control-plane pull
-    // writing it) land without a restart. No pubkey = M1 posture:
-    // unauthenticated on a private network, loudly.
-    let policy_store = match (&cfg.policy_pubkey_b64, &cfg.policy_path) {
-        (Some(pubkey_b64), Some(path)) => {
-            let pubkey = screenpipe_gateway::policy::parse_pubkey_b64(pubkey_b64)
-                .map_err(|e| format!("SCREENPIPE_GATEWAY_POLICY_PUBKEY_B64: {e}"))?;
-            let store = screenpipe_gateway::PolicyStore::new();
-            let refresh_store = store.clone();
-            let path = path.clone();
-            let interval = cfg.poll_interval;
-            tokio::spawn(async move {
-                loop {
-                    match tokio::fs::read(&path).await {
-                        Ok(bytes) => {
-                            match screenpipe_gateway::policy::verify_policy_envelope(
-                                &bytes, &pubkey,
-                            ) {
-                                Ok(doc) => refresh_store.replace(doc),
-                                Err(e) => tracing::warn!(error = %e, "policy file rejected"),
+    // Offline token auth (SCR-291) + the control-plane loop (SCR-295).
+    //
+    // Pinning a policy-signer public key turns bearer verification ON. The
+    // signed policy then comes from exactly ONE source, never two writers:
+    //
+    //   * a control plane (SCREENPIPE_GATEWAY_CONTROL_PLANE): enroll once,
+    //     pull + verify on the cadence the control plane advertises, and
+    //     heartbeat the real ingest cursor. SCREENPIPE_GATEWAY_POLICY_PATH, if
+    //     also set, becomes the pull's cold-start CACHE — not a second source.
+    //   * a local file (SCREENPIPE_GATEWAY_POLICY_PATH alone), re-read on the
+    //     poll interval: the air-gapped / operator-managed posture.
+    //
+    // No pubkey = M1 posture: unauthenticated on a private network, loudly.
+    let policy_pubkey = match &cfg.policy_pubkey_b64 {
+        Some(b64) => Some(
+            screenpipe_gateway::policy::parse_pubkey_b64(b64)
+                .map_err(|e| format!("SCREENPIPE_GATEWAY_POLICY_PUBKEY_B64: {e}"))?,
+        ),
+        None => None,
+    };
+    let policy_store = policy_pubkey.map(|_| PolicyStore::new());
+
+    // Enroll (once) → seed the policy store → arm the refresh + heartbeat
+    // loop. Returns None only when no control plane is configured; every
+    // misconfiguration is a hard boot error inside boot().
+    let control_plane_handle = match ControlPlaneTask::boot(
+        &cfg,
+        policy_pubkey.zip(policy_store.clone()),
+        ingestor.errors(),
+        ingestor.status(),
+    )
+    .await?
+    {
+        Some(task) => {
+            let shutdown_rx = shutdown_tx.subscribe();
+            Some(tokio::spawn(task.run(shutdown_rx)))
+        }
+        None => {
+            // No control plane: fall back to the file posture, or shout.
+            match (&policy_store, &cfg.policy_path) {
+                (Some(store), Some(path)) => {
+                    let pubkey = policy_pubkey.expect("store implies pubkey");
+                    let refresh_store = store.clone();
+                    let path = path.clone();
+                    let interval = cfg.poll_interval;
+                    tokio::spawn(async move {
+                        loop {
+                            match tokio::fs::read(&path).await {
+                                Ok(bytes) => {
+                                    match screenpipe_gateway::policy::verify_policy_envelope(
+                                        &bytes, &pubkey,
+                                    ) {
+                                        Ok(doc) => refresh_store.replace(doc),
+                                        Err(e) => {
+                                            tracing::warn!(error = %e, "policy file rejected")
+                                        }
+                                    }
+                                }
+                                Err(e) => tracing::warn!(error = %e, "policy file unreadable"),
                             }
+                            tokio::time::sleep(interval).await;
                         }
-                        Err(e) => tracing::warn!(error = %e, "policy file unreadable"),
-                    }
-                    tokio::time::sleep(interval).await;
+                    });
+                    None
                 }
-            });
-            Some(store)
-        }
-        (Some(_), None) => {
-            return Err(
-                "SCREENPIPE_GATEWAY_POLICY_PUBKEY_B64 is set but SCREENPIPE_GATEWAY_POLICY_PATH \
-                 is not — refusing to guess an auth posture"
-                    .into(),
-            );
-        }
-        (None, _) => {
-            tracing::warn!(
-                "no policy-signer public key configured — serving the v1 surface \
-                 UNAUTHENTICATED (acceptable only on a private network)"
-            );
-            None
+                (Some(_), None) => {
+                    return Err("SCREENPIPE_GATEWAY_POLICY_PUBKEY_B64 is set but neither \
+                         SCREENPIPE_GATEWAY_CONTROL_PLANE nor SCREENPIPE_GATEWAY_POLICY_PATH is \
+                         — refusing to guess an auth posture"
+                        .into());
+                }
+                (None, path) => {
+                    // Louder than a bare warning: this is the configuration in
+                    // which the entire v1 archive surface answers without a
+                    // token, and it is reachable by simply omitting two env
+                    // vars. Say what it means and how to fix it.
+                    tracing::error!(
+                        "SERVING THE v1 SURFACE UNAUTHENTICATED: no \
+                         SCREENPIPE_GATEWAY_POLICY_PUBKEY_B64 is pinned, so bearer verification \
+                         is OFF and every /api/enterprise/v1/* route answers without a token. \
+                         Acceptable only on a private network you fully control. To turn auth on, \
+                         set SCREENPIPE_GATEWAY_POLICY_PUBKEY_B64 (GET \
+                         /api/enterprise/gateway/policy-key) plus \
+                         SCREENPIPE_GATEWAY_CONTROL_PLANE and \
+                         SCREENPIPE_GATEWAY_ENROLLMENT_TOKEN — the dashboard's gateway panel \
+                         prints the last two."
+                    );
+                    if path.is_some() {
+                        tracing::error!(
+                            "SCREENPIPE_GATEWAY_POLICY_PATH is set but IGNORED without a pinned \
+                             public key — an unverified policy file grants nothing."
+                        );
+                    }
+                    None
+                }
+            }
         }
     };
 
@@ -118,6 +171,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let _ = shutdown_tx.send(true);
     let _ = ingest_handle.await;
+    if let Some(handle) = control_plane_handle {
+        let _ = handle.await;
+    }
     db.close().await;
     Ok(())
+}
+
+#[cfg(test)]
+mod boot_wiring {
+    /// SCR-295 was marked done once while `control_plane.rs` had ZERO
+    /// production callers: the module, its three passing tests, its dependency
+    /// comment and its endpoint-contract docs all existed, and this binary
+    /// invoked none of it. No library test can catch that — by construction it
+    /// tests the library. This one looks at the boot path itself.
+    ///
+    /// It is a source-level assertion, deliberately: it is the cheapest thing
+    /// that fails if the wiring is ever removed again. The behavioural proof
+    /// lives in `control_plane::tests::boot_enrolls_pulls_and_heartbeats_the_real_ingest_cursor`,
+    /// which drives these exact two calls against a mock control plane.
+    #[test]
+    fn main_wires_the_control_plane_and_the_ingest_report() {
+        let src = include_str!("main.rs");
+        for needle in [
+            "ControlPlaneTask::boot(",
+            "task.run(",
+            // The heartbeat's only source of a real cursor/counters and codes.
+            "ingestor.status()",
+            "ingestor.errors()",
+        ] {
+            assert!(
+                src.contains(needle),
+                "the gateway binary no longer contains `{needle}` — the control-plane \
+                 loop (enroll → policy pull → heartbeat) is unwired again, which is \
+                 exactly the state SCR-295 was reopened for"
+            );
+        }
+    }
 }
