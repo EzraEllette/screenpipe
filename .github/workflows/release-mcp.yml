@@ -5,6 +5,11 @@ on:
     tags:
       - "mcp-v*"
   workflow_dispatch:
+    inputs:
+      allow_already_published:
+        description: "Version is already on npm and that's expected — re-run only the registry/mcpb/GitHub-release steps. THE NPM REGISTRY WILL NOT CHANGE."
+        type: boolean
+        default: false
 
 concurrency:
   # Serialize releases — aborting a release mid-flight is worse than waiting.
@@ -55,12 +60,29 @@ jobs:
         working-directory: packages/screenpipe-mcp
         run: cp ../../LICENSE.md .
 
+      # A version already on npm used to SKIP quietly and let the whole workflow
+      # report success — so "Release MCP" could be re-run forever and change
+      # nothing. That is how screenpipe-mcp@0.18.15 stayed on the registry while
+      # the repo moved on: the tree gained src/team-config.ts (customer-gateway
+      # support for the team-* tools) but package.json still said 0.18.15, so
+      # every release run no-op'd and gateway orgs kept getting a build that
+      # 401'd (SCR-352). npm cannot overwrite a published version, so an
+      # unbumped version is an ERROR, not a skip. The escape hatch exists only
+      # for deliberately re-running the MCP-Registry / mcpb / GitHub-release
+      # steps after a partial failure.
       - name: Publish to npm
         working-directory: packages/screenpipe-mcp
+        env:
+          ALLOW_ALREADY_PUBLISHED: ${{ inputs.allow_already_published }}
         run: |
           VER=$(node -p "require('./package.json').version")
           if npm view "screenpipe-mcp@$VER" version >/dev/null 2>&1; then
-            echo "screenpipe-mcp@$VER already on npm — skipping publish"
+            if [ "$ALLOW_ALREADY_PUBLISHED" = "true" ]; then
+              echo "::warning::screenpipe-mcp@$VER is already on npm — publish skipped on request. THE REGISTRY IS UNCHANGED BY THIS RUN."
+            else
+              echo "::error::screenpipe-mcp@$VER is already on npm. npm cannot overwrite a published version, so this run would publish NOTHING while reporting success. Bump packages/screenpipe-mcp/package.json (and server.json — src/version.test.ts enforces both), or re-dispatch with allow_already_published=true if you only need the MCP-Registry / mcpb / GitHub-release steps."
+              exit 1
+            fi
           else
             npm publish --access public
           fi
