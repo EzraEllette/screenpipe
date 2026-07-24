@@ -56,6 +56,14 @@ pub struct GatewayConfig {
     /// the enroll → policy-pull → heartbeat loop ON (SCR-295).
     /// `SCREENPIPE_GATEWAY_CONTROL_PLANE_BASE` is accepted as an alias.
     pub control_plane_base: Option<String>,
+    /// Allow a plain-`http://` control plane on a NON-loopback host
+    /// (`SCREENPIPE_GATEWAY_CONTROL_PLANE_ALLOW_HTTP`). Off by default: over
+    /// cleartext the long-lived `sgw_` credential is on the wire in every
+    /// policy pull and heartbeat, and an on-path attacker can substitute the
+    /// policy envelope. Loopback (`127.0.0.1`/`::1`/`localhost`) needs no
+    /// escape hatch — that is the local-stack path. Same shape as
+    /// `s3_allow_http`.
+    pub control_plane_allow_http: bool,
     /// Short-TTL single-use enrollment token
     /// (`SCREENPIPE_GATEWAY_ENROLLMENT_TOKEN`, minted in the dashboard).
     /// Consumed on first boot only: the long-lived credential it returns is
@@ -69,7 +77,11 @@ pub struct GatewayConfig {
     /// Deliberately NOT `SCREENPIPE_GATEWAY_POLL_SECONDS` — that knob is S3
     /// ingest tuning and reusing it refreshed policy 10x too often.
     pub policy_refresh_override: Option<std::time::Duration>,
-    /// Heartbeat cadence (`SCREENPIPE_GATEWAY_HEARTBEAT_SECONDS`).
+    /// Heartbeat cadence (`SCREENPIPE_GATEWAY_HEARTBEAT_SECONDS`). Floored at
+    /// [`MIN_HEARTBEAT_SECONDS`] — `tokio::time::interval` PANICS on a zero
+    /// period, and that panic would happen inside the spawned control-plane
+    /// task, killing policy refresh with it while the gateway kept serving the
+    /// boot-time policy and ignoring revocations, with nothing in the logs.
     pub heartbeat_interval: std::time::Duration,
 }
 
@@ -80,6 +92,9 @@ pub const DEFAULT_POLICY_REFRESH_SECONDS: u64 = 300;
 /// Default heartbeat cadence. Independent of the policy cadence: heartbeats
 /// are the dashboard's liveness signal and cost one row update.
 pub const DEFAULT_HEARTBEAT_SECONDS: u64 = 60;
+/// Floor on the heartbeat cadence. `tokio::time::interval` panics on a zero
+/// period, so `SCREENPIPE_GATEWAY_HEARTBEAT_SECONDS=0` must not reach it.
+pub const MIN_HEARTBEAT_SECONDS: u64 = 1;
 
 fn env_opt(name: &str) -> Option<String> {
     std::env::var(name)
@@ -125,12 +140,18 @@ impl GatewayConfig {
             policy_path: env_opt("SCREENPIPE_GATEWAY_POLICY_PATH").map(Into::into),
             control_plane_base: env_opt("SCREENPIPE_GATEWAY_CONTROL_PLANE")
                 .or_else(|| env_opt("SCREENPIPE_GATEWAY_CONTROL_PLANE_BASE")),
+            control_plane_allow_http: env_opt("SCREENPIPE_GATEWAY_CONTROL_PLANE_ALLOW_HTTP")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false),
             enrollment_token: env_opt("SCREENPIPE_GATEWAY_ENROLLMENT_TOKEN"),
             policy_refresh_override: env_secs("SCREENPIPE_GATEWAY_POLICY_REFRESH_SECONDS")?
                 .map(std::time::Duration::from_secs),
             heartbeat_interval: std::time::Duration::from_secs(
                 env_secs("SCREENPIPE_GATEWAY_HEARTBEAT_SECONDS")?
-                    .unwrap_or(DEFAULT_HEARTBEAT_SECONDS),
+                    .unwrap_or(DEFAULT_HEARTBEAT_SECONDS)
+                    // 0 would panic tokio::time::interval inside the spawned
+                    // control-plane task and silently kill policy refresh.
+                    .max(MIN_HEARTBEAT_SECONDS),
             ),
         })
     }

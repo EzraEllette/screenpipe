@@ -1259,8 +1259,8 @@ mod tests {
         // Fixture-sign to prove the full envelope path, then load the store.
         let (envelope, pubkey) = sign_policy_for_fixture(&policy, &[3u8; 32], "test-v1");
         let verified = crate::policy::verify_policy_envelope(envelope.as_bytes(), &pubkey).unwrap();
-        let store = PolicyStore::new();
-        store.install(verified, ClockSkew::Ok);
+        let store = PolicyStore::new("lic-1");
+        store.install(verified, ClockSkew::Ok).expect("own license");
         let router = router(db, src, "lic-1".to_string(), Some(store.clone()));
 
         let call = |auth: Option<&'static str>, uri: &'static str| {
@@ -1323,7 +1323,9 @@ mod tests {
         let mut barely_expired = policy.clone();
         barely_expired.issued_at = now - Duration::minutes(31);
         barely_expired.valid_until = now - Duration::minutes(1);
-        store.install(barely_expired, ClockSkew::Ok);
+        store
+            .install(barely_expired, ClockSkew::Ok)
+            .expect("own license");
         assert_eq!(
             call(
                 Some("Bearer sk_ent_search_only_1234"),
@@ -1340,7 +1342,9 @@ mod tests {
         let mut stale = policy.clone();
         stale.issued_at = now - Duration::hours(2);
         stale.valid_until = now - Duration::minutes(10);
-        store.install(stale.clone(), ClockSkew::Ok);
+        store
+            .install(stale.clone(), ClockSkew::Ok)
+            .expect("own license");
         assert_eq!(
             call(
                 Some("Bearer sk_ent_search_only_1234"),
@@ -1352,7 +1356,9 @@ mod tests {
         // Same expiry, but the clock disagreed with the signer when the policy
         // was delivered: still 503, and the message must point at NTP instead
         // of implying a control-plane outage.
-        store.install(stale, ClockSkew::Ahead(7200));
+        store
+            .install(stale, ClockSkew::Ahead(7200))
+            .expect("own license");
         let res = router
             .clone()
             .oneshot(
@@ -1385,7 +1391,7 @@ mod tests {
         let mut future = policy.clone();
         future.issued_at = now + Duration::hours(2);
         future.valid_until = now + Duration::hours(3);
-        store.install(future, ClockSkew::Ok);
+        store.install(future, ClockSkew::Ok).expect("own license");
         let res = router
             .clone()
             .oneshot(
@@ -1410,6 +1416,94 @@ mod tests {
             body.contains("clock"),
             "the 503 must name the clock, not misdirect at policy expiry: {body}"
         );
+    }
+
+    /// CROSS-TENANT, at the route: another organization's signed policy must
+    /// authorize NOTHING here, even though it verifies against the pinned key.
+    ///
+    /// The policy-signing key is global across tenants (one
+    /// `ENTERPRISE_GATEWAY_POLICY_SIGNING_SEED_B64`, one public key served to
+    /// everybody), so the payload's `license_id` is the only binding. Every
+    /// handler below derives its S3 prefix and its SQL from `state.license_id`,
+    /// never from the policy — so an installed foreign grant list would let
+    /// another org's `sk_ent_` tokens read THIS org's archive.
+    #[tokio::test]
+    async fn a_foreign_orgs_policy_authorizes_nothing_on_the_v1_surface() {
+        use crate::auth::PolicyStore;
+        use crate::policy::{sign_policy_for_fixture, ClockSkew, PolicyDocument, TokenGrant};
+        use chrono::Duration;
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(
+            DatabaseManager::new(
+                dir.path().join("gateway.db").to_str().unwrap(),
+                DbConfig::default(),
+            )
+            .await
+            .unwrap(),
+        );
+        let src = Arc::new(S3BlobSource::from_store(Arc::new(InMemory::new()), None));
+        crate::ingest::ensure_gateway_schema(&db).await.unwrap();
+
+        let now = Utc::now();
+        let attacker_policy = PolicyDocument {
+            license_id: "lic-ATTACKER-ORG".to_string(),
+            issued_at: now,
+            valid_until: now + Duration::minutes(30),
+            token_grants: vec![TokenGrant {
+                digest: crate::policy::token_digest("sk_ent_attacker_token_1234"),
+                // Every scope, so a negative result cannot be a scope accident.
+                scopes: vec![
+                    "read:search".to_string(),
+                    "read:devices".to_string(),
+                    "read:records".to_string(),
+                    "read:files".to_string(),
+                    "read:files:raw".to_string(),
+                ],
+                expires_at: None,
+            }],
+        };
+        // Signed correctly — a real Screenpipe-issued envelope, just not ours.
+        let (envelope, pubkey) = sign_policy_for_fixture(&attacker_policy, &[3u8; 32], "test-v1");
+        let verified = crate::policy::verify_policy_envelope(envelope.as_bytes(), &pubkey)
+            .expect("it must genuinely verify, or this test proves nothing");
+
+        // This gateway serves lic-1.
+        let store = PolicyStore::new("lic-1");
+        let err = store
+            .install(verified, ClockSkew::Ok)
+            .expect_err("a foreign-license policy must not install");
+        assert_eq!(err.document_license_id, "lic-ATTACKER-ORG");
+        let router = router(db, src, "lic-1".to_string(), Some(store.clone()));
+
+        // Nothing installed ⇒ every scoped route fails closed, and the
+        // attacker's token is worth exactly as much as no token at all.
+        for path in [
+            "/api/enterprise/v1/search?q=x",
+            "/api/enterprise/v1/devices",
+            "/api/enterprise/v1/records",
+            "/api/enterprise/v1/files",
+            "/api/enterprise/v1/rollups",
+        ] {
+            for auth in [None, Some("Bearer sk_ent_attacker_token_1234")] {
+                let mut req = Request::builder().uri(path);
+                if let Some(a) = auth {
+                    req = req.header("authorization", a);
+                }
+                let status = router
+                    .clone()
+                    .oneshot(req.body(Body::empty()).unwrap())
+                    .await
+                    .unwrap()
+                    .status();
+                assert!(
+                    status == StatusCode::SERVICE_UNAVAILABLE || status == StatusCode::UNAUTHORIZED,
+                    "{path} with auth={auth:?} returned {status}; a foreign org's grants \
+                     must never open this surface"
+                );
+            }
+        }
+        assert!(store.current().is_none());
     }
 
     #[tokio::test]

@@ -34,11 +34,50 @@ use serde_json::json;
 
 use crate::policy::{ClockSkew, PolicyDocument, TokenCheck};
 
+/// A policy envelope that verified against the pinned key but was signed for
+/// a DIFFERENT organization.
+///
+/// This is the single most consequential rejection in the crate, so it has a
+/// type. The policy-signing key is **global across tenants** — the control
+/// plane signs every org's policy with one seed
+/// (`ENTERPRISE_GATEWAY_POLICY_SIGNING_SEED_B64`) and serves the matching
+/// public key to everybody at `/api/enterprise/gateway/policy-key` — so a
+/// valid signature proves only "Screenpipe issued this", never "issued to
+/// YOU". The payload's `license_id` is the ONLY thing binding an envelope to
+/// an organization, and every read path in `api.rs` derives its S3 prefix and
+/// its queries from the gateway's configured `license_id`, not from the
+/// policy. An unchecked foreign envelope would therefore authorize its own
+/// `sk_ent_` tokens against THIS org's archive.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForeignPolicy {
+    pub expected_license_id: String,
+    pub document_license_id: String,
+}
+
+impl std::fmt::Display for ForeignPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "policy is signed for license {:?} but this gateway serves license {:?}",
+            self.document_license_id, self.expected_license_id
+        )
+    }
+}
+
 /// Shared, refreshable policy slot. The control-plane loop (SCR-295) replaces
 /// the document on every successful policy pull; requests read it
 /// lock-free-ish (parking-lot-style short read locks).
-#[derive(Clone, Default)]
+///
+/// The store owns the license this gateway serves and is therefore the ONE
+/// choke point where tenant binding is enforced: [`PolicyStore::install`]
+/// refuses a document belonging to another organization, so no call site can
+/// forget the check (there is no `Default`/`new()` that omits the license, by
+/// design — a store that does not know its tenant cannot be constructed).
+#[derive(Clone)]
 pub struct PolicyStore {
+    /// The license id the gateway is configured for (`cfg.license_id`, the
+    /// same value `api.rs` derives every S3 prefix and query from).
+    expected_license_id: Arc<str>,
     inner: Arc<RwLock<Option<Installed>>>,
 }
 
@@ -50,12 +89,23 @@ struct Installed {
 }
 
 impl PolicyStore {
-    pub fn new() -> Self {
-        Self::default()
+    /// A store bound to the license this gateway serves. There is deliberately
+    /// no license-free constructor: see [`ForeignPolicy`].
+    pub fn new(expected_license_id: impl AsRef<str>) -> Self {
+        Self {
+            expected_license_id: Arc::from(expected_license_id.as_ref()),
+            inner: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    pub fn expected_license_id(&self) -> &str {
+        &self.expected_license_id
     }
 
     /// Install a verified document together with the clock verdict for THIS
-    /// delivery.
+    /// delivery. Fails (and installs nothing) when the document belongs to
+    /// another organization — see [`ForeignPolicy`] for why a valid signature
+    /// is not enough.
     ///
     /// `skew` is a required argument rather than something computed here on
     /// purpose: only the code that obtained the document knows whether
@@ -64,16 +114,39 @@ impl PolicyStore {
     /// from a cache file or an operator-managed file passes
     /// [`ClockSkew::Ok`], because its `issued_at` is legitimately old and
     /// classifying it would invent skew that isn't there.
-    pub fn install(&self, policy: PolicyDocument, skew: ClockSkew) {
+    pub fn install(&self, policy: PolicyDocument, skew: ClockSkew) -> Result<(), ForeignPolicy> {
+        if policy.license_id != *self.expected_license_id {
+            return Err(ForeignPolicy {
+                expected_license_id: self.expected_license_id.to_string(),
+                document_license_id: policy.license_id,
+            });
+        }
         *self.inner.write().expect("policy lock") = Some(Installed { policy, skew });
+        Ok(())
     }
 
     pub fn current(&self) -> Option<PolicyDocument> {
-        self.inner
+        let policy = self
+            .inner
             .read()
             .expect("policy lock")
             .as_ref()
-            .map(|i| i.policy.clone())
+            .map(|i| i.policy.clone())?;
+        // Unreachable by construction (`install` is the only writer and it
+        // rejects foreign documents), and deliberately kept anyway: this is the
+        // gate every reader goes through — auth.rs's request path and the
+        // heartbeat's fault re-assertion — so a future second writer cannot
+        // make cross-tenant authorization reachable without also editing this.
+        if policy.license_id != *self.expected_license_id {
+            tracing::error!(
+                expected_license_id = %self.expected_license_id,
+                document_license_id = %policy.license_id,
+                "policy store holds a FOREIGN policy document — refusing to use it \
+                 (this should be impossible; PolicyStore::install rejects them)"
+            );
+            return None;
+        }
+        Some(policy)
     }
 
     /// Clock verdict measured when the current document was delivered. `None`
@@ -118,6 +191,26 @@ pub enum RouteAuth {
 /// a scope or it is refused. Adding a route is therefore a deliberate act
 /// in one of two directions, and `api::routes` is asserted against this
 /// function in tests so the omission fails CI rather than production.
+///
+/// SCR-295 review round 1 reached the same conclusion independently and
+/// closed the hole a different way: `required_scope`'s fallthrough returned
+/// a sentinel scope (`read:__unmapped_v1_route`) that no token could hold,
+/// so an unlisted v1 path 403'd instead of being waved through. That
+/// sentinel is deliberately NOT carried forward, because this shape is
+/// strictly stronger and the two together would cancel out:
+///   * a sentinel scope makes `required_scope` return `Some(_)`, so
+///     `route_auth` would report `Scoped(...)` and [`RouteAuth::Unmapped`]
+///     would become unreachable — silently disabling the `api::routes`
+///     enumeration guard, whose whole job is to panic in CI on exactly the
+///     route the sentinel was invented to catch;
+///   * a sentinel denies only *after* the bearer token has been parsed and
+///     verified against the policy, whereas `Unmapped` denies before the
+///     token is examined at all;
+///   * a sentinel covers only `/api/enterprise/v1/*`, while the allow-list
+///     covers every path the router can ever serve.
+/// SCR-295's test for the sentinel survives below, rewritten against this
+/// mechanism (`an_unmapped_v1_route_is_denied_not_waved_through`), so its
+/// cases — including the prefix-lookalike `records-v2` — still fail CI.
 pub fn route_auth(path: &str) -> RouteAuth {
     if PUBLIC_ROUTES.contains(&path) {
         return RouteAuth::Public;
@@ -132,7 +225,12 @@ pub fn route_auth(path: &str) -> RouteAuth {
 /// uses (api-auth.ts / each route's withApiAuth arg).
 ///
 /// Returning `None` here means "not in the scope map", which
-/// [`route_auth`] treats as deny. Do not read it as "no auth needed".
+/// [`route_auth`] treats as deny. Do not read it as "no auth needed" — that
+/// reading is what made the fallthrough arm dangerous before SCR-353, and it
+/// is no longer true of this function: the ONLY way to be unauthenticated is
+/// to be named in [`PUBLIC_ROUTES`], which is checked before this map is
+/// consulted. Callers must therefore go through [`route_auth`] rather than
+/// branching on this `Option` themselves.
 pub fn required_scope(path: &str) -> Option<&'static str> {
     let rest = path.strip_prefix("/api/enterprise/v1/")?;
     Some(match rest.split('/').next().unwrap_or("") {
@@ -147,6 +245,10 @@ pub fn required_scope(path: &str) -> Option<&'static str> {
                 "read:files"
             }
         }
+        // Not in the map. `route_auth` turns this into `RouteAuth::Unmapped`
+        // and refuses the request before the token is read; it is NOT "no auth
+        // needed". Do not make this arm return a sentinel scope instead — see
+        // `route_auth`'s docs for why that weakens the guard.
         _ => return None,
     })
 }
@@ -366,23 +468,33 @@ mod tests {
         use tower::util::ServiceExt;
 
         let now = Utc::now();
-        let store = PolicyStore::new();
-        store.replace(PolicyDocument {
-            license_id: "lic-1".to_string(),
-            issued_at: now,
-            valid_until: now + Duration::minutes(30),
-            token_grants: vec![TokenGrant {
-                digest: token_digest("sk_ent_all_scopes_1234"),
-                scopes: vec![
-                    "read:search".to_string(),
-                    "read:records".to_string(),
-                    "read:devices".to_string(),
-                    "read:files".to_string(),
-                    "read:files:raw".to_string(),
-                ],
-                expires_at: None,
-            }],
-        });
+        // Tenant-bound store (SCR-295): the license the document carries must
+        // match the one the gateway serves, so both are "lic-1" here. The
+        // point of this test is the ROUTE classification, so the policy has to
+        // install successfully — otherwise the 403 below would be satisfied by
+        // "no policy loaded" and prove nothing.
+        let store = PolicyStore::new("lic-1");
+        store
+            .install(
+                PolicyDocument {
+                    license_id: "lic-1".to_string(),
+                    issued_at: now,
+                    valid_until: now + Duration::minutes(30),
+                    token_grants: vec![TokenGrant {
+                        digest: token_digest("sk_ent_all_scopes_1234"),
+                        scopes: vec![
+                            "read:search".to_string(),
+                            "read:records".to_string(),
+                            "read:devices".to_string(),
+                            "read:files".to_string(),
+                            "read:files:raw".to_string(),
+                        ],
+                        expires_at: None,
+                    }],
+                },
+                ClockSkew::Ok,
+            )
+            .expect("own license");
 
         let router = Router::new()
             .route(
@@ -416,5 +528,83 @@ mod tests {
             !body.contains("SECRET-ARCHIVE-CONTENT"),
             "the handler ran despite the deny: {body}"
         );
+    }
+
+    /// Deny by default, SCR-295's cases. Originally written against a sentinel
+    /// scope returned by `required_scope`'s fallthrough arm; rewritten against
+    /// the SCR-353 mechanism that replaced it (see [`route_auth`]). The
+    /// property under test is unchanged and the paths are SCR-295's — notably
+    /// `records-v2`, a prefix-lookalike of the mapped `records` that no other
+    /// test covers, and which must NOT inherit `read:records`.
+    #[test]
+    fn an_unmapped_v1_route_is_denied_not_waved_through() {
+        for path in [
+            "/api/enterprise/v1/exports",
+            "/api/enterprise/v1/",
+            "/api/enterprise/v1/records-v2/x",
+        ] {
+            assert_eq!(
+                route_auth(path),
+                RouteAuth::Unmapped,
+                "{path} is not classified, so it must be refused before the token \
+                 is examined — not served anonymously and not handed a scope"
+            );
+            // The unauthenticated door is the allow-list and nothing else, so
+            // an unmapped path must not be reachable through it either.
+            assert!(!PUBLIC_ROUTES.contains(&path), "{path}");
+            // The sentinel's other half: an unmapped path must not be handed
+            // any scope the control plane can actually mint, or a token holding
+            // it would be sufficient for a route nobody classified.
+            for real in [
+                "read:search",
+                "read:devices",
+                "read:records",
+                "read:files",
+                "read:files:raw",
+            ] {
+                assert_ne!(route_auth(path), RouteAuth::Scoped(real), "{path}");
+            }
+        }
+    }
+
+    /// THE cross-tenant guard. The policy-signing key is global across orgs, so
+    /// a foreign envelope verifies against this gateway's pinned key; only the
+    /// payload's `license_id` binds it to an organization. Installing one would
+    /// let another org's tokens read this org's archive.
+    #[test]
+    fn a_policy_signed_for_another_org_is_never_installed() {
+        use crate::policy::TokenGrant;
+        use chrono::Duration;
+
+        let now = Utc::now();
+        let foreign = PolicyDocument {
+            license_id: "lic-ATTACKER-ORG".to_string(),
+            issued_at: now,
+            valid_until: now + Duration::minutes(30),
+            token_grants: vec![TokenGrant {
+                digest: crate::policy::token_digest("sk_ent_attacker_token_1234"),
+                scopes: vec!["read:search".to_string()],
+                expires_at: None,
+            }],
+        };
+
+        let store = PolicyStore::new("lic-victim");
+        let err = store
+            .install(foreign.clone(), ClockSkew::Ok)
+            .expect_err("a foreign-license policy must be refused");
+        assert_eq!(err.document_license_id, "lic-ATTACKER-ORG");
+        assert_eq!(err.expected_license_id, "lic-victim");
+        assert!(
+            store.current().is_none(),
+            "nothing may be installed: the grants in a foreign policy would \
+             authorize reads of THIS org's archive"
+        );
+
+        // The same document under its own license installs fine — the check is
+        // a tenant binding, not a blanket rejection.
+        let mut own = foreign;
+        own.license_id = "lic-victim".to_string();
+        store.install(own, ClockSkew::Ok).expect("own license");
+        assert_eq!(store.current().unwrap().license_id, "lic-victim");
     }
 }

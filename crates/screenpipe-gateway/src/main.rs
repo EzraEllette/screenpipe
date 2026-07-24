@@ -79,7 +79,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ),
         None => None,
     };
-    let policy_store = policy_pubkey.map(|_| PolicyStore::new());
+    // The store is bound to the license this gateway serves: a policy signed
+    // for another org verifies against the (globally shared) pinned key, so the
+    // payload's license_id is the only tenant binding there is.
+    let policy_store = policy_pubkey.map(|_| PolicyStore::new(&cfg.license_id));
 
     // Enroll (once) → seed the policy store → arm the refresh + heartbeat
     // loop. Returns None only when no control plane is configured; every
@@ -117,10 +120,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         // interval), so measuring it against
                                         // `now` would invent skew. Only a
                                         // control-plane pull can judge that.
-                                        Ok(doc) => refresh_store.install(
-                                            doc,
-                                            screenpipe_gateway::policy::ClockSkew::Ok,
-                                        ),
+                                        Ok(doc) => {
+                                            if let Err(foreign) = refresh_store.install(
+                                                doc,
+                                                screenpipe_gateway::policy::ClockSkew::Ok,
+                                            ) {
+                                                // A file the operator placed is
+                                                // no more trusted than the
+                                                // network: the signing key is
+                                                // shared across tenants.
+                                                tracing::error!(
+                                                    expected_license_id =
+                                                        %foreign.expected_license_id,
+                                                    document_license_id =
+                                                        %foreign.document_license_id,
+                                                    "policy file is signed for a DIFFERENT \
+                                                     organization — refusing to install it"
+                                                );
+                                            }
+                                        }
                                         Err(e) => {
                                             tracing::warn!(error = %e, "policy file rejected")
                                         }
@@ -199,9 +217,27 @@ mod boot_wiring {
     /// that fails if the wiring is ever removed again. The behavioural proof
     /// lives in `control_plane::tests::boot_enrolls_pulls_and_heartbeats_the_real_ingest_cursor`,
     /// which drives these exact two calls against a mock control plane.
+    ///
+    /// CRITICAL: the haystack must EXCLUDE this module. `include_str!("main.rs")`
+    /// contains the needles below as string literals, so searching the whole
+    /// file makes every assertion unconditionally true — the first version of
+    /// this test did exactly that and still passed with the entire
+    /// control-plane block deleted from `main()`. Split the file at this
+    /// module's own marker and search only the production prefix.
     #[test]
     fn main_wires_the_control_plane_and_the_ingest_report() {
-        let src = include_str!("main.rs");
+        let production = include_str!("main.rs")
+            .split("mod boot_wiring")
+            .next()
+            .expect("split always yields a first element");
+        // Prove the split actually excluded this module. If the marker is ever
+        // renamed, `production` silently becomes the whole file and every
+        // assertion below goes back to matching itself.
+        assert!(
+            !production.contains("fn main_wires_the_control_plane"),
+            "the haystack still contains this test, so the needle assertions \
+             below would match their own string literals and could never fail"
+        );
         for needle in [
             "ControlPlaneTask::boot(",
             "task.run(",
@@ -210,7 +246,7 @@ mod boot_wiring {
             "ingestor.errors()",
         ] {
             assert!(
-                src.contains(needle),
+                production.contains(needle),
                 "the gateway binary no longer contains `{needle}` — the control-plane \
                  loop (enroll → policy pull → heartbeat) is unwired again, which is \
                  exactly the state SCR-295 was reopened for"
