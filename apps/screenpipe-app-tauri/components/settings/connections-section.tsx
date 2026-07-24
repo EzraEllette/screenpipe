@@ -34,7 +34,7 @@ import { message, open as openDialog } from "@tauri-apps/plugin-dialog";
 import { localFetch } from "@/lib/api";
 import { screenpipeWebUrl } from "@/lib/web-url";
 import { exists, writeFile, readTextFile, mkdir } from "@tauri-apps/plugin-fs";
-import { fetch as tauriFetch } from "@tauri-apps/plugin-http";
+import { tauriFetchWithDeadline } from "@/lib/http/tauri-fetch";
 import { platform } from "@tauri-apps/plugin-os";
 import { join, homeDir, tempDir, dirname } from "@tauri-apps/api/path";
 import { AppleCalendarCard } from "./apple-calendar-card";
@@ -88,12 +88,24 @@ function formatRelativeTime(ts: number): string {
   return `${Math.floor(hours / 24)}d ago`;
 }
 
+/** One budget for the whole release walk, not one per page. */
+const GITHUB_RELEASES_BUDGET_MS = 30_000;
+
 async function getLatestMcpRelease(): Promise<{ url: string; version: string }> {
   const maxPages = 5;
+  // The wrapper's deadline is per request, so five pages at the default would
+  // allow ~2.5 minutes of blocking. Share one deadline across the loop instead.
+  const deadlineAt = Date.now() + GITHUB_RELEASES_BUDGET_MS;
   for (let page = 1; page <= maxPages; page++) {
-    const response = await tauriFetch(
+    // Stop when the shared budget is gone rather than starting another page on
+    // the wrapper's minimum deadline — otherwise "one 30s budget" could still
+    // run ~1s per remaining page past it.
+    const remainingMs = deadlineAt - Date.now();
+    if (remainingMs <= 0) throw new Error("Timed out looking for an MCP release");
+    const response = await tauriFetchWithDeadline(
       `${GITHUB_RELEASES_API}?per_page=50&page=${page}`,
-      { method: "GET", headers: { "Accept": "application/vnd.github.v3+json" } }
+      { method: "GET", headers: { "Accept": "application/vnd.github.v3+json" } },
+      { timeoutMs: remainingMs }
     );
     if (!response.ok) throw new Error("Failed to fetch releases");
     const releases: GitHubRelease[] = await response.json();
