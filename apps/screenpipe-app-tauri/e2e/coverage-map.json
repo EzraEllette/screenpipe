@@ -545,6 +545,16 @@
       "notes": "macOS-only recovery window for missing TCC permissions."
     },
     {
+      "spec": "sck-startup-recovery.spec.ts",
+      "platforms": ["macos"],
+      "layers": ["capture-ocr", "local-api", "os-integration"],
+      "features": ["app-launch", "capture-ocr", "health", "local-api-search"],
+      "criticality": "high",
+      "confidence": "conditional",
+      "ux": "api",
+      "notes": "Opt-in macOS fault injection verifies bounded SCK enumeration recovery, same-process capture, and OCR persistence."
+    },
+    {
       "spec": "pipes.spec.ts",
       "platforms": ["windows", "macos", "linux"],
       "layers": ["pipes", "real-ui-e2e", "local-api"],
