@@ -28,6 +28,7 @@
     "test:e2e:onboarding-redirect": "SCREENPIPE_E2E_SEED=no-recording bun run wdio run e2e/wdio.conf.ts --spec e2e/specs/onboarding-redirect.spec.ts",
     "test:e2e:hd:macos": "SCREENPIPE_E2E_SEED=onboarding bun run wdio run e2e/wdio.conf.ts --spec e2e/specs/hd-recording-pipeline.spec.ts",
     "test:e2e:capture-frequency:macos": "SCREENPIPE_E2E_SEED=onboarding,no-audio bun run wdio run e2e/wdio.conf.ts --spec e2e/specs/capture-frequency-floor.spec.ts",
+    "test:e2e:sck-startup-recovery:macos": "SCREENPIPE_E2E_SEED=onboarding,no-audio,sck-enumeration-hang-once bun run wdio run e2e/wdio.conf.ts --spec e2e/specs/sck-startup-recovery.spec.ts",
     "test:e2e:search-bugs": "SCREENPIPE_E2E_SEED=onboarding,no-recording,search-fixture SCREENPIPE_PORT=3041 bun run wdio run e2e/wdio.conf.ts --spec e2e/specs/search/search-bugs-4645.spec.ts",
     "typecheck": "bunx tsc --noEmit",
     "bindings:check": "cargo test -p screenpipe-app tauri_bindings_are_current --manifest-path src-tauri/Cargo.toml -- --nocapture",
