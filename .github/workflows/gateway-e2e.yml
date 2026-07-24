@@ -17,6 +17,13 @@ on:
       - "crates/screenpipe-telemetry-wire/**"
       - "crates/screenpipe-sync/**"
       - "crates/screenpipe-db/**"
+      # The e2e's last step drives the real stdio MCP against the live gateway
+      # with SCREENPIPE_TEAM_API_URL set (see e2e/run.sh + e2e/mcp_team_search.mjs),
+      # so MCP source changes must run it too — that path is the only automated
+      # proof that `team-*` tools actually reach a customer gateway. Scoped to
+      # src/ on purpose: a README or version-only edit does not need a
+      # docker-compose + cargo build.
+      - "packages/screenpipe-mcp/src/**"
       - ".github/workflows/gateway-e2e.yml"
 
 concurrency:
