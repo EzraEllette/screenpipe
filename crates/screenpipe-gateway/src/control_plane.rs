@@ -511,6 +511,10 @@ pub struct ControlPlaneTask {
     /// cold-start cache so a restart during a control-plane outage still comes
     /// up with the last-known-good policy.
     policy_cache_path: Option<PathBuf>,
+    /// Where the persisted credential lives. Kept so the revoked-credential
+    /// error can NAME the file the operator has to delete — the only recovery
+    /// path, and one a bare "restart with a fresh token" does not reach.
+    registration_path: PathBuf,
     refresh_interval: Duration,
     heartbeat_interval: Duration,
     /// The fault from the MOST RECENT policy refresh, `None` once one fully
@@ -552,7 +556,17 @@ impl ControlPlaneTask {
         errors: ErrorCodeSink,
         status: IngestStatus,
     ) -> Result<Option<Self>, GatewayError> {
-        let persisted = load_registration(&cfg.data_dir)?;
+        // Only a gateway that HAS a control plane reads this file, and reading
+        // it is the one step here that can hard-fail (a corrupt credential is
+        // deliberately not "never enrolled"). In the file/M1 postures the
+        // credential is never used, so a truncated leftover — the retired
+        // sidecar wrote it non-atomically, `echo "$resp" > "$REG"` — must not
+        // refuse to boot over a file this process will never open, with a
+        // message about revoking a credential that does not apply here.
+        let persisted = match cfg.control_plane_base {
+            Some(_) => load_registration(&cfg.data_dir)?,
+            None => None,
+        };
         let posture = decide_posture(
             cfg.control_plane_base.as_deref(),
             cfg.enrollment_token.as_deref(),
@@ -623,6 +637,7 @@ impl ControlPlaneTask {
             errors,
             status,
             policy_cache_path: cfg.policy_path.clone(),
+            registration_path: registration_path(&cfg.data_dir),
             refresh_interval,
             heartbeat_interval: cfg.heartbeat_interval,
             refresh_fault: Default::default(),
@@ -736,13 +751,32 @@ impl ControlPlaneTask {
                         }
                     }
                 }
-                Err(e) => warn!(
-                    cache = %path.display(),
-                    error = %e,
-                    "gateway control plane: cached policy envelope rejected; ignoring it"
-                ),
+                // Reportable, not just logged. This file is re-read and
+                // re-rejected on EVERY boot, so a poisoned cache is a standing
+                // condition — and it is the same class of event as a fresh pull
+                // failing verification (wrong pinned key, rotated signer,
+                // tampered file), which does record a code. Leaving it at
+                // `warn!` made the dashboard read "recent errors: none" for a
+                // gateway whose cold-start recovery is permanently broken.
+                Err(e) => {
+                    self.errors.record(ErrorCode::EPolicyRejected);
+                    error!(
+                        cache = %path.display(),
+                        error = %e,
+                        "gateway control plane: cached policy envelope FAILED verification against \
+                         the pinned key — ignoring it. This file will be re-read and re-rejected \
+                         on every boot until it is replaced by a successful pull or deleted \
+                         (wrong SCREENPIPE_GATEWAY_POLICY_PUBKEY_B64, a rotated signer, or a \
+                         corrupt/foreign file)."
+                    );
+                }
             },
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            // Deliberately code-less: an unreadable file is an IO condition,
+            // not a rejected signature, and E_POLICY_REJECTED here would send
+            // the operator hunting a key mismatch. If it matters, the pull that
+            // runs moments later records the accurate code; if the pull
+            // succeeds, it overwrites this file and there is nothing to report.
             Err(e) => {
                 warn!(cache = %path.display(), error = %e, "gateway control plane: cached policy unreadable")
             }
@@ -760,11 +794,21 @@ impl ControlPlaneTask {
                 self.errors.record(ErrorCode::EPolicyFetch);
                 self.set_refresh_fault(Some(ErrorCode::EPolicyFetch));
                 match e {
+                    // The remedy has to name the FILE. `decide_posture` returns
+                    // UsePersisted whenever gateway-registration.json exists, so
+                    // a restart with a fresh enrollment token reuses the dead
+                    // credential and keeps 503ing — "mint a token and restart"
+                    // on its own sends the operator round a loop on the one
+                    // recovery path a revoked gateway has.
                     ControlPlaneError::AuthRejected => error!(
+                        credential = %self.registration_path.display(),
                         "gateway control plane: policy pull REJECTED our credential — this \
                          gateway has been revoked (or another gateway re-registered for this \
-                         license). Mint a fresh enrollment token and restart; queries keep \
-                         failing closed until then."
+                         license). To recover: mint a fresh enrollment token in the dashboard, \
+                         DELETE the persisted credential file logged above, set \
+                         SCREENPIPE_GATEWAY_ENROLLMENT_TOKEN and restart. Restarting without \
+                         deleting that file re-uses the dead credential and changes nothing. \
+                         Queries keep failing closed until then."
                     ),
                     ControlPlaneError::ServerError(503) => error!(
                         "gateway control plane: policy endpoint returned 503 — policy signing is \
@@ -1958,6 +2002,114 @@ mod tests {
         }
     }
 
+    /// The CLEAR half of the `refresh_fault` state machine — the transition
+    /// every other fault test is structurally unable to observe.
+    ///
+    /// `refresh_fault` is deliberately sticky and re-asserted on EVERY beat
+    /// (`send_heartbeat`), and the website OVERWRITES `last_error_codes` with
+    /// whatever the newest beat carried. So the set half and the clear half fail
+    /// in opposite, equally bad ways: without the set, a gateway that is 503ing
+    /// everything reports "recent errors: none" four beats in five; without the
+    /// clear, a gateway that had ONE transient policy-pull blip reports
+    /// E_POLICY_FETCH forever and the dashboard shows a permanent hard fault for
+    /// a healthy gateway — and a permanently-red field trains operators to
+    /// ignore it, which costs exactly as much as showing nothing.
+    ///
+    /// Every other test that drives this mechanism
+    /// (`unreachable_control_plane_boots_failed_closed_and_reports_the_code`,
+    /// `a_policy_signed_by_the_wrong_key_records_e_policy_rejected`,
+    /// `a_stale_pulled_policy_records_e_policy_stale_on_every_beat`,
+    /// `a_policy_for_another_organization_is_refused_at_the_pull`) points at a
+    /// control plane that NEVER recovers, so replacing
+    /// `self.set_refresh_fault(fault)` with a set-only variant leaves them all
+    /// green. This test is the one that fails.
+    #[tokio::test]
+    async fn a_recovered_control_plane_clears_the_sticky_refresh_fault() {
+        let server = wiremock::MockServer::start().await;
+        mount_register_ok(&server).await;
+        mount_heartbeat_ok(&server).await;
+
+        let (envelope, pubkey) =
+            sign_policy_for_fixture(&fresh_policy(Utc::now()), &[11u8; 32], "k1");
+        // ONE 503 — verbatim what app/api/enterprise/gateway/policy/route.ts
+        // returns while ENTERPRISE_GATEWAY_POLICY_SIGNING_SEED_B64 is unset —
+        // and then the operator fixes it. `with_priority(1)` beats the default
+        // 5 so this mock wins while it is still eligible, and
+        // `up_to_n_times(1)` retires it after the boot pull, letting every
+        // later pull fall through to the healthy mock below.
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/api/enterprise/gateway/policy"))
+            .respond_with(wiremock::ResponseTemplate::new(503).set_body_json(
+                serde_json::json!({"error": "policy signing is not configured on this control plane"}),
+            ))
+            .up_to_n_times(1)
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        mount_policy_raw(&server, envelope).await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = test_config(dir.path());
+        cfg.control_plane_base = Some(server.uri());
+        cfg.enrollment_token = Some("sge_first_boot".to_string());
+        cfg.policy_pubkey_b64 = Some(BASE64.encode(pubkey.to_bytes()));
+
+        let store = PolicyStore::new("lic-1");
+        let errors = ErrorCodeSink::new();
+        let task = ControlPlaneTask::boot(
+            &cfg,
+            Some((pubkey, store.clone())),
+            errors.clone(),
+            IngestStatus::new(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        // Phase 1 — the blip. Nothing installed, fault recorded AND stuck.
+        assert!(
+            store.current().is_none(),
+            "the boot pull 503'd, so there must be no policy"
+        );
+        assert_eq!(
+            errors.drain(),
+            vec![ErrorCode::EPolicyFetch],
+            "the blip must be reportable"
+        );
+        assert_eq!(
+            task.refresh_fault(),
+            Some(ErrorCode::EPolicyFetch),
+            "and it must be sticky, or the next four beats say nothing"
+        );
+
+        // Phase 2 — recovery. One good refresh must clear the verdict.
+        task.refresh_policy().await;
+        assert!(
+            store.current().is_some(),
+            "the second pull serves a valid, correctly signed policy"
+        );
+        assert_eq!(
+            task.refresh_fault(),
+            None,
+            "a fully successful refresh must CLEAR the fault, not merely be \
+             overwritten by the next failure"
+        );
+        assert!(
+            errors.drain().is_empty(),
+            "a clean install records no code of its own"
+        );
+
+        // Phase 3 — what the dashboard actually reads. The beat after recovery
+        // must be clean; a sticky-forever fault shows up right here.
+        task.send_heartbeat().await;
+        let hb = heartbeats(&server).await.pop().expect("a heartbeat");
+        assert!(
+            hb.error_codes.is_empty(),
+            "a recovered gateway must stop reporting the old fault, got {:?}",
+            hb.error_codes
+        );
+    }
+
     /// SCR-292: the cadence comes from the control plane, never from
     /// SCREENPIPE_GATEWAY_POLL_SECONDS (which is S3 ingest tuning).
     #[test]
@@ -2244,14 +2396,20 @@ mod tests {
             "only the failed pull may be reported — no phantom E_POLICY_CLOCK_SKEW"
         );
 
-        // A cache signed by someone else must be ignored, not installed.
+        // A cache signed by someone else must be ignored, not installed — and
+        // must be REPORTABLE. This file is re-read and re-rejected on every
+        // boot, so a poisoned cache is a standing condition: with only a
+        // `warn!`, the dashboard showed E_POLICY_FETCH alone and an operator
+        // would conclude the control plane was the whole problem while their
+        // cold-start recovery was also broken.
         let (other, _) = sign_policy_for_fixture(&fresh_policy(Utc::now()), &[99u8; 32], "k2");
         std::fs::write(&cache, other).unwrap();
         let store2 = PolicyStore::new("lic-1");
+        let errors2 = ErrorCodeSink::new();
         ControlPlaneTask::boot(
             &cfg,
             Some((pubkey, store2.clone())),
-            ErrorCodeSink::new(),
+            errors2.clone(),
             IngestStatus::new(),
         )
         .await
@@ -2260,6 +2418,43 @@ mod tests {
         assert!(
             store2.current().is_none(),
             "a cache that fails verification must never be installed"
+        );
+        assert_eq!(
+            errors2.drain(),
+            // Sink order is ErrorCode's declaration order, not observation
+            // order (the sink is a BTreeSet so heartbeat bodies are stable).
+            vec![ErrorCode::EPolicyFetch, ErrorCode::EPolicyRejected],
+            "BOTH failures must reach the dashboard: the poisoned cache AND the failed pull"
+        );
+    }
+
+    /// A gateway in the file/M1 posture never opens `gateway-registration.json`,
+    /// so a truncated leftover in its data dir must not refuse to boot.
+    ///
+    /// Reachable in practice: the retired shell sidecar wrote that file
+    /// non-atomically (`echo "$resp" > "$REG"`), so a dev who ran it, then
+    /// booted without SCREENPIPE_GATEWAY_CONTROL_PLANE, would hit a hard boot
+    /// error over a file this process never reads — with a message about
+    /// revoking a credential that does not apply.
+    #[tokio::test]
+    async fn a_corrupt_credential_file_does_not_block_a_gateway_with_no_control_plane() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(registration_path(dir.path()), b"{\"gateway_id\": tru").unwrap();
+
+        // Negative control: the file really is corrupt, so this test cannot
+        // pass because the fixture stopped being poison.
+        assert!(
+            load_registration(dir.path()).is_err(),
+            "fixture must be an unparseable credential file"
+        );
+
+        let cfg = test_config(dir.path()); // control_plane_base: None
+        let task = ControlPlaneTask::boot(&cfg, None, ErrorCodeSink::new(), IngestStatus::new())
+            .await
+            .expect("no control plane configured must not hard-fail on that file");
+        assert!(
+            task.is_none(),
+            "Disabled posture returns no task, as before"
         );
     }
 
