@@ -54,20 +54,18 @@ impl PolicyStore {
         Self::default()
     }
 
-    /// Install a freshly verified document. Clock skew is classified HERE,
-    /// at delivery, because that is the only moment `issued_at ≈ now` holds
-    /// (SCR-292) — later reads would see a legitimately ageing `issued_at`.
-    pub fn replace(&self, policy: PolicyDocument) {
-        let mut slot = self.inner.write().expect("policy lock");
-        let skew = match slot.as_ref() {
-            // Re-installing the SAME document (the file-watcher path re-reads
-            // the same envelope every interval) must keep the original
-            // verdict: its `issued_at` recedes while it stays installed, and
-            // re-classifying would invent skew that isn't there.
-            Some(existing) if existing.policy.issued_at == policy.issued_at => existing.skew,
-            _ => policy.clock_skew_at_fetch(Utc::now()),
-        };
-        *slot = Some(Installed { policy, skew });
+    /// Install a verified document together with the clock verdict for THIS
+    /// delivery.
+    ///
+    /// `skew` is a required argument rather than something computed here on
+    /// purpose: only the code that obtained the document knows whether
+    /// `issued_at ≈ now` should hold. A document just pulled from the control
+    /// plane passes [`PolicyDocument::clock_skew_at_fetch`]; a document read
+    /// from a cache file or an operator-managed file passes
+    /// [`ClockSkew::Ok`], because its `issued_at` is legitimately old and
+    /// classifying it would invent skew that isn't there.
+    pub fn install(&self, policy: PolicyDocument, skew: ClockSkew) {
+        *self.inner.write().expect("policy lock") = Some(Installed { policy, skew });
     }
 
     pub fn current(&self) -> Option<PolicyDocument> {

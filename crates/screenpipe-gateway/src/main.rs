@@ -111,7 +111,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     match screenpipe_gateway::policy::verify_policy_envelope(
                                         &bytes, &pubkey,
                                     ) {
-                                        Ok(doc) => refresh_store.replace(doc),
+                                        // ClockSkew::Ok: an operator-managed
+                                        // file's `issued_at` is legitimately
+                                        // old (and it is re-read every
+                                        // interval), so measuring it against
+                                        // `now` would invent skew. Only a
+                                        // control-plane pull can judge that.
+                                        Ok(doc) => refresh_store.install(
+                                            doc,
+                                            screenpipe_gateway::policy::ClockSkew::Ok,
+                                        ),
                                         Err(e) => {
                                             tracing::warn!(error = %e, "policy file rejected")
                                         }

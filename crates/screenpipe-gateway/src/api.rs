@@ -1231,7 +1231,7 @@ mod tests {
     #[tokio::test]
     async fn bearer_auth_enforces_grants_scopes_and_policy_freshness() {
         use crate::auth::PolicyStore;
-        use crate::policy::{sign_policy_for_fixture, PolicyDocument, TokenGrant};
+        use crate::policy::{sign_policy_for_fixture, ClockSkew, PolicyDocument, TokenGrant};
         use chrono::Duration;
 
         let dir = tempfile::tempdir().unwrap();
@@ -1260,7 +1260,7 @@ mod tests {
         let (envelope, pubkey) = sign_policy_for_fixture(&policy, &[3u8; 32], "test-v1");
         let verified = crate::policy::verify_policy_envelope(envelope.as_bytes(), &pubkey).unwrap();
         let store = PolicyStore::new();
-        store.replace(verified);
+        store.install(verified, ClockSkew::Ok);
         let router = router(db, src, "lic-1".to_string(), Some(store.clone()));
 
         let call = |auth: Option<&'static str>, uri: &'static str| {
@@ -1323,7 +1323,7 @@ mod tests {
         let mut barely_expired = policy.clone();
         barely_expired.issued_at = now - Duration::minutes(31);
         barely_expired.valid_until = now - Duration::minutes(1);
-        store.replace(barely_expired);
+        store.install(barely_expired, ClockSkew::Ok);
         assert_eq!(
             call(
                 Some("Bearer sk_ent_search_only_1234"),
@@ -1340,7 +1340,7 @@ mod tests {
         let mut stale = policy.clone();
         stale.issued_at = now - Duration::hours(2);
         stale.valid_until = now - Duration::minutes(10);
-        store.replace(stale);
+        store.install(stale.clone(), ClockSkew::Ok);
         assert_eq!(
             call(
                 Some("Bearer sk_ent_search_only_1234"),
@@ -1348,6 +1348,34 @@ mod tests {
             )
             .await,
             StatusCode::SERVICE_UNAVAILABLE
+        );
+        // Same expiry, but the clock disagreed with the signer when the policy
+        // was delivered: still 503, and the message must point at NTP instead
+        // of implying a control-plane outage.
+        store.install(stale, ClockSkew::Ahead(7200));
+        let res = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/enterprise/v1/search?q=x")
+                    .header("authorization", "Bearer sk_ent_search_only_1234")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = String::from_utf8(
+            http_body_util::BodyExt::collect(res.into_body())
+                .await
+                .unwrap()
+                .to_bytes()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(
+            body.contains("clock") && body.contains("7200"),
+            "an expiry caused by clock skew must say so, with the delta: {body}"
         );
 
         // A policy from the FUTURE can only mean a wrong local clock. Fail
@@ -1357,7 +1385,7 @@ mod tests {
         let mut future = policy.clone();
         future.issued_at = now + Duration::hours(2);
         future.valid_until = now + Duration::hours(3);
-        store.replace(future);
+        store.install(future, ClockSkew::Ok);
         let res = router
             .clone()
             .oneshot(

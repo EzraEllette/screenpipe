@@ -588,7 +588,12 @@ impl ControlPlaneTask {
                         stale,
                         "gateway control plane: loaded the cached policy envelope"
                     );
-                    self.store.replace(doc);
+                    // ClockSkew::Ok, NOT a fetch-time classification: a cache
+                    // written before the last restart has a legitimately old
+                    // `issued_at`, and measuring it against `now` would report
+                    // a clock problem that does not exist. The first real pull
+                    // supplies the actual verdict moments later.
+                    self.store.install(doc, crate::policy::ClockSkew::Ok);
                 }
                 Err(e) => warn!(
                     cache = %path.display(),
@@ -682,8 +687,9 @@ impl ControlPlaneTask {
         let grants = doc.token_grants.len();
         let valid_until = doc.valid_until;
         // Install even a suspect document: it is the newest evidence we have,
-        // and auth.rs re-checks staleness on every request anyway.
-        self.store.replace(doc);
+        // and auth.rs re-checks staleness on every request anyway. The skew
+        // verdict travels WITH it so a later 503 can name the clock.
+        self.store.install(doc, skew);
         if let Some(path) = &self.policy_cache_path {
             // Same file the file-watcher posture reads, written atomically and
             // 0600: the payload carries the org's token verifier digests.
@@ -1533,8 +1539,18 @@ mod tests {
             .await;
 
         let dir = tempfile::tempdir().unwrap();
-        let (envelope, pubkey) =
-            sign_policy_for_fixture(&fresh_policy(Utc::now()), &[11u8; 32], "k1");
+        // Written before the last restart: still inside its validity window,
+        // but with an `issued_at` 40 minutes old. Classifying THAT against the
+        // local clock would report a two-thirds-of-an-hour "skew" that does not
+        // exist, which is why PolicyStore::install takes the verdict as an
+        // argument instead of measuring it.
+        let aged = PolicyDocument {
+            license_id: "lic-1".to_string(),
+            issued_at: Utc::now() - ChronoDuration::minutes(40),
+            valid_until: Utc::now() + ChronoDuration::minutes(20),
+            token_grants: vec![],
+        };
+        let (envelope, pubkey) = sign_policy_for_fixture(&aged, &[11u8; 32], "k1");
         let cache = dir.path().join("policy.json");
         std::fs::write(&cache, &envelope).unwrap();
         // Already enrolled.
@@ -1566,7 +1582,16 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(store.current().unwrap().license_id, "lic-1");
-        assert_eq!(errors.drain(), vec![ErrorCode::EPolicyFetch]);
+        assert_eq!(
+            store.current_skew().unwrap(),
+            crate::policy::ClockSkew::Ok,
+            "an aged cache must not be mistaken for a wrong clock"
+        );
+        assert_eq!(
+            errors.drain(),
+            vec![ErrorCode::EPolicyFetch],
+            "only the failed pull may be reported — no phantom E_POLICY_CLOCK_SKEW"
+        );
 
         // A cache signed by someone else must be ignored, not installed.
         let (other, _) = sign_policy_for_fixture(&fresh_policy(Utc::now()), &[99u8; 32], "k2");
