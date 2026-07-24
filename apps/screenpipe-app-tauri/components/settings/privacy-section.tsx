@@ -18,6 +18,7 @@ export const searchIndex: SettingsField[] = [
 ];
 import { LockedSetting, ManagedSwitch } from "@/components/enterprise-locked-setting";
 import { useManagedPolicy } from "@/lib/hooks/use-managed-policy";
+import { screenpipeWebUrl } from "@/lib/web-url";
 import {
   Eye,
   EyeOff,
@@ -2031,7 +2032,7 @@ function AdminTeamTokenCard() {
                 <button
                   className="underline text-foreground hover:text-foreground/80"
                   onClick={() =>
-                    openUrl("https://screenpipe.com/enterprise?tab=tokens")
+                    openUrl(screenpipeWebUrl("/enterprise?tab=tokens", "https://screenpipe.com"))
                   }
                 >
                   screenpipe.com/enterprise → api tokens

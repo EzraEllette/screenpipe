@@ -18,9 +18,10 @@ import { useSettings } from "@/lib/hooks/use-settings";
 import { useInterval } from "@/lib/hooks/use-interval";
 import { localFetch } from "@/lib/api";
 import { notifyConnectionsUpdated } from "@/lib/connections-events";
+import { screenpipeWebUrl } from "@/lib/web-url";
 import posthog from "posthog-js";
 
-const COMPOSIO_API = "https://screenpipe.com/api/composio";
+const COMPOSIO_API = screenpipeWebUrl("/api/composio", "https://screenpipe.com");
 const MCP_SERVER_ID = "composio";
 const POLL_MS = 2000;
 const MAX_POLLS = 60; // 2 minutes

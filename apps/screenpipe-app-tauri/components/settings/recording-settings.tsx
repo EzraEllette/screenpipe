@@ -8,6 +8,7 @@ const DEFAULT_OPENAI_COMPATIBLE_ENDPOINT = "http://127.0.0.1:8080";
 
 import React, { useEffect, useState, useMemo, useCallback, useRef } from "react";
 import { useEventListener } from "@/lib/hooks/use-event-listener";
+import { screenpipeWebUrl } from "@/lib/web-url";
 import { useInterval } from "@/lib/hooks/use-interval";
 import { useSettingsIndexDriftCheck, type SettingsField } from "./settings-search";
 import { CaptureFrequencyPreview, AudioCaptureModePreview } from "./setting-previews";
@@ -2397,7 +2398,7 @@ export function RecordingSettings() {
     // If trying to use cloud but not subscribed
     if (value === "screenpipe-cloud" && !hasCloudTranscriptionAccess) {
       try {
-        const response = await fetch("https://screenpipe.com/api/cloud-sync/checkout", {
+        const response = await fetch(screenpipeWebUrl("/api/cloud-sync/checkout", "https://screenpipe.com"), {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -2411,9 +2412,9 @@ export function RecordingSettings() {
           }),
         });
         const data = await response.json();
-        openUrl(data.url || "https://screenpipe.com/billing");
+        openUrl(data.url || screenpipeWebUrl("/billing", "https://screenpipe.com"));
       } catch {
-        openUrl("https://screenpipe.com/billing");
+        openUrl(screenpipeWebUrl("/billing", "https://screenpipe.com"));
       }
       // Revert back to previous value in the Select component
       return;
@@ -2826,7 +2827,7 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
                         size="sm"
                         className="h-7 px-2 text-xs"
                         data-testid="audio-engine-fallback-upgrade"
-                        onClick={() => openUrl("https://screenpipe.com/billing")}
+                        onClick={() => openUrl(screenpipeWebUrl("/billing", "https://screenpipe.com"))}
                       >
                         Upgrade
                       </Button>

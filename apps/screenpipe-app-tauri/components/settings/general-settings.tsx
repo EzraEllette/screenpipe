@@ -35,6 +35,7 @@ export const searchIndex: SettingsField[] = [
   { label: "Record only", keywords: ["headless", "pipes", "scheduler", "automation"] },
 ];
 import { useManagedPolicy } from "@/lib/hooks/use-managed-policy";
+import { screenpipeWebUrl } from "@/lib/web-url";
 import { open as openUrl } from "@tauri-apps/plugin-shell";
 import {
   DEFAULT_ENTERPRISE_APP_UPDATE_POLICY,
@@ -200,7 +201,7 @@ export default function GeneralSettings() {
 
     const path = isManagedDeployment ? "/enterprise" : "/account/versions";
     if (isManagedDeployment) params.set("tab", "builds");
-    const url = `https://screenpipe.com${path}?${params.toString()}`;
+    const url = screenpipeWebUrl(`${path}?${params.toString()}`, "https://screenpipe.com");
 
     try {
       await openUrl(url);

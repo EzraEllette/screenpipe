@@ -32,6 +32,7 @@ import { Command } from "@tauri-apps/plugin-shell";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { message, open as openDialog } from "@tauri-apps/plugin-dialog";
 import { localFetch } from "@/lib/api";
+import { screenpipeWebUrl } from "@/lib/web-url";
 import { exists, writeFile, readTextFile, mkdir } from "@tauri-apps/plugin-fs";
 import { fetch as tauriFetch } from "@tauri-apps/plugin-http";
 import { platform } from "@tauri-apps/plugin-os";
@@ -3718,7 +3719,7 @@ export function ConnectionsSection({
   const composioToken = composioSettings.user?.token;
   useEffect(() => {
     if (!composioToken) return;
-    fetch("https://screenpipe.com/api/composio/status", {
+    fetch(screenpipeWebUrl("/api/composio/status", "https://screenpipe.com"), {
       headers: { Authorization: `Bearer ${composioToken}` },
     })
       .then((r) => (r.ok ? r.json() : null))
