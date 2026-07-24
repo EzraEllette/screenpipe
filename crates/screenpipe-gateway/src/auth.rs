@@ -56,8 +56,52 @@ impl PolicyStore {
     }
 }
 
+/// Routes served without a bearer token. This is an **allow-list, and it
+/// is the only way to be unauthenticated** — see [`route_auth`]. Both
+/// carry gateway-own metadata (liveness, build version), never archive
+/// content.
+pub const PUBLIC_ROUTES: &[&str] = &["/health", "/version"];
+
+/// How a request path is authenticated. Three states, not two, because the
+/// dangerous case has to be nameable: a route nobody classified.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RouteAuth {
+    /// On [`PUBLIC_ROUTES`] — deliberately unauthenticated.
+    Public,
+    /// Requires a bearer token carrying this scope.
+    Scoped(&'static str),
+    /// Neither public nor scoped. Denied (SCR-353): the trust model must
+    /// not depend on the next contributor remembering to add a match arm.
+    Unmapped,
+}
+
+/// Classify a request path — **deny by default**.
+///
+/// The predecessor of this function returned `Option<scope>` and the
+/// middleware passed `None` straight through, which meant "route absent
+/// from the scope map" and "route needs no auth" were the same value: a
+/// new v1 route added without a scope arm was served unauthenticated, and
+/// was exempt from policy-expiry enforcement too (SCR-353, fail-open by
+/// omission). Being unauthenticated is now something a route can only
+/// obtain by being named in [`PUBLIC_ROUTES`]; everything else must map to
+/// a scope or it is refused. Adding a route is therefore a deliberate act
+/// in one of two directions, and `api::routes` is asserted against this
+/// function in tests so the omission fails CI rather than production.
+pub fn route_auth(path: &str) -> RouteAuth {
+    if PUBLIC_ROUTES.contains(&path) {
+        return RouteAuth::Public;
+    }
+    match required_scope(path) {
+        Some(scope) => RouteAuth::Scoped(scope),
+        None => RouteAuth::Unmapped,
+    }
+}
+
 /// Scope required per v1 route — the exact strings the hosted scope map
 /// uses (api-auth.ts / each route's withApiAuth arg).
+///
+/// Returning `None` here means "not in the scope map", which
+/// [`route_auth`] treats as deny. Do not read it as "no auth needed".
 pub fn required_scope(path: &str) -> Option<&'static str> {
     let rest = path.strip_prefix("/api/enterprise/v1/")?;
     Some(match rest.split('/').next().unwrap_or("") {
@@ -85,17 +129,34 @@ fn deny(status: StatusCode, msg: &str) -> Response {
     (status, Json(json!({ "error": msg }))).into_response()
 }
 
-/// Axum middleware enforcing bearer auth + per-route scopes on the v1
-/// surface. Non-v1 routes (/health, /version) pass through — they carry no
-/// content.
+/// Axum middleware enforcing bearer auth + per-route scopes. Only the
+/// [`PUBLIC_ROUTES`] allow-list passes through unauthenticated; every other
+/// path needs a scope mapping, and a path without one is denied rather
+/// than served (SCR-353).
 pub async fn require_bearer(
     State(state): State<AuthLayerState>,
     request: Request,
     next: Next,
 ) -> Response {
     let path = request.uri().path().to_string();
-    let Some(scope) = required_scope(&path) else {
-        return next.run(request).await;
+    let scope = match route_auth(&path) {
+        RouteAuth::Public => return next.run(request).await,
+        RouteAuth::Scoped(scope) => scope,
+        RouteAuth::Unmapped => {
+            // Deny before even looking at the token: with no scope mapping
+            // there is no correct scope to require, so no token can be
+            // sufficient. Loud, because for a registered route this is our
+            // bug, not the caller's — and it must be found in dev.
+            tracing::error!(
+                %path,
+                "refusing a request to a route with no auth classification — add a \
+                 scope arm in auth::required_scope or list it in auth::PUBLIC_ROUTES"
+            );
+            return deny(
+                StatusCode::FORBIDDEN,
+                "route has no scope mapping; refusing to serve it unauthenticated",
+            );
+        }
     };
 
     let header = request
@@ -203,5 +264,103 @@ mod tests {
         );
         assert_eq!(required_scope("/health"), None);
         assert_eq!(required_scope("/version"), None);
+    }
+
+    #[test]
+    fn public_routes_are_the_only_unauthenticated_paths() {
+        assert_eq!(route_auth("/health"), RouteAuth::Public);
+        assert_eq!(route_auth("/version"), RouteAuth::Public);
+        assert_eq!(
+            route_auth("/api/enterprise/v1/search"),
+            RouteAuth::Scoped("read:search")
+        );
+        // Everything unclassified denies — including the shapes a
+        // fail-open `Option`-based check used to wave through: a brand-new
+        // v1 route, the bare namespace, a version-adjacent prefix, and any
+        // unrelated path someone might add later.
+        for path in [
+            "/api/enterprise/v1/experimental",
+            "/api/enterprise/v1/",
+            "/api/enterprise/v1",
+            "/api/enterprise/v2/search",
+            "/api/enterprise/v1beta/search",
+            "/metrics",
+            "/",
+        ] {
+            assert_eq!(
+                route_auth(path),
+                RouteAuth::Unmapped,
+                "{path} must not be reachable without a deliberate classification"
+            );
+        }
+    }
+
+    /// The SCR-353 regression, end to end: a route registered WITHOUT a
+    /// scope-map arm — exactly what the next contributor produces by
+    /// forgetting one — must be refused by the middleware, and must not
+    /// run its handler. Asserted with a token that is valid and carries
+    /// every scope, because "no mapping" means no token can be sufficient.
+    #[tokio::test]
+    async fn a_registered_route_with_no_scope_mapping_is_denied_not_served() {
+        use crate::policy::{token_digest, PolicyDocument, TokenGrant};
+        use axum::body::Body;
+        use axum::http::Request;
+        use axum::routing::get;
+        use axum::Router;
+        use chrono::Duration;
+        use http_body_util::BodyExt;
+        use tower::util::ServiceExt;
+
+        let now = Utc::now();
+        let store = PolicyStore::new();
+        store.replace(PolicyDocument {
+            license_id: "lic-1".to_string(),
+            issued_at: now,
+            valid_until: now + Duration::minutes(30),
+            token_grants: vec![TokenGrant {
+                digest: token_digest("sk_ent_all_scopes_1234"),
+                scopes: vec![
+                    "read:search".to_string(),
+                    "read:records".to_string(),
+                    "read:devices".to_string(),
+                    "read:files".to_string(),
+                    "read:files:raw".to_string(),
+                ],
+                expires_at: None,
+            }],
+        });
+
+        let router = Router::new()
+            .route(
+                "/api/enterprise/v1/experimental",
+                get(|| async { "SECRET-ARCHIVE-CONTENT" }),
+            )
+            .layer(axum::middleware::from_fn_with_state(
+                AuthLayerState { store },
+                require_bearer,
+            ));
+
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .uri("/api/enterprise/v1/experimental")
+                    .header("authorization", "Bearer sk_ent_all_scopes_1234")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "an unmapped route must fail closed"
+        );
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let body = String::from_utf8_lossy(&body);
+        assert!(
+            !body.contains("SECRET-ARCHIVE-CONTENT"),
+            "the handler ran despite the deny: {body}"
+        );
     }
 }

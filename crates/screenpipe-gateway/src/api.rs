@@ -35,7 +35,10 @@ use std::sync::Arc;
 use axum::extract::{Path as AxPath, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::{routing::get, Json, Router};
+use axum::{
+    routing::{get, MethodRouter},
+    Json, Router,
+};
 use chrono::{DateTime, Duration as ChronoDuration, SecondsFormat, Utc};
 use screenpipe_db::DatabaseManager;
 use screenpipe_sync::{BlobSource, ListRequest};
@@ -54,8 +57,34 @@ pub struct ApiState {
     pub license_id: String,
 }
 
+/// Every route the gateway serves, as (path, handler) pairs.
+///
+/// Single source of truth on purpose: [`router`] folds over this list and
+/// `auth::route_auth` is asserted against it in tests
+/// (`every_registered_route_has_an_auth_classification`), so a route added
+/// here without an auth classification fails CI instead of being served
+/// unauthenticated (SCR-353). Paths stay axum patterns — the scope map keys
+/// off the first path segment, so a pattern classifies identically to the
+/// concrete request paths that match it.
+fn routes() -> Vec<(&'static str, MethodRouter<ApiState>)> {
+    vec![
+        ("/health", get(health)),
+        ("/version", get(version)),
+        ("/api/enterprise/v1/devices", get(devices)),
+        ("/api/enterprise/v1/search", get(search)),
+        ("/api/enterprise/v1/records", get(records)),
+        ("/api/enterprise/v1/files", get(files)),
+        ("/api/enterprise/v1/files/*key", get(file_raw)),
+        (
+            "/api/enterprise/v1/frames/:device_id/:frame_id",
+            get(frame_image),
+        ),
+        ("/api/enterprise/v1/rollups", get(rollups)),
+    ]
+}
+
 /// Build the v1 router. `policy` enables offline bearer verification
-/// (SCR-291) over every `/api/enterprise/v1/*` route; `None` serves
+/// (SCR-291) over every route except `auth::PUBLIC_ROUTES`; `None` serves
 /// unauthenticated (the M1 compose posture — private network only).
 pub fn router(
     db: Arc<DatabaseManager>,
@@ -68,20 +97,11 @@ pub fn router(
         source,
         license_id,
     };
-    let mut router = Router::new()
-        .route("/health", get(health))
-        .route("/version", get(version))
-        .route("/api/enterprise/v1/devices", get(devices))
-        .route("/api/enterprise/v1/search", get(search))
-        .route("/api/enterprise/v1/records", get(records))
-        .route("/api/enterprise/v1/files", get(files))
-        .route("/api/enterprise/v1/files/*key", get(file_raw))
-        .route(
-            "/api/enterprise/v1/frames/:device_id/:frame_id",
-            get(frame_image),
-        )
-        .route("/api/enterprise/v1/rollups", get(rollups))
-        .with_state(state);
+    let mut stateful = Router::new();
+    for (path, handler) in routes() {
+        stateful = stateful.route(path, handler);
+    }
+    let mut router = stateful.with_state(state);
     if let Some(store) = policy {
         router = router.layer(axum::middleware::from_fn_with_state(
             crate::auth::AuthLayerState { store },
@@ -924,6 +944,59 @@ mod tests {
 
     use crate::ingest::Ingestor;
     use crate::source::S3BlobSource;
+
+    /// SCR-353: the router's registrations are the authority on what this
+    /// gateway serves, so they are what gets checked. Every registered path
+    /// must be deliberately classified — named in `auth::PUBLIC_ROUTES` or
+    /// mapped to a scope. Add a route to `routes()` and forget the scope arm
+    /// and this fails here, rather than serving archive content to anyone
+    /// who asks.
+    #[test]
+    fn every_registered_route_has_an_auth_classification() {
+        for (path, _) in routes() {
+            match crate::auth::route_auth(path) {
+                crate::auth::RouteAuth::Public => assert!(
+                    crate::auth::PUBLIC_ROUTES.contains(&path),
+                    "{path} classified Public but is not in PUBLIC_ROUTES"
+                ),
+                crate::auth::RouteAuth::Scoped(_) => {}
+                crate::auth::RouteAuth::Unmapped => panic!(
+                    "route {path} has no auth classification: add a scope arm to \
+                     auth::required_scope, or list it in auth::PUBLIC_ROUTES if it \
+                     genuinely serves no archive content. Unmapped routes are \
+                     denied at runtime, so this route is currently unreachable."
+                ),
+            }
+        }
+    }
+
+    /// The other half of the guard: every scope the map can hand out must
+    /// belong to some registered route. A scope arm left behind after a
+    /// route is renamed or removed is dead code that looks like coverage.
+    #[test]
+    fn scope_map_has_no_arms_for_routes_that_do_not_exist() {
+        for probe in [
+            "/api/enterprise/v1/devices",
+            "/api/enterprise/v1/search",
+            "/api/enterprise/v1/records",
+            "/api/enterprise/v1/rollups",
+            "/api/enterprise/v1/files",
+            "/api/enterprise/v1/frames/dev-a/1",
+        ] {
+            let first_segment = probe.trim_start_matches("/api/enterprise/v1/");
+            let first_segment = first_segment.split('/').next().unwrap();
+            assert!(
+                routes().iter().any(|(path, _)| {
+                    path.trim_start_matches("/api/enterprise/v1/")
+                        .split('/')
+                        .next()
+                        .unwrap()
+                        == first_segment
+                }),
+                "auth::required_scope maps '{first_segment}' but no route serves it"
+            );
+        }
+    }
 
     async fn seeded_router(dir: &tempfile::TempDir) -> Router {
         let db = Arc::new(
