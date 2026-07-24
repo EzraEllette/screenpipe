@@ -158,10 +158,11 @@ pub fn token_digest(raw_token: &str) -> String {
 pub const CLOCK_SKEW_TOLERANCE_SECONDS: i64 = 300;
 
 /// How the local clock compares with the signed `issued_at` of a *freshly
-/// delivered* policy. Only meaningful at delivery time — a cached document's
-/// `issued_at` legitimately ages as it sits installed, so
-/// [`PolicyDocument::clock_skew_at_fetch`] must not be re-applied to a
-/// document that was already installed (see [`crate::auth::PolicyStore`]).
+/// delivered* policy. Only meaningful for a document that was just fetched
+/// from the control plane — a cached or operator-managed file's `issued_at` is
+/// legitimately old, so [`PolicyDocument::clock_skew_at_fetch`] must not be
+/// applied to it. [`crate::auth::PolicyStore::install`] therefore takes the
+/// verdict as an argument instead of computing one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ClockSkew {
     /// Within [`CLOCK_SKEW_TOLERANCE_SECONDS`] of the signer's clock.
