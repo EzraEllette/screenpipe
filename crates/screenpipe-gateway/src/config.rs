@@ -40,14 +40,46 @@ pub struct GatewayConfig {
     pub poll_interval: std::time::Duration,
     /// Base64 ed25519 public key pinning the policy signer. Setting it
     /// turns bearer auth ON for the v1 surface (SCR-291): the gateway then
-    /// requires a signed policy (see `policy_path`) and fails closed
-    /// without one. Unset = M1 posture (unauthenticated, private network).
+    /// requires a signed policy (from the control plane, or `policy_path`)
+    /// and fails closed without one. Unset = M1 posture (unauthenticated,
+    /// private network) — and unset together with `control_plane_base` set
+    /// is a hard boot error, since an unverifiable policy is no policy.
     pub policy_pubkey_b64: Option<String>,
-    /// Path to the signed policy envelope JSON. Re-read on the poll
-    /// interval so a refreshed file (or the SCR-295 control-plane pull
-    /// writing it) lands without a restart.
+    /// Path to the signed policy envelope JSON. Without a control plane this
+    /// is the policy SOURCE, re-read on the poll interval. With a control
+    /// plane it is a cold-start CACHE: the pull writes it atomically and
+    /// reads it once at boot, so a restart during a control-plane outage
+    /// still comes up with the last-known-good policy.
     pub policy_path: Option<std::path::PathBuf>,
+    /// Control-plane base URL — `SCREENPIPE_GATEWAY_CONTROL_PLANE`, the env
+    /// var the dashboard's copy-paste boot command prints. Setting it turns
+    /// the enroll → policy-pull → heartbeat loop ON (SCR-295).
+    /// `SCREENPIPE_GATEWAY_CONTROL_PLANE_BASE` is accepted as an alias.
+    pub control_plane_base: Option<String>,
+    /// Short-TTL single-use enrollment token
+    /// (`SCREENPIPE_GATEWAY_ENROLLMENT_TOKEN`, minted in the dashboard).
+    /// Consumed on first boot only: the long-lived credential it returns is
+    /// persisted in `{data_dir}/gateway-registration.json`, so restarts do
+    /// not need one (by then it has expired by design).
+    pub enrollment_token: Option<String>,
+    /// Policy refresh cadence override
+    /// (`SCREENPIPE_GATEWAY_POLICY_REFRESH_SECONDS`). Normally UNSET: the
+    /// cadence comes from the control plane's own `policy_refresh_seconds`
+    /// (SCR-292: 300s), which is the number it advertises at /register.
+    /// Deliberately NOT `SCREENPIPE_GATEWAY_POLL_SECONDS` — that knob is S3
+    /// ingest tuning and reusing it refreshed policy 10x too often.
+    pub policy_refresh_override: Option<std::time::Duration>,
+    /// Heartbeat cadence (`SCREENPIPE_GATEWAY_HEARTBEAT_SECONDS`).
+    pub heartbeat_interval: std::time::Duration,
 }
+
+/// Fallback policy-refresh cadence for a control plane that advertises none
+/// (an older /register response). Matches the website's
+/// `DEFAULT_POLICY_REFRESH_SECONDS` (SCR-292).
+pub const DEFAULT_POLICY_REFRESH_SECONDS: u64 = 300;
+/// Default heartbeat cadence. Independent of the policy cadence: heartbeats
+/// are the dashboard's liveness signal and cost one row update.
+pub const DEFAULT_HEARTBEAT_SECONDS: u64 = 60;
 
 fn env_opt(name: &str) -> Option<String> {
     std::env::var(name)
@@ -60,18 +92,18 @@ fn env_required(name: &str) -> Result<String, GatewayError> {
     env_opt(name).ok_or_else(|| GatewayError::Config(format!("{name} is required")))
 }
 
+fn env_secs(name: &str) -> Result<Option<u64>, GatewayError> {
+    env_opt(name)
+        .map(|s| {
+            s.parse::<u64>()
+                .map_err(|_| GatewayError::Config(format!("{name} must be an integer")))
+        })
+        .transpose()
+}
+
 impl GatewayConfig {
     pub fn from_env() -> Result<Self, GatewayError> {
-        let poll_secs: u64 = env_opt("SCREENPIPE_GATEWAY_POLL_SECONDS")
-            .map(|s| {
-                s.parse().map_err(|_| {
-                    GatewayError::Config(
-                        "SCREENPIPE_GATEWAY_POLL_SECONDS must be an integer".into(),
-                    )
-                })
-            })
-            .transpose()?
-            .unwrap_or(30);
+        let poll_secs: u64 = env_secs("SCREENPIPE_GATEWAY_POLL_SECONDS")?.unwrap_or(30);
         Ok(Self {
             license_id: env_required("SCREENPIPE_GATEWAY_LICENSE_ID")?,
             s3_bucket: env_required("SCREENPIPE_GATEWAY_S3_BUCKET")?,
@@ -91,6 +123,15 @@ impl GatewayConfig {
             poll_interval: std::time::Duration::from_secs(poll_secs),
             policy_pubkey_b64: env_opt("SCREENPIPE_GATEWAY_POLICY_PUBKEY_B64"),
             policy_path: env_opt("SCREENPIPE_GATEWAY_POLICY_PATH").map(Into::into),
+            control_plane_base: env_opt("SCREENPIPE_GATEWAY_CONTROL_PLANE")
+                .or_else(|| env_opt("SCREENPIPE_GATEWAY_CONTROL_PLANE_BASE")),
+            enrollment_token: env_opt("SCREENPIPE_GATEWAY_ENROLLMENT_TOKEN"),
+            policy_refresh_override: env_secs("SCREENPIPE_GATEWAY_POLICY_REFRESH_SECONDS")?
+                .map(std::time::Duration::from_secs),
+            heartbeat_interval: std::time::Duration::from_secs(
+                env_secs("SCREENPIPE_GATEWAY_HEARTBEAT_SECONDS")?
+                    .unwrap_or(DEFAULT_HEARTBEAT_SECONDS),
+            ),
         })
     }
 

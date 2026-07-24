@@ -32,14 +32,21 @@ use axum::Json;
 use chrono::Utc;
 use serde_json::json;
 
-use crate::policy::{PolicyDocument, TokenCheck};
+use crate::policy::{ClockSkew, PolicyDocument, TokenCheck};
 
-/// Shared, refreshable policy slot. The ingest/control-plane side (SCR-295)
-/// replaces the document on every successful policy pull; requests read it
+/// Shared, refreshable policy slot. The control-plane loop (SCR-295) replaces
+/// the document on every successful policy pull; requests read it
 /// lock-free-ish (parking-lot-style short read locks).
 #[derive(Clone, Default)]
 pub struct PolicyStore {
-    inner: Arc<RwLock<Option<PolicyDocument>>>,
+    inner: Arc<RwLock<Option<Installed>>>,
+}
+
+/// A policy plus the clock verdict measured when it was installed.
+#[derive(Clone)]
+struct Installed {
+    policy: PolicyDocument,
+    skew: ClockSkew,
 }
 
 impl PolicyStore {
@@ -47,12 +54,38 @@ impl PolicyStore {
         Self::default()
     }
 
+    /// Install a freshly verified document. Clock skew is classified HERE,
+    /// at delivery, because that is the only moment `issued_at ≈ now` holds
+    /// (SCR-292) — later reads would see a legitimately ageing `issued_at`.
     pub fn replace(&self, policy: PolicyDocument) {
-        *self.inner.write().expect("policy lock") = Some(policy);
+        let mut slot = self.inner.write().expect("policy lock");
+        let skew = match slot.as_ref() {
+            // Re-installing the SAME document (the file-watcher path re-reads
+            // the same envelope every interval) must keep the original
+            // verdict: its `issued_at` recedes while it stays installed, and
+            // re-classifying would invent skew that isn't there.
+            Some(existing) if existing.policy.issued_at == policy.issued_at => existing.skew,
+            _ => policy.clock_skew_at_fetch(Utc::now()),
+        };
+        *slot = Some(Installed { policy, skew });
     }
 
     pub fn current(&self) -> Option<PolicyDocument> {
-        self.inner.read().expect("policy lock").clone()
+        self.inner
+            .read()
+            .expect("policy lock")
+            .as_ref()
+            .map(|i| i.policy.clone())
+    }
+
+    /// Clock verdict measured when the current document was delivered. `None`
+    /// when no policy is installed.
+    pub fn current_skew(&self) -> Option<ClockSkew> {
+        self.inner
+            .read()
+            .expect("policy lock")
+            .as_ref()
+            .map(|i| i.skew)
     }
 }
 
@@ -176,9 +209,32 @@ pub async fn require_bearer(
         );
     };
     let now = Utc::now();
+    let skew = state.store.current_skew().unwrap_or_default();
+    if policy.is_not_yet_valid(now) {
+        // Only a wrong clock produces a policy issued in the future. Fail
+        // closed, but name the actual cause.
+        return deny(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "policy is not yet valid: this gateway's clock is behind the control plane's \
+             (check NTP) — refusing to verify tokens",
+        );
+    }
     if policy.is_stale(now) {
         // Fail closed: serving on an expired grant list would silently
-        // ignore every revocation since the last refresh.
+        // ignore every revocation since the last refresh. But if the clock
+        // disagreed with the signer when this policy was delivered, expiry is
+        // a symptom and NTP is the cause — say so, or the operator files an
+        // outage against Screenpipe for their own clock (SCR-292).
+        if skew.is_skewed() {
+            return deny(
+                StatusCode::SERVICE_UNAVAILABLE,
+                &format!(
+                    "cached policy looks expired, but this gateway's clock disagreed with the \
+                     signed issued_at when the policy arrived ({skew}) — fix NTP before \
+                     suspecting the control plane"
+                ),
+            );
+        }
         return deny(
             StatusCode::SERVICE_UNAVAILABLE,
             "cached policy is past its validity window; refusing to verify tokens",

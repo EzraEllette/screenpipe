@@ -51,7 +51,7 @@ use screenpipe_telemetry_wire::{
 };
 use tracing::{debug, info, warn};
 
-use crate::error::GatewayError;
+use crate::error::{ErrorCodeSink, GatewayError};
 
 /// Outcome of one poll cycle. Counters only — safe to log and to project
 /// into content-free telemetry.
@@ -71,11 +71,67 @@ pub struct IngestReport {
     pub cursor: Option<String>,
 }
 
+/// Ingest state published for the control-plane heartbeat (SCR-295).
+///
+/// Before this existed, `Ingestor::run` dropped the `IngestReport` that
+/// `run_once` returns, so a heartbeat had no source for the cursor or the
+/// counters and would have reported zeros. Semantics, per field:
+///
+/// - `cursor` — running MAX of every cycle's max object `LastModified`. This
+///   is the liveness half of the M3 activation gate, so it must only ever
+///   advance.
+/// - `objects_seen` — GAUGE: how many objects the archive prefix held on the
+///   most recent cycle. Every cycle re-lists the prefix, so summing it would
+///   just measure uptime.
+/// - every other counter — cumulative since process boot (work actually done).
+#[derive(Clone, Default)]
+pub struct IngestStatus {
+    inner: Arc<std::sync::Mutex<IngestReport>>,
+}
+
+impl IngestStatus {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Fold one cycle's report into the published state.
+    pub fn accumulate(&self, cycle: &IngestReport) {
+        let mut acc = self.inner.lock().expect("ingest status lock");
+        acc.objects_seen = cycle.objects_seen; // gauge, not a counter
+        acc.objects_ingested += cycle.objects_ingested;
+        acc.objects_already_ingested += cycle.objects_already_ingested;
+        acc.objects_skipped_encrypted += cycle.objects_skipped_encrypted;
+        acc.objects_skipped_foreign += cycle.objects_skipped_foreign;
+        acc.objects_failed += cycle.objects_failed;
+        acc.records_inserted += cycle.records_inserted;
+        acc.records_deduped += cycle.records_deduped;
+        acc.lines_unparseable += cycle.lines_unparseable;
+        if let Some(lm) = &cycle.cursor {
+            if acc
+                .cursor
+                .as_deref()
+                .map(|c| lm.as_str() > c)
+                .unwrap_or(true)
+            {
+                acc.cursor = Some(lm.clone());
+            }
+        }
+    }
+
+    pub fn snapshot(&self) -> IngestReport {
+        self.inner.lock().expect("ingest status lock").clone()
+    }
+}
+
 pub struct Ingestor {
     source: Arc<dyn BlobSource>,
     db: Arc<DatabaseManager>,
     license_id: String,
     snapshots_dir: PathBuf,
+    /// Published cursor + counters for the heartbeat.
+    status: IngestStatus,
+    /// Closed error codes observed while ingesting, drained by the heartbeat.
+    errors: ErrorCodeSink,
 }
 
 /// Create the gateway-owned tables. Outside screenpipe-db's migration set
@@ -128,7 +184,21 @@ impl Ingestor {
             db,
             license_id,
             snapshots_dir,
+            status: IngestStatus::new(),
+            errors: ErrorCodeSink::new(),
         })
+    }
+
+    /// Handle on the published cursor/counters — the heartbeat's only source
+    /// for them. Cheap clone of a shared slot.
+    pub fn status(&self) -> IngestStatus {
+        self.status.clone()
+    }
+
+    /// Handle on the error-code sink. The control-plane loop shares it so one
+    /// heartbeat reports both ingest and policy faults.
+    pub fn errors(&self) -> ErrorCodeSink {
+        self.errors.clone()
     }
 
     /// One poll cycle: list the org prefix, ingest every new batch object.
@@ -202,6 +272,11 @@ impl Ingestor {
                 }
                 Err(e) => {
                     report.objects_failed += 1;
+                    // Project onto the closed telemetry code so the failure is
+                    // visible in the dashboard, not only in the customer's own
+                    // logs. The code, never the message: `e` carries the object
+                    // key and the store's error text.
+                    self.errors.record_error(&e);
                     warn!(key = %entry.key, error = %e, "gateway ingest: object failed; will retry next cycle");
                 }
             }
@@ -226,8 +301,14 @@ impl Ingestor {
         mut shutdown: tokio::sync::watch::Receiver<bool>,
     ) {
         loop {
-            if let Err(e) = self.run_once().await {
-                warn!(error = %e, "gateway ingest: cycle failed");
+            match self.run_once().await {
+                // Publish, don't discard: this report is the ONLY source of
+                // the heartbeat's cursor and counters.
+                Ok(report) => self.status.accumulate(&report),
+                Err(e) => {
+                    self.errors.record_error(&e);
+                    warn!(error = %e, "gateway ingest: cycle failed");
+                }
             }
             tokio::select! {
                 _ = tokio::time::sleep(interval) => {}

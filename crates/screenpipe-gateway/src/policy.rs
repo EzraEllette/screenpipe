@@ -140,6 +140,67 @@ pub fn token_digest(raw_token: &str) -> String {
     d.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// Allowance for the gateway's clock disagreeing with the control plane's
+/// (SCR-292). Applied to BOTH ends of the window: `valid_until +
+/// tolerance` for staleness and `issued_at - tolerance` for not-yet-valid.
+///
+/// Why tolerate anything at all: the signed `issued_at`/`valid_until` pair is
+/// stamped by the control plane's clock and evaluated against the gateway's.
+/// A container a couple of minutes fast would otherwise expire a
+/// just-delivered policy and 503 every query with a message pointing at us.
+/// 300s against a 3600s window is a deliberate ~8% extension of the effective
+/// revocation window (3600s → 3900s worst case) bought for that robustness —
+/// still an order of magnitude under the window itself, and far under the
+/// unbounded exposure of a gateway that has stopped refreshing entirely.
+/// Skew LARGER than this is not tolerated: it is reported as
+/// [`crate::ErrorCode::EPolicyClockSkew`] so the operator fixes NTP instead of
+/// filing an outage against Screenpipe.
+pub const CLOCK_SKEW_TOLERANCE_SECONDS: i64 = 300;
+
+/// How the local clock compares with the signed `issued_at` of a *freshly
+/// delivered* policy. Only meaningful at delivery time — a cached document's
+/// `issued_at` legitimately ages as it sits installed, so
+/// [`PolicyDocument::clock_skew_at_fetch`] must not be re-applied to a
+/// document that was already installed (see [`crate::auth::PolicyStore`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ClockSkew {
+    /// Within [`CLOCK_SKEW_TOLERANCE_SECONDS`] of the signer's clock.
+    #[default]
+    Ok,
+    /// The local clock reads AHEAD of the signer's by this many seconds — the
+    /// direction that makes good policies look expired (phantom outage).
+    Ahead(i64),
+    /// The local clock reads BEHIND the signer's by this many seconds — the
+    /// security-relevant direction: a revoked token survives that much longer
+    /// than the stated revocation latency.
+    Behind(i64),
+}
+
+impl ClockSkew {
+    pub fn is_skewed(self) -> bool {
+        !matches!(self, ClockSkew::Ok)
+    }
+
+    /// Signed delta in seconds (positive = local clock ahead), 0 when Ok.
+    pub fn seconds(self) -> i64 {
+        match self {
+            ClockSkew::Ok => 0,
+            ClockSkew::Ahead(s) => s,
+            ClockSkew::Behind(s) => -s,
+        }
+    }
+}
+
+impl std::fmt::Display for ClockSkew {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ClockSkew::Ok => write!(f, "within tolerance"),
+            ClockSkew::Ahead(s) => write!(f, "local clock {s}s AHEAD of the control plane"),
+            ClockSkew::Behind(s) => write!(f, "local clock {s}s BEHIND the control plane"),
+        }
+    }
+}
+
 /// Outcome of checking a bearer token against a policy document.
 #[derive(Debug, PartialEq)]
 pub enum TokenCheck {
@@ -153,11 +214,40 @@ pub enum TokenCheck {
 }
 
 impl PolicyDocument {
-    /// True once `now` is past the validity window — the gateway must then
-    /// fail closed (a stale policy can no longer prove anything, including
-    /// revocations that happened since).
+    /// True once `now` is past the validity window (plus the clock-skew
+    /// tolerance) — the gateway must then fail closed (a stale policy can no
+    /// longer prove anything, including revocations that happened since).
     pub fn is_stale(&self, now: DateTime<Utc>) -> bool {
-        now > self.valid_until
+        now > self.valid_until + chrono::Duration::seconds(CLOCK_SKEW_TOLERANCE_SECONDS)
+    }
+
+    /// True when the signed document claims to have been issued in the future
+    /// beyond tolerance. Only a wrong local clock (or a wrong control-plane
+    /// clock) produces this, and the document cannot be trusted to be the
+    /// current one, so the gateway fails closed here too — but with a
+    /// clock-specific diagnosis instead of "expired".
+    pub fn is_not_yet_valid(&self, now: DateTime<Utc>) -> bool {
+        now + chrono::Duration::seconds(CLOCK_SKEW_TOLERANCE_SECONDS) < self.issued_at
+    }
+
+    /// Classify local-vs-signer clock disagreement for a policy that has JUST
+    /// been delivered: `now - issued_at` is then network latency plus skew.
+    ///
+    /// Do NOT call this on a document that has been installed for a while —
+    /// `issued_at` recedes legitimately (up to the whole validity window) and
+    /// this would report a false `Ahead`. The signed `issued_at` is a trusted
+    /// clock reference we already have in hand; this is the only place it is
+    /// used, and it is what turns a phantom "Screenpipe is down" 503 into
+    /// "your container's clock is wrong".
+    pub fn clock_skew_at_fetch(&self, now: DateTime<Utc>) -> ClockSkew {
+        let delta = (now - self.issued_at).num_seconds();
+        if delta > CLOCK_SKEW_TOLERANCE_SECONDS {
+            ClockSkew::Ahead(delta)
+        } else if delta < -CLOCK_SKEW_TOLERANCE_SECONDS {
+            ClockSkew::Behind(-delta)
+        } else {
+            ClockSkew::Ok
+        }
     }
 
     pub fn check_token(&self, raw_token: &str, now: DateTime<Utc>) -> TokenCheck {
@@ -291,6 +381,68 @@ mod tests {
             "297d0c0cfa929299c189c95d559a77dce6ac870d7cda5b4dd5fa004529efdd4a"
         );
         assert_eq!(token_digest("sk_ent_test").len(), 64);
+    }
+
+    /// SCR-292: `issued_at` was parsed and never compared to anything, so a
+    /// gateway clock >1h fast made every policy look expired — a permanent 503
+    /// blaming the control plane for a customer NTP problem. These are the
+    /// assertions that were missing.
+    #[test]
+    fn clock_skew_is_detected_and_tolerated_within_bounds() {
+        let now = Utc::now();
+        let policy = fixture_policy(now); // issued now, valid 30 min
+
+        // Small disagreement in both directions: tolerated, not flagged.
+        assert_eq!(policy.clock_skew_at_fetch(now), ClockSkew::Ok);
+        assert_eq!(
+            policy.clock_skew_at_fetch(now + Duration::seconds(299)),
+            ClockSkew::Ok
+        );
+        assert_eq!(
+            policy.clock_skew_at_fetch(now - Duration::seconds(299)),
+            ClockSkew::Ok
+        );
+
+        // Past tolerance: flagged, with the direction and the delta.
+        assert_eq!(
+            policy.clock_skew_at_fetch(now + Duration::hours(2)),
+            ClockSkew::Ahead(7200)
+        );
+        assert_eq!(
+            policy.clock_skew_at_fetch(now - Duration::hours(2)),
+            ClockSkew::Behind(7200)
+        );
+        assert!(policy
+            .clock_skew_at_fetch(now + Duration::hours(2))
+            .is_skewed());
+        assert_eq!(
+            policy
+                .clock_skew_at_fetch(now + Duration::hours(2))
+                .seconds(),
+            7200
+        );
+
+        // The window itself gets the same tolerance on both ends.
+        assert!(
+            !policy.is_stale(now + Duration::minutes(30) + Duration::seconds(299)),
+            "a clock a few minutes fast must not expire a live policy"
+        );
+        assert!(policy.is_stale(now + Duration::minutes(30) + Duration::seconds(301)));
+        assert!(
+            !policy.is_not_yet_valid(now - Duration::seconds(299)),
+            "small backwards skew is tolerated, not treated as a future policy"
+        );
+        assert!(
+            policy.is_not_yet_valid(now - Duration::seconds(301)),
+            "a document from the future can only mean a wrong clock"
+        );
+
+        // The clock-fast-by-2h case that produced the misdirecting 503: the
+        // document is BOTH stale and provably skewed, and the skew signal is
+        // what the operator needs.
+        let clock_fast = now + Duration::hours(2);
+        assert!(policy.is_stale(clock_fast));
+        assert!(policy.clock_skew_at_fetch(clock_fast).is_skewed());
     }
 
     #[test]

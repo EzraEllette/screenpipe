@@ -1316,9 +1316,30 @@ mod tests {
         // /health carries no content — no auth required.
         assert_eq!(call(None, "/health").await, StatusCode::OK);
 
-        // Stale policy → fail closed for everyone (503), even valid tokens.
+        // Just-expired policy → STILL SERVED. SCR-292 buys clock-skew
+        // robustness with a bounded extension of the window
+        // (policy::CLOCK_SKEW_TOLERANCE_SECONDS): a container a couple of
+        // minutes fast must not 503 every query and blame the control plane.
+        let mut barely_expired = policy.clone();
+        barely_expired.issued_at = now - Duration::minutes(31);
+        barely_expired.valid_until = now - Duration::minutes(1);
+        store.replace(barely_expired);
+        assert_eq!(
+            call(
+                Some("Bearer sk_ent_search_only_1234"),
+                "/api/enterprise/v1/search?q=x"
+            )
+            .await,
+            StatusCode::OK,
+            "within the skew tolerance the policy must still verify"
+        );
+
+        // Past the tolerance → fail closed for everyone (503), even valid
+        // tokens. This is the revocation guarantee: an expired grant list can
+        // no longer prove what has been revoked since.
         let mut stale = policy.clone();
-        stale.valid_until = now - Duration::minutes(1);
+        stale.issued_at = now - Duration::hours(2);
+        stale.valid_until = now - Duration::minutes(10);
         store.replace(stale);
         assert_eq!(
             call(
@@ -1327,6 +1348,39 @@ mod tests {
             )
             .await,
             StatusCode::SERVICE_UNAVAILABLE
+        );
+
+        // A policy from the FUTURE can only mean a wrong local clock. Fail
+        // closed too, but the operator must get a clock-specific diagnosis
+        // rather than "expired" (SCR-292: `issued_at` used to be parsed and
+        // never compared to anything).
+        let mut future = policy.clone();
+        future.issued_at = now + Duration::hours(2);
+        future.valid_until = now + Duration::hours(3);
+        store.replace(future);
+        let res = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/enterprise/v1/search?q=x")
+                    .header("authorization", "Bearer sk_ent_search_only_1234")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = String::from_utf8(
+            http_body_util::BodyExt::collect(res.into_body())
+                .await
+                .unwrap()
+                .to_bytes()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(
+            body.contains("clock"),
+            "the 503 must name the clock, not misdirect at policy expiry: {body}"
         );
     }
 
