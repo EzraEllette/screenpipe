@@ -30,6 +30,7 @@ import {
   buildChatTestBody,
   shouldRetryWithMaxCompletionTokens,
 } from "@/lib/utils/chat-test-body";
+import { screenpipeWebUrl } from "@/lib/web-url";
 import { Label } from "../ui/label";
 import { Input } from "../ui/input";
 import { ValidatedInput } from "../ui/validated-input";
@@ -1531,7 +1532,7 @@ const AISection = ({
                                   await commands.openLoginWindow(null);
                                 } else {
                                   try {
-                                    const res = await fetch("https://screenpipe.com/api/cloud-sync/checkout", {
+                                    const res = await fetch(screenpipeWebUrl("/api/cloud-sync/checkout", "https://screenpipe.com"), {
                                       method: "POST",
                                       headers: { "Content-Type": "application/json", "Authorization": `Bearer ${settings.user.token}` },
                                       body: JSON.stringify({ tier: "pro", billingPeriod: "monthly", userId: settings.user.id, email: settings.user.email }),
