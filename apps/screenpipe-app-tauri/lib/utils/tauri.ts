@@ -1641,6 +1641,20 @@ async readLogTail(path: string, maxBytes: number) : Promise<Result<string, strin
 }
 },
 /**
+ * Read text from the system clipboard (native API — navigator.clipboard.readText()
+ * is not permitted in the Tauri webview). Returns empty string when the
+ * clipboard has no text. Used by the IMAP card to auto-detect a copied
+ * Gmail app password.
+ */
+async readClipboardText() : Promise<Result<string, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("read_clipboard_text") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Read a file for the viewer. Returns text for text-like files, a
  * base64 data URL for images. Files larger than `MAX_VIEWER_FILE_BYTES`
  * are truncated for text or refused for images, since both would blow
