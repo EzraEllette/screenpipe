@@ -238,6 +238,107 @@ mod tests {
         );
     }
 
+    /// Every variant must have a PRODUCER, not just a place in the allowlist.
+    ///
+    /// `every_variant_is_in_the_websites_allowlist` pins the enum against the
+    /// website and nothing pinned a variant to something that can emit it, so
+    /// `E_BATCH_PARSE` shipped in both repos' allowlists with zero production
+    /// constructors: `GatewayError` has no `BatchParse` variant, and
+    /// `parse_jsonl`'s `skipped_lines` only ever became the `lines_unparseable`
+    /// counter. The two-repo contract therefore claimed a signal the gateway
+    /// could not send. This is the check that catches that.
+    ///
+    /// A variant is "produced" if it is either projected from a `GatewayError`
+    /// by `code()`, or recorded directly by name in production source (the
+    /// policy codes and `E_BATCH_PARSE`, none of which travel as a
+    /// `GatewayError`).
+    #[test]
+    fn every_variant_has_a_production_producer() {
+        // Production source only — each file's test module is cut off, so a code
+        // that appears ONLY in a test fixture does not count.
+        // (control_plane.rs's `heartbeat_shape_is_closed` has exactly such an
+        // `EBatchParse` fixture, which is part of why the gap survived.)
+        //
+        // Split on the module declaration, not on `#[cfg(test)]`: control_plane.rs
+        // has `#[cfg(test)]` methods (`refresh_interval`, `set_intervals_for_test`)
+        // in the middle of the production impl, and splitting there silently
+        // truncated the real body. The marker is assembled from fragments so it
+        // does not appear literally in this file before the module it names.
+        const MARKER: &str = concat!("mod ", "tests {");
+        let split = |src: &'static str| src.split(MARKER).next().expect("a prefix");
+        let ingest = split(include_str!("ingest.rs"));
+        let control_plane = split(include_str!("control_plane.rs"));
+        // Non-vacuity: the prefixes must still hold the production functions and
+        // must NOT hold the test functions.
+        assert!(
+            ingest.contains("pub async fn run_once")
+                && control_plane.contains("async fn refresh_policy")
+                && control_plane.contains("async fn send_heartbeat"),
+            "the split cut into the production body — this check would then pass for \
+             the wrong reason on any code recorded after the cut"
+        );
+        assert!(
+            !ingest.contains("fn a_failed_object_reaches")
+                && !control_plane.contains("fn a_recovered_control_plane_clears"),
+            "the split must exclude the test modules, or a test fixture counts as a producer"
+        );
+
+        // Every GatewayError variant, exhaustively (no wildcard arm below), so
+        // the projections `code()` can produce are enumerated by the compiler.
+        let projected: Vec<ErrorCode> = [
+            GatewayError::StorageList(String::new()),
+            GatewayError::StorageGet {
+                key: String::new(),
+                detail: String::new(),
+            },
+            GatewayError::StorageAccessDenied(String::new()),
+            GatewayError::DbWrite(String::new()),
+            GatewayError::DbRead(String::new()),
+            GatewayError::SnapshotStore(String::new()),
+            GatewayError::Config(String::new()),
+        ]
+        .iter()
+        .filter_map(|e| {
+            #[allow(clippy::let_unit_value)]
+            let _exhaustive: () = match e {
+                GatewayError::StorageList(_)
+                | GatewayError::StorageGet { .. }
+                | GatewayError::StorageAccessDenied(_)
+                | GatewayError::DbWrite(_)
+                | GatewayError::DbRead(_)
+                | GatewayError::SnapshotStore(_)
+                | GatewayError::Config(_) => (),
+            };
+            e.code()
+        })
+        .collect();
+
+        for (code, name) in [
+            (ErrorCode::ES3AccessDenied, "ES3AccessDenied"),
+            (ErrorCode::ES3List, "ES3List"),
+            (ErrorCode::ES3Get, "ES3Get"),
+            (ErrorCode::EBatchParse, "EBatchParse"),
+            (ErrorCode::EDbWrite, "EDbWrite"),
+            (ErrorCode::EDbRead, "EDbRead"),
+            (ErrorCode::ESnapshotStore, "ESnapshotStore"),
+            (ErrorCode::EPolicyFetch, "EPolicyFetch"),
+            (ErrorCode::EPolicyRejected, "EPolicyRejected"),
+            (ErrorCode::EPolicyStale, "EPolicyStale"),
+            (ErrorCode::EPolicyClockSkew, "EPolicyClockSkew"),
+        ] {
+            let recorded = format!("record(ErrorCode::{name})");
+            assert!(
+                projected.contains(&code)
+                    || ingest.contains(&recorded)
+                    || control_plane.contains(&recorded),
+                "ErrorCode::{name} has NO production producer: nothing in GatewayError::code() \
+                 projects onto it and no production `errors.record(ErrorCode::{name})` exists. \
+                 It is in both repos' allowlists, so the contract promises a signal the gateway \
+                 cannot emit."
+            );
+        }
+    }
+
     #[test]
     fn sink_dedupes_drains_and_restores() {
         let sink = ErrorCodeSink::new();
