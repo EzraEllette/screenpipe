@@ -929,6 +929,139 @@ mod tests {
         assert_eq!(report.objects_ingested, 0);
     }
 
+    /// A per-object ingest failure must reach the closed telemetry code
+    /// (ingest.rs's `self.errors.record_error(&e)` in `run_once`).
+    ///
+    /// Before SCR-295 `GatewayError::code()` had ZERO callers, so the
+    /// heartbeat's `error_codes` was structurally always empty. It has callers
+    /// now, and this is what notices if they disappear again: stubbing the
+    /// recording out used to leave the whole suite green.
+    #[tokio::test]
+    async fn a_failed_object_reaches_the_heartbeats_error_codes() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = test_db(&dir).await;
+        let src = Arc::new(S3BlobSource::from_store(Arc::new(InMemory::new()), None));
+        // A frame (so the snapshot finds its row) plus a snapshot whose payload
+        // is not base64 → GatewayError::SnapshotStore for this object only.
+        let body = build_jsonl(
+            "dev-a",
+            "alice-mbp",
+            &[FrameRow {
+                frame_id: 7,
+                timestamp: "2026-07-22T10:00:00Z".to_string(),
+                app_name: Some("Arc".to_string()),
+                window_name: None,
+                browser_url: None,
+                text: Some("snapshot host".to_string()),
+            }],
+            &[],
+            &[],
+            &[SnapshotRow {
+                frame_id: 7,
+                timestamp: "2026-07-22T10:00:00Z".to_string(),
+                mime: "image/jpeg".to_string(),
+                image_b64: "!!! not base64 !!!".to_string(),
+                width: 320,
+                height: 180,
+            }],
+            &[],
+        );
+        src.put_for_tests(&direct_batch_key("lic-1", "dev-a", "b-bad"), body)
+            .await
+            .unwrap();
+        let ingestor = Ingestor::new(
+            src as Arc<dyn BlobSource>,
+            db,
+            "lic-1".to_string(),
+            dir.path().join("snapshots"),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            ingestor.errors().drain().is_empty(),
+            "nothing observed yet — proves the assertion below is about THIS cycle"
+        );
+        let report = ingestor.run_once().await.unwrap();
+        assert_eq!(report.objects_failed, 1, "report: {report:?}");
+        assert_eq!(report.objects_ingested, 0);
+        assert_eq!(
+            ingestor.errors().drain(),
+            vec![crate::error::ErrorCode::ESnapshotStore],
+            "the failure must be projected onto the closed code the heartbeat \
+             carries — the message never travels, only the code"
+        );
+    }
+
+    /// A whole-cycle failure (the `list` call itself) must also reach the sink —
+    /// the second `record_error` call site, inside `Ingestor::run`. This is the
+    /// path a customer hits with a wrong bucket policy, and E_S3_LIST in the
+    /// dashboard is the only thing that tells them so.
+    #[tokio::test]
+    async fn a_failed_list_cycle_reaches_the_error_sink_through_run() {
+        struct ListRefused;
+
+        #[async_trait::async_trait]
+        impl BlobSource for ListRefused {
+            async fn list(
+                &self,
+                _req: &ListRequest<'_>,
+            ) -> Result<screenpipe_sync::ListResponse, screenpipe_sync::SyncError> {
+                Err(screenpipe_sync::SyncError::Network(
+                    "s3: ListObjectsV2 refused".to_string(),
+                ))
+            }
+            async fn get(
+                &self,
+                _key: &str,
+            ) -> Result<screenpipe_sync::GetResponse, screenpipe_sync::SyncError> {
+                unreachable!("the cycle fails before any get")
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = test_db(&dir).await;
+        let ingestor = Arc::new(
+            Ingestor::new(
+                Arc::new(ListRefused) as Arc<dyn BlobSource>,
+                db,
+                "lic-1".to_string(),
+                dir.path().join("snapshots"),
+            )
+            .await
+            .unwrap(),
+        );
+        let errors = ingestor.errors();
+
+        // Drive the real loop, exactly as main.rs spawns it (one cycle is
+        // enough: the interval is long, so it fails once and then waits).
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let handle = {
+            let ingestor = ingestor.clone();
+            tokio::spawn(async move {
+                ingestor
+                    .run(std::time::Duration::from_secs(3600), shutdown_rx)
+                    .await
+            })
+        };
+        let mut observed = Vec::new();
+        for _ in 0..100 {
+            observed = errors.drain();
+            if !observed.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let _ = shutdown_tx.send(true);
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
+
+        assert_eq!(
+            observed,
+            vec![crate::error::ErrorCode::ES3List],
+            "Ingestor::run must project a failed cycle onto its code, not just warn!"
+        );
+    }
+
     #[tokio::test]
     async fn snapshot_lands_on_frame_row_and_disk() {
         let dir = tempfile::tempdir().unwrap();
