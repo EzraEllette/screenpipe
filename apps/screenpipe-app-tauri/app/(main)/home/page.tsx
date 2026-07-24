@@ -1066,9 +1066,6 @@ function HomeContent() {
               devices={recordingDevices}
               onDevicesChange={setRecordingDevices}
               meetingActive={meetingState.active ?? false}
-              meetingApp={meetingState.meetingApp}
-              meetingLoading={meetingLoading}
-              onToggleMeeting={() => void toggleMeeting()}
               onPauseRecording={pauseRecording}
               onResumeRecording={resumeRecording}
               isGloballyPaused={isCapturePaused}
