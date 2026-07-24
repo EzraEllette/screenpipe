@@ -52,6 +52,8 @@ app.py
 *.pyd
 *.py
 !scripts/memory-leak/leak_hunt.py
+!apps/screenpipe-app-tauri/scripts/benchmark_tauri_build.py
+!apps/screenpipe-app-tauri/scripts/benchmark_tauri_build_test.py
 *.pyw
 *.pyz
 *.py3
