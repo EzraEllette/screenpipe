@@ -19,6 +19,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "info,sqlx=warn".into()),
         )
+        // ANSI only for a human at a terminal. tracing-subscriber colourizes by
+        // default whatever the destination is, and this binary's stdout is
+        // almost always a file or a container log driver — where the escape
+        // codes are not cosmetic. The per-query access log
+        // (`access_log::record_query`) is the customer's ONLY audit record of
+        // who read their archive; the deployment guide tells them to ship it to
+        // their log sink and grep it by token digest prefix. Colour codes land
+        // between the field name and its `=`, so `grep 'token_digest_prefix=…'`
+        // silently matches nothing — which is how this was found: the SCR-301
+        // acceptance run's log assertion failed while the counters were
+        // correct.
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()))
         .init();
 
     let cfg = GatewayConfig::from_env()?;

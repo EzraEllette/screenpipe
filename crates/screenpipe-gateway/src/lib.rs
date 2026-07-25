@@ -19,8 +19,10 @@
 //!    the same clients that talk to the hosted API today (agent skills,
 //!    `packages/screenpipe-mcp` `team-*` tools, curl).
 //!
-//! Design notes live in the website repo's
-//! `docs/query-gateway-architecture.md`. Load-bearing choices:
+//! Deploying it: `crates/screenpipe-gateway/README.md` (env, sizing, wiping
+//! the plaintext index, TLS, troubleshooting). Design notes and the trust model
+//! live in the website repo's `docs/query-gateway-architecture.md`.
+//! Load-bearing choices:
 //!
 //! - Device identity maps onto `screenpipe-db`'s existing cross-machine
 //!   columns: wire `device_id` → `machine_id`, `device_label` →
