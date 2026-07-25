@@ -57,10 +57,14 @@ in the README):
 1. **The source commit must be on `main`.** `src/team-config.ts` arrived with
    PR #5400 (`feat(enterprise): write-only archive + customer-run query
    gateway`). Publishing from a feature branch ships a tree nobody reviewed as
-   `latest`. Confirm:
+   `latest`. Confirm — this asks whether the *file* is on `main`, not whether a
+   particular sha is an ancestor, so it stays correct when the PR is squash- or
+   rebase-merged and commit `930020705` ceases to exist:
    ```bash
    git fetch origin
-   git merge-base --is-ancestor <team-config-commit> origin/main && echo "on main" || echo "NOT on main — do not release"
+   git cat-file -e origin/main:packages/screenpipe-mcp/src/team-config.ts 2>/dev/null \
+     && echo "team-config.ts is on main — safe to release" \
+     || echo "NOT on main — do not release"
    ```
 2. **The version must not already be on npm.** `release-mcp.yml` now *fails* in
    that case instead of skipping quietly, but check first so you don't burn a
