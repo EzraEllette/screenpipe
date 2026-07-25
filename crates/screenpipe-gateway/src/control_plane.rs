@@ -2356,6 +2356,280 @@ mod tests {
         );
     }
 
+    /// SCR-301 acceptance criterion (c), end to end and in one test: **a token
+    /// revoked in the dashboard loses access within one policy refresh.**
+    ///
+    /// Nothing proved this before. `gateway-policy.unit.test.ts` proves the
+    /// website stops PROJECTING a revoked token into the grant list;
+    /// `api::tests::bearer_auth_enforces_grants_scopes_and_policy_freshness`
+    /// proves an unknown digest 401s — but it installs its policy into the store
+    /// by hand, so the machinery that carries a revocation from the control
+    /// plane to the request path (this refresh loop) is between the two tests
+    /// and covered by neither. That gap is exactly where "the dashboard says
+    /// revoked, the gateway keeps serving" lives.
+    ///
+    /// So this drives the REAL loop: `boot()` → `run()` on the refresh timer,
+    /// against a control plane whose policy changes underneath, with the REAL
+    /// v1 router reading the same `PolicyStore`. And it asserts the revocation
+    /// with a POSITIVE CONTROL — the gateway's own access-log counters
+    /// (SCR-301) must show the search was genuinely served before, and
+    /// genuinely refused after. Without that, "the query returns 401" is
+    /// satisfied by a gateway that never worked at all.
+    #[tokio::test]
+    async fn revoking_a_token_grant_stops_being_served_within_one_policy_refresh() {
+        use crate::policy::{token_digest, TokenGrant};
+        use object_store::memory::InMemory;
+        use screenpipe_config::DbConfig;
+        use screenpipe_db::DatabaseManager;
+        use std::sync::Arc;
+
+        const TOKEN: &str = "sk_ent_acceptance_run_1234567890";
+        // One signing seed, two documents: the same org, the same signer, the
+        // only difference is whether TOKEN's digest is in the grant list. That
+        // is precisely what `DELETE /api/enterprise/tokens/[id]` changes about
+        // the next policy the control plane signs.
+        let granted = |now: chrono::DateTime<Utc>| PolicyDocument {
+            license_id: "lic-1".to_string(),
+            issued_at: now,
+            valid_until: now + ChronoDuration::hours(1),
+            token_grants: vec![TokenGrant {
+                digest: token_digest(TOKEN),
+                scopes: vec!["read:search".to_string()],
+                expires_at: None,
+            }],
+        };
+        let (with_grant, pubkey) =
+            sign_policy_for_fixture(&granted(Utc::now()), &[31u8; 32], "rev");
+        // Freshly issued, so a 401 here can only mean "revoked" — never
+        // "expired". The two failure modes have different messages and this test
+        // asserts which one it got.
+        let (without_grant, _) = sign_policy_for_fixture(
+            &PolicyDocument {
+                token_grants: vec![],
+                ..granted(Utc::now())
+            },
+            &[31u8; 32],
+            "rev",
+        );
+
+        let server = wiremock::MockServer::start().await;
+        mount_register_ok(&server).await;
+        mount_heartbeat_ok(&server).await;
+        // The control plane's answer flips when the test revokes, mid-run.
+        let served_envelope = Arc::new(std::sync::Mutex::new(with_grant));
+        {
+            let served_envelope = served_envelope.clone();
+            wiremock::Mock::given(wiremock::matchers::method("GET"))
+                .and(wiremock::matchers::path("/api/enterprise/gateway/policy"))
+                .respond_with(move |_: &wiremock::Request| {
+                    let body = served_envelope.lock().expect("envelope lock").clone();
+                    wiremock::ResponseTemplate::new(200).set_body_raw(body, "application/json")
+                })
+                .mount(&server)
+                .await;
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = test_config(dir.path());
+        cfg.control_plane_base = Some(server.uri());
+        cfg.enrollment_token = Some("sge_first_boot".to_string());
+        cfg.policy_pubkey_b64 = Some(BASE64.encode(pubkey.to_bytes()));
+
+        let store = PolicyStore::new("lic-1");
+        let mut task = ControlPlaneTask::boot(
+            &cfg,
+            Some((pubkey, store.clone())),
+            ErrorCodeSink::new(),
+            IngestStatus::new(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        // The shipped cadence, asserted before it is compressed: this is the
+        // number the guarantee is stated in (SCR-292's 300s), and the whole
+        // claim is "within ONE of these".
+        assert_eq!(
+            task.refresh_interval(),
+            Duration::from_secs(300),
+            "the revocation window IS the refresh cadence, so it must come from \
+             the control plane"
+        );
+        let refresh = Duration::from_millis(50);
+        task.set_intervals_for_test(refresh, Duration::from_secs(3600));
+
+        // The real v1 surface over the same store the loop refreshes.
+        let db = Arc::new(
+            DatabaseManager::new(
+                dir.path().join("gateway.db").to_str().unwrap(),
+                DbConfig::default(),
+            )
+            .await
+            .unwrap(),
+        );
+        crate::ingest::ensure_gateway_schema(&db).await.unwrap();
+        let router = crate::api::router(
+            db.clone(),
+            Arc::new(crate::S3BlobSource::from_store(
+                Arc::new(InMemory::new()),
+                None,
+            )),
+            "lic-1".to_string(),
+            Some(store.clone()),
+        );
+        let search = || {
+            let router = router.clone();
+            async move {
+                use tower::util::ServiceExt;
+                let resp = router
+                    .oneshot(
+                        axum::http::Request::builder()
+                            .uri("/api/enterprise/v1/search?q=roadmap")
+                            .header("authorization", format!("Bearer {TOKEN}"))
+                            .body(axum::body::Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                let status = resp.status();
+                let body = http_body_util::BodyExt::collect(resp.into_body())
+                    .await
+                    .unwrap()
+                    .to_bytes();
+                (status, String::from_utf8_lossy(&body).to_string())
+            }
+        };
+        let access_log = || {
+            let router = router.clone();
+            async move {
+                use tower::util::ServiceExt;
+                let resp = router
+                    .oneshot(
+                        axum::http::Request::builder()
+                            .uri("/access-log")
+                            .body(axum::body::Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                let body = http_body_util::BodyExt::collect(resp.into_body())
+                    .await
+                    .unwrap()
+                    .to_bytes();
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap()
+            }
+        };
+
+        // BEFORE: the token works, and the gateway's own counter says so. This
+        // is the positive control the whole assertion rests on.
+        let (status, body) = search().await;
+        assert_eq!(
+            status,
+            axum::http::StatusCode::OK,
+            "the granted token must be served before revocation: {body}"
+        );
+        let before = access_log().await;
+        assert_eq!(
+            before["queries_served"], 1,
+            "the gateway must record the query it just served: {before}"
+        );
+        assert_eq!(before["queries_denied"], 0, "{before}");
+
+        // REVOKE — the control plane now signs a policy without the grant.
+        *served_envelope.lock().expect("envelope lock") = without_grant;
+        let revoked_at = std::time::Instant::now();
+        let cp_handle = tokio::spawn(task.run(tokio::sync::watch::channel(false).1));
+
+        // AFTER: poll the surface until it refuses. Deadline is generous in
+        // absolute terms and tight in refresh intervals — the claim is "within
+        // one refresh", and 60 compressed intervals failing means the
+        // revocation never propagated at all, not that the machine was slow.
+        let deadline = revoked_at + refresh * 60;
+        let (status, body) = loop {
+            let (status, body) = search().await;
+            if status != axum::http::StatusCode::OK {
+                break (status, body);
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!(
+                    "the gateway still served a REVOKED token after {} policy refresh intervals \
+                     — the refresh loop is not carrying revocations to the request path \
+                     (pulls={})",
+                    60,
+                    policy_pull_count(&server).await
+                );
+            }
+            tokio::time::sleep(refresh).await;
+        };
+        let elapsed = revoked_at.elapsed();
+
+        assert_eq!(
+            status,
+            axum::http::StatusCode::UNAUTHORIZED,
+            "a revoked token must be 401 invalid-token: {body}"
+        );
+        assert!(
+            body.contains("invalid token"),
+            "the 401 must be about the TOKEN, not a stale/expired policy — a 503 \
+             or an expiry message would mean this test passed for the wrong \
+             reason (the revoked policy is freshly issued): {body}"
+        );
+        assert!(
+            elapsed < refresh * 60,
+            "revocation took {elapsed:?}, more than the window this asserts"
+        );
+
+        // The counters are the other half of the evidence, and they are asserted
+        // as a DELTA from the moment of the first refusal rather than against an
+        // absolute. Queries served between the revocation and the next refresh
+        // are legitimate — that latency window is precisely what "within one
+        // refresh" concedes — so an absolute `served == 1` would be asserting
+        // that the window does not exist.
+        let at_refusal = access_log().await;
+        assert!(
+            at_refusal["queries_denied"].as_u64().unwrap() >= 1,
+            "the refusal must be recorded, or an acceptance run cannot tell \
+             'refused' from 'never asked': {at_refusal}"
+        );
+        let served_at_refusal = at_refusal["queries_served"].as_u64().unwrap();
+        let denied_at_refusal = at_refusal["queries_denied"].as_u64().unwrap();
+        assert!(
+            served_at_refusal >= 1,
+            "the pre-revocation query must still be on the record: {at_refusal}"
+        );
+
+        // Sticky, not a flap: once refused, it stays refused. A gateway that
+        // 401'd on one refresh and served again on the next would satisfy a
+        // single-shot assertion and leak the archive to a revoked token.
+        for _ in 0..3 {
+            let (status, body) = search().await;
+            assert_eq!(
+                status,
+                axum::http::StatusCode::UNAUTHORIZED,
+                "a revoked token must stay revoked across refreshes: {body}"
+            );
+        }
+        let after = access_log().await;
+        assert_eq!(
+            after["queries_served"].as_u64().unwrap(),
+            served_at_refusal,
+            "not one query may be served after the revocation took effect: {after}"
+        );
+        assert_eq!(
+            after["queries_denied"].as_u64().unwrap(),
+            denied_at_refusal + 3,
+            "every refusal must be recorded: {after}"
+        );
+        assert_eq!(
+            after["by_scope"]["read:search"]["served"].as_u64().unwrap(),
+            served_at_refusal,
+            "{after}"
+        );
+
+        cp_handle.abort();
+        db.close().await;
+    }
+
     /// SCR-292: the cadence comes from the control plane, never from
     /// SCREENPIPE_GATEWAY_POLL_SECONDS (which is S3 ingest tuning).
     #[test]

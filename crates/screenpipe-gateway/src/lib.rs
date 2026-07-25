@@ -36,6 +36,7 @@
 //!   table `gateway_ingested_objects` in the same SQLite file, committed
 //!   atomically with the batch's records) rather than a key cursor.
 
+pub mod access_log;
 pub mod api;
 pub mod auth;
 pub mod config;
@@ -45,6 +46,7 @@ pub mod ingest;
 pub mod policy;
 pub mod source;
 
+pub use access_log::QueryLog;
 pub use auth::PolicyStore;
 pub use config::GatewayConfig;
 pub use error::{ErrorCode, GatewayError};

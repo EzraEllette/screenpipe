@@ -142,6 +142,25 @@ echo "── rollups (seeded org digest)…"
 curl -sf "$GATEWAY/api/enterprise/v1/rollups?from=2026-07-01&to=2026-07-31" \
   | python3 -c 'import json,sys; b=json.load(sys.stdin); assert b["count"]==1, b; assert b["rollups"][0]["day"]=="2026-07-22", b; print("   rollups:", b["count"], "day", b["rollups"][0]["day"])'
 
+echo "── the gateway's own access log (SCR-301)…"
+# The positive control, in the container: every query above must be on the
+# gateway's own record, and none of it may be reported to Screenpipe. Asserted
+# as ">= 1 per scope" rather than exact totals on purpose — the device-poll and
+# search-retry loops above run an unpredictable number of times, and an exact
+# count would fail on a slow machine for a reason that has nothing to do with
+# the property under test.
+curl -sf "$GATEWAY/access-log" | python3 -c '
+import json, sys
+b = json.load(sys.stdin)
+assert b["reported_to_screenpipe"] is False, b
+assert b["queries_served"] >= 5, b
+assert b["last_query_served_at"], b
+for scope in ("read:devices", "read:search", "read:records", "read:files"):
+    assert b["by_scope"][scope]["served"] >= 1, (scope, b)
+print("   access log:", b["queries_served"], "queries served,",
+      b["queries_denied"], "denied — recorded HERE, not at Screenpipe")
+'
+
 echo "── MCP client (packages/screenpipe-mcp team-* tools) against the gateway…"
 MCP_DIR=../../../packages/screenpipe-mcp
 if command -v bun >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
