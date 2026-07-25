@@ -316,6 +316,8 @@ pub struct ResourceTelemetryReporter {
     resource_log_file: Option<String>, // analyse output here: https://colab.research.google.com/drive/1zELlGdzGdjChWKikSqZTHekm5XRxY-1r?usp=sharing
     posthog_client: Option<Client>,
     posthog_enabled: bool,
+    posthog_capture_url: String,
+    posthog_request_timeout: Duration,
     distinct_id: String,
     /// Cached host info (collected once at startup, never changes)
     hw_info: HardwareInfo,
@@ -324,6 +326,8 @@ pub struct ResourceTelemetryReporter {
     /// One leak alert per process lifetime — a leaking process keeps leaking;
     /// re-alerting every tick would just flood Sentry with the same issue.
     leak_alerted: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    local_tick_observer: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 /// Compatibility name for downstream users. New code should use
@@ -613,10 +617,35 @@ impl ResourceTelemetryReporter {
             resource_log_file,
             posthog_client,
             posthog_enabled: telemetry_enabled,
+            posthog_capture_url: POSTHOG_CAPTURE_URL.to_string(),
+            posthog_request_timeout: POSTHOG_REQUEST_TIMEOUT,
             distinct_id,
             hw_info,
             leak_window: std::sync::Mutex::new(std::collections::VecDeque::new()),
             leak_alerted: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            local_tick_observer: None,
+        })
+    }
+
+    #[cfg(test)]
+    fn new_for_test(
+        url: String,
+        timeout: Duration,
+        observer: Option<Arc<dyn Fn() + Send + Sync>>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            start_time: Instant::now() - Duration::from_secs(LEAK_WARMUP_SECS as u64),
+            resource_log_file: None,
+            posthog_client: Some(Client::new()),
+            posthog_enabled: true,
+            posthog_capture_url: url,
+            posthog_request_timeout: timeout,
+            distinct_id: "resource-monitor-test".into(),
+            hw_info: HardwareInfo::collect(),
+            leak_window: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            leak_alerted: std::sync::atomic::AtomicBool::new(false),
+            local_tick_observer: observer,
         })
     }
 
@@ -681,16 +710,12 @@ impl ResourceTelemetryReporter {
         Some(stats)
     }
 
-    async fn send_to_posthog(
+    fn posthog_payload(
         &self,
         snapshot: &ResourceSnapshot,
         runtime: Duration,
         mem_trend: Option<&LeakStats>,
-    ) -> Result<(), PostHogDeliveryFailure> {
-        let Some(client) = &self.posthog_client else {
-            return Ok(());
-        };
-
+    ) -> serde_json::Value {
         // Avoid unnecessary cloning by using references
         let mut properties = Map::new();
         properties.insert("distinct_id".to_string(), json!(&self.distinct_id));
@@ -782,21 +807,11 @@ impl ResourceTelemetryReporter {
         }
         TelemetryContext::from_env().insert_posthog_properties(&mut properties);
 
-        let property_count = properties.len();
-        let payload = json!({
+        json!({
             "api_key": "phc_z7FZXE8vmXtdTQ78LMy3j1BQWW4zP6PGDUP46rgcdnb",
             "event": "resource_usage",
             "properties": properties,
-        });
-
-        trace!(
-            target: "resource_monitor",
-            event = "resource_usage",
-            property_count,
-            "Sending resource usage telemetry"
-        );
-
-        deliver_posthog(client, POSTHOG_CAPTURE_URL, &payload).await
+        })
     }
 
     /// Max resource log file size (10 MB). When exceeded the file is truncated.
@@ -898,24 +913,11 @@ impl ResourceTelemetryReporter {
         Self::log_process_breakdown(&snapshot.process_breakdown);
     }
 
-    async fn log_status(&self, snapshot: &ResourceSnapshot) -> Result<(), PostHogDeliveryFailure> {
-        let runtime = self.start_time.elapsed();
-        self.log_snapshot(snapshot, runtime);
-
-        // Log to file
-        self.log_to_file(snapshot, runtime).await;
-
-        let mem_trend = self.record_leak_sample(runtime.as_secs_f64(), snapshot.total_memory_gb);
-
-        self.send_to_posthog(snapshot, runtime, mem_trend.as_ref())
-            .await
-    }
-
     pub fn start_monitoring(
         self: &Arc<Self>,
         interval: Duration,
         posthog_interval: Option<Duration>,
-    ) {
+    ) -> tokio::task::JoinHandle<()> {
         // Always run locally so resource-pressure warnings still fire when
         // analytics/debug/file logging are disabled.
         let monitor = Arc::clone(self);
@@ -925,10 +927,29 @@ impl ResourceTelemetryReporter {
             let mut sampler = ResourceSampler::new();
             let mut delivery_state =
                 PostHogDeliveryState::new(TokioInstant::now(), posthog_interval);
+            let (delivery_tx, mut delivery_rx) = tokio::sync::mpsc::unbounded_channel();
+            let mut delivery_in_flight = false;
+            let mut ticker = tokio::time::interval_at(TokioInstant::now() + interval, interval);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
             loop {
                 tokio::select! {
-                    _ = tokio::time::sleep(interval) => {
+                    Some(result) = delivery_rx.recv(), if delivery_in_flight => {
+                        delivery_in_flight = false;
+                        match result {
+                            Ok(()) => {
+                                let failed = delivery_state.consecutive_failures;
+                                if delivery_state.record_success(TokioInstant::now(), posthog_interval) == DeliveryTransition::Recovered {
+                                    info!(target: "resource_monitor", consecutive_failures = failed, "PostHog resource telemetry delivery recovered");
+                                }
+                            }
+                            Err(failure) => {
+                                let (transition, delay) = delivery_state.record_failure(TokioInstant::now(), posthog_interval);
+                                log_delivery_failure(transition, failure, delivery_state.consecutive_failures, delay);
+                            }
+                        }
+                    }
+                    _ = ticker.tick() => {
                         sampler.refresh();
 
                         // Tell the system allocator to return freed pages to the OS.
@@ -958,42 +979,27 @@ impl ResourceTelemetryReporter {
                         }
                         let now = TokioInstant::now();
                         let snapshot = sampler.snapshot();
-
-                        if monitor.posthog_enabled && delivery_state.is_due(now) {
-                            match monitor.log_status(&snapshot).await {
-                                Ok(()) => {
-                                    let failed_probes = delivery_state.consecutive_failures;
-                                    if delivery_state.record_success(TokioInstant::now(), posthog_interval)
-                                        == DeliveryTransition::Recovered
-                                    {
-                                        info!(
-                                            target: "resource_monitor",
-                                            consecutive_failures = failed_probes,
-                                            "PostHog resource telemetry delivery recovered"
-                                        );
-                                    }
-                                }
-                                Err(failure) => {
-                                    let (transition, retry_delay) = delivery_state
-                                        .record_failure(TokioInstant::now(), posthog_interval);
-                                    log_delivery_failure(
-                                        transition,
-                                        failure,
-                                        delivery_state.consecutive_failures,
-                                        retry_delay,
-                                    );
-                                }
+                        let (runtime, trend) = monitor.log_status_local(&snapshot).await;
+                        if monitor.posthog_enabled && !delivery_in_flight && delivery_state.is_due(now) {
+                            if let Some(client) = monitor.posthog_client.clone() {
+                                let payload = monitor.posthog_payload(&snapshot, runtime, trend.as_ref());
+                                trace!(target: "resource_monitor", event = "resource_usage", property_count = payload["properties"].as_object().map_or(0, Map::len), "Sending resource usage telemetry");
+                                let url = monitor.posthog_capture_url.clone();
+                                let timeout = monitor.posthog_request_timeout;
+                                let tx = delivery_tx.clone();
+                                delivery_in_flight = true;
+                                tokio::spawn(async move {
+                                    let _ = tx.send(deliver_posthog_with_timeout(&client, &url, &payload, timeout).await);
+                                });
                             }
-                        } else {
-                            monitor.log_status_local(&snapshot).await;
                         }
                     }
                 }
             }
-        });
+        })
     }
 
-    async fn log_status_local(&self, snapshot: &ResourceSnapshot) {
+    async fn log_status_local(&self, snapshot: &ResourceSnapshot) -> (Duration, Option<LeakStats>) {
         let runtime = self.start_time.elapsed();
         self.log_snapshot(snapshot, runtime);
 
@@ -1002,7 +1008,12 @@ impl ResourceTelemetryReporter {
 
         // Every tick feeds the leak sentinel — alerting must not depend on
         // the (less frequent) PostHog cadence.
-        let _ = self.record_leak_sample(runtime.as_secs_f64(), snapshot.total_memory_gb);
+        let trend = self.record_leak_sample(runtime.as_secs_f64(), snapshot.total_memory_gb);
+        #[cfg(test)]
+        if let Some(observer) = &self.local_tick_observer {
+            observer();
+        }
+        (runtime, trend)
     }
 
     pub async fn shutdown(&self) {
@@ -1022,11 +1033,13 @@ impl ResourceTelemetryReporter {
 mod tests {
     use super::{
         analyze_memory_trend, deliver_posthog, deliver_posthog_with_timeout, DeliveryTransition,
-        PostHogDeliveryState, PostHogFailureClass, LEAK_WARMUP_SECS, POSTHOG_MAX_BACKOFF,
+        PostHogDeliveryState, PostHogFailureClass, ResourceTelemetryReporter, LEAK_WARMUP_SECS,
+        POSTHOG_MAX_BACKOFF,
     };
     use reqwest::Client;
     use serde_json::json;
     use std::fmt;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
     use tracing::field::{Field, Visit};
@@ -1034,7 +1047,27 @@ mod tests {
     use tracing_subscriber::layer::{Context, SubscriberExt};
     use tracing_subscriber::Layer;
     use wiremock::matchers::{body_partial_json, method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
+
+    struct FailOnce(AtomicUsize);
+    impl Respond for FailOnce {
+        fn respond(&self, _: &Request) -> ResponseTemplate {
+            if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+                ResponseTemplate::new(503)
+            } else {
+                ResponseTemplate::new(200)
+            }
+        }
+    }
+    async fn wait_requests(server: &MockServer, n: usize) {
+        for _ in 0..100 {
+            if server.received_requests().await.unwrap().len() == n {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("request count did not reach {n}");
+    }
 
     /// (runtime_secs, mem_gb) samples at 30s cadence starting after warmup.
     fn samples_over(hours: f64, mem_at: impl Fn(f64) -> f64) -> Vec<(f64, f64)> {
@@ -1125,6 +1158,124 @@ mod tests {
         let stats = analyze_memory_trend(&s).expect("5h window should be judged");
         assert!(stats.r2 > 0.99);
         assert!(!stats.is_leak(), "30 MB/h flagged: {:?}", stats);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn monitor_drives_payload_backoff_and_recovery() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/capture/"))
+            .respond_with(FailOnce(AtomicUsize::new(0)))
+            .mount(&server)
+            .await;
+        let monitor = ResourceTelemetryReporter::new_for_test(
+            format!("{}/capture/", server.uri()),
+            Duration::from_secs(5),
+            None,
+        );
+        let task = monitor.start_monitoring(Duration::from_secs(10), Some(Duration::from_secs(10)));
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(10)).await;
+        wait_requests(&server, 1).await;
+        tokio::time::advance(Duration::from_millis(1)).await;
+        for _ in 0..500 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::advance(Duration::from_secs(10)).await;
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+        tokio::time::advance(Duration::from_secs(10)).await;
+        wait_requests(&server, 2).await;
+        tokio::time::advance(Duration::from_millis(1)).await;
+        for _ in 0..500 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::advance(Duration::from_secs(10)).await;
+        wait_requests(&server, 3).await;
+        let body: serde_json::Value =
+            serde_json::from_slice(&server.received_requests().await.unwrap()[0].body).unwrap();
+        assert_eq!(body["event"], "resource_usage");
+        assert!(body["properties"]["total_memory_gb"].is_number());
+        task.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn monitor_samples_while_delivery_stalls() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(3600)))
+            .mount(&server)
+            .await;
+        let ticks = Arc::new(AtomicUsize::new(0));
+        let seen = ticks.clone();
+        let monitor = ResourceTelemetryReporter::new_for_test(
+            format!("{}/capture/", server.uri()),
+            Duration::from_secs(7200),
+            Some(Arc::new(move || {
+                seen.fetch_add(1, Ordering::SeqCst);
+            })),
+        );
+        let task = monitor.start_monitoring(Duration::from_secs(10), Some(Duration::from_secs(10)));
+        tokio::task::yield_now().await;
+        for n in 1..=5 {
+            tokio::time::advance(Duration::from_secs(10)).await;
+            tokio::task::yield_now().await;
+            assert_eq!(ticks.load(Ordering::SeqCst), n);
+        }
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+        assert_eq!(monitor.leak_window.lock().unwrap().len(), 5);
+        task.abort();
+    }
+
+    #[derive(Clone, Default)]
+    struct MemoryTransport(Arc<Mutex<Vec<sentry::Envelope>>>);
+    impl sentry::Transport for MemoryTransport {
+        fn send_envelope(&self, envelope: sentry::Envelope) {
+            self.0.lock().unwrap().push(envelope);
+        }
+    }
+    #[tokio::test(start_paused = true)]
+    async fn monitor_failure_is_only_a_sentry_breadcrumb() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(429))
+            .mount(&server)
+            .await;
+        let transport = Arc::new(MemoryTransport::default());
+        let options = sentry::ClientOptions {
+            dsn: "https://public@sentry.invalid/1".parse().ok(),
+            transport: Some(Arc::new(transport.clone())),
+            ..Default::default()
+        };
+        let _hub = sentry::HubSwitchGuard::new(Arc::new(sentry::Hub::new(
+            Some(Arc::new(options.into())),
+            Arc::new(Default::default()),
+        )));
+        let _subscriber = tracing::subscriber::set_default(
+            tracing_subscriber::registry().with(sentry::integrations::tracing::layer()),
+        );
+        let monitor = ResourceTelemetryReporter::new_for_test(
+            format!("{}/capture/", server.uri()),
+            Duration::from_secs(5),
+            None,
+        );
+        let task = monitor.start_monitoring(Duration::from_secs(10), Some(Duration::from_secs(10)));
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(10)).await;
+        wait_requests(&server, 1).await;
+        tokio::time::advance(Duration::from_millis(1)).await;
+        for _ in 0..500 {
+            tokio::task::yield_now().await;
+        }
+        tracing::error!(target: "resource_monitor_test", "sentry control event");
+        let envelopes = transport.0.lock().unwrap();
+        assert_eq!(envelopes.len(), 1);
+        let text = format!("{:?}", envelopes[0].event().unwrap());
+        assert!(text.contains("sentry control event"));
+        for secret in ["api_key", "distinct_id", "phc_"] {
+            assert!(!text.contains(secret));
+        }
+        drop(envelopes);
+        task.abort();
     }
 
     #[tokio::test]

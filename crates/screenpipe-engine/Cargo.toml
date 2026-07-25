@@ -135,6 +135,7 @@ tikv-jemallocator = { version = "0.6", optional = true }
 [dev-dependencies]
 env_logger = { workspace = true }
 tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
 tokio-tungstenite = { workspace = true }
 tower = { version = "0.4", features = ["util"] }
 wiremock = { workspace = true }
