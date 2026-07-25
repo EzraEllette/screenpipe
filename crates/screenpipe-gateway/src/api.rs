@@ -23,7 +23,28 @@
 //!   uploads full frames — true for every write-only org).
 //! - `workflows/generated` and `pipes` are not served: Workflow Studio
 //!   surfaces are hard-disabled for write-only bindings and pipe
-//!   management is a control-plane concern that stays hosted.
+//!   management is a control-plane concern that stays hosted. They answer a
+//!   typed `501 {error, code:"not_served_by_gateway"}` (SCR-288) rather than
+//!   the posture-dependent 403-or-empty-404 they used to, so a misdirected
+//!   client can tell "wrong surface" from "wrong base URL".
+//!
+//! Deliberately CONVERGED with the hosted routes (SCR-288), because these were
+//! divergences that answered a different question with a 200 from both sides:
+//!
+//! - **Time-window parsing** is one grammar (`normalize_timestamp` here,
+//!   `parseTimestamp` in v1-helpers.ts): bare dates are UTC midnight, bare
+//!   datetimes are UTC (never the server's local zone), offsets are honoured,
+//!   and anything else is `400 {code:"invalid_time_window"}` instead of a
+//!   silent now-24h window.
+//! - **Numeric params** (`parse_bounded_int`) floor-and-clamp any real number
+//!   and refuse non-numbers with `400 {code:"invalid_query_param"}`, so
+//!   `page_size=-5` is 1 item on both instead of 1 here and 100 there.
+//! - **Absent and present-but-empty params are the same thing** on both, so
+//!   `?page_size=` is not `0` in JS and a parse error in Rust.
+//!
+//! The full ledger, including the divergences that are deliberate and stay,
+//! lives in the OpenAPI spec's `x-divergence` entries — see
+//! `e2e/conformance/enterprise-v1.yaml` and its README.
 //!
 //! Auth lands with SCR-291 (offline `sk_ent_` verification against the
 //! signed policy's grant list); M1 serves unauthenticated on a private
@@ -36,7 +57,7 @@ use axum::extract::{Path as AxPath, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{
-    routing::{get, MethodRouter},
+    routing::{any, get, MethodRouter},
     Json, Router,
 };
 use chrono::{DateTime, Duration as ChronoDuration, SecondsFormat, Utc};
@@ -80,6 +101,21 @@ fn routes() -> Vec<(&'static str, MethodRouter<ApiState>)> {
             get(frame_image),
         ),
         ("/api/enterprise/v1/rollups", get(rollups)),
+        // Hosted-only surfaces, registered so they answer a typed 501 instead
+        // of a posture-dependent 403-or-empty-404 (SCR-288 ruling d). `any` so
+        // POST /pipes gets the diagnosis too rather than a bare 405 — the
+        // hosted route is a POST, and a client aimed at the wrong base URL is
+        // exactly who needs to be told which surface it hit.
+        //
+        // Both are also matched by the auth middleware's `RouteAuth::NotServed`
+        // arm, which short-circuits with the SAME body from the SAME function.
+        // These registrations are what answers in the unauthenticated posture,
+        // where no middleware is installed at all.
+        (
+            "/api/enterprise/v1/workflows/generated",
+            any(not_served_here),
+        ),
+        ("/api/enterprise/v1/pipes", any(not_served_here)),
     ]
 }
 
@@ -111,6 +147,12 @@ pub fn router(
     router
 }
 
+/// Handler for [`crate::auth::NOT_SERVED_ROUTES`]. Serves no state and reads
+/// nothing, so it is safe unauthenticated — see `NOT_SERVED_ROUTES`.
+async fn not_served_here() -> Response {
+    crate::auth::not_served_response()
+}
+
 async fn health() -> Json<Value> {
     Json(json!({ "status": "ok" }))
 }
@@ -126,7 +168,29 @@ fn err_json(status: StatusCode, msg: &str) -> Response {
     (status, Json(json!({ "error": msg }))).into_response()
 }
 
-// ─── Time window (mirrors v1-helpers.ts parseTimeWindow) ────────────────────
+/// A refused request that carries a machine code, so a client can branch
+/// without string-matching. The hosted side emits the identical
+/// `{error, code}` body from `V1RequestError` (lib/enterprise/v1-helpers.ts).
+///
+/// Boxed, like `auth::parse_bearer`'s: axum's `Response` is large and every
+/// param-rejection path is cold, so an unboxed `Result<_, Response>` bloats the
+/// happy path (clippy::result_large_err).
+fn err_json_code(status: StatusCode, code: &str, msg: &str) -> Box<Response> {
+    Box::new((status, Json(json!({ "error": msg, "code": code }))).into_response())
+}
+
+pub const INVALID_TIME_WINDOW: &str = "invalid_time_window";
+pub const INVALID_QUERY_PARAM: &str = "invalid_query_param";
+
+/// A query param that is absent OR present-but-empty (`?since=`) reads as "not
+/// supplied" on both implementations. Without this, `?page_size=` was `0` in JS
+/// (`Number("")`) and a parse error in Rust — the same silent-divergence class
+/// this module exists to remove.
+fn param<'a>(params: &'a HashMap<String, String>, name: &str) -> Option<&'a str> {
+    params.get(name).map(|s| s.trim()).filter(|s| !s.is_empty())
+}
+
+// ─── Time window (converged with v1-helpers.ts parseTimeWindow) ─────────────
 
 struct TimeWindow {
     since: DateTime<Utc>,
@@ -134,48 +198,190 @@ struct TimeWindow {
     window_hours: f64,
 }
 
-fn parse_time_window(params: &HashMap<String, String>) -> TimeWindow {
-    let now = Utc::now();
-    let until = params
-        .get("until")
-        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-        .map(|t| t.with_timezone(&Utc))
-        .unwrap_or(now);
-    let since = if let Some(s) = params.get("since") {
-        // Present-but-unparseable `since` silently falls back to now-24h,
-        // exactly like the hosted helper.
-        DateTime::parse_from_rfc3339(s)
-            .map(|t| t.with_timezone(&Utc))
-            .unwrap_or_else(|_| now - ChronoDuration::hours(24))
-    } else if let Some(h) = params
-        .get("since_hours_ago")
-        .and_then(|s| s.parse::<f64>().ok())
-        .filter(|h| h.is_finite() && *h > 0.0)
+/// Shape-check a `since`/`until` value and return it as a normalized RFC3339
+/// string. Hand-rolled rather than `chrono`-lenient on purpose: chrono accepts
+/// `2026-7-2T1:2:3` and JS does not, so parsing straight through would leave
+/// exactly the kind of accepts-here-rejects-there gap this converges away. The
+/// three accepted shapes are the three regexes in `v1-helpers.ts`:
+///
+///   `YYYY-MM-DD`                        → that day's 00:00:00 UTC
+///   `YYYY-MM-DDTHH:MM[:SS[.fff]]`       → UTC (never local — see below)
+///   the same plus `Z` / `±HH:MM`        → as written
+///
+/// A bare datetime is UTC because `Date.parse` read it in the SERVER's timezone
+/// on the hosted side, so the same query returned a different window from a
+/// gateway in another timezone and neither said so (SCR-288 divergence 7). UTC
+/// is the only reading both can reproduce.
+fn normalize_timestamp(value: &str) -> Option<String> {
+    let b = value.as_bytes();
+    if b.len() < 10 {
+        return None;
+    }
+    let digits = |r: std::ops::Range<usize>| b[r].iter().all(|c| c.is_ascii_digit());
+    if !(digits(0..4) && b[4] == b'-' && digits(5..7) && b[7] == b'-' && digits(8..10)) {
+        return None;
+    }
+    let date = &value[..10];
+    if b.len() == 10 {
+        return Some(format!("{date}T00:00:00Z"));
+    }
+    if b[10] != b'T' && b[10] != b't' {
+        return None;
+    }
+    let rest = &value[11..];
+
+    // Split a trailing timezone off, defaulting to UTC when there is none.
+    let (time, tz) = if let Some(head) = rest.strip_suffix('Z').or_else(|| rest.strip_suffix('z')) {
+        (head, "Z")
+    } else if rest.len() >= 6 {
+        let (head, tail) = rest.split_at(rest.len() - 6);
+        let t = tail.as_bytes();
+        let is_offset = (t[0] == b'+' || t[0] == b'-')
+            && t[1].is_ascii_digit()
+            && t[2].is_ascii_digit()
+            && t[3] == b':'
+            && t[4].is_ascii_digit()
+            && t[5].is_ascii_digit();
+        if is_offset {
+            (head, tail)
+        } else {
+            (rest, "Z")
+        }
+    } else {
+        (rest, "Z")
+    };
+
+    // time := HH:MM[:SS[.fff]]
+    let t = time.as_bytes();
+    if t.len() < 5
+        || !(t[0].is_ascii_digit()
+            && t[1].is_ascii_digit()
+            && t[2] == b':'
+            && t[3].is_ascii_digit()
+            && t[4].is_ascii_digit())
     {
+        return None;
+    }
+    let mut seconds = "00";
+    let mut frac = String::new();
+    if t.len() > 5 {
+        if t[5] != b':' || t.len() < 8 || !(t[6].is_ascii_digit() && t[7].is_ascii_digit()) {
+            return None;
+        }
+        seconds = &time[6..8];
+        if t.len() > 8 {
+            if t[8] != b'.' {
+                return None;
+            }
+            let f = &time[9..];
+            if f.is_empty() || !f.bytes().all(|c| c.is_ascii_digit()) {
+                return None;
+            }
+            frac = format!(".{f}");
+        }
+    }
+    Some(format!("{date}T{}:{seconds}{frac}{tz}", &time[..5]))
+}
+
+fn parse_timestamp(value: &str, name: &str) -> Result<DateTime<Utc>, Box<Response>> {
+    let shaped = normalize_timestamp(value).ok_or_else(|| {
+        err_json_code(
+            StatusCode::BAD_REQUEST,
+            INVALID_TIME_WINDOW,
+            &format!(
+                "invalid '{name}': expected YYYY-MM-DD, YYYY-MM-DDTHH:MM:SS (UTC), or an \
+                 RFC3339 timestamp with an offset — got '{value}'"
+            ),
+        )
+    })?;
+    DateTime::parse_from_rfc3339(&shaped)
+        .map(|t| t.with_timezone(&Utc))
+        .map_err(|_| {
+            // Shape matched but the values do not exist (2026-02-30, 25:00).
+            err_json_code(
+                StatusCode::BAD_REQUEST,
+                INVALID_TIME_WINDOW,
+                &format!("invalid '{name}': '{value}' is not a real date/time"),
+            )
+        })
+}
+
+/// `since_hours_ago` / `since` / `until` → a window. Present-but-nonsense is a
+/// 400 rather than a silent fall back to now-24h, which is what let the same
+/// query answer two different questions with a 200 from both sides.
+///
+/// `since > until` still SWAPS instead of erroring: one legible intent, one
+/// unambiguous answer, and both implementations already agreed.
+fn parse_time_window(params: &HashMap<String, String>) -> Result<TimeWindow, Box<Response>> {
+    let now = Utc::now();
+    let until = match param(params, "until") {
+        Some(s) => parse_timestamp(s, "until")?,
+        None => now,
+    };
+    let since = if let Some(s) = param(params, "since") {
+        parse_timestamp(s, "since")?
+    } else if let Some(raw) = param(params, "since_hours_ago") {
+        let h: f64 = raw.parse().unwrap_or(f64::NAN);
+        if !h.is_finite() || h <= 0.0 {
+            return Err(err_json_code(
+                StatusCode::BAD_REQUEST,
+                INVALID_TIME_WINDOW,
+                &format!(
+                    "invalid 'since_hours_ago': expected a positive number of hours, got '{raw}'"
+                ),
+            ));
+        }
         now - ChronoDuration::milliseconds((h.min(MAX_HOURS) * 3_600_000.0) as i64)
     } else {
         now - ChronoDuration::hours(24)
     };
-    // Inverted windows swap instead of erroring (hosted behavior).
     let (since, until) = if since > until {
         (until, since)
     } else {
         (since, until)
     };
     let window_hours = ((until - since).num_milliseconds() as f64 / 3_600_000.0).max(0.0);
-    TimeWindow {
+    Ok(TimeWindow {
         since,
         until,
         window_hours,
-    }
+    })
 }
 
-fn parse_limit(params: &HashMap<String, String>) -> i64 {
-    params
-        .get("limit")
-        .and_then(|s| s.parse::<f64>().ok())
-        .map(|v| (v.floor() as i64).clamp(1, MAX_LIMIT))
-        .unwrap_or(DEFAULT_LIMIT)
+/// Numeric query param, converged with `parseBoundedInt` in v1-helpers.ts.
+///
+///   absent / empty  → `def`
+///   a finite number → floored, then clamped to `[min, max]`
+///   anything else   → 400
+///
+/// Out-of-RANGE numbers still clamp: `page_size=100000` is a legible intent and
+/// both sides agree on it. `page_size=abc` is not, and used to be answered with
+/// 1 item hosted and 100 here (SCR-288 divergence 6) — as did `page_size=-5`,
+/// because `parse::<usize>()` rejected the sign and fell back to the DEFAULT
+/// while JS clamped a valid -5 up to the minimum.
+fn parse_bounded_int(
+    params: &HashMap<String, String>,
+    name: &str,
+    def: i64,
+    min: i64,
+    max: i64,
+) -> Result<i64, Box<Response>> {
+    let Some(raw) = param(params, name) else {
+        return Ok(def);
+    };
+    let n: f64 = raw.parse().unwrap_or(f64::NAN);
+    if !n.is_finite() {
+        return Err(err_json_code(
+            StatusCode::BAD_REQUEST,
+            INVALID_QUERY_PARAM,
+            &format!("invalid '{name}': expected a number, got '{raw}'"),
+        ));
+    }
+    Ok((n.floor() as i64).clamp(min, max))
+}
+
+fn parse_limit(params: &HashMap<String, String>) -> Result<i64, Box<Response>> {
+    parse_bounded_int(params, "limit", DEFAULT_LIMIT, 1, MAX_LIMIT)
 }
 
 fn rfc3339z(t: &DateTime<Utc>) -> String {
@@ -599,10 +805,16 @@ async fn search(
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
     let q = params.get("q").map(|s| s.trim()).unwrap_or("");
-    let device_id = params.get("device_id").map(|s| s.as_str());
-    let app_name = params.get("app_name").map(|s| s.as_str());
-    let window = parse_time_window(&params);
-    let limit = parse_limit(&params);
+    let device_id = param(&params, "device_id");
+    let app_name = param(&params, "app_name");
+    let window = match parse_time_window(&params) {
+        Ok(w) => w,
+        Err(resp) => return *resp,
+    };
+    let limit = match parse_limit(&params) {
+        Ok(l) => l,
+        Err(resp) => return *resp,
+    };
 
     let kq = KindQuery {
         q: if q.is_empty() { None } else { Some(q) },
@@ -642,13 +854,18 @@ async fn records(
     State(state): State<ApiState>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    let device_id = params.get("device_id").map(|s| s.as_str());
-    let kind_filter = params
-        .get("kind")
+    let device_id = param(&params, "device_id");
+    let kind_filter = param(&params, "kind")
         .map(|s| s.to_ascii_lowercase())
         .unwrap_or_else(|| "all".to_string());
-    let window = parse_time_window(&params);
-    let limit = parse_limit(&params);
+    let window = match parse_time_window(&params) {
+        Ok(w) => w,
+        Err(resp) => return *resp,
+    };
+    let limit = match parse_limit(&params) {
+        Ok(l) => l,
+        Err(resp) => return *resp,
+    };
 
     let kinds: Vec<&str> = match kind_filter.as_str() {
         "all" => vec!["frame", "audio", "ui", "memory"],
@@ -690,13 +907,18 @@ async fn files(
     State(state): State<ApiState>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    let device_id = params.get("device_id").map(|s| s.as_str());
-    let window = parse_time_window(&params);
-    let page_size = params
-        .get("page_size")
-        .and_then(|s| s.parse::<usize>().ok())
-        .map(|v| v.clamp(1, 1000))
-        .unwrap_or(100);
+    let device_id = param(&params, "device_id");
+    let window = match parse_time_window(&params) {
+        Ok(w) => w,
+        Err(resp) => return *resp,
+    };
+    let page_size = match parse_bounded_int(&params, "page_size", 100, 1, 1000) {
+        Ok(v) => v as usize,
+        Err(resp) => return *resp,
+    };
+    // `cursor` is an OPAQUE token by contract (the hosted target's is a storage
+    // continuation token, not a number), so an unparseable one is deliberately
+    // page-one rather than a 400 — a client is not supposed to construct it.
     let offset: usize = params
         .get("cursor")
         .and_then(|s| s.parse().ok())
@@ -859,8 +1081,7 @@ async fn rollups(
     State(state): State<ApiState>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    let device: String = params
-        .get("device")
+    let device: String = param(&params, "device")
         .map(|s| {
             s.chars()
                 .map(|c| {
@@ -875,17 +1096,18 @@ async fn rollups(
         .filter(|s: &String| !s.is_empty())
         .unwrap_or_else(|| "org".to_string());
     let today = Utc::now().format("%Y-%m-%d").to_string();
-    let to = params.get("to").cloned().unwrap_or(today);
-    let from = params.get("from").cloned().unwrap_or_else(|| {
-        (Utc::now() - ChronoDuration::days(31))
-            .format("%Y-%m-%d")
-            .to_string()
-    });
-    let limit = params
-        .get("limit")
-        .and_then(|s| s.parse::<usize>().ok())
-        .map(|v| v.clamp(1, 100))
-        .unwrap_or(35);
+    let to = param(&params, "to").map(str::to_string).unwrap_or(today);
+    let from = param(&params, "from")
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            (Utc::now() - ChronoDuration::days(31))
+                .format("%Y-%m-%d")
+                .to_string()
+        });
+    let limit = match parse_bounded_int(&params, "limit", 35, 1, 100) {
+        Ok(v) => v as usize,
+        Err(resp) => return *resp,
+    };
 
     let prefix = format!("rollups/{}/{}/", sanitize_id(&state.license_id, 64), device);
     let listed = match state.source.list(&ListRequest::new(&prefix)).await {
@@ -960,6 +1182,10 @@ mod tests {
                     "{path} classified Public but is not in PUBLIC_ROUTES"
                 ),
                 crate::auth::RouteAuth::Scoped(_) => {}
+                crate::auth::RouteAuth::NotServed => assert!(
+                    crate::auth::NOT_SERVED_ROUTES.contains(&path),
+                    "{path} classified NotServed but is not in NOT_SERVED_ROUTES"
+                ),
                 crate::auth::RouteAuth::Unmapped => panic!(
                     "route {path} has no auth classification: add a scope arm to \
                      auth::required_scope, or list it in auth::PUBLIC_ROUTES if it \
@@ -994,6 +1220,264 @@ mod tests {
                         == first_segment
                 }),
                 "auth::required_scope maps '{first_segment}' but no route serves it"
+            );
+        }
+    }
+
+    /// SCR-288 ruling (b): the time-window grammar is the SAME on both
+    /// implementations, and an input we cannot honour is a 400 rather than a
+    /// silent now-24h window. Before this, `?since=2026-07-22` returned a
+    /// July-22 window from the hosted API and the last 24 hours from here,
+    /// with a 200 from both — the worst kind of divergence.
+    #[test]
+    fn timestamp_grammar_matches_the_hosted_parser() {
+        // The three accepted shapes, normalized to the same instant.
+        for (input, want) in [
+            ("2026-07-22", "2026-07-22T00:00:00Z"),
+            ("2026-07-22T09:30", "2026-07-22T09:30:00Z"),
+            ("2026-07-22T09:30:15", "2026-07-22T09:30:15Z"),
+            ("2026-07-22T09:30:15.250", "2026-07-22T09:30:15.250Z"),
+            ("2026-07-22t09:30:15z", "2026-07-22T09:30:15Z"),
+            ("2026-07-22T09:30:15Z", "2026-07-22T09:30:15Z"),
+            ("2026-07-22T09:30:15+00:00", "2026-07-22T09:30:15+00:00"),
+        ] {
+            assert_eq!(
+                normalize_timestamp(input).as_deref(),
+                Some(want),
+                "{input} must normalize to {want}"
+            );
+            assert!(parse_timestamp(input, "since").is_ok(), "{input}");
+        }
+
+        // A bare datetime is UTC, NOT local — the whole point of converging.
+        assert_eq!(
+            parse_timestamp("2026-07-22T09:30:15", "since")
+                .unwrap()
+                .to_rfc3339(),
+            "2026-07-22T09:30:15+00:00"
+        );
+        // An explicit offset is honoured, so the two readings stay distinguishable.
+        assert_eq!(
+            parse_timestamp("2026-07-22T09:30:15-05:00", "since")
+                .unwrap()
+                .to_rfc3339(),
+            "2026-07-22T14:30:15+00:00"
+        );
+
+        // Everything else is refused. chrono alone would accept several of
+        // these (single-digit fields, a space separator); JS accepts others
+        // ("July 22 2026", "2026/07/22"). Neither side may.
+        for bad in [
+            "",
+            "now",
+            "July 22 2026",
+            "2026/07/22",
+            "2026-7-2",
+            "2026-7-2T1:2:3",
+            "2026-07-22 09:30:15",
+            "2026-07-22T09",
+            "2026-07-22T09:30:1",
+            "2026-07-22T09:30:15.",
+            "2026-07-22T09:30:15+5:00",
+            "2026-02-30",
+            "2026-07-22T25:00:00Z",
+            "1753228800",
+        ] {
+            assert!(
+                parse_timestamp(bad, "since").is_err(),
+                "{bad:?} must be refused, not silently defaulted"
+            );
+        }
+    }
+
+    /// SCR-288 ruling (c): `page_size=-5` returned 1 item from the hosted API
+    /// (clamp of a valid negative) and 100 from here (`parse::<usize>()`
+    /// rejected the sign and fell back to the DEFAULT). Same request, 1 vs 100.
+    #[test]
+    fn bounded_int_clamps_valid_numbers_and_refuses_non_numbers() {
+        let p = |k: &str, v: &str| {
+            let mut m = HashMap::new();
+            m.insert(k.to_string(), v.to_string());
+            m
+        };
+        let ok = |v: &str| parse_bounded_int(&p("page_size", v), "page_size", 100, 1, 1000).ok();
+
+        assert_eq!(ok("-5"), Some(1), "a valid negative clamps to the minimum");
+        assert_eq!(ok("0"), Some(1));
+        assert_eq!(ok("2.5"), Some(2), "floored, like Math.floor");
+        assert_eq!(ok("-2.5"), Some(1), "floor(-2.5) = -3, clamped to 1");
+        assert_eq!(ok("250"), Some(250));
+        assert_eq!(ok("100000"), Some(1000), "out of RANGE still clamps");
+        assert_eq!(ok("1e3"), Some(1000));
+        // Absent and present-but-empty both mean "not supplied".
+        assert_eq!(
+            parse_bounded_int(&HashMap::new(), "page_size", 100, 1, 1000).ok(),
+            Some(100)
+        );
+        assert_eq!(ok(""), Some(100));
+        assert_eq!(ok("   "), Some(100));
+
+        for bad in ["abc", "5abc", "NaN", "inf", "-inf", "0x10", "1,000"] {
+            assert!(
+                parse_bounded_int(&p("page_size", bad), "page_size", 100, 1, 1000).is_err(),
+                "{bad:?} must be a 400, not a silent default"
+            );
+        }
+    }
+
+    /// The window parser refuses at the ROUTE, with the machine code the hosted
+    /// side emits — not just in the unit above.
+    #[tokio::test]
+    async fn a_malformed_window_is_a_typed_400_not_a_silent_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let router = seeded_router(&dir).await;
+
+        for (uri, code) in [
+            (
+                "/api/enterprise/v1/search?since=not-a-date",
+                "invalid_time_window",
+            ),
+            (
+                "/api/enterprise/v1/records?until=2026/07/22",
+                "invalid_time_window",
+            ),
+            (
+                "/api/enterprise/v1/files?since_hours_ago=soon",
+                "invalid_time_window",
+            ),
+            (
+                "/api/enterprise/v1/files?page_size=abc",
+                "invalid_query_param",
+            ),
+            (
+                "/api/enterprise/v1/rollups?limit=lots",
+                "invalid_query_param",
+            ),
+        ] {
+            let (status, body) = get_json(&router, uri).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{uri} -> {body}");
+            assert_eq!(body["code"], code, "{uri} -> {body}");
+        }
+
+        // And a well-formed bare date is honoured as UTC rather than dropped.
+        let (status, body) = get_json(
+            &router,
+            "/api/enterprise/v1/search?q=roadmap&since=2026-07-22&until=2026-07-23",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["window_hours"], 24.0);
+        assert!(
+            body["result_count"].as_u64().unwrap() > 0,
+            "a bare date must select the seeded July-22 window: {body}"
+        );
+    }
+
+    /// SCR-288 ruling (d): the two hosted-only routes answer a TYPED 501 in
+    /// BOTH postures. Previously the authenticated posture 403'd with a
+    /// scope-map message and the unauthenticated one returned a bare 404 with
+    /// an empty body, so an MCP client aimed at a gateway could not tell "wrong
+    /// surface" from "wrong base URL".
+    #[tokio::test]
+    async fn hosted_only_routes_return_a_typed_501_in_both_postures() {
+        use crate::auth::PolicyStore;
+        use crate::policy::{ClockSkew, PolicyDocument, TokenGrant};
+        use chrono::Duration;
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(
+            DatabaseManager::new(
+                dir.path().join("gateway.db").to_str().unwrap(),
+                DbConfig::default(),
+            )
+            .await
+            .unwrap(),
+        );
+        crate::ingest::ensure_gateway_schema(&db).await.unwrap();
+        let src = Arc::new(S3BlobSource::from_store(Arc::new(InMemory::new()), None));
+
+        let now = Utc::now();
+        let store = PolicyStore::new("lic-1");
+        store
+            .install(
+                PolicyDocument {
+                    license_id: "lic-1".to_string(),
+                    issued_at: now,
+                    valid_until: now + Duration::minutes(30),
+                    token_grants: vec![TokenGrant {
+                        digest: crate::policy::token_digest("sk_ent_every_scope_1234"),
+                        scopes: vec!["read:workflows".to_string(), "write:pipes".to_string()],
+                        expires_at: None,
+                    }],
+                },
+                ClockSkew::Ok,
+            )
+            .expect("own license");
+
+        for policy in [None, Some(store.clone())] {
+            let authed = policy.is_some();
+            let router = router(db.clone(), src.clone(), "lic-1".to_string(), policy);
+            for (method, uri) in [
+                ("GET", "/api/enterprise/v1/workflows/generated?kind=sop"),
+                ("POST", "/api/enterprise/v1/pipes"),
+                ("GET", "/api/enterprise/v1/pipes"),
+            ] {
+                // Asserted BOTH with and without a token that holds the scope
+                // the hosted route requires: the answer must be about the
+                // SURFACE, never about the credential.
+                for auth in [None, Some("Bearer sk_ent_every_scope_1234")] {
+                    let mut req = Request::builder().method(method).uri(uri);
+                    if let Some(a) = auth {
+                        req = req.header("authorization", a);
+                    }
+                    let resp = router
+                        .clone()
+                        .oneshot(req.body(Body::empty()).unwrap())
+                        .await
+                        .unwrap();
+                    let status = resp.status();
+                    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+                    let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+                    assert_eq!(
+                        status,
+                        StatusCode::NOT_IMPLEMENTED,
+                        "{method} {uri} (authed={authed}, token={}) returned {status} \
+                         with body {body}",
+                        auth.is_some()
+                    );
+                    assert_eq!(
+                        body["code"], "not_served_by_gateway",
+                        "the 501 must be machine-diagnosable: {body}"
+                    );
+                    assert!(body["error"].as_str().unwrap_or("").contains("hosted"));
+                }
+            }
+        }
+    }
+
+    /// The `NotServed` classification must not become a hole. A route on the
+    /// not-served list is unauthenticated BY DESIGN, so nothing that serves
+    /// archive content may ever appear on it.
+    #[test]
+    fn not_served_routes_never_overlap_the_scoped_surface() {
+        for path in crate::auth::NOT_SERVED_ROUTES {
+            assert_eq!(
+                crate::auth::route_auth(path),
+                crate::auth::RouteAuth::NotServed,
+                "{path}"
+            );
+            assert!(
+                !crate::auth::PUBLIC_ROUTES.contains(path),
+                "{path} cannot be both public and not-served"
+            );
+            // The not-served check runs BEFORE the scope map, so an overlap
+            // would silently make a content route unauthenticated.
+            assert_eq!(
+                crate::auth::required_scope(path),
+                None,
+                "{path} is on NOT_SERVED_ROUTES but the scope map claims it \
+                 serves content — the not-served check runs first, so this \
+                 would serve it unauthenticated"
             );
         }
     }

@@ -166,7 +166,47 @@ impl PolicyStore {
 /// content.
 pub const PUBLIC_ROUTES: &[&str] = &["/health", "/version"];
 
-/// How a request path is authenticated. Three states, not two, because the
+/// Hosted v1 routes this gateway deliberately does NOT serve, answered with a
+/// typed 501 instead.
+///
+/// Both are real parts of the hosted contract that a gateway cannot honour:
+/// `workflows/generated` reads Workflow Studio artifacts, which are
+/// hard-disabled for a write-only binding, and `pipes` is fleet management,
+/// which stays on the control plane. Before SCR-288 neither had a scope arm, so
+/// the answer depended on the deployment posture: 403 "route has no scope
+/// mapping" with a policy loaded, and a bare 404 with an EMPTY body and no
+/// content-type without one. `packages/screenpipe-mcp`'s `team-records` tool
+/// routes synthesized kinds to `/workflows/generated`, so its failure against a
+/// gateway base URL was indistinguishable from a mistyped base URL.
+///
+/// Deliberately unauthenticated (like [`PUBLIC_ROUTES`]): the answer is a
+/// constant that leaks nothing, and requiring a token to learn "this surface
+/// does not exist here" would make the diagnostic unreachable for the client
+/// that most needs it.
+pub const NOT_SERVED_ROUTES: &[&str] = &[
+    "/api/enterprise/v1/workflows/generated",
+    "/api/enterprise/v1/pipes",
+];
+
+/// Machine code on the 501. Clients branch on this rather than the prose.
+pub const NOT_SERVED_BY_GATEWAY: &str = "not_served_by_gateway";
+
+pub const NOT_SERVED_MESSAGE: &str =
+    "this endpoint is part of the hosted v1 API and is not served by the customer-run gateway; \
+     query it against the Screenpipe hosted API instead";
+
+/// The typed 501. One function so the auth middleware's short-circuit and the
+/// registered handler (which is what answers when no policy is loaded and the
+/// middleware is absent entirely) cannot drift apart.
+pub fn not_served_response() -> Response {
+    (
+        StatusCode::NOT_IMPLEMENTED,
+        Json(json!({ "error": NOT_SERVED_MESSAGE, "code": NOT_SERVED_BY_GATEWAY })),
+    )
+        .into_response()
+}
+
+/// How a request path is authenticated. Four states, not two, because the
 /// dangerous case has to be nameable: a route nobody classified.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RouteAuth {
@@ -174,8 +214,13 @@ pub enum RouteAuth {
     Public,
     /// Requires a bearer token carrying this scope.
     Scoped(&'static str),
-    /// Neither public nor scoped. Denied (SCR-353): the trust model must
-    /// not depend on the next contributor remembering to add a match arm.
+    /// On [`NOT_SERVED_ROUTES`] — answered with a typed 501, no auth. A
+    /// deliberate classification, so it satisfies the `api::routes`
+    /// enumeration guard; it is NOT a way to serve archive content.
+    NotServed,
+    /// Neither public, scoped, nor deliberately unimplemented. Denied
+    /// (SCR-353): the trust model must not depend on the next contributor
+    /// remembering to add a match arm.
     Unmapped,
 }
 
@@ -215,6 +260,9 @@ pub enum RouteAuth {
 pub fn route_auth(path: &str) -> RouteAuth {
     if PUBLIC_ROUTES.contains(&path) {
         return RouteAuth::Public;
+    }
+    if NOT_SERVED_ROUTES.contains(&path) {
+        return RouteAuth::NotServed;
     }
     match required_scope(path) {
         Some(scope) => RouteAuth::Scoped(scope),
@@ -276,6 +324,11 @@ pub async fn require_bearer(
     let scope = match route_auth(&path) {
         RouteAuth::Public => return next.run(request).await,
         RouteAuth::Scoped(scope) => scope,
+        // Short-circuit rather than run the handler: identical body either way
+        // (both call `not_served_response`), and this keeps the 501 reachable in
+        // the authenticated posture without a token — the whole point is that a
+        // misdirected client can tell "wrong surface" from "wrong credentials".
+        RouteAuth::NotServed => return not_served_response(),
         RouteAuth::Unmapped => {
             // Deny before even looking at the token: with no scope mapping
             // there is no correct scope to require, so no token can be
