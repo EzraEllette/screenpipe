@@ -2328,16 +2328,38 @@ mod tests {
         // Liveness probes and the counter endpoint are not queries.
         assert_eq!(call(None, "/health").await, StatusCode::OK);
         assert_eq!(call(None, "/version").await, StatusCode::OK);
+        // The hosted-only surface (SCR-288) is a 501 that serves no content. It
+        // belongs in the log — an MCP client hitting it is indistinguishable
+        // from a mistyped base URL without one — but NOT under a `read:*` scope,
+        // or it would inflate the positive control for "the archive WAS read".
+        assert_eq!(
+            call(None, "/api/enterprise/v1/pipes").await,
+            StatusCode::NOT_IMPLEMENTED
+        );
 
         let after = counters().await;
         assert_eq!(
             after["queries_served"], 2,
-            "two searches were served: {after}"
+            "two searches were served, and a 501 is not a read: {after}"
         );
-        assert_eq!(after["queries_denied"], 2, "one 401 and one 403: {after}");
+        assert_eq!(
+            after["queries_denied"], 3,
+            "one 401, one 403, one 501: {after}"
+        );
         assert_eq!(after["by_scope"]["read:search"]["served"], 2, "{after}");
         assert_eq!(after["by_scope"]["read:search"]["denied"], 1, "{after}");
         assert_eq!(after["by_scope"]["read:devices"]["denied"], 1, "{after}");
+        assert_eq!(
+            after["by_scope"][crate::access_log::NOT_SERVED_BUCKET]["denied"],
+            1,
+            "the hosted-only 501 must be recorded under its own key: {after}"
+        );
+        for scope in ["read:devices", "read:records", "read:files"] {
+            assert_eq!(
+                after["by_scope"][scope]["served"], 0,
+                "no archive read happened on {scope}: {after}"
+            );
+        }
         assert!(
             after["last_query_served_at"].is_string(),
             "a served query must timestamp itself: {after}"
@@ -2350,7 +2372,7 @@ mod tests {
             .values()
             .map(|v| v["served"].as_u64().unwrap() + v["denied"].as_u64().unwrap())
             .sum();
-        assert_eq!(total, 4, "public routes must not be counted: {after}");
+        assert_eq!(total, 5, "public routes must not be counted: {after}");
     }
 
     /// The counter must NOT be a side effect of the auth layer. In the M1

@@ -293,6 +293,12 @@ driver gets plain text that greps and parses cleanly.
 * Ship these lines to your log sink and retain them on your own schedule. **This
   is the durable audit record of who read the archive** — Screenpipe has no
   equivalent, by construction.
+* Two `scope` values are not scopes. `<unmapped>` is a route that matched no
+  scope and was therefore denied before the token was even read; `<not-served>`
+  is the hosted-only surface (`/pipes`, `/workflows/generated`) answering its
+  typed 501. Both are logged so a probe leaves a trace, and both are counted
+  separately from `read:*` — neither can ever be an archive read, so folding
+  them in would overstate how much of your archive was queried.
 
 A machine-readable summary lives at `/access-log`:
 

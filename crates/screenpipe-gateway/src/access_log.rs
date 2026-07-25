@@ -68,6 +68,25 @@ pub const DIGEST_PREFIX_HEX_CHARS: usize = 8;
 /// key, so the breakdown map stays bounded.
 pub const UNMAPPED_BUCKET: &str = "<unmapped>";
 
+/// Counter bucket for [`crate::auth::NOT_SERVED_ROUTES`]
+/// (`RouteAuth::NotServed` — the hosted-only v1 surface, answered with a typed
+/// 501 by SCR-288).
+///
+/// These are recorded rather than skipped, but deliberately NOT under a
+/// `read:*` scope. Two reasons, pulling in opposite directions and both
+/// satisfied by giving them their own key:
+///
+/// * They must be IN the durable log. They are unauthenticated by design, so
+///   in the M1 posture a probe of `/pipes` would otherwise leave no trace at
+///   all — and SCR-288 added them precisely because an MCP client hitting
+///   `/workflows/generated` against a gateway was indistinguishable from a
+///   mistyped base URL. That diagnosis is an access-log read.
+/// * They must not touch the `read:*` counters. A constant 501 that leaks
+///   nothing can never be an archive read, so folding it into a scope bucket
+///   would inflate the very number the acceptance run uses as its positive
+///   control for "the archive WAS queried".
+pub const NOT_SERVED_BUCKET: &str = "<not-served>";
+
 /// Served/denied pair for one bucket.
 #[derive(Default, Debug)]
 struct Pair {
@@ -83,9 +102,9 @@ struct Pair {
 /// path-keyed map would grow without bound on request from anyone who can
 /// reach the port — a memory-growth DoS reachable, in the M1 posture, without
 /// a token. Scopes come from [`crate::auth::required_scope`], a closed set of
-/// five `&'static str`s plus [`UNMAPPED_BUCKET`], so the map has a hard
-/// ceiling of six entries and cannot drift out of sync with the scope map (it
-/// *is* the scope map).
+/// five `&'static str`s plus [`UNMAPPED_BUCKET`] and [`NOT_SERVED_BUCKET`], so
+/// the map has a hard ceiling of seven entries and cannot drift out of sync
+/// with the scope map (it *is* the scope map).
 pub struct QueryLog {
     started_at: DateTime<Utc>,
     served: AtomicU64,
@@ -109,6 +128,7 @@ const BUCKETS: &[&str] = &[
     "read:files",
     "read:files:raw",
     UNMAPPED_BUCKET,
+    NOT_SERVED_BUCKET,
 ];
 
 impl Default for QueryLog {
@@ -252,10 +272,14 @@ pub async fn record_query(
     next: Next,
 ) -> Response {
     let path = request.uri().path().to_string();
+    // Exhaustive on purpose — no wildcard arm. A new `RouteAuth` variant must
+    // fail to COMPILE here rather than being silently lumped in with an
+    // existing bucket; that is how SCR-288's `NotServed` was caught.
     let bucket = match route_auth(&path) {
         RouteAuth::Public => return next.run(request).await,
         RouteAuth::Scoped(scope) => scope,
         RouteAuth::Unmapped => UNMAPPED_BUCKET,
+        RouteAuth::NotServed => NOT_SERVED_BUCKET,
     };
     // Read before the request is consumed by the inner service.
     let digest = bearer(&request).map(digest_prefix);
@@ -333,6 +357,41 @@ mod tests {
         }
     }
 
+    /// The hosted-only surface (SCR-288) is logged, but under its own key.
+    ///
+    /// Pins both halves of the decision, because each fails a different way. If
+    /// these routes were skipped like [`RouteAuth::Public`], an anonymous probe
+    /// of `/pipes` in the M1 posture would leave no durable trace. If they were
+    /// folded into a `read:*` bucket, a 501 that serves no content would inflate
+    /// the counter the acceptance run reads as its positive control for "the
+    /// archive WAS queried".
+    #[test]
+    fn the_hosted_only_surface_is_logged_but_never_as_an_archive_read() {
+        for path in crate::auth::NOT_SERVED_ROUTES {
+            assert_eq!(
+                route_auth(path),
+                RouteAuth::NotServed,
+                "{path} is in NOT_SERVED_ROUTES but no longer classifies as NotServed"
+            );
+        }
+        let log = QueryLog::new();
+        // A 501 is not a success, so the middleware records it as denied.
+        log.record(NOT_SERVED_BUCKET, false);
+        let snap = log.snapshot();
+        assert_eq!(snap["by_scope"][NOT_SERVED_BUCKET]["denied"], 1);
+        assert_eq!(snap["queries_served"], 0, "a 501 is not an archive read");
+        for scope in ["read:devices", "read:search", "read:records", "read:files"] {
+            assert_eq!(
+                snap["by_scope"][scope]["served"], 0,
+                "the hosted-only surface must not touch {scope}: {snap}"
+            );
+        }
+        assert!(
+            BUCKETS.contains(&NOT_SERVED_BUCKET),
+            "the bucket must be pre-allocated, or `record` drops it"
+        );
+    }
+
     /// Denials must not read as served. This is the whole point of splitting
     /// the two counters: a run in which every query was refused must not be
     /// indistinguishable from a run that worked.
@@ -386,22 +445,51 @@ mod tests {
     /// binary is added, and a new binary is exactly how this would return. Note
     /// the needles live in THIS file, so they cannot match themselves inside the
     /// haystacks (the trap `main.rs`'s `boot_wiring` test documents).
+    ///
+    /// The binary list is DISCOVERED from `src/bin/`, not hardcoded. An earlier
+    /// version enumerated the two binaries that existed when it was written, and
+    /// SCR-288's `bin/policy_fixture.rs` then landed outside it — a guard whose
+    /// whole stated purpose is to fire when a binary is added, silently not
+    /// covering the next binary added. Discovery removes the hole rather than
+    /// re-listing it.
     #[test]
     fn no_binary_configures_tracing_by_hand() {
-        for (name, source) in [
-            ("main.rs", include_str!("main.rs")),
-            ("bin/seed.rs", include_str!("bin/seed.rs")),
-        ] {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut sources = vec![("main.rs".to_string(), src.join("main.rs"))];
+        for entry in std::fs::read_dir(src.join("bin")).expect("src/bin must exist") {
+            let path = entry.expect("readable dir entry").path();
+            if path.extension().is_some_and(|e| e == "rs") {
+                let name = format!("bin/{}", path.file_name().unwrap().to_string_lossy());
+                sources.push((name, path));
+            }
+        }
+        assert!(
+            sources.len() >= 3,
+            "expected main.rs + at least seed.rs and policy_fixture.rs, found {:?} — \
+             discovery is broken, which would make this guard vacuous",
+            sources.iter().map(|(n, _)| n).collect::<Vec<_>>()
+        );
+
+        for (name, path) in sources {
+            let source = std::fs::read_to_string(&path).expect("binary source is readable");
             assert!(
                 !source.contains("tracing_subscriber::fmt("),
                 "{name} builds its own subscriber. Colour codes then go into the access log, \
                  where they break `grep token_digest_prefix=…` — call \
                  screenpipe_gateway::init_tracing() instead"
             );
-            assert!(
-                source.contains("init_tracing()"),
-                "{name} installs no subscriber at all, so the access log goes nowhere"
-            );
+            // Only binaries that actually emit through `tracing` need a
+            // subscriber. `bin/policy_fixture.rs` is a build-time fixture minter
+            // that reports through println!/eprintln! and serves no requests, so
+            // requiring init_tracing() of it would be cargo-culting rather than
+            // protecting anything.
+            if source.contains("tracing::") {
+                assert!(
+                    source.contains("init_tracing()"),
+                    "{name} logs through tracing but installs no subscriber, \
+                     so its access log goes nowhere"
+                );
+            }
         }
     }
 
