@@ -1824,7 +1824,8 @@ def execute_run(
         "measured": measured,
         "expected_architecture": expected_architecture,
         "verification_plan": {
-            gate: redact_command(command) for gate, command in (verification_plan or {}).items()
+            gate: {"configured": True, "argument_count": len(command)}
+            for gate, command in (verification_plan or {}).items()
         },
         "measurement_availability": {
             "install_wall_time": "measured",

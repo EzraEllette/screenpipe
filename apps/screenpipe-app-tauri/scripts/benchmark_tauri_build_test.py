@@ -151,6 +151,78 @@ class RedactionTests(unittest.TestCase):
 
 
 class ScenarioTests(unittest.TestCase):
+    def test_manifest_omits_external_verifier_paths_from_complete_verification_plan(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            external = root / "external-private-root"
+            external.mkdir()
+            external_files = {
+                "verifier": external / "private-verifier-binary",
+                "plain": external / "plain-private-input.json",
+                "split": external / "split-private-input.json",
+                "equals": external / "equals-private-input.json",
+                "response": external / "response-private-input.rsp",
+            }
+            for path in external_files.values():
+                path.write_text(path.name, encoding="utf-8")
+            output = root / "benchmark-output"
+
+            def create_fake_worktree(_repo, paths, _commit):
+                paths.worktree.mkdir(parents=True)
+
+            with mock.patch.object(benchmark, "resolve_revision", return_value="a" * 40), mock.patch.object(
+                benchmark, "create_worktree", side_effect=create_fake_worktree
+            ), mock.patch.object(
+                benchmark, "machine_metadata", return_value={"machine_id": "machine"}
+            ), mock.patch.object(
+                benchmark,
+                "effective_config_metadata",
+                return_value={"merged_tauri_config": {}},
+            ), mock.patch.object(
+                benchmark, "source_state", return_value={}
+            ), mock.patch.object(
+                benchmark, "toolchain_metadata", return_value={}
+            ), mock.patch.object(
+                benchmark, "all_storage_snapshots", return_value={}
+            ), mock.patch.object(
+                benchmark, "write_summary"
+            ):
+                benchmark.execute_run(
+                    repo=root / "repo",
+                    output=output,
+                    scenario="F1",
+                    variant="candidate",
+                    revision="HEAD",
+                    repetition=1,
+                    enable_sccache=False,
+                    release_args=[],
+                    override_command=None,
+                    dry_run=True,
+                    verification_plan={
+                        "isolated_launch": [
+                            str(external_files["verifier"]),
+                            str(external_files["plain"]),
+                            "--fixture",
+                            str(external_files["split"]),
+                            f"--config={external_files['equals']}",
+                            f"@{external_files['response']}",
+                        ]
+                    },
+                )
+
+            manifest_path = output / "runs" / "F1-C-01" / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            persisted = json.dumps(manifest, sort_keys=True)
+
+            self.assertEqual(
+                manifest["verification_plan"]["isolated_launch"],
+                {"argument_count": 6, "configured": True},
+            )
+            self.assertNotIn(str(external), persisted)
+            self.assertNotIn(external.name, persisted)
+            for path in external_files.values():
+                self.assertNotIn(path.name, persisted)
+
     def test_comparison_pins_unchanged_origin_main_as_baseline(self):
         with mock.patch.object(
             benchmark,
