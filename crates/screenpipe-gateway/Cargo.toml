@@ -20,6 +20,13 @@ path = "src/main.rs"
 name = "screenpipe-gateway-seed"
 path = "src/bin/seed.rs"
 
+[[bin]]
+# Mints the fixture-signed policy that turns bearer auth ON in the compose e2e
+# (SCR-288). Never shipped to customers; production policies are signed by the
+# website control plane and this gateway only ever verifies.
+name = "screenpipe-gateway-policy-fixture"
+path = "src/bin/policy_fixture.rs"
+
 [dependencies]
 async-trait = { workspace = true }
 axum = { workspace = true }

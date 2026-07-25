@@ -27,10 +27,18 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --no-create-home screenpipe \
     # Default data dir, owned by the service user so a fresh named volume
-    # (which inherits the image directory's ownership) is writable.
-    && mkdir -p /data && chown screenpipe /data
+    # (which inherits the image directory's ownership) is writable. /policy is
+    # the same story for the e2e's fixture-signed policy (SCR-288): a named
+    # volume mounted at a path the image does not have would be created owned by
+    # root, and the policy-fixture bin runs as `screenpipe`.
+    && mkdir -p /data /policy && chown screenpipe /data /policy
 COPY --from=builder /src/target/release/screenpipe-gateway /usr/local/bin/screenpipe-gateway
 COPY --from=builder /src/target/release/screenpipe-gateway-seed /usr/local/bin/screenpipe-gateway-seed
+# Mints the fixture-signed policy that turns bearer auth ON in the compose e2e
+# (SCR-288). Test-only, like the seeder; both are in the image because the e2e
+# runs them AS this image with a different entrypoint rather than building a
+# second one.
+COPY --from=builder /src/target/release/screenpipe-gateway-policy-fixture /usr/local/bin/screenpipe-gateway-policy-fixture
 USER screenpipe
 EXPOSE 3040
 ENTRYPOINT ["screenpipe-gateway"]
