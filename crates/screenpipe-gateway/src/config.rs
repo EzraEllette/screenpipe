@@ -97,6 +97,21 @@ pub const DEFAULT_POLICY_REFRESH_SECONDS: u64 = 300;
 pub const DEFAULT_HEARTBEAT_SECONDS: u64 = 60;
 /// Floor on the heartbeat cadence. `tokio::time::interval` panics on a zero
 /// period, so `SCREENPIPE_GATEWAY_HEARTBEAT_SECONDS=0` must not reach it.
+///
+/// Deliberately 1s, and deliberately NOT the 30s
+/// [`crate::control_plane::MIN_POLICY_REFRESH_SECONDS`] floor — the asymmetry is
+/// a decision, not an oversight. The 1s value exists so the real-binary
+/// integration test can observe several beats without sleeping for minutes.
+/// The load it permits is not symmetric with the policy floor's: the policy
+/// endpoint does an Ed25519 sign plus a Supabase query per request, so a fleet
+/// refreshing 10× too often multiplies work on the signing path, whereas
+/// `POST /api/enterprise/gateway/heartbeat` is one authenticated row update.
+/// It is still one row update PER SECOND PER GATEWAY at the floor, against a
+/// route with no rate limit — so this knob is self-inflicted load an operator
+/// can aim at their own control plane. It is not customer-reachable (it is a
+/// gateway-side env var on the customer's own container) and the remedy is to
+/// unset it, which is why the floor is left where the test needs it rather
+/// than raised to a value the test cannot use.
 pub const MIN_HEARTBEAT_SECONDS: u64 = 1;
 /// Default ingest poll cadence.
 pub const DEFAULT_POLL_SECONDS: u64 = 30;
