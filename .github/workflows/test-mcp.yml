@@ -64,24 +64,7 @@ jobs:
       - name: Pack contents include the gateway config module
         # npm 0.18.15 shipped with NO team-config in the tarball, so every
         # `team-*` tool 401'd against a customer gateway. The version bump alone
-        # does not prove the artifact is right — assert the file list does.
-        # `npm pack --dry-run` writes nothing and needs no registry auth.
-        run: |
-          npm pack --dry-run --json > /tmp/pack.json
-          node -e '
-            const files = require("/tmp/pack.json")[0].files.map(f => f.path);
-            const required = [
-              "package.json",
-              "dist/cli.js",
-              "dist/index.js",
-              "dist/team-config.js",
-              "dist/version.js",
-            ];
-            const missing = required.filter(f => !files.includes(f));
-            if (missing.length) {
-              console.error("missing from npm tarball: " + missing.join(", "));
-              console.error("packed " + files.length + " files");
-              process.exit(1);
-            }
-            console.log("pack contents OK (" + files.length + " files)");
-          '
+        # does not prove the artifact is right — the file list and the built
+        # bytes do. Same script `release-mcp.yml` runs immediately before
+        # `npm publish`, so the PR gate and the release gate cannot drift.
+        run: npm run verify:pack

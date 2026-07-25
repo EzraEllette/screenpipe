@@ -27,6 +27,12 @@ this MCP from source.
   `src/version.ts`.
 - README documents the whole knob, including which install paths cannot reach a
   gateway yet.
+- The release path now inspects its own artifact. `scripts/assert-pack-contents.js`
+  (`npm run verify:pack`) runs in the step before `npm publish` and fails the
+  release if the tarball is missing `dist/team-config.js` / `dist/version.js`, if
+  a built file lost the override strings, or if the team API base is a hardcoded
+  literal again — the exact shape of the 0.18.15 artifact. The `.mcpb` bundle gets
+  the same treatment right after `mcpb pack`.
 
 **Why 0.19.0 and not 0.18.16.** npm's `0.18.15` was built from a tree that
 predated `src/team-config.ts`, and nobody bumped `package.json`, so the registry
@@ -80,7 +86,14 @@ in the README):
    bun run typecheck
    bun run build
    bun run test
+   npm run verify:pack   # what the tarball would actually contain
    ```
+   `verify:pack` is the same gate `release-mcp.yml` runs in the step immediately
+   before `npm publish`, so a green run there means the artifact was checked, not
+   assumed. It fails if `dist/team-config.js` / `dist/version.js` are missing from
+   the pack list, if a built file lost `SCREENPIPE_TEAM_API_URL` / `--team-api-url`,
+   or if the team API base is back to a hardcoded literal. `npm pack --dry-run`
+   writes nothing and needs no npm auth, so it is safe to run anywhere.
 
 ## Publishing
 
@@ -126,11 +139,18 @@ curl -sSL https://registry.npmjs.org/screenpipe-mcp/-/screenpipe-mcp-$VER.tgz \
   | tar -xzO package/dist/index.js | grep 'TEAM_API = "https' \
   && echo "REGRESSION: hardcoded base" || echo "ok — base is resolved, not hardcoded"
 
-# 5. the .mcpb bundle attached to the GitHub release contains it too
-#    (mcpb pack contents have never been verified — do this once)
+# 5. the .mcpb bundle attached to the GitHub release contains it too.
+#    The run now gates on this itself ("Verify the mcpb bundle carries the
+#    gateway knob") and prints the full `unzip -l` listing, so read that step's
+#    log for the definitive answer. Independent confirmation from the artifact:
 gh release download mcp-v$VER -R screenpipe/screenpipe -p '*.mcpb' -D /tmp
 unzip -l /tmp/screenpipe-mcp.mcpb | grep team-config
 ```
+
+Checks 3–5 duplicate gates the release run already enforces (`verify:pack` before
+`npm publish`, and the mcpb grep after `mcpb pack`). Run them anyway the first
+time: they are the only ones that inspect what the **registry** actually serves
+rather than what CI built.
 
 End-to-end against a real gateway:
 
