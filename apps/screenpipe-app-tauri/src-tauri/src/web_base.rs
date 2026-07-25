@@ -60,9 +60,6 @@ mod tests {
             screenpipe_web_url("/api/enterprise/ingest"),
             format!("{base}/api/enterprise/ingest")
         );
-        assert_eq!(
-            screenpipe_web_url("login"),
-            format!("{base}/login")
-        );
+        assert_eq!(screenpipe_web_url("login"), format!("{base}/login"));
     }
 }

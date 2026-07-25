@@ -247,10 +247,7 @@ async fn fetch_desired_mode_from_server(
     ingest_url: &str,
 ) -> Result<ServerModeHint, EnterpriseSyncError> {
     let endpoint = sibling_enterprise_endpoint(ingest_url, "storage-binding/mode");
-    let client = reqwest::Client::builder()
-        .timeout(MODE_RESOLVE_TIMEOUT)
-        .build()
-        .map_err(|e| EnterpriseSyncError::Network(e.to_string()))?;
+    let client = super::enterprise_http_client_with_timeout(MODE_RESOLVE_TIMEOUT);
     let resp = client
         .get(&endpoint)
         .header("x-license-key", license_key)
@@ -525,6 +522,43 @@ mod tests {
         assert_eq!(
             parse_server_mode_hint("direct_upload_readable").unwrap(),
             ServerModeHint::DirectUploadReadable
+        );
+    }
+
+    #[tokio::test]
+    async fn mode_resolve_never_forwards_license_headers_across_redirects() {
+        let source = wiremock::MockServer::start().await;
+        let target = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(
+                "/api/enterprise/storage-binding/mode",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(302)
+                    .insert_header("Location", format!("{}/stolen", target.uri())),
+            )
+            .expect(1)
+            .mount(&source)
+            .await;
+        // Catch-all: the target must never be touched at all.
+        wiremock::Mock::given(wiremock::matchers::any())
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "desired_mode": "direct_upload_readable" })),
+            )
+            .expect(0)
+            .mount(&target)
+            .await;
+
+        let err = fetch_desired_mode_from_server(
+            "sek_test",
+            &format!("{}/api/enterprise/ingest", source.uri()),
+        )
+        .await
+        .expect_err("a 3xx from the mode endpoint must surface as an error, not be followed");
+        assert!(
+            format!("{err:?}").contains("302"),
+            "expected the 302 to be surfaced verbatim, got {err:?}"
         );
     }
 
