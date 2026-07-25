@@ -64,6 +64,37 @@ jobs:
       - name: Set up sccache
         uses: mozilla-actions/sccache-action@v0.0.9
 
+      - name: Compute target-layer compatibility key
+        id: target-key
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            rustc -Vv
+            xcodebuild -version
+            sw_vers -productVersion
+            git ls-files -z \
+              '**/Cargo.toml' \
+              '**/Cargo.lock' \
+              '.cargo/**' \
+              'rust-toolchain*' \
+              '**/build.rs' \
+              'apps/screenpipe-app-tauri/src-tauri/tauri*.json' \
+              | xargs -0 shasum -a 256
+            printf '%s\n' 'profile=dev' 'features=e2e' 'incremental=0'
+          } > "$RUNNER_TEMP/target-layer-inputs.txt"
+          digest="$(shasum -a 256 "$RUNNER_TEMP/target-layer-inputs.txt" | awk '{print $1}')"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Restore complete Cargo target layer
+        id: target-cache
+        uses: actions/cache@v4
+        with:
+          path: apps/screenpipe-app-tauri/src-tauri/target
+          key: tauri-dev-target-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.target-key.outputs.digest }}-${{ github.sha }}
+          restore-keys: |
+            tauri-dev-target-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.target-key.outputs.digest }}-
+
       - name: Cache native sidecars
         uses: actions/cache@v4
         with:
@@ -105,11 +136,12 @@ jobs:
           brew list pkg-config >/dev/null 2>&1 || brew install pkg-config
           /usr/bin/time -lp bun install --frozen-lockfile 2>&1 | tee "$RUNNER_TEMP/bun-install.log"
 
-      - name: Verify fresh target and reset compiler statistics
+      - name: Inspect target layer and reset compiler statistics
         working-directory: apps/screenpipe-app-tauri
         run: |
           set -euo pipefail
-          test ! -e src-tauri/target
+          echo "target_cache_hit=${{ steps.target-cache.outputs.cache-hit }}"
+          du -sh src-tauri/target 2>/dev/null || true
           sccache --zero-stats
           sccache --show-stats
 
@@ -171,9 +203,10 @@ jobs:
             echo "- Build wall time: \`${{ steps.build.outputs.elapsed_seconds || 'not-produced' }} seconds\`"
             echo "- Target bytes: \`${{ steps.build.outputs.target_bytes || 'not-produced' }}\`"
             echo "- Debug binary bytes: \`${{ steps.build.outputs.binary_bytes || 'not-produced' }}\`"
-            echo "- Semantics: empty local target; reusable GitHub Actions sccache, frontend, and sidecar caches"
+            echo "- Complete target-layer exact hit: \`${{ steps.target-cache.outputs.cache-hit }}\`"
+            echo "- Semantics: compatible complete target layer when available, plus reusable sccache, frontend, and sidecar caches"
             echo "- The repository's member Cargo.lock was stale on the first run; this temporary metric allows Cargo to resolve it and retains the resulting lockfile diff/hash as evidence."
-            echo "- This is a CI developer-cold metric, not the harness's authoritative same-machine baseline/candidate comparison."
+            echo "- This tests a prewarmed ephemeral task environment, not a hermetic cold build or the harness's authoritative baseline/candidate comparison."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload benchmark evidence
@@ -185,6 +218,7 @@ jobs:
           retention-days: 14
           path: |
             machine.txt
+            ${{ runner.temp }}/target-layer-inputs.txt
             ${{ runner.temp }}/bun-install.log
             ${{ runner.temp }}/tauri-build.log
             ${{ runner.temp }}/build-metrics.env
