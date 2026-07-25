@@ -223,7 +223,7 @@ Each run lives under `OUTPUT/runs/<run-id>/`:
 
 All JSON objects currently use `schema: 1`. Important stable fields are:
 
-- `manifest.json`: `run_id`, `scenario`, `variant`, `revision`, resolved `commit`, command-derived `expected_profile`, `machine`, redacted `environment`, isolated `paths`, redacted build and verification commands, `dry_run`, `measured`, `expected_architecture`, and `measurement_availability`;
+- `manifest.json`: `run_id`, `scenario`, `variant`, `revision`, resolved `commit`, command-derived `expected_profile`, `machine`, redacted `environment`, isolated `paths`, redacted build commands, safe verification-plan configuration metadata (`configured` and `argument_count`, without verifier command or path strings), `dry_run`, `measured`, `expected_architecture`, and `measurement_availability`;
 - `result.json`: every manifest field plus `stages`, `cargo_timing_files`, `correctness`, `success`, and `completed_utc` for executed runs;
 - each `artifacts/timings.jsonl` record: `run_id`, `scenario`, `variant`, `commit`, `machine_id`, `stage`, redacted `command`, UTC bounds, `elapsed_ms`, nullable resource counters, `max_rss_bytes`, `peak_target_bytes`, `peak_disk_bytes`, `exit_code`, and explanatory `notes`;
 - `summary.csv`: one row per measured run with identity fields, `total_ms`, bounded stage columns, `warmup_ms`, `build_ms`, `incremental_ms`, nullable `peak_rss_bytes`, `peak_disk_bytes`, and aggregate `exit_code`;
