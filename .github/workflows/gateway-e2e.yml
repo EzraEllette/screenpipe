@@ -24,6 +24,10 @@ on:
       # src/ on purpose: a README or version-only edit does not need a
       # docker-compose + cargo build.
       - "packages/screenpipe-mcp/src/**"
+      # Already covered by crates/screenpipe-gateway/**, listed for clarity: the
+      # conformance suite and its fixtures live under e2e/conformance/ and a
+      # change to either must re-run the job that executes them.
+      - "crates/screenpipe-gateway/e2e/**"
       - ".github/workflows/gateway-e2e.yml"
 
 concurrency:
@@ -48,8 +52,14 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-      # bun builds packages/screenpipe-mcp for the MCP-client step; node
-      # runs it (both present → step runs, else run.sh skips it).
+      # bun builds packages/screenpipe-mcp for the MCP-client step and runs the
+      # OpenAPI conformance suite (SCR-288); node runs the MCP client. run.sh
+      # skips each step if its tool is missing rather than failing.
       - uses: oven-sh/setup-bun@v2
-      - name: compose e2e (MinIO + two synthetic devices + gateway + MCP client)
+      # Two postures now (SCR-288): the unauthenticated M1 stack, then the same
+      # image restarted with a fixture-signed policy so the conformance auth
+      # matrix has something to assert 401/403 against. Measured increment over
+      # the previous 3m57s job: ~70s, because the container is already built and
+      # the second posture restarts it rather than building another.
+      - name: compose e2e (MinIO + devices + gateway + MCP + OpenAPI conformance + auth matrix)
         run: ./crates/screenpipe-gateway/e2e/run.sh

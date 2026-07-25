@@ -108,6 +108,23 @@ fn batch_for(device: &Device) -> Vec<u8> {
     )
 }
 
+/// One org-wide daily rollup, byte-identical to the conformance fixture.
+///
+/// Seeded so the gateway's `/v1/rollups` route has real coverage in the e2e and
+/// in the conformance suite — before this, MinIO had no `rollups/` prefix at
+/// all, so the route only ever returned an empty list and the suite could not
+/// compare it against the hosted target for anything but emptiness.
+const ROLLUP_DAY: &str = "2026-07-22";
+
+fn rollup_body() -> Vec<u8> {
+    // Written as a literal rather than serialized from a struct: this IS the
+    // fixture, and the fixture-parity test compares bytes.
+    // br##..##: the body contains `"#` (the "#eng" window name), which would
+    // close a single-hash raw string.
+    br##"{"day":"2026-07-22","records":10,"devices":["dev-alice","dev-bob"],"apps":{"Arc":6,"Slack":2},"top_windows":["quarterly planning","#eng"],"speakers":["presenter"],"active_hours":[9,10]}"##
+        .to_vec()
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt().init();
@@ -139,6 +156,78 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         source.put_for_tests(&key, body).await?;
         println!("seeded {key}");
     }
-    println!("seed complete: {} devices", DEVICES.len());
+    // Org-wide rollup, at the key /v1/rollups lists.
+    let rollup_key = format!("rollups/{}/org/{ROLLUP_DAY}.json", cfg.license_id);
+    source.put_for_tests(&rollup_key, rollup_body()).await?;
+    println!("seeded {rollup_key}");
+
+    println!("seed complete: {} devices + 1 rollup", DEVICES.len());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// FIXTURE PARITY (SCR-288). The conformance suite drives the HOSTED target
+    /// from checked-in JSONL fixtures and the GATEWAY target from this seeder,
+    /// so the two only compare like with like while the bytes match. Without
+    /// this test a wire-format change desyncs them silently and the failure
+    /// surfaces as a baffling value mismatch three files away instead of
+    /// "the fixtures are stale".
+    ///
+    /// Regenerate with:
+    ///   cargo test -p screenpipe-gateway --bin screenpipe-gateway-seed \
+    ///     fixtures -- --nocapture --ignored
+    #[test]
+    fn batches_match_the_checked_in_conformance_fixtures() {
+        for device in DEVICES {
+            let path = format!(
+                "{}/e2e/conformance/fixtures/batch-{}.jsonl",
+                env!("CARGO_MANIFEST_DIR"),
+                device.id
+            );
+            let want = std::fs::read(&path).unwrap_or_else(|e| {
+                panic!("missing conformance fixture {path}: {e} — regenerate it (see this test's docs)")
+            });
+            let got = batch_for(device);
+            assert_eq!(
+                String::from_utf8_lossy(&got),
+                String::from_utf8_lossy(&want),
+                "seed.rs::batch_for({}) no longer matches {path}. Either the wire \
+                 format changed (regenerate the fixture AND re-vendor it into the \
+                 website repo's conformance/fixtures/) or the seeder drifted.",
+                device.id
+            );
+        }
+    }
+
+    #[test]
+    fn rollup_matches_the_checked_in_conformance_fixture() {
+        let path = format!(
+            "{}/e2e/conformance/fixtures/rollup-org-{ROLLUP_DAY}.json",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let want = std::fs::read(&path).unwrap_or_else(|e| panic!("missing {path}: {e}"));
+        assert_eq!(
+            String::from_utf8_lossy(&rollup_body()),
+            String::from_utf8_lossy(&want)
+        );
+    }
+
+    /// Not a test — the generator. `--ignored` so it never runs in CI.
+    #[test]
+    #[ignore]
+    fn print_fixtures() {
+        let dir = format!("{}/e2e/conformance/fixtures", env!("CARGO_MANIFEST_DIR"));
+        std::fs::create_dir_all(&dir).unwrap();
+        for device in DEVICES {
+            let path = format!("{dir}/batch-{}.jsonl", device.id);
+            std::fs::write(&path, batch_for(device)).unwrap();
+            println!("wrote {path}");
+        }
+        let path = format!("{dir}/rollup-org-{ROLLUP_DAY}.json");
+        std::fs::write(&path, rollup_body()).unwrap();
+        println!("wrote {path}");
+    }
 }
