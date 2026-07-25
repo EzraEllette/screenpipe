@@ -27,6 +27,7 @@ import signal
 import statistics
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import tomllib
@@ -35,6 +36,17 @@ from typing import Any, Iterable, Mapping, NamedTuple, Protocol, Sequence
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 SCENARIOS = ("H0", "F1", "W1", "P1")
+RUNTIME_VERIFICATION_GATES = (
+    "isolated_launch",
+    "production_data_untouched",
+)
+P1_VERIFICATION_GATES = ("platform_signature", "updater_artifacts")
+VERIFICATION_CHECKS = {
+    "isolated_launch": ("artifact_launched", "isolated_data_dir", "readiness_reached"),
+    "production_data_untouched": ("production_data_unchanged", "production_port_untouched"),
+    "platform_signature": ("signature_valid",),
+    "updater_artifacts": ("updater_artifact_exists", "updater_signature_valid"),
+}
 APP_RELATIVE = Path("apps/screenpipe-app-tauri")
 SECRET_NAME = re.compile(
     r"(?:TOKEN|SECRET|PASSWORD|PASSWD|PRIVATE|CREDENTIAL|COOKIE|AUTH|SIGNING|KEY(?:_PATH|FILE)?$|DATABASE_URL)",
@@ -44,7 +56,7 @@ RELEVANT_ENV = re.compile(
     r"^(?:CARGO|RUST|RUSTUP|BUN|NODE|NEXT|TAURI|SCREENPIPE|SHIP_SOURCE_MAPS|CC|CXX|AR|LD|CMAKE|NINJA|MACOSX|SDKROOT|DEVELOPER_DIR|TMPDIR|PATH)(?:_|$)",
     re.IGNORECASE,
 )
-PROFILE_BY_SCENARIO = {"H0": "dev", "F1": "dev", "W1": "dev", "P1": "release"}
+
 
 
 class ScenarioPaths(NamedTuple):
@@ -221,6 +233,8 @@ def scenario_environment(
             "BUN_INSTALL_CACHE_DIR": str(paths.cache_root / "bun-install"),
             "SCREENPIPE_NATIVE_CACHE_DIR": str(paths.cache_root / "native"),
             "SCREENPIPE_FRONTEND_CACHE_DIR": str(paths.cache_root / "frontend"),
+            "SCREENPIPE_BENCHMARK_RUN_ROOT": str(paths.run_root),
+            "SCREENPIPE_BENCHMARK_DATA_DIR": str(paths.run_root / "verification-data"),
             "TMPDIR": str(paths.run_root / "tmp"),
         }
     )
@@ -242,6 +256,36 @@ def build_command(scenario: str, release_args: Sequence[str] | None = None) -> l
     if scenario == "P1":
         return ["bun", "tauri", "build", "--", *cargo_args]
     raise ValueError(f"unknown scenario: {scenario}")
+
+
+def command_option(arguments: Sequence[str], name: str) -> str | None:
+    for index, argument in enumerate(arguments):
+        if argument == name and index + 1 < len(arguments):
+            return arguments[index + 1]
+        if argument.startswith(name + "="):
+            return argument.split("=", 1)[1]
+    return None
+
+
+def command_metadata(command: Sequence[str]) -> dict[str, Any]:
+    delimiter = command.index("--") if "--" in command else len(command)
+    tauri_arguments = command[:delimiter]
+    cargo_arguments = command[delimiter + 1 :] if delimiter < len(command) else []
+    profile = command_option(cargo_arguments, "--profile")
+    if profile is None:
+        profile = "dev" if "--debug" in tauri_arguments else "release"
+    config_overrides: list[str] = []
+    for index, argument in enumerate(tauri_arguments):
+        if argument == "--config" and index + 1 < len(tauri_arguments):
+            config_overrides.append(tauri_arguments[index + 1])
+        elif argument.startswith("--config="):
+            config_overrides.append(argument.split("=", 1)[1])
+    return {
+        "profile": profile,
+        "target": command_option(cargo_arguments, "--target")
+        or command_option(tauri_arguments, "--target"),
+        "config_overrides": config_overrides,
+    }
 
 
 def comparison_schedule(runs: int) -> list[tuple[str, int]]:
@@ -470,6 +514,8 @@ def process_tree_rss(root_pid: int) -> int | None:
             }
         except (OSError, ValueError, subprocess.TimeoutExpired):
             return None
+    if root_pid not in processes:
+        return None
     descendants = {root_pid}
     changed = True
     while changed:
@@ -683,6 +729,99 @@ def run_capture(command: Sequence[str], cwd: Path, env: Mapping[str, str] | None
         }
 
 
+def run_verification_plan(
+    plan: Mapping[str, Sequence[str]],
+    cwd: Path,
+    env: Mapping[str, str],
+) -> dict[str, dict[str, Any]]:
+    records: dict[str, dict[str, Any]] = {}
+    for gate, command in plan.items():
+        executable_candidate = Path(command[0])
+        if executable_candidate.is_absolute():
+            executable_path = executable_candidate.resolve()
+        elif len(executable_candidate.parts) > 1:
+            executable_path = (cwd / executable_candidate).resolve()
+        else:
+            resolved_executable = shutil.which(command[0], path=env.get("PATH"))
+            executable_path = Path(resolved_executable).resolve() if resolved_executable else None
+        roots = [
+            ("<worktree>", cwd.resolve()),
+            *(
+                [("<target>", Path(env["CARGO_TARGET_DIR"]).resolve())]
+                if env.get("CARGO_TARGET_DIR")
+                else []
+            ),
+            *(
+                [("<run-root>", Path(env["SCREENPIPE_BENCHMARK_RUN_ROOT"]).resolve())]
+                if env.get("SCREENPIPE_BENCHMARK_RUN_ROOT")
+                else []
+            ),
+        ]
+
+        def redacted_path(path: Path) -> str:
+            for label, root in roots:
+                if path.is_relative_to(root):
+                    return str(Path(label) / path.relative_to(root))
+            return "<external-file>"
+
+        input_files: list[dict[str, Any]] = []
+        file_argument_paths: dict[int, tuple[str, str, str]] = {}
+        for index, argument in enumerate(command[1:], 1):
+            option_prefix = ""
+            candidate_argument = argument
+            if argument.startswith("-") and "=" in argument:
+                option, candidate_argument = argument.split("=", 1)
+                option_prefix = option + "="
+            elif argument.startswith("@"):
+                candidate_argument = argument[1:]
+                option_prefix = "@"
+            candidate = Path(candidate_argument)
+            if not candidate.is_absolute():
+                candidate = cwd / candidate
+            candidate = candidate.resolve()
+            if candidate.is_file():
+                displayed_path = redacted_path(candidate)
+                displayed_argument = option_prefix + displayed_path
+                file_argument_paths[index] = (str(candidate), displayed_path, displayed_argument)
+                input_files.append(
+                    {
+                        "argument_index": index,
+                        "path": displayed_path,
+                        "sha256": sha256_file(candidate),
+                    }
+                )
+        provenance = {
+            "collected_before_execution": True,
+            "executable": redacted_path(executable_path) if executable_path else None,
+            "executable_sha256": sha256_file(executable_path)
+            if executable_path is not None and executable_path.is_file()
+            else None,
+            "input_files": input_files,
+        }
+        record = run_capture(command, cwd, env)
+        persisted_command = redact_command(command)
+        if executable_path is not None:
+            displayed_executable = redacted_path(executable_path)
+            persisted_command[0] = displayed_executable
+            for field in ("stdout", "stderr", "error"):
+                if isinstance(record.get(field), str):
+                    record[field] = record[field].replace(str(executable_path), displayed_executable).replace(
+                        command[0], displayed_executable
+                    )
+        for index, (absolute_path, displayed_path, displayed_argument) in file_argument_paths.items():
+            persisted_command[index] = displayed_argument
+            for field in ("stdout", "stderr", "error"):
+                if isinstance(record.get(field), str):
+                    record[field] = record[field].replace(absolute_path, displayed_path).replace(
+                        command[index], displayed_argument
+                    )
+        record["command"] = persisted_command
+        record["provenance"] = provenance
+        record["executed_by_harness"] = True
+        records[gate] = record
+    return records
+
+
 def resolve_revision(repo: Path, revision: str) -> str:
     result = subprocess.run(
         ["git", "rev-parse", "--verify", f"{revision}^{{commit}}"],
@@ -750,6 +889,7 @@ def prepare_directories(paths: ScenarioPaths) -> None:
         paths.cache_root / "native",
         paths.cache_root / "frontend",
         paths.run_root / "tmp",
+        paths.run_root / "verification-data",
         paths.artifacts,
     ):
         path.mkdir(parents=True, exist_ok=True)
@@ -781,7 +921,27 @@ def relevant_environment(env: Mapping[str, str]) -> dict[str, str]:
     return redact_mapping({name: value for name, value in env.items() if RELEVANT_ENV.match(name)})
 
 
-def effective_config_metadata(app: Path, selected_profile: str) -> dict[str, Any]:
+def merge_json(base: Any, override: Any) -> Any:
+    if not isinstance(base, Mapping) or not isinstance(override, Mapping):
+        return override
+    merged = dict(base)
+    for key, value in override.items():
+        if value is None:
+            merged.pop(key, None)
+        elif key in merged:
+            merged[key] = merge_json(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def effective_config_metadata(
+    app: Path,
+    selected_profile: str,
+    config_overrides: Sequence[str] = (),
+    *,
+    platform_name: str | None = None,
+) -> dict[str, Any]:
     cargo_manifest = app / "src-tauri" / "Cargo.toml"
     cargo_data = tomllib.loads(cargo_manifest.read_text(encoding="utf-8"))
     tauri_configs: dict[str, Any] = {}
@@ -795,6 +955,34 @@ def effective_config_metadata(app: Path, selected_profile: str) -> dict[str, Any
             tauri_configs[name] = redact_value(json.loads(path.read_text(encoding="utf-8")))
         except json.JSONDecodeError as error:
             tauri_configs[name] = {"parse_error": str(error)}
+    platform_key = platform_name or sys.platform
+    platform_config = {
+        "darwin": "src-tauri/tauri.macos.conf.json",
+        "linux": "src-tauri/tauri.linux.conf.json",
+        "win32": "src-tauri/tauri.windows.conf.json",
+    }.get(platform_key)
+    config_chain: list[str] = []
+    config_entries = ["src-tauri/tauri.conf.json", *config_overrides]
+    if platform_config and (app / platform_config).exists():
+        config_entries.append(platform_config)
+    merged_config: Any = {}
+    for config_entry in config_entries:
+        if config_entry.lstrip().startswith("{"):
+            parsed_config = json.loads(config_entry)
+            chain_name = "<inline-json>"
+        else:
+            config_path = Path(config_entry)
+            if not config_path.is_absolute():
+                config_path = app / config_path
+            parsed_config = json.loads(config_path.read_text(encoding="utf-8"))
+            try:
+                chain_name = str(config_path.relative_to(app))
+            except ValueError:
+                chain_name = str(config_path)
+            hashes[chain_name] = sha256_file(config_path)
+            tauri_configs.setdefault(config_path.name, redact_value(parsed_config))
+        config_chain.append(chain_name)
+        merged_config = merge_json(merged_config, parsed_config)
     for relative in (Path("bun.lock"), Path("package.json"), Path("src-tauri/Cargo.lock")):
         path = app / relative
         if path.exists():
@@ -803,7 +991,33 @@ def effective_config_metadata(app: Path, selected_profile: str) -> dict[str, Any
         "selected_profile": selected_profile,
         "cargo_profiles": redact_value(cargo_data.get("profile", {})),
         "tauri_configs": tauri_configs,
+        "config_chain": config_chain,
+        "merged_tauri_config": redact_value(merged_config),
         "input_hashes": hashes,
+    }
+
+
+def frontend_cache_validation(app: Path, env: Mapping[str, str]) -> dict[str, Any]:
+    marker_path = app / "out" / ".frontend-build-key"
+    marker = marker_path.read_text(encoding="utf-8").strip() if marker_path.is_file() else None
+    result = run_capture(
+        [
+            "bun",
+            "-e",
+            "import { computeInputHash } from './scripts/build-frontend.js'; "
+            "console.log(await computeInputHash())",
+        ],
+        app,
+        env,
+    )
+    current_input_hash = result.get("stdout") if result.get("exit_code") == 0 else None
+    if not isinstance(current_input_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", current_input_hash):
+        current_input_hash = None
+    return {
+        "marker": marker,
+        "current_input_hash": current_input_hash,
+        "matches_current_inputs": marker is not None and marker == current_input_hash,
+        "calculation": result,
     }
 
 
@@ -878,6 +1092,8 @@ def copy_cargo_timings(paths: ScenarioPaths) -> list[str]:
 def artifact_inventory(app: Path, target: Path) -> dict[str, Any]:
     candidates: list[tuple[int, Path]] = []
     bundle_directories: list[dict[str, Any]] = []
+    packaged_files: list[dict[str, Any]] = []
+    package_inspections: list[dict[str, Any]] = []
     interesting_suffixes = {".app", ".dmg", ".appimage", ".deb", ".msi", ".exe", ".sig", ".tar", ".gz"}
     if target.exists():
         for bundle in sorted(target.glob("*/bundle/**/*.app")):
@@ -887,6 +1103,8 @@ def artifact_inventory(app: Path, target: Path) -> dict[str, Any]:
             bundle_directories.append(
                 {
                     "path": str(bundle),
+                    "kind": "app",
+                    "sha256": sha256_tree(bundle),
                     "apparent_bytes": snapshot["apparent_bytes"],
                     "allocated_bytes": snapshot["allocated_bytes"],
                 }
@@ -919,10 +1137,116 @@ def artifact_inventory(app: Path, target: Path) -> dict[str, Any]:
             "bytes": size,
             "sha256": sha256_file(path) if size < 2 * 1024 * 1024 * 1024 else None,
             "architecture": file_architecture(path),
+            "role": artifact_role(path),
         }
         for size, path in candidates[:200]
     ]
-    return {"files": files, "bundles": bundle_directories, "sidecars": sidecar_inventory(app)}
+    known_bundles = {item["path"] for item in bundle_directories}
+    for item in files:
+        path = Path(item["path"])
+        if item["role"] != "production_bundle" or str(path) in known_bundles:
+            continue
+        kind = packaged_bundle_kind(path)
+        bundle_directories.append(
+            {
+                "path": str(path),
+                "kind": kind,
+                "sha256": item["sha256"],
+                "apparent_bytes": item["bytes"],
+                "allocated_bytes": path.stat().st_blocks * 512,
+            }
+        )
+        if kind in {"appimage", "nsis", "msi"}:
+            inspection = inspect_packaged_bundle(path, temporary_root=target.parent)
+            packaged_files.extend(inspection.pop("files"))
+            package_inspections.append(inspection)
+    return {
+        "files": files,
+        "bundles": bundle_directories,
+        "sidecars": sidecar_inventory(app),
+        "packaged_files": packaged_files,
+        "package_inspections": package_inspections,
+    }
+
+
+def artifact_role(path: Path) -> str | None:
+    lower_name = path.name.lower()
+    lower_parts = {part.lower() for part in path.parts}
+    if lower_name.endswith(".sig"):
+        return "updater_signature"
+    if lower_name.endswith((".tar.gz", ".tar", ".zip")) and "bundle" in lower_parts:
+        return "updater"
+    if packaged_bundle_kind(path) is not None:
+        return "production_bundle"
+    return None
+
+
+def packaged_bundle_kind(path: Path) -> str | None:
+    lower_name = path.name.lower()
+    lower_parts = {part.lower() for part in path.parts}
+    if lower_name.endswith(".appimage"):
+        return "appimage"
+    if lower_name.endswith(".msi"):
+        return "msi"
+    if lower_name.endswith(".exe") and "nsis" in lower_parts:
+        return "nsis"
+    if lower_name.endswith(".dmg"):
+        return "dmg"
+    if lower_name.endswith(".deb"):
+        return "deb"
+    return None
+
+
+def sha256_tree(root: Path) -> str:
+    digest = hashlib.sha256()
+    for path in sorted(item for item in root.rglob("*") if item.is_file()):
+        relative = str(path.relative_to(root)).encode()
+        digest.update(len(relative).to_bytes(8, "big"))
+        digest.update(relative)
+        digest.update(bytes.fromhex(sha256_file(path)))
+    return digest.hexdigest()
+
+
+def inspect_packaged_bundle(bundle: Path, *, temporary_root: Path | None = None) -> dict[str, Any]:
+    seven_zip = shutil.which("7zz") or shutil.which("7z")
+    record: dict[str, Any] = {
+        "bundle_path": str(bundle),
+        "bundle_sha256": sha256_file(bundle),
+        "format": packaged_bundle_kind(bundle),
+        "tool_sha256": sha256_file(Path(seven_zip)) if seven_zip else None,
+        "complete": False,
+        "files": [],
+    }
+    if seven_zip is None:
+        record["error"] = "7z/7zz is required to inspect packaged bundle contents"
+        return record
+    with tempfile.TemporaryDirectory(
+        prefix="screenpipe-package-inspection-", dir=temporary_root
+    ) as temporary:
+        result = subprocess.run(
+            [seven_zip, "x", "-y", f"-o{temporary}", str(bundle)],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+        record["exit_code"] = result.returncode
+        if result.returncode != 0:
+            record["error"] = redact_output(result.stderr.strip() or "package extraction failed", {})
+            return record
+        extracted = Path(temporary)
+        for path in sorted(item for item in extracted.rglob("*") if item.is_file()):
+            record["files"].append(
+                {
+                    "bundle_path": str(bundle),
+                    "path": str(path.relative_to(extracted)),
+                    "bytes": path.stat().st_size,
+                    "sha256": sha256_file(path),
+                    "architecture": file_architecture(path),
+                }
+            )
+        record["complete"] = True
+    return record
 
 
 def sidecar_inventory(app: Path) -> list[dict[str, Any]]:
@@ -942,6 +1266,8 @@ def sidecar_inventory(app: Path) -> list[dict[str, Any]]:
                 "path": str(path.relative_to(app)),
                 "apparent_bytes": snapshot["apparent_bytes"],
                 "allocated_bytes": snapshot["allocated_bytes"],
+                "sha256": sha256_file(path) if path.is_file() else None,
+                "architecture": file_architecture(path) if path.is_file() else None,
             }
         )
     entries.sort(key=lambda item: (-item["apparent_bytes"], item["path"]))
@@ -975,6 +1301,7 @@ def storage_roots(app: Path, paths: ScenarioPaths) -> dict[str, Path]:
         "next": app / ".next",
         "frontend_out": app / "out",
         "target": paths.target,
+        "cargo_home": paths.cache_root / "cargo-home",
         "cargo_registry_cache": paths.cache_root / "cargo-home" / "registry" / "cache",
         "cargo_registry_source": paths.cache_root / "cargo-home" / "registry" / "src",
         "cargo_registry_index": paths.cache_root / "cargo-home" / "registry" / "index",
@@ -982,12 +1309,79 @@ def storage_roots(app: Path, paths: ScenarioPaths) -> dict[str, Path]:
         "bun_cache": paths.cache_root / "bun-install",
         "native_cache": paths.cache_root / "native",
         "frontend_cache": paths.cache_root / "frontend",
+        "sccache": paths.cache_root / "sccache",
         "temp": paths.run_root / "tmp",
     }
 
 
 def all_storage_snapshots(app: Path, paths: ScenarioPaths) -> dict[str, Any]:
     return {name: storage_snapshot(path) for name, path in storage_roots(app, paths).items()}
+
+
+def sidecars_match_config(
+    artifacts: Mapping[str, Any],
+    effective_config: Mapping[str, Any],
+    expected_architecture: str | None,
+    scenario: str,
+) -> bool:
+    bundle = effective_config.get("bundle", {})
+    required = bundle.get("externalBin", []) if isinstance(bundle, Mapping) else []
+    if not isinstance(required, list) or not all(isinstance(name, str) for name in required):
+        return False
+    if scenario == "P1":
+        sidecars = [
+            item
+            for item in [*artifacts.get("files", []), *artifacts.get("packaged_files", [])]
+            if isinstance(item, Mapping)
+            and (
+                "bundle" in Path(str(item.get("path", ""))).parts
+                or isinstance(item.get("bundle_path"), str)
+            )
+            and Path(str(item.get("path", ""))).name not in {"screenpipe-app", "screenpipe-app.exe"}
+        ]
+        packaged_bundle_paths = {
+            str(item["bundle_path"])
+            for item in sidecars
+            if isinstance(item.get("bundle_path"), str)
+        }
+        inspections = [
+            item for item in artifacts.get("package_inspections", []) if isinstance(item, Mapping)
+        ]
+        if any(
+            len(
+                [
+                    inspection
+                    for inspection in inspections
+                    if inspection.get("bundle_path") == bundle_path
+                    and inspection.get("complete") is True
+                ]
+            )
+            != 1
+            for bundle_path in packaged_bundle_paths
+        ):
+            return False
+    else:
+        sidecars = [item for item in artifacts.get("sidecars", []) if isinstance(item, Mapping)]
+    expected_architectures = {expected_architecture} if expected_architecture else set()
+    if expected_architecture == "aarch64":
+        expected_architectures.add("arm64")
+    if expected_architecture == "arm64":
+        expected_architectures.add("aarch64")
+    expected_architectures.add("universal")
+    for required_name in required:
+        matches = [
+            sidecar
+            for sidecar in sidecars
+            if (name := Path(str(sidecar.get("path", ""))).name) == required_name
+            or name.startswith(required_name + "-")
+        ]
+        if not matches:
+            return False
+        if expected_architecture and not any(
+            sidecar.get("architecture") in expected_architectures for sidecar in matches
+        ):
+            return False
+    return True
 
 
 def correctness_checks(
@@ -998,14 +1392,18 @@ def correctness_checks(
     frontend_index_exists: bool,
     timing_files: Sequence[str],
     artifacts: Mapping[str, Any],
+    frontend_marker_exists: bool = False,
+    effective_config: Mapping[str, Any] | None = None,
+    expected_data_dir: Path | None = None,
     scenario: str = "F1",
     target: Path | None = None,
     expected_profile: str = "dev",
     expected_architecture: str | None = None,
-    p1_evidence: Mapping[str, Any] | None = None,
+    verification: Mapping[str, Any] | None = None,
 ) -> dict[str, bool]:
     binary_names = {"screenpipe-app", "screenpipe-app.exe"}
     artifact_files = [item for item in artifacts.get("files", []) if isinstance(item, Mapping)]
+    bundle_artifacts = [item for item in artifacts.get("bundles", []) if isinstance(item, Mapping)]
     binary_artifacts = [
         item for item in artifact_files if Path(str(item.get("path", ""))).name in binary_names
     ]
@@ -1031,35 +1429,174 @@ def correctness_checks(
             for item in binary_artifacts
         )
 
+    verification = verification or {}
+    effective_config = effective_config or {}
+    artifact_hashes = {
+        str(item.get("sha256"))
+        for item in [*artifact_files, *bundle_artifacts]
+        if isinstance(item.get("sha256"), str)
+    }
+
+    def exact_artifact_matches(
+        items: Sequence[Mapping[str, Any]], path: Any, sha256: Any, role: str | None = None
+    ) -> list[Mapping[str, Any]]:
+        if not isinstance(path, str) or not isinstance(sha256, str) or len(sha256) != 64:
+            return []
+        return [
+            item
+            for item in items
+            if item.get("path") == path
+            and item.get("sha256") == sha256
+            and (role is None or item.get("role") == role)
+        ]
+
+    def verification_payload(name: str) -> Mapping[str, Any]:
+        record = verification.get(name)
+        if not isinstance(record, Mapping):
+            return {}
+        try:
+            payload = json.loads(str(record.get("stdout", "")))
+        except json.JSONDecodeError:
+            return {}
+        return payload if isinstance(payload, Mapping) else {}
+
+    signature_payload = verification_payload("platform_signature")
+    signed_bundle_matches = exact_artifact_matches(
+        bundle_artifacts,
+        signature_payload.get("artifact_path"),
+        signature_payload.get("artifact_sha256"),
+    )
+
+    def gate_passed(name: str) -> bool:
+        record = verification.get(name)
+        provenance = record.get("provenance") if isinstance(record, Mapping) else None
+        if not (
+            isinstance(record, Mapping)
+            and record.get("executed_by_harness") is True
+            and isinstance(record.get("command"), list)
+            and record.get("exit_code") == 0
+            and isinstance(provenance, Mapping)
+            and provenance.get("collected_before_execution") is True
+            and isinstance(provenance.get("executable_sha256"), str)
+            and len(provenance["executable_sha256"]) == 64
+            and isinstance(provenance.get("input_files"), list)
+        ):
+            return False
+        try:
+            payload = json.loads(str(record.get("stdout", "")))
+        except json.JSONDecodeError:
+            return False
+        if not isinstance(payload, Mapping) or payload.get("gate") != name:
+            return False
+        if payload.get("artifact_sha256") not in artifact_hashes:
+            return False
+        checks = payload.get("checks")
+        if not isinstance(checks, Mapping) or not all(
+            checks.get(check) is True for check in VERIFICATION_CHECKS[name]
+        ):
+            return False
+        if name == "isolated_launch":
+            timeout = payload.get("timeout_seconds")
+            isolated_port = payload.get("isolated_port")
+            return (
+                expected_data_dir is not None
+                and payload.get("benchmark_data_dir") == str(expected_data_dir)
+                and isinstance(payload.get("readiness"), str)
+                and bool(payload["readiness"])
+                and isinstance(timeout, (int, float))
+                and not isinstance(timeout, bool)
+                and timeout > 0
+                and isinstance(isolated_port, int)
+                and not isinstance(isolated_port, bool)
+                and 0 < isolated_port < 65536
+            )
+        if name == "production_data_untouched":
+            before = payload.get("before_state_sha256")
+            after = payload.get("after_state_sha256")
+            production_data_dir = payload.get("production_data_dir")
+            production_port = payload.get("production_port")
+            return (
+                isinstance(before, str)
+                and len(before) == 64
+                and before == after
+                and isinstance(production_data_dir, str)
+                and Path(production_data_dir).is_absolute()
+                and (expected_data_dir is None or production_data_dir != str(expected_data_dir))
+                and isinstance(production_port, int)
+                and not isinstance(production_port, bool)
+                and 0 < production_port < 65536
+            )
+        if name == "platform_signature":
+            return (
+                len(signed_bundle_matches) == 1
+                and isinstance(payload.get("verification_output"), str)
+                and bool(payload["verification_output"])
+                and payload.get("bundle_identifier") == "screenpi.pe"
+                and payload.get("product_name") == "screenpipe"
+            )
+        if name == "updater_artifacts":
+            updater_matches = exact_artifact_matches(
+                artifact_files, payload.get("updater_path"), payload.get("updater_sha256"), "updater"
+            )
+            signature_matches = exact_artifact_matches(
+                artifact_files,
+                payload.get("signature_path"),
+                payload.get("signature_sha256"),
+                "updater_signature",
+            )
+            return (
+                len(updater_matches) == 1
+                and len(signature_matches) == 1
+                and payload.get("updater_path") != payload.get("signature_path")
+                and payload.get("updater_sha256") != payload.get("signature_sha256")
+            )
+        return True
+
+    try:
+        isolated_payload = json.loads(str(verification.get("isolated_launch", {}).get("stdout", "")))
+        production_payload = json.loads(
+            str(verification.get("production_data_untouched", {}).get("stdout", ""))
+        )
+    except (AttributeError, json.JSONDecodeError):
+        isolated_payload = {}
+        production_payload = {}
+
     checks = {
         "source_before_matches_commit": bool(source_before.get("matches_expected")),
         "source_before_clean": bool(source_before.get("clean")),
         "all_stages_exited_zero": bool(stages) and all(stage.get("exit_code") == 0 for stage in stages),
         "frontend_index_exists": frontend_index_exists,
+        "frontend_marker_matches_current_inputs": frontend_marker_exists,
         "cargo_timings_exist": bool(timing_files),
         "app_binary_exists": binary_exists,
         "expected_profile_artifact_exists": expected_profile_binary,
         "artifact_architecture_matches": architecture_matches,
         "source_after_matches_commit": bool(source_after.get("matches_expected")),
         "source_after_clean": bool(source_after.get("clean")),
+        "required_sidecars_verified": sidecars_match_config(
+            artifacts, effective_config, expected_architecture, scenario
+        ),
+        "isolated_launch_verified": gate_passed("isolated_launch"),
+        "production_data_untouched": gate_passed("production_data_untouched"),
+        "isolated_port_differs_from_production": isinstance(isolated_payload, Mapping)
+        and isinstance(production_payload, Mapping)
+        and isolated_payload.get("isolated_port") != production_payload.get("production_port"),
+        "app_identity_verified": (scenario != "P1" or len(signed_bundle_matches) == 1)
+        and effective_config.get("identifier")
+        == ("screenpi.pe" if scenario == "P1" else "screenpi.pe.dev")
+        and effective_config.get("productName")
+        == ("screenpipe" if scenario == "P1" else "screenpipe - Development"),
     }
     if scenario == "P1":
-        evidence = p1_evidence or {}
         bundle_root = (target / profile_directory / "bundle").resolve() if target is not None else None
-        production_bundle_exists = bundle_root is not None and any(
-            Path(str(item.get("path", ""))).resolve().is_relative_to(bundle_root)
-            for item in artifact_files
-        )
+        production_bundle_exists = bundle_root is not None and len(signed_bundle_matches) == 1 and Path(
+            str(signed_bundle_matches[0].get("path", ""))
+        ).resolve().is_relative_to(bundle_root)
         checks.update(
             {
                 "production_bundle_exists": production_bundle_exists,
-                "production_bundle_identity_matches": evidence.get("bundle_identifier") == "screenpi.pe"
-                and evidence.get("product_name") == "screenpipe",
-                "required_sidecars_verified": evidence.get("required_sidecars_verified") is True,
-                "isolated_launch_verified": evidence.get("isolated_launch_verified") is True,
-                "production_data_untouched": evidence.get("production_data_untouched") is True,
-                "platform_signature_verified": evidence.get("platform_signature_verified") is True,
-                "updater_artifacts_verified": evidence.get("updater_artifacts_verified") is True,
+                "platform_signature_verified": gate_passed("platform_signature"),
+                "updater_artifacts_verified": gate_passed("updater_artifacts"),
             }
         )
     return checks
@@ -1142,6 +1679,8 @@ def write_summary(root: Path) -> None:
         "warmup_ms", "build_ms", "incremental_ms", "peak_rss_bytes", "peak_disk_bytes", "exit_code",
     ]
     rows = [summary_row(result) for result in records]
+    successful_records = [result for result in records if result.get("success") is True]
+    successful_rows = [summary_row(result) for result in successful_records]
     summary_path = root / "summary.csv"
     with summary_path.open("w", encoding="utf-8", newline="") as output:
         writer = csv.DictWriter(output, fieldnames=fields)
@@ -1153,10 +1692,14 @@ def write_summary(root: Path) -> None:
         "total_ms", "install_ms", "prebuild_ms", "frontend_ms", "cargo_ms", "link_ms",
         "bundle_ms", "sign_ms", "notarize_ms", "build_ms", "incremental_ms",
     ]
-    for scenario in sorted({str(row["scenario"]) for row in rows}):
+    for scenario in sorted({str(row["scenario"]) for row in successful_rows}):
         groups[scenario] = {}
         for variant in ("baseline", "candidate"):
-            variant_rows = [row for row in rows if row["scenario"] == scenario and row["variant"] == variant]
+            variant_rows = [
+                row
+                for row in successful_rows
+                if row["scenario"] == scenario and row["variant"] == variant
+            ]
             if not variant_rows:
                 continue
             groups[scenario][variant] = {}
@@ -1189,6 +1732,12 @@ def write_summary(root: Path) -> None:
     lines = ["Screenpipe Tauri build benchmark summary", ""]
     if not rows:
         lines.append("No measured runs.")
+    failed_count = len(records) - len(successful_records)
+    if failed_count:
+        lines.append(
+            f"{failed_count} failed measured run{'s' if failed_count != 1 else ''} "
+            "excluded from performance statistics; inspect summary.csv and raw run evidence."
+        )
     for scenario, variants in groups.items():
         for variant, metrics in variants.items():
             total = metrics.get("total_ms")
@@ -1196,7 +1745,7 @@ def write_summary(root: Path) -> None:
                 continue
             variant_records = [
                 result
-                for result in records
+                for result in successful_records
                 if result["scenario"] == scenario and result["variant"] == variant
             ]
             verified = sum(result.get("success") is True for result in variant_records)
@@ -1229,7 +1778,7 @@ def execute_run(
     override_command: Sequence[str] | None,
     dry_run: bool,
     measured: bool = True,
-    p1_evidence: Mapping[str, Any] | None = None,
+    verification_plan: Mapping[str, Sequence[str]] | None = None,
 ) -> dict[str, Any]:
     commit = resolve_revision(repo, revision)
     run_id = f"{scenario}-{variant[0].upper()}-{repetition:02d}"
@@ -1242,11 +1791,18 @@ def execute_run(
     env = scenario_environment(scenario, paths, os.environ, enable_sccache=enable_sccache)
     machine = machine_metadata()
     command = list(override_command) if override_command else build_command(scenario, release_args)
-    target_option = next(
-        (command[index + 1] for index, item in enumerate(command[:-1]) if item == "--target"),
-        env.get("SCREENPIPE_RELEASE_TARGET", platform.machine()),
+    effective_command = command_metadata(command)
+    expected_profile = effective_command["profile"]
+    target_option = (
+        effective_command["target"]
+        or env.get("CARGO_BUILD_TARGET")
+        or env.get("SCREENPIPE_RELEASE_TARGET")
+        or platform.machine()
     )
     expected_architecture = str(target_option).split("-", 1)[0]
+    effective_config = effective_config_metadata(
+        app, expected_profile, effective_command["config_overrides"]
+    )
 
     manifest = {
         "schema": 1,
@@ -1255,7 +1811,7 @@ def execute_run(
         "variant": variant,
         "revision": revision,
         "commit": commit,
-        "expected_profile": PROFILE_BY_SCENARIO[scenario],
+        "expected_profile": expected_profile,
         "created_utc": utc_now(),
         "machine": machine,
         "environment": relevant_environment(env),
@@ -1267,7 +1823,9 @@ def execute_run(
         "dry_run": dry_run,
         "measured": measured,
         "expected_architecture": expected_architecture,
-        "p1_evidence": redact_value(p1_evidence) if p1_evidence is not None else None,
+        "verification_plan": {
+            gate: redact_command(command) for gate, command in (verification_plan or {}).items()
+        },
         "measurement_availability": {
             "install_wall_time": "measured",
             "tauri_build_wall_time": "measured",
@@ -1286,7 +1844,7 @@ def execute_run(
     json_dump(paths.artifacts / "toolchain.json", toolchain_metadata(app, env))
     json_dump(
         paths.artifacts / "effective-config.json",
-        effective_config_metadata(app, PROFILE_BY_SCENARIO[scenario]),
+        effective_config,
     )
     json_dump(paths.artifacts / "storage-before.json", all_storage_snapshots(app, paths))
 
@@ -1341,6 +1899,14 @@ def execute_run(
     )
     artifacts = artifact_inventory(app, paths.target)
     json_dump(paths.artifacts / "artifacts.json", artifacts)
+    frontend_validation = frontend_cache_validation(app, env)
+    json_dump(paths.artifacts / "frontend-cache-validation.json", frontend_validation)
+    verification = (
+        run_verification_plan(verification_plan or {}, app, env)
+        if stages and all(stage["exit_code"] == 0 for stage in stages)
+        else {}
+    )
+    json_dump(paths.artifacts / "verification.json", verification)
     source_after = source_state(paths.worktree, commit)
     json_dump(paths.artifacts / "source-after.json", source_after)
     timing_files = copy_cargo_timings(paths)
@@ -1349,13 +1915,16 @@ def execute_run(
         source_after=source_after,
         stages=stages,
         frontend_index_exists=(app / "out" / "index.html").exists(),
+        frontend_marker_exists=frontend_validation["matches_current_inputs"],
         timing_files=timing_files,
         artifacts=artifacts,
+        effective_config=effective_config["merged_tauri_config"],
+        expected_data_dir=paths.run_root / "verification-data",
         scenario=scenario,
         target=paths.target,
-        expected_profile=PROFILE_BY_SCENARIO[scenario],
+        expected_profile=expected_profile,
         expected_architecture=expected_architecture,
-        p1_evidence=p1_evidence,
+        verification=verification,
     )
 
     result = {
@@ -1421,9 +1990,9 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         help="quoted exact build command; required to mirror signed P1 workflows",
     )
     parser.add_argument(
-        "--p1-evidence",
+        "--verification-plan",
         type=Path,
-        help="JSON evidence for P1 identity, sidecar, isolated-launch, signature, and updater gates",
+        help="JSON object mapping required correctness gates to commands the harness executes",
     )
     parser.add_argument("--dry-run", action="store_true", help="create worktrees and manifests without installs/builds")
     subparsers = parser.add_subparsers(dest="mode", required=True)
@@ -1455,21 +2024,33 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise RuntimeError("H0 requires sccache to be disabled")
     if args.scenario == "P1" and not args.command:
         raise RuntimeError("P1 requires --command with the exact signed production workflow build command")
-    p1_evidence = None
-    if args.p1_evidence:
+    verification_plan: dict[str, list[str]] = {}
+    if args.verification_plan:
         try:
-            loaded_evidence = json.loads(args.p1_evidence.read_text(encoding="utf-8"))
+            loaded_plan = json.loads(args.verification_plan.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as error:
-            raise RuntimeError(f"cannot read P1 evidence: {error}") from error
-        if not isinstance(loaded_evidence, Mapping):
-            raise RuntimeError("P1 evidence must be a JSON object")
-        p1_evidence = loaded_evidence
+            raise RuntimeError(f"cannot read verification plan: {error}") from error
+        if not isinstance(loaded_plan, Mapping):
+            raise RuntimeError("verification plan must be a JSON object")
+        for gate, command in loaded_plan.items():
+            if not isinstance(gate, str) or not isinstance(command, list) or not command or not all(
+                isinstance(argument, str) and argument for argument in command
+            ):
+                raise RuntimeError("verification plan values must be non-empty command argument arrays")
+            verification_plan[gate] = command
+    required_gates: set[str] = set(RUNTIME_VERIFICATION_GATES)
+    if args.scenario == "P1":
+        required_gates.update(P1_VERIFICATION_GATES)
+    if not args.dry_run and set(verification_plan) != required_gates:
+        missing = sorted(required_gates - set(verification_plan))
+        extra = sorted(set(verification_plan) - required_gates)
+        raise RuntimeError(f"verification plan gates mismatch; missing={missing}, extra={extra}")
 
     if args.mode == "run":
         result = execute_run(
             repo=repo, output=output, scenario=args.scenario, variant=args.variant, revision=args.revision,
             repetition=args.repetition, enable_sccache=args.enable_sccache, release_args=args.release_arg,
-            override_command=args.command, dry_run=args.dry_run, p1_evidence=p1_evidence,
+            override_command=args.command, dry_run=args.dry_run, verification_plan=verification_plan,
         )
         if not args.dry_run and not result["success"]:
             print(f"run {result.get('run_id', 'unknown')} failed correctness gates", file=sys.stderr)
@@ -1485,7 +2066,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 repo=repo, output=output, scenario=args.scenario, variant=variant,
                 revision=revisions[variant], repetition=repetition, enable_sccache=args.enable_sccache,
                 release_args=args.release_arg, override_command=args.command, dry_run=args.dry_run,
-                measured=measured, p1_evidence=p1_evidence,
+                measured=measured, verification_plan=verification_plan,
             )
             assert_origin_main_unchanged(repo, pinned_origin_main)
             if not args.dry_run and not result["success"]:

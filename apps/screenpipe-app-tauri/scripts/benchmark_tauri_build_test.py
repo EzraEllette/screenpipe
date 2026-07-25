@@ -19,6 +19,58 @@ assert SPEC.loader is not None
 SPEC.loader.exec_module(benchmark)
 
 
+def verified_records(
+    gates,
+    *,
+    artifact_sha256="b" * 64,
+    artifact_path="/tmp/target/release/bundle/macos/screenpipe.app",
+    benchmark_data_dir="/tmp/verification-data",
+    updater_sha256="c" * 64,
+    updater_path="/tmp/target/release/bundle/updater/screenpipe.tar.gz",
+    signature_sha256="d" * 64,
+    signature_path="/tmp/target/release/bundle/updater/screenpipe.tar.gz.sig",
+):
+    records = {}
+    for gate in gates:
+        payload = {
+            "gate": gate,
+            "artifact_sha256": artifact_sha256,
+            "checks": {name: True for name in benchmark.VERIFICATION_CHECKS[gate]},
+        }
+        if gate == "isolated_launch":
+            payload["benchmark_data_dir"] = benchmark_data_dir
+            payload["readiness"] = "health endpoint ready"
+            payload["timeout_seconds"] = 30
+            payload["isolated_port"] = 18000
+        elif gate == "production_data_untouched":
+            payload["before_state_sha256"] = "e" * 64
+            payload["after_state_sha256"] = "e" * 64
+            payload["production_data_dir"] = "/home/example/.screenpipe"
+            payload["production_port"] = 11435
+        elif gate == "platform_signature":
+            payload["verification_output"] = "codesign verification passed"
+            payload["bundle_identifier"] = "screenpi.pe"
+            payload["product_name"] = "screenpipe"
+            payload["artifact_path"] = artifact_path
+        elif gate == "updater_artifacts":
+            payload["updater_sha256"] = updater_sha256
+            payload["updater_path"] = updater_path
+            payload["signature_sha256"] = signature_sha256
+            payload["signature_path"] = signature_path
+        records[gate] = {
+            "command": ["verify", gate],
+            "exit_code": 0,
+            "stdout": json.dumps(payload),
+            "executed_by_harness": True,
+            "provenance": {
+                "collected_before_execution": True,
+                "executable_sha256": "a" * 64,
+                "input_files": [],
+            },
+        }
+    return records
+
+
 class RedactionTests(unittest.TestCase):
     def test_redacts_secret_values_and_assignments_from_command_output(self):
         fixture_value = "fixture-" + "credential"
@@ -130,6 +182,11 @@ class ScenarioTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             repo = Path(temporary)
             (repo / "Cargo.toml").write_text("[workspace]\n", encoding="utf-8")
+            verification_plan = repo / "verification-plan.json"
+            verification_plan.write_text(
+                json.dumps({gate: ["verify", gate] for gate in benchmark.RUNTIME_VERIFICATION_GATES}),
+                encoding="utf-8",
+            )
             with mock.patch.object(
                 benchmark,
                 "pin_comparison_revisions",
@@ -152,6 +209,7 @@ class ScenarioTests(unittest.TestCase):
                         "--output", str(repo / "output"),
                         "--minimum-free-gib", "0",
                         "--scenario", "F1",
+                        "--verification-plan", str(verification_plan),
                         "compare", "--baseline", "origin/main", "--candidate", "HEAD", "--runs", "1",
                     ]
                 )
@@ -163,6 +221,16 @@ class ScenarioTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             (root / "Cargo.toml").write_text("[workspace]\n", encoding="utf-8")
+            verification_plan = root / "verification-plan.json"
+            verification_plan.write_text(
+                json.dumps(
+                    {
+                        gate: ["verify", gate]
+                        for gate in (*benchmark.RUNTIME_VERIFICATION_GATES, *benchmark.P1_VERIFICATION_GATES)
+                    }
+                ),
+                encoding="utf-8",
+            )
             with mock.patch.object(benchmark, "execute_run", return_value={"success": False}), mock.patch(
                 "sys.stderr", new=io.StringIO()
             ):
@@ -173,6 +241,7 @@ class ScenarioTests(unittest.TestCase):
                         "--minimum-free-gib", "0",
                         "--scenario", "P1",
                         "--command", "bun tauri build",
+                        "--verification-plan", str(verification_plan),
                         "run", "--variant", "candidate", "--revision", "HEAD",
                     ]
                 )
@@ -196,6 +265,79 @@ class ScenarioTests(unittest.TestCase):
             self.assertEqual(config["cargo_profiles"]["dev"]["opt-level"], 1)
             self.assertEqual(config["selected_profile"], "dev")
             self.assertEqual(config["tauri_configs"]["tauri.conf.json"]["bundle"]["macOS"]["signingIdentity"], "<redacted>")
+
+    def test_command_metadata_honors_equals_style_profile_target_and_config_overrides(self):
+        metadata = benchmark.command_metadata(
+            [
+                "bun",
+                "tauri",
+                "build",
+                "--debug",
+                "--config=src-tauri/tauri.prod.conf.json",
+                "--",
+                "--profile=release-local",
+                "--target=aarch64-apple-darwin",
+            ]
+        )
+
+        self.assertEqual(metadata["profile"], "release-local")
+        self.assertEqual(metadata["target"], "aarch64-apple-darwin")
+        self.assertEqual(metadata["config_overrides"], ["src-tauri/tauri.prod.conf.json"])
+        self.assertEqual(
+            benchmark.command_metadata(["bun", "tauri", "build", "--target=x86_64-unknown-linux-gnu"])[
+                "target"
+            ],
+            "x86_64-unknown-linux-gnu",
+        )
+
+    def test_effective_config_reports_merged_platform_and_command_overrides(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            app = Path(temporary)
+            source = app / "src-tauri"
+            source.mkdir()
+            (source / "Cargo.toml").write_text("[workspace]\n", encoding="utf-8")
+            (source / "tauri.conf.json").write_text(
+                '{"identifier":"screenpi.pe.dev","bundle":{"targets":["app"]}}',
+                encoding="utf-8",
+            )
+            (source / "tauri.linux.conf.json").write_text(
+                '{"bundle":{"targets":["deb"]}}',
+                encoding="utf-8",
+            )
+            (source / "custom.json").write_text(
+                '{"identifier":"screenpi.pe","bundle":{"active":true}}',
+                encoding="utf-8",
+            )
+
+            config = benchmark.effective_config_metadata(
+                app,
+                "release-local",
+                ["src-tauri/custom.json"],
+                platform_name="linux",
+            )
+
+            self.assertEqual(
+                config["config_chain"],
+                ["src-tauri/tauri.conf.json", "src-tauri/custom.json", "src-tauri/tauri.linux.conf.json"],
+            )
+            self.assertEqual(config["merged_tauri_config"]["identifier"], "screenpi.pe")
+            self.assertEqual(config["merged_tauri_config"]["bundle"], {"targets": ["deb"], "active": True})
+
+    def test_frontend_cache_validation_compares_marker_to_current_input_hash(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            app = Path(temporary)
+            (app / "out").mkdir()
+            (app / "out" / ".frontend-build-key").write_text("a" * 64, encoding="utf-8")
+            with mock.patch.object(
+                benchmark,
+                "run_capture",
+                return_value={"command": ["bun"], "exit_code": 0, "stdout": "b" * 64},
+            ):
+                validation = benchmark.frontend_cache_validation(app, {})
+
+            self.assertEqual(validation["marker"], "a" * 64)
+            self.assertEqual(validation["current_input_hash"], "b" * 64)
+            self.assertFalse(validation["matches_current_inputs"])
 
     def test_refuses_output_volume_below_declared_free_space_floor(self):
         with self.assertRaisesRegex(RuntimeError, "requires at least 250 GiB"):
@@ -302,6 +444,15 @@ class ScenarioTests(unittest.TestCase):
 
 
 class StorageTests(unittest.TestCase):
+    def test_storage_roots_include_reconcilable_cargo_home_and_sccache(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            paths = benchmark.scenario_paths(Path(temporary), "F1", "F1-C-01")
+
+            roots = benchmark.storage_roots(paths.worktree / benchmark.APP_RELATIVE, paths)
+
+            self.assertEqual(roots["cargo_home"], paths.cache_root / "cargo-home")
+            self.assertEqual(roots["sccache"], paths.cache_root / "sccache")
+
     def test_file_architecture_normalizes_file_tool_x86_64_spelling(self):
         with mock.patch.object(benchmark.shutil, "which", return_value="/usr/bin/file"), mock.patch.object(
             benchmark.subprocess,
@@ -345,6 +496,95 @@ class StorageTests(unittest.TestCase):
 
             self.assertEqual(inventory["bundles"][0]["path"], str(bundle))
             self.assertGreaterEqual(inventory["bundles"][0]["apparent_bytes"], len(b"bundle-binary"))
+
+    def test_packaged_bundle_sidecars_are_checked_from_extracted_contents(self):
+        artifacts = {
+            "files": [],
+            "sidecars": [],
+            "packaged_files": [
+                {
+                    "bundle_path": "/tmp/target/release/bundle/appimage/screenpipe.AppImage",
+                    "path": "usr/bin/bun-aarch64-unknown-linux-gnu",
+                    "architecture": "aarch64",
+                }
+            ],
+            "package_inspections": [
+                {
+                    "bundle_path": "/tmp/target/release/bundle/appimage/screenpipe.AppImage",
+                    "complete": True,
+                }
+            ],
+        }
+
+        self.assertTrue(
+            benchmark.sidecars_match_config(
+                artifacts,
+                {"bundle": {"externalBin": ["bun"]}},
+                "aarch64",
+                "P1",
+            )
+        )
+
+    def test_packaged_bundle_inspection_extracts_members_with_hashed_tool(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            bundle = root / "screenpipe.AppImage"
+            bundle.write_bytes(b"package")
+            fake_7z = root / "fake7z"
+            fake_7z.write_text(
+                "#!/bin/sh\n"
+                "for argument in \"$@\"; do\n"
+                "  case \"$argument\" in -o*) output=${argument#-o};; esac\n"
+                "done\n"
+                "mkdir -p \"$output/usr/bin\"\n"
+                "printf sidecar > \"$output/usr/bin/bun-aarch64-unknown-linux-gnu\"\n",
+                encoding="utf-8",
+            )
+            fake_7z.chmod(0o755)
+            with mock.patch.object(
+                benchmark.shutil,
+                "which",
+                side_effect=lambda name, **_kwargs: str(fake_7z)
+                if name in {"7z", "7zz"}
+                else None,
+            ):
+                inspection = benchmark.inspect_packaged_bundle(bundle, temporary_root=root)
+
+            self.assertTrue(inspection["complete"])
+            self.assertEqual(inspection["tool_sha256"], benchmark.sha256_file(fake_7z))
+            self.assertEqual(inspection["files"][0]["path"], "usr/bin/bun-aarch64-unknown-linux-gnu")
+            self.assertEqual(
+                inspection["files"][0]["sha256"],
+                "6c8b4535ccc87f19061c4646189e33d78f01c8b63dc4e3cb2f630b1796ee93b6",
+            )
+
+    def test_packaged_bundle_sidecars_fail_closed_without_complete_inspection(self):
+        artifacts = {
+            "files": [],
+            "sidecars": [],
+            "packaged_files": [
+                {
+                    "bundle_path": "/tmp/target/release/bundle/nsis/screenpipe.exe",
+                    "path": "bun-x86_64-pc-windows-msvc.exe",
+                    "architecture": "x86_64",
+                }
+            ],
+            "package_inspections": [
+                {
+                    "bundle_path": "/tmp/target/release/bundle/nsis/screenpipe.exe",
+                    "complete": False,
+                }
+            ],
+        }
+
+        self.assertFalse(
+            benchmark.sidecars_match_config(
+                artifacts,
+                {"bundle": {"externalBin": ["bun"]}},
+                "x86_64",
+                "P1",
+            )
+        )
 
     def test_storage_snapshot_accepts_a_sidecar_file(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -402,6 +642,14 @@ class StorageTests(unittest.TestCase):
 
 
 class StageExecutionTests(unittest.TestCase):
+    def test_linux_process_sampler_marks_missing_root_as_unavailable(self):
+        with mock.patch.object(benchmark.sys, "platform", "linux"), mock.patch.object(
+            benchmark.Path,
+            "glob",
+            return_value=[],
+        ):
+            self.assertIsNone(benchmark.process_tree_rss(99999999))
+
     def test_unavailable_process_sampler_records_peak_rss_as_unsupported(self):
         with mock.patch.object(benchmark.sys, "platform", "unsupported"), mock.patch.object(
             benchmark.subprocess,
@@ -496,6 +744,48 @@ class StageExecutionTests(unittest.TestCase):
 
             self.assertEqual(len((root / "summary.csv").read_text(encoding="utf-8").splitlines()), 1)
 
+    def test_failed_runs_remain_in_csv_but_never_feed_performance_statistics(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for variant, elapsed in (("baseline", 100), ("candidate", 50)):
+                run_id = f"F1-{variant[0].upper()}-01"
+                run = root / "runs" / run_id
+                run.mkdir(parents=True)
+                (run / "result.json").write_text(
+                    json.dumps(
+                        {
+                            "scenario": "F1",
+                            "variant": variant,
+                            "commit": variant,
+                            "run_id": run_id,
+                            "measured": True,
+                            "dry_run": False,
+                            "success": False,
+                            "stages": [
+                                {
+                                    "stage": "20-tauri-build",
+                                    "elapsed_ms": elapsed,
+                                    "max_rss_bytes": 1,
+                                    "peak_disk_bytes": 1,
+                                    "exit_code": 9,
+                                }
+                            ],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+            benchmark.write_summary(root)
+            rows = list(csv.DictReader(io.StringIO((root / "summary.csv").read_text(encoding="utf-8"))))
+            stats = json.loads((root / "summary-stats.json").read_text(encoding="utf-8"))
+            summary = (root / "summary.txt").read_text(encoding="utf-8")
+
+            self.assertEqual(len(rows), 2)
+            self.assertEqual(stats["groups"], {})
+            self.assertEqual(stats["comparisons"], {})
+            self.assertNotIn("median total", summary)
+            self.assertIn("2 failed measured runs excluded from performance statistics", summary)
+
     def test_w1_summary_reports_incremental_build_separately_from_install(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -546,6 +836,7 @@ class StageExecutionTests(unittest.TestCase):
                                 "run_id": run_id,
                                 "measured": True,
                                 "dry_run": False,
+                                "success": True,
                                 "stages": [
                                     {"stage": "20-tauri-build", "elapsed_ms": elapsed, "max_rss_bytes": 1, "peak_disk_bytes": 1, "exit_code": 0}
                                 ],
@@ -570,11 +861,83 @@ class StageExecutionTests(unittest.TestCase):
             source_after={"matches_expected": True, "clean": True},
             stages=[{"exit_code": 0}],
             frontend_index_exists=True,
+            frontend_marker_exists=True,
             timing_files=["cargo-timings/cargo-timing.html"],
-            artifacts={"files": [{"path": "/tmp/target/debug/screenpipe-app"}]},
+            artifacts={
+                "files": [{"path": "/tmp/target/debug/screenpipe-app", "sha256": "b" * 64}],
+                "sidecars": [],
+            },
+            effective_config={
+                "identifier": "screenpi.pe.dev",
+                "productName": "screenpipe - Development",
+                "bundle": {"externalBin": []},
+            },
+            expected_data_dir=Path("/tmp/verification-data"),
+            verification=verified_records(benchmark.RUNTIME_VERIFICATION_GATES),
         )
 
         self.assertTrue(all(checks.values()))
+
+    def test_correctness_fails_closed_without_harness_executed_runtime_verification(self):
+        checks = benchmark.correctness_checks(
+            source_before={"matches_expected": True, "clean": True},
+            source_after={"matches_expected": True, "clean": True},
+            stages=[{"exit_code": 0}],
+            frontend_index_exists=True,
+            frontend_marker_exists=True,
+            timing_files=["cargo-timings/cargo-timing.html"],
+            artifacts={
+                "files": [{"path": "/tmp/target/debug/screenpipe-app", "sha256": "b" * 64}],
+                "sidecars": [],
+            },
+            effective_config={
+                "identifier": "screenpi.pe.dev",
+                "productName": "screenpipe - Development",
+                "bundle": {"externalBin": []},
+            },
+            expected_data_dir=Path("/tmp/verification-data"),
+            verification={
+                gate: {
+                    "command": ["/bin/true"],
+                    "exit_code": 0,
+                    "stdout": "",
+                    "executed_by_harness": True,
+                    "provenance": {
+                        "collected_before_execution": True,
+                        "executable_sha256": "a" * 64,
+                        "input_files": [],
+                    },
+                }
+                for gate in benchmark.RUNTIME_VERIFICATION_GATES
+            },
+        )
+
+        self.assertFalse(checks["isolated_launch_verified"])
+        self.assertFalse(checks["production_data_untouched"])
+
+    def test_correctness_rejects_missing_required_sidecar_and_frontend_marker(self):
+        checks = benchmark.correctness_checks(
+            source_before={"matches_expected": True, "clean": True},
+            source_after={"matches_expected": True, "clean": True},
+            stages=[{"exit_code": 0}],
+            frontend_index_exists=True,
+            frontend_marker_exists=False,
+            timing_files=["cargo-timings/cargo-timing.html"],
+            artifacts={
+                "files": [{"path": "/tmp/target/debug/screenpipe-app", "sha256": "b" * 64}],
+                "sidecars": [],
+            },
+            effective_config={
+                "identifier": "screenpi.pe.dev",
+                "productName": "screenpipe - Development",
+                "bundle": {"externalBin": ["bun"]},
+            },
+            expected_data_dir=Path("/tmp/verification-data"),
+            verification=verified_records(benchmark.RUNTIME_VERIFICATION_GATES),
+        )
+
+        self.assertFalse(checks["frontend_marker_matches_current_inputs"])
+        self.assertFalse(checks["required_sidecars_verified"])
 
     def test_p1_rejects_debug_unsigned_unverified_artifact(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -589,6 +952,7 @@ class StageExecutionTests(unittest.TestCase):
                 source_after={"matches_expected": True, "clean": True},
                 stages=[{"exit_code": 0}],
                 frontend_index_exists=True,
+                frontend_marker_exists=True,
                 timing_files=["cargo-timings/cargo-timing.html"],
                 artifacts={
                     "files": [{"path": str(binary), "architecture": "x86_64"}],
@@ -598,51 +962,181 @@ class StageExecutionTests(unittest.TestCase):
                 target=target,
                 expected_profile="release",
                 expected_architecture="aarch64",
-                p1_evidence=None,
+                effective_config={
+                    "identifier": "screenpi.pe.dev",
+                    "productName": "screenpipe - Development",
+                    "bundle": {"externalBin": ["bun"]},
+                },
+                verification={},
             )
 
             self.assertFalse(checks["expected_profile_artifact_exists"])
             self.assertFalse(checks["artifact_architecture_matches"])
             self.assertFalse(checks["production_bundle_exists"])
-            self.assertFalse(checks["production_bundle_identity_matches"])
+            self.assertFalse(checks["app_identity_verified"])
             self.assertFalse(checks["required_sidecars_verified"])
             self.assertFalse(checks["isolated_launch_verified"])
             self.assertFalse(checks["production_data_untouched"])
             self.assertFalse(checks["platform_signature_verified"])
             self.assertFalse(checks["updater_artifacts_verified"])
 
-    def test_p1_requires_complete_matching_external_evidence(self):
+    def test_p1_requires_successful_harness_executed_verification_commands(self):
         with tempfile.TemporaryDirectory() as temporary:
             target = Path(temporary) / "target"
             bundle_binary = target / "release" / "bundle" / "macos" / "screenpipe.app" / "Contents" / "MacOS" / "screenpipe-app"
             bundle_binary.parent.mkdir(parents=True)
             bundle_binary.write_bytes(b"release")
             bundle_binary.chmod(0o755)
-            evidence = {
-                "bundle_identifier": "screenpi.pe",
-                "product_name": "screenpipe",
-                "required_sidecars_verified": True,
-                "isolated_launch_verified": True,
-                "production_data_untouched": True,
-                "platform_signature_verified": True,
-                "updater_artifacts_verified": True,
-            }
+            bundle_path = target / "release" / "bundle" / "macos" / "screenpipe.app"
+            updater_path = target / "release" / "bundle" / "updater" / "screenpipe.tar.gz"
+            signature_path = updater_path.with_suffix(updater_path.suffix + ".sig")
+            verification = verified_records(
+                (*benchmark.RUNTIME_VERIFICATION_GATES, *benchmark.P1_VERIFICATION_GATES),
+                artifact_path=str(bundle_path),
+                updater_path=str(updater_path),
+                signature_path=str(signature_path),
+            )
 
             checks = benchmark.correctness_checks(
                 source_before={"matches_expected": True, "clean": True},
                 source_after={"matches_expected": True, "clean": True},
                 stages=[{"exit_code": 0}],
                 frontend_index_exists=True,
+                frontend_marker_exists=True,
                 timing_files=["cargo-timings/cargo-timing.html"],
-                artifacts={"files": [{"path": str(bundle_binary), "architecture": "arm64"}], "sidecars": []},
+                artifacts={
+                    "files": [
+                        {"path": str(bundle_binary), "architecture": "arm64", "sha256": "b" * 64},
+                        {
+                            "path": str(target / "release/bundle/macos/screenpipe.app/Contents/MacOS/bun"),
+                            "architecture": "arm64",
+                            "sha256": "f" * 64,
+                        },
+                        {"path": str(updater_path), "sha256": "c" * 64, "role": "updater"},
+                        {"path": str(signature_path), "sha256": "d" * 64, "role": "updater_signature"},
+                    ],
+                    "bundles": [{"path": str(bundle_path), "sha256": "b" * 64, "kind": "app"}],
+                    "sidecars": [],
+                    "packaged_files": [],
+                },
                 scenario="P1",
                 target=target,
                 expected_profile="release",
                 expected_architecture="aarch64",
-                p1_evidence=evidence,
+                effective_config={
+                    "identifier": "screenpi.pe",
+                    "productName": "screenpipe",
+                    "bundle": {"externalBin": ["bun"]},
+                },
+                expected_data_dir=Path("/tmp/verification-data"),
+                verification=verification,
             )
 
             self.assertTrue(all(checks.values()), checks)
+
+    def test_p1_rejects_signature_and_updater_evidence_bound_to_wrong_or_same_artifact(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary) / "target"
+            bundle_path = target / "release" / "bundle" / "macos" / "screenpipe.app"
+            updater_path = target / "release" / "bundle" / "updater" / "screenpipe.tar.gz"
+            signature_path = updater_path.with_suffix(updater_path.suffix + ".sig")
+            binary_path = bundle_path / "Contents" / "MacOS" / "screenpipe-app"
+            verification = verified_records(
+                (*benchmark.RUNTIME_VERIFICATION_GATES, *benchmark.P1_VERIFICATION_GATES),
+                artifact_path=str(updater_path),
+                updater_path=str(updater_path),
+                signature_path=str(updater_path),
+                signature_sha256="c" * 64,
+            )
+            checks = benchmark.correctness_checks(
+                source_before={"matches_expected": True, "clean": True},
+                source_after={"matches_expected": True, "clean": True},
+                stages=[{"exit_code": 0}],
+                frontend_index_exists=True,
+                frontend_marker_exists=True,
+                timing_files=["cargo-timings/cargo-timing.html"],
+                artifacts={
+                    "files": [
+                        {"path": str(binary_path), "architecture": "arm64", "sha256": "b" * 64},
+                        {"path": str(updater_path), "sha256": "c" * 64, "role": "updater"},
+                        {"path": str(signature_path), "sha256": "d" * 64, "role": "updater_signature"},
+                    ],
+                    "bundles": [{"path": str(bundle_path), "sha256": "b" * 64, "kind": "app"}],
+                    "sidecars": [],
+                    "packaged_files": [],
+                },
+                scenario="P1",
+                target=target,
+                expected_profile="release",
+                expected_architecture="arm64",
+                effective_config={
+                    "identifier": "screenpi.pe",
+                    "productName": "screenpipe",
+                    "bundle": {"externalBin": []},
+                },
+                expected_data_dir=Path("/tmp/verification-data"),
+                verification=verification,
+            )
+
+            self.assertFalse(checks["production_bundle_exists"])
+            self.assertFalse(checks["app_identity_verified"])
+            self.assertFalse(checks["platform_signature_verified"])
+            self.assertFalse(checks["updater_artifacts_verified"])
+
+    def test_verifier_provenance_is_hashed_before_execution_and_redacts_external_paths(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            cwd = root / "worktree"
+            cwd.mkdir()
+            verifier = root / "private" / "verify-secret-name"
+            verifier.parent.mkdir()
+            verifier.write_bytes(b"verifier-before")
+            input_file = root / "outside" / "customer-private-input.json"
+            input_file.parent.mkdir()
+            input_file.write_bytes(b"input-before")
+            expected_verifier_hash = benchmark.sha256_file(verifier)
+            expected_input_hash = benchmark.sha256_file(input_file)
+
+            def mutate_after_provenance(_command, _cwd, _env):
+                verifier.write_bytes(b"verifier-after")
+                input_file.write_bytes(b"input-after")
+                return {
+                    "command": list(_command),
+                    "exit_code": 0,
+                    "stdout": f'{{"input": "{input_file}"}}',
+                }
+
+            with mock.patch.object(benchmark, "run_capture", side_effect=mutate_after_provenance):
+                records = benchmark.run_verification_plan(
+                    {"isolated_launch": [str(verifier), f"--fixture={input_file}"]}, cwd, {}
+                )
+
+            provenance = records["isolated_launch"]["provenance"]
+            self.assertEqual(provenance["executable_sha256"], expected_verifier_hash)
+            self.assertEqual(provenance["input_files"][0]["sha256"], expected_input_hash)
+            self.assertNotIn(str(root), json.dumps(provenance))
+            self.assertNotIn("customer-private-input", json.dumps(provenance))
+            self.assertNotIn(str(root), json.dumps(records))
+
+    def test_verification_plan_is_executed_by_the_harness(self):
+        plan = {gate: ["verify", gate] for gate in benchmark.RUNTIME_VERIFICATION_GATES}
+        with mock.patch.object(
+            benchmark,
+            "run_capture",
+            side_effect=lambda command, _cwd, _env: {"command": command, "exit_code": 0},
+        ) as capture, mock.patch.object(
+            benchmark.shutil,
+            "which",
+            return_value="/bin/true",
+        ), mock.patch.object(benchmark, "sha256_file", return_value="a" * 64):
+            records = benchmark.run_verification_plan(plan, Path("/app"), {})
+
+        self.assertEqual(capture.call_count, len(benchmark.RUNTIME_VERIFICATION_GATES))
+        self.assertEqual(set(records), set(benchmark.RUNTIME_VERIFICATION_GATES))
+        self.assertTrue(all(record["exit_code"] == 0 for record in records.values()))
+        self.assertTrue(
+            all(record["provenance"]["executable_sha256"] == "a" * 64 for record in records.values())
+        )
 
     def test_missing_command_is_recorded_as_failed_stage(self):
         with tempfile.TemporaryDirectory() as temporary:
