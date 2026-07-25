@@ -708,6 +708,12 @@ describe("enterprise policy runtime manual activation", () => {
     });
     expect(result.current.authenticationState).toBe("authenticated");
 
+    // Abandoning the run cancelled the in-flight native request AT abandonment.
+    // Asserted HERE, before any timer advance: after the advance below, an
+    // aborted signal is also what "left alive until its own 12s deadline" looks
+    // like, so the assertion could not tell the two apart and could not fail.
+    expect(mocks.tauriFetch.mock.calls[1][1].signal.aborted).toBe(true);
+
     // Now let the abandoned attempt hit its own deadline (and a further backoff
     // and the first policy poll) with the control plane gone again.
     hangUntilAborted();
@@ -719,9 +725,6 @@ describe("enterprise policy runtime manual activation", () => {
     expect(result.current.isEnterpriseAuthenticated).toBe(true);
     expect(result.current.authenticationError).toBeNull();
 
-    // Abandoning the run also cancelled it, so the native request was not left
-    // alive burning a Rust FetchRequest until its own deadline.
-    expect(mocks.tauriFetch.mock.calls[1][1].signal.aborted).toBe(true);
   }, 20_000);
 
   it("does not let an in-flight license-key retry yank the employee off the sign-in screen", async () => {
