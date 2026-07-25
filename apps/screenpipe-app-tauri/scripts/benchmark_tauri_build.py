@@ -14,16 +14,17 @@ from __future__ import annotations
 
 import argparse
 import collections
+import csv
 import datetime as dt
 import hashlib
 import json
 import os
 import platform
 import re
-import resource
 import shlex
 import shutil
 import signal
+import statistics
 import subprocess
 import sys
 import threading
@@ -31,7 +32,7 @@ import time
 import tomllib
 from pathlib import Path
 from typing import Any, Iterable, Mapping, NamedTuple, Protocol, Sequence
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 SCENARIOS = ("H0", "F1", "W1", "P1")
 APP_RELATIVE = Path("apps/screenpipe-app-tauri")
@@ -98,13 +99,33 @@ def redact_url(value: str) -> str:
         parsed = urlsplit(value)
     except ValueError:
         return value
-    if not parsed.scheme or not parsed.netloc or "@" not in parsed.netloc:
+    if not parsed.scheme or not parsed.netloc:
         return value
     hostname = parsed.hostname or ""
     if ":" in hostname and not hostname.startswith("["):
         hostname = f"[{hostname}]"
     port = f":{parsed.port}" if parsed.port else ""
-    return urlunsplit((parsed.scheme, f"<redacted>@{hostname}{port}", parsed.path, parsed.query, parsed.fragment))
+    netloc = f"<redacted>@{hostname}{port}" if "@" in parsed.netloc else f"{hostname}{port}"
+
+    def redact_component(component: str) -> str:
+        if not component:
+            return component
+        pairs = parse_qsl(component, keep_blank_values=True)
+        if not pairs:
+            return "<redacted>" if is_secret_name(component) else component
+        return urlencode(
+            [(name, "<redacted>" if is_secret_name(name) else item) for name, item in pairs]
+        )
+
+    return urlunsplit(
+        (
+            parsed.scheme,
+            netloc,
+            parsed.path,
+            redact_component(parsed.query),
+            redact_component(parsed.fragment),
+        )
+    )
 
 
 def redact_mapping(values: Mapping[str, str]) -> dict[str, str]:
@@ -129,13 +150,17 @@ def redact_value(value: Any, key: str = "") -> Any:
 def redact_command(command: Sequence[str]) -> list[str]:
     result: list[str] = []
     redact_next = False
-    sensitive_option = re.compile(r"^--?(?:token|password|secret|key|credential|auth)(?:=|$)", re.IGNORECASE)
+    sensitive_option = re.compile(
+        r"(?:^|[-_])(?:token|password|passwd|secret|private|key|credential|cookie|auth|signing)(?:[-_]|$)",
+        re.IGNORECASE,
+    )
     for argument in command:
         if redact_next:
             result.append("<redacted>")
             redact_next = False
             continue
-        if sensitive_option.match(argument):
+        option_name = argument.split("=", 1)[0].lstrip("-")
+        if argument.startswith("-") and sensitive_option.search(option_name):
             if "=" in argument:
                 result.append(argument.split("=", 1)[0] + "=<redacted>")
             else:
@@ -315,7 +340,17 @@ def file_architecture(path: Path) -> str | None:
     except (OSError, subprocess.TimeoutExpired):
         return None
     lowered = output.lower()
-    architectures = [name for name in ("x86_64", "aarch64", "arm64", "i386") if name in lowered]
+    architecture_patterns = {
+        "x86_64": ("x86_64", "x86-64"),
+        "aarch64": ("aarch64",),
+        "arm64": ("arm64",),
+        "i386": ("i386",),
+    }
+    architectures = [
+        name
+        for name, patterns in architecture_patterns.items()
+        if any(pattern in lowered for pattern in patterns)
+    ]
     if "universal binary" in lowered or len(architectures) > 1:
         return "universal"
     return architectures[0] if architectures else None
@@ -479,8 +514,6 @@ def command_record(
     start_utc: str,
     end_utc: str,
     elapsed_ms: int,
-    usage_before: resource.struct_rusage,
-    usage_after: resource.struct_rusage,
     sampler: ResourceSample,
     exit_code: int,
     free_before: int,
@@ -499,18 +532,22 @@ def command_record(
         "start_utc": start_utc,
         "end_utc": end_utc,
         "elapsed_ms": elapsed_ms,
-        "user_ms": round((usage_after.ru_utime - usage_before.ru_utime) * 1000),
-        "sys_ms": round((usage_after.ru_stime - usage_before.ru_stime) * 1000),
+        "user_ms": None,
+        "sys_ms": None,
         "max_rss_bytes": max_rss,
         "exit_code": exit_code,
         "cache_result": "na",
-        "bytes_read": 0,
-        "bytes_written": 0,
-        "net_rx_bytes": 0,
-        "net_tx_bytes": 0,
+        "bytes_read": None,
+        "bytes_written": None,
+        "net_rx_bytes": None,
+        "net_tx_bytes": None,
         "peak_target_bytes": sampler.peak_target_bytes,
         "peak_disk_bytes": max(0, free_before - (sampler.minimum_free_bytes or free_before)),
-        "notes": [],
+        "notes": [
+            "cpu time unsupported: process-tree sampler subprocesses prevent uncontaminated RUSAGE_CHILDREN attribution",
+            "process I/O counters unsupported on this cross-platform sampler",
+            "network counters unsupported on this cross-platform sampler",
+        ],
     }
 
 
@@ -526,14 +563,15 @@ def run_stage(
     commit: str,
     machine_id: str,
     stage: str,
+    free_baseline: int | None = None,
 ) -> dict[str, Any]:
     log_path = paths.artifacts / "logs" / f"{stage}.log"
     sample_path = paths.artifacts / "samples" / f"{stage}.jsonl"
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    free_before = shutil.disk_usage(paths.run_root).free
+    free_before = shutil.disk_usage(paths.run_root).free if free_baseline is None else free_baseline
     start_utc = utc_now()
     start = time.monotonic_ns()
-    usage_before = resource.getrusage(resource.RUSAGE_CHILDREN)
+
     with log_path.open("w", encoding="utf-8") as log:
         log.write(f"{time.monotonic_ns()} [{stage}] command={shlex.join(redact_command(command))}\n")
         log.flush()
@@ -550,7 +588,6 @@ def run_stage(
             )
         except OSError as error:
             log.write(f"{time.monotonic_ns()} [{stage}] {error}\n")
-            usage_after = resource.getrusage(resource.RUSAGE_CHILDREN)
             sampler = ResourceSnapshot(
                 peak_rss_bytes=0,
                 peak_target_bytes=0,
@@ -567,8 +604,6 @@ def run_stage(
                 start_utc=start_utc,
                 end_utc=utc_now(),
                 elapsed_ms=(time.monotonic_ns() - start) // 1_000_000,
-                usage_before=usage_before,
-                usage_after=usage_after,
                 sampler=sampler,
                 exit_code=127,
                 free_before=free_before,
@@ -587,7 +622,7 @@ def run_stage(
             exit_code = process.wait()
             sampler.stop()
             sampler.join(timeout=10)
-    usage_after = resource.getrusage(resource.RUSAGE_CHILDREN)
+
     end = time.monotonic_ns()
     return command_record(
         run_id=run_id,
@@ -600,8 +635,6 @@ def run_stage(
         start_utc=start_utc,
         end_utc=utc_now(),
         elapsed_ms=(end - start) // 1_000_000,
-        usage_before=usage_before,
-        usage_after=usage_after,
         sampler=sampler,
         exit_code=exit_code,
         free_before=free_before,
@@ -795,17 +828,40 @@ def copy_cargo_timings(paths: ScenarioPaths) -> list[str]:
 
 def artifact_inventory(app: Path, target: Path) -> dict[str, Any]:
     candidates: list[tuple[int, Path]] = []
-    roots = [target, app / "out", app / "src-tauri"]
+    bundle_directories: list[dict[str, Any]] = []
     interesting_suffixes = {".app", ".dmg", ".appimage", ".deb", ".msi", ".exe", ".sig", ".tar", ".gz"}
-    for root in roots:
-        if not root.exists():
-            continue
-        for path in root.rglob("*"):
+    if target.exists():
+        for bundle in sorted(target.glob("*/bundle/**/*.app")):
+            if not bundle.is_dir():
+                continue
+            snapshot = storage_snapshot(bundle)
+            bundle_directories.append(
+                {
+                    "path": str(bundle),
+                    "apparent_bytes": snapshot["apparent_bytes"],
+                    "allocated_bytes": snapshot["allocated_bytes"],
+                }
+            )
+        for path in target.rglob("*"):
             try:
-                if path.is_file() and (os.access(path, os.X_OK) or any(suffix in interesting_suffixes for suffix in path.suffixes)):
+                if not path.is_file():
+                    continue
+                relative = path.relative_to(target)
+                if len(relative.parts) < 2:
+                    continue
+                in_bundle = "bundle" in relative.parts
+                is_profile_binary = len(relative.parts) == 2 and path.name in {
+                    "screenpipe-app",
+                    "screenpipe-app.exe",
+                }
+                is_bundle_artifact = in_bundle and (
+                    os.access(path, os.X_OK)
+                    or any(suffix.lower() in interesting_suffixes for suffix in path.suffixes)
+                )
+                if is_profile_binary or is_bundle_artifact:
                     stat = path.stat()
                     candidates.append((stat.st_size, path))
-            except (FileNotFoundError, PermissionError, OSError):
+            except (FileNotFoundError, PermissionError, OSError, ValueError):
                 continue
     candidates.sort(key=lambda item: (-item[0], str(item[1])))
     files = [
@@ -817,7 +873,7 @@ def artifact_inventory(app: Path, target: Path) -> dict[str, Any]:
         }
         for size, path in candidates[:200]
     ]
-    return {"files": files, "sidecars": sidecar_inventory(app)}
+    return {"files": files, "bundles": bundle_directories, "sidecars": sidecar_inventory(app)}
 
 
 def sidecar_inventory(app: Path) -> list[dict[str, Any]]:
@@ -893,57 +949,190 @@ def correctness_checks(
     frontend_index_exists: bool,
     timing_files: Sequence[str],
     artifacts: Mapping[str, Any],
+    scenario: str = "F1",
+    target: Path | None = None,
+    expected_profile: str = "dev",
+    expected_architecture: str | None = None,
+    p1_evidence: Mapping[str, Any] | None = None,
 ) -> dict[str, bool]:
     binary_names = {"screenpipe-app", "screenpipe-app.exe"}
-    binary_exists = any(
-        Path(str(item.get("path", ""))).name in binary_names
-        for item in artifacts.get("files", [])
-        if isinstance(item, Mapping)
-    )
-    return {
+    artifact_files = [item for item in artifacts.get("files", []) if isinstance(item, Mapping)]
+    binary_artifacts = [
+        item for item in artifact_files if Path(str(item.get("path", ""))).name in binary_names
+    ]
+    binary_exists = bool(binary_artifacts)
+    profile_directory = "debug" if expected_profile == "dev" else expected_profile
+    expected_profile_binary = binary_exists
+    if target is not None:
+        expected_root = (target / profile_directory).resolve()
+        expected_profile_binary = any(
+            Path(str(item.get("path", ""))).resolve().is_relative_to(expected_root)
+            for item in binary_artifacts
+        )
+
+    expected_architectures = {expected_architecture} if expected_architecture else set()
+    if expected_architecture == "aarch64":
+        expected_architectures.add("arm64")
+    if expected_architecture == "arm64":
+        expected_architectures.add("aarch64")
+    architecture_matches = True
+    if expected_architectures:
+        architecture_matches = any(
+            item.get("architecture") in expected_architectures | {"universal"}
+            for item in binary_artifacts
+        )
+
+    checks = {
         "source_before_matches_commit": bool(source_before.get("matches_expected")),
         "source_before_clean": bool(source_before.get("clean")),
         "all_stages_exited_zero": bool(stages) and all(stage.get("exit_code") == 0 for stage in stages),
         "frontend_index_exists": frontend_index_exists,
         "cargo_timings_exist": bool(timing_files),
         "app_binary_exists": binary_exists,
+        "expected_profile_artifact_exists": expected_profile_binary,
+        "artifact_architecture_matches": architecture_matches,
         "source_after_matches_commit": bool(source_after.get("matches_expected")),
         "source_after_clean": bool(source_after.get("clean")),
     }
+    if scenario == "P1":
+        evidence = p1_evidence or {}
+        bundle_root = (target / profile_directory / "bundle").resolve() if target is not None else None
+        production_bundle_exists = bundle_root is not None and any(
+            Path(str(item.get("path", ""))).resolve().is_relative_to(bundle_root)
+            for item in artifact_files
+        )
+        checks.update(
+            {
+                "production_bundle_exists": production_bundle_exists,
+                "production_bundle_identity_matches": evidence.get("bundle_identifier") == "screenpi.pe"
+                and evidence.get("product_name") == "screenpipe",
+                "required_sidecars_verified": evidence.get("required_sidecars_verified") is True,
+                "isolated_launch_verified": evidence.get("isolated_launch_verified") is True,
+                "production_data_untouched": evidence.get("production_data_untouched") is True,
+                "platform_signature_verified": evidence.get("platform_signature_verified") is True,
+                "updater_artifacts_verified": evidence.get("updater_artifacts_verified") is True,
+            }
+        )
+    return checks
+
+
+def aggregate_exit_code(stages: Sequence[Mapping[str, Any]]) -> int:
+    for stage in stages:
+        exit_code = stage.get("exit_code")
+        if isinstance(exit_code, int) and exit_code != 0:
+            return exit_code
+    return 0
+
+
+def distribution(values: Sequence[int | float]) -> dict[str, int | float]:
+    median = statistics.median(values)
+    return {
+        "count": len(values),
+        "median": median,
+        "min": min(values),
+        "max": max(values),
+        "mad": statistics.median([abs(value - median) for value in values]),
+    }
+
+
+def summary_row(result: Mapping[str, Any]) -> dict[str, Any]:
+    stages = {stage["stage"]: stage for stage in result["stages"]}
+    measured_stages = [
+        stage
+        for stage in result["stages"]
+        if stage["stage"] != "15-warmup"
+        and not (result["scenario"] == "W1" and stage["stage"] == "10-install")
+    ]
+    stage_columns = {
+        "install_ms": "10-install",
+        "prebuild_ms": "20-prebuild",
+        "frontend_ms": "22-frontend",
+        "cargo_ms": "30-cargo",
+        "link_ms": "33-link",
+        "bundle_ms": "40-bundle",
+        "sign_ms": "41-sign",
+        "notarize_ms": "42-notarize",
+        "warmup_ms": "15-warmup",
+        "build_ms": "20-tauri-build",
+    }
+    row: dict[str, Any] = {
+        "scenario": result["scenario"],
+        "variant": result["variant"],
+        "commit": result["commit"],
+        "run_id": result["run_id"],
+        "total_ms": sum(stage["elapsed_ms"] for stage in measured_stages),
+        "incremental_ms": stages.get("20-tauri-build", {}).get("elapsed_ms", "")
+        if result["scenario"] == "W1"
+        else "",
+        "peak_rss_bytes": max((stage["max_rss_bytes"] for stage in result["stages"]), default=0),
+        "peak_disk_bytes": max((stage["peak_disk_bytes"] for stage in result["stages"]), default=0),
+        "exit_code": aggregate_exit_code(result["stages"]),
+    }
+    row.update(
+        {
+            column: stages.get(stage_name, {}).get("elapsed_ms", "")
+            for column, stage_name in stage_columns.items()
+        }
+    )
+    return row
 
 
 def write_summary(root: Path) -> None:
     records = []
     for result_path in sorted((root / "runs").glob("*/result.json")):
         result = json.loads(result_path.read_text(encoding="utf-8"))
-        if not result.get("measured", True):
+        if not result.get("measured", True) or result.get("dry_run", False):
             continue
         records.append(result)
     fields = [
-        "scenario", "variant", "commit", "run_id", "total_ms", "install_ms", "warmup_ms", "build_ms",
-        "peak_rss_bytes", "peak_disk_bytes", "exit_code",
+        "scenario", "variant", "commit", "run_id", "total_ms", "install_ms", "prebuild_ms",
+        "frontend_ms", "cargo_ms", "link_ms", "bundle_ms", "sign_ms", "notarize_ms",
+        "warmup_ms", "build_ms", "incremental_ms", "peak_rss_bytes", "peak_disk_bytes", "exit_code",
     ]
-    lines = [",".join(fields)]
-    for result in records:
-        stages = {stage["stage"]: stage for stage in result["stages"]}
-        total = sum(stage["elapsed_ms"] for stage in result["stages"] if stage["stage"] != "15-warmup")
-        peak_rss = max((stage["max_rss_bytes"] for stage in result["stages"]), default=0)
-        peak_disk = max((stage["peak_disk_bytes"] for stage in result["stages"]), default=0)
-        row = {
-            "scenario": result["scenario"],
-            "variant": result["variant"],
-            "commit": result["commit"],
-            "run_id": result["run_id"],
-            "total_ms": total,
-            "install_ms": stages.get("10-install", {}).get("elapsed_ms", ""),
-            "warmup_ms": stages.get("15-warmup", {}).get("elapsed_ms", ""),
-            "build_ms": stages.get("20-tauri-build", {}).get("elapsed_ms", ""),
-            "peak_rss_bytes": peak_rss,
-            "peak_disk_bytes": peak_disk,
-            "exit_code": max((stage["exit_code"] for stage in result["stages"]), default=0),
-        }
-        lines.append(",".join(str(row[field]) for field in fields))
-    (root / "summary.csv").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    rows = [summary_row(result) for result in records]
+    summary_path = root / "summary.csv"
+    with summary_path.open("w", encoding="utf-8", newline="") as output:
+        writer = csv.DictWriter(output, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    groups: dict[str, dict[str, dict[str, dict[str, int | float]]]] = {}
+    numeric_fields = [
+        "total_ms", "install_ms", "prebuild_ms", "frontend_ms", "cargo_ms", "link_ms",
+        "bundle_ms", "sign_ms", "notarize_ms", "build_ms", "incremental_ms",
+    ]
+    for scenario in sorted({str(row["scenario"]) for row in rows}):
+        groups[scenario] = {}
+        for variant in ("baseline", "candidate"):
+            variant_rows = [row for row in rows if row["scenario"] == scenario and row["variant"] == variant]
+            if not variant_rows:
+                continue
+            groups[scenario][variant] = {}
+            for field in numeric_fields:
+                values = [row[field] for row in variant_rows if isinstance(row[field], (int, float))]
+                if values:
+                    groups[scenario][variant][field] = distribution(values)
+
+    comparisons: dict[str, dict[str, dict[str, int | float | None]]] = {}
+    for scenario, variants in groups.items():
+        if "baseline" not in variants or "candidate" not in variants:
+            continue
+        comparisons[scenario] = {}
+        for field in numeric_fields:
+            baseline = variants["baseline"].get(field)
+            candidate = variants["candidate"].get(field)
+            if not baseline or not candidate:
+                continue
+            baseline_median = baseline["median"]
+            candidate_median = candidate["median"]
+            absolute = candidate_median - baseline_median
+            comparisons[scenario][field] = {
+                "baseline_median": baseline_median,
+                "candidate_median": candidate_median,
+                "absolute_change": absolute,
+                "percent_change": (absolute / baseline_median * 100) if baseline_median else None,
+            }
+    json_dump(root / "summary-stats.json", {"schema": 1, "groups": groups, "comparisons": comparisons})
 
 
 def execute_run(
@@ -959,6 +1148,7 @@ def execute_run(
     override_command: Sequence[str] | None,
     dry_run: bool,
     measured: bool = True,
+    p1_evidence: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     commit = resolve_revision(repo, revision)
     run_id = f"{scenario}-{variant[0].upper()}-{repetition:02d}"
@@ -971,6 +1161,11 @@ def execute_run(
     env = scenario_environment(scenario, paths, os.environ, enable_sccache=enable_sccache)
     machine = machine_metadata()
     command = list(override_command) if override_command else build_command(scenario, release_args)
+    target_option = next(
+        (command[index + 1] for index, item in enumerate(command[:-1]) if item == "--target"),
+        env.get("SCREENPIPE_RELEASE_TARGET", platform.machine()),
+    )
+    expected_architecture = str(target_option).split("-", 1)[0]
 
     manifest = {
         "schema": 1,
@@ -990,6 +1185,8 @@ def execute_run(
         },
         "dry_run": dry_run,
         "measured": measured,
+        "expected_architecture": expected_architecture,
+        "p1_evidence": redact_value(p1_evidence) if p1_evidence is not None else None,
     }
     json_dump(paths.run_root / "manifest.json", manifest)
     source_before = source_state(paths.worktree, commit)
@@ -1002,16 +1199,24 @@ def execute_run(
     json_dump(paths.artifacts / "storage-before.json", all_storage_snapshots(app, paths))
 
     if dry_run:
-        result = {**manifest, "stages": [], "dry_run": True}
+        result = {
+            **manifest,
+            "stages": [],
+            "dry_run": True,
+            "measurement_requested": measured,
+            "measured": False,
+        }
         json_dump(paths.run_root / "result.json", result)
         write_summary(output)
         return result
 
     stages: list[dict[str, Any]] = []
+    run_free_baseline = shutil.disk_usage(paths.run_root).free
     before_sccache = sccache_stats(app, env)
     install = run_stage(
         ["bun", "install", "--frozen-lockfile"], cwd=app, env=env, paths=paths, run_id=run_id,
         scenario=scenario, variant=variant, commit=commit, machine_id=machine["machine_id"], stage="10-install",
+        free_baseline=run_free_baseline,
     )
     stages.append(install)
     append_jsonl(paths.artifacts / "timings.jsonl", install)
@@ -1020,6 +1225,7 @@ def execute_run(
         warmup = run_stage(
             command, cwd=app, env=env, paths=paths, run_id=run_id, scenario=scenario, variant=variant,
             commit=commit, machine_id=machine["machine_id"], stage="15-warmup",
+            free_baseline=run_free_baseline,
         )
         stages.append(warmup)
         append_jsonl(paths.artifacts / "timings.jsonl", warmup)
@@ -1028,6 +1234,7 @@ def execute_run(
         build = run_stage(
             command, cwd=app, env=env, paths=paths, run_id=run_id, scenario=scenario, variant=variant,
             commit=commit, machine_id=machine["machine_id"], stage="20-tauri-build",
+            free_baseline=run_free_baseline,
         )
         stages.append(build)
         append_jsonl(paths.artifacts / "timings.jsonl", build)
@@ -1052,6 +1259,11 @@ def execute_run(
         frontend_index_exists=(app / "out" / "index.html").exists(),
         timing_files=timing_files,
         artifacts=artifacts,
+        scenario=scenario,
+        target=paths.target,
+        expected_profile=PROFILE_BY_SCENARIO[scenario],
+        expected_architecture=expected_architecture,
+        p1_evidence=p1_evidence,
     )
 
     result = {
@@ -1116,6 +1328,11 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         type=shlex.split,
         help="quoted exact build command; required to mirror signed P1 workflows",
     )
+    parser.add_argument(
+        "--p1-evidence",
+        type=Path,
+        help="JSON evidence for P1 identity, sidecar, isolated-launch, signature, and updater gates",
+    )
     parser.add_argument("--dry-run", action="store_true", help="create worktrees and manifests without installs/builds")
     subparsers = parser.add_subparsers(dest="mode", required=True)
 
@@ -1146,13 +1363,25 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise RuntimeError("H0 requires sccache to be disabled")
     if args.scenario == "P1" and not args.command:
         raise RuntimeError("P1 requires --command with the exact signed production workflow build command")
+    p1_evidence = None
+    if args.p1_evidence:
+        try:
+            loaded_evidence = json.loads(args.p1_evidence.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise RuntimeError(f"cannot read P1 evidence: {error}") from error
+        if not isinstance(loaded_evidence, Mapping):
+            raise RuntimeError("P1 evidence must be a JSON object")
+        p1_evidence = loaded_evidence
 
     if args.mode == "run":
-        execute_run(
+        result = execute_run(
             repo=repo, output=output, scenario=args.scenario, variant=args.variant, revision=args.revision,
             repetition=args.repetition, enable_sccache=args.enable_sccache, release_args=args.release_arg,
-            override_command=args.command, dry_run=args.dry_run,
+            override_command=args.command, dry_run=args.dry_run, p1_evidence=p1_evidence,
         )
+        if not args.dry_run and not result["success"]:
+            print(f"run {result.get('run_id', 'unknown')} failed correctness gates", file=sys.stderr)
+            return 1
     else:
         revisions = {"baseline": args.baseline, "candidate": args.candidate}
         for variant, repetition, measured in comparison_plan(
@@ -1162,7 +1391,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 repo=repo, output=output, scenario=args.scenario, variant=variant,
                 revision=revisions[variant], repetition=repetition, enable_sccache=args.enable_sccache,
                 release_args=args.release_arg, override_command=args.command, dry_run=args.dry_run,
-                measured=measured,
+                measured=measured, p1_evidence=p1_evidence,
             )
             if not args.dry_run and not result["success"]:
                 print(f"run {result['run_id']} failed; stopping comparison", file=sys.stderr)
