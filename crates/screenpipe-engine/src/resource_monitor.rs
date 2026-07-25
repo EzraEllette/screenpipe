@@ -327,7 +327,11 @@ pub struct ResourceTelemetryReporter {
     /// re-alerting every tick would just flood Sentry with the same issue.
     leak_alerted: std::sync::atomic::AtomicBool,
     #[cfg(test)]
-    local_tick_observer: Option<Arc<dyn Fn() + Send + Sync>>,
+    monitor_started_observer: Option<std::sync::mpsc::Sender<()>>,
+    #[cfg(test)]
+    local_tick_observer: Option<std::sync::mpsc::Sender<()>>,
+    #[cfg(test)]
+    delivery_transition_observer: Option<std::sync::mpsc::Sender<DeliveryTransition>>,
 }
 
 /// Compatibility name for downstream users. New code should use
@@ -624,7 +628,11 @@ impl ResourceTelemetryReporter {
             leak_window: std::sync::Mutex::new(std::collections::VecDeque::new()),
             leak_alerted: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
+            monitor_started_observer: None,
+            #[cfg(test)]
             local_tick_observer: None,
+            #[cfg(test)]
+            delivery_transition_observer: None,
         })
     }
 
@@ -632,7 +640,9 @@ impl ResourceTelemetryReporter {
     fn new_for_test(
         url: String,
         timeout: Duration,
-        observer: Option<Arc<dyn Fn() + Send + Sync>>,
+        monitor_started_observer: Option<std::sync::mpsc::Sender<()>>,
+        local_tick_observer: Option<std::sync::mpsc::Sender<()>>,
+        delivery_transition_observer: Option<std::sync::mpsc::Sender<DeliveryTransition>>,
     ) -> Arc<Self> {
         Arc::new(Self {
             start_time: Instant::now() - Duration::from_secs(LEAK_WARMUP_SECS as u64),
@@ -645,7 +655,9 @@ impl ResourceTelemetryReporter {
             hw_info: HardwareInfo::collect(),
             leak_window: std::sync::Mutex::new(std::collections::VecDeque::new()),
             leak_alerted: std::sync::atomic::AtomicBool::new(false),
-            local_tick_observer: observer,
+            monitor_started_observer,
+            local_tick_observer,
+            delivery_transition_observer,
         })
     }
 
@@ -931,6 +943,10 @@ impl ResourceTelemetryReporter {
             let mut delivery_in_flight = false;
             let mut ticker = tokio::time::interval_at(TokioInstant::now() + interval, interval);
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            #[cfg(test)]
+            if let Some(observer) = &monitor.monitor_started_observer {
+                let _ = observer.send(());
+            }
 
             loop {
                 tokio::select! {
@@ -939,13 +955,22 @@ impl ResourceTelemetryReporter {
                         match result {
                             Ok(()) => {
                                 let failed = delivery_state.consecutive_failures;
-                                if delivery_state.record_success(TokioInstant::now(), posthog_interval) == DeliveryTransition::Recovered {
+                                let transition = delivery_state.record_success(TokioInstant::now(), posthog_interval);
+                                if transition == DeliveryTransition::Recovered {
                                     info!(target: "resource_monitor", consecutive_failures = failed, "PostHog resource telemetry delivery recovered");
+                                }
+                                #[cfg(test)]
+                                if let Some(observer) = &monitor.delivery_transition_observer {
+                                    let _ = observer.send(transition);
                                 }
                             }
                             Err(failure) => {
                                 let (transition, delay) = delivery_state.record_failure(TokioInstant::now(), posthog_interval);
                                 log_delivery_failure(transition, failure, delivery_state.consecutive_failures, delay);
+                                #[cfg(test)]
+                                if let Some(observer) = &monitor.delivery_transition_observer {
+                                    let _ = observer.send(transition);
+                                }
                             }
                         }
                     }
@@ -1011,7 +1036,7 @@ impl ResourceTelemetryReporter {
         let trend = self.record_leak_sample(runtime.as_secs_f64(), snapshot.total_memory_gb);
         #[cfg(test)]
         if let Some(observer) = &self.local_tick_observer {
-            observer();
+            let _ = observer.send(());
         }
         (runtime, trend)
     }
@@ -1049,24 +1074,55 @@ mod tests {
     use wiremock::matchers::{body_partial_json, method, path};
     use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
-    struct FailOnce(AtomicUsize);
+    struct FailOnce {
+        attempts: AtomicUsize,
+        requests: std::sync::mpsc::Sender<()>,
+    }
     impl Respond for FailOnce {
         fn respond(&self, _: &Request) -> ResponseTemplate {
-            if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+            self.requests.send(()).unwrap();
+            if self.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
                 ResponseTemplate::new(503)
             } else {
                 ResponseTemplate::new(200)
             }
         }
     }
-    async fn wait_requests(server: &MockServer, n: usize) {
-        for _ in 0..100 {
-            if server.received_requests().await.unwrap().len() == n {
-                return;
-            }
-            tokio::task::yield_now().await;
+
+    struct ObservedResponse {
+        response: ResponseTemplate,
+        requests: std::sync::mpsc::Sender<()>,
+    }
+    impl Respond for ObservedResponse {
+        fn respond(&self, _: &Request) -> ResponseTemplate {
+            self.requests.send(()).unwrap();
+            self.response.clone()
         }
-        panic!("request count did not reach {n}");
+    }
+
+    fn observed_channel<T>() -> (
+        std::sync::mpsc::Sender<T>,
+        Arc<Mutex<std::sync::mpsc::Receiver<T>>>,
+    ) {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        (sender, Arc::new(Mutex::new(receiver)))
+    }
+
+    async fn recv_within<T: Send + 'static>(
+        receiver: &Arc<Mutex<std::sync::mpsc::Receiver<T>>>,
+        label: &str,
+    ) -> T {
+        let receiver = Arc::clone(receiver);
+        let label = label.to_string();
+        tokio::task::spawn_blocking(move || {
+            receiver
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap_or_else(|_| panic!("timed out waiting for {label}"))
+        })
+        .await
+        .unwrap()
     }
 
     /// (runtime_secs, mem_gb) samples at 30s cadence starting after warmup.
@@ -1163,34 +1219,54 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn monitor_drives_payload_backoff_and_recovery() {
         let server = MockServer::start().await;
+        let (request_tx, mut request_rx) = observed_channel();
         Mock::given(method("POST"))
             .and(path("/capture/"))
-            .respond_with(FailOnce(AtomicUsize::new(0)))
+            .respond_with(FailOnce {
+                attempts: AtomicUsize::new(0),
+                requests: request_tx,
+            })
             .mount(&server)
             .await;
+        let (local_tx, mut local_rx) = observed_channel();
+        let (delivery_tx, mut delivery_rx) = observed_channel();
+        let (started_tx, mut started_rx) = observed_channel();
         let monitor = ResourceTelemetryReporter::new_for_test(
             format!("{}/capture/", server.uri()),
             Duration::from_secs(5),
-            None,
+            Some(started_tx),
+            Some(local_tx),
+            Some(delivery_tx),
         );
         let task = monitor.start_monitoring(Duration::from_secs(10), Some(Duration::from_secs(10)));
-        tokio::task::yield_now().await;
+        recv_within(&mut started_rx, "monitor startup").await;
         tokio::time::advance(Duration::from_secs(10)).await;
-        wait_requests(&server, 1).await;
-        tokio::time::advance(Duration::from_millis(1)).await;
-        for _ in 0..500 {
-            tokio::task::yield_now().await;
-        }
-        tokio::time::advance(Duration::from_secs(10)).await;
+        recv_within(&mut local_rx, "first local sample").await;
+        recv_within(&mut request_rx, "first loopback request").await;
+        assert_eq!(
+            recv_within(&mut delivery_rx, "failed delivery transition").await,
+            DeliveryTransition::OutageOpened
+        );
         assert_eq!(server.received_requests().await.unwrap().len(), 1);
         tokio::time::advance(Duration::from_secs(10)).await;
-        wait_requests(&server, 2).await;
-        tokio::time::advance(Duration::from_millis(1)).await;
-        for _ in 0..500 {
-            tokio::task::yield_now().await;
-        }
+        recv_within(&mut local_rx, "backoff local sample").await;
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
         tokio::time::advance(Duration::from_secs(10)).await;
-        wait_requests(&server, 3).await;
+        recv_within(&mut local_rx, "recovery local sample").await;
+        recv_within(&mut request_rx, "recovery loopback request").await;
+        assert_eq!(
+            recv_within(&mut delivery_rx, "recovered delivery transition").await,
+            DeliveryTransition::Recovered
+        );
+        assert_eq!(server.received_requests().await.unwrap().len(), 2);
+        tokio::time::advance(Duration::from_secs(10)).await;
+        recv_within(&mut local_rx, "healthy local sample").await;
+        recv_within(&mut request_rx, "healthy loopback request").await;
+        assert_eq!(
+            recv_within(&mut delivery_rx, "healthy delivery transition").await,
+            DeliveryTransition::Healthy
+        );
+        assert_eq!(server.received_requests().await.unwrap().len(), 3);
         let body: serde_json::Value =
             serde_json::from_slice(&server.received_requests().await.unwrap()[0].body).unwrap();
         assert_eq!(body["event"], "resource_usage");
@@ -1201,25 +1277,31 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn monitor_samples_while_delivery_stalls() {
         let server = MockServer::start().await;
+        let (request_tx, mut request_rx) = observed_channel();
         Mock::given(method("POST"))
-            .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(3600)))
+            .respond_with(ObservedResponse {
+                response: ResponseTemplate::new(200).set_delay(Duration::from_secs(3600)),
+                requests: request_tx,
+            })
             .mount(&server)
             .await;
-        let ticks = Arc::new(AtomicUsize::new(0));
-        let seen = ticks.clone();
+        let (local_tx, mut local_rx) = observed_channel();
+        let (started_tx, mut started_rx) = observed_channel();
         let monitor = ResourceTelemetryReporter::new_for_test(
             format!("{}/capture/", server.uri()),
             Duration::from_secs(7200),
-            Some(Arc::new(move || {
-                seen.fetch_add(1, Ordering::SeqCst);
-            })),
+            Some(started_tx),
+            Some(local_tx),
+            None,
         );
         let task = monitor.start_monitoring(Duration::from_secs(10), Some(Duration::from_secs(10)));
-        tokio::task::yield_now().await;
+        recv_within(&mut started_rx, "monitor startup").await;
         for n in 1..=5 {
             tokio::time::advance(Duration::from_secs(10)).await;
-            tokio::task::yield_now().await;
-            assert_eq!(ticks.load(Ordering::SeqCst), n);
+            recv_within(&mut local_rx, &format!("local sample {n}")).await;
+            if n == 1 {
+                recv_within(&mut request_rx, "stalled loopback request").await;
+            }
         }
         assert_eq!(server.received_requests().await.unwrap().len(), 1);
         assert_eq!(monitor.leak_window.lock().unwrap().len(), 5);
@@ -1236,8 +1318,12 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn monitor_failure_is_only_a_sentry_breadcrumb() {
         let server = MockServer::start().await;
+        let (request_tx, mut request_rx) = observed_channel();
         Mock::given(method("POST"))
-            .respond_with(ResponseTemplate::new(429))
+            .respond_with(ObservedResponse {
+                response: ResponseTemplate::new(429),
+                requests: request_tx,
+            })
             .mount(&server)
             .await;
         let transport = Arc::new(MemoryTransport::default());
@@ -1253,19 +1339,25 @@ mod tests {
         let _subscriber = tracing::subscriber::set_default(
             tracing_subscriber::registry().with(sentry::integrations::tracing::layer()),
         );
+        let (local_tx, mut local_rx) = observed_channel();
+        let (delivery_tx, mut delivery_rx) = observed_channel();
+        let (started_tx, mut started_rx) = observed_channel();
         let monitor = ResourceTelemetryReporter::new_for_test(
             format!("{}/capture/", server.uri()),
             Duration::from_secs(5),
-            None,
+            Some(started_tx),
+            Some(local_tx),
+            Some(delivery_tx),
         );
         let task = monitor.start_monitoring(Duration::from_secs(10), Some(Duration::from_secs(10)));
-        tokio::task::yield_now().await;
+        recv_within(&mut started_rx, "monitor startup").await;
         tokio::time::advance(Duration::from_secs(10)).await;
-        wait_requests(&server, 1).await;
-        tokio::time::advance(Duration::from_millis(1)).await;
-        for _ in 0..500 {
-            tokio::task::yield_now().await;
-        }
+        recv_within(&mut local_rx, "Sentry local sample").await;
+        recv_within(&mut request_rx, "Sentry loopback request").await;
+        assert_eq!(
+            recv_within(&mut delivery_rx, "Sentry failure transition").await,
+            DeliveryTransition::OutageOpened
+        );
         tracing::error!(target: "resource_monitor_test", "sentry control event");
         let envelopes = transport.0.lock().unwrap();
         assert_eq!(envelopes.len(), 1);
