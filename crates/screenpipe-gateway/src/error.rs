@@ -54,8 +54,13 @@ pub enum ErrorCode {
     /// control plane returns when policy signing is unconfigured).
     #[serde(rename = "E_POLICY_FETCH")]
     EPolicyFetch,
-    /// An envelope arrived but failed verification against the pinned key
-    /// (bad signature, wrong algorithm, malformed payload).
+    /// An envelope arrived and this gateway refused to install it. Covers the
+    /// cryptographic refusals (bad signature, wrong algorithm, malformed
+    /// payload) AND the two non-cryptographic ones — a document signed for
+    /// another organization, and a REPLAY of an older document (see
+    /// [`crate::auth::PolicyRejected`]). One code on purpose: the operator
+    /// remedy is the same shape ("something is serving us the wrong bytes"),
+    /// and the log line names which.
     #[serde(rename = "E_POLICY_REJECTED")]
     EPolicyRejected,
     /// The cached policy is past its validity window, so every scoped v1

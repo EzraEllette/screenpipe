@@ -157,6 +157,37 @@ pub fn token_digest(raw_token: &str) -> String {
 /// filing an outage against Screenpipe.
 pub const CLOCK_SKEW_TOLERANCE_SECONDS: i64 = 300;
 
+/// How far BACKWARDS an incoming policy's `issued_at` may sit relative to the
+/// one already installed before [`crate::auth::PolicyStore::install`] treats it
+/// as a replay (SCR-359).
+///
+/// Deliberately a SEPARATE constant from
+/// [`CLOCK_SKEW_TOLERANCE_SECONDS`] despite the same magnitude: that one bounds
+/// gateway-vs-control-plane disagreement, this one bounds control-plane
+/// host-vs-host disagreement. `issued_at` is stamped per-request from the local
+/// clock of whichever serverless instance answers the pull (website
+/// `lib/enterprise/gateway-policy.ts` defaults `now = new Date()`; the route is
+/// `force-dynamic` with no cached clock and no authoritative row), so strict
+/// monotonicity would be a BUG: `ControlPlaneTask::boot` loads the cache and
+/// then pulls back-to-back, and two documents signed milliseconds apart by two
+/// hosts can legitimately invert — refusing the fresh one would keep the OLD
+/// grant list, the exact opposite of what a revocation needs.
+///
+/// A tolerated replay is therefore at most this far behind the installed
+/// document, which is also one refresh interval
+/// ([`crate::config::DEFAULT_POLICY_REFRESH_SECONDS`]) — so any grant it
+/// resurrects was still live in the policy this gateway itself installed one
+/// refresh ago. What the check buys is refusal of every replay old enough to
+/// matter: yesterday's envelope, the primitive that resurrects a token revoked
+/// arbitrarily long ago. It can only refuse a legitimate revocation if two
+/// control-plane hosts disagree by more than this, which is already the
+/// threshold at which the gateway reports
+/// [`crate::ErrorCode::EPolicyClockSkew`] and tells the operator to fix NTP.
+///
+/// If the signer ever moves to one authoritative clock (the real fix) this can
+/// go to 0; only this constant should move then, not the skew tolerance.
+pub const POLICY_ROLLBACK_TOLERANCE_SECONDS: i64 = 300;
+
 /// How the local clock compares with the signed `issued_at` of a *freshly
 /// delivered* policy. Only meaningful for a document that was just fetched
 /// from the control plane — a cached or operator-managed file's `issued_at` is

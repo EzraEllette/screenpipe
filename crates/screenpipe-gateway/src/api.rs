@@ -1845,7 +1845,7 @@ mod tests {
         barely_expired.issued_at = now - Duration::minutes(31);
         barely_expired.valid_until = now - Duration::minutes(1);
         store
-            .install(barely_expired, ClockSkew::Ok)
+            .install_aged_for_test(barely_expired, ClockSkew::Ok)
             .expect("own license");
         assert_eq!(
             call(
@@ -1864,7 +1864,7 @@ mod tests {
         stale.issued_at = now - Duration::hours(2);
         stale.valid_until = now - Duration::minutes(10);
         store
-            .install(stale.clone(), ClockSkew::Ok)
+            .install_aged_for_test(stale.clone(), ClockSkew::Ok)
             .expect("own license");
         assert_eq!(
             call(
@@ -1878,7 +1878,7 @@ mod tests {
         // was delivered: still 503, and the message must point at NTP instead
         // of implying a control-plane outage.
         store
-            .install(stale, ClockSkew::Ahead(7200))
+            .install_aged_for_test(stale, ClockSkew::Ahead(7200))
             .expect("own license");
         let res = router
             .clone()
@@ -1994,6 +1994,9 @@ mod tests {
         let err = store
             .install(verified, ClockSkew::Ok)
             .expect_err("a foreign-license policy must not install");
+        let crate::auth::PolicyRejected::ForeignLicense(err) = err else {
+            panic!("expected a foreign-license rejection, got {err:?}");
+        };
         assert_eq!(err.document_license_id, "lic-ATTACKER-ORG");
         let router = router(db, src, "lic-1".to_string(), Some(store.clone()));
 

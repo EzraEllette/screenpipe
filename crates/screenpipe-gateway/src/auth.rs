@@ -34,7 +34,7 @@ use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde_json::json;
 
 use crate::policy::{ClockSkew, PolicyDocument, TokenCheck};
@@ -66,6 +66,48 @@ impl std::fmt::Display for ForeignPolicy {
             "policy is signed for license {:?} but this gateway serves license {:?}",
             self.document_license_id, self.expected_license_id
         )
+    }
+}
+
+/// Why [`PolicyStore::install`] refused a document that already verified
+/// against the pinned key. Both arms are non-cryptographic: a genuine
+/// Screenpipe signature proves "we issued this", never "issued to YOU"
+/// ([`ForeignPolicy`]) and never "this is the CURRENT one"
+/// ([`PolicyRejected::Replay`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PolicyRejected {
+    /// Signed for a different organization — see [`ForeignPolicy`].
+    ForeignLicense(ForeignPolicy),
+    /// An OLDER document than the one installed, by more than
+    /// [`crate::policy::POLICY_ROLLBACK_TOLERANCE_SECONDS`] (SCR-359).
+    ///
+    /// Whoever chooses the bytes on a pull — an on-path attacker on a
+    /// `SCREENPIPE_GATEWAY_CONTROL_PLANE_ALLOW_HTTP=1` deployment, or anyone
+    /// with write access to the `policy_path` cache file — could otherwise
+    /// replay yesterday's correctly signed envelope and RESURRECT a revoked
+    /// `sk_ent_` grant for up to `valid_until + CLOCK_SKEW_TOLERANCE_SECONDS`.
+    /// Every other failure on that path (bad signature, staleness, skew) costs
+    /// the attacker availability; this one cost the defender secrecy.
+    Replay {
+        installed_issued_at: DateTime<Utc>,
+        document_issued_at: DateTime<Utc>,
+    },
+}
+
+impl std::fmt::Display for PolicyRejected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PolicyRejected::ForeignLicense(foreign) => write!(f, "{foreign}"),
+            PolicyRejected::Replay {
+                installed_issued_at,
+                document_issued_at,
+            } => write!(
+                f,
+                "policy was issued at {document_issued_at}, older than the installed \
+                 policy's {installed_issued_at} by more than the {}s rollback tolerance",
+                crate::policy::POLICY_ROLLBACK_TOLERANCE_SECONDS
+            ),
+        }
     }
 }
 
@@ -109,8 +151,13 @@ impl PolicyStore {
 
     /// Install a verified document together with the clock verdict for THIS
     /// delivery. Fails (and installs nothing) when the document belongs to
-    /// another organization — see [`ForeignPolicy`] for why a valid signature
-    /// is not enough.
+    /// another organization, or when it is a replay of a document older than
+    /// the installed one — see [`PolicyRejected`] for why a valid signature is
+    /// not enough on either axis.
+    ///
+    /// The rollback check reads the installed `issued_at` and writes the new
+    /// document under ONE write lock, so two concurrent installs cannot both
+    /// see the old document and race a stale one in.
     ///
     /// `skew` is a required argument rather than something computed here on
     /// purpose: only the code that obtained the document knows whether
@@ -119,12 +166,51 @@ impl PolicyStore {
     /// from a cache file or an operator-managed file passes
     /// [`ClockSkew::Ok`], because its `issued_at` is legitimately old and
     /// classifying it would invent skew that isn't there.
-    pub fn install(&self, policy: PolicyDocument, skew: ClockSkew) -> Result<(), ForeignPolicy> {
+    pub fn install(&self, policy: PolicyDocument, skew: ClockSkew) -> Result<(), PolicyRejected> {
         if policy.license_id != *self.expected_license_id {
-            return Err(ForeignPolicy {
+            return Err(PolicyRejected::ForeignLicense(ForeignPolicy {
                 expected_license_id: self.expected_license_id.to_string(),
                 document_license_id: policy.license_id,
-            });
+            }));
+        }
+        let mut slot = self.inner.write().expect("policy lock");
+        if let Some(installed) = slot.as_ref() {
+            // `<` and not `<=`: an EQUAL `issued_at` must pass, because the
+            // operator file-watcher posture re-reads and re-installs the very
+            // same file every poll interval and would otherwise log an error
+            // forever.
+            let floor = installed.policy.issued_at
+                - chrono::Duration::seconds(crate::policy::POLICY_ROLLBACK_TOLERANCE_SECONDS);
+            if policy.issued_at < floor {
+                return Err(PolicyRejected::Replay {
+                    installed_issued_at: installed.policy.issued_at,
+                    document_issued_at: policy.issued_at,
+                });
+            }
+        }
+        *slot = Some(Installed { policy, skew });
+        Ok(())
+    }
+
+    /// Install without the [`PolicyRejected::Replay`] check. Test-only, and it
+    /// exists for exactly one shape of test: the ones that AGE the installed
+    /// document (staleness, skew diagnosis, the 503 fail-closed paths) by
+    /// installing a deliberately older one, which is what the replay guard is
+    /// there to refuse. Those tests are about `is_stale`, not about rollback;
+    /// the guard itself is covered by `an_older_policy_is_refused_as_a_replay`.
+    /// Still enforces the tenant binding — nothing may install a foreign
+    /// policy, not even a test.
+    #[cfg(test)]
+    pub(crate) fn install_aged_for_test(
+        &self,
+        policy: PolicyDocument,
+        skew: ClockSkew,
+    ) -> Result<(), PolicyRejected> {
+        if policy.license_id != *self.expected_license_id {
+            return Err(PolicyRejected::ForeignLicense(ForeignPolicy {
+                expected_license_id: self.expected_license_id.to_string(),
+                document_license_id: policy.license_id,
+            }));
         }
         *self.inner.write().expect("policy lock") = Some(Installed { policy, skew });
         Ok(())
@@ -665,6 +751,9 @@ mod tests {
         let err = store
             .install(foreign.clone(), ClockSkew::Ok)
             .expect_err("a foreign-license policy must be refused");
+        let PolicyRejected::ForeignLicense(err) = err else {
+            panic!("expected a foreign-license rejection, got {err:?}");
+        };
         assert_eq!(err.document_license_id, "lic-ATTACKER-ORG");
         assert_eq!(err.expected_license_id, "lic-victim");
         assert!(
@@ -679,5 +768,126 @@ mod tests {
         own.license_id = "lic-victim".to_string();
         store.install(own, ClockSkew::Ok).expect("own license");
         assert_eq!(store.current().unwrap().license_id, "lic-victim");
+    }
+
+    /// A policy for `lic-victim` issued at `issued_at`, carrying one grant.
+    fn policy_at(issued_at: DateTime<Utc>, token: &str) -> PolicyDocument {
+        use crate::policy::TokenGrant;
+        PolicyDocument {
+            license_id: "lic-victim".to_string(),
+            issued_at,
+            valid_until: issued_at + chrono::Duration::minutes(60),
+            token_grants: vec![TokenGrant {
+                digest: crate::policy::token_digest(token),
+                scopes: vec!["read:search".to_string()],
+                expires_at: None,
+            }],
+        }
+    }
+
+    /// THE replay guard (SCR-359). A signature proves "Screenpipe issued this",
+    /// never "this is the current one" — so an entity that chooses the bytes on
+    /// a pull could otherwise replay yesterday's envelope and resurrect a
+    /// revoked `sk_ent_` grant.
+    #[test]
+    fn an_older_policy_is_refused_as_a_replay() {
+        use crate::policy::POLICY_ROLLBACK_TOLERANCE_SECONDS as EPSILON;
+
+        let now = Utc::now();
+        let store = PolicyStore::new("lic-victim");
+
+        // The current policy: the revoked token is GONE from the grant list.
+        let current = policy_at(now, "sk_ent_still_live_token_1234");
+        store.install(current, ClockSkew::Ok).expect("fresh policy");
+
+        // Yesterday's envelope, correctly signed for us, still listing the
+        // token that has since been revoked.
+        let replay = policy_at(
+            now - chrono::Duration::hours(24),
+            "sk_ent_revoked_token_1234",
+        );
+        let err = store
+            .install(replay, ClockSkew::Ok)
+            .expect_err("a policy older than the installed one must be refused");
+        match err {
+            PolicyRejected::Replay {
+                installed_issued_at,
+                document_issued_at,
+            } => {
+                assert_eq!(installed_issued_at, now);
+                assert_eq!(document_issued_at, now - chrono::Duration::hours(24));
+            }
+            other => panic!("expected a replay rejection, got {other:?}"),
+        }
+
+        // The store still holds the NEWER document, and the revoked token is
+        // still unknown to it.
+        let held = store.current().expect("the newer policy stays installed");
+        assert_eq!(held.issued_at, now);
+        assert_eq!(
+            held.check_token("sk_ent_revoked_token_1234", now),
+            TokenCheck::Unknown,
+            "the replay must not resurrect the revoked grant"
+        );
+
+        // Boundary pair. `issued_at` is stamped per-request from whichever
+        // control-plane instance answers the pull, so a genuinely newer
+        // document can sit slightly behind the installed one; epsilon is what
+        // keeps strict monotonicity from refusing a legitimate revocation.
+        let just_inside = policy_at(
+            now - chrono::Duration::seconds(EPSILON),
+            "sk_ent_inside_1234",
+        );
+        store
+            .install(just_inside, ClockSkew::Ok)
+            .expect("exactly epsilon behind is host-clock disagreement, not a replay");
+        assert_eq!(
+            store.current().unwrap().issued_at,
+            now - chrono::Duration::seconds(EPSILON)
+        );
+
+        // Re-installing the SAME `issued_at` must succeed: the operator
+        // file-watcher posture re-reads and re-installs one file every poll
+        // interval, and `<=` would make it log an error forever.
+        let same = policy_at(
+            now - chrono::Duration::seconds(EPSILON),
+            "sk_ent_reinstalled_1234",
+        );
+        store
+            .install(same, ClockSkew::Ok)
+            .expect("an equal issued_at is a re-install, not a replay");
+
+        // Just outside epsilon, measured against what is now installed.
+        let installed_at = store.current().unwrap().issued_at;
+        let just_outside = policy_at(
+            installed_at - chrono::Duration::seconds(EPSILON + 1),
+            "sk_ent_outside_1234",
+        );
+        let err = store
+            .install(just_outside, ClockSkew::Ok)
+            .expect_err("one second past epsilon is a replay");
+        assert!(matches!(err, PolicyRejected::Replay { .. }), "{err:?}");
+        assert_eq!(store.current().unwrap().issued_at, installed_at);
+    }
+
+    /// A replay must not be able to downgrade the clock verdict either: the
+    /// refusal leaves the installed document AND its skew untouched.
+    #[test]
+    fn a_refused_replay_leaves_the_skew_verdict_alone() {
+        let now = Utc::now();
+        let store = PolicyStore::new("lic-victim");
+        store
+            .install(
+                policy_at(now, "sk_ent_live_token_1234"),
+                ClockSkew::Behind(9),
+            )
+            .expect("fresh policy");
+        let _ = store
+            .install(
+                policy_at(now - chrono::Duration::hours(2), "sk_ent_old_token_1234"),
+                ClockSkew::Ok,
+            )
+            .expect_err("replay");
+        assert_eq!(store.current_skew(), Some(ClockSkew::Behind(9)));
     }
 }
