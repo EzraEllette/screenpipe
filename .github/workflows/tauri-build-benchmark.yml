@@ -128,7 +128,6 @@ jobs:
             --no-bundle \
             --verbose \
             -- \
-            --locked \
             --timings \
             --features e2e \
             2>&1 | tee "$RUNNER_TEMP/tauri-build.log"
@@ -159,6 +158,9 @@ jobs:
         run: |
           set -euo pipefail
           sccache --show-stats --stats-format=json > "$RUNNER_TEMP/sccache-stats.json" || true
+          git status --short > "$RUNNER_TEMP/post-build-git-status.txt" || true
+          git diff -- src-tauri/Cargo.lock > "$RUNNER_TEMP/member-lockfile.diff" || true
+          shasum -a 256 src-tauri/Cargo.lock > "$RUNNER_TEMP/member-lockfile.sha256" 2>/dev/null || true
           du -h -d 3 src-tauri/target 2>/dev/null | sort -h > "$RUNNER_TEMP/target-du.txt" || true
           find src-tauri/target -type f -exec stat -f '%z %N' {} + 2>/dev/null \
             | sort -nr | head -200 > "$RUNNER_TEMP/largest-target-files.txt" || true
@@ -170,6 +172,7 @@ jobs:
             echo "- Target bytes: \`${{ steps.build.outputs.target_bytes || 'not-produced' }}\`"
             echo "- Debug binary bytes: \`${{ steps.build.outputs.binary_bytes || 'not-produced' }}\`"
             echo "- Semantics: empty local target; reusable GitHub Actions sccache, frontend, and sidecar caches"
+            echo "- The repository's member Cargo.lock was stale on the first run; this temporary metric allows Cargo to resolve it and retains the resulting lockfile diff/hash as evidence."
             echo "- This is a CI developer-cold metric, not the harness's authoritative same-machine baseline/candidate comparison."
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -186,6 +189,9 @@ jobs:
             ${{ runner.temp }}/tauri-build.log
             ${{ runner.temp }}/build-metrics.env
             ${{ runner.temp }}/sccache-stats.json
+            ${{ runner.temp }}/post-build-git-status.txt
+            ${{ runner.temp }}/member-lockfile.diff
+            ${{ runner.temp }}/member-lockfile.sha256
             ${{ runner.temp }}/target-du.txt
             ${{ runner.temp }}/largest-target-files.txt
             apps/screenpipe-app-tauri/src-tauri/target/cargo-timings/
