@@ -118,21 +118,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         // `now` would invent skew. Only a
                                         // control-plane pull can judge that.
                                         Ok(doc) => {
-                                            if let Err(foreign) = refresh_store.install(
+                                            if let Err(rejected) = refresh_store.install(
                                                 doc,
                                                 screenpipe_gateway::policy::ClockSkew::Ok,
                                             ) {
                                                 // A file the operator placed is
                                                 // no more trusted than the
                                                 // network: the signing key is
-                                                // shared across tenants.
+                                                // shared across tenants, and it
+                                                // says nothing about which
+                                                // document is current. Logged
+                                                // only, no error code: this
+                                                // posture has no control plane,
+                                                // so the heartbeat drain that
+                                                // codes exist for is absent and
+                                                // recording would be write-only.
+                                                //
+                                                // Re-installing the SAME file
+                                                // every poll is fine — install
+                                                // accepts an equal `issued_at`.
                                                 tracing::error!(
-                                                    expected_license_id =
-                                                        %foreign.expected_license_id,
-                                                    document_license_id =
-                                                        %foreign.document_license_id,
-                                                    "policy file is signed for a DIFFERENT \
-                                                     organization — refusing to install it"
+                                                    reason = %rejected,
+                                                    "policy file REJECTED — refusing to install it"
                                                 );
                                             }
                                         }

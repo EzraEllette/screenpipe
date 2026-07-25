@@ -737,16 +737,18 @@ impl ControlPlaneTask {
                             stale,
                             "gateway control plane: loaded the cached policy envelope"
                         ),
-                        Err(foreign) => {
-                            // A signature only proves Screenpipe issued it; the
-                            // signing key is shared across tenants.
+                        // A signature only proves Screenpipe issued it: the
+                        // signing key is shared across tenants, and it says
+                        // nothing about which document is current. The replay
+                        // arm is unreachable from here in practice (this runs
+                        // before anything is installed) and handled anyway.
+                        Err(rejected) => {
                             self.errors.record(ErrorCode::EPolicyRejected);
                             error!(
                                 cache = %path.display(),
-                                expected_license_id = %foreign.expected_license_id,
-                                document_license_id = %foreign.document_license_id,
-                                "gateway control plane: cached policy belongs to a DIFFERENT \
-                                 organization — refusing to install it"
+                                reason = %rejected,
+                                "gateway control plane: cached policy REJECTED — refusing to \
+                                 install it"
                             );
                         }
                     }
@@ -899,25 +901,40 @@ impl ControlPlaneTask {
         // and auth.rs re-checks staleness on every request anyway. The skew
         // verdict travels WITH it so a later 503 can name the clock.
         //
-        // A foreign-license document is the one exception, and it is not
-        // suspect-but-useful — it is another organization's grant list, which
-        // this gateway would honour against ITS OWN archive (api.rs derives
-        // every prefix and query from `state.license_id`, never from the
-        // policy). The pinned key cannot catch it: the control plane signs
-        // every org's policy with one global seed and publishes the matching
-        // public key to everybody, so a signature proves "Screenpipe issued
-        // this", not "issued to you".
-        if let Err(foreign) = self.store.install(doc, skew) {
+        // [`crate::auth::PolicyRejected`] carries the two exceptions, and
+        // neither is suspect-but-useful. A foreign-license document is another
+        // organization's grant list, which this gateway would honour against
+        // ITS OWN archive (api.rs derives every prefix and query from
+        // `state.license_id`, never from the policy). A replay is an OLDER
+        // document of our own, which resurrects grants we already revoked. The
+        // pinned key catches neither: the control plane signs every org's
+        // policy with one global seed and publishes the matching public key to
+        // everybody, so a signature proves "Screenpipe issued this" — not
+        // "issued to you", and not "this is the current one".
+        //
+        // This is also the site that must NOT reach the cache write below: a
+        // rejected envelope has no business becoming the next cold start.
+        if let Err(rejected) = self.store.install(doc, skew) {
             self.errors.record(ErrorCode::EPolicyRejected);
             self.set_refresh_fault(Some(ErrorCode::EPolicyRejected));
-            error!(
-                expected_license_id = %foreign.expected_license_id,
-                document_license_id = %foreign.document_license_id,
-                "gateway control plane: the pulled policy is signed for a DIFFERENT organization \
-                 — refusing to install it. Either SCREENPIPE_GATEWAY_LICENSE_ID does not match the \
-                 org this gateway enrolled with, or this envelope did not come from our control \
-                 plane. Scoped routes stay failed closed."
-            );
+            match &rejected {
+                crate::auth::PolicyRejected::ForeignLicense(_) => error!(
+                    reason = %rejected,
+                    "gateway control plane: the pulled policy is signed for a DIFFERENT \
+                     organization — refusing to install it. Either SCREENPIPE_GATEWAY_LICENSE_ID \
+                     does not match the org this gateway enrolled with, or this envelope did not \
+                     come from our control plane. Scoped routes stay failed closed."
+                ),
+                crate::auth::PolicyRejected::Replay { .. } => error!(
+                    reason = %rejected,
+                    "gateway control plane: the pulled policy is OLDER than the one installed — \
+                     refusing it as a replay. A correctly signed but stale envelope would \
+                     resurrect revoked tokens; something between this gateway and the control \
+                     plane is serving old bytes (check SCREENPIPE_GATEWAY_CONTROL_PLANE_ALLOW_HTTP \
+                     and who can write the policy cache file). The previously installed policy \
+                     stays in force."
+                ),
+            }
             return;
         }
         self.set_refresh_fault(fault);
@@ -1974,6 +1991,74 @@ mod tests {
         assert_eq!(hb.error_codes, vec![ErrorCode::EPolicyRejected]);
     }
 
+    /// A REPLAYED pull (SCR-359): correctly signed by the pinned key, for the
+    /// right license, but OLDER than the document already installed. This is
+    /// the one primitive by which attacker-controlled transport could WEAKEN
+    /// auth rather than merely deny it, so the installed policy must survive it
+    /// and the replayed bytes must not become the next cold start.
+    #[tokio::test]
+    async fn a_replayed_older_policy_is_refused_and_records_e_policy_rejected() {
+        let server = wiremock::MockServer::start().await;
+        mount_register_ok(&server).await;
+        mount_heartbeat_ok(&server).await;
+
+        let now = Utc::now();
+        // Yesterday's envelope, genuinely signed with the pinned seed, still
+        // listing a grant that has since been revoked.
+        let mut yesterday = fresh_policy(now - ChronoDuration::hours(24));
+        yesterday.token_grants = vec![crate::policy::TokenGrant {
+            digest: crate::policy::token_digest("sk_ent_revoked_token_1234"),
+            scopes: vec!["read:search".to_string()],
+            expires_at: None,
+        }];
+        let (envelope, pinned) = sign_policy_for_fixture(&yesterday, &[11u8; 32], "k1");
+        mount_policy_raw(&server, envelope).await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = test_config(dir.path());
+        cfg.control_plane_base = Some(server.uri());
+        cfg.enrollment_token = Some("sge_first_boot".to_string());
+        cfg.policy_pubkey_b64 = Some(BASE64.encode(pinned.to_bytes()));
+        cfg.policy_path = Some(dir.path().join("policy.json"));
+
+        // The current policy is already in force: the revoked token is gone.
+        let store = PolicyStore::new("lic-1");
+        store
+            .install(fresh_policy(now), crate::policy::ClockSkew::Ok)
+            .expect("current policy");
+
+        let errors = ErrorCodeSink::new();
+        // `boot` pulls immediately — that pull is the replay.
+        let _task = ControlPlaneTask::boot(
+            &cfg,
+            Some((pinned, store.clone())),
+            errors.clone(),
+            IngestStatus::new(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        let held = store.current().expect("the installed policy must survive");
+        assert_eq!(held.issued_at, now, "the replay must not be installed");
+        assert_eq!(
+            held.check_token("sk_ent_revoked_token_1234", now),
+            crate::policy::TokenCheck::Unknown,
+            "the replay must not resurrect the revoked grant"
+        );
+        assert!(
+            !dir.path().join("policy.json").exists(),
+            "a rejected envelope must not be cached — it would be installed on \
+             the next cold start, before any pull can correct it"
+        );
+        // A 24h-old document is also skewed and stale, and those codes are
+        // correct; the rejection is the one that must be there.
+        assert!(
+            errors.drain().contains(&ErrorCode::EPolicyRejected),
+            "the replay must be reportable to the dashboard"
+        );
+    }
+
     /// E_POLICY_STALE must actually be emitted, and re-asserted per beat: it is
     /// the code that tells an operator WHY every scoped v1 route is 503ing.
     #[tokio::test]
@@ -2230,7 +2315,9 @@ mod tests {
             aged.is_stale(Utc::now()),
             "fixture guard: the aged document must actually be stale"
         );
-        store.install(aged, crate::policy::ClockSkew::Ok).unwrap();
+        store
+            .install_aged_for_test(aged, crate::policy::ClockSkew::Ok)
+            .unwrap();
         assert_eq!(
             task.refresh_fault(),
             None,
