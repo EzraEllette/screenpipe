@@ -1255,8 +1255,16 @@ async fn run_log_request_loop(
 }
 
 fn enterprise_http_client() -> reqwest::Client {
+    enterprise_http_client_with_timeout(Duration::from_secs(60))
+}
+
+/// The single place that knows the redirect policy for license-authenticated
+/// requests. Build every such client through here rather than calling
+/// `reqwest::Client::builder()` directly, so the no-redirect guarantee can't
+/// be lost by a new call site that only wanted a different timeout.
+pub(crate) fn enterprise_http_client_with_timeout(timeout: Duration) -> reqwest::Client {
     reqwest::Client::builder()
-        .timeout(Duration::from_secs(60))
+        .timeout(timeout)
         // License-authenticated control-plane requests use X-License-Key.
         // Reqwest only strips a small standard set of sensitive headers on
         // cross-origin redirects, so following redirects could leak that key.

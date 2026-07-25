@@ -82,6 +82,12 @@ impl TicketedConfig {
             control_headers: HeaderMap::new(),
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(30))
+                // `control_headers` is where callers put custom-header auth
+                // (e.g. X-License-Key). Reqwest only strips a small standard
+                // set of sensitive headers on a cross-origin redirect, so a
+                // redirect-following default client would hand that
+                // credential to whatever host the 3xx names.
+                .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .expect("default reqwest client builds"),
             put_max_retries: 3,

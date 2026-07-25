@@ -291,6 +291,37 @@ fn build_client_for_with_timeouts(
     build_client_with_timeouts(builder, connect_timeout, request_timeout)
 }
 
+/// Redirect policy for every integration client.
+///
+/// [`ProxyAuth::Header`] integrations authenticate with a custom header
+/// (`X-API-Key` for Limitless, `apikey` for Supabase). Reqwest strips only a
+/// small standard set — `Authorization`, `Cookie`, `Proxy-Authorization`,
+/// `WWW-Authenticate` — on a cross-origin hop, so a custom-header credential
+/// survives one 3xx to an arbitrary host. Third-party APIs do legitimately
+/// redirect (http→https, moved paths), so unlike the enterprise control-plane
+/// clients this can't be `Policy::none()`: allow same-origin hops, refuse to
+/// carry the credential off-origin.
+fn same_origin_redirects_only() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|attempt| {
+        let same_origin = attempt
+            .previous()
+            .last()
+            .map(|prev| {
+                prev.scheme() == attempt.url().scheme()
+                    && prev.host_str() == attempt.url().host_str()
+                    && prev.port_or_known_default() == attempt.url().port_or_known_default()
+            })
+            .unwrap_or(false);
+        if !same_origin {
+            attempt.stop()
+        } else if attempt.previous().len() > 10 {
+            attempt.error("too many redirects")
+        } else {
+            attempt.follow()
+        }
+    })
+}
+
 fn build_client_with_timeouts(
     builder: reqwest::ClientBuilder,
     connect_timeout: std::time::Duration,
@@ -299,12 +330,14 @@ fn build_client_with_timeouts(
     builder
         .connect_timeout(connect_timeout)
         .timeout(request_timeout)
+        .redirect(same_origin_redirects_only())
         .build()
         .unwrap_or_else(|e| {
             tracing::warn!("custom client build failed, using default: {}", e);
             reqwest::Client::builder()
                 .connect_timeout(connect_timeout)
                 .timeout(request_timeout)
+                .redirect(same_origin_redirects_only())
                 .build()
                 .expect("default reqwest client should build")
         })
@@ -992,6 +1025,60 @@ mod tests {
     use super::*;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn integration_clients_never_carry_custom_header_auth_off_origin() {
+        let source = MockServer::start().await;
+        let target = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/lifelogs"))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("Location", format!("{}/stolen", target.uri())),
+            )
+            .expect(1)
+            .mount(&source)
+            .await;
+        Mock::given(wiremock::matchers::any())
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&target)
+            .await;
+
+        let resp = build_default_client()
+            .get(format!("{}/v1/lifelogs", source.uri()))
+            .header("X-API-Key", "secret-user-credential")
+            .send()
+            .await
+            .expect("the 302 is returned to us, not followed");
+
+        assert_eq!(resp.status().as_u16(), 302);
+    }
+
+    #[tokio::test]
+    async fn integration_clients_still_follow_same_origin_redirects() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/old"))
+            .respond_with(ResponseTemplate::new(302).insert_header("Location", "/new"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/new"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let resp = build_default_client()
+            .get(format!("{}/old", server.uri()))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status().as_u16(), 200);
+    }
 
     fn temp_screenpipe_dir() -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
