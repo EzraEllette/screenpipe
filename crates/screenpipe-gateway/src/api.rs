@@ -76,6 +76,11 @@ pub struct ApiState {
     pub db: Arc<DatabaseManager>,
     pub source: Arc<dyn BlobSource>,
     pub license_id: String,
+    /// Served/denied query counters (SCR-301). Created by [`router`] and
+    /// shared with the `access_log` middleware, so there is no way to build a
+    /// router whose counters and whose `/access-log` handler are different
+    /// objects.
+    pub query_log: Arc<crate::access_log::QueryLog>,
 }
 
 /// Every route the gateway serves, as (path, handler) pairs.
@@ -91,6 +96,7 @@ fn routes() -> Vec<(&'static str, MethodRouter<ApiState>)> {
     vec![
         ("/health", get(health)),
         ("/version", get(version)),
+        ("/access-log", get(access_log)),
         ("/api/enterprise/v1/devices", get(devices)),
         ("/api/enterprise/v1/search", get(search)),
         ("/api/enterprise/v1/records", get(records)),
@@ -128,10 +134,17 @@ pub fn router(
     license_id: String,
     policy: Option<crate::auth::PolicyStore>,
 ) -> Router {
+    // One counter object per router, handed to both the middleware that writes
+    // it and the handler that reads it. Deliberately NOT a parameter: a caller
+    // that could pass its own could also pass two different ones, and
+    // `/access-log` would then report a counter nothing increments (the M1
+    // shape of the SCR-301 bug — a mechanism that exists and is not wired).
+    let query_log = Arc::new(crate::access_log::QueryLog::new());
     let state = ApiState {
         db,
         source,
         license_id,
+        query_log: query_log.clone(),
     };
     let mut stateful = Router::new();
     for (path, handler) in routes() {
@@ -144,7 +157,14 @@ pub fn router(
             crate::auth::require_bearer,
         ));
     }
-    router
+    // OUTSIDE the auth layer (each `.layer` wraps what came before), and
+    // applied unconditionally: the access log must record refusals, and it must
+    // work in the unauthenticated M1 posture where no auth layer exists at all
+    // — see `access_log::record_query`.
+    router.layer(axum::middleware::from_fn_with_state(
+        query_log,
+        crate::access_log::record_query,
+    ))
 }
 
 /// Handler for [`crate::auth::NOT_SERVED_ROUTES`]. Serves no state and reads
@@ -162,6 +182,13 @@ async fn version() -> Json<Value> {
         "name": "screenpipe-gateway",
         "version": env!("CARGO_PKG_VERSION"),
     }))
+}
+
+/// This gateway's own served/denied query counters (SCR-301) — the customer's
+/// evidence that queries happened here and not at Screenpipe. Unauthenticated
+/// by design; see `auth::PUBLIC_ROUTES`.
+async fn access_log(State(state): State<ApiState>) -> Json<Value> {
+    Json(state.query_log.snapshot())
 }
 
 fn err_json(status: StatusCode, msg: &str) -> Response {
@@ -1483,6 +1510,16 @@ mod tests {
     }
 
     async fn seeded_router(dir: &tempfile::TempDir) -> Router {
+        seeded_router_with_policy(dir, None).await
+    }
+
+    /// Two synthetic devices ingested into one db, then a router over them.
+    /// `policy = Some(store)` is the M2/production posture (bearer auth ON);
+    /// `None` is the M1 compose posture.
+    async fn seeded_router_with_policy(
+        dir: &tempfile::TempDir,
+        policy: Option<crate::auth::PolicyStore>,
+    ) -> Router {
         let db = Arc::new(
             DatabaseManager::new(
                 dir.path().join("gateway.db").to_str().unwrap(),
@@ -1540,7 +1577,7 @@ mod tests {
         .await
         .unwrap();
         ingestor.run_once().await.unwrap();
-        router(db, src, "lic-1".to_string(), None)
+        router(db, src, "lic-1".to_string(), policy)
     }
 
     async fn get_json(router: &Router, uri: &str) -> (StatusCode, Value) {
@@ -2071,5 +2108,281 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// SCR-301 acceptance criterion (a): **multi-device search through the
+    /// gateway with a real `sk_ent_` token.** Two existing tests each cover one
+    /// half — `search_returns_summaries_across_devices` is multi-device with
+    /// auth OFF, `bearer_auth_enforces_grants_scopes_and_policy_freshness` is
+    /// auth ON over an empty index — and the compose e2e (`e2e/run.sh`) is
+    /// multi-device with no `Authorization` header at all. Nothing combined
+    /// them, so "a real token, both devices, through the gateway" was asserted
+    /// nowhere: an auth layer that quietly dropped the device filter, or a
+    /// scope check that only passed on an empty result set, would have been
+    /// invisible.
+    #[tokio::test]
+    async fn a_real_token_searches_across_every_device_with_auth_on() {
+        use crate::auth::PolicyStore;
+        use crate::policy::{
+            sign_policy_for_fixture, token_digest, ClockSkew, PolicyDocument, TokenGrant,
+        };
+        use chrono::Duration;
+
+        // Shaped like the real thing the seed mints (`sk_ent_` + base64url), so
+        // the length/shape checks in `auth::parse_bearer` are exercised as they
+        // are in production rather than by a short stub.
+        const SK: &str = "sk_ent_QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo";
+        let now = Utc::now();
+        let (envelope, pubkey) = sign_policy_for_fixture(
+            &PolicyDocument {
+                license_id: "lic-1".to_string(),
+                issued_at: now,
+                valid_until: now + Duration::hours(1),
+                token_grants: vec![TokenGrant {
+                    digest: token_digest(SK),
+                    scopes: vec!["read:search".to_string(), "read:devices".to_string()],
+                    expires_at: None,
+                }],
+            },
+            &[17u8; 32],
+            "multi-dev",
+        );
+        let store = PolicyStore::new("lic-1");
+        store
+            .install(
+                crate::policy::verify_policy_envelope(envelope.as_bytes(), &pubkey).unwrap(),
+                ClockSkew::Ok,
+            )
+            .expect("own license");
+
+        let dir = tempfile::tempdir().unwrap();
+        let router = seeded_router_with_policy(&dir, Some(store)).await;
+        let authed = |uri: &'static str| {
+            let router = router.clone();
+            async move {
+                let resp = router
+                    .oneshot(
+                        Request::builder()
+                            .uri(uri)
+                            .header("authorization", format!("Bearer {SK}"))
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                let status = resp.status();
+                let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+                (status, serde_json::from_slice::<Value>(&bytes).unwrap())
+            }
+        };
+
+        let (status, body) = authed(
+            "/api/enterprise/v1/search?q=roadmap&since=2026-07-22T00:00:00Z\
+             &until=2026-07-23T00:00:00Z&limit=50",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let devices: std::collections::BTreeSet<&str> = body["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["device_id"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            devices,
+            ["dev-a", "dev-b"].into_iter().collect(),
+            "one authenticated search must span the whole fleet: {body}"
+        );
+        let kinds: std::collections::BTreeSet<&str> = body["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["kind"].as_str().unwrap())
+            .collect();
+        assert!(
+            ["audio", "frame", "memory"]
+                .iter()
+                .all(|k| kinds.contains(k)),
+            "kinds: {kinds:?}"
+        );
+
+        // The devices route needs its own scope, and this token has it.
+        let (status, body) = authed("/api/enterprise/v1/devices").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["count"], 2, "{body}");
+
+        // A scope this token does NOT hold is still refused — the grant is not
+        // a blanket pass.
+        let (status, _) = authed("/api/enterprise/v1/records?kind=memory").await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        // And the gateway's own record of all of it (SCR-301).
+        let (_, snap) = get_json(&router, "/access-log").await;
+        assert_eq!(snap["queries_served"], 2, "{snap}");
+        assert_eq!(snap["queries_denied"], 1, "{snap}");
+        assert_eq!(snap["by_scope"]["read:search"]["served"], 1, "{snap}");
+        assert_eq!(snap["by_scope"]["read:devices"]["served"], 1, "{snap}");
+        assert_eq!(snap["by_scope"]["read:records"]["denied"], 1, "{snap}");
+    }
+
+    /// SCR-301, the positive control. The acceptance claim is "Screenpipe's
+    /// hosted access logs show zero content reads for this org **while the
+    /// org's people were searching**". The second half has to be provable from
+    /// the gateway or the first half is worthless: zero hosted rows is equally
+    /// what you see when nobody searched, when the token was wrong, and when
+    /// the gateway was down.
+    ///
+    /// So: with auth ON, drive the real router and assert `/access-log` moves
+    /// the way the request outcomes did — successes into `queries_served`,
+    /// refusals into `queries_denied`, per-scope breakdown intact, and the
+    /// public routes (including `/access-log` itself) counted in neither.
+    #[tokio::test]
+    async fn the_access_log_counts_served_queries_and_refusals_separately() {
+        use crate::auth::PolicyStore;
+        use crate::policy::{
+            sign_policy_for_fixture, token_digest, ClockSkew, PolicyDocument, TokenGrant,
+        };
+        use chrono::Duration;
+
+        let dir = tempfile::tempdir().unwrap();
+        let router = {
+            let db = Arc::new(
+                DatabaseManager::new(
+                    dir.path().join("gateway.db").to_str().unwrap(),
+                    DbConfig::default(),
+                )
+                .await
+                .unwrap(),
+            );
+            crate::ingest::ensure_gateway_schema(&db).await.unwrap();
+            let src = Arc::new(S3BlobSource::from_store(Arc::new(InMemory::new()), None));
+            let now = Utc::now();
+            let policy = PolicyDocument {
+                license_id: "lic-1".to_string(),
+                issued_at: now,
+                valid_until: now + Duration::hours(1),
+                token_grants: vec![TokenGrant {
+                    digest: token_digest("sk_ent_search_only_1234"),
+                    scopes: vec!["read:search".to_string()],
+                    expires_at: None,
+                }],
+            };
+            let (envelope, pubkey) = sign_policy_for_fixture(&policy, &[9u8; 32], "acc-log");
+            let verified =
+                crate::policy::verify_policy_envelope(envelope.as_bytes(), &pubkey).unwrap();
+            let store = PolicyStore::new("lic-1");
+            store.install(verified, ClockSkew::Ok).expect("own license");
+            router(db, src, "lic-1".to_string(), Some(store))
+        };
+
+        let call = |auth: Option<&'static str>, uri: &'static str| {
+            let router = router.clone();
+            async move {
+                let mut req = Request::builder().uri(uri);
+                if let Some(a) = auth {
+                    req = req.header("authorization", a);
+                }
+                router
+                    .oneshot(req.body(Body::empty()).unwrap())
+                    .await
+                    .unwrap()
+                    .status()
+            }
+        };
+        let counters = || {
+            let router = router.clone();
+            async move { get_json(&router, "/access-log").await.1 }
+        };
+
+        // Nothing has happened yet — and the acceptance script's baseline read
+        // must not itself register as a query.
+        let before = counters().await;
+        assert_eq!(before["queries_served"], 0, "{before}");
+        assert_eq!(before["queries_denied"], 0, "{before}");
+        assert!(before["last_query_served_at"].is_null(), "{before}");
+        assert_eq!(before["reported_to_screenpipe"], false);
+
+        // Two genuine searches, one refusal per refusal shape.
+        for _ in 0..2 {
+            assert_eq!(
+                call(
+                    Some("Bearer sk_ent_search_only_1234"),
+                    "/api/enterprise/v1/search?q=roadmap"
+                )
+                .await,
+                StatusCode::OK
+            );
+        }
+        assert_eq!(
+            call(None, "/api/enterprise/v1/search?q=roadmap").await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            call(
+                Some("Bearer sk_ent_search_only_1234"),
+                "/api/enterprise/v1/devices"
+            )
+            .await,
+            StatusCode::FORBIDDEN,
+        );
+        // Liveness probes and the counter endpoint are not queries.
+        assert_eq!(call(None, "/health").await, StatusCode::OK);
+        assert_eq!(call(None, "/version").await, StatusCode::OK);
+
+        let after = counters().await;
+        assert_eq!(
+            after["queries_served"], 2,
+            "two searches were served: {after}"
+        );
+        assert_eq!(after["queries_denied"], 2, "one 401 and one 403: {after}");
+        assert_eq!(after["by_scope"]["read:search"]["served"], 2, "{after}");
+        assert_eq!(after["by_scope"]["read:search"]["denied"], 1, "{after}");
+        assert_eq!(after["by_scope"]["read:devices"]["denied"], 1, "{after}");
+        assert!(
+            after["last_query_served_at"].is_string(),
+            "a served query must timestamp itself: {after}"
+        );
+        // /health, /version and the two /access-log reads add up to five public
+        // requests; none of them may appear anywhere in the counters.
+        let total: u64 = after["by_scope"]
+            .as_object()
+            .unwrap()
+            .values()
+            .map(|v| v["served"].as_u64().unwrap() + v["denied"].as_u64().unwrap())
+            .sum();
+        assert_eq!(total, 4, "public routes must not be counted: {after}");
+    }
+
+    /// The counter must NOT be a side effect of the auth layer. In the M1
+    /// posture (`policy = None`) there is no auth middleware at all, and a
+    /// gateway serving the entire archive anonymously is the one that most
+    /// needs an access log — reporting `queries_served: 0` there would be the
+    /// most misleading value the endpoint could return.
+    #[tokio::test]
+    async fn queries_are_counted_in_the_unauthenticated_posture_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let router = seeded_router(&dir).await;
+
+        let (status, _) = get_json(&router, "/api/enterprise/v1/search?q=roadmap").await;
+        assert_eq!(status, StatusCode::OK, "M1 serves without a token");
+        let (status, _) = get_json(&router, "/api/enterprise/v1/devices").await;
+        assert_eq!(status, StatusCode::OK);
+        // An unclassified v1 path. With no auth layer to refuse it, axum's
+        // router answers 404 rather than the 403 `auth::route_auth` produces in
+        // the M2 posture — and it is still recorded, because the middleware sits
+        // outside the router, not inside the auth layer.
+        let (status, _) = get_json(&router, "/api/enterprise/v1/experimental").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        let (status, snap) = get_json(&router, "/access-log").await;
+        assert_eq!(status, StatusCode::OK, "/access-log needs no token");
+        assert_eq!(
+            snap["queries_served"], 2,
+            "an unauthenticated gateway still serves real queries: {snap}"
+        );
+        assert_eq!(snap["queries_denied"], 1, "{snap}");
+        assert_eq!(snap["by_scope"]["read:search"]["served"], 1, "{snap}");
+        assert_eq!(snap["by_scope"]["read:devices"]["served"], 1, "{snap}");
+        assert_eq!(snap["by_scope"]["<unmapped>"]["denied"], 1, "{snap}");
     }
 }

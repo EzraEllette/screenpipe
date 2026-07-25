@@ -21,6 +21,11 @@
 //! Query-level audit logs live HERE, on customer infrastructure (tracing,
 //! token digest prefix only) — not with Screenpipe. That asymmetry is the
 //! product: our access logs show zero per-query auth traffic for the org.
+//! [`crate::access_log`] is where that promise is actually kept (SCR-301):
+//! one log line per v1 request plus the served/denied counters on
+//! `/access-log`, which are the POSITIVE CONTROL an acceptance run needs —
+//! without them "our hosted logs show zero content reads" is equally true of
+//! an org that never searched.
 
 use std::sync::{Arc, RwLock};
 
@@ -161,10 +166,24 @@ impl PolicyStore {
 }
 
 /// Routes served without a bearer token. This is an **allow-list, and it
-/// is the only way to be unauthenticated** — see [`route_auth`]. Both
-/// carry gateway-own metadata (liveness, build version), never archive
-/// content.
-pub const PUBLIC_ROUTES: &[&str] = &["/health", "/version"];
+/// is the only way to be unauthenticated** — see [`route_auth`]. All three
+/// carry gateway-own metadata (liveness, build version, query counters),
+/// never archive content.
+///
+/// `/access-log` is public deliberately, and the reason is not convenience:
+/// it is the endpoint an operator needs precisely when auth is NOT working.
+/// The v1 surface fails closed — a stale policy 503s every scoped route, a
+/// revoked token 401s — so a counter endpoint behind that same gate would be
+/// unreadable in exactly the three situations it exists to diagnose (policy
+/// expired, control plane down, token revoked), including the revocation step
+/// of the acceptance run, which reads the counters *after* revoking the only
+/// token it has. It carries aggregate served/denied counts and nothing else:
+/// no query text, no device ids, no object keys, no token material. It does
+/// expose *how busy* this gateway is to anyone who can reach the port, which
+/// is the same audience `/health` already tells the gateway exists to — see
+/// the network-posture section of `crates/screenpipe-gateway/README.md`, which
+/// requires the port be private and TLS-terminated regardless.
+pub const PUBLIC_ROUTES: &[&str] = &["/health", "/version", "/access-log"];
 
 /// Hosted v1 routes this gateway deliberately does NOT serve, answered with a
 /// typed 501 instead.
