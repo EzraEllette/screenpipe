@@ -127,7 +127,7 @@ fn rollup_body() -> Vec<u8> {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt().init();
+    screenpipe_gateway::init_tracing();
     let cfg = GatewayConfig::from_env()?;
     let source = Arc::new(S3BlobSource::from_config(&cfg)?);
 

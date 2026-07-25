@@ -377,6 +377,34 @@ mod tests {
         );
     }
 
+    /// The class guard for the ANSI defect. Both binaries must go through
+    /// [`crate::init_tracing`], because a `tracing_subscriber::fmt()` built by
+    /// hand colourizes by default and puts escape codes inside the access log's
+    /// `field=value` pairs — breaking the grep the deployment guide documents.
+    ///
+    /// Textual, deliberately: it is the only thing that can fail when a NEW
+    /// binary is added, and a new binary is exactly how this would return. Note
+    /// the needles live in THIS file, so they cannot match themselves inside the
+    /// haystacks (the trap `main.rs`'s `boot_wiring` test documents).
+    #[test]
+    fn no_binary_configures_tracing_by_hand() {
+        for (name, source) in [
+            ("main.rs", include_str!("main.rs")),
+            ("bin/seed.rs", include_str!("bin/seed.rs")),
+        ] {
+            assert!(
+                !source.contains("tracing_subscriber::fmt("),
+                "{name} builds its own subscriber. Colour codes then go into the access log, \
+                 where they break `grep token_digest_prefix=…` — call \
+                 screenpipe_gateway::init_tracing() instead"
+            );
+            assert!(
+                source.contains("init_tracing()"),
+                "{name} installs no subscriber at all, so the access log goes nowhere"
+            );
+        }
+    }
+
     #[test]
     fn bearer_parsing_tolerates_case_and_whitespace_and_rejects_empty() {
         let req = |v: &str| {

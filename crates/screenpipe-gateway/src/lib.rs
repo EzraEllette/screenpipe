@@ -48,6 +48,29 @@ pub mod ingest;
 pub mod policy;
 pub mod source;
 
+/// Install this crate's tracing subscriber. **Every binary in the crate must
+/// use this** rather than calling `tracing_subscriber::fmt()` itself — asserted
+/// by `access_log::tests::no_binary_configures_tracing_by_hand`.
+///
+/// The one non-obvious setting is `with_ansi`. tracing-subscriber colourizes by
+/// default no matter what it is writing to, and these processes almost always
+/// write to a file or a container log driver. Escape codes there are not
+/// cosmetic: they land between a field name and its `=`, so
+/// `grep 'token_digest_prefix=…'` over the customer's audit log — the exact
+/// command `README.md` §9 tells them to run — silently matches nothing. The
+/// access log ([`access_log`]) is the customer's only record of who read their
+/// archive, so this is a correctness property of the product, and it is
+/// centralized here so a third binary cannot reintroduce it.
+pub fn init_tracing() {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "info,sqlx=warn".into()),
+        )
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()))
+        .init();
+}
+
 pub use access_log::QueryLog;
 pub use auth::PolicyStore;
 pub use config::GatewayConfig;
