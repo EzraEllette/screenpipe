@@ -58,7 +58,7 @@ class ScenarioPaths(NamedTuple):
 
 class ResourceSample(Protocol):
     @property
-    def peak_rss_bytes(self) -> int: ...
+    def peak_rss_bytes(self) -> int | None: ...
 
     @property
     def peak_target_bytes(self) -> int: ...
@@ -68,7 +68,7 @@ class ResourceSample(Protocol):
 
 
 class ResourceSnapshot(NamedTuple):
-    peak_rss_bytes: int
+    peak_rss_bytes: int | None
     peak_target_bytes: int
     minimum_free_bytes: int | None
 
@@ -169,6 +169,25 @@ def redact_command(command: Sequence[str]) -> list[str]:
             continue
         result.append(redact_url(argument))
     return result
+
+
+def redact_output(output: str, env: Mapping[str, str]) -> str:
+    """Redact inherited secrets and secret-shaped assignments from captured output."""
+    redacted = output
+    secret_values = {
+        str(value)
+        for name, value in env.items()
+        if is_secret_name(name) and len(str(value)) >= 4
+    }
+    for value in sorted(secret_values, key=len, reverse=True):
+        redacted = redacted.replace(value, "<redacted>")
+    redacted = re.sub(r"https?://[^\s]+", lambda match: redact_url(match.group(0)), redacted)
+    assignment = re.compile(
+        r"\b([A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|PRIVATE|CREDENTIAL|COOKIE|AUTH|SIGNING|KEY)[A-Z0-9_]*)"
+        r"(\s*[:=]\s*)([^\s]+)",
+        re.IGNORECASE,
+    )
+    return assignment.sub(lambda match: f"{match.group(1)}{match.group(2)}<redacted>", redacted)
 
 
 def scenario_paths(root: Path, scenario: str, run_id: str) -> ScenarioPaths:
@@ -423,7 +442,7 @@ def directory_kib(path: Path) -> int:
         return 0
 
 
-def process_tree_rss(root_pid: int) -> int:
+def process_tree_rss(root_pid: int) -> int | None:
     if sys.platform.startswith("linux"):
         processes: dict[int, tuple[int, int]] = {}
         for status_path in Path("/proc").glob("[0-9]*/status"):
@@ -450,7 +469,7 @@ def process_tree_rss(root_pid: int) -> int:
                 if len(fields := line.split()) == 3
             }
         except (OSError, ValueError, subprocess.TimeoutExpired):
-            return 0
+            return None
     descendants = {root_pid}
     changed = True
     while changed:
@@ -470,7 +489,7 @@ class ResourceSampler(threading.Thread):
         self.sample_path = sample_path
         self.interval = interval
         self.stop_event = threading.Event()
-        self.peak_rss_bytes = 0
+        self.peak_rss_bytes: int | None = None
         self.peak_target_bytes = 0
         self.minimum_free_bytes: int | None = None
         self._sample_count = 0
@@ -486,7 +505,8 @@ class ResourceSampler(threading.Thread):
             if self._sample_count % max(1, round(5 / self.interval)) == 0:
                 target_bytes = directory_kib(self.target) * 1024
             self._sample_count += 1
-            self.peak_rss_bytes = max(self.peak_rss_bytes, rss)
+            if rss is not None:
+                self.peak_rss_bytes = rss if self.peak_rss_bytes is None else max(self.peak_rss_bytes, rss)
             self.peak_target_bytes = max(self.peak_target_bytes, target_bytes)
             self.minimum_free_bytes = free if self.minimum_free_bytes is None else min(self.minimum_free_bytes, free)
             append_jsonl(
@@ -519,6 +539,13 @@ def command_record(
     free_before: int,
 ) -> dict[str, Any]:
     max_rss = sampler.peak_rss_bytes
+    notes = [
+        "cpu time unsupported: process-tree sampler subprocesses prevent uncontaminated RUSAGE_CHILDREN attribution",
+        "process I/O counters unsupported on this cross-platform sampler",
+        "network counters unsupported on this cross-platform sampler",
+    ]
+    if max_rss is None:
+        notes.append("peak RSS unsupported: host process enumeration was unavailable")
     return {
         "schema": 1,
         "run_id": run_id,
@@ -543,11 +570,7 @@ def command_record(
         "net_tx_bytes": None,
         "peak_target_bytes": sampler.peak_target_bytes,
         "peak_disk_bytes": max(0, free_before - (sampler.minimum_free_bytes or free_before)),
-        "notes": [
-            "cpu time unsupported: process-tree sampler subprocesses prevent uncontaminated RUSAGE_CHILDREN attribution",
-            "process I/O counters unsupported on this cross-platform sampler",
-            "network counters unsupported on this cross-platform sampler",
-        ],
+        "notes": notes,
     }
 
 
@@ -587,9 +610,9 @@ def run_stage(
                 start_new_session=True,
             )
         except OSError as error:
-            log.write(f"{time.monotonic_ns()} [{stage}] {error}\n")
+            log.write(f"{time.monotonic_ns()} [{stage}] {redact_output(str(error), env)}\n")
             sampler = ResourceSnapshot(
-                peak_rss_bytes=0,
+                peak_rss_bytes=None,
                 peak_target_bytes=0,
                 minimum_free_bytes=free_before,
             )
@@ -613,7 +636,7 @@ def run_stage(
         assert process.stdout is not None
         try:
             for line in process.stdout:
-                log.write(f"{time.monotonic_ns()} [{stage}] {line}")
+                log.write(f"{time.monotonic_ns()} [{stage}] {redact_output(line, env)}")
                 log.flush()
         except KeyboardInterrupt:
             os.killpg(process.pid, signal.SIGTERM)
@@ -649,11 +672,15 @@ def run_capture(command: Sequence[str], cwd: Path, env: Mapping[str, str] | None
         return {
             "command": redact_command(command),
             "exit_code": result.returncode,
-            "stdout": result.stdout.strip(),
-            "stderr": result.stderr.strip(),
+            "stdout": redact_output(result.stdout.strip(), env or {}),
+            "stderr": redact_output(result.stderr.strip(), env or {}),
         }
     except (OSError, subprocess.TimeoutExpired) as error:
-        return {"command": redact_command(command), "exit_code": None, "error": str(error)}
+        return {
+            "command": redact_command(command),
+            "exit_code": None,
+            "error": redact_output(str(error), env or {}),
+        }
 
 
 def resolve_revision(repo: Path, revision: str) -> str:
@@ -667,6 +694,28 @@ def resolve_revision(repo: Path, revision: str) -> str:
     if result.returncode:
         raise RuntimeError(f"cannot resolve revision {revision!r}: {result.stderr.strip()}")
     return result.stdout.strip()
+
+
+def pin_comparison_revisions(repo: Path, baseline: str, candidate: str) -> dict[str, str]:
+    origin_main = resolve_revision(repo, "origin/main")
+    baseline_commit = resolve_revision(repo, baseline)
+    if baseline_commit != origin_main:
+        raise RuntimeError(
+            "comparison baseline must resolve to unchanged origin/main "
+            f"({origin_main}); got {baseline_commit} from {baseline!r}"
+        )
+    return {
+        "baseline": baseline_commit,
+        "candidate": resolve_revision(repo, candidate),
+    }
+
+
+def assert_origin_main_unchanged(repo: Path, expected_commit: str) -> None:
+    current = resolve_revision(repo, "origin/main")
+    if current != expected_commit:
+        raise RuntimeError(
+            f"origin/main changed during comparison: expected {expected_commit}, found {current}"
+        )
 
 
 def create_worktree(repo: Path, paths: ScenarioPaths, commit: str) -> None:
@@ -1064,7 +1113,10 @@ def summary_row(result: Mapping[str, Any]) -> dict[str, Any]:
         "incremental_ms": stages.get("20-tauri-build", {}).get("elapsed_ms", "")
         if result["scenario"] == "W1"
         else "",
-        "peak_rss_bytes": max((stage["max_rss_bytes"] for stage in result["stages"]), default=0),
+        "peak_rss_bytes": max(
+            (stage["max_rss_bytes"] for stage in result["stages"] if stage["max_rss_bytes"] is not None),
+            default=None,
+        ),
         "peak_disk_bytes": max((stage["peak_disk_bytes"] for stage in result["stages"]), default=0),
         "exit_code": aggregate_exit_code(result["stages"]),
     }
@@ -1134,6 +1186,35 @@ def write_summary(root: Path) -> None:
             }
     json_dump(root / "summary-stats.json", {"schema": 1, "groups": groups, "comparisons": comparisons})
 
+    lines = ["Screenpipe Tauri build benchmark summary", ""]
+    if not rows:
+        lines.append("No measured runs.")
+    for scenario, variants in groups.items():
+        for variant, metrics in variants.items():
+            total = metrics.get("total_ms")
+            if not total:
+                continue
+            variant_records = [
+                result
+                for result in records
+                if result["scenario"] == scenario and result["variant"] == variant
+            ]
+            verified = sum(result.get("success") is True for result in variant_records)
+            lines.append(
+                f"{scenario} {variant} ({variant_records[0]['commit']}): "
+                f"median total: {total['median']} ms; range: {total['min']}-{total['max']} ms; "
+                f"MAD: {total['mad']} ms; {verified}/{len(variant_records)} correctness-verified"
+            )
+    lines.extend(
+        [
+            "",
+            "Tauri-internal stage wall times: unavailable unless independently instrumented by the build command; "
+            "the harness reports install and bounded Tauri build wall time without fabricating nested timings.",
+            "Cargo crate/build-script timings are retained as HTML in each run's artifacts/cargo-timings directory.",
+        ]
+    )
+    (root / "summary.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
 
 def execute_run(
     *,
@@ -1187,6 +1268,17 @@ def execute_run(
         "measured": measured,
         "expected_architecture": expected_architecture,
         "p1_evidence": redact_value(p1_evidence) if p1_evidence is not None else None,
+        "measurement_availability": {
+            "install_wall_time": "measured",
+            "tauri_build_wall_time": "measured",
+            "tauri_internal_stage_wall_times": "unavailable_without_independent_build_instrumentation",
+            "cargo_crate_and_build_script_timings": "cargo_html",
+            "peak_rss": "measured_when_host_process_enumeration_is_available",
+            "cpu_time": "unavailable",
+            "process_io": "unavailable",
+            "network_io": "unavailable",
+        },
+        "warm_incremental_subcase": "W1a-noop" if scenario == "W1" else None,
     }
     json_dump(paths.run_root / "manifest.json", manifest)
     source_before = source_state(paths.worktree, commit)
@@ -1383,16 +1475,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"run {result.get('run_id', 'unknown')} failed correctness gates", file=sys.stderr)
             return 1
     else:
-        revisions = {"baseline": args.baseline, "candidate": args.candidate}
+        revisions = pin_comparison_revisions(repo, args.baseline, args.candidate)
+        pinned_origin_main = revisions["baseline"]
         for variant, repetition, measured in comparison_plan(
             args.scenario, args.runs, skip_conditioning=args.skip_conditioning
         ):
+            assert_origin_main_unchanged(repo, pinned_origin_main)
             result = execute_run(
                 repo=repo, output=output, scenario=args.scenario, variant=variant,
                 revision=revisions[variant], repetition=repetition, enable_sccache=args.enable_sccache,
                 release_args=args.release_arg, override_command=args.command, dry_run=args.dry_run,
                 measured=measured, p1_evidence=p1_evidence,
             )
+            assert_origin_main_unchanged(repo, pinned_origin_main)
             if not args.dry_run and not result["success"]:
                 print(f"run {result['run_id']} failed; stopping comparison", file=sys.stderr)
                 return 1

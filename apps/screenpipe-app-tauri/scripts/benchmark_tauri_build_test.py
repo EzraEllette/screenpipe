@@ -20,6 +20,22 @@ SPEC.loader.exec_module(benchmark)
 
 
 class RedactionTests(unittest.TestCase):
+    def test_redacts_secret_values_and_assignments_from_command_output(self):
+        fixture_value = "fixture-" + "credential"
+        output = (
+            f"GITHUB_TOKEN={fixture_value}\n"
+            "download https://user:pass@example.test/archive?auth=query-secret\n"
+            "password: printed-secret\n"
+        )
+
+        redacted = benchmark.redact_output(output, {"GITHUB_TOKEN": fixture_value})
+
+        self.assertNotIn(fixture_value, redacted)
+        self.assertNotIn("user:pass", redacted)
+        self.assertNotIn("query-secret", redacted)
+        self.assertNotIn("printed-secret", redacted)
+        self.assertIn("GITHUB_TOKEN=<redacted>", redacted)
+
     def test_recursively_redacts_sensitive_configuration_fields(self):
         redacted = benchmark.redact_value(
             {"build": {"rustflags": ["-C", "opt-level=1"]}, "signing": {"privateKey": "secret"}}
@@ -83,6 +99,66 @@ class RedactionTests(unittest.TestCase):
 
 
 class ScenarioTests(unittest.TestCase):
+    def test_comparison_pins_unchanged_origin_main_as_baseline(self):
+        with mock.patch.object(
+            benchmark,
+            "resolve_revision",
+            side_effect=lambda _repo, revision: {
+                "origin/main": "baseline-sha",
+                "baseline-sha": "baseline-sha",
+                "candidate": "candidate-sha",
+            }[revision],
+        ):
+            revisions = benchmark.pin_comparison_revisions(Path("/repo"), "baseline-sha", "candidate")
+
+        self.assertEqual(revisions, {"baseline": "baseline-sha", "candidate": "candidate-sha"})
+
+    def test_comparison_rejects_baseline_other_than_origin_main(self):
+        with mock.patch.object(
+            benchmark,
+            "resolve_revision",
+            side_effect=lambda _repo, revision: {
+                "origin/main": "origin-sha",
+                "old-main": "old-sha",
+                "candidate": "candidate-sha",
+            }[revision],
+        ):
+            with self.assertRaisesRegex(RuntimeError, "must resolve to unchanged origin/main"):
+                benchmark.pin_comparison_revisions(Path("/repo"), "old-main", "candidate")
+
+    def test_comparison_rechecks_origin_main_even_when_run_fails(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary)
+            (repo / "Cargo.toml").write_text("[workspace]\n", encoding="utf-8")
+            with mock.patch.object(
+                benchmark,
+                "pin_comparison_revisions",
+                return_value={"baseline": "origin-sha", "candidate": "candidate-sha"},
+            ), mock.patch.object(
+                benchmark,
+                "comparison_plan",
+                return_value=[("baseline", 1, True)],
+            ), mock.patch.object(
+                benchmark,
+                "execute_run",
+                return_value={"success": False, "run_id": "F1-B-01"},
+            ), mock.patch.object(
+                benchmark,
+                "assert_origin_main_unchanged",
+            ) as unchanged, mock.patch("sys.stderr", new=io.StringIO()):
+                exit_code = benchmark.main(
+                    [
+                        "--repo", str(repo),
+                        "--output", str(repo / "output"),
+                        "--minimum-free-gib", "0",
+                        "--scenario", "F1",
+                        "compare", "--baseline", "origin/main", "--candidate", "HEAD", "--runs", "1",
+                    ]
+                )
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(unchanged.call_count, 2)
+
     def test_single_failed_correctness_run_returns_nonzero(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -149,6 +225,37 @@ class ScenarioTests(unittest.TestCase):
             self.assertNotEqual(first.target, second.target)
             self.assertEqual(first_env["CARGO_HOME"], second_env["CARGO_HOME"])
             self.assertNotEqual(first_env["CARGO_TARGET_DIR"], second_env["CARGO_TARGET_DIR"])
+
+    def test_hermetic_setup_neither_reuses_nor_cleans_shared_developer_state(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            shared_target = root / "developer-target"
+            shared_cargo_home = root / "developer-cargo-home"
+            target_sentinel = shared_target / "keep-target"
+            cache_sentinel = shared_cargo_home / "keep-cache"
+            target_sentinel.parent.mkdir()
+            cache_sentinel.parent.mkdir()
+            target_sentinel.write_text("developer artifact", encoding="utf-8")
+            cache_sentinel.write_text("developer cache", encoding="utf-8")
+            paths = benchmark.scenario_paths(root / "benchmark", "H0", "H0-C-01")
+
+            env = benchmark.scenario_environment(
+                "H0",
+                paths,
+                {
+                    "CARGO_TARGET_DIR": str(shared_target),
+                    "CARGO_HOME": str(shared_cargo_home),
+                },
+                enable_sccache=False,
+            )
+            benchmark.prepare_directories(paths)
+
+            self.assertEqual(Path(env["CARGO_TARGET_DIR"]), paths.target)
+            self.assertEqual(Path(env["CARGO_HOME"]), paths.cache_root / "cargo-home")
+            self.assertFalse(paths.target.is_relative_to(shared_target))
+            self.assertFalse(paths.cache_root.is_relative_to(shared_cargo_home))
+            self.assertEqual(target_sentinel.read_text(encoding="utf-8"), "developer artifact")
+            self.assertEqual(cache_sentinel.read_text(encoding="utf-8"), "developer cache")
 
     def test_build_command_selects_named_scenario_contract(self):
         self.assertEqual(
@@ -295,6 +402,76 @@ class StorageTests(unittest.TestCase):
 
 
 class StageExecutionTests(unittest.TestCase):
+    def test_unavailable_process_sampler_records_peak_rss_as_unsupported(self):
+        with mock.patch.object(benchmark.sys, "platform", "unsupported"), mock.patch.object(
+            benchmark.subprocess,
+            "run",
+            side_effect=OSError("ps unavailable"),
+        ):
+            peak_rss = benchmark.process_tree_rss(123)
+
+        record = benchmark.command_record(
+            run_id="F1-C-01",
+            scenario="F1",
+            variant="candidate",
+            commit="abc",
+            machine_id="machine",
+            stage="20-tauri-build",
+            command=["true"],
+            start_utc="2026-07-24T00:00:00Z",
+            end_utc="2026-07-24T00:00:01Z",
+            elapsed_ms=1000,
+            sampler=benchmark.ResourceSnapshot(peak_rss, 0, 100),
+            exit_code=0,
+            free_before=100,
+        )
+
+        self.assertIsNone(peak_rss)
+        self.assertIsNone(record["max_rss_bytes"])
+        self.assertTrue(any("peak RSS unsupported" in note for note in record["notes"]))
+        summary = benchmark.summary_row(
+            {
+                "scenario": "F1",
+                "variant": "candidate",
+                "commit": "abc",
+                "run_id": "F1-C-01",
+                "stages": [record],
+            }
+        )
+        self.assertIsNone(summary["peak_rss_bytes"])
+
+    def test_summary_writes_concise_human_readable_report(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            run = root / "runs" / "F1-C-01"
+            run.mkdir(parents=True)
+            (run / "result.json").write_text(
+                json.dumps(
+                    {
+                        "scenario": "F1",
+                        "variant": "candidate",
+                        "commit": "candidate-sha",
+                        "run_id": "F1-C-01",
+                        "measured": True,
+                        "dry_run": False,
+                        "success": True,
+                        "stages": [
+                            {"stage": "10-install", "elapsed_ms": 100, "max_rss_bytes": 1, "peak_disk_bytes": 1, "exit_code": 0},
+                            {"stage": "20-tauri-build", "elapsed_ms": 200, "max_rss_bytes": 2, "peak_disk_bytes": 2, "exit_code": 0},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            benchmark.write_summary(root)
+            summary = (root / "summary.txt").read_text(encoding="utf-8")
+
+            self.assertIn("F1 candidate", summary)
+            self.assertIn("median total: 300 ms", summary)
+            self.assertIn("1/1 correctness-verified", summary)
+            self.assertIn("Tauri-internal stage wall times: unavailable", summary)
+
     def test_summary_excludes_dry_runs_even_if_manifest_marked_measured(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
