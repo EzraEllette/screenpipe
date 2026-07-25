@@ -817,9 +817,24 @@ impl ControlPlaneTask {
                          misconfiguration, not a gateway fault; token verification stays failed \
                          closed."
                     ),
-                    other => warn!(
+                    // error!, not warn!: a failed pull means the advertised
+                    // revocation latency is NOT being honoured right now, which
+                    // is the same operator-visible condition as the two arms
+                    // above and is reported with the same E_POLICY_FETCH code.
+                    // It was warn! until a reviewer probed a dead control plane
+                    // and got zero ERROR lines — while both this crate's
+                    // acceptance evidence and docs/write-only-archive-local.md's
+                    // misconfiguration table promised "boots, logs ERROR" for
+                    // exactly the unreachable case, which lands here and not on
+                    // the AuthRejected/503 arms.
+                    other => error!(
                         error = %other,
-                        "gateway control plane: policy pull failed; keeping the cached policy"
+                        "gateway control plane: policy pull FAILED — keeping the currently \
+                         installed policy, if any, and retrying on the refresh cadence. Until a \
+                         pull succeeds this gateway cannot see revocations, so the stated \
+                         revocation latency does not hold; with no policy installed at all every \
+                         scoped v1 route fails closed with 503. Check that \
+                         SCREENPIPE_GATEWAY_CONTROL_PLANE is reachable from this host."
                     ),
                 }
                 return;
@@ -1733,10 +1748,31 @@ mod tests {
 
         // Installed (it is the newest evidence we have) but flagged.
         assert!(store.current().is_some());
-        assert_eq!(
-            store.current_skew().unwrap(),
-            crate::policy::ClockSkew::Ahead(7200)
-        );
+        // A RANGE, not `Ahead(7200)`. `issued_at` is stamped from the wall clock
+        // when the fixture is built, but the skew is measured when the pull
+        // actually COMPLETES — after a wiremock start, a /register round trip
+        // and a /policy round trip. Every whole second that elapses in between
+        // lands in the delta, so the exact form is racy and fails under load
+        // (observed on this branch: `left: Ahead(7203)`, on a machine running
+        // concurrent cargo builds). The lower bound stays exact because time
+        // only moves forward: the delta cannot come in under 7200.
+        //
+        // The pure-function equivalents in policy.rs (`ClockSkew::Ahead(7200)`
+        // at policy.rs:410/414) are NOT affected and were deliberately left
+        // exact: they pass one captured `now` into `clock_skew_at_fetch`, so
+        // both operands come from a single clock reading and nothing elapses.
+        match store.current_skew().unwrap() {
+            crate::policy::ClockSkew::Ahead(s) => assert!(
+                (7200..7260).contains(&s),
+                "expected the two-hour skew to be reported as Ahead(~7200), far past the \
+                 {}s tolerance, got Ahead({s})",
+                crate::policy::CLOCK_SKEW_TOLERANCE_SECONDS
+            ),
+            other => panic!(
+                "a host two hours FAST must be reported as Ahead — the direction is what \
+                 tells the operator which way to fix NTP — got {other:?}"
+            ),
+        }
         assert_eq!(errors.drain(), vec![ErrorCode::EPolicyClockSkew]);
 
         // And it keeps being reported on every beat — the dashboard shows the
@@ -2000,6 +2036,216 @@ mod tests {
                 i + 1
             );
         }
+    }
+
+    /// THE state the sticky `refresh_fault` exists for, and the ONE state no
+    /// other test in this file reaches: a **valid, non-stale** policy is
+    /// installed *and* the last refresh failed.
+    ///
+    /// This is the revoked-credential scenario, and it is the most dangerous
+    /// one to under-report because everything else still looks healthy.
+    /// `refresh_policy` maps `AuthRejected` to `E_POLICY_FETCH` and
+    /// DELIBERATELY keeps the still-valid document (dropping it would turn a
+    /// blip into an outage), so for up to a whole validity window — 3600s plus
+    /// the 300s skew tolerance — the gateway serves queries normally while its
+    /// credential is dead and its grant list is frozen. `send_heartbeat`'s
+    /// other two sources are both silent here: `store.current()` is `Some`, so
+    /// the `None` → `unwrap_or(E_POLICY_FETCH)` arm never runs, and the live
+    /// `is_stale` / skew re-checks both pass. Only the sticky re-assertion
+    /// speaks, and the website OVERWRITES `last_error_codes` with the newest
+    /// beat — so without it the dashboard reads "recent errors: none" for a
+    /// revoked gateway right up to the moment every scoped route starts 503ing.
+    ///
+    /// Why the `errors.drain()` below is load-bearing: the failed refresh also
+    /// records the code directly into the sink. Draining it first is what makes
+    /// the following beats able to observe ONLY the re-assertion. Without the
+    /// drain this test passes with the re-assertion deleted.
+    #[tokio::test]
+    async fn a_revoked_credential_is_reported_on_every_beat_while_the_policy_is_still_valid() {
+        let server = wiremock::MockServer::start().await;
+        mount_register_ok(&server).await;
+        mount_heartbeat_ok(&server).await;
+
+        let (envelope, pubkey) =
+            sign_policy_for_fixture(&fresh_policy(Utc::now()), &[11u8; 32], "k1");
+        // Exactly one good pull — the boot pull. `with_priority(1)` beats the
+        // default 5 while it is still eligible; `up_to_n_times(1)` retires it
+        // so every later pull falls through to the 401 below.
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/api/enterprise/gateway/policy"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_raw(envelope, "application/json"),
+            )
+            .up_to_n_times(1)
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        // ...and then the credential is revoked (or another gateway
+        // re-registered for this license, which revokes this row server-side).
+        // Verbatim what lib/enterprise/gateway.ts's authenticateGateway
+        // returns for an unknown/revoked `x-gateway-token`.
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/api/enterprise/gateway/policy"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(401)
+                    .set_body_json(serde_json::json!({"error": "invalid gateway token"})),
+            )
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = test_config(dir.path());
+        cfg.control_plane_base = Some(server.uri());
+        cfg.enrollment_token = Some("sge_first_boot".to_string());
+        cfg.policy_pubkey_b64 = Some(BASE64.encode(pubkey.to_bytes()));
+
+        let store = PolicyStore::new("lic-1");
+        let errors = ErrorCodeSink::new();
+        let task = ControlPlaneTask::boot(
+            &cfg,
+            Some((pubkey, store.clone())),
+            errors.clone(),
+            IngestStatus::new(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        // Phase 1 — healthy. A clean install records nothing and sets no fault.
+        assert!(
+            store.current().is_some(),
+            "the boot pull served a good policy"
+        );
+        assert_eq!(task.refresh_fault(), None);
+        assert!(errors.drain().is_empty());
+
+        // Phase 2 — the credential dies. The policy is KEPT on purpose.
+        task.refresh_policy().await;
+        let live = store.current().expect(
+            "a failed refresh must NOT drop a still-valid policy — that would turn a \
+             revoked credential into an immediate outage",
+        );
+        assert!(
+            !live.is_stale(Utc::now()),
+            "the installed policy is still inside its window: this is precisely the \
+             state where nothing else in send_heartbeat can produce a code"
+        );
+        assert_eq!(
+            store.current_skew(),
+            Some(crate::policy::ClockSkew::Ok),
+            "and the skew re-check is silent too, so the beat below can only be \
+             carrying the sticky refresh fault"
+        );
+        assert_eq!(
+            task.refresh_fault(),
+            Some(ErrorCode::EPolicyFetch),
+            "a 401 on the policy pull is E_POLICY_FETCH and it must stick"
+        );
+        assert_eq!(
+            errors.drain(),
+            vec![ErrorCode::EPolicyFetch],
+            "the refresh records it once directly; draining here is what forces the \
+             beats below to prove the RE-ASSERTION rather than reading this"
+        );
+
+        // Phase 3 — what the dashboard actually reads. Two beats, no intervening
+        // refresh: both must carry the code, because the website keeps only the
+        // newest beat's list.
+        task.send_heartbeat().await;
+        task.send_heartbeat().await;
+        let beats = heartbeats(&server).await;
+        assert_eq!(beats.len(), 2);
+        for (i, hb) in beats.iter().enumerate() {
+            assert_eq!(
+                hb.error_codes,
+                vec![ErrorCode::EPolicyFetch],
+                "beat #{} of a gateway on a dead credential must NOT be empty — an \
+                 empty list is what makes the dashboard say \"recent errors: none\" \
+                 for the whole validity window",
+                i + 1
+            );
+        }
+    }
+
+    /// The LIVE staleness re-check in `send_heartbeat` — source #2, and the
+    /// other half of the pair that was shielding each other from mutation.
+    ///
+    /// Every wiremock fault test installs a stale policy THROUGH
+    /// `refresh_policy`, which also sets the sticky fault, so the sticky path
+    /// supplies `E_POLICY_STALE` and deleting the live check leaves them green.
+    /// Here the document is aged past its window via `store.install` — the
+    /// store-level fixture — leaving `refresh_fault` deliberately `None`, so
+    /// the live check is the only thing that can speak.
+    ///
+    /// Reachable, not hypothetical: `run()` arms the policy timer ONCE from the
+    /// boot-time cadence, so a control plane that later shortens
+    /// `policy_validity_seconds` hands out documents that expire well before
+    /// this gateway's next refresh attempt, and the refresh that eventually
+    /// runs SUCCEEDS (clearing any fault) — the installed policy simply ages
+    /// out in between. Heartbeats are 5× more frequent than refreshes, so the
+    /// beats in that gap are the operator's only signal.
+    #[tokio::test]
+    async fn a_policy_that_ages_out_between_refreshes_is_reported_without_a_refresh_fault() {
+        let server = wiremock::MockServer::start().await;
+        mount_register_ok(&server).await;
+        mount_heartbeat_ok(&server).await;
+
+        let now = Utc::now();
+        let (envelope, pubkey) = sign_policy_for_fixture(&fresh_policy(now), &[11u8; 32], "k1");
+        mount_policy_raw(&server, envelope).await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = test_config(dir.path());
+        cfg.control_plane_base = Some(server.uri());
+        cfg.enrollment_token = Some("sge_first_boot".to_string());
+        cfg.policy_pubkey_b64 = Some(BASE64.encode(pubkey.to_bytes()));
+
+        let store = PolicyStore::new("lic-1");
+        let errors = ErrorCodeSink::new();
+        let task = ControlPlaneTask::boot(
+            &cfg,
+            Some((pubkey, store.clone())),
+            errors.clone(),
+            IngestStatus::new(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(task.refresh_fault(), None, "the boot pull was clean");
+        assert!(errors.drain().is_empty());
+
+        // Age the INSTALLED document past its window without touching
+        // `refresh_policy`. `ClockSkew::Ok` because this is not a clock
+        // problem — the policy is simply older than its validity window, which
+        // is what "the refresh timer has not caught up" looks like. Past
+        // `valid_until + CLOCK_SKEW_TOLERANCE_SECONDS`, or `is_stale` is false
+        // and the test would be vacuous.
+        let aged = PolicyDocument {
+            license_id: "lic-1".to_string(),
+            issued_at: now - ChronoDuration::seconds(3600),
+            valid_until: now - ChronoDuration::seconds(400),
+            token_grants: vec![],
+        };
+        assert!(
+            aged.is_stale(Utc::now()),
+            "fixture guard: the aged document must actually be stale"
+        );
+        store.install(aged, crate::policy::ClockSkew::Ok).unwrap();
+        assert_eq!(
+            task.refresh_fault(),
+            None,
+            "no refresh has failed, so the sticky path must be silent — that is what \
+             makes this test able to see the live check at all"
+        );
+
+        task.send_heartbeat().await;
+        let hb = heartbeats(&server).await.pop().expect("a heartbeat");
+        assert_eq!(
+            hb.error_codes,
+            vec![ErrorCode::EPolicyStale],
+            "a policy that aged out between refreshes must still be reported: every \
+             scoped v1 route is 503ing on it"
+        );
     }
 
     /// The CLEAR half of the `refresh_fault` state machine — the transition
