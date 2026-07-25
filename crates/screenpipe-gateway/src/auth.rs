@@ -208,6 +208,7 @@ pub enum RouteAuth {
 ///     token is examined at all;
 ///   * a sentinel covers only `/api/enterprise/v1/*`, while the allow-list
 ///     covers every path the router can ever serve.
+///
 /// SCR-295's test for the sentinel survives below, rewritten against this
 /// mechanism (`an_unmapped_v1_route_is_denied_not_waved_through`), so its
 /// cases — including the prefix-lookalike `records-v2` — still fail CI.
