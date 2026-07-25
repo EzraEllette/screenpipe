@@ -137,6 +137,7 @@ env_logger = { workspace = true }
 tempfile = { workspace = true }
 tokio-tungstenite = { workspace = true }
 tower = { version = "0.4", features = ["util"] }
+wiremock = { workspace = true }
 
 # Lock-free queue used by tests/consumer_sleep_test.rs to reproduce the
 # OCR frame-drop bug (see the test's docstring). Not needed by the crate

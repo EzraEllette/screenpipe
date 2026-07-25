@@ -13,11 +13,204 @@ use std::io::Write;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use sysinfo::{CpuExt, System, SystemExt};
+use tokio::time::Instant as TokioInstant;
 use tracing::debug;
 use tracing::trace;
 use tracing::{error, info, warn};
 
 use crate::telemetry_context::TelemetryContext;
+
+const POSTHOG_CAPTURE_URL: &str = "https://us.i.posthog.com/capture/";
+const POSTHOG_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+const POSTHOG_MAX_BACKOFF: Duration = Duration::from_secs(30 * 60);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PostHogFailureClass {
+    Timeout,
+    Connect,
+    Request,
+    Body,
+    Decode,
+    RateLimited,
+    Server,
+    Client,
+    OtherStatus,
+    Other,
+}
+
+impl PostHogFailureClass {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Timeout => "timeout",
+            Self::Connect => "connect",
+            Self::Request => "request",
+            Self::Body => "body",
+            Self::Decode => "decode",
+            Self::RateLimited => "rate_limited",
+            Self::Server => "server",
+            Self::Client => "client",
+            Self::OtherStatus => "other_status",
+            Self::Other => "other",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PostHogDeliveryFailure {
+    class: PostHogFailureClass,
+    status: Option<u16>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DeliveryTransition {
+    Healthy,
+    OutageOpened,
+    OutageContinues,
+    Recovered,
+}
+
+#[derive(Debug)]
+struct PostHogDeliveryState {
+    consecutive_failures: u32,
+    next_attempt_at: TokioInstant,
+}
+
+impl PostHogDeliveryState {
+    fn new(now: TokioInstant, base_interval: Duration) -> Self {
+        Self {
+            consecutive_failures: 0,
+            next_attempt_at: now + base_interval,
+        }
+    }
+
+    fn is_due(&self, now: TokioInstant) -> bool {
+        now >= self.next_attempt_at
+    }
+
+    fn record_success(&mut self, now: TokioInstant, base_interval: Duration) -> DeliveryTransition {
+        let transition = if self.consecutive_failures == 0 {
+            DeliveryTransition::Healthy
+        } else {
+            DeliveryTransition::Recovered
+        };
+        self.consecutive_failures = 0;
+        self.next_attempt_at = now + base_interval;
+        transition
+    }
+
+    fn record_failure(
+        &mut self,
+        now: TokioInstant,
+        base_interval: Duration,
+    ) -> (DeliveryTransition, Duration) {
+        let transition = if self.consecutive_failures == 0 {
+            DeliveryTransition::OutageOpened
+        } else {
+            DeliveryTransition::OutageContinues
+        };
+        self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+        let multiplier = 1_u32
+            .checked_shl(self.consecutive_failures.min(31))
+            .unwrap_or(u32::MAX);
+        let retry_delay = base_interval
+            .checked_mul(multiplier)
+            .unwrap_or(POSTHOG_MAX_BACKOFF)
+            .min(POSTHOG_MAX_BACKOFF);
+        self.next_attempt_at = now + retry_delay;
+        (transition, retry_delay)
+    }
+}
+
+fn log_delivery_failure(
+    transition: DeliveryTransition,
+    failure: PostHogDeliveryFailure,
+    consecutive_failures: u32,
+    retry_delay: Duration,
+) {
+    match transition {
+        DeliveryTransition::OutageOpened => warn!(
+            target: "resource_monitor",
+            failure_class = failure.class.as_str(),
+            http_status = ?failure.status,
+            consecutive_failures,
+            retry_in_seconds = retry_delay.as_secs(),
+            "PostHog resource telemetry outage opened"
+        ),
+        DeliveryTransition::OutageContinues => debug!(
+            target: "resource_monitor",
+            failure_class = failure.class.as_str(),
+            http_status = ?failure.status,
+            consecutive_failures,
+            retry_in_seconds = retry_delay.as_secs(),
+            "PostHog resource telemetry outage continues"
+        ),
+        DeliveryTransition::Healthy | DeliveryTransition::Recovered => {}
+    }
+}
+
+async fn deliver_posthog(
+    client: &Client,
+    capture_url: &str,
+    payload: &serde_json::Value,
+) -> Result<(), PostHogDeliveryFailure> {
+    deliver_posthog_with_timeout(client, capture_url, payload, POSTHOG_REQUEST_TIMEOUT).await
+}
+
+async fn deliver_posthog_with_timeout(
+    client: &Client,
+    capture_url: &str,
+    payload: &serde_json::Value,
+    timeout: Duration,
+) -> Result<(), PostHogDeliveryFailure> {
+    let response = client
+        .post(capture_url)
+        .timeout(timeout)
+        .json(payload)
+        .send()
+        .await
+        .map_err(classify_reqwest_error)?;
+    if response.status().is_success() {
+        Ok(())
+    } else {
+        Err(classify_status(response.status()))
+    }
+}
+
+fn classify_status(status: reqwest::StatusCode) -> PostHogDeliveryFailure {
+    let class = if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        PostHogFailureClass::RateLimited
+    } else if status.is_server_error() {
+        PostHogFailureClass::Server
+    } else if status.is_client_error() {
+        PostHogFailureClass::Client
+    } else {
+        PostHogFailureClass::OtherStatus
+    };
+    PostHogDeliveryFailure {
+        class,
+        status: Some(status.as_u16()),
+    }
+}
+
+fn classify_reqwest_error(error: reqwest::Error) -> PostHogDeliveryFailure {
+    let class = if error.is_timeout() {
+        PostHogFailureClass::Timeout
+    } else if error.is_connect() {
+        PostHogFailureClass::Connect
+    } else if error.is_request() {
+        PostHogFailureClass::Request
+    } else if error.is_body() {
+        PostHogFailureClass::Body
+    } else if error.is_decode() {
+        PostHogFailureClass::Decode
+    } else {
+        PostHogFailureClass::Other
+    };
+    PostHogDeliveryFailure {
+        class,
+        status: error.status().map(|status| status.as_u16()),
+    }
+}
 
 // --- memory-leak sentinel -------------------------------------------------
 // A leak that users actually feel ("screenpipe ate 10GB overnight") is slow
@@ -493,9 +686,9 @@ impl ResourceTelemetryReporter {
         snapshot: &ResourceSnapshot,
         runtime: Duration,
         mem_trend: Option<&LeakStats>,
-    ) {
+    ) -> Result<(), PostHogDeliveryFailure> {
         let Some(client) = &self.posthog_client else {
-            return;
+            return Ok(());
         };
 
         // Avoid unnecessary cloning by using references
@@ -589,23 +782,21 @@ impl ResourceTelemetryReporter {
         }
         TelemetryContext::from_env().insert_posthog_properties(&mut properties);
 
+        let property_count = properties.len();
         let payload = json!({
             "api_key": "phc_z7FZXE8vmXtdTQ78LMy3j1BQWW4zP6PGDUP46rgcdnb",
             "event": "resource_usage",
             "properties": properties,
         });
 
-        trace!(target: "resource_monitor", "Sending resource usage to PostHog: {:?}", payload);
+        trace!(
+            target: "resource_monitor",
+            event = "resource_usage",
+            property_count,
+            "Sending resource usage telemetry"
+        );
 
-        // Send the event to PostHog
-        if let Err(e) = client
-            .post("https://us.i.posthog.com/capture/")
-            .json(&payload)
-            .send()
-            .await
-        {
-            error!("Failed to send resource usage to PostHog: {}", e);
-        }
+        deliver_posthog(client, POSTHOG_CAPTURE_URL, &payload).await
     }
 
     /// Max resource log file size (10 MB). When exceeded the file is truncated.
@@ -707,7 +898,7 @@ impl ResourceTelemetryReporter {
         Self::log_process_breakdown(&snapshot.process_breakdown);
     }
 
-    async fn log_status(&self, snapshot: &ResourceSnapshot) {
+    async fn log_status(&self, snapshot: &ResourceSnapshot) -> Result<(), PostHogDeliveryFailure> {
         let runtime = self.start_time.elapsed();
         self.log_snapshot(snapshot, runtime);
 
@@ -716,15 +907,8 @@ impl ResourceTelemetryReporter {
 
         let mem_trend = self.record_leak_sample(runtime.as_secs_f64(), snapshot.total_memory_gb);
 
-        // Send to PostHog if enabled
-        if self.posthog_enabled {
-            tokio::select! {
-                _ = self.send_to_posthog(snapshot, runtime, mem_trend.as_ref()) => {},
-                _ = tokio::time::sleep(Duration::from_secs(5)) => {
-                    warn!("PostHog request timed out");
-                }
-            }
-        }
+        self.send_to_posthog(snapshot, runtime, mem_trend.as_ref())
+            .await
     }
 
     pub fn start_monitoring(
@@ -736,10 +920,11 @@ impl ResourceTelemetryReporter {
         // analytics/debug/file logging are disabled.
         let monitor = Arc::clone(self);
         let posthog_interval = posthog_interval.unwrap_or(interval);
-        let mut last_posthog_update = Instant::now();
 
         tokio::spawn(async move {
             let mut sampler = ResourceSampler::new();
+            let mut delivery_state =
+                PostHogDeliveryState::new(TokioInstant::now(), posthog_interval);
 
             loop {
                 tokio::select! {
@@ -771,13 +956,34 @@ impl ResourceTelemetryReporter {
                             }
                             unsafe { malloc_trim(0) };
                         }
-                        let now = Instant::now();
-                        let should_send_to_posthog = now.duration_since(last_posthog_update) >= posthog_interval;
+                        let now = TokioInstant::now();
                         let snapshot = sampler.snapshot();
 
-                        if should_send_to_posthog {
-                            last_posthog_update = now;
-                            monitor.log_status(&snapshot).await;
+                        if monitor.posthog_enabled && delivery_state.is_due(now) {
+                            match monitor.log_status(&snapshot).await {
+                                Ok(()) => {
+                                    let failed_probes = delivery_state.consecutive_failures;
+                                    if delivery_state.record_success(TokioInstant::now(), posthog_interval)
+                                        == DeliveryTransition::Recovered
+                                    {
+                                        info!(
+                                            target: "resource_monitor",
+                                            consecutive_failures = failed_probes,
+                                            "PostHog resource telemetry delivery recovered"
+                                        );
+                                    }
+                                }
+                                Err(failure) => {
+                                    let (transition, retry_delay) = delivery_state
+                                        .record_failure(TokioInstant::now(), posthog_interval);
+                                    log_delivery_failure(
+                                        transition,
+                                        failure,
+                                        delivery_state.consecutive_failures,
+                                        retry_delay,
+                                    );
+                                }
+                            }
                         } else {
                             monitor.log_status_local(&snapshot).await;
                         }
@@ -814,7 +1020,21 @@ impl ResourceTelemetryReporter {
 
 #[cfg(test)]
 mod tests {
-    use super::{analyze_memory_trend, LEAK_WARMUP_SECS};
+    use super::{
+        analyze_memory_trend, deliver_posthog, deliver_posthog_with_timeout, DeliveryTransition,
+        PostHogDeliveryState, PostHogFailureClass, LEAK_WARMUP_SECS, POSTHOG_MAX_BACKOFF,
+    };
+    use reqwest::Client;
+    use serde_json::json;
+    use std::fmt;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+    use tracing::field::{Field, Visit};
+    use tracing::{Event, Level, Subscriber};
+    use tracing_subscriber::layer::{Context, SubscriberExt};
+    use tracing_subscriber::Layer;
+    use wiremock::matchers::{body_partial_json, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     /// (runtime_secs, mem_gb) samples at 30s cadence starting after warmup.
     fn samples_over(hours: f64, mem_at: impl Fn(f64) -> f64) -> Vec<(f64, f64)> {
@@ -905,5 +1125,293 @@ mod tests {
         let stats = analyze_memory_trend(&s).expect("5h window should be judged");
         assert!(stats.r2 > 0.99);
         assert!(!stats.is_leak(), "30 MB/h flagged: {:?}", stats);
+    }
+
+    #[tokio::test]
+    async fn posthog_delivery_accepts_successful_resource_usage_event() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/capture/"))
+            .and(body_partial_json(json!({ "event": "resource_usage" })))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let result = deliver_posthog(
+            &Client::new(),
+            &format!("{}/capture/", server.uri()),
+            &json!({ "event": "resource_usage" }),
+        )
+        .await;
+
+        assert_eq!(result, Ok(()));
+    }
+
+    #[tokio::test]
+    async fn posthog_delivery_classifies_rate_limit_status() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/capture/"))
+            .respond_with(ResponseTemplate::new(429))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let failure = deliver_posthog(
+            &Client::new(),
+            &format!("{}/capture/", server.uri()),
+            &json!({ "event": "resource_usage" }),
+        )
+        .await
+        .expect_err("429 must not count as successful delivery");
+
+        assert_eq!(failure.class, super::PostHogFailureClass::RateLimited);
+        assert_eq!(failure.status, Some(429));
+    }
+
+    #[tokio::test]
+    async fn posthog_delivery_classifies_server_status() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(503))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let failure = deliver_posthog(
+            &Client::new(),
+            &format!("{}/capture/", server.uri()),
+            &json!({ "event": "resource_usage" }),
+        )
+        .await
+        .expect_err("503 must not count as successful delivery");
+
+        assert_eq!(failure.class, PostHogFailureClass::Server);
+        assert_eq!(failure.status, Some(503));
+    }
+
+    #[tokio::test]
+    async fn posthog_delivery_classifies_connection_failure_without_status() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+
+        let failure = deliver_posthog(
+            &Client::new(),
+            &format!("http://{address}/capture/"),
+            &json!({ "event": "resource_usage" }),
+        )
+        .await
+        .expect_err("dropped loopback listener must refuse the connection");
+
+        assert!(
+            matches!(
+                failure.class,
+                PostHogFailureClass::Connect | PostHogFailureClass::Other
+            ),
+            "backend exposed unexpected class: {:?}",
+            failure.class
+        );
+        assert_eq!(failure.status, None);
+    }
+
+    #[tokio::test]
+    async fn posthog_delivery_classifies_request_timeout() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_millis(200)))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let failure = deliver_posthog_with_timeout(
+            &Client::new(),
+            &format!("{}/capture/", server.uri()),
+            &json!({ "event": "resource_usage" }),
+            Duration::from_millis(20),
+        )
+        .await
+        .expect_err("stalled response must hit the request deadline");
+
+        assert_eq!(failure.class, PostHogFailureClass::Timeout);
+        assert_eq!(failure.status, None);
+    }
+
+    #[tokio::test]
+    async fn posthog_pending_delivery_does_not_block_unrelated_runtime_work() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_millis(100)))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = Client::new();
+        let url = format!("{}/capture/", server.uri());
+        let delivery = tokio::spawn(async move {
+            deliver_posthog(&client, &url, &json!({ "event": "resource_usage" })).await
+        });
+
+        for _ in 0..5 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            assert!(!delivery.is_finished(), "delivery did not remain pending");
+        }
+
+        assert_eq!(delivery.await.unwrap(), Ok(()));
+    }
+
+    #[test]
+    fn posthog_backoff_skips_ticks_and_grows_until_cap() {
+        let base = Duration::from_secs(60);
+        let now = tokio::time::Instant::now();
+        let mut state = PostHogDeliveryState::new(now, base);
+        assert!(!state.is_due(now));
+        assert!(state.is_due(now + base));
+
+        let first_attempt = now + base;
+        let (transition, first_delay) = state.record_failure(first_attempt, base);
+        assert_eq!(transition, DeliveryTransition::OutageOpened);
+        assert_eq!(first_delay, Duration::from_secs(120));
+        assert!(!state.is_due(first_attempt + base));
+        assert!(state.is_due(first_attempt + first_delay));
+
+        let (_, second_delay) = state.record_failure(first_attempt + first_delay, base);
+        assert_eq!(second_delay, Duration::from_secs(240));
+        let mut last_delay = second_delay;
+        for n in 0..40 {
+            let probe_at = state.next_attempt_at;
+            let (_, delay) = state.record_failure(probe_at, base);
+            assert!(delay <= POSTHOG_MAX_BACKOFF, "failure {n} exceeded cap");
+            last_delay = delay;
+        }
+        assert_eq!(last_delay, POSTHOG_MAX_BACKOFF);
+        assert_eq!(state.consecutive_failures, 42);
+
+        state.consecutive_failures = u32::MAX;
+        let probe_at = state.next_attempt_at;
+        let (_, delay) = state.record_failure(probe_at, base);
+        assert_eq!(state.consecutive_failures, u32::MAX);
+        assert_eq!(delay, POSTHOG_MAX_BACKOFF);
+    }
+
+    #[test]
+    fn posthog_backoff_recovery_resets_normal_cadence() {
+        let base = Duration::from_secs(60);
+        let now = tokio::time::Instant::now();
+        let mut state = PostHogDeliveryState::new(now, base);
+        assert_eq!(
+            state.record_success(now + base, base),
+            DeliveryTransition::Healthy
+        );
+        let (opened, _) = state.record_failure(now + base * 2, base);
+        assert_eq!(opened, DeliveryTransition::OutageOpened);
+        assert_eq!(
+            state.record_success(now + base * 4, base),
+            DeliveryTransition::Recovered
+        );
+        assert_eq!(state.consecutive_failures, 0);
+        assert!(!state.is_due(now + base * 4));
+        assert!(state.is_due(now + base * 5));
+    }
+
+    #[derive(Clone, Default)]
+    struct CapturedEvents(Arc<Mutex<Vec<(Level, String)>>>);
+
+    struct FieldCapture(String);
+
+    impl Visit for FieldCapture {
+        fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
+            self.0.push_str(field.name());
+            self.0.push('=');
+            self.0.push_str(&format!("{value:?}"));
+            self.0.push(' ');
+        }
+    }
+
+    impl<S> Layer<S> for CapturedEvents
+    where
+        S: Subscriber,
+    {
+        fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+            let mut fields = FieldCapture(String::new());
+            event.record(&mut fields);
+            self.0
+                .lock()
+                .unwrap()
+                .push((*event.metadata().level(), fields.0));
+        }
+    }
+
+    #[test]
+    fn posthog_outage_logging_is_bounded_and_privacy_safe() {
+        let captured = CapturedEvents::default();
+        let subscriber = tracing_subscriber::registry().with(captured.clone());
+        let failure = super::PostHogDeliveryFailure {
+            class: PostHogFailureClass::RateLimited,
+            status: Some(429),
+        };
+
+        tracing::subscriber::with_default(subscriber, || {
+            super::log_delivery_failure(
+                DeliveryTransition::OutageOpened,
+                failure,
+                1,
+                Duration::from_secs(120),
+            );
+            for count in 2..=3 {
+                super::log_delivery_failure(
+                    DeliveryTransition::OutageContinues,
+                    failure,
+                    count,
+                    Duration::from_secs(120 * count as u64),
+                );
+            }
+        });
+
+        let events = captured.0.lock().unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|(level, _)| *level == Level::ERROR)
+                .count(),
+            0
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|(level, _)| *level == Level::WARN)
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|(level, _)| *level == Level::DEBUG)
+                .count(),
+            2
+        );
+        let fields = events
+            .iter()
+            .map(|(_, fields)| fields.as_str())
+            .collect::<String>();
+        for expected in [
+            "failure_class",
+            "rate_limited",
+            "http_status",
+            "429",
+            "consecutive_failures",
+            "retry_in_seconds",
+        ] {
+            assert!(fields.contains(expected), "missing field/value {expected}");
+        }
+        for secret in [
+            "api_key",
+            "distinct_id",
+            "capture/",
+            "phc_",
+            "error sending request",
+        ] {
+            assert!(!fields.contains(secret), "diagnostic leaked {secret}");
+        }
     }
 }
