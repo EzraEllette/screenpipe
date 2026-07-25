@@ -17,6 +17,7 @@
     "dev:http": "ts-node src/cli.ts --http",
     "test": "vitest run",
     "test:watch": "vitest",
+    "verify:pack": "node scripts/assert-pack-contents.js",
     "prepublishOnly": "npm run build"
   },
   "keywords": [
