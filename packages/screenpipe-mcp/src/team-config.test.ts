@@ -38,10 +38,10 @@ describe("discoverTeamApiBase", () => {
     expect(discoverTeamApiBase(undefined, {}, home)).toBe(HOSTED_TEAM_API);
   });
 
-  it("uses enterprise.json team_api_url for gateway orgs", () => {
+  it("uses enterprise.json gateway_url for gateway orgs", () => {
     const home = homeWithEnterpriseJson({
       team_api_token: "sk_ent_abc",
-      team_api_url: "https://gateway.corp.internal:3040/api/enterprise/v1/",
+      gateway_url: "https://gateway.corp.internal:3040/api/enterprise/v1/",
     });
     expect(discoverTeamApiBase(undefined, {}, home)).toBe(
       "https://gateway.corp.internal:3040/api/enterprise/v1"
@@ -50,7 +50,7 @@ describe("discoverTeamApiBase", () => {
 
   it("env overrides file; flag overrides env", () => {
     const home = homeWithEnterpriseJson({
-      team_api_url: "https://from-file.example",
+      gateway_url: "https://from-file.example",
     });
     const env = { SCREENPIPE_TEAM_API_URL: "https://from-env.example" };
     expect(discoverTeamApiBase(undefined, env, home)).toBe(
@@ -61,8 +61,8 @@ describe("discoverTeamApiBase", () => {
     );
   });
 
-  it("ignores a non-string team_api_url", () => {
-    const home = homeWithEnterpriseJson({ team_api_url: 42 });
+  it("ignores a non-string gateway_url", () => {
+    const home = homeWithEnterpriseJson({ gateway_url: 42 });
     expect(discoverTeamApiBase(undefined, {}, home)).toBe(HOSTED_TEAM_API);
   });
 });

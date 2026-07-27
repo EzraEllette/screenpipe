@@ -159,7 +159,7 @@ No token → the `team-*` tools do not appear at all.
 |---|---|---|
 | 1 | `--team-api-url` flag | `npx -y screenpipe-mcp --team-api-url https://sp-gw.acme.internal/api/enterprise/v1` |
 | 2 | `SCREENPIPE_TEAM_API_URL` env var | `SCREENPIPE_TEAM_API_URL=https://sp-gw.acme.internal/api/enterprise/v1` |
-| 3 | `team_api_url` in `~/.screenpipe/enterprise.json` | `{ "team_api_url": "https://sp-gw.acme.internal/api/enterprise/v1" }` |
+| 3 | `gateway_url` in `~/.screenpipe/enterprise.json` | `{ "gateway_url": "https://sp-gw.acme.internal/api/enterprise/v1" }` |
 | 4 | *(default)* the hosted control plane | `https://screenpi.pe/api/enterprise/v1` |
 
 Trailing slashes are trimmed, so both `…/v1` and `…/v1/` work.
@@ -198,8 +198,9 @@ error text on a missing token also prints the base currently in use.
   hosted base and cannot be repointed at a gateway at all. Check with
   `npm view screenpipe-mcp version`, or read `serverInfo.version` from the MCP
   `initialize` response.
-- The desktop app does not write `team_api_url` yet, so priority 3 is currently
-  unpopulated in practice — use the env var or the flag.
+- Priority 3 is populated by the desktop app, which writes `gateway_url` from
+  the org's policy poll. It needs an admin signed in on that machine; on a
+  server or CI box use the env var or the flag.
 - The HTTP transport (`--http`) exposes `search_content` only; `team-*` tools are
   stdio-only.
 - The `.mcpb` bundle (Claude Desktop extension install) has no UI for these

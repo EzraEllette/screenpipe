@@ -2053,9 +2053,9 @@ async saveEnterpriseLicenseKey(licenseKey: string) : Promise<Result<null, string
  * just the token after a rotation. To FORCE a field to null, pass
  * an empty string for strings or `false` for `is_admin`/`license_active`.
  */
-async saveEnterpriseTeamConfig(isAdmin: boolean | null, licenseActive: boolean | null, teamApiToken: string | null, teamApiUrl: string | null) : Promise<Result<null, string>> {
+async saveEnterpriseTeamConfig(isAdmin: boolean | null, licenseActive: boolean | null, teamApiToken: string | null, gatewayUrl: string | null) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("save_enterprise_team_config", { isAdmin, licenseActive, teamApiToken, teamApiUrl }) };
+    return { status: "ok", data: await TAURI_INVOKE("save_enterprise_team_config", { isAdmin, licenseActive, teamApiToken, gatewayUrl }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };

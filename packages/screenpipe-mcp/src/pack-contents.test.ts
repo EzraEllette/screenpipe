@@ -90,7 +90,7 @@ describe("pack-contents gate — built-file contents", () => {
     "dist/team-config.js":
       'exports.HOSTED_TEAM_API = "https://screenpi.pe/api/enterprise/v1";\n' +
       "const base = flagOverride || env.SCREENPIPE_TEAM_API_URL || fromFile;\n" +
-      "const url = typeof parsed?.team_api_url === \"string\" ? parsed.team_api_url : \"\";\n",
+      "const url = typeof parsed?.gateway_url === \"string\" ? parsed.gateway_url : \"\";\n",
     "dist/index.js":
       'else if (args[i] === "--team-api-url" && args[i + 1]) {\n' +
       "const TEAM_API = (0, team_config_1.discoverTeamApiBase)(teamApiOverride);\n",
@@ -111,7 +111,7 @@ describe("pack-contents gate — built-file contents", () => {
     const failures: string[] = gate.markerFailures(reader(stale));
     expect(failures).toHaveLength(2);
     expect(failures[0]).toContain("SCREENPIPE_TEAM_API_URL");
-    expect(failures[1]).toContain("team_api_url");
+    expect(failures[1]).toContain("gateway_url");
   });
 
   it("fails on the hardcoded base that 0.18.15 shipped", () => {
