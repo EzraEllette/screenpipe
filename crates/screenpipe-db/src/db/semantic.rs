@@ -801,7 +801,7 @@ async fn ensure_semantic_actor_assignment_in_tx(
     }
 
     let normalized_label = normalize_actor_label(&observed_label);
-    let source_key = semantic_actor_source_key(manifest, app, projection, item, &normalized_label);
+    let source_key = semantic_actor_source_key(app, projection, item, &normalized_label);
     let source_label = semantic_actor_source_label(manifest, app);
     let alias: Option<(i64, i64)> = sqlx::query_as(
         r#"SELECT id, actor_id FROM semantic_actor_aliases
@@ -868,7 +868,6 @@ fn normalize_actor_label(value: &str) -> String {
 }
 
 fn semantic_actor_source_key(
-    manifest: &ParserManifest,
     app: &AppIdentity,
     projection: &ValidatedProjection,
     item: &SemanticItem,
@@ -886,12 +885,10 @@ fn semantic_actor_source_key(
                 .map(|executable| format!("exe={executable}"))
         })
         .unwrap_or_else(|| format!("name={}", app.display_name.trim().to_lowercase()));
-    let mut key = format!(
-        "parser={}|platform={}|{}",
-        manifest.id,
-        platform_name(app.platform),
-        app_key
-    );
+    // Parser selection is deliberately excluded. An exact parser may abstain
+    // after an app update and hand the same observation to a family parser;
+    // that drift must not split one source-scoped actor into two identities.
+    let mut key = format!("platform={}|{}", platform_name(app.platform), app_key);
     if is_directional_actor_label(normalized_label) {
         if let Some(parent_key) = item.parent_local_id.as_deref().and_then(|parent_id| {
             projection

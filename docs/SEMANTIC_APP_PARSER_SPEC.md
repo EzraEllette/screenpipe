@@ -338,9 +338,11 @@ Required keys and constraints:
 - A changed title, body, actor, time, status, or metadata value creates a new
   immutable item version while preserving the entity fingerprint.
 - The parser's observed `semantic_items.actor` value is never edited. Initial
-  identity assignment is a source-scoped label heuristic; directional labels
-  such as `[contact]` are additionally conversation-scoped. Renames, merges,
-  and item-level corrections update only the actor mapping.
+  identity assignment is an app/host-scoped label heuristic and deliberately
+  excludes parser ID, so exact-parser fallback after UI drift does not split an
+  actor. Directional labels such as `[contact]` are additionally
+  conversation-scoped. Renames, merges, and item-level corrections update only
+  the actor mapping.
 - Merging actors moves their aliases as well as existing assignments. Future
   observations therefore inherit the reconciliation instead of recreating the
   discarded provisional actor. Actor aliases intentionally survive source-frame

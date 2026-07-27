@@ -371,16 +371,19 @@ async fn semantic_actors_are_heuristic_correctable_and_durable() {
     )
     .await
     .expect("store first actor observation");
+    let mut fallback_manifest = manifest();
+    fallback_manifest.id = "conversation-fallback".into();
+    fallback_manifest.parser_version = "2.0.0".into();
     db.store_semantic_projection(
         second_frame,
-        &manifest(),
+        &fallback_manifest,
         &app(),
         102,
         Duration::from_micros(100),
         &projection("second message"),
     )
     .await
-    .expect("store repeated actor observation");
+    .expect("store repeated actor observation through parser fallback");
 
     let mut actors = db
         .search_semantic_actors("ALICE", 10, 0)
