@@ -10,6 +10,7 @@
 
 mod capture;
 mod context;
+mod messaging;
 mod model;
 pub mod parsers;
 mod registry;
@@ -22,6 +23,12 @@ pub use capture::{
     CapturedAccessibilityNode, CapturedNodeFlags,
 };
 pub use context::{render_semantic_context, render_semantic_items_context};
+pub use messaging::{
+    apply_message_identity, apply_message_time, is_message_time_label, normalize_e164,
+    normalize_email, normalize_message_time, MessageIdentityInput, MessageTimeContext,
+    NormalizedMessageTime, PersonIdentifier, PersonRecord, PersonResolution, PersonResolver,
+    TimeParseStatus,
+};
 pub use model::{
     AccessibilityAttribute, AppIdentity, AppVersionRequirement, AttributeSet, IdentityQuality,
     ParseContext, ParseOutcome, ParserManifest, ParserScope, Platform, SemanticCapturePlan,

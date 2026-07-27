@@ -163,6 +163,8 @@ fn evaluate_case(
     let context = ParseContext {
         frame_id: 7,
         captured_at_unix_ms: 1_700_000_000_000,
+        utc_offset_minutes: None,
+        locale_hint: None,
         app: &case.app,
         input_content_hash: 9,
     };
@@ -249,6 +251,8 @@ fn benchmark_pipeline(
         let context = ParseContext {
             frame_id: iteration as i64,
             captured_at_unix_ms: 1_700_000_000_000,
+            utc_offset_minutes: None,
+            locale_hint: None,
             app: &case.app,
             input_content_hash: iteration as u64,
         };

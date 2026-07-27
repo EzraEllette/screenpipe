@@ -147,6 +147,8 @@ fn replay_one(
     let context = ParseContext {
         frame_id,
         captured_at_unix_ms,
+        utc_offset_minutes: None,
+        locale_hint: None,
         app: &app,
         input_content_hash: content_hash,
     };

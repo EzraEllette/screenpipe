@@ -66,6 +66,8 @@ fn parse_fixture(source: &str) -> ParserChainResult {
     let context = ParseContext {
         frame_id: 7,
         captured_at_unix_ms: 1_700_000_000_000,
+        utc_offset_minutes: None,
+        locale_hint: None,
         app: &app,
         input_content_hash: 9,
     };
@@ -110,6 +112,8 @@ fn claude_abstains_on_typography_outside_a_message_pair() {
     let context = ParseContext {
         frame_id: 7,
         captured_at_unix_ms: 1_700_000_000_000,
+        utc_offset_minutes: None,
+        locale_hint: None,
         app: &app,
         input_content_hash: 9,
     };

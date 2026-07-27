@@ -332,6 +332,8 @@ fn build_contexts(
         let parse_context = ParseContext {
             frame_id: index as i64 + 1,
             captured_at_unix_ms: 1_700_000_000_000 + index as i64,
+            utc_offset_minutes: None,
+            locale_hint: None,
             app: &capture.app,
             input_content_hash: index as u64 + 1,
         };

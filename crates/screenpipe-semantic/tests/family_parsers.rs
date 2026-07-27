@@ -61,6 +61,8 @@ fn parse_fixture(source: &str) -> ParserChainResult {
     let context = ParseContext {
         frame_id: 7,
         captured_at_unix_ms: 1_700_000_000_000,
+        utc_offset_minutes: None,
+        locale_hint: None,
         app: &fixture.app,
         input_content_hash: 9,
     };

@@ -6,9 +6,12 @@ use super::catalog::{
     contains_ascii_case_insensitive, manifest_for_family, profile_for, AppFamily, BuiltinAppProfile,
 };
 use crate::{
-    AccessibilityAttribute, IdentityQuality, NodeId, ParseContext, ParseOutcome, ParserManifest,
-    ProjectionError, SemanticItem, SemanticKind, SemanticParser, SemanticTree,
+    apply_message_identity, apply_message_time, is_message_time_label, AccessibilityAttribute,
+    IdentityQuality, MessageIdentityInput, MessageTimeContext, NodeId, ParseContext, ParseOutcome,
+    ParserManifest, ProjectionError, SemanticItem, SemanticKind, SemanticParser, SemanticTree,
 };
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 
 const MAX_STRUCTURAL_CANDIDATES: usize = 256;
 
@@ -68,25 +71,26 @@ impl FamilyParser {
     }
 
     fn new(family: AppFamily, id: &str, supported_kinds: Vec<SemanticKind>, priority: i16) -> Self {
-        Self {
+        let mut manifest = manifest_for_family(
             family,
-            manifest: manifest_for_family(
-                family,
-                id,
-                supported_kinds,
-                vec![
-                    AccessibilityAttribute::Subrole,
-                    AccessibilityAttribute::Title,
-                    AccessibilityAttribute::Description,
-                    AccessibilityAttribute::Value,
-                    AccessibilityAttribute::Children,
-                    AccessibilityAttribute::Identifier,
-                    AccessibilityAttribute::DomIdentifier,
-                    AccessibilityAttribute::DomClasses,
-                ],
-                priority,
-            ),
+            id,
+            supported_kinds,
+            vec![
+                AccessibilityAttribute::Subrole,
+                AccessibilityAttribute::Title,
+                AccessibilityAttribute::Description,
+                AccessibilityAttribute::Value,
+                AccessibilityAttribute::Children,
+                AccessibilityAttribute::Identifier,
+                AccessibilityAttribute::DomIdentifier,
+                AccessibilityAttribute::DomClasses,
+            ],
+            priority,
+        );
+        if family == AppFamily::Conversation {
+            manifest.parser_version = "2".into();
         }
+        Self { family, manifest }
     }
 }
 
@@ -104,7 +108,7 @@ impl SemanticParser for FamilyParser {
             return Ok(ParseOutcome::NotHandled);
         };
         let items = match self.family {
-            AppFamily::Conversation => parse_conversation(profile, tree),
+            AppFamily::Conversation => parse_conversation(profile, context, tree),
             AppFamily::Mail => parse_mail(profile, tree),
             AppFamily::Document => parse_document(profile, tree),
             AppFamily::Task => parse_tasks(profile, tree),
@@ -120,7 +124,11 @@ impl SemanticParser for FamilyParser {
     }
 }
 
-fn parse_conversation(profile: &BuiltinAppProfile, tree: &SemanticTree) -> Vec<SemanticItem> {
+fn parse_conversation(
+    profile: &BuiltinAppProfile,
+    context: &ParseContext<'_>,
+    tree: &SemanticTree,
+) -> Vec<SemanticItem> {
     let candidates = leaf_marker_nodes(
         tree,
         &[
@@ -136,17 +144,18 @@ fn parse_conversation(profile: &BuiltinAppProfile, tree: &SemanticTree) -> Vec<S
     );
     let mut messages = Vec::new();
     for node in candidates {
-        let Some(actor) = conversation_actor(profile, tree, node) else {
+        let Some((actor, actor_evidence)) = conversation_actor(profile, tree, node) else {
             continue;
         };
+        let time_label = first_message_time_label(tree, node);
         let Some(body) = collect_text(tree, node) else {
             continue;
         };
-        let body = remove_actor_prefix(body, &actor);
+        let body = remove_exact_line(remove_actor_prefix(body, &actor), time_label.as_deref());
         if body.trim().is_empty() {
             continue;
         }
-        messages.push((node, actor, body));
+        messages.push((node, actor, actor_evidence, time_label, body));
     }
     if messages.is_empty() {
         return Vec::new();
@@ -172,10 +181,16 @@ fn parse_conversation(profile: &BuiltinAppProfile, tree: &SemanticTree) -> Vec<S
     if let Some(parent) = tree.parent(messages[0].0) {
         conversation.source_nodes.push(parent);
     }
+    let conversation_id = conversation
+        .title
+        .clone()
+        .unwrap_or_else(|| profile.id.to_owned());
 
     let mut items = Vec::with_capacity(messages.len() + 1);
     items.push(conversation);
-    for (index, (node, actor, body)) in messages.into_iter().enumerate() {
+    let mut duplicate_ordinals = HashMap::<[u8; 32], usize>::new();
+    for (index, (node, actor, actor_evidence, time_label, body)) in messages.into_iter().enumerate()
+    {
         let mut message = SemanticItem::new(
             format!("message-{index}"),
             SemanticKind::Message,
@@ -183,7 +198,39 @@ fn parse_conversation(profile: &BuiltinAppProfile, tree: &SemanticTree) -> Vec<S
             IdentityQuality::Ephemeral,
         );
         message.parent_local_id = Some("conversation".into());
+        let actor_label = actor.clone();
         message.actor = Some(actor);
+        message
+            .metadata
+            .insert("actor_evidence".into(), actor_evidence.into());
+        apply_message_time(
+            &mut message,
+            time_label.as_deref(),
+            MessageTimeContext {
+                captured_at_unix_ms: context.captured_at_unix_ms,
+                utc_offset_minutes: context.utc_offset_minutes,
+                locale_hint: context.locale_hint,
+            },
+        );
+        let duplicate_key =
+            family_message_duplicate_key(message.actor.as_deref(), time_label.as_deref(), &body);
+        let duplicate_ordinal = duplicate_ordinals.entry(duplicate_key).or_default();
+        let native_message_id = family_native_message_id(tree, node);
+        apply_message_identity(
+            &mut message,
+            MessageIdentityInput {
+                app: profile.id,
+                conversation_id: &conversation_id,
+                native_message_id: native_message_id.as_deref(),
+                actor_label: Some(&actor_label),
+                actor_evidence: Some(actor_evidence),
+                raw_time_label: time_label.as_deref(),
+                body: &body,
+                duplicate_ordinal: *duplicate_ordinal,
+                parse_position: index,
+            },
+        );
+        *duplicate_ordinal += 1;
         message.body = Some(body);
         message.source_nodes.push(node);
         items.push(message);
@@ -195,12 +242,15 @@ fn conversation_actor(
     profile: &BuiltinAppProfile,
     tree: &SemanticTree,
     node: NodeId,
-) -> Option<String> {
+) -> Option<(String, &'static str)> {
     if signature_has_any(tree, node, &["user", "human", "outgoing", "message-out"]) {
-        return Some("[user]".into());
+        return Some(("[user]".into(), "direction_state"));
     }
-    if signature_has_any(tree, node, &["assistant", "bot", "incoming", "message-in"]) {
-        return Some(profile.display_name.into());
+    if signature_has_any(tree, node, &["assistant", "bot"]) {
+        return Some((profile.display_name.into(), "direction_state"));
+    }
+    if signature_has_any(tree, node, &["incoming", "message-in"]) {
+        return Some(("[contact]".into(), "direction_state"));
     }
     for descendant in tree.descendants(node) {
         if !signature_has_any(tree, descendant, &["sender", "author", "speaker"]) {
@@ -208,13 +258,13 @@ fn conversation_actor(
         }
         let label = node_content(tree, descendant)?.trim();
         if label.eq_ignore_ascii_case("you") || label.eq_ignore_ascii_case("user") {
-            return Some("[user]".into());
+            return Some(("[user]".into(), "explicit_author"));
         }
         if label.eq_ignore_ascii_case("assistant") {
-            return Some(profile.display_name.into());
+            return Some((profile.display_name.into(), "explicit_author"));
         }
         if !label.is_empty() && label.len() <= 120 {
-            return Some(label.to_owned());
+            return Some((label.to_owned(), "explicit_author"));
         }
     }
     None
@@ -651,6 +701,80 @@ fn remove_actor_prefix(mut body: String, actor: &str) -> String {
         }
     }
     body
+}
+
+fn first_message_time_label(tree: &SemanticTree, root: NodeId) -> Option<String> {
+    let mut fallback = None;
+    for node in tree.descendants(root).take(MAX_STRUCTURAL_CANDIDATES) {
+        let Some(content) = node_content(tree, node) else {
+            continue;
+        };
+        let explicit_time = signature_has_any(
+            tree,
+            node,
+            &[
+                "timestamp",
+                "time-label",
+                "message-time",
+                "date-label",
+                "datetime",
+            ],
+        );
+        for line in content
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+        {
+            if line.len() > 96 || (!explicit_time && !is_message_time_label(line)) {
+                continue;
+            }
+            let normalized = line.replace(['\u{00a0}', '\u{202f}'], " ");
+            if explicit_time {
+                return Some(normalized);
+            }
+            fallback.get_or_insert(normalized);
+        }
+    }
+    fallback
+}
+
+fn remove_exact_line(body: String, value: Option<&str>) -> String {
+    let Some(value) = value else {
+        return body;
+    };
+    body.lines()
+        .filter(|line| !line.trim().eq_ignore_ascii_case(value.trim()))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn family_native_message_id(tree: &SemanticTree, root: NodeId) -> Option<String> {
+    tree.descendants(root)
+        .take(MAX_STRUCTURAL_CANDIDATES)
+        .find_map(|node| {
+            [tree.dom_identifier(node), tree.identifier(node)]
+                .into_iter()
+                .flatten()
+                .find(|value| {
+                    let lower = value.to_ascii_lowercase();
+                    (lower.contains("message") || lower.contains("msg"))
+                        && value.chars().any(|character| character.is_ascii_digit())
+                })
+                .map(str::to_owned)
+        })
+}
+
+fn family_message_duplicate_key(
+    actor: Option<&str>,
+    time_label: Option<&str>,
+    body: &str,
+) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    for field in [actor.unwrap_or(""), time_label.unwrap_or(""), body] {
+        digest.update((field.len() as u64).to_le_bytes());
+        digest.update(field.as_bytes());
+    }
+    digest.finalize().into()
 }
 
 fn key_component(value: &str) -> String {

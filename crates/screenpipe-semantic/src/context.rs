@@ -79,10 +79,24 @@ pub fn render_semantic_items_context(
             let _ = write!(output, " | status={status}");
         }
         for (key, value) in &item.metadata {
-            if matches!(key.as_str(), "app" | "family") {
+            if matches!(
+                key.as_str(),
+                "app"
+                    | "family"
+                    | "actor_evidence"
+                    | "message_id"
+                    | "message_identity_quality"
+                    | "time_parse_status"
+                    | "time_zone"
+            ) || (key == "raw_time_label" && item.occurred_at.is_some())
+            {
                 continue;
             }
-            let key = inline_text(key);
+            let key = if key == "raw_time_label" {
+                "time_label".into()
+            } else {
+                inline_text(key)
+            };
             let value = inline_text(value);
             if !key.is_empty() && !value.is_empty() {
                 let _ = write!(output, " | {key}={value}");
@@ -226,5 +240,40 @@ mod tests {
     fn renders_neutral_user_actor_without_marker_syntax() {
         assert_eq!(render_actor("[user]"), "user");
         assert_eq!(render_actor("Claude"), "Claude");
+    }
+
+    #[test]
+    fn hides_identity_metadata_but_keeps_unparsed_raw_time() {
+        let mut message = SemanticItem::new(
+            "message",
+            SemanticKind::Message,
+            "internal-key",
+            IdentityQuality::Stable,
+        );
+        message.body = Some("ship it".into());
+        message
+            .metadata
+            .insert("message_id".into(), "native-123".into());
+        message
+            .metadata
+            .insert("message_identity_quality".into(), "native".into());
+        message
+            .metadata
+            .insert("raw_time_label".into(), "after lunch".into());
+        message
+            .metadata
+            .insert("time_parse_status".into(), "unrecognized".into());
+        let app = AppIdentity {
+            platform: Platform::Macos,
+            app_id: None,
+            executable: None,
+            display_name: "Messages".into(),
+            version: None,
+            browser_url: None,
+        };
+        let rendered = render_semantic_items_context(&app, 1, &[message]);
+        assert!(rendered.contains("time_label=after lunch"));
+        assert!(!rendered.contains("native-123"));
+        assert!(!rendered.contains("message_identity_quality"));
     }
 }

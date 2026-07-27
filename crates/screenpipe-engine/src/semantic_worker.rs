@@ -18,7 +18,7 @@ use screenpipe_semantic::{
     CapturedAccessibilityNode, NodeBounds, OutputBudget, ParseContext, ParserRegistry, Platform,
     TreeBudget, ValidatedParseOutcome,
 };
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 use tokio::runtime::Handle;
 use tokio::sync::watch;
@@ -161,6 +161,14 @@ async fn process_semantic_job(
     let context = ParseContext {
         frame_id: job.frame_id,
         captured_at_unix_ms: job.captured_at.timestamp_millis(),
+        utc_offset_minutes: Some(
+            (job.captured_at
+                .with_timezone(&chrono::Local)
+                .offset()
+                .local_minus_utc()
+                / 60) as i16,
+        ),
+        locale_hint: semantic_locale_hint(),
         app: &app,
         input_content_hash,
     };
@@ -311,6 +319,34 @@ const fn current_platform() -> Platform {
     return Platform::Linux;
 }
 
+fn semantic_locale_hint() -> Option<&'static str> {
+    static LOCALE: OnceLock<Option<String>> = OnceLock::new();
+    LOCALE
+        .get_or_init(|| {
+            ["LC_ALL", "LC_TIME", "LANG"]
+                .into_iter()
+                .find_map(|name| std::env::var(name).ok().and_then(normalize_locale_hint))
+        })
+        .as_deref()
+}
+
+fn normalize_locale_hint(value: String) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty()
+        || value.eq_ignore_ascii_case("c")
+        || value.eq_ignore_ascii_case("posix")
+        || value.len() > 64
+    {
+        return None;
+    }
+    let locale = value
+        .split(['.', '@'])
+        .next()
+        .unwrap_or(value)
+        .replace('_', "-");
+    (locale.len() >= 2).then_some(locale)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -401,6 +437,16 @@ mod tests {
         assert_eq!(merged[0].role, "AXWindow");
         assert_eq!(merged[1].role, "AXWindow");
         assert_eq!(merged[2].role, "AXGroup");
+    }
+
+    #[test]
+    fn locale_environment_hint_is_bounded_and_normalized_once() {
+        assert_eq!(
+            normalize_locale_hint("en_US.UTF-8".into()).as_deref(),
+            Some("en-US")
+        );
+        assert_eq!(normalize_locale_hint("C".into()), None);
+        assert_eq!(normalize_locale_hint("x".repeat(65)), None);
     }
 
     #[tokio::test]

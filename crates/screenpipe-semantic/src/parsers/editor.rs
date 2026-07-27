@@ -402,6 +402,8 @@ mod tests {
         let context = ParseContext {
             frame_id: 1,
             captured_at_unix_ms: 2,
+            utc_offset_minutes: None,
+            locale_hint: None,
             app: &app,
             input_content_hash: 3,
         };

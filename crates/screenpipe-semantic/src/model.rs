@@ -255,6 +255,13 @@ impl SemanticItem {
 pub struct ParseContext<'a> {
     pub frame_id: i64,
     pub captured_at_unix_ms: i64,
+    /// Local UTC offset at capture time. Parsers must leave local wall-clock
+    /// labels unnormalized when this is unavailable rather than guessing a
+    /// timezone.
+    pub utc_offset_minutes: Option<i16>,
+    /// Optional BCP-47/POSIX locale hint used only to disambiguate numeric
+    /// dates. Parsers still recognize unambiguous localized labels without it.
+    pub locale_hint: Option<&'a str>,
     pub app: &'a AppIdentity,
     pub input_content_hash: u64,
 }
@@ -385,6 +392,8 @@ mod tests {
         let context = ParseContext {
             frame_id: 1,
             captured_at_unix_ms: 2,
+            utc_offset_minutes: None,
+            locale_hint: None,
             app: &app,
             input_content_hash: 3,
         };
@@ -411,6 +420,8 @@ mod tests {
         let context = ParseContext {
             frame_id: 1,
             captured_at_unix_ms: 2,
+            utc_offset_minutes: None,
+            locale_hint: None,
             app: &app,
             input_content_hash: 3,
         };

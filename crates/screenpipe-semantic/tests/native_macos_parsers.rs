@@ -49,7 +49,9 @@ fn parse(app_id: &str, tree: &SemanticTree) -> (String, ValidatedParseOutcome) {
     let result = registry.parse(
         &ParseContext {
             frame_id: 1,
-            captured_at_unix_ms: 2,
+            captured_at_unix_ms: 1_753_666_200_000,
+            utc_offset_minutes: Some(-420),
+            locale_hint: None,
             app: &app,
             input_content_hash: 3,
         },
@@ -143,6 +145,17 @@ fn mail_extracts_message_view_fields_and_body() {
         &mut builder,
         Some(view),
         "AXStaticText",
+        Some("Today at 6:20 PM"),
+        None,
+        None,
+        Some("message.timestamp"),
+        None,
+        None,
+    );
+    push(
+        &mut builder,
+        Some(view),
+        "AXStaticText",
         None,
         Some("Alice"),
         None,
@@ -190,6 +203,14 @@ fn mail_extracts_message_view_fields_and_body() {
     assert_eq!(items[0].title.as_deref(), Some("Parser review"));
     assert_eq!(items[1].actor.as_deref(), Some("Alice"));
     assert_eq!(
+        items[1].occurred_at.as_deref(),
+        Some("2025-07-27T18:20:00-07:00")
+    );
+    assert_eq!(
+        items[1].metadata.get("raw_time_label").map(String::as_str),
+        Some("Today at 6:20 PM")
+    );
+    assert_eq!(
         items[1].body.as_deref(),
         Some("Please retry the signing job.")
     );
@@ -236,9 +257,31 @@ fn messages_uses_transcript_and_balloon_identifiers() {
             height: 0.8,
         }),
     );
-    push(
+    let first_group = push(
         &mut builder,
         Some(transcript),
+        "AXGroup",
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+    push(
+        &mut builder,
+        Some(first_group),
+        "AXStaticText",
+        Some("Today at 18:18"),
+        None,
+        None,
+        Some("message-time-label"),
+        None,
+        None,
+    );
+    push(
+        &mut builder,
+        Some(first_group),
         "AXTextArea",
         None,
         Some("Can you review this?"),
@@ -252,9 +295,31 @@ fn messages_uses_transcript_and_balloon_identifiers() {
             height: 0.05,
         }),
     );
-    push(
+    let second_group = push(
         &mut builder,
         Some(transcript),
+        "AXGroup",
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+    push(
+        &mut builder,
+        Some(second_group),
+        "AXStaticText",
+        Some("Today at 18:20"),
+        None,
+        None,
+        Some("message-time-label"),
+        None,
+        None,
+    );
+    push(
+        &mut builder,
+        Some(second_group),
         "AXTextArea",
         None,
         Some("Yes, sending it now."),
@@ -275,6 +340,10 @@ fn messages_uses_transcript_and_balloon_identifiers() {
     assert_eq!(items.len(), 3);
     assert_eq!(items[1].actor.as_deref(), Some("[contact]"));
     assert_eq!(items[2].actor.as_deref(), Some("[user]"));
+    assert_eq!(
+        items[2].occurred_at.as_deref(),
+        Some("2025-07-27T18:20:00-07:00")
+    );
 }
 
 #[test]
@@ -464,6 +533,17 @@ fn discord_requires_content_list_with_document_articles() {
         &mut builder,
         Some(article),
         "AXStaticText",
+        Some("Today at 18:20"),
+        None,
+        None,
+        Some("message-time-label"),
+        None,
+        None,
+    );
+    push(
+        &mut builder,
+        Some(article),
+        "AXStaticText",
         Some("The release is ready."),
         None,
         None,
@@ -475,9 +555,11 @@ fn discord_requires_content_list_with_document_articles() {
     let (parser, outcome) = parse("com.hnc.Discord", &tree);
     assert_eq!(parser, "app.macos.discord.content_list");
     let items = handled_items(outcome);
+    assert_eq!(items[1].actor.as_deref(), Some("Alice"));
+    assert_eq!(items[1].body.as_deref(), Some("The release is ready."));
     assert_eq!(
-        items[1].body.as_deref(),
-        Some("Alice\nThe release is ready.")
+        items[1].occurred_at.as_deref(),
+        Some("2025-07-27T18:20:00-07:00")
     );
 }
 
@@ -568,6 +650,28 @@ fn slack_and_whatsapp_use_native_conversation_anchors() {
         &mut slack,
         Some(message),
         "AXStaticText",
+        Some("Alice"),
+        None,
+        None,
+        Some("message-sender"),
+        None,
+        None,
+    );
+    push(
+        &mut slack,
+        Some(message),
+        "AXStaticText",
+        Some("Today at 18:20"),
+        None,
+        None,
+        Some("message-time-label"),
+        None,
+        None,
+    );
+    push(
+        &mut slack,
+        Some(message),
+        "AXStaticText",
         Some("The build is ready."),
         None,
         None,
@@ -577,7 +681,11 @@ fn slack_and_whatsapp_use_native_conversation_anchors() {
     );
     let (parser, outcome) = parse("com.tinyspeck.slackmacgap", &slack.finish());
     assert_eq!(parser, "app.macos.slack.content_list");
-    assert_eq!(handled_items(outcome)[1].source_nodes, vec![message]);
+    let items = handled_items(outcome);
+    assert_eq!(items[1].source_nodes, vec![message]);
+    assert_eq!(items[1].actor.as_deref(), Some("Alice"));
+    assert_eq!(items[1].body.as_deref(), Some("The build is ready."));
+    assert_eq!(items[1].timestamp_precision.as_deref(), Some("minute"));
 
     let mut whatsapp = SemanticTreeBuilder::new(TreeBudget::default());
     let window = push(
@@ -628,6 +736,28 @@ fn slack_and_whatsapp_use_native_conversation_anchors() {
         &mut whatsapp,
         Some(cell),
         "AXStaticText",
+        Some("Bob"),
+        None,
+        None,
+        Some("message-sender"),
+        None,
+        None,
+    );
+    push(
+        &mut whatsapp,
+        Some(cell),
+        "AXStaticText",
+        Some("Today at 18:19"),
+        None,
+        None,
+        Some("message-time-label"),
+        None,
+        None,
+    );
+    push(
+        &mut whatsapp,
+        Some(cell),
+        "AXStaticText",
         Some("Ship it."),
         None,
         None,
@@ -639,6 +769,7 @@ fn slack_and_whatsapp_use_native_conversation_anchors() {
     assert_eq!(parser, "app.macos.whatsapp.message_table");
     let items = handled_items(outcome);
     assert_eq!(items[0].title.as_deref(), Some("Release team"));
+    assert_eq!(items[1].actor.as_deref(), Some("Bob"));
     assert_eq!(items[1].body.as_deref(), Some("Ship it."));
 }
 

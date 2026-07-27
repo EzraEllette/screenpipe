@@ -6,6 +6,7 @@ description = "Deterministic app-semantic parser contracts for screenpipe"
 license-file = { workspace = true }
 
 [dependencies]
+chrono = { workspace = true }
 regex = { workspace = true }
 serde = { workspace = true }
 sha2 = { workspace = true }
