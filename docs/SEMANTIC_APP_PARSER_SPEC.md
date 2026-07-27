@@ -185,11 +185,18 @@ the stored neutral `[user]` marker as `actor=user` without changing persistence.
 ## 4. Capture integration
 
 The parser registry returns a `SemanticCapturePlan` before an accessibility walk.
-The plan combines every matching fallback candidate's `AttributeSet` and
-`OffscreenPolicy` with engine-owned `TreeBudget` and `OutputBudget` hard caps.
-This prevents an app override from abstaining after capture omitted an attribute
-needed by its family fallback. Parser packs may request less data, but they
-cannot raise the engine's resource ceilings.
+The plan combines every matching fallback candidate's `AttributeSet` with
+engine-owned `TreeBudget` and `OutputBudget` hard caps. This prevents an app
+override from abstaining after capture omitted an attribute needed by its
+family fallback. Parser packs may request less data, but they cannot raise the
+engine's resource ceilings.
+
+Semantic memory is visible-first: a node explicitly marked off-screen keeps its
+role, hierarchy, identifiers, classes, state, and bounds, but its text, value,
+and description are not copied into the compact tree. Unknown visibility stays
+fail-open. This preserves parser structure without turning scrollback or hidden
+overflow into durable memory. Raw accessibility storage and automation
+targeting remain separate compatibility surfaces.
 
 The macOS walker retains a bounded set of parser-relevant structural nodes while
 it performs the existing walk. Identifier and subrole extend the existing

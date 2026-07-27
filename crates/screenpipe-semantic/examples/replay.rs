@@ -34,6 +34,9 @@ struct ReplayMetrics {
     input_nodes: usize,
     retained_nodes: usize,
     depth_gap_nodes: usize,
+    known_offscreen_nodes: usize,
+    suppressed_offscreen_content_nodes: usize,
+    suppressed_offscreen_content_bytes: usize,
     identifier_nodes: usize,
     class_nodes: usize,
     subrole_nodes: usize,
@@ -177,6 +180,9 @@ fn replay_one(
         input_nodes: adapted.stats.input_nodes,
         retained_nodes: adapted.stats.retained_nodes,
         depth_gap_nodes: adapted.stats.depth_gap_nodes,
+        known_offscreen_nodes: adapted.stats.known_offscreen_nodes,
+        suppressed_offscreen_content_nodes: adapted.stats.suppressed_offscreen_content_nodes,
+        suppressed_offscreen_content_bytes: adapted.stats.suppressed_offscreen_content_bytes,
         identifier_nodes: adapted.stats.identifier_nodes,
         class_nodes: adapted.stats.class_nodes,
         subrole_nodes: adapted.stats.subrole_nodes,
@@ -277,16 +283,28 @@ mod tests {
             version: None,
             browser_url: None,
         };
-        let nodes = vec![CapturedAccessibilityNode {
-            role: "AXStaticText".into(),
-            text: "private replay sentinel".into(),
-            ..Default::default()
-        }];
+        let nodes = vec![
+            CapturedAccessibilityNode {
+                role: "AXStaticText".into(),
+                text: "private replay sentinel".into(),
+                ..Default::default()
+            },
+            CapturedAccessibilityNode {
+                role: "AXStaticText".into(),
+                text: "private offscreen sentinel".into(),
+                on_screen: Some(false),
+                ..Default::default()
+            },
+        ];
         let metrics = replay_one(&registry, 42, 0, 42, app, nodes).unwrap();
         let output = serde_json::to_string(&metrics).unwrap();
         assert!(!output.contains("private replay sentinel"));
+        assert!(!output.contains("private offscreen sentinel"));
         assert_eq!(metrics.frame_id, 42);
         assert_eq!(metrics.outcome, "handled");
+        assert_eq!(metrics.known_offscreen_nodes, 1);
+        assert_eq!(metrics.suppressed_offscreen_content_nodes, 1);
+        assert_eq!(metrics.suppressed_offscreen_content_bytes, 26);
         assert!(metrics.semantic_context_tokens.is_some());
     }
 }

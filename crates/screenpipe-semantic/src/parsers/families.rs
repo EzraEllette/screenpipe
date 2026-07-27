@@ -6,8 +6,8 @@ use super::catalog::{
     contains_ascii_case_insensitive, manifest_for_family, profile_for, AppFamily, BuiltinAppProfile,
 };
 use crate::{
-    AccessibilityAttribute, IdentityQuality, NodeId, OffscreenPolicy, ParseContext, ParseOutcome,
-    ParserManifest, ProjectionError, SemanticItem, SemanticKind, SemanticParser, SemanticTree,
+    AccessibilityAttribute, IdentityQuality, NodeId, ParseContext, ParseOutcome, ParserManifest,
+    ProjectionError, SemanticItem, SemanticKind, SemanticParser, SemanticTree,
 };
 
 const MAX_STRUCTURAL_CANDIDATES: usize = 256;
@@ -59,14 +59,12 @@ impl FamilyParser {
     }
 
     pub fn terminal() -> Self {
-        let mut parser = Self::new(
+        Self::new(
             AppFamily::Terminal,
             "family.terminal",
             vec![SemanticKind::Document],
             70,
-        );
-        parser.manifest.offscreen = OffscreenPolicy::VisibleOnly;
-        parser
+        )
     }
 
     fn new(family: AppFamily, id: &str, supported_kinds: Vec<SemanticKind>, priority: i16) -> Self {
@@ -86,7 +84,6 @@ impl FamilyParser {
                     AccessibilityAttribute::DomIdentifier,
                     AccessibilityAttribute::DomClasses,
                 ],
-                OffscreenPolicy::Lists { overflow_count: 10 },
                 priority,
             ),
         }

@@ -4,8 +4,8 @@
 
 use screenpipe_semantic::{
     semantic_projection_storage_keys, AppIdentity, AppVersionRequirement, IdentityQuality,
-    OffscreenPolicy, OutputBudget, ParserManifest, ParserScope, Platform, SemanticItem,
-    SemanticKind, SemanticTreeBuilder, TreeBudget, ValidatedProjection,
+    OutputBudget, ParserManifest, ParserScope, Platform, SemanticItem, SemanticKind,
+    SemanticTreeBuilder, TreeBudget, ValidatedProjection,
 };
 use std::collections::HashSet;
 
@@ -20,7 +20,6 @@ fn manifest() -> ParserManifest {
         executables: Vec::new(),
         url_patterns: Vec::new(),
         required_attributes: Vec::new(),
-        offscreen: OffscreenPolicy::VisibleOnly,
         app_version: AppVersionRequirement::Any,
         supported_kinds: vec![SemanticKind::Task, SemanticKind::Message],
         priority: 0,

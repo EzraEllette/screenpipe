@@ -163,7 +163,6 @@ mod tests {
             executables: Vec::new(),
             url_patterns: Vec::new(),
             required_attributes: Vec::new(),
-            offscreen: Default::default(),
             app_version: AppVersionRequirement::Any,
             supported_kinds: vec![SemanticKind::Conversation, SemanticKind::Message],
             priority: 0,

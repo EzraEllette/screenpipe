@@ -4,8 +4,8 @@
 
 use crate::{
     AccessibilityAttribute, AppVersionRequirement, IdentityQuality, NodeBounds, NodeId,
-    OffscreenPolicy, ParseContext, ParseOutcome, ParserManifest, ParserScope, Platform,
-    ProjectionError, SemanticItem, SemanticKind, SemanticParser, SemanticTree,
+    ParseContext, ParseOutcome, ParserManifest, ParserScope, Platform, ProjectionError,
+    SemanticItem, SemanticKind, SemanticParser, SemanticTree,
 };
 use std::collections::HashSet;
 
@@ -43,7 +43,6 @@ impl NativeMacParser {
         id: &str,
         app_id: &str,
         attributes: Vec<AccessibilityAttribute>,
-        offscreen: OffscreenPolicy,
         kinds: Vec<SemanticKind>,
     ) -> Self {
         Self {
@@ -58,7 +57,6 @@ impl NativeMacParser {
                 executables: Vec::new(),
                 url_patterns: Vec::new(),
                 required_attributes: attributes,
-                offscreen,
                 app_version: AppVersionRequirement::Any,
                 supported_kinds: kinds,
                 priority: 110,
@@ -84,7 +82,6 @@ pub fn native_macos_parsers() -> Vec<NativeMacParser> {
             "app.macos.calendar.active_view",
             "com.apple.iCal",
             common(),
-            OffscreenPolicy::Lists { overflow_count: 10 },
             vec![SemanticKind::CalendarEvent],
         ),
         NativeMacParser::new(
@@ -92,7 +89,6 @@ pub fn native_macos_parsers() -> Vec<NativeMacParser> {
             "app.macos.discord.content_list",
             "com.hnc.Discord",
             common(),
-            OffscreenPolicy::Lists { overflow_count: 10 },
             vec![SemanticKind::Conversation, SemanticKind::Message],
         ),
         NativeMacParser::new(
@@ -100,7 +96,6 @@ pub fn native_macos_parsers() -> Vec<NativeMacParser> {
             "app.macos.gemini.table_rows",
             "com.google.GeminiMacOS",
             common(),
-            OffscreenPolicy::Lists { overflow_count: 20 },
             vec![SemanticKind::Conversation, SemanticKind::Message],
         ),
         NativeMacParser::new(
@@ -108,7 +103,6 @@ pub fn native_macos_parsers() -> Vec<NativeMacParser> {
             "app.macos.mail.message_view",
             "com.apple.mail",
             common(),
-            OffscreenPolicy::Lists { overflow_count: 10 },
             vec![SemanticKind::Conversation, SemanticKind::Message],
         ),
         NativeMacParser::new(
@@ -120,7 +114,6 @@ pub fn native_macos_parsers() -> Vec<NativeMacParser> {
                 attributes.push(AccessibilityAttribute::Frame);
                 attributes
             },
-            OffscreenPolicy::Lists { overflow_count: 10 },
             vec![SemanticKind::Conversation, SemanticKind::Message],
         ),
         NativeMacParser::new(
@@ -128,7 +121,6 @@ pub fn native_macos_parsers() -> Vec<NativeMacParser> {
             "app.macos.microsoft_todo.task_cells",
             "com.microsoft.to-do-mac",
             common(),
-            OffscreenPolicy::Lists { overflow_count: 20 },
             vec![SemanticKind::Task],
         ),
         NativeMacParser::new(
@@ -136,7 +128,6 @@ pub fn native_macos_parsers() -> Vec<NativeMacParser> {
             "app.macos.notes.body",
             "com.apple.Notes",
             common(),
-            OffscreenPolicy::VisibleOnly,
             vec![SemanticKind::Document],
         ),
         NativeMacParser::new(
@@ -144,7 +135,6 @@ pub fn native_macos_parsers() -> Vec<NativeMacParser> {
             "app.macos.omnifocus.outline",
             "com.omnigroup.OmniFocus4",
             common(),
-            OffscreenPolicy::Lists { overflow_count: 20 },
             vec![SemanticKind::Task],
         ),
         NativeMacParser::new(
@@ -152,7 +142,6 @@ pub fn native_macos_parsers() -> Vec<NativeMacParser> {
             "app.macos.pages.body",
             "com.apple.iWork.Pages",
             common(),
-            OffscreenPolicy::VisibleOnly,
             vec![SemanticKind::Document],
         ),
         NativeMacParser::new(
@@ -160,7 +149,6 @@ pub fn native_macos_parsers() -> Vec<NativeMacParser> {
             "app.macos.slack.content_list",
             "com.tinyspeck.slackmacgap",
             common(),
-            OffscreenPolicy::Lists { overflow_count: 20 },
             vec![SemanticKind::Conversation, SemanticKind::Message],
         ),
         NativeMacParser::new(
@@ -168,7 +156,6 @@ pub fn native_macos_parsers() -> Vec<NativeMacParser> {
             "app.macos.textedit.first_text_view",
             "com.apple.TextEdit",
             common(),
-            OffscreenPolicy::VisibleOnly,
             vec![SemanticKind::Document],
         ),
         NativeMacParser::new(
@@ -176,7 +163,6 @@ pub fn native_macos_parsers() -> Vec<NativeMacParser> {
             "app.macos.whatsapp.message_table",
             "net.whatsapp.WhatsApp",
             common(),
-            OffscreenPolicy::Lists { overflow_count: 20 },
             vec![SemanticKind::Conversation, SemanticKind::Message],
         ),
         NativeMacParser::new(
@@ -184,7 +170,6 @@ pub fn native_macos_parsers() -> Vec<NativeMacParser> {
             "app.macos.word.text_areas",
             "com.microsoft.Word",
             common(),
-            OffscreenPolicy::VisibleOnly,
             vec![SemanticKind::Document],
         ),
     ]

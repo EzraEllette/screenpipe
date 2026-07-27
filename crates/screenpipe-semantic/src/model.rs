@@ -105,41 +105,6 @@ impl AccessibilityAttribute {
     }
 }
 
-/// How much offscreen content a parser may ask the walker to retain.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OffscreenPolicy {
-    #[default]
-    VisibleOnly,
-    Lists {
-        overflow_count: u16,
-    },
-    All,
-}
-
-impl OffscreenPolicy {
-    /// Merge candidate requirements without allowing a parser to exceed the
-    /// engine-owned tree budget.
-    pub const fn merge(self, other: Self) -> Self {
-        match (self, other) {
-            (Self::All, _) | (_, Self::All) => Self::All,
-            (
-                Self::Lists {
-                    overflow_count: left,
-                },
-                Self::Lists {
-                    overflow_count: right,
-                },
-            ) => Self::Lists {
-                overflow_count: if left > right { left } else { right },
-            },
-            (lists @ Self::Lists { .. }, Self::VisibleOnly)
-            | (Self::VisibleOnly, lists @ Self::Lists { .. }) => lists,
-            (Self::VisibleOnly, Self::VisibleOnly) => Self::VisibleOnly,
-        }
-    }
-}
-
 /// App-specific overrides run before shared UI-family parsers. A family parser
 /// can match many apps that expose the same interaction shape, such as Chromium
 /// editors or message timelines.
@@ -189,8 +154,6 @@ pub struct ParserManifest {
     #[serde(default)]
     pub required_attributes: Vec<AccessibilityAttribute>,
     #[serde(default)]
-    pub offscreen: OffscreenPolicy,
-    #[serde(default)]
     pub app_version: AppVersionRequirement,
     #[serde(default)]
     pub supported_kinds: Vec<SemanticKind>,
@@ -207,7 +170,6 @@ impl ParserManifest {
         SemanticCapturePlan {
             parser_ids: vec![self.id.clone()],
             required_attributes,
-            offscreen: self.offscreen,
         }
     }
 }
@@ -218,7 +180,6 @@ pub struct SemanticCapturePlan {
     /// to the next parser; exhaustion falls back to generic accessibility.
     pub parser_ids: Vec<String>,
     pub required_attributes: AttributeSet,
-    pub offscreen: OffscreenPolicy,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -387,7 +348,6 @@ mod tests {
             executables: vec![],
             url_patterns: vec![],
             required_attributes: vec![AccessibilityAttribute::Value],
-            offscreen: OffscreenPolicy::VisibleOnly,
             app_version: AppVersionRequirement::Any,
             supported_kinds: vec![SemanticKind::Message],
             priority: 0,

@@ -291,6 +291,13 @@ jq -s \
           ($rows | map(select((.candidate_parsers | length) > 0)) | length)
         ),
         items: ($rows | map(.items) | add // 0),
+        known_offscreen_nodes: ($rows | map(.known_offscreen_nodes) | add // 0),
+        suppressed_offscreen_content_nodes:
+          ($rows | map(.suppressed_offscreen_content_nodes) | add // 0),
+        suppressed_offscreen_content_bytes:
+          ($rows | map(.suppressed_offscreen_content_bytes) | add // 0),
+        frames_with_known_offscreen_content:
+          ($rows | map(select(.suppressed_offscreen_content_nodes > 0)) | length),
         raw_json_tokens_handled: $raw_tokens,
         semantic_context_tokens_handled: $semantic_tokens,
         semantic_token_reduction_percent:

@@ -24,8 +24,8 @@ pub use capture::{
 pub use context::{render_semantic_context, render_semantic_items_context};
 pub use model::{
     AccessibilityAttribute, AppIdentity, AppVersionRequirement, AttributeSet, IdentityQuality,
-    OffscreenPolicy, ParseContext, ParseOutcome, ParserManifest, ParserScope, Platform,
-    SemanticCapturePlan, SemanticItem, SemanticKind, SemanticParser, ValidatedParseOutcome,
+    ParseContext, ParseOutcome, ParserManifest, ParserScope, Platform, SemanticCapturePlan,
+    SemanticItem, SemanticKind, SemanticParser, ValidatedParseOutcome,
 };
 pub use registry::{
     input_fingerprint, ParserChainResult, ParserFailure, ParserRegistry, RegistryError,

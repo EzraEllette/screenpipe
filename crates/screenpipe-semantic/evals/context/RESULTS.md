@@ -12,18 +12,22 @@ targets through shared families plus exact app overrides.
 
 | format | retained facts | context tokens | complete prompt tokens | tokens per retained fact |
 |---|---:|---:|---:|---:|
-| raw accessibility JSON | 30/30 | 1,420 | 1,825 | 47.33 |
-| current element outline | 26/30 | 910 | 1,315 | 35.00 |
+| raw accessibility JSON | 30/30 | 1,660 | 2,065 | 55.33 |
+| current element outline | 26/30 | 1,081 | 1,486 | 41.58 |
 | semantic context | 30/30 | 372 | 777 | 12.40 |
 
-Semantic context used 57.4% fewer complete input-prompt tokens than raw JSON
-and 40.9% fewer than the current outline. It retained task status, calendar
-schedule, and editor identity facts that the text-only outline dropped.
-Representative compact trees retained 507 to 1,584 heap bytes. Every
-release-mode 1,000-iteration adapt, parse, and render benchmark stayed below 16
-microseconds mean and 27 microseconds p95 latency. The Claude case used 67.0%
-fewer complete prompt tokens than raw JSON, and the Obsidian case used 63.9%
-fewer. These tiny synthetic trees are regression signals, not the older-hardware
+Semantic context used 62.4% fewer complete input-prompt tokens than raw JSON
+and 47.7% fewer than the current outline. Each case included one explicitly
+off-screen synthetic distractor. Raw JSON and the outline retained all 10;
+semantic context retained zero while preserving all 30 visible facts. The
+adapter suppressed 297 source bytes but retained every node's role, hierarchy,
+identifiers, classes, state, and bounds.
+
+Semantic context also retained task status, calendar schedule, and editor
+identity facts that the text-only outline dropped. Representative compact trees
+retained at most 1,656 heap bytes. Every release-mode 1,000-iteration adapt,
+parse, and render benchmark stayed below 6 microseconds mean and p95 latency.
+These tiny synthetic trees are regression signals, not the older-hardware
 acceptance benchmark.
 
 ## Prior local Pi model check
@@ -72,6 +76,27 @@ classes and structural container nodes, so fresh opt-in captures remain
 necessary for parser contracts that depend on the transient structural sidecar.
 The replay has no human semantic labels, so it measures safe applicability,
 context size, time, and memory, not extraction correctness.
+
+### Recent off-screen visibility audit
+
+A separate read-only streaming replay on 2026-07-27 processed the newest 1,000
+valid saved trees without writing captured text or app identities to disk or
+the report:
+
+| subset | frames | frames with suppressed content | suppressed nodes | suppressed source bytes |
+|---|---:|---:|---:|---:|
+| all sampled trees | 1,000 | 833 | 101,071 | 3,552,559 |
+| parser candidates | 478 | 425 | 47,936 | 1,624,848 |
+| handled semantic frames | 257 | 256 | 31,843 | 1,047,954 |
+
+The handled frames rendered 107,537 semantic tokens versus 5,396,623 raw JSON
+tokens, a 98.01% representation reduction, with zero parser failures. That
+percentage measures the complete semantic projection rather than attributing
+the entire reduction to visibility filtering. The direct visibility result is
+that known off-screen text contributed about 1.05 MB of parser input across the
+handled frames and no longer enters semantic memory. Inner scroll-container
+clipping remains outside this audit because the current platform flag only
+tests intersection with the focused window.
 
 ## Committed-data privacy audit
 

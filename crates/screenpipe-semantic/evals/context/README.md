@@ -9,10 +9,13 @@ privacy-safe accessibility trees:
 
 The report uses the exact `o200k_base` tokenizer. It scores both context-only
 tokens and the complete fixed Pi input prompt, retained task facts, tokens per
-retained fact, parser selection, compact-tree heap, and a 1,000-iteration local
-adapt/parse/render benchmark for each case. Seven cases cover the shared parser
-families and three cover exact ChatGPT, Claude, and Obsidian app overrides;
-catalog tests separately keep all 47 supported target profiles matched.
+retained fact, known off-screen suppression, parser selection, compact-tree
+heap, and a 1,000-iteration local adapt/parse/render benchmark for each case.
+Every case includes one synthetic, explicitly off-screen distractor that must
+remain visible in the raw baselines and absent from semantic context while all
+visible facts remain available. Seven cases cover the shared parser families
+and three cover exact ChatGPT, Claude, and Obsidian app overrides; catalog tests
+separately keep all 47 supported target profiles matched.
 
 Run the deterministic report:
 

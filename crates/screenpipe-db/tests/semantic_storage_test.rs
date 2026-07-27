@@ -5,9 +5,9 @@
 use chrono::{Duration as ChronoDuration, Utc};
 use screenpipe_db::{DatabaseManager, SemanticContextQuery};
 use screenpipe_semantic::{
-    AppIdentity, AppVersionRequirement, IdentityQuality, NodeId, OffscreenPolicy, OutputBudget,
-    ParserManifest, ParserScope, Platform, SemanticItem, SemanticKind, SemanticNodeInput,
-    SemanticTreeBuilder, TreeBudget, ValidatedProjection,
+    AppIdentity, AppVersionRequirement, IdentityQuality, NodeId, OutputBudget, ParserManifest,
+    ParserScope, Platform, SemanticItem, SemanticKind, SemanticNodeInput, SemanticTreeBuilder,
+    TreeBudget, ValidatedProjection,
 };
 use std::time::{Duration, Instant};
 
@@ -28,7 +28,6 @@ fn manifest() -> ParserManifest {
         executables: Vec::new(),
         url_patterns: Vec::new(),
         required_attributes: Vec::new(),
-        offscreen: OffscreenPolicy::VisibleOnly,
         app_version: AppVersionRequirement::Any,
         supported_kinds: vec![SemanticKind::Conversation, SemanticKind::Message],
         priority: 0,

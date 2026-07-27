@@ -186,6 +186,11 @@ async fn process_semantic_job(
             let parse_duration = started.elapsed();
             let item_count = projection.items().len();
             let tree_heap_bytes = adapted.tree.estimated_heap_bytes();
+            let known_offscreen_nodes = adapted.stats.known_offscreen_nodes;
+            let suppressed_offscreen_content_nodes =
+                adapted.stats.suppressed_offscreen_content_nodes;
+            let suppressed_offscreen_content_bytes =
+                adapted.stats.suppressed_offscreen_content_bytes;
             let write = db
                 .store_semantic_projection(
                     job.frame_id,
@@ -202,6 +207,9 @@ async fn process_semantic_job(
                 parser_id,
                 item_count,
                 tree_heap_bytes,
+                known_offscreen_nodes,
+                suppressed_offscreen_content_nodes,
+                suppressed_offscreen_content_bytes,
                 parse_duration_us = parse_duration.as_micros() as u64,
                 reused_run = write.reused_run,
                 "semantic projection stored"

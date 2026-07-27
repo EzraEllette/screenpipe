@@ -23,6 +23,7 @@ struct EvalCase {
     #[serde(default)]
     accepted_answers: Vec<String>,
     facts: Vec<String>,
+    offscreen_distractors: Vec<String>,
     app: AppIdentity,
     nodes: Vec<CapturedAccessibilityNode>,
 }
@@ -34,6 +35,7 @@ pub struct FormatMetrics {
     pub prompt_tokens: usize,
     pub retained_facts: usize,
     pub total_facts: usize,
+    pub offscreen_distractors_retained: usize,
     pub tokens_per_retained_fact: Option<f64>,
 }
 
@@ -58,6 +60,9 @@ pub struct CaseReport {
     pub id: String,
     pub parser: String,
     pub nodes: usize,
+    pub known_offscreen_nodes: usize,
+    pub suppressed_offscreen_content_nodes: usize,
+    pub suppressed_offscreen_content_bytes: usize,
     pub tree_heap_bytes: usize,
     pub raw_json: FormatMetrics,
     pub current_outline: FormatMetrics,
@@ -75,6 +80,7 @@ pub struct FormatTotals {
     pub prompt_tokens: usize,
     pub retained_facts: usize,
     pub total_facts: usize,
+    pub offscreen_distractors_retained: usize,
     pub tokens_per_retained_fact: Option<f64>,
 }
 
@@ -174,9 +180,24 @@ fn evaluate_case(
     let render_micros = render_started.elapsed().as_micros();
     let pipeline_benchmark = benchmark_pipeline(registry, &case)?;
 
-    let raw_metrics = format_metrics(&raw_json, &case.question, &case.facts);
-    let outline_metrics = format_metrics(&outline, &case.question, &case.facts);
-    let semantic_metrics = format_metrics(&semantic, &case.question, &case.facts);
+    let raw_metrics = format_metrics(
+        &raw_json,
+        &case.question,
+        &case.facts,
+        &case.offscreen_distractors,
+    );
+    let outline_metrics = format_metrics(
+        &outline,
+        &case.question,
+        &case.facts,
+        &case.offscreen_distractors,
+    );
+    let semantic_metrics = format_metrics(
+        &semantic,
+        &case.question,
+        &case.facts,
+        &case.offscreen_distractors,
+    );
     let prompts = [
         ("raw_json", raw_json.as_str()),
         ("current_outline", outline.as_str()),
@@ -191,6 +212,9 @@ fn evaluate_case(
             id: case.id,
             parser,
             nodes: case.nodes.len(),
+            known_offscreen_nodes: adapted.stats.known_offscreen_nodes,
+            suppressed_offscreen_content_nodes: adapted.stats.suppressed_offscreen_content_nodes,
+            suppressed_offscreen_content_bytes: adapted.stats.suppressed_offscreen_content_bytes,
             tree_heap_bytes,
             semantic_vs_raw_prompt_token_reduction_percent: reduction_percent(
                 semantic_metrics.prompt_tokens,
@@ -274,19 +298,25 @@ fn build_prompt(question: &str, context: &str) -> String {
     )
 }
 
-fn format_metrics(context: &str, question: &str, facts: &[String]) -> FormatMetrics {
+fn format_metrics(
+    context: &str,
+    question: &str,
+    facts: &[String],
+    offscreen_distractors: &[String],
+) -> FormatMetrics {
     let context_tokens = o200k_base_singleton().encode_ordinary(context).len();
     let prompt_tokens = o200k_base_singleton()
         .encode_ordinary(&build_prompt(question, context))
         .len();
-    let retained_facts = retained_facts(context, facts);
+    let retained_fact_count = retained_facts(context, facts);
     FormatMetrics {
         bytes: context.len(),
         context_tokens,
         prompt_tokens,
-        retained_facts,
+        retained_facts: retained_fact_count,
         total_facts: facts.len(),
-        tokens_per_retained_fact: ratio(context_tokens, retained_facts),
+        offscreen_distractors_retained: retained_facts(context, offscreen_distractors),
+        tokens_per_retained_fact: ratio(context_tokens, retained_fact_count),
     }
 }
 
@@ -444,6 +474,7 @@ fn add_metrics(total: &mut FormatTotals, metrics: &FormatMetrics) {
     total.prompt_tokens += metrics.prompt_tokens;
     total.retained_facts += metrics.retained_facts;
     total.total_facts += metrics.total_facts;
+    total.offscreen_distractors_retained += metrics.offscreen_distractors_retained;
 }
 
 fn ratio(tokens: usize, facts: usize) -> Option<f64> {

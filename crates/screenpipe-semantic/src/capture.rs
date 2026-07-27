@@ -77,6 +77,9 @@ pub struct CaptureAdapterStats {
     pub input_nodes: usize,
     pub retained_nodes: usize,
     pub depth_gap_nodes: usize,
+    pub known_offscreen_nodes: usize,
+    pub suppressed_offscreen_content_nodes: usize,
+    pub suppressed_offscreen_content_bytes: usize,
     pub identifier_nodes: usize,
     pub class_nodes: usize,
     pub subrole_nodes: usize,
@@ -91,7 +94,10 @@ pub struct AdaptedSemanticTree {
 
 /// Convert Screenpipe's current flattened accessibility nodes into a compact
 /// semantic tree. The nearest retained shallower node becomes the parent when
-/// text-only capture omitted intervening containers.
+/// text-only capture omitted intervening containers. Nodes explicitly marked
+/// off-screen retain structural fields and flags, but human-readable content is
+/// withheld so scrollback and hidden overflow cannot become semantic memory.
+/// Unknown visibility remains fail-open.
 pub fn adapt_captured_accessibility_tree(
     nodes: &[CapturedAccessibilityNode],
     budget: TreeBudget,
@@ -143,18 +149,36 @@ pub fn adapt_captured_accessibility_tree(
             class_count += 1;
         }
         let classes = &class_buffer[..class_count];
-        let description = node
+        let known_offscreen = node.on_screen == Some(false);
+        let source_description = node
             .help_text
             .as_deref()
             .and_then(nonempty)
             .or_else(|| node.role_description.as_deref().and_then(nonempty));
+        let (text, value, description) = if known_offscreen {
+            stats.known_offscreen_nodes += 1;
+            let suppressed_bytes = nonempty(&node.text).map_or(0, str::len)
+                + node.value.as_deref().and_then(nonempty).map_or(0, str::len)
+                + source_description.map_or(0, str::len);
+            if suppressed_bytes > 0 {
+                stats.suppressed_offscreen_content_nodes += 1;
+                stats.suppressed_offscreen_content_bytes += suppressed_bytes;
+            }
+            (None, None, None)
+        } else {
+            (
+                nonempty(&node.text),
+                node.value.as_deref().and_then(nonempty),
+                source_description,
+            )
+        };
         let id = builder.push(
             parent,
             SemanticNodeInput {
                 role: node.role.trim(),
                 subrole: node.subrole.as_deref().and_then(nonempty),
-                text: nonempty(&node.text),
-                value: node.value.as_deref().and_then(nonempty),
+                text,
+                value,
                 description,
                 identifier: node.automation_id.as_deref().and_then(nonempty),
                 dom_identifier: node.dom_identifier.as_deref().and_then(nonempty),
@@ -177,7 +201,7 @@ pub fn adapt_captured_accessibility_tree(
             usize::from(node.automation_id.as_deref().is_some_and(is_nonempty));
         stats.class_nodes += usize::from(class_count > 0);
         stats.subrole_nodes += usize::from(node.subrole.as_deref().is_some_and(is_nonempty));
-        stats.value_nodes += usize::from(node.value.as_deref().is_some_and(is_nonempty));
+        stats.value_nodes += usize::from(value.is_some());
     }
 
     Ok(AdaptedSemanticTree {

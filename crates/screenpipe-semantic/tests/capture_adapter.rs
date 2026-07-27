@@ -97,6 +97,71 @@ fn falls_back_to_nonempty_role_description() {
 }
 
 #[test]
+fn suppresses_known_offscreen_content_without_dropping_structure() {
+    let nodes = vec![
+        CapturedAccessibilityNode {
+            role: "AXGroup".into(),
+            text: "stale hidden message".into(),
+            value: Some("hidden value".into()),
+            help_text: Some("hidden description".into()),
+            on_screen: Some(false),
+            automation_id: Some("message-container".into()),
+            class_name: Some("message assistant".into()),
+            ..Default::default()
+        },
+        CapturedAccessibilityNode {
+            role: "AXStaticText".into(),
+            text: "visible reply".into(),
+            depth: 1,
+            on_screen: Some(true),
+            ..Default::default()
+        },
+    ];
+    let adapted = adapt_captured_accessibility_tree(&nodes, TreeBudget::default()).unwrap();
+    let root = NodeId(0);
+    let child = NodeId(1);
+
+    assert_eq!(adapted.tree.len(), 2);
+    assert_eq!(adapted.tree.text(root), None);
+    assert_eq!(adapted.tree.value(root), None);
+    assert_eq!(adapted.tree.description(root), None);
+    assert_eq!(adapted.tree.identifier(root), Some("message-container"));
+    assert!(adapted.tree.has_class(root, "assistant"));
+    assert_eq!(adapted.tree.parent(child), Some(root));
+    assert_eq!(adapted.tree.text(child), Some("visible reply"));
+    let flags = adapted.tree.flags(root).unwrap();
+    assert_ne!(flags & CapturedNodeFlags::ON_SCREEN_KNOWN, 0);
+    assert_eq!(flags & CapturedNodeFlags::ON_SCREEN, 0);
+    assert_eq!(adapted.stats.known_offscreen_nodes, 1);
+    assert_eq!(adapted.stats.suppressed_offscreen_content_nodes, 1);
+    assert_eq!(adapted.stats.suppressed_offscreen_content_bytes, 50);
+    assert_eq!(adapted.stats.value_nodes, 0);
+}
+
+#[test]
+fn keeps_content_when_visibility_is_unknown() {
+    let nodes = vec![CapturedAccessibilityNode {
+        role: "AXStaticText".into(),
+        text: "fail open when geometry is unavailable".into(),
+        value: Some("retained value".into()),
+        role_description: Some("retained description".into()),
+        on_screen: None,
+        ..Default::default()
+    }];
+    let adapted = adapt_captured_accessibility_tree(&nodes, TreeBudget::default()).unwrap();
+    let root = adapted.tree.roots().next().unwrap();
+
+    assert_eq!(
+        adapted.tree.text(root),
+        Some("fail open when geometry is unavailable")
+    );
+    assert_eq!(adapted.tree.value(root), Some("retained value"));
+    assert_eq!(adapted.tree.description(root), Some("retained description"));
+    assert_eq!(adapted.stats.known_offscreen_nodes, 0);
+    assert_eq!(adapted.stats.suppressed_offscreen_content_nodes, 0);
+}
+
+#[test]
 fn skips_empty_roles_but_preserves_budget_errors() {
     let nodes = vec![node("", "ignored", 0), node("AXWindow", "", 0)];
     let adapted = adapt_captured_accessibility_tree(

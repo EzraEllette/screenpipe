@@ -4,8 +4,8 @@
 
 use super::catalog::{manifest_for_family, profile_for, AppFamily, BuiltinAppProfile};
 use crate::{
-    AccessibilityAttribute, IdentityQuality, NodeId, OffscreenPolicy, ParseContext, ParseOutcome,
-    ParserManifest, ProjectionError, SemanticItem, SemanticKind, SemanticParser, SemanticTree,
+    AccessibilityAttribute, IdentityQuality, NodeId, ParseContext, ParseOutcome, ParserManifest,
+    ProjectionError, SemanticItem, SemanticKind, SemanticParser, SemanticTree,
 };
 
 const MONACO_WORKBENCH_CLASS: &str = "monaco-workbench";
@@ -37,7 +37,6 @@ impl EditorFamilyParser {
                     AccessibilityAttribute::DomIdentifier,
                     AccessibilityAttribute::DomClasses,
                 ],
-                OffscreenPolicy::Lists { overflow_count: 10 },
                 60,
             ),
         }

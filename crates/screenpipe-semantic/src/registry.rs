@@ -166,7 +166,6 @@ impl ParserRegistry {
             let candidate = parser.manifest().capture_plan();
             plan.parser_ids.extend(candidate.parser_ids);
             plan.required_attributes |= candidate.required_attributes;
-            plan.offscreen = plan.offscreen.merge(candidate.offscreen);
         }
         Some(plan)
     }
@@ -320,9 +319,9 @@ fn push_field(digest: &mut Sha256, value: &[u8]) {
 mod tests {
     use super::*;
     use crate::{
-        AccessibilityAttribute, AttributeSet, IdentityQuality, OffscreenPolicy, ParseContext,
-        ParseOutcome, ParserScope, Platform, ProjectionError, SemanticItem, SemanticKind,
-        SemanticNodeInput, SemanticTree, SemanticTreeBuilder, TreeBudget,
+        AccessibilityAttribute, AttributeSet, IdentityQuality, ParseContext, ParseOutcome,
+        ParserScope, Platform, ProjectionError, SemanticItem, SemanticKind, SemanticNodeInput,
+        SemanticTree, SemanticTreeBuilder, TreeBudget,
     };
 
     struct MockParser {
@@ -374,7 +373,6 @@ mod tests {
                 executables: vec![],
                 url_patterns,
                 required_attributes: vec![AccessibilityAttribute::Value],
-                offscreen: OffscreenPolicy::VisibleOnly,
                 app_version: AppVersionRequirement::Any,
                 supported_kinds: vec![SemanticKind::Message],
                 priority,
@@ -604,14 +602,12 @@ mod tests {
     fn chains_app_override_into_family_parser_and_merges_capture_plan() {
         let mut app_manifest = parser("slack-override", 0, vec![]).manifest().clone();
         app_manifest.required_attributes = vec![AccessibilityAttribute::Value];
-        app_manifest.offscreen = OffscreenPolicy::Lists { overflow_count: 10 };
 
         let mut family_manifest = parser("conversation-family", 100, vec![])
             .manifest()
             .clone();
         family_manifest.scope = ParserScope::Family;
         family_manifest.required_attributes = vec![AccessibilityAttribute::DomClasses];
-        family_manifest.offscreen = OffscreenPolicy::Lists { overflow_count: 20 };
 
         let mut item = SemanticItem::new(
             "message-1",
@@ -640,10 +636,6 @@ mod tests {
         assert_eq!(plan.parser_ids, ["slack-override", "conversation-family"]);
         assert!(plan.required_attributes.contains(AttributeSet::VALUE));
         assert!(plan.required_attributes.contains(AttributeSet::DOM_CLASSES));
-        assert_eq!(
-            plan.offscreen,
-            OffscreenPolicy::Lists { overflow_count: 20 }
-        );
 
         let context = ParseContext {
             frame_id: 1,
