@@ -305,11 +305,13 @@ that a user or Pipe can correct without overwriting source evidence.
 - `POST /semantic/actors/update` `{"id":12,"name":"Alice Smith"}` — rename
 - `POST /semantic/actors/merge` `{"actor_to_keep_id":12,"actor_to_merge_id":31}` — merge current and future aliases
 - `POST /semantic/actors/reassign` `{"item_id":902,"actor_id":12}` — correct one semantic item
+- `POST /semantic/actors/aliases/reassign` `{"alias_id":44,"actor_id":12}` — move one alias, its heuristic history, and future observations
 
 In `format=json`, `items[*].actor` is always the original parser label. The
 parallel `actors` array contains `item_id`, canonical `actor_id`/`name`, observed
 name, and assignment source. Use actor IDs for edits; never merge by display
-name alone.
+name alone. Prefer moving a specific alias when a full actor merge would be too
+broad; explicit item corrections are preserved.
 
 ---
 

@@ -6,9 +6,9 @@ use super::DatabaseManager;
 use chrono::{DateTime, Utc};
 use oasgen::OaSchema;
 use screenpipe_semantic::{
-    render_semantic_items_context_with_actor_names, semantic_projection_storage_keys, AppIdentity,
-    IdentityQuality, NodeId, ParserManifest, Platform, SemanticItem, SemanticKind,
-    ValidatedProjection,
+    normalize_e164, normalize_email, render_semantic_items_context_with_actor_names,
+    semantic_projection_storage_keys, AppIdentity, IdentityQuality, NodeId, ParserManifest,
+    Platform, SemanticItem, SemanticKind, ValidatedProjection,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, QueryBuilder, Sqlite};
@@ -715,6 +715,65 @@ impl DatabaseManager {
         Ok(())
     }
 
+    /// Move one source-scoped observed alias to another canonical actor. All
+    /// heuristic assignments derived from that alias move with it, while
+    /// explicit item-level reconciliations remain authoritative. Future
+    /// observations also resolve through the moved alias.
+    pub async fn reassign_semantic_actor_alias(
+        &self,
+        alias_id: i64,
+        actor_id: i64,
+    ) -> Result<SemanticActor, sqlx::Error> {
+        let mut tx = self.begin_immediate_with_retry().await?;
+        let previous_actor_id: Option<i64> =
+            sqlx::query_scalar("SELECT actor_id FROM semantic_actor_aliases WHERE id = ?1")
+                .bind(alias_id)
+                .fetch_optional(&mut **tx.conn())
+                .await?;
+        let actor_exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM semantic_actors WHERE id = ?1)")
+                .bind(actor_id)
+                .fetch_one(&mut **tx.conn())
+                .await?;
+        let Some(previous_actor_id) = previous_actor_id else {
+            tx.rollback().await?;
+            return Err(sqlx::Error::RowNotFound);
+        };
+        if !actor_exists {
+            tx.rollback().await?;
+            return Err(sqlx::Error::RowNotFound);
+        }
+
+        sqlx::query("UPDATE semantic_actor_aliases SET actor_id = ?1 WHERE id = ?2")
+            .bind(actor_id)
+            .bind(alias_id)
+            .execute(&mut **tx.conn())
+            .await?;
+        sqlx::query(
+            r#"UPDATE semantic_item_actors
+               SET actor_id = ?1,
+                   assignment_source = 'reconciled',
+                   updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+               WHERE observed_alias_id = ?2
+                 AND assignment_source = 'heuristic'"#,
+        )
+        .bind(actor_id)
+        .bind(alias_id)
+        .execute(&mut **tx.conn())
+        .await?;
+        sqlx::query(
+            r#"UPDATE semantic_actors
+               SET updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+               WHERE id IN (?1, ?2)"#,
+        )
+        .bind(previous_actor_id)
+        .bind(actor_id)
+        .execute(&mut **tx.conn())
+        .await?;
+        tx.commit().await?;
+        self.get_semantic_actor(actor_id).await
+    }
+
     async fn hydrate_semantic_actors(
         &self,
         rows: Vec<SemanticActorRow>,
@@ -889,7 +948,7 @@ fn semantic_actor_source_key(
     // after an app update and hand the same observation to a family parser;
     // that drift must not split one source-scoped actor into two identities.
     let mut key = format!("platform={}|{}", platform_name(app.platform), app_key);
-    if is_directional_actor_label(normalized_label) {
+    if should_scope_actor_to_conversation(normalized_label) {
         if let Some(parent_key) = item.parent_local_id.as_deref().and_then(|parent_id| {
             projection
                 .items()
@@ -933,6 +992,11 @@ fn is_directional_actor_label(value: &str) -> bool {
         value,
         "[user]" | "[contact]" | "[assistant]" | "user" | "contact" | "assistant" | "you" | "me"
     )
+}
+
+fn should_scope_actor_to_conversation(value: &str) -> bool {
+    is_directional_actor_label(value)
+        || (normalize_email(value).is_none() && normalize_e164(value).is_none())
 }
 
 pub(super) async fn cleanup_orphaned_semantic_data_in_tx(

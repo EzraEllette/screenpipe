@@ -79,6 +79,12 @@ pub(crate) struct ReassignSemanticActorRequest {
     actor_id: i64,
 }
 
+#[derive(Debug, Deserialize, OaSchema)]
+pub(crate) struct ReassignSemanticActorAliasRequest {
+    alias_id: i64,
+    actor_id: i64,
+}
+
 #[derive(Debug, Serialize, OaSchema)]
 pub(crate) struct ReassignSemanticActorResponse {
     item_id: i64,
@@ -228,6 +234,21 @@ pub(crate) async fn reassign_semantic_actor(
         item_id: payload.item_id,
         actor,
     }))
+}
+
+#[oasgen]
+pub(crate) async fn reassign_semantic_actor_alias(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<ReassignSemanticActorAliasRequest>,
+) -> Result<JsonResponse<SemanticActor>, (StatusCode, JsonResponse<Value>)> {
+    validate_positive_id(payload.alias_id, "alias id")?;
+    validate_positive_id(payload.actor_id, "actor id")?;
+    state
+        .db
+        .reassign_semantic_actor_alias(payload.alias_id, payload.actor_id)
+        .await
+        .map(JsonResponse)
+        .map_err(|error| semantic_actor_error("reassign alias", error))
 }
 
 fn validate_actor_name(name: &str) -> Result<(), (StatusCode, JsonResponse<Value>)> {

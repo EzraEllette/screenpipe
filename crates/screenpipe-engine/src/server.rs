@@ -58,7 +58,8 @@ use crate::{
         search::{keyword_search_handler, search},
         semantic::{
             create_semantic_actor, get_semantic_context, merge_semantic_actors,
-            reassign_semantic_actor, search_semantic_actors, update_semantic_actor,
+            reassign_semantic_actor, reassign_semantic_actor_alias, search_semantic_actors,
+            update_semantic_actor,
         },
         speakers::{
             delete_speaker_handler, get_similar_speakers_handler, get_speaker_sample_handler,
@@ -788,6 +789,10 @@ impl SCServer {
             .post("/semantic/actors/update", update_semantic_actor)
             .post("/semantic/actors/merge", merge_semantic_actors)
             .post("/semantic/actors/reassign", reassign_semantic_actor)
+            .post(
+                "/semantic/actors/aliases/reassign",
+                reassign_semantic_actor_alias,
+            )
             .get("/audio/list", api_list_audio_devices)
             .get("/vision/list", api_list_monitors)
             .get("/tags/autocomplete", autocomplete_tags)

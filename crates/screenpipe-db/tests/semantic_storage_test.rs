@@ -497,9 +497,80 @@ async fn semantic_actors_are_heuristic_correctable_and_durable() {
     assert_eq!(future.actors[0].actor_id, alice_id);
     assert_eq!(future.actors[0].name, "Alice Smith");
 
+    let split = db
+        .create_semantic_actor("Discord Alice")
+        .await
+        .expect("create actor for alias split");
+    let discord_alias_id = merged
+        .aliases
+        .iter()
+        .find(|alias| alias.source_label == "Discord")
+        .expect("merged actor keeps discord alias")
+        .id;
+    let split = db
+        .reassign_semantic_actor_alias(discord_alias_id, split.id)
+        .await
+        .expect("move one source alias after an overly broad merge");
+    assert_eq!(split.aliases.len(), 1);
+    let corrected_future = db
+        .get_frame_semantic_context(future_discord_frame)
+        .await
+        .expect("read alias-corrected context")
+        .expect("alias-corrected context exists");
+    assert_eq!(corrected_future.actors[0].actor_id, split.id);
+    assert_eq!(corrected_future.actors[0].assignment_source, "reconciled");
+
+    let after_split_frame = insert_frame(&db, now + ChronoDuration::seconds(1)).await;
+    db.store_semantic_projection(
+        after_split_frame,
+        &manifest(),
+        &discord_app(),
+        105,
+        Duration::from_micros(100),
+        &projection_with_actor("after split", "Alice", "discord:channel:release"),
+    )
+    .await
+    .expect("store future observation after alias split");
+    let after_split = db
+        .get_frame_semantic_context(after_split_frame)
+        .await
+        .expect("read future alias context")
+        .expect("future alias context exists");
+    assert_eq!(after_split.actors[0].actor_id, split.id);
+
+    let slack_split = db
+        .create_semantic_actor("Slack Alice")
+        .await
+        .expect("create actor for slack alias split");
+    let slack_alias_id = merged
+        .aliases
+        .iter()
+        .find(|alias| alias.source_label == "Slack")
+        .expect("merged actor keeps slack alias")
+        .id;
+    db.reassign_semantic_actor_alias(slack_alias_id, slack_split.id)
+        .await
+        .expect("move slack alias");
+    let heuristic_slack = db
+        .get_frame_semantic_context(first_frame)
+        .await
+        .expect("read heuristic slack context")
+        .expect("heuristic slack context exists");
+    assert_eq!(heuristic_slack.actors[0].actor_id, slack_split.id);
+    let explicitly_corrected_slack = db
+        .get_frame_semantic_context(second_frame)
+        .await
+        .expect("read explicitly corrected slack context")
+        .expect("explicitly corrected slack context exists");
+    assert_eq!(explicitly_corrected_slack.actors[0].actor_id, alice_id);
+    assert_eq!(
+        explicitly_corrected_slack.actors[0].assignment_source,
+        "reconciled"
+    );
+
     db.delete_time_range(
         now - ChronoDuration::minutes(4),
-        now + ChronoDuration::seconds(1),
+        now + ChronoDuration::seconds(2),
     )
     .await
     .expect("delete semantic source frames");
@@ -510,7 +581,19 @@ async fn semantic_actors_are_heuristic_correctable_and_durable() {
         .await
         .expect("actor identity survives source retention");
     assert_eq!(durable.item_count, 0);
-    assert_eq!(durable.aliases.len(), 2);
+    assert_eq!(durable.aliases.len(), 0);
+    let durable_split = db
+        .get_semantic_actor(split.id)
+        .await
+        .expect("split alias survives source retention");
+    assert_eq!(durable_split.item_count, 0);
+    assert_eq!(durable_split.aliases.len(), 1);
+    let durable_slack_split = db
+        .get_semantic_actor(slack_split.id)
+        .await
+        .expect("slack alias split survives source retention");
+    assert_eq!(durable_slack_split.item_count, 0);
+    assert_eq!(durable_slack_split.aliases.len(), 1);
 }
 
 #[tokio::test]
@@ -540,6 +623,28 @@ async fn directional_actor_labels_are_scoped_to_the_conversation() {
         .expect("search directional actors");
     assert_eq!(actors.len(), 2);
     assert!(actors.iter().all(|actor| actor.aliases.len() == 1));
+
+    for (index, conversation) in ["slack:channel:one", "slack:channel:two"]
+        .into_iter()
+        .enumerate()
+    {
+        let frame = insert_frame(&db, now + ChronoDuration::seconds(10 + index as i64)).await;
+        db.store_semantic_projection(
+            frame,
+            &manifest(),
+            &app(),
+            300 + index as u64,
+            Duration::from_micros(100),
+            &projection_with_actor("hello", "Alex", conversation),
+        )
+        .await
+        .expect("store ambiguous display name");
+    }
+    let named_actors = db
+        .search_semantic_actors("Alex", 10, 0)
+        .await
+        .expect("search conversation-scoped display names");
+    assert_eq!(named_actors.len(), 2);
 }
 
 #[tokio::test]

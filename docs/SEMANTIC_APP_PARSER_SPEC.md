@@ -340,9 +340,10 @@ Required keys and constraints:
 - The parser's observed `semantic_items.actor` value is never edited. Initial
   identity assignment is an app/host-scoped label heuristic and deliberately
   excludes parser ID, so exact-parser fallback after UI drift does not split an
-  actor. Directional labels such as `[contact]` are additionally
-  conversation-scoped. Renames, merges, and item-level corrections update only
-  the actor mapping.
+  actor. Plain display names and directional labels such as `[contact]` are
+  additionally conversation-scoped; only exact email/E.164-shaped labels can
+  reuse an alias across conversations. Renames, merges, alias moves, and
+  item-level corrections update only the actor mapping.
 - Merging actors moves their aliases as well as existing assignments. Future
   observations therefore inherit the reconciliation instead of recreating the
   discarded provisional actor. Actor aliases intentionally survive source-frame
@@ -408,6 +409,9 @@ Actor reconciliation uses the same local API shape as speaker correction:
 - `POST /semantic/actors/update` renames a canonical actor.
 - `POST /semantic/actors/merge` merges identities and their future aliases.
 - `POST /semantic/actors/reassign` corrects one canonical semantic item by ID.
+- `POST /semantic/actors/aliases/reassign` moves one observed alias and its
+  heuristic history, so a reconciliation affects future captures or can split
+  an overly broad merge. Explicit item corrections remain untouched.
 
 These endpoints are sufficient for a local reconciliation Pipe. It can inspect
 actors and source-backed JSON, propose or apply merges, then retrieve all context
