@@ -13,3 +13,7 @@
 !crates/
 crates/**/target
 crates/**/node_modules
+# Test fixtures carry credentials (conformance/fixtures/tokens.json) and are
+# not needed to compile. Keep them out of the daemon upload entirely so they
+# cannot land in a builder layer.
+crates/screenpipe-gateway/e2e

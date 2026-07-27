@@ -21,7 +21,7 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 RUN cargo build --locked --release -p screenpipe-gateway --bins
 
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim AS base
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/* \
@@ -32,13 +32,36 @@ RUN apt-get update \
     # volume mounted at a path the image does not have would be created owned by
     # root, and the policy-fixture bin runs as `screenpipe`.
     && mkdir -p /data /policy && chown screenpipe /data /policy
+
+# Test-only image: adds the compose e2e's synthetic-device seeder and the
+# fixture policy minter (SCR-288). Both carry test credentials — the minter
+# embeds a fixed ed25519 signing seed — so they stay out of the default image.
+# The e2e runs them AS this image with a different entrypoint, which is why
+# they live in an image at all. Built explicitly with `--target e2e`.
+FROM base AS e2e
 COPY --from=builder /src/target/release/screenpipe-gateway /usr/local/bin/screenpipe-gateway
 COPY --from=builder /src/target/release/screenpipe-gateway-seed /usr/local/bin/screenpipe-gateway-seed
-# Mints the fixture-signed policy that turns bearer auth ON in the compose e2e
-# (SCR-288). Test-only, like the seeder; both are in the image because the e2e
-# runs them AS this image with a different entrypoint rather than building a
-# second one.
 COPY --from=builder /src/target/release/screenpipe-gateway-policy-fixture /usr/local/bin/screenpipe-gateway-policy-fixture
+USER screenpipe
+EXPOSE 3040
+ENTRYPOINT ["screenpipe-gateway"]
+
+# The clean image, and the default target: the gateway binary and nothing else.
+# This is what gets published to ghcr.io/screenpipe/screenpipe-gateway.
+FROM base AS runtime
+# Public image: the labels are how someone who pulled it finds the source and
+# the license terms. VERSION is a plain build arg (not a secret) and is
+# stamped by the release workflow.
+ARG VERSION=dev
+LABEL org.opencontainers.image.title="screenpipe-gateway" \
+      org.opencontainers.image.description="Customer-run query gateway for the screenpipe enterprise archive." \
+      org.opencontainers.image.source="https://github.com/screenpipe/screenpipe" \
+      org.opencontainers.image.documentation="https://github.com/screenpipe/screenpipe/blob/main/crates/screenpipe-gateway/README.md" \
+      org.opencontainers.image.url="https://screenpipe.com" \
+      org.opencontainers.image.vendor="Mediar, Inc. (dba Screenpipe)" \
+      org.opencontainers.image.version="$VERSION" \
+      org.opencontainers.image.licenses="LicenseRef-Screenpipe-Commercial"
+COPY --from=builder /src/target/release/screenpipe-gateway /usr/local/bin/screenpipe-gateway
 USER screenpipe
 EXPOSE 3040
 ENTRYPOINT ["screenpipe-gateway"]

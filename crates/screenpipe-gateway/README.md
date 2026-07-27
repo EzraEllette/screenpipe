@@ -30,6 +30,34 @@ monitor.
 
 ## 2. Container image
 
+Published images live in a public registry — no registry credentials, no IAM
+setup, no allow-listing:
+
+```bash
+docker pull ghcr.io/screenpipe/screenpipe-gateway:0.4.29
+```
+
+**Pin a version, and preferably a digest.** `:latest` moves. GHCR has no
+immutable-tag setting, so a version tag is protected by release policy (the
+publish job refuses to overwrite an existing tag) rather than by the registry
+itself. A digest is the only reference that cannot be repointed:
+
+```bash
+docker pull ghcr.io/screenpipe/screenpipe-gateway@sha256:<digest>
+```
+
+Every published image carries a signed build provenance attestation binding
+that digest to the workflow run and commit that produced it. Verify before you
+deploy:
+
+```bash
+gh attestation verify oci://ghcr.io/screenpipe/screenpipe-gateway:0.4.29 \
+  --repo screenpipe/screenpipe
+```
+
+Building it yourself is equally supported — the source is public and the build
+takes no secrets:
+
 ```bash
 # Build context is the REPO ROOT — the workspace manifest is needed.
 docker build -f crates/screenpipe-gateway/Dockerfile -t screenpipe-gateway .
@@ -41,10 +69,14 @@ the closure has exactly one C dependency (bundled SQLite + `sqlite-vec`) and
 `ca-certificates` (TLS to S3 and to the control plane) and `curl` (health
 checks), runs as the non-root `screenpipe` user, and `EXPOSE`s 3040.
 
-Two binaries ship in it: `screenpipe-gateway` (the entrypoint) and
-`screenpipe-gateway-seed`, which fabricates two synthetic devices for the
-compose demo. The seeder is a **test fixture** — it writes to the archive
-bucket. Never point it at a production bucket.
+The published image contains **one binary**, `screenpipe-gateway`, and no
+configuration: every credential is supplied through the environment at run
+time (§3). The compose demo's synthetic-device seeder and its policy-signing
+fixture are test-only and live in a separate `--target e2e` image that is never
+published — the seeder writes to the archive bucket, so it must never be
+pointed at production.
+
+Images are `linux/amd64`. On Graviton/arm64 hosts, build from source for now.
 
 ---
 

@@ -34,6 +34,7 @@ services:
     build:
       context: ../../..
       dockerfile: crates/screenpipe-gateway/Dockerfile
+      target: e2e
     entrypoint: ["screenpipe-gateway-seed"]
     environment: &s3env
       SCREENPIPE_GATEWAY_LICENSE_ID: lic-e2e
@@ -52,6 +53,7 @@ services:
     build:
       context: ../../..
       dockerfile: crates/screenpipe-gateway/Dockerfile
+      target: e2e
     environment:
       <<: *s3env
       SCREENPIPE_GATEWAY_DATA_DIR: /data
