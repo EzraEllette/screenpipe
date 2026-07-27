@@ -949,16 +949,17 @@ fn semantic_actor_source_key(
     // that drift must not split one source-scoped actor into two identities.
     let mut key = format!("platform={}|{}", platform_name(app.platform), app_key);
     if should_scope_actor_to_conversation(normalized_label) {
-        if let Some(parent_key) = item.parent_local_id.as_deref().and_then(|parent_id| {
+        let scope_key = item.parent_local_id.as_deref().and_then(|parent_id| {
             projection
                 .items()
                 .iter()
                 .find(|candidate| candidate.local_id == parent_id)
                 .map(|parent| parent.item_key.as_str())
-        }) {
-            key.push_str("|conversation=");
-            key.push_str(parent_key);
-        }
+        });
+        // Missing conversation structure must fail conservative: isolate the
+        // observation by item key instead of joining a plain name app-wide.
+        key.push_str("|scope=");
+        key.push_str(scope_key.unwrap_or(&item.item_key));
     }
     key.chars().take(1024).collect()
 }

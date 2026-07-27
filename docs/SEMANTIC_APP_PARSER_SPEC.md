@@ -342,8 +342,9 @@ Required keys and constraints:
   excludes parser ID, so exact-parser fallback after UI drift does not split an
   actor. Plain display names and directional labels such as `[contact]` are
   additionally conversation-scoped; only exact email/E.164-shaped labels can
-  reuse an alias across conversations. Renames, merges, alias moves, and
-  item-level corrections update only the actor mapping.
+  reuse an alias across conversations. A plain label without conversation
+  structure is isolated to its item rather than joined app-wide. Renames,
+  merges, alias moves, and item-level corrections update only the actor mapping.
 - Merging actors moves their aliases as well as existing assignments. Future
   observations therefore inherit the reconciliation instead of recreating the
   discarded provisional actor. Actor aliases intentionally survive source-frame
