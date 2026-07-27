@@ -43,8 +43,56 @@ fn log_webview_build_failure(label: &str, url_hint: &str, err: &(impl std::fmt::
 mod tests {
     use super::{
         fallback_local_api_config, is_login_callback_scheme, read_enterprise_config_from_path,
-        scan_chat_entries_by_mtime,
+        save_enterprise_team_config, scan_chat_entries_by_mtime,
     };
+
+    /// The whole point of SCR-357: every client READ `team_api_url` while
+    /// nothing wrote it. Assert the writer actually sets the key, that a
+    /// changed URL overwrites (the 5-minute policy poll re-asserts it, so a
+    /// moved gateway must self-heal), and that `None` leaves it alone.
+    #[test]
+    fn team_config_writes_and_updates_team_api_url() {
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("SCREENPIPE_DATA_DIR", dir.path());
+        let path = dir.path().join("enterprise.json");
+        let read = || -> serde_json::Value {
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap()
+        };
+
+        save_enterprise_team_config(
+            Some(true),
+            Some(true),
+            None,
+            Some("https://gw.acme.com/api/enterprise/v1/".to_string()),
+        )
+        .unwrap();
+        // Trailing slash trimmed, matching what the three readers expect.
+        assert_eq!(
+            read()["team_api_url"],
+            "https://gw.acme.com/api/enterprise/v1"
+        );
+
+        // Gateway moved: the next poll overwrites it.
+        save_enterprise_team_config(None, None, None, Some("https://gw2.acme.com".to_string()))
+            .unwrap();
+        assert_eq!(read()["team_api_url"], "https://gw2.acme.com");
+
+        // Hosted org / older backend omits the field: leave the key as-is
+        // rather than silently sending clients to the hosted base.
+        save_enterprise_team_config(None, None, Some("sk_ent_abc".to_string()), None).unwrap();
+        assert_eq!(read()["team_api_url"], "https://gw2.acme.com");
+        assert_eq!(read()["team_api_token"], "sk_ent_abc");
+
+        // Junk is refused, not written.
+        save_enterprise_team_config(None, None, None, Some("not a url".to_string())).unwrap();
+        assert_eq!(read()["team_api_url"], "https://gw2.acme.com");
+
+        // Empty string is the explicit "clear it" signal (binding removed).
+        save_enterprise_team_config(None, None, None, Some(String::new())).unwrap();
+        assert!(read()["team_api_url"].is_null());
+
+        std::env::remove_var("SCREENPIPE_DATA_DIR");
+    }
 
     #[test]
     fn enterprise_json_parses_license_and_ingest_url() {
@@ -749,8 +797,9 @@ pub async fn set_cloud_token(
     Ok(())
 }
 
-/// Persist the user's enterprise admin status + team API token so the
-/// pi-agent's `screenpipe-team` skill knows whether to install itself.
+/// Persist the user's enterprise admin status, team API token, and the org's
+/// team API base URL so the pi-agent's `screenpipe-team` skill knows whether
+/// to install itself and where to point.
 ///
 /// Called by the frontend right after a policy fetch confirms admin
 /// role. Storing this alongside the license key in `enterprise.json`
@@ -767,6 +816,7 @@ pub fn save_enterprise_team_config(
     is_admin: Option<bool>,
     license_active: Option<bool>,
     team_api_token: Option<String>,
+    team_api_url: Option<String>,
 ) -> Result<(), String> {
     let dir = screenpipe_core::paths::default_screenpipe_data_dir();
     std::fs::create_dir_all(&dir).map_err(|e| format!("failed to create dir: {}", e))?;
@@ -791,16 +841,32 @@ pub fn save_enterprise_team_config(
             serde_json::Value::String(t)
         };
     }
+    // The org's team-API base (a gateway org's `gateway_url`). Every client
+    // reads this key; the 5-minute policy poll re-asserts it, so a changed
+    // gateway URL propagates without user action. Only http(s) values are
+    // written — a junk value would silently redirect all three readers.
+    let url_set = team_api_url.is_some();
+    if let Some(u) = team_api_url {
+        let u = u.trim();
+        if u.is_empty() {
+            json["team_api_url"] = serde_json::Value::Null;
+        } else if u.starts_with("http://") || u.starts_with("https://") {
+            json["team_api_url"] = serde_json::Value::String(u.trim_end_matches('/').to_string());
+        } else {
+            warn!("enterprise: ignoring non-http team_api_url: {}", u);
+        }
+    }
 
     std::fs::write(&path, serde_json::to_string_pretty(&json).unwrap())
         .map_err(|e| format!("failed to write {}: {}", path.display(), e))?;
 
     info!(
-        "enterprise: team config saved to {} (is_admin set: {}, license_active set: {}, token set: {})",
+        "enterprise: team config saved to {} (is_admin set: {}, license_active set: {}, token set: {}, url set: {})",
         path.display(),
         is_admin.is_some(),
         license_active.is_some(),
-        token_set
+        token_set,
+        url_set
     );
     Ok(())
 }

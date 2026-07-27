@@ -856,12 +856,27 @@ export function useEnterprisePolicyRuntime() {
       if (cloudToken) {
         try {
           const adminFlag = Boolean(data.isAdmin);
+          // A gateway org's data-API base. Re-asserted on every poll, so a
+          // changed gateway URL lands within one interval. `null` when the
+          // server omits it (hosted org, or a backend that predates the
+          // field) — leave whatever is already on disk alone.
+          //
+          // Admins only: every consumer of this key also needs the admin
+          // `sk_ent_` token, so a non-admin has no use for the URL and no
+          // reason to have the org's internal hostname on disk. The server
+          // is the authoritative gate — this is the second lock.
+          const gatewayUrl =
+            adminFlag &&
+            typeof data.gatewayUrl === "string" &&
+            data.gatewayUrl.trim()
+              ? data.gatewayUrl.trim()
+              : null;
           console.log(
-            `[enterprise] persisting team config: is_admin=${adminFlag} (raw response.isAdmin=${data.isAdmin})`
+            `[enterprise] persisting team config: is_admin=${adminFlag} (raw response.isAdmin=${data.isAdmin}), team_api_url=${gatewayUrl ?? "(unchanged)"}`
           );
           await withTimeout(
             "enterprise saveEnterpriseTeamConfig",
-            commands.saveEnterpriseTeamConfig(adminFlag, true, null),
+            commands.saveEnterpriseTeamConfig(adminFlag, true, null, gatewayUrl),
             LOCAL_POLICY_COMMAND_TIMEOUT_MS
           );
         } catch (e) {

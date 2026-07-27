@@ -2076,7 +2076,7 @@ function AdminTeamTokenCard() {
     }
     setSaving(true);
     try {
-      const res = await commands.saveEnterpriseTeamConfig(null, null, trimmed);
+      const res = await commands.saveEnterpriseTeamConfig(null, null, trimmed, null);
       if (res.status === "error") throw new Error(res.error);
       setLiveToken(trimmed);
       setPendingToken(null);
@@ -2098,7 +2098,7 @@ function AdminTeamTokenCard() {
   const handleClear = useCallback(async () => {
     setSaving(true);
     try {
-      const res = await commands.saveEnterpriseTeamConfig(null, null, "");
+      const res = await commands.saveEnterpriseTeamConfig(null, null, "", null);
       if (res.status === "error") throw new Error(res.error);
       setLiveToken(null);
       setPendingToken(null);
