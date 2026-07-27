@@ -331,7 +331,7 @@ function ensureApiKey(): Promise<string> {
 //   BASE URL (discoverTeamApiBase) — where those tools send their requests:
 //     1. --team-api-url flag
 //     2. SCREENPIPE_TEAM_API_URL env var
-//     3. team_api_url in ~/.screenpipe/enterprise.json
+//     3. gateway_url in ~/.screenpipe/enterprise.json
 //     4. the hosted default, https://screenpi.pe/api/enterprise/v1
 //
 // The base is NOT always the hosted API: orgs on the write-only archive tier

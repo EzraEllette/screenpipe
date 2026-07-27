@@ -872,7 +872,7 @@ export function useEnterprisePolicyRuntime() {
               ? data.gatewayUrl.trim()
               : null;
           console.log(
-            `[enterprise] persisting team config: is_admin=${adminFlag} (raw response.isAdmin=${data.isAdmin}), team_api_url=${gatewayUrl ?? "(unchanged)"}`
+            `[enterprise] persisting team config: is_admin=${adminFlag} (raw response.isAdmin=${data.isAdmin}), gateway_url=${gatewayUrl ?? "(unchanged)"}`
           );
           await withTimeout(
             "enterprise saveEnterpriseTeamConfig",

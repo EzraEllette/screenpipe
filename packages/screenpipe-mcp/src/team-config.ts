@@ -54,7 +54,7 @@ export function discoverTeamToken(
  * Team API base resolution (mirrors the local-API URL resolution):
  *   1. --team-api-url flag
  *   2. SCREENPIPE_TEAM_API_URL env
- *   3. team_api_url in ~/.screenpipe/enterprise.json (written by the
+ *   3. gateway_url in ~/.screenpipe/enterprise.json (written by the
  *      desktop app from the org's storage-binding gateway URL)
  *   4. hosted default
  */
@@ -66,7 +66,7 @@ export function discoverTeamApiBase(
   const fromFile = (() => {
     const parsed = readEnterpriseJson(homedir);
     const url =
-      typeof parsed?.team_api_url === "string" ? parsed.team_api_url : "";
+      typeof parsed?.gateway_url === "string" ? parsed.gateway_url : "";
     return url.trim();
   })();
   const base =

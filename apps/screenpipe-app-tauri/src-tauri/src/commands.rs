@@ -46,12 +46,13 @@ mod tests {
         save_enterprise_team_config, scan_chat_entries_by_mtime,
     };
 
-    /// The whole point of SCR-357: every client READ `team_api_url` while
-    /// nothing wrote it. Assert the writer actually sets the key, that a
-    /// changed URL overwrites (the 5-minute policy poll re-asserts it, so a
-    /// moved gateway must self-heal), and that `None` leaves it alone.
+    /// The whole point of SCR-300: `gateway_url` is the ONE name the server,
+    /// this file, and all three readers use, and this is its only writer.
+    /// Assert the writer actually sets the key, that a changed URL overwrites
+    /// (the 5-minute policy poll re-asserts it, so a moved gateway must
+    /// self-heal), and that `None` leaves it alone.
     #[test]
-    fn team_config_writes_and_updates_team_api_url() {
+    fn team_config_writes_and_updates_gateway_url() {
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("SCREENPIPE_DATA_DIR", dir.path());
         let path = dir.path().join("enterprise.json");
@@ -68,28 +69,28 @@ mod tests {
         .unwrap();
         // Trailing slash trimmed, matching what the three readers expect.
         assert_eq!(
-            read()["team_api_url"],
+            read()["gateway_url"],
             "https://gw.acme.com/api/enterprise/v1"
         );
 
         // Gateway moved: the next poll overwrites it.
         save_enterprise_team_config(None, None, None, Some("https://gw2.acme.com".to_string()))
             .unwrap();
-        assert_eq!(read()["team_api_url"], "https://gw2.acme.com");
+        assert_eq!(read()["gateway_url"], "https://gw2.acme.com");
 
         // Hosted org / older backend omits the field: leave the key as-is
         // rather than silently sending clients to the hosted base.
         save_enterprise_team_config(None, None, Some("sk_ent_abc".to_string()), None).unwrap();
-        assert_eq!(read()["team_api_url"], "https://gw2.acme.com");
+        assert_eq!(read()["gateway_url"], "https://gw2.acme.com");
         assert_eq!(read()["team_api_token"], "sk_ent_abc");
 
         // Junk is refused, not written.
         save_enterprise_team_config(None, None, None, Some("not a url".to_string())).unwrap();
-        assert_eq!(read()["team_api_url"], "https://gw2.acme.com");
+        assert_eq!(read()["gateway_url"], "https://gw2.acme.com");
 
         // Empty string is the explicit "clear it" signal (binding removed).
         save_enterprise_team_config(None, None, None, Some(String::new())).unwrap();
-        assert!(read()["team_api_url"].is_null());
+        assert!(read()["gateway_url"].is_null());
 
         std::env::remove_var("SCREENPIPE_DATA_DIR");
     }
@@ -815,7 +816,7 @@ pub fn save_enterprise_team_config(
     is_admin: Option<bool>,
     license_active: Option<bool>,
     team_api_token: Option<String>,
-    team_api_url: Option<String>,
+    gateway_url: Option<String>,
 ) -> Result<(), String> {
     let dir = screenpipe_core::paths::default_screenpipe_data_dir();
     std::fs::create_dir_all(&dir).map_err(|e| format!("failed to create dir: {}", e))?;
@@ -844,15 +845,15 @@ pub fn save_enterprise_team_config(
     // reads this key; the 5-minute policy poll re-asserts it, so a changed
     // gateway URL propagates without user action. Only http(s) values are
     // written — a junk value would silently redirect all three readers.
-    let url_set = team_api_url.is_some();
-    if let Some(u) = team_api_url {
+    let url_set = gateway_url.is_some();
+    if let Some(u) = gateway_url {
         let u = u.trim();
         if u.is_empty() {
-            json["team_api_url"] = serde_json::Value::Null;
+            json["gateway_url"] = serde_json::Value::Null;
         } else if u.starts_with("http://") || u.starts_with("https://") {
-            json["team_api_url"] = serde_json::Value::String(u.trim_end_matches('/').to_string());
+            json["gateway_url"] = serde_json::Value::String(u.trim_end_matches('/').to_string());
         } else {
-            warn!("enterprise: ignoring non-http team_api_url: {}", u);
+            warn!("enterprise: ignoring non-http gateway_url: {}", u);
         }
     }
 

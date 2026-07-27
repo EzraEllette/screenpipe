@@ -18,7 +18,7 @@
 //! via `SCREENPIPE_TEAM_API_TOKEN` env var for scripts/CI. Base URL
 //! resolution (same contract as `packages/screenpipe-mcp`):
 //! `SCREENPIPE_TEAM_API_URL` env (full v1 base) → legacy
-//! `SCREENPIPE_CLOUD_BASE_URL` env (origin) → `team_api_url` in
+//! `SCREENPIPE_CLOUD_BASE_URL` env (origin) → `gateway_url` in
 //! enterprise.json (gateway orgs) → hosted default.
 //!
 //! Skips the local sp daemon entirely — calls go straight to the cloud,
@@ -91,7 +91,7 @@ impl TeamEnv {
 }
 
 /// Base resolution, same contract as packages/screenpipe-mcp: explicit
-/// full-v1-base env → legacy origin env → enterprise.json team_api_url
+/// full-v1-base env → legacy origin env → enterprise.json gateway_url
 /// (written by the desktop app from the org's storage-binding gateway
 /// URL) → hosted default.
 fn resolve_v1_base(
@@ -106,7 +106,7 @@ fn resolve_v1_base(
         return format!("{}/api/enterprise/v1", origin.trim_end_matches('/'));
     }
     if let Some(base) = ent
-        .and_then(|v| v.get("team_api_url"))
+        .and_then(|v| v.get("gateway_url"))
         .and_then(|v| v.as_str())
         .map(str::trim)
         .filter(|s| s.starts_with("http://") || s.starts_with("https://"))
@@ -484,17 +484,17 @@ mod tests {
             resolve_v1_base(None, None, None),
             "https://screenpi.pe/api/enterprise/v1"
         );
-        // enterprise.json team_api_url → gateway orgs, trailing slash trimmed.
+        // enterprise.json gateway_url → gateway orgs, trailing slash trimmed.
         let ent = serde_json::json!({
             "team_api_token": "sk_ent_x",
-            "team_api_url": "https://gateway.corp.internal:3040/api/enterprise/v1/",
+            "gateway_url": "https://gateway.corp.internal:3040/api/enterprise/v1/",
         });
         assert_eq!(
             resolve_v1_base(None, None, Some(&ent)),
             "https://gateway.corp.internal:3040/api/enterprise/v1"
         );
         // Non-URL junk in the file falls through to the default.
-        let junk = serde_json::json!({ "team_api_url": "not a url" });
+        let junk = serde_json::json!({ "gateway_url": "not a url" });
         assert_eq!(
             resolve_v1_base(None, None, Some(&junk)),
             "https://screenpi.pe/api/enterprise/v1"

@@ -16,7 +16,7 @@ constant, so `team-search` / `team-devices` / `team-records` registered and then
 failed with **HTTP 401** for every such org, and the only workaround was running
 this MCP from source.
 
-- `--team-api-url` flag, `SCREENPIPE_TEAM_API_URL` env var, and `team_api_url`
+- `--team-api-url` flag, `SCREENPIPE_TEAM_API_URL` env var, and `gateway_url`
   in `~/.screenpipe/enterprise.json` now select the team API base, in that
   precedence order, falling back to `https://screenpi.pe/api/enterprise/v1`
   (`src/team-config.ts`).
@@ -48,9 +48,9 @@ minor bump changes no resolution.
 **Known gaps that this release does NOT close** (documented under "Known limits"
 in the README):
 
-- Nothing in the repo writes `team_api_url` into `~/.screenpipe/enterprise.json`
-  yet, so precedence step 3 is unpopulated in practice; gateway orgs must set the
-  env var or the flag by hand.
+- Precedence step 3 needs the desktop app: it is the only writer of
+  `gateway_url` into `~/.screenpipe/enterprise.json`, and only for a signed-in
+  admin. On a server or CI box, set the env var or the flag by hand.
 - The `.mcpb` bundle's `manifest.json` has no `user_config`/`env` block, so the
   Claude Desktop extension install has no UI for these variables.
 - The `--http` transport still exposes `search_content` only; `team-*` is

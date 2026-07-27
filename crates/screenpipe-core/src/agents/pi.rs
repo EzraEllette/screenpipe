@@ -412,13 +412,13 @@ impl PiExecutor {
     }
 
     /// The org's team-API base URL from `~/.screenpipe/enterprise.json`
-    /// (`team_api_url`, written by the desktop app from the storage
+    /// (`gateway_url`, written by the desktop app from the storage
     /// binding's gateway URL). `None` = hosted org, keep the baked base.
     fn team_api_base_override() -> Option<String> {
         let home = dirs::home_dir()?;
         let raw = std::fs::read_to_string(home.join(".screenpipe").join("enterprise.json")).ok()?;
         let parsed: serde_json::Value = serde_json::from_str(&raw).ok()?;
-        let base = parsed.get("team_api_url")?.as_str()?.trim();
+        let base = parsed.get("gateway_url")?.as_str()?.trim();
         let base = base.trim_end_matches('/');
         if base.starts_with("http://") || base.starts_with("https://") {
             Some(base.to_string())

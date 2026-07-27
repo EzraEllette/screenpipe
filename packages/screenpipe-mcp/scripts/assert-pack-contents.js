@@ -67,7 +67,7 @@ const REQUIRED_MARKERS = [
   },
   {
     file: "dist/team-config.js",
-    marker: "team_api_url",
+    marker: "gateway_url",
     why: "the ~/.screenpipe/enterprise.json fallback in the precedence ladder",
   },
   {
