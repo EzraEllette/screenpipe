@@ -221,10 +221,13 @@ enough structure.
 
 The master `enableSemanticContext` switch remains off by default. Missing mode
 values deserialize as `memory`, preserving the behavior of earlier opt-in
-installs. On macOS, the computer-use subset keeps interactive controls plus a
-small set of navigation and window landmarks, rather than every group, row, or
-cell. Windows and Linux use the same output contract over their existing
-platform accessibility nodes.
+installs. The computer-use subset keeps interactive controls plus a small set
+of navigation and window landmarks, rather than every group, row, or cell.
+macOS, Windows, and Linux also retain unnamed actionable controls that the
+memory projection would omit. All three platforms reuse the existing bounded
+accessibility walk. Windows makes no additional platform query; Linux only
+fetches state for an otherwise unnamed action control while the opt-in mode is
+active.
 
 The two identifier layers intentionally have different lifetimes:
 

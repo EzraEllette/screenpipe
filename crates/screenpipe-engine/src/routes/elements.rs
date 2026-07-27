@@ -486,6 +486,10 @@ fn automation_actions(
         "disclosure",
         "cell",
         "row",
+        "listitem",
+        "list_item",
+        "treeitem",
+        "tree_item",
     ]
     .iter()
     .any(|candidate| role.contains(candidate))
@@ -499,7 +503,10 @@ fn automation_actions(
         "text_box",
         "textarea",
         "edit",
+        "entry",
         "input",
+        "passwordtext",
+        "password_text",
     ]
     .iter()
     .any(|candidate| role.contains(candidate))
@@ -525,6 +532,16 @@ fn automation_actions(
             actions.push("click");
         }
         actions.push("select");
+    }
+    if ["slider", "spinbutton", "spin_button", "spinner"]
+        .iter()
+        .any(|candidate| role.contains(candidate))
+    {
+        if !actions.contains(&"click") {
+            actions.push("click");
+        }
+        actions.push("set_value");
+        actions.push("press_key");
     }
     if [
         "scrollarea",
@@ -1117,6 +1134,33 @@ mod tests {
         assert!(!output.contains("hunter2"), "got:\n{output}");
         assert!(output.contains("\"Password\""), "got:\n{output}");
         assert!(output.contains("actions=click,type,set_value"));
+    }
+
+    #[test]
+    fn automation_actions_cover_native_windows_and_linux_control_roles() {
+        let elements = vec![
+            automation_el(1, None, "Entry", Some("Query"), None),
+            automation_el(2, None, "Slider", Some("Volume"), None),
+            automation_el(3, None, "TreeItem", Some("Downloads"), None),
+            automation_el(4, None, "ScrollBar", None, None),
+        ];
+        let output = automation_context_text(&elements, 4);
+        assert!(
+            output.contains("Entry \"Query\" actions=click,type,set_value"),
+            "got:\n{output}"
+        );
+        assert!(
+            output.contains("Slider \"Volume\" actions=click,set_value,press_key"),
+            "got:\n{output}"
+        );
+        assert!(
+            output.contains("TreeItem \"Downloads\" actions=click"),
+            "got:\n{output}"
+        );
+        assert!(
+            output.contains("ScrollBar actions=scroll"),
+            "got:\n{output}"
+        );
     }
 
     #[test]
