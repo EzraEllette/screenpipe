@@ -22,7 +22,10 @@ pub use capture::{
     adapt_captured_accessibility_tree, AdaptedSemanticTree, CaptureAdapterStats,
     CapturedAccessibilityNode, CapturedNodeFlags,
 };
-pub use context::{render_semantic_context, render_semantic_items_context};
+pub use context::{
+    render_semantic_context, render_semantic_items_context,
+    render_semantic_items_context_with_actor_names,
+};
 pub use messaging::{
     apply_message_identity, apply_message_time, is_message_time_label, normalize_e164,
     normalize_email, normalize_message_time, MessageIdentityInput, MessageTimeContext,

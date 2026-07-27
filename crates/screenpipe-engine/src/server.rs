@@ -56,7 +56,10 @@ use crate::{
         },
         retranscribe::retranscribe_meeting_handler,
         search::{keyword_search_handler, search},
-        semantic::get_semantic_context,
+        semantic::{
+            create_semantic_actor, get_semantic_context, merge_semantic_actors,
+            reassign_semantic_actor, search_semantic_actors, update_semantic_actor,
+        },
         speakers::{
             delete_speaker_handler, get_similar_speakers_handler, get_speaker_sample_handler,
             get_unnamed_speakers_handler, mark_as_hallucination_handler, merge_speakers_handler,
@@ -780,6 +783,11 @@ impl SCServer {
         let server = Server::axum()
             .get("/search", search)
             .get("/semantic/context", get_semantic_context)
+            .get("/semantic/actors/search", search_semantic_actors)
+            .post("/semantic/actors/create", create_semantic_actor)
+            .post("/semantic/actors/update", update_semantic_actor)
+            .post("/semantic/actors/merge", merge_semantic_actors)
+            .post("/semantic/actors/reassign", reassign_semantic_actor)
             .get("/audio/list", api_list_audio_devices)
             .get("/vision/list", api_list_monitors)
             .get("/tags/autocomplete", autocomplete_tags)

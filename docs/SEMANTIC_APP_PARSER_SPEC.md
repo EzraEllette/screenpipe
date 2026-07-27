@@ -312,6 +312,9 @@ message or document. The normalized persistence contract is:
 - `semantic_items`: immutable, canonical, versioned typed records
 - `semantic_run_items`: run membership, parent, order, and source node indexes
 - external-content `semantic_items_fts`
+- `semantic_actors`: durable, user/Pipe-correctable actor identities
+- `semantic_actor_aliases`: source-scoped heuristic labels retained across cleanup
+- `semantic_item_actors`: mutable identity assignments over immutable observations
 
 Required keys and constraints:
 
@@ -334,6 +337,17 @@ Required keys and constraints:
   canonical value.
 - A changed title, body, actor, time, status, or metadata value creates a new
   immutable item version while preserving the entity fingerprint.
+- The parser's observed `semantic_items.actor` value is never edited. Initial
+  identity assignment is a source-scoped label heuristic; directional labels
+  such as `[contact]` are additionally conversation-scoped. Renames, merges,
+  and item-level corrections update only the actor mapping.
+- Merging actors moves their aliases as well as existing assignments. Future
+  observations therefore inherit the reconciliation instead of recreating the
+  discarded provisional actor. Actor aliases intentionally survive source-frame
+  retention; they are a small durable identity index, not another frame copy.
+- Names are searchable but never implicit join keys. Cross-app identity is
+  established only by an explicit merge or a future conservative identifier
+  resolver.
 
 `semantic_projection_storage_keys` implements this contract. It domain-separates
 run, entity, and version hashes and scopes them by parser and app. The storage
@@ -361,7 +375,7 @@ Keep both forms only while they serve distinct purposes:
 
 Storage reduction is therefore a later retention outcome, not an automatic
 consequence of parsing. The initial synthetic SQLite regression measured 8.2
-semantic bytes/frame for 1,000 identical projections and 802.8 bytes/frame for
+semantic bytes/frame for 1,000 identical projections and 860.2 bytes/frame for
 1,000 changing projections, including indexes and frame links. Before changing
 retention defaults, a representative fixed capture trace must still compare
 current full, current lean, semantic full, and semantic lean modes after
@@ -380,7 +394,22 @@ frame and time.
 
 The database API supports exact-frame and bounded time/app/full-text queries.
 `GET /semantic/context` exposes grouped compact text by default and typed JSON
-with parser provenance when `format=json` is passed.
+with parser provenance when `format=json` is passed. `actor_id` filters context
+by the current reconciled actor. Compact output uses the corrected canonical
+name, while JSON retains the raw parser label and returns the mutable actor
+reference separately.
+
+Actor reconciliation uses the same local API shape as speaker correction:
+
+- `GET /semantic/actors/search?q=...` searches canonical and observed names.
+- `POST /semantic/actors/create` creates an intentionally separate identity.
+- `POST /semantic/actors/update` renames a canonical actor.
+- `POST /semantic/actors/merge` merges identities and their future aliases.
+- `POST /semantic/actors/reassign` corrects one canonical semantic item by ID.
+
+These endpoints are sufficient for a local reconciliation Pipe. It can inspect
+actors and source-backed JSON, propose or apply merges, then retrieve all context
+for the corrected actor without rewriting historical parser evidence.
 
 The `semantic-context` MCP tool wraps the same bounded endpoint and returns
 compact plain text. When no semantic records exist, it directs the agent back to

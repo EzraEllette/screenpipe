@@ -25,6 +25,18 @@ pub fn render_semantic_items_context(
     frame_id: i64,
     items: &[SemanticItem],
 ) -> String {
+    render_semantic_items_context_with_actor_names(app, frame_id, items, &HashMap::new())
+}
+
+/// Render stored semantic items with mutable canonical actor names while the
+/// immutable parser observations remain untouched. The map is keyed by the
+/// parser-local item id for this run.
+pub fn render_semantic_items_context_with_actor_names(
+    app: &AppIdentity,
+    frame_id: i64,
+    items: &[SemanticItem],
+    actor_names: &HashMap<&str, &str>,
+) -> String {
     let by_id: HashMap<&str, &SemanticItem> = items
         .iter()
         .map(|item| (item.local_id.as_str(), item))
@@ -54,9 +66,10 @@ pub fn render_semantic_items_context(
         {
             let _ = write!(output, " | title={title}");
         }
-        if let Some(actor) = item
-            .actor
-            .as_deref()
+        if let Some(actor) = actor_names
+            .get(item.local_id.as_str())
+            .copied()
+            .or(item.actor.as_deref())
             .map(render_actor)
             .filter(|value| !value.is_empty())
         {
@@ -240,6 +253,31 @@ mod tests {
     fn renders_neutral_user_actor_without_marker_syntax() {
         assert_eq!(render_actor("[user]"), "user");
         assert_eq!(render_actor("Claude"), "Claude");
+    }
+
+    #[test]
+    fn renders_corrected_actor_without_mutating_observation() {
+        let mut message = SemanticItem::new(
+            "message",
+            SemanticKind::Message,
+            "message-key",
+            IdentityQuality::Stable,
+        );
+        message.actor = Some("alice".into());
+        message.body = Some("ship it".into());
+        let app = AppIdentity {
+            platform: Platform::Macos,
+            app_id: None,
+            executable: None,
+            display_name: "Messages".into(),
+            version: None,
+            browser_url: None,
+        };
+        let names = HashMap::from([("message", "Alice Smith")]);
+        let rendered =
+            render_semantic_items_context_with_actor_names(&app, 1, &[message.clone()], &names);
+        assert!(rendered.contains("actor=Alice Smith"));
+        assert_eq!(message.actor.as_deref(), Some("alice"));
     }
 
     #[test]

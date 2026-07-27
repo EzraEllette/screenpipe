@@ -46,6 +46,14 @@ fn app() -> AppIdentity {
 }
 
 fn projection(message: &str) -> ValidatedProjection {
+    projection_with_actor(message, "alice", "slack:channel:release")
+}
+
+fn projection_with_actor(
+    message: &str,
+    actor: &str,
+    conversation_key: &str,
+) -> ValidatedProjection {
     let mut builder = SemanticTreeBuilder::new(TreeBudget::default());
     let source = builder
         .push(
@@ -62,7 +70,7 @@ fn projection(message: &str) -> ValidatedProjection {
     let mut conversation = SemanticItem::new(
         "channel",
         SemanticKind::Conversation,
-        "slack:channel:release",
+        conversation_key,
         IdentityQuality::Stable,
     );
     conversation.title = Some("release".into());
@@ -75,13 +83,24 @@ fn projection(message: &str) -> ValidatedProjection {
         IdentityQuality::Ephemeral,
     );
     item.parent_local_id = Some("channel".into());
-    item.actor = Some("alice".into());
+    item.actor = Some(actor.into());
     item.body = Some(message.into());
     item.metadata.insert("thread".into(), "signing".into());
     item.source_nodes = vec![NodeId(0)];
 
     ValidatedProjection::new(vec![conversation, item], &tree, OutputBudget::default())
         .expect("validate projection")
+}
+
+fn discord_app() -> AppIdentity {
+    AppIdentity {
+        platform: Platform::Macos,
+        app_id: Some("com.hnc.Discord".into()),
+        executable: None,
+        display_name: "Discord".into(),
+        version: Some("0.0.350".into()),
+        browser_url: None,
+    }
 }
 
 async fn insert_frame(db: &DatabaseManager, timestamp: chrono::DateTime<Utc>) -> i64 {
@@ -334,6 +353,190 @@ async fn replacing_a_frame_projection_collects_the_superseded_run() {
         .expect("read replacement")
         .expect("replacement exists");
     assert_eq!(context.items[1].body.as_deref(), Some("replacement value"));
+}
+
+#[tokio::test]
+async fn semantic_actors_are_heuristic_correctable_and_durable() {
+    let db = database().await;
+    let now = Utc::now();
+    let first_frame = insert_frame(&db, now - ChronoDuration::minutes(3)).await;
+    let second_frame = insert_frame(&db, now - ChronoDuration::minutes(2)).await;
+    db.store_semantic_projection(
+        first_frame,
+        &manifest(),
+        &app(),
+        101,
+        Duration::from_micros(100),
+        &projection("first message"),
+    )
+    .await
+    .expect("store first actor observation");
+    db.store_semantic_projection(
+        second_frame,
+        &manifest(),
+        &app(),
+        102,
+        Duration::from_micros(100),
+        &projection("second message"),
+    )
+    .await
+    .expect("store repeated actor observation");
+
+    let mut actors = db
+        .search_semantic_actors("ALICE", 10, 0)
+        .await
+        .expect("search observed actor");
+    assert_eq!(actors.len(), 1);
+    let alice_id = actors.remove(0).id;
+    let alice = db
+        .get_semantic_actor(alice_id)
+        .await
+        .expect("read provisional actor");
+    assert_eq!(alice.name, "alice");
+    assert_eq!(alice.item_count, 2);
+    assert_eq!(alice.aliases.len(), 1);
+    assert_eq!(alice.aliases[0].source_label, "Slack");
+
+    let renamed = db
+        .update_semantic_actor_name(alice_id, "Alice Smith")
+        .await
+        .expect("rename actor");
+    assert_eq!(renamed.name, "Alice Smith");
+    let first_context = db
+        .get_frame_semantic_context(first_frame)
+        .await
+        .expect("read first context")
+        .expect("first context exists");
+    assert_eq!(first_context.items[1].actor.as_deref(), Some("alice"));
+    assert_eq!(first_context.actors[0].name, "Alice Smith");
+    assert!(first_context.render_compact().contains("actor=Alice Smith"));
+
+    let bob = db
+        .create_semantic_actor("Bob")
+        .await
+        .expect("create canonical actor");
+    let second_context = db
+        .get_frame_semantic_context(second_frame)
+        .await
+        .expect("read second context")
+        .expect("second context exists");
+    let second_item_id = second_context.actors[0].item_id;
+    db.reassign_semantic_item_actor(second_item_id, bob.id)
+        .await
+        .expect("reassign one observation");
+    let corrected = db
+        .get_frame_semantic_context(second_frame)
+        .await
+        .expect("read corrected context")
+        .expect("corrected context exists");
+    assert_eq!(corrected.items[1].actor.as_deref(), Some("alice"));
+    assert_eq!(corrected.actors[0].name, "Bob");
+    assert_eq!(corrected.actors[0].assignment_source, "reconciled");
+
+    let bob_contexts = db
+        .search_semantic_context(&SemanticContextQuery {
+            actor_id: Some(bob.id),
+            limit: 10,
+            ..Default::default()
+        })
+        .await
+        .expect("filter by reconciled actor");
+    assert_eq!(bob_contexts.len(), 1);
+    assert_eq!(bob_contexts[0].frame_id, second_frame);
+
+    let merged = db
+        .merge_semantic_actors(alice_id, bob.id)
+        .await
+        .expect("merge corrected actor");
+    assert_eq!(merged.id, alice_id);
+    assert_eq!(merged.item_count, 2);
+
+    let discord_frame = insert_frame(&db, now - ChronoDuration::minutes(1)).await;
+    db.store_semantic_projection(
+        discord_frame,
+        &manifest(),
+        &discord_app(),
+        103,
+        Duration::from_micros(100),
+        &projection_with_actor("discord message", "Alice", "discord:channel:release"),
+    )
+    .await
+    .expect("store separate source actor");
+    let discord_context = db
+        .get_frame_semantic_context(discord_frame)
+        .await
+        .expect("read discord context")
+        .expect("discord context exists");
+    let discord_actor_id = discord_context.actors[0].actor_id;
+    assert_ne!(discord_actor_id, alice_id);
+    let merged = db
+        .merge_semantic_actors(alice_id, discord_actor_id)
+        .await
+        .expect("merge cross-source aliases");
+    assert_eq!(merged.aliases.len(), 2);
+
+    let future_discord_frame = insert_frame(&db, now).await;
+    db.store_semantic_projection(
+        future_discord_frame,
+        &manifest(),
+        &discord_app(),
+        104,
+        Duration::from_micros(100),
+        &projection_with_actor("future discord message", "Alice", "discord:channel:release"),
+    )
+    .await
+    .expect("store observation after merge");
+    let future = db
+        .get_frame_semantic_context(future_discord_frame)
+        .await
+        .expect("read future context")
+        .expect("future context exists");
+    assert_eq!(future.actors[0].actor_id, alice_id);
+    assert_eq!(future.actors[0].name, "Alice Smith");
+
+    db.delete_time_range(
+        now - ChronoDuration::minutes(4),
+        now + ChronoDuration::seconds(1),
+    )
+    .await
+    .expect("delete semantic source frames");
+    assert_eq!(count(&db, "semantic_items").await, 0);
+    assert_eq!(count(&db, "semantic_item_actors").await, 0);
+    let durable = db
+        .get_semantic_actor(alice_id)
+        .await
+        .expect("actor identity survives source retention");
+    assert_eq!(durable.item_count, 0);
+    assert_eq!(durable.aliases.len(), 2);
+}
+
+#[tokio::test]
+async fn directional_actor_labels_are_scoped_to_the_conversation() {
+    let db = database().await;
+    let now = Utc::now();
+    for (index, conversation) in ["messages:thread:one", "messages:thread:two"]
+        .into_iter()
+        .enumerate()
+    {
+        let frame = insert_frame(&db, now + ChronoDuration::seconds(index as i64)).await;
+        db.store_semantic_projection(
+            frame,
+            &manifest(),
+            &app(),
+            200 + index as u64,
+            Duration::from_micros(100),
+            &projection_with_actor("hello", "[contact]", conversation),
+        )
+        .await
+        .expect("store directional actor");
+    }
+
+    let actors = db
+        .search_semantic_actors("[contact]", 10, 0)
+        .await
+        .expect("search directional actors");
+    assert_eq!(actors.len(), 2);
+    assert!(actors.iter().all(|actor| actor.aliases.len() == 1));
 }
 
 #[tokio::test]
