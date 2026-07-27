@@ -12,8 +12,9 @@
 //! identical across both builds (the hard invariant — batching may not change a
 //! single emitted byte).
 //!
-//! Usage: `cargo run --release -p screenpipe-a11y --example macos_walk_bench [iters] [--semantic] [--expect-identifier ID] [--timeout-ms N]`
-//! (default: 20). `--semantic` measures the opt-in structural capture path.
+//! Usage: `cargo run --release -p screenpipe-a11y --example macos_walk_bench [iters] [--semantic|--automation] [--expect-identifier ID] [--timeout-ms N]`
+//! (default: 20). `--semantic` measures parser-only structure;
+//! `--automation` measures persisted action structure.
 //! Focus the window you care about first from a terminal that has Accessibility
 //! permission.
 
@@ -28,6 +29,7 @@ fn main() {
         .find_map(|argument| argument.parse().ok())
         .unwrap_or(20);
     let semantic = args.iter().any(|argument| argument == "--semantic");
+    let automation = args.iter().any(|argument| argument == "--automation");
     let expected_identifier = args
         .iter()
         .position(|argument| argument == "--expect-identifier")
@@ -42,8 +44,9 @@ fn main() {
     // Defaults mirror production; keep the timeout generous so a slow app under
     // measurement is not truncated (which would perturb node_count / hash).
     let config = TreeWalkerConfig {
-        capture_app_identity: semantic,
+        capture_app_identity: semantic || automation,
         capture_semantic_structure: semantic,
+        capture_automation_structure: automation,
         walk_timeout: Duration::from_millis(timeout_ms),
         ..TreeWalkerConfig::default()
     };

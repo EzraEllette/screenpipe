@@ -6,6 +6,7 @@
 
 use anyhow::Result;
 use dashmap::{DashMap, DashSet};
+use screenpipe_config::SemanticContextMode;
 use screenpipe_db::DatabaseManager;
 use screenpipe_screen::monitor::{get_monitor_by_id, list_monitors};
 use screenpipe_screen::PipelineMetrics;
@@ -60,6 +61,8 @@ pub struct VisionManagerConfig {
     pub disable_screenshots: bool,
     /// Enable the bounded semantic projection worker. Off by default.
     pub enable_semantic_context: bool,
+    /// Choose memory, computer-use, or both projections over one capture.
+    pub semantic_context_mode: SemanticContextMode,
 
     /// Mitsukeru fork: overrides for `EventDrivenCaptureConfig`.
     /// Each field is applied only when `Some(_)`. None = follow active PowerProfile.
@@ -169,9 +172,9 @@ impl VisionManager {
             FocusAwareController::new(tracker)
         };
 
-        let semantic_tx = config
-            .enable_semantic_context
-            .then(|| spawn_semantic_projection_worker(db.clone(), &vision_handle));
+        let semantic_tx = (config.enable_semantic_context
+            && config.semantic_context_mode.includes_memory())
+        .then(|| spawn_semantic_projection_worker(db.clone(), &vision_handle));
 
         Self {
             config,
@@ -212,6 +215,14 @@ impl VisionManager {
     pub fn with_high_fps_controller(mut self, controller: Arc<HighFpsController>) -> Self {
         self.high_fps_controller = Some(controller);
         self
+    }
+
+    /// Whether element APIs should default to the action-ready projection.
+    /// `Both` stays read-oriented by default because callers can explicitly
+    /// request either view; computer-use-only is the unambiguous preference.
+    pub fn prefers_computer_use_context(&self) -> bool {
+        self.config.enable_semantic_context
+            && self.config.semantic_context_mode == SemanticContextMode::ComputerUse
     }
 
     /// Get a clone of the broadcast trigger sender.
@@ -519,8 +530,13 @@ impl VisionManager {
             monitor_height: monitor.height() as f64,
             ignore_incognito_windows: self.config.ignore_incognito_windows,
             enhanced_incognito_detection: self.config.enhanced_incognito_detection,
-            capture_app_identity: self.config.enable_semantic_context,
-            capture_semantic_structure: self.config.enable_semantic_context,
+            capture_app_identity: self.config.enable_semantic_context
+                && (self.config.semantic_context_mode.includes_memory()
+                    || self.config.semantic_context_mode.includes_computer_use()),
+            capture_semantic_structure: self.config.enable_semantic_context
+                && self.config.semantic_context_mode.includes_memory(),
+            capture_automation_structure: self.config.enable_semantic_context
+                && self.config.semantic_context_mode.includes_computer_use(),
             ..TreeWalkerConfig::default()
         };
 
@@ -800,6 +816,7 @@ mod tests {
             video_quality: "balanced".to_string(),
             disable_screenshots: false,
             enable_semantic_context,
+            semantic_context_mode: SemanticContextMode::Memory,
             idle_capture_interval_ms: None,
             visual_check_interval_ms: None,
             visual_change_threshold: None,
@@ -812,6 +829,20 @@ mod tests {
 
     async fn make_vm_with_monitor_ids(monitor_ids: Vec<String>) -> VisionManager {
         make_vm_with_options(monitor_ids, false).await
+    }
+
+    #[tokio::test]
+    async fn computer_use_only_skips_semantic_parser_worker() {
+        let mut vm = make_vm_with_options(vec![], true).await;
+        assert!(vm.semantic_tx.is_some());
+        assert!(!vm.prefers_computer_use_context());
+
+        vm.config.semantic_context_mode = SemanticContextMode::ComputerUse;
+        let db = vm.db.clone();
+        let config = vm.config.clone();
+        let automation_vm = VisionManager::new(config, db, Handle::current());
+        assert!(automation_vm.semantic_tx.is_none());
+        assert!(automation_vm.prefers_computer_use_context());
     }
 
     #[tokio::test]

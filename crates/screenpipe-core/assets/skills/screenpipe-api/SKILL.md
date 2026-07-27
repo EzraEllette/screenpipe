@@ -93,6 +93,18 @@ curl -H "Authorization: Bearer $SCREENPIPE_LOCAL_API_KEY" "http://localhost:3030
 
 Params: `q`, `frame_id`, `source` (`accessibility`|`ocr`), `role`, `start_time`, `end_time`, `app_name`, `limit`, `offset`, `format`, `fields`.
 
+Use `format=outline` for token-efficient reading. Use `format=automation` only
+for computer-use planning: it keeps interactive controls and returns a snapshot
+revision, short response-local refs, best-effort stable keys, state, bounds, and
+allowed actions. Refresh before each action and verify key + role + name + bounds.
+Database element ids and response refs are not durable live UI handles.
+`format=preferred` follows the desktop AI context setting; its default is the
+read/memory outline.
+
+```bash
+curl -H "Authorization: Bearer $SCREENPIPE_LOCAL_API_KEY" "http://localhost:3030/frames/12345/elements?format=automation"
+```
+
 Frame context (accessibility text, parsed nodes, extracted URLs): `GET /frames/{id}/context`.
 
 **Roles are not normalized across platforms** — use the right one for the user's OS:

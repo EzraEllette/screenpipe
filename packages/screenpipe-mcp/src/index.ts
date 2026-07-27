@@ -29,6 +29,7 @@ import {
 import { createMcpQualifiedValueReporter } from "./qualified-value";
 import { discoverTeamApiBase, discoverTeamToken } from "./team-config";
 import { PKG_VERSION } from "./version";
+import { formatForElementPurpose } from "./element-format";
 
 initMcpTelemetry({ transport: "stdio" });
 
@@ -517,6 +518,12 @@ const TOOLS: Tool[] = [
         start_time: { type: "string", description: "ISO 8601 UTC or relative" },
         end_time: { type: "string", description: "ISO 8601 UTC or relative" },
         app_name: { type: "string", description: "Filter by app name" },
+        purpose: {
+          type: "string",
+          enum: ["read", "computer-use"],
+          description:
+            "read returns the compact text outline; computer-use returns fresh refs, best-effort keys, state, bounds, and allowed actions. Omit to follow the desktop capture profile.",
+        },
         limit: { type: "integer", description: "Max results (default 50). Start with 10-20.", default: 50 },
         offset: { type: "integer", description: "Pagination offset", default: 0 },
       },
@@ -803,6 +810,12 @@ const TOOLS: Tool[] = [
       type: "object",
       properties: {
         frame_id: { type: "integer", description: "Frame ID" },
+        purpose: {
+          type: "string",
+          enum: ["read", "computer-use"],
+          description:
+            "read returns the text outline; computer-use returns targeting context for a downstream computer-use tool. Omit to follow the desktop capture profile. Refresh before each action.",
+        },
       },
       required: ["frame_id"],
     },
@@ -1774,16 +1787,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const normalized = normalizeTimeFields(args);
         const params = new URLSearchParams();
         for (const [key, value] of Object.entries(normalized)) {
+          if (key === "purpose") continue;
           if (value !== null && value !== undefined) {
             params.append(key, String(value));
           }
         }
 
-        // Default to the server's compact `outline` view — a deduped, indented
-        // tree of just the text-bearing nodes, far cheaper for the model to read
-        // than the raw JSON rows (and the dedup/cap/footer replace the old
-        // hand-rolled header). Callers can still override with format=json|csv|tsv.
-        if (!params.has("format")) params.append("format", "outline");
+        // An explicit purpose selects one view. Otherwise let the server follow
+        // the user's desktop capture profile. Callers can still override with
+        // format=json|csv|tsv when this tool schema is extended to expose it.
+        if (!params.has("format")) {
+          params.append("format", formatForElementPurpose(args.purpose));
+        }
 
         const response = await callAPI(`/elements?${params.toString()}`);
         const text = (await response.text()).trim();
@@ -2278,7 +2293,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // rows, caps the body. Also avoids the old bug here that parsed the
         // `{data,pagination}` envelope as a bare array and always reported
         // "no elements".
-        const response = await callAPI(`/frames/${frameId}/elements?format=outline`);
+        const format = formatForElementPurpose(args.purpose);
+        const response = await callAPI(`/frames/${frameId}/elements?format=${format}`);
         const text = (await response.text()).trim();
         if (text.length && !text.startsWith("No elements")) {
           qualifiedValue.searchResult();

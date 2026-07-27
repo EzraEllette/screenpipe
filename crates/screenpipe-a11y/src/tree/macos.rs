@@ -1014,14 +1014,11 @@ impl MacosTreeWalker {
             walk_duration
         );
 
-        let (nodes, semantic_nodes) = if state.capture_semantic_structure {
-            state
-                .nodes
-                .into_iter()
-                .partition(|node| !node.semantic_only)
-        } else {
-            (state.nodes, Vec::new())
-        };
+        let (nodes, semantic_nodes) = split_structural_nodes(
+            state.nodes,
+            state.capture_parser_structure,
+            state.persist_structural_nodes,
+        );
 
         Ok(TreeWalkResult::Found(TreeSnapshot {
             app_name,
@@ -1044,6 +1041,32 @@ impl MacosTreeWalker {
             max_depth_reached: state.max_depth_reached,
             window_bounds,
         }))
+    }
+}
+
+fn split_structural_nodes(
+    nodes: Vec<AccessibilityTreeNode>,
+    capture_semantic_structure: bool,
+    persist_structural_nodes: bool,
+) -> (Vec<AccessibilityTreeNode>, Vec<AccessibilityTreeNode>) {
+    if persist_structural_nodes {
+        if capture_semantic_structure {
+            // `both`: persist only action-relevant structure. Parser-specific
+            // containers stay transient, while the worker later sees the union
+            // of raw + semantic nodes without duplicate storage.
+            nodes
+                .into_iter()
+                .partition(|node| !node.semantic_only || node.automation_relevant)
+        } else {
+            // Computer-use-only emits only the bounded automation subset.
+            (nodes, Vec::new())
+        }
+    } else if capture_semantic_structure {
+        // Memory-only mode keeps parser evidence transient and preserves the
+        // historical raw-tree storage shape.
+        nodes.into_iter().partition(|node| !node.semantic_only)
+    } else {
+        (nodes, Vec::new())
     }
 }
 
@@ -1162,6 +1185,13 @@ struct WalkState {
     /// opt-in and leaves the historical text-only capture path byte-for-byte
     /// unchanged when semantic context is disabled.
     capture_semantic_structure: bool,
+    /// Capture the broader parser structure for supported applications.
+    capture_parser_structure: bool,
+    /// Capture only the bounded action/landmark subset for computer use.
+    capture_automation_structure: bool,
+    /// Persist bounded structural nodes in the existing raw tree for the
+    /// computer-use projection instead of keeping them parser-only.
+    persist_structural_nodes: bool,
     /// Request DOM identity only for browser/Electron apps that can expose it.
     capture_semantic_dom: bool,
     /// Per-frame budget for parameterized AX calls used by line-bounds capture.
@@ -1180,10 +1210,16 @@ impl WalkState {
         ignored_patterns: Vec<WindowPattern>,
         focused_app_lower: String,
     ) -> Self {
-        let capture_semantic_structure =
+        let persist_structural_nodes = config.capture_automation_structure;
+        let capture_parser_structure =
             config.capture_semantic_structure && is_semantic_target_app(&focused_app_lower);
+        let capture_automation_structure = config.capture_automation_structure;
+        let capture_semantic_structure = capture_parser_structure || capture_automation_structure;
+        // DOM class/id attributes are parser evidence. Computer use needs the
+        // native AX identifier/subrole only, so automation-only stays at the
+        // cheaper 8-attribute batch instead of the 10-attribute DOM batch.
         let capture_semantic_dom =
-            capture_semantic_structure && is_semantic_dom_app(&focused_app_lower);
+            capture_parser_structure && is_semantic_dom_app(&focused_app_lower);
         Self {
             text_buffer: String::with_capacity(4096),
             nodes: Vec::with_capacity(256),
@@ -1209,6 +1245,9 @@ impl WalkState {
             focused_app_lower,
             hit_ignored_extension: false,
             capture_semantic_structure,
+            capture_parser_structure,
+            capture_automation_structure,
+            persist_structural_nodes,
             capture_semantic_dom,
             line_budget: if config.enable_line_bounds {
                 Some(LineBudget::new(
@@ -1761,11 +1800,38 @@ fn read_node_attrs(
     })
 }
 
-/// Keep a small set of structurally meaningful containers for deterministic
-/// app parsers. Generic groups without an identifier are intentionally omitted
-/// so semantic capture does not turn into a full accessibility-tree archive.
-fn capture_structural_node(role_str: &str, depth: usize, attrs: &NodeAttrs, state: &mut WalkState) {
-    let structural_role = matches!(
+fn is_automation_structure(role_str: &str, attrs: &NodeAttrs) -> bool {
+    if is_interactive_role(role_str) {
+        return true;
+    }
+    let landmark = matches!(
+        role_str,
+        "AXWindow" | "AXWebArea" | "AXScrollArea" | "AXTable" | "AXList" | "AXOutline"
+    );
+    landmark
+        && (matches!(role_str, "AXWindow" | "AXWebArea" | "AXScrollArea")
+            || attrs.identifier.is_some()
+            || attrs.subrole.is_some()
+            || attrs
+                .title
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+            || attrs
+                .desc
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty()))
+}
+
+/// Keep parser-grade containers transient, plus a smaller action/landmark
+/// subset in the existing raw tree when computer-use capture is selected.
+fn capture_structural_node(
+    elem: &ax::UiElement,
+    role_str: &str,
+    depth: usize,
+    attrs: &NodeAttrs,
+    state: &mut WalkState,
+) {
+    let parser_structural_role = matches!(
         role_str,
         "AXWindow"
             | "AXGroup"
@@ -1782,11 +1848,7 @@ fn capture_structural_node(role_str: &str, depth: usize, attrs: &NodeAttrs, stat
             | "AXGenericElement"
             | "AXUnknown"
     );
-    if !structural_role {
-        return;
-    }
-
-    let role_is_evidence = matches!(
+    let parser_role_is_evidence = matches!(
         role_str,
         "AXWindow"
             | "AXRow"
@@ -1798,12 +1860,16 @@ fn capture_structural_node(role_str: &str, depth: usize, attrs: &NodeAttrs, stat
             | "AXLayoutItem"
             | "AXGenericElement"
     );
-    if !role_is_evidence
-        && attrs.identifier.is_none()
-        && attrs.subrole.is_none()
-        && attrs.dom_identifier.is_none()
-        && attrs.dom_classes.is_none()
-    {
+    let parser_relevant = state.capture_parser_structure
+        && parser_structural_role
+        && (parser_role_is_evidence
+            || attrs.identifier.is_some()
+            || attrs.subrole.is_some()
+            || attrs.dom_identifier.is_some()
+            || attrs.dom_classes.is_some());
+    let automation_relevant =
+        state.capture_automation_structure && is_automation_structure(role_str, attrs);
+    if !parser_relevant && !automation_relevant {
         return;
     }
 
@@ -1822,6 +1888,7 @@ fn capture_structural_node(role_str: &str, depth: usize, attrs: &NodeAttrs, stat
     node.on_screen = on_screen;
     node.walk_index = state.node_count.min(u32::MAX as usize) as u32;
     node.semantic_only = true;
+    node.automation_relevant = automation_relevant;
     node.value = attrs
         .value
         .as_deref()
@@ -1829,6 +1896,9 @@ fn capture_structural_node(role_str: &str, depth: usize, attrs: &NodeAttrs, stat
         .filter(|value| !value.is_empty())
         .map(str::to_owned);
     apply_primary_semantic_attrs(&mut node, attrs);
+    if automation_relevant {
+        fill_ax_props(&mut node, elem, role_str, state.capture_semantic_structure);
+    }
     state.nodes.push(node);
 }
 
@@ -2000,7 +2070,7 @@ fn walk_element(elem: &ax::UiElement, depth: usize, state: &mut WalkState) {
     }
 
     if state.capture_semantic_structure && !emitted_text_node {
-        capture_structural_node(&role_str, depth, &attrs, state);
+        capture_structural_node(elem, &role_str, depth, &attrs, state);
     }
 
     if state.should_stop() {
@@ -2734,6 +2804,30 @@ mod tests {
     }
 
     #[test]
+    fn automation_structure_keeps_actions_and_landmarks_not_every_row_or_cell() {
+        let mut attrs = NodeAttrs {
+            role: None,
+            value: None,
+            title: None,
+            desc: None,
+            frame: None,
+            identifier: None,
+            subrole: None,
+            dom_identifier: None,
+            dom_classes: None,
+        };
+        assert!(is_automation_structure("AXButton", &attrs));
+        assert!(is_automation_structure("AXWebArea", &attrs));
+        assert!(is_automation_structure("AXScrollArea", &attrs));
+        assert!(!is_automation_structure("AXRow", &attrs));
+        assert!(!is_automation_structure("AXCell", &attrs));
+        assert!(!is_automation_structure("AXGroup", &attrs));
+        assert!(!is_automation_structure("AXTable", &attrs));
+        attrs.identifier = Some("results".into());
+        assert!(is_automation_structure("AXTable", &attrs));
+    }
+
+    #[test]
     fn test_append_text() {
         let mut buf = String::new();
         append_text(&mut buf, "hello");
@@ -2742,6 +2836,35 @@ mod tests {
         assert_eq!(buf, "hello\nworld");
         append_text(&mut buf, "  ");
         assert_eq!(buf, "hello\nworld"); // empty/whitespace skipped
+    }
+
+    #[test]
+    fn computer_use_persists_structural_nodes_once_while_memory_keeps_them_transient() {
+        let visible = AccessibilityTreeNode::new("AXButton".into(), "Save".into(), 1, None);
+        let mut structural = AccessibilityTreeNode::new("AXGroup".into(), String::new(), 0, None);
+        structural.semantic_only = true;
+
+        let (memory_raw, memory_parser) =
+            split_structural_nodes(vec![visible.clone(), structural.clone()], true, false);
+        assert_eq!(memory_raw.len(), 1);
+        assert_eq!(memory_parser.len(), 1);
+
+        let (automation_raw, automation_parser) =
+            split_structural_nodes(vec![visible.clone(), structural.clone()], false, true);
+        assert_eq!(automation_raw.len(), 2);
+        assert!(automation_parser.is_empty());
+
+        let mut action_structure = structural.clone();
+        action_structure.automation_relevant = true;
+        let mut parser_structure = structural;
+        parser_structure.role = "AXRow".into();
+        let (both_raw, both_parser) = split_structural_nodes(
+            vec![visible, action_structure, parser_structure],
+            true,
+            true,
+        );
+        assert_eq!(both_raw.len(), 2);
+        assert_eq!(both_parser.len(), 1);
     }
 
     #[test]

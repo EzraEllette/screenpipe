@@ -8,5 +8,6 @@ import { createDefaultSettingsObject } from "@/lib/hooks/use-settings";
 describe("default settings: structured app context", () => {
   it("keeps semantic parsing disabled until the user opts in", () => {
     expect(createDefaultSettingsObject().enableSemanticContext).toBe(false);
+    expect(createDefaultSettingsObject().semanticContextMode).toBe("memory");
   });
 });

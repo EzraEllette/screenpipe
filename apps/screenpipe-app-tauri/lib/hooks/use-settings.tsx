@@ -716,6 +716,7 @@ let DEFAULT_SETTINGS: Settings = {
 			disableVision: false,
 			disableScreenshots: false,
 			enableSemanticContext: false,
+			semanticContextMode: "memory",
 			useAllMonitors: true,
 			showShortcutOverlay: true,
 			chatHistory: {

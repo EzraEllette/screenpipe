@@ -1,7 +1,7 @@
 # Semantic App Parser
 
 > **Status**: Experimental end-to-end path, opt-in and off by default
-> **Date**: 2026-07-24
+> **Date**: 2026-07-27
 
 ## 1. Problem
 
@@ -209,6 +209,39 @@ preserves the existing raw tree JSON and avoids duplicating structural capture
 on disk. Conservative parsers still abstain when an app version does not expose
 enough structure.
 
+### Capture-purpose profiles
+
+`semanticContextMode` selects a projection over the same accessibility walk:
+
+| Mode | Capture and processing behavior | Default agent view |
+|---|---|---|
+| `memory` | Keep parser-requested structure transient and run the semantic worker | compact readable outline |
+| `computerUse` | Persist only action controls and bounded landmarks in the existing raw tree; do not start the semantic parser worker | computer-use targeting view |
+| `both` | Persist the action subset and pass the union to the semantic worker without storing a second tree | compact readable outline, with explicit automation requests available |
+
+The master `enableSemanticContext` switch remains off by default. Missing mode
+values deserialize as `memory`, preserving the behavior of earlier opt-in
+installs. On macOS, the computer-use subset keeps interactive controls plus a
+small set of navigation and window landmarks, rather than every group, row, or
+cell. Windows and Linux use the same output contract over their existing
+platform accessibility nodes.
+
+The two identifier layers intentionally have different lifetimes:
+
+- `ref=eN` is a response-local target label. An agent must request a fresh
+  snapshot before every action and must not reuse a ref from an older response.
+- `key=k_*` is a best-effort recognition key derived from an automation-ID
+  ancestry when available, otherwise from bounded role/name ancestry.
+  `key_quality` is `strong`, `derived`, or `ambiguous`.
+
+Database row IDs are never exposed as live UI handles. A key helps the agent
+recognize the same logical control after a refresh, but it does not authorize an
+action. The agent must verify revision, key, role, name, state, and bounds in the
+latest snapshot. Ambiguous keys require another query or visual fallback.
+This change provides targeting context, not a native desktop action executor.
+A downstream computer-use tool must resolve the latest target or coordinates;
+Screenpipe does not accept these refs at a write endpoint.
+
 ## 5. Scheduling
 
 Do not parse inside `paired_capture`, the frame transaction, or deferred element
@@ -325,6 +358,14 @@ current full, current lean, semantic full, and semantic lean modes after
 checkpoint and compaction. It must separately report media bytes, database
 bytes, reused parse runs, reused item versions, and parse failures.
 
+Computer-use mode does not add a semantic table or a per-frame automation blob.
+Its bounded action structure is part of the existing
+`accessibility_tree_json`/`elements` capture, and the automation view is rendered
+on demand. `both` mode stores the same action subset once while normalized
+semantic tables deduplicate memory-oriented records independently. UI events
+continue to store the user's actual actions and can be joined to either view by
+frame and time.
+
 ## 8. Retrieval
 
 The database API supports exact-frame and bounded time/app/full-text queries.
@@ -334,6 +375,19 @@ with parser provenance when `format=json` is passed.
 The `semantic-context` MCP tool wraps the same bounded endpoint and returns
 compact plain text. When no semantic records exist, it directs the agent back to
 `search-content` or `activity-summary`, preserving the old retrieval behavior.
+
+Element endpoints expose three explicit projections:
+
+- `format=outline` for reading and memory tasks
+- `format=automation` (aliases `computer-use` and `computer_use`) for controls,
+  allowed actions, state, normalized bounds, response-local refs, and
+  best-effort keys
+- `format=preferred` to follow the active capture-purpose setting
+
+The MCP `search-elements` and `get-frame-elements` tools accept
+`purpose=read|computer-use`. An explicit purpose wins. When omitted they request
+`format=preferred`, so computer-use-only installations get targeting context
+without requiring every agent prompt to know the local preference.
 
 Default output is grouped plain text:
 
@@ -396,6 +450,22 @@ The synthetic suite verifies the representation contract, not real-app parser
 recall. Fresh-capture evaluation is still required for app contracts that rely
 on the new transient structural sidecar because historical trees cannot express
 all sender/message, task/status, or event/schedule relationships.
+
+A deterministic computer-use fixture separately compares the targeting view
+with raw accessibility JSON using the exact `o200k_base` tokenizer. It preserves
+all 80 interactive controls, names, and action refs while using 3,860 tokens
+instead of 7,923, a 51.3% reduction. Tests also cover stable strong keys across
+sibling insertion and database-ID changes, ambiguous derived keys, password
+redaction, output bounds, and allowed actions.
+
+An exploratory walk against a live macOS accessibility window compared the
+closest same-shape samples after the action subset was bounded: 490 retained
+nodes and 109,597 JSON bytes in the default walk versus 504 nodes and 112,839
+bytes in computer-use mode. Mean walk time was 111.5 ms versus 118.0 ms. This is
+approximately 3.0% more tree bytes and 5.8% more walk time, but it is not a
+deterministic benchmark because the live window changed during sampling. The
+release gate still requires a fixed trace, an older Intel Mac, Windows hardware,
+steady RSS, and an eight-hour CPU run.
 
 The release-mode synthetic pipeline benchmark runs 1,000 adapt, parse, and
 render iterations for each family. On the 2026-07-24 development machine,

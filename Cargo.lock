@@ -8647,6 +8647,7 @@ dependencies = [
  "sqlx",
  "sysinfo",
  "tempfile",
+ "tiktoken-rs",
  "tikv-jemallocator",
  "tinfoil",
  "tokio",

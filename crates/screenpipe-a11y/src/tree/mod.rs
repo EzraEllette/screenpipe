@@ -174,6 +174,11 @@ pub struct AccessibilityTreeNode {
     /// semantic worker and excluded from the historical raw tree payload.
     #[serde(skip)]
     pub semantic_only: bool,
+    /// Structural node that is useful for computer-use targeting and should be
+    /// retained in the existing raw tree when that projection is selected.
+    /// Transient policy marker; never serialized as an extra field.
+    #[serde(skip)]
+    pub automation_relevant: bool,
     /// AXDescription captured for parser use without expanding the persisted
     /// raw text-node JSON contract.
     #[serde(skip)]
@@ -215,6 +220,7 @@ impl AccessibilityTreeNode {
             lines: None,
             walk_index: 0,
             semantic_only: false,
+            automation_relevant: false,
             semantic_description: None,
             semantic_dom_identifier: None,
             semantic_dom_classes: None,
@@ -505,6 +511,12 @@ pub struct TreeWalkerConfig {
     /// disabled by default. Enabling it adds two attributes to the existing
     /// batched macOS AX read, but does not add another IPC round trip per node.
     pub capture_semantic_structure: bool,
+    /// Retain action-relevant structural nodes in the persisted accessibility
+    /// tree for computer use. This reuses the semantic structural walk but puts
+    /// the bounded nodes in the existing raw tree instead of a parser-only
+    /// side channel. Disabled by default, so memory-only and legacy capture do
+    /// not grow their stored tree.
+    pub capture_automation_structure: bool,
     /// Per-walk override for `max_nodes` (set by adaptive budget, takes precedence).
     pub max_nodes_override: Option<usize>,
     /// Per-walk override for `walk_timeout` (set by adaptive budget, takes precedence).
@@ -551,6 +563,7 @@ impl Default for TreeWalkerConfig {
             enhanced_incognito_detection: false,
             capture_app_identity: false,
             capture_semantic_structure: false,
+            capture_automation_structure: false,
             max_nodes_override: None,
             walk_timeout_override: None,
             enable_line_bounds: true,
@@ -938,6 +951,7 @@ mod tests {
         assert_eq!(config.max_text_length, 50_000);
         assert!(!config.capture_app_identity);
         assert!(!config.capture_semantic_structure);
+        assert!(!config.capture_automation_structure);
     }
 
     #[test]
