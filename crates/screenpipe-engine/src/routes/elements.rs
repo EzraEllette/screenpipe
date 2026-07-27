@@ -396,7 +396,7 @@ fn elements_outline_response(elements: &[ElementResponse], total: i64) -> Respon
 }
 
 // ---------------------------------------------------------------------------
-// `format=automation` — targeting context for downstream computer-use agents
+// `format=automation` — targeting context for downstream automation agents
 //
 // The database id is historical evidence, not a safe live UI handle. This view
 // therefore emits a short response-local `ref=eN` and a separate best-effort
@@ -657,7 +657,7 @@ fn automation_context_text(elements: &[Element], total: i64) -> String {
     }
 
     if candidates.is_empty() {
-        return "no computer-use accessibility targets (try format=outline for readable text)"
+        return "no automation accessibility targets (try format=outline for readable text)"
             .to_string();
     }
 
@@ -690,7 +690,7 @@ fn automation_context_text(elements: &[Element], total: i64) -> String {
         .collect::<Vec<_>>()
         .join(",");
     let mut out = format!(
-        "computer-use snapshot · frame {frame_ids} · revision=r_{revision}\nrefs are response-local; refresh before every action and verify key + role + name + bounds\n"
+        "automation snapshot · frame {frame_ids} · revision=r_{revision}\nrefs are response-local; refresh before every action and verify key + role + name + bounds\n"
     );
 
     let shown = candidates.len().min(AUTOMATION_MAX_LINES);
@@ -750,7 +750,7 @@ fn automation_context_text(elements: &[Element], total: i64) -> String {
     }
     if candidates.len() > shown || total as usize > elements.len() {
         out.push_str(&format!(
-            "… showing {shown} computer-use targets; narrow to one frame or app before acting\n"
+            "… showing {shown} automation targets; narrow to one frame or app before acting\n"
         ));
     }
     out
@@ -1059,6 +1059,8 @@ mod tests {
             Some(r#"{"automation_id":"save-button","is_enabled":true,"is_focused":true}"#),
         )];
         let output = automation_context_text(&elements, 1);
+        assert!(output.starts_with("automation snapshot"), "got:\n{output}");
+        assert!(!output.contains("computer-use"), "got:\n{output}");
         assert!(output.contains("revision=r_"), "got:\n{output}");
         assert!(output.contains("ref=e1"), "got:\n{output}");
         assert!(output.contains("key_quality=strong"), "got:\n{output}");

@@ -82,10 +82,11 @@ pub enum AecMode {
 
 /// Which AI projection to build from the existing screen/accessibility stream.
 ///
-/// `Memory` preserves the original semantic-parser behavior. `ComputerUse`
-/// keeps capture action-oriented and skips the semantic parser worker. `Both`
-/// derives both views from the same captured tree; it never starts a second
-/// screen recorder or stores a duplicate raw accessibility tree.
+/// `Memory` preserves the original semantic-parser behavior. `ComputerUse` is
+/// shown to users as automation: it keeps capture action-oriented and skips the
+/// semantic parser worker. `Both` is shown as memory + automation and derives
+/// both views from the same captured tree; it never starts a second screen
+/// recorder or stores a duplicate raw accessibility tree.
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]

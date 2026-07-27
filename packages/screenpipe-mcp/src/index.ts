@@ -520,9 +520,9 @@ const TOOLS: Tool[] = [
         app_name: { type: "string", description: "Filter by app name" },
         purpose: {
           type: "string",
-          enum: ["read", "computer-use"],
+          enum: ["read", "automation"],
           description:
-            "read returns the compact text outline; computer-use returns fresh refs, best-effort keys, state, bounds, and allowed actions. Omit to follow the desktop capture profile.",
+            "read returns the compact memory outline; automation returns fresh refs, best-effort keys, state, bounds, and allowed actions. Omit to follow the desktop capture profile.",
         },
         limit: { type: "integer", description: "Max results (default 50). Start with 10-20.", default: 50 },
         offset: { type: "integer", description: "Pagination offset", default: 0 },
@@ -812,9 +812,9 @@ const TOOLS: Tool[] = [
         frame_id: { type: "integer", description: "Frame ID" },
         purpose: {
           type: "string",
-          enum: ["read", "computer-use"],
+          enum: ["read", "automation"],
           description:
-            "read returns the text outline; computer-use returns targeting context for a downstream computer-use tool. Omit to follow the desktop capture profile. Refresh before each action.",
+            "read returns the memory outline; automation returns targeting context for a downstream automation tool. Omit to follow the desktop capture profile. Refresh before each action.",
         },
       },
       required: ["frame_id"],

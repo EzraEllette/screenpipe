@@ -12,6 +12,10 @@ import { useInterval } from "@/lib/hooks/use-interval";
 import { useSettingsIndexDriftCheck, type SettingsField } from "./settings-search";
 import { CaptureFrequencyPreview, AudioCaptureModePreview } from "./setting-previews";
 import {
+  SEMANTIC_CONTEXT_MODE_COPY,
+  type SemanticContextMode,
+} from "@/lib/semantic-context-mode";
+import {
   createSettingsWriteQueue,
   enqueueSettingsWrite,
   flushSettingsWrites,
@@ -3810,14 +3814,16 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
                           AI context use
                         </label>
                         <p className="text-xs text-muted-foreground mt-0.5">
-                          {(settings.semanticContextMode ?? "memory") === "memory" && "Compact app records for recall, search, summaries, and pipes."}
-                          {settings.semanticContextMode === "computerUse" && "Computer-use controls with fresh refs, best-effort keys, state, bounds, and allowed actions. Skips parser storage."}
-                          {settings.semanticContextMode === "both" && "Build memory and computer-use views from one accessibility capture."}
+                          {
+                            SEMANTIC_CONTEXT_MODE_COPY[
+                              (settings.semanticContextMode ?? "memory") as SemanticContextMode
+                            ].description
+                          }
                         </p>
                       </div>
                       <Select
                         value={settings.semanticContextMode ?? "memory"}
-                        onValueChange={(value: "memory" | "computerUse" | "both") =>
+                        onValueChange={(value: SemanticContextMode) =>
                           handleSettingsChange({ semanticContextMode: value }, true)
                         }
                       >
@@ -3825,9 +3831,9 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
-                          <SelectItem value="memory">memory</SelectItem>
-                          <SelectItem value="computerUse">computer use</SelectItem>
-                          <SelectItem value="both">both</SelectItem>
+                          <SelectItem value="memory">{SEMANTIC_CONTEXT_MODE_COPY.memory.label}</SelectItem>
+                          <SelectItem value="computerUse">{SEMANTIC_CONTEXT_MODE_COPY.computerUse.label}</SelectItem>
+                          <SelectItem value="both">{SEMANTIC_CONTEXT_MODE_COPY.both.label}</SelectItem>
                         </SelectContent>
                       </Select>
                     </div>

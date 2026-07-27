@@ -21,7 +21,7 @@ The `$SCREENPIPE_LOCAL_API_KEY` env var is already set in your environment. With
 
 API responses can be large. Always write curl output to a file first (`curl ... -o /tmp/sp_result.json`), check size (`wc -c /tmp/sp_result.json`), and if over 5KB read only the first 50-100 lines. Extract what you need with `jq`. NEVER dump full large responses into context.
 
-For the list endpoints (`/search`, `/elements`, `/frames/{id}/elements`) you can also cut tokens at the source: add `&format=csv` (or `tsv`) to get a columnar table that writes each column name once instead of repeating keys per row, and `&fields=a,b,c` to return only the columns you need (dotted paths like `content.text`). On a list of UI elements that is roughly a 70% token cut versus JSON. For the element endpoints specifically, `&format=outline` (alias `tree`) goes further still — a deduped, indented tree of just the text-bearing nodes (~91% fewer tokens, measured) — and is the best default for reading UI structure. Use `&format=automation` for computer-use planning: it retains interactive controls, state, bounds, allowed actions, short response-local refs, and best-effort stable keys. Text-heavy `ocr`/`audio` barely benefit from any reshaping (the text blob dominates), so reach for `fields` + `max_content_length` there. With no `format`/`fields` the response is unchanged JSON.
+For the list endpoints (`/search`, `/elements`, `/frames/{id}/elements`) you can also cut tokens at the source: add `&format=csv` (or `tsv`) to get a columnar table that writes each column name once instead of repeating keys per row, and `&fields=a,b,c` to return only the columns you need (dotted paths like `content.text`). On a list of UI elements that is roughly a 70% token cut versus JSON. For the element endpoints specifically, `&format=outline` (alias `tree`) goes further still — a deduped, indented tree of just the text-bearing nodes (~91% fewer tokens, measured) — and is the best default for reading UI structure. Use `&format=automation` for automation planning: it retains interactive controls, state, bounds, allowed actions, short response-local refs, and best-effort stable keys. Text-heavy `ocr`/`audio` barely benefit from any reshaping (the text blob dominates), so reach for `fields` + `max_content_length` there. With no `format`/`fields` the response is unchanged JSON.
 
 ---
 
@@ -160,7 +160,7 @@ curl -H "Authorization: Bearer $SCREENPIPE_LOCAL_API_KEY" "http://localhost:3030
 
 `GET /frames/{id}/elements?format=outline` gives the whole frame's tree the same way (and is capped, unlike the raw JSON dump).
 
-**`format=automation` is for computer-use structure, not memory.** It emits a
+**`format=automation` is for automation structure, not memory.** It emits a
 snapshot revision, short `ref=eN` handles, best-effort `key=k_*` identities,
 key quality, state, normalized bounds, and allowed actions. Re-fetch it before
 every action. A best-effort key is matching evidence, not authority to act: verify

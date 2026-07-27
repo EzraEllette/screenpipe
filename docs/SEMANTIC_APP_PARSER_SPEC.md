@@ -216,12 +216,12 @@ enough structure.
 | Mode | Capture and processing behavior | Default agent view |
 |---|---|---|
 | `memory` | Keep parser-requested structure transient and run the semantic worker | compact readable outline |
-| `computerUse` | Persist only action controls and bounded landmarks in the existing raw tree; do not start the semantic parser worker | computer-use targeting view |
-| `both` | Persist the action subset and pass the union to the semantic worker without storing a second tree | compact readable outline, with explicit automation requests available |
+| `computerUse` (shown as `automation`) | Persist only action controls and bounded landmarks in the existing raw tree; do not start the semantic parser worker | automation targeting view |
+| `both` (shown as `memory + automation`) | Persist the action subset and pass the union to the semantic worker without storing a second tree | compact readable outline, with explicit automation requests available |
 
 The master `enableSemanticContext` switch remains off by default. Missing mode
 values deserialize as `memory`, preserving the behavior of earlier opt-in
-installs. The computer-use subset keeps interactive controls plus a small set
+installs. The automation subset keeps interactive controls plus a small set
 of navigation and window landmarks, rather than every group, row, or cell.
 macOS, Windows, and Linux also retain unnamed actionable controls that the
 memory projection would omit. All three platforms reuse the existing bounded
@@ -242,7 +242,7 @@ recognize the same logical control after a refresh, but it does not authorize an
 action. The agent must verify revision, key, role, name, state, and bounds in the
 latest snapshot. Ambiguous keys require another query or visual fallback.
 This change provides targeting context, not a native desktop action executor.
-A downstream computer-use tool must resolve the latest target or coordinates;
+A downstream automation tool must resolve the latest target or coordinates;
 Screenpipe does not accept these refs at a write endpoint.
 
 ## 5. Scheduling
@@ -361,7 +361,7 @@ current full, current lean, semantic full, and semantic lean modes after
 checkpoint and compaction. It must separately report media bytes, database
 bytes, reused parse runs, reused item versions, and parse failures.
 
-Computer-use mode does not add a semantic table or a per-frame automation blob.
+Automation mode does not add a semantic table or a per-frame automation blob.
 Its bounded action structure is part of the existing
 `accessibility_tree_json`/`elements` capture, and the automation view is rendered
 on demand. `both` mode stores the same action subset once while normalized
@@ -388,8 +388,8 @@ Element endpoints expose three explicit projections:
 - `format=preferred` to follow the active capture-purpose setting
 
 The MCP `search-elements` and `get-frame-elements` tools accept
-`purpose=read|computer-use`. An explicit purpose wins. When omitted they request
-`format=preferred`, so computer-use-only installations get targeting context
+`purpose=read|automation` (`computer-use` remains a legacy alias). An explicit
+purpose wins. When omitted they request `format=preferred`, so automation-only installations get targeting context
 without requiring every agent prompt to know the local preference.
 
 Default output is grouped plain text:
@@ -454,7 +454,7 @@ recall. Fresh-capture evaluation is still required for app contracts that rely
 on the new transient structural sidecar because historical trees cannot express
 all sender/message, task/status, or event/schedule relationships.
 
-A deterministic computer-use fixture separately compares the targeting view
+A deterministic automation fixture separately compares the targeting view
 with raw accessibility JSON using the exact `o200k_base` tokenizer. It preserves
 all 80 interactive controls, names, and action refs while using 3,860 tokens
 instead of 7,923, a 51.3% reduction. Tests also cover stable strong keys across
@@ -464,7 +464,7 @@ redaction, output bounds, and allowed actions.
 An exploratory walk against a live macOS accessibility window compared the
 closest same-shape samples after the action subset was bounded: 490 retained
 nodes and 109,597 JSON bytes in the default walk versus 504 nodes and 112,839
-bytes in computer-use mode. Mean walk time was 111.5 ms versus 118.0 ms. This is
+bytes in automation mode. Mean walk time was 111.5 ms versus 118.0 ms. This is
 approximately 3.0% more tree bytes and 5.8% more walk time, but it is not a
 deterministic benchmark because the live window changed during sampling. The
 release gate still requires a fixed trace, an older Intel Mac, Windows hardware,

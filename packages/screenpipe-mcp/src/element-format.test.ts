@@ -10,8 +10,9 @@ describe("formatForElementPurpose", () => {
     expect(formatForElementPurpose(undefined)).toBe("preferred");
   });
 
-  it("maps explicit reading and computer-use purposes", () => {
+  it("maps explicit reading and automation purposes", () => {
     expect(formatForElementPurpose("read")).toBe("outline");
+    expect(formatForElementPurpose("automation")).toBe("automation");
     expect(formatForElementPurpose("computer-use")).toBe("automation");
   });
 

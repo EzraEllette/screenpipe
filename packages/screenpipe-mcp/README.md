@@ -260,15 +260,16 @@ Search structured UI elements (accessibility tree nodes and OCR text blocks):
 - Returns a compact `outline` view by default — a deduped, indented tree of the
   text-bearing nodes (`#id` refs, `(off-screen)` flags), ~91% fewer tokens than
   raw element JSON
-- Pass `purpose: "computer-use"` for computer-use targeting context with response-local
+- Pass `purpose: "automation"` for automation targeting context with response-local
   refs, best-effort stable keys, state, bounds, and allowed actions. Refresh it
   before each action; historical database ids are not live control handles.
+  `computer-use` remains a legacy alias.
 - If `purpose` is omitted, the MCP follows the desktop `AI context use` setting.
   The backward-compatible default remains the read/memory outline.
 
 ### get-frame-elements
 The whole element tree for one frame, as the same compact outline. Pass
-`purpose: "computer-use"` for the computer-use targeting view.
+`purpose: "automation"` for the automation targeting view.
 
 ### frame-context
 Get accessibility text, parsed tree nodes, and extracted URLs for a specific frame.
