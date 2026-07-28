@@ -726,7 +726,7 @@ pub(super) fn check_focused_window_filters(
 fn check_focused_window_filters_inner(
     config: &TreeWalkerConfig,
 ) -> Result<FocusedWindowFilterResult> {
-    let (focused_app, pid, app_name) = match resolve_focused_ax_app() {
+    let (focused_app, pid, app_name, _) = match resolve_focused_ax_app(false) {
         Some(focused) => focused,
         None => return Ok(FocusedWindowFilterResult::NotFound),
     };
