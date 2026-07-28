@@ -1539,13 +1539,7 @@ pub async fn event_driven_capture_loop(
                         screenshot_disabled,
                         hd_active,
                         in_meeting,
-                        // Meeting-OCR-gate scope (#5054): only the monitor
-                        // hosting the focused window is gated; Active is also
-                        // the controller's safe fallback when focus is unknown.
-                        matches!(
-                            focus_controller.state_for_monitor(&monitor),
-                            crate::focus_aware_controller::CaptureState::Active
-                        ),
+                        focus_controller.monitor_hosts_focus(&monitor),
                     ),
                 )
                 .await;
@@ -1917,6 +1911,38 @@ fn resolve_capture_metadata(
         lightweight_metadata,
         cfg!(target_os = "linux"),
     )
+}
+
+/// Restrict globally-focused metadata to the frame that contains that focused
+/// window. Each monitor captures all of its pixels, but the accessibility walk
+/// describes exactly one window; attaching it to another monitor would make
+/// search and `full_text` claim that unrelated pixels belong to that window.
+fn resolve_frame_capture_metadata(
+    tree_snapshot: Option<&screenpipe_a11y::tree::TreeSnapshot>,
+    trigger: &CaptureTrigger,
+    lightweight_metadata: Option<&LightweightFocusedMetadata>,
+    monitor_hosts_focus: bool,
+) -> (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+) {
+    if !monitor_hosts_focus {
+        return (None, None, None, None);
+    }
+
+    resolve_capture_metadata(tree_snapshot, trigger, lightweight_metadata)
+}
+
+/// The accessibility walker follows the globally focused window. Its text is
+/// valid only for the monitor that hosts that window; other monitors must not
+/// carry it into their frame records.
+fn tree_snapshot_for_frame<'a>(
+    tree_snapshot: Option<&'a screenpipe_a11y::tree::TreeSnapshot>,
+    monitor_hosts_focus: bool,
+) -> Option<&'a screenpipe_a11y::tree::TreeSnapshot> {
+    monitor_hosts_focus.then_some(tree_snapshot).flatten()
 }
 
 fn resolve_capture_metadata_with_policy(
@@ -2373,39 +2399,47 @@ async fn do_capture(
         }
     }
 
-    // Walk accessibility tree on blocking thread (AX APIs are synchronous).
-    // Apply adaptive budget overrides: expensive apps (Electron/Discord) get
-    // reduced max_nodes and timeout to avoid blocking their UI thread.
+    // The accessibility walker follows the globally focused window. Do not
+    // run it for another monitor: it cannot describe that monitor's pixels.
+    // Apply adaptive budget overrides on the focused monitor only.
     let mut config = params.tree_walker_config.clone();
 
     // Get focused metadata for budget decisions. AppSwitch triggers carry
     // the name directly; for all other triggers (visual change, idle, manual)
     // we do a lightweight platform query. This ensures the walk budget applies
     // to ALL captures, not just app switches.
-    let lightweight_focused_metadata = match trigger {
-        CaptureTrigger::AppSwitch { .. } => None,
-        _ => match tokio::time::timeout(
-            Duration::from_secs(1),
-            tokio::task::spawn_blocking(get_focused_metadata_lightweight),
-        )
-        .await
-        {
-            Ok(Ok(metadata)) => metadata,
-            Ok(Err(err)) => {
-                debug!("focused metadata lookup task failed: {}", err);
-                None
-            }
-            Err(_) => {
-                debug!("focused metadata lookup timed out");
-                None
-            }
-        },
+    let lightweight_focused_metadata = if monitor_hosts_focus {
+        match trigger {
+            CaptureTrigger::AppSwitch { .. } => None,
+            _ => match tokio::time::timeout(
+                Duration::from_secs(1),
+                tokio::task::spawn_blocking(get_focused_metadata_lightweight),
+            )
+            .await
+            {
+                Ok(Ok(metadata)) => metadata,
+                Ok(Err(err)) => {
+                    debug!("focused metadata lookup task failed: {}", err);
+                    None
+                }
+                Err(_) => {
+                    debug!("focused metadata lookup timed out");
+                    None
+                }
+            },
+        }
+    } else {
+        None
     };
-    let trigger_app = match trigger {
-        CaptureTrigger::AppSwitch { app_name, .. } => Some(app_name.clone()),
-        _ => lightweight_focused_metadata
-            .as_ref()
-            .and_then(|metadata| metadata.app_name.clone()),
+    let trigger_app = if monitor_hosts_focus {
+        match trigger {
+            CaptureTrigger::AppSwitch { app_name, .. } => Some(app_name.clone()),
+            _ => lightweight_focused_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.app_name.clone()),
+        }
+    } else {
+        None
     };
 
     // Terminal OCR rate-limit: wezterm/alacritty/kitty/hyper/warp all bypass AX
@@ -2465,10 +2499,14 @@ async fn do_capture(
         config.walk_timeout_override = Some(decision.timeout);
     }
 
-    let tree_walk_result = tokio::task::spawn_blocking(move || {
-        screenpipe_capture::paired_capture::walk_accessibility_tree(&config)
-    })
-    .await?;
+    let tree_walk_result = if monitor_hosts_focus {
+        tokio::task::spawn_blocking(move || {
+            screenpipe_capture::paired_capture::walk_accessibility_tree(&config)
+        })
+        .await?
+    } else {
+        TreeWalkResult::NotFound
+    };
 
     // If the window was skipped (incognito/private browsing or user filter),
     // bail out entirely — don't OCR the screenshot.
@@ -2539,11 +2577,11 @@ async fn do_capture(
                 crate::ui_recorder::record_tree_walk(outcome);
             }
         }
-        TreeWalkResult::NotFound => {
+        TreeWalkResult::NotFound if monitor_hosts_focus => {
             crate::ui_recorder::record_tree_walk(crate::ui_recorder::TreeWalkOutcome::Error);
         }
         // Skipped: user filter / incognito — not a walk attempt, don't count.
-        TreeWalkResult::Skipped(_) => {}
+        TreeWalkResult::NotFound | TreeWalkResult::Skipped(_) => {}
     }
 
     let tree_snapshot = match tree_walk_result {
@@ -2594,7 +2632,7 @@ async fn do_capture(
     // Never dedup Idle/Manual triggers, bypass entirely during HD sessions, and
     // force a write every 30s even if the hash matches — see `dedup_applies`.
     let dedup_eligible = dedup_applies(trigger, hd_active, in_meeting, last_db_write.elapsed());
-    if dedup_eligible {
+    if monitor_hosts_focus && dedup_eligible {
         if let Some(ref snap) = tree_snapshot {
             if !snap.text_content.is_empty() {
                 let new_hash = snap.content_hash as i64;
@@ -2618,19 +2656,19 @@ async fn do_capture(
         }
     }
 
-    // Use tree metadata by default, but for focus-change triggers prefer the
-    // event payload when the tree lags or reports the wrong frontmost target.
-    let (app_name_owned, window_name_owned, browser_url_owned, document_path_owned) =
-        resolve_capture_metadata(
-            tree_snapshot.as_ref(),
-            trigger,
-            lightweight_focused_metadata.as_ref(),
-        );
+    // Resolve the focused-window metadata for global safety gates first.
+    // The metadata attached to the frame itself is resolved below and is
+    // intentionally empty for monitors that do not host that focused window.
+    let focused_metadata = resolve_capture_metadata(
+        tree_snapshot.as_ref(),
+        trigger,
+        lightweight_focused_metadata.as_ref(),
+    );
 
     // Skip lock screen / screensaver — these waste disk and pollute timeline.
     // Also update the global SCREEN_IS_LOCKED flag so subsequent loop iterations
     // skip the screenshot entirely (saves CPU).
-    if let Some(ref app) = app_name_owned {
+    if let Some(ref app) = focused_metadata.0 {
         if is_lock_screen_app(app) {
             warn!(
                 "skipping capture: lock screen app '{}' on monitor {}",
@@ -2674,8 +2712,13 @@ async fn do_capture(
     // here even though earlier app-only gates intentionally skipped them. Reuses
     // the patterns parsed above.
     {
-        let check_app = app_name_owned.as_deref().unwrap_or_default().to_lowercase();
-        let check_win = window_name_owned
+        let check_app = focused_metadata
+            .0
+            .as_deref()
+            .unwrap_or_default()
+            .to_lowercase();
+        let check_win = focused_metadata
+            .1
             .as_deref()
             .unwrap_or_default()
             .to_lowercase();
@@ -2698,8 +2741,8 @@ async fn do_capture(
     // and the monitor watcher releases all SCK handles.
     if crate::drm_detector::check_and_update_drm_state(
         params.pause_on_drm_content,
-        app_name_owned.as_deref(),
-        browser_url_owned.as_deref(),
+        focused_metadata.0.as_deref(),
+        focused_metadata.2.as_deref(),
     ) {
         return Ok(CaptureOutput {
             result: None,
@@ -2708,6 +2751,20 @@ async fn do_capture(
             corrupt: None,
         });
     }
+
+    // The accessibility walk and lightweight metadata describe the globally
+    // focused window. Do not attach either to frames from another monitor.
+    // Those frames proceed without searchable text or focused-window
+    // attribution, while retaining their screenshot.
+    let (app_name_owned, window_name_owned, browser_url_owned, document_path_owned) =
+        resolve_frame_capture_metadata(
+            tree_snapshot.as_ref(),
+            trigger,
+            lightweight_focused_metadata.as_ref(),
+            monitor_hosts_focus,
+        );
+    let tree_snapshot_for_frame =
+        tree_snapshot_for_frame(tree_snapshot.as_ref(), monitor_hosts_focus);
 
     // Focused-window bounds for window-scoped meeting OCR (#5054 follow-up):
     // scale the walker's monitor-normalized fractions to this frame's actual
@@ -2721,8 +2778,7 @@ async fn do_capture(
     let focused_window_bounds = {
         use image::GenericImageView;
         let (frame_w, frame_h) = image.dimensions();
-        tree_snapshot
-            .as_ref()
+        tree_snapshot_for_frame
             .filter(|snap| {
                 app_name_owned
                     .as_deref()
@@ -2750,7 +2806,7 @@ async fn do_capture(
         window_name: window_name_owned.as_deref(),
         browser_url: browser_url_owned.as_deref(),
         document_path: document_path_owned.as_deref(),
-        focused: true, // event-driven captures are always for the focused window
+        focused: monitor_hosts_focus,
         capture_trigger: trigger.as_str(),
         use_pii_removal: params.use_pii_removal,
         languages: params.languages.to_vec(),
@@ -2761,7 +2817,7 @@ async fn do_capture(
         focused_window_bounds,
     };
 
-    let result = paired_capture(&ctx, tree_snapshot.as_ref(), Some(ocr_gate)).await?;
+    let result = paired_capture(&ctx, tree_snapshot_for_frame, Some(ocr_gate)).await?;
     let deduped = elements_ref_frame_id.is_some();
     // Extract image from Arc for comparer reuse. Arc::try_unwrap succeeds
     // because paired_capture no longer retains a clone.
@@ -3174,6 +3230,46 @@ mod tests {
         assert_eq!(window_name.as_deref(), Some("Lucern Clinic"));
         assert_eq!(browser_url, None);
         assert_eq!(document_path, None);
+    }
+
+    #[test]
+    fn non_focused_monitor_suppresses_global_metadata_and_a11y_text() {
+        let snapshot = screenpipe_a11y::tree::TreeSnapshot {
+            app_name: "zoom.us".into(),
+            window_name: "Zoom Meeting".into(),
+            text_content: "Discussing next quarter's roadmap".into(),
+            nodes: Vec::new(),
+            browser_url: Some("https://zoom.us/j/123".into()),
+            document_path: None,
+            timestamp: Utc::now(),
+            node_count: 0,
+            walk_duration: Duration::from_millis(1),
+            content_hash: 0,
+            simhash: 0,
+            truncated: false,
+            truncation_reason: screenpipe_a11y::tree::TruncationReason::None,
+            max_depth_reached: 0,
+            window_bounds: None,
+        };
+        let metadata = LightweightFocusedMetadata {
+            app_name: Some("zoom.us".into()),
+            window_name: Some("Zoom Meeting".into()),
+        };
+
+        let frame_metadata = resolve_frame_capture_metadata(
+            Some(&snapshot),
+            &CaptureTrigger::Idle,
+            Some(&metadata),
+            false,
+        );
+
+        assert_eq!(frame_metadata, (None, None, None, None));
+        assert!(tree_snapshot_for_frame(Some(&snapshot), false).is_none());
+        assert_eq!(
+            tree_snapshot_for_frame(Some(&snapshot), true)
+                .map(|snapshot| snapshot.text_content.as_str()),
+            Some("Discussing next quarter's roadmap")
+        );
     }
 
     #[test]

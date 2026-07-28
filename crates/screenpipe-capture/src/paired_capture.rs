@@ -143,13 +143,12 @@ pub struct CaptureContext<'a> {
     /// meeting apps/URLs get no special OCR treatment at all.
     pub in_meeting: bool,
     /// Whether the captured monitor is the one hosting the focused window.
-    /// App/window metadata comes from the globally focused window, so on a
-    /// multi-monitor setup a second monitor's frames inherit the meeting
-    /// app's name while showing unrelated pixels — the meeting OCR gate
-    /// must not fingerprint-gate those (#5054 review). Callers without
-    /// per-monitor focus knowledge should pass `true` (single-monitor and
-    /// unknown-focus cases behave like the focused monitor, matching the
-    /// focus controller's own all-Active fallback).
+    /// Accessibility text and app/window metadata belong only to that
+    /// monitor. When `false`, `paired_capture` keeps the screenshot frame
+    /// but persists no focused-window metadata, accessibility text, or OCR.
+    /// Callers without per-monitor focus knowledge should pass `true`
+    /// (single-monitor and unknown-focus cases behave like the focused
+    /// monitor, matching the focus controller's own all-Active fallback).
     pub monitor_hosts_focus: bool,
     /// Screen bounds of the focused window in this frame's pixel space, when
     /// the platform exposes them (macOS AX frame, Windows GetWindowRect).
@@ -223,9 +222,28 @@ pub async fn paired_capture(
 ) -> Result<PairedCaptureResult> {
     let start = Instant::now();
 
+    // Accessibility data is collected for the globally focused window, not
+    // for every monitor being captured. Keep each monitor's screenshot frame,
+    // but only allow that data to be indexed on the monitor hosting the window.
+    // This guard lives at the persistence boundary so future callers cannot
+    // accidentally attach one monitor's a11y data to another monitor's pixels.
+    let tree_snapshot = ctx.monitor_hosts_focus.then_some(tree_snapshot).flatten();
+    let (app_name, window_name, browser_url, document_path, focused) = if ctx.monitor_hosts_focus {
+        (
+            ctx.app_name,
+            ctx.window_name,
+            ctx.browser_url,
+            ctx.document_path,
+            ctx.focused,
+        )
+    } else {
+        (None, None, None, None, false)
+    };
+
     // Write JPEG snapshot to disk — skipped when screenshot_disabled (AudioPaused / FullPause).
-    // The accessibility tree walk still runs so metadata rows keep timestamp,
-    // app_name, window_name, and full_text for search/timeline queries.
+    // On the focused monitor, the accessibility tree supplies metadata and
+    // full_text for search/timeline queries. Other monitors store only their
+    // screenshot frame.
     let snapshot_path_str = if ctx.screenshot_disabled {
         debug!(
             "paired_capture: screenshot skipped (screenshot_disabled, trigger={})",
@@ -291,7 +309,8 @@ pub async fn paired_capture(
     let meeting_matched = ctx.app_name.map(is_meeting_app).unwrap_or(false)
         || ctx.browser_url.map(is_meeting_url).unwrap_or(false);
     let meeting_trigger = ctx.in_meeting && meeting_matched && ctx.monitor_hosts_focus;
-    let wants_ocr = !ctx.screenshot_disabled
+    let wants_ocr = ctx.monitor_hosts_focus
+        && !ctx.screenshot_disabled
         && (app_prefers_ocr || meeting_trigger || !has_accessibility_text || a11y_is_thin_generic);
 
     let mut ocr_gate = ocr_gate;
@@ -641,11 +660,11 @@ pub async fn paired_capture(
             ctx.device_name,
             ctx.captured_at,
             &snapshot_path_str,
-            ctx.app_name,
-            ctx.window_name,
-            ctx.browser_url,
-            ctx.document_path,
-            ctx.focused,
+            app_name,
+            window_name,
+            browser_url,
+            document_path,
+            focused,
             Some(ctx.capture_trigger),
             sanitized_text.as_deref(),
             text_source,
@@ -697,9 +716,9 @@ pub async fn paired_capture(
         ocr_was_empty,
         ocr_gate_decision,
         ocr_gate_detect_duration,
-        app_name: ctx.app_name.map(String::from),
-        window_name: ctx.window_name.map(String::from),
-        browser_url: ctx.browser_url.map(String::from),
+        app_name: app_name.map(String::from),
+        window_name: window_name.map(String::from),
+        browser_url: browser_url.map(String::from),
         content_hash,
     })
 }
@@ -1734,14 +1753,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn non_focused_monitor_gets_gated_ocr_on_its_own_pixels() {
-        // Multi-monitor: a second monitor's frames inherit the focused
-        // meeting app's NAME while showing unrelated pixels. Since the gate
-        // moved to pixel-exact skipping (#5060), gating them is safe — a
-        // changing dashboard changes the signature and OCRs; only truly
-        // static content skips. This replaced the earlier rule that
-        // exempted non-focused monitors (which existed to protect changing
-        // content from fingerprint-stability starvation).
+    async fn non_focused_monitor_keeps_screenshot_without_indexing_focus_data() {
+        // The second monitor gets its own screenshot frame, but its pixels
+        // must never inherit a11y, app metadata, or OCR from the focused
+        // meeting window on another monitor.
         let tmp = TempDir::new().unwrap();
         let snapshot_writer = SnapshotWriter::new(tmp.path(), 80, 1920);
         let db = DatabaseManager::new("sqlite::memory:", Default::default())
@@ -1777,38 +1792,20 @@ mod tests {
             focused_window_bounds: None,
         };
         let mut gate = OcrGate::new();
-        // Text on this monitor: first sighting OCRs it.
         let ctx = make_ctx(strokes_image_at(50, 100));
         let result = paired_capture(&ctx, Some(&snap), Some(&mut gate))
             .await
             .unwrap();
         assert!(
-            result.ocr_duration_ms.is_some(),
-            "new text on a non-focused monitor must be OCR'd"
+            !result.snapshot_path.is_empty(),
+            "screenshot frame is retained"
         );
-        // Content changes (a second text line appears): the union crop's
-        // pixels differ → OCR again. This is the coverage the old
-        // fingerprint gate starved. (Note: purely MOVED text is skipped by
-        // design — the union crop follows it and its pixels are identical.)
-        let mut canvas = image::RgbImage::from_pixel(400, 300, image::Rgb([235, 235, 235]));
-        for (y0, strokes) in [(100u32, 10u32), (200, 6)] {
-            for s in 0..strokes {
-                let sx = 50 + s * 7;
-                for dy in 0..12 {
-                    for dx in 0..3 {
-                        canvas.put_pixel(sx + dx, y0 + dy, image::Rgb([10, 10, 10]));
-                    }
-                }
-            }
-        }
-        let ctx2 = make_ctx(Arc::new(DynamicImage::ImageRgb8(canvas)));
-        let result2 = paired_capture(&ctx2, Some(&snap), Some(&mut gate))
-            .await
-            .unwrap();
-        assert!(
-            result2.ocr_duration_ms.is_some(),
-            "changed content on a non-focused monitor must re-OCR"
-        );
+        assert!(result.accessibility_text.is_none());
+        assert!(result.text_source.is_none());
+        assert!(result.ocr_duration_ms.is_none());
+        assert_eq!(result.app_name, None);
+        assert_eq!(result.window_name, None);
+        assert_eq!(result.browser_url, None);
     }
 
     #[tokio::test]
