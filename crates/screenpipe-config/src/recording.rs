@@ -80,13 +80,10 @@ pub enum AecMode {
     Windows,
 }
 
-/// Which AI projection to build from the existing screen/accessibility stream.
+/// Legacy semantic-context choice retained solely to deserialize older settings.
 ///
-/// `Memory` preserves the original semantic-parser behavior. `ComputerUse` is
-/// shown to users as automation: it keeps capture action-oriented and skips the
-/// semantic parser worker. `Both` is shown as memory + automation and derives
-/// both views from the same captured tree; it never starts a second screen
-/// recorder or stores a duplicate raw accessibility tree.
+/// The runtime always builds the standard memory projection regardless of this
+/// value.
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
@@ -279,15 +276,17 @@ pub struct RecordingSettings {
     #[serde(rename = "disableScreenshots", default)]
     pub disable_screenshots: bool,
 
-    /// Build normalized semantic context from captured accessibility trees.
-    /// Experimental and opt-in. False preserves the historical capture path
-    /// without starting a parser worker or writing semantic tables.
+    /// Legacy compatibility field for older settings files.
+    ///
+    /// Semantic context is now part of the standard capture pipeline, so this
+    /// value no longer controls whether parsing runs.
     #[serde(rename = "enableSemanticContext", default)]
     pub enable_semantic_context: bool,
 
-    /// Select the AI view derived from the single captured accessibility tree.
-    /// Missing values default to memory so existing opt-in users retain the
-    /// exact behavior they selected before this setting existed.
+    /// Legacy compatibility field for older settings files.
+    ///
+    /// The standard memory projection is always produced; this value is kept
+    /// only so previously-written settings continue to deserialize.
     #[serde(rename = "semanticContextMode", default)]
     pub semantic_context_mode: SemanticContextMode,
 
@@ -771,7 +770,7 @@ impl Default for RecordingSettings {
             vocabulary: vec![],
             disable_vision: false,
             disable_screenshots: false,
-            enable_semantic_context: false,
+            enable_semantic_context: true,
             semantic_context_mode: SemanticContextMode::Memory,
             disable_timeline: false,
             monitor_ids: vec![],
@@ -1177,9 +1176,10 @@ mod tests {
     }
 
     #[test]
-    fn semantic_context_mode_defaults_legacy_users_to_memory_and_round_trips() {
+    fn legacy_semantic_context_values_continue_to_deserialize() {
         let legacy: RecordingSettings =
             serde_json::from_str(r#"{"enableSemanticContext":true}"#).unwrap();
+        assert!(legacy.enable_semantic_context);
         assert_eq!(legacy.semantic_context_mode, SemanticContextMode::Memory);
         assert!(legacy.semantic_context_mode.includes_memory());
         assert!(!legacy.semantic_context_mode.includes_computer_use());

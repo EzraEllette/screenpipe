@@ -116,8 +116,6 @@ export const MANAGED_SETTING_DEFINITIONS: readonly ManagedSettingDefinition[] = 
 
   bool("disableVision", false),
   bool("disableScreenshots", false),
-  bool("enableSemanticContext", false),
-  enumeration("semanticContextMode", ["memory", "computerUse", "both"], "memory"),
   bool("disableTimeline", false),
   bool("useAllMonitors", true),
   enumeration("videoQuality", ["low", "balanced", "high", "max"], "balanced"),

@@ -715,8 +715,6 @@ let DEFAULT_SETTINGS: Settings = {
 			lockVaultShortcut: "Super+Shift+L",
 			disableVision: false,
 			disableScreenshots: false,
-			enableSemanticContext: false,
-			semanticContextMode: "memory",
 			useAllMonitors: true,
 			showShortcutOverlay: true,
 			chatHistory: {

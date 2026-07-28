@@ -2926,6 +2926,13 @@ endTime: string;
  */
 recordMode: string }
 export type SchedulerStatus = { running: boolean; last_sync: string | null; last_error: string | null }
+/**
+ * Legacy semantic-context choice retained solely to deserialize older settings.
+ *
+ * The runtime always builds the standard memory projection regardless of this
+ * value.
+ */
+export type SemanticContextMode = "memory" | "computerUse" | "both"
 export type SettingsStore =
 /**
  * All recording/capture config lives here. Flattened so the JSON shape
@@ -3075,14 +3082,19 @@ disableVision: boolean;
  */
 disableScreenshots?: boolean;
 /**
- * Enable experimental normalized semantic context parsing. Off by default.
+ * Legacy compatibility field for older settings files.
+ *
+ * Semantic context is now part of the standard capture pipeline, so this
+ * value no longer controls whether parsing runs.
  */
 enableSemanticContext?: boolean;
 /**
- * AI projection derived from the shared accessibility capture. `computerUse`
- * skips semantic parser storage; `both` reuses the same captured tree.
+ * Legacy compatibility field for older settings files.
+ *
+ * The standard memory projection is always produced; this value is kept
+ * only so previously-written settings continue to deserialize.
  */
-semanticContextMode?: "memory" | "computerUse" | "both";
+semanticContextMode?: SemanticContextMode;
 /**
  * Disable the timeline / rewind feature. When true, the engine skips
  * timeline-only work: warming the hot frame cache from the DB at startup

@@ -247,15 +247,6 @@ fn wants_preferred(format: &Option<String>) -> bool {
         .is_some_and(|value| value.trim().eq_ignore_ascii_case("preferred"))
 }
 
-fn prefers_automation(state: &AppState) -> bool {
-    state
-        .vision_manager
-        .load_full()
-        .as_ref()
-        .as_ref()
-        .is_some_and(|manager| manager.prefers_computer_use_context())
-}
-
 /// Collapse internal whitespace and clip to `n` chars (char-safe, not byte).
 fn outline_clip(s: &str, n: usize) -> String {
     let collapsed = s.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -778,7 +769,7 @@ pub(crate) async fn search_elements(
     // `outline`/`tree` is element-specific and handled below; everything else
     // goes through the generic json|csv|tsv negotiation.
     let preferred = wants_preferred(&query.format);
-    let automation = wants_automation(&query.format) || (preferred && prefers_automation(&state));
+    let automation = wants_automation(&query.format);
     let outline = wants_outline(&query.format) || (preferred && !automation);
     let format = if outline || automation {
         OutputFormat::Json
@@ -849,7 +840,7 @@ pub(crate) async fn get_frame_elements(
     Query(query): Query<FrameElementsQuery>,
 ) -> Result<Response<Body>, (StatusCode, JsonResponse<Value>)> {
     let preferred = wants_preferred(&query.format);
-    let automation = wants_automation(&query.format) || (preferred && prefers_automation(&state));
+    let automation = wants_automation(&query.format);
     let outline = wants_outline(&query.format) || (preferred && !automation);
     let format = if outline || automation {
         OutputFormat::Json
