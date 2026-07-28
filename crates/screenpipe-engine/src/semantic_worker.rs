@@ -18,11 +18,14 @@ use screenpipe_semantic::{
     CapturedAccessibilityNode, NodeBounds, OutputBudget, ParseContext, ParserRegistry, Platform,
     TreeBudget, ValidatedParseOutcome,
 };
+use serde_json::{json, Value};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 use tokio::runtime::Handle;
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
+
+const SEMANTIC_TELEMETRY_SAMPLE_DENOMINATOR: i64 = 100;
 
 #[derive(Clone)]
 pub(crate) struct SemanticProjectionSender {
@@ -143,7 +146,19 @@ async fn process_semantic_job(
 
     // Most captures are not from a supported app. Reject them before copying
     // node strings into the compact arena.
-    if registry.select(&app).is_none() {
+    let candidate_parser_ids = registry
+        .capture_plan(&app)
+        .map(|plan| plan.parser_ids)
+        .unwrap_or_default();
+    if candidate_parser_ids.is_empty() {
+        emit_sampled_semantic_telemetry(
+            job.frame_id,
+            &app,
+            &candidate_parser_ids,
+            None,
+            "no_candidate",
+            0,
+        );
         return Ok(());
     }
 
@@ -154,6 +169,14 @@ async fn process_semantic_job(
     // copies before parsing and database work.
     drop(nodes);
     if adapted.tree.is_empty() {
+        emit_sampled_semantic_telemetry(
+            job.frame_id,
+            &app,
+            &candidate_parser_ids,
+            None,
+            "empty",
+            0,
+        );
         return Ok(());
     }
 
@@ -172,7 +195,9 @@ async fn process_semantic_job(
         app: &app,
         input_content_hash,
     };
+    let parse_started = Instant::now();
     let result = registry.parse(&context, &adapted.tree, OutputBudget::default());
+    let parse_duration_us = parse_started.elapsed().as_micros() as u64;
     for failure in &result.failures {
         debug!(
             frame_id = job.frame_id,
@@ -182,15 +207,14 @@ async fn process_semantic_job(
         );
     }
 
-    let Some(parser_id) = result.selected_parser_id.as_deref() else {
-        return Ok(());
-    };
-    let Some(parser) = registry.parser(parser_id) else {
-        anyhow::bail!("selected semantic parser {parser_id} disappeared from registry");
-    };
-
     match result.outcome {
         ValidatedParseOutcome::Handled(projection) => {
+            let Some(parser_id) = result.selected_parser_id.as_deref() else {
+                anyhow::bail!("handled semantic projection did not select a parser");
+            };
+            let Some(parser) = registry.parser(parser_id) else {
+                anyhow::bail!("selected semantic parser {parser_id} disappeared from registry");
+            };
             let parse_duration = started.elapsed();
             let item_count = projection.items().len();
             let tree_heap_bytes = adapted.tree.estimated_heap_bytes();
@@ -209,6 +233,14 @@ async fn process_semantic_job(
                     &projection,
                 )
                 .await?;
+            emit_sampled_semantic_telemetry(
+                job.frame_id,
+                &app,
+                &candidate_parser_ids,
+                Some(parser_id),
+                "handled",
+                parse_duration_us,
+            );
             debug!(
                 frame_id = job.frame_id,
                 run_id = write.run_id,
@@ -223,9 +255,82 @@ async fn process_semantic_job(
                 "semantic projection stored"
             );
         }
-        ValidatedParseOutcome::Empty | ValidatedParseOutcome::NotHandled => {}
+        ValidatedParseOutcome::Empty => emit_sampled_semantic_telemetry(
+            job.frame_id,
+            &app,
+            &candidate_parser_ids,
+            result.selected_parser_id.as_deref(),
+            "empty",
+            parse_duration_us,
+        ),
+        ValidatedParseOutcome::NotHandled => emit_sampled_semantic_telemetry(
+            job.frame_id,
+            &app,
+            &candidate_parser_ids,
+            None,
+            "not_handled",
+            parse_duration_us,
+        ),
     }
     Ok(())
+}
+
+/// Emits a small, deterministic sample of semantic coverage data. This runs
+/// after capture has completed and delegates the HTTP request to the existing
+/// analytics task, so semantic processing never awaits telemetry.
+fn emit_sampled_semantic_telemetry(
+    frame_id: i64,
+    app: &AppIdentity,
+    candidate_parser_ids: &[String],
+    selected_parser_id: Option<&str>,
+    outcome: &'static str,
+    parse_duration_us: u64,
+) {
+    if !should_sample_semantic_telemetry(frame_id) {
+        return;
+    }
+
+    crate::analytics::capture_event_nonblocking(
+        "semantic_parser_sample",
+        semantic_telemetry_properties(
+            app,
+            candidate_parser_ids,
+            selected_parser_id,
+            outcome,
+            parse_duration_us,
+        ),
+    );
+}
+
+fn should_sample_semantic_telemetry(frame_id: i64) -> bool {
+    frame_id.rem_euclid(SEMANTIC_TELEMETRY_SAMPLE_DENOMINATOR) == 0
+}
+
+fn semantic_telemetry_properties(
+    app: &AppIdentity,
+    candidate_parser_ids: &[String],
+    selected_parser_id: Option<&str>,
+    outcome: &'static str,
+    parse_duration_us: u64,
+) -> Value {
+    let app_identifier = semantic_telemetry_app_identifier(app);
+    json!({
+        "semantic_app_identifier": app_identifier,
+        "semantic_candidate_parser_ids": candidate_parser_ids,
+        "semantic_selected_parser_id": selected_parser_id,
+        "semantic_outcome": outcome,
+        "semantic_parse_duration_us": parse_duration_us,
+    })
+}
+
+fn semantic_telemetry_app_identifier(app: &AppIdentity) -> &str {
+    if let Some(app_id) = app.app_id.as_deref() {
+        return app_id;
+    }
+    if let Some(executable) = app.executable.as_deref() {
+        return executable.rsplit(['/', '\\']).next().unwrap_or(executable);
+    }
+    &app.display_name
 }
 
 fn captured_semantic_nodes(
@@ -447,6 +552,56 @@ mod tests {
         );
         assert_eq!(normalize_locale_hint("C".into()), None);
         assert_eq!(normalize_locale_hint("x".repeat(65)), None);
+    }
+
+    #[test]
+    fn semantic_telemetry_sampling_is_deterministic_and_bounded() {
+        assert!(should_sample_semantic_telemetry(100));
+        assert!(should_sample_semantic_telemetry(-100));
+        assert!(!should_sample_semantic_telemetry(99));
+        assert!(!should_sample_semantic_telemetry(101));
+    }
+
+    #[test]
+    fn semantic_telemetry_properties_exclude_capture_content() {
+        let app = AppIdentity {
+            platform: Platform::Macos,
+            app_id: Some("com.tinyspeck.slackmacgap".into()),
+            executable: Some("Slack".into()),
+            display_name: "Slack".into(),
+            version: Some("4.39.95".into()),
+            browser_url: Some("https://private.example.com/thread/123".into()),
+        };
+        let properties = semantic_telemetry_properties(
+            &app,
+            &[
+                "app.macos.slack.content_list".into(),
+                "family.conversation".into(),
+            ],
+            Some("family.conversation"),
+            "handled",
+            73,
+        );
+
+        assert_eq!(
+            properties["semantic_app_identifier"],
+            "com.tinyspeck.slackmacgap"
+        );
+        assert_eq!(properties["semantic_outcome"], "handled");
+        assert_eq!(properties["semantic_parse_duration_us"], 73);
+        let serialized = properties.to_string();
+        assert!(!serialized.contains("private.example.com"));
+        assert!(!serialized.contains("browser_url"));
+        assert!(!serialized.contains("window_name"));
+        assert!(!serialized.contains("frame_id"));
+        assert!(!serialized.contains("text_content"));
+
+        let executable_only = AppIdentity {
+            app_id: None,
+            executable: Some("/Users/private-user/Applications/Slack".into()),
+            ..app
+        };
+        assert_eq!(semantic_telemetry_app_identifier(&executable_only), "Slack");
     }
 
     #[tokio::test]
