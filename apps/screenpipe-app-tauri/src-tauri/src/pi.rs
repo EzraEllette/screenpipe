@@ -2207,6 +2207,62 @@ pub async fn pi_start_inner(
         });
     }
 
+    // A queue deadline means Pi's internal agent state is unknowable: allowing
+    // the process to live would recreate the old failure where Rust "proceeded"
+    // after 300s while the UI and SDK remained wedged. Surface a real agent
+    // error, then stop only the PID that raised this timeout. The ordinary
+    // stdout-EOF path emits agent_terminated and the foreground restart logic
+    // can recover the session.
+    if let Some(qs) = queue_state_for_reader.clone() {
+        let mut timeout_rx = qs.subscribe_timeout();
+        let app_handle_for_timeout = app.clone();
+        let state_for_timeout = state.clone();
+        let sid_for_timeout = sid.clone();
+        tokio::spawn(async move {
+            while timeout_rx.changed().await.is_ok() {
+                let timeout = timeout_rx.borrow().clone();
+                let Some(timeout) = timeout else {
+                    continue;
+                };
+                let message = format!(
+                    "AI {} timed out after {} seconds",
+                    timeout.command_type, timeout.timeout_secs
+                );
+                let _ = emit_agent_event(
+                    &app_handle_for_timeout,
+                    &sid_for_timeout,
+                    json!({
+                        "type": "error",
+                        "error": message,
+                    }),
+                );
+                let _ = emit_agent_event(
+                    &app_handle_for_timeout,
+                    &sid_for_timeout,
+                    json!({
+                        "type": "response",
+                        "success": false,
+                        "error": message,
+                    }),
+                );
+
+                let mut pool = state_for_timeout.0.lock().await;
+                if let Some(manager) = pool.sessions.get_mut(&sid_for_timeout) {
+                    let timed_out_pid_is_current =
+                        manager.child.as_ref().map(|child| child.id()) == Some(pid);
+                    if timed_out_pid_is_current {
+                        error!(
+                            "Stopping timed-out Pi process (pid {}, session {}, command {})",
+                            pid, sid_for_timeout, timeout.command_type
+                        );
+                        manager.stop();
+                    }
+                }
+                break;
+            }
+        });
+    }
+
     // Snapshot the state BEFORE dropping the lock, so we don't hold it during I/O
     let snapshot = match pool.sessions.get_mut(&sid) {
         Some(m) => m.snapshot(&sid),

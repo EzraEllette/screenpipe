@@ -9,6 +9,10 @@ import { isFrontierModel } from '../services/cost-tracker';
 import { isFlexEligible } from '../utils/latency';
 import { routeTier, routerArm, TIER_HEAD } from './difficulty-router';
 import { captureException } from '@sentry/cloudflare';
+import {
+	openStreamWithDeadlines,
+	streamDeadlinesForLatency,
+} from '../utils/stream-deadline';
 
 // Auto model waterfall (INTERACTIVE) — use only current OpenAI/Anthropic models.
 // Keep a cross-provider option second so an OpenAI outage does not break chat.
@@ -185,6 +189,7 @@ async function tryModel(
   env: Env,
   ctx: 'auto' | 'fallback' | 'explicit',
   flexEligible: boolean = false,
+  latency: 'interactive' | 'background' = 'interactive',
 ): Promise<Response> {
   try {
     // Resolve legacy aliases up front so both provider selection AND the
@@ -207,7 +212,13 @@ async function tryModel(
       if (withFlex) rb.serviceTier = 'flex';
       else delete (rb as Partial<RequestBody>).serviceTier;
       if (body.stream) {
-        const stream = await provider.createStreamingCompletion(rb);
+        const stream = await openStreamWithDeadlines(
+          (signal) => provider.createStreamingCompletion(rb, signal),
+          {
+            ...streamDeadlinesForLatency(latency),
+            label: `${model} streaming completion`,
+          },
+        );
         return tagServedTier(new Response(stream, {
           headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' },
         }), withFlex);
@@ -279,7 +290,9 @@ async function tryModel(
 
     if (transient) {
       console.warn(`${ctx}: ${model} failed (${status}), cascading`);
-      const outcome = status === 429 ? 'rate_limited' : status === 408 ? 'timeout' : 'error';
+      const outcome = status === 429
+        ? 'rate_limited'
+        : [408, 504, 524].includes(status) ? 'timeout' : 'error';
       logModelOutcome(env, { model, outcome }).catch(() => {});
       // A 500 the provider actually returned (explicit .status, or "500" in
       // its message — e.g. Gemini "error code: 500", SCREENPIPE-AI-PROXY-V)
@@ -330,13 +343,14 @@ async function runChain(
   ctx: 'auto' | 'fallback',
   flexEligible: boolean = false,
   maxAttempts: number = chain.length,
+  latency: 'interactive' | 'background' = 'interactive',
 ): Promise<{ response: Response; model: string } | { error: any; lastModel: string }> {
   let lastError: any = null;
   let lastModel = chain[0];
   for (const model of boundedModelChain(chain, maxAttempts)) {
     lastModel = model;
     try {
-      const response = await tryModel(model, body, env, ctx, flexEligible);
+      const response = await tryModel(model, body, env, ctx, flexEligible, latency);
       logModelOutcome(env, { model, outcome: 'ok' }).catch(() => {});
       return { response, model };
     } catch (error: any) {
@@ -521,6 +535,7 @@ export async function handleChatCompletions(
       'auto',
       flexEligible,
       freePreview ? FREE_PREVIEW_MAX_UPSTREAM_ATTEMPTS : chain.length,
+      latency,
     );
     if ('response' in result) {
       const resp = addCorsHeaders(addModelHeader(result.response, result.model));
@@ -538,7 +553,7 @@ export async function handleChatCompletions(
   const fallbacks = MODEL_FALLBACKS[body.model];
   if (fallbacks?.length) {
     const chain = [body.model, ...fallbacks];
-    const result = await runChain(chain, body, env, 'fallback', flexEligible);
+    const result = await runChain(chain, body, env, 'fallback', flexEligible, chain.length, latency);
     if ('response' in result) {
       return addCorsHeaders(addModelHeader(result.response, result.model));
     }
@@ -553,7 +568,7 @@ export async function handleChatCompletions(
   // Single attempt — but still translate gateway errors to friendlier
   // messages instead of leaking raw "524 error code: 524" to the user.
   try {
-    const response = await tryModel(body.model, body, env, 'explicit', flexEligible);
+    const response = await tryModel(body.model, body, env, 'explicit', flexEligible, latency);
     logModelOutcome(env, { model: body.model, outcome: 'ok' }).catch(() => {});
     return addCorsHeaders(addModelHeader(response, body.model));
   } catch (error: any) {

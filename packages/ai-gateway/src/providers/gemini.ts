@@ -151,7 +151,10 @@ export class GeminiProvider implements AIProvider {
 		});
 	}
 
-	async createStreamingCompletion(body: RequestBody): Promise<ReadableStream> {
+	async createStreamingCompletion(
+		body: RequestBody,
+		signal?: AbortSignal,
+	): Promise<ReadableStream<Uint8Array>> {
 		const url = this.getEndpointUrl(body.model, true);
 		const requestBody = this.buildRequestBody(body);
 
@@ -168,6 +171,7 @@ export class GeminiProvider implements AIProvider {
 			method: 'POST',
 			headers: streamHeaders,
 			body: JSON.stringify(requestBody),
+			signal,
 		});
 
 		if (!response.ok) {
