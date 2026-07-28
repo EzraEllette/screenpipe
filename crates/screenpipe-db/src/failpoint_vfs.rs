@@ -383,7 +383,10 @@ mod tests {
 
         // Build the production queue shape with its recovery callback wired.
         let write_pool = SqlitePoolOptions::new()
-            .max_connections(2)
+            // Keep the pre-fault write and the armed batch on exactly one
+            // connection so `PRAGMA shrink_memory` below clears the page cache
+            // that the batch will actually use.
+            .max_connections(1)
             .min_connections(1)
             .acquire_timeout(Duration::from_secs(2))
             .connect_with(opts.clone())
@@ -395,7 +398,7 @@ mod tests {
         let fired_hook = fired.clone();
         let queue = spawn_write_drain_with(
             write_pool.clone(),
-            sem,
+            sem.clone(),
             Arc::from(format!("{}", db.display()).as_str()),
             WriteDrainOpts {
                 on_persistent_failure: crate::write_queue::persistent_failure_slot(Some(Arc::new(
@@ -417,6 +420,20 @@ mod tests {
             .await
             .expect("write succeeds before the wedge");
 
+        // The failpoint only intercepts real VFS reads. A prior write can leave
+        // the b-tree pages cached, allowing the first armed write to commit
+        // without an I/O operation. Empty the sole write connection's cache and
+        // hold the drain semaphore while all callers are submitted, making the
+        // first batch deterministically cross the injected I/O boundary.
+        {
+            let mut conn = write_pool.acquire().await.unwrap();
+            sqlx::query("PRAGMA shrink_memory")
+                .execute(&mut *conn)
+                .await
+                .unwrap();
+        }
+        let write_gate = sem.clone().acquire_owned().await.unwrap();
+
         // --- ARM the wedge: every write now hits a hard disk I/O error.
         arm();
 
@@ -434,6 +451,7 @@ mod tests {
                     .await
             }));
         }
+        drop(write_gate);
         for result in pending {
             assert!(
                 result.await.expect("write task must not panic").is_err(),
