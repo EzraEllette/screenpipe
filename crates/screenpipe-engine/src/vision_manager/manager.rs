@@ -230,6 +230,23 @@ impl VisionManager {
         &self.config.vision_metrics
     }
 
+    /// Whether every event-driven capture loop is deliberately paused.
+    ///
+    /// Keep this authoritative state beside the manager's power-profile
+    /// receiver so supervisors do not mistake an intentional no-frame period
+    /// for a dead ScreenCaptureKit stream. The event loop applies the same
+    /// four predicates before releasing its persistent capture handle.
+    pub(crate) fn capture_is_intentionally_paused(&self) -> bool {
+        crate::sleep_monitor::screen_is_locked()
+            || self
+                .power_profile_rx
+                .as_ref()
+                .map(|rx| rx.borrow().capture_paused)
+                .unwrap_or(false)
+            || crate::drm_detector::drm_content_paused()
+            || crate::schedule_monitor::schedule_paused()
+    }
+
     /// Check whether a monitor is allowed by the user's monitor filter settings.
     /// Uses prefix matching (name + resolution) so that position changes after
     /// reconnect don't break the filter.

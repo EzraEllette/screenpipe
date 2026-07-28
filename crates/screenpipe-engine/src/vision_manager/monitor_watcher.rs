@@ -84,6 +84,16 @@ const SILENT_DB_STALE_SECS: u64 = 240;
 /// first model load / device probe is never mistaken for a stall.
 const SILENT_NEVER_PRODUCED_UPTIME_SECS: f64 = 240.0;
 
+/// Whether the capture-stall watchdog must stand down. `capture_ready` is
+/// `Some(false)` only when CoreGraphics positively says that no display can
+/// produce a frame (sleep / clamshell); `None` is an unreadable topology, not
+/// proof that capture is intentionally unavailable. This preserves #5393's
+/// three-state discipline instead of conflating no data with no opportunity to
+/// capture it.
+fn capture_watchdog_paused(intentionally_paused: bool, capture_ready: Option<bool>) -> bool {
+    intentionally_paused || matches!(capture_ready, Some(false))
+}
+
 fn now_epoch_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -577,7 +587,22 @@ pub async fn start_monitor_watcher(
             //     `vision_capture_silent`.
             // Both are cooldown-gated so a stall a restart can't fix can't cause
             // a restart storm, and neither fires on a healthy static screen.
-            {
+            // Do not interpret an intentionally paused capture pipeline as a
+            // dead SCK stream. The shared topology reader is deliberately
+            // stricter than the audio watchdog's `usable_display_ids`: an
+            // asleep external display may remain usable for audio, but it
+            // cannot produce a vision frame. An unreadable topology stays
+            // actionable rather than suppressing recovery.
+            let capture_ready = if cfg!(target_os = "macos") {
+                screenpipe_core::display_topology::capture_ready_display_ids()
+                    .map(|displays| !displays.is_empty())
+            } else {
+                None
+            };
+            if !capture_watchdog_paused(
+                vision_manager.capture_is_intentionally_paused(),
+                capture_ready,
+            ) {
                 let now_ts = now_epoch_secs();
                 let snap = vision_manager.vision_metrics().snapshot();
                 let wedged = vision_capture_wedged(
@@ -1008,6 +1033,25 @@ mod tests {
         // same config won't help (permission/monitor issue handled elsewhere) and
         // could restart-loop → not silent.
         assert!(!vision_capture_silent(600.0, 0, 0, NOW));
+    }
+
+    // ── capture_watchdog_paused ────────────────────────────────────────────
+
+    #[test]
+    fn watchdog_stands_down_only_for_known_intentional_unavailability() {
+        // Lock / DRM / schedule / FullPause always deliberately stop capture.
+        assert!(capture_watchdog_paused(true, Some(true)));
+
+        // #5393's shared topology verdict: no capture-ready display is a
+        // normal sleep / clamshell condition, never a dead capture stream.
+        assert!(capture_watchdog_paused(false, Some(false)));
+
+        // A capture-ready display means data should arrive; keep recovery on.
+        assert!(!capture_watchdog_paused(false, Some(true)));
+
+        // CoreGraphics failed to answer: unknown must never be reclassified as
+        // an intentional pause, or a real stream wedge could be hidden.
+        assert!(!capture_watchdog_paused(false, None));
     }
 
     fn mon(name: &str, x: i32, y: i32, w: u32, h: u32, primary: bool) -> MonitorData {
