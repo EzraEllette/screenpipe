@@ -10,7 +10,11 @@ import { mountAgentEventBus, onTerminated as onAgentTerminated } from "@/lib/eve
 import { commands } from "@/lib/utils/tauri";
 import { useChatStore } from "@/lib/stores/chat-store";
 import { useAcpSessionConfig } from "@/lib/stores/acp-session-config";
-import { statusForEvent } from "@/lib/stores/pi-event-router";
+import {
+  settlePiForegroundTurn,
+  settlePiQueueTimeout,
+  statusForEvent,
+} from "@/lib/stores/pi-event-router";
 import { extractInjectedUserText } from "@/lib/chat-utils";
 import { imageDataUrlsFromPiContent } from "@/lib/chat/image-content";
 import { acpSpawnSignature } from "@/lib/chat/acp-spawn-signature";
@@ -205,6 +209,19 @@ export function usePiForegroundEvents({
         });
       }
       return true;
+    };
+
+    const publishForegroundSettlement = (
+      messageId: string,
+      updateMessage: (message: Message) => Message | null,
+      outcome: { status: "idle" } | { status: "error"; error: string },
+    ) => {
+      const sid = piSessionIdRef.current;
+      if (!sid) return;
+      if (settlePiForegroundTurn(sid, messageId, updateMessage, outcome)) {
+        const storeMessages = useChatStore.getState().sessions[sid]?.messages as Message[] | undefined;
+        if (storeMessages) setMessages(storeMessages);
+      }
     };
 
     const handlePiEventData = (payload: unknown) => {
@@ -830,6 +847,7 @@ export function usePiForegroundEvents({
               id: queuedTurnAssistantId,
               role: "assistant",
               content: "Processing...",
+              ...(typeof data.queueId === "string" ? { piQueueId: data.queueId } : {}),
               ...(nextUserIntent === "steer" ? { intent: "steer" as const } : {}),
               ...(matchedTurnIntent ? { turnIntentId: matchedTurnIntent.id } : {}),
               ...(nextUserIntent === "steer" ? { steeredResponse: true } : {}),
@@ -966,7 +984,6 @@ export function usePiForegroundEvents({
           if (!isPipeWatch) {
             setIsLoading(false);
             setIsStreaming(false);
-            emitSessionActivity({ status: "idle" });
           }
 
           if (piMessageIdRef.current && !isPipeWatch) {
@@ -1027,84 +1044,85 @@ export function usePiForegroundEvents({
               !piLastErrorRef.current &&
               hasNonEmptyChatResult;
 
-            // Check if content was already set by error handlers above
-            setMessages((prev) => {
-              const existing = prev.find((m) => m.id === msgId);
-              // Don't overwrite error messages with "Done" or empty content
-              const isErrorMessage = existing?.content?.includes("daily") && existing?.content?.includes("limit") ||
-                existing?.content?.includes("free queries") ||
-                existing?.content?.includes("daily Pro limit") ||
-                existing?.content?.includes("daily query limit") ||
-                existing?.content?.includes("requires an upgrade") ||
-                existing?.content?.includes("Rate limited") ||
-                existing?.content?.includes("rate limit") ||
-                existing?.content?.includes("safety policy") ||
-                existing?.content?.includes("chat is too long") ||
-                existing?.content?.startsWith("Error:");
-              if (isErrorMessage) {
-                return prev;
+            // Derive settlement from the store-current correlated turn. The
+            // panel snapshot may predate a queued row that started immediately.
+            const updateTerminalMessage = (existing: Message): Message | null => {
+              const isErrorMessage = existing.content?.includes("daily") && existing.content?.includes("limit") ||
+                existing.content?.includes("free queries") ||
+                existing.content?.includes("daily Pro limit") ||
+                existing.content?.includes("daily query limit") ||
+                existing.content?.includes("requires an upgrade") ||
+                existing.content?.includes("Rate limited") ||
+                existing.content?.includes("rate limit") ||
+                existing.content?.includes("safety policy") ||
+                existing.content?.includes("chat is too long") ||
+                existing.content?.startsWith("Error:");
+              if (isErrorMessage || (existing.content !== "Processing..." && !content)) {
+                return existing;
               }
-              // Don't overwrite if we have no new content and existing isn't "Processing..."
-              if (existing && existing.content !== "Processing..." && !content) {
-                return prev;
-              }
+
               const contentBlocks = [...blocksSnapshot];
-              // The turn paused for a sign-in card, or the user stopped it, with
-              // nothing rendered yet: drop the empty placeholder bubble instead
-              // of showing "No response from model". The auth flow re-sends the
-              // prompt after login.
               const authPending = (data as { authPending?: boolean }).authPending === true;
               if ((wasStoppedByUser || authPending) && !content && contentBlocks.length === 0) {
-                return prev.filter((m) => m.id !== msgId);
+                return null;
               }
-              // If no text content but we have tool/thinking blocks, don't show "no response"
-              const hasNonTextBlocks = contentBlocks.some((b) => b.type === "tool" || b.type === "thinking");
+
+              let resolvedContent = content;
               let emptyResponseRetryPrompt: string | undefined;
-              if (!content && hasNonTextBlocks) {
-                content = ""; // empty — tool/thinking blocks will render
-              } else if (!content) {
-                // If any error text was observed during this stream (e.g. a 429
-                // credits_exhausted or daily_cost_limit_exceeded emitted as a
-                // message_update error or auto-retry failure) classify it
-                // before falling back to the generic "no response" string.
+              const hasNonTextBlocks = contentBlocks.some(
+                (block) => block.type === "tool" || block.type === "thinking",
+              );
+              if (!resolvedContent && hasNonTextBlocks) {
+                resolvedContent = "";
+              } else if (!resolvedContent) {
                 const lastErr = piLastErrorRef.current;
                 const lastErrKind = lastErr ? classifyQuotaError(lastErr) : "none";
                 if (lastErr && lastErrKind === "daily") {
                   posthog.capture("wall_hit", { reason: "daily_limit", source: "chat" });
-                  content = dailyLimitMessage(lastErr);
+                  resolvedContent = dailyLimitMessage(lastErr);
                 } else if (lastErr && lastErrKind === "rate") {
-                  content = buildRateLimitMessage(lastErr);
+                  resolvedContent = buildRateLimitMessage(lastErr);
                 } else if (lastErr) {
                   const providerError = buildProviderErrorPresentation(lastErr, getActivePreset());
-                  content = providerError?.message || `Error: ${lastErr}`;
+                  resolvedContent = providerError?.message || `Error: ${lastErr}`;
                   if (providerError?.retryable !== false) {
                     emptyResponseRetryPrompt = lastUserMessageRef.current || undefined;
                   }
                 } else {
-                  content = buildNoResponseMessage(getActivePreset());
+                  resolvedContent = buildNoResponseMessage(getActivePreset());
                   emptyResponseRetryPrompt = lastUserMessageRef.current || undefined;
                 }
               }
-              // Add text as a content block if no text block exists yet
-              const hasTextBlock = contentBlocks.some((b) => b.type === "text");
-              if (!streamedText && content && !hasTextBlock) {
-                contentBlocks.push({ type: "text", text: content });
+              const hasTextBlock = contentBlocks.some((block) => block.type === "text");
+              if (!streamedText && resolvedContent && !hasTextBlock) {
+                contentBlocks.push({ type: "text", text: resolvedContent });
               }
-              return prev.map((m) => m.id === msgId
-                ? {
-                    ...m,
-                    content,
-                    contentBlocks,
-                    ...(wasStoppedByUser
-                      ? {
-                          workDurationMs: Math.max(1, Date.now() - m.timestamp),
-                          stoppedByUser: true,
-                        }
-                      : {}),
-                    ...(emptyResponseRetryPrompt ? { retryPrompt: emptyResponseRetryPrompt } : {}),
-                  }
-                : m);
-            });
+              return {
+                ...existing,
+                content: resolvedContent,
+                contentBlocks,
+                ...(wasStoppedByUser
+                  ? {
+                      workDurationMs: Math.max(1, Date.now() - existing.timestamp),
+                      stoppedByUser: true,
+                    }
+                  : {}),
+                ...(emptyResponseRetryPrompt ? { retryPrompt: emptyResponseRetryPrompt } : {}),
+              };
+            };
+            const terminalError = agentEndError ?? piLastErrorRef.current;
+            publishForegroundSettlement(
+              msgId,
+              updateTerminalMessage,
+              terminalError
+                ? { status: "error", error: terminalError }
+                : { status: "idle" },
+            );
+            emitSessionActivity(
+              terminalError
+                ? { status: "error", lastError: terminalError }
+                : { status: "idle" },
+            );
             if (!isPipeWatch) {
               const telemetryContext = chatTelemetryContextForResponse(
                 messagesRef.current,
@@ -1124,6 +1142,8 @@ export function usePiForegroundEvents({
                 }
               }, POST_STREAM_SIDE_EFFECT_DELAY_MS);
             }
+          } else if (!isPipeWatch) {
+            emitSessionActivity({ status: "idle" });
           }
           if (!isPipeWatch) {
             piStreamingTextRef.current = "";
@@ -1136,11 +1156,35 @@ export function usePiForegroundEvents({
             piRateLimitRetries.current = 0;
             setIsLoading(false);
             setIsStreaming(false);
-            emitSessionActivity({ status: "idle" });
             if (pendingSteerBatchRef.current.some((item: { sessionId: string }) => item.sessionId === piSessionIdRef.current)) {
               void flushPendingSteerBatch();
             }
           }
+        } else if (data.type === "queue_timeout") {
+          const sid = piSessionIdRef.current;
+          const msgId = piMessageIdRef.current;
+          if (!sid || !msgId || !settlePiQueueTimeout(sid, data, msgId)) return;
+
+          const errorStr = stringValue(data.error, "Unknown error");
+          const content = `Error: ${errorStr}`;
+          cancelStreamingMessageRender();
+          emitSessionActivity({ status: "error", lastError: errorStr });
+          setMessages((prev) =>
+            prev.map((message) =>
+              message.id === msgId
+                ? {
+                    ...message,
+                    content,
+                    contentBlocks: [{ type: "text", text: content }],
+                  }
+                : message,
+            ),
+          );
+          piStreamingTextRef.current = "";
+          piMessageIdRef.current = null;
+          piContentBlocksRef.current = [];
+          setIsLoading(false);
+          setIsStreaming(false);
         } else if (data.type === "response" && data.success === false) {
           const errorStr = stringValue(data.error, "Unknown error");
           emitSessionActivity({ status: "error", lastError: errorStr });

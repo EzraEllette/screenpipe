@@ -31,6 +31,7 @@ import {
   flushPendingSaves,
   handlePiEvent,
   handleTerminated,
+  settlePiForegroundTurn,
 } from "../stores/pi-event-router";
 import { useChatStore, type SessionRecord } from "../stores/chat-store";
 import { useAcpSessionConfig } from "../stores/acp-session-config";
@@ -239,6 +240,119 @@ describe("pi-event-router: status mirroring for backgrounded sessions", () => {
     const session = useChatStore.getState().sessions.A;
     expect(session.lastContentAt).toBeGreaterThan(100);
     expect(session.unread).toBe(true);
+  });
+});
+
+describe("pi-event-router: correlated terminal settlement", () => {
+  beforeEach(reset);
+
+  it("settles only the background turn matching the timeout queue id", async () => {
+    seed("A", {
+      status: "streaming",
+      streamingMessageId: "a1",
+      isLoading: true,
+      isStreaming: true,
+      messages: [
+        {
+          id: "a1",
+          role: "assistant",
+          content: "Processing...",
+          piQueueId: "q_current",
+          timestamp: 1,
+        },
+      ],
+      messageCount: 1,
+    });
+    useChatStore.setState({ currentId: "B" });
+
+    await handlePiEvent(
+      piEvt("A", {
+        type: "queue_timeout",
+        queueId: "q_current",
+        error: "Pi prompt timed out after 300 seconds without completing",
+      }),
+    );
+
+    const session = useChatStore.getState().sessions.A;
+    expect(session.status).toBe("error");
+    expect(session.isLoading).toBe(false);
+    expect(session.isStreaming).toBe(false);
+    expect((session.messages![0] as any).content).toContain("timed out");
+  });
+
+  it("ignores a delayed timeout from an older queue turn", async () => {
+    seed("A", {
+      status: "streaming",
+      streamingMessageId: "a2",
+      isLoading: true,
+      isStreaming: true,
+      messages: [
+        { id: "a1", role: "assistant", content: "done", piQueueId: "q_old", timestamp: 1 },
+        { id: "a2", role: "assistant", content: "Processing...", piQueueId: "q_new", timestamp: 2 },
+      ],
+      messageCount: 2,
+    });
+
+    await handlePiEvent(
+      piEvt("A", { type: "queue_timeout", queueId: "q_old", error: "old timeout" }),
+    );
+
+    const session = useChatStore.getState().sessions.A;
+    expect(session.status).toBe("streaming");
+    expect(session.streamingMessageId).toBe("a2");
+    expect((session.messages![1] as any).content).toBe("Processing...");
+  });
+
+  it("carries message_start queue identity into a background placeholder", async () => {
+    seed("A");
+    useChatStore.setState({ currentId: "B" });
+
+    await handlePiEvent(
+      piEvt("A", {
+        type: "message_start",
+        queueId: "q_followup",
+        message: { role: "user", content: "queued follow-up" },
+      }),
+    );
+    await handlePiEvent(
+      piEvt("A", { type: "queue_timeout", queueId: "q_followup", error: "follow-up timed out" }),
+    );
+
+    const session = useChatStore.getState().sessions.A;
+    expect(session.status).toBe("error");
+    expect((session.messages![1] as any).piQueueId).toBe("q_followup");
+  });
+
+  it("foreground settlement preserves store-newer queued rows", () => {
+    seed("A", {
+      status: "streaming",
+      streamingMessageId: "a1",
+      isLoading: true,
+      isStreaming: true,
+      messages: [
+        { id: "u1", role: "user", content: "first", timestamp: 1 },
+        { id: "a1", role: "assistant", content: "Processing...", timestamp: 2 },
+        { id: "u2", role: "user", content: "queued", timestamp: 3 },
+        { id: "a2", role: "assistant", content: "Processing...", timestamp: 4 },
+      ],
+      messageCount: 4,
+    });
+
+    expect(
+      settlePiForegroundTurn(
+        "A",
+        "a1",
+        (message) => ({ ...message, content: "done" }),
+        { status: "idle" },
+      ),
+    ).toBe(true);
+
+    expect(useChatStore.getState().sessions.A.messages?.map((message: any) => message.id)).toEqual([
+      "u1",
+      "a1",
+      "u2",
+      "a2",
+    ]);
   });
 });
 

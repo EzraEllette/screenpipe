@@ -117,6 +117,8 @@ export interface Message {
   displayContent?: string;
   intent?: "steer";
   turnIntentId?: string;
+  /** Rust queue identity for timeout correlation during this live session. */
+  piQueueId?: string;
   images?: string[];
   attachments?: ChatAttachment[];
   timestamp: number;

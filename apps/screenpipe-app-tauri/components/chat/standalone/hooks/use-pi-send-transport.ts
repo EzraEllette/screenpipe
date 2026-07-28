@@ -11,6 +11,7 @@ import { buildProviderErrorPresentation, preflightChatProvider } from "@/lib/cha
 import { isAcpAuthenticationCancelledError, isAcpExternalAuthError } from "@/lib/chat/auth-errors";
 import { queuedPreviewForText } from "@/lib/chat/queued-display";
 import { useChatStore } from "@/lib/stores/chat-store";
+import { settlePiForegroundTurn } from "@/lib/stores/pi-event-router";
 import { createPiMessageQueueTransport } from "@/components/chat/standalone/hooks/use-pi-message-queue-transport";
 import { usePiLiveSendControls } from "@/components/chat/standalone/hooks/use-pi-live-send";
 import { usePiSteeringTransport } from "@/components/chat/standalone/hooks/use-pi-steering-transport";
@@ -130,6 +131,18 @@ export function usePiSendTransport(options: PiSendTransportOptions) {
     syncThinkingLevelAfterStart,
   } = options;
   const getActivePreset = () => activePresetRef?.current ?? activePreset;
+  const settleDispatchFailure = (
+    sessionId: string | null,
+    messageId: string,
+    error: string,
+    patcher: (message: Message) => Message,
+  ) => {
+    if (!sessionId) return;
+    settlePiForegroundTurn(sessionId, messageId, patcher, {
+      status: "error",
+      error,
+    });
+  };
   const { enqueuePiMessage } = createPiMessageQueueTransport(
     options,
     (message, displayLabel, imageDataUrls) => sendPiMessage(message, displayLabel, imageDataUrls),
@@ -665,21 +678,16 @@ export function usePiSendTransport(options: PiSendTransportOptions) {
             ? { ...m, content: providerPreflight.message, retryPrompt: userMessage }
             : m)
         );
-        if (sidNow) {
-          const storeState = useChatStore.getState();
-          storeState.actions.patchMessage(sidNow, assistantMessageId, (m: any) => ({
-            ...m,
+        settleDispatchFailure(
+          sidNow,
+          assistantMessageId,
+          providerPreflight.message,
+          (message) => ({
+            ...message,
             content: providerPreflight.message,
             retryPrompt: userMessage,
-          }));
-          storeState.actions.setStreaming(sidNow, {
-            streamingMessageId: null,
-            streamingText: "",
-            contentBlocks: [],
-            isLoading: false,
-            isStreaming: false,
-          });
-        }
+          }),
+        );
         forceQueueModeRef.current = false;
         setIsLoading(false);
         setIsStreaming(false);
@@ -727,6 +735,22 @@ export function usePiSendTransport(options: PiSendTransportOptions) {
         }
       }
 
+      if (result.status === "ok") {
+        const piQueueId = result.data;
+        setMessages((prev) =>
+          prev.map((message) =>
+            message.id === assistantMessageId ? { ...message, piQueueId } : message,
+          ),
+        );
+        if (sidNow) {
+          useChatStore.getState().actions.patchMessage(
+            sidNow,
+            assistantMessageId,
+            (message: any) => ({ ...message, piQueueId }),
+          );
+        }
+      }
+
       if (result.status === "error") {
         if (timeoutId) clearTimeout(timeoutId);
         piMessageIdRef.current = null;
@@ -765,21 +789,11 @@ export function usePiSendTransport(options: PiSendTransportOptions) {
               : m
           )
         );
-        if (sidNow) {
-          const storeState = useChatStore.getState();
-          storeState.actions.patchMessage(sidNow, assistantMessageId, (message: any) => ({
-            ...message,
-            content: errorMsg,
-            ...(retryPrompt ? { retryPrompt } : {}),
-          }));
-          storeState.actions.setStreaming(sidNow, {
-            streamingMessageId: null,
-            streamingText: "",
-            contentBlocks: [],
-            isLoading: false,
-            isStreaming: false,
-          });
-        }
+        settleDispatchFailure(sidNow, assistantMessageId, rawError, (message) => ({
+          ...message,
+          content: errorMsg,
+          ...(retryPrompt ? { retryPrompt } : {}),
+        }));
         posthog.capture("chat_response_error", {
           provider: getActivePreset()?.provider,
           model: getActivePreset()?.model,
@@ -802,22 +816,11 @@ export function usePiSendTransport(options: PiSendTransportOptions) {
             : m
         )
       );
-      if (sidNow) {
-        const content = providerError?.message || `Error: ${rawError}`;
-        const storeState = useChatStore.getState();
-        storeState.actions.patchMessage(sidNow, assistantMessageId, (message: any) => ({
-          ...message,
-          content,
-          retryPrompt: providerError?.retryable === false ? undefined : userMessage,
-        }));
-        storeState.actions.setStreaming(sidNow, {
-          streamingMessageId: null,
-          streamingText: "",
-          contentBlocks: [],
-          isLoading: false,
-          isStreaming: false,
-        });
-      }
+      settleDispatchFailure(sidNow, assistantMessageId, rawError, (message) => ({
+        ...message,
+        content: providerError?.message || `Error: ${rawError}`,
+        retryPrompt: providerError?.retryable === false ? undefined : userMessage,
+      }));
       forceQueueModeRef.current = false;
       setIsLoading(false);
       setIsStreaming(false);

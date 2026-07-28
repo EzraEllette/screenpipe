@@ -3154,8 +3154,9 @@ pub async fn pi_start_inner(
     if let Some(qs) = queue_state_for_reader.clone() {
         let app_handle_for_queue = app.clone();
         let sid_for_queue = sid.clone();
+        let qs_for_queue = qs.clone();
         tokio::spawn(async move {
-            let mut rx = qs.subscribe_queued();
+            let mut rx = qs_for_queue.subscribe_queued();
             // Emit current state immediately so any UI that subscribes after
             // the watcher boot still gets a fresh value without polling.
             let snap = rx.borrow().clone();
@@ -3175,6 +3176,26 @@ pub async fn pi_start_inner(
                         "queued": snap,
                     }),
                 );
+            }
+        });
+
+        let app_handle_for_timeout = app.clone();
+        let sid_for_timeout = sid.clone();
+        tokio::spawn(async move {
+            let mut rx = qs.subscribe_timeout_errors();
+            while rx.changed().await.is_ok() {
+                let timeout = rx.borrow().clone();
+                if let Some(timeout) = timeout {
+                    let _ = emit_agent_event(
+                        &app_handle_for_timeout,
+                        &sid_for_timeout,
+                        serde_json::json!({
+                            "type": "queue_timeout",
+                            "queueId": timeout.queue_id,
+                            "error": timeout.error,
+                        }),
+                    );
+                }
             }
         });
     }
@@ -3214,13 +3235,30 @@ pub async fn pi_start_inner(
         let mut pending_text_delta: Option<PendingAgentTextDelta> = None;
         while let Some(line) = read_lines_lossy(&mut reader) {
             line_count += 1;
-            let parsed = serde_json::from_str::<Value>(&line).ok();
+            let mut parsed = serde_json::from_str::<Value>(&line).ok();
             let is_stdout_text_delta = parsed.as_ref().and_then(assistant_text_delta).is_some();
             let event_type = parsed.as_ref().and_then(|v| {
                 v.get("type")
                     .and_then(|t| t.as_str())
                     .map(|s| s.to_string())
             });
+            if event_type.as_deref() == Some("message_start") {
+                if let (Some(event), Some(qs)) = (parsed.as_mut(), queue_state_for_reader.as_ref())
+                {
+                    let is_user_message = event
+                        .get("message")
+                        .and_then(|message| message.get("role"))
+                        .and_then(|role| role.as_str())
+                        == Some("user");
+                    if is_user_message {
+                        if let (Some(queue_id), Some(event)) =
+                            (qs.active_prompt_id(), event.as_object_mut())
+                        {
+                            event.insert("queueId".to_string(), Value::String(queue_id));
+                        }
+                    }
+                }
+            }
             debug!(
                 "Pi stdout #{} (pid {}, session {}): type={}",
                 line_count,

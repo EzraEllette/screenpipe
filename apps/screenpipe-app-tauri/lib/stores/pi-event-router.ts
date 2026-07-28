@@ -180,6 +180,80 @@ function errorMessage(evt: PiInnerEvent): string | null {
   return null;
 }
 
+function messageMatchesQueueId(message: any, queueId: string): boolean {
+  return message?.piQueueId === queueId || message?.turnIntentId === `queued-${queueId}`;
+}
+
+type PiForegroundTurnOutcome =
+  | { status: "idle" }
+  | { status: "error"; error: string };
+
+/** Settle only the store-current foreground turn. The message-id guard keeps
+ * a delayed terminal event from clearing a newer queued turn. */
+export function settlePiForegroundTurn(
+  sid: string,
+  expectedMessageId: string,
+  updateMessage: (message: any) => any | null,
+  outcome: PiForegroundTurnOutcome,
+): boolean {
+  const store = useChatStore.getState();
+  const session = store.sessions[sid];
+  if (session?.streamingMessageId !== expectedMessageId) return false;
+
+  const currentMessages = session.messages ?? [];
+  const currentMessage = currentMessages.find(
+    (message: any) => message?.id === expectedMessageId,
+  );
+  if (!currentMessage) return false;
+
+  const updatedMessage = updateMessage(currentMessage);
+  const messages = updatedMessage
+    ? currentMessages.map((message: any) =>
+        message?.id === expectedMessageId ? updatedMessage : message,
+      )
+    : currentMessages.filter((message: any) => message?.id !== expectedMessageId);
+
+  store.actions.setMessages(sid, messages);
+  store.actions.patch(sid, {
+    status: outcome.status,
+    lastError: outcome.status === "error" ? outcome.error : undefined,
+  });
+  store.actions.endTurn(sid);
+  return true;
+}
+
+/** Settle a timeout only when its backend queue id still belongs to the
+ * assistant message currently streaming for this session. */
+export function settlePiQueueTimeout(
+  sid: string,
+  payload: PiInnerEvent,
+  expectedMessageId?: string | null,
+): boolean {
+  if (payload.type !== "queue_timeout") return false;
+  const queueId = typeof payload.queueId === "string" ? payload.queueId : null;
+  const error = typeof payload.error === "string" ? payload.error : "Unknown error";
+  if (!queueId) return false;
+
+  const store = useChatStore.getState();
+  const session = store.sessions[sid];
+  const messageId = session?.streamingMessageId;
+  if (!messageId || (expectedMessageId && messageId !== expectedMessageId)) return false;
+  const message = (session.messages as any[] | undefined)?.find(
+    (item) => item?.id === messageId,
+  );
+  if (!messageMatchesQueueId(message, queueId)) return false;
+
+  const content = `Error: ${error}`;
+  store.actions.patchMessage(sid, messageId, (current: any) => ({
+    ...current,
+    content,
+    contentBlocks: [{ type: "text", text: content }],
+  }));
+  store.actions.patch(sid, { status: "error", lastError: error });
+  store.actions.endTurn(sid);
+  return true;
+}
+
 // Per-session throttling: text_delta fires at ~100Hz; rendering the sidebar
 // row that fast wastes CPU. We coalesce to one preview update per
 // `PREVIEW_THROTTLE_MS` window per session. Status changes bypass the
@@ -236,6 +310,12 @@ export async function handlePiEvent(envelope: AgentEventEnvelope) {
   // row pinned to "streaming" (mirrors the acp_session_config / acp_update
   // guards above). If the row already exists they proceed to normal handling.
   if (!existing && (inner as { type?: string }).type?.startsWith("acp_")) {
+    return;
+  }
+
+  if (inner.type === "queue_timeout") {
+    if (!settlePiQueueTimeout(sid, inner)) return;
+    if (store.currentId !== sid) void persistBackgroundSession(sid);
     return;
   }
 
@@ -649,6 +729,7 @@ function applyEventToSessionContent(sid: string, payload: PiInnerEvent) {
       role: "assistant",
       content: "",
       contentBlocks: [],
+      ...(typeof payload.queueId === "string" ? { piQueueId: payload.queueId } : {}),
       timestamp: Date.now(),
     };
 
