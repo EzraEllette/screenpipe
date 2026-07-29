@@ -53,6 +53,7 @@ mod disk_usage;
 mod e2e_seed;
 mod embedded_server;
 mod enterprise;
+mod enterprise_host_identity;
 mod enterprise_install_metadata;
 mod enterprise_policy;
 mod enterprise_sync;
@@ -131,6 +132,7 @@ pub use server::spawn_server;
 // Removed: pub use store::get_profiles_store; // Profile functionality has been removed
 
 pub use enterprise_install_metadata::get_enterprise_install_metadata;
+pub use enterprise_host_identity::get_enterprise_host_identity;
 pub use enterprise_policy::set_enterprise_policy;
 pub use enterprise_policy::set_sync_streams;
 pub use permissions::do_permissions_check;
@@ -280,6 +282,7 @@ macro_rules! define_specta_builder {
             .typ::<suggestions::Suggestion>()
             .typ::<hardware::HardwareCapability>()
             .typ::<enterprise_install_metadata::EnterpriseInstallMetadata>()
+            .typ::<enterprise_host_identity::EnterpriseHostIdentity>()
             .typ::<chatgpt_oauth::ChatGptOAuthStatus>()
             .typ::<oauth::OAuthStatus>()
             .typ::<events::JobEvent>()

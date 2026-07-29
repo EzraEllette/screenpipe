@@ -690,6 +690,9 @@ async getDiskUsage(forceRefresh: boolean | null, dataDir: string | null) : Promi
 async getE2eSeedFlags() : Promise<string[]> {
     return await TAURI_INVOKE("get_e2e_seed_flags");
 },
+async getEnterpriseHostIdentity() : Promise<EnterpriseHostIdentity> {
+    return await TAURI_INVOKE("get_enterprise_host_identity");
+},
 async getEnterpriseInstallMetadata() : Promise<EnterpriseInstallMetadata> {
     return await TAURI_INVOKE("get_enterprise_install_metadata");
 },
@@ -2743,6 +2746,7 @@ alias?: string | null }
 export type E2eAgentStreamResult = { emitted_deltas: number; emit_ms: number }
 export type EmbeddedLLM = { enabled: boolean; model: string; port: number }
 export type EngineEvent = { name: string; data: JsonValue }
+export type EnterpriseHostIdentity = { machine_id_hash: string | null; os_user_id_hash: string | null }
 export type EnterpriseInstallMetadata = { install_source: string; update_manager: string; managed: boolean; detected_by: string[] }
 export type ExcludedApp = { bundleId: string; name: string | null; icon: string | null }
 export type ExportEvent = { kind: "started"; jobId: string; request: ExportRequestInfo } | { kind: "completed"; jobId: string; request: ExportRequestInfo; summary: MeetingExportSummary } | { kind: "failed"; jobId: string; request: ExportRequestInfo; error: string }
@@ -2940,6 +2944,16 @@ endTime: string;
  */
 recordMode: string }
 export type SchedulerStatus = { running: boolean; last_sync: string | null; last_error: string | null }
+/**
+ * Which AI projection to build from the existing screen/accessibility stream.
+ *
+ * `Memory` preserves the original semantic-parser behavior. `ComputerUse` is
+ * shown to users as automation: it keeps capture action-oriented and skips the
+ * semantic parser worker. `Both` is shown as memory + automation and derives
+ * both views from the same captured tree; it never starts a second screen
+ * recorder or stores a duplicate raw accessibility tree.
+ */
+export type SemanticContextMode = "memory" | "computerUse" | "both"
 export type SettingsStore =
 /**
  * All recording/capture config lives here. Flattened so the JSON shape
@@ -3089,14 +3103,17 @@ disableVision: boolean;
  */
 disableScreenshots?: boolean;
 /**
- * Enable experimental normalized semantic context parsing. Off by default.
+ * Build normalized semantic context from captured accessibility trees.
+ * Experimental and opt-in. False preserves the historical capture path
+ * without starting a parser worker or writing semantic tables.
  */
 enableSemanticContext?: boolean;
 /**
- * AI projection derived from the shared accessibility capture. `computerUse`
- * skips semantic parser storage; `both` reuses the same captured tree.
+ * Select the AI view derived from the single captured accessibility tree.
+ * Missing values default to memory so existing opt-in users retain the
+ * exact behavior they selected before this setting existed.
  */
-semanticContextMode?: "memory" | "computerUse" | "both";
+semanticContextMode?: SemanticContextMode;
 /**
  * Disable the timeline / rewind feature. When true, the engine skips
  * timeline-only work: warming the hot frame cache from the DB at startup

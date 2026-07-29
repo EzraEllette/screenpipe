@@ -1845,6 +1845,25 @@ impl SettingsStore {
     }
 }
 
+/// Consumer builds no longer support the legacy tray-only UI preference. Reset
+/// both fields together so installs that used it reopen headed and resume their
+/// normal scheduled-pipe behavior on the first launch after upgrading.
+///
+/// Enterprise builds retain the fields because a managed deployment may still
+/// use the dormant-UI lifecycle independently of the consumer settings page.
+fn restore_headed_mode_for_consumer(
+    settings: &mut SettingsStore,
+    is_enterprise_build: bool,
+) -> bool {
+    if is_enterprise_build || (!settings.headless && !settings.headless_record_only) {
+        return false;
+    }
+
+    settings.headless = false;
+    settings.headless_record_only = false;
+    true
+}
+
 pub fn init_store(app: &AppHandle) -> Result<SettingsStore, String> {
     println!("Initializing settings store");
 
@@ -1952,6 +1971,13 @@ pub fn init_store(app: &AppHandle) -> Result<SettingsStore, String> {
             );
             should_save = true;
         }
+    }
+
+    if restore_headed_mode_for_consumer(&mut store, cfg!(feature = "enterprise-build")) {
+        tracing::info!(
+            "settings migration: restored headed UI and scheduled pipe runs for consumer install"
+        );
+        should_save = true;
     }
 
     if should_save {
@@ -2160,6 +2186,29 @@ mod tests {
         .unwrap();
 
         assert!(settings.headless_record_only);
+    }
+
+    #[test]
+    fn consumer_headless_migration_restores_headed_mode() {
+        let mut consumer = SettingsStore {
+            headless: true,
+            headless_record_only: true,
+            ..Default::default()
+        };
+
+        assert!(restore_headed_mode_for_consumer(&mut consumer, false));
+        assert!(!consumer.headless);
+        assert!(!consumer.headless_record_only);
+        assert!(!restore_headed_mode_for_consumer(&mut consumer, false));
+
+        let mut enterprise = SettingsStore {
+            headless: true,
+            headless_record_only: true,
+            ..Default::default()
+        };
+        assert!(!restore_headed_mode_for_consumer(&mut enterprise, true));
+        assert!(enterprise.headless);
+        assert!(enterprise.headless_record_only);
     }
 
     #[test]

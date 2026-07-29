@@ -11059,7 +11059,7 @@ dependencies = [
 
 [[package]]
 name = "screenpipe-app"
-version = "2.5.150"
+version = "2.5.151"
 dependencies = [
  "aes 0.8.4",
  "aes-gcm 0.10.3",
@@ -11094,6 +11094,7 @@ dependencies = [
  "image 0.25.10",
  "ini",
  "lazy_static",
+ "libc",
  "log",
  "minisign",
  "minisign-verify",
