@@ -9,8 +9,11 @@ on:
   pull_request:
     branches: [main]
     paths:
+      - ".github/scripts/linux/appimage-gstreamer-smoke.sh"
       - ".github/scripts/linux/bundle-appimage-runtime-deps.sh"
       - ".github/scripts/linux/pipewire-loop-smoke.c"
+      - ".github/scripts/linux/screenpipe-appimage-entrypoint.sh"
+      - ".github/scripts/linux/test-appimage-gstreamer-entrypoint.sh"
       - ".github/workflows/linux-appimage-smoke.yml"
       - "apps/screenpipe-app-tauri/scripts/pre_build.js"
       - "apps/screenpipe-app-tauri/src-tauri/**"
@@ -35,6 +38,9 @@ jobs:
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
+
+      - name: Test AppImage GStreamer entrypoint
+        run: bash .github/scripts/linux/test-appimage-gstreamer-entrypoint.sh
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -73,6 +79,8 @@ jobs:
           sudo apt-get install -y \
             g++ \
             ffmpeg \
+            gstreamer1.0-plugins-good \
+            gstreamer1.0-tools \
             tesseract-ocr \
             cmake \
             clang \
@@ -233,6 +241,7 @@ jobs:
           set -euxo pipefail
           mkdir -p /tmp/screenpipe-appimage-smoke
           cp "apps/screenpipe-app-tauri/${APPIMAGE}" /tmp/screenpipe-appimage-smoke/screenpipe.AppImage
+          cp .github/scripts/linux/appimage-gstreamer-smoke.sh /tmp/screenpipe-appimage-smoke/
 
           docker run --rm \
             -v /tmp/screenpipe-appimage-smoke:/smoke \
@@ -244,6 +253,8 @@ jobs:
                 dbus \
                 dbus-x11 \
                 desktop-file-utils \
+                gstreamer1.0-plugins-good \
+                gstreamer1.0-tools \
                 libasound2t64 \
                 libayatana-appindicator3-1 \
                 libgtk-3-0 \
@@ -264,6 +275,9 @@ jobs:
               cd /smoke
               chmod +x screenpipe.AppImage
               ./screenpipe.AppImage --appimage-extract >/dev/null
+              /smoke/appimage-gstreamer-smoke.sh \
+                squashfs-root \
+                /usr/lib/x86_64-linux-gnu/gstreamer-1.0
 
               export LD_LIBRARY_PATH=/smoke/squashfs-root/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
               squashfs-root/usr/bin/ffmpeg -version
@@ -332,6 +346,7 @@ jobs:
           # must launch here.
           mkdir -p /tmp/screenpipe-appimage-arch
           cp "apps/screenpipe-app-tauri/${APPIMAGE}" /tmp/screenpipe-appimage-arch/screenpipe.AppImage
+          cp .github/scripts/linux/appimage-gstreamer-smoke.sh /tmp/screenpipe-appimage-arch/
           cp .github/scripts/linux/pipewire-loop-smoke.c /tmp/screenpipe-appimage-arch/
 
           docker run --rm \
@@ -352,6 +367,8 @@ jobs:
                 xdotool \
                 pipewire \
                 gcc \
+                gstreamer \
+                gst-plugins-good \
                 pkgconf \
                 dbus \
                 xorg-server-xvfb \
@@ -368,6 +385,9 @@ jobs:
               cd /smoke
               chmod +x screenpipe.AppImage
               ./screenpipe.AppImage --appimage-extract >/dev/null
+              /smoke/appimage-gstreamer-smoke.sh \
+                squashfs-root \
+                /usr/lib/gstreamer-1.0
 
               # The Ubuntu-built libpipewire uses a Debian multiarch SPA plugin
               # path that does not exist on Arch. The AppImage must carry the

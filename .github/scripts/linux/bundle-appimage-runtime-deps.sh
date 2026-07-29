@@ -7,6 +7,7 @@ set -euo pipefail
 
 APPDIR="${1:-squashfs-root}"
 LIBDIR="${APPDIR}/usr/lib"
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 
 mkdir -p "${LIBDIR}"
 
@@ -128,20 +129,31 @@ wrap_apprun_for_bundled_spa() {
   local original="${APPDIR}/AppRun.screenpipe-original"
 
   [ -e "${launcher}" ] || [ -L "${launcher}" ] || return 0
-  if grep -q "screenpipe bundled SPA runtime" "${launcher}" 2>/dev/null; then
+  if grep -q "screenpipe preserves caller GStreamer system paths" "${launcher}" 2>/dev/null; then
+    if [ ! -e "${original}" ] && [ ! -L "${original}" ]; then
+      echo "::error::screenpipe AppRun wrapper is missing ${original}" >&2
+      return 1
+    fi
     return 0
   fi
-  if [ -e "${original}" ] || [ -L "${original}" ]; then
+  if grep -q "screenpipe bundled SPA runtime" "${launcher}" 2>/dev/null; then
+    if [ ! -e "${original}" ] && [ ! -L "${original}" ]; then
+      echo "::error::screenpipe AppRun wrapper is missing ${original}" >&2
+      return 1
+    fi
+  elif [ -e "${original}" ] || [ -L "${original}" ]; then
     echo "::error::refusing to replace existing ${original}" >&2
     return 1
+  else
+    mv "${launcher}" "${original}"
   fi
 
-  mv "${launcher}" "${original}"
   cat > "${launcher}" <<'APPRUN'
 #!/bin/sh
 # screenpipe — AI that knows everything you've seen, said, or heard
 # https://screenpi.pe
 # screenpipe bundled SPA runtime
+# screenpipe preserves caller GStreamer system paths
 
 set -eu
 
@@ -157,10 +169,109 @@ else
   export SPA_PLUGIN_DIR="${bundled_spa_dir}"
 fi
 
+# Tauri's generated AppRun overwrites both variables before dispatching the
+# desktop command. Preserve explicit caller values across that generated layer
+# so the screenpipe entrypoint can restore them after removing bundle poison.
+if [ "${GST_PLUGIN_SYSTEM_PATH+x}" = x ]; then
+  export SCREENPIPE_GST_PLUGIN_SYSTEM_PATH_WAS_SET=1
+  export SCREENPIPE_GST_PLUGIN_SYSTEM_PATH_VALUE="${GST_PLUGIN_SYSTEM_PATH}"
+else
+  unset SCREENPIPE_GST_PLUGIN_SYSTEM_PATH_WAS_SET
+  unset SCREENPIPE_GST_PLUGIN_SYSTEM_PATH_VALUE
+fi
+if [ "${GST_PLUGIN_SYSTEM_PATH_1_0+x}" = x ]; then
+  export SCREENPIPE_GST_PLUGIN_SYSTEM_PATH_1_0_WAS_SET=1
+  export SCREENPIPE_GST_PLUGIN_SYSTEM_PATH_1_0_VALUE="${GST_PLUGIN_SYSTEM_PATH_1_0}"
+else
+  unset SCREENPIPE_GST_PLUGIN_SYSTEM_PATH_1_0_WAS_SET
+  unset SCREENPIPE_GST_PLUGIN_SYSTEM_PATH_1_0_VALUE
+fi
+
 exec "${appdir}/AppRun.screenpipe-original" "$@"
 APPRUN
   chmod 0755 "${launcher}"
 }
+
+install_system_gstreamer_entrypoint() {
+  local source_entrypoint="${SCRIPT_DIR}/screenpipe-appimage-entrypoint.sh"
+  local target_entrypoint="${APPDIR}/usr/bin/screenpipe-app-appimage-entrypoint"
+  local native_app="${APPDIR}/usr/bin/screenpipe-app"
+  local desktop_dir="${APPDIR}/usr/share/applications"
+  local desktop
+  local temp_desktop
+  local -a matching_desktops=()
+
+  if [ ! -x "${native_app}" ]; then
+    echo "::error::native AppImage binary is missing or not executable: ${native_app}" >&2
+    return 1
+  fi
+  if [ ! -f "${source_entrypoint}" ]; then
+    echo "::error::screenpipe AppImage entrypoint source is missing: ${source_entrypoint}" >&2
+    return 1
+  fi
+
+  while IFS= read -r -d '' desktop; do
+    if grep -Eq '^Exec=(screenpipe-app|screenpipe-app-appimage-entrypoint)([[:space:]]|$)' "${desktop}"; then
+      matching_desktops+=("${desktop}")
+    fi
+  done < <(find "${desktop_dir}" -maxdepth 1 -type f -name '*.desktop' -print0 2>/dev/null)
+
+  if [ "${#matching_desktops[@]}" -ne 1 ]; then
+    echo "::error::expected exactly one screenpipe AppImage desktop entry, found ${#matching_desktops[@]}" >&2
+    return 1
+  fi
+  desktop="${matching_desktops[0]}"
+
+  if [ -e "${target_entrypoint}" ]; then
+    if ! grep -q 'screenpipe system GStreamer AppImage entrypoint' "${target_entrypoint}" 2>/dev/null; then
+      echo "::error::refusing to overwrite existing ${target_entrypoint}" >&2
+      return 1
+    fi
+    if ! cmp -s "${source_entrypoint}" "${target_entrypoint}"; then
+      install -m 0755 "${source_entrypoint}" "${target_entrypoint}"
+    fi
+  else
+    install -m 0755 "${source_entrypoint}" "${target_entrypoint}"
+  fi
+
+  if grep -Eq '^Exec=screenpipe-app([[:space:]]|$)' "${desktop}"; then
+    if ! temp_desktop="$(mktemp "${desktop}.screenpipe-tmp.XXXXXX")"; then
+      echo "::error::could not create a secure desktop-entry temporary file" >&2
+      return 1
+    fi
+    if ! awk '
+      /^Exec=screenpipe-app([[:space:]]|$)/ {
+        sub(/^Exec=screenpipe-app/, "Exec=screenpipe-app-appimage-entrypoint")
+      }
+      { print }
+    ' "${desktop}" >"${temp_desktop}"; then
+      rm -f -- "${temp_desktop}"
+      echo "::error::could not rewrite AppImage desktop entry: ${desktop}" >&2
+      return 1
+    fi
+    if ! chmod --reference="${desktop}" "${temp_desktop}"; then
+      rm -f -- "${temp_desktop}"
+      echo "::error::could not preserve AppImage desktop-entry mode" >&2
+      return 1
+    fi
+    if ! mv -- "${temp_desktop}" "${desktop}"; then
+      rm -f -- "${temp_desktop}"
+      echo "::error::could not install rewritten AppImage desktop entry" >&2
+      return 1
+    fi
+  fi
+
+  if ! grep -Eq '^Exec=screenpipe-app-appimage-entrypoint([[:space:]]|$)' "${desktop}"; then
+    echo "::error::AppImage desktop entry was not redirected: ${desktop}" >&2
+    return 1
+  fi
+}
+
+if [ "${2:-}" = "--prepare-appimage-launchers-only" ]; then
+  wrap_apprun_for_bundled_spa
+  install_system_gstreamer_entrypoint
+  exit 0
+fi
 
 for tool in ffmpeg ffprobe qt-faststart tesseract; do
   copy_deps_for "${APPDIR}/usr/bin/${tool}"
@@ -180,6 +291,7 @@ bundle_named_lib "libopenblas.so.0"
 bundle_named_lib "libpipewire-0.3.so.0"
 bundle_spa_support_plugin
 wrap_apprun_for_bundled_spa
+install_system_gstreamer_entrypoint
 
 # Copy transitive deps for libs we just staged (for example libgfortran for
 # OpenBLAS, or libx264/libmp3lame if a dynamic ffmpeg slips in via cache).
@@ -219,5 +331,14 @@ if LD_LIBRARY_PATH="${LIBDIR}:${LD_LIBRARY_PATH:-}" ldd "${SPA_SUPPORT_PLUGIN}" 
 fi
 if ! grep -q "screenpipe bundled SPA runtime" "${APPDIR}/AppRun" 2>/dev/null; then
   echo "::error::AppRun does not configure the bundled SPA plugin directory"
+  exit 1
+fi
+if [ ! -x "${APPDIR}/usr/bin/screenpipe-app-appimage-entrypoint" ]; then
+  echo "::error::screenpipe AppImage entrypoint is missing or not executable"
+  exit 1
+fi
+if ! grep -REq '^Exec=screenpipe-app-appimage-entrypoint([[:space:]]|$)' \
+  "${APPDIR}/usr/share/applications"/*.desktop; then
+  echo "::error::AppImage desktop entry does not use the screenpipe entrypoint"
   exit 1
 fi
