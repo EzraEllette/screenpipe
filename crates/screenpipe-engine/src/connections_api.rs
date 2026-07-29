@@ -667,17 +667,38 @@ async fn list_instances(
     match mgr.get_all_instances(&id).await {
         Ok(instances) => {
             if let Some(def) = mgr.find_def(&id) {
-                items.extend(instances.into_iter().map(|(inst, conn)| {
+                for (inst, conn) in instances {
                     let safe = screenpipe_connect::connections::safe_connection_config(
                         def,
                         &conn.credentials,
                     );
-                    json!({
-                        "instance": inst,
-                        "enabled": conn.enabled,
-                        "credentials": safe,
-                    })
-                }));
+                    let connected = conn.enabled && !conn.credentials.is_empty();
+                    let instance_value = json!(inst);
+                    if let Some(existing) = items
+                        .iter_mut()
+                        .find(|item| item.get("instance") == Some(&instance_value))
+                    {
+                        if let Some(object) = existing.as_object_mut() {
+                            let oauth_connected = object
+                                .get("connected")
+                                .and_then(Value::as_bool)
+                                .unwrap_or(false);
+                            object.insert(
+                                "connected".to_string(),
+                                json!(oauth_connected || connected),
+                            );
+                            object.insert("enabled".to_string(), json!(conn.enabled));
+                            object.insert("credentials".to_string(), json!(safe));
+                        }
+                    } else {
+                        items.push(json!({
+                            "instance": inst,
+                            "connected": connected,
+                            "enabled": conn.enabled,
+                            "credentials": safe,
+                        }));
+                    }
+                }
             }
             (StatusCode::OK, Json(json!({ "instances": items })))
         }
@@ -3790,6 +3811,76 @@ mod tests {
             BrowserRegistry::new(),
             None,
         )
+    }
+
+    async fn hybrid_connection_test_router(dir: &TempDir) -> Router<()> {
+        let pool = sqlx::SqlitePool::connect(":memory:").await.unwrap();
+        let store = Arc::new(SecretStore::new(pool, None).await.unwrap());
+        let screenpipe_dir = dir.path().to_path_buf();
+        let cm = Arc::new(Mutex::new(ConnectionManager::new(
+            screenpipe_dir.clone(),
+            Some(store.clone()),
+        )));
+        cm.lock()
+            .await
+            .connect_instance(
+                "teams",
+                Some("work"),
+                serde_json::from_value(json!({
+                    "webhook_url": "https://secret.example/teams/work"
+                }))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        store
+            .set_json(
+                "oauth:teams:work",
+                &json!({"access_token": "oauth-secret-sentinel", "email": "work@example.com"}),
+            )
+            .await
+            .unwrap();
+        let wa = Arc::new(Mutex::new(WhatsAppGateway::new(screenpipe_dir.clone())));
+        router(
+            cm,
+            wa,
+            screenpipe_dir,
+            Some(store),
+            crate::routes::browser::BrowserBridge::new(),
+            BrowserRegistry::new(),
+            None,
+        )
+    }
+
+    #[tokio::test]
+    async fn connection_reads_deduplicate_hybrid_named_instances() {
+        let dir = TempDir::new().unwrap();
+        let app = hybrid_connection_test_router(&dir).await;
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/teams/instances")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let payload: Value = serde_json::from_slice(&body).unwrap();
+        let work = payload["instances"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|item| item["instance"] == "work")
+            .collect::<Vec<_>>();
+        assert_eq!(work.len(), 1, "hybrid instance was duplicated: {payload}");
+        assert_eq!(work[0]["connected"], true);
+        assert_eq!(work[0]["enabled"], true);
+        let serialized = payload.to_string();
+        assert!(!serialized.contains("secret.example"));
+        assert!(!serialized.contains("oauth-secret-sentinel"));
     }
 
     async fn spawn_webhook_upstream(

@@ -7,6 +7,11 @@ interface ConnectionFieldVisibility {
   secret: boolean;
 }
 
+interface ConnectionReadResponse {
+  connected?: unknown;
+  credentials?: unknown;
+}
+
 export function visibleConnectionCredentials(
   fields: ConnectionFieldVisibility[],
   credentials: Record<string, string> = {}
@@ -17,4 +22,23 @@ export function visibleConnectionCredentials(
   return Object.fromEntries(
     Object.entries(credentials).filter(([key]) => visibleKeys.has(key))
   );
+}
+
+export function connectionResponseState(
+  fields: ConnectionFieldVisibility[],
+  response: ConnectionReadResponse
+): { connected: boolean; credentials: Record<string, string> } {
+  const credentials =
+    response.credentials && typeof response.credentials === "object"
+      ? Object.fromEntries(
+          Object.entries(response.credentials).filter(
+            (entry): entry is [string, string] => typeof entry[1] === "string"
+          )
+        )
+      : {};
+
+  return {
+    connected: response.connected === true,
+    credentials: visibleConnectionCredentials(fields, credentials),
+  };
 }

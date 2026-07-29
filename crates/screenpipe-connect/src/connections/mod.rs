@@ -929,9 +929,17 @@ pub async fn render_context(
         }
     }
 
+    let manual_instances = cred_connected
+        .iter()
+        .map(|(_, def, instance)| (def.id, instance.clone()))
+        .collect::<HashSet<_>>();
+
     for (integration, def, instance) in &oauth_connected {
-        out.push_str(&connection_context_header(def, instance.as_deref()));
-        out.push_str(&format!("{}\n", def.description));
+        let shares_manual_instance = manual_instances.contains(&(def.id, instance.clone()));
+        if !shares_manual_instance {
+            out.push_str(&connection_context_header(def, instance.as_deref()));
+            out.push_str(&format!("{}\n", def.description));
+        }
 
         if integration.proxy_config().is_some() {
             let suffix = instance_query(instance.as_deref());
@@ -939,10 +947,12 @@ pub async fn render_context(
                 "  proxy: {}/{}/proxy/<api-path>{}  (append the API path, e.g. /v1/pages)\n",
                 base, def.id, suffix
             ));
-            out.push_str(&format!(
-                "  config: {}/{}/config{}  (non-secret settings)\n",
-                base, def.id, suffix
-            ));
+            if !shares_manual_instance {
+                out.push_str(&format!(
+                    "  config: {}/{}/config{}  (non-secret settings)\n",
+                    base, def.id, suffix
+                ));
+            }
         } else {
             // OAuth without proxy — still don't expose the token
             out.push_str("  (connected via OAuth — use the endpoints listed above; no raw token is exposed)\n");
@@ -1436,6 +1446,42 @@ mod tests {
             .contains("http://localhost:3030/connections/teams/proxy/<api-path>?instance=work"));
         assert!(!context.contains("https://example.com/webhook"));
         assert!(!context.contains("secret-teams-oauth-token"));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn render_context_deduplicates_hybrid_named_instances() {
+        use sqlx::SqlitePool;
+
+        let pool = SqlitePool::connect(":memory:").await.unwrap();
+        let store = Arc::new(SecretStore::new(pool, None).await.unwrap());
+        let dir = temp_screenpipe_dir();
+        let mgr = ConnectionManager::new(dir.clone(), Some(store.clone()));
+        mgr.connect_instance("teams", Some("work"), manual_webhook_creds())
+            .await
+            .unwrap();
+        store
+            .set_json(
+                "oauth:teams:work",
+                &serde_json::json!({"access_token": "secret-teams-oauth-token"}),
+            )
+            .await
+            .unwrap();
+
+        let context = render_context(&dir, 3030, Some(store.as_ref())).await;
+        assert_eq!(
+            context
+                .matches("## Microsoft Teams (teams, instance: work)")
+                .count(),
+            1,
+            "hybrid manual/OAuth instances must render under one header: {context}"
+        );
+        assert!(
+            context.contains("POST http://localhost:3030/connections/teams/proxy?instance=work")
+        );
+        assert!(context
+            .contains("http://localhost:3030/connections/teams/proxy/<api-path>?instance=work"));
 
         let _ = std::fs::remove_dir_all(dir);
     }
