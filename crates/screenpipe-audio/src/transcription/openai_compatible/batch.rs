@@ -149,7 +149,10 @@ pub async fn transcribe_with_openai_compatible(
 /// endpoint. Keeping this in the shared request path means the settings
 /// verification request and production transcription use the exact same URL.
 fn transcription_url(endpoint: &str) -> String {
-    format!("{}/v1/audio/transcriptions", endpoint.trim().trim_end_matches('/'))
+    format!(
+        "{}/v1/audio/transcriptions",
+        endpoint.trim().trim_end_matches('/')
+    )
 }
 
 /// Whether a transport-level error is transient (worth retrying) rather than
