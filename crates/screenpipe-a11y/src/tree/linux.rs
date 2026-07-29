@@ -962,6 +962,15 @@ fn connect_to_atspi_bus() -> Result<Connection> {
     Ok(conn)
 }
 
+/// Verify that this process can open the AT-SPI2 bus.
+///
+/// The UI-event recorder uses this only to report AT-SPI availability. Keeping
+/// the probe beside the tree-walker connection code means both paths honor the
+/// same session-bus and `AT_SPI_BUS_ADDRESS` resolution rules.
+pub(crate) fn check_atspi_bus_connection() -> Result<()> {
+    connect_to_atspi_bus().map(|_| ())
+}
+
 /// Enable accessibility for Chromium/Electron apps.
 ///
 /// Chromium only builds its AT-SPI2 tree when it detects an AT is active:

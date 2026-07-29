@@ -13,7 +13,7 @@
 mod app_version;
 mod electron_docs;
 #[cfg(target_os = "linux")]
-mod linux;
+pub(crate) mod linux;
 #[cfg(target_os = "linux")]
 mod linux_lines;
 #[cfg(target_os = "macos")]

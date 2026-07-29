@@ -169,10 +169,9 @@ impl UiRecorder {
     ) -> Result<(RecordingHandle, Option<ActivityFeed>)> {
         let perms = self.check_permissions();
         if !perms.accessibility && !perms.input_monitoring {
-            anyhow::bail!(
-                "No permissions available. Need either:\n\
-                 - AT-SPI2 (accessibility): install at-spi2-core\n\
-                 - evdev (input monitoring): sudo usermod -aG input $USER"
+            warn!(
+                "AT-SPI2 and evdev input monitoring are unavailable; continuing with \
+                 compositor/X11 window tracking only"
             );
         }
 
@@ -228,21 +227,23 @@ impl UiRecorder {
 // Permission checks
 // ============================================================================
 
-/// Check if AT-SPI2 D-Bus service is available.
+/// Check whether this process can connect to the AT-SPI2 bus.
+///
+/// This deliberately reuses the tree walker's in-process zbus connection
+/// rather than shelling out to `dbus-send`. The previous command probe hid its
+/// stderr and reported every failure as a missing package, even when the
+/// AppImage simply lacked the graphical session's D-Bus environment.
 fn check_atspi_available() -> bool {
-    // Try to connect to the session bus and check if org.a11y.Bus exists
-    std::process::Command::new("dbus-send")
-        .args([
-            "--session",
-            "--dest=org.a11y.Bus",
-            "--type=method_call",
-            "--print-reply",
-            "/org/a11y/bus",
-            "org.a11y.Bus.GetAddress",
-        ])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    match crate::tree::linux::check_atspi_bus_connection() {
+        Ok(()) => true,
+        Err(error) => {
+            warn!(
+                "AT-SPI2 is unavailable to this process: {error:#}. \
+                 Accessibility-tree capture is disabled, but window tracking can continue."
+            );
+            false
+        }
+    }
 }
 
 /// Check if the user can read evdev input devices.

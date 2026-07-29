@@ -22,6 +22,13 @@ use crate::frame_linker_actor::{next_correlation_id, LinkerMessage, LinkerSender
 const UI_RECORDER_IDLE_RECV_TIMEOUT: Duration = Duration::from_secs(1);
 const UI_RECORDER_MIN_RECV_TIMEOUT: Duration = Duration::from_millis(1);
 
+// Linux app/window activity comes from compositor IPC or X11, not AT-SPI2.
+// AT-SPI remains required by the separate accessibility-tree walker.
+#[cfg(target_os = "linux")]
+const UI_EVENT_CAPTURE_REQUIRES_ACCESSIBILITY: bool = false;
+#[cfg(not(target_os = "linux"))]
+const UI_EVENT_CAPTURE_REQUIRES_ACCESSIBILITY: bool = true;
+
 /// A batched UI event plus an optional correlation id. Events that
 /// won't trigger a capture (Move, Idle, filtered-out targets) leave
 /// `correlation_id` as `None` — those rows stay `frame_id = NULL`.
@@ -701,7 +708,7 @@ pub async fn start_ui_recording(
             perms.accessibility, perms.input_monitoring
         );
     }
-    if !perms.accessibility {
+    if !perms.accessibility && UI_EVENT_CAPTURE_REQUIRES_ACCESSIBILITY {
         // The "accessibility" bit means different things per OS. macOS:
         // TCC grant for the app. Linux: AT-SPI2 client library present.
         // Windows: always true (no separate gate). Tailor the remediation
@@ -726,6 +733,13 @@ pub async fn start_ui_recording(
             task_handle: None,
             tree_walker_handle: None,
         });
+    }
+    #[cfg(target_os = "linux")]
+    if !perms.accessibility {
+        warn!(
+            "AT-SPI2 is unavailable to this process; continuing UI event recording with \
+             compositor/X11 window tracking. Accessibility-tree capture remains unavailable."
+        );
     }
     if !perms.input_monitoring {
         // On macOS this is a TCC gate (System Settings → Input Monitoring).
@@ -770,10 +784,8 @@ pub async fn start_ui_recording(
         }
     };
 
-    // app_events_running mirrors the recorder being up: the app observer
-    // thread is unconditionally spawned in start_internal whenever
-    // accessibility is granted (which it is, here — we'd have bailed
-    // otherwise).
+    // `start_internal` starts the platform's app/window observer whenever
+    // the recorder starts, including Linux's compositor/X11 fallback.
     set_ui_recorder_state(
         true,
         true,
@@ -1973,6 +1985,14 @@ mod scroll_burst_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_ui_event_capture_does_not_require_atspi() {
+        // Linux app/window events come from compositor IPC or X11. AT-SPI is
+        // required by the separate tree walker, not this recorder's startup.
+        assert!(!UI_EVENT_CAPTURE_REQUIRES_ACCESSIBILITY);
+    }
 
     #[test]
     fn window_focus_capture_is_always_enabled() {
