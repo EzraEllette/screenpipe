@@ -396,6 +396,9 @@ pub async fn reconcile_untranscribed(
             Ok(output) => output,
             Err(e) => {
                 error!("reconciliation: transcription failed for batch: {}", e);
+                if let Some(metrics) = &metrics {
+                    metrics.record_transcription_error();
+                }
                 // Bump attempts on every chunk in the batch. Once a chunk has
                 // failed MAX_TRANSCRIPTION_ATTEMPTS times in a row the outcome
                 // helper flips it to status='failed' and it stops being picked.

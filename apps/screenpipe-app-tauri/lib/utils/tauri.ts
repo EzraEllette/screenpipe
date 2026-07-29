@@ -2440,6 +2440,20 @@ async suspendGlobalShortcuts() : Promise<Result<null, string>> {
 }
 },
 /**
+ * Verifies an OpenAI-compatible endpoint with the exact request path and
+ * audio encoding used by the recording engine. A successful response is
+ * required before the settings UI can activate this engine, so recordings
+ * cannot silently accumulate without searchable audio transcripts.
+ */
+async testOpenaiCompatibleTranscription(endpoint: string, apiKey: string | null, model: string, headers: { [key in string]: string } | null, rawAudio: boolean) : Promise<Result<string, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("test_openai_compatible_transcription", { endpoint, apiKey, model, headers, rawAudio }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Tauri command: start voice training. Spawns a background task that polls
  * until audio is transcribed, then assigns the speaker. Returns immediately.
  */
