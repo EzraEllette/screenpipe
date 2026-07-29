@@ -114,21 +114,31 @@ cat >"${package_appdir}/AppRun" <<'GENERATED_APPRUN'
 set -eu
 export GST_PLUGIN_SYSTEM_PATH="${APPDIR}/usr/lib/gstreamer:"
 export GST_PLUGIN_SYSTEM_PATH_1_0="${APPDIR}/usr/lib/gstreamer-1.0:"
-exec "${APPDIR}/usr/bin/screenpipe-app-appimage-entrypoint" "$@"
+exec "${APPDIR}/AppRun.wrapped" "$@"
 GENERATED_APPRUN
 chmod 0755 "${package_appdir}/AppRun"
+ln -s 'usr/bin/screenpipe-app' "${package_appdir}/AppRun.wrapped"
 
 bash "${bundle_script}" "${package_appdir}" --prepare-appimage-launchers-only
 
 test -x "${package_appdir}/usr/bin/screenpipe-app-appimage-entrypoint"
+if [ "$(readlink "${package_appdir}/AppRun.wrapped")" != 'usr/bin/screenpipe-app-appimage-entrypoint' ]; then
+  echo "expected AppRun.wrapped to dispatch through the GStreamer entrypoint" >&2
+  exit 1
+fi
 assert_line 'Exec=screenpipe-app-appimage-entrypoint --from-desktop %U' \
   "${package_appdir}/usr/share/applications/screenpipe.desktop"
 
 cp "${package_appdir}/usr/share/applications/screenpipe.desktop" "${tmpdir}/desktop.after-first"
 cp "${package_appdir}/usr/bin/screenpipe-app-appimage-entrypoint" "${tmpdir}/entrypoint.after-first"
+wrapped_target_after_first="$(readlink "${package_appdir}/AppRun.wrapped")"
 bash "${bundle_script}" "${package_appdir}" --prepare-appimage-launchers-only
 cmp "${tmpdir}/desktop.after-first" "${package_appdir}/usr/share/applications/screenpipe.desktop"
 cmp "${tmpdir}/entrypoint.after-first" "${package_appdir}/usr/bin/screenpipe-app-appimage-entrypoint"
+if [ "$(readlink "${package_appdir}/AppRun.wrapped")" != "${wrapped_target_after_first}" ]; then
+  echo "AppRun.wrapped redirect changed on a repeated launcher preparation" >&2
+  exit 1
+fi
 
 cat >"${package_appdir}/usr/share/applications/screenpipe-beta.desktop" <<'DESKTOP'
 [Desktop Entry]
@@ -142,6 +152,15 @@ if bash "${bundle_script}" "${package_appdir}" --prepare-appimage-launchers-only
 fi
 
 rm "${package_appdir}/usr/share/applications/screenpipe-beta.desktop"
+default_wrapped_output="${tmpdir}/default-wrapped.out"
+env \
+  -u GST_PLUGIN_SYSTEM_PATH -u GST_PLUGIN_SYSTEM_PATH_1_0 \
+  APPDIR="${package_appdir}" \
+  PROBE_OUTPUT="${default_wrapped_output}" \
+  "${package_appdir}/AppRun"
+assert_line 'GST_PLUGIN_SYSTEM_PATH=<unset>' "${default_wrapped_output}"
+assert_line 'GST_PLUGIN_SYSTEM_PATH_1_0=<unset>' "${default_wrapped_output}"
+
 wrapped_output="${tmpdir}/wrapped.out"
 env \
   APPDIR="${package_appdir}" \

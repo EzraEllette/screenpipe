@@ -196,6 +196,11 @@ install_system_gstreamer_entrypoint() {
   local source_entrypoint="${SCRIPT_DIR}/screenpipe-appimage-entrypoint.sh"
   local target_entrypoint="${APPDIR}/usr/bin/screenpipe-app-appimage-entrypoint"
   local native_app="${APPDIR}/usr/bin/screenpipe-app"
+  local wrapped_launcher="${APPDIR}/AppRun.wrapped"
+  local native_wrapped_target='usr/bin/screenpipe-app'
+  local entrypoint_wrapped_target='usr/bin/screenpipe-app-appimage-entrypoint'
+  local wrapped_target
+  local temp_link_dir
   local desktop_dir="${APPDIR}/usr/share/applications"
   local desktop
   local temp_desktop
@@ -233,6 +238,38 @@ install_system_gstreamer_entrypoint() {
   else
     install -m 0755 "${source_entrypoint}" "${target_entrypoint}"
   fi
+
+  if [ ! -L "${wrapped_launcher}" ]; then
+    echo "::error::expected linuxdeploy AppRun target symlink: ${wrapped_launcher}" >&2
+    return 1
+  fi
+  wrapped_target="$(readlink "${wrapped_launcher}")"
+  case "${wrapped_target}" in
+    "${entrypoint_wrapped_target}")
+      ;;
+    "${native_wrapped_target}")
+      if ! temp_link_dir="$(mktemp -d "${APPDIR}/.screenpipe-AppRun-wrapped.XXXXXX")"; then
+        echo "::error::could not create a secure AppRun target temporary directory" >&2
+        return 1
+      fi
+      if ! ln -s "${entrypoint_wrapped_target}" "${temp_link_dir}/AppRun.wrapped"; then
+        rmdir -- "${temp_link_dir}" 2>/dev/null || true
+        echo "::error::could not create redirected AppRun target" >&2
+        return 1
+      fi
+      if ! mv -T -- "${temp_link_dir}/AppRun.wrapped" "${wrapped_launcher}"; then
+        rm -f -- "${temp_link_dir}/AppRun.wrapped"
+        rmdir -- "${temp_link_dir}" 2>/dev/null || true
+        echo "::error::could not install redirected AppRun target" >&2
+        return 1
+      fi
+      rmdir -- "${temp_link_dir}"
+      ;;
+    *)
+      echo "::error::refusing to redirect unexpected ${wrapped_launcher} target: ${wrapped_target}" >&2
+      return 1
+      ;;
+  esac
 
   if grep -Eq '^Exec=screenpipe-app([[:space:]]|$)' "${desktop}"; then
     if ! temp_desktop="$(mktemp "${desktop}.screenpipe-tmp.XXXXXX")"; then
