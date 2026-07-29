@@ -371,3 +371,57 @@ debug = false
 [profile.dev.build-override]
 opt-level = 0
 debug = false
+
+# Space-efficient debugging: the app and Screenpipe retain complete symbols,
+# while third-party crates carry no debuginfo. Invoke through
+# `bun run tauri:dev:debug` (or `tauri dev -- --profile dev-debug`).
+[profile.dev-debug]
+inherits = "dev"
+debug = true
+split-debuginfo = "packed"
+incremental = false
+
+[profile.dev-debug.package."*"]
+opt-level = 2
+debug = false
+
+# Preserve complete debugging across the first-party runtime
+# stack without paying for third-party dependency symbols.
+[profile.dev-debug.package.screenpipe-a11y]
+debug = true
+[profile.dev-debug.package.screenpipe-audio]
+debug = true
+[profile.dev-debug.package.screenpipe-capture]
+debug = true
+[profile.dev-debug.package.screenpipe-config]
+debug = true
+[profile.dev-debug.package.screenpipe-connect]
+debug = true
+[profile.dev-debug.package.screenpipe-core]
+debug = true
+[profile.dev-debug.package.screenpipe-db]
+debug = true
+[profile.dev-debug.package.screenpipe-engine]
+debug = true
+[profile.dev-debug.package.screenpipe-events]
+debug = true
+[profile.dev-debug.package.screenpipe-redact]
+debug = true
+[profile.dev-debug.package.screenpipe-resource]
+debug = true
+[profile.dev-debug.package.screenpipe-screen]
+debug = true
+[profile.dev-debug.package.screenpipe-secrets]
+debug = true
+[profile.dev-debug.package.screenpipe-sqlite-coordinator]
+debug = true
+[profile.dev-debug.package.screenpipe-sync]
+debug = true
+[profile.dev-debug.package.screenpipe-vault]
+debug = true
+
+# Build scripts/proc macros are not part of the shipped app, so do not retain
+# their debuginfo either.
+[profile.dev-debug.build-override]
+opt-level = 0
+debug = false
