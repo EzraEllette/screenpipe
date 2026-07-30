@@ -1269,19 +1269,97 @@ mod windows_com_audio {
         Ok(name)
     }
 
+    fn pnp_instance_id_is_bluetooth(instance_id: &str) -> bool {
+        instance_id
+            .trim_start()
+            .get(..3)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("BTH"))
+    }
+
+    /// Resolve the PnP parent behind an MMDevice endpoint.
+    ///
+    /// `IMMDevice::GetId` returns the suffix used by Windows' software-device
+    /// audio endpoint node. The endpoint's immediate PnP parent is the actual
+    /// audio transport device: `BTH*` for Bluetooth profiles, `USB*` for USB
+    /// headsets and 2.4 GHz receivers, and `HDAUDIO*`/`INTELAUDIO*` for
+    /// built-in devices. The endpoint property store does not reliably expose
+    /// either the Bluetooth address or its PnP instance ID, so query the
+    /// Configuration Manager device tree directly.
+    unsafe fn endpoint_parent_is_bluetooth(
+        device: &windows::Win32::Media::Audio::IMMDevice,
+    ) -> Result<Option<bool>> {
+        use windows::core::PCWSTR;
+        use windows::Win32::Devices::DeviceAndDriverInstallation::{
+            CM_Get_Device_IDW, CM_Get_Parent, CM_Locate_DevNodeW, CM_LOCATE_DEVNODE_NORMAL,
+            CR_SUCCESS, MAX_DEVICE_ID_LEN,
+        };
+
+        let endpoint_id = CoTaskMemPwstr(device.GetId()?).to_string()?;
+        if endpoint_id.is_empty() {
+            return Ok(None);
+        }
+
+        let devnode_id = format!(r"SWD\MMDEVAPI\{endpoint_id}");
+        let devnode_id_wide = devnode_id
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+
+        let mut endpoint_devnode = 0;
+        let result = CM_Locate_DevNodeW(
+            &mut endpoint_devnode,
+            PCWSTR(devnode_id_wide.as_ptr()),
+            CM_LOCATE_DEVNODE_NORMAL,
+        );
+        if result != CR_SUCCESS {
+            return Err(anyhow!(
+                "CM_Locate_DevNodeW failed for '{}' with CONFIGRET 0x{:08x}",
+                devnode_id,
+                result.0
+            ));
+        }
+
+        let mut parent_devnode = 0;
+        let result = CM_Get_Parent(&mut parent_devnode, endpoint_devnode, 0);
+        if result != CR_SUCCESS {
+            return Err(anyhow!(
+                "CM_Get_Parent failed for '{}' with CONFIGRET 0x{:08x}",
+                devnode_id,
+                result.0
+            ));
+        }
+
+        let mut parent_id = vec![0u16; MAX_DEVICE_ID_LEN as usize];
+        let result = CM_Get_Device_IDW(parent_devnode, &mut parent_id, 0);
+        if result != CR_SUCCESS {
+            return Err(anyhow!(
+                "CM_Get_Device_IDW failed for '{}' parent with CONFIGRET 0x{:08x}",
+                devnode_id,
+                result.0
+            ));
+        }
+
+        let length = parent_id
+            .iter()
+            .position(|character| *character == 0)
+            .unwrap_or(parent_id.len());
+        let parent_id = String::from_utf16(&parent_id[..length])
+            .map_err(|error| anyhow!("invalid PnP parent device id utf-16: {}", error))?;
+
+        Ok((!parent_id.is_empty()).then(|| pnp_instance_id_is_bluetooth(&parent_id)))
+    }
+
     /// Return the transport reported by Windows for the capture endpoint.
     ///
     /// The Bluetooth address is the direct signal. Some audio drivers expose
-    /// only a PnP instance ID instead; its `BTH*` hardware-enumerator prefix
-    /// is still an OS transport identifier, unlike the localized friendly
-    /// name. An unrecognised or unavailable property remains inconclusive.
+    /// only a PnP parent instead; its `BTH*` hardware-enumerator prefix is
+    /// still an OS transport identifier, unlike the localized friendly name.
+    /// An unrecognised or unavailable property remains inconclusive.
     pub unsafe fn bare_name_is_bluetooth(bare_name: &str) -> Result<Option<bool>> {
         use windows::Win32::Media::Audio::{
             eCapture, IMMDeviceEnumerator, MMDeviceEnumerator, DEVICE_STATE_ACTIVE,
         };
-        use windows::Win32::Storage::EnhancedStorage::{
-            PKEY_DeviceInterface_Bluetooth_DeviceAddress, PKEY_Devices_DeviceInstanceId,
-        };
+        use windows::Win32::Storage::EnhancedStorage::PKEY_DeviceInterface_Bluetooth_DeviceAddress;
         use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_ALL, STGM};
 
         let _com = ComApartment::enter();
@@ -1305,16 +1383,7 @@ mod windows_com_audio {
                 return Ok(Some(true));
             }
 
-            let instance_id = match store.GetValue(&PKEY_Devices_DeviceInstanceId) {
-                Ok(instance_id) => instance_id.to_string(),
-                Err(_) => return Ok(None),
-            };
-            return Ok((!instance_id.is_empty()).then(|| {
-                instance_id
-                    .trim_start()
-                    .to_ascii_uppercase()
-                    .starts_with("BTH")
-            }));
+            return endpoint_parent_is_bluetooth(&device);
         }
 
         Err(anyhow!("capture endpoint '{}' not found", bare_name))
@@ -1542,7 +1611,10 @@ mod windows_com_audio {
 
     #[cfg(test)]
     mod tests {
-        use super::{com_init_added_reference, container_id_indicates_combo_headset};
+        use super::{
+            com_init_added_reference, container_id_indicates_combo_headset,
+            pnp_instance_id_is_bluetooth,
+        };
         use windows::Win32::Foundation::{RPC_E_CHANGED_MODE, S_FALSE, S_OK};
 
         #[test]
@@ -1563,6 +1635,35 @@ mod windows_com_audio {
                 !com_init_added_reference(RPC_E_CHANGED_MODE),
                 "RPC_E_CHANGED_MODE means we did NOT add a reference"
             );
+        }
+
+        #[test]
+        fn bluetooth_pnp_enumerators_are_detected_without_friendly_names() {
+            for instance_id in [
+                r"BTHHFENUM\BthHFPAudio\device",
+                r"BTHENUM\{0000111e-0000-1000-8000-00805f9b34fb}\device",
+                r"BTHLEDEVICE\{0000180a-0000-1000-8000-00805f9b34fb}\device",
+            ] {
+                assert!(
+                    pnp_instance_id_is_bluetooth(instance_id),
+                    "expected '{instance_id}' to be Bluetooth"
+                );
+            }
+        }
+
+        #[test]
+        fn non_bluetooth_pnp_enumerators_are_not_detected_as_bluetooth() {
+            for instance_id in [
+                r"USB\VID_03F0&PID_03CC\device",
+                r"HDAUDIO\FUNC_01&VEN_10EC\device",
+                r"INTELAUDIO\FUNC_01&VEN_10EC\device",
+                r"SWD\MMDEVAPI\{endpoint}",
+            ] {
+                assert!(
+                    !pnp_instance_id_is_bluetooth(instance_id),
+                    "expected '{instance_id}' to be non-Bluetooth"
+                );
+            }
         }
 
         /// No render endpoint shares the capture endpoint's container ID at
