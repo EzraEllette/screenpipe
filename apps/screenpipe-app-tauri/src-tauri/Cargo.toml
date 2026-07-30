@@ -354,10 +354,12 @@ incremental = true
 opt-level = 1
 debug = false
 
-# Faster dev builds
+# Default non-release builds retain complete Screenpipe symbols while omitting
+# debuginfo from third-party crates.
 [profile.dev]
 opt-level = 0
-debug = false
+debug = true
+split-debuginfo = "packed"
 # Per-worktree incremental state cannot help a cold target and prevents the
 # shared compiler cache from reusing screenpipe's path crates across worktrees.
 incremental = false
@@ -373,9 +375,8 @@ debug = false
 opt-level = 0
 debug = false
 
-# Space-efficient debugging: the app and Screenpipe retain complete symbols,
-# while third-party crates carry no debuginfo. Invoke through
-# `bun run tauri:dev:debug` (or `tauri dev -- --profile dev-debug`).
+# Kept for explicit invocations; default non-release builds use these settings
+# through the `dev` profile above.
 [profile.dev-debug]
 inherits = "dev"
 debug = true
