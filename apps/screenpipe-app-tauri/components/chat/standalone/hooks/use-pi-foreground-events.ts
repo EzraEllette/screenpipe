@@ -560,6 +560,9 @@ export function usePiForegroundEvents({
             });
             if (nextRows) {
               void saveConversation(nextRows, {
+                // This panel-lifetime listener can retain the previous React
+                // conversation id. Bind the write to the live foreground id.
+                idOverride: piSessionIdRef.current,
                 refreshHistory: false,
                 syncActiveConversation: false,
               });

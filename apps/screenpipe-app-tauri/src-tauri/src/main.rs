@@ -101,6 +101,7 @@ mod tray;
 mod tray_monitor_preview;
 #[cfg(target_os = "macos")]
 mod staged_update;
+mod stale_tier;
 mod updates;
 mod voice_training;
 mod window;
@@ -172,12 +173,20 @@ impl MicFocusRecoveryTracker {
         }
     }
 
-    fn should_restart_capture(&self, permission_granted: bool, audio_devices_empty: bool) -> bool {
+    fn should_restart_capture(
+        &self,
+        permission_granted: bool,
+        audio_devices_empty: bool,
+        audio_capture_enabled: bool,
+    ) -> bool {
         let permission_was_granted = self
             .permission_was_granted
             .swap(permission_granted, Ordering::SeqCst);
 
-        permission_granted && !permission_was_granted && audio_devices_empty
+        audio_capture_enabled
+            && permission_granted
+            && !permission_was_granted
+            && audio_devices_empty
     }
 }
 
@@ -729,9 +738,16 @@ async fn main() {
                     let permission_granted =
                         permissions::check_microphone_permission().permitted();
                     let audio_devices_empty = health::get_audio_device_status().is_empty();
-                    if !MIC_FOCUS_RECOVERY
-                        .should_restart_capture(permission_granted, audio_devices_empty)
-                    {
+                    let audio_capture_enabled = store::SettingsStore::get(&app)
+                        .ok()
+                        .flatten()
+                        .map(|settings| !settings.recording.disable_audio)
+                        .unwrap_or(true);
+                    if !MIC_FOCUS_RECOVERY.should_restart_capture(
+                        permission_granted,
+                        audio_devices_empty,
+                        audio_capture_enabled,
+                    ) {
                         return;
                     }
                     info!(
@@ -844,7 +860,10 @@ async fn main() {
         // single-instance plugin uses zbus::blocking on Linux which panics
         // inside an existing tokio runtime (nested block_on), so skip it on Linux
         ;
-    #[cfg(not(target_os = "linux"))]
+    // E2E instances already use isolated focus, API, WebDriver, and data
+    // ports. Registering the OS-wide single-instance plugin would still make
+    // an unrelated developer or CI app silently win before WebDriver starts.
+    #[cfg(all(not(target_os = "linux"), not(feature = "e2e")))]
     let app = app.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
         // Defer off event stack: plugin may invoke this from run loop (nounwind).
         let app_for_closure = app.clone();
@@ -2243,34 +2262,42 @@ mod mic_focus_recovery_tests {
     fn repeated_focus_with_empty_audio_status_restarts_only_once() {
         let tracker = MicFocusRecoveryTracker::new();
 
-        assert!(tracker.should_restart_capture(true, true));
-        assert!(!tracker.should_restart_capture(true, true));
-        assert!(!tracker.should_restart_capture(true, true));
+        assert!(tracker.should_restart_capture(true, true, true));
+        assert!(!tracker.should_restart_capture(true, true, true));
+        assert!(!tracker.should_restart_capture(true, true, true));
     }
 
     #[test]
     fn temporary_empty_audio_status_does_not_look_like_a_new_permission_grant() {
         let tracker = MicFocusRecoveryTracker::new();
 
-        assert!(!tracker.should_restart_capture(true, false));
-        assert!(!tracker.should_restart_capture(true, true));
+        assert!(!tracker.should_restart_capture(true, false, true));
+        assert!(!tracker.should_restart_capture(true, true, true));
     }
 
     #[test]
     fn permission_revoke_rearms_focus_recovery() {
         let tracker = MicFocusRecoveryTracker::new();
 
-        assert!(tracker.should_restart_capture(true, true));
-        assert!(!tracker.should_restart_capture(false, true));
-        assert!(tracker.should_restart_capture(true, true));
+        assert!(tracker.should_restart_capture(true, true, true));
+        assert!(!tracker.should_restart_capture(false, true, true));
+        assert!(tracker.should_restart_capture(true, true, true));
     }
 
     #[test]
     fn missing_permission_never_restarts_capture() {
         let tracker = MicFocusRecoveryTracker::new();
 
-        assert!(!tracker.should_restart_capture(false, true));
-        assert!(!tracker.should_restart_capture(false, false));
+        assert!(!tracker.should_restart_capture(false, true, true));
+        assert!(!tracker.should_restart_capture(false, false, true));
+    }
+
+    #[test]
+    fn disabled_audio_never_restarts_capture_on_focus() {
+        let tracker = MicFocusRecoveryTracker::new();
+
+        assert!(!tracker.should_restart_capture(true, true, false));
+        assert!(!tracker.should_restart_capture(true, true, true));
     }
 }
 
