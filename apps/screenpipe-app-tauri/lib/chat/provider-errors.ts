@@ -116,7 +116,7 @@ export function buildProviderErrorMessage(
   }
 
   if (normalized.includes("no api key found for anthropic-byok")) {
-    return "The selected Anthropic preset is missing an API key. Add your Anthropic API key in Settings → AI, or switch to another preset.";
+    return "The selected Anthropic preset is missing an API key. Add your Anthropic API key in Settings → AI Presets, or switch to another preset.";
   }
 
   if (isNativeOllamaProvider(provider)) {

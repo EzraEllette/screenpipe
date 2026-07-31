@@ -129,7 +129,7 @@ describe("provider error copy", () => {
     });
 
     expect(msg).toBe(
-      "The selected Anthropic preset is missing an API key. Add your Anthropic API key in Settings → AI, or switch to another preset."
+      "The selected Anthropic preset is missing an API key. Add your Anthropic API key in Settings → AI Presets, or switch to another preset."
     );
     expect(msg).not.toContain("/login");
     expect(msg).not.toContain("node_modules");
