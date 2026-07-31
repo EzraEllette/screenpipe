@@ -50,6 +50,7 @@ mod db_recovery_notifications;
 mod db_relaunch;
 mod diagnostic_logs;
 mod disk_usage;
+mod disk_pressure_notifications;
 mod e2e_seed;
 mod embedded_server;
 mod enterprise;
@@ -59,6 +60,7 @@ mod enterprise_policy;
 mod enterprise_sync;
 mod events;
 mod feedback_redact;
+mod feedback_upload;
 mod google_calendar;
 mod hardware;
 mod ics_calendar;
@@ -80,6 +82,7 @@ mod engine_events;
 mod monitor_events;
 mod owned_browser_cookies;
 mod permissions;
+mod acp_runtime;
 mod pi;
 mod pi_command_queue;
 mod power_awake;
@@ -273,6 +276,15 @@ async fn is_server_running(app: AppHandle) -> Result<bool, String> {
     Ok(response.is_ok())
 }
 
+// `tauri_collect_commands!` historically degraded to an empty handler when
+// its generated registry was missing. Make the same compile-time view a hard
+// build invariant so a commandless native app can never be published again.
+const TAURI_COMMAND_COUNT: usize = tauri_helper::array_collect_commands!(false).len();
+const _: () = assert!(
+    TAURI_COMMAND_COUNT > 0,
+    "generated Tauri command registry must not be empty"
+);
+
 /// Shared tauri-specta registry body.
 macro_rules! define_specta_builder {
     () => {{
@@ -308,6 +320,36 @@ macro_rules! define_specta_builder {
 
 #[tokio::main]
 async fn main() {
+    // The ACP agent runs as a hidden mode of this same signed executable, so no
+    // second sidecar or hand-written protocol ships. These paths must exit
+    // before any Tauri, database, or recording setup.
+    if acp_runtime::is_process_guard_mode() {
+        let exit_code = match acp_runtime::run_process_guard() {
+            Ok(exit_code) => exit_code,
+            Err(error) => {
+                eprintln!("[acp-process-guard] {error}");
+                1
+            }
+        };
+        std::process::exit(exit_code);
+    }
+    if acp_runtime::is_runtime_mode() {
+        let exit_code = match acp_runtime::run_from_env().await {
+            Ok(()) => 0,
+            Err(error) => {
+                use std::io::Write as _;
+                let mut stdout = std::io::stdout().lock();
+                let _ = writeln!(
+                    stdout,
+                    "{}",
+                    serde_json::json!({ "type": "error", "message": error })
+                );
+                1
+            }
+        };
+        std::process::exit(exit_code);
+    }
+
     #[cfg(target_os = "linux")]
     linux_webkit_env::configure();
 
@@ -1023,11 +1065,7 @@ async fn main() {
             }
 
             // Logging setup
-            let base_dir = get_base_dir(app_handle, None)
-                .unwrap_or_else(|e| {
-                    eprintln!("Failed to get base dir, using fallback: {}", e);
-                    screenpipe_core::paths::default_screenpipe_data_dir()
-                });
+            let base_dir = get_base_dir(app_handle, None)?;
 
             // Set up rolling file appender
             let log_dir = get_screenpipe_data_dir(app.handle())
@@ -1198,7 +1236,7 @@ async fn main() {
             }
 
             // Resolve data directory from user setting (custom dir or ~/.screenpipe)
-            let (data_dir, data_dir_fell_back) = config::resolve_data_dir(&store.data_dir);
+            let (data_dir, data_dir_fell_back) = config::resolve_data_dir(&store.data_dir)?;
             info!("Recording data directory: {}", data_dir.display());
 
             // Pin SCREENPIPE_DATA_DIR to the *resolved* dir so every consumer of
@@ -1834,7 +1872,10 @@ async fn main() {
                                 *guard = Some(server);
                             }
                             if let Some(capture) = capture {
-                                *capture_guard = Some(capture);
+                                crate::recording::install_capture_session(
+                                    &mut capture_guard,
+                                    capture,
+                                );
                                 info!("Server + capture started successfully on dedicated runtime");
                             } else {
                                 info!("Server started without capture");
@@ -1967,6 +2008,7 @@ async fn main() {
             crate::meeting_live_notes::start(app_handle.clone());
             crate::meeting_stall_notifications::start(app_handle.clone());
             crate::db_recovery_notifications::start(app_handle.clone());
+            crate::disk_pressure_notifications::start(app_handle.clone());
 
             // Background ChatGPT OAuth token refresh — keeps access tokens
             // fresh so the lazy path in get_valid_token() rarely needs to

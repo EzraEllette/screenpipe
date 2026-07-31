@@ -7,12 +7,14 @@ import {
 	isTransient,
 	isUserInputTooLarge,
 	isGeoBlocked,
+	isProviderUsageCapped,
 	clientPayloadMessage,
 	MODEL_FALLBACKS,
 	TRANSIENT_STATUSES,
 	FREE_PREVIEW_MAX_UPSTREAM_ATTEMPTS,
 	FREE_PREVIEW_WATERFALL,
 	boundedModelChain,
+	efficientModelChain,
 } from '../handlers/chat';
 
 describe('chat handler — transient status classification', () => {
@@ -94,6 +96,22 @@ describe('chat handler — geo-block detection (SCREENPIPE-AI-PROXY-1C)', () => 
 	});
 });
 
+describe('chat handler — provider usage-cap classification (SCREENPIPE-AI-PROXY-30/-2P)', () => {
+	it('detects the Anthropic monthly spend-cap 400', () => {
+		expect(
+			isProviderUsageCapped(
+				400,
+				'400 {"type":"error","error":{"type":"invalid_request_error","message":"You have reached your specified API usage limits. You will regain access on 2026-08-01 at 00:00 UTC."},"request_id":"req_011CdZwqaamihBfwacKwXY4a"}',
+			),
+		).toBe(true);
+	});
+
+	it('leaves other 400s and non-400 statuses unclassified', () => {
+		expect(isProviderUsageCapped(400, 'invalid tool schema')).toBe(false);
+		expect(isProviderUsageCapped(429, 'You have reached your specified API usage limits.')).toBe(false);
+	});
+});
+
 describe('chat handler — client payload classification (SCREENPIPE-AI-PROXY-1A / -1V)', () => {
 	it('maps the Gemini corrupt-image 400 to a clear user message', () => {
 		const msg = clientPayloadMessage(400, 'Failed to decode image data. Please make sure the image is valid.');
@@ -117,9 +135,23 @@ describe('chat handler — client payload classification (SCREENPIPE-AI-PROXY-1A
 
 describe('chat handler — current hosted fallback chains', () => {
 	it('crosses providers through Sonnet 5 when Luna fails', () => {
+		expect(MODEL_FALLBACKS['claude-fable-5']).toEqual([
+			'claude-opus-5',
+			'claude-sonnet-5',
+			'gpt-5.4-mini',
+		]);
 		expect(MODEL_FALLBACKS['claude-opus-5']).toEqual(['claude-sonnet-5', 'gpt-5.4-mini']);
 		expect(MODEL_FALLBACKS['gpt-5.6-luna']).toEqual(['claude-sonnet-5', 'gpt-5.4-mini']);
 		expect(MODEL_FALLBACKS['claude-sonnet-5']).toEqual(['gpt-5.4-mini']);
+	});
+
+	it('strips frontier fallbacks from Free and Basic Auto chains', () => {
+		expect(efficientModelChain([
+			'gpt-5.6-luna',
+			'claude-sonnet-5',
+			'gpt-5.6-sol',
+			'gpt-5.4-mini',
+		])).toEqual(['gpt-5.6-luna', 'gpt-5.4-mini']);
 	});
 
 	it('contains no removed Google, Open MaaS, Gemma, or GPT-OSS model', () => {

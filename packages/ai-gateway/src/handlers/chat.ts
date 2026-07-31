@@ -45,6 +45,18 @@ export const FREE_PREVIEW_WATERFALL = [
 ];
 export const FREE_PREVIEW_MAX_UPSTREAM_ATTEMPTS = 2;
 
+const NON_FRONTIER_FALLBACK_MODELS = new Set([
+  'gpt-5.6-luna',
+  'gpt-5.4-mini',
+  'gpt-5.4-nano',
+  'gpt-5-mini',
+  'gpt-5-nano',
+]);
+
+export function efficientModelChain(chain: string[]): string[] {
+  return chain.filter((model) => NON_FRONTIER_FALLBACK_MODELS.has(model));
+}
+
 export function boundedModelChain(chain: string[], maxAttempts: number): string[] {
   return chain.slice(0, Math.max(0, Math.floor(maxAttempts)));
 }
@@ -57,6 +69,7 @@ function isGeminiModel(model: string): boolean {
 // Per-model fallback chains — when a current user-selected model fails with a
 // transient/upstream error, try a comparable model from another provider.
 export const MODEL_FALLBACKS: Record<string, string[]> = {
+  'claude-fable-5': ['claude-opus-5', 'claude-sonnet-5', 'gpt-5.4-mini'],
   'claude-opus-5': ['claude-sonnet-5', 'gpt-5.4-mini'],
   'gpt-5.6-luna': ['claude-sonnet-5', 'gpt-5.4-mini'],
   'claude-sonnet-5': ['gpt-5.4-mini'],
@@ -129,6 +142,17 @@ const GEO_BLOCK_PATTERN = /country,? region,? or territory not supported|request
 
 export function isGeoBlocked(status: number, msg: string): boolean {
   return status === 403 && GEO_BLOCK_PATTERN.test(msg);
+}
+
+// Anthropic's org-level monthly spend cap ("You have reached your specified
+// API usage limits. You will regain access on ... at 00:00 UTC.", 400
+// invalid_request_error) — a provider-wide outage until the cap resets or is
+// raised, not a client bug. 4k+ identical Sentry events on 2026-07-31
+// (SCREENPIPE-AI-PROXY-30/-2P/-2W/-31) for one billing fact.
+const PROVIDER_USAGE_CAP_PATTERN = /reached your specified api usage limits/i;
+
+export function isProviderUsageCapped(status: number, msg: string): boolean {
+  return status === 400 && PROVIDER_USAGE_CAP_PATTERN.test(msg);
 }
 
 export function isUserInputTooLarge(status: number, msg: string): boolean {
@@ -257,6 +281,19 @@ async function tryModel(
       error.status = 413;
       error.transient = true;
       console.warn(`${ctx}: ${model} rejected oversized prompt (413), cascading`);
+      logModelOutcome(env, { model, outcome: 'error' }).catch(() => {});
+      throw error;
+    }
+
+    // Provider spend cap (Anthropic monthly limit) — cascade to another
+    // provider's model; if the whole chain is capped, tell the user what
+    // will work instead of leaking the raw provider JSON. One Sentry alert
+    // per request would drown the dashboard for a single billing fact, so
+    // skip it — the cost dashboards and model-health log still see it.
+    if (isProviderUsageCapped(status, msg)) {
+      error.transient = true;
+      error.userMessage = `${model} is temporarily at capacity (the provider's usage limit was reached). Pick Auto or a model from a different provider, or try again later.`;
+      console.warn(`${ctx}: ${model} provider usage cap hit (400), cascading`);
       logModelOutcome(env, { model, outcome: 'error' }).catch(() => {});
       throw error;
     }
@@ -448,7 +485,7 @@ export async function handleChatCompletions(
   latency: 'interactive' | 'background' = 'interactive',
   deviceId: string = '',
   allowFrontierBackground: boolean = false,
-  options: { freePreview?: boolean } = {},
+  options: { freePreview?: boolean; efficientOnly?: boolean } = {},
 ): Promise<Response> {
   // A request with no messages at all can never complete: OpenAI would
   // answer the injected system hint below, and Anthropic 400s outright once
@@ -490,6 +527,7 @@ export async function handleChatCompletions(
   // interactive Gemini too, not just background — see isFlexEligible. tryModel
   // scopes it to Gemini attempts; a flex 429 cascades to a standard sibling.
   const freePreview = options.freePreview === true;
+  const efficientOnly = options.efficientOnly === true;
   // A flex rejection causes a same-model standard-tier retry inside tryModel.
   // Disable flex for the preview so its explicit upstream-attempt ceiling is
   // an actual provider-call ceiling, not merely a model-count ceiling.
@@ -505,12 +543,15 @@ export async function handleChatCompletions(
       : (hasImages(body)
         ? AUTO_WATERFALL_VISION
         : (useBackgroundChain ? AUTO_WATERFALL_BACKGROUND : AUTO_WATERFALL));
+    if (efficientOnly) {
+      chain = efficientModelChain(chain);
+    }
     // Difficulty router (interactive text only). A/B by device: arm 'on' keeps
     // trivial/normal requests on Luna and promotes hard requests to GPT-5.6 Sol;
     // arm 'off' is the control baseline (chain unchanged = today's behavior). We tag
     // router_tier on the response so the cost log can measure ON vs control.
     let routerTier: string | null = null;
-    if (!freePreview && !hasImages(body) && !useBackgroundChain) {
+    if (!freePreview && !efficientOnly && !hasImages(body) && !useBackgroundChain) {
       if (routerArm(deviceId, env) === 'on') {
         const hasTools = Array.isArray(body.tools) && body.tools.length > 0;
         const tier = await routeTier(body.messages, env, { hasTools });
@@ -543,7 +584,9 @@ export async function handleChatCompletions(
   // the user's pick and fall through on transient failure.
   const fallbacks = MODEL_FALLBACKS[body.model];
   if (fallbacks?.length) {
-    const chain = [body.model, ...fallbacks];
+    const chain = efficientOnly
+      ? efficientModelChain([body.model, ...fallbacks])
+      : [body.model, ...fallbacks];
     const result = await runChain(chain, body, env, 'fallback', flexEligible);
     if ('response' in result) {
       return addCorsHeaders(addModelHeader(result.response, result.model));

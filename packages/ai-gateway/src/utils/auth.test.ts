@@ -14,7 +14,17 @@ mock.module('@clerk/backend', () => ({
   verifyToken: verifyTokenMock,
 }));
 
-const { validateAuth, __resetAuthEntitlementCacheForTests } = await import('./auth');
+const { validateAuth, __resetAuthEntitlementCacheForTests, resolveUsageTier } = await import('./auth');
+
+describe('resolveUsageTier', () => {
+	it('grants power capacity only when the authenticated model tier is subscribed', () => {
+		expect(resolveUsageTier('business_max', 'subscribed')).toBe('business_max');
+		expect(resolveUsageTier('business_ultra', 'subscribed')).toBe('business_ultra');
+		expect(resolveUsageTier('business_max', 'logged_in')).toBe('logged_in');
+		expect(resolveUsageTier('business_ultra', 'anonymous')).toBe('anonymous');
+		expect(resolveUsageTier('business', 'subscribed')).toBe('subscribed');
+	});
+});
 
 // Canceling a subscription must not strip Pro access before the paid period
 // ends. Stripe stamps canceled_at / flips status to canceled the moment a
@@ -250,6 +260,36 @@ describe('validateAuth — verified identities only', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it('maps Lifetime app ownership to the canonical Basic hosted-AI plan', async () => {
+    verifyTokenMock.mockImplementation(async () => ({ sub: 'user_lifetime' }) as any);
+    const fetchMock = mock(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === 'https://screenpipe.com/api/user') {
+        return new Response(JSON.stringify({
+          success: true,
+          user: {
+            clerk_id: 'user_lifetime',
+            cloud_subscribed: false,
+            app_entitled: true,
+            subscription_plan: 'lifetime',
+            entitlement: { active: true, plan: 'lifetime', features: { app: true, cloud: false } },
+          },
+        }), { status: 200 });
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+    globalThis.fetch = fetchMock as typeof fetch;
+
+    expect(await validateAuth(requestFor('eyJ.lifetime.clerk'), env)).toEqual({
+      isValid: true,
+      tier: 'logged_in',
+      accountPlan: 'basic',
+      deviceId: 'user_lifetime',
+      userId: 'user_lifetime',
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it('keeps a verified identity but marks missing plan truth unknown', async () => {
     verifyTokenMock.mockImplementation(async () => ({ sub: 'user_unknown' }) as any);
     const fetchMock = mock(async (input: RequestInfo | URL) => {
@@ -377,6 +417,60 @@ describe('validateAuth — verified identities only', () => {
       deviceId: 'user_subscribed',
       userId: 'user_subscribed',
     });
+  });
+
+	it('propagates only a server-verified hosted AI trial marker', async () => {
+		verifyTokenMock.mockImplementation(async () => ({ sub: 'user_trial' }) as any);
+		globalThis.fetch = mock(async () => new Response(JSON.stringify({
+			success: true,
+			user: {
+				clerk_id: 'user_trial',
+				cloud_subscribed: true,
+				app_entitled: true,
+				subscription_plan: 'pro',
+				hosted_ai_trial: true,
+				entitlement: { active: true, plan: 'pro', features: { app: true } },
+			},
+		}), { status: 200 })) as typeof fetch;
+
+		expect(await validateAuth(requestFor('eyJ.trial.clerk'), env)).toEqual({
+			isValid: true,
+			tier: 'subscribed',
+			accountPlan: 'business',
+			hostedAiTrial: true,
+			deviceId: 'user_trial',
+			userId: 'user_trial',
+		});
+	});
+
+  it('keeps Max and Ultra on subscribed model access with separate capacity tiers', async () => {
+    for (const [plan, accountPlan, usageTier] of [
+      ['pro_max', 'business_max', 'business_max'],
+      ['pro_ultra', 'business_ultra', 'business_ultra'],
+    ] as const) {
+      __resetAuthEntitlementCacheForTests();
+      const clerkId = `user_${plan}`;
+      verifyTokenMock.mockImplementation(async () => ({ sub: clerkId }) as any);
+      globalThis.fetch = mock(async () => new Response(JSON.stringify({
+        success: true,
+        user: {
+          clerk_id: clerkId,
+          cloud_subscribed: true,
+          app_entitled: true,
+          subscription_plan: plan,
+          entitlement: { active: true, plan, features: { app: true } },
+        },
+      }), { status: 200 })) as typeof fetch;
+
+      expect(await validateAuth(requestFor(`eyJ.${plan}.clerk`), env)).toEqual({
+        isValid: true,
+        tier: 'subscribed',
+        usageTier,
+        accountPlan,
+        deviceId: clerkId,
+        userId: clerkId,
+      });
+    }
   });
 
   it('does not trust paid plan data for a different Clerk subject', async () => {
