@@ -1970,7 +1970,8 @@ pub fn init_store(app: &AppHandle) -> Result<SettingsStore, String> {
     // app-config dir. So additionally require that the data dir holds no existing
     // recordings — retention may only default on when there is nothing to delete.
     if is_new_store && !store.extra.contains_key("localRetentionEnabled") {
-        let (data_dir, _) = crate::config::resolve_data_dir(&store.data_dir);
+        let (data_dir, _) = crate::config::resolve_data_dir(&store.data_dir)
+            .map_err(|error| format!("failed to prepare Screenpipe data directory: {error}"))?;
         let has_existing_recordings = data_dir.join("db.sqlite").exists();
         if has_existing_recordings {
             tracing::info!(

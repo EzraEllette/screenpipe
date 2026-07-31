@@ -7,8 +7,8 @@ and layer declared in the manifest, weighted by confidence and criticality.
 - Manifest: `e2e/coverage-map.json`
 - Specs directory: `e2e/specs`
 - Mapped specs: 85
-- Declared test blocks: 243
-- Weighted coverage points: 185.7
+- Declared test blocks: 244
+- Weighted coverage points: 186.7
 
 Confidence weights: strong=1.0, partial=0.7, conditional=0.4, smoke=0.3.
 Criticality weights: high=1.0, medium=0.7, low=0.4.
@@ -19,9 +19,9 @@ can execute more runtime cases than this number shows.
 
 | Platform | Specs | Declared tests | Weighted points | Layers | Features | Critical score |
 | --- | --- | --- | --- | --- | --- | --- |
-| windows | 70 | 219 | 176.2 | 15 | 74 | 90% |
-| macos | 81 | 206 | 156.5 | 17 | 75 | 88% |
-| linux | 60 | 179 | 146.0 | 13 | 69 | 87% |
+| windows | 69 | 218 | 175.2 | 15 | 72 | 90% |
+| macos | 81 | 207 | 157.5 | 17 | 74 | 88% |
+| linux | 59 | 178 | 145.0 | 13 | 67 | 87% |
 
 ## Runtime Results
 
@@ -42,7 +42,7 @@ pass/fail/skip counts.
 | local-api | 17 specs / 99 tests / 81.8 pts | 18 specs / 74 tests / 62.8 pts | 13 specs / 70 tests / 61.2 pts |
 | notifications | 3 specs / 24 tests / 15.3 pts | 2 specs / 4 tests / 2.4 pts | 1 specs / 3 tests / 2.1 pts |
 | onboarding | 2 specs / 7 tests / 4.6 pts | 2 specs / 7 tests / 4.6 pts | 2 specs / 7 tests / 4.6 pts |
-| os-integration | 5 specs / 17 tests / 16.1 pts | 6 specs / 5 tests / 1.7 pts | - |
+| os-integration | 5 specs / 17 tests / 16.1 pts | 7 specs / 7 tests / 3.7 pts | - |
 | performance | 2 specs / 44 tests / 44.0 pts | 4 specs / 34 tests / 30.5 pts | 1 specs / 29 tests / 29.0 pts |
 | pipes | 5 specs / 15 tests / 15.0 pts | 5 specs / 15 tests / 15.0 pts | 5 specs / 15 tests / 15.0 pts |
 | real-ui-e2e | 47 specs / 136 tests / 109.0 pts | 50 specs / 123 tests / 99.1 pts | 43 specs / 114 tests / 95.4 pts |
@@ -74,6 +74,7 @@ pass/fail/skip counts.
 | Tray/search window behavior | window-lifecycle | covered (strong; window-lifecycle, tray-search) | covered (strong; window-lifecycle, tray-search) | covered (strong; window-lifecycle, tray-search) |
 | Native tray recording status refresh | os-integration | covered (strong; tray-recording-status) | - | - |
 | Storage retention safety UX | storage-privacy | covered (strong; settings-sections, windows-user-journey) | covered (strong; settings-sections) | covered (strong; settings-sections) |
+| Screenpipe data stays out of macOS Spotlight | storage-privacy, os-integration | - | covered (strong; spotlight-exclusion) | - |
 | Updater install and rollback safety | os-integration | gap | gap | gap |
 | Update-available banner surfacing | real-ui-e2e | covered (partial; updater-banner) | covered (partial; updater-banner) | covered (partial; updater-banner) |
 
@@ -111,7 +112,7 @@ pass/fail/skip counts.
 | chat-composer-isolation.spec.ts | windows, macos, linux | chat-ai, real-ui-e2e | chat, chat-drafts | medium | partial | mixed | 1 | Composer draft isolation across conversations. |
 | chat-connections-context-duplicate.spec.ts | windows, macos | chat-ai | chat, chat-sidebar-dedupe | medium | partial | synthetic | 1 | QUARANTINED (#4689): connections-context wrapper stripping regression. The synthetic background-router event path never persists deterministically on Linux/macOS CI; re-enable once it drives a deterministic persisted session. |
 | chat-cross-window-transcript-sync.spec.ts | windows, macos, linux | chat-ai, window-lifecycle, real-ui-e2e | chat, chat-streaming, window-lifecycle | high | strong | mixed | 1 | Both Home and standalone Chat show persistent pending feedback, then hydrate a completed disk transcript and clear stop state from the real cross-window save event without calling a provider. |
-| chat-empty-space.spec.ts | windows, macos, linux | chat-ai, real-ui-e2e | chat | medium | strong | real-user-flow | 1 | A real Tauri chat session keeps a short answer near the composer without exposing a false new-content state or a large empty viewport gap. |
+| chat-empty-space.spec.ts | windows, macos, linux | chat-ai, real-ui-e2e | chat | medium | strong | real-user-flow | 1 | A real Tauri chat session keeps a short answer at the top of the message rail without exposing a false new-content state. |
 | chat-hosted-retry-feedback.spec.ts | macos | chat-ai, real-ui-e2e, tauri-command | chat, chat-streaming | high | strong | real-user-flow | 1 | A local provider returns priced_request_in_flight twice; Pi retries while the UI remains active, a real composer follow-up enters the Rust queue, and both turns recover without the misleading mid-response error. |
 | chat-new-session-stale-save.spec.ts | windows, macos, linux | chat-ai, real-ui-e2e, storage-privacy | chat, chat-drafts | high | strong | synthetic | 1 | Switching to a new Pi session binds its echoed user turn to the new conversation file and leaves the previous chat intact. |
 | chat-newchat-duplicate.spec.ts | windows, macos, linux | chat-ai | chat, chat-sidebar-dedupe | medium | partial | synthetic | 1 | Synthetic chat event regression for duplicate sidebar rows. |
@@ -160,6 +161,7 @@ pass/fail/skip counts.
 | sck-startup-recovery.spec.ts | macos | capture-ocr, local-api, os-integration | app-launch, capture-ocr, health, local-api-search | high | conditional | api | 1 | Opt-in macOS fault injection verifies bounded SCK enumeration recovery, same-process capture, and OCR persistence. |
 | search-request-priority.spec.ts | windows, macos, linux | real-ui-e2e, local-api | home-search, local-api-search | medium | partial | synthetic | 1 | Verifies keyword search request fires before secondary search, facet, and speaker requests. |
 | settings-sections.spec.ts | windows, macos, linux | settings, real-ui-e2e, storage-privacy | settings-recording, settings-ai, settings-privacy-api-auth, storage-retention, low-disk-recording-guard, audio-device-health | high | strong | real-user-flow | 11 | Settings sections, AI preset/preferences split and toggle flows, default-off low-disk capture stop with persistent notification, storage, privacy, and rapid switching crash guard. |
+| spotlight-exclusion.spec.ts | macos | storage-privacy, os-integration | spotlight-exclusion | high | strong | mixed | 2 | Requires the launched app's exact E2E data directory to appear in Spotlight Search Privacy, then force-imports paired excluded/control canaries and proves only the control becomes searchable. |
 | timeline-daily-summary.spec.ts | windows, macos, linux | real-ui-e2e | timeline, settings-ai | medium | strong | real-user-flow | 1 | Opens a cached Pi-generated daily summary in Timeline, checks its bounded scrolling layout, captures a screenshot, and closes it. |
 | timeline.spec.ts | windows, macos, linux | real-ui-e2e, capture-ocr | timeline, capture-ocr | high | conditional | real-user-flow | 3 | Timeline shell always runs; seeded frame assertion skips under no-recording. |
 | tray-recording-status.spec.ts | windows | os-integration, tauri-command | tray-recording-status | high | strong | command | 1 | Drives Starting to Recording and reads back the status item from the successfully installed native tray menu. |

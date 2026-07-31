@@ -1065,11 +1065,7 @@ async fn main() {
             }
 
             // Logging setup
-            let base_dir = get_base_dir(app_handle, None)
-                .unwrap_or_else(|e| {
-                    eprintln!("Failed to get base dir, using fallback: {}", e);
-                    screenpipe_core::paths::default_screenpipe_data_dir()
-                });
+            let base_dir = get_base_dir(app_handle, None)?;
 
             // Set up rolling file appender
             let log_dir = get_screenpipe_data_dir(app.handle())
@@ -1240,7 +1236,7 @@ async fn main() {
             }
 
             // Resolve data directory from user setting (custom dir or ~/.screenpipe)
-            let (data_dir, data_dir_fell_back) = config::resolve_data_dir(&store.data_dir);
+            let (data_dir, data_dir_fell_back) = config::resolve_data_dir(&store.data_dir)?;
             info!("Recording data directory: {}", data_dir.display());
 
             // Pin SCREENPIPE_DATA_DIR to the *resolved* dir so every consumer of
