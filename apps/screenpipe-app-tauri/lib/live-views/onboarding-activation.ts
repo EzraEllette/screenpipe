@@ -20,8 +20,7 @@ const LEGACY_HOME_FOCUS_STORAGE_KEY = "screenpipe.home.focus.v1";
 const MAX_STORED_ACTIVATIONS = 12;
 
 export type UserGoalCategory =
-  | Exclude<OnboardingGoalCategory, "custom">
-  | "default";
+  Exclude<OnboardingGoalCategory, "custom"> | "default";
 
 const USER_GOAL_CATEGORIES = new Set<UserGoalCategory>([
   "default",
@@ -233,6 +232,7 @@ export function startOnboardingLiveViewActivation(
   options: {
     goal?: string | null;
     setupStatus?: OnboardingLiveViewActivation["setupStatus"];
+    guideStep?: OnboardingLiveViewActivation["guideStep"];
     resetProgress?: boolean;
   } = {},
 ): OnboardingLiveViewActivation {
@@ -244,9 +244,11 @@ export function startOnboardingLiveViewActivation(
     goal: options.goal ?? existing?.goal ?? null,
     setupStatus: options.setupStatus ?? existing?.setupStatus ?? "building",
     setupError: null,
-    guideStep: options.resetProgress
-      ? "dashboard"
-      : (existing?.guideStep ?? "dashboard"),
+    guideStep:
+      options.guideStep ??
+      (options.resetProgress
+        ? "dashboard"
+        : (existing?.guideStep ?? "dashboard")),
     createdAt:
       options.resetProgress || !existing
         ? new Date().toISOString()
@@ -281,6 +283,17 @@ export function markOnboardingLiveViewSetupReady(
   }));
   if (activation) dispatchOnboardingLiveViewFollowUp();
   return activation;
+}
+
+/** Selects an existing view without replaying the first-view product guide. */
+export function selectExistingLiveViewForOnboarding(
+  viewId: string,
+): OnboardingLiveViewActivation | null {
+  startOnboardingLiveViewActivation(viewId, "custom", {
+    setupStatus: "ready",
+    guideStep: "done",
+  });
+  return markOnboardingLiveViewSetupReady(viewId);
 }
 
 export function markOnboardingLiveViewSetupNeedsRetry(
