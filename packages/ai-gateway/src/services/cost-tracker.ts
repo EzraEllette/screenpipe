@@ -109,6 +109,13 @@ const MODEL_PRICING: Record<string, ModelPricing> = {
 const DEFAULT_INPUT_TOKENS = 2000;
 const DEFAULT_OUTPUT_TOKENS = 500;
 
+// Admission reservations use a deliberately larger request shape than the
+// accounting fallback above. This bounds concurrent priced work without
+// serializing an account behind one global in-flight lease.
+export const COST_RESERVATION_INPUT_TOKENS = 16_000;
+export const COST_RESERVATION_OUTPUT_TOKENS = 4_096;
+export const MIN_COST_RESERVATION_MICRO_USD = 50_000;
+
 /**
  * Fuzzy-match a model string to a pricing entry.
  * E.g. "claude-haiku-4-5-20251001" → "claude-haiku-4-5"
@@ -196,6 +203,27 @@ export function getModelCost(
     writeTokens * inputRate * (pricing.cacheWrite ?? 1);
   const outCost = (outTokens / 1_000_000) * pricing.output;
   return inCost + outCost;
+}
+
+/**
+ * Conservative pre-inference hold for one priced provider request.
+ *
+ * The hold is not charged spend. It is released after the real cost is written
+ * and only protects the gap between admission and settlement. A floor keeps
+ * unknown/cheap routes from admitting an unbounded burst, while expensive
+ * models reserve according to their own input/output rates.
+ */
+export function getCostReservationMicroUsd(model: string | null | undefined): number {
+  if (isZeroCostModel(model)) return 0;
+  const estimatedUsd = getModelCost(
+    model,
+    COST_RESERVATION_INPUT_TOKENS,
+    COST_RESERVATION_OUTPUT_TOKENS,
+  );
+  return Math.max(
+    MIN_COST_RESERVATION_MICRO_USD,
+    Math.ceil(estimatedUsd * 1_000_000),
+  );
 }
 
 /**

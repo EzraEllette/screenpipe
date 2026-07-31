@@ -21,7 +21,7 @@ import { trackResponseUsage } from './utils/stream-usage-tracker';
 import { pruneRuntimeState } from './services/runtime-state-maintenance';
 import { resolveLatencyClass, isBackgroundRequest } from './utils/latency';
 import {
-	releaseDailyCostLease,
+	releaseDailyCostReservation,
 	reserveDailyCostCap,
 	withDailyCostSettlement,
 	getDailyUserCostForCap,
@@ -127,15 +127,15 @@ async function handleMeteredTinfoilRequest(
 		auth.deviceId,
 		auth.tier,
 		model,
-		new Date(),
-		isBackgroundRequest(request) ? 'background' : 'interactive',
 	);
 	if (!reservation.allowed) return reservation.response;
 	let response: Response;
 	try {
 		response = await handleTinfoilProxy(request, env, auth, subPath);
 	} catch (error) {
-		if (reservation.lease) await releaseDailyCostLease(env, reservation.lease);
+		if (reservation.reservation) {
+			await releaseDailyCostReservation(env, reservation.reservation);
+		}
 		throw error;
 	}
 	const usage = parseTinfoilUsageMetrics(response);
@@ -155,7 +155,7 @@ async function handleMeteredTinfoilRequest(
 		endpoint: `/v1/tinfoil${subPath}`,
 		stream: usage === null,
 	}) : Promise.resolve(true);
-	return withDailyCostSettlement(response, env, reservation.lease, settlement);
+	return withDailyCostSettlement(response, env, reservation.reservation, settlement);
 }
 
 async function handleMeteredVoiceAiRequest(
@@ -170,8 +170,6 @@ async function handleMeteredVoiceAiRequest(
 		auth.deviceId,
 		auth.tier,
 		model,
-		new Date(),
-		isBackgroundRequest(request) ? 'background' : 'interactive',
 	);
 	if (!reservation.allowed) return reservation.response;
 	let response: Response;
@@ -180,7 +178,9 @@ async function handleMeteredVoiceAiRequest(
 			? await handleVoiceQuery(request, env)
 			: await handleVoiceChat(request, env);
 	} catch (error) {
-		if (reservation.lease) await releaseDailyCostLease(env, reservation.lease);
+		if (reservation.reservation) {
+			await releaseDailyCostReservation(env, reservation.reservation);
+		}
 		throw error;
 	}
 	const settlement = response.ok ? logCost(env, {
@@ -195,7 +195,7 @@ async function handleMeteredVoiceAiRequest(
 		endpoint,
 		stream: false,
 	}) : Promise.resolve(true);
-	return withDailyCostSettlement(response, env, reservation.lease, settlement);
+	return withDailyCostSettlement(response, env, reservation.reservation, settlement);
 }
 
 // Handler function for the worker
@@ -413,8 +413,8 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 			}
 
 			// Reserve the Free-preview allowance only after every other request gate.
-			// Its legacy fail-open behavior is still bounded by the fail-closed shared
-			// spend lease acquired immediately below.
+			// Its legacy fail-open behavior is still bounded by the fail-closed spend
+			// reservation acquired immediately below.
 			let freeChatLease: FreeChatLease | null = null;
 			if (freeChat.mode === 'metered') {
 				const reservation = await reserveFreeChatRequest(env, freeChat);
@@ -424,24 +424,22 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 				freeChatLease = reservation.lease;
 			}
 
-			// Serialize priced work within its foreground/background lane. A scheduled
-			// pipe must not block a user who is actively waiting in chat.
-			const latency = resolveLatencyClass(request, body, env);
+			// Reserve this request's conservative share of the daily hosted-AI budget.
+			// Independent rows keep parallel chats and pipes safe without serializing them.
 			const costReservation = await reserveDailyCostCap(
 				env,
 				authResult.deviceId,
 				authResult.tier,
 				body.model,
-				new Date(),
-				isBackgroundRequest(request) ? 'background' : 'interactive',
 			);
 			if (!costReservation.allowed) {
 				if (freeChatLease) await releaseFreeChatLease(env, freeChatLease);
 				return costReservation.response;
 			}
-			const dailyCostLease = costReservation.lease;
+			const dailyCostReservation = costReservation.reservation;
 
 			// Route latency-tolerant (background) traffic to the cheaper flex tier.
+			const latency = resolveLatencyClass(request, body, env);
 			let leaseReleased = false;
 			const releaseLease = async () => {
 				if (!freeChatLease || leaseReleased) return;
@@ -453,7 +451,7 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 				const costBound = withDailyCostSettlement(
 					outgoing,
 					env,
-					dailyCostLease,
+					dailyCostReservation,
 					costSettlement,
 				);
 				if (!freeChatLease) return costBound;
@@ -564,7 +562,9 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 				return attachLeaseRelease(response);
 			} catch (error) {
 				await releaseLease();
-				if (dailyCostLease) await releaseDailyCostLease(env, dailyCostLease);
+				if (dailyCostReservation) {
+					await releaseDailyCostReservation(env, dailyCostReservation);
+				}
 				throw error;
 			}
 		}
@@ -592,11 +592,17 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 				authResult.deviceId,
 				authResult.tier,
 				'gemini-2.5-flash',
-				new Date(),
-				isBackgroundRequest(request) ? 'background' : 'interactive',
 			);
 			if (!costReservation.allowed) return costReservation.response;
-			const webSearchResponse = await handleWebSearch(request, env);
+			let webSearchResponse: Response;
+			try {
+				webSearchResponse = await handleWebSearch(request, env);
+			} catch (error) {
+				if (costReservation.reservation) {
+					await releaseDailyCostReservation(env, costReservation.reservation);
+				}
+				throw error;
+			}
 			const settlement = webSearchResponse.ok ? logCost(env, {
 				device_id: authResult.deviceId,
 				user_id: authResult.userId,
@@ -612,7 +618,7 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 			return withDailyCostSettlement(
 				webSearchResponse,
 				env,
-				costReservation.lease,
+				costReservation.reservation,
 				settlement,
 			);
 		}
@@ -773,8 +779,6 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 				authResult.deviceId,
 				authResult.tier,
 				parsedModel,
-				new Date(),
-				isBackgroundRequest(request) ? 'background' : 'interactive',
 			);
 			if (!costReservation.allowed) return costReservation.response;
 
@@ -782,7 +786,9 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 			try {
 				vertexResponse = await handleVertexProxy(request, env);
 			} catch (error) {
-				if (costReservation.lease) await releaseDailyCostLease(env, costReservation.lease);
+				if (costReservation.reservation) {
+					await releaseDailyCostReservation(env, costReservation.reservation);
+				}
 				throw error;
 			}
 			let costSettlement = Promise.resolve(true);
@@ -845,7 +851,7 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 			return withDailyCostSettlement(
 				vertexResponse,
 				env,
-				costReservation.lease,
+				costReservation.reservation,
 				costSettlement,
 			);
 		}
@@ -911,8 +917,6 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 				authResult.deviceId,
 				authResult.tier,
 				ocModel,
-				new Date(),
-				isBackgroundRequest(request) ? 'background' : 'interactive',
 			);
 			if (!costReservation.allowed) return costReservation.response;
 
@@ -920,7 +924,9 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 			try {
 				anthropicResponse = await handleVertexProxy(request, env);
 			} catch (error) {
-				if (costReservation.lease) await releaseDailyCostLease(env, costReservation.lease);
+				if (costReservation.reservation) {
+					await releaseDailyCostReservation(env, costReservation.reservation);
+				}
 				throw error;
 			}
 			let costSettlement = Promise.resolve(true);
@@ -983,7 +989,7 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 			return withDailyCostSettlement(
 				anthropicResponse,
 				env,
-				costReservation.lease,
+				costReservation.reservation,
 				costSettlement,
 			);
 		}

@@ -12,7 +12,39 @@
  */
 
 import { describe, it, expect } from 'bun:test';
-import { getModelCost, getStreamModelCost, logCost, isZeroCostModel, inferProvider, isFrontierModel } from '../services/cost-tracker';
+import {
+	MIN_COST_RESERVATION_MICRO_USD,
+	getCostReservationMicroUsd,
+	getModelCost,
+	getStreamModelCost,
+	inferProvider,
+	isFrontierModel,
+	isZeroCostModel,
+	logCost,
+} from '../services/cost-tracker';
+
+describe('getCostReservationMicroUsd', () => {
+	it('does not reserve provider cash for a zero-cost model', () => {
+		expect(getCostReservationMicroUsd('glm-5')).toBe(0);
+	});
+
+	it('applies a burst-safety floor to cheap and unknown models', () => {
+		expect(getCostReservationMicroUsd('gemini-2.5-flash')).toBe(
+			MIN_COST_RESERVATION_MICRO_USD,
+		);
+		expect(getCostReservationMicroUsd('unknown-provider-model')).toBe(
+			MIN_COST_RESERVATION_MICRO_USD,
+		);
+	});
+
+	it('reserves model-aware amounts for expensive requests', () => {
+		expect(getCostReservationMicroUsd('gpt-5.6-sol')).toBe(202_880);
+		expect(getCostReservationMicroUsd('gpt-5.5-pro')).toBe(1_217_280);
+		expect(getCostReservationMicroUsd('gpt-5.5-pro')).toBeGreaterThan(
+			getCostReservationMicroUsd('gpt-5.6-sol'),
+		);
+	});
+});
 
 describe('getModelCost — cache-aware pricing', () => {
 	it('uses a conservative estimate when a cancelled stream has partial usage', () => {
