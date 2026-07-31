@@ -4,6 +4,7 @@
 
 import React from "react";
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -34,11 +35,24 @@ const summarizedMeeting: MeetingRecord = {
 
 const mocks = vi.hoisted(() => ({
   localFetch: vi.fn(),
+  openMeetingNoteListener: null as null | ((event: {
+    payload: { meetingId: number; transcript?: boolean };
+  }) => Promise<void>),
 }));
 
 vi.mock("@/lib/api", () => ({ localFetch: mocks.localFetch }));
 vi.mock("@tauri-apps/api/event", () => ({
-  listen: vi.fn(async () => () => undefined),
+  listen: vi.fn(
+    async (
+      _event: string,
+      listener: (event: {
+        payload: { meetingId: number; transcript?: boolean };
+      }) => Promise<void>,
+    ) => {
+      mocks.openMeetingNoteListener = listener;
+      return () => undefined;
+    },
+  ),
 }));
 vi.mock("@/lib/hooks/use-health-check", () => ({
   useHealthCheck: () => ({ health: null }),
@@ -78,23 +92,56 @@ vi.mock("@/components/meeting-notes/list-view", () => ({
     </div>
   ),
 }));
-vi.mock("@/components/meeting-notes/note-view", () => ({
-  NoteView: ({
-    meeting,
-    initialTranscriptOpen,
-  }: {
-    meeting: MeetingRecord;
-    initialTranscriptOpen?: boolean;
-  }) => (
-    <section
-      aria-label="meeting note"
-      data-transcript-open={String(Boolean(initialTranscriptOpen))}
-    >
-      <div data-testid="saved-note">{meeting.note ?? ""}</div>
-      {initialTranscriptOpen ? <p>{TRANSCRIPT}</p> : null}
-    </section>
-  ),
-}));
+vi.mock("@/components/meeting-notes/note-view", async () => {
+  const { resolveTranscriptOpen } = await import(
+    "@/components/meeting-notes/transcript-open-state"
+  );
+  return {
+    NoteView: ({
+      meeting,
+      onBack,
+      initialTranscriptOpen,
+      transcriptOpenIntent,
+      transcriptOpenRequestKey,
+    }: {
+      meeting: MeetingRecord;
+      onBack: () => void;
+      initialTranscriptOpen?: boolean;
+      transcriptOpenIntent?: "open" | "closed";
+      transcriptOpenRequestKey?: number;
+    }) => {
+      // Preserve compatibility with the pre-fix open-only prop so the transition
+      // reaches the actual bug: legacy false is absence of intent and therefore
+      // cannot override a stored-open preference.
+      const intent =
+        transcriptOpenIntent ?? (initialTranscriptOpen ? "open" : undefined);
+      const persistedOpen =
+        window.sessionStorage.getItem(
+          `screenpipe:meeting:${meeting.id}:transcript-open`,
+        ) === "true";
+      const transcriptOpen = resolveTranscriptOpen(intent, persistedOpen);
+
+      React.useEffect(() => {
+        if (intent === undefined) return;
+        window.sessionStorage.setItem(
+          `screenpipe:meeting:${meeting.id}:transcript-open`,
+          String(intent === "open"),
+        );
+      }, [intent, meeting.id, transcriptOpenRequestKey]);
+
+      return (
+        <section
+          aria-label="meeting note"
+          data-transcript-open={String(transcriptOpen)}
+        >
+          <button onClick={onBack}>back</button>
+          <div data-testid="saved-note">{meeting.note ?? ""}</div>
+          {transcriptOpen ? <p>{TRANSCRIPT}</p> : null}
+        </section>
+      );
+    },
+  };
+});
 
 import { MeetingNotesSection } from "@/components/meeting-notes";
 
@@ -124,6 +171,7 @@ function meetingsResponse(meetings: MeetingRecord[]) {
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  mocks.openMeetingNoteListener = null;
   window.history.replaceState({}, "", "/");
   window.sessionStorage.clear();
 });
@@ -172,6 +220,47 @@ describe("MeetingNotesSection meeting selection", () => {
     const note = await screen.findByRole("region", { name: "meeting note" });
     await waitFor(() =>
       expect(note).toHaveAttribute("data-transcript-open", "false"),
+    );
+    expect(screen.queryByText(TRANSCRIPT)).not.toBeInTheDocument();
+  });
+
+  it("keeps an explicit false reopen closed after the same meeting persisted open", async () => {
+    mocks.localFetch.mockImplementation(async (path: string) =>
+      path === "/meetings/42"
+        ? new Response(JSON.stringify(emptyNoteMeeting), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          })
+        : meetingsResponse([emptyNoteMeeting]),
+    );
+    renderMeetingNotes();
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: emptyNoteMeeting.title! }),
+    );
+    expect(
+      await screen.findByRole("region", { name: "meeting note" }),
+    ).toHaveAttribute("data-transcript-open", "true");
+    expect(
+      window.sessionStorage.getItem(
+        `screenpipe:meeting:${emptyNoteMeeting.id}:transcript-open`,
+      ),
+    ).toBe("true");
+
+    fireEvent.click(screen.getByRole("button", { name: "back" }));
+    await screen.findByRole("button", { name: emptyNoteMeeting.title! });
+    await waitFor(() => expect(mocks.openMeetingNoteListener).not.toBeNull());
+    await act(async () => {
+      await mocks.openMeetingNoteListener!({
+        payload: { meetingId: emptyNoteMeeting.id, transcript: false },
+      });
+    });
+
+    const reopenedNote = await screen.findByRole("region", {
+      name: "meeting note",
+    });
+    await waitFor(() =>
+      expect(reopenedNote).toHaveAttribute("data-transcript-open", "false"),
     );
     expect(screen.queryByText(TRANSCRIPT)).not.toBeInTheDocument();
   });

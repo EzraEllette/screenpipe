@@ -33,6 +33,7 @@ import {
 import { ListView } from "./list-view";
 import { NoteView } from "./note-view";
 import type { ComingUpStatus } from "./coming-up";
+import type { TranscriptOpenIntent } from "./transcript-open-state";
 
 const PAGE_SIZE = 30;
 const CALENDAR_REFRESH_MS = 60_000;
@@ -71,15 +72,18 @@ export function MeetingNotesSection({
   const [hasMore, setHasMore] = useState(true);
   const [errorText, setErrorText] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<number | null>(null);
-  const [openTranscriptRequest, setOpenTranscriptRequest] = useState<{
+  const [transcriptOpenRequest, setTranscriptOpenRequest] = useState<{
     id: number;
+    intent: TranscriptOpenIntent;
     token: number;
   } | null>(null);
   const selectMeeting = useCallback(
     (id: number, { openTranscript }: { openTranscript: boolean }) => {
-      setOpenTranscriptRequest(
-        openTranscript ? { id, token: Date.now() } : null,
-      );
+      setTranscriptOpenRequest({
+        id,
+        intent: openTranscript ? "open" : "closed",
+        token: Date.now(),
+      });
       setSelectedId(id);
     },
     [],
@@ -627,10 +631,14 @@ export function MeetingNotesSection({
         captureDevices={captureDevices}
         onCaptureDevicesRefresh={onCaptureDevicesRefresh}
         calendarEvents={upcoming}
-        initialTranscriptOpen={openTranscriptRequest?.id === selected.id}
+        transcriptOpenIntent={
+          transcriptOpenRequest?.id === selected.id
+            ? transcriptOpenRequest.intent
+            : undefined
+        }
         transcriptOpenRequestKey={
-          openTranscriptRequest?.id === selected.id
-            ? openTranscriptRequest.token
+          transcriptOpenRequest?.id === selected.id
+            ? transcriptOpenRequest.token
             : undefined
         }
       />
