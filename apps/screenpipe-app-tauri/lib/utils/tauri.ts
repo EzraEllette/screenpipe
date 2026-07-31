@@ -9,6 +9,13 @@
 
 export const commands = {
 /**
+ * Frontend hook for browser OAuth flows that complete by polling (MCP and
+ * Composio). Generic integration OAuth calls the same mechanism directly.
+ */
+async activateAppAfterOauth() : Promise<void> {
+    await TAURI_INVOKE("activate_app_after_oauth");
+},
+/**
  * Reconcile the live app + the next-boot config with the current enterprise
  * hidden-UI policy. The frontend calls this right after pushing a freshly
  * fetched policy via `set_enterprise_policy`, so the moment an admin turns on
