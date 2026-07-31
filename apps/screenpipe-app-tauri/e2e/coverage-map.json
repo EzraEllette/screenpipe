@@ -137,6 +137,16 @@
   ],
   "specs": [
     {
+      "spec": "acp-text-streaming.spec.ts",
+      "platforms": ["windows", "macos", "linux"],
+      "layers": ["chat-ai", "tauri-command"],
+      "features": ["chat", "acp-runtime", "acp-text-streaming"],
+      "criticality": "high",
+      "confidence": "strong",
+      "ux": "command",
+      "notes": "A deterministic ACP adapter runs through the packaged Rust desktop runtime and proves ordered assistant text streaming from pi_start through agent_end."
+    },
+    {
       "spec": "api.spec.ts",
       "platforms": ["windows", "macos", "linux"],
       "layers": ["local-api"],
@@ -224,7 +234,7 @@
       "criticality": "medium",
       "confidence": "strong",
       "ux": "real-user-flow",
-      "notes": "A real Tauri chat session keeps a short answer near the composer without exposing a false new-content state or a large empty viewport gap."
+      "notes": "A real Tauri chat session keeps a short answer at the top of the message rail without exposing a false new-content state."
     },
     {
       "spec": "chat-ask-user-tool-card.spec.ts",

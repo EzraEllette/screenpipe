@@ -37,7 +37,7 @@ pass/fail/skip counts.
 | auth | - | 1 specs / 1 tests / 1.0 pts | - |
 | billing | 4 specs / 6 tests / 5.7 pts | 4 specs / 6 tests / 5.7 pts | 4 specs / 6 tests / 5.7 pts |
 | capture-ocr | 2 specs / 16 tests / 6.4 pts | 5 specs / 7 tests / 2.8 pts | 1 specs / 3 tests / 1.2 pts |
-| chat-ai | 22 specs / 35 tests / 26.1 pts | 28 specs / 47 tests / 30.7 pts | 21 specs / 34 tests / 25.6 pts |
+| chat-ai | 23 specs / 36 tests / 27.1 pts | 29 specs / 48 tests / 31.7 pts | 22 specs / 35 tests / 26.6 pts |
 | entitlement | - | 1 specs / 1 tests / 1.0 pts | - |
 | local-api | 17 specs / 99 tests / 81.8 pts | 18 specs / 74 tests / 62.8 pts | 13 specs / 70 tests / 61.2 pts |
 | notifications | 3 specs / 24 tests / 15.3 pts | 2 specs / 4 tests / 2.4 pts | 1 specs / 3 tests / 2.1 pts |
@@ -47,8 +47,8 @@ pass/fail/skip counts.
 | pipes | 5 specs / 15 tests / 15.0 pts | 5 specs / 15 tests / 15.0 pts | 5 specs / 15 tests / 15.0 pts |
 | real-ui-e2e | 47 specs / 136 tests / 109.0 pts | 50 specs / 123 tests / 99.1 pts | 43 specs / 114 tests / 95.4 pts |
 | settings | 14 specs / 36 tests / 33.0 pts | 16 specs / 31 tests / 26.7 pts | 13 specs / 28 tests / 25.0 pts |
-| storage-privacy | 8 specs / 36 tests / 27.3 pts | 7 specs / 17 tests / 16.1 pts | 5 specs / 15 tests / 14.1 pts |
-| tauri-command | 10 specs / 19 tests / 12.3 pts | 11 specs / 21 tests / 12.8 pts | 9 specs / 18 tests / 11.3 pts |
+| storage-privacy | 8 specs / 36 tests / 27.3 pts | 6 specs / 15 tests / 14.1 pts | 5 specs / 15 tests / 14.1 pts |
+| tauri-command | 11 specs / 20 tests / 13.3 pts | 12 specs / 22 tests / 13.8 pts | 10 specs / 19 tests / 12.3 pts |
 | window-lifecycle | 18 specs / 62 tests / 52.6 pts | 18 specs / 43 tests / 31.0 pts | 13 specs / 38 tests / 29.5 pts |
 
 ## Critical Feature Matrix
@@ -96,6 +96,7 @@ pass/fail/skip counts.
 
 | Spec | Platforms | Layers | Features | Criticality | Confidence | UX | Tests | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| acp-text-streaming.spec.ts | windows, macos, linux | chat-ai, tauri-command | chat, acp-runtime, acp-text-streaming | high | strong | command | 1 | A deterministic ACP adapter runs through the packaged Rust desktop runtime and proves ordered assistant text streaming from pi_start through agent_end. |
 | api-key-cold-spawn.spec.ts | windows, macos, linux | local-api, tauri-command | local-api-auth, app-launch | medium | partial | command | 3 | Cold-spawn local API config regression coverage. |
 | api-search-stress.spec.ts | windows, macos, linux | local-api, performance | local-api-auth, local-api-search, health, audio-device-health, local-api-load | high | strong | api | 29 | Broad readonly API, auth, search, and load coverage. |
 | api.spec.ts | windows, macos, linux | local-api | health, audio-device-health, connections, local-api-auth | high | partial | api | 7 | Smoke coverage for local HTTP API shape and auth behavior. |
@@ -111,7 +112,7 @@ pass/fail/skip counts.
 | chat-composer-isolation.spec.ts | windows, macos, linux | chat-ai, real-ui-e2e | chat, chat-drafts | medium | partial | mixed | 1 | Composer draft isolation across conversations. |
 | chat-connections-context-duplicate.spec.ts | windows, macos | chat-ai | chat, chat-sidebar-dedupe | medium | partial | synthetic | 1 | QUARANTINED (#4689): connections-context wrapper stripping regression. The synthetic background-router event path never persists deterministically on Linux/macOS CI; re-enable once it drives a deterministic persisted session. |
 | chat-cross-window-transcript-sync.spec.ts | windows, macos, linux | chat-ai, window-lifecycle, real-ui-e2e | chat, chat-streaming, window-lifecycle | high | strong | mixed | 1 | Both Home and standalone Chat show persistent pending feedback, then hydrate a completed disk transcript and clear stop state from the real cross-window save event without calling a provider. |
-| chat-empty-space.spec.ts | windows, macos, linux | chat-ai, real-ui-e2e | chat | medium | strong | real-user-flow | 1 | A real Tauri chat session keeps a short answer near the composer without exposing a false new-content state or a large empty viewport gap. |
+| chat-empty-space.spec.ts | windows, macos, linux | chat-ai, real-ui-e2e | chat | medium | strong | real-user-flow | 1 | A real Tauri chat session keeps a short answer at the top of the message rail without exposing a false new-content state. |
 | chat-hosted-retry-feedback.spec.ts | macos | chat-ai, real-ui-e2e, tauri-command | chat, chat-streaming | high | strong | real-user-flow | 1 | A local provider returns priced_request_in_flight twice; Pi retries while the UI remains active, a real composer follow-up enters the Rust queue, and both turns recover without the misleading mid-response error. |
 | chat-new-session-stale-save.spec.ts | windows, macos, linux | chat-ai, real-ui-e2e, storage-privacy | chat, chat-drafts | high | strong | synthetic | 1 | Switching to a new Pi session binds its echoed user turn to the new conversation file and leaves the previous chat intact. |
 | chat-newchat-duplicate.spec.ts | windows, macos, linux | chat-ai | chat, chat-sidebar-dedupe | medium | partial | synthetic | 1 | Synthetic chat event regression for duplicate sidebar rows. |
