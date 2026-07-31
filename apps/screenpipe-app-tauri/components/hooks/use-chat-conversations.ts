@@ -44,6 +44,7 @@ import {
 } from "@/lib/chat-storage";
 import type { ContentBlock, Message } from "@/lib/chat/types";
 import {
+  savedTurnEventState,
   shouldAdoptPersistedTranscript,
   synchronizedActiveTurn,
   toRuntimeMessages,
@@ -122,8 +123,7 @@ function newestUserMessageTimestamp(messages: Message[]): number | undefined {
 
 /** Module-scope guard for AI title generation — survives component remounts
  *  and is shared across all hook instances so two StandaloneChat mounts
- *  (chat window + home page) never both fire for the same conversation.
- *  Entries are removed on failure/null to allow retry. */
+ *  (chat window + home page) never both fire for the same conversation. */
 const aiTitleAttempted = new Set<string>();
 
 export function useChatConversations(opts: UseChatConversationsOpts) {
@@ -426,11 +426,19 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
         titleSource?: "fallback" | "ai" | "user";
         updatedAt?: number;
         turnState?: { isLoading: boolean; isStreaming: boolean };
+        activeAssistantMessageId?: string;
       }>(
         "chat-conversation-saved",
         async (event) => {
           if (cancelled) return;
-          const { id, title, titleSource, updatedAt, turnState } = event.payload ?? {};
+          const {
+            id,
+            title,
+            titleSource,
+            updatedAt,
+            turnState,
+            activeAssistantMessageId,
+          } = event.payload ?? {};
           if (!id) return;
 
           // Each WebView owns separate React/Zustand state. A sibling can save
@@ -439,6 +447,19 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
           // strictly more complete so a stale save never rolls back a live
           // foreground stream.
           if (id === conversationId || id === piSessionIdRef.current) {
+            // Publish the stable assistant identity before any disk/title
+            // awaits below. Pi can echo the user prompt within milliseconds;
+            // without this synchronous handoff a sibling treats that echo as
+            // a queued turn and persists the prompt + placeholder twice.
+            if (
+              activeAssistantMessageId &&
+              (turnState?.isLoading || turnState?.isStreaming) &&
+              !piMessageIdRef.current
+            ) {
+              piMessageIdRef.current = activeAssistantMessageId;
+              piStreamingTextRef.current = "";
+              piContentBlocksRef.current = [];
+            }
             if (typeof updatedAt === "number") {
               latestSavedEventAtRef.current.set(
                 id,
@@ -681,9 +702,16 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
     // Only allow AI titles when the user manually renames (titleSource
     // would be "user" at that point, so this gate is a no-op for renames).
     const isPipeChat = existing?.kind === "pipe-run" || existing?.kind === "pipe-watch";
+    const turnIsActive = options.turnState
+      ? options.turnState.isLoading || options.turnState.isStreaming
+      : isLoading || isStreaming;
     if (
       autoTitleEnabled &&
       !isPipeChat &&
+      // Title generation uses a second hosted request. Starting it beside the
+      // first answer competes with the user's chat for the account-wide hosted
+      // request slot, so wait until that answer has actually settled.
+      !turnIsActive &&
       titleSource === "fallback" &&
       rawContent &&
       hasValidPreset &&
@@ -768,16 +796,16 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
               } catch {}
             }
           } else {
-            // AI returned null — clear streaming state, allow retry.
-            aiTitleAttempted.delete(convId);
+            // AI returned null — clear streaming state. Keep the once-per-chat
+            // guard so later autosaves do not repeatedly consume hosted slots.
             try {
               const { useChatStore } = await import("@/lib/stores/chat-store");
               useChatStore.getState().actions.patch(convId, { streamingTitle: undefined });
             } catch {}
           }
         } catch (error) {
-          // Clear streamingTitle on error, allow retry.
-          aiTitleAttempted.delete(convId);
+          // Clear streamingTitle on error. Keep the once-per-chat guard so an
+          // unavailable title provider cannot retry on every autosave.
           try {
             const { useChatStore } = await import("@/lib/stores/chat-store");
             useChatStore.getState().actions.patch(convId, { streamingTitle: undefined });
@@ -917,12 +945,13 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
       upsertFileConversationMeta(conversation);
     }
     try {
+      const emittedTurnState = savedTurnEventState(msgs, options.turnState);
       await emit("chat-conversation-saved", {
         id: conversation.id,
         title: conversation.title,
         titleSource: conversation.titleSource,
         updatedAt: conversation.updatedAt,
-        turnState: options.turnState ?? { isLoading, isStreaming },
+        ...emittedTurnState,
       });
     } catch {
       // ignore broadcast failures; local save already succeeded
@@ -995,7 +1024,9 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
       // If the user has typed follow-up messages, some won't have pipe- IDs → save.
       const allPipe = messages.every((m) => m.id?.startsWith("pipe-"));
       if (!allPipe) {
-        saveConversation(messages);
+        saveConversation(messages, {
+          turnState: { isLoading: false, isStreaming: false },
+        });
         // Reveal this session in the sidebar — the assistant has replied,
         // so it's no longer an empty draft.
         void (async () => {
@@ -1053,6 +1084,7 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
       saveConversation(messages, {
         refreshHistory: false,
         syncActiveConversation: false,
+        turnState: { isLoading, isStreaming },
       });
     }, 1500);
 

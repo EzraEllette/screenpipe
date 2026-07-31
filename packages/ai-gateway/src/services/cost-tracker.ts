@@ -109,6 +109,19 @@ const MODEL_PRICING: Record<string, ModelPricing> = {
 const DEFAULT_INPUT_TOKENS = 2000;
 const DEFAULT_OUTPUT_TOKENS = 500;
 
+// A reservation protects the gap between request admission and final cost
+// settlement. Callers pass a request-sized prompt estimate when they have one;
+// these defaults keep opaque routes bounded without pretending that every
+// request has the same shape.
+export const DEFAULT_COST_RESERVATION_INPUT_TOKENS = 16_000;
+export const DEFAULT_COST_RESERVATION_OUTPUT_TOKENS = 4_096;
+export const MIN_COST_RESERVATION_MICRO_USD = 50_000;
+
+export interface CostReservationShape {
+  inputTokens?: number | null;
+  maxOutputTokens?: number | null;
+}
+
 /**
  * Fuzzy-match a model string to a pricing entry.
  * E.g. "claude-haiku-4-5-20251001" → "claude-haiku-4-5"
@@ -196,6 +209,47 @@ export function getModelCost(
     writeTokens * inputRate * (pricing.cacheWrite ?? 1);
   const outCost = (outTokens / 1_000_000) * pricing.output;
   return inCost + outCost;
+}
+
+function finiteTokenCount(value: number | null | undefined, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value)
+    ? Math.max(fallback, Math.ceil(value))
+    : fallback;
+}
+
+/**
+ * Conservative pre-inference hold for one priced provider request.
+ *
+ * Prompt tokens scale with the request body instead of a fixed average. Treat
+ * the whole prompt as a cache write because providers such as Anthropic and
+ * GPT-5.6 can bill cache creation above the base input rate. `auto` has no
+ * pricing row, so reserve against GPT-5.6 Sol, the expensive routed candidate,
+ * rather than the unknown-model penny fallback.
+ */
+export function getCostReservationMicroUsd(
+  model: string | null | undefined,
+  shape: CostReservationShape = {},
+): number {
+  if (isZeroCostModel(model)) return 0;
+  const pricedModel = hasPricing(model) ? model : 'gpt-5.6-sol';
+  const inputTokens = finiteTokenCount(
+    shape.inputTokens,
+    DEFAULT_COST_RESERVATION_INPUT_TOKENS,
+  );
+  const outputTokens = finiteTokenCount(
+    shape.maxOutputTokens,
+    DEFAULT_COST_RESERVATION_OUTPUT_TOKENS,
+  );
+  const estimatedUsd = getModelCost(
+    pricedModel,
+    inputTokens,
+    outputTokens,
+    { cache_creation_tokens: inputTokens },
+  );
+  return Math.max(
+    MIN_COST_RESERVATION_MICRO_USD,
+    Math.ceil(estimatedUsd * 1_000_000),
+  );
 }
 
 /**
@@ -405,14 +459,18 @@ export function getMaxDailyCostPerUser(env?: Env): number {
   return parseFloat((env as any)?.MAX_DAILY_COST_PER_USER || '') || DEFAULT_MAX_DAILY_COST_USD;
 }
 
+function getMaxDailyTextCostPerUser(env?: Env): number {
+  return parseFloat(env?.MAX_DAILY_TEXT_COST_PER_USER || '') || getMaxDailyCostPerUser(env);
+}
+
 // Tier-aware daily cost cap:
 //   anonymous:  ~5 opus reqs/day  ($1.60)
 //   logged_in:  ~10 opus reqs/day ($3.20)
 //   subscribed: ~109 opus reqs/day ($35)
 export function getTierDailyCostCap(tier: string, env?: Env): number {
-  const baseCap = getMaxDailyCostPerUser(env);
+  const baseCap = getMaxDailyTextCostPerUser(env);
   switch (tier) {
-    case 'subscribed': return baseCap * 7;   // $35
+    case 'subscribed': return parseFloat(env?.MAX_DAILY_SUBSCRIBED_TEXT_COST || '') || baseCap * 7;
     case 'logged_in':  return baseCap * 0.64; // $3.20
     default:           return baseCap * 0.32; // $1.60 (anonymous)
   }

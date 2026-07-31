@@ -50,9 +50,13 @@ describe('OpenAI API model catalog', () => {
 		expect(ids).toContain('gpt-5.5-pro');
 		expect(ids).toContain('gpt-5.4');
 		expect(ids).toContain('gpt-5.4-pro');
-		expect(ids).toContain('gpt-5.3-codex');
 		expect(ids).toContain('gpt-5.4-mini');
 		expect(ids).toContain('gpt-5.4-nano');
+	});
+
+	it('never advertises Responses-API-only codex models (chat-completions 404s them)', async () => {
+		const ids = await listedModelIds();
+		expect(ids).not.toContain('gpt-5.3-codex');
 	});
 
 	it('hides OpenAI models until OPENAI_API_KEY is configured', async () => {
@@ -92,9 +96,8 @@ describe('OpenAI API model catalog', () => {
 			TINFOIL_API_KEY: 'tinfoil-test',
 		});
 		for (const id of ids) {
-			expect(id).not.toMatch(/gemini|gemma|gpt-oss|glm-|kimi-|qwen|llama-4|haiku|sonnet-4/i);
+			expect(id).not.toMatch(/fable|opus|gemini|gemma|gpt-oss|glm-|kimi-|qwen|llama-4|haiku|sonnet-4/i);
 		}
-		expect(ids).toContain('claude-opus-5');
 		expect(ids).toContain('claude-sonnet-5');
 	});
 
@@ -118,9 +121,9 @@ describe('tier locking in /v1/models', () => {
 		const models = await listedFor('logged_in');
 		const sonnet = models.find(m => m.id === 'claude-sonnet-5');
 		const opus = models.find(m => m.id === 'claude-opus-5');
-		// present (not hidden) and flagged so the app can grey + upsell
+		// Sonnet remains visible and locked; Opus is hidden during containment.
 		expect(sonnet?.locked).toBe(true);
-		expect(opus?.locked).toBe(true);
+		expect(opus).toBeUndefined();
 	});
 
 	it('leaves allowed models unlocked for non-Business', async () => {

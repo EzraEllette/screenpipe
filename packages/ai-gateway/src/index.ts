@@ -16,14 +16,15 @@ import { handleVoiceTranscription, handleVoiceQuery, handleTextToSpeech, handleV
 import { handleVertexProxy, handleVertexModels } from './handlers/vertex-proxy';
 import { handleWebSearch } from './handlers/web-search';
 import { handleTinfoilAttestation, handleTinfoilProxy, parseTinfoilUsageMetrics } from './handlers/tinfoil-proxy';
-import { logCost, getModelCost, getStreamModelCost, inferProvider, getSpendSummary, getDailyUserCost, getMaxDailyCostPerUser, getTierDailyCostCap, resolveServedModel } from './services/cost-tracker';
+import { logCost, getModelCost, getStreamModelCost, inferProvider, getSpendSummary, getDailyUserCost, getMaxDailyCostPerUser, getTierDailyCostCap, resolveServedModel, type CostReservationShape } from './services/cost-tracker';
 import { trackResponseUsage } from './utils/stream-usage-tracker';
 import { pruneRuntimeState } from './services/runtime-state-maintenance';
 import { resolveLatencyClass, isBackgroundRequest } from './utils/latency';
 import {
-	releaseDailyCostLease,
+	releaseDailyCostReservation,
 	reserveDailyCostCap,
 	withDailyCostSettlement,
+	getDailyUserCostForCap,
 } from './services/cost-cap';
 import {
 	FREE_CHAT_MAX_PROVIDER_CALLS_PER_MESSAGE,
@@ -94,6 +95,30 @@ async function readBoundedJson(request: Request, maxBytes: number): Promise<Boun
 	}
 }
 
+/** Scale the pre-inference hold with the actual JSON request shape. */
+function costReservationShape(body: unknown, knownBytes = 0): CostReservationShape {
+	let bytes = knownBytes;
+	if (bytes <= 0) {
+		try {
+			bytes = new TextEncoder().encode(JSON.stringify(body)).byteLength;
+		} catch {
+			bytes = 0;
+		}
+	}
+	const request = body && typeof body === 'object'
+		? body as { max_tokens?: unknown; max_completion_tokens?: unknown }
+		: {};
+	const requestedOutput = [request.max_tokens, request.max_completion_tokens]
+		.filter((value): value is number => typeof value === 'number' && Number.isFinite(value))
+		.reduce((maximum, value) => Math.max(maximum, value), 0);
+	return {
+		// Two UTF-8 bytes per estimated token is conservative for normal prompts;
+		// the hard lane ceiling bounds tokenizer variance and adversarial bodies.
+		inputTokens: Math.ceil(bytes / 2),
+		maxOutputTokens: requestedOutput > 0 ? Math.ceil(requestedOutput) : undefined,
+	};
+}
+
 function paidHostedAiRouteError(auth: AuthResult): Response | null {
 	if (hasPaidHostedAiPlan(auth)) return null;
 	if (auth.tier !== 'anonymous' && auth.accountPlan !== 'free') {
@@ -121,13 +146,22 @@ async function handleMeteredTinfoilRequest(
 	subPath: '/v1/chat/completions' | '/v1/responses',
 ): Promise<Response> {
 	const model = 'gemma4-31b';
-	const reservation = await reserveDailyCostCap(env, auth.deviceId, auth.tier, model);
+	const reservation = await reserveDailyCostCap(
+		env,
+		auth.deviceId,
+		auth.tier,
+		model,
+		new Date(),
+		isBackgroundRequest(request) ? 'background' : 'interactive',
+	);
 	if (!reservation.allowed) return reservation.response;
 	let response: Response;
 	try {
 		response = await handleTinfoilProxy(request, env, auth, subPath);
 	} catch (error) {
-		if (reservation.lease) await releaseDailyCostLease(env, reservation.lease);
+		if (reservation.reservation) {
+			await releaseDailyCostReservation(env, reservation.reservation);
+		}
 		throw error;
 	}
 	const usage = parseTinfoilUsageMetrics(response);
@@ -147,7 +181,7 @@ async function handleMeteredTinfoilRequest(
 		endpoint: `/v1/tinfoil${subPath}`,
 		stream: usage === null,
 	}) : Promise.resolve(true);
-	return withDailyCostSettlement(response, env, reservation.lease, settlement);
+	return withDailyCostSettlement(response, env, reservation.reservation, settlement);
 }
 
 async function handleMeteredVoiceAiRequest(
@@ -157,7 +191,14 @@ async function handleMeteredVoiceAiRequest(
 	endpoint: '/v1/voice/query' | '/v1/voice/chat',
 ): Promise<Response> {
 	const model = request.headers.get('ai-model') || 'gpt-5.4';
-	const reservation = await reserveDailyCostCap(env, auth.deviceId, auth.tier, model);
+	const reservation = await reserveDailyCostCap(
+		env,
+		auth.deviceId,
+		auth.tier,
+		model,
+		new Date(),
+		isBackgroundRequest(request) ? 'background' : 'interactive',
+	);
 	if (!reservation.allowed) return reservation.response;
 	let response: Response;
 	try {
@@ -165,7 +206,9 @@ async function handleMeteredVoiceAiRequest(
 			? await handleVoiceQuery(request, env)
 			: await handleVoiceChat(request, env);
 	} catch (error) {
-		if (reservation.lease) await releaseDailyCostLease(env, reservation.lease);
+		if (reservation.reservation) {
+			await releaseDailyCostReservation(env, reservation.reservation);
+		}
 		throw error;
 	}
 	const settlement = response.ok ? logCost(env, {
@@ -180,7 +223,7 @@ async function handleMeteredVoiceAiRequest(
 		endpoint,
 		stream: false,
 	}) : Promise.resolve(true);
-	return withDailyCostSettlement(response, env, reservation.lease, settlement);
+	return withDailyCostSettlement(response, env, reservation.reservation, settlement);
 }
 
 // Handler function for the worker
@@ -223,7 +266,7 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 			// are our internal margin and shouldn't leak to any client/user).
 			// Stored query credits do not raise the cash ceiling. Credit-funded
 			// provider spend needs consumptive accounting before it can safely do so.
-			const dailyCost = await getDailyUserCost(env, authResult.deviceId);
+			const dailyCost = await getDailyUserCostForCap(env, authResult.deviceId);
 			const maxCost = getTierDailyCostCap(authResult.tier, env);
 			const enriched = {
 				...status,
@@ -409,22 +452,25 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 				freeChatLease = reservation.lease;
 			}
 
-			// Serialize the account's priced read/inference/write interval. Acquiring
-			// this only after every non-cost gate avoids holding it for rejected work.
+			// Serialize priced work within its foreground/background lane. A scheduled
+			// pipe must not block a user who is actively waiting in chat.
+			const latency = resolveLatencyClass(request, body, env);
 			const costReservation = await reserveDailyCostCap(
 				env,
 				authResult.deviceId,
 				authResult.tier,
 				body.model,
+				new Date(),
+				isBackgroundRequest(request) ? 'background' : 'interactive',
+				costReservationShape(body, rawRequestBytes),
 			);
 			if (!costReservation.allowed) {
 				if (freeChatLease) await releaseFreeChatLease(env, freeChatLease);
 				return costReservation.response;
 			}
-			const dailyCostLease = costReservation.lease;
+			const dailyCostReservation = costReservation.reservation;
 
 			// Route latency-tolerant (background) traffic to the cheaper flex tier.
-			const latency = resolveLatencyClass(request, body, env);
 			let leaseReleased = false;
 			const releaseLease = async () => {
 				if (!freeChatLease || leaseReleased) return;
@@ -436,7 +482,7 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 				const costBound = withDailyCostSettlement(
 					outgoing,
 					env,
-					dailyCostLease,
+					dailyCostReservation,
 					costSettlement,
 				);
 				if (!freeChatLease) return costBound;
@@ -547,7 +593,9 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 				return attachLeaseRelease(response);
 			} catch (error) {
 				await releaseLease();
-				if (dailyCostLease) await releaseDailyCostLease(env, dailyCostLease);
+				if (dailyCostReservation) {
+					await releaseDailyCostReservation(env, dailyCostReservation);
+				}
 				throw error;
 			}
 		}
@@ -575,6 +623,8 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 				authResult.deviceId,
 				authResult.tier,
 				'gemini-2.5-flash',
+				new Date(),
+				isBackgroundRequest(request) ? 'background' : 'interactive',
 			);
 			if (!costReservation.allowed) return costReservation.response;
 			const webSearchResponse = await handleWebSearch(request, env);
@@ -593,7 +643,7 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 			return withDailyCostSettlement(
 				webSearchResponse,
 				env,
-				costReservation.lease,
+				costReservation.reservation,
 				settlement,
 			);
 		}
@@ -718,10 +768,12 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 			const clonedRequest = request.clone();
 			let parsedModel = 'claude-sonnet-4-5@20250929';
 			let parsedStream = false;
+			let parsedRequestShape: CostReservationShape = {};
 			try {
 				const body = (await clonedRequest.json()) as { model?: string; stream?: boolean };
-				parsedModel = body.model || parsedModel;
+				parsedModel = resolveModelAlias(body.model || parsedModel);
 				parsedStream = body.stream === true;
+				parsedRequestShape = costReservationShape(body);
 				if (!isModelAllowed(parsedModel, authResult.tier, env)) {
 					const allowedModels = getTierConfig(env)[authResult.tier].allowedModels;
 					return addCorsHeaders(createErrorResponse(403, JSON.stringify({
@@ -754,6 +806,9 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 				authResult.deviceId,
 				authResult.tier,
 				parsedModel,
+				new Date(),
+				isBackgroundRequest(request) ? 'background' : 'interactive',
+				parsedRequestShape,
 			);
 			if (!costReservation.allowed) return costReservation.response;
 
@@ -761,7 +816,9 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 			try {
 				vertexResponse = await handleVertexProxy(request, env);
 			} catch (error) {
-				if (costReservation.lease) await releaseDailyCostLease(env, costReservation.lease);
+				if (costReservation.reservation) {
+					await releaseDailyCostReservation(env, costReservation.reservation);
+				}
 				throw error;
 			}
 			let costSettlement = Promise.resolve(true);
@@ -824,7 +881,7 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 			return withDailyCostSettlement(
 				vertexResponse,
 				env,
-				costReservation.lease,
+				costReservation.reservation,
 				costSettlement,
 			);
 		}
@@ -848,11 +905,13 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 			// Extract model/stream before proxy consumes the body
 			let ocModel = 'claude-sonnet-5';
 			let ocStream = false;
+			let ocRequestShape: CostReservationShape = {};
 			try {
 				const clonedReq = request.clone();
 				const reqBody = await clonedReq.json() as { model?: string; stream?: boolean };
-				ocModel = reqBody.model || ocModel;
+				ocModel = resolveModelAlias(reqBody.model || ocModel);
 				ocStream = reqBody.stream === true;
+				ocRequestShape = costReservationShape(reqBody);
 			} catch (e) {
 				// body parse failure — proceed with defaults
 			}
@@ -890,6 +949,9 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 				authResult.deviceId,
 				authResult.tier,
 				ocModel,
+				new Date(),
+				isBackgroundRequest(request) ? 'background' : 'interactive',
+				ocRequestShape,
 			);
 			if (!costReservation.allowed) return costReservation.response;
 
@@ -897,7 +959,9 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 			try {
 				anthropicResponse = await handleVertexProxy(request, env);
 			} catch (error) {
-				if (costReservation.lease) await releaseDailyCostLease(env, costReservation.lease);
+				if (costReservation.reservation) {
+					await releaseDailyCostReservation(env, costReservation.reservation);
+				}
 				throw error;
 			}
 			let costSettlement = Promise.resolve(true);
@@ -960,7 +1024,7 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 			return withDailyCostSettlement(
 				anthropicResponse,
 				env,
-				costReservation.lease,
+				costReservation.reservation,
 				costSettlement,
 			);
 		}
