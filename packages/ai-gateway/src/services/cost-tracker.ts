@@ -307,6 +307,34 @@ function utcToday(): string {
   return new Date().toISOString().split('T')[0];
 }
 
+function d1ErrorText(error: unknown): string {
+  const value = error as { message?: unknown; cause?: { message?: unknown } } | null;
+  const messages = [value?.message, value?.cause?.message]
+    .filter((message): message is string => typeof message === 'string' && message.trim().length > 0);
+  return messages.join(': ') || String(error);
+}
+
+const RETRYABLE_D1_ERRORS = [
+  'network connection lost',
+  'storage caused object to be reset',
+  'reset because its code was updated',
+  'cannot resolve d1 db due to transient issue on remote node',
+];
+
+/** Only use for reads or writes that are idempotent after ambiguous completion. */
+export async function retryTransientD1<T>(operation: () => Promise<T>): Promise<T> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      const retryable = RETRYABLE_D1_ERRORS.some((text) => d1ErrorText(error).toLowerCase().includes(text));
+      if (!retryable || attempt === 4) throw error;
+      const delay = 25 * (3 ** attempt) * (0.75 + Math.random() * 0.5);
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
+}
+
 /**
  * Maintain the O(1) per-device daily-cost accumulator on the usage table
  * (migration 0006). Replaces the per-request SUM over cost_log that tipped
@@ -331,7 +359,7 @@ async function bumpDailyCostAccumulator(env: Env, deviceId: string, cost: number
     ).bind(deviceId, today, cost).run();
     return true;
   } catch (error) {
-    console.warn('daily cost accumulator update failed:', error);
+    console.warn('daily cost accumulator update failed:', d1ErrorText(error));
     return false;
   }
 }
@@ -398,7 +426,7 @@ export async function logCost(env: Env, entry: CostLogEntry): Promise<boolean> {
       )
       .run();
   } catch (error) {
-    console.error('cost aggregation failed:', error);
+    console.error('cost aggregation failed:', d1ErrorText(error));
   }
   return accumulatorRecorded;
 }
@@ -487,7 +515,7 @@ export async function getDailyUserCost(env: Env, deviceId: string): Promise<numb
   try {
     return await getDailyUserCostOrThrow(env, deviceId);
   } catch (error) {
-    console.error('getDailyUserCost failed:', error);
+    console.error('getDailyUserCost failed:', d1ErrorText(error));
     return 0;
   }
 }
@@ -496,14 +524,14 @@ export async function getDailyUserCost(env: Env, deviceId: string): Promise<numb
 export async function getDailyUserCostOrThrow(env: Env, deviceId: string): Promise<number> {
   const today = utcToday();
   try {
-    const row = await env.DB.prepare(
+    const row = await retryTransientD1(() => env.DB.prepare(
       `SELECT CASE WHEN cost_day = ? THEN daily_cost_usd ELSE 0 END as daily_cost
        FROM usage WHERE device_id = ?`
-    ).bind(today, deviceId).first<{ daily_cost: number }>();
+    ).bind(today, deviceId).first<{ daily_cost: number }>());
     // No usage row yet = no recorded spend today.
     return row?.daily_cost ?? 0;
   } catch (error) {
-    console.error('daily cost accumulator read failed:', error);
+    console.error('daily cost accumulator read failed:', d1ErrorText(error));
     throw new Error('daily cost accounting unavailable');
   }
 }

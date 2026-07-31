@@ -74,6 +74,26 @@ describe('enforceDailyCostCap', () => {
 		expect(response?.status).toBe(503);
 		expect(await response!.text()).toContain('cost_control_unavailable');
 	});
+
+	it('recovers from a documented transient D1 read failure', async () => {
+		let attempts = 0;
+		const env = {
+			DB: {
+				prepare() {
+					attempts += 1;
+					if (attempts < 3) throw new Error('D1_ERROR: Network connection lost.');
+					return {
+						bind() {
+							return { async first() { return { daily_cost: 0 }; } };
+						},
+					};
+				},
+			},
+		} as unknown as Env;
+
+		expect(await enforceDailyCostCap(env, 'dev', 'subscribed', 'gpt-5.6-sol')).toBeNull();
+		expect(attempts).toBe(3);
+	});
 });
 
 describe('reserveDailyCostCap policy edges', () => {

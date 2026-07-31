@@ -333,6 +333,36 @@ describe('usage reservations against workerd D1', () => {
 		expect(rows?.count).toBe(2);
 	});
 
+	it('retains unsettled spend without falsely occupying an interactive lane', async () => {
+		const now = new Date('2026-07-14T12:00:00.000Z');
+		const model = 'gemini-2.5-flash';
+		const userId = 'user-d1-cost-unsettled';
+		env.MAX_DAILY_SUBSCRIBED_TEXT_COST = '1';
+		const first = await reserveDailyCostCap(env, userId, 'subscribed', model, now);
+		const second = await reserveDailyCostCap(env, userId, 'subscribed', model, now);
+		if (!first.allowed || !first.reservation || !second.allowed || !second.reservation) {
+			throw new Error('expected two interactive reservations');
+		}
+
+		const blocked = await reserveDailyCostCap(env, userId, 'subscribed', model, now);
+		expect(blocked.allowed).toBe(false);
+		const response = withDailyCostSettlement(
+			new Response('ok'), env, first.reservation, Promise.resolve(false),
+		);
+		expect(await response.text()).toBe('ok');
+
+		const replacement = await reserveDailyCostCap(env, userId, 'subscribed', model, now);
+		expect(replacement.allowed).toBe(true);
+		const rows = await env.DB.prepare(`
+			SELECT
+				SUM(CASE WHEN device_id LIKE 'daily-cost:reservation:v3:interactive:%'
+					AND device_id NOT LIKE '%:unsettled' THEN 1 ELSE 0 END) AS active,
+				SUM(CASE WHEN device_id LIKE '%:unsettled' THEN 1 ELSE 0 END) AS unsettled
+			FROM usage WHERE user_id = ? AND tier LIKE 'daily_cost_reservation_v3:%'
+		`).bind(userId).first<{ active: number; unsettled: number }>();
+		expect(rows).toEqual({ active: 2, unsettled: 1 });
+	});
+
 	it('reclaims an expired priced-request reservation without accepting its stale release', async () => {
 		const start = new Date('2026-07-14T12:00:00.000Z');
 		const model = 'gemini-2.5-flash';
