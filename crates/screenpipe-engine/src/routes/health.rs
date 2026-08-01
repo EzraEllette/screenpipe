@@ -293,6 +293,7 @@ fn expected_system_output_missing(
     audio_disabled: bool,
     audio_waiting_for_meeting: bool,
     audio_paused_for_screen_lock: bool,
+    drm_content_paused: bool,
     uptime_secs: f64,
     has_output_device: bool,
     has_user_disabled_output: bool,
@@ -302,6 +303,7 @@ fn expected_system_output_missing(
         && !audio_disabled
         && !audio_waiting_for_meeting
         && !audio_paused_for_screen_lock
+        && !drm_content_paused
         && !has_user_disabled_output
         && uptime_secs > 120.0
         && !has_output_device
@@ -1355,12 +1357,14 @@ async fn health_check_inner(state: &Arc<AppState>) -> HealthCheckResponse {
     let has_user_disabled_output = user_disabled_audio_devices
         .iter()
         .any(|device| device.contains("(output)"));
+    let drm_content_paused = crate::drm_detector::drm_content_paused();
     if expected_system_output_missing(
         cfg!(target_os = "macos"),
         use_system_default_audio,
         state.audio_disabled,
         audio_waiting_for_meeting,
         audio_paused_for_screen_lock,
+        drm_content_paused,
         audio_snap.uptime_secs,
         has_output_device,
         has_user_disabled_output,
@@ -1796,7 +1800,7 @@ async fn health_check_inner(state: &Arc<AppState>) -> HealthCheckResponse {
         persistent_failure_signals: wqh.persistent_failure_signals(),
         vision_db_write_stalled,
         audio_db_write_stalled,
-        drm_content_paused: crate::drm_detector::drm_content_paused(),
+        drm_content_paused,
         schedule_paused: crate::schedule_monitor::schedule_paused(),
         hostname: hostname::get().ok().and_then(|h| h.into_string().ok()),
         version: Some(env!("CARGO_PKG_VERSION").to_string()),
@@ -2803,6 +2807,7 @@ mod tests {
             false, // audio enabled
             false, // not intentionally waiting for a meeting
             false, // not paused for screen lock
+            false, // not paused for DRM content
             121.0, // startup grace elapsed
             false, // no output device
             false, // output was not explicitly disabled
@@ -2811,13 +2816,13 @@ mod tests {
         // An explicitly disabled output, meeting-only idle, and other platforms
         // must not inherit macOS ScreenCaptureKit permission requirements.
         assert!(!expected_system_output_missing(
-            true, false, false, false, false, 121.0, false, false,
+            true, false, false, false, false, false, 121.0, false, false,
         ));
         assert!(!expected_system_output_missing(
-            true, true, false, true, false, 121.0, false, false,
+            true, true, false, true, false, false, 121.0, false, false,
         ));
         assert!(!expected_system_output_missing(
-            false, true, false, false, false, 121.0, false, false,
+            false, true, false, false, false, false, 121.0, false, false,
         ));
     }
 
@@ -2829,9 +2834,25 @@ mod tests {
             false, // audio enabled
             false, // not intentionally waiting for a meeting
             false, // not paused for screen lock
+            false, // not paused for DRM content
             121.0, // startup grace elapsed
             false, // no output stream is running
             true,  // the output stream was explicitly disabled by the user
+        ));
+    }
+
+    #[test]
+    fn macos_drm_paused_system_output_is_not_a_partial_capture_failure() {
+        assert!(!expected_system_output_missing(
+            true,  // macOS
+            true,  // follow system default remains enabled
+            false, // audio enabled
+            false, // not intentionally waiting for a meeting
+            false, // not paused for screen lock
+            true,  // output is intentionally paused for DRM content
+            121.0, // startup grace elapsed
+            false, // no output stream is running
+            false, // output was not explicitly disabled by the user
         ));
     }
 }
