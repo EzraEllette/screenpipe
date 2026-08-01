@@ -282,6 +282,31 @@ fn meetings_only_audio_idle_state(
     }
 }
 
+/// macOS system-output capture is an explicitly requested stream, not an
+/// optional bonus. A healthy microphone must not mask its absence after the
+/// normal startup grace period. Other platforms use different output-device
+/// semantics and are deliberately excluded here.
+#[allow(clippy::too_many_arguments)]
+fn expected_system_output_missing(
+    is_macos: bool,
+    use_system_default_audio: bool,
+    audio_disabled: bool,
+    audio_waiting_for_meeting: bool,
+    audio_paused_for_screen_lock: bool,
+    uptime_secs: f64,
+    has_output_device: bool,
+    has_user_disabled_output: bool,
+) -> bool {
+    is_macos
+        && use_system_default_audio
+        && !audio_disabled
+        && !audio_waiting_for_meeting
+        && !audio_paused_for_screen_lock
+        && !has_user_disabled_output
+        && uptime_secs > 120.0
+        && !has_output_device
+}
+
 /// Classify the raw audio capture status from health signals. Pure so it can be
 /// unit-tested in isolation. `stream_timeout_recent` must mean a recent timeout
 /// that the same current device has not recovered from, NOT a cumulative count
@@ -397,7 +422,7 @@ fn capture_status(
             "warning",
             "audio capture has not produced data yet",
         )
-    } else if audio_status == "stale" || audio_status == "active_no_data" {
+    } else if matches!(audio_status, "stale" | "active_no_data" | "capture_stalled") {
         (
             "audio_stalled",
             "warning",
@@ -1308,7 +1333,7 @@ async fn health_check_inner(state: &Arc<AppState>) -> HealthCheckResponse {
     let audio_paused_for_screen_lock =
         screenpipe_config::should_pause_audio_for_lock() && audio_devices.is_empty();
 
-    let audio_status = classify_audio_status(
+    let mut audio_status = classify_audio_status(
         state.audio_disabled,
         audio_paused_for_screen_lock,
         meeting_detector_unavailable,
@@ -1322,6 +1347,28 @@ async fn health_check_inner(state: &Arc<AppState>) -> HealthCheckResponse {
         threshold_secs,
     )
     .to_string();
+
+    let use_system_default_audio = state.audio_manager.use_system_default_audio().await;
+    let has_output_device = audio_devices
+        .iter()
+        .any(|device| device.to_string().contains("(output)"));
+    let has_user_disabled_output = user_disabled_audio_devices
+        .iter()
+        .any(|device| device.contains("(output)"));
+    if expected_system_output_missing(
+        cfg!(target_os = "macos"),
+        use_system_default_audio,
+        state.audio_disabled,
+        audio_waiting_for_meeting,
+        audio_paused_for_screen_lock,
+        audio_snap.uptime_secs,
+        has_output_device,
+        has_user_disabled_output,
+    ) {
+        // Reuse the established hard-failure status so the desktop recording
+        // health overlay surfaces this partial-capture state after its debounce.
+        audio_status = "capture_stalled".to_string();
+    }
 
     let transcription_paused = if !state.audio_disabled {
         state
@@ -2127,6 +2174,30 @@ mod tests {
     }
 
     #[test]
+    fn capture_status_reports_missing_system_output_as_stalled() {
+        let state = capture_status(
+            false,
+            false,
+            false,
+            false,
+            "capture_stalled",
+            1,
+            1,
+            0,
+            0,
+            false,
+            None,
+            0.0,
+            4,
+            120,
+            121,
+        );
+
+        assert_eq!(state.status, "audio_stalled");
+        assert_eq!(state.severity, "warning");
+    }
+
+    #[test]
     fn capture_status_recovers_after_raw_status_clears() {
         let state = capture_status(
             false, false, false, false, "ok", 1, 1, 0, 0, false, None, 0.0, 4, 120, 121,
@@ -2722,5 +2793,45 @@ mod tests {
             audio_is_degraded(status_broken),
             "a present-but-silent mic must still surface as degraded"
         );
+    }
+
+    #[test]
+    fn macos_expected_system_output_missing_is_a_partial_capture_failure() {
+        assert!(expected_system_output_missing(
+            true,  // macOS
+            true,  // use system default audio
+            false, // audio enabled
+            false, // not intentionally waiting for a meeting
+            false, // not paused for screen lock
+            121.0, // startup grace elapsed
+            false, // no output device
+            false, // output was not explicitly disabled
+        ));
+
+        // An explicitly disabled output, meeting-only idle, and other platforms
+        // must not inherit macOS ScreenCaptureKit permission requirements.
+        assert!(!expected_system_output_missing(
+            true, false, false, false, false, 121.0, false, false,
+        ));
+        assert!(!expected_system_output_missing(
+            true, true, false, true, false, 121.0, false, false,
+        ));
+        assert!(!expected_system_output_missing(
+            false, true, false, false, false, 121.0, false, false,
+        ));
+    }
+
+    #[test]
+    fn macos_user_disabled_system_output_is_not_a_partial_capture_failure() {
+        assert!(!expected_system_output_missing(
+            true,  // macOS
+            true,  // follow system default remains enabled
+            false, // audio enabled
+            false, // not intentionally waiting for a meeting
+            false, // not paused for screen lock
+            121.0, // startup grace elapsed
+            false, // no output stream is running
+            true,  // the output stream was explicitly disabled by the user
+        ));
     }
 }
