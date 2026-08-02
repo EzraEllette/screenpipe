@@ -8,7 +8,6 @@ import {
   pipeConnectionDisplayLabel,
   pipeConnectionLookupKey,
 } from "@/lib/pipe-connections";
-import { mcpOauthRedirectUri } from "@/lib/connections/mcp-oauth";
 
 describe("pipeConnectionDisplayLabel", () => {
   it("suffixes MCP servers so they don't collide with same-named connections", () => {
@@ -28,17 +27,6 @@ describe("pipeConnectionLookupKey", () => {
     expect(pipeConnectionLookupKey("notion:crm")).toBe("notion");
     expect(pipeConnectionLookupKey(mcpConnectionKey("abc123"))).toBe(
       "mcp:abc123",
-    );
-  });
-});
-
-describe("mcpOauthRedirectUri", () => {
-  it("builds the HTTPS relay callback with an encoded server id", () => {
-    expect(mcpOauthRedirectUri("196e4fda44e233d0")).toBe(
-      "https://screenpi.pe/api/oauth/mcp/196e4fda44e233d0/callback",
-    );
-    expect(mcpOauthRedirectUri("a/b c")).toBe(
-      "https://screenpi.pe/api/oauth/mcp/a%2Fb%20c/callback",
     );
   });
 });

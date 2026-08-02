@@ -9,7 +9,7 @@ import { commands } from "@/lib/utils/tauri";
 import type { ConnectionListItem } from "@/lib/chat/connection-suggestions";
 import { MCP_OAUTH_PROVIDERS } from "@/components/settings/connections-section";
 import { foregroundAfterOAuth } from "@/lib/connections/foreground-oauth";
-import { mcpOauthRedirectUri } from "@/lib/connections/mcp-oauth";
+import { startMcpOAuth } from "@/lib/connections/mcp-oauth";
 
 const DEFAULT_OAUTH_VARIANTS: Record<string, string | null> = {
   slack: "send",
@@ -82,27 +82,27 @@ async function connectMcpProvider(connectionId: string, signal?: AbortSignal): P
 
   const existingId = await findMcpServerIdByUrl(provider.url);
   const targetId = existingId ?? mcpRandomId();
-  const res = await localFetch(`/mcp-servers/${encodeURIComponent(targetId)}/oauth/start`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(
+  let authUrl: string;
+  try {
+    authUrl = await startMcpOAuth(
+      targetId,
       existingId
-        ? { redirect_uri: mcpOauthRedirectUri(targetId) }
+        ? undefined
         : {
             name: provider.name,
             url: provider.url,
             headers: [],
             enabled: true,
-            redirect_uri: mcpOauthRedirectUri(targetId),
           },
-    ),
-  });
-  const body = await res.json();
-  if (!res.ok) {
-    return { status: "error", reason: body?.error ?? `sign-in failed (HTTP ${res.status})` };
+    );
+  } catch (error) {
+    return {
+      status: "error",
+      reason: error instanceof Error ? error.message : String(error),
+    };
   }
 
-  await openUrl(body.data.auth_url);
+  await openUrl(authUrl);
   let connected = false;
   try {
     connected = await pollMcpOAuthStatus(targetId, 120_000, signal);

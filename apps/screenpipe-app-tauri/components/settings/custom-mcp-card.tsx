@@ -30,7 +30,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { localFetch } from "@/lib/api";
 import { notifyConnectionsUpdated } from "@/lib/connections-events";
 import { foregroundAfterOAuth } from "@/lib/connections/foreground-oauth";
-import { mcpOauthRedirectUri } from "@/lib/connections/mcp-oauth";
+import { startMcpOAuth } from "@/lib/connections/mcp-oauth";
 import { RegistryBrowser } from "./registry-browser";
 import type { McpHeader, McpServer, McpServerDraft } from "@/lib/mcp-registry";
 
@@ -722,39 +722,18 @@ function ServerEditor({
       if (!effectiveName || !url.trim()) return;
       const targetId = duplicateServer?.id ?? initial.id;
       if (mode === "edit" && !(await saveConfig())) return;
-      // A manual (non-DCR) client_id is registered against the engine's
-      // localhost callback, so only DCR flows go through the HTTPS relay.
-      const manualClientId = Boolean(initial.oauth?.client_id?.trim());
-      const redirectUri = manualClientId
-        ? undefined
-        : mcpOauthRedirectUri(targetId);
-      const res = await localFetch(
-        `/mcp-servers/${encodeURIComponent(targetId)}/oauth/start`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(
-            mode === "create" && !duplicateServer
-              ? {
-                  name: effectiveName,
-                  url: url.trim(),
-                  headers: headersForRequest(),
-                  enabled,
-                  redirect_uri: redirectUri,
-                }
-              : { redirect_uri: redirectUri }
-          ),
-        }
+      const authUrl = await startMcpOAuth(
+        targetId,
+        mode === "create" && !duplicateServer
+          ? {
+              name: effectiveName,
+              url: url.trim(),
+              headers: headersForRequest(),
+              enabled,
+            }
+          : undefined,
       );
-      const body = await res.json();
-      if (!res.ok) {
-        setTestResult({
-          kind: "err",
-          message: body?.error ?? `OAuth start failed (HTTP ${res.status})`,
-        });
-        return;
-      }
-      await openUrl(body.data.auth_url);
+      await openUrl(authUrl);
       setOauthWaiting(true);
       setOauthMessage("Finish sign-in in the browser");
       setOauthStatus({ connected: false, has_refresh_token: false });

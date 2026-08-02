@@ -20,7 +20,7 @@ import { useToast } from "@/components/ui/use-toast";
 import { ensureChatGptPreset } from "@/lib/utils/chatgpt-preset";
 import { notifyConnectionsUpdated } from "@/lib/connections-events";
 import { foregroundAfterOAuth } from "@/lib/connections/foreground-oauth";
-import { mcpOauthRedirectUri } from "@/lib/connections/mcp-oauth";
+import { startMcpOAuth } from "@/lib/connections/mcp-oauth";
 import { searchInputBehaviorProps } from "@/lib/search-input-behavior";
 import {
   CONNECTION_CATEGORY_BY_ID,
@@ -3311,30 +3311,18 @@ function OAuthMcpPanel({
       // (the server is persisted only when OAuth succeeds).
       const targetId = serverId ?? mcpRandomId();
       const isNew = !serverId;
-      const res = await localFetch(
-        `/mcp-servers/${encodeURIComponent(targetId)}/oauth/start`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(
-            isNew
-              ? {
-                  name,
-                  url: mcpUrl,
-                  headers: [],
-                  enabled: true,
-                  redirect_uri: mcpOauthRedirectUri(targetId),
-                }
-              : { redirect_uri: mcpOauthRedirectUri(targetId) }
-          ),
-        }
+      const authUrl = await startMcpOAuth(
+        targetId,
+        isNew
+          ? {
+              name,
+              url: mcpUrl,
+              headers: [],
+              enabled: true,
+            }
+          : undefined,
       );
-      const body = await res.json();
-      if (!res.ok) {
-        setStatusMsg(body?.error ?? `Sign-in failed (HTTP ${res.status})`);
-        return;
-      }
-      await openUrl(body.data.auth_url);
+      await openUrl(authUrl);
       setWaiting(true);
       setStatusMsg("Finish sign-in in the browser…");
       const started = Date.now();
