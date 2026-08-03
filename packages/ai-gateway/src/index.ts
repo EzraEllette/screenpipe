@@ -181,6 +181,7 @@ async function handleMeteredTinfoilRequest(
 	}
 	const usage = parseTinfoilUsageMetrics(response);
 	const settlement = response.ok ? logCost(env, {
+		settlement_id: reservation.reservation?.key,
 		device_id: auth.deviceId,
 		user_id: auth.userId,
 		tier: auth.tier,
@@ -198,6 +199,9 @@ async function handleMeteredTinfoilRequest(
 		),
 		endpoint: `/v1/tinfoil${subPath}`,
 		stream: usage === null,
+		lane: reservation.reservation?.lane,
+		cost_ledger_epoch: reservation.reservation?.ledgerEpoch,
+		cost_total_ledger_epoch: reservation.reservation?.totalLedgerEpoch,
 	}) : logReservedCost(env, reservation.reservation, attribution);
 	return withDailyCostSettlement(response, env, reservation.reservation, settlement);
 }
@@ -237,6 +241,7 @@ async function handleMeteredVoiceAiRequest(
 		throw error;
 	}
 	const settlement = response.ok ? logCost(env, {
+		settlement_id: reservation.reservation?.key,
 		device_id: auth.deviceId,
 		user_id: auth.userId,
 		tier: auth.tier,
@@ -254,6 +259,9 @@ async function handleMeteredVoiceAiRequest(
 		),
 		endpoint,
 		stream: false,
+		lane: reservation.reservation?.lane,
+		cost_ledger_epoch: reservation.reservation?.ledgerEpoch,
+		cost_total_ledger_epoch: reservation.reservation?.totalLedgerEpoch,
 	}) : logReservedCost(env, reservation.reservation, attribution);
 	return withDailyCostSettlement(response, env, reservation.reservation, settlement);
 }
@@ -709,6 +717,7 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 					const { response: trackedResponse, usage: usagePromise } = trackResponseUsage(response, 'openai');
 					response = trackedResponse;
 					costSettlement = usagePromise.then(u => logCost(env, {
+						settlement_id: dailyCostReservation?.key,
 						device_id: authResult.deviceId,
 						user_id: authResult.userId,
 						tier: authResult.tier,
@@ -731,6 +740,9 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 						stream: true,
 						latency_ms: latencyMs,
 						router_tier: routerTier,
+						lane: dailyCostReservation?.lane,
+						cost_ledger_epoch: dailyCostReservation?.ledgerEpoch,
+						cost_total_ledger_epoch: dailyCostReservation?.totalLedgerEpoch,
 					}));
 				} else {
 					costSettlement = settleActualOrReservedCost(
@@ -753,6 +765,7 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 							const cacheRead = json?.usage?.prompt_tokens_details?.cached_tokens ?? null;
 							const cacheCreation = json?.usage?.cache_creation_input_tokens ?? null;
 							return await logCost(env, {
+								settlement_id: dailyCostReservation?.key,
 								device_id: authResult.deviceId,
 								user_id: authResult.userId,
 								tier: authResult.tier,
@@ -772,6 +785,9 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 								stream: false,
 								latency_ms: latencyMs,
 								router_tier: routerTier,
+								lane: dailyCostReservation?.lane,
+								cost_ledger_epoch: dailyCostReservation?.ledgerEpoch,
+								cost_total_ledger_epoch: dailyCostReservation?.totalLedgerEpoch,
 							});
 						},
 					);
@@ -846,6 +862,7 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 				throw error;
 			}
 			const settlement = webSearchResponse.ok ? logCost(env, {
+				settlement_id: costReservation.reservation?.key,
 				device_id: authResult.deviceId,
 				user_id: authResult.userId,
 				tier: authResult.tier,
@@ -863,6 +880,9 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 				),
 				endpoint: '/v1/web-search',
 				stream: false,
+				lane: costReservation.reservation?.lane,
+				cost_ledger_epoch: costReservation.reservation?.ledgerEpoch,
+				cost_total_ledger_epoch: costReservation.reservation?.totalLedgerEpoch,
 			}) : logReservedCost(env, costReservation.reservation, attribution);
 			return withDailyCostSettlement(
 				webSearchResponse,
@@ -1077,6 +1097,7 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 				const { response: trackedResponse, usage: usagePromise } = trackResponseUsage(vertexResponse, 'anthropic');
 				vertexResponse = trackedResponse;
 				costSettlement = usagePromise.then(u => logCost(env, {
+					settlement_id: costReservation.reservation?.key,
 					device_id: authResult.deviceId,
 					user_id: authResult.userId,
 					tier: authResult.tier,
@@ -1096,6 +1117,9 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 					}, costReservation.reservation?.reservedMicroUsd),
 					endpoint: '/v1/messages',
 					stream: true,
+					lane: costReservation.reservation?.lane,
+					cost_ledger_epoch: costReservation.reservation?.ledgerEpoch,
+					cost_total_ledger_epoch: costReservation.reservation?.totalLedgerEpoch,
 				}));
 			} else {
 				costSettlement = settleActualOrReservedCost(
@@ -1113,6 +1137,7 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 						const inputTokens = rawInput === null ? null : rawInput + cacheRead + cacheCreation;
 						const outputTokens = json?.usage?.output_tokens ?? null;
 						return await logCost(env, {
+							settlement_id: costReservation.reservation?.key,
 							device_id: authResult.deviceId,
 							user_id: authResult.userId,
 							tier: authResult.tier,
@@ -1129,6 +1154,9 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 							}, costReservation.reservation?.reservedMicroUsd),
 							endpoint: '/v1/messages',
 							stream: false,
+							lane: costReservation.reservation?.lane,
+							cost_ledger_epoch: costReservation.reservation?.ledgerEpoch,
+							cost_total_ledger_epoch: costReservation.reservation?.totalLedgerEpoch,
 						});
 					},
 				);
@@ -1225,6 +1253,7 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 				const { response: trackedResponse, usage: usagePromise } = trackResponseUsage(anthropicResponse, 'anthropic');
 				anthropicResponse = trackedResponse;
 				costSettlement = usagePromise.then(u => logCost(env, {
+					settlement_id: costReservation.reservation?.key,
 					device_id: authResult.deviceId,
 					user_id: authResult.userId,
 					tier: authResult.tier,
@@ -1244,6 +1273,9 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 					}, costReservation.reservation?.reservedMicroUsd),
 					endpoint: '/anthropic/v1/messages',
 					stream: true,
+					lane: costReservation.reservation?.lane,
+					cost_ledger_epoch: costReservation.reservation?.ledgerEpoch,
+					cost_total_ledger_epoch: costReservation.reservation?.totalLedgerEpoch,
 				}));
 			} else {
 				costSettlement = settleActualOrReservedCost(
@@ -1261,6 +1293,7 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 						const inputTokens = rawInput === null ? null : rawInput + cacheRead + cacheCreation;
 						const outputTokens = json?.usage?.output_tokens ?? null;
 						return await logCost(env, {
+							settlement_id: costReservation.reservation?.key,
 							device_id: authResult.deviceId,
 							user_id: authResult.userId,
 							tier: authResult.tier,
@@ -1277,6 +1310,9 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 							}, costReservation.reservation?.reservedMicroUsd),
 							endpoint: '/anthropic/v1/messages',
 							stream: false,
+							lane: costReservation.reservation?.lane,
+							cost_ledger_epoch: costReservation.reservation?.ledgerEpoch,
+							cost_total_ledger_epoch: costReservation.reservation?.totalLedgerEpoch,
 						});
 					},
 				);

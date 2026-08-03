@@ -20,6 +20,7 @@ import { useToast } from "@/components/ui/use-toast";
 import { ensureChatGptPreset } from "@/lib/utils/chatgpt-preset";
 import { notifyConnectionsUpdated } from "@/lib/connections-events";
 import { foregroundAfterOAuth } from "@/lib/connections/foreground-oauth";
+import { appDeepLinkScheme } from "@/lib/connections/mcp-oauth";
 import { searchInputBehaviorProps } from "@/lib/search-input-behavior";
 import {
   CONNECTION_CATEGORY_BY_ID,
@@ -443,7 +444,7 @@ async function installGrokMcp(): Promise<void> {
   const mcp = (config.mcp && typeof config.mcp === "object" ? config.mcp : {}) as Record<string, unknown>;
   const servers = (Array.isArray(mcp.servers) ? mcp.servers : []) as Record<string, unknown>[];
   const next = servers.filter((s) => s?.id !== "screenpipe");
-  next.push(buildGrokMcpServer(await buildMcpConfig()));
+  next.push(buildGrokMcpServer(await buildMcpConfig({ client: "grok" })));
   mcp.servers = next;
   config.mcp = mcp;
   await mkdir(await dirname(configPath), { recursive: true });
@@ -1075,13 +1076,12 @@ function ClaudePanel({ onConnected, onDisconnected }: { onConnected?: () => void
       if (!(await areExternalAgentSkillsInstalled("claude"))) return;
       setState("connected");
       onConnected?.();
-      // Auto-repair legacy/keyless configs (older builds, hand-authored npx
-      // snippets) so they hit the MCP's fast env-key path instead of the slow
-      // discovery ladder that can stall Claude Desktop's attach. Idempotent:
-      // a config that already carries the key is left untouched.
+      // Auto-repair legacy managed configs so they use the fast env-key path
+      // and carry the fixed Claude category used by privacy-safe value metrics.
+      // Hand-customized configs are always left untouched.
       if (isStaleClaudeScreenpipeEntry(entry)) {
         try {
-          const next = await buildMcpConfig();
+          const next = await buildMcpConfig({ client: "claude" });
           if (next.env?.SCREENPIPE_LOCAL_API_KEY) {
             await installClaudeMcp();
           }
@@ -3310,6 +3310,7 @@ function OAuthMcpPanel({
       // (the server is persisted only when OAuth succeeds).
       const targetId = serverId ?? mcpRandomId();
       const isNew = !serverId;
+      const appScheme = await appDeepLinkScheme();
       const res = await localFetch(
         `/mcp-servers/${encodeURIComponent(targetId)}/oauth/start`,
         {
@@ -3317,8 +3318,14 @@ function OAuthMcpPanel({
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(
             isNew
-              ? { name, url: mcpUrl, headers: [], enabled: true }
-              : {}
+              ? {
+                  name,
+                  url: mcpUrl,
+                  headers: [],
+                  enabled: true,
+                  app_scheme: appScheme,
+                }
+              : { app_scheme: appScheme }
           ),
         }
       );
@@ -3356,7 +3363,9 @@ function OAuthMcpPanel({
           timerRef.current = setTimeout(poll, 2000);
         } else {
           setWaiting(false);
-          setStatusMsg("Sign-in was not completed");
+          setStatusMsg(
+            "Sign-in was not completed — if your browser blocks http://localhost (e.g. Safari HTTPS-Only mode), click \"Open screenpipe\" on the confirmation page"
+          );
         }
       };
       timerRef.current = setTimeout(poll, 2000);
