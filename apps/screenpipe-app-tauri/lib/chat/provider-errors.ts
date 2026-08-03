@@ -93,6 +93,13 @@ function isContextOverflowError(errorStr: string): boolean {
   );
 }
 
+function isOutputLimitError(errorStr: string): boolean {
+  const normalized = errorStr.toLowerCase();
+  return normalized.includes(
+    "could not finish the message because max_tokens or model output limit was reached"
+  );
+}
+
 function parseContextTokenCounts(errorStr: string): {
   requested?: number;
   available?: number;
@@ -128,6 +135,10 @@ export function buildProviderErrorMessage(
 
   if (isContextOverflowError(errorStr)) {
     return buildContextOverflowMessage(errorStr);
+  }
+
+  if (isOutputLimitError(errorStr)) {
+    return "The model reached its output limit. Increase Max Output Tokens in Settings → AI, or ask for a shorter response.";
   }
 
   // ChatGPT OAuth tokens from Enterprise/Business workspaces can lack the

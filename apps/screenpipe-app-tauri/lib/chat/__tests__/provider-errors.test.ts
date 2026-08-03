@@ -201,6 +201,14 @@ describe("provider error copy", () => {
     expect(msg).not.toContain("invalid_request_error");
   });
 
+  it("maps output-limit errors to Max Output Tokens guidance", () => {
+    const raw = 'Error: 400 data: {"error":{"message":"400 Could not finish the message because max_tokens or model output limit was reached. Please try again with higher max_tokens.","type":"api_error","code":"400"}} data: [DONE]';
+
+    expect(buildProviderErrorMessage(raw, null)).toBe(
+      "The model reached its output limit. Increase Max Output Tokens in Settings → AI, or ask for a shorter response."
+    );
+  });
+
   it("explains llama.cpp context mismatches with reported token counts", () => {
     const raw = 'Engine protocol predict request returned 400: {"error":{"code":400,"message":"request (13069 tokens) exceeds the available context size (8192 tokens), try increasing it","type":"exceed_context_size_error","n_prompt_tokens":13069,"n_ctx":8192}}';
     expect(
