@@ -12,7 +12,11 @@ on:
       - ".github/scripts/linux/bundle-appimage-runtime-deps.sh"
       - ".github/scripts/linux/pipewire-context-smoke.c"
       - ".github/scripts/linux/test-bundle-appimage-runtime-deps.sh"
+      - ".github/scripts/linux/test-verify-pipewire-runtime-packages.sh"
+      - ".github/scripts/linux/verify-pipewire-runtime-packages.sh"
       - ".github/workflows/linux-appimage-smoke.yml"
+      - ".github/workflows/release-app.yml"
+      - ".github/workflows/release-enterprise.yml"
       - "apps/screenpipe-app-tauri/scripts/pre_build.js"
       - "apps/screenpipe-app-tauri/src-tauri/**"
       - "apps/screenpipe-app-tauri/package.json"
@@ -121,23 +125,11 @@ jobs:
           sudo ln -sf /usr/lib/x86_64-linux-gnu/libopenblas.a /usr/lib/x86_64-linux-gnu/openblas/lib/liblibopenblas.a
           echo "OPENBLAS_PATH=/usr/lib/x86_64-linux-gnu/openblas" >> "$GITHUB_ENV"
 
-          dpkg-query -W -f='${binary:Package}\t${Version}\t${source:Version}\n' \
-            libpipewire-0.3-0t64 \
-            libpipewire-0.3-modules \
-            libspa-0.2-modules \
-            pipewire-bin
-          pipewire_source_versions="$(
-            dpkg-query -W -f='${source:Version}\n' \
-              libpipewire-0.3-0t64 \
-              libpipewire-0.3-modules \
-              libspa-0.2-modules \
-              pipewire-bin | sort -u
-          )"
-          if [ "$(wc -l <<<"${pipewire_source_versions}")" -ne 1 ]; then
-            echo "::error::PipeWire AppImage runtime packages have mismatched source versions"
-            printf '%s\n' "${pipewire_source_versions}"
-            exit 1
-          fi
+          bash .github/scripts/linux/verify-pipewire-runtime-packages.sh
+
+      - name: Test release PipeWire runtime prerequisites
+        shell: bash
+        run: bash .github/scripts/linux/test-verify-pipewire-runtime-packages.sh
 
       - name: Test AppImage runtime dependency bundler
         shell: bash
