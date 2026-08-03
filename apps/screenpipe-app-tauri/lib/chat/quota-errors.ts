@@ -69,6 +69,17 @@ export function parseQuotaUpgradeAction(
 
 export function buildDailyLimitMessage(errorStr: string): string {
   try {
+    if (errorStr.toLowerCase().includes("hosted_ai_allowance_exceeded")) {
+      const lane = structuredString(errorStr, "lane")?.toLowerCase();
+      const plan = structuredString(errorStr, "plan")?.toLowerCase();
+      if (lane === "explicit") {
+        return "Your 30-day hosted AI allowance for explicit models is used up. Switch to Auto, or use Ollama, Claude, Codex, or your own provider key.";
+      }
+      if (plan === "free") {
+        return "Your 30-day hosted AI allowance for Auto is used up. Upgrade, or switch your AI preset to Ollama, Claude, Codex, or your own provider key.";
+      }
+      return "Your 30-day hosted AI allowance for Auto is used up. Choose an explicit hosted model, or use Ollama, Claude, Codex, or your own provider key.";
+    }
     if (errorStr.includes("free_chat_limit_exceeded")) {
       return "You've used today's 2 free hosted AI messages. Try again tomorrow, upgrade, or switch your AI preset to Ollama, Claude, Codex, or your own provider key.";
     }
@@ -121,6 +132,7 @@ export type QuotaErrorType = "daily" | "hosted_busy" | "rate" | "none";
 export function classifyQuotaError(errorStr: string): QuotaErrorType {
   const normalized = errorStr.toLowerCase();
   const isDailyLimit =
+    normalized.includes("hosted_ai_allowance_exceeded") ||
     normalized.includes("free_chat_limit_exceeded") ||
     normalized.includes("free_chat_turn_request_limit_exceeded") ||
     normalized.includes("credits_exhausted") ||
