@@ -138,6 +138,9 @@ export function buildProviderErrorMessage(
   }
 
   if (isOutputLimitError(errorStr)) {
+    if (provider === "screenpipe-cloud" || provider === "acp") {
+      return "The model reached its output limit. Ask for a shorter response.";
+    }
     return "The model reached its output limit. Increase Max Output Tokens in Settings → AI, or ask for a shorter response.";
   }
 
