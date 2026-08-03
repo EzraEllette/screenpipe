@@ -326,9 +326,7 @@ export function PostInstallConnectionsModal({
                       <ConnectionCredentialForm
                         integrationId={integration.id}
                         fields={integration.fields}
-                        initialCredentials={
-                          status?.configured ? undefined : undefined
-                        }
+                        configured={status?.configured ?? false}
                         onSaved={() => handleSaved(connId)}
                       />
                     </div>
