@@ -168,20 +168,14 @@ pub struct RecordingSettings {
     #[serde(rename = "useSystemDefaultAudio")]
     pub use_system_default_audio: bool,
 
-    /// Experimental: capture System Audio via the CoreAudio Process Tap API
-    /// (macOS 14.4+) instead of ScreenCaptureKit. The tap sidesteps SCK's
-    /// display-enumeration failures after sleep/wake and the GPU/compositor
-    /// wake overhead, but it cannot see audio rendered through a
-    /// VoiceProcessing AudioUnit (Zoom / Google Meet / Microsoft Teams all
-    /// use one for echo cancellation), so on meeting audio it silently
-    /// captures zeroed buffers even though tap creation succeeds.
+    /// Capture System Audio via the CoreAudio Process Tap API (macOS 14.4+)
+    /// instead of ScreenCaptureKit. The tap sidesteps SCK's display-enumeration
+    /// failures after sleep/wake and the GPU/compositor wake overhead.
     ///
-    /// Default `false` (see `default_experimental_coreaudio_system_audio`).
-    /// SCK captures at the display compositor, which does see VoiceProcessing
-    /// output, so it is the right default for anyone on calls. Users who hit
-    /// SCK's sleep/wake display-enumeration bug can still opt in; when the tap
-    /// is on and creation fails (permission, macOS <14.4, OS quirk), stream.rs
-    /// falls back to the SCK path automatically. Ignored on non-macOS platforms.
+    /// Default `true` (see `default_experimental_coreaudio_system_audio`).
+    /// On macOS 14.4+ this uses the Process Tap. On older macOS versions, on
+    /// unsupported platforms, or when tap creation fails, stream.rs follows
+    /// the existing SCK/platform path automatically.
     #[serde(
         rename = "experimentalCoreaudioSystemAudio",
         default = "default_experimental_coreaudio_system_audio"
@@ -757,7 +751,7 @@ impl Default for RecordingSettings {
             meeting_live_transcription_provider: "selected-engine".to_string(),
             audio_devices: vec![],
             use_system_default_audio: true,
-            experimental_coreaudio_system_audio: false,
+            experimental_coreaudio_system_audio: true,
             experimental_meeting_piggyback: false,
             always_record_bluetooth_mic: false,
             windows_input_aec_enabled: false,
@@ -766,7 +760,7 @@ impl Default for RecordingSettings {
             aec_mode: AecMode::Off,
             audio_chunk_duration: 30,
             deepgram_api_key: String::new(),
-            filter_music: false,
+            filter_music: true,
             batch_max_duration_secs: None,
             vocabulary: vec![],
             disable_vision: false,
@@ -848,15 +842,10 @@ fn default_audio_capture_mode() -> String {
     "always".to_string()
 }
 
-/// Default `false` — the Process Tap can't see audio rendered through
-/// VoiceProcessing AudioUnits (Zoom / Google Meet / Microsoft Teams all
-/// use one for echo cancellation), so for meeting audio it silently
-/// captures zeroed buffers even though the tap creation succeeds. SCK
-/// captures at the display compositor which *does* see VoiceProcessing
-/// output, so it's the right default for every user who uses call apps.
-/// Users who hit SCK's sleep/wake display-enumeration bug can still opt in.
+/// Default on. Unsupported macOS versions and platforms stay on their existing
+/// capture path because the stream checks Process Tap availability at runtime.
 fn default_experimental_coreaudio_system_audio() -> bool {
-    false
+    true
 }
 
 /// Default OFF. The per-process tap must prove itself in the field behind this
@@ -948,6 +937,10 @@ mod tests {
         assert!(!settings.macos_input_vpio_enabled);
         assert_eq!(settings.aec_mode, AecMode::Off);
         assert_eq!(settings.effective_aec_flags(), (false, false, false));
+        assert!(settings.experimental_coreaudio_system_audio);
+        assert!(settings.filter_music);
+        assert!(!settings.always_record_bluetooth_mic);
+        assert_eq!(settings.transcription_mode, "batch");
     }
 
     #[test]

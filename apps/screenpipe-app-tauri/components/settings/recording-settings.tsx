@@ -43,7 +43,11 @@ export const searchIndex: SettingsField[] = [
   { label: "Languages", keywords: ["transcript language", "language"], conditional: true },
   { label: "Custom Vocabulary", keywords: ["vocabulary", "names", "jargon", "replacement"], conditional: true },
   { label: "Smart recording", keywords: ["smart recording", "beta", "meeting", "piggyback", "per-process", "meeting audio"], conditional: true },
-  { label: "Always record bluetooth mic", keywords: ["bluetooth", "airpods", "headset", "a2dp", "sco", "meeting"], conditional: true },
+  { label: "Advanced recording settings", keywords: ["advanced", "expert", "audio"], conditional: true },
+  { label: "Always record Bluetooth microphone", keywords: ["bluetooth", "airpods", "headset", "a2dp", "sco", "meeting"], conditional: true },
+  { label: "Background transcription", keywords: ["batch", "realtime", "latency", "quality"], conditional: true },
+  { label: "Filter music", keywords: ["music", "background music", "lyrics"], conditional: true },
+  { label: "Exclude apps from system audio", keywords: ["audio", "apps", "exclude"], conditional: true },
   { label: "Screen context capture", keywords: ["screen", "video", "accessibility"] },
   { label: "Structured app context", keywords: ["semantic", "ai", "messages", "email", "tasks", "code"], conditional: true },
   { label: "Use it for", keywords: ["memory", "computer use", "automation", "agent", "skills"], conditional: true },
@@ -112,6 +116,7 @@ import {
   Rewind,
   FastForward,
   Bluetooth,
+  Settings2,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
@@ -1756,6 +1761,7 @@ export function RecordingSettings() {
   const [validationErrors, setValidationErrors] = useState<Record<string, string>>({});
   const [pendingChanges, setPendingChanges] = useState<Partial<SettingsStore>>({});
   const [meetingAppsPickerOpen, setMeetingAppsPickerOpen] = useState(false);
+  const [advancedSettingsOpen, setAdvancedSettingsOpen] = useState(false);
 
   const { items: windowItems, isLoading: isWindowItemsLoading } =
     useSqlAutocomplete("window");
@@ -3267,88 +3273,6 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
         </Card>
         )}
 
-        {/* Per-app audio exclusions — visible when the platform process tap is available */}
-        {!settings.disableAudio && (isMacOS || isWindows) && processTapAvailable && (
-        <Card className="border-border bg-card">
-          <CardContent className="px-3 py-2.5 space-y-2">
-            <div className="flex items-center space-x-2.5">
-              <VolumeX className="h-4 w-4 text-muted-foreground shrink-0" />
-              <div>
-                <h3 className="text-sm font-medium text-foreground">
-                  Exclude apps from system audio
-                </h3>
-                <p className="text-xs text-muted-foreground">
-                  Audio from these apps will be filtered out of system-audio capture.
-                  {isWindows && " Windows supports one excluded app at a time."}
-                </p>
-              </div>
-            </div>
-            <div
-              className="flex flex-wrap gap-1.5 pl-6"
-              onClick={() => setSelectedBundleId(null)}
-            >
-              {effectiveAudioExclusions.map((app) => (
-                <Badge
-                  key={app.bundleId}
-                  variant={selectedBundleId === app.bundleId ? "default" : "secondary"}
-                  className="gap-1.5 pr-1 cursor-pointer"
-                  role="button"
-                  tabIndex={0}
-                  aria-pressed={selectedBundleId === app.bundleId}
-                  title={app.bundleId}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setSelectedBundleId(
-                      selectedBundleId === app.bundleId ? null : app.bundleId
-                    );
-                  }}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" || e.key === " ") {
-                      e.preventDefault();
-                      setSelectedBundleId(
-                        selectedBundleId === app.bundleId ? null : app.bundleId
-                      );
-                    }
-                  }}
-                >
-                  {app.icon && (
-                    <img src={app.icon} alt="" className="h-4 w-4 rounded-sm" />
-                  )}
-                  <span className="text-xs">{app.name ?? app.bundleId}</span>
-                  <button
-                    type="button"
-                    className="inline-flex rounded-sm focus:outline-none focus:ring-1 focus:ring-ring"
-                    aria-label={`Remove ${app.name ?? app.bundleId} from audio exclusions`}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      removeAudioExclusion(app.bundleId);
-                    }}
-                  >
-                    <XCircle className="h-3 w-3" />
-                  </button>
-                </Badge>
-              ))}
-              <Button
-                variant="outline"
-                size="sm"
-                className="h-6 text-xs"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  pickAppToExclude();
-                }}
-              >
-                + add app
-              </Button>
-              {effectiveAudioExclusions.length === 0 && (
-                <span className="text-xs text-muted-foreground italic self-center">
-                  No apps excluded. All system audio is captured.
-                </span>
-              )}
-            </div>
-          </CardContent>
-        </Card>
-        )}
-
         {!settings.disableAudio && (
           <div className="flex items-center gap-2 px-1 pt-1.5">
             <span className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground/70">meetings</span>
@@ -3676,30 +3600,6 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
             </Card>
           );
         })()}
-
-        {/* Bluetooth mic — only shown when a combo BT headset is detected */}
-        {!settings.disableAudio && availableAudioDevices.some(d => d.isComboBluetoothMic) && (
-        <Card className="border-border bg-card">
-          <CardContent className="px-3 py-2.5">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center space-x-2.5">
-                <Bluetooth className="h-4 w-4 text-muted-foreground shrink-0" />
-                <div>
-                  <h3 className="text-sm font-medium text-foreground">Always record bluetooth mic</h3>
-                  <p className="text-xs text-muted-foreground">
-                    by default bluetooth mics are only recorded during meetings to avoid degrading headphone audio quality. turn on to record always.
-                  </p>
-                </div>
-              </div>
-              <Switch
-                id="alwaysRecordBluetoothMic"
-                checked={Boolean(settings.alwaysRecordBluetoothMic ?? false)}
-                onCheckedChange={(checked) => handleSettingsChange({ alwaysRecordBluetoothMic: checked }, true)}
-              />
-            </div>
-          </CardContent>
-        </Card>
-        )}
 
         {!settings.disableAudio && (
           <div className="flex items-center gap-2 px-1 pt-1.5">
@@ -4140,6 +4040,229 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
           <BatterySaverSection />
         </div>
       </details>
+
+      <div className="flex justify-end pt-1">
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="h-8 gap-1.5 text-xs"
+          data-testid="recording-advanced-settings-button"
+          onClick={() => setAdvancedSettingsOpen(true)}
+        >
+          <Settings2 className="h-3.5 w-3.5" />
+          Advanced...
+        </Button>
+      </div>
+
+      <Dialog
+        open={advancedSettingsOpen}
+        onOpenChange={(open) => {
+          setAdvancedSettingsOpen(open);
+          if (!open) setSelectedBundleId(null);
+        }}
+      >
+        <DialogContent
+          className="w-[min(680px,calc(100vw-2rem))] max-w-none gap-0 overflow-hidden p-0"
+          data-testid="recording-advanced-settings-dialog"
+        >
+          <div className="border-b border-border px-5 py-4 pr-12">
+            <DialogTitle>advanced recording settings</DialogTitle>
+            <DialogDescription className="mt-1 text-xs">
+              Defaults work for most people. Change these only when you need a specific device or transcription behavior.
+            </DialogDescription>
+          </div>
+
+          <div className="max-h-[min(620px,calc(100vh-10rem))] space-y-5 overflow-y-auto p-5">
+            <section aria-labelledby="advanced-audio-devices-heading" className="space-y-2">
+              <h3
+                id="advanced-audio-devices-heading"
+                className="text-xs font-semibold uppercase tracking-wider text-muted-foreground"
+              >
+                Audio devices
+              </h3>
+              <div className="divide-y divide-border border border-border bg-card">
+                <div className="flex items-center justify-between gap-5 p-3">
+                  <div className="flex min-w-0 items-start gap-2.5">
+                    <Bluetooth className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+                    <div>
+                      <label htmlFor="alwaysRecordBluetoothMic" className="text-sm font-medium text-foreground">
+                        Always record Bluetooth microphone
+                      </label>
+                      <p className="text-xs text-muted-foreground">
+                        Normally recorded only during meetings so Bluetooth headphones stay in high-quality playback mode. Turn on for continuous microphone capture.
+                      </p>
+                    </div>
+                  </div>
+                  <Switch
+                    id="alwaysRecordBluetoothMic"
+                    checked={Boolean(settings.alwaysRecordBluetoothMic ?? false)}
+                    onCheckedChange={(checked) => handleSettingsChange({ alwaysRecordBluetoothMic: checked }, true)}
+                  />
+                </div>
+
+                {(isMacOS || isWindows) && processTapAvailable && (
+                  <div className="space-y-2 p-3">
+                    <div className="flex items-start gap-2.5">
+                      <VolumeX className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+                      <div>
+                        <h4 className="text-sm font-medium text-foreground">Exclude apps from system audio</h4>
+                        <p className="text-xs text-muted-foreground">
+                          Audio from these apps will not be captured.
+                          {isWindows && " Windows supports one excluded app at a time."}
+                        </p>
+                      </div>
+                    </div>
+                    <div
+                      className="flex flex-wrap gap-1.5 pl-6"
+                      onClick={() => setSelectedBundleId(null)}
+                    >
+                      {effectiveAudioExclusions.map((app) => (
+                        <Badge
+                          key={app.bundleId}
+                          variant={selectedBundleId === app.bundleId ? "default" : "secondary"}
+                          className="cursor-pointer gap-1.5 pr-1"
+                          role="button"
+                          tabIndex={0}
+                          aria-pressed={selectedBundleId === app.bundleId}
+                          title={app.bundleId}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setSelectedBundleId(selectedBundleId === app.bundleId ? null : app.bundleId);
+                          }}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" || e.key === " ") {
+                              e.preventDefault();
+                              setSelectedBundleId(selectedBundleId === app.bundleId ? null : app.bundleId);
+                            }
+                          }}
+                        >
+                          {app.icon && <img src={app.icon} alt="" className="h-4 w-4" />}
+                          <span className="text-xs">{app.name ?? app.bundleId}</span>
+                          <button
+                            type="button"
+                            className="inline-flex focus:outline-none focus:ring-1 focus:ring-ring"
+                            aria-label={`Remove ${app.name ?? app.bundleId} from audio exclusions`}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              removeAudioExclusion(app.bundleId);
+                            }}
+                          >
+                            <XCircle className="h-3 w-3" />
+                          </button>
+                        </Badge>
+                      ))}
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="h-6 text-xs"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          pickAppToExclude();
+                        }}
+                      >
+                        + add app
+                      </Button>
+                      {effectiveAudioExclusions.length === 0 && (
+                        <span className="self-center text-xs italic text-muted-foreground">
+                          No apps excluded.
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </section>
+
+            <section aria-labelledby="advanced-transcription-heading" className="space-y-2">
+              <h3
+                id="advanced-transcription-heading"
+                className="text-xs font-semibold uppercase tracking-wider text-muted-foreground"
+              >
+                Transcription
+              </h3>
+              <div className="divide-y divide-border border border-border bg-card">
+                <div className="flex items-center justify-between gap-5 p-3">
+                  <div>
+                    <label htmlFor="advancedTranscriptionMode" className="text-sm font-medium text-foreground">
+                      Background transcription
+                    </label>
+                    <p className="text-xs text-muted-foreground">
+                      Batch waits for more context and uses less CPU during calls. Real-time writes transcripts sooner.
+                    </p>
+                  </div>
+                  <Select
+                    value={["smart", "batch"].includes(settings.transcriptionMode ?? "batch") ? "batch" : "realtime"}
+                    onValueChange={(value) => handleSettingsChange({ transcriptionMode: value as "batch" | "realtime" }, true)}
+                  >
+                    <SelectTrigger id="advancedTranscriptionMode" className="h-8 w-[210px] shrink-0 text-xs">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="batch">batch (recommended)</SelectItem>
+                      <SelectItem value="realtime">real-time</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div className="flex items-center justify-between gap-5 p-3">
+                  <div>
+                    <label htmlFor="filterMusic" className="text-sm font-medium text-foreground">
+                      Filter music
+                    </label>
+                    <p className="text-xs text-muted-foreground">
+                      Skip music-dominant audio before transcription. Turn off if you want music or lyrics transcribed.
+                    </p>
+                  </div>
+                  <Switch
+                    id="filterMusic"
+                    checked={settings.filterMusic ?? true}
+                    onCheckedChange={(checked) => handleSettingsChange({ filterMusic: checked }, true)}
+                  />
+                </div>
+
+                {["smart", "batch"].includes(settings.transcriptionMode ?? "batch") &&
+                  settings.audioTranscriptionEngine === "openai-compatible" && (
+                    <div className="space-y-2 p-3">
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <h4 className="text-sm font-medium text-foreground">Maximum batch duration</h4>
+                          <p className="text-xs text-muted-foreground">
+                            Limit each upload when your provider accepts shorter or longer audio files.
+                          </p>
+                        </div>
+                        <span className="text-xs font-mono text-foreground">
+                          {(settings.batchMaxDurationSecs ?? 0) === 0
+                            ? "automatic"
+                            : `${Math.floor((settings.batchMaxDurationSecs ?? 0) / 60)} min`}
+                        </span>
+                      </div>
+                      <Slider
+                        data-testid="advanced-batch-duration-slider"
+                        value={[settings.batchMaxDurationSecs ?? 0]}
+                        onValueChange={([value]) => handleSettingsChange({ batchMaxDurationSecs: value ?? 0 }, true)}
+                        min={0}
+                        max={5400}
+                        step={60}
+                      />
+                      <div className="flex justify-between text-[10px] text-muted-foreground">
+                        <span>automatic</span>
+                        <span>90 min</span>
+                      </div>
+                    </div>
+                  )}
+              </div>
+            </section>
+          </div>
+
+          <div className="flex justify-end border-t border-border px-5 py-3">
+            <Button type="button" size="sm" onClick={() => setAdvancedSettingsOpen(false)}>
+              done
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
 
       {/* Voice Training Dialog */}
       <Dialog open={voiceTraining.dialogOpen} onOpenChange={(open) => {

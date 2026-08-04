@@ -341,7 +341,7 @@ export type Settings = SettingsStore & {
 	/** Skip mouse-click rows in the UI recorder. Defaults to false (click capture ON) — clicks carry no text payload and drive workflow/task mining. Clicks still wake event-driven capture when disabled. */
 	disableClickCapture?: boolean;
 	/** Experimental: capture System Audio via CoreAudio Process Tap (macOS 14.4+) instead of ScreenCaptureKit.
-	 *  Off by default. Ignored on macOS <14.4 and non-macOS — falls back to SCK. */
+	 *  On by default. Ignored on macOS <14.4 and non-macOS — falls back to SCK. */
 	experimentalCoreaudioSystemAudio?: boolean;
 	/** Beta ("Smart recording" in the app): during meetings, capture only the meeting app's audio
 	 *  and the microphone it actually uses (per-process piggyback). Off by default. Engages in ANY

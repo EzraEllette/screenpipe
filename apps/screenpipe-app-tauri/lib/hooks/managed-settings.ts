@@ -107,7 +107,7 @@ export const MANAGED_SETTING_DEFINITIONS: readonly ManagedSettingDefinition[] = 
     "selected-engine",
   ),
   bool("experimentalMeetingPiggyback", false),
-  bool("filterMusic", false),
+  bool("filterMusic", true),
   enumeration("aecMode", ["off", "screenpipe", "macos", "windows"], "off"),
   number("audioChunkDuration", 5, 300, 30),
   bool("recordWhileLocked", false),
