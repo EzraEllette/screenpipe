@@ -8,8 +8,8 @@
 //!
 //! It is a **minimal** shim: it does not wrap the file object or change `szOsFile`.
 //! On open it delegates to the real (default) VFS, then patches the returned file's
-//! `pMethods` to a single shared copy of the real I/O methods with only `xRead` and
-//! `xClose` overridden:
+//! `pMethods` to cached copies of the real I/O method tables with `xRead`,
+//! `xWrite`, and `xClose` overridden:
 //!
 //! * `xRead` returns a hard `SQLITE_IOERR` ("disk I/O error") for reads past the file
 //!   header while ARMED — a genuine read failure surfaced through the real sqlite read
@@ -26,30 +26,55 @@
 
 use libsqlite3_sys::{
     sqlite3_file, sqlite3_int64, sqlite3_io_methods, sqlite3_vfs, sqlite3_vfs_find,
-    sqlite3_vfs_register, SQLITE_IOERR, SQLITE_OK,
+    sqlite3_vfs_register, SQLITE_FULL, SQLITE_IOERR, SQLITE_OK,
 };
+use std::collections::HashMap;
 use std::os::raw::{c_char, c_int, c_void};
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 const VFS_NAME: &[u8] = b"spfail\0";
 
-/// Original `xRead`/`xClose` captured from the real VFS's io-methods table.
-static REAL_XREAD: AtomicUsize = AtomicUsize::new(0);
-static REAL_XCLOSE: AtomicUsize = AtomicUsize::new(0);
-/// The original io-methods pointer we patched from; only files using it are patched.
-static PATCH_SRC: AtomicUsize = AtomicUsize::new(0);
-/// Our leaked, patched io-methods table (address).
-static PATCHED_METHODS: OnceLock<usize> = OnceLock::new();
+#[derive(Clone, Copy)]
+struct RealMethods {
+    read: usize,
+    write: usize,
+    close: usize,
+}
+
+#[derive(Default)]
+struct MethodMaps {
+    original_to_patched: HashMap<usize, usize>,
+    patched_to_real: HashMap<usize, RealMethods>,
+}
+
+static METHOD_MAPS: OnceLock<Mutex<MethodMaps>> = OnceLock::new();
 
 static ARMED: AtomicBool = AtomicBool::new(false);
+static FULL_ARMED: AtomicBool = AtomicBool::new(false);
 static AUTO_HEAL: AtomicBool = AtomicBool::new(true);
 static OPEN_HANDLES: AtomicI64 = AtomicI64::new(0);
 static READ_TOTAL: AtomicI64 = AtomicI64::new(0);
 static READ_FAILED: AtomicI64 = AtomicI64::new(0);
+static WRITE_TOTAL: AtomicI64 = AtomicI64::new(0);
+static WRITE_FAILED_FULL: AtomicI64 = AtomicI64::new(0);
 
 type XReadFn = unsafe extern "C" fn(*mut sqlite3_file, *mut c_void, c_int, sqlite3_int64) -> c_int;
+type XWriteFn =
+    unsafe extern "C" fn(*mut sqlite3_file, *const c_void, c_int, sqlite3_int64) -> c_int;
 type XCloseFn = unsafe extern "C" fn(*mut sqlite3_file) -> c_int;
+
+unsafe fn real_methods(file: *mut sqlite3_file) -> RealMethods {
+    let patched = (*file).pMethods as usize;
+    METHOD_MAPS
+        .get_or_init(|| Mutex::new(MethodMaps::default()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .patched_to_real
+        .get(&patched)
+        .copied()
+        .expect("patched SQLite method table must retain its real methods")
+}
 
 unsafe extern "C" fn fp_read(
     file: *mut sqlite3_file,
@@ -74,16 +99,32 @@ unsafe extern "C" fn fp_read(
         READ_FAILED.fetch_add(1, Ordering::SeqCst);
         return SQLITE_IOERR;
     }
-    let real: XReadFn = std::mem::transmute(REAL_XREAD.load(Ordering::SeqCst));
+    let real: XReadFn = std::mem::transmute(real_methods(file).read);
+    real(file, buf, amt, ofst)
+}
+
+unsafe extern "C" fn fp_write(
+    file: *mut sqlite3_file,
+    buf: *const c_void,
+    amt: c_int,
+    ofst: sqlite3_int64,
+) -> c_int {
+    WRITE_TOTAL.fetch_add(1, Ordering::SeqCst);
+    if FULL_ARMED.load(Ordering::SeqCst) {
+        WRITE_FAILED_FULL.fetch_add(1, Ordering::SeqCst);
+        return SQLITE_FULL;
+    }
+    let real: XWriteFn = std::mem::transmute(real_methods(file).write);
     real(file, buf, amt, ofst)
 }
 
 unsafe extern "C" fn fp_close(file: *mut sqlite3_file) -> c_int {
-    let real: XCloseFn = std::mem::transmute(REAL_XCLOSE.load(Ordering::SeqCst));
+    let real: XCloseFn = std::mem::transmute(real_methods(file).close);
     let rc = real(file);
     let remaining = OPEN_HANDLES.fetch_sub(1, Ordering::SeqCst) - 1;
     if remaining <= 0 && AUTO_HEAL.load(Ordering::SeqCst) {
         ARMED.store(false, Ordering::SeqCst);
+        FULL_ARMED.store(false, Ordering::SeqCst);
     }
     rc
 }
@@ -102,23 +143,33 @@ unsafe extern "C" fn fp_open(
         return rc;
     }
     let orig_methods = (*file).pMethods;
-    // Lazily build the single patched methods table from the first file's table.
-    let patched = *PATCHED_METHODS.get_or_init(|| {
+    // SQLite may use distinct method tables for the main DB, WAL, journal, and
+    // temp files. Patch each original table once and remember its real methods
+    // so injected disk-full reaches WAL appends as well as main-file writes.
+    let original_key = orig_methods as usize;
+    let maps = METHOD_MAPS.get_or_init(|| Mutex::new(MethodMaps::default()));
+    let mut maps = maps.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let patched = if let Some(patched) = maps.original_to_patched.get(&original_key) {
+        *patched
+    } else {
         let src = &*orig_methods;
-        REAL_XREAD.store(src.xRead.expect("real xRead") as usize, Ordering::SeqCst);
-        REAL_XCLOSE.store(src.xClose.expect("real xClose") as usize, Ordering::SeqCst);
-        PATCH_SRC.store(orig_methods as usize, Ordering::SeqCst);
+        let real = RealMethods {
+            read: src.xRead.expect("real xRead") as usize,
+            write: src.xWrite.expect("real xWrite") as usize,
+            close: src.xClose.expect("real xClose") as usize,
+        };
         let mut copy: sqlite3_io_methods = *src;
         copy.xRead = Some(fp_read);
+        copy.xWrite = Some(fp_write);
         copy.xClose = Some(fp_close);
-        Box::leak(Box::new(copy)) as *mut sqlite3_io_methods as usize
-    });
-    // Only patch files that use the same underlying methods table we captured
-    // (the main-db handle); others pass through untouched.
-    if orig_methods as usize == PATCH_SRC.load(Ordering::SeqCst) {
-        (*file).pMethods = patched as *const sqlite3_io_methods;
-        OPEN_HANDLES.fetch_add(1, Ordering::SeqCst);
-    }
+        let patched = Box::leak(Box::new(copy)) as *mut sqlite3_io_methods as usize;
+        maps.original_to_patched.insert(original_key, patched);
+        maps.patched_to_real.insert(patched, real);
+        patched
+    };
+    drop(maps);
+    (*file).pMethods = patched as *const sqlite3_io_methods;
+    OPEN_HANDLES.fetch_add(1, Ordering::SeqCst);
     rc
 }
 
@@ -146,9 +197,16 @@ pub fn arm() {
     ARMED.store(true, Ordering::SeqCst);
 }
 
+/// Fail every physical SQLite write with `SQLITE_FULL`. This exercises commit,
+/// rollback, queue draining, and durable quarantine under an exhausted device.
+pub fn arm_full() {
+    FULL_ARMED.store(true, Ordering::SeqCst);
+}
+
 /// Stop failing reads.
 pub fn disarm() {
     ARMED.store(false, Ordering::SeqCst);
+    FULL_ARMED.store(false, Ordering::SeqCst);
 }
 
 /// When true (default), the fault auto-clears the moment the last patched handle
@@ -170,6 +228,14 @@ pub fn read_stats() -> (i64, i64) {
     (
         READ_TOTAL.load(Ordering::SeqCst),
         READ_FAILED.load(Ordering::SeqCst),
+    )
+}
+
+/// (total xWrite calls, xWrite calls rejected with SQLITE_FULL).
+pub fn write_stats() -> (i64, i64) {
+    (
+        WRITE_TOTAL.load(Ordering::SeqCst),
+        WRITE_FAILED_FULL.load(Ordering::SeqCst),
     )
 }
 
@@ -323,18 +389,17 @@ mod tests {
 
     /// End-to-end proof of the fail-closed boundary. The real VFS injects
     /// SQLITE_IOERR_SHORT_READ (522) into a live write queue. The first error
-    /// must quarantine that queue generation, reject later writes without a
-    /// retry/tail flush, and request recovery exactly once. Only a newly opened
-    /// queue generation may write after the underlying fault clears.
+    /// must quarantine the physical database path, reject later writes without
+    /// a retry/tail flush, and request recovery exactly once. A new manager in
+    /// the same process must remain quarantined after the injected fault clears.
     #[tokio::test]
-    async fn write_queue_quarantines_on_first_ioerr_and_requires_new_generation() {
+    async fn write_queue_quarantines_ioerr_across_manager_generations() {
         use crate::write_queue::{
             spawn_write_drain_with, WriteDrainOpts, WriteOp, WriteQueueHealth,
         };
         use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
         use std::sync::Arc;
         use std::time::Duration;
-        use tokio::sync::Semaphore;
 
         let _guard = failpoint_test_lock().lock().await;
 
@@ -389,8 +454,8 @@ mod tests {
             .connect_with(opts.clone())
             .await
             .unwrap();
-        let sem = Arc::new(Semaphore::new(1));
-        let health = WriteQueueHealth::default();
+        let sem = screenpipe_sqlite_coordinator::sqlite_write_lock(&db);
+        let health = WriteQueueHealth::for_database_path(db.to_string_lossy().into_owned());
         let fired = Arc::new(AtomicBool::new(false));
         let fired_hook = fired.clone();
         let queue = spawn_write_drain_with(
@@ -501,40 +566,38 @@ mod tests {
         drop(queue);
         write_pool.close().await;
 
-        // Model the app's existing recovery hook: a new manager generation gets
-        // fresh pools and may write after the storage fault is gone.
-        let replacement_pool = SqlitePoolOptions::new()
-            .max_connections(2)
-            .min_connections(1)
-            .acquire_timeout(Duration::from_secs(2))
-            .connect_with(opts.clone())
-            .await
-            .unwrap();
-        let replacement_health = WriteQueueHealth::default();
-        let replacement = spawn_write_drain_with(
-            replacement_pool.clone(),
-            Arc::new(Semaphore::new(1)),
-            Arc::from(format!("{}", db.display()).as_str()),
-            WriteDrainOpts {
-                health: replacement_health.clone(),
-                ..Default::default()
-            },
-        );
-        replacement
-            .submit(WriteOp::InsertAudioChunk {
-                file_path: "/post/ok".into(),
-                timestamp: None,
-            })
-            .await
-            .expect("new queue generation must recover after fault clearance");
+        // Reproduce the unsafe desktop behavior from the July 31 incident: the
+        // engine teardown completes, then tries to construct a fresh manager
+        // over the same path. Clearing the VFS fault is not operator recovery;
+        // this process must remain ineligible to reopen the database.
+        let replacement_health =
+            WriteQueueHealth::for_database_path(db.to_string_lossy().into_owned());
         assert!(
-            !replacement_health.is_hard_faulted(),
-            "quarantine must not leak into a new manager generation"
+            replacement_health.is_hard_faulted(),
+            "replacement health must inherit the path quarantine"
         );
-        drop(replacement);
-        replacement_pool.close().await;
+        assert!(
+            screenpipe_sqlite_coordinator::sqlite_write_lock(&db).is_closed(),
+            "replacement writer admission must stay closed"
+        );
+        let replacement_error = match crate::DatabaseManager::new(
+            db.to_str().expect("utf-8 temp path"),
+            screenpipe_config::DbConfig::for_tier(screenpipe_config::DeviceTier::Low),
+        )
+        .await
+        {
+            Ok(database) => {
+                database.close().await;
+                panic!("same-process manager replacement must fail closed");
+            }
+            Err(error) => error,
+        };
+        assert!(replacement_error
+            .to_string()
+            .contains("remains durably quarantined"));
 
-        // Fresh-connection readback proves only the replacement write committed.
+        // A forensic read-only connection proves no pre- or post-fault write
+        // crossed the quarantine boundary.
         let verify = SqlitePoolOptions::new()
             .min_connections(1)
             .connect_with(opts.clone())
@@ -550,11 +613,211 @@ mod tests {
                 .fetch_one(&verify)
                 .await
                 .unwrap();
-        assert_eq!(post.0, 1, "replacement write must be durable");
+        assert_eq!(post.0, 0, "replacement write must never be attempted");
         assert_eq!(
             quarantined.0, 0,
             "hard-fault and post-fault writes must never commit"
         );
         verify.close().await;
+    }
+
+    /// A real `SQLITE_FULL` from xWrite is a generation fault, not a retryable
+    /// capacity warning. The first failed commit must close admission, reject
+    /// the rest of the buffered batch, and leave no partial rows behind.
+    #[tokio::test]
+    async fn write_queue_quarantines_sqlite_full_without_tail_flush() {
+        use crate::write_queue::{
+            spawn_write_drain_with, WriteDrainOpts, WriteOp, WriteQueueHealth,
+        };
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let _guard = failpoint_test_lock().lock().await;
+        let dir = tempfile::tempdir().expect("temp dir");
+        let db = dir.path().join("full.sqlite");
+        let vfs = register();
+        disarm();
+        set_auto_heal(false);
+        let opts = tiny_cache_opts(&db, vfs);
+
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .min_connections(1)
+            .connect_with(opts.clone())
+            .await
+            .expect("open failpoint pool");
+        sqlx::query(
+            "CREATE TABLE audio_chunks (id INTEGER PRIMARY KEY AUTOINCREMENT, \
+             file_path TEXT NOT NULL, timestamp TIMESTAMP)",
+        )
+        .execute(&pool)
+        .await
+        .expect("create queue table");
+
+        let health = WriteQueueHealth::for_database_path(db.to_string_lossy().into_owned());
+        let queue = spawn_write_drain_with(
+            pool.clone(),
+            screenpipe_sqlite_coordinator::sqlite_write_lock(&db),
+            Arc::from(db.to_string_lossy().into_owned()),
+            WriteDrainOpts {
+                health: health.clone(),
+                ..Default::default()
+            },
+        );
+
+        let (_, failed_before) = write_stats();
+        arm_full();
+        let mut pending = Vec::new();
+        for index in 0..12 {
+            let queue = queue.clone();
+            pending.push(tokio::spawn(async move {
+                queue
+                    .submit(WriteOp::InsertAudioChunk {
+                        file_path: format!("/full/{index}"),
+                        timestamp: None,
+                    })
+                    .await
+            }));
+        }
+        for result in pending {
+            assert!(
+                result.await.expect("write task must not panic").is_err(),
+                "no caller may report success after SQLITE_FULL"
+            );
+        }
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !health.is_hard_faulted() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("SQLITE_FULL must quarantine immediately");
+        let (_, failed_after) = write_stats();
+        assert!(
+            failed_after > failed_before,
+            "xWrite must inject SQLITE_FULL"
+        );
+        assert_eq!(
+            screenpipe_sqlite_coordinator::registered_sqlite_hard_fault(&db),
+            Some(13)
+        );
+        assert!(screenpipe_sqlite_coordinator::sqlite_quarantine_exists(&db));
+        assert_eq!(health.write_pool_reopens(), 0, "hard faults never retry");
+
+        disarm();
+        assert!(
+            queue
+                .submit(WriteOp::InsertAudioChunk {
+                    file_path: "/full/after".into(),
+                    timestamp: None,
+                })
+                .await
+                .is_err(),
+            "clearing device pressure must not reopen the same generation"
+        );
+        drop(queue);
+        pool.close().await;
+
+        let verify = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(opts)
+            .await
+            .expect("forensic open");
+        let count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM audio_chunks WHERE file_path LIKE '/full/%'")
+                .fetch_one(&verify)
+                .await
+                .expect("count partial writes");
+        assert_eq!(count, 0, "failed batch and tail must remain atomic");
+        set_auto_heal(true);
+        verify.close().await;
+    }
+
+    /// Direct transaction callers execute statements through `tx.conn()`, so
+    /// the statement error is not routed through DatabaseManager. Prove that
+    /// dropping that failed transaction reads SQLite's extended result before
+    /// rollback, quarantines the path, and fires recovery exactly once.
+    #[tokio::test]
+    async fn direct_transaction_statement_ioerr_quarantines_before_rollback() {
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let _guard = failpoint_test_lock().lock().await;
+        let dir = tempfile::tempdir().expect("temp dir");
+        let db = dir.path().join("direct-tx.sqlite");
+        let vfs = register();
+        disarm();
+        set_auto_heal(false);
+
+        let opts = tiny_cache_opts(&db, vfs);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .min_connections(1)
+            .connect_with(opts)
+            .await
+            .expect("open failpoint pool");
+        seed_multipage(&pool).await;
+        sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+            .execute(&pool)
+            .await
+            .expect("checkpoint seed");
+
+        let writer_gate = screenpipe_sqlite_coordinator::sqlite_write_lock(&db);
+        let permit = Arc::clone(&writer_gate)
+            .acquire_owned()
+            .await
+            .expect("open writer gate");
+        let mut conn = pool.acquire().await.expect("write connection");
+        sqlx::query("PRAGMA shrink_memory")
+            .execute(&mut *conn)
+            .await
+            .expect("clear page cache");
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut *conn)
+            .await
+            .expect("begin before fault");
+
+        let health = crate::write_queue::WriteQueueHealth::for_database_path(
+            db.to_string_lossy().into_owned(),
+        );
+        let hook_calls = Arc::new(AtomicUsize::new(0));
+        let hook_counter = Arc::clone(&hook_calls);
+        let hook = crate::write_queue::persistent_failure_slot(Some(Arc::new(move || {
+            hook_counter.fetch_add(1, AtomicOrdering::SeqCst);
+        })));
+        let mut tx = crate::ImmediateTx::for_test(conn, permit, health.clone(), hook);
+
+        arm();
+        let error = sqlx::query("INSERT INTO t VALUES (?, ?)")
+            .bind(99_999)
+            .bind("fault".repeat(40))
+            .execute(&mut **tx.conn())
+            .await
+            .expect_err("uncached statement must observe the injected IOERR");
+        assert!(
+            crate::sqlite_error::is_sqlite_hard_fault(&error),
+            "injected error must be a hard SQLite fault: {error}"
+        );
+        drop(tx);
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !health.is_hard_faulted() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("transaction drop must quarantine promptly");
+        assert!(writer_gate.is_closed(), "writer admission must close");
+        assert_eq!(hook_calls.load(AtomicOrdering::SeqCst), 1);
+        assert!(matches!(
+            screenpipe_sqlite_coordinator::registered_sqlite_hard_fault(&db),
+            Some(10 | 522)
+        ));
+
+        disarm();
+        set_auto_heal(true);
+        pool.close().await;
     }
 }

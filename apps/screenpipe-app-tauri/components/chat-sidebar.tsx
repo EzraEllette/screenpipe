@@ -109,6 +109,7 @@ import { pipeExecutionToConversation } from "@/lib/pipe-ndjson-to-chat";
 import {
   buildPipeExecutionHistoryPage,
   isTerminalPipeExecutionStatus,
+  shouldReloadPipeExecutionHistory,
 } from "@/lib/pipe-execution-status";
 import { parsePipeSessionId, pipeSessionId } from "@/lib/events/types";
 import type { ChatConversation } from "@/lib/hooks/use-settings";
@@ -181,7 +182,7 @@ function pipeExecutionConversation(execution: SidebarPipeExecution): ChatConvers
     const detail =
       execution.error_message?.trim() ||
       execution.stderr?.trim() ||
-      `pipe execution ${execution.status}`;
+      `scheduled task execution ${execution.status}`;
     conversation.messages = [{
       id: `pipe-execution-status-${execution.id}`,
       role: "assistant",
@@ -526,6 +527,7 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
   const executionConversationsRef = useRef<Map<string, ChatConversation>>(new Map());
   const executionMetadataRef = useRef<Map<string, SidebarPipeExecution>>(new Map());
   const syntheticExecutionIdsRef = useRef<Set<string>>(new Set());
+  const loadedPipeLatestExecutionIdsRef = useRef<Record<string, number>>({});
   const pipeDataGenerationRef = useRef(0);
 
   const releasePipeData = useCallback(() => {
@@ -541,6 +543,7 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
         : new Set();
     executionConversationsRef.current.clear();
     executionMetadataRef.current.clear();
+    loadedPipeLatestExecutionIdsRef.current = {};
     setLoadedPipeRuns({});
     setPipeRunCursors({});
     setPipeRunsHaveMore({});
@@ -562,7 +565,10 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
     (event) => updatePipesCollapsed(event.payload.collapsed),
   );
 
-  const fetchPipeInventory = useCallback(async (append = false) => {
+  const fetchPipeInventory = useCallback(async (
+    append = false,
+    preserveExisting = false,
+  ) => {
     const generation = pipeDataGenerationRef.current;
     if (append) setPipeInventoryLoadingMore(true);
     try {
@@ -591,16 +597,20 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
         });
       }
       setPipeInventory((previous) => {
-        if (!append) return page;
+        if (!append && !preserveExisting) return page;
         const merged = new Map(previous.map((pipe) => [pipe.name, pipe]));
         for (const pipe of page) merged.set(pipe.name, pipe);
         return Array.from(merged.values()).sort(
           (a, b) => b.latestExecutionId - a.latestExecutionId,
         );
       });
-      setPipeInventoryHasMore(payload.has_more === true);
-      pipeInventoryCursorRef.current =
-        typeof payload.next_before_id === "number" ? payload.next_before_id : null;
+      // A heartbeat refreshes only the newest page. Preserve the pagination
+      // cursor and older inventory rows the user explicitly loaded.
+      if (!preserveExisting) {
+        setPipeInventoryHasMore(payload.has_more === true);
+        pipeInventoryCursorRef.current =
+          typeof payload.next_before_id === "number" ? payload.next_before_id : null;
+      }
       setPipeInventoryAuthoritative(true);
     } catch {
       // Keep recent in-memory pipe groups available if the engine is still
@@ -619,12 +629,25 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
     if (!pipesCollapsed) void fetchPipeInventory(false);
   }, [pipesCollapsed, fetchPipeInventory]);
   useInterval(
-    () => void fetchPipeInventory(false),
-    pipesCollapsed || pipeInventory.length > PIPE_INVENTORY_PAGE_SIZE ? null : 15_000,
+    () => void fetchPipeInventory(false, true),
+    pipesCollapsed ? null : 15_000,
   );
 
-  const loadPipeRuns = useCallback(async (pipeName: string, append = false) => {
-    if (loadingPipeRuns.has(pipeName) || (!append && loadedPipeRuns[pipeName])) return;
+  const loadPipeRuns = useCallback(async (
+    pipeName: string,
+    append = false,
+    latestExecutionId?: number,
+  ) => {
+    const loadedLatestExecutionId =
+      loadedPipeLatestExecutionIdsRef.current[pipeName];
+    const loadedPageIsCurrent = !shouldReloadPipeExecutionHistory(
+      loadedLatestExecutionId,
+      latestExecutionId,
+    );
+    if (
+      loadingPipeRuns.has(pipeName) ||
+      (!append && loadedPipeRuns[pipeName] && loadedPageIsCurrent)
+    ) return;
     const generation = pipeDataGenerationRef.current;
     setLoadingPipeRuns((prev) => new Set(prev).add(pipeName));
     try {
@@ -674,6 +697,10 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
       const records = candidates.flatMap((candidate) =>
         candidate?.belongsInPipeGroup ? [candidate.record] : [],
       );
+      if (!append) {
+        loadedPipeLatestExecutionIdsRef.current[pipeName] =
+          terminalExecutions[0]?.id ?? 0;
+      }
       setLoadedPipeRuns((prev) => ({
         ...prev,
         [pipeName]: append
@@ -718,6 +745,7 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
     const orderedNames = visibleSidebarPipeNames(pipeInventory, pipes);
 
     return orderedNames.map((name) => {
+      const inventoryItem = pipeInventory.find((pipe) => pipe.name === name);
       // Keep a newly completed run visible before the activity inventory
       // refreshes, while deduping the same saved row returned by both sources.
       // Filter out sessions deleted from the store but still in the lazy cache.
@@ -745,6 +773,7 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
         kind: "group" as const,
         key: `pipe:${name}`,
         title: name,
+        latestExecutionId: inventoryItem?.latestExecutionId,
         sessions,
       };
     });
@@ -833,7 +862,11 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
       return next;
     });
     if (!wasExpanded && key.startsWith("pipe:")) {
-      void loadPipeRuns(key.slice("pipe:".length));
+      const pipeName = key.slice("pipe:".length);
+      const latestExecutionId = pipeInventory.find(
+        (pipe) => pipe.name === pipeName,
+      )?.latestExecutionId;
+      void loadPipeRuns(pipeName, false, latestExecutionId);
     }
   };
 
@@ -844,7 +877,7 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
     if (pipesCollapsed) return;
     for (const item of pipeItems) {
       if (expandedGroups.has(item.key)) {
-        void loadPipeRuns(item.title);
+        void loadPipeRuns(item.title, false, item.latestExecutionId);
       }
     }
   }, [expandedGroups, loadPipeRuns, pipeItems, pipesCollapsed]);
@@ -977,7 +1010,7 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
       !isTerminalPipeExecutionStatus(fullExecution.status)
     ) {
       toast({
-        title: "couldn't load pipe run",
+        title: "couldn't load scheduled run",
         description: "the execution output is temporarily unavailable",
         variant: "destructive",
       });
@@ -1322,7 +1355,7 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
 
           <div className="group/pipes min-h-0 flex flex-col shrink-0">
               <Section
-                title="pipes"
+                title="scheduled"
                 collapsed={pipesCollapsed}
                 onCollapsedChange={updatePipesCollapsed}
                 headerAction={
@@ -1338,7 +1371,7 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
                   </div>
                 ) : pipeItems.length === 0 ? (
                   <div className="px-2.5 py-2 text-xs text-muted-foreground/70 italic">
-                    no pipe runs yet
+                    no scheduled runs yet
                   </div>
                 ) : pipeItems.map((item) => (
                     <PipeGroupRow
@@ -1373,7 +1406,7 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
                     onClick={() => void fetchPipeInventory(true)}
                     disabled={pipeInventoryLoadingMore}
                   >
-                    {pipeInventoryLoadingMore ? "loading…" : "show more pipes"}
+                    {pipeInventoryLoadingMore ? "loading…" : "show more scheduled tasks"}
                   </button>
                 )}
               </Section>
@@ -2399,6 +2432,8 @@ export function SidebarChatRow({
     session.status === "tool";
   const isError = session.status === "error";
   const isUnread = session.unread && !isCurrent;
+  const showCurrentLabel =
+    isCurrent && !isLive && !isError && queuedCount === 0;
   const canShowActions = showActions && !disableHover;
   const activityAt = session.lastUserMessageAt ?? session.updatedAt ?? session.createdAt;
   const now = useMinuteTick(!isLive && !isUnread && !isError && queuedCount === 0);
@@ -2436,24 +2471,26 @@ export function SidebarChatRow({
       <ContextMenuTrigger asChild disabled={!canShowActions}>
     <div
       className={cn(
-        "group relative flex items-center gap-2 px-2.5 py-1 rounded-md select-none",
+        "group relative flex items-center gap-2 border-l-2 px-2.5 py-1 rounded-md select-none",
         "transition-colors",
         isCurrent
-          ? "bg-muted/70 text-foreground"
+          ? "border-foreground bg-foreground/[0.08] text-foreground"
           : disableHover
             ? tone === "subtle"
-              ? "text-muted-foreground/75"
-              : "text-muted-foreground"
+              ? "border-transparent text-muted-foreground/75"
+              : "border-transparent text-muted-foreground"
             : tone === "subtle"
-              ? "text-muted-foreground/75 hover:bg-muted/12"
-              : "text-muted-foreground hover:bg-muted/20"
+              ? "border-transparent text-muted-foreground/75 hover:bg-muted/12"
+              : "border-transparent text-muted-foreground hover:bg-muted/20"
       )}
       data-testid={`chat-row-${session.id}`}
+      data-current={isCurrent ? "true" : undefined}
       title={isError && session.lastError ? session.lastError : undefined}
     >
       <button
         type="button"
         className="min-w-0 flex-1 flex items-center gap-2 text-left"
+        aria-current={isCurrent ? "page" : undefined}
         onClick={() => {
           setOpenConversationMenuId?.(null);
           onSelect(session.id);
@@ -2468,7 +2505,7 @@ export function SidebarChatRow({
             isUnread
               ? "font-medium text-foreground"
               : isCurrent
-                ? "text-foreground/80"
+                ? "font-medium text-foreground"
                 : tone === "subtle"
                   ? "text-muted-foreground/70"
                 : "text-muted-foreground"
@@ -2484,14 +2521,20 @@ export function SidebarChatRow({
               menuOpen && "opacity-0"
             )}
           >
-            <RowRightSignal
-              isLive={isLive}
-              isError={isError}
-              isUnread={isUnread}
-              queuedCount={queuedCount}
-              status={session.status}
-              age={age}
-            />
+            {showCurrentLabel ? (
+              <span className="text-[9px] font-medium uppercase tracking-[0.08em] text-foreground/70">
+                current
+              </span>
+            ) : (
+              <RowRightSignal
+                isLive={isLive}
+                isError={isError}
+                isUnread={isUnread}
+                queuedCount={queuedCount}
+                status={session.status}
+                age={age}
+              />
+            )}
           </span>
         </span>
       </button>

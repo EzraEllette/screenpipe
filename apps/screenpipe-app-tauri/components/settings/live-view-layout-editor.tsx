@@ -172,6 +172,7 @@ export function LiveViewLayoutEditor({
       binding: null,
       value: null,
       feedback: { upCount: 0, downCount: 0, current: null },
+      itemActions: { items: [] },
     };
     changeSlots([...slots, nextSlot]);
     setSelectedSlotId(id);
@@ -263,9 +264,7 @@ export function LiveViewLayoutEditor({
 
       <div
         className={`mb-4 grid border border-border ${
-          hasSelectableTimeRange
-            ? "md:grid-cols-[minmax(0,1fr)_12rem]"
-            : ""
+          hasSelectableTimeRange ? "md:grid-cols-[minmax(0,1fr)_12rem]" : ""
         }`}
       >
         <label
@@ -381,7 +380,7 @@ export function LiveViewLayoutEditor({
             </label>
             <label className="space-y-1">
               <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
-                Connected Pipe
+                Connected scheduled task
               </span>
               <select
                 data-testid={`overview-pipe-${selectedSlot.id}`}
@@ -397,7 +396,7 @@ export function LiveViewLayoutEditor({
                   }))
                 }
               >
-                <option value="">No Pipe</option>
+                <option value="">No scheduled task</option>
                 {pipeNames.map((pipeName) => (
                   <option key={pipeName} value={pipeName}>
                     {pipeName}
@@ -453,7 +452,7 @@ export function LiveViewLayoutEditor({
               )?.schema
             }
             . The title is display copy. The instruction above is the data
-            contract the connected Pipe receives on its next run.
+            contract the connected scheduled task receives on its next run.
           </p>
         </section>
       )}
@@ -467,7 +466,7 @@ export function LiveViewLayoutEditor({
           <Plus className="h-5 w-5" />
           <span className="text-sm font-medium">Add your first Block</span>
           <span className="text-xs text-muted-foreground">
-            Connect it to a Pipe now or fill it with AI later.
+            Connect it to a scheduled task now or fill it with AI later.
           </span>
         </button>
       ) : (

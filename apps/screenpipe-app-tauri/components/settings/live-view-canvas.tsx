@@ -31,7 +31,10 @@ import {
 } from "@xyflow/react";
 import {
   ArrowRight,
+  ChevronLeft,
+  ChevronRight,
   Hand,
+  LayoutGrid,
   Maximize2,
   MousePointer2,
   Move,
@@ -41,7 +44,11 @@ import {
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
-import { LiveViewCard } from "@/components/settings/live-view-card";
+import {
+  LiveViewCard,
+  type LiveViewItemActionRequest,
+  type LiveViewListItem,
+} from "@/components/settings/live-view-card";
 import { Button } from "@/components/ui/button";
 import {
   CANVAS_GRID,
@@ -92,6 +99,8 @@ type LiveViewFlowNodeData = CanvasNodeActions & {
   ) => Promise<boolean>;
   onRegenerate: () => void;
   onAiEdit: (prompt: string) => Promise<boolean>;
+  onItemAction: (request: LiveViewItemActionRequest) => Promise<boolean>;
+  onItemHandoff: (item: LiveViewListItem) => void;
 };
 
 type NoteFlowNodeData = CanvasNodeActions & {
@@ -260,6 +269,8 @@ function LiveViewBlockNode({ id, data }: NodeProps<LiveViewFlowNode>) {
           onFeedback={data.onFeedback}
           onRegenerate={data.onRegenerate}
           onAiEdit={data.onAiEdit}
+          onItemAction={data.onItemAction}
+          onItemHandoff={data.onItemHandoff}
         />
       </div>
     </article>
@@ -343,6 +354,8 @@ export function LiveViewCanvas({
   onFeedback,
   onRegenerate,
   onAiEdit,
+  onItemAction,
+  onItemHandoff,
 }: {
   document: BrainViewCanvasDocument;
   slots: BrainViewSlot[];
@@ -357,8 +370,14 @@ export function LiveViewCanvas({
   ) => Promise<boolean>;
   onRegenerate: (slot: BrainViewSlot) => void;
   onAiEdit: (slot: BrainViewSlot, prompt: string) => Promise<boolean>;
+  onItemAction: (
+    slot: BrainViewSlot,
+    request: LiveViewItemActionRequest,
+  ) => Promise<boolean>;
+  onItemHandoff: (slot: BrainViewSlot, item: LiveViewListItem) => void;
 }) {
   const [tool, setTool] = useState<CanvasTool>("select");
+  const [toolsOpen, setToolsOpen] = useState(false);
   const [selection, setSelection] = useState<string[]>([]);
   const [arrowSource, setArrowSource] = useState<string | null>(null);
   const [draftStroke, setDraftStroke] = useState<BrainViewCanvasStroke | null>(
@@ -367,10 +386,18 @@ export function LiveViewCanvas({
   const surfaceRef = useRef<HTMLDivElement | null>(null);
   const drawSessionRef = useRef<DrawSession | null>(null);
   const latestDocumentRef = useRef(document);
+  const isMountedRef = useRef(true);
   const slotsById = useMemo(
     () => new Map(slots.map((slot) => [slot.id, slot])),
     [slots],
   );
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
 
   useEffect(() => {
     latestDocumentRef.current = document;
@@ -382,6 +409,7 @@ export function LiveViewCanvas({
 
   const applyDocument = useCallback(
     (next: BrainViewCanvasDocument, persist: boolean) => {
+      if (!isMountedRef.current) return;
       latestDocumentRef.current = next;
       onChange(next, { persist });
     },
@@ -582,6 +610,8 @@ export function LiveViewCanvas({
               onFeedback(slot, rating, correction),
             onRegenerate: () => onRegenerate(slot),
             onAiEdit: (prompt) => onAiEdit(slot, prompt),
+            onItemAction: (request) => onItemAction(slot, request),
+            onItemHandoff: (item) => onItemHandoff(slot, item),
           },
         },
       ];
@@ -639,6 +669,8 @@ export function LiveViewCanvas({
     document.notes,
     onAiEdit,
     onFeedback,
+    onItemAction,
+    onItemHandoff,
     onRegenerate,
     refreshingSlotIds,
     selection,
@@ -968,6 +1000,11 @@ export function LiveViewCanvas({
     (event: React.KeyboardEvent<HTMLDivElement>) => {
       const target = event.target as HTMLElement;
       if (event.key === "Escape") {
+        if (toolsOpen) {
+          event.preventDefault();
+          setToolsOpen(false);
+          return;
+        }
         setArrowSource(null);
         setCanvasSelection([]);
         setTool("select");
@@ -1032,6 +1069,7 @@ export function LiveViewCanvas({
       removeSelection,
       selection,
       setCanvasSelection,
+      toolsOpen,
       updateNodePosition,
       zoomCanvas,
     ],
@@ -1062,11 +1100,14 @@ export function LiveViewCanvas({
   );
 
   const selectedCanDelete = selection.some((id) => !id.startsWith("block:"));
+  const activeTool =
+    TOOL_OPTIONS.find((option) => option.value === tool) ?? TOOL_OPTIONS[0];
+  const ActiveToolIcon = activeTool.icon;
 
   return (
     <section
       data-testid="live-view-canvas"
-      className="relative h-[min(70vh,720px)] min-h-[480px] w-full overflow-hidden border border-border bg-background"
+      className="relative min-h-0 w-full flex-1 overflow-hidden border border-border bg-background"
       aria-label="Live View process canvas"
     >
       <div
@@ -1176,98 +1217,183 @@ export function LiveViewCanvas({
 
       <div
         data-canvas-toolbar
-        className="absolute left-3 top-3 z-30 flex max-w-[calc(100%-1.5rem)] flex-wrap items-center border border-foreground bg-background shadow-lg shadow-black/5"
+        data-state={toolsOpen ? "open" : "closed"}
+        className={`absolute left-3 top-3 z-30 max-w-[calc(100%-1.5rem)] overflow-hidden border border-foreground bg-background p-1 shadow-lg shadow-black/5 transition-[max-width,opacity,transform] duration-150 ease-out motion-reduce:transition-none ${
+          toolsOpen
+            ? "opacity-100"
+            : "max-w-36 opacity-75 hover:-translate-y-0.5 hover:opacity-100 focus-within:opacity-100"
+        }`}
+        onKeyDown={(event) => {
+          if (event.key !== "Escape" || !toolsOpen) return;
+          event.preventDefault();
+          event.stopPropagation();
+          setToolsOpen(false);
+          surfaceRef.current?.focus({ preventScroll: true });
+        }}
       >
-        {TOOL_OPTIONS.map((option) => {
-          const Icon = option.icon;
-          return (
+        {toolsOpen ? (
+          <div
+            data-testid="canvas-tools-panel"
+            className="flex max-w-full animate-in items-center overflow-x-auto fade-in slide-in-from-left-1 duration-150 motion-reduce:animate-none"
+          >
             <Button
-              key={option.value}
               type="button"
-              data-testid={`canvas-tool-${option.value}`}
               variant="ghost"
-              size="sm"
-              aria-label={option.label}
-              aria-pressed={tool === option.value}
-              className={`h-8 rounded-none border-r border-border px-2 text-[10px] ${
-                tool === option.value ? "bg-foreground text-background" : ""
-              }`}
+              size="icon"
+              data-testid="canvas-tools-close"
+              aria-label="close canvas tools"
+              title="close canvas tools"
+              className="h-8 w-8 shrink-0 rounded-none"
               onClick={() => {
-                setTool(option.value);
-                setArrowSource(null);
+                setToolsOpen(false);
+                surfaceRef.current?.focus({ preventScroll: true });
               }}
             >
-              <Icon className="mr-1 h-3 w-3" />
-              <span className="hidden sm:inline">{option.label}</span>
+              <ChevronLeft className="h-3.5 w-3.5" aria-hidden="true" />
             </Button>
-          );
-        })}
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon"
-          aria-label="zoom out"
-          className="h-8 w-8 rounded-none"
-          onClick={() => zoomCanvas(1 / 1.2)}
-        >
-          <ZoomOut className="h-3 w-3" />
-        </Button>
-        <span className="w-11 text-center font-mono text-[10px] tabular-nums">
-          {Math.round(document.viewport.zoom * 100)}%
-        </span>
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon"
-          aria-label="zoom in"
-          className="h-8 w-8 rounded-none"
-          onClick={() => zoomCanvas(1.2)}
-        >
-          <ZoomIn className="h-3 w-3" />
-        </Button>
-        <Button
-          type="button"
-          data-testid="canvas-fit"
-          variant="ghost"
-          size="icon"
-          aria-label="fit canvas"
-          className="h-8 w-8 rounded-none border-l border-border"
-          onClick={fitCanvas}
-        >
-          <Maximize2 className="h-3 w-3" />
-        </Button>
-        <Button
-          type="button"
-          data-testid="canvas-arrange"
-          variant="ghost"
-          size="sm"
-          className="h-8 rounded-none border-l border-border px-2 text-[10px]"
-          onClick={arrangeCanvas}
-        >
-          arrange
-        </Button>
-        <Button
-          type="button"
-          data-testid="canvas-delete-selection"
-          variant="ghost"
-          size="icon"
-          aria-label="delete selected canvas item"
-          className="h-8 w-8 rounded-none border-l border-border"
-          disabled={!selectedCanDelete}
-          onClick={removeSelection}
-        >
-          <Trash2 className="h-3 w-3" />
-        </Button>
+            <span
+              className="mx-0.5 h-5 w-px shrink-0 bg-border"
+              aria-hidden="true"
+            />
+            {TOOL_OPTIONS.map((option) => {
+              const Icon = option.icon;
+              return (
+                <Button
+                  key={option.value}
+                  type="button"
+                  data-testid={`canvas-tool-${option.value}`}
+                  variant="ghost"
+                  size="icon"
+                  aria-label={option.label}
+                  aria-pressed={tool === option.value}
+                  title={option.label}
+                  className={`h-8 w-8 shrink-0 rounded-none ${
+                    tool === option.value
+                      ? "bg-foreground text-background hover:bg-foreground hover:text-background"
+                      : ""
+                  }`}
+                  onClick={() => {
+                    setTool(option.value);
+                    setArrowSource(null);
+                    setToolsOpen(false);
+                    surfaceRef.current?.focus({ preventScroll: true });
+                  }}
+                >
+                  <Icon className="h-3.5 w-3.5" aria-hidden="true" />
+                  <span className="sr-only">{option.label}</span>
+                </Button>
+              );
+            })}
+            <span
+              className="mx-0.5 h-5 w-px shrink-0 bg-border"
+              aria-hidden="true"
+            />
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              aria-label="zoom out"
+              title="zoom out (-)"
+              className="h-8 w-8 shrink-0 rounded-none"
+              onClick={() => zoomCanvas(1 / 1.2)}
+            >
+              <ZoomOut className="h-3 w-3" aria-hidden="true" />
+            </Button>
+            <button
+              type="button"
+              aria-label="reset zoom to 100%"
+              title="reset zoom to 100%"
+              className="h-8 w-11 shrink-0 text-center font-mono text-[10px] tabular-nums text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline focus-visible:outline-1 focus-visible:outline-foreground"
+              onClick={() =>
+                zoomCanvas(1 / latestDocumentRef.current.viewport.zoom)
+              }
+            >
+              {Math.round(document.viewport.zoom * 100)}%
+            </button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              aria-label="zoom in"
+              title="zoom in (+)"
+              className="h-8 w-8 shrink-0 rounded-none"
+              onClick={() => zoomCanvas(1.2)}
+            >
+              <ZoomIn className="h-3 w-3" aria-hidden="true" />
+            </Button>
+            <Button
+              type="button"
+              data-testid="canvas-fit"
+              variant="ghost"
+              size="icon"
+              aria-label="fit canvas"
+              title="fit canvas"
+              className="h-8 w-8 shrink-0 rounded-none"
+              onClick={fitCanvas}
+            >
+              <Maximize2 className="h-3 w-3" aria-hidden="true" />
+            </Button>
+            <Button
+              type="button"
+              data-testid="canvas-arrange"
+              variant="ghost"
+              size="icon"
+              aria-label="arrange canvas"
+              title="arrange canvas"
+              className="h-8 w-8 shrink-0 rounded-none"
+              onClick={arrangeCanvas}
+            >
+              <LayoutGrid className="h-3.5 w-3.5" aria-hidden="true" />
+              <span className="sr-only">arrange canvas</span>
+            </Button>
+            <Button
+              type="button"
+              data-testid="canvas-delete-selection"
+              variant="ghost"
+              size="icon"
+              aria-label="delete selected canvas item"
+              title="delete selected canvas item"
+              className="h-8 w-8 shrink-0 rounded-none"
+              disabled={!selectedCanDelete}
+              onClick={removeSelection}
+            >
+              <Trash2 className="h-3 w-3" aria-hidden="true" />
+            </Button>
+          </div>
+        ) : (
+          <button
+            type="button"
+            data-testid="canvas-tools-toggle"
+            aria-label={`open canvas tools. ${activeTool.label} tool active`}
+            aria-expanded="false"
+            className="flex h-8 max-w-32 items-center gap-2 px-2 font-mono text-[10px] uppercase tracking-wide text-muted-foreground transition-colors hover:bg-foreground hover:text-background focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-1 focus-visible:outline-foreground"
+            onClick={() => setToolsOpen(true)}
+          >
+            <ActiveToolIcon
+              className="h-3.5 w-3.5 shrink-0"
+              aria-hidden="true"
+            />
+            <span className="truncate">
+              {tool === "select" ? "tools" : activeTool.label}
+            </span>
+            <ChevronRight className="h-3 w-3 shrink-0" aria-hidden="true" />
+          </button>
+        )}
       </div>
 
       {tool === "arrow" && arrowSource && (
-        <div className="absolute bottom-3 left-3 z-30 border border-foreground bg-background px-3 py-2 text-xs">
+        <div className="absolute bottom-14 left-3 z-30 border border-foreground bg-background px-3 py-2 text-xs">
           choose another Block or note to connect
         </div>
       )}
-      <div className="pointer-events-none absolute bottom-3 right-3 z-20 border border-border bg-background/95 px-2 py-1 font-mono text-[9px] text-muted-foreground">
-        drag nodes · pan tool or middle-drag · ctrl/⌘ + wheel to zoom
-      </div>
+      {!toolsOpen && (
+        <div
+          data-testid="canvas-interaction-hint"
+          className="pointer-events-none absolute right-3 top-3 z-20 max-w-[calc(100%-11rem)] border border-border bg-background/95 px-2 py-1 text-right font-mono text-[9px] leading-tight text-muted-foreground"
+        >
+          drag nodes · pan tool or middle-drag · ctrl/⌘ + wheel to zoom
+        </div>
+      )}
     </section>
   );
 }

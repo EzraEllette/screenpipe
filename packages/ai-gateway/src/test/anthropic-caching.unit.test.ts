@@ -87,6 +87,33 @@ const body = (messages: Message[], extra: Partial<RequestBody> = {}): RequestBod
 });
 
 describe('current Claude request compatibility', () => {
+	it('passes the real SDK auth validator while omitting the provider key for Cloudflare BYOK', async () => {
+		let sentHeaders: Headers | null = null;
+		const provider = new AnthropicProvider(
+			'cloudflare-byok',
+			'https://gateway.test/anthropic',
+			{ 'x-api-key': null, 'cf-aig-metadata': '{"lane":"explicit"}' },
+			0,
+		) as any;
+		provider.client.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+			sentHeaders = new Headers(init?.headers);
+			return new Response(JSON.stringify({
+				id: 'msg_test',
+				type: 'message',
+				role: 'assistant',
+				model: 'claude-sonnet-5',
+				content: [{ type: 'text', text: 'ok' }],
+				stop_reason: 'end_turn',
+				stop_sequence: null,
+				usage: { input_tokens: 10, output_tokens: 5 },
+			}), { status: 200, headers: { 'Content-Type': 'application/json' } });
+		};
+
+		await provider.createCompletion(body([{ role: 'user', content: 'hi' }]));
+		expect(sentHeaders?.has('x-api-key')).toBe(false);
+		expect(sentHeaders?.get('cf-aig-metadata')).toBe('{"lane":"explicit"}');
+	});
+
 	for (const model of ['claude-opus-5', 'claude-sonnet-5']) {
 		it(`omits temperature for ${model}`, async () => {
 			const { provider, calls } = makeProvider();
@@ -98,6 +125,32 @@ describe('current Claude request compatibility', () => {
 			expect(calls[0].temperature).toBeUndefined();
 		});
 	}
+
+	it('aborts the upstream Anthropic request when the client cancels', async () => {
+		const controller = new AbortController();
+		let resolveNext: ((value: IteratorResult<any>) => void) | null = null;
+		controller.signal.addEventListener('abort', () => {
+			resolveNext?.({ done: true, value: undefined });
+		});
+		const upstream: any = {
+			controller,
+			[Symbol.asyncIterator]() {
+				return {
+					next: () => new Promise<IteratorResult<any>>((resolve) => {
+						resolveNext = resolve;
+					}),
+				};
+			},
+		};
+		const { provider } = makeProvider(upstream);
+		const responseStream = await provider.createStreamingCompletion(body([
+			{ role: 'user', content: 'cancel this' },
+		]));
+		await responseStream.cancel('client disconnected');
+
+		expect(controller.signal.aborted).toBe(true);
+		expect(controller.signal.reason).toBe('client disconnected');
+	});
 });
 
 describe('system prompt cache breakpoints', () => {

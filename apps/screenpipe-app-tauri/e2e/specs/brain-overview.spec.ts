@@ -39,12 +39,18 @@ interface CanvasDocument {
     height: number;
   }>;
   notes: Array<{ id: string; text: string }>;
-  arrows: Array<{ id: string; fromId: string; toId: string }>;
+  arrows: Array<{
+    id: string;
+    fromId: string;
+    toId: string;
+    label: string | null;
+  }>;
   strokes: Array<{ id: string }>;
 }
 
 const SELECTABLE_VIEW_ID = "my-overview";
 const FIXED_VIEW_ID = "daily-memory-fixed";
+const RANGE_TRUTH_VIEW_ID = "range-truth-e2e";
 const PIPE_NAME = "e2e-overview-pipe";
 
 const SUPPORTED_WINDOW_SIZES = [
@@ -88,6 +94,11 @@ async function selectDashboard(viewId: string) {
       })) as string) === viewId,
     { timeout: t(10_000) },
   );
+}
+
+async function openDashboardMenu() {
+  await pointerPressTestId("overview-dashboard-menu");
+  await waitForTestId("overview-new-dashboard", 10_000);
 }
 
 async function openHomeWithDiagnostics() {
@@ -242,9 +253,7 @@ async function resizeCanvasBlockBottomRight(
   );
 
   const geometry = (await browser.execute((id) => {
-    const block = document.querySelector<HTMLElement>(
-      `[data-testid="${id}"]`,
-    );
+    const block = document.querySelector<HTMLElement>(`[data-testid="${id}"]`);
     const handle = block?.querySelector<HTMLElement>(
       ".react-flow__resize-control.handle.bottom.right",
     );
@@ -265,9 +274,19 @@ async function resizeCanvasBlockBottomRight(
   expect(geometry).not.toBeNull();
 
   const dragError = (await browser.execute(
-    (drag: { startX: number; startY: number; endX: number; endY: number }) => {
+    (drag: {
+      testId: string;
+      startX: number;
+      startY: number;
+      endX: number;
+      endY: number;
+    }) => {
       try {
-        const handle = document.elementFromPoint(drag.startX, drag.startY);
+        const handle = document
+          .querySelector<HTMLElement>(`[data-testid="${drag.testId}"]`)
+          ?.querySelector<HTMLElement>(
+            ".react-flow__resize-control.handle.bottom.right",
+          );
         if (!(handle instanceof HTMLElement)) {
           return "resize handle is not available at the drag origin";
         }
@@ -307,6 +326,7 @@ async function resizeCanvasBlockBottomRight(
       }
     },
     {
+      testId,
       startX: Math.round(geometry!.handle.x),
       startY: Math.round(geometry!.handle.y),
       endX: Math.round(geometry!.handle.x + delta.x),
@@ -355,6 +375,223 @@ describe("Brain Live Views", function () {
     if (starterViews.some((candidate) => candidate.id === "my-dashboard")) {
       await invokeOrThrow("delete_brain_view", { id: "my-dashboard" });
     }
+  });
+
+  it("hands the process map template to the Live View builder agent", async () => {
+    await waitForAppReady();
+    await openHomeWithDiagnostics();
+    const existingViews = await invokeOrThrow<BrainView[]>("list_brain_views");
+    if (existingViews.some((view) => view.id === "process-map")) {
+      await invokeOrThrow("delete_brain_view", { id: "process-map" });
+    }
+
+    const brainNav = await waitForTestId("nav-brain", 10_000);
+    await brainNav.click();
+    await waitForTestId("section-brain", 15_000);
+    await openDashboardMenu();
+    await waitForTestId("overview-templates", 10_000).then((element) =>
+      element.click(),
+    );
+    await waitForTestId("preview-live-view-template-process-map", 10_000).then(
+      (element) => element.click(),
+    );
+
+    const capturedPrefillKey = "e2eLiveViewBuilderPrefill";
+    await browser.execute((captureKey: string) => {
+      window.sessionStorage.removeItem(captureKey);
+      const originalSetItem = Storage.prototype.setItem;
+      Storage.prototype.setItem = function (key: string, value: string) {
+        if (this === window.sessionStorage && key === "pendingChatPrefill") {
+          originalSetItem.call(this, captureKey, value);
+        }
+        originalSetItem.call(this, key, value);
+      };
+    }, capturedPrefillKey);
+
+    await waitForTestId("overview-apply-template", 10_000).then((element) =>
+      element.click(),
+    );
+
+    await waitForTestId("section-home", 20_000);
+    const capturedPrefill = (await browser.execute((captureKey: string) => {
+      const value = window.sessionStorage.getItem(captureKey);
+      return value ? JSON.parse(value) : null;
+    }, capturedPrefillKey)) as {
+      context?: string;
+      prompt?: string;
+      displayLabel?: string;
+      autoSend?: boolean;
+      source?: string;
+      useHomeChat?: boolean;
+      targetWindow?: string;
+    } | null;
+
+    expect(capturedPrefill).not.toBeNull();
+    expect(capturedPrefill?.context).toBe(
+      "Create a Live View guided by “Process map”",
+    );
+    expect(capturedPrefill?.displayLabel).toBe(
+      "Build “Process map” with the Live View agent",
+    );
+    expect(capturedPrefill?.source).toBe("live-view-builder-agent");
+    expect(capturedPrefill?.autoSend).toBe(true);
+    expect(capturedPrefill?.useHomeChat).toBe(true);
+    expect(capturedPrefill?.targetWindow).toBe("home");
+    expect(capturedPrefill?.prompt).toContain('"title":"Trigger and outcome"');
+    expect(capturedPrefill?.prompt).toContain(
+      '"title":"Safe improvement path"',
+    );
+    expect(capturedPrefill?.prompt).not.toContain("automate-my-work");
+
+    const viewsAfterHandoff = await invokeOrThrow<BrainView[]>(
+      "list_brain_views",
+    );
+    expect(viewsAfterHandoff.some((view) => view.id === "process-map")).toBe(
+      false,
+    );
+
+    const screenshot = await saveScreenshot("brain-process-map-agent-handoff");
+    expect(existsSync(screenshot)).toBe(true);
+    await browser.execute((captureKey: string) => {
+      window.sessionStorage.removeItem(captureKey);
+    }, capturedPrefillKey);
+  });
+
+  it("shows requested range and per-block freshness honestly", async () => {
+    await waitForAppReady();
+    await openHomeWithDiagnostics();
+    const config = await invokeOrThrow<LocalApiConfig>("get_local_api_config");
+    const base = `http://127.0.0.1:${config.port}`;
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+    };
+    if (config.key) headers.Authorization = `Bearer ${config.key}`;
+
+    const existingViews = await invokeOrThrow<BrainView[]>("list_brain_views");
+    if (existingViews.some((view) => view.id === RANGE_TRUTH_VIEW_ID)) {
+      await invokeOrThrow("delete_brain_view", { id: RANGE_TRUTH_VIEW_ID });
+    }
+    await invokeOrThrow("save_brain_view", {
+      request: {
+        id: RANGE_TRUTH_VIEW_ID,
+        title: "Time and focus",
+        expectedRevision: null,
+        timeRange: "7d",
+        periodPolicy: {
+          type: "selectable.v1",
+          values: ["today", "24h", "7d", "30d"],
+        },
+        slots: [
+          {
+            id: "tracked-work",
+            title: "Tracked work",
+            component: "metric.v1",
+            width: 6,
+            order: 0,
+            intent: "Show captured active work for the selected period.",
+            binding: { pipeName: "time-breakdown" },
+          },
+          {
+            id: "activity",
+            title: "Activity",
+            component: "timeline.v1",
+            width: 6,
+            order: 1,
+            intent: "Show recent activity for the selected period.",
+            binding: { pipeName: "time-breakdown" },
+          },
+        ],
+      },
+    });
+
+    const targetResponse = await fetch(
+      `${base}/outputs/targets?pipe=time-breakdown`,
+      { headers },
+    );
+    expect(targetResponse.ok).toBe(true);
+    const { data: targets } = (await targetResponse.json()) as {
+      data: OutputTarget[];
+    };
+    const payloads: Record<string, object> = {
+      "tracked-work": {
+        label: "Tracked active work today",
+        value: 326.1,
+        unit: "minutes",
+      },
+      activity: {
+        items: [
+          {
+            title: "Reviewed product metrics",
+            timestamp: "2026-07-25T14:10:00-07:00",
+            subtitle: "PostHog",
+          },
+        ],
+      },
+    };
+    const artifactIds: number[] = [];
+    for (const slotId of ["tracked-work", "activity"]) {
+      const targetId = `live-view:${RANGE_TRUTH_VIEW_ID}:${slotId}`;
+      const target = targets.find((candidate) => candidate.id === targetId);
+      expect(target).toBeTruthy();
+      const submit = await fetch(
+        `${base}/outputs/targets/${encodeURIComponent(targetId)}/submit`,
+        {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            target_revision: target!.revision,
+            source_pipe: "time-breakdown",
+            payload: payloads[slotId],
+            evidence: [{ frame_id: 42, ts: "2026-07-25T21:10:00Z" }],
+          }),
+        },
+      );
+      expect(submit.ok).toBe(true);
+      const submitted = await submit.json();
+      artifactIds.push(submitted.artifact_output_id);
+    }
+
+    await browser.execute(() => {
+      window.location.href = "/home?section=brain";
+    });
+    await waitForTestId("section-brain", 15_000);
+    await waitForTestId("overview-dashboard-selector", 15_000);
+    await selectDashboard(RANGE_TRUTH_VIEW_ID);
+    await waitForTestId("live-view-canvas", 15_000);
+    await waitForTestId("canvas-block-tracked-work", 10_000);
+    await setCssWindowSize(1440, 900);
+
+    const statusText = (
+      await waitForTestId("overview-data-status", 10_000)
+    ).getText();
+    expect((await statusText).toLowerCase()).toContain("2 of 2 blocks ready");
+    expect((await statusText).toLowerCase()).toContain("updated");
+    expect((await statusText).toLowerCase()).not.toMatch(/^updated /);
+
+    const cardText = (
+      await waitForTestId("overview-card-tracked-work", 10_000)
+    ).getText();
+    expect((await cardText).toLowerCase()).toContain(
+      "requested: last 7 days",
+    );
+    expect((await cardText).toLowerCase()).toContain(
+      "tracked active work today",
+    );
+    expect((await cardText).toLowerCase()).toContain("updated");
+    expect((await cardText).toLowerCase()).toContain("artifact #");
+
+    const screenshot = await saveScreenshot(
+      "brain-overview-range-freshness-truth",
+    );
+    expect(existsSync(screenshot)).toBe(true);
+
+    for (const artifactId of artifactIds) {
+      await fetch(`${base}/artifacts/${artifactId}`, {
+        method: "DELETE",
+        headers,
+      });
+    }
+    await invokeOrThrow("delete_brain_view", { id: RANGE_TRUTH_VIEW_ID });
   });
 
   it("renders a Pipe-filled Live View template", async () => {
@@ -572,12 +809,12 @@ Refresh the assigned Live View output targets from source-backed activity.
       })
       .catch(() => {});
     await waitForTestId("section-brain", 15_000);
-    await waitForTestId("brain-overview-grid", 15_000);
     const dashboardSelector = await waitForTestId(
       "overview-dashboard-selector",
       15_000,
     );
     await selectDashboard(SELECTABLE_VIEW_ID);
+    await waitForTestId("live-view-canvas", 15_000);
     for (const size of SUPPORTED_WINDOW_SIZES) {
       await setCssWindowSize(size.width, size.height);
       await browser.pause(150);
@@ -588,8 +825,15 @@ Refresh the assigned Live View output targets from source-backed activity.
         const content = document.querySelector<HTMLElement>(
           "[data-testid='brain-content']",
         );
-        if (!section || !content) return null;
+        const overview = document.querySelector<HTMLElement>(
+          "[data-testid='brain-overview-scroll']",
+        );
+        const canvas = document.querySelector<HTMLElement>(
+          "[data-testid='live-view-canvas']",
+        );
+        if (!section || !content || !overview || !canvas) return null;
         const sectionRect = section.getBoundingClientRect();
+        const canvasRect = canvas.getBoundingClientRect();
         const firstContentTop =
           content.firstElementChild?.getBoundingClientRect().top ?? 0;
         const visibleControls = Array.from(
@@ -598,19 +842,33 @@ Refresh the assigned Live View output targets from source-backed activity.
           ),
         ).filter((element) => {
           const rect = element.getBoundingClientRect();
-          return rect.width > 0 && rect.height > 0;
+          // Canvas nodes live in a transformed, clipped world and may extend
+          // beyond the page viewport by design. Their own geometry is checked
+          // below; this scan covers page-level controls only.
+          return (
+            !element.closest("[data-testid='live-view-canvas']") &&
+            rect.width > 0 &&
+            rect.height > 0
+          );
         });
         return {
           viewportWidth: document.documentElement.clientWidth,
           documentWidth: document.documentElement.scrollWidth,
+          viewportHeight: document.documentElement.clientHeight,
+          documentHeight: document.documentElement.scrollHeight,
+          sectionTop: sectionRect.top,
           sectionLeft: sectionRect.left,
           sectionRight: sectionRect.right,
+          sectionBottom: sectionRect.bottom,
+          canvasBottom: canvasRect.bottom,
+          canvasHeight: canvasRect.height,
+          overviewOverflowY: getComputedStyle(overview).overflowY,
           firstContentTop,
           clippedControls: visibleControls
             .filter((element) => {
               const rect = element.getBoundingClientRect();
               return (
-                rect.top < 32 ||
+                rect.top < sectionRect.top - 1 ||
                 rect.left < -1 ||
                 rect.right > document.documentElement.clientWidth + 1
               );
@@ -632,8 +890,15 @@ Refresh the assigned Live View output targets from source-backed activity.
       })) as {
         viewportWidth: number;
         documentWidth: number;
+        viewportHeight: number;
+        documentHeight: number;
+        sectionTop: number;
         sectionLeft: number;
         sectionRight: number;
+        sectionBottom: number;
+        canvasBottom: number;
+        canvasHeight: number;
+        overviewOverflowY: string;
         firstContentTop: number;
         clippedControls: Array<{
           label: string;
@@ -644,7 +909,11 @@ Refresh the assigned Live View output targets from source-backed activity.
       } | null;
 
       expect(layout).not.toBeNull();
-      expect(layout!.firstContentTop).toBeGreaterThanOrEqual(32);
+      // Windows and Linux intentionally render the custom titlebar flush with
+      // the section top; macOS keeps extra space for the traffic lights.
+      expect(layout!.firstContentTop).toBeGreaterThanOrEqual(
+        layout!.sectionTop - 1,
+      );
       expect(layout!.sectionLeft).toBeGreaterThanOrEqual(-1);
       expect(layout!.sectionRight).toBeLessThanOrEqual(
         layout!.viewportWidth + 1,
@@ -652,6 +921,14 @@ Refresh the assigned Live View output targets from source-backed activity.
       expect(layout!.documentWidth).toBeLessThanOrEqual(
         layout!.viewportWidth + 1,
       );
+      expect(layout!.documentHeight).toBeLessThanOrEqual(
+        layout!.viewportHeight + 1,
+      );
+      expect(layout!.overviewOverflowY).toBe("hidden");
+      expect(layout!.canvasBottom).toBeLessThanOrEqual(
+        layout!.sectionBottom + 1,
+      );
+      expect(layout!.canvasHeight).toBeGreaterThan(200);
       expect(layout!.clippedControls).toEqual([]);
       if (size.label === "minimum") {
         await saveScreenshot("brain-overview-minimum-window");
@@ -662,7 +939,8 @@ Refresh the assigned Live View output targets from source-backed activity.
     if (await collapseSidebar.isExisting()) {
       await collapseSidebar.click();
     }
-    const customize = await $("[data-testid='overview-edit']");
+    await openDashboardMenu();
+    const customize = await waitForTestId("overview-edit", 10_000);
     await customize.moveTo({
       xOffset: 10,
       yOffset: 10,
@@ -672,9 +950,8 @@ Refresh the assigned Live View output targets from source-backed activity.
     const renderedText = (await browser.execute(
       () => document.body?.innerText || "",
     )) as string;
-    expect(renderedText).toContain("Live Views");
-    expect(renderedText).toContain("DASHBOARDS");
-    expect(renderedText).toContain("CUSTOMIZE");
+    expect(renderedText.toLowerCase()).toContain("dashboards");
+    expect(renderedText.toLowerCase()).toContain("customize");
     expect(renderedText).toContain("Automation opportunities");
     expect(await dashboardSelector.getValue()).toBe(SELECTABLE_VIEW_ID);
     const selectedDashboardTitle = (await browser.execute(() => {
@@ -686,6 +963,7 @@ Refresh the assigned Live View output targets from source-backed activity.
     expect(selectedDashboardTitle).toBe("How I worked today");
     const screenshot = await saveScreenshot("brain-overview-pipe-filled");
     expect(existsSync(screenshot)).toBe(true);
+    await browser.keys(["Escape"]);
 
     const timeRange = await waitForTestId("overview-time-range", 10_000);
     await timeRange.click();
@@ -717,14 +995,14 @@ Refresh the assigned Live View output targets from source-backed activity.
     const fixedDashboardText = (await browser.execute(
       () => document.body?.innerText || "",
     )) as string;
-    expect(fixedDashboardText).toContain(
-      "Pipes fill these Blocks for today. Data changes when you refresh or a connected Pipe runs.",
-    );
+    expect(fixedDashboardText.toLowerCase()).toContain("blocks ready");
+    expect(fixedDashboardText.toLowerCase()).toContain("updated");
     const fixedScreenshot = await saveScreenshot(
       "brain-overview-fixed-range-hidden",
     );
     expect(existsSync(fixedScreenshot)).toBe(true);
 
+    await openDashboardMenu();
     const fixedCustomize = await waitForTestId("overview-edit", 10_000);
     await fixedCustomize.click();
     await waitForTestId("brain-overview-editor", 10_000);
@@ -742,9 +1020,10 @@ Refresh the assigned Live View output targets from source-backed activity.
     await cancelFixedEditor.click();
     await selectDashboard(SELECTABLE_VIEW_ID);
 
-    const canvasMode = await $("[data-testid='overview-mode-canvas']");
-    await canvasMode.click();
     const canvas = await waitForTestId("live-view-canvas", 10_000);
+    expect(
+      await $("[data-testid='overview-display-mode']").isExisting(),
+    ).toBe(false);
     await waitForTestId("canvas-block-focus-time", 10_000);
     expect(await canvas.getText()).toContain("4.5");
     expect(await canvas.getText()).toContain("Automation opportunities");
@@ -753,9 +1032,7 @@ Refresh the assigned Live View output targets from source-backed activity.
       "canvas-block-time-by-app",
       { x: 96, y: 64 },
     );
-    let chartAfterResize:
-      | CanvasDocument["blocks"][number]
-      | undefined;
+    let chartAfterResize: CanvasDocument["blocks"][number] | undefined;
     await browser.waitUntil(
       async () => {
         const saved = await invokeOrThrow<CanvasDocument | null>(
@@ -767,8 +1044,8 @@ Refresh the assigned Live View output targets from source-backed activity.
         );
         return Boolean(
           chartAfterResize &&
-            chartAfterResize.width >= chartBeforeResize.width + 80 &&
-            chartAfterResize.height >= chartBeforeResize.height + 48,
+          chartAfterResize.width >= chartBeforeResize.width + 80 &&
+          chartAfterResize.height >= chartBeforeResize.height + 48,
         );
       },
       {
@@ -830,14 +1107,19 @@ Refresh the assigned Live View output targets from source-backed activity.
       },
     );
 
+    await pointerPressTestId("canvas-tools-toggle");
     const noteTool = await $("[data-testid='canvas-tool-note']");
     await noteTool.click();
-    expect(await noteTool.getAttribute("aria-pressed")).toBe("true");
+    const compactTools = await waitForTestId("canvas-tools-toggle", 10_000);
+    expect(await compactTools.getAttribute("aria-label")).toContain(
+      "note tool active",
+    );
     await clickEmptyCanvasSpace();
     const surface = await waitForTestId("live-view-canvas-surface", 10_000);
     const noteInput = await $("textarea[aria-label='Canvas note']");
     await noteInput.waitForDisplayed({ timeout: t(10_000) });
     await noteInput.setValue("Review the source evidence before automating.");
+    await pointerPressTestId("canvas-tools-toggle");
     await $("[data-testid='canvas-fit']").click();
 
     const arrowTool = await $("[data-testid='canvas-tool-arrow']");
@@ -872,8 +1154,7 @@ Refresh the assigned Live View output targets from source-backed activity.
               candidate.fromId === "block:focus-time" &&
               candidate.toId === "block:time-by-app",
           ) &&
-          saved.blocks.find((block) => block.slotId === "focus-time")?.x ===
-            96,
+          saved.blocks.find((block) => block.slotId === "focus-time")?.x === 96,
         );
       },
       {
@@ -885,8 +1166,55 @@ Refresh the assigned Live View output targets from source-backed activity.
 
     for (const size of [SUPPORTED_WINDOW_SIZES[0], SUPPORTED_WINDOW_SIZES[5]]) {
       await setCssWindowSize(size.width, size.height);
-      await canvas.scrollIntoView();
       await browser.pause(150);
+      const compactCanvasLayout = (await browser.execute(() => {
+        const canvasElement = document.querySelector<HTMLElement>(
+          "[data-testid='live-view-canvas']",
+        );
+        const toolbar = document.querySelector<HTMLElement>(
+          "[data-canvas-toolbar]",
+        );
+        const hint = document.querySelector<HTMLElement>(
+          "[data-testid='canvas-interaction-hint']",
+        );
+        const composer = document.querySelector<HTMLElement>(
+          "[data-testid='overview-floating-composer']",
+        );
+        if (!canvasElement || !toolbar || !hint || !composer) return null;
+        const canvasRect = canvasElement.getBoundingClientRect();
+        const toolbarRect = toolbar.getBoundingClientRect();
+        const hintRect = hint.getBoundingClientRect();
+        const composerRect = composer.getBoundingClientRect();
+        const overlaps = (a: DOMRect, b: DOMRect) =>
+          a.left < b.right &&
+          a.right > b.left &&
+          a.top < b.bottom &&
+          a.bottom > b.top;
+        return {
+          hintInsideCanvas:
+            hintRect.left >= canvasRect.left &&
+            hintRect.right <= canvasRect.right &&
+            hintRect.top >= canvasRect.top &&
+            hintRect.bottom <= canvasRect.bottom,
+          hintOverlapsToolbar: overlaps(hintRect, toolbarRect),
+          hintOverlapsComposer: overlaps(hintRect, composerRect),
+        };
+      })) as {
+        hintInsideCanvas: boolean;
+        hintOverlapsToolbar: boolean;
+        hintOverlapsComposer: boolean;
+      } | null;
+      expect(compactCanvasLayout).not.toBeNull();
+      expect(compactCanvasLayout!.hintInsideCanvas).toBe(true);
+      expect(compactCanvasLayout!.hintOverlapsToolbar).toBe(false);
+      expect(compactCanvasLayout!.hintOverlapsComposer).toBe(false);
+
+      await pointerPressTestId("canvas-tools-toggle");
+      const toolsPanel = await waitForTestId("canvas-tools-panel", 10_000);
+      await toolsPanel.waitForDisplayed({ timeout: t(10_000) });
+      expect(
+        await $("[data-testid='canvas-interaction-hint']").isExisting(),
+      ).toBe(false);
       const canvasLayout = (await browser.execute(() => {
         const canvasElement = document.querySelector<HTMLElement>(
           "[data-testid='live-view-canvas']",
@@ -941,6 +1269,7 @@ Refresh the assigned Live View output targets from source-backed activity.
       expect(canvasLayout!.toolbarBottom).toBeLessThanOrEqual(
         canvasLayout!.canvasBottom,
       );
+      await pointerPressTestId("canvas-tools-close");
       await canvas.moveTo({ xOffset: 0, yOffset: 160 });
       await browser.keys(["Escape"]);
       await browser.pause(250);
@@ -960,6 +1289,8 @@ Refresh the assigned Live View output targets from source-backed activity.
     const restoredBrainNav = await waitForTestId("nav-brain", 10_000);
     await restoredBrainNav.click();
     await waitForTestId("section-brain", 15_000);
+    await waitForTestId("overview-dashboard-selector", 10_000);
+    await selectDashboard(SELECTABLE_VIEW_ID);
     await waitForTestId("live-view-canvas", 15_000);
     expect(await $("textarea[aria-label='Canvas note']").getValue()).toBe(
       "Review the source evidence before automating.",
@@ -967,10 +1298,10 @@ Refresh the assigned Live View output targets from source-backed activity.
     expect(await $("[data-testid^='canvas-arrow-']").isExisting()).toBe(true);
 
     await setCssWindowSize(1440, 900);
-    await $("[data-testid='overview-mode-dashboard']").click();
-    await waitForTestId("brain-overview-grid", 10_000);
-
-    await $("[data-testid='overview-edit']").click();
+    await openDashboardMenu();
+    await waitForTestId("overview-edit", 10_000).then((element) =>
+      element.click(),
+    );
     await waitForTestId("brain-overview-editor", 10_000);
     const editorText = (await browser.execute(
       () => document.body?.innerText || "",

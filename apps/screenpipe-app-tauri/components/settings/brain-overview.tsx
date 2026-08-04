@@ -13,15 +13,12 @@ import React, {
 import dynamic from "next/dynamic";
 import posthog from "posthog-js";
 import { qualifiedValue } from "@/lib/analytics/qualified-value";
+import { onboardingFunnel } from "@/lib/analytics/onboarding-funnel";
 import {
   AlertCircle,
   CheckCircle2,
-  LayoutDashboard,
-  LayoutTemplate,
   Loader2,
-  Network,
   RefreshCw,
-  SlidersHorizontal,
   Undo2,
   X,
 } from "lucide-react";
@@ -37,7 +34,11 @@ import {
   LiveViewAiComposer,
   type LiveViewGenerationIntent,
 } from "@/components/settings/live-view-ai-composer";
-import { LiveViewCard as OverviewCard } from "@/components/settings/live-view-card";
+import {
+  LiveViewCard as OverviewCard,
+  type LiveViewItemActionRequest,
+  type LiveViewListItem,
+} from "@/components/settings/live-view-card";
 import { LiveViewCreateDashboardDialog } from "@/components/settings/live-view-create-dashboard-dialog";
 import { LiveViewDashboardSwitcher } from "@/components/settings/live-view-dashboard-switcher";
 import { LiveViewLayoutEditor } from "@/components/settings/live-view-layout-editor";
@@ -64,23 +65,26 @@ import { useToast } from "@/components/ui/use-toast";
 import { localFetch } from "@/lib/api";
 import { showChatWithPrefill } from "@/lib/chat-utils";
 import {
+  buildLiveViewItemHandoff,
+  persistLiveViewItemAction,
+} from "@/lib/live-views/item-actions";
+import {
   readActiveAiPresetId,
   resolveActiveAiPreset,
   writeActiveAiPresetId,
 } from "@/lib/active-ai-preset";
 import { Input } from "@/components/ui/input";
 import {
-  createCanvasDocument,
   reconcileCanvasDocument,
   toSaveCanvasRequest,
 } from "@/lib/live-views/canvas-layout";
-import {
-  generateLiveViewWithPi,
-  type GeneratedLiveViewBlock,
-  type LiveViewGenerationScope,
-} from "@/lib/live-views/generate-live-view-with-pi";
+import { MAX_DASHBOARDS } from "@/lib/live-views/constants";
+import type { LiveViewGenerationScope } from "@/lib/live-views/generate-live-view-with-pi";
 import { createOnboardingLiveView } from "@/lib/live-views/onboarding-live-view";
-import { buildLiveViewPipeAgentPrompt } from "@/lib/live-views/pipe-agent-prompt";
+import {
+  buildLiveViewBuilderAgentPrompt,
+  type LiveViewBuilderTarget,
+} from "@/lib/live-views/pipe-agent-prompt";
 import {
   allowedLiveViewTimeRanges,
   buildLiveViewTimeContext,
@@ -93,7 +97,6 @@ import {
   type BrainViewCanvasDocument,
   type BrainViewComponent,
   type BrainViewDefinition,
-  type BrainViewDisplayMode,
   type BrainViewSlot,
   type BrainViewSlotInput,
   type BrainViewTemplateKit,
@@ -154,18 +157,43 @@ type LiveViewRefreshTrigger =
   | "dashboard_duplicated"
   | "undo"
   | "card_regenerated"
+  | "item_changed"
   | "card_ai_edit";
 
-type PreviewSource =
-  | { kind: "ai"; scope: LiveViewGenerationScope }
-  | { kind: "template"; kit: BrainViewTemplateKit };
+type PreviewSource = { kind: "template"; kit: BrainViewTemplateKit };
 
 type PreviewDestination = "new" | "replace";
 
-const MAX_DASHBOARDS = 12;
 const STARTER_DASHBOARD_ID = "my-dashboard";
 const STARTER_DASHBOARD_TITLE = "My dashboard";
 const LIVE_VIEW_ANALYTICS_SCHEMA_VERSION = 2;
+const LIVE_VIEW_COHERENT_UPDATE_WINDOW_MS = 60_000;
+
+const LIVE_VIEW_FRESHNESS_FORMATTER = new Intl.DateTimeFormat(undefined, {
+  month: "short",
+  day: "numeric",
+  hour: "numeric",
+  minute: "2-digit",
+});
+
+function liveViewDataStatus(slots: BrainViewSlot[]): string {
+  const timestamps = slots.flatMap((slot) => {
+    const timestamp = slot.value?.updatedAt
+      ? Date.parse(slot.value.updatedAt)
+      : Number.NaN;
+    return Number.isFinite(timestamp) ? [timestamp] : [];
+  });
+  if (timestamps.length === 0) return "No data yet";
+
+  const blockLabel = slots.length === 1 ? "block" : "blocks";
+  const readiness = `${timestamps.length} of ${slots.length} ${blockLabel} ready`;
+  const oldest = Math.min(...timestamps);
+  const latest = Math.max(...timestamps);
+  if (latest - oldest <= LIVE_VIEW_COHERENT_UPDATE_WINDOW_MS) {
+    return `${readiness} · updated ${LIVE_VIEW_FRESHNESS_FORMATTER.format(latest)}`;
+  }
+  return `${readiness} · oldest ${LIVE_VIEW_FRESHNESS_FORMATTER.format(oldest)} · latest ${LIVE_VIEW_FRESHNESS_FORMATTER.format(latest)}`;
+}
 
 function analyticsErrorType(error: unknown): string {
   return error instanceof Error ? error.name : "unknown";
@@ -197,8 +225,7 @@ function liveViewAnalyticsProperties(
     time_range: targetView.timeRange,
     has_result: resultSlots.length > 0,
     all_bound_blocks_have_results:
-      boundSlots.length > 0 &&
-      boundSlots.every((slot) => slot.value !== null),
+      boundSlots.length > 0 && boundSlots.every((slot) => slot.value !== null),
     reviewed_block_count:
       positiveFeedbackBlockCount + negativeFeedbackBlockCount,
     positive_feedback_block_count: positiveFeedbackBlockCount,
@@ -303,39 +330,6 @@ function normalizedSlots(slots: ViewSlot[]): ViewSlot[] {
     .map((slot, order) => ({ ...slot, order }));
 }
 
-function generatedSlots(
-  blocks: GeneratedLiveViewBlock[],
-  existingSlots: ViewSlot[] = [],
-): ViewSlot[] {
-  const usedIds = new Set(existingSlots.map((slot) => slot.id));
-  return blocks.map((block, index) => {
-    const stem =
-      block.title
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, "-")
-        .replace(/^-|-$/g, "")
-        .slice(0, 48) || `section-${index + 1}`;
-    let id = stem;
-    let suffix = 2;
-    while (usedIds.has(id)) {
-      id = `${stem}-${suffix}`;
-      suffix += 1;
-    }
-    usedIds.add(id);
-    return {
-      id,
-      title: block.title,
-      intent: block.intent,
-      component: block.component,
-      width: block.width,
-      order: existingSlots.length + index,
-      binding: block.pipeName ? { pipeName: block.pipeName } : null,
-      value: null,
-      feedback: { upCount: 0, downCount: 0, current: null },
-    };
-  });
-}
-
 function copyViewDefinition(view: ViewDefinition): ViewDefinition {
   return {
     ...view,
@@ -359,6 +353,7 @@ function kitSlots(kit: BrainViewTemplateKit): ViewSlot[] {
     ...slot,
     value: null,
     feedback: { upCount: 0, downCount: 0, current: null },
+    itemActions: { items: [] },
   }));
 }
 
@@ -393,8 +388,10 @@ function uniqueDashboardTitle(title: string, views: ViewDefinition[]): string {
 }
 
 export function BrainOverview({
+  navigation,
   onViewCountChange,
 }: {
+  navigation?: React.ReactNode;
   onViewCountChange?: (count: number) => void;
 } = {}) {
   const { toast } = useToast();
@@ -406,7 +403,6 @@ export function BrainOverview({
   const [draft, setDraft] = useState<ViewDefinition | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [generating, setGenerating] = useState(false);
   const [editing, setEditing] = useState(false);
   const [aiPreview, setAiPreview] = useState(false);
   const [previewSource, setPreviewSource] = useState<PreviewSource | null>(
@@ -632,23 +628,6 @@ export function BrainOverview({
     });
   }, [canvasDocument, canvasSlotSignature, changeCanvasDocument, view]);
 
-  const changeDisplayMode = (mode: BrainViewDisplayMode) => {
-    if (!view || canvasLoading || canvasError) return;
-    const current = reconcileCanvasDocument(
-      view,
-      canvasLatestRef.current ?? createCanvasDocument(view),
-    );
-    if (current.mode === mode) return;
-    const next = { ...current, mode };
-    changeCanvasDocument(next, { persist: true });
-    posthog.capture("live_view_layout_mode_changed", {
-      analytics_schema_version: LIVE_VIEW_ANALYTICS_SCHEMA_VERSION,
-      mode,
-      block_count: view.slots.length,
-      has_result: view.slots.some((slot) => slot.value !== null),
-    });
-  };
-
   const load = useCallback(
     async (silent = false, preferredDashboardId?: string | null) => {
       if (!silent) setLoading(true);
@@ -737,8 +716,7 @@ export function BrainOverview({
       ...liveViewAnalyticsProperties(view, views.length),
       entry_method,
       is_onboarding: Boolean(onboardingActivation),
-      onboarding_goal_category:
-        onboardingActivation?.goalCategory ?? "unknown",
+      onboarding_goal_category: onboardingActivation?.goalCategory ?? "unknown",
     });
   }, [onboardingActivation, view, views.length]);
 
@@ -750,10 +728,7 @@ export function BrainOverview({
     const captureVisibleResult = () => {
       if (document.visibilityState === "hidden") return;
       const previous = lastViewedResultRef.current;
-      if (
-        previous?.viewId === view.id &&
-        previous.signature === signature
-      ) {
+      if (previous?.viewId === view.id && previous.signature === signature) {
         return;
       }
       const entryMethod = !previous
@@ -837,9 +812,7 @@ export function BrainOverview({
         trigger,
         requested_block_count: boundSlots.length,
         requested_pipe_count: pipeNames.length,
-        is_onboarding: Boolean(
-          getOnboardingLiveViewActivation(targetView.id),
-        ),
+        is_onboarding: Boolean(getOnboardingLiveViewActivation(targetView.id)),
       };
       posthog.capture("live_view_refresh_requested", analyticsProperties);
       if (pipeNames.length === 0) {
@@ -967,6 +940,7 @@ export function BrainOverview({
         pipe_count: onboardingPipeNames.length,
         capture_state: captureReadiness,
       });
+      onboardingFunnel.brainHandoffViewed(onboardingActivation.goalCategory);
     }
     if (!onboardingHasResult || onboardingActivation.firstResultAt) return;
     const updated = markOnboardingLiveViewFirstResult(
@@ -978,6 +952,7 @@ export function BrainOverview({
       goal_category: onboardingActivation.goalCategory,
       pipe_count: onboardingPipeNames.length,
     });
+    onboardingFunnel.firstResultVisible(onboardingActivation.goalCategory);
   }, [
     captureReadiness,
     onboardingActivation,
@@ -1108,8 +1083,8 @@ export function BrainOverview({
               filled,
               message:
                 filled > 0
-                  ? `${filled} of ${current.total} sections updated. The Pipes are still working on the rest.`
-                  : "The Pipes are still working. This view will update when they publish data.",
+                  ? `${filled} of ${current.total} sections updated. The scheduled tasks are still working on the rest.`
+                  : "The scheduled tasks are still working. This view will update when they publish data.",
             };
           }
           if (current.filled === filled) return current;
@@ -1264,163 +1239,95 @@ export function BrainOverview({
     setAiPreview(true);
   };
 
-  const generate = async (
-    prompt: string,
-    scope: LiveViewGenerationScope,
-    preset: AIPreset,
-    intent: LiveViewGenerationIntent,
-  ) => {
-    const startedAt = Date.now();
+  const openLiveViewBuilderAgent = async ({
+    request,
+    target,
+    reference,
+    template = null,
+    displayLabel = request,
+  }: {
+    request: string;
+    target: LiveViewBuilderTarget;
+    reference: ViewDefinition | null;
+    template?: BrainViewTemplateKit | null;
+    displayLabel?: string;
+  }): Promise<boolean> => {
     const analyticsProperties = {
       analytics_schema_version: LIVE_VIEW_ANALYTICS_SCHEMA_VERSION,
-      scope,
-      intent,
-      prompt_length: prompt.length,
-      has_current_view: Boolean(view),
-      current_block_count: view?.slots.length ?? 0,
-      dashboard_count: views.length,
+      scope: target.scope,
+      operation: target.operation,
+      has_current_view: Boolean(reference),
+      current_block_count: reference?.slots.length ?? 0,
+      has_template_guide: Boolean(template),
+      prompt_length: request.length,
     };
-    posthog.capture("live_view_generation_started", analyticsProperties);
-    setTemplateGalleryOpen(false);
-    setGenerating(true);
+    posthog.capture(
+      "live_view_builder_agent_handoff_started",
+      analyticsProperties,
+    );
+
+    const agentPrompt = buildLiveViewBuilderAgentPrompt({
+      request,
+      view: reference,
+      target,
+      template,
+    });
+    const context =
+      target.scope === "block"
+        ? `Edit Block “${target.block.title}” in Live View “${reference?.title ?? "unknown"}”`
+        : target.operation === "create"
+          ? template
+            ? `Create a Live View guided by “${template.title}”`
+            : "Create a new Live View"
+          : `${target.operation === "replace" ? "Replace" : "Edit"} Live View “${reference?.title ?? "unknown"}”`;
+
     try {
-      const generated = await generateLiveViewWithPi({
-        prompt,
-        scope,
-        preset,
-        userToken: settings.user?.token ?? null,
-        pipes: installedPipes.map((pipe) => ({
-          name: pipe.config.name,
-          description:
-            pipe.prompt_body?.trim().slice(0, 500) ||
-            `${pipe.config.name} Screenpipe Pipe`,
-        })),
-        currentViewRef:
-          view && intent !== "new-dashboard"
-            ? {
-                id: view.id,
-                revision: view.revision,
-              }
-            : null,
+      await showChatWithPrefill({
+        context,
+        prompt: agentPrompt,
+        displayLabel,
+        autoSend: true,
+        source: "live-view-builder-agent",
+        useHomeChat: true,
       });
-      const now = new Date().toISOString();
-      const base: ViewDefinition =
-        view && intent !== "new-dashboard"
-          ? copyViewDefinition(view)
-          : {
-              id: "my-overview",
-              title: generated.title,
-              revision: 0,
-              timeRange: generated.timeRange,
-              periodPolicy:
-                generated.periodPolicy ?? DEFAULT_LIVE_VIEW_PERIOD_POLICY,
-              slots: [],
-              createdAt: now,
-              updatedAt: now,
-            };
-      const slots =
-        scope === "block"
-          ? normalizedSlots([
-              ...base.slots,
-              ...generatedSlots(generated.blocks, base.slots),
-            ])
-          : generatedSlots(generated.blocks);
-      setDraft({
-        ...base,
-        title: scope === "dashboard" || !view ? generated.title : base.title,
-        timeRange:
-          (scope === "dashboard" || !view) &&
-          base.periodPolicy.type !== "fixed.v1"
-            ? generated.timeRange
-            : base.timeRange,
-        slots,
-        updatedAt: now,
-      });
-      setAiNote(generated.note);
-      setPreviewSource({ kind: "ai", scope });
-      setPreviewDestination(
-        scope === "block"
-          ? "replace"
-          : view && views.length >= MAX_DASHBOARDS
-            ? "replace"
-            : intent === "replace-dashboard"
-              ? "replace"
-              : "new",
-      );
-      setEditing(false);
-      setAiPreview(true);
-      posthog.capture("live_view_generation_completed", {
+      posthog.capture("live_view_builder_agent_handoff_completed", {
         ...analyticsProperties,
-        duration_ms: Math.max(0, Date.now() - startedAt),
-        generated_block_count: generated.blocks.length,
-        generated_bound_block_count: generated.blocks.filter(
-          (block) => block.pipeName,
-        ).length,
       });
       return true;
-    } catch (generateError) {
-      posthog.capture("live_view_generation_failed", {
+    } catch (handoffError) {
+      posthog.capture("live_view_builder_agent_handoff_failed", {
         ...analyticsProperties,
-        duration_ms: Math.max(0, Date.now() - startedAt),
-        failure_type: analyticsErrorType(generateError),
+        failure_type: analyticsErrorType(handoffError),
       });
       toast({
-        title: "failed to generate Live View",
+        title: "could not open the Live View agent",
         description:
-          generateError instanceof Error
-            ? generateError.message
-            : String(generateError),
+          handoffError instanceof Error
+            ? handoffError.message
+            : String(handoffError),
         variant: "destructive",
       });
       return false;
-    } finally {
-      setGenerating(false);
     }
   };
 
   const generateFromComposer = async (
     prompt: string,
-    scope: LiveViewGenerationScope,
-    preset: AIPreset,
+    _scope: LiveViewGenerationScope,
+    _preset: AIPreset,
     intent: LiveViewGenerationIntent,
   ) => {
-    if (intent === "pipe-agent") {
-      posthog.capture("live_view_pipe_agent_handoff", {
-        analytics_schema_version: LIVE_VIEW_ANALYTICS_SCHEMA_VERSION,
-        has_current_view: Boolean(view),
-        current_block_count: view?.slots.length ?? 0,
-        prompt_length: prompt.length,
-      });
-
-      const agentPrompt = buildLiveViewPipeAgentPrompt({
-        request: prompt,
-        view,
-      });
-
-      try {
-        await showChatWithPrefill({
-          context: view
-            ? `Live View “${view.title}” (revision ${view.revision})`
-            : "Create a Pipe for a new Live View",
-          prompt: agentPrompt,
-          displayLabel: prompt,
-          autoSend: true,
-          source: "live-view-pipe-agent",
-          useHomeChat: true,
-        });
-      } catch (handoffError) {
-        toast({
-          title: "could not open the Pipe agent",
-          description:
-            handoffError instanceof Error
-              ? handoffError.message
-              : String(handoffError),
-          variant: "destructive",
-        });
-      }
-      return;
-    }
-    await generate(prompt, scope, preset, intent);
+    const creating = intent === "new-dashboard";
+    setCreateDashboardOpen(false);
+    setTemplateGalleryOpen(false);
+    return await openLiveViewBuilderAgent({
+      request: prompt,
+      target: {
+        scope: "dashboard",
+        operation: creating ? "create" : "edit",
+      },
+      reference: creating ? null : view,
+    });
   };
 
   const recordCardFeedback = async (
@@ -1500,6 +1407,12 @@ export function BrainOverview({
       });
       if (rating === "up" && persistedFeedback.current?.rating === "up") {
         qualifiedValue.liveViewResultAccepted();
+        if (onboardingActivation) {
+          onboardingFunnel.firstResultAccepted(
+            onboardingActivation.goalCategory,
+            "positive_feedback",
+          );
+        }
       }
       if (rating) finishOnboardingActivation("feedback");
       return true;
@@ -1524,6 +1437,94 @@ export function BrainOverview({
     }
   };
 
+  const recordItemAction = async (
+    slot: ViewSlot,
+    request: LiveViewItemActionRequest,
+  ): Promise<boolean> => {
+    if (!view || !slot.value) return false;
+    try {
+      const persistedItemActions = await persistLiveViewItemAction({
+        viewId: view.id,
+        slot,
+        request,
+      });
+      setView((current) =>
+        current
+          ? {
+              ...current,
+              slots: current.slots.map((candidate) =>
+                candidate.id === slot.id
+                  ? { ...candidate, itemActions: persistedItemActions }
+                  : candidate,
+              ),
+            }
+          : current,
+      );
+      posthog.capture("live_view_item_action", {
+        ...liveViewAnalyticsProperties(view, views.length),
+        action: request.action,
+        component: slot.component,
+        has_pipe: Boolean(slot.binding),
+        has_correction: Boolean(request.correction?.trim()),
+      });
+      if (qualifiedValue.liveViewItemActionCompleted(request.action)) {
+        if (onboardingActivation) {
+          onboardingFunnel.firstResultAccepted(
+            onboardingActivation.goalCategory,
+            "item_action",
+          );
+        }
+      }
+      // The row changes immediately from persisted local state. Reconcile the
+      // whole dashboard in the background so metrics, timelines, and context
+      // blocks cannot remain out of step with the list.
+      void refreshConnectedPipes(view, undefined, "item_changed");
+      return true;
+    } catch (actionError) {
+      posthog.capture("live_view_item_action_failed", {
+        analytics_schema_version: LIVE_VIEW_ANALYTICS_SCHEMA_VERSION,
+        action: request.action,
+        component: slot.component,
+        failure_type: analyticsErrorType(actionError),
+      });
+      toast({
+        title: "could not update this item",
+        description:
+          actionError instanceof Error
+            ? actionError.message
+            : String(actionError),
+        variant: "destructive",
+      });
+      return false;
+    }
+  };
+
+  const handoffItem = async (slot: ViewSlot, item: LiveViewListItem) => {
+    if (!view) return;
+    const handoff = buildLiveViewItemHandoff({
+      viewTitle: view.title,
+      slotTitle: slot.title,
+      item,
+    });
+    try {
+      await showChatWithPrefill({
+        ...handoff,
+        autoSend: true,
+        source: "live-view-item-handoff",
+        useHomeChat: true,
+      });
+    } catch (handoffError) {
+      toast({
+        title: "could not open the handoff",
+        description:
+          handoffError instanceof Error
+            ? handoffError.message
+            : String(handoffError),
+        variant: "destructive",
+      });
+    }
+  };
+
   const editSlotWithAi = async (
     slot: ViewSlot,
     prompt: string,
@@ -1537,102 +1538,18 @@ export function BrainOverview({
       return false;
     }
 
-    const startedAt = Date.now();
-    const analyticsProperties = {
-      analytics_schema_version: LIVE_VIEW_ANALYTICS_SCHEMA_VERSION,
-      prompt_length: prompt.length,
-      component: slot.component,
-      has_pipe: Boolean(slot.binding),
-      time_range: view.timeRange,
-    };
-    posthog.capture("live_view_card_ai_edit_started", analyticsProperties);
     setAiEditingSlotId(slot.id);
     try {
-      const previousView = copyViewDefinition(view);
-      const generated = await generateLiveViewWithPi({
-        prompt: `Replace only the existing section "${slot.title}". Do not add another section. User request: ${prompt}`,
-        scope: "block",
-        preset: selectedAiPreset,
-        userToken: settings.user?.token ?? null,
-        pipes: installedPipes.map((pipe) => ({
-          name: pipe.config.name,
-          description:
-            pipe.prompt_body?.trim().slice(0, 500) ||
-            `${pipe.config.name} Screenpipe Pipe`,
-        })),
-        currentView: {
-          title: view.title,
-          timeRange: view.timeRange,
-          blocks: [
-            {
-              title: slot.title,
-              intent: slot.intent ?? slot.title,
-              component: slot.component,
-              width: slot.width === 3 || slot.width === 12 ? slot.width : 6,
-              pipeName: slot.binding?.pipeName ?? null,
-            },
-          ],
+      return await openLiveViewBuilderAgent({
+        request: prompt,
+        target: {
+          scope: "block",
+          operation: "edit",
+          block: { id: slot.id, title: slot.title },
         },
+        reference: view,
+        displayLabel: `Change “${slot.title}”: ${prompt}`,
       });
-      const replacement = generated.blocks[0];
-      const nextSlots = normalizedSlots(view.slots).map((current) =>
-        current.id === slot.id
-          ? {
-              ...current,
-              title: replacement.title,
-              intent: replacement.intent,
-              component: replacement.component,
-              width: replacement.width,
-              binding: replacement.pipeName
-                ? { pipeName: replacement.pipeName }
-                : null,
-              value: null,
-            }
-          : current,
-      );
-      const result = await commands.saveBrainView({
-        id: view.id,
-        title: view.title,
-        expectedRevision: view.revision,
-        timeRange: view.timeRange,
-        periodPolicy: view.periodPolicy,
-        slots: serializedSlots(nextSlots),
-      });
-      if (result.status === "error") throw new Error(result.error);
-      setView(result.data);
-      setUndoView(previousView);
-      setUndoRevision(previousView ? result.data.revision : null);
-      const refreshedSlot = result.data.slots.find(
-        (candidate) => candidate.id === slot.id,
-      );
-      if (refreshedSlot?.binding) {
-        void refreshConnectedPipes(
-          result.data,
-          [refreshedSlot],
-          "card_ai_edit",
-        );
-      }
-      posthog.capture("live_view_card_ai_edit_completed", {
-        ...analyticsProperties,
-        duration_ms: Math.max(0, Date.now() - startedAt),
-        next_component: replacement.component,
-        next_has_pipe: Boolean(replacement.pipeName),
-      });
-      toast({ title: `${replacement.title} updated` });
-      return true;
-    } catch (editError) {
-      posthog.capture("live_view_card_ai_edit_failed", {
-        ...analyticsProperties,
-        duration_ms: Math.max(0, Date.now() - startedAt),
-        failure_type: analyticsErrorType(editError),
-      });
-      toast({
-        title: "failed to edit this section",
-        description:
-          editError instanceof Error ? editError.message : String(editError),
-        variant: "destructive",
-      });
-      return false;
     } finally {
       setAiEditingSlotId(null);
     }
@@ -1746,88 +1663,34 @@ export function BrainOverview({
     destination: PreviewDestination,
   ) => {
     const creatingNew = destination === "new" || !view;
-    const previousView = !creatingNew && view ? copyViewDefinition(view) : null;
     setSaving(true);
     try {
-      if (creatingNew && views.length >= MAX_DASHBOARDS) {
-        throw new Error(
-          `You can keep up to ${MAX_DASHBOARDS} dashboards. Delete one before creating another.`,
-        );
-      }
-      const requestedTitle = creatingNew
-        ? uniqueDashboardTitle(draft?.title.trim() || kit.title, views)
-        : draft?.title.trim() || kit.title;
-      const targetViewId = creatingNew
-        ? uniqueDashboardId(requestedTitle, views)
-        : view!.id;
-      const result = await commands.installBrainViewTemplateKit({
-        kitId: kit.id,
-        targetViewId,
-        expectedRevision: creatingNew ? null : view!.revision,
+      const opened = await openLiveViewBuilderAgent({
+        request: `Build a useful Live View for the “${kit.title}” outcome. Use the template as guidance, then personalize the Blocks and Pipe strategy from a small relevant sample of my local data.`,
+        target: {
+          scope: "dashboard",
+          operation: creatingNew ? "create" : "replace",
+        },
+        reference: creatingNew ? null : view,
+        template: kit,
+        displayLabel: `Build “${kit.title}” with the Live View agent`,
       });
-      if (result.status === "error") throw new Error(result.error);
-      let installedView = result.data;
-      if (requestedTitle && requestedTitle !== installedView.title) {
-        const renameResult = await commands.saveBrainView({
-          id: installedView.id,
-          title: requestedTitle,
-          expectedRevision: installedView.revision,
-          timeRange: installedView.timeRange,
-          periodPolicy: installedView.periodPolicy,
-          slots: serializedSlots(installedView.slots),
-        });
-        if (renameResult.status === "error")
-          throw new Error(renameResult.error);
-        installedView = renameResult.data;
-      }
-      setView(installedView);
-      setUndoView(previousView);
-      setUndoRevision(previousView ? installedView.revision : null);
+      if (!opened) return;
+
+      posthog.capture("live_view_template_agent_handoff", {
+        analytics_schema_version: LIVE_VIEW_ANALYTICS_SCHEMA_VERSION,
+        template_id: kit.id,
+        template_block_count: kit.slots.length,
+        template_pipe_count: kit.pipes.length,
+        destination,
+        dashboard_count: views.length,
+      });
       setDraft(null);
       setEditing(false);
       setAiPreview(false);
       setPreviewSource(null);
       setAiNote(null);
       setReplaceConfirmationOpen(false);
-      await refetchPipes();
-      toast({
-        title: creatingNew
-          ? `${installedView.title} created`
-          : `${installedView.title} replaced`,
-      });
-      posthog.capture("live_view_dashboard_saved", {
-        ...liveViewAnalyticsProperties(
-          installedView,
-          creatingNew ? views.length + 1 : views.length,
-        ),
-        action: creatingNew ? "created" : "replaced",
-        source: "template",
-        template_id: kit.id,
-        refresh_requested: true,
-      });
-      void refreshConnectedPipes(
-        installedView,
-        undefined,
-        "template_applied",
-      );
-    } catch (installError) {
-      posthog.capture("live_view_dashboard_save_failed", {
-        analytics_schema_version: LIVE_VIEW_ANALYTICS_SCHEMA_VERSION,
-        action: creatingNew ? "created" : "replaced",
-        source: "template",
-        template_id: kit.id,
-        block_count: kit.slots.length,
-        dashboard_count: views.length,
-        failure_type: analyticsErrorType(installError),
-      });
-      toast({
-        title: "template was not installed",
-        description:
-          installError instanceof Error
-            ? installError.message
-            : String(installError),
-        variant: "destructive",
-      });
     } finally {
       setSaving(false);
     }
@@ -2137,7 +2000,7 @@ export function BrainOverview({
         className="mx-auto flex min-h-80 w-full max-w-5xl flex-col items-center justify-center px-6 py-8 text-center"
       >
         <LiveViewAiComposer
-          busy={generating}
+          busy={false}
           selectedPresetId={selectedAiPreset?.id ?? null}
           onSelectedPresetIdChange={selectAiPreset}
           onGenerate={generateFromComposer}
@@ -2167,10 +2030,7 @@ export function BrainOverview({
     const previewSlots = normalizedSlots(draft.slots);
     const templatePreview =
       previewSource?.kind === "template" ? previewSource.kit : null;
-    const wholeDashboardPreview = Boolean(
-      templatePreview ||
-      (previewSource?.kind === "ai" && previewSource.scope === "dashboard"),
-    );
+    const wholeDashboardPreview = Boolean(templatePreview);
     const canChooseDestination = Boolean(view && wholeDashboardPreview);
     const dashboardLimitReached = views.length >= MAX_DASHBOARDS;
     const replacingDashboard = Boolean(
@@ -2261,11 +2121,11 @@ export function BrainOverview({
                   <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
                 )}
                 {replacingDashboard
-                  ? "replace current dashboard"
-                  : previewSource?.kind === "ai" &&
-                      previewSource.scope === "block" &&
-                      view
-                    ? "add sections & load data"
+                  ? templatePreview
+                    ? "replace with agent"
+                    : "replace current dashboard"
+                  : templatePreview
+                    ? "build with agent"
                     : "create dashboard & load data"}
               </Button>
             </div>
@@ -2295,7 +2155,7 @@ export function BrainOverview({
                     <p>{templateReadiness?.explanation}</p>
                     <details className="mt-1 text-[11px]">
                       <summary className="cursor-pointer select-none hover:text-foreground">
-                        what powers this dashboard
+                        template starting points
                       </summary>
                       <p className="mt-1 font-mono">
                         {templatePreview.pipes
@@ -2303,7 +2163,8 @@ export function BrainOverview({
                           .join(", ")}
                       </p>
                       <p className="mt-1">
-                        Existing custom Pipe instructions are kept.
+                        The agent decides which existing or new Pipes fit after
+                        checking a small relevant sample of your data.
                       </p>
                     </details>
                   </div>
@@ -2448,38 +2309,36 @@ export function BrainOverview({
   const slots = normalizedSlots(view.slots);
   const boundSlotCount = slots.filter((slot) => slot.binding).length;
   const periodRanges = allowedLiveViewTimeRanges(view.periodPolicy);
-  const selectedPeriod =
-    periodRanges.find((range) => range.value === view.timeRange) ??
-    getLiveViewTimeRangeOption(view.timeRange);
-  const latestDataTimestamp = slots.reduce<number | null>((latest, slot) => {
-    const timestamp = slot.value?.updatedAt
-      ? Date.parse(slot.value.updatedAt)
-      : Number.NaN;
-    if (!Number.isFinite(timestamp)) return latest;
-    return latest === null ? timestamp : Math.max(latest, timestamp);
-  }, null);
+  const dataStatus = liveViewDataStatus(slots);
   const refreshIsActive =
     dataRefresh?.viewId === view.id &&
     (dataRefresh.status === "starting" || dataRefresh.status === "running");
-  const dashboardBusy = saving || refreshIsActive || generating;
-  const displayMode = canvasDocument?.mode ?? "dashboard";
+  const dashboardBusy = saving || refreshIsActive;
   const canvasReady =
     !canvasLoading && canvasDocument?.viewId === view.id && !canvasError;
   const refreshingSlotIds = new Set(
     refreshIsActive ? (dataRefresh?.slotIds ?? []) : [],
   );
-  const dashboardSelectionDisabled = saving || generating;
+  const dashboardSelectionDisabled = saving;
   const showOnboardingActivation = Boolean(
     onboardingActivation && !onboardingActivation.completedAt,
   );
   const onboardingColdStart = showOnboardingActivation && !onboardingHasResult;
   return (
-    <div className="min-h-0 flex-1 overflow-y-auto pb-8 pr-4 [scrollbar-gutter:stable]">
+    <div className="relative flex min-h-0 flex-1 overflow-hidden">
       <div
-        data-onboarding-guide-target="dashboard"
-        className="mb-5 grid gap-4 border-b border-border pb-4 xl:grid-cols-[minmax(0,1fr)_auto] xl:items-end"
+        data-testid="brain-overview-scroll"
+        className="flex h-full min-h-0 w-full flex-col overflow-hidden pr-2"
       >
-        <div className="min-w-0">
+        <div
+          data-onboarding-guide-target="dashboard"
+          className="mb-3 flex shrink-0 flex-col gap-2 border-b border-border pb-2 lg:flex-row lg:items-center lg:justify-between"
+        >
+          <div
+            data-testid="overview-dashboard-row"
+            className="flex min-w-0 flex-1 flex-wrap items-center gap-x-3 gap-y-1"
+          >
+          {navigation}
           <LiveViewDashboardSwitcher
             views={views}
             current={view}
@@ -2487,85 +2346,45 @@ export function BrainOverview({
             selectionDisabled={dashboardSelectionDisabled}
             onSelect={selectDashboard}
             onCreate={beginCreate}
+            onCustomize={onboardingColdStart ? undefined : beginEdit}
+            onOpenTemplates={
+              !onboardingColdStart && templateKits.length > 0
+                ? () => setTemplateGalleryOpen(true)
+                : undefined
+            }
             onRename={renameDashboard}
             onDuplicate={duplicateDashboard}
             onDelete={deleteDashboard}
           />
           <LiveViewCreateDashboardDialog
             open={createDashboardOpen}
-            busy={generating}
+            busy={false}
             selectedPresetId={selectedAiPreset?.id ?? null}
             onOpenChange={setCreateDashboardOpen}
             onSelectedPresetIdChange={selectAiPreset}
             onGenerate={(prompt, preset) =>
-              generate(prompt, "dashboard", preset, "new-dashboard")
+              generateFromComposer(
+                prompt,
+                "dashboard",
+                preset,
+                "new-dashboard",
+              )
             }
             onCreateBlank={beginManualCreate}
           />
-          <p className="mt-2 text-xs text-muted-foreground">
+          <p
+            data-testid="overview-data-status"
+            className="basis-full pl-12 font-mono text-[9px] text-muted-foreground sm:basis-auto sm:pl-0"
+          >
             {onboardingColdStart
               ? "This view will appear when Screenpipe has enough real activity for your outcome."
-              : `Pipes fill these Blocks for ${selectedPeriod.label.toLowerCase()}. Data changes when you refresh or a connected Pipe runs.`}
-            {latestDataTimestamp !== null && (
-              <span className="ml-1">
-                Last data {new Date(latestDataTimestamp).toLocaleString()}.
-              </span>
-            )}
+              : dataStatus}
           </p>
-        </div>
-        <div
-          data-testid="overview-header-controls"
-          className="flex w-full flex-wrap items-center gap-2 xl:w-auto xl:justify-end"
-        >
-          {!onboardingColdStart && (
-            <div
-              data-testid="overview-display-mode"
-              className="inline-flex h-9 flex-1 border border-border sm:flex-none"
-              aria-label="Live View layout"
-            >
-              <Button
-                data-testid="overview-mode-dashboard"
-                type="button"
-                variant="ghost"
-                size="sm"
-                aria-pressed={displayMode === "dashboard"}
-                disabled={
-                  dashboardBusy || canvasLoading || Boolean(canvasError)
-                }
-                className={`h-8 rounded-none border-r border-border px-2 text-xs ${
-                  displayMode === "dashboard"
-                    ? "bg-foreground text-background"
-                    : ""
-                }`}
-                onClick={() => changeDisplayMode("dashboard")}
-              >
-                <LayoutDashboard className="mr-1.5 h-3.5 w-3.5" /> dashboard
-              </Button>
-              <Button
-                data-testid="overview-mode-canvas"
-                type="button"
-                variant="ghost"
-                size="sm"
-                aria-pressed={displayMode === "canvas"}
-                disabled={
-                  dashboardBusy || canvasLoading || Boolean(canvasError)
-                }
-                className={`h-8 rounded-none px-2 text-xs ${
-                  displayMode === "canvas"
-                    ? "bg-foreground text-background"
-                    : ""
-                }`}
-                onClick={() => changeDisplayMode("canvas")}
-              >
-                {canvasLoading ? (
-                  <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
-                ) : (
-                  <Network className="mr-1.5 h-3.5 w-3.5" />
-                )}
-                canvas
-              </Button>
-            </div>
-          )}
+          </div>
+          <div
+            data-testid="overview-header-controls"
+            className="flex w-full flex-wrap items-center gap-2 lg:w-auto lg:justify-end"
+          >
           {view.periodPolicy.type !== "fixed.v1" && (
             <Select
               value={view.timeRange}
@@ -2590,50 +2409,26 @@ export function BrainOverview({
               </SelectContent>
             </Select>
           )}
-          {!onboardingColdStart && templateKits.length > 0 && (
-            <Button
-              data-testid="overview-templates"
-              variant="outline"
-              size="sm"
-              className="h-9 flex-1 rounded-none px-3 sm:flex-none"
-              disabled={dashboardBusy}
-              onClick={() => setTemplateGalleryOpen((open) => !open)}
-            >
-              <LayoutTemplate className="mr-1.5 h-3.5 w-3.5" /> templates
-            </Button>
-          )}
           {boundSlotCount > 0 && !onboardingColdStart && (
             <Button
               data-testid="overview-refresh-data"
               variant="outline"
-              size="sm"
-              className="h-9 flex-1 rounded-none px-3 sm:flex-none"
+              size="icon"
+              className="h-9 w-9 shrink-0 rounded-none"
               aria-label={refreshIsActive ? "loading data" : "refresh data"}
+              title={refreshIsActive ? "loading data" : "refresh data"}
               disabled={dashboardBusy}
               onClick={() => void refreshConnectedPipes(view)}
             >
               <RefreshCw
-                className={`mr-1.5 h-3.5 w-3.5 ${
+                className={`h-3.5 w-3.5 ${
                   refreshIsActive ? "animate-spin" : ""
                 }`}
               />
-              <span aria-hidden="true">refresh data</span>
             </Button>
           )}
-          {!onboardingColdStart && (
-            <Button
-              data-testid="overview-edit"
-              variant="outline"
-              size="sm"
-              className="h-9 flex-1 rounded-none px-3 sm:flex-none"
-              disabled={dashboardBusy}
-              onClick={beginEdit}
-            >
-              <SlidersHorizontal className="mr-1.5 h-3.5 w-3.5" /> customize
-            </Button>
-          )}
+          </div>
         </div>
-      </div>
       {canvasError && (
         <div
           data-testid="live-view-canvas-error"
@@ -2641,17 +2436,17 @@ export function BrainOverview({
         >
           <AlertCircle className="h-3.5 w-3.5 shrink-0" />
           <span>
-            Canvas could not be loaded. Dashboard mode is still available.
+            Canvas could not be loaded. Reopen Live Views to try again.
           </span>
         </div>
       )}
-      {canvasSaving && displayMode === "canvas" && (
+      {canvasSaving && (
         <p className="sr-only" role="status">
           saving canvas
         </p>
       )}
       {templateGalleryOpen && !onboardingColdStart && (
-        <div className="relative mb-5 border border-border p-4 pr-12">
+        <div className="relative mb-5 max-h-[min(50vh,32rem)] shrink-0 overflow-y-auto border border-border p-4 pr-12">
           <Button
             aria-label="close templates"
             variant="ghost"
@@ -2665,18 +2460,6 @@ export function BrainOverview({
             kits={templateKits}
             installedPipeNames={installedPipeNames}
             onPreview={previewTemplate}
-          />
-        </div>
-      )}
-      {!onboardingColdStart && (
-        <div className="mb-5">
-          <LiveViewAiComposer
-            busy={generating}
-            compact
-            currentViewTitle={view.title}
-            selectedPresetId={selectedAiPreset?.id ?? null}
-            onSelectedPresetIdChange={selectAiPreset}
-            onGenerate={generateFromComposer}
           />
         </div>
       )}
@@ -2744,12 +2527,12 @@ export function BrainOverview({
       !onboardingHasResult ? null : slots.length === 0 ? (
         <button
           type="button"
-          className="flex min-h-48 w-full items-center justify-center border border-dashed border-border text-xs text-muted-foreground hover:text-foreground"
+          className="flex min-h-0 w-full flex-1 items-center justify-center border border-dashed border-border text-xs text-muted-foreground hover:text-foreground"
           onClick={beginEdit}
         >
           add your first Block
         </button>
-      ) : displayMode === "canvas" && canvasReady && canvasDocument ? (
+      ) : canvasReady && canvasDocument ? (
         <LiveViewCanvas
           document={canvasDocument}
           slots={slots}
@@ -2762,34 +2545,33 @@ export function BrainOverview({
             void refreshConnectedPipes(view, [slot], "card_regenerated")
           }
           onAiEdit={editSlotWithAi}
+          onItemAction={recordItemAction}
+          onItemHandoff={handoffItem}
         />
-      ) : (
+      ) : canvasLoading ? (
         <div
-          data-testid="brain-overview-grid"
-          className="grid grid-cols-12 gap-4"
+          data-testid="live-view-canvas-loading"
+          className="flex min-h-0 flex-1 items-center justify-center border border-border font-mono text-[10px] uppercase tracking-wide text-muted-foreground"
         >
-          {slots.map((slot) => (
-            <OverviewCard
-              key={slot.id}
-              slot={slot}
-              timeRange={view.timeRange}
-              refreshing={refreshingSlotIds.has(slot.id)}
-              feedback={slot.feedback?.current?.rating ?? null}
-              feedbackCorrection={slot.feedback?.current?.correction ?? null}
-              aiEditing={aiEditingSlotId === slot.id}
-              onFeedback={(rating, correction) =>
-                recordCardFeedback(slot, rating, correction)
-              }
-              onRegenerate={() =>
-                void refreshConnectedPipes(
-                  view,
-                  [slot],
-                  "card_regenerated",
-                )
-              }
-              onAiEdit={(prompt) => editSlotWithAi(slot, prompt)}
+          loading process map
+        </div>
+      ) : null}
+      </div>
+      {!onboardingColdStart && (
+        <div
+          data-testid="overview-floating-composer"
+          className="pointer-events-none absolute inset-x-4 bottom-4 z-40 flex justify-center"
+        >
+          <div className="pointer-events-auto w-full max-w-2xl shadow-lg shadow-black/5">
+            <LiveViewAiComposer
+              busy={false}
+              compact
+              currentViewTitle={view.title}
+              selectedPresetId={selectedAiPreset?.id ?? null}
+              onSelectedPresetIdChange={selectAiPreset}
+              onGenerate={generateFromComposer}
             />
-          ))}
+          </div>
         </div>
       )}
     </div>

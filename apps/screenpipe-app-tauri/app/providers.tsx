@@ -17,6 +17,7 @@ import { NuqsAdapter } from "nuqs/adapters/next/app";
 import { useUpdateListener } from "@/components/update-banner";
 import { AppEntitlementGate } from "@/components/app-entitlement-gate";
 import { DeeplinkHandler } from "@/components/deeplink-handler";
+import { LiveViewOnboardingFollowUp } from "@/components/live-view-onboarding-follow-up";
 import { usePathname } from "next/navigation";
 import { readCachedAnalyticsId, readCachedAnalyticsEnabled } from "@/lib/analytics-id";
 import { QueryClientProvider } from "@tanstack/react-query";
@@ -70,7 +71,8 @@ export const Providers = forwardRef<
       // over every spec (clean localStorage each run = empty dismissed-set) —
       // plus pollute prod analytics with test traffic.
       const isE2E = process.env.NEXT_PUBLIC_SCREENPIPE_E2E === "true";
-      if (isDebug || isE2E) return;
+      const isBrowserDev = Boolean(process.env.NEXT_PUBLIC_SCREENPIPE_WEB_DEV);
+      if (isDebug || isE2E || isBrowserDev) return;
       // Read the cached analytics preference to sync PostHog opt-in/out
       // after init. undefined = first boot → allow capturing (default true).
       const cachedEnabled = readCachedAnalyticsEnabled();
@@ -118,6 +120,7 @@ export const Providers = forwardRef<
                         {mounted ? (
                           <>
                             {!isOverlay && <DeeplinkHandler />}
+                            {!isOverlay && <LiveViewOnboardingFollowUp />}
                             <AppEntitlementGate>{children}</AppEntitlementGate>
                           </>
                         ) : null}
