@@ -9,7 +9,10 @@ import { AIPresetsSelector } from "@/components/rewind/ai-presets-selector";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { useSettings } from "@/lib/hooks/use-settings";
-import { useUsageStatus } from "@/lib/hooks/use-usage-status";
+import {
+  isCloudflareManagedHostedAllowance,
+  useUsageStatus,
+} from "@/lib/hooks/use-usage-status";
 import { openBusinessUpgradeSurface } from "@/lib/upgrade-flow";
 import type { AIPreset } from "@/lib/utils/tauri";
 import type { LiveViewGenerationScope } from "@/lib/live-views/generate-live-view-with-pi";
@@ -85,7 +88,8 @@ export function LiveViewAiComposer({
   );
   const hostedUsageExhausted = Boolean(
     selectedPreset?.provider === "screenpipe-cloud" &&
-      usage &&
+    usage &&
+      !isCloudflareManagedHostedAllowance(usage) &&
       usage.remaining <= 0,
   );
   const canUpgrade = Boolean(

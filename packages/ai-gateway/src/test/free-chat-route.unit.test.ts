@@ -123,9 +123,20 @@ describe('/v1/chat/completions free-plan route policy', () => {
 		}), env, ctx);
 		const body = await response.json() as {
 			tier: string;
+			used_today: number;
+			limit_today: number;
+			remaining: number;
+			resets_at: string;
+			legacy_daily_queries: {
+				used_today: number;
+				limit_today: number;
+				remaining: number;
+				resets_at: string;
+			};
 			cost_limit_reached: boolean;
 			hosted_ai: {
 				plan: string;
+				allowance_managed_by: string;
 				included_credits: number;
 				model_access: string[];
 			};
@@ -137,8 +148,15 @@ describe('/v1/chat/completions free-plan route policy', () => {
 			cost_limit_reached: false,
 			hosted_ai: {
 				plan: 'free',
+				allowance_managed_by: 'legacy',
 				included_credits: 10,
 			},
+		});
+		expect(body.legacy_daily_queries).toEqual({
+			used_today: body.used_today,
+			limit_today: body.limit_today,
+			remaining: body.remaining,
+			resets_at: body.resets_at,
 		});
 		expect(body.hosted_ai.model_access).toContain('auto');
 	});
@@ -498,6 +516,13 @@ describe('/v1/chat/completions free-plan route policy', () => {
 			used_credits: null,
 			remaining_credits: null,
 		});
+		expect(body.legacy_daily_queries).toEqual({
+			used_today: body.used_today,
+			limit_today: body.limit_today,
+			remaining: body.remaining,
+			resets_at: body.resets_at,
+		});
+		expect(body.hosted_ai).not.toHaveProperty('resets_at');
 	});
 
 	it('bypasses legacy paid admission and reaches Gateway routing when D1 is unavailable', async () => {

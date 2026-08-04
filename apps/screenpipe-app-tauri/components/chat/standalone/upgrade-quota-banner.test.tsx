@@ -30,7 +30,10 @@ vi.mock("@/lib/hooks/use-settings", () => ({
 
 vi.mock("@/lib/hooks/use-usage-status", () => ({
   useUsageStatus: () => mocks.usageState,
-  formatResetTime: () => "5:00 PM",
+  formatResetTime: (iso: string) =>
+    iso === "2026-08-02T00:00:00.000Z" ? "5:00 PM" : "1:00 PM",
+  isCloudflareManagedHostedAllowance: (usage: any) =>
+    usage?.hosted_ai?.allowance_managed_by === "cloudflare",
 }));
 
 vi.mock("@/lib/hooks/use-model-upsell-gating", () => ({
@@ -111,6 +114,31 @@ describe("UpgradeQuotaBanner", () => {
     );
   });
 
+  it("hides the proactive banner when Cloudflare owns the allowance", () => {
+    mocks.usageState.hosted_ai = {
+      allowance_managed_by: "cloudflare",
+    };
+    mocks.gateState = true;
+
+    render(<UpgradeQuotaBanner />);
+
+    expect(screen.queryByTestId("quota-upgrade-banner")).toBeNull();
+  });
+
+  it.each(["legacy", undefined])(
+    "keeps proactive exhaustion for %s ownership",
+    (owner) => {
+      mocks.usageState.hosted_ai = owner
+        ? { allowance_managed_by: owner }
+        : undefined;
+      mocks.gateState = true;
+
+      render(<UpgradeQuotaBanner />);
+
+      expect(screen.getByTestId("quota-upgrade-banner")).toBeTruthy();
+    },
+  );
+
   it("renders the structured cost-limit action even while the query meter has room", async () => {
     mocks.usageState = {
       ...mocks.usageState,
@@ -120,6 +148,7 @@ describe("UpgradeQuotaBanner", () => {
       remaining: 999_876,
       upsell_banner: false,
       upgrade_eligible: false,
+      hosted_ai: { allowance_managed_by: "cloudflare" },
     };
     mocks.blockedUpgrade = {
       requiredPlan: "business",
@@ -133,6 +162,7 @@ describe("UpgradeQuotaBanner", () => {
     expect(
       screen.getByText(/resets 5:00 PM/i),
     ).toBeTruthy();
+    expect(screen.queryByText(/resets 1:00 PM/i)).toBeNull();
 
     fireEvent.click(
       screen.getByRole("button", { name: "Upgrade to Business" }),

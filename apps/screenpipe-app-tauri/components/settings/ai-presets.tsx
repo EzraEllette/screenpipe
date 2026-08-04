@@ -21,12 +21,8 @@ import {
   DEFAULT_PROMPT,
   useSettings,
 } from "@/lib/hooks/use-settings";
-import {
-  useUsageStatus,
-  messagesLeftForModel,
-  shouldWarnLowQuota,
-  formatResetTime,
-} from "@/lib/hooks/use-usage-status";
+import { useUsageStatus } from "@/lib/hooks/use-usage-status";
+import { HostedModelQuotaBadge } from "./hosted-model-quota-badge";
 import {
   buildChatTestBody,
   shouldRetryWithMaxCompletionTokens,
@@ -1621,15 +1617,11 @@ const AISection = ({
                                       Silent otherwise (normal state = no extra clutter). Never on a
                                       locked model — the Business lock already says "not available",
                                       so a "N left" count on top would be contradictory. */}
-                                  {!locked && shouldWarnLowQuota(usage, model.query_weight) && (
-                                    <Badge
-                                      variant="outline"
-                                      className="text-[10px] bg-yellow-500/10 text-yellow-700 border-yellow-500/40 dark:text-yellow-400"
-                                      title={`approaching daily limit${usage?.resets_at ? ` — resets ${formatResetTime(usage.resets_at)}` : ""}`}
-                                    >
-                                      ≈ {messagesLeftForModel(usage, model.query_weight)} left
-                                    </Badge>
-                                  )}
+                                  <HostedModelQuotaBadge
+                                    usage={usage}
+                                    queryWeight={model.query_weight}
+                                    locked={locked}
+                                  />
                                 </div>
                               </div>
                               <span className="text-xs text-muted-foreground">

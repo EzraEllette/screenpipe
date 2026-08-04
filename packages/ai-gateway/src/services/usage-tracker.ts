@@ -522,13 +522,17 @@ export async function getUsageStatus(
 
   const limitToday = limits.dailyQueries;
   const remaining = Math.max(0, limits.dailyQueries - usedToday);
+	const legacyDailyQueries = {
+		used_today: usedToday,
+		limit_today: limitToday,
+		remaining,
+		resets_at: getNextResetTime(),
+	};
 
   const status: UsageStatus = {
     tier,
-    used_today: usedToday,
-    limit_today: limitToday,
-    remaining,
-    resets_at: getNextResetTime(),
+		...legacyDailyQueries,
+		legacy_daily_queries: legacyDailyQueries,
     model_access: [...getHostedAiAllowedModels(accountPlan)],
     // Server-controlled visibility for the app's at-the-cap banner. Only
     // non-Business tiers, and suppressed entirely by the master kill-switch.

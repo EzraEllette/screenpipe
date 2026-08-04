@@ -406,6 +406,7 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 				hosted_ai: {
 					plan: getHostedAiPlan(usageAccountPlan) ?? 'unknown',
 					trial: authResult.hostedAiTrial === true,
+					allowance_managed_by: 'legacy',
 					included_credits: includedCredits,
 					used_credits: usedCredits,
 					remaining_credits: usedCredits === null

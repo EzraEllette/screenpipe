@@ -330,13 +330,25 @@ export interface UsageResult {
 	creditsRemaining?: number;
 }
 
-// Usage status response
-export interface UsageStatus {
-	tier: UsageTier;
+export type HostedAiAllowanceOwner = 'legacy' | 'cloudflare';
+
+export interface LegacyDailyQueries {
 	used_today: number;
 	limit_today: number;
 	remaining: number;
 	resets_at: string;
+}
+
+// Usage status response
+export interface UsageStatus {
+	tier: UsageTier;
+	/** Deprecated compatibility aliases for `legacy_daily_queries`. */
+	used_today: number;
+	limit_today: number;
+	remaining: number;
+	resets_at: string;
+	/** Weighted daily-query meter used by legacy gateway routes. */
+	legacy_daily_queries: LegacyDailyQueries;
 	model_access: string[];
 	credits_balance?: number;
 	/** Gateway-controlled signal for the app's at-the-cap upsell banner. True only
