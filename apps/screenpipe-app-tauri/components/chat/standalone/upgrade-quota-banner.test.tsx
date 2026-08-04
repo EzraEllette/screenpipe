@@ -31,6 +31,9 @@ vi.mock("@/lib/hooks/use-settings", () => ({
 vi.mock("@/lib/hooks/use-usage-status", () => ({
   useUsageStatus: () => mocks.usageState,
   formatResetTime: () => "5:00 PM",
+  formatAllowanceReset: () => "Aug 17, 5:00 PM",
+  formatAllowanceWindow: () => "30-day",
+  formatUsagePercent: (percent: number) => `${percent}%`,
 }));
 
 vi.mock("@/lib/hooks/use-model-upsell-gating", () => ({
@@ -109,6 +112,37 @@ describe("UpgradeQuotaBanner", () => {
         "ai-quota-banner",
       ),
     );
+  });
+
+  it("reports Cloudflare allowance utilization without sensitive amounts when upsell UI is off", () => {
+    mocks.usageState = {
+      ...mocks.usageState,
+      remaining: 999_999,
+      upsell_banner: false,
+      hosted_ai: {
+        allowance_managed_by: "cloudflare",
+        usage_as_of: "2026-08-04T16:30:00.000Z",
+        allowances: [
+          {
+            lane: "auto",
+            used_percent: 100,
+            remaining_percent: 0,
+            window_seconds: 2_592_000,
+            technique: "fixed",
+            resets_at: "2026-08-17T00:00:00.000Z",
+          },
+        ],
+      },
+    };
+    mocks.gateState = false;
+
+    render(<UpgradeQuotaBanner />);
+
+    expect(screen.getByTestId("hosted-ai-allowance-banner")).toBeTruthy();
+    expect(screen.getByText(/100% used/i)).toBeTruthy();
+    expect(screen.getByText(/30-day fixed period/i)).toBeTruthy();
+    expect(screen.getByText(/resets Aug 17, 5:00 PM/i)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "View Business" })).toBeNull();
   });
 
   it("renders the structured cost-limit action even while the query meter has room", async () => {

@@ -45,7 +45,7 @@ describe('Cloudflare hosted-chat routing', () => {
 		expect(attempts).toHaveBeenCalledTimes(1);
 		if ('error' in result) {
 			expect(result.error.code).toBe('hosted_ai_allowance_exceeded');
-			expect(result.error.allowance).toEqual({ lane: 'explicit', plan: 'basic', window: '30d' });
+			expect(result.error.allowance).toEqual({ lane: 'explicit', plan: 'basic', managed_by: 'cloudflare' });
 		}
 	});
 
@@ -123,7 +123,7 @@ describe('Cloudflare hosted-chat routing', () => {
 		const json = await jsonResponse.json() as any;
 		expect(jsonResponse.status).toBe(429);
 		expect(json.error.code).toBe('hosted_ai_allowance_exceeded');
-		expect(json.allowance).toEqual({ lane: 'auto', plan: 'basic', window: '30d' });
+		expect(json.allowance).toEqual({ lane: 'auto', plan: 'basic', managed_by: 'cloudflare' });
 
 		const streamResponse = allowanceErrorResponse({ ...body, model: 'auto', stream: true }, error);
 		const stream = await streamResponse.text();

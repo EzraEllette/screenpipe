@@ -480,30 +480,92 @@ describe('/v1/chat/completions free-plan route policy', () => {
 		expect(await errorCode(response)).toBe('cost_control_unavailable');
 	});
 
-	it('reports Cloudflare-managed allowance without reading legacy cost controls', async () => {
-		globalThis.fetch = mock(async (input: RequestInfo | URL) => {
+	it.each([
+		['Basic', 'standard', 'standard', 'basic', false],
+		['Max', 'pro', 'pro_max', 'business_max', true],
+		['Ultra', 'pro', 'pro_ultra', 'business_ultra', true],
+	] as const)('reports Cloudflare %s utilization without exposing provider amounts', async (
+		_label,
+		subscriptionPlan,
+		billingPlan,
+		cloudflarePlan,
+		cloudSubscribed,
+	) => {
+		const gatewayId = `hosted-chat-${cloudflarePlan}-test`;
+		globalThis.fetch = mock(async (input: RequestInfo | URL, init?: RequestInit) => {
 			const url = String(input);
 			if (url === 'https://screenpipe.com/api/user') {
 				return new Response(JSON.stringify({
 					success: true,
 					user: {
 						clerk_id: 'user_cloudflare_usage',
-						cloud_subscribed: false,
+						cloud_subscribed: cloudSubscribed,
 						app_entitled: true,
-						subscription_plan: 'standard',
-						entitlement: { active: true, plan: 'standard', features: { app: true } },
+						subscription_plan: subscriptionPlan,
+						billing_plan: billingPlan,
+						entitlement: { active: true, plan: subscriptionPlan, features: { app: true } },
 					},
 				}), { status: 200 });
 			}
 			if (url.startsWith('https://supabase.test/rest/v1/user_credits')) {
 				return new Response('[]', { status: 200 });
 			}
+			if (url.includes(`/ai-gateway/gateways/${gatewayId}`)) {
+				return new Response(JSON.stringify({
+					success: true,
+					result: {
+						spend_limits: {
+							enabled: true,
+							rules: [{
+								id: `${cloudflarePlan}-auto`,
+								enabled: true,
+								limit: 8,
+								limitType: 'cost',
+								window: 2_592_000,
+								technique: 'fixed',
+								metadata: {
+									user_id: { mode: 'partition' },
+									plan: { mode: 'filter', values: [cloudflarePlan] },
+									lane: { mode: 'filter', values: ['auto'] },
+								},
+							}],
+						},
+					},
+				}), { status: 200 });
+			}
+			if (url.endsWith('/graphql')) {
+				const request = JSON.parse(String(init?.body)) as {
+					variables: { metadata: string };
+				};
+				const hashedUserId = request.variables.metadata.replaceAll('%', '');
+				return new Response(JSON.stringify({
+					data: {
+						viewer: {
+							accounts: [{
+								window0: [{
+									dimensions: {
+										metadataRaw: JSON.stringify({
+											user_id: hashedUserId,
+											plan: cloudflarePlan,
+											lane: 'auto',
+											workload: 'interactive',
+										}),
+									},
+									sum: { cost: 8 },
+								}],
+							}],
+						},
+					},
+				}), { status: 200 });
+			}
 			throw new Error(`unexpected fetch: ${url}`);
 		}) as typeof fetch;
 		const cloudflareEnv = {
 			...env,
 			HOSTED_CHAT_GATEWAY_MODE: 'cloudflare',
-			CLOUDFLARE_AI_GATEWAY_ID: 'hosted-chat-test',
+			CLOUDFLARE_AI_GATEWAY_ID: gatewayId,
+			CLOUDFLARE_ACCOUNT_ID: '9850df1eb8fd807eb8e06f4057b473f1',
+			CLOUDFLARE_API_TOKEN: 'read-only-token',
 			DB: { prepare: () => { throw new Error('legacy cost storage unavailable'); } },
 		} as unknown as Env;
 
@@ -513,15 +575,29 @@ describe('/v1/chat/completions free-plan route policy', () => {
 		const body = await response.json() as any;
 
 		expect(response.status).toBe(200);
-		expect(body.upsell_banner).toBe(false);
-		expect(body.cost_limit_reached).toBeNull();
+		if (cloudflarePlan === 'basic') expect(body.upsell_banner).toBe(true);
+		expect(body.cost_limit_reached).toBe(true);
 		expect(body.hosted_ai).toMatchObject({
-			plan: 'basic',
+			plan: cloudflarePlan,
 			allowance_managed_by: 'cloudflare',
 			included_credits: null,
 			used_credits: null,
 			remaining_credits: null,
+			allowances: [{
+				lane: 'auto',
+				used_percent: 100,
+				remaining_percent: 0,
+			}],
 		});
+		expect(JSON.stringify(body.hosted_ai)).not.toMatch(/(?:limit|used|remaining)_usd/);
+		expect(Object.keys(body.hosted_ai.allowances[0]).sort()).toEqual([
+			'lane',
+			'remaining_percent',
+			'resets_at',
+			'technique',
+			'used_percent',
+			'window_seconds',
+		]);
 	});
 
 	it('bypasses legacy paid admission and reaches Gateway routing when D1 is unavailable', async () => {

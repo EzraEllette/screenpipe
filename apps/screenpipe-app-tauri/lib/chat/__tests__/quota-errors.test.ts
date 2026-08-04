@@ -22,7 +22,7 @@ describe("classifyQuotaError", () => {
   it("classifies daily-limit signals as 'daily'", () => {
     expect(
       classifyQuotaError(
-        'HTTP 429: {"error":{"code":"hosted_ai_allowance_exceeded"},"allowance":{"lane":"auto","plan":"basic","window":"30d"}}',
+        'HTTP 429: {"error":{"code":"hosted_ai_allowance_exceeded"},"allowance":{"lane":"auto","plan":"basic","managed_by":"cloudflare"}}',
       ),
     ).toBe("daily");
     expect(classifyQuotaError("free_chat_limit_exceeded")).toBe("daily");
@@ -90,16 +90,16 @@ describe("hosted busy messages", () => {
 describe("buildDailyLimitMessage", () => {
   it("suggests the independent explicit lane when Auto is exhausted", () => {
     const message = buildDailyLimitMessage(
-      '{"error":{"code":"hosted_ai_allowance_exceeded"},"allowance":{"lane":"auto","plan":"basic","window":"30d"}}',
+      '{"error":{"code":"hosted_ai_allowance_exceeded"},"allowance":{"lane":"auto","plan":"basic","managed_by":"cloudflare"}}',
     );
-    expect(message).toContain("30-day hosted AI allowance for Auto");
+    expect(message).toContain("current hosted AI allowance for Auto");
     expect(message).toContain("explicit hosted model");
     expect(message).not.toMatch(/\$\d/);
   });
 
   it("suggests Auto when the explicit lane is exhausted", () => {
     const message = buildDailyLimitMessage(
-      '{"error":{"code":"hosted_ai_allowance_exceeded"},"allowance":{"lane":"explicit","plan":"business","window":"30d"}}',
+      '{"error":{"code":"hosted_ai_allowance_exceeded"},"allowance":{"lane":"explicit","plan":"business","managed_by":"cloudflare"}}',
     );
     expect(message).toContain("explicit models");
     expect(message).toContain("Switch to Auto");
@@ -107,7 +107,7 @@ describe("buildDailyLimitMessage", () => {
 
   it("does not suggest an unavailable explicit hosted lane to Free users", () => {
     const message = buildDailyLimitMessage(
-      '{"error":{"code":"hosted_ai_allowance_exceeded"},"allowance":{"lane":"auto","plan":"free","window":"30d"}}',
+      '{"error":{"code":"hosted_ai_allowance_exceeded"},"allowance":{"lane":"auto","plan":"free","managed_by":"cloudflare"}}',
     );
     expect(message).toContain("Upgrade");
     expect(message).not.toContain("explicit hosted model");

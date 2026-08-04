@@ -543,12 +543,12 @@ function errorResponse(body: RequestBody, status: number, message: string): Resp
 
 function allowanceMessage(allowance: HostedChatAllowanceExceededError['allowance']): string {
   if (allowance.lane === 'explicit') {
-    return 'Your 30-day hosted AI allowance for explicit models is used up. Switch to Auto, or use a local model or your own provider key.';
+    return 'Your current hosted AI allowance for explicit models is used up. Switch to Auto, or use a local model or your own provider key.';
   }
   if (allowance.plan === 'free') {
-    return 'Your 30-day hosted AI allowance for Auto is used up. Upgrade, or use a local model or your own provider key.';
+    return 'Your current hosted AI allowance for Auto is used up. Upgrade, or use a local model or your own provider key.';
   }
-  return 'Your 30-day hosted AI allowance for Auto is used up. Choose an explicit hosted model, or use a local model or your own provider key.';
+  return 'Your current hosted AI allowance for Auto is used up. Choose an explicit hosted model, or use a local model or your own provider key.';
 }
 
 /** Render the stable terminal contract Pi uses to avoid generic 429 retries. */
