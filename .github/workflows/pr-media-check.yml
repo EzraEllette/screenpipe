@@ -1,10 +1,11 @@
-name: PR media check (potential AI slop)
+name: PR evidence check
 
 # screenpipe — AI that knows everything you've seen, said, or heard
 # https://screenpipe.com
-# flags PRs whose description has no before/after screen recording. uses
-# pull_request_target so it can label/comment on fork PRs (it only reads PR
-# metadata via the api — it never checks out untrusted PR code).
+# checks that contributors select an evidence category and that UI or behavior
+# changes include a before/after recording. uses pull_request_target so it can
+# label/comment on fork PRs (it only reads PR metadata via the api — it never
+# checks out untrusted PR code).
 
 on:
   pull_request_target:
@@ -16,14 +17,14 @@ permissions:
   issues: write
 
 concurrency:
-  group: pr-media-check-${{ github.event.pull_request.number }}
+  group: pr-evidence-check-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
-  check-video:
+  check-evidence:
     runs-on: ubuntu-latest
     steps:
-      - name: Check PR body for a before/after video
+      - name: Check PR evidence requirements
         uses: actions/github-script@v7
         with:
           script: |
@@ -32,8 +33,10 @@ jobs:
             const pr = context.payload.pull_request;
             const issue_number = pr.number;
 
-            const LABEL = "potential-ai-slop";
-            const MARKER = "<!-- potential-ai-slop-check -->";
+            const LABEL = "needs-evidence";
+            const MARKER = "<!-- pr-evidence-check -->";
+            const LEGACY_LABEL = "potential-ai-slop";
+            const LEGACY_MARKER = "<!-- potential-ai-slop-check -->";
 
             // ---- detect a video in the PR description -------------------------
             // strip image markdown first, so github drag-dropped IMAGES
@@ -52,7 +55,21 @@ jobs:
             ];
 
             const hasVideo = videoPatterns.some((re) => re.test(withoutImages));
-            core.info(`PR #${issue_number} hasVideo=${hasVideo}`);
+            const evidenceKinds = {
+              ui: /-\s*\[[xX]\]\s*UI or behavior change\b/i,
+              backend: /-\s*\[[xX]\]\s*Backend change\b/i,
+              performance: /-\s*\[[xX]\]\s*Performance change\b/i,
+              nonRuntime: /-\s*\[[xX]\]\s*Docs, CI, or pure refactor\b/i,
+            };
+            const selectedKinds = Object.entries(evidenceKinds)
+              .filter(([, pattern]) => pattern.test(body))
+              .map(([kind]) => kind);
+            const needsCategory = selectedKinds.length === 0;
+            const needsUiRecording = selectedKinds.includes("ui") && !hasVideo;
+            const needsEvidence = needsCategory || needsUiRecording;
+            core.info(
+              `PR #${issue_number} selectedKinds=${selectedKinds.join(",")} hasVideo=${hasVideo}`,
+            );
 
             // ---- helpers ------------------------------------------------------
             async function ensureLabel() {
@@ -64,26 +81,48 @@ jobs:
                   owner,
                   repo,
                   name: LABEL,
-                  color: "b60205",
-                  description: "no before/after video in pr — may be ai slop and closed",
+                  color: "FBCA04",
+                  description: "Exact results, logs, benchmarks, or end-to-end evidence are required",
                 });
               }
             }
 
-            async function findMarkerComment() {
+            async function findMarkerComments() {
               const comments = await github.paginate(github.rest.issues.listComments, {
                 owner,
                 repo,
                 issue_number,
                 per_page: 100,
               });
-              return comments.find((c) => c.body && c.body.includes(MARKER));
+              return comments.filter(
+                (c) =>
+                  c.body &&
+                  (c.body.includes(MARKER) || c.body.includes(LEGACY_MARKER)),
+              );
+            }
+
+            async function removeLabel(name) {
+              try {
+                await github.rest.issues.removeLabel({
+                  owner,
+                  repo,
+                  issue_number,
+                  name,
+                });
+                core.info(`Removed ${name} from PR #${issue_number}`);
+              } catch (e) {
+                if (e.status !== 404) throw e; // 404 == label wasn't set, fine
+              }
             }
 
             // ---- act ----------------------------------------------------------
-            const existing = await findMarkerComment();
+            const existingComments = await findMarkerComments();
+            const existing = existingComments[0];
 
-            if (!hasVideo) {
+            // Any PR touched by the new check leaves the retired state behind.
+            await removeLabel(LEGACY_LABEL);
+
+            if (needsEvidence) {
               await ensureLabel();
               await github.rest.issues.addLabels({
                 owner,
@@ -92,49 +131,60 @@ jobs:
                 labels: [LABEL],
               });
 
-              if (!existing) {
-                const commentBody = [
-                  MARKER,
-                  "👋 thanks for the pr!",
-                  "",
-                  "i couldn't find a **before/after screen recording** in the description. prs without a video showing the change in action are hard to review and may be **closed soon** as potential ai slop.",
-                  "",
-                  "to clear this:",
-                  "- add a short screen recording of the app/cli **before** and **after** your change to the pr description",
-                  "- drag the file into the description box — github hosts it (never commit media into the repo)",
-                  "- the `" + LABEL + "` label drops automatically once a video is detected",
-                  "",
-                  "if a video genuinely doesn't apply (docs / ci / pure refactor), reply here and a maintainer can remove the label.",
-                ].join("\n");
+              const commentBody = [
+                MARKER,
+                "👋 thanks for the pr!",
+                "",
+                "this PR is in the **`" + LABEL + "`** process state. this is a concrete evidence request, not a judgment about how the PR was written.",
+                "",
+                "to resolve it:",
+                needsCategory
+                  ? "- select every applicable evidence category in the PR template and provide the requested evidence"
+                  : "- add a short **before/after screen recording** for the selected UI or behavior change",
+                needsUiRecording
+                  ? "- drag the recording into the PR description — GitHub hosts it (never commit media into the repo)"
+                  : "",
+                "- edit the PR description after fixing this; the check will run again and remove the process state",
+                "",
+                "docs, CI, pure refactors, backend work, and performance work are not required to fabricate a video; select their category and provide the appropriate checks, tests/logs, or benchmarks instead.",
+                "",
+                "a maintainer may close the PR while waiting. you are welcome to reopen it after addressing the request. see the [AI-assisted contribution policy](https://github.com/screenpipe/screenpipe/blob/main/CONTRIBUTING.md#ai-assisted-contributions).",
+              ].join("\n");
 
+              if (existing) {
+                await github.rest.issues.updateComment({
+                  owner,
+                  repo,
+                  comment_id: existing.id,
+                  body: commentBody,
+                });
+              } else {
                 await github.rest.issues.createComment({
                   owner,
                   repo,
                   issue_number,
                   body: commentBody,
                 });
-                core.info(`Flagged PR #${issue_number} as ${LABEL}`);
               }
-            } else {
-              // video present — clean up any prior flag so the check self-heals.
-              try {
-                await github.rest.issues.removeLabel({
-                  owner,
-                  repo,
-                  issue_number,
-                  name: LABEL,
-                });
-                core.info(`Removed ${LABEL} from PR #${issue_number}`);
-              } catch (e) {
-                if (e.status !== 404) throw e; // 404 == label wasn't set, fine
-              }
+              core.info(`Marked PR #${issue_number} as ${LABEL}`);
 
-              if (existing) {
+              for (const duplicate of existingComments.slice(1)) {
                 await github.rest.issues.deleteComment({
                   owner,
                   repo,
-                  comment_id: existing.id,
+                  comment_id: duplicate.id,
                 });
-                core.info(`Deleted stale slop comment on PR #${issue_number}`);
               }
+            } else {
+              // The selected evidence category passes the structural check.
+              await removeLabel(LABEL);
+
+              for (const comment of existingComments) {
+                await github.rest.issues.deleteComment({
+                  owner,
+                  repo,
+                  comment_id: comment.id,
+                });
+              }
+              core.info(`Deleted resolved evidence comments on PR #${issue_number}`);
             }
