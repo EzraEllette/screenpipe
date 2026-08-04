@@ -33,6 +33,7 @@ function usageResponse(upgradeEligible: boolean): Promise<Response> {
       resets_at: "2026-07-31T00:00:00.000Z",
       upsell_banner: upgradeEligible,
       upgrade_eligible: upgradeEligible,
+      cost_limit_reached: false,
       hosted_ai: {
         plan: upgradeEligible ? "basic" : "business_ultra",
         allowance_managed_by: "cloudflare",
@@ -100,6 +101,46 @@ describe("useUsageStatus", () => {
       upgradeUrl: "https://screenpi.pe/account/billing",
       resetsAt: null,
     });
+    expect(result.current?.cost_limit_reached).toBe(false);
+  });
+
+  it("preserves legacy cost exhaustion and its exact server upgrade", async () => {
+    settingsState = {
+      settings: { user: { token: "business.jwt" } },
+      isSettingsLoaded: true,
+    };
+    vi.mocked(fetch).mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        tier: "subscribed",
+        used_today: 12,
+        limit_today: 1_000_000,
+        remaining: 999_988,
+        resets_at: "",
+        upsell_banner: false,
+        upgrade_eligible: false,
+        cost_limit_reached: true,
+        hosted_ai: {
+          plan: "business",
+          required_plan: "business_max",
+          upgrade_url:
+            "https://screenpipe.com/account/billing?target_plan=pro_max&interval=month",
+        },
+      }),
+    } as Response);
+
+    const { result } = renderHook(() => useUsageStatus());
+    await waitFor(() => expect(result.current?.cost_limit_reached).toBe(true));
+    expect(result.current?.hosted_ai).toMatchObject({
+      plan: "business",
+      allowances: null,
+      upgrade: {
+        requiredPlan: "business_max",
+        upgradeUrl:
+          "https://screenpipe.com/account/billing?target_plan=pro_max&interval=month",
+      },
+    });
+    expect(result.current?.hosted_ai?.allowance_managed_by).toBeUndefined();
   });
 
   it("clears stale Basic status immediately while a new token is resolving", async () => {

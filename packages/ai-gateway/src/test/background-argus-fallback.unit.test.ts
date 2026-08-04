@@ -12,6 +12,7 @@ import {
 	isAccountLocalAllowanceError,
 	isProviderQuotaOrBillingLimitError,
 	prepareArgusBackgroundFallbackBody,
+	resolveArgusBackgroundFallbackBody,
 	shouldUseArgusBackgroundFallback,
 } from '../services/background-limit-fallback';
 import { HostedChatAllowanceExceededError } from '../services/cloudflare-ai-gateway';
@@ -55,6 +56,34 @@ describe('paid background Pipe Argus fallback', () => {
 		};
 		expect(hasArgusUnsupportedInput(imageBody)).toBe(true);
 		expect(shouldUseArgusBackgroundFallback({ enabled: true, error: allowanceError, body: imageBody, env })).toBe(false);
+	});
+
+	it('resolves eligibility and the complete Argus request shape together', () => {
+		const fallbackBody = resolveArgusBackgroundFallbackBody({
+			enabled: true,
+			error: { status: 429, code: 'daily_cost_limit_exceeded' },
+			body: {
+				...body,
+				messages: [
+					{ role: 'developer', content: 'Run this background Pipe.' } as any,
+					{ role: 'user', content: 'Summarize today.' },
+				],
+				max_completion_tokens: 32_000,
+			},
+			env,
+		});
+
+		expect(fallbackBody).not.toBeNull();
+		expect(fallbackBody?.model).toBe(ARGUS_BACKGROUND_FALLBACK_MODEL);
+		expect(fallbackBody?.messages[0].role).toBe('user');
+		expect(fallbackBody?.max_completion_tokens).toBeUndefined();
+		expect(fallbackBody?.max_tokens).toBe(ARGUS_BACKGROUND_MAX_COMPLETION_TOKENS);
+		expect(resolveArgusBackgroundFallbackBody({
+			enabled: false,
+			error: allowanceError,
+			body,
+			env,
+		})).toBeNull();
 	});
 
 	it('serves streaming or JSON Pipe responses directly from Argus without Cloudflare metadata', async () => {

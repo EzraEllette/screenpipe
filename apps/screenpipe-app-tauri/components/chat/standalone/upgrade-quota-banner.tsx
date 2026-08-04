@@ -8,6 +8,14 @@ import { X, Zap } from "lucide-react";
 import posthog from "posthog-js";
 import { Button } from "@/components/ui/button";
 import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
   formatAllowanceReset,
   formatAllowanceWindow,
   formatResetTime,
@@ -44,21 +52,30 @@ export function UpgradeQuotaBanner() {
   const upsellEnabled = useModelUpsellGating(usage?.upgrade_eligible);
   const blockedUpgrade = useQuotaUpgrade();
   const [dismissed, setDismissed] = useState(false);
+  const [dismissedModalKey, setDismissedModalKey] = useState<string | null>(
+    null,
+  );
   const [busy, setBusy] = useState(false);
   const cloudflareAllowance = usage?.hosted_ai?.allowances
     ?.filter((allowance) => allowance.remaining_percent <= 0)
     .sort((left, right) => left.lane.localeCompare(right.lane))[0] ?? null;
   const cloudflareBlocked = !blockedUpgrade && cloudflareAllowance !== null;
-  const cloudflareUpgrade = cloudflareBlocked
+  const legacyCostBlocked =
+    !blockedUpgrade &&
+    !cloudflareBlocked &&
+    usage?.cost_limit_reached === true &&
+    usage.hosted_ai?.allowance_managed_by !== "cloudflare";
+  const polledUpgrade = cloudflareBlocked || legacyCostBlocked
     ? usage?.hosted_ai?.upgrade ?? null
     : null;
+  const serverBlocked = cloudflareBlocked || legacyCostBlocked;
 
   if (!blockedUpgrade) {
     if (dismissed) return null;
-    // A Cloudflare allowance notice is product status, not an upsell. Show the
-    // rule's real usage even when upgrade experiments are disabled or the plan
-    // has no self-serve next tier.
-    if (cloudflareBlocked) {
+    // A live provider-cost allowance notice is product status, not an upsell.
+    // Show it even when upgrade experiments are disabled or the plan has no
+    // self-serve next tier.
+    if (serverBlocked) {
       // Continue to rendering below.
     } else {
     // Proactive prompts require settings, PostHog, and server plan truth. A
@@ -81,17 +98,32 @@ export function UpgradeQuotaBanner() {
 
   const resets = cloudflareBlocked
     ? formatAllowanceReset(cloudflareAllowance.resets_at)
-    : formatResetTime(blockedUpgrade?.resetsAt ?? usage?.resets_at ?? "");
+    : legacyCostBlocked
+      ? ""
+      : formatResetTime(blockedUpgrade?.resetsAt ?? usage?.resets_at ?? "");
   const source = blockedUpgrade
     ? "ai-usage-limit-banner"
     : cloudflareBlocked
       ? "cloudflare-ai-allowance-banner"
-      : "ai-quota-banner";
-  const showCloudflareUpgrade = cloudflareUpgrade !== null;
-  const activeUpgrade = blockedUpgrade ?? cloudflareUpgrade;
+      : legacyCostBlocked
+        ? "hosted-ai-cost-limit-banner"
+        : "ai-quota-banner";
+  const activeUpgrade = blockedUpgrade ?? polledUpgrade;
+  const showUpgradeAction =
+    activeUpgrade !== null || (!blockedUpgrade && !serverBlocked);
+  const modalKey = [
+    source,
+    activeUpgrade?.requiredPlan ?? "no-upgrade",
+    activeUpgrade?.upgradeUrl ?? "",
+    cloudflareAllowance?.lane ?? "",
+    cloudflareAllowance?.resets_at ?? blockedUpgrade?.resetsAt ?? "",
+  ].join(":");
+  const modalOpen = dismissedModalKey !== modalKey;
+  const dismissModal = () => setDismissedModalKey(modalKey);
 
   const onUpgrade = async () => {
     if (busy) return;
+    dismissModal();
     setBusy(true);
     try {
       posthog.capture("desktop_upgrade_entry_clicked", {
@@ -116,80 +148,130 @@ export function UpgradeQuotaBanner() {
   const blockedTitle = cloudflareBlocked
     ? `${cloudflareAllowance.lane === "auto" ? "Auto" : "Explicit model"} hosted AI limit reached`
     : "Hosted AI usage limit reached";
+  const modalDescription = cloudflareBlocked
+    ? `Your ${cloudflareAllowance.lane === "auto" ? "Auto" : "explicit model"} hosted AI allowance is fully used${resets ? ` until ${resets}` : ""}. ${
+        cloudflareAllowance.lane === "auto"
+          ? "Choose an explicit hosted model, or use a local or own-key preset."
+          : "Switch to Auto, or use a local or own-key preset."
+      }`
+    : legacyCostBlocked || blockedUpgrade
+      ? `Your plan's hosted AI allowance is used up${resets ? ` until ${resets}` : ""}. Switch to a local or own-key AI preset to keep working.`
+      : `You've used today's premium hosted AI allowance${resets ? `; it resets ${resets}` : ""}. Free models still work.`;
 
   return (
-    <div
-      className="mb-2 border border-border bg-background px-3 py-2.5 shadow-lg shadow-black/5"
-      data-testid={
-        blockedUpgrade
-          ? "cost-limit-upgrade-banner"
-          : cloudflareBlocked
-            ? "hosted-ai-allowance-banner"
-            : "quota-upgrade-banner"
-      }
-      role={blockedUpgrade || cloudflareBlocked ? "alert" : undefined}
-    >
-      <div className="flex items-start gap-3">
-        <Zap className="mt-0.5 h-4 w-4 shrink-0 text-foreground/70" />
-        <div className="min-w-0 flex-1 text-[12px] leading-snug">
-          <div className="font-medium">
-            {blockedUpgrade || cloudflareBlocked
-              ? blockedTitle
-              : "You're out of premium AI for today."}
-          </div>
-          <div className="mt-0.5 text-muted-foreground">
-            {cloudflareBlocked ? (
-              <>
-                {formatUsagePercent(cloudflareAllowance.used_percent)} used for this{" "}
-                {formatAllowanceWindow(cloudflareAllowance.window_seconds)}{" "}
-                {cloudflareAllowance.technique} period.
-                {resets ? ` Resets ${resets}.` : " Usage falls as the window moves."}{" "}
-                {cloudflareAllowance.lane === "auto"
-                  ? "Choose an explicit hosted model, or use a local or own-key preset."
-                  : "Switch to Auto, or use a local or own-key preset."}
-              </>
-            ) : blockedUpgrade ? (
-              <>
-                {resets ? `Resets ${resets}. ` : ""}
-                Upgrade to {requiredPlanLabel} for a higher limit, or switch to a
-                local or own-key AI preset.
-              </>
-            ) : (
-              <>Free models still work{resets ? ` · resets ${resets}` : ""}.</>
-            )}
-          </div>
-        </div>
-        <span className="flex shrink-0 items-center gap-1.5">
-          {(!cloudflareBlocked || showCloudflareUpgrade) && (
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              className="h-7 text-[12px]"
-              onClick={onUpgrade}
-              disabled={busy}
-            >
-              {activeUpgrade
-                ? `Upgrade to ${requiredPlanLabel}`
-                : "View Business"}
+    <>
+      <Dialog
+        open={modalOpen}
+        onOpenChange={(open) => {
+          if (!open) dismissModal();
+        }}
+      >
+        <DialogContent data-testid="ai-usage-limit-modal">
+          <DialogHeader>
+            <DialogTitle>
+              {showUpgradeAction ? "upgrade hosted AI" : "hosted AI usage limit"}
+            </DialogTitle>
+            <DialogDescription>{modalDescription}</DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={dismissModal}>
+              not now
             </Button>
-          )}
-          <button
-            type="button"
-            onClick={() => {
-              if (blockedUpgrade) {
-                clearQuotaUpgrade();
-              } else {
-                setDismissed(true);
-              }
-            }}
-            className="ml-0.5 shrink-0 text-muted-foreground/50 transition-colors hover:text-foreground"
-            aria-label="dismiss AI usage notice"
-          >
-            <X className="h-3.5 w-3.5" />
-          </button>
-        </span>
+            {showUpgradeAction && (
+              <Button type="button" onClick={onUpgrade} disabled={busy}>
+                {activeUpgrade
+                  ? `Upgrade to ${requiredPlanLabel}`
+                  : "View Business"}
+              </Button>
+            )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <div
+        className="mb-2 border border-border bg-background px-3 py-2.5 shadow-lg shadow-black/5"
+        data-testid={
+          blockedUpgrade
+            ? "cost-limit-upgrade-banner"
+            : cloudflareBlocked
+              ? "hosted-ai-allowance-banner"
+              : legacyCostBlocked
+                ? "hosted-ai-cost-limit-banner"
+                : "quota-upgrade-banner"
+        }
+        role={blockedUpgrade || serverBlocked ? "alert" : undefined}
+      >
+        <div className="flex items-start gap-3">
+          <Zap className="mt-0.5 h-4 w-4 shrink-0 text-foreground/70" />
+          <div className="min-w-0 flex-1 text-[12px] leading-snug">
+            <div className="font-medium">
+              {blockedUpgrade || serverBlocked
+                ? blockedTitle
+                : "You're out of premium AI for today."}
+            </div>
+            <div className="mt-0.5 text-muted-foreground">
+              {cloudflareBlocked ? (
+                <>
+                  {formatUsagePercent(cloudflareAllowance.used_percent)} used for this{" "}
+                  {formatAllowanceWindow(cloudflareAllowance.window_seconds)}{" "}
+                  {cloudflareAllowance.technique} period.
+                  {resets ? ` Resets ${resets}.` : " Usage falls as the window moves."}{" "}
+                  {cloudflareAllowance.lane === "auto"
+                    ? "Choose an explicit hosted model, or use a local or own-key preset."
+                    : "Switch to Auto, or use a local or own-key preset."}
+                </>
+              ) : legacyCostBlocked ? (
+                activeUpgrade ? (
+                  <>
+                    Upgrade to {requiredPlanLabel} for a higher hosted AI allowance,
+                    or switch to a local or own-key AI preset.
+                  </>
+                ) : (
+                  <>Switch to a local or own-key AI preset to keep working.</>
+                )
+              ) : blockedUpgrade ? (
+                <>
+                  {resets ? `Resets ${resets}. ` : ""}
+                  Upgrade to {requiredPlanLabel} for a higher limit, or switch to a
+                  local or own-key AI preset.
+                </>
+              ) : (
+                <>Free models still work{resets ? ` · resets ${resets}` : ""}.</>
+              )}
+            </div>
+          </div>
+          <span className="flex shrink-0 items-center gap-1.5">
+            {showUpgradeAction && !modalOpen && (
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className="h-7 text-[12px]"
+                onClick={onUpgrade}
+                disabled={busy}
+              >
+                {activeUpgrade
+                  ? `Upgrade to ${requiredPlanLabel}`
+                  : "View Business"}
+              </Button>
+            )}
+            <button
+              type="button"
+              onClick={() => {
+                if (blockedUpgrade) {
+                  clearQuotaUpgrade();
+                } else {
+                  setDismissed(true);
+                }
+              }}
+              className="ml-0.5 shrink-0 text-muted-foreground/50 transition-colors hover:text-foreground"
+              aria-label="dismiss AI usage notice"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </span>
+        </div>
       </div>
-    </div>
+    </>
   );
 }

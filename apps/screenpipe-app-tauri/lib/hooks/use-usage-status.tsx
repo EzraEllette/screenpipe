@@ -41,7 +41,7 @@ export interface HostedAiAllowance {
 
 export interface HostedAiUsage {
   plan: string | null;
-  allowance_managed_by: "cloudflare";
+  allowance_managed_by?: "cloudflare";
   usage_as_of: string | null;
   allowances: HostedAiAllowance[] | null;
   upgrade: QuotaUpgradeAction | null;
@@ -59,6 +59,9 @@ export interface UsageStatus {
   upsell_banner?: boolean;
   /** Server-backed Free/Basic eligibility. Missing or unresolved is false. */
   upgrade_eligible?: boolean;
+  /** Provider-cost admission is currently exhausted. Null means the server
+   * could not resolve the live allowance and must not be presented as empty. */
+  cost_limit_reached: boolean | null;
   /** Cloudflare allowance utilization for the authenticated user's metadata. */
   hosted_ai?: HostedAiUsage;
 }
@@ -112,8 +115,8 @@ function parseHostedAiUsage(value: unknown): HostedAiUsage | undefined {
     required_plan?: unknown;
     upgrade_url?: unknown;
   };
-  if (candidate.allowance_managed_by !== "cloudflare") return undefined;
-  const allowances = candidate.allowances === null
+  const cloudflareManaged = candidate.allowance_managed_by === "cloudflare";
+  const allowances = !cloudflareManaged || candidate.allowances === null
     ? null
     : Array.isArray(candidate.allowances)
       ? candidate.allowances
@@ -122,7 +125,7 @@ function parseHostedAiUsage(value: unknown): HostedAiUsage | undefined {
       : null;
   return {
     plan: typeof candidate.plan === "string" ? candidate.plan : null,
-    allowance_managed_by: "cloudflare",
+    ...(cloudflareManaged ? { allowance_managed_by: "cloudflare" as const } : {}),
     usage_as_of:
       typeof candidate.usage_as_of === "string" ? candidate.usage_as_of : null,
     allowances,
@@ -169,6 +172,10 @@ export function useUsageStatus(): UsageStatus | null {
               resets_at: json.resets_at ?? "",
               upsell_banner: json.upsell_banner === true,
               upgrade_eligible: json.upgrade_eligible === true,
+              cost_limit_reached:
+                typeof json.cost_limit_reached === "boolean"
+                  ? json.cost_limit_reached
+                  : null,
               hosted_ai: parseHostedAiUsage(json.hosted_ai),
             },
           });

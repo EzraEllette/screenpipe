@@ -20,9 +20,8 @@ import {
 } from '../services/cloudflare-ai-gateway';
 import {
   ARGUS_BACKGROUND_FALLBACK_MODEL,
-  prepareArgusBackgroundFallbackBody,
   isProviderQuotaOrBillingLimitError,
-  shouldUseArgusBackgroundFallback,
+  resolveArgusBackgroundFallbackBody,
 } from '../services/background-limit-fallback';
 import { getHostedAiCapacityUpgrade } from '../services/hosted-ai-policy';
 
@@ -438,9 +437,9 @@ export async function tryArgusBackgroundFallback(
   error: unknown,
   attemptModel: typeof tryModel = tryModel,
 ): Promise<Response | null> {
-  if (!shouldUseArgusBackgroundFallback({ enabled, error, body, env })) return null;
+  const fallbackBody = resolveArgusBackgroundFallbackBody({ enabled, error, body, env });
+  if (!fallbackBody) return null;
   try {
-    const fallbackBody = prepareArgusBackgroundFallbackBody(body);
     const response = await attemptModel(
       ARGUS_BACKGROUND_FALLBACK_MODEL,
       fallbackBody,

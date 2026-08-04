@@ -289,3 +289,19 @@ export function shouldUseArgusBackgroundFallback(input: {
 			isAccountLocalAllowanceError(input.error) ||
 			isProviderQuotaOrBillingLimitError(input.error));
 }
+
+/**
+ * Resolve the complete provider-compatible rescue request in one operation.
+ * Admission gates and provider failures both use this helper so no caller can
+ * select Argus while accidentally skipping its role, context, tool-schema, or
+ * output-token normalization.
+ */
+export function resolveArgusBackgroundFallbackBody(input: {
+	enabled: boolean;
+	error: unknown;
+	body: RequestBody;
+	env: Pick<Env, 'SCREENPIPE_QWEN35_API_KEY' | 'SCREENPIPE_QWEN35_URL'>;
+}): RequestBody | null {
+	if (!shouldUseArgusBackgroundFallback(input)) return null;
+	return prepareArgusBackgroundFallbackBody(input.body);
+}
