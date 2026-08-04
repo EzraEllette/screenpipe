@@ -229,6 +229,12 @@ async function pointerPressTestId(testId: string) {
   }, testId);
 }
 
+async function clickTestId(testId: string) {
+  const target = await waitForTestId(testId, 10_000);
+  await target.waitForClickable({ timeout: t(10_000) });
+  await target.click();
+}
+
 async function resizeCanvasBlockBottomRight(
   testId: string,
   delta: { x: number; y: number },
@@ -377,7 +383,7 @@ describe("Brain Live Views", function () {
     }
   });
 
-  it("installs the process map template as a connected Canvas", async () => {
+  it("hands the process map template to the Live View builder agent", async () => {
     await waitForAppReady();
     await openHomeWithDiagnostics();
     const existingViews = await invokeOrThrow<BrainView[]>("list_brain_views");
@@ -395,48 +401,66 @@ describe("Brain Live Views", function () {
     await waitForTestId("preview-live-view-template-process-map", 10_000).then(
       (element) => element.click(),
     );
+
+    const capturedPrefillKey = "e2eLiveViewBuilderPrefill";
+    await browser.execute((captureKey: string) => {
+      window.sessionStorage.removeItem(captureKey);
+      const originalSetItem = Storage.prototype.setItem;
+      Storage.prototype.setItem = function (key: string, value: string) {
+        if (this === window.sessionStorage && key === "pendingChatPrefill") {
+          originalSetItem.call(this, captureKey, value);
+        }
+        originalSetItem.call(this, key, value);
+      };
+    }, capturedPrefillKey);
+
     await waitForTestId("overview-apply-template", 10_000).then((element) =>
       element.click(),
     );
 
-    const selector = await waitForTestId("overview-dashboard-selector", 20_000);
-    await browser.waitUntil(
-      async () => (await selector.getText()).includes("Process map"),
-      {
-        timeout: t(20_000),
-        timeoutMsg: "Process map dashboard was not selected after install",
-      },
-    );
-    await waitForTestId("live-view-canvas", 15_000);
-    expect(await $("textarea[aria-label='Canvas note']").getValue()).toContain(
-      "Observed workflow → handoffs → friction → controls → improvement",
-    );
-    expect(await $$(`[data-testid^='canvas-arrow-']`)).toHaveLength(5);
-    const canvasText = (await browser.execute(
-      () => document.body?.innerText || "",
-    )) as string;
-    expect(canvasText).toContain("moves through");
-    expect(canvasText).toContain("must preserve");
-    await waitForTestId("canvas-fit", 10_000).then((element) =>
-      element.click(),
-    );
-    await browser.pause(300);
-    const screenshot = await saveScreenshot("brain-process-map-template");
-    expect(existsSync(screenshot)).toBe(true);
+    await waitForTestId("section-home", 20_000);
+    const capturedPrefill = (await browser.execute((captureKey: string) => {
+      const value = window.sessionStorage.getItem(captureKey);
+      return value ? JSON.parse(value) : null;
+    }, capturedPrefillKey)) as {
+      context?: string;
+      prompt?: string;
+      displayLabel?: string;
+      autoSend?: boolean;
+      source?: string;
+      useHomeChat?: boolean;
+      targetWindow?: string;
+    } | null;
 
-    const saved = await invokeOrThrow<CanvasDocument | null>(
-      "load_brain_view_canvas",
-      { viewId: "process-map" },
+    expect(capturedPrefill).not.toBeNull();
+    expect(capturedPrefill?.context).toBe(
+      "Create a Live View guided by “Process map”",
     );
-    expect(saved?.mode).toBe("canvas");
-    expect(saved?.arrows.map((arrow) => arrow.label)).toEqual([
-      "starts",
-      "moves through",
-      "reveals",
-      "must preserve",
-      "enables",
-    ]);
-    await invokeOrThrow("delete_brain_view", { id: "process-map" });
+    expect(capturedPrefill?.displayLabel).toBe(
+      "Build “Process map” with the Live View agent",
+    );
+    expect(capturedPrefill?.source).toBe("live-view-builder-agent");
+    expect(capturedPrefill?.autoSend).toBe(true);
+    expect(capturedPrefill?.useHomeChat).toBe(true);
+    expect(capturedPrefill?.targetWindow).toBe("home");
+    expect(capturedPrefill?.prompt).toContain('"title":"Trigger and outcome"');
+    expect(capturedPrefill?.prompt).toContain(
+      '"title":"Safe improvement path"',
+    );
+    expect(capturedPrefill?.prompt).not.toContain("automate-my-work");
+
+    const viewsAfterHandoff = await invokeOrThrow<BrainView[]>(
+      "list_brain_views",
+    );
+    expect(viewsAfterHandoff.some((view) => view.id === "process-map")).toBe(
+      false,
+    );
+
+    const screenshot = await saveScreenshot("brain-process-map-agent-handoff");
+    expect(existsSync(screenshot)).toBe(true);
+    await browser.execute((captureKey: string) => {
+      window.sessionStorage.removeItem(captureKey);
+    }, capturedPrefillKey);
   });
 
   it("shows requested range and per-block freshness honestly", async () => {
@@ -1089,14 +1113,21 @@ Refresh the assigned Live View output targets from source-backed activity.
       },
     );
 
+    await clickTestId("canvas-tools-toggle");
+    await waitForTestId("canvas-tools-panel", 10_000);
     const noteTool = await $("[data-testid='canvas-tool-note']");
     await noteTool.click();
-    expect(await noteTool.getAttribute("aria-pressed")).toBe("true");
+    const compactTools = await waitForTestId("canvas-tools-toggle", 10_000);
+    expect(await compactTools.getAttribute("aria-label")).toContain(
+      "note tool active",
+    );
     await clickEmptyCanvasSpace();
     const surface = await waitForTestId("live-view-canvas-surface", 10_000);
     const noteInput = await $("textarea[aria-label='Canvas note']");
     await noteInput.waitForDisplayed({ timeout: t(10_000) });
     await noteInput.setValue("Review the source evidence before automating.");
+    await clickTestId("canvas-tools-toggle");
+    await waitForTestId("canvas-tools-panel", 10_000);
     await $("[data-testid='canvas-fit']").click();
 
     const arrowTool = await $("[data-testid='canvas-tool-arrow']");
@@ -1144,6 +1175,54 @@ Refresh the assigned Live View output targets from source-backed activity.
     for (const size of [SUPPORTED_WINDOW_SIZES[0], SUPPORTED_WINDOW_SIZES[5]]) {
       await setCssWindowSize(size.width, size.height);
       await browser.pause(150);
+      const compactCanvasLayout = (await browser.execute(() => {
+        const canvasElement = document.querySelector<HTMLElement>(
+          "[data-testid='live-view-canvas']",
+        );
+        const toolbar = document.querySelector<HTMLElement>(
+          "[data-canvas-toolbar]",
+        );
+        const hint = document.querySelector<HTMLElement>(
+          "[data-testid='canvas-interaction-hint']",
+        );
+        const composer = document.querySelector<HTMLElement>(
+          "[data-testid='overview-floating-composer']",
+        );
+        if (!canvasElement || !toolbar || !hint || !composer) return null;
+        const canvasRect = canvasElement.getBoundingClientRect();
+        const toolbarRect = toolbar.getBoundingClientRect();
+        const hintRect = hint.getBoundingClientRect();
+        const composerRect = composer.getBoundingClientRect();
+        const overlaps = (a: DOMRect, b: DOMRect) =>
+          a.left < b.right &&
+          a.right > b.left &&
+          a.top < b.bottom &&
+          a.bottom > b.top;
+        return {
+          hintInsideCanvas:
+            hintRect.left >= canvasRect.left &&
+            hintRect.right <= canvasRect.right &&
+            hintRect.top >= canvasRect.top &&
+            hintRect.bottom <= canvasRect.bottom,
+          hintOverlapsToolbar: overlaps(hintRect, toolbarRect),
+          hintOverlapsComposer: overlaps(hintRect, composerRect),
+        };
+      })) as {
+        hintInsideCanvas: boolean;
+        hintOverlapsToolbar: boolean;
+        hintOverlapsComposer: boolean;
+      } | null;
+      expect(compactCanvasLayout).not.toBeNull();
+      expect(compactCanvasLayout!.hintInsideCanvas).toBe(true);
+      expect(compactCanvasLayout!.hintOverlapsToolbar).toBe(false);
+      expect(compactCanvasLayout!.hintOverlapsComposer).toBe(false);
+
+      await clickTestId("canvas-tools-toggle");
+      const toolsPanel = await waitForTestId("canvas-tools-panel", 10_000);
+      await toolsPanel.waitForDisplayed({ timeout: t(10_000) });
+      expect(
+        await $("[data-testid='canvas-interaction-hint']").isExisting(),
+      ).toBe(false);
       const canvasLayout = (await browser.execute(() => {
         const canvasElement = document.querySelector<HTMLElement>(
           "[data-testid='live-view-canvas']",
@@ -1198,6 +1277,7 @@ Refresh the assigned Live View output targets from source-backed activity.
       expect(canvasLayout!.toolbarBottom).toBeLessThanOrEqual(
         canvasLayout!.canvasBottom,
       );
+      await clickTestId("canvas-tools-close");
       await canvas.moveTo({ xOffset: 0, yOffset: 160 });
       await browser.keys(["Escape"]);
       await browser.pause(250);

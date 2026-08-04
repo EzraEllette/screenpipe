@@ -340,6 +340,25 @@ export class OpenAIProvider implements AIProvider {
 			this.client.chat.completions.create(p as ChatCompletionCreateParams & { stream: true }),
 		)) as OpenAIChatStream;
 
+		// OpenAI-compatible SDK streams are lazy: the HTTP request can succeed at
+		// `create()` time and only surface an upstream 429 when the first chunk is
+		// consumed. Prime that first chunk before returning a ReadableStream so the
+		// gateway's outer model cascade can still recognize allowance exhaustion and
+		// route paid background Pipes to Argus. Later mid-stream failures remain SSE
+		// errors because a response may already have reached the client by then.
+		const iterator = stream[Symbol.asyncIterator]();
+		const firstChunk = await iterator.next();
+		const primedStream = {
+			async *[Symbol.asyncIterator]() {
+				if (!firstChunk.done) yield firstChunk.value;
+				while (true) {
+					const next = await iterator.next();
+					if (next.done) return;
+					yield next.value;
+				}
+			},
+		};
+
 		// Capture scope fields for the error path below — `this` inside the
 		// ReadableStream start() refers to the controller, not the provider.
 		const modelForTags = body.model;
@@ -350,7 +369,7 @@ export class OpenAIProvider implements AIProvider {
 				try {
 					let finishReason: string | null = null;
 					let usage: any = null;
-					for await (const chunk of stream) {
+					for await (const chunk of primedStream) {
 						// include_usage delivers a final chunk with empty choices
 						// and the request's usage (incl. cached-token details)
 						if ((chunk as any).usage) {
