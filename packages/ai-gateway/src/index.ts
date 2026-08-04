@@ -17,32 +17,22 @@ import { handleVertexProxy, handleVertexModels } from './handlers/vertex-proxy';
 import { handleWebSearch } from './handlers/web-search';
 import { handleTinfoilAttestation, handleTinfoilProxy, parseTinfoilUsageMetrics } from './handlers/tinfoil-proxy';
 import {
-	getCostAccumulatorOrThrow,
-	getDailyUserCost,
 	getTranscriptionDailyCostOrThrow,
 	getNonStreamSettlementCost,
 	getStreamSettlementCost,
 	getSpendSummary,
 	inferProvider,
 	logCost,
-	monthlyCostKey,
-	trialCostKey,
 	resolveServedModel,
-	utcMonth,
 	type CostReservationShape,
 } from './services/cost-tracker';
-import {
-	getTranscriptionDailyCostCap,
-	resolveHostedAiTextCostLimits,
-} from './services/hosted-ai-cost-controls';
+import { getTranscriptionDailyCostCap } from './services/hosted-ai-cost-controls';
 import { trackResponseUsage } from './utils/stream-usage-tracker';
 import { pruneRuntimeState } from './services/runtime-state-maintenance';
 import { resolveLatencyClass, isBackgroundRequest } from './utils/latency';
 import {
 	reserveDailyCostCap,
 	withDailyCostSettlement,
-	getDailyUserCostForCap,
-	type DailyCostHold,
 } from './services/cost-cap';
 import {
 	logReservedCost,
@@ -61,7 +51,6 @@ import {
 } from './services/free-chat-limit';
 import {
 	getHostedAiAllowedModels,
-	getHostedAiIncludedCredits,
 	getHostedAiPlan,
 	hasPaidHostedAiPlan,
 	isHostedAiUpgradeEligible,
@@ -75,10 +64,7 @@ import {
 	paidHostedAiRouteError,
 } from './services/hosted-ai-errors';
 import { resolveModelAlias } from './providers';
-import {
-	buildHostedChatGatewayContext,
-	isHostedChatGatewayEnabled,
-} from './services/cloudflare-ai-gateway';
+import { buildHostedChatGatewayContext } from './services/cloudflare-ai-gateway';
 // import { handleTTSWebSocketUpgrade } from './handlers/voice-ws';
 
 export { RateLimiter };
@@ -314,97 +300,33 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 			const usageAccountPlan = authResult.tier === 'anonymous' && authResult.accountPlan === 'unknown'
 				? 'free'
 				: authResult.accountPlan;
-			const cloudflareManaged = isHostedChatGatewayEnabled(env);
 			const status = await getUsageStatus(
 				env,
 				authResult.deviceId,
 				usageTier,
-				cloudflareManaged ? undefined : authResult.userId,
+				undefined,
 				usageAccountPlan,
 			);
-			if (cloudflareManaged) {
-				const enriched = {
-					...status,
-					// Cloudflare owns the 30-day spend allowance in this mode. The
-					// legacy query counters remain in the compatibility envelope, but
-					// cannot be presented as a live provider-cost meter.
-					upsell_banner: false,
-					cost_limit_reached: null,
-					upgrade_eligible: isHostedAiUpgradeEligible(authResult),
-					hosted_ai: {
-						plan: authResult.service === true
-							? 'internal'
-							: getHostedAiPlan(usageAccountPlan) ?? 'unknown',
-						trial: authResult.hostedAiTrial === true,
-						allowance_managed_by: 'cloudflare',
-						included_credits: null,
-						used_credits: null,
-						remaining_credits: null,
-						model_access: [...getHostedAiAllowedModels(usageAccountPlan)],
-						upgrade_url: isHostedAiUpgradeEligible(authResult)
-							? 'https://screenpi.pe/account/billing'
-							: null,
-						can_buy_credits: false,
-						byok_supported: true,
-					},
-				};
-				return addCorsHeaders(createSuccessResponse(enriched));
-			}
-			// Enrich with cost-based limit flag (NOT the raw $ numbers — those
-			// are our internal margin and shouldn't leak to any client/user).
-			// Stored query credits do not raise the cash ceiling. Credit-funded
-			// provider spend needs consumptive accounting before it can safely do so.
-			const dailyCost = await getDailyUserCostForCap(env, authResult.deviceId);
-			let maxCost: number;
-			let monthlyCap: number;
-			try {
-				const limits = resolveHostedAiTextCostLimits(
-					usageAccountPlan,
-					env,
-					authResult.hostedAiTrial === true,
-				);
-				maxCost = limits.daily;
-				monthlyCap = limits.monthly;
-			} catch (error) {
-				console.error('usage cost control configuration unavailable', error);
-				return addCorsHeaders(createErrorResponse(503, JSON.stringify({
-					error: 'cost_control_unavailable',
-					message: 'Hosted AI usage controls are temporarily unavailable. Try again shortly.',
-				})));
-			}
-			let monthlyCost: number | null = null;
-			try {
-				monthlyCost = await getCostAccumulatorOrThrow(
-					env,
-					authResult.hostedAiTrial === true
-						? trialCostKey(authResult.deviceId)
-						: monthlyCostKey(authResult.deviceId),
-					authResult.hostedAiTrial === true ? 'trial' : utcMonth(),
-				);
-			} catch {
-				// Admission still fails closed. The status route stays available but
-				// marks usage unknown instead of pretending the customer spent zero.
-			}
-			const includedCredits = getHostedAiIncludedCredits(usageAccountPlan);
-			const usedCredits = monthlyCost === null ? null : Math.ceil(monthlyCost * 100);
 			const enriched = {
 				...status,
-				cost_limit_reached: dailyCost >= maxCost || (monthlyCost !== null && monthlyCost >= monthlyCap),
+				// Cloudflare owns the 30-day spend allowance. Legacy query counters
+				// remain in the compatibility envelope, but are not a provider-cost meter.
+				upsell_banner: false,
+				cost_limit_reached: null,
 				upgrade_eligible: isHostedAiUpgradeEligible(authResult),
-				upsell_banner: status.upsell_banner === true && isHostedAiUpgradeEligible(authResult),
 				hosted_ai: {
-					plan: getHostedAiPlan(usageAccountPlan) ?? 'unknown',
+					plan: authResult.service === true
+						? 'internal'
+						: getHostedAiPlan(usageAccountPlan) ?? 'unknown',
 					trial: authResult.hostedAiTrial === true,
-					included_credits: includedCredits,
-					used_credits: usedCredits,
-					remaining_credits: usedCredits === null
-						? null
-						: Math.max(0, includedCredits - usedCredits),
+					allowance_managed_by: 'cloudflare',
+					included_credits: null,
+					used_credits: null,
+					remaining_credits: null,
 					model_access: [...getHostedAiAllowedModels(usageAccountPlan)],
 					upgrade_url: isHostedAiUpgradeEligible(authResult)
 						? 'https://screenpi.pe/account/billing'
 						: null,
-					// Legacy query credits do not raise the provider-cost ceiling yet.
 					can_buy_credits: false,
 					byok_supported: true,
 				},
@@ -534,8 +456,8 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 			// already rewrote it to free 'auto'), free weight-0 models meter
 			// against the high `freeRpm` bucket — so "switch to a free model to
 			// avoid rate limits" actually works. Paid models keep the low `rpm`.
-			// The two buckets are independent; the daily cost cap below is the
-			// real backstop against runaway free loops.
+			// The two buckets are independent; Cloudflare spend rules remain the
+			// cumulative backstop against runaway hosted loops.
 			const rateLimit = await checkRateLimit(request, env, authResult, {
 				freeModel: isFreeModel(body.model),
 			});
@@ -548,49 +470,9 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 				return rateLimit.response;
 			}
 
-			const cloudflareGateway = isHostedChatGatewayEnabled(env);
-			// Legacy mode retains the paid weighted-query admission gate. In
-			// Cloudflare mode the provider-cost spend rules are authoritative for
-			// this endpoint; Free's separate two-message lease remains above.
-			let usage: Awaited<ReturnType<typeof trackUsage>> | null = null;
-			if (!cloudflareGateway) {
-				const ipAddress = request.headers.get('cf-connecting-ip') || undefined;
-				usage = await trackUsage(env, authResult.deviceId, usageTier, authResult.userId, ipAddress, body.model);
-			}
-			if (usage && !usage.allowed) {
-				console.warn('hosted AI admission rejected', {
-					gate: 'daily_query',
-					tier: authResult.tier,
-					accountPlan: authResult.accountPlan,
-				});
-				const creditsExhausted = (usage.creditsRemaining ?? 0) <= 0;
-				return addCorsHeaders(createErrorResponse(429, JSON.stringify({
-					error: creditsExhausted ? 'credits_exhausted' : 'daily_limit_exceeded',
-					message: creditsExhausted
-						? `You've used all free queries and have no credits remaining. Buy more at screenpi.pe`
-						: `You've used all ${usage.limit} free AI queries for today. Resets at ${usage.resetsAt}`,
-					used_today: usage.used,
-					limit_today: usage.limit,
-					resets_at: usage.resetsAt,
-					tier: usageTier,
-					credits_remaining: usage.creditsRemaining ?? 0,
-					upgrade_options: {
-						buy_credits: {
-							url: 'https://screenpi.pe/onboarding',
-							benefit: 'Credits extend your daily limit — use anytime',
-						},
-						subscribe: {
-							url: 'https://screenpi.pe/onboarding',
-							benefit: 'Frontier Claude and GPT models, higher hosted AI limits, and encrypted sync',
-							price: '$29/mo',
-						},
-					},
-				})));
-			}
-
 			// Reserve the Free-preview allowance only after every other request gate.
-			// Its legacy fail-open behavior is still bounded by the fail-closed shared
-			// spend lease acquired immediately below.
+			// Its D1 lease and conservative budget remain in force alongside the
+			// two-message cap, request-size ceiling, attempt ceiling, and RPM limit.
 			let freeChatLease: FreeChatLease | null = null;
 			if (freeChat.mode === 'metered') {
 				const reservation = await reserveFreeChatRequest(env, freeChat);
@@ -600,54 +482,8 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 				freeChatLease = reservation.lease;
 			}
 
-			// Serialize priced work within its foreground/background lane. A scheduled
-			// pipe must not block a user who is actively waiting in chat.
 			const latency = resolveLatencyClass(request, body, env);
-			const gatewayContext = cloudflareGateway
-				? await buildHostedChatGatewayContext(authResult, body.model, latency)
-				: undefined;
-			let dailyCostReservation: DailyCostHold | null = null;
-			if (!cloudflareGateway) {
-				const costReservation = await reserveDailyCostCap(
-					env,
-					authResult.deviceId,
-					authResult.tier,
-					body.model,
-					new Date(),
-					isBackgroundRequest(request) ? 'background' : 'interactive',
-					costReservationShape(body, rawRequestBytes),
-					authResult.accountPlan,
-					authResult.hostedAiTrial === true,
-				);
-				if (!costReservation.allowed) {
-					let rejectionReason: string | undefined;
-					try {
-						const payload = await costReservation.response.clone().json() as { error?: unknown };
-						if (typeof payload.error === 'string') {
-							rejectionReason = payload.error;
-							try {
-								const nested = JSON.parse(payload.error) as { error?: unknown };
-								if (typeof nested.error === 'string') rejectionReason = nested.error;
-							} catch {
-								// The error was already a plain code.
-							}
-						}
-					} catch {
-						// Preserve the original response even if diagnostic decoding fails.
-					}
-					console.warn('hosted AI admission rejected', {
-						gate: 'cost_reservation',
-						reason: rejectionReason,
-						tier: authResult.tier,
-						accountPlan: authResult.accountPlan,
-						hostedAiTrial: authResult.hostedAiTrial === true,
-						status: costReservation.response.status,
-					});
-					if (freeChatLease) await releaseFreeChatLease(env, freeChatLease);
-					return costReservation.response;
-				}
-				dailyCostReservation = costReservation.reservation;
-			}
+			const gatewayContext = await buildHostedChatGatewayContext(authResult, body.model, latency);
 
 			// Route latency-tolerant (background) traffic to the cheaper flex tier.
 			let leaseReleased = false;
@@ -656,25 +492,17 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 				leaseReleased = true;
 				await releaseFreeChatLease(env, freeChatLease);
 			};
-			let costSettlement: Promise<boolean>;
 			const attachLeaseRelease = (outgoing: Response): Response => {
-				const costBound = withDailyCostSettlement(
-					outgoing,
-					env,
-					dailyCostReservation,
-					costSettlement,
-				);
-				if (!freeChatLease) return costBound;
-				return withFreeChatLeaseRelease(costBound, () => {
+				if (!freeChatLease) return outgoing;
+				return withFreeChatLeaseRelease(outgoing, () => {
 					const release = releaseLease();
 					ctx.waitUntil(release);
 					return release;
 				});
 			};
 
-			// Add credit info header if paid via credits. Time it for the cost log
-			// (Date.now advances across the upstream fetch I/O) — ≈ TTFB for stream,
-			// total for non-stream. Includes any router/embed overhead.
+			// Time the request for D1 telemetry (≈ TTFB for streams, total latency
+			// for non-stream responses, including router/embed overhead).
 			const reqStart = Date.now();
 			try {
 				let response = await handleChatCompletions(
@@ -708,21 +536,18 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 					: servedModel;
 
 				// Cloudflare records blocked attempts with no provider cost. Keep D1 as
-				// a completed-cost comparison only; estimating a 429 with default token
-				// counts would manufacture spend that the Gateway correctly reports as $0.
-				if (cloudflareGateway && !response.ok) {
-					costSettlement = Promise.resolve(true);
-				// Log cost — for streaming, intercept SSE events to get real token counts.
-				} else if (body.stream) {
+				// completed-cost telemetry only; estimating a 429 with default token
+				// counts would manufacture spend that the Gateway reports as $0.
+				let costLog: Promise<boolean> | null = null;
+				if (response.ok && body.stream) {
 					const { response: trackedResponse, usage: usagePromise } = trackResponseUsage(response, 'openai');
 					response = trackedResponse;
-					costSettlement = usagePromise.then(u => logCost(env, {
-						settlement_id: dailyCostReservation?.key,
+					costLog = usagePromise.then(u => logCost(env, {
 						device_id: authResult.deviceId,
 						user_id: authResult.userId,
 						tier: authResult.tier,
 						hosted_ai_trial: authResult.hostedAiTrial === true,
-						budgeted: !cloudflareGateway,
+						budgeted: false,
 						provider: inferProvider(servedModel),
 						model: pricedModel,
 						input_tokens: u.input_tokens ?? null,
@@ -735,19 +560,16 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 							cache_read_tokens: u.cache_read_input_tokens,
 							cache_creation_tokens: u.cache_creation_input_tokens,
 							usage_complete: u.usage_complete,
-						}, dailyCostReservation?.reservedMicroUsd),
+						}),
 						endpoint: '/v1/chat/completions',
 						stream: true,
 						latency_ms: latencyMs,
 						router_tier: routerTier,
-						lane: dailyCostReservation?.lane,
-						cost_ledger_epoch: dailyCostReservation?.ledgerEpoch,
-						cost_total_ledger_epoch: dailyCostReservation?.totalLedgerEpoch,
 					}));
-				} else {
-					costSettlement = settleActualOrReservedCost(
+				} else if (response.ok) {
+					costLog = settleActualOrReservedCost(
 						env,
-						dailyCostReservation,
+						null,
 						reservedCostAttribution(
 							authResult,
 							pricedModel,
@@ -765,12 +587,11 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 							const cacheRead = json?.usage?.prompt_tokens_details?.cached_tokens ?? null;
 							const cacheCreation = json?.usage?.cache_creation_input_tokens ?? null;
 							return await logCost(env, {
-								settlement_id: dailyCostReservation?.key,
 								device_id: authResult.deviceId,
 								user_id: authResult.userId,
 								tier: authResult.tier,
 								hosted_ai_trial: authResult.hostedAiTrial === true,
-								budgeted: !cloudflareGateway,
+								budgeted: false,
 								provider: inferProvider(servedModel),
 								model: pricedModel,
 								input_tokens: inputTokens,
@@ -780,39 +601,19 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 								estimated_cost_usd: getNonStreamSettlementCost(pricedModel, inputTokens, outputTokens, {
 									cache_read_tokens: cacheRead,
 									cache_creation_tokens: cacheCreation,
-								}, dailyCostReservation?.reservedMicroUsd),
+								}),
 								endpoint: '/v1/chat/completions',
 								stream: false,
 								latency_ms: latencyMs,
 								router_tier: routerTier,
-								lane: dailyCostReservation?.lane,
-								cost_ledger_epoch: dailyCostReservation?.ledgerEpoch,
-								cost_total_ledger_epoch: dailyCostReservation?.totalLedgerEpoch,
 							});
 						},
 					);
 				}
-
-				if (usage?.paidVia === 'credits' && usage.creditsRemaining !== undefined) {
-					const newResponse = new Response(response.body, response);
-					newResponse.headers.set('X-Credits-Remaining', String(usage.creditsRemaining));
-					newResponse.headers.set('X-Paid-Via', 'credits');
-					return attachLeaseRelease(newResponse);
-				}
+				if (costLog) ctx.waitUntil(costLog);
 				return attachLeaseRelease(response);
 			} catch (error) {
 				await releaseLease();
-				await settleProviderException(
-					env,
-					dailyCostReservation,
-					reservedCostAttribution(
-						authResult,
-						body.model,
-						'/v1/chat/completions',
-						body.stream === true,
-						{ latencyMs: Date.now() - reqStart },
-					),
-				);
 				throw error;
 			}
 		}

@@ -9,7 +9,6 @@ import {
 	buildHostedChatGatewayContext,
 	gatewayProviderForModel,
 	getHostedChatGatewayConnection,
-	getHostedChatGatewayMode,
 	isCloudflareSpendLimitError,
 	withHostedChatLane,
 } from '../services/cloudflare-ai-gateway';
@@ -26,12 +25,6 @@ function auth(overrides: Partial<AuthResult> = {}): AuthResult {
 }
 
 describe('Cloudflare hosted-chat metadata', () => {
-	it('defaults safely to legacy unless cloudflare is explicit', () => {
-		expect(getHostedChatGatewayMode({})).toBe('legacy');
-		expect(getHostedChatGatewayMode({ HOSTED_CHAT_GATEWAY_MODE: 'legacy' })).toBe('legacy');
-		expect(getHostedChatGatewayMode({ HOSTED_CHAT_GATEWAY_MODE: 'CLOUDFLARE' })).toBe('cloudflare');
-	});
-
 	it('hashes the account identity and sends only the four reviewed fields', async () => {
 		const first = await buildHostedChatGatewayContext(auth(), 'auto', 'interactive');
 		const second = await buildHostedChatGatewayContext(
@@ -76,12 +69,11 @@ describe('Cloudflare hosted-chat metadata', () => {
 });
 
 describe('Cloudflare provider-native connection', () => {
-	it('uses the Workers binding, BYOK, metadata-only logs, and disables Gateway retries/cache', async () => {
+	it('uses explicit Gateway auth, BYOK, metadata-only logs, and disables retries/cache', async () => {
 		const calls: string[] = [];
 		const env = {
-			HOSTED_CHAT_GATEWAY_MODE: 'cloudflare',
 			CLOUDFLARE_AI_GATEWAY_ID: 'screenpipe-staging',
-			CLOUDFLARE_AI_GATEWAY_TOKEN: 'local-oauth-token',
+			CLOUDFLARE_AI_GATEWAY_TOKEN: 'authenticated-gateway-token',
 			AI: {
 				gateway: (id: string) => ({
 					getUrl: async (provider: string) => {
@@ -99,7 +91,7 @@ describe('Cloudflare provider-native connection', () => {
 		expect(connection.maxRetries).toBe(0);
 		expect(connection.defaultHeaders.Authorization).toBeNull();
 		expect(connection.defaultHeaders['cf-aig-byok-alias']).toBe('default');
-		expect(connection.defaultHeaders['cf-aig-authorization']).toBe('Bearer local-oauth-token');
+		expect(connection.defaultHeaders['cf-aig-authorization']).toBe('Bearer authenticated-gateway-token');
 		expect(connection.defaultHeaders['cf-aig-skip-cache']).toBe('true');
 		expect(connection.defaultHeaders['cf-aig-max-attempts']).toBe('1');
 		expect(connection.defaultHeaders['cf-aig-collect-log-payload']).toBe('false');
@@ -108,7 +100,6 @@ describe('Cloudflare provider-native connection', () => {
 
 	it('uses the explicit provider-native Gateway URL during local development', async () => {
 		const env = {
-			HOSTED_CHAT_GATEWAY_MODE: 'cloudflare',
 			CLOUDFLARE_AI_GATEWAY_ID: 'gateway-staging',
 			CLOUDFLARE_AI_GATEWAY_BASE_URL:
 				'https://gateway.ai.cloudflare.com/v1/account-id/gateway-staging/compat/chat/completions',
@@ -121,6 +112,20 @@ describe('Cloudflare provider-native connection', () => {
 		expect(connection.baseURL).toBe(
 			'https://gateway.ai.cloudflare.com/v1/account-id/gateway-staging/anthropic',
 		);
+	});
+
+	it.each([
+		['CLOUDFLARE_AI_GATEWAY_ID', { CLOUDFLARE_AI_GATEWAY_TOKEN: 'gateway-token' }],
+		['CLOUDFLARE_AI_GATEWAY_TOKEN', { CLOUDFLARE_AI_GATEWAY_ID: 'gateway-id' }],
+	] as const)('fails closed when %s is missing', async (name, partialEnv) => {
+		const context = await buildHostedChatGatewayContext(auth(), 'gpt-5.6-luna', 'interactive');
+		await expect(getHostedChatGatewayConnection({
+			...partialEnv,
+			AI: { gateway: () => { throw new Error('binding must not be called'); } },
+		} as unknown as Env, 'openai', context)).rejects.toMatchObject({
+			status: 503,
+			message: `${name} is not configured`,
+		});
 	});
 
 	it('routes only OpenAI and Anthropic hosted models through the Gateway', () => {

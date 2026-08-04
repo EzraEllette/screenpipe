@@ -83,39 +83,6 @@ describe('Cloudflare hosted-chat routing', () => {
 		]);
 	});
 
-	it('keeps the legacy fallback path free of Gateway context', async () => {
-		const seen: Array<{ model: string; context: unknown }> = [];
-		const attempts = mock(async (
-			model: string,
-			_requestBody: RequestBody,
-			_env: Env,
-			_ctx: 'auto' | 'fallback' | 'explicit',
-			_flex: boolean,
-			gatewayContext?: unknown,
-		) => {
-			seen.push({ model, context: gatewayContext });
-			if (seen.length === 1) throw Object.assign(new Error('provider unavailable'), { status: 503 });
-			return new Response('ok');
-		});
-
-		const result = await runChain(
-			['gpt-5.6-luna', 'claude-sonnet-5'],
-			body,
-			{} as Env,
-			'fallback',
-			false,
-			2,
-			undefined,
-			attempts,
-		);
-
-		expect('response' in result).toBe(true);
-		expect(seen).toEqual([
-			{ model: 'gpt-5.6-luna', context: undefined },
-			{ model: 'claude-sonnet-5', context: undefined },
-		]);
-	});
-
 	it('renders a stable terminal contract for JSON and streaming clients', async () => {
 		const autoContext = await buildHostedChatGatewayContext(basicAuth, 'auto', 'interactive');
 		const error = new HostedChatAllowanceExceededError(autoContext);

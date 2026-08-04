@@ -66,11 +66,9 @@ GEMINI_FLEX_INTERACTIVE = "false"
 MODEL_GATING_ENABLED = "true"
 PIPE_FRONTIER_POLICY = "reject"
 
-# Hosted-chat AI Gateway rollout is managed in Worker dashboard variables so a
-# deploy cannot flip production (keep_vars=true above):
-# - HOSTED_CHAT_GATEWAY_MODE: "legacy" (default/rollback) or "cloudflare".
-# - CLOUDFLARE_AI_GATEWAY_ID: same-account Gateway with default OpenAI and
-#   Anthropic BYOK keys. See CLOUDFLARE_AI_GATEWAY_ROLLOUT.md.
+# Hosted chat requires Worker dashboard secrets/variables (preserved by
+# keep_vars=true above): CLOUDFLARE_AI_GATEWAY_ID and the explicit
+# CLOUDFLARE_AI_GATEWAY_TOKEN. The Gateway owns cumulative spend enforcement.
 
 # Cost / flex tuning knobs — read with a code default, so they live in the CF
 # dashboard (Settings → Variables), not here, and take effect with no redeploy:

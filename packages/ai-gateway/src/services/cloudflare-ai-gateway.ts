@@ -5,7 +5,6 @@
 import type { AuthResult, Env } from '../types';
 import { getHostedAiPlan } from './hosted-ai-policy';
 
-export type HostedChatGatewayMode = 'legacy' | 'cloudflare';
 export type HostedChatPlan = 'free' | 'basic' | 'business' | 'internal';
 export type HostedChatLane = 'auto' | 'explicit';
 export type HostedChatWorkload = 'interactive' | 'background';
@@ -51,21 +50,13 @@ export class HostedChatAllowanceExceededError extends Error {
 class HostedChatGatewayConfigurationError extends Error {
 	status = 503;
 	transient = false;
+	userMessage: string;
 
 	constructor(message: string) {
 		super(message);
 		this.name = 'HostedChatGatewayConfigurationError';
+		this.userMessage = message;
 	}
-}
-
-export function getHostedChatGatewayMode(env: Pick<Env, 'HOSTED_CHAT_GATEWAY_MODE'>): HostedChatGatewayMode {
-	return String(env.HOSTED_CHAT_GATEWAY_MODE ?? '').trim().toLowerCase() === 'cloudflare'
-		? 'cloudflare'
-		: 'legacy';
-}
-
-export function isHostedChatGatewayEnabled(env: Pick<Env, 'HOSTED_CHAT_GATEWAY_MODE'>): boolean {
-	return getHostedChatGatewayMode(env) === 'cloudflare';
 }
 
 function collapsePlan(auth: AuthResult): HostedChatPlan {
@@ -136,11 +127,7 @@ function localGatewayProviderUrl(baseUrl: string, gatewayId: string, provider: C
 	return `${url.origin}${gatewayRoot}/${provider}`;
 }
 
-/**
- * Resolve a pre-authenticated provider-native Gateway URL from the Workers AI
- * binding. Provider auth headers are explicitly removed so Cloudflare injects
- * the provider's `default` BYOK key instead of receiving a Worker secret.
- */
+/** Resolve a provider-native Gateway URL with explicit Gateway authentication. */
 export async function getHostedChatGatewayConnection(
 	env: Env,
 	provider: CloudflareGatewayProvider,
@@ -150,8 +137,9 @@ export async function getHostedChatGatewayConnection(
 	if (!gatewayId) {
 		throw new HostedChatGatewayConfigurationError('CLOUDFLARE_AI_GATEWAY_ID is not configured');
 	}
-	if (!env.AI || typeof env.AI.gateway !== 'function') {
-		throw new HostedChatGatewayConfigurationError('Workers AI binding is not configured');
+	const gatewayToken = String(env.CLOUDFLARE_AI_GATEWAY_TOKEN ?? '').trim();
+	if (!gatewayToken) {
+		throw new HostedChatGatewayConfigurationError('CLOUDFLARE_AI_GATEWAY_TOKEN is not configured');
 	}
 
 	const defaultHeaders: Record<string, string | null> = {
@@ -160,21 +148,27 @@ export async function getHostedChatGatewayConnection(
 		'cf-aig-collect-log-payload': 'false',
 		'cf-aig-max-attempts': '1',
 		'cf-aig-byok-alias': 'default',
+		'cf-aig-authorization': gatewayToken.toLowerCase().startsWith('bearer ')
+			? gatewayToken
+			: `Bearer ${gatewayToken}`,
 	};
-	const localGatewayToken = String(env.CLOUDFLARE_AI_GATEWAY_TOKEN ?? '').trim();
-	if (localGatewayToken) {
-		defaultHeaders['cf-aig-authorization'] = localGatewayToken.toLowerCase().startsWith('bearer ')
-			? localGatewayToken
-			: `Bearer ${localGatewayToken}`;
-	}
 	if (provider === 'openai') defaultHeaders.Authorization = null;
 	else defaultHeaders['x-api-key'] = null;
 	const localBaseUrl = String(env.CLOUDFLARE_AI_GATEWAY_BASE_URL ?? '').trim();
+	let baseURL: string;
+	if (localBaseUrl) {
+		baseURL = localGatewayProviderUrl(localBaseUrl, gatewayId, provider);
+	} else {
+		if (!env.AI || typeof env.AI.gateway !== 'function') {
+			throw new HostedChatGatewayConfigurationError('Workers AI binding is not configured');
+		}
+		// The binding resolves the same-account URL only. Authenticated Gateway
+		// still requires the explicit cf-aig-authorization token above.
+		baseURL = await env.AI.gateway(gatewayId).getUrl(provider);
+	}
 
 	return {
-		baseURL: localBaseUrl
-			? localGatewayProviderUrl(localBaseUrl, gatewayId, provider)
-			: await env.AI.gateway(gatewayId).getUrl(provider),
+		baseURL,
 		// Both SDKs require a value at construction time. The null header above
 		// removes it from the actual request before Cloudflare injects BYOK.
 		apiKey: 'cloudflare-byok',

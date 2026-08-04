@@ -15,6 +15,9 @@ const MIGRATIONS_DIR = join(GATEWAY_ROOT, 'migrations');
 
 export const LOCAL_GATEWAY_SERVICE_TOKEN = 'screenpipe-local-e2e-service-token';
 export const LOCAL_GATEWAY_DEVICE_ID = 'screenpipe-local-e2e-device';
+export const LOCAL_CLOUDFLARE_GATEWAY_TOKEN = 'screenpipe-local-e2e-gateway-token';
+export const LOCAL_CLOUDFLARE_OPENAI_CHAT_URL =
+	'https://gateway.ai.cloudflare.com/v1/local-account/screenpipe-local-e2e/openai/chat/completions';
 
 type PrivateControlName = keyof typeof TEST_PRIVATE_COST_CONTROLS;
 
@@ -28,6 +31,7 @@ export interface LocalGatewayOutboundRequest {
 	url: string;
 	method: string;
 	body: unknown;
+	headers: Record<string, string>;
 	expected: boolean;
 }
 
@@ -148,7 +152,7 @@ function jsonBindings(overrides: LocalGatewayHarnessOptions['privateCostControls
  *
  * The harness bundles the production Worker, provisions an in-memory D1 with
  * every checked-in migration, and intercepts all Worker outbound traffic.
- * Only the exact OpenAI chat endpoint receives a synthetic response; every
+	 * Only the exact Cloudflare provider-native endpoint receives a synthetic response; every
  * other outbound request is recorded and rejected with status 599.
  */
 export class LocalGatewayHarness {
@@ -180,7 +184,10 @@ export class LocalGatewayHarness {
 				port: options.port ?? 0,
 				bindings: {
 					...jsonBindings(options.privateCostControls),
-					OPENAI_API_KEY: 'screenpipe-local-e2e-only',
+					CLOUDFLARE_AI_GATEWAY_ID: 'screenpipe-local-e2e',
+					CLOUDFLARE_AI_GATEWAY_TOKEN: LOCAL_CLOUDFLARE_GATEWAY_TOKEN,
+					CLOUDFLARE_AI_GATEWAY_BASE_URL:
+						'https://gateway.ai.cloudflare.com/v1/local-account/screenpipe-local-e2e/compat/chat/completions',
 					AI_GATEWAY_SERVICE_TOKEN: LOCAL_GATEWAY_SERVICE_TOKEN,
 					MODEL_GATING_ENABLED: 'true',
 					PIPE_FRONTIER_POLICY: 'reject',
@@ -198,11 +205,12 @@ export class LocalGatewayHarness {
 							.text()
 							.catch(() => null);
 					}
-					const expected = request.method === 'POST' && request.url === 'https://api.openai.com/v1/chat/completions';
+					const expected = request.method === 'POST' && request.url === LOCAL_CLOUDFLARE_OPENAI_CHAT_URL;
 					harness.outboundRequests.push({
 						url: request.url,
 						method: request.method,
 						body,
+						headers: Object.fromEntries(request.headers),
 						expected,
 					});
 					if (!expected) {

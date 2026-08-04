@@ -140,13 +140,11 @@ export interface GeminiResponse {
 
 export interface Env {
 	AI: Ai;
-	/** Hosted chat rollout switch. Any value other than `cloudflare` is legacy. */
-	HOSTED_CHAT_GATEWAY_MODE?: string;
-	/** Same-account Cloudflare AI Gateway used by the Workers AI binding. */
+	/** Same-account Cloudflare AI Gateway used for provider-billed hosted chat. */
 	CLOUDFLARE_AI_GATEWAY_ID?: string;
 	/** Local-dev only: Gateway root or compat chat URL when remote binding URL resolution is unavailable. */
 	CLOUDFLARE_AI_GATEWAY_BASE_URL?: string;
-	/** Local-dev only: authenticate provider-native fetches made off-platform. */
+	/** Authenticated Gateway token required for every provider-native request. */
 	CLOUDFLARE_AI_GATEWAY_TOKEN?: string;
 	OPENAI_API_KEY: string;
 	/** Runner-only bearer for trusted backend jobs. Stored as a Worker secret. */

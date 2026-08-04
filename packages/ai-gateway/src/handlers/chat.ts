@@ -222,15 +222,17 @@ async function tryModel(
   env: Env,
   ctx: 'auto' | 'fallback' | 'explicit',
   flexEligible: boolean = false,
-  gatewayContext?: HostedChatGatewayContext,
+  gatewayContext: HostedChatGatewayContext,
 ): Promise<Response> {
   try {
     // Resolve legacy aliases up front so both provider selection AND the
     // upstream request body see the canonical name. Otherwise the provider
     // receives a body.model that its registry rejects.
     model = resolveModelAlias(model);
-    const gatewayProvider = gatewayContext ? gatewayProviderForModel(model) : null;
-    const connection = gatewayProvider && gatewayContext
+    const gatewayProvider = gatewayProviderForModel(model);
+    // Internal zero-cost models retain their dedicated provider; every
+    // provider-billed hosted chat model must use this Gateway connection.
+    const connection = gatewayProvider
       ? await getHostedChatGatewayConnection(env, gatewayProvider, gatewayContext)
       : undefined;
     const provider = createProvider(model, env, connection);
@@ -270,7 +272,7 @@ async function tryModel(
       throw flexErr;
     }
   } catch (error: any) {
-    if (gatewayContext && isCloudflareSpendLimitError(error)) {
+    if (isCloudflareSpendLimitError(error)) {
       error = new HostedChatAllowanceExceededError(gatewayContext);
     }
     if (isHostedChatAllowanceError(error)) {
@@ -400,7 +402,7 @@ export async function runChain(
   ctx: 'auto' | 'fallback',
   flexEligible: boolean = false,
   maxAttempts: number = chain.length,
-  gatewayContext?: HostedChatGatewayContext,
+  gatewayContext: HostedChatGatewayContext,
   attemptModel: typeof tryModel = tryModel,
 ): Promise<{ response: Response; model: string } | { error: any; lastModel: string }> {
   let lastError: any = null;
@@ -557,8 +559,8 @@ export async function handleChatCompletions(
   options: {
     freePreview?: boolean;
     efficientOnly?: boolean;
-    gatewayContext?: HostedChatGatewayContext;
-  } = {},
+    gatewayContext: HostedChatGatewayContext;
+  },
 ): Promise<Response> {
   // A request with no messages at all can never complete: OpenAI would
   // answer the injected system hint below, and Anthropic 400s outright once
@@ -598,9 +600,7 @@ export async function handleChatCompletions(
   // Background frontier policy can change an explicit request to Auto inside
   // this handler. Resolve the lane only after that final rewrite, then keep the
   // same metadata across difficulty routing and every provider fallback.
-  const gatewayContext = options.gatewayContext
-    ? withHostedChatLane(options.gatewayContext, body.model)
-    : undefined;
+  const gatewayContext = withHostedChatLane(options.gatewayContext, body.model);
 
   // Flex (Vertex's 50%-off, cache-read-discounted Gemini lane) now applies to
   // interactive Gemini too, not just background — see isFlexEligible. tryModel

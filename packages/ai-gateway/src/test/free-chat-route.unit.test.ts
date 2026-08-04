@@ -123,10 +123,11 @@ describe('/v1/chat/completions free-plan route policy', () => {
 		}), env, ctx);
 		const body = await response.json() as {
 			tier: string;
-			cost_limit_reached: boolean;
+			cost_limit_reached: null;
 			hosted_ai: {
 				plan: string;
-				included_credits: number;
+				allowance_managed_by: string;
+				included_credits: null;
 				model_access: string[];
 			};
 		};
@@ -134,10 +135,11 @@ describe('/v1/chat/completions free-plan route policy', () => {
 		expect(response.status).toBe(200);
 		expect(body).toMatchObject({
 			tier: 'anonymous',
-			cost_limit_reached: false,
+			cost_limit_reached: null,
 			hosted_ai: {
 				plan: 'free',
-				included_credits: 10,
+				allowance_managed_by: 'cloudflare',
+				included_credits: null,
 			},
 		});
 		expect(body.hosted_ai.model_access).toContain('auto');
@@ -369,8 +371,8 @@ describe('/v1/chat/completions free-plan route policy', () => {
 			env,
 			ctx,
 		);
-		// Missing test provider credentials yield 503 only after plan/model/cost
-		// admission, proving the reviewed Fable path reached provider setup.
+			// Missing Gateway configuration yields 503 only after plan/model
+			// admission, proving the reviewed Fable path reached provider setup.
 		expect(reviewed.status).toBe(503);
 		expect(await reviewed.text()).not.toContain('model_not_allowed');
 	});
@@ -405,55 +407,21 @@ describe('/v1/chat/completions free-plan route policy', () => {
 			hosted_ai: {
 				plan: string;
 				trial: boolean;
-				included_credits: number;
+				allowance_managed_by: string;
+				included_credits: null;
 				model_access: string[];
 			};
 		};
 
 		expect(response.status).toBe(200);
 		expect(result.hosted_ai).toMatchObject({
-			plan: 'business',
-			trial: true,
-			included_credits: 400,
-		});
+				plan: 'business',
+				trial: true,
+				allowance_managed_by: 'cloudflare',
+				included_credits: null,
+			});
 		expect(result.hosted_ai.model_access).toContain('claude-fable-5');
 		expect(result.hosted_ai.model_access).not.toContain('*');
-	});
-
-	it('fails the usage endpoint closed when private controls are missing', async () => {
-		globalThis.fetch = mock(async (input: RequestInfo | URL) => {
-			const url = String(input);
-			if (url === 'https://screenpipe.com/api/user') {
-				return new Response(JSON.stringify({
-					success: true,
-					user: {
-						clerk_id: 'user_missing_private_controls',
-						cloud_subscribed: true,
-						app_entitled: true,
-						subscription_plan: 'pro',
-						entitlement: { active: true, plan: 'pro', features: { app: true, cloud: true } },
-					},
-				}), { status: 200 });
-			}
-			if (url.startsWith('https://supabase.test/rest/v1/user_credits')) {
-				return new Response('[]', { status: 200 });
-			}
-			throw new Error(`unexpected fetch: ${url}`);
-		}) as typeof fetch;
-
-		const missingControlsEnv = { ...env } as Record<string, unknown>;
-		for (const key of Object.keys(missingControlsEnv)) {
-			if (key.startsWith('MAX_') && key.endsWith('_TEXT_COST')) {
-				delete missingControlsEnv[key];
-			}
-		}
-		const response = await handleRequest(new Request('https://gateway.test/v1/usage', {
-			method: 'GET',
-			headers: { Authorization: 'Bearer eyJ.missing.private.controls' },
-		}), missingControlsEnv as unknown as Env, ctx);
-
-		expect(response.status).toBe(503);
-		expect(await errorCode(response)).toBe('cost_control_unavailable');
 	});
 
 	it('reports Cloudflare-managed allowance without reading legacy cost controls', async () => {
@@ -478,8 +446,6 @@ describe('/v1/chat/completions free-plan route policy', () => {
 		}) as typeof fetch;
 		const cloudflareEnv = {
 			...env,
-			HOSTED_CHAT_GATEWAY_MODE: 'cloudflare',
-			CLOUDFLARE_AI_GATEWAY_ID: 'hosted-chat-test',
 			DB: { prepare: () => { throw new Error('legacy cost storage unavailable'); } },
 		} as unknown as Env;
 
@@ -500,7 +466,7 @@ describe('/v1/chat/completions free-plan route policy', () => {
 		});
 	});
 
-	it('bypasses legacy paid admission and reaches Gateway routing when D1 is unavailable', async () => {
+	it('routes through Cloudflare when legacy admission storage is unavailable', async () => {
 		let gatewayCalls = 0;
 		const d1Statements: string[] = [];
 		globalThis.fetch = mock(async (input: RequestInfo | URL) => {
@@ -521,8 +487,8 @@ describe('/v1/chat/completions free-plan route policy', () => {
 		}) as typeof fetch;
 		const cloudflareEnv = {
 			...env,
-			HOSTED_CHAT_GATEWAY_MODE: 'cloudflare',
 			CLOUDFLARE_AI_GATEWAY_ID: 'hosted-chat-test',
+			CLOUDFLARE_AI_GATEWAY_TOKEN: 'hosted-chat-token',
 			OPENAI_API_KEY: '',
 			AI: {
 				gateway: () => ({
@@ -532,8 +498,8 @@ describe('/v1/chat/completions free-plan route policy', () => {
 					},
 				}),
 			},
-			// trackUsage/reserveDailyCostCap would fail before inference. The
-			// completed-cost write is intentionally best-effort in this mode.
+			// Legacy admission would fail before inference. Completed-cost telemetry
+			// remains intentionally best-effort on the Cloudflare-only path.
 			DB: {
 				prepare: (query: string) => {
 					d1Statements.push(query);
@@ -558,6 +524,50 @@ describe('/v1/chat/completions free-plan route policy', () => {
 		expect(gatewayCalls).toBeGreaterThan(0);
 		expect(await response.text()).not.toContain('cost_control_unavailable');
 		expect(d1Statements.some((query) => query.includes('INSERT INTO cost_daily'))).toBe(false);
+	});
+
+	it.each([
+		['CLOUDFLARE_AI_GATEWAY_ID', { CLOUDFLARE_AI_GATEWAY_TOKEN: 'hosted-chat-token' }],
+		['CLOUDFLARE_AI_GATEWAY_TOKEN', { CLOUDFLARE_AI_GATEWAY_ID: 'hosted-chat-test' }],
+	] as const)('fails chat closed with a clear 503 when %s is missing', async (name, gatewayConfig) => {
+		globalThis.fetch = mock(async (input: RequestInfo | URL) => {
+			if (String(input) === 'https://screenpipe.com/api/user') {
+				return new Response(JSON.stringify({
+					success: true,
+					user: {
+						clerk_id: `user_missing_${name}`,
+						cloud_subscribed: false,
+						app_entitled: true,
+						subscription_plan: 'standard',
+						entitlement: { active: true, plan: 'standard', features: { app: true } },
+					},
+				}), { status: 200 });
+			}
+			throw new Error(`unexpected fetch: ${String(input)}`);
+		}) as typeof fetch;
+		let gatewayCalls = 0;
+		const response = await handleRequest(
+			request(
+				{ Authorization: `Bearer eyJ.missing.${name}` },
+				'/v1/chat/completions',
+				'gpt-5.6-luna',
+			),
+			{
+				...env,
+				...gatewayConfig,
+				AI: {
+					gateway: () => {
+						gatewayCalls++;
+						throw new Error('binding must not be called');
+					},
+				},
+			} as unknown as Env,
+			ctx,
+		);
+
+		expect(response.status).toBe(503);
+		expect(await response.text()).toContain(`${name} is not configured`);
+		expect(gatewayCalls).toBe(0);
 	});
 
 	it('returns canonical Max and Ultra capacity from desktop-compatible user responses', async () => {
@@ -591,7 +601,8 @@ describe('/v1/chat/completions free-plan route policy', () => {
 				remaining: dailyLimit,
 				upsell_banner: false,
 				upgrade_eligible: false,
-				cost_limit_reached: false,
+				cost_limit_reached: null,
+				hosted_ai: { allowance_managed_by: 'cloudflare' },
 			});
 		}
 	});
@@ -685,7 +696,6 @@ describe('/v1/chat/completions free-plan route policy', () => {
 	});
 
 	it.each([
-		'/v1/chat/completions',
 		'/v1/web-search',
 		'/v1/tinfoil/chat/completions',
 		'/v1/tinfoil/responses',
@@ -693,7 +703,7 @@ describe('/v1/chat/completions free-plan route policy', () => {
 		'/v1/voice/chat',
 		'/v1/messages',
 		'/anthropic/v1/messages',
-	])('fails closed before every hosted text-AI route when spend storage is unavailable: %s', async (path: string) => {
+	])('preserves local spend enforcement for non-chat hosted AI routes: %s', async (path: string) => {
 		globalThis.fetch = mock(async (input: RequestInfo | URL) => {
 			if (String(input) === 'https://screenpipe.com/api/user') {
 				return new Response(JSON.stringify({

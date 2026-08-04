@@ -4,11 +4,10 @@
 
 import { Env, UserTier, type AccountPlan } from '../types';
 import { createSuccessResponse, createErrorResponse, addCorsHeaders } from '../utils/cors';
-import { getTierConfig, getModelWeight, isModelGatingEnabled } from '../services/usage-tracker';
+import { getTierConfig, isModelGatingEnabled } from '../services/usage-tracker';
 import { getHostedAiAllowedModels, getHostedAiPlan } from '../services/hosted-ai-policy';
 import { getModelHealth, ModelHealthStatus } from '../services/model-health';
 import { isGooglePolicyBlockedModel } from '../utils/model-policy';
-import { isHostedChatGatewayEnabled } from '../services/cloudflare-ai-gateway';
 
 /** Enriched model metadata — OpenAI-compatible (extra fields ignored by standard clients) */
 interface ModelEntry {
@@ -29,8 +28,6 @@ interface ModelEntry {
   recommended_for: ('pipes' | 'chat' | 'coding' | 'analysis')[];
   /** Optional warning shown when model is selected (e.g. for expensive models) */
   warning?: string;
-  /** Env var required before the model is shown in /v1/models */
-  requires_env?: keyof Env;
   /** Live health status from rolling 5-minute error rate */
   health?: ModelHealthStatus;
   /**
@@ -40,25 +37,13 @@ interface ModelEntry {
    * (index.ts -> 403 model_not_allowed), so this is presentation-only.
    */
   locked?: boolean;
-  /**
-   * How many "daily query" units one message on this model consumes.
-   * 0 = doesn't count against the user's daily query cap (`auto`). Higher =
-   * fewer messages before the cap; the separate cash cap still applies.
-   * Cloudflare Gateway mode publishes 0 for every hosted-chat model because
-   * provider spend rules replace this proactive legacy query meter.
-   * UI uses `floor(remaining / query_weight)` to warn when the user is
-   * about to run out for a weighted model. Populated server-side from
-   * `getModelWeight()` so client doesn't have to mirror the table.
+	/**
+	 * Local "daily query" units consumed by this hosted-chat model.
+	 * Cloudflare manages hosted-chat spend, so every model publishes 0.
+   * UI uses `floor(remaining / query_weight)` for legacy weighted meters;
+   * zero prevents it from presenting that meter for Cloudflare-managed chat.
    */
   query_weight?: number;
-}
-
-function hasConfiguredSecret(value: unknown): boolean {
-  if (typeof value !== 'string') return false;
-  const trimmed = value.trim();
-  if (!trimmed) return false;
-  const lower = trimmed.toLowerCase();
-  return !['placeholder', 'changeme', 'change-me', 'todo', 'none', 'null', 'undefined'].includes(lower);
 }
 
 /** Curated model catalog — single source of truth */
@@ -79,7 +64,7 @@ const CURATED_MODELS: ModelEntry[] = [
     cost_tier: 'free',
     recommended_for: ['pipes', 'chat', 'coding', 'analysis'],
   },
-  // ── OpenAI API (shown only when OPENAI_API_KEY is configured) ──
+  // ── OpenAI through Cloudflare AI Gateway BYOK ──
   {
     id: 'gpt-5.6-sol',
     object: 'model',
@@ -95,7 +80,6 @@ const CURATED_MODELS: ModelEntry[] = [
     cost_tier: 'high',
     recommended_for: ['chat', 'analysis', 'coding'],
     warning: 'frontier-priced — reserve for high-value work; choose GPT-5.6 Terra or Luna when cost matters',
-    requires_env: 'OPENAI_API_KEY',
   },
   {
     id: 'gpt-5.6-terra',
@@ -112,7 +96,6 @@ const CURATED_MODELS: ModelEntry[] = [
     cost_tier: 'medium',
     recommended_for: ['chat', 'analysis', 'coding'],
     warning: 'expensive for continuous high-volume pipes — use GPT-5.6 Luna for those workloads',
-    requires_env: 'OPENAI_API_KEY',
   },
   {
     id: 'gpt-5.6-luna',
@@ -128,7 +111,6 @@ const CURATED_MODELS: ModelEntry[] = [
     intelligence: 'high',
     cost_tier: 'low',
     recommended_for: ['pipes', 'chat', 'analysis'],
-    requires_env: 'OPENAI_API_KEY',
   },
   {
     id: 'gpt-5.5',
@@ -145,7 +127,6 @@ const CURATED_MODELS: ModelEntry[] = [
     cost_tier: 'high',
     recommended_for: ['chat', 'analysis', 'coding'],
     warning: 'expensive — use gpt-5.4-mini or a free model for high-volume pipes',
-    requires_env: 'OPENAI_API_KEY',
   },
   {
     id: 'gpt-5.5-pro',
@@ -162,7 +143,6 @@ const CURATED_MODELS: ModelEntry[] = [
     cost_tier: 'very_high',
     recommended_for: ['chat', 'analysis', 'coding'],
     warning: 'very expensive — avoid for pipes unless the task truly needs pro-level accuracy',
-    requires_env: 'OPENAI_API_KEY',
   },
   {
     id: 'gpt-5.4',
@@ -179,7 +159,6 @@ const CURATED_MODELS: ModelEntry[] = [
     cost_tier: 'high',
     recommended_for: ['chat', 'analysis', 'coding'],
     warning: 'expensive for pipes — use gpt-5.4-mini or gpt-5.4-nano for high-volume jobs',
-    requires_env: 'OPENAI_API_KEY',
   },
   {
     id: 'gpt-5.4-pro',
@@ -196,7 +175,6 @@ const CURATED_MODELS: ModelEntry[] = [
     cost_tier: 'very_high',
     recommended_for: ['chat', 'analysis', 'coding'],
     warning: 'very expensive — avoid for pipes unless the task truly needs pro-level accuracy',
-    requires_env: 'OPENAI_API_KEY',
   },
   // gpt-5.3-codex is deliberately NOT listed: codex models are served only via
   // OpenAI's Responses API, and this worker speaks Chat Completions — every
@@ -216,7 +194,6 @@ const CURATED_MODELS: ModelEntry[] = [
     intelligence: 'high',
     cost_tier: 'low',
     recommended_for: ['pipes', 'chat', 'coding'],
-    requires_env: 'OPENAI_API_KEY',
   },
   {
     id: 'gpt-5.4-nano',
@@ -232,7 +209,6 @@ const CURATED_MODELS: ModelEntry[] = [
     intelligence: 'standard',
     cost_tier: 'low',
     recommended_for: ['pipes', 'chat'],
-    requires_env: 'OPENAI_API_KEY',
   },
   // ── Included with screenpipe ──
   {
@@ -302,14 +278,6 @@ export async function handleModelListing(
   try {
     let models: ModelEntry[] = [...CURATED_MODELS];
 
-    // Avoid advertising models that would immediately fail because their
-    // provider secret is not configured in the Worker environment yet.
-    const cloudflareGateway = isHostedChatGatewayEnabled(env);
-    models = models.filter(model =>
-      !model.requires_env ||
-      hasConfiguredSecret(env[model.requires_env]) ||
-      (cloudflareGateway && model.requires_env === 'OPENAI_API_KEY')
-    );
     models = models.filter(model => !isGooglePolicyBlockedModel(model.id));
 
     // Non-Business tiers used to have above-tier models filtered OUT of the
@@ -334,10 +302,10 @@ export async function handleModelListing(
 
       // Attach per-message query weight so UIs can warn the user before
       // they run out for a weighted model. 0 means "doesn't count."
-      model.query_weight = cloudflareGateway ? 0 : getModelWeight(model.id);
+      model.query_weight = 0;
     }
 
-    const responseModels = models.map(({ requires_env, ...model }) => {
+    const responseModels = models.map((model) => {
       if (!lockAllowlist) return model;
       const allowed = lockAllowlist.some(allowed =>
         model.id.toLowerCase().includes(allowed.toLowerCase()) ||
