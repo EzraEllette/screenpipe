@@ -1547,50 +1547,107 @@ fn apply_rotated_device_config(
     true
 }
 
-/// Exchange a signed-in enterprise member's Clerk session for the current
-/// device credential. This is deliberately attempted only after the server
-/// rejects the saved key; ordinary sync remains key-authenticated and no Clerk
-/// token is attached to telemetry requests.
-async fn recover_rotated_license_key(cfg: &mut EnterpriseSyncConfig) -> bool {
-    let Some(token) = crate::commands::get_cloud_token() else {
-        return false;
-    };
-    let url = super::device_config::device_config_url(Some(&cfg.ingest_url));
-    let remote = match super::device_config::fetch_remote_device_config(&url, &token).await {
-        Ok(remote) => remote,
-        Err(error) => {
-            debug!(
-                error = %error,
-                "enterprise sync: account device-config recovery not available"
-            );
+#[async_trait::async_trait]
+trait LicenseKeyRecovery: Send + Sync {
+    async fn recover(&self, cfg: &mut EnterpriseSyncConfig) -> bool;
+}
+
+struct SavedOrAccountLicenseKeyRecovery;
+
+#[async_trait::async_trait]
+impl LicenseKeyRecovery for SavedOrAccountLicenseKeyRecovery {
+    async fn recover(&self, cfg: &mut EnterpriseSyncConfig) -> bool {
+        // The enterprise gate validates replacement keys before saving them.
+        // Re-read it so key entry repairs the running worker without a restart.
+        if let Some(saved_key) = crate::commands::get_enterprise_license_key()
+            .filter(|saved_key| !saved_key.trim().is_empty() && saved_key != &cfg.license_key)
+        {
+            cfg.license_key = saved_key;
+            info!("enterprise sync: applied replacement credential from device config");
+            return true;
+        }
+
+        let Some(token) = crate::commands::get_cloud_token() else {
+            return false;
+        };
+        let url = super::device_config::device_config_url(Some(&cfg.ingest_url));
+        let remote = match super::device_config::fetch_remote_device_config(&url, &token).await {
+            Ok(remote) => remote,
+            Err(error) => {
+                debug!(
+                    error = %error,
+                    "enterprise sync: account device-config recovery not available"
+                );
+                return false;
+            }
+        };
+        let replaced_license_key = cfg.license_key.clone();
+        if !apply_rotated_device_config(cfg, &remote) {
             return false;
         }
-    };
-    if !apply_rotated_device_config(cfg, &remote) {
-        return false;
+
+        if let Err(error) = crate::commands::persist_recovered_enterprise_device_config(
+            &replaced_license_key,
+            &remote.license_key,
+            remote.ingest_url.as_deref(),
+        ) {
+            warn!(
+                error = %error,
+                "enterprise sync: rotated key works for this session but could not be persisted"
+            );
+        }
+        info!(
+            org = remote.org_name.as_deref().unwrap_or("?"),
+            "enterprise sync: recovered rotated device credential through account auth"
+        );
+        true
+    }
+}
+
+/// Replace a rejected credential from a newly saved key or a signed-in
+/// enterprise member's current device config. Ordinary sync remains
+/// key-authenticated; no account token is attached to telemetry requests.
+async fn recover_rotated_license_key<R: LicenseKeyRecovery + ?Sized>(
+    cfg: &mut EnterpriseSyncConfig,
+    recovery: &R,
+) -> bool {
+    recovery.recover(cfg).await
+}
+
+/// Resolve policy, recover a rejected credential at most once, then upload.
+/// A mode-endpoint auth rejection is handled before `run_sync_burst`, so no local
+/// telemetry is read with a rejected credential. Upload-plane rejections use
+/// the same path for explicit MDM modes and previously resolved modes.
+async fn run_sync_burst_with_recovery<R: LicenseKeyRecovery + ?Sized>(
+    cfg: &mut EnterpriseSyncConfig,
+    cursor: &mut Cursor,
+    local: &dyn LocalApiClient,
+    http: &reqwest::Client,
+    recovery: &R,
+) -> Result<SyncBurstReport, EnterpriseSyncError> {
+    let mut recovered = false;
+    match cfg.resolve_upload_mode().await {
+        Ok(()) => {}
+        Err(EnterpriseSyncError::IngestAuthRejected) => {
+            if !recover_rotated_license_key(cfg, recovery).await {
+                return Err(EnterpriseSyncError::IngestAuthRejected);
+            }
+            recovered = true;
+            cfg.resolve_upload_mode().await?;
+        }
+        Err(error) => return Err(error),
     }
 
-    if let Err(error) = crate::commands::persist_enterprise_device_config(
-        Some(&remote.license_key),
-        remote.ingest_url.as_deref(),
-    ) {
-        warn!(
-            error = %error,
-            "enterprise sync: rotated key works for this session but could not be persisted"
-        );
+    match run_sync_burst(cfg, cursor, local, http).await {
+        Err(EnterpriseSyncError::IngestAuthRejected) if !recovered => {
+            if !recover_rotated_license_key(cfg, recovery).await {
+                return Err(EnterpriseSyncError::IngestAuthRejected);
+            }
+            cfg.resolve_upload_mode().await?;
+            run_sync_burst(cfg, cursor, local, http).await
+        }
+        result => result,
     }
-    if let Err(error) = cfg.resolve_upload_mode().await {
-        warn!(
-            error = %error,
-            "enterprise sync: replacement device credential was rejected"
-        );
-        return false;
-    }
-    info!(
-        org = remote.org_name.as_deref().unwrap_or("?"),
-        "enterprise sync: recovered rotated device credential through account auth"
-    );
-    true
 }
 
 /// The single place that knows the redirect policy for license-authenticated
@@ -1612,6 +1669,7 @@ pub async fn run(
     mut cfg: EnterpriseSyncConfig,
     local: Arc<dyn LocalApiClient>,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
+    on_auth_rejected: Option<Arc<dyn Fn() + Send + Sync>>,
 ) {
     info!(
         "enterprise sync: starting for device={} ingest_url={}",
@@ -1622,6 +1680,7 @@ pub async fn run(
 
     let mut cursor = Cursor::load(&cfg.cursor_path);
     let mut backoff = BACKOFF_INITIAL;
+    let recovery = SavedOrAccountLicenseKeyRecovery;
     let mut log_request_loop = tokio::spawn(run_log_request_loop(
         cfg.clone(),
         http.clone(),
@@ -1629,19 +1688,33 @@ pub async fn run(
     ));
 
     loop {
-        // Re-resolve before touching local telemetry. This picks up a live
-        // hosted-to-customer-storage policy change without requiring an app
-        // restart, and preserves the last safe mode on lookup failure.
-        let result = match cfg.resolve_upload_mode().await {
-            Ok(()) => run_sync_burst(&cfg, &mut cursor, local.as_ref(), &http).await,
-            Err(error) => Err(error),
-        };
+        // Re-resolve before touching local telemetry. Auth rejection recovers
+        // and reruns resolution before any local read; other failures preserve
+        // the last safe mode.
+        let license_key_before_tick = cfg.license_key.clone();
+        let result =
+            run_sync_burst_with_recovery(&mut cfg, &mut cursor, local.as_ref(), &http, &recovery)
+                .await;
+
+        if cfg.license_key != license_key_before_tick {
+            // The log poller owns a cloned config, so restart it with the
+            // recovered key. Fulfillment state lives server-side.
+            log_request_loop.abort();
+            log_request_loop = tokio::spawn(run_log_request_loop(
+                cfg.clone(),
+                http.clone(),
+                shutdown.clone(),
+            ));
+        }
 
         match &result {
             Err(EnterpriseSyncError::IngestAuthRejected) => {
                 error!(
-                    "enterprise sync: device credential rejected by the enterprise control plane, attempting account recovery"
+                    "enterprise sync: device credential rejected and recovery is unavailable; enterprise access is required"
                 );
+                if let Some(notify) = &on_auth_rejected {
+                    notify();
+                }
             }
             Err(EnterpriseSyncError::CentralizedDataDisabled) => {
                 error!(
@@ -1696,19 +1769,6 @@ pub async fn run(
                 }
             }
             Err(EnterpriseSyncError::IngestAuthRejected) => {
-                if recover_rotated_license_key(&mut cfg).await {
-                    // The log poller owns a cloned config, so restart it with
-                    // the recovered key too. No diagnostic request is lost;
-                    // fulfillment state lives server-side.
-                    log_request_loop.abort();
-                    log_request_loop = tokio::spawn(run_log_request_loop(
-                        cfg.clone(),
-                        http.clone(),
-                        shutdown.clone(),
-                    ));
-                    backoff = BACKOFF_INITIAL;
-                    continue;
-                }
                 if sleep_or_shutdown(RETRY_WHILE_WAITING_FOR_ACCOUNT, &mut shutdown).await {
                     break;
                 }
@@ -1764,8 +1824,13 @@ mod tests {
     use super::*;
     use base64::Engine;
     use enterprise_upload::DirectUploadConfig;
-    use std::sync::Mutex;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+    };
     use tempfile::TempDir;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn enterprise_log_identifier_is_regex_safe() {
@@ -2401,6 +2466,7 @@ mod tests {
     /// eliminating the race entirely without pulling in a serial-test crate.
     #[test]
     fn from_env_handles_all_cases() {
+        let _env_guard = ENV_LOCK.lock().unwrap();
         // Snapshot prior env so we don't leak state into other tests.
         let prior_license = std::env::var("SCREENPIPE_ENTERPRISE_LICENSE_KEY").ok();
         let prior_url = std::env::var("SCREENPIPE_ENTERPRISE_INGEST_URL").ok();
@@ -2786,6 +2852,351 @@ mod tests {
         assert_eq!(cfg.license_key, "sek_rotated");
         assert_eq!(cfg.ingest_url, "https://new.example/api/enterprise/ingest");
         assert!(!apply_rotated_device_config(&mut cfg, &remote));
+    }
+
+    struct UploadModeEnvGuard(Option<String>);
+
+    impl UploadModeEnvGuard {
+        fn clear() -> Self {
+            let prior = std::env::var("SCREENPIPE_ENTERPRISE_UPLOAD_MODE").ok();
+            std::env::remove_var("SCREENPIPE_ENTERPRISE_UPLOAD_MODE");
+            Self(prior)
+        }
+    }
+
+    impl Drop for UploadModeEnvGuard {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => std::env::set_var("SCREENPIPE_ENTERPRISE_UPLOAD_MODE", value),
+                None => std::env::remove_var("SCREENPIPE_ENTERPRISE_UPLOAD_MODE"),
+            }
+        }
+    }
+
+    struct TestLicenseKeyRecovery {
+        replacement_key: Option<String>,
+        calls: AtomicUsize,
+        local_reads: Arc<AtomicUsize>,
+        reads_seen_during_recovery: Mutex<Vec<usize>>,
+    }
+
+    impl TestLicenseKeyRecovery {
+        fn replacing(key: &str, local_reads: Arc<AtomicUsize>) -> Self {
+            Self {
+                replacement_key: Some(key.to_string()),
+                calls: AtomicUsize::new(0),
+                local_reads,
+                reads_seen_during_recovery: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn unavailable(local_reads: Arc<AtomicUsize>) -> Self {
+            Self {
+                replacement_key: None,
+                calls: AtomicUsize::new(0),
+                local_reads,
+                reads_seen_during_recovery: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LicenseKeyRecovery for TestLicenseKeyRecovery {
+        async fn recover(&self, cfg: &mut EnterpriseSyncConfig) -> bool {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.reads_seen_during_recovery
+                .lock()
+                .unwrap()
+                .push(self.local_reads.load(Ordering::SeqCst));
+            let Some(replacement_key) = &self.replacement_key else {
+                return false;
+            };
+            cfg.license_key = replacement_key.clone();
+            true
+        }
+    }
+
+    struct CountingLocal {
+        reads: Arc<AtomicUsize>,
+        frames_to_yield: Mutex<Vec<Vec<FrameRow>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl LocalApiClient for CountingLocal {
+        async fn fetch_frames_since(
+            &self,
+            _since_ts: Option<&str>,
+            _limit: u32,
+        ) -> Result<Vec<FrameRow>, EnterpriseSyncError> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            Ok(self
+                .frames_to_yield
+                .lock()
+                .unwrap()
+                .pop()
+                .unwrap_or_default())
+        }
+
+        async fn fetch_audio_since(
+            &self,
+            _since_ts: Option<&str>,
+            _limit: u32,
+        ) -> Result<Vec<AudioRow>, EnterpriseSyncError> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            Ok(Vec::new())
+        }
+    }
+
+    fn initialized_cursor() -> Cursor {
+        Cursor {
+            last_frame_ts: Some("2026-08-04T00:00:00Z".to_string()),
+            last_audio_ts: Some("2026-08-04T00:00:00Z".to_string()),
+            last_ui_ts: Some("2026-08-04T00:00:00Z".to_string()),
+            last_memory_ts: Some("2026-08-04T00:00:00Z".to_string()),
+            last_feedback_ts: Some("2026-08-04T00:00:00Z".to_string()),
+            last_parsed_ts: Some("2026-08-04T00:00:00Z".to_string()),
+        }
+    }
+
+    fn counting_local(reads: Arc<AtomicUsize>, pages: Vec<Vec<FrameRow>>) -> CountingLocal {
+        CountingLocal {
+            reads,
+            frames_to_yield: Mutex::new(pages),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mode_auth_rejection_recovers_before_local_reads_and_uploads() {
+        let _env_lock = ENV_LOCK.lock().unwrap();
+        let _mode_env = UploadModeEnvGuard::clear();
+        let server = wiremock::MockServer::start().await;
+        let mode_path = "/api/enterprise/storage-binding/mode";
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(mode_path))
+            .and(wiremock::matchers::header("x-license-key", "stale-key"))
+            .respond_with(wiremock::ResponseTemplate::new(401))
+            .expect(1)
+            .mount(&server)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(mode_path))
+            .and(wiremock::matchers::header("x-license-key", "current-key"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "desired_mode": "hosted_ingest" })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/api/enterprise/ingest"))
+            .and(wiremock::matchers::header("x-license-key", "current-key"))
+            .respond_with(wiremock::ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let dir = TempDir::new().unwrap();
+        let mut cfg = test_cfg(&dir, format!("{}/api/enterprise/ingest", server.uri()));
+        cfg.license_key = "stale-key".to_string();
+        cfg.upload_mode = EnterpriseUploadMode::Blocked("fresh start".to_string());
+        let reads = Arc::new(AtomicUsize::new(0));
+        let local = counting_local(
+            reads.clone(),
+            vec![vec![frame(1, "2026-08-04T00:01:00Z", "Arc", "recovered")]],
+        );
+        let recovery = TestLicenseKeyRecovery::replacing("current-key", reads.clone());
+
+        let report = run_sync_burst_with_recovery(
+            &mut cfg,
+            &mut initialized_cursor(),
+            &local,
+            &enterprise_http_client(),
+            &recovery,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(report.total.frames, 1);
+        assert_eq!(cfg.license_key, "current-key");
+        assert!(matches!(
+            cfg.upload_mode,
+            EnterpriseUploadMode::HostedIngest
+        ));
+        assert_eq!(recovery.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            *recovery.reads_seen_during_recovery.lock().unwrap(),
+            vec![0]
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn resolved_mode_upload_rejection_rotates_and_retries_same_tick() {
+        let _env_lock = ENV_LOCK.lock().unwrap();
+        let _mode_env = UploadModeEnvGuard::clear();
+        let server = wiremock::MockServer::start().await;
+        let mode_path = "/api/enterprise/storage-binding/mode";
+        for key in ["stale-key", "current-key"] {
+            wiremock::Mock::given(wiremock::matchers::method("GET"))
+                .and(wiremock::matchers::path(mode_path))
+                .and(wiremock::matchers::header("x-license-key", key))
+                .respond_with(
+                    wiremock::ResponseTemplate::new(200)
+                        .set_body_json(serde_json::json!({ "desired_mode": "hosted_ingest" })),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/api/enterprise/ingest"))
+            .and(wiremock::matchers::header("x-license-key", "stale-key"))
+            .respond_with(wiremock::ResponseTemplate::new(401))
+            .expect(1)
+            .mount(&server)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/api/enterprise/ingest"))
+            .and(wiremock::matchers::header("x-license-key", "current-key"))
+            .respond_with(wiremock::ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let dir = TempDir::new().unwrap();
+        let mut cfg = test_cfg(&dir, format!("{}/api/enterprise/ingest", server.uri()));
+        cfg.license_key = "stale-key".to_string();
+        let reads = Arc::new(AtomicUsize::new(0));
+        let page = vec![frame(1, "2026-08-04T00:01:00Z", "Arc", "rotation")];
+        let local = counting_local(reads.clone(), vec![page.clone(), page]);
+        let recovery = TestLicenseKeyRecovery::replacing("current-key", reads.clone());
+
+        let report = run_sync_burst_with_recovery(
+            &mut cfg,
+            &mut initialized_cursor(),
+            &local,
+            &enterprise_http_client(),
+            &recovery,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(report.total.frames, 1);
+        assert_eq!(cfg.license_key, "current-key");
+        assert_eq!(recovery.calls.load(Ordering::SeqCst), 1);
+        assert!(recovery.reads_seen_during_recovery.lock().unwrap()[0] > 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn signed_out_stale_key_stays_blocked_and_reports_auth_rejection() {
+        let _env_lock = ENV_LOCK.lock().unwrap();
+        let _mode_env = UploadModeEnvGuard::clear();
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(
+                "/api/enterprise/storage-binding/mode",
+            ))
+            .respond_with(wiremock::ResponseTemplate::new(401))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let dir = TempDir::new().unwrap();
+        let mut cfg = test_cfg(&dir, format!("{}/api/enterprise/ingest", server.uri()));
+        cfg.license_key = "stale-key".to_string();
+        cfg.upload_mode = EnterpriseUploadMode::Blocked("fresh start".to_string());
+        let reads = Arc::new(AtomicUsize::new(0));
+        let local = counting_local(reads.clone(), Vec::new());
+        let recovery = TestLicenseKeyRecovery::unavailable(reads.clone());
+
+        let error = run_sync_burst_with_recovery(
+            &mut cfg,
+            &mut initialized_cursor(),
+            &local,
+            &enterprise_http_client(),
+            &recovery,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(error, EnterpriseSyncError::IngestAuthRejected));
+        assert!(matches!(cfg.upload_mode, EnterpriseUploadMode::Blocked(_)));
+        assert_eq!(reads.load(Ordering::SeqCst), 0);
+        assert_eq!(recovery.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn server_mode_resolution_covers_hosted_and_both_direct_modes() {
+        let _env_lock = ENV_LOCK.lock().unwrap();
+        let _mode_env = UploadModeEnvGuard::clear();
+        for (desired_mode, expected_label) in [
+            ("hosted_ingest", "hosted_ingest"),
+            ("direct_upload_readable", "direct_readable"),
+            ("direct_upload_write_only", "direct_write_only"),
+        ] {
+            let server = wiremock::MockServer::start().await;
+            wiremock::Mock::given(wiremock::matchers::method("GET"))
+                .respond_with(
+                    wiremock::ResponseTemplate::new(200)
+                        .set_body_json(serde_json::json!({ "desired_mode": desired_mode })),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+            let dir = TempDir::new().unwrap();
+            let mut cfg = test_cfg(&dir, format!("{}/api/enterprise/ingest", server.uri()));
+            cfg.upload_mode = EnterpriseUploadMode::Blocked("fresh start".to_string());
+
+            cfg.resolve_upload_mode().await.unwrap();
+
+            assert_eq!(cfg.upload_mode.label(), expected_label);
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn explicit_mdm_mode_resolves_without_calling_the_control_plane() {
+        let _env_lock = ENV_LOCK.lock().unwrap();
+        let _mode_env = UploadModeEnvGuard(std::env::var("SCREENPIPE_ENTERPRISE_UPLOAD_MODE").ok());
+        std::env::set_var(
+            "SCREENPIPE_ENTERPRISE_UPLOAD_MODE",
+            "direct_upload_write_only",
+        );
+
+        let dir = TempDir::new().unwrap();
+        let mut cfg = test_cfg(&dir, "http://control-plane-must-not-run/ingest".to_string());
+        cfg.upload_mode = EnterpriseUploadMode::Blocked("fresh start".to_string());
+
+        cfg.resolve_upload_mode().await.unwrap();
+
+        assert!(matches!(
+            cfg.upload_mode,
+            EnterpriseUploadMode::DirectWriteOnly(_)
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mode_failures_preserve_fresh_start_block() {
+        let _env_lock = ENV_LOCK.lock().unwrap();
+        let _mode_env = UploadModeEnvGuard::clear();
+        for response in [
+            wiremock::ResponseTemplate::new(503),
+            wiremock::ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({ "desired_mode": "unknown" })),
+        ] {
+            let server = wiremock::MockServer::start().await;
+            wiremock::Mock::given(wiremock::matchers::method("GET"))
+                .respond_with(response)
+                .expect(1)
+                .mount(&server)
+                .await;
+            let dir = TempDir::new().unwrap();
+            let mut cfg = test_cfg(&dir, format!("{}/api/enterprise/ingest", server.uri()));
+            cfg.upload_mode = EnterpriseUploadMode::Blocked("fresh start".to_string());
+
+            cfg.resolve_upload_mode().await.unwrap();
+
+            assert!(matches!(cfg.upload_mode, EnterpriseUploadMode::Blocked(_)));
+        }
     }
 
     #[tokio::test]

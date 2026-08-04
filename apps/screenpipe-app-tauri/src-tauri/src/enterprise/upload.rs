@@ -247,8 +247,9 @@ struct ModeResponse {
 const MODE_RESOLVE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// HTTP GET `<ingest sibling>/storage-binding/mode` with the license-key
-/// header. Returns the parsed hint; any non-2xx, parse failure, or network
-/// error bubbles up so the caller can preserve its last known mode.
+/// header. A 401 is the credential-rotation signal. Other failures remain
+/// transient policy-resolution errors so the caller preserves its last safe
+/// mode (`Blocked` on a fresh process).
 async fn fetch_desired_mode_from_server(
     license_key: &str,
     ingest_url: &str,

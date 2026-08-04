@@ -900,6 +900,7 @@ mod imp {
 
         let (tx, rx) = tokio::sync::watch::channel(false);
         let mut shutdown_rx = rx.clone();
+        let auth_gate_app = app.clone();
         tauri::async_runtime::spawn(async move {
             // Wait until a device config exists. Config sources, checked
             // every tick until one lands (previously this was a boot-time
@@ -985,29 +986,23 @@ mod imp {
                 cfg.device_id, cfg.device_label, cfg.ingest_url
             );
 
-            // Ask the control plane what upload mode this license should run
-            // in. Replaces the old "set SCREENPIPE_ENTERPRISE_UPLOAD_MODE on
-            // every customer machine" UX — the dashboard binding is now the
-            // single source of truth, so a fresh enterprise install just
-            // needs the license key and uploads start automatically.
-            if let Err(error) = cfg.resolve_upload_mode().await {
-                warn!(
-                    error = %error,
-                    "enterprise sync: saved device credential rejected during startup; account recovery will run after the local recorder starts"
-                );
-            }
-            info!(
-                "enterprise sync: resolved upload mode = {}",
-                cfg.upload_mode.label()
-            );
-
             // Small startup delay so the local screenpipe server is up before
-            // we hammer it. Mode resolution runs first so customer root keys
-            // are removed from the process environment before child agents
-            // can inherit them.
+            // we hammer it. The sync state machine resolves upload policy and
+            // recovers rejected credentials before its first local data read.
             tokio::time::sleep(std::time::Duration::from_secs(15)).await;
 
-            ee_sync::run(cfg, local, rx).await;
+            let on_auth_rejected: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+                if let Err(error) =
+                    crate::window::ShowRewindWindow::PermissionRecovery.show(&auth_gate_app)
+                {
+                    warn!(
+                        error = %error,
+                        "enterprise sync: failed to show enterprise access gate"
+                    );
+                }
+            });
+
+            ee_sync::run(cfg, local, rx, Some(on_auth_rejected)).await;
         });
 
         Some(tx)
