@@ -28,7 +28,7 @@ export interface HostedChatGatewayConnection {
 export interface HostedChatAllowance {
 	lane: HostedChatLane;
 	plan: HostedChatPlan;
-	window: '30d';
+	managed_by: 'cloudflare';
 }
 
 export class HostedChatAllowanceExceededError extends Error {
@@ -43,7 +43,7 @@ export class HostedChatAllowanceExceededError extends Error {
 		this.allowance = {
 			lane: context.lane,
 			plan: context.plan,
-			window: '30d',
+			managed_by: 'cloudflare',
 		};
 	}
 }

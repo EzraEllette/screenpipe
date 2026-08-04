@@ -195,12 +195,13 @@ impl EnterpriseSyncConfig {
     /// This is what makes the "install enterprise build → enter license key
     /// → uploads start" flow possible without any env-var setup on the
     /// customer's machine.
-    pub async fn resolve_upload_mode(&mut self) {
+    pub async fn resolve_upload_mode(&mut self) -> Result<(), EnterpriseSyncError> {
         if let Some(resolved) =
-            EnterpriseUploadMode::resolve(&self.license_key, &self.ingest_url).await
+            EnterpriseUploadMode::resolve(&self.license_key, &self.ingest_url).await?
         {
             self.upload_mode = resolved;
         }
+        Ok(())
     }
 }
 
@@ -1578,7 +1579,13 @@ async fn recover_rotated_license_key(cfg: &mut EnterpriseSyncConfig) -> bool {
             "enterprise sync: rotated key works for this session but could not be persisted"
         );
     }
-    cfg.resolve_upload_mode().await;
+    if let Err(error) = cfg.resolve_upload_mode().await {
+        warn!(
+            error = %error,
+            "enterprise sync: replacement device credential was rejected"
+        );
+        return false;
+    }
     info!(
         org = remote.org_name.as_deref().unwrap_or("?"),
         "enterprise sync: recovered rotated device credential through account auth"
@@ -1625,13 +1632,15 @@ pub async fn run(
         // Re-resolve before touching local telemetry. This picks up a live
         // hosted-to-customer-storage policy change without requiring an app
         // restart, and preserves the last safe mode on lookup failure.
-        cfg.resolve_upload_mode().await;
-        let result = run_sync_burst(&cfg, &mut cursor, local.as_ref(), &http).await;
+        let result = match cfg.resolve_upload_mode().await {
+            Ok(()) => run_sync_burst(&cfg, &mut cursor, local.as_ref(), &http).await,
+            Err(error) => Err(error),
+        };
 
         match &result {
             Err(EnterpriseSyncError::IngestAuthRejected) => {
                 error!(
-                    "enterprise sync: license rejected by ingest endpoint (license invalid / revoked), attempting account recovery"
+                    "enterprise sync: device credential rejected by the enterprise control plane, attempting account recovery"
                 );
             }
             Err(EnterpriseSyncError::CentralizedDataDisabled) => {

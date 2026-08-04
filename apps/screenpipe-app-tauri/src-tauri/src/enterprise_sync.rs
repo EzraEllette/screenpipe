@@ -990,7 +990,12 @@ mod imp {
             // every customer machine" UX — the dashboard binding is now the
             // single source of truth, so a fresh enterprise install just
             // needs the license key and uploads start automatically.
-            cfg.resolve_upload_mode().await;
+            if let Err(error) = cfg.resolve_upload_mode().await {
+                warn!(
+                    error = %error,
+                    "enterprise sync: saved device credential rejected during startup; account recovery will run after the local recorder starts"
+                );
+            }
             info!(
                 "enterprise sync: resolved upload mode = {}",
                 cfg.upload_mode.label()

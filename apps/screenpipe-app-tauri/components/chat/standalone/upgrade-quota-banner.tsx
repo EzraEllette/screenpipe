@@ -7,7 +7,13 @@ import { useState } from "react";
 import { X, Zap } from "lucide-react";
 import posthog from "posthog-js";
 import { Button } from "@/components/ui/button";
-import { useUsageStatus, formatResetTime } from "@/lib/hooks/use-usage-status";
+import {
+  formatAllowanceReset,
+  formatAllowanceWindow,
+  formatResetTime,
+  formatUsagePercent,
+  useUsageStatus,
+} from "@/lib/hooks/use-usage-status";
 import { useModelUpsellGating } from "@/lib/hooks/use-model-upsell-gating";
 import { clearQuotaUpgrade, useQuotaUpgrade } from "@/lib/chat/quota-upgrade";
 import { openExternalUrl } from "@/lib/open-external-url";
@@ -39,30 +45,50 @@ export function UpgradeQuotaBanner() {
   const blockedUpgrade = useQuotaUpgrade();
   const [dismissed, setDismissed] = useState(false);
   const [busy, setBusy] = useState(false);
+  const cloudflareAllowance = usage?.hosted_ai?.allowances
+    ?.filter((allowance) => allowance.remaining_percent <= 0)
+    .sort((left, right) => left.lane.localeCompare(right.lane))[0] ?? null;
+  const cloudflareBlocked = !blockedUpgrade && cloudflareAllowance !== null;
+  const cloudflareUpgrade = cloudflareBlocked
+    ? usage?.hosted_ai?.upgrade ?? null
+    : null;
 
   if (!blockedUpgrade) {
     if (dismissed) return null;
+    // A Cloudflare allowance notice is product status, not an upsell. Show the
+    // rule's real usage even when upgrade experiments are disabled or the plan
+    // has no self-serve next tier.
+    if (cloudflareBlocked) {
+      // Continue to rendering below.
+    } else {
     // Proactive prompts require settings, PostHog, and server plan truth. A
     // structured usage-limit rejection below is already an authoritative,
     // server-scoped next-plan decision and deliberately bypasses these gates.
-    if (!upsellEnabled) return null;
-    if (!usage) return null;
-    if (
-      usage.tier === "subscribed" ||
-      usage.tier === "business_max" ||
-      usage.tier === "business_ultra"
-    ) {
-      return null;
+      if (!upsellEnabled) return null;
+      if (!usage) return null;
+      if (
+        usage.tier === "subscribed" ||
+        usage.tier === "business_max" ||
+        usage.tier === "business_ultra"
+      ) {
+        return null;
+      }
+      // Server can suppress the banner via MODEL_GATING_ENABLED with no app release.
+      if (usage.upsell_banner === false) return null;
+      if (usage.remaining > 0) return null;
     }
-    // Server can suppress the banner via MODEL_GATING_ENABLED with no app release.
-    if (usage.upsell_banner === false) return null;
-    if (usage.remaining > 0) return null;
   }
 
-  const resets = formatResetTime(
-    blockedUpgrade?.resetsAt ?? usage?.resets_at ?? "",
-  );
-  const source = blockedUpgrade ? "ai-usage-limit-banner" : "ai-quota-banner";
+  const resets = cloudflareBlocked
+    ? formatAllowanceReset(cloudflareAllowance.resets_at)
+    : formatResetTime(blockedUpgrade?.resetsAt ?? usage?.resets_at ?? "");
+  const source = blockedUpgrade
+    ? "ai-usage-limit-banner"
+    : cloudflareBlocked
+      ? "cloudflare-ai-allowance-banner"
+      : "ai-quota-banner";
+  const showCloudflareUpgrade = cloudflareUpgrade !== null;
+  const activeUpgrade = blockedUpgrade ?? cloudflareUpgrade;
 
   const onUpgrade = async () => {
     if (busy) return;
@@ -70,10 +96,10 @@ export function UpgradeQuotaBanner() {
     try {
       posthog.capture("desktop_upgrade_entry_clicked", {
         source,
-        target_plan: blockedUpgrade?.requiredPlan,
+        target_plan: activeUpgrade?.requiredPlan,
       });
-      if (blockedUpgrade) {
-        await openExternalUrl(blockedUpgrade.upgradeUrl);
+      if (activeUpgrade) {
+        await openExternalUrl(activeUpgrade.upgradeUrl);
       } else {
         await openBusinessUpgradeSurface(source);
       }
@@ -84,29 +110,45 @@ export function UpgradeQuotaBanner() {
     }
   };
 
-  const requiredPlanLabel = blockedUpgrade
-    ? PLAN_LABELS[blockedUpgrade.requiredPlan]
+  const requiredPlanLabel = activeUpgrade
+    ? PLAN_LABELS[activeUpgrade.requiredPlan]
     : "Business";
-  const blockedTitle = "Hosted AI usage limit reached";
+  const blockedTitle = cloudflareBlocked
+    ? `${cloudflareAllowance.lane === "auto" ? "Auto" : "Explicit model"} hosted AI limit reached`
+    : "Hosted AI usage limit reached";
 
   return (
     <div
       className="mb-2 border border-border bg-background px-3 py-2.5 shadow-lg shadow-black/5"
       data-testid={
-        blockedUpgrade ? "cost-limit-upgrade-banner" : "quota-upgrade-banner"
+        blockedUpgrade
+          ? "cost-limit-upgrade-banner"
+          : cloudflareBlocked
+            ? "hosted-ai-allowance-banner"
+            : "quota-upgrade-banner"
       }
-      role={blockedUpgrade ? "alert" : undefined}
+      role={blockedUpgrade || cloudflareBlocked ? "alert" : undefined}
     >
       <div className="flex items-start gap-3">
         <Zap className="mt-0.5 h-4 w-4 shrink-0 text-foreground/70" />
         <div className="min-w-0 flex-1 text-[12px] leading-snug">
           <div className="font-medium">
-            {blockedUpgrade
+            {blockedUpgrade || cloudflareBlocked
               ? blockedTitle
               : "You're out of premium AI for today."}
           </div>
           <div className="mt-0.5 text-muted-foreground">
-            {blockedUpgrade ? (
+            {cloudflareBlocked ? (
+              <>
+                {formatUsagePercent(cloudflareAllowance.used_percent)} used for this{" "}
+                {formatAllowanceWindow(cloudflareAllowance.window_seconds)}{" "}
+                {cloudflareAllowance.technique} period.
+                {resets ? ` Resets ${resets}.` : " Usage falls as the window moves."}{" "}
+                {cloudflareAllowance.lane === "auto"
+                  ? "Choose an explicit hosted model, or use a local or own-key preset."
+                  : "Switch to Auto, or use a local or own-key preset."}
+              </>
+            ) : blockedUpgrade ? (
               <>
                 {resets ? `Resets ${resets}. ` : ""}
                 Upgrade to {requiredPlanLabel} for a higher limit, or switch to a
@@ -118,18 +160,20 @@ export function UpgradeQuotaBanner() {
           </div>
         </div>
         <span className="flex shrink-0 items-center gap-1.5">
-          <Button
-            type="button"
-            size="sm"
-            variant="outline"
-            className="h-7 text-[12px]"
-            onClick={onUpgrade}
-            disabled={busy}
-          >
-            {blockedUpgrade
-              ? `Upgrade to ${requiredPlanLabel}`
-              : "View Business"}
-          </Button>
+          {(!cloudflareBlocked || showCloudflareUpgrade) && (
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              className="h-7 text-[12px]"
+              onClick={onUpgrade}
+              disabled={busy}
+            >
+              {activeUpgrade
+                ? `Upgrade to ${requiredPlanLabel}`
+                : "View Business"}
+            </Button>
+          )}
           <button
             type="button"
             onClick={() => {
