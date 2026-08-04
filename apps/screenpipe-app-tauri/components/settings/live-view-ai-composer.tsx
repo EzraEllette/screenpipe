@@ -10,7 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { useSettings } from "@/lib/hooks/use-settings";
 import {
-  isCloudflareManagedHostedAllowance,
+  usesLegacyHostedAllowanceCounter,
   useUsageStatus,
 } from "@/lib/hooks/use-usage-status";
 import { openBusinessUpgradeSurface } from "@/lib/upgrade-flow";
@@ -89,7 +89,7 @@ export function LiveViewAiComposer({
   const hostedUsageExhausted = Boolean(
     selectedPreset?.provider === "screenpipe-cloud" &&
     usage &&
-      !isCloudflareManagedHostedAllowance(usage) &&
+      usesLegacyHostedAllowanceCounter(usage) &&
       usage.remaining <= 0,
   );
   const canUpgrade = Boolean(

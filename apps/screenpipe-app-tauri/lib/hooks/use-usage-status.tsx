@@ -138,6 +138,20 @@ export function isCloudflareManagedHostedAllowance(
 }
 
 /**
+ * Whether the compatibility daily-query counter is authoritative for hosted
+ * allowance UI. Missing ownership preserves older gateway behavior; any named
+ * owner other than `legacy` must fail closed instead of treating D1 as its
+ * balance.
+ */
+export function usesLegacyHostedAllowanceCounter(
+  usage: UsageStatus | null,
+): boolean {
+  if (!usage) return false;
+  const owner = usage.hosted_ai?.allowance_managed_by;
+  return owner === undefined || owner === "legacy";
+}
+
+/**
  * Compute how many messages a user has left for a specific weighted model.
  * Returns null when the concept doesn't apply (unknown/zero weight, no
  * usage fetched). Weight 0 means the model doesn't eat the daily cap and
@@ -148,7 +162,7 @@ export function messagesLeftForModel(
   weight: number | undefined
 ): number | null {
   if (!usage) return null;
-  if (isCloudflareManagedHostedAllowance(usage)) return null;
+  if (!usesLegacyHostedAllowanceCounter(usage)) return null;
   if (!weight || weight <= 0) return null;
   return Math.max(0, Math.floor(usage.remaining / weight));
 }
@@ -163,7 +177,7 @@ export function shouldWarnLowQuota(
   weight: number | undefined
 ): boolean {
   if (!usage) return false;
-  if (isCloudflareManagedHostedAllowance(usage)) return false;
+  if (!usesLegacyHostedAllowanceCounter(usage)) return false;
   if (!weight || weight <= 0) return false;
   const fullCapacity = Math.floor(usage.limit_today / weight);
   const remainingForModel = Math.floor(usage.remaining / weight);

@@ -8,12 +8,19 @@ import type { SettingsField } from "./settings-search";
 
 /** Settings search index for this section. Co-located with the component so adding a field here means updating one file. See `SettingsField` in `./settings-search` for the schema. */
 export const searchIndex: SettingsField[] = [
-  { label: "Usage stats", keywords: ["stats", "activity", "analytics", "metrics"] },
+  {
+    label: "Local AI activity",
+    keywords: ["usage", "stats", "activity", "analytics", "metrics", "allowance"],
+  },
 ];
 import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import { loadAllConversations } from "@/lib/chat-storage";
+import {
+  isCloudflareManagedHostedAllowance,
+  useUsageStatus,
+} from "@/lib/hooks/use-usage-status";
 import { homeDir, join } from "@tauri-apps/api/path";
 import { readTextFile, writeTextFile, exists } from "@tauri-apps/plugin-fs";
 import { localFetch } from "@/lib/api";
@@ -138,6 +145,7 @@ function getTimeSince(range: TimeRange): number | undefined {
 }
 
 export function UsageSection() {
+  const hostedUsage = useUsageStatus();
   const [entries, setEntries] = useState<UsageEntry[]>([]);
   const [totalChats, setTotalChats] = useState(0);
   const [totalChatMessages, setTotalChatMessages] = useState(0);
@@ -289,7 +297,7 @@ export function UsageSection() {
 
   const since = getTimeSince(timeRange);
   const usage = aggregateEntries(entries, since);
-  const totalTracked = usage.reduce((sum, u) => sum + u.count, 0);
+  const totalRecords = usage.reduce((sum, u) => sum + u.count, 0);
   const totalPipeExecutions = entries.filter((e) => e.source === "pipe").length;
   const filteredPipeExecs = since
     ? entries.filter((e) => e.source === "pipe" && e.timestamp >= since).length
@@ -383,6 +391,28 @@ export function UsageSection() {
 
   return (
     <div className="space-y-6">
+      <div className="space-y-1">
+        <h2 className="text-sm font-medium">Local AI activity</h2>
+        <p className="text-sm text-muted-foreground">
+          Counts from conversations and completed scheduled runs saved on this
+          device. These are activity records, not provider requests, billing,
+          or hosted AI allowance.
+        </p>
+      </div>
+
+      {isCloudflareManagedHostedAllowance(hostedUsage) && (
+        <Card data-testid="hosted-allowance-source">
+          <CardContent className="pt-6">
+            <p className="text-sm font-medium">Hosted AI allowance</p>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Screenpipe Cloud checks your plan allowance when each request is
+              sent. A blocked response is authoritative; this app does not
+              estimate a remaining balance from local activity.
+            </p>
+          </CardContent>
+        </Card>
+      )}
+
       {updating && (
         <p className="text-xs text-muted-foreground">Updating...</p>
       )}
@@ -426,8 +456,8 @@ export function UsageSection() {
         <div className="rounded-lg border border-dashed p-6 text-center">
           <p className="text-sm text-muted-foreground">
             {timeRange === "all"
-              ? "No model data yet — tracking starts from your next conversation"
-              : `No usage in the last ${timeRange === "day" ? "24 hours" : timeRange === "week" ? "7 days" : "30 days"}`}
+              ? "No model activity recorded yet"
+              : `No recorded activity in the last ${timeRange === "day" ? "24 hours" : timeRange === "week" ? "7 days" : "30 days"}`}
           </p>
           {timeRange === "all" && untrackedMessages > 0 && (
             <p className="text-xs text-muted-foreground mt-2">
@@ -439,10 +469,10 @@ export function UsageSection() {
         <div className="space-y-3">
           <div className="flex items-center justify-between">
             <h3 className="text-sm font-medium text-muted-foreground">
-              Requests per model
+              Recorded activity by model
             </h3>
             <span className="text-xs text-muted-foreground">
-              {totalTracked} Tracked
+              {totalRecords} {totalRecords === 1 ? "record" : "records"}
             </span>
           </div>
           {usage.map((u) => {

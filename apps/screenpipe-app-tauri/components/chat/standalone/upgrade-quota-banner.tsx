@@ -9,7 +9,7 @@ import posthog from "posthog-js";
 import { Button } from "@/components/ui/button";
 import {
   formatResetTime,
-  isCloudflareManagedHostedAllowance,
+  usesLegacyHostedAllowanceCounter,
   useUsageStatus,
 } from "@/lib/hooks/use-usage-status";
 import { useModelUpsellGating } from "@/lib/hooks/use-model-upsell-gating";
@@ -51,7 +51,7 @@ export function UpgradeQuotaBanner() {
     // server-scoped next-plan decision and deliberately bypasses these gates.
     if (!upsellEnabled) return null;
     if (!usage) return null;
-    if (isCloudflareManagedHostedAllowance(usage)) return null;
+    if (!usesLegacyHostedAllowanceCounter(usage)) return null;
     if (
       usage.tier === "subscribed" ||
       usage.tier === "business_max" ||

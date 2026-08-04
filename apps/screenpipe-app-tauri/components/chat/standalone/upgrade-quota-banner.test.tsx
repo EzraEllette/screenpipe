@@ -32,8 +32,10 @@ vi.mock("@/lib/hooks/use-usage-status", () => ({
   useUsageStatus: () => mocks.usageState,
   formatResetTime: (iso: string) =>
     iso === "2026-08-02T00:00:00.000Z" ? "5:00 PM" : "1:00 PM",
-  isCloudflareManagedHostedAllowance: (usage: any) =>
-    usage?.hosted_ai?.allowance_managed_by === "cloudflare",
+  usesLegacyHostedAllowanceCounter: (usage: any) => {
+    const owner = usage?.hosted_ai?.allowance_managed_by;
+    return Boolean(usage) && (owner === undefined || owner === "legacy");
+  },
 }));
 
 vi.mock("@/lib/hooks/use-model-upsell-gating", () => ({
@@ -114,16 +116,19 @@ describe("UpgradeQuotaBanner", () => {
     );
   });
 
-  it("hides the proactive banner when Cloudflare owns the allowance", () => {
-    mocks.usageState.hosted_ai = {
-      allowance_managed_by: "cloudflare",
-    };
-    mocks.gateState = true;
+  it.each(["cloudflare", "future-owner"])(
+    "hides the proactive banner when %s owns the allowance",
+    (owner) => {
+      mocks.usageState.hosted_ai = {
+        allowance_managed_by: owner,
+      };
+      mocks.gateState = true;
 
-    render(<UpgradeQuotaBanner />);
+      render(<UpgradeQuotaBanner />);
 
-    expect(screen.queryByTestId("quota-upgrade-banner")).toBeNull();
-  });
+      expect(screen.queryByTestId("quota-upgrade-banner")).toBeNull();
+    },
+  );
 
   it.each(["legacy", undefined])(
     "keeps proactive exhaustion for %s ownership",

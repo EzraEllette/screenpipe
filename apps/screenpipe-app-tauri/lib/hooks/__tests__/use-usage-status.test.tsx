@@ -8,6 +8,7 @@ import {
   isCloudflareManagedHostedAllowance,
   messagesLeftForModel,
   shouldWarnLowQuota,
+  usesLegacyHostedAllowanceCounter,
   useUsageStatus,
   type UsageStatus,
 } from "../use-usage-status";
@@ -148,7 +149,6 @@ describe("hosted allowance ownership helpers", () => {
   it.each([
     ["explicit legacy", "legacy"],
     ["missing owner", undefined],
-    ["unknown future owner", "future-owner"],
   ])("keeps legacy quota behavior for %s", (_label, allowanceManagedBy) => {
     const usage = allowanceManagedBy
       ? {
@@ -158,18 +158,25 @@ describe("hosted allowance ownership helpers", () => {
       : exhaustedUsage;
 
     expect(isCloudflareManagedHostedAllowance(usage)).toBe(false);
+    expect(usesLegacyHostedAllowanceCounter(usage)).toBe(true);
     expect(messagesLeftForModel(usage, 1)).toBe(0);
     expect(shouldWarnLowQuota(usage, 1)).toBe(true);
   });
 
-  it("does not derive quota state from legacy counters in Cloudflare mode", () => {
-    const usage = {
-      ...exhaustedUsage,
-      hosted_ai: { allowance_managed_by: "cloudflare" },
-    };
+  it.each(["cloudflare", "future-owner"])(
+    "does not derive quota state from legacy counters for %s ownership",
+    (owner) => {
+      const usage = {
+        ...exhaustedUsage,
+        hosted_ai: { allowance_managed_by: owner },
+      };
 
-    expect(isCloudflareManagedHostedAllowance(usage)).toBe(true);
-    expect(messagesLeftForModel(usage, 1)).toBeNull();
-    expect(shouldWarnLowQuota(usage, 1)).toBe(false);
-  });
+      expect(isCloudflareManagedHostedAllowance(usage)).toBe(
+        owner === "cloudflare",
+      );
+      expect(usesLegacyHostedAllowanceCounter(usage)).toBe(false);
+      expect(messagesLeftForModel(usage, 1)).toBeNull();
+      expect(shouldWarnLowQuota(usage, 1)).toBe(false);
+    },
+  );
 });

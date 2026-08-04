@@ -35,8 +35,10 @@ vi.mock("@/lib/hooks/use-settings", () => ({
 
 vi.mock("@/lib/hooks/use-usage-status", () => ({
   useUsageStatus: () => mocks.usageState,
-  isCloudflareManagedHostedAllowance: (usage: any) =>
-    usage?.hosted_ai?.allowance_managed_by === "cloudflare",
+  usesLegacyHostedAllowanceCounter: (usage: any) => {
+    const owner = usage?.hosted_ai?.allowance_managed_by;
+    return Boolean(usage) && (owner === undefined || owner === "legacy");
+  },
 }));
 
 vi.mock("@/lib/upgrade-flow", () => ({
@@ -70,21 +72,25 @@ describe("LiveViewAiComposer hosted allowance ownership", () => {
     };
   });
 
-  it("keeps Cloudflare-managed hosted submission available", () => {
-    const { onGenerate } = renderComposer();
+  it.each(["cloudflare", "future-owner"])(
+    "keeps %s-managed hosted submission available",
+    (owner) => {
+      mocks.usageState.hosted_ai = { allowance_managed_by: owner };
+      const { onGenerate } = renderComposer();
 
-    const prompt = screen.getByTestId("live-view-ai-prompt");
-    expect(prompt).not.toBeDisabled();
-    expect(
-      screen.getByRole("button", { name: "show how I spend my time today" }),
-    ).not.toBeDisabled();
+      const prompt = screen.getByTestId("live-view-ai-prompt");
+      expect(prompt).not.toBeDisabled();
+      expect(
+        screen.getByRole("button", { name: "show how I spend my time today" }),
+      ).not.toBeDisabled();
 
-    fireEvent.change(prompt, { target: { value: "show my week" } });
-    const generate = screen.getByTestId("live-view-ai-generate");
-    expect(generate).not.toBeDisabled();
-    fireEvent.click(generate);
-    expect(onGenerate).toHaveBeenCalledOnce();
-  });
+      fireEvent.change(prompt, { target: { value: "show my week" } });
+      const generate = screen.getByTestId("live-view-ai-generate");
+      expect(generate).not.toBeDisabled();
+      fireEvent.click(generate);
+      expect(onGenerate).toHaveBeenCalledOnce();
+    },
+  );
 
   it.each([
     ["explicit legacy", "legacy"],

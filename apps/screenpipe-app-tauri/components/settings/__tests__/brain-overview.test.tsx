@@ -121,8 +121,10 @@ vi.mock("@/lib/hooks/use-settings", () => ({
 }));
 vi.mock("@/lib/hooks/use-usage-status", () => ({
   useUsageStatus: () => mocks.usageState,
-  isCloudflareManagedHostedAllowance: (usage: any) =>
-    usage?.hosted_ai?.allowance_managed_by === "cloudflare",
+  usesLegacyHostedAllowanceCounter: (usage: any) => {
+    const owner = usage?.hosted_ai?.allowance_managed_by;
+    return Boolean(usage) && (owner === undefined || owner === "legacy");
+  },
 }));
 vi.mock("@/lib/upgrade-flow", () => ({
   openBusinessUpgradeSurface: mocks.openBusinessUpgradeSurface,
