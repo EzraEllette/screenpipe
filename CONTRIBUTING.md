@@ -244,8 +244,7 @@ use `autocomplete` when AI only supplied inline completions, `chat` when you
 asked for suggestions or code and chose what to apply, and `agent` when AI
 planned or executed multi-step work or edited files.
 
-maintainers use process labels to identify the concrete next step, not to guess
-whether text or code was AI-generated:
+maintainers use process labels to identify the concrete next step:
 
 - `needs-reproduction`: provide a reproducible case and exact steps.
 - `needs-tests`: add the missing regression or coverage tests.
@@ -253,22 +252,19 @@ whether text or code was AI-generated:
 - `needs-human-explanation`: explain the rationale or material changes yourself.
 - `needs-scope-approval`: get maintainer agreement before continuing the work.
 
-if the review cost clearly exceeds the likely project value, a maintainer may
-close the contribution with the applicable process label and one concrete
-remediation request. this is not a verdict on the use of AI. you are welcome to
-reopen the contribution, or submit a corrected replacement that links the
-original, after addressing that request.
+you are welcome to reopen the contribution, or submit a corrected replacement
+that links the original, after addressing that request.
 
 reopening or resubmitting without addressing the stated request results in a
 seven-calendar-day contribution cooldown, beginning when a maintainer posts the
-cooldown notice. during the cooldown, do not open or reopen issues or pull
+cooldown notice. during the cooldown, you may not open or reopen issues or pull
 requests, or submit review comments in this repository. the next submission
 after that cooldown that again reopens or resubmits without addressing a
-concrete remediation request results in a permanent repository contribution
+concrete remediation request results in a repository contribution
 ban.
 
-we do not use AI detectors. enforcement is based on accountable ownership,
-accepted scope, evidence, and the contributor's ability to explain the work.
+enforcement is based on accountable ownership, accepted scope, evidence, and
+the contributor's ability to explain the work.
 
 ### reporting bugs
 
