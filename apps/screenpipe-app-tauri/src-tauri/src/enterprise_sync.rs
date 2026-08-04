@@ -198,14 +198,14 @@ mod imp {
         async fn fetch_frames_since(
             &self,
             since_ts: Option<&str>,
+            boundary_offset: u32,
             limit: u32,
         ) -> Result<Vec<FrameRow>, EnterpriseSyncError> {
-            // /search takes start_time as ISO. We pass `since` (exclusive in
-            // spirit) — server returns >= start_time; one duplicate row per
-            // tick is acceptable since server-side dedups by (device_id, frame_id).
+            // /search returns rows whose timestamp is >= `since`. The durable
+            // boundary offset skips rows already acknowledged at that timestamp.
             let mut url = format!(
-                "{}/search?content_type=ocr&limit={}&order=ascending",
-                self.api_url_base, limit
+                "{}/search?content_type=ocr&limit={}&offset={}&order=ascending",
+                self.api_url_base, limit, boundary_offset
             );
             if let Some(ts) = since_ts {
                 url.push_str(&format!("&start_time={}", urlencoding::encode(ts)));
@@ -248,11 +248,12 @@ mod imp {
         async fn fetch_audio_since(
             &self,
             since_ts: Option<&str>,
+            boundary_offset: u32,
             limit: u32,
         ) -> Result<Vec<AudioRow>, EnterpriseSyncError> {
             let mut url = format!(
-                "{}/search?content_type=audio&limit={}&order=ascending",
-                self.api_url_base, limit
+                "{}/search?content_type=audio&limit={}&offset={}&order=ascending",
+                self.api_url_base, limit, boundary_offset
             );
             if let Some(ts) = since_ts {
                 url.push_str(&format!("&start_time={}", urlencoding::encode(ts)));
@@ -292,11 +293,12 @@ mod imp {
         async fn fetch_parsed_since(
             &self,
             since_ts: Option<&str>,
+            boundary_offset: u32,
             limit: u32,
         ) -> Result<Vec<ParsedRow>, EnterpriseSyncError> {
             let mut url = format!(
-                "{}/search?content_type=parsed&limit={}&order=ascending",
-                self.api_url_base, limit
+                "{}/search?content_type=parsed&limit={}&offset={}&order=ascending",
+                self.api_url_base, limit, boundary_offset
             );
             if let Some(ts) = since_ts {
                 url.push_str(&format!("&start_time={}", urlencoding::encode(ts)));
@@ -332,6 +334,7 @@ mod imp {
         async fn fetch_ui_events_since(
             &self,
             since_ts: Option<&str>,
+            boundary_offset: u32,
             limit: u32,
         ) -> Result<Vec<UiEventRow>, EnterpriseSyncError> {
             // Local /search content_type=input returns rows from the
@@ -342,8 +345,8 @@ mod imp {
             // targets) — keystroke noise without element context isn't
             // useful for SOP synthesis and bloats the corpus.
             let mut url = format!(
-                "{}/search?content_type=input&limit={}&order=ascending&input_context_only=true",
-                self.api_url_base, limit
+                "{}/search?content_type=input&limit={}&offset={}&order=ascending&input_context_only=true",
+                self.api_url_base, limit, boundary_offset
             );
             if let Some(ts) = since_ts {
                 url.push_str(&format!("&start_time={}", urlencoding::encode(ts)));
@@ -558,15 +561,14 @@ mod imp {
         async fn fetch_memories_since(
             &self,
             since_ts: Option<&str>,
+            boundary_offset: u32,
             limit: u32,
         ) -> Result<Vec<MemoryRow>, EnterpriseSyncError> {
-            // /memories filters by created_at >= start_time; ascending order
-            // means the cursor advances monotonically. Server-side dedup is
-            // on (device_id, memory_id), so a single-row overlap per tick is
-            // acceptable (same convention as /search-backed fetches above).
+            // /memories returns created_at >= start_time. The durable boundary
+            // offset skips rows already acknowledged at that timestamp.
             let mut url = format!(
-                "{}/memories?limit={}&order_by=created_at&order_dir=asc",
-                self.api_url_base, limit
+                "{}/memories?limit={}&offset={}&order_by=created_at&order_dir=asc",
+                self.api_url_base, limit, boundary_offset
             );
             if let Some(ts) = since_ts {
                 url.push_str(&format!("&start_time={}", urlencoding::encode(ts)));
@@ -607,11 +609,18 @@ mod imp {
         async fn fetch_feedback_since(
             &self,
             since_ts: Option<&str>,
+            after_id: Option<&str>,
             limit: u32,
         ) -> Result<Vec<FeedbackRow>, EnterpriseSyncError> {
-            let mut url = format!("{}/feedback?limit={}&order=asc", self.api_url_base, limit);
+            let mut url = format!(
+                "{}/feedback?limit={}&order=asc&since_inclusive=true",
+                self.api_url_base, limit
+            );
             if let Some(ts) = since_ts {
                 url.push_str(&format!("&since={}", urlencoding::encode(ts)));
+            }
+            if let Some(id) = after_id {
+                url.push_str(&format!("&after_id={}", urlencoding::encode(id)));
             }
             let resp = self
                 .auth(self.http.get(&url))

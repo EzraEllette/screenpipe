@@ -232,6 +232,24 @@ pub struct Cursor {
     /// backfill its own bounded window.
     #[serde(default)]
     pub last_parsed_ts: Option<String>,
+    /// Rows already acknowledged at each stream's current timestamp. Local
+    /// APIs use inclusive timestamp filters, so this durable offset is the
+    /// second half of the pagination key and prevents a 500-row timestamp tie
+    /// from either repeating forever or being skipped after restart.
+    #[serde(default)]
+    boundary: CursorBoundary,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct CursorBoundary {
+    frames: u32,
+    audio: u32,
+    ui: u32,
+    memories: u32,
+    parsed: u32,
+    /// Feedback supports a true `(updated_at, id)` keyset cursor because its
+    /// IDs are stable strings and its local route merges DB and legacy rows.
+    feedback_id: Option<String>,
 }
 
 impl Cursor {
@@ -281,24 +299,26 @@ impl Cursor {
 /// desktop crate against `LocalApiContext`.
 #[async_trait::async_trait]
 pub trait LocalApiClient: Send + Sync {
-    /// Fetch frames + their text since `since_ts` (exclusive), ordered by
-    /// timestamp ascending, capped at `limit`.
+    /// Fetch frames + their text at or after `since_ts`, ordered by timestamp
+    /// ascending, skipping `boundary_offset` rows at the boundary timestamp.
     async fn fetch_frames_since(
         &self,
         since_ts: Option<&str>,
+        boundary_offset: u32,
         limit: u32,
     ) -> Result<Vec<FrameRow>, EnterpriseSyncError>;
 
-    /// Fetch audio transcriptions since `since_ts` (exclusive), ordered ASC,
-    /// capped at `limit`.
+    /// Fetch audio transcriptions at or after `since_ts`, ordered ascending,
+    /// skipping `boundary_offset` rows at the boundary timestamp.
     async fn fetch_audio_since(
         &self,
         since_ts: Option<&str>,
+        boundary_offset: u32,
         limit: u32,
     ) -> Result<Vec<AudioRow>, EnterpriseSyncError>;
 
-    /// Fetch UI events (clicks, keystrokes, clipboard) since `since_ts`
-    /// (exclusive), ordered ASC, capped at `limit`. UI events give the
+    /// Fetch UI events (clicks, keystrokes, clipboard) at or after `since_ts`,
+    /// ordered ascending and skipping `boundary_offset` boundary rows. UI events give the
     /// extracted workflows their *verbs* — without them an SOP can only
     /// say "the user opened Slack", not "the user clicked Send on the
     /// upgrade-confirmed message". Default empty implementation lets
@@ -306,6 +326,7 @@ pub trait LocalApiClient: Send + Sync {
     async fn fetch_ui_events_since(
         &self,
         _since_ts: Option<&str>,
+        _boundary_offset: u32,
         _limit: u32,
     ) -> Result<Vec<UiEventRow>, EnterpriseSyncError> {
         Ok(Vec::new())
@@ -329,6 +350,7 @@ pub trait LocalApiClient: Send + Sync {
     async fn fetch_memories_since(
         &self,
         _since_ts: Option<&str>,
+        _boundary_offset: u32,
         _limit: u32,
     ) -> Result<Vec<MemoryRow>, EnterpriseSyncError> {
         Ok(Vec::new())
@@ -340,6 +362,7 @@ pub trait LocalApiClient: Send + Sync {
     async fn fetch_feedback_since(
         &self,
         _since_ts: Option<&str>,
+        _after_id: Option<&str>,
         _limit: u32,
     ) -> Result<Vec<FeedbackRow>, EnterpriseSyncError> {
         Ok(Vec::new())
@@ -350,6 +373,7 @@ pub trait LocalApiClient: Send + Sync {
     async fn fetch_parsed_since(
         &self,
         _since_ts: Option<&str>,
+        _boundary_offset: u32,
         _limit: u32,
     ) -> Result<Vec<ParsedRow>, EnterpriseSyncError> {
         Ok(Vec::new())
@@ -544,26 +568,32 @@ async fn run_one_sync_inner(
     if cursor.last_frame_ts.is_none() {
         let cutoff = chrono::Utc::now() - chrono::Duration::from_std(SAFE_BACKFILL).unwrap();
         cursor.last_frame_ts = Some(cutoff.to_rfc3339());
+        cursor.boundary.frames = 0;
     }
     if cursor.last_audio_ts.is_none() {
         let cutoff = chrono::Utc::now() - chrono::Duration::from_std(SAFE_BACKFILL).unwrap();
         cursor.last_audio_ts = Some(cutoff.to_rfc3339());
+        cursor.boundary.audio = 0;
     }
     if cursor.last_ui_ts.is_none() {
         let cutoff = chrono::Utc::now() - chrono::Duration::from_std(SAFE_BACKFILL).unwrap();
         cursor.last_ui_ts = Some(cutoff.to_rfc3339());
+        cursor.boundary.ui = 0;
     }
     if cursor.last_memory_ts.is_none() {
         let cutoff = chrono::Utc::now() - chrono::Duration::from_std(SAFE_BACKFILL).unwrap();
         cursor.last_memory_ts = Some(cutoff.to_rfc3339());
+        cursor.boundary.memories = 0;
     }
     if cursor.last_feedback_ts.is_none() {
         let cutoff = chrono::Utc::now() - chrono::Duration::from_std(SAFE_BACKFILL).unwrap();
         cursor.last_feedback_ts = Some(cutoff.to_rfc3339());
+        cursor.boundary.feedback_id = None;
     }
     if cursor.last_parsed_ts.is_none() {
         let cutoff = chrono::Utc::now() - chrono::Duration::from_std(SAFE_BACKFILL).unwrap();
         cursor.last_parsed_ts = Some(cutoff.to_rfc3339());
+        cursor.boundary.parsed = 0;
     }
 
     // Per-stream sync policy is fetched fresh on every tick — the admin can
@@ -576,14 +606,22 @@ async fn run_one_sync_inner(
 
     let frames = if streams.frames {
         local
-            .fetch_frames_since(cursor.last_frame_ts.as_deref(), PAGE_LIMIT)
+            .fetch_frames_since(
+                cursor.last_frame_ts.as_deref(),
+                cursor.boundary.frames,
+                PAGE_LIMIT,
+            )
             .await?
     } else {
         Vec::new()
     };
     let audio = if streams.audio {
         local
-            .fetch_audio_since(cursor.last_audio_ts.as_deref(), PAGE_LIMIT)
+            .fetch_audio_since(
+                cursor.last_audio_ts.as_deref(),
+                cursor.boundary.audio,
+                PAGE_LIMIT,
+            )
             .await?
     } else {
         Vec::new()
@@ -593,7 +631,7 @@ async fn run_one_sync_inner(
     // The frame + audio paths are the load-bearing ones.
     let ui = if streams.ui_events {
         match local
-            .fetch_ui_events_since(cursor.last_ui_ts.as_deref(), PAGE_LIMIT)
+            .fetch_ui_events_since(cursor.last_ui_ts.as_deref(), cursor.boundary.ui, PAGE_LIMIT)
             .await
         {
             Ok(rows) => rows,
@@ -624,7 +662,11 @@ async fn run_one_sync_inner(
     // the frame+audio path. The default trait impl returns empty.
     let memories = if streams.memories {
         match local
-            .fetch_memories_since(cursor.last_memory_ts.as_deref(), PAGE_LIMIT)
+            .fetch_memories_since(
+                cursor.last_memory_ts.as_deref(),
+                cursor.boundary.memories,
+                PAGE_LIMIT,
+            )
             .await
         {
             Ok(rows) => rows,
@@ -638,7 +680,11 @@ async fn run_one_sync_inner(
     };
     let mut feedback = if streams.feedback != crate::enterprise_policy::FeedbackSyncMode::Off {
         match local
-            .fetch_feedback_since(cursor.last_feedback_ts.as_deref(), PAGE_LIMIT)
+            .fetch_feedback_since(
+                cursor.last_feedback_ts.as_deref(),
+                cursor.boundary.feedback_id.as_deref(),
+                PAGE_LIMIT,
+            )
             .await
         {
             Ok(rows) => rows,
@@ -665,7 +711,11 @@ async fn run_one_sync_inner(
     // not expose content_type=parsed.
     let parsed = if streams.parsed {
         match local
-            .fetch_parsed_since(cursor.last_parsed_ts.as_deref(), PAGE_LIMIT)
+            .fetch_parsed_since(
+                cursor.last_parsed_ts.as_deref(),
+                cursor.boundary.parsed,
+                PAGE_LIMIT,
+            )
             .await
         {
             Ok(rows) => rows,
@@ -708,24 +758,40 @@ async fn run_one_sync_inner(
     let bytes = body.len();
 
     let mut next_cursor = cursor.clone();
-    if let Some(latest) = frames.last() {
-        next_cursor.last_frame_ts = Some(latest.timestamp.clone());
-    }
-    if let Some(latest) = audio.last() {
-        next_cursor.last_audio_ts = Some(latest.timestamp.clone());
-    }
-    if let Some(latest) = ui.last() {
-        next_cursor.last_ui_ts = Some(latest.timestamp.clone());
-    }
-    if let Some(latest) = memories.last() {
-        next_cursor.last_memory_ts = Some(latest.created_at.clone());
-    }
+    advance_timestamp_boundary(
+        &mut next_cursor.last_frame_ts,
+        &mut next_cursor.boundary.frames,
+        &frames,
+        |row| &row.timestamp,
+    );
+    advance_timestamp_boundary(
+        &mut next_cursor.last_audio_ts,
+        &mut next_cursor.boundary.audio,
+        &audio,
+        |row| &row.timestamp,
+    );
+    advance_timestamp_boundary(
+        &mut next_cursor.last_ui_ts,
+        &mut next_cursor.boundary.ui,
+        &ui,
+        |row| &row.timestamp,
+    );
+    advance_timestamp_boundary(
+        &mut next_cursor.last_memory_ts,
+        &mut next_cursor.boundary.memories,
+        &memories,
+        |row| &row.created_at,
+    );
     if let Some(latest) = feedback.last() {
         next_cursor.last_feedback_ts = Some(latest.updated_at.clone());
+        next_cursor.boundary.feedback_id = Some(latest.feedback_id.clone());
     }
-    if let Some(latest) = parsed.last() {
-        next_cursor.last_parsed_ts = Some(latest.timestamp.clone());
-    }
+    advance_timestamp_boundary(
+        &mut next_cursor.last_parsed_ts,
+        &mut next_cursor.boundary.parsed,
+        &parsed,
+        |row| &row.timestamp,
+    );
 
     match &cfg.upload_mode {
         EnterpriseUploadMode::HostedIngest => {
@@ -792,6 +858,30 @@ async fn run_one_sync_inner(
         feedback: feedback.len(),
         bytes,
     })
+}
+
+fn advance_timestamp_boundary<T>(
+    cursor_ts: &mut Option<String>,
+    boundary_offset: &mut u32,
+    rows: &[T],
+    timestamp: impl Fn(&T) -> &str,
+) {
+    let Some(last) = rows.last() else {
+        return;
+    };
+    let latest_ts = timestamp(last);
+    let rows_at_latest = rows
+        .iter()
+        .rev()
+        .take_while(|row| timestamp(row) == latest_ts)
+        .count() as u32;
+
+    if cursor_ts.as_deref() == Some(latest_ts) {
+        *boundary_offset = boundary_offset.saturating_add(rows_at_latest);
+    } else {
+        *cursor_ts = Some(latest_ts.to_string());
+        *boundary_offset = rows_at_latest;
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -2241,12 +2331,37 @@ mod tests {
             last_memory_ts: Some("2026-05-07T09:15:00Z".to_string()),
             last_feedback_ts: None,
             last_parsed_ts: Some("2026-05-07T09:15:00Z".to_string()),
+            boundary: CursorBoundary {
+                frames: 500,
+                feedback_id: Some("feedback-0500".to_string()),
+                ..CursorBoundary::default()
+            },
         };
         c.save(&p).unwrap();
         let loaded = Cursor::load(&p);
         assert_eq!(loaded.last_frame_ts, c.last_frame_ts);
         assert_eq!(loaded.last_audio_ts, c.last_audio_ts);
         assert_eq!(loaded.last_ui_ts, c.last_ui_ts);
+        assert_eq!(loaded.boundary.frames, 500);
+        assert_eq!(
+            loaded.boundary.feedback_id.as_deref(),
+            Some("feedback-0500")
+        );
+    }
+
+    #[test]
+    fn cursor_from_older_app_defaults_boundary_progress() {
+        let cursor: Cursor = serde_json::from_str(
+            r#"{"last_frame_ts":"2026-05-07T10:00:00Z","last_audio_ts":null}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            cursor.last_frame_ts.as_deref(),
+            Some("2026-05-07T10:00:00Z")
+        );
+        assert_eq!(cursor.boundary.frames, 0);
+        assert!(cursor.boundary.feedback_id.is_none());
     }
 
     #[test]
@@ -2260,6 +2375,7 @@ mod tests {
             last_memory_ts: None,
             last_feedback_ts: None,
             last_parsed_ts: None,
+            boundary: CursorBoundary::default(),
         }
         .save(&p)
         .unwrap();
@@ -2449,11 +2565,115 @@ mod tests {
         }
     }
 
+    /// Models the local `/search` and `/memories` pagination contract: the
+    /// timestamp boundary is inclusive and the durable boundary offset skips
+    /// rows already acknowledged at that exact timestamp.
+    struct InclusiveTimestampLocal {
+        frames: Vec<FrameRow>,
+    }
+
+    #[async_trait::async_trait]
+    impl LocalApiClient for InclusiveTimestampLocal {
+        async fn fetch_frames_since(
+            &self,
+            since_ts: Option<&str>,
+            boundary_offset: u32,
+            limit: u32,
+        ) -> Result<Vec<FrameRow>, EnterpriseSyncError> {
+            Ok(self
+                .frames
+                .iter()
+                .filter(|row| since_ts.is_none_or(|since| row.timestamp.as_str() >= since))
+                .skip(boundary_offset as usize)
+                .take(limit as usize)
+                .cloned()
+                .collect())
+        }
+
+        async fn fetch_audio_since(
+            &self,
+            _since_ts: Option<&str>,
+            _boundary_offset: u32,
+            _limit: u32,
+        ) -> Result<Vec<AudioRow>, EnterpriseSyncError> {
+            Ok(Vec::new())
+        }
+    }
+
+    /// Models the corrected feedback keyset contract. The regression test
+    /// below proves why the old exclusive `updated_at > cursor` filter was
+    /// unsafe when a full page shared one timestamp.
+    struct ExclusiveTimestampLocal {
+        feedback: Vec<FeedbackRow>,
+    }
+
+    #[async_trait::async_trait]
+    impl LocalApiClient for ExclusiveTimestampLocal {
+        async fn fetch_frames_since(
+            &self,
+            _since_ts: Option<&str>,
+            _boundary_offset: u32,
+            _limit: u32,
+        ) -> Result<Vec<FrameRow>, EnterpriseSyncError> {
+            Ok(Vec::new())
+        }
+
+        async fn fetch_audio_since(
+            &self,
+            _since_ts: Option<&str>,
+            _boundary_offset: u32,
+            _limit: u32,
+        ) -> Result<Vec<AudioRow>, EnterpriseSyncError> {
+            Ok(Vec::new())
+        }
+
+        async fn fetch_feedback_since(
+            &self,
+            since_ts: Option<&str>,
+            after_id: Option<&str>,
+            limit: u32,
+        ) -> Result<Vec<FeedbackRow>, EnterpriseSyncError> {
+            Ok(self
+                .feedback
+                .iter()
+                .filter(|row| {
+                    since_ts.is_none_or(|since| {
+                        row.updated_at.as_str() > since
+                            || (row.updated_at.as_str() == since
+                                && after_id.is_none_or(|id| row.feedback_id.as_str() > id))
+                    })
+                })
+                .take(limit as usize)
+                .cloned()
+                .collect())
+        }
+    }
+
+    /// Restore the process-global stream policy even when an intentionally
+    /// red regression test panics on its assertion.
+    struct RestoreDefaultSyncStreams;
+
+    impl Drop for RestoreDefaultSyncStreams {
+        fn drop(&mut self) {
+            crate::enterprise_policy::set_sync_streams(
+                true,
+                false,
+                true,
+                true,
+                true,
+                true,
+                "off".to_string(),
+                "off".to_string(),
+            );
+        }
+    }
+
     #[async_trait::async_trait]
     impl LocalApiClient for MockLocal {
         async fn fetch_frames_since(
             &self,
             since_ts: Option<&str>,
+            _boundary_offset: u32,
             _limit: u32,
         ) -> Result<Vec<FrameRow>, EnterpriseSyncError> {
             *self.last_frames_since.lock().unwrap() = since_ts.map(|s| s.to_string());
@@ -2468,6 +2688,7 @@ mod tests {
         async fn fetch_audio_since(
             &self,
             since_ts: Option<&str>,
+            _boundary_offset: u32,
             _limit: u32,
         ) -> Result<Vec<AudioRow>, EnterpriseSyncError> {
             *self.last_audio_since.lock().unwrap() = since_ts.map(|s| s.to_string());
@@ -2482,6 +2703,7 @@ mod tests {
         async fn fetch_memories_since(
             &self,
             since_ts: Option<&str>,
+            _boundary_offset: u32,
             _limit: u32,
         ) -> Result<Vec<MemoryRow>, EnterpriseSyncError> {
             *self.last_memories_since.lock().unwrap() = since_ts.map(|s| s.to_string());
@@ -2496,6 +2718,7 @@ mod tests {
         async fn fetch_feedback_since(
             &self,
             since_ts: Option<&str>,
+            _after_id: Option<&str>,
             _limit: u32,
         ) -> Result<Vec<FeedbackRow>, EnterpriseSyncError> {
             *self.last_feedback_since.lock().unwrap() = since_ts.map(str::to_string);
@@ -2510,6 +2733,7 @@ mod tests {
         async fn fetch_parsed_since(
             &self,
             since_ts: Option<&str>,
+            _boundary_offset: u32,
             _limit: u32,
         ) -> Result<Vec<ParsedRow>, EnterpriseSyncError> {
             *self.last_parsed_since.lock().unwrap() = since_ts.map(|s| s.to_string());
@@ -2611,6 +2835,7 @@ mod tests {
             last_memory_ts: Some("2026-05-07T10:00:00Z".to_string()),
             last_feedback_ts: None,
             last_parsed_ts: Some("2026-05-07T10:00:00Z".to_string()),
+            boundary: CursorBoundary::default(),
         };
         let local = MockLocal::new(vec![vec![]], vec![vec![]]);
         let http = reqwest::Client::new();
@@ -2666,6 +2891,7 @@ mod tests {
             last_memory_ts: None,
             last_feedback_ts: None,
             last_parsed_ts: None,
+            boundary: CursorBoundary::default(),
         };
         let local = MockLocal::new(
             vec![vec![
@@ -2717,6 +2943,7 @@ mod tests {
             last_memory_ts: Some("2026-07-27T23:26:23Z".to_string()),
             last_feedback_ts: Some("2026-07-27T23:26:23Z".to_string()),
             last_parsed_ts: Some("2026-07-27T23:26:23Z".to_string()),
+            boundary: CursorBoundary::default(),
         };
         // MockLocal pops from the end: yield first → second → final.
         let local = MockLocal::new(vec![final_page, second, first], vec![]);
@@ -2735,6 +2962,103 @@ mod tests {
             Cursor::load(&cfg.cursor_path).last_frame_ts.as_deref(),
             Some(expected_last.as_str()),
             "the final acknowledged page is durable"
+        );
+    }
+
+    #[tokio::test]
+    async fn timestamp_gte_cursor_must_progress_past_a_full_boundary_tie() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/ingest"))
+            .respond_with(wiremock::ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        let tied_at = "2026-08-01T00:00:00Z";
+        let local = InclusiveTimestampLocal {
+            frames: (1..=PAGE_LIMIT as i64 + 1)
+                .map(|id| frame(id, tied_at, "Arc", "same timestamp boundary"))
+                .collect(),
+        };
+        let dir = TempDir::new().unwrap();
+        let cfg = test_cfg(&dir, format!("{}/ingest", server.uri()));
+        let mut cursor = Cursor {
+            last_frame_ts: Some("2026-07-31T23:59:59Z".to_string()),
+            last_audio_ts: Some("2026-07-31T23:59:59Z".to_string()),
+            last_ui_ts: Some("2026-07-31T23:59:59Z".to_string()),
+            last_memory_ts: Some("2026-07-31T23:59:59Z".to_string()),
+            last_feedback_ts: Some("2026-07-31T23:59:59Z".to_string()),
+            last_parsed_ts: Some("2026-07-31T23:59:59Z".to_string()),
+            boundary: CursorBoundary::default(),
+        };
+
+        let first = run_one_sync(&cfg, &mut cursor, &local, &reqwest::Client::new())
+            .await
+            .unwrap();
+        cursor = Cursor::load(&cfg.cursor_path);
+        let second = run_one_sync(&cfg, &mut cursor, &local, &reqwest::Client::new())
+            .await
+            .unwrap();
+
+        assert_eq!(first.frames, PAGE_LIMIT as usize);
+        assert_eq!(
+            second.frames, 1,
+            "an inclusive timestamp-only cursor repeats the first 500 tied rows instead of reaching row 501"
+        );
+    }
+
+    #[tokio::test]
+    async fn timestamp_gt_cursor_must_not_skip_the_rest_of_a_full_boundary_tie() {
+        let _policy_guard = crate::enterprise_policy::sync_streams_test_lock();
+        let _restore_policy = RestoreDefaultSyncStreams;
+        crate::enterprise_policy::set_sync_streams(
+            true,
+            false,
+            true,
+            true,
+            true,
+            true,
+            "full".to_string(),
+            "off".to_string(),
+        );
+
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/ingest"))
+            .respond_with(wiremock::ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        let tied_at = "2026-08-01T00:00:00Z";
+        let local = ExclusiveTimestampLocal {
+            feedback: (1..=PAGE_LIMIT + 1)
+                .map(|id| feedback(&format!("feedback-{id:04}"), tied_at))
+                .collect(),
+        };
+        let dir = TempDir::new().unwrap();
+        let cfg = test_cfg(&dir, format!("{}/ingest", server.uri()));
+        let mut cursor = Cursor {
+            last_frame_ts: Some("2026-07-31T23:59:59Z".to_string()),
+            last_audio_ts: Some("2026-07-31T23:59:59Z".to_string()),
+            last_ui_ts: Some("2026-07-31T23:59:59Z".to_string()),
+            last_memory_ts: Some("2026-07-31T23:59:59Z".to_string()),
+            last_feedback_ts: Some("2026-07-31T23:59:59Z".to_string()),
+            last_parsed_ts: Some("2026-07-31T23:59:59Z".to_string()),
+            boundary: CursorBoundary::default(),
+        };
+
+        let first = run_one_sync(&cfg, &mut cursor, &local, &reqwest::Client::new())
+            .await
+            .unwrap();
+        cursor = Cursor::load(&cfg.cursor_path);
+        let second = run_one_sync(&cfg, &mut cursor, &local, &reqwest::Client::new())
+            .await
+            .unwrap();
+
+        assert_eq!(first.feedback, PAGE_LIMIT as usize);
+        assert_eq!(
+            second.feedback, 1,
+            "an exclusive timestamp-only cursor skips row 501 because it shares the acknowledged page's timestamp"
         );
     }
 
@@ -2771,6 +3095,7 @@ mod tests {
             last_memory_ts: Some("2026-07-27T23:26:23Z".to_string()),
             last_feedback_ts: Some("2026-07-27T23:26:23Z".to_string()),
             last_parsed_ts: Some("2026-07-27T23:26:23Z".to_string()),
+            boundary: CursorBoundary::default(),
         };
         let local = MockLocal::new(vec![second.clone(), first], vec![]);
 
@@ -2832,6 +3157,7 @@ mod tests {
             last_memory_ts: None,
             last_feedback_ts: None,
             last_parsed_ts: None,
+            boundary: CursorBoundary::default(),
         };
         let mut cursor = original_cursor.clone();
         let large_text = "x".repeat(2 * 1024 * 1024);
@@ -2894,6 +3220,7 @@ mod tests {
             last_memory_ts: None,
             last_feedback_ts: None,
             last_parsed_ts: None,
+            boundary: CursorBoundary::default(),
         };
         let before = cursor.clone();
         let large_text = "x".repeat(2 * 1024 * 1024);
@@ -2938,6 +3265,7 @@ mod tests {
             last_memory_ts: Some("2026-05-07T09:00:00Z".to_string()),
             last_feedback_ts: None,
             last_parsed_ts: Some("2026-05-07T09:00:00Z".to_string()),
+            boundary: CursorBoundary::default(),
         };
         let local = MockLocal::new(vec![vec![]], vec![vec![]]).with_memories(vec![vec![
             memory(1, "2026-05-07T10:00:00Z", "first"),
@@ -2992,6 +3320,7 @@ mod tests {
             last_memory_ts: Some("2026-05-07T09:00:00Z".to_string()),
             last_feedback_ts: Some("2026-05-07T09:00:00Z".to_string()),
             last_parsed_ts: None,
+            boundary: CursorBoundary::default(),
         };
         let local = MockLocal::new(vec![], vec![])
             .with_feedback(vec![vec![feedback("feedback-1", "2026-05-07T10:00:00Z")]]);
@@ -3055,6 +3384,7 @@ mod tests {
             last_memory_ts: Some("2026-05-07T09:00:00Z".to_string()),
             last_feedback_ts: None,
             last_parsed_ts: Some("2026-05-07T09:00:00Z".to_string()),
+            boundary: CursorBoundary::default(),
         };
         let local = MockLocal::new(vec![], vec![]).with_parsed(vec![vec![parsed(
             42,
@@ -3156,6 +3486,7 @@ mod tests {
             last_memory_ts: None,
             last_feedback_ts: None,
             last_parsed_ts: None,
+            boundary: CursorBoundary::default(),
         };
         let local = MockLocal::new(
             vec![vec![frame(1, "2026-05-07T10:00:00Z", "Arc", "secret")]],
@@ -3229,6 +3560,7 @@ mod tests {
             last_memory_ts: None,
             last_feedback_ts: None,
             last_parsed_ts: None,
+            boundary: CursorBoundary::default(),
         };
         let local = MockLocal::new(
             vec![vec![frame(
@@ -3293,6 +3625,7 @@ mod tests {
             last_memory_ts: None,
             last_feedback_ts: None,
             last_parsed_ts: None,
+            boundary: CursorBoundary::default(),
         };
         let local = MockLocal::new(
             vec![vec![frame(1, "2026-05-07T10:00:00Z", "Arc", "secret")]],
@@ -3328,6 +3661,7 @@ mod tests {
             last_memory_ts: None,
             last_feedback_ts: None,
             last_parsed_ts: None,
+            boundary: CursorBoundary::default(),
         };
         let local = MockLocal::new(
             vec![vec![frame(1, "2026-05-07T10:00:00Z", "Arc", "x")]],
@@ -3362,6 +3696,7 @@ mod tests {
             last_memory_ts: None,
             last_feedback_ts: None,
             last_parsed_ts: None,
+            boundary: CursorBoundary::default(),
         };
         let local = MockLocal::new(
             vec![vec![frame(1, "2026-05-07T10:00:00Z", "Arc", "x")]],
@@ -3402,6 +3737,7 @@ mod tests {
             last_memory_ts: None,
             last_feedback_ts: None,
             last_parsed_ts: None,
+            boundary: CursorBoundary::default(),
         };
         let local = MockLocal::new(
             vec![vec![frame(1, "2026-05-07T10:00:00Z", "Arc", "x")]],
@@ -3450,6 +3786,7 @@ mod tests {
         async fn fetch_frames_since(
             &self,
             _since: Option<&str>,
+            _boundary_offset: u32,
             _limit: u32,
         ) -> Result<Vec<FrameRow>, EnterpriseSyncError> {
             *self.frames_calls.lock().unwrap() += 1;
@@ -3459,6 +3796,7 @@ mod tests {
         async fn fetch_audio_since(
             &self,
             _since: Option<&str>,
+            _boundary_offset: u32,
             _limit: u32,
         ) -> Result<Vec<AudioRow>, EnterpriseSyncError> {
             *self.audio_calls.lock().unwrap() += 1;
@@ -3468,6 +3806,7 @@ mod tests {
         async fn fetch_ui_events_since(
             &self,
             _since: Option<&str>,
+            _boundary_offset: u32,
             _limit: u32,
         ) -> Result<Vec<UiEventRow>, EnterpriseSyncError> {
             *self.ui_calls.lock().unwrap() += 1;
@@ -3482,6 +3821,7 @@ mod tests {
         async fn fetch_memories_since(
             &self,
             _since: Option<&str>,
+            _boundary_offset: u32,
             _limit: u32,
         ) -> Result<Vec<MemoryRow>, EnterpriseSyncError> {
             *self.memories_calls.lock().unwrap() += 1;
@@ -3546,6 +3886,7 @@ mod tests {
             last_memory_ts: Some("2026-05-07T09:00:00Z".to_string()),
             last_feedback_ts: None,
             last_parsed_ts: Some("2026-05-07T09:00:00Z".to_string()),
+            boundary: CursorBoundary::default(),
         };
         let local = CallCountingLocal::new();
         let http = reqwest::Client::new();
@@ -3644,12 +3985,14 @@ mod tests {
             &self,
             _: Option<&str>,
             _: u32,
+            _: u32,
         ) -> Result<Vec<FrameRow>, EnterpriseSyncError> {
             Ok(Vec::new())
         }
         async fn fetch_audio_since(
             &self,
             _: Option<&str>,
+            _: u32,
             _: u32,
         ) -> Result<Vec<AudioRow>, EnterpriseSyncError> {
             Ok(Vec::new())
