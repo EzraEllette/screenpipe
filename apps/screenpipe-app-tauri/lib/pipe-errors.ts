@@ -52,7 +52,32 @@ export function parsePipeError(stderr: string): ParsedPipeError {
     const classified = classifyStructuredPipeError(parsed);
     if (classified) return classified;
   }
-  const normalized = stderr.toLowerCase();
+  const normalized = stderr.trim().toLowerCase();
+  if (normalized === "daily_limit") {
+    return {
+      type: "daily_limit",
+      message: "daily AI usage limit reached",
+    };
+  }
+  if (normalized === "credits_exhausted") {
+    return {
+      type: "credits_exhausted",
+      message: "daily AI limit reached — upgrade or wait until tomorrow",
+      credits_remaining: 0,
+    };
+  }
+  if (normalized === "quota_exhausted") {
+    return {
+      type: "quota_exhausted",
+      message: "provider quota or billing limit reached",
+    };
+  }
+  if (normalized === "rate_limited" || normalized === "rate_limit") {
+    return {
+      type: "rate_limit",
+      message: "rate limited — retrying automatically",
+    };
+  }
   if (
     normalized.includes("daily_cost_limit_exceeded") ||
     normalized.includes("daily_limit_exceeded")
@@ -202,4 +227,20 @@ export function isActionablePipeError(type: PipeErrorType): boolean {
     type === "quota_exhausted" ||
     type === "model_not_allowed"
   );
+}
+
+export type AICapacityFailureKind = "limit" | "rate_limit";
+
+export function aiCapacityFailureKind(
+  raw: string,
+): AICapacityFailureKind | null {
+  const type = parsePipeError(raw).type;
+  if (
+    type === "daily_limit" ||
+    type === "credits_exhausted" ||
+    type === "quota_exhausted"
+  ) {
+    return "limit";
+  }
+  return type === "rate_limit" ? "rate_limit" : null;
 }

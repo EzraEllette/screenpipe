@@ -241,4 +241,32 @@ describe("TimelineDailySummary", () => {
 			}),
 		);
 	});
+
+	it("does not present exhausted AI credits as a transient busy response", async () => {
+		mocks.settings.enhancedAI = true;
+		mocks.runDailySummaryWithPi.mockRejectedValue(
+			new Error("429 credits_exhausted"),
+		);
+		render(<TimelineDailySummary currentDate={new Date(2026, 6, 25)} />);
+
+		fireEvent.click(screen.getByTestId("timeline-daily-summary-trigger"));
+
+		await waitFor(() => {
+			expect(screen.getByText(/AI limit reached/i)).toBeInTheDocument();
+		});
+		expect(screen.queryByText(/AI is busy right now/i)).not.toBeInTheDocument();
+	});
+
+	it("presents a plain rate limit as transient busy response", async () => {
+		mocks.settings.enhancedAI = true;
+		mocks.runDailySummaryWithPi.mockRejectedValue(new Error("429 rate limit"));
+		render(<TimelineDailySummary currentDate={new Date(2026, 6, 25)} />);
+
+		fireEvent.click(screen.getByTestId("timeline-daily-summary-trigger"));
+
+		await waitFor(() => {
+			expect(screen.getByText(/AI is busy right now/i)).toBeInTheDocument();
+		});
+		expect(screen.queryByText(/AI limit reached/i)).not.toBeInTheDocument();
+	});
 });

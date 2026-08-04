@@ -374,6 +374,41 @@ describe("createOnboardingLiveView", () => {
     );
   });
 
+  it.each([
+    [
+      "429 credits_exhausted",
+      "AI limit reached. Change your plan or model before creating this dashboard.",
+    ],
+    [
+      "429 rate limit",
+      "AI is busy right now. Try creating this dashboard again in a moment.",
+    ],
+  ])("presents %s as friendly capacity guidance", async (raw, friendly) => {
+    mocks.generateLiveViewWithPi.mockRejectedValueOnce(new Error(raw));
+
+    await expect(
+      createOnboardingLiveView({
+        goal: "help me follow through after meetings",
+        goalCategory: "meeting_follow_through",
+        preset: {
+          id: "default",
+          provider: "screenpipe-cloud",
+          url: "",
+          model: "auto",
+          apiKey: null,
+          defaultPreset: true,
+          maxContextChars: 100_000,
+          prompt: "",
+        },
+        userToken: "user-token",
+      }),
+    ).rejects.toMatchObject({
+      code: "ai_plan_failed",
+      stage: "planning",
+      message: friendly,
+    });
+  });
+
   it("updates the stable first dashboard on retry instead of creating a duplicate", async () => {
     mocks.listBrainViews.mockResolvedValue({
       status: "ok",

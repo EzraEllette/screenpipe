@@ -61,13 +61,51 @@ describe("meeting summary lifecycle", () => {
     ).toBe("failed");
   });
 
-  it("explains daily limits without implying the meeting was lost", () => {
+  it.each(["daily_limit", "credits_exhausted", "quota_exhausted"])(
+    "explains terminal %s without implying the meeting was lost",
+    (errorType) => {
+      expect(
+        meetingSummaryFailureCopy({
+          ...execution,
+          status: "failed",
+          error_type: errorType,
+        }),
+      ).toBe(
+        "AI limit reached. Your meeting and transcript are safe. Change your plan or model before retrying.",
+      );
+    },
+  );
+
+  it("explains a transient rate limit without implying a permanent limit", () => {
     expect(
       meetingSummaryFailureCopy({
         ...execution,
         status: "failed",
-        error_type: "daily_limit",
+        error_type: "rate_limited",
       }),
-    ).toBe("AI limit reached. Your meeting and transcript are safe.");
+    ).toBe(
+      "AI is busy right now. Your meeting and transcript are safe. Retry in a moment.",
+    );
+  });
+
+  it("classifies legacy rows from their error message", () => {
+    expect(
+      meetingSummaryFailureCopy({
+        ...execution,
+        status: "failed",
+        error_type: null,
+        error_message: "429 insufficient_quota",
+      }),
+    ).toContain("AI limit reached");
+  });
+
+  it("keeps generic failures recoverable", () => {
+    expect(
+      meetingSummaryFailureCopy({
+        ...execution,
+        status: "cancelled",
+        error_type: "unknown",
+      }),
+    ).toBe("Your meeting and transcript are safe. Retry when you're ready.");
   });
 });

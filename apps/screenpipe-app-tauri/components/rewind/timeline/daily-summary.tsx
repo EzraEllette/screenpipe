@@ -41,6 +41,7 @@ import {
 } from "@/lib/daily-summary-prompt";
 import { runDailySummaryWithPi } from "@/lib/daily-summary-pi";
 import { useSettings } from "@/lib/hooks/use-settings";
+import { aiCapacityFailureKind } from "@/lib/pipe-errors";
 import { pickPipePreset } from "@/lib/utils/pick-pipe-preset";
 import { cn } from "@/lib/utils";
 import { commands, type AIPreset } from "@/lib/utils/tauri";
@@ -79,10 +80,13 @@ function cacheSummary(date: Date, summary: string) {
 
 function friendlyGenerationError(error: unknown): string {
 	if (!(error instanceof Error)) return "Daily summary could not be generated.";
+	const capacityFailure = aiCapacityFailureKind(error.message);
+	if (capacityFailure === "limit")
+		return "AI limit reached. Change your plan or model before trying again.";
+	if (capacityFailure === "rate_limit")
+		return "AI is busy right now. Try again in a moment.";
 	if (/401|403/.test(error.message))
 		return "Your session expired. Sign in again to continue.";
-	if (/429/.test(error.message))
-		return "AI is busy right now. Try again in a moment.";
 	if (/timed out/i.test(error.message))
 		return "The AI took too long to read this day. Try again.";
 	return "Daily summary could not be generated. Try again.";

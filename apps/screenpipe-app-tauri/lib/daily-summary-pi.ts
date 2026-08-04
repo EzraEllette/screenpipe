@@ -5,6 +5,7 @@
 import { homeDir, join } from "@tauri-apps/api/path";
 
 import { mountAgentEventBus, registerForeground } from "@/lib/events/bus";
+import { terminalAgentOutcome } from "@/lib/events/terminal-outcome";
 import type { AgentEventEnvelope } from "@/lib/events/types";
 import {
   buildDailySummaryAgentPrompt,
@@ -59,19 +60,6 @@ function contentText(content: unknown): string {
     .join("");
 }
 
-function finalAssistantText(envelope: AgentEventEnvelope): string {
-  const messages = Array.isArray(envelope.event.messages)
-    ? envelope.event.messages
-    : [];
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index];
-    if (message.role !== "assistant") continue;
-    const text = contentText(message.content).trim();
-    if (text) return text;
-  }
-  return "";
-}
-
 function abortError(): Error {
   const error = new Error("daily summary generation aborted");
   error.name = "AbortError";
@@ -122,10 +110,12 @@ export async function runDailySummaryWithPi(
       const candidate = contentText(event.message.content).trim();
       if (candidate) lastAssistant = candidate;
     }
-    if (event.type === "agent_end") {
-      settle(finalAssistantText(envelope) || lastAssistant);
-    } else if (event.type === "error") {
-      fail(new Error("AI failed to generate the daily summary"));
+    const outcome = terminalAgentOutcome(event, lastAssistant);
+    if (outcome.kind === "success") settle(outcome.text);
+    if (outcome.kind === "failure") {
+      fail(
+        new Error(outcome.error ?? "AI failed to generate the daily summary"),
+      );
     }
   };
 

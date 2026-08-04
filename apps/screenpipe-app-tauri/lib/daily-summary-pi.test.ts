@@ -4,6 +4,7 @@
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import type { AgentEventEnvelope } from "./events/types";
 import { runDailySummaryWithPi } from "./daily-summary-pi";
 
 const PRESET = {
@@ -58,7 +59,7 @@ describe("runDailySummaryWithPi", () => {
   });
 
   it("starts an isolated Pi session and returns only the final assistant response", async () => {
-    let handler: ((envelope: any) => void) | null = null;
+    let handler: ((envelope: AgentEventEnvelope) => void) | null = null;
     const unregister = vi.fn();
     mocks.registerForeground.mockImplementation((_sessionId, nextHandler) => {
       handler = nextHandler;
@@ -112,6 +113,97 @@ describe("runDailySummaryWithPi", () => {
     );
     expect(unregister).toHaveBeenCalledOnce();
     expect(mocks.piStop).toHaveBeenCalledOnce();
+  });
+
+  it("preserves a terminal provider error from the final assistant message", async () => {
+    let handler: ((envelope: AgentEventEnvelope) => void) | null = null;
+    mocks.registerForeground.mockImplementation((_sessionId, nextHandler) => {
+      handler = nextHandler;
+      return vi.fn();
+    });
+    mocks.piPrompt.mockImplementation(async () => {
+      queueMicrotask(() => {
+        handler?.({
+          event: {
+            type: "agent_end",
+            messages: [
+              {
+                role: "assistant",
+                content: [],
+                stopReason: "error",
+                errorMessage: "429 credits_exhausted",
+              },
+            ],
+          },
+        });
+      });
+      return { status: "ok", data: null };
+    });
+
+    const running = runDailySummaryWithPi({
+      date: new Date(2026, 6, 25),
+      range: { start: "start", end: "end" },
+      preset: PRESET,
+      userToken: "user-token",
+    });
+
+    await expect(running).rejects.toThrow("429 credits_exhausted");
+  });
+
+  it("waits through a Pi retry and preserves its final error", async () => {
+    let handler: ((envelope: AgentEventEnvelope) => void) | null = null;
+    mocks.registerForeground.mockImplementation((_sessionId, nextHandler) => {
+      handler = nextHandler;
+      return vi.fn();
+    });
+    mocks.piPrompt.mockResolvedValue({ status: "ok", data: null });
+
+    const running = runDailySummaryWithPi({
+      date: new Date(2026, 6, 25),
+      range: { start: "start", end: "end" },
+      preset: PRESET,
+      userToken: "user-token",
+    });
+    let settled = false;
+    void running.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+
+    await vi.waitFor(() => expect(handler).not.toBeNull());
+    handler?.({
+      source: "pi",
+      sessionId: "daily-summary",
+      event: {
+        type: "agent_end",
+        willRetry: true,
+        messages: [
+          {
+            role: "assistant",
+            content: [],
+            stopReason: "error",
+            errorMessage: "temporary rate limit",
+          },
+        ],
+      },
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    handler?.({
+      source: "pi",
+      sessionId: "daily-summary",
+      event: {
+        type: "auto_retry_end",
+        success: false,
+        finalError: "provider retries exhausted",
+      },
+    });
+    await expect(running).rejects.toThrow("provider retries exhausted");
   });
 
   it("stops the Pi session when the request is aborted", async () => {

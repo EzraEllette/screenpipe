@@ -67,7 +67,13 @@ export interface AgentInnerEvent {
   // Pipe-only: present on `agent_end` events emitted by pipe stdout.
   // The pipe runtime writes its full message history here so consumers
   // can reconstruct a transcript without replaying every delta.
-  messages?: Array<{ role?: string; content?: unknown }>;
+  messages?: Array<{
+    role?: string;
+    content?: unknown;
+    stopReason?: string;
+    errorMessage?: string;
+    error?: string;
+  }>;
   [k: string]: unknown;
 }
 

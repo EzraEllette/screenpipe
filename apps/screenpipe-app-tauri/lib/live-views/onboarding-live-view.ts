@@ -18,6 +18,7 @@ import {
   startOnboardingLiveViewActivation,
 } from "@/lib/live-views/onboarding-activation";
 import { MAX_DASHBOARDS } from "@/lib/live-views/constants";
+import { aiCapacityFailureKind } from "@/lib/pipe-errors";
 import {
   buildLiveViewTimeContext,
   DEFAULT_LIVE_VIEW_PERIOD_POLICY,
@@ -113,6 +114,18 @@ export class OnboardingLiveViewSetupError extends Error {
     super(message);
     this.name = "OnboardingLiveViewSetupError";
   }
+}
+
+function friendlyPlanningError(error: unknown): string {
+  if (!(error instanceof Error)) return "AI could not design the dashboard.";
+  const capacityFailure = aiCapacityFailureKind(error.message);
+  if (capacityFailure === "limit") {
+    return "AI limit reached. Change your plan or model before creating this dashboard.";
+  }
+  if (capacityFailure === "rate_limit") {
+    return "AI is busy right now. Try creating this dashboard again in a moment.";
+  }
+  return error.message;
 }
 
 function words(value: string): Set<string> {
@@ -712,9 +725,7 @@ export async function createOnboardingLiveView(options: {
       throw new OnboardingLiveViewSetupError(
         "ai_plan_failed",
         "planning",
-        error instanceof Error
-          ? error.message
-          : "AI could not design the dashboard.",
+        friendlyPlanningError(error),
       );
     }
 

@@ -12,6 +12,7 @@ import {
   type PiProviderConfig,
 } from "@/lib/utils/tauri";
 import { mountAgentEventBus, registerForeground } from "@/lib/events/bus";
+import { terminalAgentOutcome } from "@/lib/events/terminal-outcome";
 import type { AgentEventEnvelope } from "@/lib/events/types";
 import { INTERNAL_TITLE_PREFIX } from "@/lib/utils/internal-session";
 
@@ -357,24 +358,6 @@ function providerConfig(preset: AIPreset): PiProviderConfig {
   };
 }
 
-function textFromAgentEnd(envelope: AgentEventEnvelope): string {
-  const messages = Array.isArray(envelope.event.messages)
-    ? envelope.event.messages
-    : [];
-  return messages
-    .filter((message) => message.role === "assistant")
-    .flatMap((message) =>
-      Array.isArray(message.content)
-        ? (message.content as Array<Record<string, unknown>>)
-            .filter((content) => content.type === "text")
-            .map((content) =>
-              typeof content.text === "string" ? content.text : "",
-            )
-        : [],
-    )
-    .join("\n");
-}
-
 async function rawGeneration(
   options: GenerateLiveViewOptions,
 ): Promise<string> {
@@ -416,10 +399,10 @@ async function rawGeneration(
           ? event.assistantMessageEvent.delta
           : "";
     if (typeof delta === "string") accumulated += delta;
-    if (event.type === "agent_end") {
-      settle(accumulated || textFromAgentEnd(envelope));
-    } else if (event.type === "error") {
-      fail("AI failed to generate the Live View");
+    const outcome = terminalAgentOutcome(event, accumulated);
+    if (outcome.kind === "success") settle(outcome.text);
+    if (outcome.kind === "failure") {
+      fail(outcome.error ?? "AI failed to generate the Live View");
     }
   };
 
