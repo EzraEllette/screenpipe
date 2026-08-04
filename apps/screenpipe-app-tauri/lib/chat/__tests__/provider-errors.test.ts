@@ -141,6 +141,24 @@ describe("provider error copy", () => {
     ).toBeNull();
   });
 
+  it("replaces sensitive-content provider payloads with actionable copy", () => {
+    const raw = 'Error: 500: {"message":"sensitive words detected (request id: req_test_123)","type":"new_api_error","param":"","code":"sensitive_words_detected"}';
+
+    for (const preset of [
+      null,
+      { provider: "screenpipe-cloud", model: "auto" },
+      { provider: "custom", model: "remote-model" },
+    ]) {
+      const msg = buildProviderErrorMessage(raw, preset);
+
+      expect(msg).toBe(
+        "The AI provider blocked this request after detecting sensitive content. Rephrase your message or remove sensitive context, then try again."
+      );
+      expect(msg).not.toContain("req_test_123");
+      expect(msg).not.toContain("sensitive_words_detected");
+    }
+  });
+
   it("leaves non-connection cloud errors untouched (quota/auth handled elsewhere)", () => {
     expect(
       buildProviderErrorMessage("model_not_allowed", { provider: "screenpipe-cloud", model: "auto" })

@@ -130,6 +130,10 @@ export function buildProviderErrorMessage(
     return buildContextOverflowMessage(errorStr);
   }
 
+  if (normalized.includes("sensitive_words_detected")) {
+    return "The AI provider blocked this request after detecting sensitive content. Rephrase your message or remove sensitive context, then try again.";
+  }
+
   // ChatGPT OAuth tokens from Enterprise/Business workspaces can lack the
   // chatgpt_account_id claim the Codex backend requires — the pi provider
   // then throws "Failed to extract accountId from token" on every turn.
