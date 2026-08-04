@@ -145,6 +145,101 @@ describe("UpgradeQuotaBanner", () => {
     expect(screen.queryByRole("button", { name: "View Business" })).toBeNull();
   });
 
+  it.each([
+    [
+      "Free",
+      "logged_in",
+      "free",
+      "basic",
+      "Basic",
+      "https://screenpi.pe/account/billing",
+    ],
+    [
+      "Basic",
+      "logged_in",
+      "basic",
+      "business",
+      "Business",
+      "https://screenpi.pe/account/billing",
+    ],
+    [
+      "Business",
+      "subscribed",
+      "business",
+      "business_max",
+      "Business Max",
+      "https://screenpipe.com/account/billing?target_plan=pro_max&interval=month",
+    ],
+    [
+      "Business Max",
+      "business_max",
+      "business_max",
+      "business_ultra",
+      "Business Ultra",
+      "https://screenpipe.com/account/billing?target_plan=pro_ultra&interval=month",
+    ],
+  ] as const)(
+    "shows the same exact %s upgrade from polled and immediate Cloudflare state",
+    async (_currentPlan, tier, cloudflarePlan, requiredPlan, planLabel, upgradeUrl) => {
+      mocks.usageState = {
+        ...mocks.usageState,
+        tier,
+        remaining: 999_999,
+        upsell_banner: false,
+        upgrade_eligible: true,
+        hosted_ai: {
+          plan: cloudflarePlan,
+          allowance_managed_by: "cloudflare",
+          usage_as_of: "2026-08-04T16:30:00.000Z",
+          upgrade: {
+            requiredPlan,
+            upgradeUrl,
+            resetsAt: null,
+          },
+          allowances: [
+            {
+              lane: "auto",
+              used_percent: 100,
+              remaining_percent: 0,
+              window_seconds: 2_592_000,
+              technique: "fixed",
+              resets_at: "2026-08-17T00:00:00.000Z",
+            },
+          ],
+        },
+      };
+      mocks.gateState = false;
+
+      const polled = render(<UpgradeQuotaBanner />);
+
+      expect(mocks.seenEligibility).toBe(true);
+      expect(screen.getByTestId("hosted-ai-allowance-banner")).toBeTruthy();
+      fireEvent.click(
+        screen.getByRole("button", { name: `Upgrade to ${planLabel}` }),
+      );
+      await waitFor(() =>
+        expect(mocks.openExternalUrl).toHaveBeenCalledWith(upgradeUrl),
+      );
+      expect(screen.queryByRole("button", { name: "View Business" })).toBeNull();
+
+      polled.unmount();
+      mocks.openExternalUrl.mockClear();
+      mocks.blockedUpgrade = {
+        requiredPlan,
+        upgradeUrl,
+        resetsAt: null,
+      };
+
+      render(<UpgradeQuotaBanner />);
+      fireEvent.click(
+        screen.getByRole("button", { name: `Upgrade to ${planLabel}` }),
+      );
+      await waitFor(() =>
+        expect(mocks.openExternalUrl).toHaveBeenCalledWith(upgradeUrl),
+      );
+    },
+  );
+
   it("renders the structured cost-limit action even while the query meter has room", async () => {
     mocks.usageState = {
       ...mocks.usageState,

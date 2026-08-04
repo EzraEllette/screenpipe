@@ -24,6 +24,7 @@ import {
   isProviderQuotaOrBillingLimitError,
   shouldUseArgusBackgroundFallback,
 } from '../services/background-limit-fallback';
+import { getHostedAiCapacityUpgrade } from '../services/hosted-ai-policy';
 
 // Auto model waterfall (INTERACTIVE) — use only current OpenAI/Anthropic models.
 // Keep a cross-provider option second so an OpenAI outage does not break chat.
@@ -553,6 +554,9 @@ function allowanceMessage(allowance: HostedChatAllowanceExceededError['allowance
 
 /** Render the stable terminal contract Pi uses to avoid generic 429 retries. */
 export function allowanceErrorResponse(body: RequestBody, error: HostedChatAllowanceExceededError): Response {
+  const upgrade = error.allowance.plan === 'internal'
+    ? null
+    : getHostedAiCapacityUpgrade(error.allowance.plan);
   const payload = {
     error: {
       message: allowanceMessage(error.allowance),
@@ -560,6 +564,8 @@ export function allowanceErrorResponse(body: RequestBody, error: HostedChatAllow
       code: 'hosted_ai_allowance_exceeded',
     },
     allowance: error.allowance,
+    required_plan: upgrade?.requiredPlan ?? null,
+    upgrade_url: upgrade?.upgradeUrl ?? null,
   };
   if (body.stream) {
     return addCorsHeaders(new Response(

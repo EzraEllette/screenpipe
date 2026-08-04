@@ -16,6 +16,7 @@ import {
   parseRateLimitWaitSeconds,
   parseQuotaUpgradeAction,
   PI_MAX_RATE_LIMIT_RETRIES,
+  validateQuotaUpgradeAction,
 } from "../quota-errors";
 
 describe("classifyQuotaError", () => {
@@ -207,6 +208,39 @@ describe("buildDailyLimitMessage", () => {
         resetsAt: null,
       });
     }
+  });
+
+  it("validates the same plan action contract for polled usage state", () => {
+    const upgradeUrl =
+      "https://screenpipe.com/account/billing?target_plan=pro_max&interval=month";
+    expect(
+      validateQuotaUpgradeAction({
+        requiredPlan: "business_max",
+        upgradeUrl,
+      }),
+    ).toEqual({
+      requiredPlan: "business_max",
+      upgradeUrl,
+      resetsAt: null,
+    });
+    expect(
+      validateQuotaUpgradeAction({
+        requiredPlan: "business_ultra",
+        upgradeUrl: "https://example.com/account/billing",
+      }),
+    ).toBeNull();
+  });
+
+  it("accepts the immediate Cloudflare allowance action contract", () => {
+    const error = JSON.stringify({
+      error: { code: "hosted_ai_allowance_exceeded" },
+      allowance: { lane: "auto", plan: "business", managed_by: "cloudflare" },
+      required_plan: "business_max",
+      upgrade_url:
+        "https://screenpipe.com/account/billing?target_plan=pro_max&interval=month",
+    });
+    expect(parseQuotaUpgradeAction(error)?.requiredPlan).toBe("business_max");
+    expect(buildDailyLimitMessage(error)).toContain("explicit hosted model");
   });
 
   it("recognizes monthly and trial cost limits through the same upgrade contract", () => {

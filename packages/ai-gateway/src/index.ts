@@ -68,6 +68,7 @@ import {
 } from './services/free-chat-limit';
 import {
 	getHostedAiAllowedModels,
+	getHostedAiCapacityUpgrade,
 	getHostedAiIncludedCredits,
 	getHostedAiPlan,
 	hasPaidHostedAiPlan,
@@ -365,7 +366,8 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 				}
 				const allowanceExhausted = cloudflareUsage?.allowances
 					.some((allowance) => allowance.remaining_percent <= 0) ?? null;
-				const upgradeEligible = isHostedAiUpgradeEligible(authResult);
+				const capacityUpgrade = getHostedAiCapacityUpgrade(usageAccountPlan);
+				const upgradeEligible = capacityUpgrade !== null;
 				const enriched = {
 					...status,
 					// Cloudflare owns the spend allowance in this mode. The
@@ -386,9 +388,8 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 						usage_as_of: cloudflareUsage?.usage_as_of ?? null,
 						allowances: cloudflareUsage?.allowances ?? null,
 						model_access: [...getHostedAiAllowedModels(usageAccountPlan)],
-						upgrade_url: isHostedAiUpgradeEligible(authResult)
-							? 'https://screenpi.pe/account/billing'
-							: null,
+						required_plan: capacityUpgrade?.requiredPlan ?? null,
+						upgrade_url: capacityUpgrade?.upgradeUrl ?? null,
 						can_buy_credits: false,
 						byok_supported: true,
 					},
@@ -432,9 +433,12 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 			}
 			const includedCredits = getHostedAiIncludedCredits(usageAccountPlan);
 			const usedCredits = monthlyCost === null ? null : Math.ceil(monthlyCost * 100);
+			const capacityUpgrade = getHostedAiCapacityUpgrade(usageAccountPlan);
 			const enriched = {
 				...status,
 				cost_limit_reached: dailyCost >= maxCost || (monthlyCost !== null && monthlyCost >= monthlyCap),
+				// This field controls proactive prompts. Capacity recovery is the
+				// separate required_plan + upgrade_url contract below.
 				upgrade_eligible: isHostedAiUpgradeEligible(authResult),
 				upsell_banner: status.upsell_banner === true && isHostedAiUpgradeEligible(authResult),
 				hosted_ai: {
@@ -446,9 +450,8 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 						? null
 						: Math.max(0, includedCredits - usedCredits),
 					model_access: [...getHostedAiAllowedModels(usageAccountPlan)],
-					upgrade_url: isHostedAiUpgradeEligible(authResult)
-						? 'https://screenpi.pe/account/billing'
-						: null,
+					required_plan: capacityUpgrade?.requiredPlan ?? null,
+					upgrade_url: capacityUpgrade?.upgradeUrl ?? null,
 					// Legacy query credits do not raise the provider-cost ceiling yet.
 					can_buy_credits: false,
 					byok_supported: true,

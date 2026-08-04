@@ -49,6 +49,9 @@ export function UpgradeQuotaBanner() {
     ?.filter((allowance) => allowance.remaining_percent <= 0)
     .sort((left, right) => left.lane.localeCompare(right.lane))[0] ?? null;
   const cloudflareBlocked = !blockedUpgrade && cloudflareAllowance !== null;
+  const cloudflareUpgrade = cloudflareBlocked
+    ? usage?.hosted_ai?.upgrade ?? null
+    : null;
 
   if (!blockedUpgrade) {
     if (dismissed) return null;
@@ -84,7 +87,8 @@ export function UpgradeQuotaBanner() {
     : cloudflareBlocked
       ? "cloudflare-ai-allowance-banner"
       : "ai-quota-banner";
-  const showCloudflareUpgrade = cloudflareBlocked && upsellEnabled;
+  const showCloudflareUpgrade = cloudflareUpgrade !== null;
+  const activeUpgrade = blockedUpgrade ?? cloudflareUpgrade;
 
   const onUpgrade = async () => {
     if (busy) return;
@@ -92,10 +96,10 @@ export function UpgradeQuotaBanner() {
     try {
       posthog.capture("desktop_upgrade_entry_clicked", {
         source,
-        target_plan: blockedUpgrade?.requiredPlan,
+        target_plan: activeUpgrade?.requiredPlan,
       });
-      if (blockedUpgrade) {
-        await openExternalUrl(blockedUpgrade.upgradeUrl);
+      if (activeUpgrade) {
+        await openExternalUrl(activeUpgrade.upgradeUrl);
       } else {
         await openBusinessUpgradeSurface(source);
       }
@@ -106,8 +110,8 @@ export function UpgradeQuotaBanner() {
     }
   };
 
-  const requiredPlanLabel = blockedUpgrade
-    ? PLAN_LABELS[blockedUpgrade.requiredPlan]
+  const requiredPlanLabel = activeUpgrade
+    ? PLAN_LABELS[activeUpgrade.requiredPlan]
     : "Business";
   const blockedTitle = cloudflareBlocked
     ? `${cloudflareAllowance.lane === "auto" ? "Auto" : "Explicit model"} hosted AI limit reached`
@@ -165,7 +169,7 @@ export function UpgradeQuotaBanner() {
               onClick={onUpgrade}
               disabled={busy}
             >
-              {blockedUpgrade
+              {activeUpgrade
                 ? `Upgrade to ${requiredPlanLabel}`
                 : "View Business"}
             </Button>

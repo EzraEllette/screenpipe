@@ -481,7 +481,9 @@ describe('/v1/chat/completions free-plan route policy', () => {
 	});
 
 	it.each([
+		['Free', 'free', 'free', 'free', false],
 		['Basic', 'standard', 'standard', 'basic', false],
+		['Business', 'pro', 'pro', 'business', true],
 		['Max', 'pro', 'pro_max', 'business_max', true],
 		['Ultra', 'pro', 'pro_ultra', 'business_ultra', true],
 	] as const)('reports Cloudflare %s utilization without exposing provider amounts', async (
@@ -500,10 +502,12 @@ describe('/v1/chat/completions free-plan route policy', () => {
 					user: {
 						clerk_id: 'user_cloudflare_usage',
 						cloud_subscribed: cloudSubscribed,
-						app_entitled: true,
+						app_entitled: cloudflarePlan !== 'free',
 						subscription_plan: subscriptionPlan,
 						billing_plan: billingPlan,
-						entitlement: { active: true, plan: subscriptionPlan, features: { app: true } },
+						entitlement: cloudflarePlan === 'free'
+							? null
+							: { active: true, plan: subscriptionPlan, features: { app: true } },
 					},
 				}), { status: 200 });
 			}
@@ -573,10 +577,30 @@ describe('/v1/chat/completions free-plan route policy', () => {
 			headers: { Authorization: 'Bearer eyJ.cloudflare.usage' },
 		}), cloudflareEnv, ctx);
 		const body = await response.json() as any;
+		const expectedUpgrade = {
+			free: {
+				requiredPlan: 'basic',
+				upgradeUrl: 'https://screenpi.pe/account/billing',
+			},
+			basic: {
+				requiredPlan: 'business',
+				upgradeUrl: 'https://screenpi.pe/account/billing',
+			},
+			business: {
+				requiredPlan: 'business_max',
+				upgradeUrl: 'https://screenpipe.com/account/billing?target_plan=pro_max&interval=month',
+			},
+			business_max: {
+				requiredPlan: 'business_ultra',
+				upgradeUrl: 'https://screenpipe.com/account/billing?target_plan=pro_ultra&interval=month',
+			},
+			business_ultra: null,
+		}[cloudflarePlan];
 
 		expect(response.status).toBe(200);
-		if (cloudflarePlan === 'basic') expect(body.upsell_banner).toBe(true);
+		expect(body.upsell_banner).toBe(expectedUpgrade !== null);
 		expect(body.cost_limit_reached).toBe(true);
+		expect(body.upgrade_eligible).toBe(expectedUpgrade !== null);
 		expect(body.hosted_ai).toMatchObject({
 			plan: cloudflarePlan,
 			allowance_managed_by: 'cloudflare',
@@ -589,6 +613,8 @@ describe('/v1/chat/completions free-plan route policy', () => {
 				remaining_percent: 0,
 			}],
 		});
+		expect(body.hosted_ai.required_plan).toBe(expectedUpgrade?.requiredPlan ?? null);
+		expect(body.hosted_ai.upgrade_url).toBe(expectedUpgrade?.upgradeUrl ?? null);
 		expect(JSON.stringify(body.hosted_ai)).not.toMatch(/(?:limit|used|remaining)_usd/);
 		expect(Object.keys(body.hosted_ai.allowances[0]).sort()).toEqual([
 			'lane',

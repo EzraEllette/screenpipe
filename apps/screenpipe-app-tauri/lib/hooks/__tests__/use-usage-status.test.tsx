@@ -34,8 +34,13 @@ function usageResponse(upgradeEligible: boolean): Promise<Response> {
       upsell_banner: upgradeEligible,
       upgrade_eligible: upgradeEligible,
       hosted_ai: {
+        plan: upgradeEligible ? "basic" : "business_ultra",
         allowance_managed_by: "cloudflare",
         usage_as_of: "2026-08-04T16:30:00.000Z",
+        required_plan: upgradeEligible ? "business" : null,
+        upgrade_url: upgradeEligible
+          ? "https://screenpi.pe/account/billing"
+          : null,
         allowances: [
           {
             lane: "auto",
@@ -90,6 +95,11 @@ describe("useUsageStatus", () => {
     });
     expect(shouldWarnLowHostedAiAllowance(allowance)).toBe(true);
     expect(formatAllowanceWindow(allowance!.window_seconds)).toBe("30-day");
+    expect(result.current?.hosted_ai?.upgrade).toEqual({
+      requiredPlan: "business",
+      upgradeUrl: "https://screenpi.pe/account/billing",
+      resetsAt: null,
+    });
   });
 
   it("clears stale Basic status immediately while a new token is resolving", async () => {

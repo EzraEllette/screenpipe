@@ -6,6 +6,10 @@
 import { useEffect, useState } from "react";
 import { useSettings } from "@/lib/hooks/use-settings";
 import { fetchAiGateway } from "@/lib/ai-gateway-url";
+import {
+  validateQuotaUpgradeAction,
+  type QuotaUpgradeAction,
+} from "@/lib/chat/quota-errors";
 
 /**
  * Daily quota snapshot from the ai-proxy worker's /v1/usage endpoint.
@@ -36,9 +40,11 @@ export interface HostedAiAllowance {
 }
 
 export interface HostedAiUsage {
+  plan: string | null;
   allowance_managed_by: "cloudflare";
   usage_as_of: string | null;
   allowances: HostedAiAllowance[] | null;
+  upgrade: QuotaUpgradeAction | null;
 }
 
 export interface UsageStatus {
@@ -99,9 +105,12 @@ function parseHostedAiAllowance(value: unknown): HostedAiAllowance | null {
 function parseHostedAiUsage(value: unknown): HostedAiUsage | undefined {
   if (!value || typeof value !== "object") return undefined;
   const candidate = value as {
+    plan?: unknown;
     allowance_managed_by?: unknown;
     usage_as_of?: unknown;
     allowances?: unknown;
+    required_plan?: unknown;
+    upgrade_url?: unknown;
   };
   if (candidate.allowance_managed_by !== "cloudflare") return undefined;
   const allowances = candidate.allowances === null
@@ -112,10 +121,15 @@ function parseHostedAiUsage(value: unknown): HostedAiUsage | undefined {
           .filter((allowance): allowance is HostedAiAllowance => allowance !== null)
       : null;
   return {
+    plan: typeof candidate.plan === "string" ? candidate.plan : null,
     allowance_managed_by: "cloudflare",
     usage_as_of:
       typeof candidate.usage_as_of === "string" ? candidate.usage_as_of : null,
     allowances,
+    upgrade: validateQuotaUpgradeAction({
+      requiredPlan: candidate.required_plan,
+      upgradeUrl: candidate.upgrade_url,
+    }),
   };
 }
 

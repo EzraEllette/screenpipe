@@ -10,6 +10,51 @@ export type QuotaUpgradeAction = {
   resetsAt: string | null;
 };
 
+export function validateQuotaUpgradeAction({
+  requiredPlan: rawRequiredPlan,
+  upgradeUrl: rawUpgradeUrl,
+  resetsAt: rawResetsAt = null,
+}: {
+  requiredPlan: unknown;
+  upgradeUrl: unknown;
+  resetsAt?: unknown;
+}): QuotaUpgradeAction | null {
+  const requiredPlan =
+    typeof rawRequiredPlan === "string"
+      ? rawRequiredPlan.toLowerCase()
+      : null;
+  if (
+    requiredPlan !== "basic" &&
+    requiredPlan !== "business" &&
+    requiredPlan !== "business_max" &&
+    requiredPlan !== "business_ultra"
+  ) {
+    return null;
+  }
+
+  if (typeof rawUpgradeUrl !== "string" || rawUpgradeUrl.length === 0) {
+    return null;
+  }
+  try {
+    const url = new URL(rawUpgradeUrl);
+    if (
+      url.protocol !== "https:" ||
+      !["screenpi.pe", "screenpipe.com"].includes(url.hostname) ||
+      url.pathname !== "/account/billing"
+    ) {
+      return null;
+    }
+  } catch {
+    return null;
+  }
+
+  return {
+    requiredPlan,
+    upgradeUrl: rawUpgradeUrl,
+    resetsAt: typeof rawResetsAt === "string" ? rawResetsAt : null,
+  };
+}
+
 const COST_LIMIT_CODES = [
   "daily_cost_limit_exceeded",
   "monthly_cost_limit_exceeded",
@@ -18,6 +63,7 @@ const COST_LIMIT_CODES = [
 
 const UPGRADE_LIMIT_CODES = [
   ...COST_LIMIT_CODES,
+  "hosted_ai_allowance_exceeded",
   "daily_limit_exceeded",
   "credits_exhausted",
 ] as const;
@@ -52,40 +98,11 @@ export function parseQuotaUpgradeAction(
   errorStr: string,
 ): QuotaUpgradeAction | null {
   if (!isUpgradeLimitError(errorStr)) return null;
-
-  const requiredPlan = structuredString(
-    errorStr,
-    "required_plan",
-  )?.toLowerCase();
-  if (
-    requiredPlan !== "basic" &&
-    requiredPlan !== "business" &&
-    requiredPlan !== "business_max" &&
-    requiredPlan !== "business_ultra"
-  ) {
-    return null;
-  }
-
-  const upgradeUrl = structuredString(errorStr, "upgrade_url");
-  if (!upgradeUrl) return null;
-  try {
-    const url = new URL(upgradeUrl);
-    if (
-      url.protocol !== "https:" ||
-      !["screenpi.pe", "screenpipe.com"].includes(url.hostname) ||
-      url.pathname !== "/account/billing"
-    ) {
-      return null;
-    }
-  } catch {
-    return null;
-  }
-
-  return {
-    requiredPlan,
-    upgradeUrl,
+  return validateQuotaUpgradeAction({
+    requiredPlan: structuredString(errorStr, "required_plan"),
+    upgradeUrl: structuredString(errorStr, "upgrade_url"),
     resetsAt: structuredString(errorStr, "resets_at"),
-  };
+  });
 }
 
 export function buildDailyLimitMessage(errorStr: string): string {
