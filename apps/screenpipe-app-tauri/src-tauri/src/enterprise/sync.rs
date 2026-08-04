@@ -376,8 +376,7 @@ pub trait LocalApiClient: Send + Sync {
 // same types — so it lives in `screenpipe-telemetry-wire`. Re-exported here
 // so the desktop shim keeps importing everything from `ee_sync::`.
 pub use screenpipe_telemetry_wire::{
-    AudioRow, FeedbackRow, FrameRow, MemoryRow, SnapshotRow, TelemetryRecord, UiEventRow,
-    ParsedRow,
+    AudioRow, FeedbackRow, FrameRow, MemoryRow, ParsedRow, SnapshotRow, TelemetryRecord, UiEventRow,
 };
 
 // ─── Errors ─────────────────────────────────────────────────────────────────
@@ -525,6 +524,16 @@ pub async fn run_one_sync(
     local: &dyn LocalApiClient,
     http: &reqwest::Client,
 ) -> Result<SyncTickReport, EnterpriseSyncError> {
+    run_one_sync_inner(cfg, cursor, local, http, true).await
+}
+
+async fn run_one_sync_inner(
+    cfg: &EnterpriseSyncConfig,
+    cursor: &mut Cursor,
+    local: &dyn LocalApiClient,
+    http: &reqwest::Client,
+    include_snapshot: bool,
+) -> Result<SyncTickReport, EnterpriseSyncError> {
     if let EnterpriseUploadMode::Blocked(reason) = &cfg.upload_mode {
         return Err(EnterpriseSyncError::Configuration(reason.clone()));
     }
@@ -598,7 +607,7 @@ pub async fn run_one_sync(
     };
     // One snapshot per tick. Best-effort — failure to encode/fetch
     // shouldn't block the rest of the batch.
-    let snapshots: Vec<SnapshotRow> = if streams.snapshots {
+    let snapshots: Vec<SnapshotRow> = if streams.snapshots && include_snapshot {
         match local.fetch_latest_snapshot().await {
             Ok(Some(s)) => vec![s],
             Ok(None) => Vec::new(),
@@ -795,6 +804,69 @@ pub struct SyncTickReport {
     pub memories: usize,
     pub feedback: usize,
     pub bytes: usize,
+}
+
+impl SyncTickReport {
+    /// A full cursor-backed stream page means the local API may have more rows
+    /// behind it. Point-in-time snapshots are deliberately excluded.
+    pub fn may_have_more(&self) -> bool {
+        let limit = PAGE_LIMIT as usize;
+        self.frames >= limit
+            || self.parsed >= limit
+            || self.audio >= limit
+            || self.ui >= limit
+            || self.memories >= limit
+            || self.feedback >= limit
+    }
+
+    fn add_assign(&mut self, other: &Self) {
+        self.frames += other.frames;
+        self.parsed += other.parsed;
+        self.audio += other.audio;
+        self.ui += other.ui;
+        self.snapshots += other.snapshots;
+        self.memories += other.memories;
+        self.feedback += other.feedback;
+        self.bytes += other.bytes;
+    }
+}
+
+/// Aggregate result of one scheduled sync plus any immediate catch-up pages.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SyncBurstReport {
+    pub total: SyncTickReport,
+    pub pages: usize,
+}
+
+/// Drain acknowledged pages until every cursor-backed stream returns a
+/// partial page.
+///
+/// `run_one_sync` is intentionally the only mechanism that fetches, uploads,
+/// and advances cursors. Consequently every page is durably checkpointed only
+/// after its own remote acknowledgement; a later-page failure or process exit
+/// resumes from the last successful page without skipping the rest.
+pub async fn run_sync_burst(
+    cfg: &EnterpriseSyncConfig,
+    cursor: &mut Cursor,
+    local: &dyn LocalApiClient,
+    http: &reqwest::Client,
+) -> Result<SyncBurstReport, EnterpriseSyncError> {
+    let mut burst = SyncBurstReport::default();
+    let mut include_snapshot = true;
+
+    loop {
+        let page = run_one_sync_inner(cfg, cursor, local, http, include_snapshot).await?;
+        include_snapshot = false;
+        let more_pending = page.may_have_more();
+        burst.total.add_assign(&page);
+        burst.pages += 1;
+
+        if !more_pending {
+            break;
+        }
+    }
+
+    Ok(burst)
 }
 
 // ─── On-demand frame fulfillment (P3) ───────────────────────────────────────
@@ -1464,7 +1536,7 @@ pub async fn run(
         // hosted-to-customer-storage policy change without requiring an app
         // restart, and preserves the last safe mode on lookup failure.
         cfg.resolve_upload_mode().await;
-        let result = run_one_sync(&cfg, &mut cursor, local.as_ref(), &http).await;
+        let result = run_sync_burst(&cfg, &mut cursor, local.as_ref(), &http).await;
 
         match &result {
             Err(EnterpriseSyncError::IngestAuthRejected) => {
@@ -1490,22 +1562,25 @@ pub async fn run(
 
         match result {
             Ok(report) => {
-                if report.frames > 0
-                    || report.audio > 0
-                    || report.ui > 0
-                    || report.snapshots > 0
-                    || report.memories > 0
-                    || report.feedback > 0
+                let total = &report.total;
+                if total.frames > 0
+                    || total.audio > 0
+                    || total.ui > 0
+                    || total.snapshots > 0
+                    || total.memories > 0
+                    || total.feedback > 0
                 {
                     info!(
-                        "enterprise sync: pushed {} frames, {} audio, {} ui, {} snapshots, {} memories, {} feedback ({} bytes)",
-                        report.frames,
-                        report.audio,
-                        report.ui,
-                        report.snapshots,
-                        report.memories,
-                        report.feedback,
-                        report.bytes
+                        "enterprise sync: pushed {} frames, {} parsed, {} audio, {} ui, {} snapshots, {} memories, {} feedback across {} page(s) ({} bytes)",
+                        total.frames,
+                        total.parsed,
+                        total.audio,
+                        total.ui,
+                        total.snapshots,
+                        total.memories,
+                        total.feedback,
+                        report.pages,
+                        total.bytes
                     );
                 }
                 backoff = BACKOFF_INITIAL;
@@ -1817,6 +1892,23 @@ mod tests {
             browser_url: None,
             text: Some(text.to_string()),
         }
+    }
+
+    fn frame_page(first_id: i64, count: usize) -> Vec<FrameRow> {
+        let base = chrono::DateTime::parse_from_rfc3339("2026-07-27T23:26:23Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        (0..count)
+            .map(|offset| {
+                let id = first_id + offset as i64;
+                frame(
+                    id,
+                    &(base + chrono::Duration::seconds(id)).to_rfc3339(),
+                    "Arc",
+                    "recorded locally during upload outage",
+                )
+            })
+            .collect()
     }
 
     fn audio(id: i64, ts: &str, text: &str) -> AudioRow {
@@ -2599,6 +2691,126 @@ mod tests {
         // Cursor is also persisted.
         let loaded = Cursor::load(&cfg.cursor_path);
         assert_eq!(loaded.last_frame_ts, cursor.last_frame_ts);
+    }
+
+    #[tokio::test]
+    async fn old_cursor_drains_every_page_without_waiting_for_normal_ticks() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/ingest"))
+            .respond_with(wiremock::ResponseTemplate::new(200))
+            .expect(3)
+            .mount(&server)
+            .await;
+
+        let first = frame_page(1, PAGE_LIMIT as usize);
+        let second = frame_page(501, PAGE_LIMIT as usize);
+        let final_page = frame_page(1001, 37);
+        let expected_last = final_page.last().unwrap().timestamp.clone();
+
+        let dir = TempDir::new().unwrap();
+        let cfg = test_cfg(&dir, format!("{}/ingest", server.uri()));
+        let mut cursor = Cursor {
+            last_frame_ts: Some("2026-07-27T23:26:23Z".to_string()),
+            last_audio_ts: Some("2026-07-27T23:26:23Z".to_string()),
+            last_ui_ts: Some("2026-07-27T23:26:23Z".to_string()),
+            last_memory_ts: Some("2026-07-27T23:26:23Z".to_string()),
+            last_feedback_ts: Some("2026-07-27T23:26:23Z".to_string()),
+            last_parsed_ts: Some("2026-07-27T23:26:23Z".to_string()),
+        };
+        // MockLocal pops from the end: yield first → second → final.
+        let local = MockLocal::new(vec![final_page, second, first], vec![]);
+
+        let report = run_sync_burst(&cfg, &mut cursor, &local, &reqwest::Client::new())
+            .await
+            .unwrap();
+
+        assert_eq!(report.pages, 3);
+        assert_eq!(report.total.frames, 1_037);
+        assert_eq!(
+            cursor.last_frame_ts.as_deref(),
+            Some(expected_last.as_str())
+        );
+        assert_eq!(
+            Cursor::load(&cfg.cursor_path).last_frame_ts.as_deref(),
+            Some(expected_last.as_str()),
+            "the final acknowledged page is durable"
+        );
+    }
+
+    #[tokio::test]
+    async fn catch_up_failure_keeps_last_acknowledged_page_for_restart() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_responder = calls.clone();
+        let failing_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/ingest"))
+            .respond_with(move |_request: &wiremock::Request| {
+                if calls_for_responder.fetch_add(1, Ordering::SeqCst) == 0 {
+                    wiremock::ResponseTemplate::new(200)
+                } else {
+                    wiremock::ResponseTemplate::new(503)
+                }
+            })
+            .expect(2)
+            .mount(&failing_server)
+            .await;
+
+        let first = frame_page(1, PAGE_LIMIT as usize);
+        let second = frame_page(501, 20);
+        let first_last = first.last().unwrap().timestamp.clone();
+        let second_last = second.last().unwrap().timestamp.clone();
+        let dir = TempDir::new().unwrap();
+        let cfg = test_cfg(&dir, format!("{}/ingest", failing_server.uri()));
+        let mut cursor = Cursor {
+            last_frame_ts: Some("2026-07-27T23:26:23Z".to_string()),
+            last_audio_ts: Some("2026-07-27T23:26:23Z".to_string()),
+            last_ui_ts: Some("2026-07-27T23:26:23Z".to_string()),
+            last_memory_ts: Some("2026-07-27T23:26:23Z".to_string()),
+            last_feedback_ts: Some("2026-07-27T23:26:23Z".to_string()),
+            last_parsed_ts: Some("2026-07-27T23:26:23Z".to_string()),
+        };
+        let local = MockLocal::new(vec![second.clone(), first], vec![]);
+
+        let error = run_sync_burst(&cfg, &mut cursor, &local, &reqwest::Client::new())
+            .await
+            .unwrap_err();
+        assert!(matches!(error, EnterpriseSyncError::IngestServerError(503)));
+        assert_eq!(cursor.last_frame_ts.as_deref(), Some(first_last.as_str()));
+        assert_eq!(
+            Cursor::load(&cfg.cursor_path).last_frame_ts.as_deref(),
+            Some(first_last.as_str())
+        );
+
+        // Simulate an app restart: reload the durable cursor and refetch the
+        // unacknowledged page from the local database.
+        let healthy_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/ingest"))
+            .respond_with(wiremock::ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&healthy_server)
+            .await;
+        let resumed_cfg = test_cfg(&dir, format!("{}/ingest", healthy_server.uri()));
+        let mut resumed_cursor = Cursor::load(&resumed_cfg.cursor_path);
+        let resumed_local = MockLocal::new(vec![second], vec![]);
+        let resumed = run_sync_burst(
+            &resumed_cfg,
+            &mut resumed_cursor,
+            &resumed_local,
+            &reqwest::Client::new(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(resumed.pages, 1);
+        assert_eq!(resumed.total.frames, 20);
+        assert_eq!(
+            resumed_cursor.last_frame_ts.as_deref(),
+            Some(second_last.as_str())
+        );
     }
 
     #[tokio::test]
