@@ -1855,10 +1855,9 @@ async readAppBundleMetadata(path: string) : Promise<Result<ExcludedApp, string>>
 }
 },
 /**
- * Read the current exclusion list. Returns an empty Vec if the file is
- * missing, unreadable, or wrong-shape (matches engine fallback behavior).
- * Returns Err only for malformed JSON, so the UI can surface "your file
- * has a syntax error" to the user.
+ * Read the current exclusion list. A missing file returns the platform
+ * defaults; an explicit empty array remains empty. Wrong-shape files fail
+ * open, while unreadable or malformed files return an error the UI can show.
  */
 async readAudioExclusions() : Promise<Result<ExcludedApp[], string>> {
     try {

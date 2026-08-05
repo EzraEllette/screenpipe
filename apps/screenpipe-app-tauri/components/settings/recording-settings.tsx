@@ -45,7 +45,6 @@ export const searchIndex: SettingsField[] = [
   { label: "Smart recording", keywords: ["smart recording", "beta", "meeting", "piggyback", "per-process", "meeting audio"], conditional: true },
   { label: "Advanced recording settings", keywords: ["advanced", "expert", "audio"], conditional: true },
   { label: "Always record Bluetooth microphone", keywords: ["bluetooth", "airpods", "headset", "a2dp", "sco", "meeting"], conditional: true },
-  { label: "Background transcription", keywords: ["batch", "realtime", "latency", "quality"], conditional: true },
   { label: "Filter music", keywords: ["music", "background music", "lyrics"], conditional: true },
   { label: "Exclude apps from system audio", keywords: ["audio", "apps", "exclude"], conditional: true },
   { label: "Screen context capture", keywords: ["screen", "video", "accessibility"] },
@@ -4183,29 +4182,6 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
                 Transcription
               </h3>
               <div className="divide-y divide-border border border-border bg-card">
-                <div className="flex items-center justify-between gap-5 p-3">
-                  <div>
-                    <label htmlFor="advancedTranscriptionMode" className="text-sm font-medium text-foreground">
-                      Background transcription
-                    </label>
-                    <p className="text-xs text-muted-foreground">
-                      Batch waits for more context and uses less CPU during calls. Real-time writes transcripts sooner.
-                    </p>
-                  </div>
-                  <Select
-                    value={["smart", "batch"].includes(settings.transcriptionMode ?? "batch") ? "batch" : "realtime"}
-                    onValueChange={(value) => handleSettingsChange({ transcriptionMode: value as "batch" | "realtime" }, true)}
-                  >
-                    <SelectTrigger id="advancedTranscriptionMode" className="h-8 w-[210px] shrink-0 text-xs">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="batch">batch (recommended)</SelectItem>
-                      <SelectItem value="realtime">real-time</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-
                 <div className="flex items-center justify-between gap-5 p-3">
                   <div>
                     <label htmlFor="filterMusic" className="text-sm font-medium text-foreground">

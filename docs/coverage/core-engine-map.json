@@ -575,6 +575,7 @@
         "src/core/meeting_audio/macos.rs",
         "src/core/meeting_audio/windows.rs",
         "src/core/process_tap/macos.rs",
+        "src/core/process_tap/mod.rs",
         "src/core/process_tap/windows.rs",
         "src/core/sck_output_watchdog.rs",
         "src/device/vpio_health.rs"
@@ -585,7 +586,7 @@
       "criticality": "high",
       "confidence": "partial",
       "kind": "unit",
-      "notes": "OS-specific output/system-audio capture: CoreAudio process tap and SCK output watchdog plus VPIO health policy on macOS, per-process meeting audio taps on both platforms, and the Windows follow-the-audio output watchdog. Platform impl files are cfg-gated to their target OS."
+      "notes": "OS-specific output/system-audio capture: shared platform exclusion defaults, CoreAudio process tap and SCK output watchdog plus VPIO health policy on macOS, per-process meeting audio taps on both platforms, and the Windows follow-the-audio output watchdog. Platform impl files are cfg-gated to their target OS."
     },
     {
       "id": "audio-meetings-speakers-dedup",

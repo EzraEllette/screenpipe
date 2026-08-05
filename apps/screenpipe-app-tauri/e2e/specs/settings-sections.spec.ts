@@ -122,7 +122,7 @@ describe('Settings sections', () => {
     await dialog.waitForDisplayed({ timeout: 5_000 });
     const dialogText = (await dialog.getText()).toLowerCase();
     expect(dialogText).toContain('always record bluetooth microphone');
-    expect(dialogText).toContain('background transcription');
+    expect(dialogText).not.toContain('background transcription');
     expect(dialogText).toContain('filter music');
     expect(dialogText).not.toContain('coreaudio');
 

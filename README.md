@@ -197,6 +197,8 @@ On macOS 14.4+, you can exclude specific apps from system-audio capture by listi
 
 The exclusion list hot-reloads — edits to the file and excluded apps launching/quitting are picked up on the engine's existing 500 ms tap-rebuild loop without restarting screenpipe. Override the file path with `SCREENPIPE_AUDIO_EXCLUSIONS_PATH` for testing. Note: this requires the "System Audio Recording Only" TCC permission in System Settings → Privacy & Security → Screen & System Audio Recording.
 
+When the file does not exist, macOS excludes Spotify, Apple Music, and the common YouTube Music desktop app by default. Save `{ "excluded_apps": [] }` to capture every app. Windows keeps an explicit user-selected default because its process tap accepts one absolute executable path rather than a portable app identifier list.
+
 ### AI-powered search
 Natural language search across accessibility-first screen text, OCR fallback text, and audio transcriptions. Filter by application name, window title, browser URL, date range. Full-text keyword search (SQLite FTS5) under the hood. Returns screenshots and audio clips alongside text results.
 
