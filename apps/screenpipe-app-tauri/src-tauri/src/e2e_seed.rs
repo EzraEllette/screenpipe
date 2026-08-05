@@ -119,6 +119,39 @@ pub async fn seed_search_fixture(db: &DatabaseManager) {
     info!("e2e search-fixture: seeded searchable frames (vector x12 + highlight)");
 }
 
+/// `timeline-cache-fixture`: one transcript-bearing row for the full-process
+/// cache ownership regression.
+pub async fn seed_timeline_cache_fixture(db: &DatabaseManager) {
+    let chunk_id = match db.insert_audio_chunk("e2e-timeline-cache.wav", None).await {
+        Ok(id) => id,
+        Err(error) => {
+            warn!("e2e timeline-cache-fixture: failed to insert audio chunk: {error}");
+            return;
+        }
+    };
+    if let Err(error) = db
+        .insert_audio_transcription(
+            chunk_id,
+            "stale transcript sentinel",
+            0,
+            "e2e",
+            &screenpipe_db::AudioDevice {
+                name: "e2e-timeline-cache".to_string(),
+                device_type: screenpipe_db::DeviceType::Input,
+            },
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+    {
+        warn!("e2e timeline-cache-fixture: failed to insert transcript: {error}");
+        return;
+    }
+    info!("e2e timeline-cache-fixture: seeded transcript sentinel");
+}
+
 #[cfg(feature = "e2e")]
 fn seed_requested(flag: &str) -> bool {
     std::env::var("SCREENPIPE_E2E_SEED")

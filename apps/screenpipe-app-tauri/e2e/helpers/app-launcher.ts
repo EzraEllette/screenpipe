@@ -58,7 +58,17 @@ export const E2E_DATA_DIR = resolve(
   process.env.SCREENPIPE_E2E_DATA_DIR ??
     resolve(homedir(), '.screenpipe', '.e2e'),
 );
-const APP_PID_FILE = resolve(E2E_DATA_DIR, 'app.pid');
+let activeDataDir = E2E_DATA_DIR;
+
+export interface StartAppOptions {
+  dataDir?: string;
+  resetDataDir?: boolean;
+  seedFlags?: string;
+}
+
+function appPidFile(): string {
+  return resolve(activeDataDir, 'app.pid');
+}
 
 // `onboarding` marks the onboarding store complete so the app drops straight
 // into the home window. `no-recording` disables vision + audio so the server
@@ -194,16 +204,21 @@ export function getAppPid(): number | null {
   if (pid) return pid;
 
   try {
-    const filePid = Number.parseInt(readFileSync(APP_PID_FILE, 'utf8').trim(), 10);
+    const filePid = Number.parseInt(readFileSync(appPidFile(), 'utf8').trim(), 10);
     return Number.isFinite(filePid) ? filePid : null;
   } catch {
     return null;
   }
 }
 
-export async function startApp(port = WEBDRIVER_PORT): Promise<ReturnType<typeof spawn> | null> {
+export async function startApp(
+  port = WEBDRIVER_PORT,
+  options: StartAppOptions = {},
+): Promise<ReturnType<typeof spawn> | null> {
   killPort(port);
   killPort(FOCUS_PORT);
+  activeDataDir = resolve(options.dataDir ?? E2E_DATA_DIR);
+  const seedFlags = options.seedFlags ?? E2E_SEED_FLAGS;
 
   const appPath = getAppPath();
   if (!existsSync(appPath)) {
@@ -212,9 +227,11 @@ export async function startApp(port = WEBDRIVER_PORT): Promise<ReturnType<typeof
     );
   }
 
-  rmSync(E2E_DATA_DIR, { recursive: true, force: true });
-  mkdirSync(E2E_DATA_DIR, { recursive: true });
-  removeSpotlightExclusion(E2E_DATA_DIR);
+  if (options.resetDataDir !== false) {
+    rmSync(activeDataDir, { recursive: true, force: true });
+  }
+  mkdirSync(activeDataDir, { recursive: true });
+  removeSpotlightExclusion(activeDataDir);
 
   if (backgroundAiToolsEnabled) {
     // Cross-platform fake agent homes. The app's e2e-only home override keeps
@@ -237,8 +254,8 @@ export async function startApp(port = WEBDRIVER_PORT): Promise<ReturnType<typeof
   appProcess = spawn(appPath, [], {
     env: {
       ...process.env,
-      SCREENPIPE_DATA_DIR: E2E_DATA_DIR,
-      SCREENPIPE_E2E_SEED: E2E_SEED_FLAGS,
+      SCREENPIPE_DATA_DIR: activeDataDir,
+      SCREENPIPE_E2E_SEED: seedFlags,
       SCREENPIPE_FOCUS_PORT: String(FOCUS_PORT),
       TAURI_WEBDRIVER_PORT: String(port),
       ...(backgroundAiToolsEnabled
@@ -263,14 +280,14 @@ export async function startApp(port = WEBDRIVER_PORT): Promise<ReturnType<typeof
   appProcess.on('exit', (code) => {
     if (code != null && code !== 0) console.warn(`[app] exited ${code}`);
     try {
-      unlinkSync(APP_PID_FILE);
+      unlinkSync(appPidFile());
     } catch {
       // already gone
     }
     appProcess = null;
   });
   if (appProcess.pid) {
-    writeFileSync(APP_PID_FILE, String(appProcess.pid));
+    writeFileSync(appPidFile(), String(appProcess.pid));
   }
 
   await waitForServer(port);
@@ -283,13 +300,30 @@ export function stopApp(): void {
     appProcess = null;
   }
   try {
-    unlinkSync(APP_PID_FILE);
+    unlinkSync(appPidFile());
   } catch {
     // already gone
   }
   try {
-    removeSpotlightExclusion(E2E_DATA_DIR);
+    removeSpotlightExclusion(activeDataDir);
   } catch (error) {
     console.warn('[e2e] failed to clean up Spotlight exclusion:', error);
   }
+}
+
+export async function stopAppAndWait(timeoutMs = 15_000): Promise<void> {
+  const process = appProcess;
+  if (!process) {
+    stopApp();
+    return;
+  }
+  const exited = new Promise<void>((resolveExit) => process.once('exit', () => resolveExit()));
+  process.kill('SIGTERM');
+  await Promise.race([
+    exited,
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error(`app did not exit within ${timeoutMs}ms`)), timeoutMs),
+    ),
+  ]);
+  stopApp();
 }

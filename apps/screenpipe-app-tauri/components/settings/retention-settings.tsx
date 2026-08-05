@@ -45,6 +45,41 @@ import {
 } from "@/lib/app-entitlement";
 import { cn } from "@/lib/utils";
 import { commands } from "@/lib/utils/tauri";
+import { useTimelineStore } from "@/lib/hooks/use-timeline-store";
+
+type DeleteRangeResponse = {
+  frames_deleted?: number;
+  audio_transcriptions_deleted?: number;
+  ui_events_deleted?: number;
+  video_files_deleted?: number;
+  audio_files_deleted?: number;
+};
+
+export async function deleteRecentTimelineData(
+  minutes: number,
+  request: typeof localFetch = localFetch,
+  invalidateTimelineCache: (options: { clearFrames: boolean }) => Promise<void> =
+    useTimelineStore.getState().invalidateTimelineCache,
+): Promise<DeleteRangeResponse> {
+  const end = new Date();
+  const start = new Date(end.getTime() - minutes * 60_000);
+  const response = await request("/data/delete-range", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      start: start.toISOString(),
+      end: end.toISOString(),
+      local_only: true,
+    }),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.error || `request failed (${response.status})`);
+  }
+  const result = (await response.json()) as DeleteRangeResponse;
+  await invalidateTimelineCache({ clearFrames: true });
+  return result;
+}
 
 type RetentionMode = "media" | "lean" | "all";
 type EffectiveMode = "off" | RetentionMode;
@@ -298,22 +333,7 @@ export function RetentionSettings({
     setPendingRecent(null);
     setDeletingRecent(true);
     try {
-      const end = new Date();
-      const start = new Date(end.getTime() - minutes * 60_000);
-      const res = await localFetch("/data/delete-range", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          start: start.toISOString(),
-          end: end.toISOString(),
-          local_only: true,
-        }),
-      });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.error || `request failed (${res.status})`);
-      }
-      const r = await res.json();
+      const r = await deleteRecentTimelineData(minutes);
       const total =
         (r.frames_deleted || 0) +
         (r.audio_transcriptions_deleted || 0) +

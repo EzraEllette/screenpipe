@@ -1953,6 +1953,12 @@ async fn main() {
                             if get_e2e_seed_flags().iter().any(|f| f == "search-fixture") {
                                 crate::e2e_seed::seed_search_fixture(&server.db).await;
                             }
+                            if get_e2e_seed_flags()
+                                .iter()
+                                .any(|f| f == "timeline-cache-fixture")
+                            {
+                                crate::e2e_seed::seed_timeline_cache_fixture(&server.db).await;
+                            }
 
                             // Phase 2: use the latest capture intent, not the
                             // value from app launch. Hold the slot across

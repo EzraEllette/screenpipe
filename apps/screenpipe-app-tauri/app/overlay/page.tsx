@@ -112,14 +112,8 @@ export default function OverlayPage() {
   const isProcessingRef = useRef(false);
   
   // Optimistic UI: track if user has any data (cached or live)
-  const { frames, isConnected, loadFromCache, hasCachedData: hasValidatedCachedData } = useTimelineStore();
+  const { frames, isConnected, hasCachedData: hasValidatedCachedData } = useTimelineStore();
   const hasAnyData = hasValidatedCachedData || frames.length > 0;
-  
-  // Native load validates the cache against the running database before any
-  // frame can influence this optimistic UI state.
-  useEffect(() => {
-    void loadFromCache();
-  }, [loadFromCache]);
   
   // Load onboarding status on mount
   useEffect(() => {
