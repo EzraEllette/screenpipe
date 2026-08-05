@@ -8,10 +8,13 @@
 //! Recording (capture) can be toggled independently via [`CaptureSession`].
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use futures::FutureExt;
 use screenpipe_audio::core::device::resolve_audio_devices_for_capture;
 use screenpipe_audio::core::engine::AudioTranscriptionEngine;
 use screenpipe_audio::transcription::stt::{
@@ -70,9 +73,18 @@ pub struct ServerCore {
     external_memory_sync:
         Option<Arc<screenpipe_engine::external_memory_sync::ExternalMemorySyncScheduler>>,
     /// Tasks spawned by `start()` that would otherwise outlive the engine:
-    /// the HTTP serve task (whose `Server` owns a `db` clone + secret store)
-    /// and the HD meeting-event listeners. Aborted in `shutdown()`.
+    /// the HD meeting-event listeners and background monitors. Aborted in
+    /// `shutdown()`.
     owned_tasks: Vec<tokio::task::JoinHandle<()>>,
+    /// Tells the HTTP serve loop to stop accepting and tear down every
+    /// connection task. Connection handlers hold clones of the router state
+    /// (db pool + secret store), so `shutdown()` must drain them *before*
+    /// closing the pools — otherwise surviving keep-alive/WebSocket
+    /// connections keep serving 500s from a dead generation.
+    http_shutdown: tokio::sync::watch::Sender<bool>,
+    /// The HTTP serve task. Resolves only once every connection task has
+    /// finished; `shutdown()` awaits it (bounded) after signaling above.
+    http_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 /// Bind attempts before giving up on the HTTP port. Together with
@@ -82,6 +94,73 @@ pub struct ServerCore {
 const BIND_RETRY_ATTEMPTS: u32 = 20;
 const BIND_RETRY_DELAY: Duration = Duration::from_millis(500);
 const PORT_HOLDER_LOOKUP_TIMEOUT: Duration = Duration::from_secs(2);
+const OPENAI_COMPATIBLE_FAILURE_POLL_INTERVAL: Duration = Duration::from_secs(15);
+const OPENAI_COMPATIBLE_FAILURE_NOTIFICATION_COOLDOWN: Duration = Duration::from_secs(5 * 60);
+
+fn should_notify_openai_compatible_failure(
+    previous_error_count: u64,
+    current_error_count: u64,
+    previous_empty_count: u64,
+    current_empty_count: u64,
+    previous_completed_count: u64,
+    current_completed_count: u64,
+    last_notification: Option<Instant>,
+    now: Instant,
+) -> bool {
+    let failed_request = current_error_count > previous_error_count;
+    // VAD already filters for speech before this stage. A run of empty
+    // responses with no successful transcript is therefore a strong signal
+    // that the endpoint accepted the request but is not producing indexable
+    // data, rather than normal silence.
+    let repeated_empty_responses = current_empty_count.saturating_sub(previous_empty_count) >= 3
+        && current_completed_count == previous_completed_count;
+
+    (failed_request || repeated_empty_responses)
+        && last_notification.is_none_or(|last| now.duration_since(last) >= OPENAI_COMPATIBLE_FAILURE_NOTIFICATION_COOLDOWN)
+}
+
+fn monitor_openai_compatible_transcription_failures(
+    metrics: Arc<screenpipe_audio::metrics::AudioPipelineMetrics>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut previous_error_count = metrics.transcription_errors.load(Ordering::Relaxed);
+        let mut previous_empty_count = metrics.transcriptions_empty.load(Ordering::Relaxed);
+        let mut previous_completed_count = metrics.transcriptions_completed.load(Ordering::Relaxed);
+        let mut last_notification = None;
+
+        loop {
+            tokio::time::sleep(OPENAI_COMPATIBLE_FAILURE_POLL_INTERVAL).await;
+            let current_error_count = metrics.transcription_errors.load(Ordering::Relaxed);
+            let current_empty_count = metrics.transcriptions_empty.load(Ordering::Relaxed);
+            let current_completed_count = metrics.transcriptions_completed.load(Ordering::Relaxed);
+            let now = Instant::now();
+
+            if should_notify_openai_compatible_failure(
+                previous_error_count,
+                current_error_count,
+                previous_empty_count,
+                current_empty_count,
+                previous_completed_count,
+                current_completed_count,
+                last_notification,
+                now,
+            ) {
+                crate::notifications::client::send_typed_with_priority(
+                    "OpenAI Compatible transcription is failing",
+                    "Screenpipe is still recording audio, but the endpoint is failing or returning empty transcripts, so new audio may not be searchable. Check Settings and run Test and enable again.",
+                    "system",
+                    Some(20_000),
+                    crate::notifications::store::NotificationPriority::High,
+                );
+                last_notification = Some(now);
+            }
+
+            previous_error_count = current_error_count;
+            previous_empty_count = current_empty_count;
+            previous_completed_count = current_completed_count;
+        }
+    })
+}
 
 #[cfg(any(test, target_os = "macos", target_os = "linux"))]
 fn parse_lsof_port_holder(stdout: &str) -> Option<String> {
@@ -227,6 +306,7 @@ impl ServerCore {
     ) -> Result<Self, String> {
         info!("Starting server core on port {}", config.port);
         crate::health::set_boot_phase("starting", Some("starting server"));
+        let ai_gateway_url = crate::config::screenpipe_ai_gateway_url()?;
 
         // --- Environment setup ---
         std::env::set_var("SCREENPIPE_FD_LIMIT", "8192");
@@ -513,18 +593,21 @@ impl ServerCore {
         let mut external_memory_sync_handle = None;
         let mut owned_tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
-        // Secret store — read-only keychain access on startup.
-        // Never create a key automatically (that triggers a macOS modal).
-        // Users opt in via onboarding or Settings > Privacy.
+        if config.audio_transcription_engine == AudioTranscriptionEngine::OpenAICompatible {
+            owned_tasks.push(monitor_openai_compatible_transcription_failures(
+                audio_manager.metrics.clone(),
+            ));
+        }
+
+        // Secret-store readers always resolve an existing OS-vault key. The
+        // read path never creates a key, so optional encryption remains
+        // unchanged while every process can read encrypted credentials.
         {
-            let secret_key = match crate::secrets::get_key_if_encryption_enabled() {
-                crate::secrets::KeyResult::Found(k) => Some(k),
-                _ => {
-                    info!("keychain: no encryption key found — secrets stored unencrypted until user opts in");
-                    None
-                }
-            };
-            match screenpipe_secrets::SecretStore::new(db.pool.clone(), secret_key).await {
+            match screenpipe_secrets::SecretStore::open_for_data_dir_with_vault_key(
+                &config.data_dir,
+            )
+            .await
+            {
                 Ok(store) => {
                     let fixed = screenpipe_secrets::fix_secret_file_permissions(&config.data_dir);
                     if fixed > 0 {
@@ -605,6 +688,7 @@ impl ServerCore {
             screenpipe_core::agents::pi::PiExecutor::with_shared_user_token(
                 cloud_token_handle.clone(),
             )
+            .with_api_url(ai_gateway_url)
             .with_api_auth_key(config.api_auth_key.clone()),
         );
         let mut agent_executors: std::collections::HashMap<
@@ -630,6 +714,15 @@ impl ServerCore {
         let mcp_session_access =
             screenpipe_core::pipes::mcp_access::McpSessionAccessRegistry::new();
         pipe_manager.set_mcp_session_access(mcp_session_access.clone());
+        // Keep the desktop's embedded PipeManager and HTTP auth middleware on
+        // the same scoped-token registry. Without this bridge Pi pipes receive
+        // an sp_pipe_* token, but every authenticated API call is rejected as
+        // unknown before endpoint permissions can be evaluated.
+        pipe_manager.set_token_registry(Arc::new(
+            screenpipe_engine::pipe_permissions_middleware::DashMapTokenRegistry::new(
+                server.pipe_permissions.clone(),
+            ),
+        ));
         if let Some(cb) = on_pipe_output {
             pipe_manager.set_on_output_line(cb);
         }
@@ -861,19 +954,61 @@ impl ServerCore {
 
         info!("HTTP server bound to port {}", config.port);
 
+        // Build and validate every OpenAPI + Axum route before publishing the
+        // ready phase or starting capture. oasgen panics on schema/handler
+        // mismatches; the engine converts that panic to an error so the Tauri
+        // shell (and updater) remains available instead of losing the process.
+        let router = match server.try_create_router().await {
+            Ok(router) => router,
+            Err(error) => {
+                let msg = format!("failed to construct local API router: {error}");
+                crate::health::set_boot_error(&msg);
+                crate::health::set_recording_status(crate::health::RecordingStatus::Error);
+                return Err(msg);
+            }
+        };
+
         let vision_manager_handle = server.vision_manager.clone();
 
-        // Start serving in background. The handle is kept on Self and aborted
-        // in `shutdown()`: the `Server` moved into this task owns a `db` clone
-        // + the secret store, so a task that outlives the engine restart keeps
-        // old SQLite connections (and the shared -shm WAL-index) alive — the
-        // core of the 2026-07-02 unrecoverable-522 wedge. Aborting also frees
-        // the listener so the next spawn can rebind the port.
-        owned_tasks.push(tokio::spawn(async move {
-            if let Err(e) = server.start_with_listener(listener).await {
-                error!("Server error: {:?}", e);
+        // Start serving in background. The Router state owns a `db` clone +
+        // the secret store, so the serve loop must not outlive the engine:
+        // `shutdown()` fires `http_shutdown` and awaits this task, which
+        // returns only after every connection task is gone. Draining (rather
+        // than aborting the accept loop) is what guarantees no keep-alive or
+        // WebSocket handler still reaches the pools once they close — the
+        // core of both the 2026-07-02 unrecoverable-522 wedge and the
+        // Windows closed-pool-while-serving zombie (2026-08-04 report).
+        // Returning also frees the listener so the next spawn can rebind.
+        let server_addr = SocketAddr::new(IpAddr::V4(config.listen_address), config.port);
+        let (http_shutdown, http_shutdown_rx) = tokio::sync::watch::channel(false);
+        let shutdown_requested = http_shutdown_rx.clone();
+        let http_task = tokio::spawn(async move {
+            let mut shutdown_rx = http_shutdown_rx;
+            let outcome = AssertUnwindSafe(SCServer::serve_router_with_listener_graceful(
+                server_addr,
+                listener,
+                router,
+                async move {
+                    // Err means the sender dropped, which only happens when
+                    // the whole ServerCore is gone — treat as shutdown.
+                    let _ = shutdown_rx.wait_for(|stop| *stop).await;
+                },
+            ))
+            .catch_unwind()
+            .await;
+            if *shutdown_requested.borrow() {
+                info!("local API server drained after shutdown request");
+                return;
             }
-        }));
+            let message = match outcome {
+                Ok(Ok(())) => "local API server stopped unexpectedly".to_string(),
+                Ok(Err(error)) => format!("local API server failed: {error}"),
+                Err(_) => "local API server task panicked".to_string(),
+            };
+            error!("{message}");
+            crate::health::set_boot_error(&message);
+            crate::health::set_recording_status(crate::health::RecordingStatus::Error);
+        });
 
         info!("Server core started successfully");
         crate::health::set_boot_phase("ready", None);
@@ -920,6 +1055,12 @@ impl ServerCore {
         // One shutdown signal, shared across both worker spawn paths and
         // stored on Self for `shutdown()` to fire on app quit.
         let redact_shutdown = Arc::new(Notify::new());
+        let redact_database_error_hook: screenpipe_redact::DatabaseErrorHook = {
+            let db = Arc::clone(&db);
+            Arc::new(move |error| {
+                db.report_sqlite_error(error);
+            })
+        };
 
         // Opt-in (Settings → Privacy → "redact secrets in agent logs", default
         // off): strip secrets the pi agent persists into its session logs (bash
@@ -943,7 +1084,12 @@ impl ServerCore {
                     poll_interval: std::time::Duration::from_secs(5 * 60),
                     ..Default::default()
                 };
-                let _ = Worker::new(db.pool.clone(), placeholder, cfg)
+                let _ = Worker::new_with_writer(
+                    db.pool.clone(),
+                    db.coordinated_writer(),
+                    placeholder,
+                    cfg,
+                )
                     .spawn_with_shutdown(redact_shutdown.clone());
             }
         }
@@ -1019,7 +1165,13 @@ impl ServerCore {
                     tables: ALL_TARGET_TABLES.to_vec(),
                     ..Default::default()
                 };
-                let _ = Worker::new(db.pool.clone(), pipeline_arc, cfg)
+                let _ = Worker::new_with_writer(
+                    db.pool.clone(),
+                    db.coordinated_writer(),
+                    pipeline_arc,
+                    cfg,
+                )
+                    .with_database_error_hook(redact_database_error_hook.clone())
                     .spawn_with_shutdown(redact_shutdown.clone());
             } else {
                 // Local mode: spawn the download+load off the boot path
@@ -1027,9 +1179,11 @@ impl ServerCore {
                 // launch. The worker is created inside the spawned
                 // task once the model is ready.
                 let pool = db.pool.clone();
+                let writer = db.coordinated_writer();
                 let shutdown = redact_shutdown.clone();
                 let labels = pii_labels.clone();
                 let pseudonymizer = pseudonymizer.clone();
+                let database_error_hook = redact_database_error_hook.clone();
                 tokio::spawn(async move {
                     let policy = TextRedactionPolicy::from_labels(&labels);
                     // Prefer the local ONNX text redactor (~278 MB INT8,
@@ -1107,7 +1261,9 @@ impl ServerCore {
                         tables: ALL_TARGET_TABLES.to_vec(),
                         ..Default::default()
                     };
-                    let _ = Worker::new(pool, pipeline_arc, cfg).spawn_with_shutdown(shutdown);
+                    let _ = Worker::new_with_writer(pool, writer, pipeline_arc, cfg)
+                        .with_database_error_hook(database_error_hook)
+                        .spawn_with_shutdown(shutdown);
                 });
             }
         }
@@ -1122,6 +1278,7 @@ impl ServerCore {
             use screenpipe_redact::ImageRedactor;
 
             let pool = db.pool.clone();
+            let writer = db.coordinated_writer();
             if use_tinfoil {
                 let detector = Arc::new(TinfoilImageRedactor::new(TinfoilImageConfig {
                     api_key: tinfoil_api_key.clone(),
@@ -1134,14 +1291,16 @@ impl ServerCore {
                     has_api_key = tinfoil_api_key.is_some(),
                     "starting async image-PII worker (backend=tinfoil)"
                 );
-                let _ = ImageWorker::new(
+                let _ = ImageWorker::new_with_writer(
                     pool,
+                    writer,
                     detector,
                     ImageWorkerConfig {
                         policy: ImageRedactionPolicy::from_labels(&pii_labels),
                         ..Default::default()
                     },
                 )
+                .with_database_error_hook(redact_database_error_hook.clone())
                 .spawn_with_shutdown(redact_shutdown.clone());
             } else {
                 // Local mode: rfdetr ONNX. First-run downloads ~108 MB
@@ -1151,6 +1310,7 @@ impl ServerCore {
                 // loads, so they never drift on a model bump.
                 let shutdown = redact_shutdown.clone();
                 let labels = pii_labels.clone();
+                let database_error_hook = redact_database_error_hook.clone();
                 tokio::spawn(async move {
                     match RfdetrRedactor::load_or_download(RfdetrConfig::default()).await {
                         Ok(detector) => {
@@ -1160,14 +1320,16 @@ impl ServerCore {
                                 "starting async image-PII worker (backend=local)"
                             );
                             let detector_arc = Arc::new(detector) as Arc<dyn ImageRedactor>;
-                            let _ = ImageWorker::new(
+                            let _ = ImageWorker::new_with_writer(
                                 pool,
+                                writer,
                                 detector_arc,
                                 ImageWorkerConfig {
                                     policy: ImageRedactionPolicy::from_labels(&labels),
                                     ..Default::default()
                                 },
                             )
+                            .with_database_error_hook(database_error_hook)
                             .spawn_with_shutdown(shutdown);
                         }
                         Err(e) => {
@@ -1201,11 +1363,13 @@ impl ServerCore {
             oauth_refresher: oauth_refresher_handle,
             external_memory_sync: external_memory_sync_handle,
             owned_tasks,
+            http_shutdown,
+            http_task: Some(http_task),
         })
     }
 
     /// Shut down the server core. Called only on app quit.
-    pub async fn shutdown(self) {
+    pub async fn shutdown(mut self) {
         info!("Shutting down server core");
         screenpipe_connect::mdns::shutdown();
 
@@ -1239,8 +1403,27 @@ impl ServerCore {
             sync.stop();
         }
 
-        // Abort the HTTP serve task (its `Server` owns a db clone + secret
-        // store and the bound listener) and the HD meeting-event listeners.
+        // Drain the HTTP server before the pools close below: the serve loop
+        // stops accepting, then aborts + awaits every connection task, so no
+        // keep-alive or WebSocket handler still holds a clone of the db pool
+        // or secret store when `db.close()` runs. Without this, surviving
+        // connections keep answering on the port with closed pools — the
+        // Windows "Screenpipe isn't reachable" zombie (2026-08-04 report).
+        // Bounded so a wedged connection task can't hang app quit (the quit
+        // path budgets 5s total, the DB-wedge path 15s).
+        let _ = self.http_shutdown.send(true);
+        if let Some(http_task) = self.http_task.take() {
+            let abort_handle = http_task.abort_handle();
+            match tokio::time::timeout(Duration::from_secs(3), http_task).await {
+                Ok(_) => info!("HTTP server drained: no connection task outlives the pools"),
+                Err(_) => {
+                    warn!("HTTP server drain timed out after 3s; aborting serve task");
+                    abort_handle.abort();
+                }
+            }
+        }
+
+        // Abort the HD meeting-event listeners and background monitors.
         for task in &self.owned_tasks {
             task.abort();
         }
@@ -1335,5 +1518,34 @@ mod tests {
             Some("screenpipe.exe")
         );
         assert_eq!(parse_tasklist_process_name(""), None);
+    }
+
+    #[test]
+    fn openai_compatible_failure_notifications_are_rate_limited() {
+        let now = Instant::now();
+        assert!(should_notify_openai_compatible_failure(2, 3, 0, 0, 0, 0, None, now));
+        assert!(!should_notify_openai_compatible_failure(3, 3, 0, 0, 0, 0, None, now));
+        assert!(should_notify_openai_compatible_failure(3, 3, 1, 4, 10, 10, None, now));
+        assert!(!should_notify_openai_compatible_failure(3, 3, 1, 4, 10, 11, None, now));
+        assert!(!should_notify_openai_compatible_failure(
+            3,
+            4,
+            0,
+            0,
+            0,
+            0,
+            Some(now),
+            now + Duration::from_secs(1),
+        ));
+        assert!(should_notify_openai_compatible_failure(
+            3,
+            4,
+            0,
+            0,
+            0,
+            0,
+            Some(now),
+            now + OPENAI_COMPATIBLE_FAILURE_NOTIFICATION_COOLDOWN,
+        ));
     }
 }

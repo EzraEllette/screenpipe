@@ -25,8 +25,8 @@ mod imp {
     use crate::recording::local_api_context_from_app;
     use base64::Engine;
     use ee_sync::{
-        AudioRow, EnterpriseSyncConfig, EnterpriseSyncError, FrameRow, LocalApiClient, MemoryRow,
-        SnapshotRow, UiEventRow,
+        AudioRow, EnterpriseSyncConfig, EnterpriseSyncError, FeedbackRow, FrameRow, LocalApiClient,
+        MemoryRow, ParsedRow, SnapshotRow, UiEventRow,
     };
     use serde::Deserialize;
     use sha2::{Digest, Sha256};
@@ -101,6 +101,7 @@ mod imp {
     #[serde(tag = "type", content = "content")]
     enum LocalSearchItem {
         OCR(LocalOcr),
+        Parsed(ParsedRow),
         Audio(LocalAudio),
         Input(LocalInput),
         // Memory/UI variants ignored — only the ones we sync are listed.
@@ -165,19 +166,46 @@ mod imp {
         updated_at: String,
     }
 
+    #[derive(Debug, Deserialize)]
+    struct LocalFeedbackResponse {
+        data: Vec<LocalFeedbackItem>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct LocalFeedbackTarget {
+        kind: String,
+        id: String,
+        version: Option<String>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct LocalFeedbackItem {
+        id: String,
+        target: LocalFeedbackTarget,
+        producer_ref: Option<String>,
+        actor_id: String,
+        rating: String,
+        comment: Option<String>,
+        snapshot: Option<serde_json::Value>,
+        #[serde(default)]
+        context: serde_json::Value,
+        created_at: String,
+        updated_at: String,
+    }
+
     #[async_trait::async_trait]
     impl LocalApiClient for ScreenpipeLocalClient {
         async fn fetch_frames_since(
             &self,
             since_ts: Option<&str>,
+            boundary_offset: u32,
             limit: u32,
         ) -> Result<Vec<FrameRow>, EnterpriseSyncError> {
-            // /search takes start_time as ISO. We pass `since` (exclusive in
-            // spirit) — server returns >= start_time; one duplicate row per
-            // tick is acceptable since server-side dedups by (device_id, frame_id).
+            // /search returns rows whose timestamp is >= `since`. The durable
+            // boundary offset skips rows already acknowledged at that timestamp.
             let mut url = format!(
-                "{}/search?content_type=ocr&limit={}&order=ascending",
-                self.api_url_base, limit
+                "{}/search?content_type=ocr&limit={}&offset={}&order=ascending",
+                self.api_url_base, limit, boundary_offset
             );
             if let Some(ts) = since_ts {
                 url.push_str(&format!("&start_time={}", urlencoding::encode(ts)));
@@ -220,11 +248,12 @@ mod imp {
         async fn fetch_audio_since(
             &self,
             since_ts: Option<&str>,
+            boundary_offset: u32,
             limit: u32,
         ) -> Result<Vec<AudioRow>, EnterpriseSyncError> {
             let mut url = format!(
-                "{}/search?content_type=audio&limit={}&order=ascending",
-                self.api_url_base, limit
+                "{}/search?content_type=audio&limit={}&offset={}&order=ascending",
+                self.api_url_base, limit, boundary_offset
             );
             if let Some(ts) = since_ts {
                 url.push_str(&format!("&start_time={}", urlencoding::encode(ts)));
@@ -261,9 +290,51 @@ mod imp {
             Ok(out)
         }
 
+        async fn fetch_parsed_since(
+            &self,
+            since_ts: Option<&str>,
+            boundary_offset: u32,
+            limit: u32,
+        ) -> Result<Vec<ParsedRow>, EnterpriseSyncError> {
+            let mut url = format!(
+                "{}/search?content_type=parsed&limit={}&offset={}&order=ascending",
+                self.api_url_base, limit, boundary_offset
+            );
+            if let Some(ts) = since_ts {
+                url.push_str(&format!("&start_time={}", urlencoding::encode(ts)));
+            }
+            let resp = self
+                .auth(self.http.get(&url))
+                .send()
+                .await
+                .map_err(|e| EnterpriseSyncError::LocalApi(e.to_string()))?;
+            if !resp.status().is_success() {
+                return Err(EnterpriseSyncError::LocalApi(format!(
+                    "GET {} -> {}",
+                    url,
+                    resp.status()
+                )));
+            }
+            let body: LocalSearchResponse = resp
+                .json()
+                .await
+                .map_err(|e| EnterpriseSyncError::LocalApi(format!("decode: {e}")))?;
+            let mut out = body
+                .data
+                .into_iter()
+                .filter_map(|item| match item {
+                    LocalSearchItem::Parsed(parsed) => Some(parsed),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            out.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+            Ok(out)
+        }
+
         async fn fetch_ui_events_since(
             &self,
             since_ts: Option<&str>,
+            boundary_offset: u32,
             limit: u32,
         ) -> Result<Vec<UiEventRow>, EnterpriseSyncError> {
             // Local /search content_type=input returns rows from the
@@ -274,8 +345,8 @@ mod imp {
             // targets) — keystroke noise without element context isn't
             // useful for SOP synthesis and bloats the corpus.
             let mut url = format!(
-                "{}/search?content_type=input&limit={}&order=ascending&input_context_only=true",
-                self.api_url_base, limit
+                "{}/search?content_type=input&limit={}&offset={}&order=ascending&input_context_only=true",
+                self.api_url_base, limit, boundary_offset
             );
             if let Some(ts) = since_ts {
                 url.push_str(&format!("&start_time={}", urlencoding::encode(ts)));
@@ -490,15 +561,14 @@ mod imp {
         async fn fetch_memories_since(
             &self,
             since_ts: Option<&str>,
+            boundary_offset: u32,
             limit: u32,
         ) -> Result<Vec<MemoryRow>, EnterpriseSyncError> {
-            // /memories filters by created_at >= start_time; ascending order
-            // means the cursor advances monotonically. Server-side dedup is
-            // on (device_id, memory_id), so a single-row overlap per tick is
-            // acceptable (same convention as /search-backed fetches above).
+            // /memories returns created_at >= start_time. The durable boundary
+            // offset skips rows already acknowledged at that timestamp.
             let mut url = format!(
-                "{}/memories?limit={}&order_by=created_at&order_dir=asc",
-                self.api_url_base, limit
+                "{}/memories?limit={}&offset={}&order_by=created_at&order_dir=asc",
+                self.api_url_base, limit, boundary_offset
             );
             if let Some(ts) = since_ts {
                 url.push_str(&format!("&start_time={}", urlencoding::encode(ts)));
@@ -535,6 +605,58 @@ mod imp {
                 .collect();
             Ok(out)
         }
+
+        async fn fetch_feedback_since(
+            &self,
+            since_ts: Option<&str>,
+            after_id: Option<&str>,
+            limit: u32,
+        ) -> Result<Vec<FeedbackRow>, EnterpriseSyncError> {
+            let mut url = format!(
+                "{}/feedback?limit={}&order=asc&since_inclusive=true",
+                self.api_url_base, limit
+            );
+            if let Some(ts) = since_ts {
+                url.push_str(&format!("&since={}", urlencoding::encode(ts)));
+            }
+            if let Some(id) = after_id {
+                url.push_str(&format!("&after_id={}", urlencoding::encode(id)));
+            }
+            let resp = self
+                .auth(self.http.get(&url))
+                .send()
+                .await
+                .map_err(|error| EnterpriseSyncError::LocalApi(error.to_string()))?;
+            if !resp.status().is_success() {
+                return Err(EnterpriseSyncError::LocalApi(format!(
+                    "GET {} -> {}",
+                    url,
+                    resp.status()
+                )));
+            }
+            let body: LocalFeedbackResponse = resp
+                .json()
+                .await
+                .map_err(|error| EnterpriseSyncError::LocalApi(format!("decode: {error}")))?;
+            Ok(body
+                .data
+                .into_iter()
+                .map(|item| FeedbackRow {
+                    feedback_id: item.id,
+                    target_kind: item.target.kind,
+                    target_id: item.target.id,
+                    target_version: item.target.version,
+                    producer_ref: item.producer_ref,
+                    actor_id: item.actor_id,
+                    rating: item.rating,
+                    comment: item.comment,
+                    snapshot: item.snapshot,
+                    context: item.context,
+                    created_at: item.created_at,
+                    updated_at: item.updated_at,
+                })
+                .collect())
+        }
     }
 
     // ─── Spawn ─────────────────────────────────────────────────────────
@@ -554,7 +676,11 @@ mod imp {
             .or_else(crate::commands::get_enterprise_license_key)
     }
 
-    const DEFAULT_POLICY_URL: &str = "https://screenpipe.com/api/enterprise/policy";
+    /// Default policy endpoint on the baked control-plane base
+    /// (crate::web_base — `NEXT_PUBLIC_SCREENPIPE_WEB_URL` at build time).
+    fn default_policy_url() -> String {
+        crate::web_base::screenpipe_web_url("/api/enterprise/policy")
+    }
     const HIDDEN_UI_POLICY_POLL_INTERVAL: std::time::Duration =
         std::time::Duration::from_secs(5 * 60);
 
@@ -571,7 +697,8 @@ mod imp {
             // Match the frontend policy normalization: locked setting keys also
             // hide their corresponding settings surface. `referral` is always
             // hidden in enterprise builds but is irrelevant to UI dormancy.
-            self.hidden_sections.extend(self.locked_settings.into_keys());
+            self.hidden_sections
+                .extend(self.locked_settings.into_keys());
             self.hidden_sections.sort();
             self.hidden_sections.dedup();
             self.hidden_sections
@@ -623,7 +750,7 @@ mod imp {
             let policy_url = std::env::var("SCREENPIPE_ENTERPRISE_POLICY_URL")
                 .ok()
                 .filter(|url| !url.trim().is_empty())
-                .unwrap_or_else(|| DEFAULT_POLICY_URL.to_string());
+                .unwrap_or_else(default_policy_url);
             let http = reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
                 .redirect(reqwest::redirect::Policy::none())
@@ -638,31 +765,25 @@ mod imp {
                 if crate::enterprise_policy::is_app_ui_hidden() {
                     match current_policy_credential() {
                         Some(credential) => {
-                            let device_id = settings_device_id(&app)
-                                .unwrap_or_else(|| "unknown".to_string());
-                            match fetch_hidden_ui_policy(
-                                &http,
-                                &policy_url,
-                                &device_id,
-                                credential,
-                            )
-                            .await
+                            let device_id =
+                                settings_device_id(&app).unwrap_or_else(|| "unknown".to_string());
+                            match fetch_hidden_ui_policy(&http, &policy_url, &device_id, credential)
+                                .await
                             {
                                 Ok(hidden_sections) => {
                                     crate::enterprise_policy::set_enterprise_policy(
                                         hidden_sections,
                                     );
-                                    if !crate::commands::apply_enterprise_ui_visibility(
-                                        app.clone(),
-                                    ) {
+                                    if !crate::commands::apply_enterprise_ui_visibility(app.clone())
+                                    {
                                         info!(
                                             "enterprise: native policy watcher restored visible UI"
                                         );
                                     }
                                 }
-                                Err(error) => warn!(
-                                    "enterprise: hidden-UI policy refresh failed: {error}"
-                                ),
+                                Err(error) => {
+                                    warn!("enterprise: hidden-UI policy refresh failed: {error}")
+                                }
                             }
                         }
                         None => warn!(
@@ -757,47 +878,15 @@ mod imp {
             .and_then(|h| h.into_string().ok())
             .unwrap_or_else(|| "unknown".to_string());
 
-        // Resolve license key from the canonical file location the
-        // in-app license prompt writes to (~/.screenpipe/enterprise.json,
-        // or the MDM Resources/ copy). Without this the env-var-only
-        // discovery in `from_env` silently no-ops on every standard
-        // install — the telemetry pipeline would never start, even with
-        // the dashboard fully configured.
-        let license_fallback = crate::commands::get_enterprise_license_key();
-
-        let cfg = match EnterpriseSyncConfig::from_env_with_fallback(
-            app_data_dir,
-            device_id.clone(),
-            device_label.clone(),
-            license_fallback,
-        ) {
-            Some(c) => c,
-            None => {
-                info!(
-                    "enterprise sync: no license key in env or ~/.screenpipe/enterprise.json — skipping"
-                );
-                return None;
-            }
-        };
-
-        info!(
-            "enterprise sync: enabled for device={} (label={}) ingest={}",
-            cfg.device_id, cfg.device_label, cfg.ingest_url
-        );
-
         // Point the stalled-upload watchdog at the real app-log dirs. App logs
         // live in the screenpipe data dir (RollingFileAppender), NOT Tauri's
         // app_data_dir — so the from_env default would miss them.
-        let mut cfg = cfg;
         let mut log_dirs = Vec::new();
         if let Ok(d) = crate::log_files::get_screenpipe_data_dir(app) {
             log_dirs.push(d);
         }
         if let Ok(d) = crate::log_files::get_data_dir(app) {
             log_dirs.push(d);
-        }
-        if !log_dirs.is_empty() {
-            cfg.log_dirs = log_dirs;
         }
 
         let api = local_api_context_from_app(app);
@@ -810,24 +899,110 @@ mod imp {
             Arc::new(ScreenpipeLocalClient::new(api_url_base, app.clone()));
 
         let (tx, rx) = tokio::sync::watch::channel(false);
+        let mut shutdown_rx = rx.clone();
+        let auth_gate_app = app.clone();
         tauri::async_runtime::spawn(async move {
-            // Small startup delay so the local screenpipe server is up before
-            // we hammer it. Mirrors calendar publisher's `sleep(10)`.
-            tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+            // Wait until a device config exists. Config sources, checked
+            // every tick until one lands (previously this was a boot-time
+            // check that returned None forever — pasting a license in the
+            // in-app prompt or signing in required a full app restart):
+            //   1. env / enterprise.json (MDM, in-app prompt) — as before
+            //   2. sign-in auto-config: a signed-in enterprise MEMBER's
+            //      cloud session fetches /api/enterprise/device-config and
+            //      persists license_key + ingest_url to enterprise.json,
+            //      so the next tick starts sync with zero manual config.
+            const CONFIG_POLL_SECS: u64 = 60;
+            let cfg = loop {
+                let file_cfg = crate::commands::get_enterprise_file_config();
+                if let Some(cfg) = EnterpriseSyncConfig::from_env_with_fallback(
+                    app_data_dir.clone(),
+                    device_id.clone(),
+                    device_label.clone(),
+                    file_cfg.license_key.clone(),
+                    file_cfg.ingest_url.clone(),
+                ) {
+                    break cfg;
+                }
 
-            // Ask the control plane what upload mode this license should run
-            // in. Replaces the old "set SCREENPIPE_ENTERPRISE_UPLOAD_MODE on
-            // every customer machine" UX — the dashboard binding is now the
-            // single source of truth, so a fresh enterprise install just
-            // needs the license key and uploads start automatically.
+                if let Some(token) = crate::commands::get_cloud_token() {
+                    let url = crate::enterprise::device_config::device_config_url(
+                        file_cfg.ingest_url.as_deref(),
+                    );
+                    match crate::enterprise::device_config::fetch_remote_device_config(&url, &token)
+                        .await
+                    {
+                        Ok(remote) => {
+                            info!(
+                                "enterprise sync: device auto-configured from {} (org={})",
+                                url,
+                                remote.org_name.as_deref().unwrap_or("?")
+                            );
+                            if let Err(e) = crate::commands::persist_enterprise_device_config(
+                                Some(&remote.license_key),
+                                remote.ingest_url.as_deref(),
+                            ) {
+                                warn!("enterprise sync: failed to persist device config: {e}");
+                            }
+                            // Loop around immediately: the file (or the
+                            // in-memory values on persist failure) now
+                            // satisfies from_env_with_fallback.
+                            if let Some(cfg) = EnterpriseSyncConfig::from_env_with_fallback(
+                                app_data_dir.clone(),
+                                device_id.clone(),
+                                device_label.clone(),
+                                Some(remote.license_key.clone()),
+                                remote.ingest_url.clone(),
+                            ) {
+                                break cfg;
+                            }
+                        }
+                        Err(e) => {
+                            // Signed out, consumer account, or control plane
+                            // unreachable — all normal, keep waiting quietly.
+                            tracing::debug!(
+                                "enterprise sync: device-config not available ({e}); retrying"
+                            );
+                        }
+                    }
+                }
+
+                if ee_sync::sleep_or_shutdown(
+                    std::time::Duration::from_secs(CONFIG_POLL_SECS),
+                    &mut shutdown_rx,
+                )
+                .await
+                {
+                    return;
+                }
+            };
+
             let mut cfg = cfg;
-            cfg.resolve_upload_mode().await;
+            if !log_dirs.is_empty() {
+                cfg.log_dirs = log_dirs;
+            }
+
             info!(
-                "enterprise sync: resolved upload mode = {}",
-                cfg.upload_mode.label()
+                "enterprise sync: enabled for device={} (label={}) ingest={}",
+                cfg.device_id, cfg.device_label, cfg.ingest_url
             );
 
-            ee_sync::run(cfg, local, rx).await;
+            // Small startup delay so the local screenpipe server is up before
+            // we hammer it. The sync state machine resolves upload policy and
+            // recovers rejected credentials before its first local data read.
+            tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+
+            let on_auth_rejected: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+                if let Err(error) =
+                    crate::window::ShowRewindWindow::PermissionRecovery.show(&auth_gate_app)
+                {
+                    warn!(
+                        error = %error,
+                        "enterprise sync: failed to show enterprise access gate"
+                    );
+                }
+            });
+
+            ee_sync::run(cfg, local, rx, Some(on_auth_rejected)).await;
         });
 
         Some(tx)

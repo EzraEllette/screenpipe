@@ -11,6 +11,7 @@ use crate::{
     updates::is_enterprise_build,
     window::{RewindWindowId, ShowRewindWindow},
 };
+use sha2::{Digest, Sha256};
 use tauri::{Emitter, Manager};
 use tracing::{debug, error, info, warn};
 
@@ -41,7 +42,171 @@ fn log_webview_build_failure(label: &str, url_hint: &str, err: &(impl std::fmt::
 
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
-    use super::{fallback_local_api_config, is_login_callback_scheme, scan_chat_entries_by_mtime};
+    use super::{
+        enterprise_license_key_sha256, fallback_local_api_config, is_login_callback_scheme,
+        merge_enterprise_file_configs, persist_enterprise_device_config,
+        persist_recovered_enterprise_device_config, read_enterprise_config_from_path,
+        recovery_anchor_license_key, save_enterprise_team_config, scan_chat_entries_by_mtime,
+        EnterpriseFileConfig, RecoveredEnterpriseDeviceConfig,
+    };
+
+    /// The whole point of SCR-300: `gateway_url` is the ONE name the server,
+    /// this file, and all three readers use, and this is its only writer.
+    /// Assert the writer actually sets the key, that a changed URL overwrites
+    /// (the 5-minute policy poll re-asserts it, so a moved gateway must
+    /// self-heal), and that `None` leaves it alone.
+    #[test]
+    fn team_config_writes_and_updates_gateway_url() {
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("SCREENPIPE_DATA_DIR", dir.path());
+        let path = dir.path().join("enterprise.json");
+        let read = || -> serde_json::Value {
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap()
+        };
+
+        save_enterprise_team_config(
+            Some(true),
+            Some(true),
+            None,
+            Some("https://gw.acme.com/api/enterprise/v1/".to_string()),
+        )
+        .unwrap();
+        // Trailing slash trimmed, matching what the three readers expect.
+        assert_eq!(
+            read()["gateway_url"],
+            "https://gw.acme.com/api/enterprise/v1"
+        );
+
+        // Gateway moved: the next poll overwrites it.
+        save_enterprise_team_config(None, None, None, Some("https://gw2.acme.com".to_string()))
+            .unwrap();
+        assert_eq!(read()["gateway_url"], "https://gw2.acme.com");
+
+        // Hosted org / older backend omits the field: leave the key as-is
+        // rather than silently sending clients to the hosted base.
+        save_enterprise_team_config(None, None, Some("sk_ent_abc".to_string()), None).unwrap();
+        assert_eq!(read()["gateway_url"], "https://gw2.acme.com");
+        assert_eq!(read()["team_api_token"], "sk_ent_abc");
+
+        // Junk is refused, not written.
+        save_enterprise_team_config(None, None, None, Some("not a url".to_string())).unwrap();
+        assert_eq!(read()["gateway_url"], "https://gw2.acme.com");
+
+        // Empty string is the explicit "clear it" signal (binding removed).
+        save_enterprise_team_config(None, None, None, Some(String::new())).unwrap();
+        assert!(read()["gateway_url"].is_null());
+
+        persist_recovered_enterprise_device_config(
+            "rejected-key",
+            "replacement-key",
+            Some("https://new.example/api/enterprise/ingest"),
+        )
+        .unwrap();
+        let persisted = read();
+        assert_eq!(
+            persisted["credential_recovery"]["replaces_license_key_sha256"],
+            enterprise_license_key_sha256("rejected-key")
+        );
+        assert_eq!(
+            persisted["credential_recovery"]["license_key"],
+            "replacement-key"
+        );
+        assert_ne!(
+            persisted["credential_recovery"]["replaces_license_key_sha256"],
+            "rejected-key"
+        );
+
+        persist_enterprise_device_config(Some("manual-key"), None).unwrap();
+        assert!(read().get("credential_recovery").is_none());
+
+        std::env::remove_var("SCREENPIPE_DATA_DIR");
+    }
+
+    #[test]
+    fn bundled_config_accepts_only_its_matching_recovery_record() {
+        let bundled = EnterpriseFileConfig {
+            license_key: Some("bundled-rejected-key".to_string()),
+            ingest_url: Some("https://old.example/api/enterprise/ingest".to_string()),
+            recovered_device_config: None,
+        };
+        let user = EnterpriseFileConfig {
+            license_key: Some("replacement-key".to_string()),
+            ingest_url: Some("https://new.example/api/enterprise/ingest".to_string()),
+            recovered_device_config: Some(RecoveredEnterpriseDeviceConfig {
+                replaces_license_key_sha256: enterprise_license_key_sha256("bundled-rejected-key"),
+                license_key: "replacement-key".to_string(),
+                ingest_url: Some("https://new.example/api/enterprise/ingest".to_string()),
+            }),
+        };
+
+        let recovered = merge_enterprise_file_configs(Some(bundled.clone()), Some(user.clone()));
+        assert_eq!(recovered.license_key.as_deref(), Some("replacement-key"));
+        assert_eq!(
+            recovered.ingest_url.as_deref(),
+            Some("https://new.example/api/enterprise/ingest")
+        );
+
+        let updated_mdm = EnterpriseFileConfig {
+            license_key: Some("new-mdm-key".to_string()),
+            ..bundled
+        };
+        let authoritative = merge_enterprise_file_configs(Some(updated_mdm), Some(user));
+        assert_eq!(authoritative.license_key.as_deref(), Some("new-mdm-key"));
+        assert_eq!(
+            authoritative.ingest_url.as_deref(),
+            Some("https://old.example/api/enterprise/ingest")
+        );
+
+        assert_eq!(
+            recovery_anchor_license_key(Some("bundled-rejected-key"), "recovered-key-now-rejected"),
+            "bundled-rejected-key"
+        );
+        assert_eq!(
+            recovery_anchor_license_key(None, "unbundled-rejected-key"),
+            "unbundled-rejected-key"
+        );
+    }
+
+    #[test]
+    fn enterprise_json_parses_license_and_ingest_url() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("enterprise.json");
+
+        // Both fields (sign-in auto-config or full MDM drop).
+        std::fs::write(
+            &path,
+            r#"{"license_key":"ENT-AAAA-BBBB-CCCC-DDDD","ingest_url":"http://192.168.10.161:3000/api/enterprise/ingest"}"#,
+        )
+        .unwrap();
+        let cfg = read_enterprise_config_from_path(&path).unwrap();
+        assert_eq!(cfg.license_key.as_deref(), Some("ENT-AAAA-BBBB-CCCC-DDDD"));
+        assert_eq!(
+            cfg.ingest_url.as_deref(),
+            Some("http://192.168.10.161:3000/api/enterprise/ingest")
+        );
+
+        // Legacy file: license only — ingest stays None (default base applies).
+        std::fs::write(&path, r#"{"license_key":"ENT-AAAA-BBBB-CCCC-DDDD"}"#).unwrap();
+        let cfg = read_enterprise_config_from_path(&path).unwrap();
+        assert!(cfg.ingest_url.is_none());
+        assert!(!cfg.is_empty());
+
+        // URL-only file: valid "MDM points at the control plane, sign-in
+        // supplies the license" deployment.
+        std::fs::write(&path, r#"{"ingest_url":"https://cp.acme.com/api/enterprise/ingest"}"#)
+            .unwrap();
+        let cfg = read_enterprise_config_from_path(&path).unwrap();
+        assert!(cfg.license_key.is_none());
+        assert_eq!(
+            cfg.ingest_url.as_deref(),
+            Some("https://cp.acme.com/api/enterprise/ingest")
+        );
+
+        // Blank/whitespace values are treated as absent, not empty strings.
+        std::fs::write(&path, r#"{"license_key":"  ","ingest_url":""}"#).unwrap();
+        let cfg = read_enterprise_config_from_path(&path).unwrap();
+        assert!(cfg.is_empty());
+    }
 
     #[test]
     fn chat_entries_missing_dir_is_empty() {
@@ -132,6 +297,27 @@ pub fn get_app_identifier(app_handle: tauri::AppHandle) -> String {
     app_handle.config().identifier.clone()
 }
 
+/// Stable low-disk safety values shared with the settings UI.
+///
+/// Keeping the threshold and monitor cadence in Rust prevents user-facing copy
+/// from drifting away from the values enforced by the capture engine.
+#[derive(Debug, Clone, serde::Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct LowDiskGuardConfig {
+    pub threshold_bytes: u64,
+    pub check_interval_seconds: u64,
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn get_low_disk_guard_config() -> LowDiskGuardConfig {
+    LowDiskGuardConfig {
+        threshold_bytes: screenpipe_events::LOW_DISK_THRESHOLD_BYTES,
+        check_interval_seconds:
+            screenpipe_engine::disk_pressure::LOW_DISK_CHECK_INTERVAL_SECS,
+    }
+}
+
 /// Get the local API auth key and port for the frontend to use.
 /// Returns the local API config (key, port, auth flag).
 ///
@@ -176,6 +362,15 @@ pub fn get_app_server_config() -> serde_json::Value {
         .unwrap_or(11435);
 
     serde_json::json!({ "port": port })
+}
+
+/// Start the protected database repair selected from the persistent `/notify`
+/// recovery card. The command returns immediately while recovery continues in
+/// the background and reports progress back through `/notify`.
+#[tauri::command]
+#[specta::specta]
+pub fn start_database_recovery(app_handle: tauri::AppHandle) -> Result<(), String> {
+    crate::db_recovery_notifications::start_quarantined_database_recovery(app_handle)
 }
 
 /// Pure JSON shape used by the cold-spawn fallback. Extracted so the contract
@@ -324,34 +519,100 @@ pub fn set_cloud_media_analysis_skill(enabled: bool) -> Result<(), String> {
     Ok(())
 }
 
-/// Read the enterprise license key from `enterprise.json`.
-/// Checks in order:
-/// 1. Next to executable (pushed via Intune/MDM to Program Files / .app bundle)
-/// 2. `~/.screenpipe/enterprise.json` (entered manually by employee via in-app prompt)
-/// Returns None if no file is found or is invalid.
-#[tauri::command]
-#[specta::specta]
-pub fn get_enterprise_license_key() -> Option<String> {
-    // Try MDM-deployed location first (next to executable)
-    if let Some(key) = read_enterprise_key_from_exe_dir() {
-        return Some(key);
+/// Everything `enterprise.json` can carry. `license_key` activates the
+/// telemetry pipeline; `ingest_url` re-bases every enterprise endpoint
+/// (control_plane_base derives the origin), which is how on-prem / staging
+/// control planes work without env vars. Both optional — a file with only
+/// `ingest_url` is a valid "MDM points the device at the control plane,
+/// sign-in supplies the license" deployment.
+#[derive(Debug, Clone, Default)]
+pub struct EnterpriseFileConfig {
+    pub license_key: Option<String>,
+    pub ingest_url: Option<String>,
+    recovered_device_config: Option<RecoveredEnterpriseDeviceConfig>,
+}
+
+#[derive(Debug, Clone)]
+struct RecoveredEnterpriseDeviceConfig {
+    replaces_license_key_sha256: String,
+    license_key: String,
+    ingest_url: Option<String>,
+}
+
+impl EnterpriseFileConfig {
+    pub fn is_empty(&self) -> bool {
+        self.license_key.is_none() && self.ingest_url.is_none()
+    }
+}
+
+fn enterprise_license_key_sha256(license_key: &str) -> String {
+    format!("{:x}", Sha256::digest(license_key.trim().as_bytes()))
+}
+
+fn recovery_anchor_license_key<'a>(
+    bundled_license_key: Option<&'a str>,
+    rejected_license_key: &'a str,
+) -> &'a str {
+    bundled_license_key.unwrap_or(rejected_license_key)
+}
+
+/// Preserve bundled/MDM precedence except for a recovery record tied to the
+/// exact bundled key it replaces. A later MDM key automatically wins because
+/// its fingerprint no longer matches.
+fn merge_enterprise_file_configs(
+    bundled: Option<EnterpriseFileConfig>,
+    user: Option<EnterpriseFileConfig>,
+) -> EnterpriseFileConfig {
+    let Some(mut bundled) = bundled else {
+        return user.unwrap_or_default();
+    };
+    let Some(bundled_key) = bundled.license_key.as_deref() else {
+        return bundled;
+    };
+    let Some(recovered) = user.and_then(|user| user.recovered_device_config) else {
+        return bundled;
+    };
+    if recovered.replaces_license_key_sha256 != enterprise_license_key_sha256(bundled_key) {
+        return bundled;
     }
 
-    // Fallback: ~/.screenpipe/enterprise.json (manually entered by employee)
+    bundled.license_key = Some(recovered.license_key);
+    if recovered.ingest_url.is_some() {
+        bundled.ingest_url = recovered.ingest_url;
+    }
+    info!("enterprise: applied persisted credential recovery over bundled config");
+    bundled
+}
+
+/// Read enterprise device config. Bundled/MDM config is authoritative unless
+/// the user file carries a validated recovery for that exact bundled key.
+pub fn get_enterprise_file_config() -> EnterpriseFileConfig {
+    let bundled = read_enterprise_config_from_exe_dir();
     let user_path = screenpipe_core::paths::default_screenpipe_data_dir().join("enterprise.json");
-    if user_path.exists() {
+    let user = if user_path.exists() {
         info!(
             "enterprise: checking user config at {}",
             user_path.display()
         );
-        return read_enterprise_key_from_path(&user_path);
+        read_enterprise_config_from_path(&user_path)
+    } else {
+        None
+    };
+    if bundled.is_none() && user.is_none() {
+        info!("enterprise: no enterprise.json found in any location");
     }
-
-    info!("enterprise: no enterprise.json found in any location");
-    None
+    merge_enterprise_file_configs(bundled, user)
 }
 
-fn read_enterprise_key_from_exe_dir() -> Option<String> {
+/// Read the enterprise license key from `enterprise.json`.
+/// Returns None if no file is found or is invalid.
+#[tauri::command]
+#[specta::specta]
+pub fn get_enterprise_license_key() -> Option<String> {
+    get_enterprise_file_config().license_key
+}
+
+fn read_enterprise_config_from_exe_dir() -> Option<EnterpriseFileConfig> {
     let exe = match std::env::current_exe() {
         Ok(e) => e,
         Err(e) => {
@@ -378,10 +639,10 @@ fn read_enterprise_key_from_exe_dir() -> Option<String> {
         return None;
     }
 
-    read_enterprise_key_from_path(&config_path)
+    read_enterprise_config_from_path(&config_path)
 }
 
-fn read_enterprise_key_from_path(path: &std::path::Path) -> Option<String> {
+fn read_enterprise_config_from_path(path: &std::path::Path) -> Option<EnterpriseFileConfig> {
     info!("enterprise: found enterprise.json at {}", path.display());
 
     let contents = match std::fs::read_to_string(path) {
@@ -398,27 +659,59 @@ fn read_enterprise_key_from_path(path: &std::path::Path) -> Option<String> {
             return None;
         }
     };
-    let key = parsed
-        .get("license_key")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
+    let string_field = |name: &str| {
+        parsed
+            .get(name)
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    };
+    let cfg = EnterpriseFileConfig {
+        license_key: string_field("license_key"),
+        ingest_url: string_field("ingest_url"),
+        recovered_device_config: parsed
+            .get("credential_recovery")
+            .and_then(|value| value.as_object())
+            .and_then(|recovery| {
+                let string = |name: &str| {
+                    recovery
+                        .get(name)
+                        .and_then(|value| value.as_str())
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_string)
+                };
+                Some(RecoveredEnterpriseDeviceConfig {
+                    replaces_license_key_sha256: string("replaces_license_key_sha256")?,
+                    license_key: string("license_key")?,
+                    ingest_url: string("ingest_url"),
+                })
+            }),
+    };
 
-    match &key {
+    match &cfg.license_key {
         Some(k) => info!(
             "enterprise: license key loaded ({}...)",
             &k[..k.len().min(8)]
         ),
-        None => warn!("enterprise: enterprise.json missing 'license_key' field"),
+        None => info!("enterprise: enterprise.json has no 'license_key' field"),
+    }
+    if let Some(url) = &cfg.ingest_url {
+        info!("enterprise: ingest url from enterprise.json: {}", url);
     }
 
-    key
+    Some(cfg)
 }
 
-/// Save the enterprise license key to `~/.screenpipe/enterprise.json`.
-/// Used by the in-app prompt when enterprise.json is not deployed via MDM.
-#[tauri::command]
-#[specta::specta]
-pub fn save_enterprise_license_key(license_key: String) -> Result<(), String> {
+/// Merge-write device config fields into `~/.screenpipe/enterprise.json`,
+/// preserving any other keys already in the file. Used by the in-app
+/// license prompt and by the sign-in-driven auto-config
+/// (enterprise/device_config.rs).
+fn persist_enterprise_device_config_inner(
+    license_key: Option<&str>,
+    ingest_url: Option<&str>,
+    replaces_license_key: Option<&str>,
+) -> Result<(), String> {
     let dir = screenpipe_core::paths::default_screenpipe_data_dir();
     std::fs::create_dir_all(&dir).map_err(|e| format!("failed to create dir: {}", e))?;
 
@@ -427,12 +720,67 @@ pub fn save_enterprise_license_key(license_key: String) -> Result<(), String> {
         .ok()
         .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
         .unwrap_or_else(|| serde_json::json!({}));
-    json["license_key"] = serde_json::Value::String(license_key);
+    if let Some(key) = license_key {
+        json["license_key"] = serde_json::Value::String(key.to_string());
+    }
+    if let Some(url) = ingest_url {
+        json["ingest_url"] = serde_json::Value::String(url.to_string());
+    }
+    if let Some(replaced) = replaces_license_key {
+        let mut recovery = serde_json::json!({
+            "replaces_license_key_sha256": enterprise_license_key_sha256(replaced),
+            "license_key": license_key.expect("recovery includes a replacement key"),
+        });
+        if let Some(url) = ingest_url {
+            recovery["ingest_url"] = serde_json::Value::String(url.to_string());
+        }
+        json["credential_recovery"] = recovery;
+    } else if license_key.is_some() {
+        json.as_object_mut()
+            .expect("enterprise device config is a JSON object")
+            .remove("credential_recovery");
+    }
     std::fs::write(&path, serde_json::to_string_pretty(&json).unwrap())
         .map_err(|e| format!("failed to write {}: {}", path.display(), e))?;
 
-    info!("enterprise: license key saved to {}", path.display());
+    info!("enterprise: device config saved to {}", path.display());
     Ok(())
+}
+
+pub fn persist_enterprise_device_config(
+    license_key: Option<&str>,
+    ingest_url: Option<&str>,
+) -> Result<(), String> {
+    persist_enterprise_device_config_inner(license_key, ingest_url, None)
+}
+
+pub fn persist_recovered_enterprise_device_config(
+    replaced_license_key: &str,
+    license_key: &str,
+    ingest_url: Option<&str>,
+) -> Result<(), String> {
+    // A user recovery overlays the executable-adjacent file. Keep every
+    // subsequent rotation tied to that immutable source key so recovery B can
+    // replace recovery A without making the overlay disappear on restart.
+    let bundled_license_key = read_enterprise_config_from_exe_dir().and_then(|cfg| cfg.license_key);
+    let recovery_anchor =
+        recovery_anchor_license_key(bundled_license_key.as_deref(), replaced_license_key);
+    persist_enterprise_device_config_inner(Some(license_key), ingest_url, Some(recovery_anchor))
+}
+
+/// Save the enterprise license key to `~/.screenpipe/enterprise.json`.
+/// Used by the in-app prompt when enterprise.json is not deployed via MDM.
+#[tauri::command]
+#[specta::specta]
+pub fn save_enterprise_license_key(license_key: String) -> Result<(), String> {
+    let bundled_key = read_enterprise_config_from_exe_dir().and_then(|cfg| cfg.license_key);
+    match bundled_key
+        .as_deref()
+        .filter(|key| *key != license_key.as_str())
+    {
+        Some(replaced) => persist_recovered_enterprise_device_config(replaced, &license_key, None),
+        None => persist_enterprise_device_config(Some(&license_key), None),
+    }
 }
 
 /// Persist the resolved "hide app UI" decision into `~/.screenpipe/enterprise.json`
@@ -658,12 +1006,14 @@ pub async fn set_cloud_token(
     Ok(())
 }
 
-/// Persist the user's enterprise admin status + team API token so the
-/// pi-agent's `screenpipe-team` skill knows whether to install itself.
+/// Persist the user's enterprise admin status, team API token, and the org's
+/// team API base URL. The Enterprise app uses the role/license/token fields to
+/// decide whether to inject `screenpipe-team`; the native CLI resolves the API
+/// base and token from the same file when that skill invokes it.
 ///
 /// Called by the frontend right after a policy fetch confirms admin
 /// role. Storing this alongside the license key in `enterprise.json`
-/// keeps everything pi-agent needs in one file the skill can read
+/// keeps the Enterprise app and native CLI on one local configuration contract
 /// without a Tauri round-trip.
 ///
 /// All fields are optional so callers can update one at a time —
@@ -676,6 +1026,7 @@ pub fn save_enterprise_team_config(
     is_admin: Option<bool>,
     license_active: Option<bool>,
     team_api_token: Option<String>,
+    gateway_url: Option<String>,
 ) -> Result<(), String> {
     let dir = screenpipe_core::paths::default_screenpipe_data_dir();
     std::fs::create_dir_all(&dir).map_err(|e| format!("failed to create dir: {}", e))?;
@@ -700,16 +1051,32 @@ pub fn save_enterprise_team_config(
             serde_json::Value::String(t)
         };
     }
+    // The org's team-API base (a gateway org's `gateway_url`). Every client
+    // reads this key; the 5-minute policy poll re-asserts it, so a changed
+    // gateway URL propagates without user action. Only http(s) values are
+    // written — a junk value would silently redirect all three readers.
+    let url_set = gateway_url.is_some();
+    if let Some(u) = gateway_url {
+        let u = u.trim();
+        if u.is_empty() {
+            json["gateway_url"] = serde_json::Value::Null;
+        } else if u.starts_with("http://") || u.starts_with("https://") {
+            json["gateway_url"] = serde_json::Value::String(u.trim_end_matches('/').to_string());
+        } else {
+            warn!("enterprise: ignoring non-http gateway_url: {}", u);
+        }
+    }
 
     std::fs::write(&path, serde_json::to_string_pretty(&json).unwrap())
         .map_err(|e| format!("failed to write {}: {}", path.display(), e))?;
 
     info!(
-        "enterprise: team config saved to {} (is_admin set: {}, license_active set: {}, token set: {})",
+        "enterprise: team config saved to {} (is_admin set: {}, license_active set: {}, token set: {}, url set: {})",
         path.display(),
         is_admin.is_some(),
         license_active.is_some(),
-        token_set
+        token_set,
+        url_set
     );
     Ok(())
 }
@@ -999,6 +1366,118 @@ pub fn e2e_main_overlay_visible(app_handle: tauri::AppHandle) -> bool {
         }
         false
     }
+}
+
+/// E2E helper: model an active capture intent without requiring physical
+/// screen/audio devices on the CI runner.
+#[tauri::command]
+#[specta::specta]
+pub fn e2e_mark_capture_intended(
+    state: tauri::State<'_, crate::recording::RecordingState>,
+) -> Result<(), String> {
+    if !cfg!(feature = "e2e") {
+        return Err("E2E feature is disabled".to_string());
+    }
+    state.set_capture_intent(true);
+    Ok(())
+}
+
+/// E2E helper: publish the same typed core event as the real disk probe.
+#[tauri::command]
+#[specta::specta]
+pub fn e2e_emit_disk_space_low(available_bytes: u64) -> Result<(), String> {
+    if !cfg!(feature = "e2e") {
+        return Err("E2E feature is disabled".to_string());
+    }
+
+    let event = screenpipe_events::DiskSpaceLowEvent::new(
+        available_bytes,
+        ".e2e".to_string(),
+    );
+    screenpipe_events::send_event(event.event_name(), event).map_err(|error| error.to_string())
+}
+
+/// E2E helper: execute the production policy handler directly and return its
+/// explicit outcome. This avoids sleep-based assertions; the settings E2E also
+/// publishes through the typed event bus to cover the production subscription.
+#[tauri::command]
+#[specta::specta]
+pub async fn e2e_handle_disk_space_low(
+    app_handle: tauri::AppHandle,
+    available_bytes: u64,
+) -> Result<crate::disk_pressure_notifications::DiskPressureOutcome, String> {
+    if !cfg!(feature = "e2e") {
+        return Err("E2E feature is disabled".to_string());
+    }
+
+    let event = screenpipe_events::DiskSpaceLowEvent::new(
+        available_bytes,
+        ".e2e".to_string(),
+    );
+    Ok(crate::disk_pressure_notifications::handle(&app_handle, event).await)
+}
+
+/// E2E helper: distinguish a real CaptureSession from capture intent alone.
+#[tauri::command]
+#[specta::specta]
+pub async fn e2e_capture_session_running(
+    state: tauri::State<'_, crate::recording::RecordingState>,
+) -> Result<bool, String> {
+    if !cfg!(feature = "e2e") {
+        return Err("E2E feature is disabled".to_string());
+    }
+    Ok(state.capture.lock().await.is_some())
+}
+
+/// E2E helper: update the native store without depending on a mounted settings
+/// webview. Used by the recording-enabled Windows lane.
+#[tauri::command]
+#[specta::specta]
+pub fn e2e_set_low_disk_guard_enabled(
+    app_handle: tauri::AppHandle,
+    enabled: bool,
+) -> Result<(), String> {
+    if !cfg!(feature = "e2e") {
+        return Err("E2E feature is disabled".to_string());
+    }
+    let mut settings = SettingsStore::get(&app_handle)?.unwrap_or_default();
+    settings.stop_recording_on_low_disk = enabled;
+    settings.save(&app_handle)
+}
+
+/// E2E helper: prove critical recording-stopped alerts bypass the user's
+/// ordinary notification master switch.
+#[tauri::command]
+#[specta::specta]
+pub fn e2e_set_notification_master_enabled(
+    app_handle: tauri::AppHandle,
+    enabled: bool,
+) -> Result<(), String> {
+    if !cfg!(feature = "e2e") {
+        return Err("E2E feature is disabled".to_string());
+    }
+    let mut settings = SettingsStore::get(&app_handle)?.unwrap_or_default();
+    let prefs = settings
+        .extra
+        .entry("notificationPrefs".to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    if !prefs.is_object() {
+        *prefs = serde_json::json!({});
+    }
+    prefs["notificationsEnabled"] = serde_json::Value::Bool(enabled);
+    settings.save(&app_handle)
+}
+
+/// E2E helper: read back the persisted guard value before publishing an event.
+#[tauri::command]
+#[specta::specta]
+pub fn e2e_low_disk_guard_enabled(app_handle: tauri::AppHandle) -> Result<bool, String> {
+    if !cfg!(feature = "e2e") {
+        return Err("E2E feature is disabled".to_string());
+    }
+    Ok(SettingsStore::get(&app_handle)?
+        .unwrap_or_default()
+        .stop_recording_on_low_disk)
 }
 
 /// E2E helper: drive the health-to-native-tray status transition.
@@ -1536,7 +2015,13 @@ pub async fn get_disk_usage(
     }
 }
 
-const LOGIN_URL: &str = "https://screenpipe.com/login";
+/// Login page on the baked control-plane base (crate::web_base): a build
+/// produced with NEXT_PUBLIC_SCREENPIPE_WEB_URL signs in against that
+/// deployment, so its session token verifies on the same control plane
+/// the rest of the app talks to.
+fn login_url() -> String {
+    crate::web_base::screenpipe_web_url("/login")
+}
 
 /// The custom URL scheme this build registers for deep links. The enterprise
 /// build uses a distinct scheme so it does not collide with the consumer app's
@@ -1554,6 +2039,22 @@ pub fn deep_link_scheme() -> &'static str {
 
 fn is_login_callback_scheme(scheme: &str) -> bool {
     scheme == deep_link_scheme() || scheme == "screenpipe"
+}
+
+#[cfg(not(target_os = "macos"))]
+fn reset_existing_login_window<R: tauri::Runtime>(
+    window: &tauri::WebviewWindow<R>,
+    login_url: tauri::Url,
+) -> Result<(), String> {
+    // A provider flow can leave this reusable webview on GitHub, Google, or
+    // even a failed/blank document. A later login click means "start over",
+    // so never surface whatever navigation state the previous attempt left.
+    window
+        .navigate(login_url)
+        .map_err(|e| format!("failed to reset login window: {e}"))?;
+    let _ = window.show();
+    let _ = window.set_focus();
+    Ok(())
 }
 
 /// Open the screenpipe.com login page.
@@ -1577,7 +2078,7 @@ pub async fn open_login_window(
         // with another installed build here (#3890) and stays correct until
         // the website honours `return_scheme`.
         let callback_url = match crate::auth_session::start_session(
-            LOGIN_URL.to_string(),
+            login_url(),
             "screenpipe".to_string(),
             fresh_session,
         )
@@ -1613,24 +2114,28 @@ pub async fn open_login_window(
             "login-browser".to_string()
         };
 
+        let login_url = format!("{}?return_scheme={}", login_url(), deep_link_scheme());
+        let parsed_login_url = login_url
+            .parse()
+            .map_err(|e| format!("invalid login URL: {e}"))?;
+
         if fresh_session {
             if let Some(w) = app_handle.get_webview_window("login-browser") {
                 let _ = w.close();
             }
         } else if let Some(w) = app_handle.get_webview_window(&label) {
-            let _ = w.show();
-            let _ = w.set_focus();
+            info!("resetting existing login window");
+            reset_existing_login_window(&w, parsed_login_url)?;
             return Ok(());
         }
 
         let app_for_nav = app_handle.clone();
         let label_for_nav = label.clone();
 
-        let login_url = format!("{}?return_scheme={}", LOGIN_URL, deep_link_scheme());
         let mut builder = WebviewWindowBuilder::new(
             &app_handle,
             label.clone(),
-            WebviewUrl::External(login_url.parse().unwrap()),
+            WebviewUrl::External(parsed_login_url),
         )
         .title("sign in to screenpipe")
         .inner_size(460.0, 700.0)
@@ -1662,6 +2167,31 @@ pub async fn open_login_window(
             })?;
 
         Ok(())
+    }
+}
+
+#[cfg(all(test, not(target_os = "macos")))]
+mod login_window_tests {
+    use super::reset_existing_login_window;
+    use tauri::{WebviewUrl, WebviewWindowBuilder};
+
+    #[test]
+    fn reused_login_window_returns_to_login_page() {
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let stale_url: tauri::Url = "https://github.com/settings/profile".parse().unwrap();
+        let login_url: tauri::Url = "https://screenpipe.com/login?return_scheme=screenpipe"
+            .parse()
+            .unwrap();
+        let window =
+            WebviewWindowBuilder::new(&app, "login-browser", WebviewUrl::External(stale_url))
+                .build()
+                .expect("login webview");
+
+        reset_existing_login_window(&window, login_url.clone()).unwrap();
+
+        assert_eq!(window.url().unwrap(), login_url);
     }
 }
 
@@ -1789,13 +2319,41 @@ pub async fn show_window_activated(
     show_window(app_handle, window).await
 }
 
-/// Programmatically adjust a window's always-on-top level after creation.
+#[cfg(target_os = "macos")]
+#[derive(Default)]
+struct TemporaryWindowLevelState {
+    original_levels: std::collections::HashMap<String, i64>,
+}
+
+#[cfg(target_os = "macos")]
+impl TemporaryWindowLevelState {
+    fn transition(&mut self, label: &str, current_level: i64, restore: bool) -> i64 {
+        if restore {
+            self.original_levels.remove(label).unwrap_or(current_level)
+        } else {
+            // Repeated lowering must not overwrite the real origin with level 0.
+            self.original_levels
+                .entry(label.to_string())
+                .or_insert(current_level);
+            0
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+static TEMPORARY_WINDOW_LEVELS: once_cell::sync::Lazy<std::sync::Mutex<TemporaryWindowLevelState>> =
+    once_cell::sync::Lazy::new(|| std::sync::Mutex::new(TemporaryWindowLevelState::default()));
+
+/// Temporarily lower a window for a permission flow, then restore its native
+/// level. The command name and boolean are retained for binding compatibility:
+/// `false` begins the temporary lowering and `true` restores the captured
+/// level.
 ///
 /// Tauri's JS `setAlwaysOnTop` can be unreliable for macOS panel-style
-/// windows. For permission flows we need Screenpipe to stay normally
-/// always-on-top, but temporarily drop below System Settings while the user is
-/// granting permissions. On macOS this directly sets the underlying NSWindow
-/// level: floating when enabled, normal when disabled.
+/// windows. The old implementation restored every window to a hardcoded
+/// floating level, which permanently elevated the normal Home/Settings window
+/// after it regained focus. Capture-once/restore-exactly mirrors the native
+/// focus-session lifecycle used to preserve external-app focus.
 #[tauri::command]
 #[specta::specta]
 pub async fn set_window_always_on_top_native(
@@ -1809,36 +2367,105 @@ pub async fn set_window_always_on_top_native(
         .get_webview_window(&label)
         .ok_or_else(|| format!("window not found: {}", label))?;
 
-    window
-        .set_always_on_top(always_on_top)
-        .map_err(|e| format!("failed to set always-on-top: {}", e))?;
-
     #[cfg(target_os = "macos")]
     {
-        use crate::window::run_on_main_thread_safe;
         use raw_window_handle::HasWindowHandle;
 
         let window_clone = window.clone();
-        run_on_main_thread_safe(&app_handle, move || {
-            if let Ok(handle) = window_clone.window_handle() {
-                if let raw_window_handle::RawWindowHandle::AppKit(appkit_handle) = handle.as_raw() {
+        let label_for_main_thread = label.clone();
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        app_handle
+            .run_on_main_thread(move || {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let handle = window_clone
+                        .window_handle()
+                        .map_err(|e| format!("failed to get native window handle: {e}"))?;
+                    let raw_window_handle::RawWindowHandle::AppKit(appkit_handle) = handle.as_raw()
+                    else {
+                        return Err("window is not backed by AppKit".to_string());
+                    };
+
                     use objc::{msg_send, sel, sel_impl};
                     let ns_view = appkit_handle.ns_view.as_ptr() as *mut objc::runtime::Object;
                     let ns_window: *mut objc::runtime::Object =
                         unsafe { msg_send![ns_view, window] };
-                    if !ns_window.is_null() {
-                        // NSNormalWindowLevel = 0. NSFloatingWindowLevel = 3.
-                        // Floating keeps recovery/onboarding above normal app
-                        // windows; normal lets System Settings sit above it.
-                        let level: i64 = if always_on_top { 3 } else { 0 };
-                        let _: () = unsafe { msg_send![ns_window, setLevel: level] };
+                    if ns_window.is_null() {
+                        return Err("native NSWindow is unavailable".to_string());
                     }
-                }
-            }
-        });
+
+                    let current_level: i64 = unsafe { msg_send![ns_window, level] };
+                    let target_level = TEMPORARY_WINDOW_LEVELS
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .transition(&label_for_main_thread, current_level, always_on_top);
+                    let _: () = unsafe { msg_send![ns_window, setLevel: target_level] };
+                    info!(
+                        window_label = %label_for_main_thread,
+                        current_level,
+                        target_level,
+                        restore = always_on_top,
+                        "permission window-level transition"
+                    );
+                    Ok(())
+                }))
+                .unwrap_or_else(|panic| {
+                    Err(format!(
+                        "panic while changing native window level: {panic:?}"
+                    ))
+                });
+                let _ = sender.send(result);
+            })
+            .map_err(|e| format!("failed to schedule native window-level change: {e}"))?;
+
+        receiver
+            .await
+            .map_err(|_| "native window-level change was cancelled".to_string())??;
     }
 
+    #[cfg(not(target_os = "macos"))]
+    window
+        .set_always_on_top(always_on_top)
+        .map_err(|e| format!("failed to set always-on-top: {}", e))?;
+
     Ok(())
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod temporary_window_level_tests {
+    use super::TemporaryWindowLevelState;
+
+    #[test]
+    fn normal_window_returns_to_normal_level() {
+        let mut state = TemporaryWindowLevelState::default();
+
+        assert_eq!(state.transition("home", 0, false), 0);
+        assert_eq!(state.transition("home", 0, true), 0);
+    }
+
+    #[test]
+    fn floating_window_returns_to_its_original_level() {
+        let mut state = TemporaryWindowLevelState::default();
+
+        assert_eq!(state.transition("permission-recovery", 3, false), 0);
+        assert_eq!(state.transition("permission-recovery", 0, true), 3);
+    }
+
+    #[test]
+    fn repeated_lowering_preserves_the_first_level() {
+        let mut state = TemporaryWindowLevelState::default();
+
+        assert_eq!(state.transition("home", 3, false), 0);
+        assert_eq!(state.transition("home", 0, false), 0);
+        assert_eq!(state.transition("home", 0, true), 3);
+    }
+
+    #[test]
+    fn unmatched_restore_keeps_the_current_level() {
+        let mut state = TemporaryWindowLevelState::default();
+
+        assert_eq!(state.transition("home", 0, true), 0);
+        assert_eq!(state.transition("chat", 1001, true), 1001);
+    }
 }
 
 /// Apply the "Chat Always on Top" setting to the already-open chat window.
@@ -2138,7 +2765,16 @@ pub async fn complete_onboarding(app_handle: tauri::AppHandle) -> Result<(), Str
         return Ok(());
     }
 
-    show_window(app_handle.clone(), ShowRewindWindow::Home { page: None }).await?;
+    // Setup ends at Brain. If the user built a first Live View it is selected
+    // there; if they skipped, Brain presents the honest create-your-first-view
+    // state instead of dropping them into an unrelated chat screen.
+    show_window(
+        app_handle.clone(),
+        ShowRewindWindow::Home {
+            page: Some("brain".to_string()),
+        },
+    )
+    .await?;
 
     Ok(())
 }
@@ -2288,12 +2924,8 @@ pub async fn enable_keychain_encryption() -> Result<KeychainStatus, String> {
         tracing::warn!("failed to write .encrypt-store flag: {}", e);
     }
 
-    let db_path = data_dir.join("db.sqlite");
-
-    // Shared, engine-matched pool (never an ad-hoc per-call connection — that
-    // churn corrupts db.sqlite, #4263).
     if let Ok(store) =
-        screenpipe_secrets::SecretStore::open(&db_path.to_string_lossy(), Some(key)).await
+        screenpipe_secrets::SecretStore::open_for_data_dir(&data_dir, Some(key)).await
     {
         match store.reencrypt_unencrypted_secrets(&key).await {
             Ok(count) if count > 0 => {
@@ -2315,13 +2947,10 @@ pub async fn enable_keychain_encryption() -> Result<KeychainStatus, String> {
 #[specta::specta]
 pub async fn disable_keychain_encryption() -> Result<KeychainStatus, String> {
     let data_dir = screenpipe_core::paths::default_screenpipe_data_dir();
-    let db_path = data_dir.join("db.sqlite");
+    let secrets_path = screenpipe_secrets::secrets_database_path(&data_dir);
 
-    if db_path.exists() {
-        // Shared, engine-matched pool (never an ad-hoc per-call connection —
-        // that churn corrupts db.sqlite, #4263). The later encrypted-store open
-        // reuses this same cached pool.
-        let plain_store = screenpipe_secrets::SecretStore::open(&db_path.to_string_lossy(), None)
+    if secrets_path.exists() || data_dir.join("db.sqlite").exists() {
+        let plain_store = screenpipe_secrets::SecretStore::open_for_data_dir(&data_dir, None)
             .await
             .map_err(|e| format!("failed to open secret store: {e}"))?;
         let encrypted_count = plain_store
@@ -2350,7 +2979,7 @@ pub async fn disable_keychain_encryption() -> Result<KeychainStatus, String> {
             };
 
             let encrypted_store =
-                screenpipe_secrets::SecretStore::open(&db_path.to_string_lossy(), Some(key))
+                screenpipe_secrets::SecretStore::open_for_data_dir(&data_dir, Some(key))
                     .await
                     .map_err(|e| format!("failed to open encrypted secret store: {e}"))?;
             match encrypted_store.decrypt_encrypted_secrets().await {
@@ -2836,13 +3465,118 @@ pub async fn hide_shortcut_reminder(app_handle: tauri::AppHandle) -> Result<(), 
 }
 
 /// Current recording-health overlay state: "normal" | "failure" | "fixing" |
-/// "recovered", optionally suffixed "|<detail>" (boot-phase label while
-/// fixing). The shortcut-reminder webview pulls this on mount, then stays
-/// current via the "recording-health-state" event.
+/// "recovered", optionally suffixed "|<detail>" (a concise failure reason or
+/// boot-phase label while fixing). The shortcut-reminder webview pulls this on
+/// mount, then stays current via the "recording-health-state" event.
 #[tauri::command]
 #[specta::specta]
 pub async fn get_recording_health_state() -> String {
     crate::overlay_health::current_state_payload()
+}
+
+/// Arm the full-stack gone-silent capture fault after the E2E client has
+/// observed a healthy baseline. The engine validates the explicit seed again;
+/// release builds always return false.
+#[tauri::command]
+#[specta::specta]
+pub async fn e2e_arm_capture_loop_silent_fault() -> Result<bool, String> {
+    if !cfg!(feature = "e2e") {
+        return Err("capture-loop silent probe requires the e2e feature".into());
+    }
+    let armed = screenpipe_engine::event_driven_capture::e2e_arm_capture_loop_silent_fault();
+    if !armed {
+        return Err("capture-loop silent probe was not seeded or was already consumed".into());
+    }
+    Ok(true)
+}
+
+/// Arm the debug-only one-shot SCK id-lookup wedge after startup is healthy,
+/// preventing unrelated monitor-list consumers from racing the E2E assertion.
+#[tauri::command]
+#[specta::specta]
+pub async fn e2e_arm_sck_lookup_hang_fault() -> Result<bool, String> {
+    if !cfg!(feature = "e2e") {
+        return Err("SCK lookup probe requires the e2e feature".into());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let armed = screenpipe_screen::monitor::e2e_arm_sck_lookup_hang_fault();
+        if !armed {
+            return Err(
+                "SCK lookup probe was not seeded, was already armed, or was consumed".into(),
+            );
+        }
+        Ok(true)
+    }
+    #[cfg(not(target_os = "macos"))]
+    Err("SCK lookup probe requires macOS".into())
+}
+
+/// Read the real OS lock state for platform E2E setup. The capture recovery
+/// lane must skip rather than bypass an intentional lock-screen privacy pause.
+#[tauri::command]
+#[specta::specta]
+pub async fn e2e_screen_is_locked() -> Result<bool, String> {
+    if !cfg!(feature = "e2e") {
+        return Err("screen-lock probe requires the e2e feature".into());
+    }
+    Ok(screenpipe_engine::sleep_monitor::screen_is_locked())
+}
+
+/// E2E-only accelerated reproduction of an idle capture heartbeat pause that
+/// recovers as the user returns. The real incident accumulated 114 idle stale
+/// checks, then the first input both woke capture and crossed the attended
+/// alert threshold before the next healthy check arrived.
+#[tauri::command]
+#[specta::specta]
+pub async fn e2e_recording_health_return_race(
+    app_handle: tauri::AppHandle,
+) -> Result<serde_json::Value, String> {
+    let seed_enabled = std::env::var("SCREENPIPE_E2E_SEED")
+        .ok()
+        .map(|flags| {
+            flags
+                .split(',')
+                .any(|flag| flag.trim() == "recording-health-return-race")
+        })
+        .unwrap_or(false);
+    if !cfg!(feature = "e2e") || !seed_enabled {
+        return Err("recording-health return-race probe requires the e2e feature and seed".into());
+    }
+
+    let mut tier = crate::stale_tier::StaleTier::default();
+    for _ in 0..114 {
+        tier.observe(true, false);
+    }
+    let idle_confirmed = tier.confirmed();
+
+    tier.observe(true, true);
+    let return_confirmed = tier.confirmed();
+    let alerts_enabled = crate::store::SettingsStore::get(&app_handle)
+        .ok()
+        .flatten()
+        .map(|settings| settings.show_restart_notifications)
+        .unwrap_or(false);
+    crate::overlay_health::on_tick(
+        &app_handle,
+        return_confirmed,
+        false,
+        false,
+        "screen capture is not updating",
+    )
+    .await;
+    let overlay_state = crate::overlay_health::current_state_payload();
+
+    let recovered_after = tier.observe(false, true);
+    crate::overlay_health::dismiss_incident(app_handle).await;
+
+    Ok(serde_json::json!({
+        "idleConfirmed": idle_confirmed,
+        "returnConfirmed": return_confirmed,
+        "alertsEnabled": alerts_enabled,
+        "overlayState": overlay_state,
+        "recoveredAfter": recovered_after,
+    }))
 }
 
 /// Restart the recording engine from the overlay's failure state. Runs the
@@ -2891,14 +3625,17 @@ pub async fn show_notification_inbox(app_handle: tauri::AppHandle) -> Result<(),
                     app_handle.try_state::<std::sync::Arc<crate::analytics::AnalyticsManager>>()
                 {
                     let analytics = std::sync::Arc::clone(&analytics);
-                    let unread = entries.iter().filter(|e| !e.read).count();
+                    let unread = entries
+                        .iter()
+                        .filter(|entry| !entry.read && entry.is_high_priority())
+                        .count();
                     let total = entries.len();
                     tauri::async_runtime::spawn(async move {
                         let _ = analytics
                             .send_event(
                                 "notification_bell_opened",
                                 Some(serde_json::json!({
-                                    "unread_count": unread,
+                                    "high_priority_unread_count": unread,
                                     "total_count": total,
                                     "surface": "native_overlay",
                                 })),

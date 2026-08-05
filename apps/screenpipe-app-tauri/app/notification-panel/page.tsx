@@ -21,7 +21,13 @@ import {
   executeNotificationAction,
   type NotificationAction,
 } from "@/lib/notifications/actions";
-import { notificationAnalyticsProperties } from "@/lib/notification-analytics";
+import {
+  notificationActionAnalyticsProperties,
+  notificationAnalyticsProperties,
+} from "@/lib/notification-analytics";
+import { qualifiedValue } from "@/lib/analytics/qualified-value";
+import { NotificationActionButton } from "@/components/notification-action-button";
+import { NotificationFeedback } from "@/components/notification-feedback";
 
 interface NotificationPayload {
   id: string;
@@ -104,8 +110,6 @@ export default function NotificationPanelPage() {
         intervalRef.current = null;
       }
       posthog.capture("notification_dismissed", {
-        type: payload?.type,
-        id: payload?.id,
         auto: reason === "auto",
         dismiss_reason: reason,
         ...notificationAnalyticsProperties(payload, "toast"),
@@ -129,11 +133,9 @@ export default function NotificationPanelPage() {
       const actionObj = typeof actionOrObj === "object" ? actionOrObj : null;
 
       posthog.capture("notification_action", {
-        type: payload?.type,
-        id: payload?.id,
-        action: actionStr,
-        actionType: actionObj?.type,
-        action_type: actionObj?.type,
+        ...notificationActionAnalyticsProperties(
+          actionObj?.type ?? actionStr,
+        ),
         ...notificationAnalyticsProperties(payload, "toast"),
       });
 
@@ -152,11 +154,12 @@ export default function NotificationPanelPage() {
               setCopied(true);
               copyResetRef.current = setTimeout(() => setCopied(false), 1400);
               posthog.capture("notification_copied", {
-                type: payload?.type,
-                id: payload?.id,
                 source: "action",
                 ...notificationAnalyticsProperties(payload, "toast"),
               });
+              if (payload?.pipe_name) {
+                qualifiedValue.pipeOutputCopied();
+              }
             }
             return;
           }
@@ -242,13 +245,10 @@ export default function NotificationPanelPage() {
           e,
         );
         posthog.capture("notification_action_error", {
-          type: payload?.type,
-          id: payload?.id,
-          action: actionStr,
-          actionType: actionObj?.type,
-          action_type: actionObj?.type,
+          ...notificationActionAnalyticsProperties(
+            actionObj?.type ?? actionStr,
+          ),
           ...notificationAnalyticsProperties(payload, "toast"),
-          error: String(e),
         });
       }
 
@@ -294,10 +294,11 @@ export default function NotificationPanelPage() {
       setCopied(true);
       copyResetRef.current = setTimeout(() => setCopied(false), 1400);
       posthog.capture("notification_copied", {
-        type: payload.type,
-        id: payload.id,
         ...notificationAnalyticsProperties(payload, "toast"),
       });
+      if (payload.pipe_name) {
+        qualifiedValue.pipeOutputCopied();
+      }
     } catch (e) {
       console.error("notification copy failed:", e);
     }
@@ -322,8 +323,6 @@ export default function NotificationPanelPage() {
         setRestartError(null);
 
         posthog.capture("notification_shown", {
-          type: data.type,
-          id: data.id,
           ...notificationAnalyticsProperties(data, "toast"),
         });
 
@@ -668,7 +667,8 @@ export default function NotificationPanelPage() {
               alignItems: "center",
               padding: "0 14px 10px 14px",
               gap: "8px",
-              flexWrap: "wrap",
+              flexWrap: "nowrap",
+              minWidth: 0,
             }}
           >
             {restartState === "restarting" ? (
@@ -718,40 +718,22 @@ export default function NotificationPanelPage() {
                   action.type ||
                   "action";
                 return (
-                  <button
+                  <NotificationActionButton
                     key={action.id || action.action || action.type || index}
                     onClick={() =>
                       handleAction(action.type ? action : action.action || "")
                     }
-                    style={{
-                      background: action.primary
-                        ? "rgba(0, 0, 0, 0.06)"
-                        : "none",
-                      border: "1px solid rgba(0, 0, 0, 0.12)",
-                      color: "rgba(0, 0, 0, 0.75)",
-                      cursor: "pointer",
-                      padding: "4px 10px",
-                      fontSize: "10px",
-                      fontFamily: '"IBM Plex Mono", monospace',
-                      fontWeight: 500,
-                      letterSpacing: "0.03em",
-                    }}
-                    onMouseEnter={(e) =>
-                      (e.currentTarget.style.background = "rgba(0, 0, 0, 0.08)")
-                    }
-                    onMouseLeave={(e) =>
-                      (e.currentTarget.style.background = action.primary
-                        ? "rgba(0, 0, 0, 0.06)"
-                        : "none")
-                    }
-                  >
-                    {actionLabel}
-                  </button>
+                    label={actionLabel}
+                    primary={action.primary}
+                    shareAvailableWidth={payload.actions.length > 1}
+                  />
                 );
               })
             )}
           </div>
         )}
+
+        <NotificationFeedback key={payload.id} notification={payload} />
 
         {/* Popup utility footer */}
         <div
@@ -770,7 +752,7 @@ export default function NotificationPanelPage() {
               display: "inline-flex",
               alignItems: "center",
               gap: "4px",
-              padding: 0,
+              padding: "8px 16px",
               border: "none",
               background: "none",
               flexShrink: 0,
@@ -802,7 +784,7 @@ export default function NotificationPanelPage() {
                 display: "inline-flex",
                 alignItems: "center",
                 gap: "4px",
-                padding: 0,
+                padding: "8px 16px",
                 border: "none",
                 background: "none",
                 flexShrink: 0,
@@ -838,7 +820,7 @@ export default function NotificationPanelPage() {
               alignItems: "center",
               gap: "4px",
               marginLeft: "auto",
-              padding: 0,
+              padding: "8px 16px",
               border: "none",
               background: "none",
               flexShrink: 0,

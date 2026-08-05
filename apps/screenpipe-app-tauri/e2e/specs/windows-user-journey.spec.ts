@@ -59,6 +59,7 @@ async function postNotification(id: string, title: string, body: string): Promis
       title,
       body,
       type: "pipe",
+      priority: "high",
       autoDismissMs: 2_000,
     }),
   });
@@ -74,6 +75,20 @@ async function openPipesView(): Promise<void> {
   const navPipes = await $('[data-testid="nav-pipes"]');
   await navPipes.waitForDisplayed({ timeout: t(20_000) });
   await navPipes.click();
+}
+
+async function showAllNotifications(): Promise<void> {
+  const allNotifications = await $('[data-testid="notification-bell-view-all"]');
+  await allNotifications.waitForDisplayed({ timeout: t(10_000) });
+  await allNotifications.click();
+  await browser.waitUntil(
+    async () => (await allNotifications.getAttribute("aria-selected")) === "true",
+    {
+      timeout: t(10_000),
+      interval: 250,
+      timeoutMsg: "Notification inbox did not switch to the All view",
+    },
+  );
 }
 
 async function clickFirstDisplayed(selector: string, timeoutMs = t(15_000)): Promise<void> {
@@ -103,7 +118,18 @@ async function clickFirstButtonWithText(text: string, timeoutMs = t(15_000)): Pr
       if (!(await button.isDisplayed().catch(() => false))) continue;
 
       const label = (await button.getText().catch(() => "")).trim().toLowerCase();
-      if (label !== expected) continue;
+      const ariaLabel = (
+        (await button.getAttribute("aria-label").catch(() => "")) ?? ""
+      )
+        .trim()
+        .toLowerCase();
+      if (
+        label !== expected &&
+        ariaLabel !== expected &&
+        !ariaLabel.startsWith(`${expected} `)
+      ) {
+        continue;
+      }
 
       await button.scrollIntoView();
       await button.waitForEnabled({ timeout: t(5_000) });
@@ -113,47 +139,45 @@ async function clickFirstButtonWithText(text: string, timeoutMs = t(15_000)): Pr
     await browser.pause(t(250));
   }
 
-  throw new Error(`No displayed button found with text "${text}"`);
+  throw new Error(`No displayed button found with text or accessible label "${text}"`);
 }
 
+// The palette publishes what it is showing as data-search-state on the results
+// container. Wait on that, never on utility classes or empty-state wording:
+// this wait used to sniff both, and a restyle that moved `flex-1` and reworded
+// the empty state timed the whole journey out while search itself was fine.
 async function waitForSearchResultsSurface(): Promise<void> {
-  await browser.waitUntil(
-    async () => {
-      const state = (await browser.execute(
-        (selector: string, query: string) => {
+  const settled = ["empty", "results"];
+  let lastState = "<no results container>";
+
+  try {
+    await browser.waitUntil(
+      async () => {
+        const state = (await browser.execute((selector: string) => {
           const input = document.querySelector<HTMLInputElement>(selector);
-          const hasResultRegion = Array.from(document.querySelectorAll<HTMLElement>("div")).some((node) => {
-            const className = node.getAttribute("class") ?? "";
-            return (
-              className.includes("flex-1") &&
-              className.includes("min-h-0") &&
-              className.includes("overflow-y-auto")
-            );
-          });
-          const bodyText = (document.body.innerText || "").toLowerCase();
+          const results = document.querySelector<HTMLElement>('[data-testid="search-results"]');
 
           return {
             inputValue: input?.value ?? "",
-            hasResultRegion,
-            hasEmptyState: bodyText.includes(`no results for "${query.toLowerCase()}"`),
+            searchState: results?.getAttribute("data-search-state") ?? null,
           };
-        },
-        SEARCH_INPUT_SELECTOR,
-        SEARCH_QUERY,
-      )) as {
-        inputValue: string;
-        hasResultRegion: boolean;
-        hasEmptyState: boolean;
-      };
+        }, SEARCH_INPUT_SELECTOR)) as { inputValue: string; searchState: string | null };
 
-      return state.inputValue === SEARCH_QUERY && (state.hasResultRegion || state.hasEmptyState);
-    },
-    {
-      timeout: t(20_000),
-      interval: 250,
-      timeoutMsg: "Search did not show a results or empty-state surface after typing",
-    },
-  );
+        if (state.searchState) lastState = state.searchState;
+
+        return state.inputValue === SEARCH_QUERY && settled.includes(state.searchState ?? "");
+      },
+      {
+        timeout: t(20_000),
+        interval: 250,
+        timeoutMsg: "Search did not settle",
+      },
+    );
+  } catch {
+    throw new Error(
+      `Search did not reach a results or empty state after typing (last state: ${lastState})`,
+    );
+  }
 }
 
 async function expectTimelineShell(): Promise<void> {
@@ -273,7 +297,12 @@ async function stopMeetingIfVisible(): Promise<void> {
     if (!(await button.isDisplayed().catch(() => false))) continue;
 
     const label = (await button.getText().catch(() => "")).trim().toLowerCase();
-    if (label !== "stop") continue;
+    const ariaLabel = (
+      (await button.getAttribute("aria-label").catch(() => "")) ?? ""
+    )
+      .trim()
+      .toLowerCase();
+    if (label !== "stop" && !ariaLabel.startsWith("stop ")) continue;
 
     await button.scrollIntoView();
     await button.click();
@@ -461,14 +490,23 @@ describe("Windows user journey", function () {
     expect(existsSync(recordingScreenshot)).toBe(true);
   });
 
-  it("starts and stops a manual meeting note from the visible Meetings UI", async function () {
+  it("starts and stops a manual meeting note from the Meetings toolbar button", async function () {
     if (!isWindows) this.skip();
 
     await openHomeWindow();
 
     const meetingsNav = await $('[data-testid="nav-meetings"]');
     await meetingsNav.waitForDisplayed({ timeout: t(15_000) });
+    expect(await meetingsNav.getAttribute("aria-label")).toContain("meetings");
     await meetingsNav.click();
+    await browser.waitUntil(
+      async () => (await meetingsNav.getAttribute("aria-current")) === "page",
+      {
+        timeout: t(10_000),
+        interval: 250,
+        timeoutMsg: "Meetings toolbar button did not become the current page",
+      },
+    );
 
     await waitForBodyText(
       (bodyText) =>
@@ -491,9 +529,47 @@ describe("Windows user journey", function () {
 
       await clickFirstButtonWithText("stop", t(15_000));
 
+      // A successful stop may immediately advance into summary lifecycle
+      // copy or return to the meeting list. The invariant is that the live
+      // stop control disappears and a user-visible post-stop state replaces
+      // it, not that one transient status string remains on screen.
+      await browser.waitUntil(
+        async () => {
+          const buttons = await $$("button");
+          for (const button of buttons) {
+            if (!(await button.isDisplayed().catch(() => false))) continue;
+            const label = (await button.getText().catch(() => ""))
+              .trim()
+              .toLowerCase();
+            const ariaLabel = (
+              (await button.getAttribute("aria-label").catch(() => "")) ?? ""
+            )
+              .trim()
+              .toLowerCase();
+            if (label === "stop" || ariaLabel.startsWith("stop ")) {
+              return false;
+            }
+          }
+          return true;
+        },
+        {
+          timeout: t(20_000),
+          interval: 250,
+          timeoutMsg: "Manual meeting remained visibly active after stop",
+        },
+      );
+
       await waitForBodyText(
-        (bodyText) => bodyText.includes("meeting saved"),
-        "Manual meeting did not transition to the saved state after stop",
+        (bodyText) =>
+          bodyText.includes("meeting saved") ||
+          bodyText.includes("finalizing transcript") ||
+          bodyText.includes("summarizing meeting") ||
+          bodyText.includes("summary ready") ||
+          bodyText.includes("summary needs attention") ||
+          bodyText.includes("new meeting") ||
+          bodyText.includes("no meetings yet") ||
+          bodyText.includes("no past meetings yet"),
+        "Manual meeting did not show a post-stop state",
       );
 
       const savedMeetingScreenshot = await saveScreenshot("windows-user-journey-meeting-saved");
@@ -731,6 +807,11 @@ describe("Windows user journey", function () {
       await bell.waitForDisplayed({ timeout: t(20_000) });
       await bell.click();
 
+      // This fixture is an ordinary pipe update, so the focused inbox keeps it
+      // out of the default Priority view. Exercise the real user path to All
+      // before looking for the seeded history row.
+      await showAllNotifications();
+
       const item = await $(itemSelector);
       await item.waitForDisplayed({ timeout: t(20_000) });
 
@@ -812,6 +893,7 @@ describe("Windows user journey", function () {
       const reopenedBell = await $(bellSelector);
       await reopenedBell.waitForDisplayed({ timeout: t(20_000) });
       await reopenedBell.click();
+      await showAllNotifications();
 
       const reopenedItem = await $(itemSelector);
       await reopenedItem.waitForDisplayed({ timeout: t(20_000) });

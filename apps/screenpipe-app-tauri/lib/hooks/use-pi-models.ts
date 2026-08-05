@@ -4,6 +4,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useSettings } from "@/lib/hooks/use-settings";
+import { fetchAiGateway } from "@/lib/ai-gateway-url";
 
 export interface PiModel {
   id: string;
@@ -19,22 +20,26 @@ export interface PiModel {
 export function usePiModels() {
   const { settings, isSettingsLoaded } = useSettings();
   const [piModels, setPiModels] = useState<PiModel[]>([]);
-  const [isLoading, setIsLoading] = useState(false);
+  const [upgradeEligibility, setUpgradeEligibility] = useState<{
+    requestKey: string;
+    eligible: boolean;
+  } | null>(null);
+  const [loadingKey, setLoadingKey] = useState<string | null>(null);
   const requestGeneration = useRef(0);
   const token = settings?.user?.token || "";
+  const requestKey = isSettingsLoaded ? token : null;
 
   useEffect(() => {
     const generation = ++requestGeneration.current;
     if (!isSettingsLoaded) {
-      setIsLoading(false);
       return;
     }
     const controller = new AbortController();
 
     const fetchPiModels = async () => {
-      setIsLoading(true);
+      setLoadingKey(token);
       try {
-        const resp = await fetch("https://api.screenpipe.com/v1/models", {
+        const resp = await fetchAiGateway("/models", {
           headers: token ? { Authorization: `Bearer ${token}` } : {},
           signal: controller.signal,
         });
@@ -62,10 +67,14 @@ export function usePiModels() {
               all.findIndex((candidate) => candidate.id === model.id) === index,
           );
         setPiModels(models);
+        setUpgradeEligibility({
+          requestKey: token,
+          eligible: data.upgrade_eligible === true,
+        });
       } catch {
         // Preserve the last known-good catalog while the gateway is unavailable.
       } finally {
-        if (generation === requestGeneration.current) setIsLoading(false);
+        if (generation === requestGeneration.current) setLoadingKey(null);
       }
     };
 
@@ -73,5 +82,10 @@ export function usePiModels() {
     return () => controller.abort();
   }, [isSettingsLoaded, token]);
 
-  return { piModels, isLoading };
+  const upgradeEligible = requestKey !== null &&
+    upgradeEligibility?.requestKey === requestKey
+    ? upgradeEligibility.eligible
+    : null;
+  const isLoading = requestKey !== null && loadingKey === requestKey;
+  return { piModels, isLoading, upgradeEligible };
 }

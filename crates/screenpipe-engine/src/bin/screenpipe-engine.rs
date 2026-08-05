@@ -34,6 +34,7 @@ use screenpipe_engine::{
         status::handle_status_command,
         sync::{handle_sync_command, start_sync_service},
         team::handle_team_command,
+        view::handle_view_command,
         vision::handle_vision_command,
         Cli, Command, RecordArgSources,
     },
@@ -138,7 +139,7 @@ fn get_base_dir(custom_path: &Option<String>) -> anyhow::Result<PathBuf> {
     let data_dir = base_dir.join("data");
 
     fs::create_dir_all(&data_dir)?;
-    paths::ensure_spotlight_excluded(&base_dir);
+    paths::ensure_spotlight_excluded(&base_dir)?;
     Ok(base_dir)
 }
 
@@ -295,6 +296,10 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Pipe { ref subcommand } => {
             handle_pipe_command(subcommand).await?;
+            return Ok(());
+        }
+        Command::View { ref subcommand } => {
+            handle_view_command(subcommand)?;
             return Ok(());
         }
         Command::Audio { ref subcommand } => {
@@ -551,6 +556,11 @@ async fn main() -> anyhow::Result<()> {
                             r"Library not loaded.*libx265\.",
                             // Linux system library missing — distro-local, not our bug
                             r"Failed to load ayatana-appindicator3 or appindicator3 dynamic library",
+                            // libwayshot reports an older Wayland compositor's wl_output
+                            // protocol as an error even though it deliberately ignores that
+                            // output and continues (CLI-ZY: 130 duplicate events, one user).
+                            // Keep the local log for diagnosis, but do not send it to Sentry.
+                            r"^Ignoring a wl_output with version < 4\.$",
                             // Deepgram DNS / connectivity blips — already logged locally
                             r"deepgram transcription failed: Cannot resolve audio transcription server",
                         ]
@@ -1333,40 +1343,28 @@ async fn main() -> anyhow::Result<()> {
     // Initialize secret store for unified credential management
     let encryption_requested =
         config.encrypt_secrets || screenpipe_secrets::is_encryption_requested(&local_data_dir);
-
     {
-        // Read-only keychain access: pick up existing key without triggering modals.
-        // Use --encrypt-secrets / explicit on-disk opt-in to create/use a key.
-        let secret_key = if encryption_requested {
-            if config.encrypt_secrets {
-                match screenpipe_secrets::keychain::get_or_create_key() {
-                    Some(k) => {
-                        info!("keychain: encryption key ready (--encrypt-secrets)");
-                        if let Err(e) = screenpipe_secrets::mark_encryption_enabled(&local_data_dir)
-                        {
-                            warn!("keychain: failed to persist encryption opt-in flag: {}", e);
-                        }
-                        Some(k)
+        // Explicit --encrypt-secrets may create a key. Every other reader uses
+        // the same existing OS-vault key as desktop and CLI without creating
+        // one, so optional encryption behavior remains unchanged.
+        let secret_store_result = if config.encrypt_secrets {
+            let secret_key = match screenpipe_secrets::keychain::get_or_create_key() {
+                Some(k) => {
+                    info!("keychain: encryption key ready (--encrypt-secrets)");
+                    if let Err(e) = screenpipe_secrets::mark_encryption_enabled(&local_data_dir) {
+                        warn!("keychain: failed to persist encryption opt-in flag: {}", e);
                     }
-                    None => {
-                        warn!("keychain: failed to create encryption key — secrets will be stored unencrypted");
-                        None
-                    }
+                    Some(k)
                 }
-            } else {
-                match screenpipe_secrets::keychain::get_key() {
-                    screenpipe_secrets::keychain::KeyResult::Found(k) => {
-                        info!("keychain: using existing encryption key");
-                        Some(k)
-                    }
-                    _ => None,
+                None => {
+                    warn!("keychain: failed to create encryption key — secrets will be stored unencrypted");
+                    None
                 }
-            }
+            };
+            screenpipe_secrets::SecretStore::open_for_data_dir(&local_data_dir, secret_key).await
         } else {
-            None
+            screenpipe_secrets::SecretStore::open_for_data_dir_with_vault_key(&local_data_dir).await
         };
-        let secret_store_result =
-            screenpipe_secrets::SecretStore::new(db.pool.clone(), secret_key).await;
         match secret_store_result {
             Ok(store) => {
                 // Run startup permission sweep
@@ -1902,6 +1900,13 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    let redact_database_error_hook: screenpipe_redact::DatabaseErrorHook = {
+        let db = Arc::clone(&db);
+        Arc::new(move |error| {
+            db.report_sqlite_error(error);
+        })
+    };
+
     // Opt-in (`--redact-agent-session-secrets`, default off): strip secrets the
     // pi agent persists into its session logs at rest. A sessions-only instance of
     // the redaction worker (no DB tables, just a session_dir) running a secrets-only
@@ -1922,7 +1927,9 @@ async fn main() -> anyhow::Result<()> {
                 ..Default::default()
             };
             info!("starting pi session secret-scrub worker (--redact-agent-session-secrets)");
-            let _ = Worker::new(db.pool.clone(), placeholder, cfg).spawn();
+            let _ =
+                Worker::new_with_writer(db.pool.clone(), db.coordinated_writer(), placeholder, cfg)
+                    .spawn();
         }
     }
 
@@ -1969,7 +1976,9 @@ async fn main() -> anyhow::Result<()> {
         //   4. Regex-only otherwise (still destructive — overwrites
         //      regex-redacted text into the source columns).
         let pool = db.pool.clone();
+        let writer = db.coordinated_writer();
         let labels = config.pii_redaction_labels.clone();
+        let database_error_hook = redact_database_error_hook.clone();
         // Consistent-pseudonym tokens (issue #4206), opt-in. Loads (or
         // creates on first run) the per-install key under the data dir;
         // on any IO error we log and fall back to static `[LABEL]` tags
@@ -2091,7 +2100,9 @@ async fn main() -> anyhow::Result<()> {
                 columns,
                 ..Default::default()
             };
-            let _worker_handle = Worker::new(pool, pipeline_arc, worker_cfg).spawn();
+            let _worker_handle = Worker::new_with_writer(pool, writer, pipeline_arc, worker_cfg)
+                .with_database_error_hook(database_error_hook)
+                .spawn();
             // The worker runs for the lifetime of the engine. We don't
             // join its handle — when the process exits the runtime
             // tears down the task. If we ever want graceful shutdown
@@ -2188,7 +2199,14 @@ async fn main() -> anyhow::Result<()> {
                 policy: ImageRedactionPolicy::from_labels(&config.pii_redaction_labels),
                 ..Default::default()
             };
-            let _img_handle = ImageWorker::new(db.pool.clone(), detector, cfg).spawn();
+            let _img_handle = ImageWorker::new_with_writer(
+                db.pool.clone(),
+                db.coordinated_writer(),
+                detector,
+                cfg,
+            )
+            .with_database_error_hook(redact_database_error_hook.clone())
+            .spawn();
         }
     }
 
