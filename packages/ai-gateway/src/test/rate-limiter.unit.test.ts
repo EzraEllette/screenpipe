@@ -619,7 +619,7 @@ describe('Clerk identity provenance', () => {
 		globalThis.fetch = fetchMock;
 		const harness = makeHarness();
 
-		expect((await checkRateLimit(new Request('https://proxy.test/v1/usage', {
+		expect((await checkRateLimit(new Request('https://proxy.test/v1/usage?standing=required', {
 			headers: { 'X-Device-Id': 'user_spoofed_header' },
 		}), harness.env)).allowed).toBe(true);
 		expect((await checkRateLimit(chatReq(), harness.env, {
@@ -632,6 +632,7 @@ describe('Clerk identity provenance', () => {
 		})).allowed).toBe(true);
 
 		expect(fetchMock).not.toHaveBeenCalled();
+		expect(harness.requestedNames).not.toContain(CLERK_LOOKUP_COORDINATOR_NAME);
 	});
 
 	it('keys standing by clerkUserId ahead of every caller-controlled identifier', async () => {

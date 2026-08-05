@@ -113,77 +113,84 @@ export async function lookupClerkStanding(
 		() => controller.abort(),
 		options.timeoutMs ?? CLERK_STANDING_LOOKUP_TIMEOUT_MS,
 	);
-	let response: Response;
 	try {
-		response = await (options.fetchImpl ?? fetch)(
-			`https://api.clerk.com/v1/users/${encodeURIComponent(userId)}`,
-			{
-				headers: { Authorization: `Bearer ${env.CLERK_SECRET_KEY}` },
-				signal: controller.signal,
-			},
-		);
-	} catch {
-		throw new ClerkStandingLookupError('Clerk standing lookup failed', {
-			retryable: true,
-		});
-	} finally {
-		clearTimeout(timeout);
-	}
-	// Start cache freshness when the authoritative response completes.
-	const checkedAt = options.now ?? Date.now();
+		let response: Response;
+		try {
+			response = await (options.fetchImpl ?? fetch)(
+				`https://api.clerk.com/v1/users/${encodeURIComponent(userId)}`,
+				{
+					headers: { Authorization: `Bearer ${env.CLERK_SECRET_KEY}` },
+					signal: controller.signal,
+				},
+			);
+		} catch {
+			throw new ClerkStandingLookupError('Clerk standing lookup failed', {
+				retryable: true,
+			});
+		}
+		// Start cache freshness when the authoritative response completes.
+		const checkedAt = options.now ?? Date.now();
 
-	if (response.status === 404) {
+		if (response.status === 404) {
+			return {
+				version: CLERK_STANDING_RECORD_VERSION,
+				userId,
+				standing: 'denied',
+				checkedAt,
+				revalidateAfter: standingRevalidateAfter(userId, checkedAt),
+			};
+		}
+		if (!response.ok) {
+			const retryable = response.status === 408 ||
+				response.status === 429 ||
+				response.status >= 500;
+			throw new ClerkStandingLookupError(
+				`Clerk standing lookup returned ${response.status}`,
+				{
+					retryable,
+					retryAfterMs: response.status === 429
+						? retryAfterMs(response, checkedAt)
+						: undefined,
+				},
+			);
+		}
+
+		let value: unknown;
+		try {
+			value = await response.json();
+		} catch {
+			if (controller.signal.aborted) {
+				throw new ClerkStandingLookupError('Clerk standing lookup failed', {
+					retryable: true,
+				});
+			}
+			throw new ClerkStandingLookupError('Clerk standing lookup returned invalid JSON');
+		}
+		if (!value || typeof value !== 'object') {
+			throw new ClerkStandingLookupError('Clerk standing lookup returned an invalid user');
+		}
+		const user = value as {
+			id?: unknown;
+			banned?: unknown;
+			locked?: unknown;
+		};
+		if (
+			user.id !== userId ||
+			typeof user.banned !== 'boolean' ||
+			typeof user.locked !== 'boolean'
+		) {
+			throw new ClerkStandingLookupError('Clerk standing lookup returned an invalid user');
+		}
+
+		const standing: ClerkStanding = !user.banned && !user.locked ? 'good' : 'denied';
 		return {
 			version: CLERK_STANDING_RECORD_VERSION,
 			userId,
-			standing: 'denied',
+			standing,
 			checkedAt,
 			revalidateAfter: standingRevalidateAfter(userId, checkedAt),
 		};
+	} finally {
+		clearTimeout(timeout);
 	}
-	if (!response.ok) {
-		const retryable = response.status === 408 ||
-			response.status === 429 ||
-			response.status >= 500;
-		throw new ClerkStandingLookupError(
-			`Clerk standing lookup returned ${response.status}`,
-			{
-				retryable,
-				retryAfterMs: response.status === 429
-					? retryAfterMs(response, checkedAt)
-					: undefined,
-			},
-		);
-	}
-
-	let value: unknown;
-	try {
-		value = await response.json();
-	} catch {
-		throw new ClerkStandingLookupError('Clerk standing lookup returned invalid JSON');
-	}
-	if (!value || typeof value !== 'object') {
-		throw new ClerkStandingLookupError('Clerk standing lookup returned an invalid user');
-	}
-	const user = value as {
-		id?: unknown;
-		banned?: unknown;
-		locked?: unknown;
-	};
-	if (
-		user.id !== userId ||
-		typeof user.banned !== 'boolean' ||
-		typeof user.locked !== 'boolean'
-	) {
-		throw new ClerkStandingLookupError('Clerk standing lookup returned an invalid user');
-	}
-
-	const standing: ClerkStanding = !user.banned && !user.locked ? 'good' : 'denied';
-	return {
-		version: CLERK_STANDING_RECORD_VERSION,
-		userId,
-		standing,
-		checkedAt,
-		revalidateAfter: standingRevalidateAfter(userId, checkedAt),
-	};
 }

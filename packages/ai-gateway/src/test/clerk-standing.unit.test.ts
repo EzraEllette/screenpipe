@@ -166,6 +166,31 @@ describe('lookupClerkStanding', () => {
 		expect(fetchImpl).toHaveBeenCalledTimes(1);
 	});
 
+	it('keeps the timeout active while reading the response body', async () => {
+		const fetchImpl = mock(async (_input: RequestInfo | URL, init?: RequestInit) => {
+			const body = new ReadableStream({
+				start(controller) {
+					init?.signal?.addEventListener('abort', () => {
+						controller.error(new Error('aborted'));
+					}, { once: true });
+				},
+			});
+			return new Response(body, {
+				headers: { 'Content-Type': 'application/json' },
+			});
+		}) as typeof fetch;
+
+		const promise = lookupClerkStanding(env(), USER_ID, {
+			fetchImpl,
+			now: CHECKED_AT,
+			timeoutMs: 1,
+		});
+
+		await expect(promise).rejects.toBeInstanceOf(ClerkStandingLookupError);
+		await expect(promise).rejects.toMatchObject({ retryable: true });
+		expect(fetchImpl).toHaveBeenCalledTimes(1);
+	});
+
 	it('rejects an invalid subject or missing Backend API secret before fetching', async () => {
 		const fetchImpl = mock(async () => Response.json(clerkUser())) as typeof fetch;
 

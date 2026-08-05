@@ -330,6 +330,7 @@ export async function checkRateLimit(
   url.searchParams.set('tier', tier);
   url.searchParams.set('rpm', String(resolvedRpm));
   url.searchParams.set('bucket', freeModel ? 'free' : 'std');
+  url.searchParams.delete('standing');
   if (standingRequired) url.searchParams.set('standing', 'required');
 
   let rateLimitResponse: Response;
