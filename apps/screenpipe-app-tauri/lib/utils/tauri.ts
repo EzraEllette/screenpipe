@@ -326,6 +326,14 @@ async copyTextToClipboard(text: string) : Promise<Result<null, string>> {
     else return { status: "error", error: e  as any };
 }
 },
+async clearTimelineCache(expectedDatabaseGenerationId: string | null) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("clear_timeline_cache", { expectedDatabaseGenerationId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async deleteBrainView(id: string) : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("delete_brain_view", { id }) };
@@ -1308,6 +1316,14 @@ async livetextUpdatePosition(frameId: string, x: number, y: number, w: number, h
     else return { status: "error", error: e  as any };
 }
 },
+async loadTimelineCache() : Promise<Result<TimelineCacheLoad, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("load_timeline_cache") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async loadBrainViewCanvas(viewId: string) : Promise<Result<BrainViewCanvasDocument | null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("load_brain_view_canvas", { viewId }) };
@@ -2219,6 +2235,14 @@ async saveBrainViewCanvas(request: SaveBrainViewCanvasRequest) : Promise<Result<
     else return { status: "error", error: e  as any };
 }
 },
+async saveTimelineCache(expectedDatabaseGenerationId: string, cache: TimelineCachePayload) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("save_timeline_cache", { expectedDatabaseGenerationId, cache }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 /**
  * Save the enterprise license key to `~/.screenpipe/enterprise.json`.
  * Used by the in-app prompt when enterprise.json is not deployed via MDM.
@@ -2671,6 +2695,14 @@ async testOpenaiCompatibleTranscription(endpoint: string, apiKey: string | null,
     else return { status: "error", error: e  as any };
 }
 },
+async timelineCacheMetadata() : Promise<Result<CacheFile | null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("timeline_cache_metadata") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 /**
  * Tauri command: start voice training. Spawns a background task that polls
  * until audio is transcribed, then assigns the speaker. Returns immediately.
@@ -2926,6 +2958,8 @@ export type BrainViewValue = { payload: JsonValue; evidence: BrainViewEvidenceRe
 export type BrowserAutomationStatus = { name: string; status: string; running: boolean }
 export type BrowserLogEntry = { level: string; message: string; windowLabel: string | null; route: string | null; sessionId: string | null; jobId: string | null; conversationId: string | null; stack: string | null; timestampMs: number | null }
 export type CacheFile = { path: string; label: string; size_bytes: number }
+export type TimelineCacheLoad = { databaseGenerationId: string; cache: TimelineCachePayload | null }
+export type TimelineCachePayload = { date: string; timestamp: number; frames: JsonValue[] }
 export type CachedSuggestions = { suggestions: Suggestion[]; generatedAt: string; mode: string; aiGenerated: boolean; tags: string[] }
 export type CalendarEventItem = { id: string; title: string;
 /**

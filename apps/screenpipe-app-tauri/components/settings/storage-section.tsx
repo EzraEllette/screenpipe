@@ -20,6 +20,7 @@ import { Button } from "@/components/ui/button";
 import { Folder, Trash2 } from "lucide-react";
 import { useSettings } from "@/lib/hooks/use-settings";
 import { useToast } from "@/components/ui/use-toast";
+import { useTimelineStore } from "@/lib/hooks/use-timeline-store";
 import { open } from "@tauri-apps/plugin-dialog";
 import { commands, CacheFile } from "@/lib/utils/tauri";
 import {
@@ -44,6 +45,8 @@ function formatBytes(bytes: number): string {
 export function StorageSection() {
   const { settings, updateSettings, getDataDir } = useSettings();
   const { toast } = useToast();
+  const invalidateTimelineCache = useTimelineStore((state) => state.invalidateTimelineCache);
+  const prepareForTimelineSourceChange = useTimelineStore((state) => state.prepareForTimelineSourceChange);
   const [cacheFiles, setCacheFiles] = useState<CacheFile[]>([]);
   const [showCacheDialog, setShowCacheDialog] = useState(false);
   const [isClearing, setIsClearing] = useState(false);
@@ -95,6 +98,7 @@ export function StorageSection() {
   const handleApplyRestart = useCallback(async () => {
     setIsRestarting(true);
     try {
+      prepareForTimelineSourceChange();
       await commands.stopScreenpipe();
       await new Promise((resolve) => setTimeout(resolve, 500));
       await commands.spawnScreenpipe(null);
@@ -104,6 +108,7 @@ export function StorageSection() {
         title: "restarted",
         description: "screenpipe restarted with the new data directory",
       });
+      window.location.reload();
     } catch (error) {
       console.error("failed to restart screenpipe:", error);
       toast({
@@ -115,7 +120,7 @@ export function StorageSection() {
     } finally {
       setIsRestarting(false);
     }
-  }, [toast]);
+  }, [toast, prepareForTimelineSourceChange]);
 
   return (
     <div className="space-y-5">
@@ -193,10 +198,6 @@ export function StorageSection() {
                 try {
                   const result = await commands.listCacheFiles();
                   if (result.status === "error") throw new Error(result.error);
-                  if (result.data.length === 0) {
-                    toast({ title: "nothing to clean up" });
-                    return;
-                  }
                   setCacheFiles(result.data);
                   setShowCacheDialog(true);
                 } catch (e: any) {
@@ -238,6 +239,7 @@ export function StorageSection() {
                 setIsClearing(true);
                 setShowCacheDialog(false);
                 try {
+                  await invalidateTimelineCache({ clearFrames: true });
                   const paths = cacheFiles.map((f) => f.path);
                   const result = await commands.deleteCacheFiles(paths);
                   if (result.status === "error") throw new Error(result.error);

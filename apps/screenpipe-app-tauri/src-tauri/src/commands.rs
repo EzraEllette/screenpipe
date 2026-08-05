@@ -4488,9 +4488,25 @@ pub struct CacheFile {
 
 #[tauri::command]
 #[specta::specta]
-pub async fn list_cache_files() -> Result<Vec<CacheFile>, String> {
-    let data_dir = screenpipe_core::paths::default_screenpipe_data_dir();
+pub async fn list_cache_files(
+    state: tauri::State<'_, crate::recording::RecordingState>,
+) -> Result<Vec<CacheFile>, String> {
+    let data_dir = crate::recording::active_timeline_source(&state)
+        .await
+        .map(|(data_dir, _)| data_dir)
+        .unwrap_or_else(screenpipe_core::paths::default_screenpipe_data_dir);
     let mut files = Vec::new();
+
+    let timeline_cache = data_dir.join("cache").join("timeline-v1.json");
+    if let Ok(metadata) = std::fs::symlink_metadata(&timeline_cache) {
+        if metadata.file_type().is_file() {
+            files.push(CacheFile {
+                path: timeline_cache.to_string_lossy().to_string(),
+                label: "Timeline startup cache".to_string(),
+                size_bytes: metadata.len(),
+            });
+        }
+    }
 
     // Pi agent node_modules (~/.screenpipe/pi-agent/)
     let pi_agent = data_dir.join("pi-agent");

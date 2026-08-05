@@ -16,6 +16,7 @@ use crate::store::{LocalPlanPolicy, SettingsStore};
 use screenpipe_engine::RecordingConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -299,6 +300,17 @@ impl RecordingState {
     pub fn capture_intended(&self) -> bool {
         capture_intended_now(&self.wants_recording)
     }
+}
+
+/// Resolve the exact source currently owned by the running server. Clone the
+/// handles while holding the mutex, then release it before database or file I/O.
+pub(crate) async fn active_timeline_source(
+    state: &RecordingState,
+) -> Option<(PathBuf, Arc<screenpipe_db::DatabaseManager>)> {
+    let server = state.server.lock().await;
+    server
+        .as_ref()
+        .map(|server| (server.data_dir.clone(), Arc::clone(&server.db)))
 }
 
 fn capture_intended_now(wants_recording: &AtomicBool) -> bool {

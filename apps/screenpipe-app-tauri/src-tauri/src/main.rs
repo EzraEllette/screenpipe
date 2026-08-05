@@ -99,6 +99,7 @@ mod space_monitor;
 mod store;
 mod suggestions;
 mod sync;
+mod timeline_cache;
 mod tray;
 #[cfg(target_os = "macos")]
 mod tray_monitor_preview;

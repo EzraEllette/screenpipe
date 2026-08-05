@@ -8,7 +8,7 @@ import { Tag, Plus, Trash2, RefreshCw, Loader2, X } from "lucide-react";
 import { useState, useRef, useMemo, useCallback, useEffect } from "react";
 import { createPortal } from "react-dom";
 import { toast } from "@/components/ui/use-toast";
-import { clearTimelineCache } from "@/lib/hooks/use-timeline-cache";
+import { useTimelineStore } from "@/lib/hooks/use-timeline-store";
 import { clearTextCache } from "@/lib/hooks/use-frame-text-data";
 import posthog from "posthog-js";
 import { PipeAIIcon } from "@/components/pipe-ai-icon";
@@ -54,6 +54,7 @@ interface TimelineTagToolbarProps {
 
 export function TimelineTagToolbar({ anchorRect, onAskAI, onRunPipe, templatePipes }: TimelineTagToolbarProps) {
 	const { selectionRange, tagFrames, removeTagFromFrames, setSelectionRange, tags } = useTimelineSelection();
+	const invalidateTimelineCache = useTimelineStore((state) => state.invalidateTimelineCache);
 	const [customTag, setCustomTag] = useState("");
 	const [radialOpen, setRadialOpen] = useState(false);
 	const radialTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -201,14 +202,14 @@ export function TimelineTagToolbar({ anchorRect, onAskAI, onRunPipe, templatePip
 			setSelectionRange(null);
 			setShowDeleteConfirm(false);
 			clearTextCache();
-			await clearTimelineCache();
+			await invalidateTimelineCache({ clearFrames: true });
 			window.location.reload();
 		} catch (e) {
 			toast({ title: "deletion failed", description: String(e), variant: "destructive" });
 		} finally {
 			setIsDeleting(false);
 		}
-	}, [selectionRange, isDeleting, setSelectionRange]);
+	}, [selectionRange, isDeleting, setSelectionRange, invalidateTimelineCache]);
 
 	const handleRetranscribe = useCallback(async () => {
 		if (!selectionRange || isRetranscribing) return;

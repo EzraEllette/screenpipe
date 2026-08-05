@@ -36,7 +36,6 @@ import { PermissionBanner } from "@/components/status/permission-banner";
 import { usePlatform } from "@/lib/hooks/use-platform";
 import SplashScreen from "@/components/splash-screen";
 import { useTimelineStore } from "@/lib/hooks/use-timeline-store";
-import { hasCachedData } from "@/lib/hooks/use-timeline-cache";
 import { screenpipeWebBase } from "@/lib/web-url";
 
 function TimelineErrorFallback({
@@ -113,29 +112,15 @@ export default function OverlayPage() {
   const isProcessingRef = useRef(false);
   
   // Optimistic UI: track if user has any data (cached or live)
-  const { frames, isConnected, loadFromCache } = useTimelineStore();
-  const [hasAnyData, setHasAnyData] = useState(false);
+  const { frames, isConnected, loadFromCache, hasCachedData: hasValidatedCachedData } = useTimelineStore();
+  const hasAnyData = hasValidatedCachedData || frames.length > 0;
   
-  // Check for cached data on mount
+  // Native load validates the cache against the running database before any
+  // frame can influence this optimistic UI state.
   useEffect(() => {
-    const checkCache = async () => {
-      const hasCached = await hasCachedData();
-      setHasAnyData(hasCached);
-      if (hasCached) {
-        // Load cached frames immediately for instant display
-        loadFromCache();
-      }
-    };
-    checkCache();
+    void loadFromCache();
   }, [loadFromCache]);
   
-  // Update hasAnyData when frames change
-  useEffect(() => {
-    if (frames.length > 0) {
-      setHasAnyData(true);
-    }
-  }, [frames.length]);
-
   // Load onboarding status on mount
   useEffect(() => {
     const { loadOnboardingStatus } = useOnboarding.getState();

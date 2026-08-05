@@ -5,7 +5,11 @@
 import { create } from "zustand";
 import { StreamTimeSeriesResponse } from "@/components/rewind/timeline";
 import { findNearestDateWithFrames } from "../actions/has-frames-date";
-import { saveFramesToCache, loadCachedFrames } from "./use-timeline-cache";
+import {
+	clearTimelineCache,
+	loadCachedFrames,
+	saveFramesToCache,
+} from "./use-timeline-cache";
 import {
 	appendAuthToken,
 	ensureApiReady,
@@ -97,6 +101,7 @@ interface TimelineState {
 	// Optimistic UI state
 	isConnected: boolean; // WebSocket connection status
 	hasCachedData: boolean; // Whether we loaded from cache
+	cacheSourceId: string | null; // Generation ID of the authoritative database
 	// When true, next flushFrameBuffer replaces frames instead of merging (date swap)
 	pendingDateSwap: boolean;
 
@@ -120,6 +125,8 @@ interface TimelineState {
 	clearSentRequestForDate: (date: Date) => void;
 	clearFramesForNavigation: () => void; // Clear frames when navigating to new date
 	loadFromCache: () => Promise<void>; // Load cached frames on startup
+	invalidateTimelineCache: (options?: { clearFrames?: boolean }) => Promise<void>;
+	prepareForTimelineSourceChange: () => void;
 }
 
 export const useTimelineStore = create<TimelineState>((set, get) => ({
@@ -136,6 +143,7 @@ export const useTimelineStore = create<TimelineState>((set, get) => ({
 	lastFlushTimestamp: 0,
 	isConnected: false,
 	hasCachedData: false,
+	cacheSourceId: null,
 	pendingDateSwap: false,
 	pendingNavigation: null,
 
@@ -166,16 +174,27 @@ export const useTimelineStore = create<TimelineState>((set, get) => ({
 	// Load cached frames for instant display
 	loadFromCache: async () => {
 		try {
-			const cached = await loadCachedFrames();
+			const context = await loadCachedFrames();
+			if (!context) {
+				set({
+					cacheSourceId: null,
+					frames: [],
+					frameTimestamps: new Set<string>(),
+					hasCachedData: false,
+				});
+				return;
+			}
+			const cached = context.cache;
 			if (cached && cached.frames.length > 0) {
 				const cachedDate = new Date(cached.date);
 				const today = new Date();
 				const isToday = cachedDate.toDateString() === today.toDateString();
 				const timestamps = new Set(cached.frames.map(f => f.timestamp));
-				
+
 				// Only use cached frames if they're from today
 				// Otherwise start fresh with today's date
 				set({
+					cacheSourceId: context.databaseGenerationId,
 					frames: isToday ? cached.frames : [],
 					frameTimestamps: isToday ? timestamps : new Set<string>(),
 					currentDate: today, // Always use today, not cached date
@@ -184,11 +203,60 @@ export const useTimelineStore = create<TimelineState>((set, get) => ({
 					message: null,
 					error: null,
 				});
-				
+			} else {
+				set({
+					cacheSourceId: context.databaseGenerationId,
+					frames: [],
+					frameTimestamps: new Set<string>(),
+					hasCachedData: false,
+					currentDate: new Date(),
+				});
 			}
 		} catch (error) {
 			console.warn("Failed to load from cache:", error);
 		}
+	},
+
+	invalidateTimelineCache: async ({ clearFrames = false } = {}) => {
+		if (cacheSaveTimer) {
+			clearTimeout(cacheSaveTimer);
+			cacheSaveTimer = null;
+		}
+		await clearTimelineCache(get().cacheSourceId);
+		if (clearFrames) {
+			frameBuffer = [];
+			set({
+				frames: [],
+				frameTimestamps: new Set<string>(),
+				hasCachedData: false,
+			});
+		}
+	},
+
+	prepareForTimelineSourceChange: () => {
+		for (const timer of [cacheSaveTimer, flushTimer, progressUpdateTimer, requestTimeoutTimer, reconnectTimeout]) {
+			if (timer) clearTimeout(timer);
+		}
+		cacheSaveTimer = null;
+		flushTimer = null;
+		progressUpdateTimer = null;
+		requestTimeoutTimer = null;
+		reconnectTimeout = null;
+		frameBuffer = [];
+		requestRetryCount = 0;
+		currentWsId++;
+		get().websocket?.close();
+		set({
+			frames: [],
+			frameTimestamps: new Set<string>(),
+			websocket: null,
+			sentRequests: new Set<string>(),
+			cacheSourceId: null,
+			hasCachedData: false,
+			isConnected: false,
+			pendingDateSwap: false,
+			loadingProgress: { loaded: 0, isStreaming: false },
+		});
 	},
 
 	// Prepare for date navigation by removing the previous day's timeline.
@@ -256,9 +324,13 @@ export const useTimelineStore = create<TimelineState>((set, get) => ({
 
 				// Debounce cache save
 				if (cacheSaveTimer) clearTimeout(cacheSaveTimer);
+				const sourceId = state.cacheSourceId;
 				cacheSaveTimer = setTimeout(() => {
 					cacheSaveTimer = null;
-					saveFramesToCache(merged.frames, state.currentDate);
+					if (sourceId) {
+						void saveFramesToCache(merged.frames, state.currentDate, sourceId)
+							.catch((error) => console.warn("Failed to save timeline cache:", error));
+					}
 				}, CACHE_SAVE_DEBOUNCE_MS);
 
 				return {
@@ -297,9 +369,13 @@ export const useTimelineStore = create<TimelineState>((set, get) => ({
 			if (cacheSaveTimer) {
 				clearTimeout(cacheSaveTimer);
 			}
+			const sourceId = state.cacheSourceId;
 			cacheSaveTimer = setTimeout(() => {
 				cacheSaveTimer = null;
-				saveFramesToCache(merged.frames, state.currentDate);
+				if (sourceId) {
+					void saveFramesToCache(merged.frames, state.currentDate, sourceId)
+						.catch((error) => console.warn("Failed to save timeline cache:", error));
+				}
 			}, CACHE_SAVE_DEBOUNCE_MS);
 
 			return {
