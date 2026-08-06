@@ -695,6 +695,16 @@
       "notes": "Seeds an ended meeting through the isolated API and verifies persistent saved-audio retranscription, its replacement warning, and completed-summary rerun without launching hosted AI."
     },
     {
+      "spec": "meeting-overlay-stream.spec.ts",
+      "platforms": ["windows", "macos", "linux"],
+      "layers": ["local-api", "tauri-command"],
+      "features": ["meeting-notes", "meeting-overlay-stream"],
+      "criticality": "high",
+      "confidence": "strong",
+      "ux": "mixed",
+      "notes": "Starts a real isolated meeting, verifies bounded snapshot plus deterministic delta/final transcript frames, and proves the stream clears on the authoritative stop edge."
+    },
+    {
       "spec": "meetings-only-audio-lifecycle.spec.ts",
       "platforms": ["windows", "macos"],
       "layers": ["audio-device", "local-api", "real-ui-e2e"],

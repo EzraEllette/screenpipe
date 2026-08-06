@@ -2760,7 +2760,7 @@ pub(crate) async fn show_shortcut_reminder_impl(
                 if let Some(ref core) = *guard {
                     let mut metrics_ws_url = format!("ws://127.0.0.1:{}/ws/metrics", core.port);
                     let mut events_ws_url =
-                        format!("ws://127.0.0.1:{}/ws/meeting-status", core.port);
+                        format!("ws://127.0.0.1:{}/ws/meeting-overlay", core.port);
                     if let Some(ref key) = core.local_api_key {
                         let enc = urlencoding::encode(key);
                         metrics_ws_url = format!("{}?token={}", metrics_ws_url, enc);
