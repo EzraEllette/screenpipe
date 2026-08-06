@@ -654,8 +654,19 @@ impl DatabaseManager {
                 "CREATE TABLE IF NOT EXISTS speakers (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     name TEXT,
-                    metadata JSON
+                    metadata JSON,
+                    hallucination BOOLEAN DEFAULT FALSE,
+                    centroid FLOAT[512],
+                    embedding_count INTEGER DEFAULT 0
                 )",
+            )
+            .execute(pool)
+            .await?;
+            // This index was added after the original table migration and would
+            // already be recorded as applied on a database missing the table.
+            sqlx::query(
+                "CREATE INDEX IF NOT EXISTS idx_speakers_hallucination_name \
+                 ON speakers(hallucination, name COLLATE NOCASE)",
             )
             .execute(pool)
             .await?;
@@ -682,9 +693,7 @@ impl DatabaseManager {
             )
             .execute(pool)
             .await?;
-
-            // Also create the index from the later migration (20260423000000)
-            // since it would also have been skipped.
+            // This index was also added by a later migration.
             sqlx::query(
                 "CREATE INDEX IF NOT EXISTS idx_speaker_embeddings_speaker_id \
                  ON speaker_embeddings(speaker_id)",
@@ -890,7 +899,79 @@ impl DatabaseManager {
 #[cfg(test)]
 mod shutdown_tests {
     use super::*;
+    use std::collections::BTreeSet;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[tokio::test]
+    async fn startup_rebuilds_missing_speaker_tables_with_current_schema() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let db_path = dir.path().join("missing-speakers.sqlite");
+        let database = DatabaseManager::new(
+            db_path.to_str().expect("utf-8 temp path"),
+            DbConfig::for_tier(screenpipe_config::DeviceTier::Low),
+        )
+        .await
+        .expect("database init");
+
+        sqlx::query("DROP TABLE speaker_embeddings")
+            .execute(&database.write_pool)
+            .await
+            .expect("drop embeddings table");
+        sqlx::query("DROP TABLE speakers")
+            .execute(&database.write_pool)
+            .await
+            .expect("drop speakers table");
+
+        DatabaseManager::run_migrations(&database.write_pool)
+            .await
+            .expect("startup self-heal");
+
+        let columns =
+            sqlx::query_scalar::<_, String>("SELECT name FROM pragma_table_info('speakers')")
+                .fetch_all(&database.pool)
+                .await
+                .expect("inspect rebuilt speakers schema")
+                .into_iter()
+                .collect::<BTreeSet<_>>();
+        assert_eq!(
+            columns,
+            [
+                "centroid",
+                "embedding_count",
+                "hallucination",
+                "id",
+                "metadata",
+                "name"
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+            "self-heal must restore every column added by later migrations"
+        );
+
+        let indexes = sqlx::query_scalar::<_, String>(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND name IN \
+             ('idx_speaker_embeddings_speaker_id', 'idx_speakers_hallucination_name')",
+        )
+        .fetch_all(&database.pool)
+        .await
+        .expect("inspect rebuilt speaker indexes")
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+        assert_eq!(
+            indexes,
+            [
+                "idx_speaker_embeddings_speaker_id",
+                "idx_speakers_hallucination_name",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+            "self-heal must restore indexes from later migrations"
+        );
+
+        database.close().await;
+    }
 
     #[tokio::test]
     async fn file_query_pool_enforces_its_platform_write_barrier() {
