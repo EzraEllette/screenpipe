@@ -64,13 +64,43 @@ impl FrameImagesMode {
     }
 }
 
+/// How much of the local feedback stream may leave the device.
+/// Feedback is a new human-authored data class, so the default is Off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FeedbackSyncMode {
+    #[default]
+    Off,
+    Ratings,
+    Full,
+}
+
+impl FeedbackSyncMode {
+    pub fn parse(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "ratings" => Self::Ratings,
+            "full" => Self::Full,
+            _ => Self::Off,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Ratings => "ratings",
+            Self::Full => "full",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SyncStreams {
     pub frames: bool,
+    pub parsed: bool,
     pub audio: bool,
     pub ui_events: bool,
     pub memories: bool,
     pub snapshots: bool,
+    pub feedback: FeedbackSyncMode,
     pub frame_images: FrameImagesMode,
 }
 
@@ -78,10 +108,12 @@ impl Default for SyncStreams {
     fn default() -> Self {
         Self {
             frames: true,
+            parsed: false,
             audio: true,
             ui_events: true,
             memories: true,
             snapshots: true,
+            feedback: FeedbackSyncMode::Off,
             frame_images: FrameImagesMode::Off,
         }
     }
@@ -226,36 +258,43 @@ pub fn set_enterprise_policy(hidden_sections: Vec<String>) {
 /// Called by the frontend after fetching the `syncStreams` block from
 /// `/api/enterprise/policy`. Flat params rather than a struct so the
 /// specta-generated TS binding stays trivial. `frame_images` is the mode
-/// string ("off" | "cited" | "all"; legacy "true" accepted) — parsed
-/// fail-closed by FrameImagesMode::parse.
+/// string ("off" | "cited" | "all"; legacy "true" accepted) and invalid
+/// values fail closed in FrameImagesMode::parse.
 #[tauri::command]
 #[specta::specta]
 pub fn set_sync_streams(
     frames: bool,
+    parsed: bool,
     audio: bool,
     ui_events: bool,
     memories: bool,
     snapshots: bool,
+    feedback: String,
     frame_images: String,
 ) {
+    let feedback = FeedbackSyncMode::parse(&feedback);
     let frame_images = FrameImagesMode::parse(&frame_images);
     let next = SyncStreams {
         frames,
+        parsed,
         audio,
         ui_events,
         memories,
         snapshots,
+        feedback,
         frame_images,
     };
     if let Ok(mut guard) = SYNC_STREAMS.write() {
         if *guard != next {
             tracing::info!(
-                "enterprise: sync streams updated frames={} audio={} ui={} memories={} snapshots={} frame_images={}",
+                "enterprise: sync streams updated frames={} parsed={} audio={} ui={} memories={} snapshots={} feedback={} frame_images={}",
                 frames,
+                parsed,
                 audio,
                 ui_events,
                 memories,
                 snapshots,
+                feedback.as_str(),
                 frame_images.as_str(),
             );
         }
@@ -351,16 +390,17 @@ mod tests {
     }
 
     #[test]
-    fn sync_streams_default_is_all_true() {
-        // Brand-new process should see all streams enabled — preserves the
-        // behavior of every existing enterprise deployment before this
-        // feature ships.
+    fn sync_streams_default_keeps_parsed_data_off() {
+        // Existing streams preserve deployed behavior; the new structured
+        // data class requires an explicit admin choice.
         let s = SyncStreams::default();
         assert!(s.frames);
+        assert!(!s.parsed);
         assert!(s.audio);
         assert!(s.ui_events);
         assert!(s.memories);
         assert!(s.snapshots);
+        assert_eq!(s.feedback, FeedbackSyncMode::Off);
     }
 
     #[test]
@@ -368,14 +408,34 @@ mod tests {
         // Touches the global static; reset to defaults after to avoid
         // poisoning sibling tests that read current_sync_streams.
         let _guard = sync_streams_test_lock();
-        set_sync_streams(false, true, false, true, false, "off".to_string());
+        set_sync_streams(
+            false,
+            true,
+            true,
+            false,
+            true,
+            false,
+            "ratings".to_string(),
+            "off".to_string(),
+        );
         let s = current_sync_streams();
         assert!(!s.frames);
+        assert!(s.parsed);
         assert!(s.audio);
         assert!(!s.ui_events);
         assert!(s.memories);
         assert!(!s.snapshots);
-        set_sync_streams(true, true, true, true, true, "off".to_string());
+        assert_eq!(s.feedback, FeedbackSyncMode::Ratings);
+        set_sync_streams(
+            true,
+            false,
+            true,
+            true,
+            true,
+            true,
+            "off".to_string(),
+            "off".to_string(),
+        );
     }
 }
 

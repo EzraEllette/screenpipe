@@ -470,7 +470,8 @@ pub async fn paired_capture(
             Some(r) => Arc::new(ctx.image.crop_imm(r.x, r.y, r.width, r.height)),
             None => ctx.image.clone(),
         };
-        // Windows native OCR is async, so call it directly (not inside spawn_blocking)
+        // The Windows wrapper serializes native OCR and runs its blocking
+        // WinRT waits on Tokio's blocking pool.
         #[cfg(target_os = "windows")]
         let raw = {
             match screenpipe_screen::perform_ocr_windows(&ocr_input, &ctx.languages).await {
@@ -1142,6 +1143,9 @@ mod tests {
 
         let snap = TreeSnapshot {
             app_name: "Safari".to_string(),
+            app_id: Some("com.apple.Safari".into()),
+            executable: None,
+            app_version: None,
             window_name: "Example Page".to_string(),
             text_content: "Hello World - Example Page".to_string(),
             nodes: vec![AccessibilityTreeNode {
@@ -1151,6 +1155,7 @@ mod tests {
                 bounds: None,
                 ..Default::default()
             }],
+            semantic_nodes: vec![],
             browser_url: Some("https://example.com".to_string()),
             document_path: None,
             timestamp: now,
@@ -1210,9 +1215,13 @@ mod tests {
         // Empty accessibility text should be treated as no text
         let snap = TreeSnapshot {
             app_name: "TestApp".to_string(),
+            app_id: None,
+            executable: None,
+            app_version: None,
             window_name: String::new(),
             text_content: String::new(),
             nodes: vec![],
+            semantic_nodes: vec![],
             browser_url: None,
             document_path: None,
             timestamp: now,
@@ -1324,9 +1333,13 @@ mod tests {
             .join("\n");
         TreeSnapshot {
             app_name: "Test".to_string(),
+            app_id: None,
+            executable: None,
+            app_version: None,
             window_name: "Test Window".to_string(),
             text_content: text,
             nodes,
+            semantic_nodes: vec![],
             browser_url: None,
             document_path: None,
             timestamp: Utc::now(),
@@ -1779,8 +1792,8 @@ mod tests {
             device_name: "monitor_2",
             app_name: Some("zoom.us"),
             window_name: Some("Zoom Meeting"),
-            browser_url: None,
-            document_path: None,
+            browser_url: Some("https://zoom.us/j/123"),
+            document_path: Some("/tmp/focused-window-document"),
             focused: true,
             capture_trigger: "visual_change",
             use_pii_removal: false,

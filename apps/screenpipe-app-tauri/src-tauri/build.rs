@@ -315,8 +315,106 @@ fn ensure_frontend_dist() {
         .expect("write frontendDist placeholder");
 }
 
+fn generate_and_validate_tauri_commands() {
+    // This Cargo.toml is both the app package and a workspace containing the
+    // Windows WER helper. The helper defaults to scanning workspace members;
+    // once `wer-dump-helper` was added, that excluded the root app package and
+    // silently produced `tauri::generate_handler![]` in release builds.
+    let options = tauri_helper::TauriHelperOptions {
+        members: Some(vec![".".to_string()]),
+    };
+    tauri_helper::generate_command_file(options);
+
+    // Never publish another native binary with an empty or partial command
+    // registry. These sentinels cover startup, authentication, and build-policy
+    // checks that the frontend needs before it can render the normal app.
+    let manifest_dir = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+    let commands_path = manifest_dir
+        .join("target")
+        .join("tauri_commands_list")
+        .join("screenpipe_app.txt");
+    let commands = std::fs::read_to_string(&commands_path).unwrap_or_else(|error| {
+        panic!(
+            "missing generated Tauri command registry at {}: {error}",
+            commands_path.display()
+        )
+    });
+    for required in [
+        "screenpipe_app::config::get_screenpipe_base_dir",
+        "screenpipe_app::commands::get_cloud_token",
+        "screenpipe_app::commands::is_enterprise_build_cmd",
+    ] {
+        assert!(
+            commands.lines().any(|command| command == required),
+            "generated Tauri command registry is missing required command {required}"
+        );
+    }
+    if let Some(command) = commands.lines().find(|command| {
+        command
+            .rsplit("::")
+            .next()
+            .is_some_and(|name| name.starts_with("e2e_") || name.starts_with("get_e2e_"))
+    }) {
+        panic!("generated production Tauri command registry contains E2E-only command {command}");
+    }
+}
+
+const E2E_COMMANDS: &[&str] = &[
+    "main_overlay_visible",
+    "mark_capture_intended",
+    "emit_disk_space_low",
+    "handle_disk_space_low",
+    "capture_session_running",
+    "set_low_disk_guard_enabled",
+    "set_notification_master_enabled",
+    "low_disk_guard_enabled",
+    "set_tray_recording_status",
+    "installed_tray_recording_status",
+    "shortcut_reminder_visible",
+    "emit_agent_stream",
+    "emit_settled_agent_follow_up",
+    "emit_pipe_stream",
+    "arm_capture_loop_silent_fault",
+    "arm_sck_lookup_hang_fault",
+    "screen_is_locked",
+    "set_screen_recording_restart_required",
+    "screen_recording_restart_requested",
+    "recording_health_return_race",
+    "owned_browser_visible",
+    "owned_browser_detach",
+    "inject_db_hard_fault",
+    "db_hard_fault_state",
+    "seed_flags",
+];
+
+fn validate_e2e_command_inventory() {
+    let source_path = std::path::Path::new("src/e2e/commands.rs");
+    println!("cargo:rerun-if-changed={}", source_path.display());
+    let source = std::fs::read_to_string(source_path).unwrap_or_else(|error| {
+        panic!(
+            "failed to read E2E command inventory at {}: {error}",
+            source_path.display()
+        )
+    });
+    let handler = source
+        .split_once("tauri::generate_handler![")
+        .and_then(|(_, rest)| rest.split_once(']'))
+        .map(|(handler, _)| handler)
+        .unwrap_or_else(|| panic!("missing E2E generate_handler inventory"));
+    let runtime_commands = handler
+        .split(',')
+        .map(str::trim)
+        .filter(|command| !command.is_empty())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        runtime_commands, E2E_COMMANDS,
+        "E2E runtime handler and feature-only ACL command inventories diverged"
+    );
+}
+
 fn main() {
-    tauri_helper::generate_command_file(tauri_helper::TauriHelperOptions::default());
+    generate_and_validate_tauri_commands();
 
     ensure_frontend_dist();
 
@@ -446,6 +544,19 @@ fn main() {
         }
     }
 
+    // Windows: build the WER runtime exception helper DLL (fail-fast crash
+    // dump recovery, see src/windows_crash_dump.rs) and stage it under
+    // src-tauri/wer/ so the `wer\*.dll` resource glob in
+    // tauri.windows.conf.json always resolves — tauri-build hard-fails on a
+    // glob that matches nothing, which broke every build without a staged
+    // DLL. Built here rather than in pre_build.js or a workflow step so it
+    // runs in the exact toolchain environment of the app build itself
+    // (cargo-under-bun in pre_build.js resolved Git's GNU link.exe instead
+    // of MSVC's and failed to link, PR #5568).
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        build_wer_dump_helper();
+    }
+
     // Windows: raise the main-thread stack reserve from the 1 MiB PE default to
     // 8 MiB, matching the Linux/macOS main-thread defaults. Debug builds place
     // large unoptimized futures/frames on the main thread's stack (the CLI's
@@ -461,7 +572,67 @@ fn main() {
         }
     }
 
-    tauri_build::build()
+    let mut attributes = tauri_build::Attributes::new();
+    if std::env::var_os("CARGO_FEATURE_E2E").is_some() {
+        validate_e2e_command_inventory();
+        attributes = attributes
+            .plugin(
+                "e2e",
+                tauri_build::InlinedPlugin::new()
+                    .commands(E2E_COMMANDS)
+                    .default_permission(tauri_build::DefaultPermissionRule::AllowAllCommands),
+            )
+            .capabilities_path_pattern("capabilities/*.json");
+    } else {
+        attributes = attributes.capabilities_path_pattern("capabilities/main.json");
+    }
+
+    tauri_build::try_build(attributes)
+        .unwrap_or_else(|error| panic!("failed to build Tauri configuration: {error:#}"));
+}
+
+/// Build the `screenpipe-wer-dump-helper` cdylib with a nested cargo
+/// invocation and stage the DLL into `src-tauri/wer/` for bundling.
+///
+/// A separate `--target-dir` under OUT_DIR avoids deadlocking on the outer
+/// build's target-dir lock; `CARGO` and `TARGET` come from the outer build so
+/// toolchain and architecture (x64/arm64) always match the app.
+fn build_wer_dump_helper() {
+    let manifest_dir = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+    println!("cargo:rerun-if-changed=wer-dump-helper/src/lib.rs");
+    println!("cargo:rerun-if-changed=wer-dump-helper/Cargo.toml");
+
+    let target = std::env::var("TARGET").unwrap();
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    let helper_target_dir =
+        std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("wer-dump-helper-target");
+
+    let status = std::process::Command::new(&cargo)
+        .current_dir(manifest_dir.join("wer-dump-helper"))
+        .args([
+            "build",
+            "--release",
+            "--package",
+            "screenpipe-wer-dump-helper",
+        ])
+        .args(["--target", &target])
+        .arg("--target-dir")
+        .arg(&helper_target_dir)
+        .status();
+    match status {
+        Ok(status) if status.success() => {}
+        other => panic!("failed to build screenpipe-wer-dump-helper: {other:?}"),
+    }
+
+    let dll_name = "screenpipe_wer_dump_helper.dll";
+    let built = helper_target_dir
+        .join(&target)
+        .join("release")
+        .join(dll_name);
+    let stage_dir = manifest_dir.join("wer");
+    std::fs::create_dir_all(&stage_dir).expect("create src-tauri/wer staging dir");
+    std::fs::copy(&built, stage_dir.join(dll_name))
+        .unwrap_or_else(|error| panic!("stage {dll_name} from {}: {error}", built.display()));
 }
 
 /// Compile shortcut_reminder.swift into a static library.

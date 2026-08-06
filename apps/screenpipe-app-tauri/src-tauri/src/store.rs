@@ -330,9 +330,9 @@ fn decrypt_store_file(path: &Path) -> DecryptOutcome {
     if !is_encrypted_bytes(&data) {
         return DecryptOutcome::PlainOrMissing; // already plain JSON (or empty)
     }
-    // File is encrypted, so user must have encryption enabled
-    // Use get_key_if_encryption_enabled to prevent prompts if encryption is somehow disabled
-    let mut key_result = secrets::get_key_if_encryption_enabled();
+    // The encrypted file is authoritative: always ask the OS vault for its
+    // existing key instead of relying on a separate opt-in flag.
+    let mut key_result = secrets::get_key();
     // Transient credential-store hiccups right after boot/update are a known
     // wipe trigger (Windows Credential Manager especially). Retry briefly
     // before declaring the file locked. AccessDenied is a deliberate user
@@ -341,7 +341,7 @@ fn decrypt_store_file(path: &Path) -> DecryptOutcome {
         match key_result {
             secrets::KeyResult::NotFound | secrets::KeyResult::Unavailable => {
                 std::thread::sleep(std::time::Duration::from_millis(250 * attempt as u64));
-                key_result = secrets::get_key_if_encryption_enabled();
+                key_result = secrets::get_key();
             }
             _ => break,
         }
@@ -530,6 +530,24 @@ pub fn reencrypt_store_file(app: &AppHandle) {
 #[specta::specta]
 pub fn reencrypt_store(app: AppHandle) -> Result<(), String> {
     reencrypt_store_file(&app);
+    Ok(())
+}
+
+fn save_store_to_disk<R: tauri::Runtime>(
+    store: &tauri_plugin_store::Store<R>,
+) -> Result<(), String> {
+    store.save().map_err(|e| e.to_string())
+}
+
+/// Flush the process-shared store to durable, encrypted storage before a
+/// restart. Native restart surfaces (for example the tray) cannot drain a
+/// webview-local settings queue, but every frontend and backend store handle
+/// points at this same registered store instance. Saving that instance here
+/// makes any already-applied setting durable before the process exits.
+pub fn persist_store_before_restart(app: &AppHandle) -> Result<(), String> {
+    let store = get_store(app, None).map_err(|e| format!("Failed to get store: {e}"))?;
+    save_store_to_disk(store.as_ref())?;
+    reencrypt_store_file(app);
     Ok(())
 }
 
@@ -938,7 +956,7 @@ pub struct SettingsStore {
     pub device_id: String,
     /// Auto-install updates and restart when a new version is available.
     /// When disabled, users must click "update now" in the tray menu.
-    #[serde(rename = "autoUpdate", default = "default_false")]
+    #[serde(rename = "autoUpdate", default = "default_true")]
     pub auto_update: bool,
     /// Auto-update store-installed pipes that haven't been locally modified.
     #[serde(rename = "autoUpdatePipes", default = "default_true")]
@@ -978,6 +996,11 @@ pub struct SettingsStore {
     /// detector is more reliable.
     #[serde(rename = "showRestartNotifications", default)]
     pub show_restart_notifications: bool,
+
+    /// Stop capture before the data volume is completely full. Search, pipes,
+    /// and the local API remain available. Safety-on unless explicitly disabled.
+    #[serde(rename = "stopRecordingOnLowDisk", default = "default_true")]
+    pub stop_recording_on_low_disk: bool,
 
     /// When true, apply macOS vibrancy effect to the sidebar for a translucent look.
     #[serde(rename = "translucentSidebar", default)]
@@ -1019,10 +1042,6 @@ fn default_true() -> bool {
     true
 }
 
-fn default_false() -> bool {
-    false
-}
-
 fn default_overlay_size() -> String {
     "small".to_string()
 }
@@ -1059,6 +1078,9 @@ pub enum AIProviderType {
     Pi,
     #[serde(rename = "anthropic")]
     Anthropic,
+    /// External Agent Client Protocol adapter, launched via the ACP runtime.
+    #[serde(rename = "acp")]
+    Acp,
 }
 
 #[derive(Serialize, Deserialize, Type, Clone)]
@@ -1079,6 +1101,9 @@ pub struct AIPreset {
     pub max_context_chars: i32,
     #[serde(rename = "maxTokens", default = "default_max_tokens")]
     pub max_tokens: i32,
+    /// The external adapter to launch when `provider` is `acp`.
+    #[serde(rename = "acpAgent", default)]
+    pub acp_agent: Option<crate::pi::AcpAgentConfig>,
 }
 
 fn default_max_tokens() -> i32 {
@@ -1097,6 +1122,7 @@ impl Default for AIPreset {
             api_key: None,
             max_context_chars: 512000,
             max_tokens: 4096,
+            acp_agent: None,
         }
     }
 }
@@ -1201,6 +1227,19 @@ fn entitlement_is_lifetime(entitlement: &serde_json::Value) -> bool {
             .unwrap_or("")
     };
     field("plan") == "lifetime" || field("source") == "lifetime"
+}
+
+fn is_verified_paid_plan_id(plan: &str) -> bool {
+    matches!(
+        plan.trim().to_ascii_lowercase().as_str(),
+        "standard"
+            | "pro"
+            | "pro_max"
+            | "pro_ultra"
+            | "team"
+            | "enterprise"
+            | "lifetime"
+    )
 }
 
 fn entitlement_feature(entitlement: &serde_json::Value, feature: &str) -> bool {
@@ -1352,7 +1391,62 @@ Rules:
             api_key: None,
             max_context_chars: 128000,
             max_tokens: 4096,
+            acp_agent: None,
         };
+
+        // Rust persists store.bin before the frontend mounts. All-null values
+        // identify a genuinely new install that may inherit remote defaults;
+        // legacy stores lack this object and are migrated from their current
+        // effective values. The persisted policy also lets Rust enforce every
+        // emergency force-off after flattened/Enterprise settings are applied.
+        let remote_control = std::collections::HashMap::from([
+            (
+                "remoteControlPreferences".to_string(),
+                json!({
+                    "semanticContext": null,
+                    "coreAudioSystemAudio": null,
+                    "smartRecording": null,
+                    "filterMusic": null,
+                    "prioritizeInputLatency": null,
+                    "aecMode": null,
+                }),
+            ),
+            (
+                "remoteControlPolicy".to_string(),
+                json!({
+                    "schemaVersion": 1,
+                    "boolean": {
+                        "semanticContext": {
+                            "defaultEnabled": false,
+                            "forceDisabled": false,
+                        },
+                        "coreAudioSystemAudio": {
+                            "defaultEnabled": true,
+                            "forceDisabled": false,
+                        },
+                        "smartRecording": {
+                            "defaultEnabled": false,
+                            "forceDisabled": false,
+                        },
+                        "filterMusic": {
+                            "defaultEnabled": true,
+                            "forceDisabled": false,
+                        },
+                        "prioritizeInputLatency": {
+                            "defaultEnabled": false,
+                            "forceDisabled": false,
+                        },
+                    },
+                    "aecMode": {
+                        "defaultValue": "off",
+                        "forceDisabled": false,
+                    },
+                    "autoUpdate": {
+                        "forceEnabled": false,
+                    },
+                }),
+            ),
+        ]);
 
         Self {
             // App-specific defaults override RecordingSettings::default() where needed
@@ -1415,7 +1509,7 @@ Rules:
             show_shortcut_overlay: true,
             shortcut_overlay_size: "small".to_string(),
             device_id: uuid::Uuid::new_v4().to_string(),
-            auto_update: false,
+            auto_update: true,
             auto_update_pipes: true,
             enhanced_ai: false,
             remote_log_collection_enabled: false,
@@ -1427,6 +1521,7 @@ Rules:
             show_overlay_in_screen_recording: false,
             chat_always_on_top: true,
             show_restart_notifications: false,
+            stop_recording_on_low_disk: true,
             #[cfg(target_os = "macos")]
             translucent_sidebar: true,
             #[cfg(not(target_os = "macos"))]
@@ -1435,7 +1530,7 @@ Rules:
             minimize_to_tray_on_close: false,
             headless: false,
             headless_record_only: false,
-            extra: std::collections::HashMap::new(),
+            extra: remote_control,
         }
     }
 }
@@ -1568,6 +1663,48 @@ impl SettingsStore {
             .filter(|s| !s.trim().is_empty())
             .or_else(|| self.user.name.clone().filter(|s| !s.trim().is_empty()))
             .or_else(|| self.user.email.clone().filter(|s| !s.trim().is_empty()));
+        // Remote emergency stops are intentionally applied after the flattened
+        // recording settings (including Enterprise-managed values). Remote
+        // config can only turn these reviewed controls off; it cannot force
+        // capture-sensitive behavior on.
+        if let Some(policy) = self
+            .extra
+            .get("remoteControlPolicy")
+            .filter(|policy| policy.get("schemaVersion").and_then(Value::as_u64) == Some(1))
+        {
+            let boolean_force_disabled = |control: &str| {
+                policy
+                    .pointer(&format!("/boolean/{control}/forceDisabled"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+            };
+
+            if boolean_force_disabled("semanticContext") {
+                settings.enable_semantic_context = false;
+            }
+            if boolean_force_disabled("coreAudioSystemAudio") {
+                settings.experimental_coreaudio_system_audio = false;
+            }
+            if boolean_force_disabled("smartRecording") {
+                settings.experimental_meeting_piggyback = false;
+            }
+            if boolean_force_disabled("filterMusic") {
+                settings.filter_music = false;
+            }
+            if boolean_force_disabled("prioritizeInputLatency") {
+                settings.prioritize_input_latency = false;
+            }
+            if policy
+                .pointer("/aecMode/forceDisabled")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                settings.aec_mode = screenpipe_config::AecMode::Off;
+                settings.screenpipe_aec_enabled = false;
+                settings.macos_input_vpio_enabled = false;
+                settings.windows_input_aec_enabled = false;
+            }
+        }
         settings
     }
 
@@ -1675,11 +1812,7 @@ impl SettingsStore {
         else {
             return false;
         };
-        let account_plan_is_paid = matches!(
-            account_plan.to_ascii_lowercase().as_str(),
-            "standard" | "pro" | "team" | "enterprise" | "lifetime"
-        );
-        if !account_plan_is_paid {
+        if !is_verified_paid_plan_id(account_plan) {
             return false;
         }
         let Some(entitlement) = self.user.entitlement.as_ref() else {
@@ -1696,11 +1829,7 @@ impl SettingsStore {
         else {
             return false;
         };
-        let entitlement_plan_is_paid = matches!(
-            entitlement_plan.to_ascii_lowercase().as_str(),
-            "standard" | "pro" | "team" | "enterprise" | "lifetime"
-        );
-        if !entitlement_plan_is_paid {
+        if !is_verified_paid_plan_id(entitlement_plan) {
             return false;
         }
         if !account_plan.eq_ignore_ascii_case(entitlement_plan) {
@@ -1845,6 +1974,25 @@ impl SettingsStore {
     }
 }
 
+/// Consumer builds no longer support the legacy tray-only UI preference. Reset
+/// both fields together so installs that used it reopen headed and resume their
+/// normal scheduled-pipe behavior on the first launch after upgrading.
+///
+/// Enterprise builds retain the fields because a managed deployment may still
+/// use the dormant-UI lifecycle independently of the consumer settings page.
+fn restore_headed_mode_for_consumer(
+    settings: &mut SettingsStore,
+    is_enterprise_build: bool,
+) -> bool {
+    if is_enterprise_build || (!settings.headless && !settings.headless_record_only) {
+        return false;
+    }
+
+    settings.headless = false;
+    settings.headless_record_only = false;
+    true
+}
+
 pub fn init_store(app: &AppHandle) -> Result<SettingsStore, String> {
     println!("Initializing settings store");
 
@@ -1937,7 +2085,8 @@ pub fn init_store(app: &AppHandle) -> Result<SettingsStore, String> {
     // app-config dir. So additionally require that the data dir holds no existing
     // recordings — retention may only default on when there is nothing to delete.
     if is_new_store && !store.extra.contains_key("localRetentionEnabled") {
-        let (data_dir, _) = crate::config::resolve_data_dir(&store.data_dir);
+        let (data_dir, _) = crate::config::resolve_data_dir(&store.data_dir)
+            .map_err(|error| format!("failed to prepare Screenpipe data directory: {error}"))?;
         let has_existing_recordings = data_dir.join("db.sqlite").exists();
         if has_existing_recordings {
             tracing::info!(
@@ -1952,6 +2101,13 @@ pub fn init_store(app: &AppHandle) -> Result<SettingsStore, String> {
             );
             should_save = true;
         }
+    }
+
+    if restore_headed_mode_for_consumer(&mut store, cfg!(feature = "enterprise-build")) {
+        tracing::info!(
+            "settings migration: restored headed UI and scheduled pipe runs for consumer install"
+        );
+        should_save = true;
     }
 
     if should_save {
@@ -2106,8 +2262,8 @@ mod tests {
     const FALLBACK_ENGINE: &str = "whisper-large-v3-turbo-quantized";
 
     #[test]
-    fn auto_update_defaults_to_disabled() {
-        assert!(!SettingsStore::default().auto_update);
+    fn auto_update_defaults_to_enabled() {
+        assert!(SettingsStore::default().auto_update);
     }
 
     #[test]
@@ -2129,9 +2285,38 @@ mod tests {
     }
 
     #[test]
-    fn missing_auto_update_deserializes_disabled() {
+    fn low_disk_recording_guard_defaults_to_enabled() {
+        assert!(SettingsStore::default().stop_recording_on_low_disk);
+
+        let missing: SettingsStore = serde_json::from_value(json!({
+            "aiPresets": []
+        }))
+        .unwrap();
+        assert!(missing.stop_recording_on_low_disk);
+
+        let opted_out: SettingsStore = serde_json::from_value(json!({
+            "aiPresets": [],
+            "stopRecordingOnLowDisk": false
+        }))
+        .unwrap();
+        assert!(!opted_out.stop_recording_on_low_disk);
+    }
+
+    #[test]
+    fn missing_auto_update_deserializes_enabled() {
         let settings: SettingsStore = serde_json::from_value(json!({
             "aiPresets": []
+        }))
+        .unwrap();
+
+        assert!(settings.auto_update);
+    }
+
+    #[test]
+    fn explicit_auto_update_false_is_respected() {
+        let settings: SettingsStore = serde_json::from_value(json!({
+            "aiPresets": [],
+            "autoUpdate": false
         }))
         .unwrap();
 
@@ -2160,6 +2345,29 @@ mod tests {
         .unwrap();
 
         assert!(settings.headless_record_only);
+    }
+
+    #[test]
+    fn consumer_headless_migration_restores_headed_mode() {
+        let mut consumer = SettingsStore {
+            headless: true,
+            headless_record_only: true,
+            ..Default::default()
+        };
+
+        assert!(restore_headed_mode_for_consumer(&mut consumer, false));
+        assert!(!consumer.headless);
+        assert!(!consumer.headless_record_only);
+        assert!(!restore_headed_mode_for_consumer(&mut consumer, false));
+
+        let mut enterprise = SettingsStore {
+            headless: true,
+            headless_record_only: true,
+            ..Default::default()
+        };
+        assert!(!restore_headed_mode_for_consumer(&mut enterprise, true));
+        assert!(enterprise.headless);
+        assert!(enterprise.headless_record_only);
     }
 
     #[test]
@@ -2403,6 +2611,31 @@ mod tests {
     }
 
     #[test]
+    fn business_capacity_plans_override_enterprise_app_requirement() {
+        for plan in ["pro_max", "pro_ultra"] {
+            let mut store = SettingsStore::default();
+            store.user.id = Some("consumer_capacity_paid".to_string());
+            store.user.app_entitled = Some(true);
+            store.user.cloud_subscribed = Some(true);
+            store.user.subscription_plan = Some(plan.to_string());
+            store.user.enterprise_account = Some(json!({ "requires_enterprise_app": true }));
+            store.user.entitlement = Some(json!({
+                "active": true,
+                "plan": plan,
+                "source": "manual",
+                "checked_at": chrono::Utc::now().to_rfc3339(),
+                "features": { "app": true, "cloud": true, "enterprise": false }
+            }));
+
+            assert_eq!(store.local_plan_policy(), LocalPlanPolicy::VerifiedPaid);
+            assert!(!store.restricts_paid_local_features());
+            assert!(!store.requires_enterprise_app_for_consumer());
+            let config = store.to_recording_config(std::path::PathBuf::from("/tmp/screenpipe"));
+            assert_eq!(config.max_non_template_pipes, None);
+        }
+    }
+
+    #[test]
     fn screenpipe_cloud_falls_back_when_not_logged_in() {
         let mut store = SettingsStore::default();
         store.recording.audio_transcription_engine = "screenpipe-cloud".to_string();
@@ -2594,6 +2827,44 @@ mod tests {
             b"new",
             "shorter new content must fully replace the old file"
         );
+    }
+
+    #[test]
+    fn restart_persistence_flushes_latest_shared_store_value() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_path = tmp.path().join("store.bin");
+        let app = tauri::test::mock_builder()
+            .plugin(tauri_plugin_store::Builder::default().build())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("failed to build mock app");
+        let store = StoreBuilder::new(app.handle(), store_path.clone())
+            .disable_auto_save()
+            .build()
+            .expect("failed to build test store");
+
+        store.set(
+            "settings",
+            json!({"aiPresets": presets_n(1), "autoUpdate": false}),
+        );
+        save_store_to_disk(store.as_ref()).expect("failed to seed test store");
+        store.set(
+            "settings",
+            json!({"aiPresets": presets_n(1), "autoUpdate": true}),
+        );
+
+        let before: Value = serde_json::from_slice(
+            &std::fs::read(&store_path).expect("failed to read pre-restart store"),
+        )
+        .expect("pre-restart store is invalid JSON");
+        assert_eq!(before.pointer("/settings/autoUpdate"), Some(&Value::Bool(false)));
+
+        save_store_to_disk(store.as_ref()).expect("restart persistence failed");
+
+        let after: Value = serde_json::from_slice(
+            &std::fs::read(&store_path).expect("failed to read persisted store"),
+        )
+        .expect("persisted store is invalid JSON");
+        assert_eq!(after.pointer("/settings/autoUpdate"), Some(&Value::Bool(true)));
     }
 
     #[test]
@@ -3045,5 +3316,95 @@ mod tests {
         assert_eq!(settings.user.token, None);
         assert_eq!(settings.embedded_llm.enabled, false);
         assert_eq!(settings.ai_presets.len(), 0);
+    }
+
+    #[test]
+    fn remote_force_offs_win_after_recording_settings() {
+        let mut store = SettingsStore::default();
+        store.recording.enable_semantic_context = true;
+        store.recording.experimental_coreaudio_system_audio = true;
+        store.recording.experimental_meeting_piggyback = true;
+        store.recording.filter_music = true;
+        store.recording.prioritize_input_latency = true;
+        store.recording.aec_mode = screenpipe_config::AecMode::Macos;
+        store.recording.macos_input_vpio_enabled = true;
+        store.extra.insert(
+            "remoteControlPolicy".to_string(),
+            json!({
+                "schemaVersion": 1,
+                "boolean": {
+                    "semanticContext": {"defaultEnabled": true, "forceDisabled": true},
+                    "coreAudioSystemAudio": {"defaultEnabled": true, "forceDisabled": true},
+                    "smartRecording": {"defaultEnabled": true, "forceDisabled": true},
+                    "filterMusic": {"defaultEnabled": true, "forceDisabled": true},
+                    "prioritizeInputLatency": {"defaultEnabled": true, "forceDisabled": true},
+                },
+                "aecMode": {"defaultValue": "macos", "forceDisabled": true},
+            }),
+        );
+
+        let effective = store.to_recording_settings();
+        assert!(!effective.enable_semantic_context);
+        assert!(!effective.experimental_coreaudio_system_audio);
+        assert!(!effective.experimental_meeting_piggyback);
+        assert!(!effective.filter_music);
+        assert!(!effective.prioritize_input_latency);
+        assert_eq!(effective.aec_mode, screenpipe_config::AecMode::Off);
+        assert!(!effective.screenpipe_aec_enabled);
+        assert!(!effective.macos_input_vpio_enabled);
+        assert!(!effective.windows_input_aec_enabled);
+
+        let round_tripped: SettingsStore =
+            serde_json::from_value(serde_json::to_value(store).unwrap()).unwrap();
+        assert_eq!(
+            round_tripped
+                .extra
+                .get("remoteControlPolicy")
+                .and_then(|policy| policy.pointer("/aecMode/forceDisabled"))
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert!(!round_tripped.to_recording_settings().enable_semantic_context);
+    }
+
+    #[test]
+    fn new_store_marks_remote_control_preferences_as_inherited() {
+        let store = SettingsStore::default();
+        assert_eq!(
+            store
+                .extra
+                .get("remoteControlPreferences")
+                .and_then(|preferences| preferences.get("semanticContext")),
+            Some(&Value::Null),
+        );
+        assert_eq!(
+            store
+                .extra
+                .get("remoteControlPreferences")
+                .and_then(|preferences| preferences.get("coreAudioSystemAudio")),
+            Some(&Value::Null),
+        );
+        assert_eq!(
+            store
+                .extra
+                .get("remoteControlPreferences")
+                .and_then(|preferences| preferences.get("filterMusic")),
+            Some(&Value::Null),
+        );
+        assert_eq!(
+            store
+                .extra
+                .get("remoteControlPreferences")
+                .and_then(|preferences| preferences.get("prioritizeInputLatency")),
+            Some(&Value::Null),
+        );
+        assert_eq!(
+            store
+                .extra
+                .get("remoteControlPolicy")
+                .and_then(|policy| policy.pointer("/boolean/coreAudioSystemAudio/defaultEnabled"))
+                .and_then(Value::as_bool),
+            Some(true),
+        );
     }
 }

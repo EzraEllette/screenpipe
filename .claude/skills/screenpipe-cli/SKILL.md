@@ -65,8 +65,21 @@ After creating:
 ```bash
 bun x screenpipe@latest pipe install ~/.screenpipe/pipes/my-pipe
 bun x screenpipe@latest pipe enable my-pipe
-bun x screenpipe@latest pipe run my-pipe   # test immediately
+bun x screenpipe@latest pipe run my-pipe   # terminal-only; in-app chat uses the workflow below
 ```
+
+### Testing from in-app chat
+
+The cloud JWT is intentionally absent from Bash. Do not expose or recover it, and do not use standalone `pipe run`. Test through the authenticated desktop runtime:
+
+```bash
+api="${SCREENPIPE_LOCAL_API_URL:-http://localhost:3030}"
+auth="Authorization: Bearer $SCREENPIPE_LOCAL_API_KEY"
+curl -sS -X POST -H "$auth" "$api/pipes/my-pipe/run"
+curl -sS -H "$auth" "$api/pipes/my-pipe/logs"
+```
+
+`{"success":true}` means the run started, not that it passed. Poll for a new terminal log. Bind only after `success: true`; otherwise report its `stderr` and leave the Live View unchanged.
 
 ### Editing Config
 
@@ -83,7 +96,7 @@ curl -X POST http://localhost:3030/pipes/<name>/config \
 1. Use `pipe list` (not `--json`) — table output is compact
 2. Never dump full pipe JSON — can be 15MB+
 3. Check logs first when debugging: `pipe logs <name>`
-4. Use `pipe run <name>` to test before waiting for schedule
+4. Outside in-app chat, use `pipe run <name>` before waiting for a schedule; in-app chat uses the authenticated runtime above
 
 ---
 
@@ -96,7 +109,7 @@ Manage integrations (Telegram, Slack, Discord, Email, Todoist, Teams) from the C
 ```bash
 bun x screenpipe@latest connection list              # List all connections + status
 bun x screenpipe@latest connection list --json       # JSON output
-bun x screenpipe@latest connection get <id>          # Show saved credentials
+bun x screenpipe@latest connection get <id>          # Show status + non-secret settings
 bun x screenpipe@latest connection get <id> --json   # JSON output
 bun x screenpipe@latest connection set <id> key=val  # Save credentials
 bun x screenpipe@latest connection test <id>         # Test a connection
@@ -121,9 +134,9 @@ bun x screenpipe@latest connection list
 
 Connection IDs: `telegram`, `slack`, `discord`, `email`, `todoist`, `teams`, `google-calendar`, `openclaw`
 
-Credentials are stored locally at `~/.screenpipe/connections.json`.
+Credentials are stored locally and are not printed by `connection get`.
 
-**Per-integration details**: don't guess API shapes from this skill. Run `connection list` or `connection get <id>` — each entry includes a self-describing `description` with credential fields, endpoints, and example bodies. Only fetch the integration you need.
+**Per-integration details**: don't guess API shapes from this skill. Run `connection list` for self-describing local endpoints. `connection get <id>` returns only status and non-secret settings.
 
 ## Publishing pipes to the store
 
