@@ -2492,6 +2492,31 @@ fn dedup_applies(
         && since_last_db_write < Duration::from_secs(30)
 }
 
+/// Accessibility hashes describe the globally focused window. They can only
+/// suppress a frame from the monitor that actually hosts that window.
+fn content_dedup_applies(
+    trigger: &CaptureTrigger,
+    hd_active: bool,
+    in_meeting: bool,
+    since_last_db_write: Duration,
+    monitor_hosts_focus: bool,
+) -> bool {
+    monitor_hosts_focus && dedup_applies(trigger, hd_active, in_meeting, since_last_db_write)
+}
+
+fn uses_focused_window_processing(monitor_hosts_focus: bool) -> bool {
+    monitor_hosts_focus
+}
+
+fn attributed_elements_ref(
+    elements_ref_frame_id: Option<i64>,
+    monitor_hosts_focus: bool,
+) -> Option<i64> {
+    monitor_hosts_focus
+        .then_some(elements_ref_frame_id)
+        .flatten()
+}
+
 /// Checkpoint triggers whose semantics justify skipping debounce and dedup
 /// unconditionally: they're context-defining and, even in pathological cases
 /// (alt-tab spam, scroll flicks), fire far less densely than a raw keystroke
@@ -2688,6 +2713,44 @@ async fn do_capture(
         }
     }
 
+    // The tree walker and every gate below describe the globally focused
+    // window. Running them for another monitor can suppress that monitor's
+    // changed pixels through walk throttling, ignored-window checks, or AX
+    // content dedup. Persist the secondary screenshot directly instead.
+    if !uses_focused_window_processing(monitor_hosts_focus) {
+        let frame_elements_ref =
+            attributed_elements_ref(elements_ref_frame_id, monitor_hosts_focus);
+        let ctx = CaptureContext {
+            db: params.db,
+            snapshot_writer: params.snapshot_writer,
+            image: Arc::new(image),
+            captured_at,
+            monitor_id: params.monitor_id,
+            device_name: params.device_name,
+            app_name: None,
+            window_name: None,
+            browser_url: None,
+            document_path: None,
+            focused: false,
+            capture_trigger: trigger.as_str(),
+            use_pii_removal: params.use_pii_removal,
+            languages: params.languages.to_vec(),
+            elements_ref_frame_id: frame_elements_ref,
+            screenshot_disabled: screenshot_disabled || skip_pixels_for_unknown_exclusions,
+            in_meeting,
+            monitor_hosts_focus,
+            focused_window_bounds: None,
+        };
+        let result = paired_capture(&ctx, None, Some(ocr_gate)).await?;
+        let image = Arc::try_unwrap(ctx.image).unwrap_or_else(|arc| (*arc).clone());
+        return Ok(CaptureOutput {
+            result: Some(result),
+            image,
+            elements_deduped: frame_elements_ref.is_some(),
+            corrupt: None,
+        });
+    }
+
     // Walk accessibility tree on blocking thread (AX APIs are synchronous).
     // Apply adaptive budget overrides: expensive apps (Electron/Discord) get
     // reduced max_nodes and timeout to avoid blocking their UI thread.
@@ -2826,10 +2889,14 @@ async fn do_capture(
                 // Mirror the downstream content-dedup gate: a non-empty walk
                 // whose hash matches the previous frame (and which is dedup
                 // eligible) won't be stored — count it as deduped.
-                let is_dedup =
-                    dedup_applies(trigger, hd_active, in_meeting, last_db_write.elapsed())
-                        && previous_content_hash
-                            .is_some_and(|prev| prev == snap.content_hash as i64 && prev != 0);
+                let is_dedup = content_dedup_applies(
+                    trigger,
+                    hd_active,
+                    in_meeting,
+                    last_db_write.elapsed(),
+                    monitor_hosts_focus,
+                ) && previous_content_hash
+                    .is_some_and(|prev| prev == snap.content_hash as i64 && prev != 0);
                 let outcome = if is_dedup {
                     crate::ui_recorder::TreeWalkOutcome::Deduped {
                         duration_ms,
@@ -2908,7 +2975,13 @@ async fn do_capture(
     // Content dedup: skip capture if accessibility text hasn't changed.
     // Never dedup Idle/Manual triggers, bypass entirely during HD sessions, and
     // force a write every 30s even if the hash matches — see `dedup_applies`.
-    let dedup_eligible = dedup_applies(trigger, hd_active, in_meeting, last_db_write.elapsed());
+    let dedup_eligible = content_dedup_applies(
+        trigger,
+        hd_active,
+        in_meeting,
+        last_db_write.elapsed(),
+        monitor_hosts_focus,
+    );
     if dedup_eligible {
         if let Some(ref snap) = tree_snapshot {
             if !snap.text_content.is_empty() {
@@ -3923,6 +3996,38 @@ mod tests {
         state.mark_captured();
         assert!(!state.can_capture());
         assert!(!state.can_capture_checkpoint());
+    }
+
+    #[test]
+    fn non_focused_monitor_drops_accessibility_element_references() {
+        assert_eq!(attributed_elements_ref(Some(42), false), None);
+        assert_eq!(attributed_elements_ref(Some(42), true), Some(42));
+    }
+
+    #[test]
+    fn non_focused_monitor_bypasses_focused_window_processing() {
+        assert!(!uses_focused_window_processing(false));
+        assert!(uses_focused_window_processing(true));
+    }
+
+    #[test]
+    fn non_focused_monitor_never_deduplicates_from_focused_tree() {
+        let recent = Duration::from_secs(5);
+
+        assert!(!content_dedup_applies(
+            &CaptureTrigger::VisualChange,
+            false,
+            false,
+            recent,
+            false,
+        ));
+        assert!(content_dedup_applies(
+            &CaptureTrigger::VisualChange,
+            false,
+            false,
+            recent,
+            true,
+        ));
     }
 
     #[test]
