@@ -118,6 +118,7 @@ import {
   Settings2,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { shouldShowAudioExclusionControls } from "@/lib/utils/audio-exclusion-visibility";
 import {
   Command,
   CommandInput,
@@ -1802,6 +1803,12 @@ export function RecordingSettings() {
   const [pendingAudioExclusions, setPendingAudioExclusions] = useState<ExcludedApp[] | null>(null);
   const [selectedBundleId, setSelectedBundleId] = useState<string | null>(null);
   const effectiveAudioExclusions = pendingAudioExclusions ?? audioExclusions;
+  const showAudioExclusionControls = shouldShowAudioExclusionControls({
+    isMacOS,
+    isWindows,
+    processTapAvailable,
+    coreaudioProcessTapEnabled: Boolean(settings.experimentalCoreaudioSystemAudio),
+  });
 
   const { toast } = useToast();
 
@@ -1822,9 +1829,9 @@ export function RecordingSettings() {
   }, [toast]);
 
   useEffect(() => {
-    if ((!isMacOS && !isWindows) || !processTapAvailable) return;
+    if (!showAudioExclusionControls) return;
     reloadAudioExclusions();
-  }, [isMacOS, isWindows, processTapAvailable, reloadAudioExclusions]);
+  }, [showAudioExclusionControls, reloadAudioExclusions]);
 
   const addAudioExclusion = useCallback(
     (app: ExcludedApp) => {
@@ -4100,7 +4107,7 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
                   />
                 </div>
 
-                {(isMacOS || isWindows) && processTapAvailable && (
+                {showAudioExclusionControls && (
                   <div className="space-y-2 p-3">
                     <div className="flex items-start gap-2.5">
                       <VolumeX className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
