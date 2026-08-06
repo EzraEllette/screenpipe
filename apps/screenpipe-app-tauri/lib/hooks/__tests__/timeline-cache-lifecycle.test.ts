@@ -38,6 +38,34 @@ const transcriptFrame = {
   devices: [{ audio: [{ transcription: "stale transcript sentinel" }] }],
 } as any;
 
+class MockWebSocket {
+  static readonly CONNECTING = 0;
+  static readonly OPEN = 1;
+  static readonly CLOSED = 3;
+  static instances: MockWebSocket[] = [];
+
+  readonly url: string;
+  readyState = MockWebSocket.CONNECTING;
+  onopen: (() => void) | null = null;
+  onmessage: ((event: { data: string }) => void) | null = null;
+  onerror: (() => void) | null = null;
+  onclose: ((event: CloseEvent) => void) | null = null;
+  send = vi.fn();
+  close = vi.fn(() => {
+    this.readyState = MockWebSocket.CLOSED;
+  });
+
+  constructor(url: string) {
+    this.url = url;
+    MockWebSocket.instances.push(this);
+  }
+
+  open() {
+    this.readyState = MockWebSocket.OPEN;
+    this.onopen?.();
+  }
+}
+
 describe("timeline cache source lifecycle", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -198,5 +226,45 @@ describe("timeline cache source lifecycle", () => {
     expect(second.request_id).toMatch(/^\d+:\d+$/);
     expect(second.request_id).not.toBe(first.request_id);
     useTimelineStore.getState().prepareForTimelineSourceChange();
+  });
+
+  it("rejects a paused pre-deletion response and requests a fresh snapshot", async () => {
+    vi.useFakeTimers();
+    MockWebSocket.instances = [];
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    useTimelineStore.setState({ cacheSourceId: "database-a" } as any);
+
+    useTimelineStore.getState().connectWebSocket();
+    await vi.advanceTimersByTimeAsync(0);
+    const staleSocket = MockWebSocket.instances[0];
+    expect(staleSocket).toBeDefined();
+    staleSocket.open();
+    vi.advanceTimersByTime(100);
+    expect(staleSocket.send).toHaveBeenCalledTimes(1);
+    const releasePausedResponse = staleSocket.onmessage;
+
+    await useTimelineStore.getState().invalidateTimelineCache({
+      clearFrames: true,
+      restartStream: true,
+    });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(staleSocket.close).toHaveBeenCalledTimes(1);
+    const freshSocket = MockWebSocket.instances[1];
+    expect(freshSocket).toBeDefined();
+    releasePausedResponse?.({ data: JSON.stringify([transcriptFrame]) });
+    vi.advanceTimersByTime(2_500);
+
+    expect(useTimelineStore.getState().frames).toEqual([]);
+    expect(saveFramesToCache).not.toHaveBeenCalled();
+
+    freshSocket.open();
+    vi.advanceTimersByTime(100);
+    expect(freshSocket.send).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(freshSocket.send.mock.calls[0][0]).request_id).toMatch(/^\d+:\d+$/);
+
+    useTimelineStore.getState().prepareForTimelineSourceChange();
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
   });
 });

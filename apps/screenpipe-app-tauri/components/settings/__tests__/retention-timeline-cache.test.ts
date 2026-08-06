@@ -16,7 +16,10 @@ describe("retention deletion timeline cache lifecycle", () => {
     const result = await deleteRecentTimelineData(15, request, invalidateTimelineCache);
 
     expect(request).toHaveBeenCalledWith("/data/delete-range", expect.objectContaining({ method: "POST" }));
-    expect(invalidateTimelineCache).toHaveBeenCalledWith({ clearFrames: true });
+    expect(invalidateTimelineCache).toHaveBeenCalledWith({
+      clearFrames: true,
+      restartStream: true,
+    });
     expect(result.audio_transcriptions_deleted).toBe(1);
   });
 

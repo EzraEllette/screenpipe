@@ -202,7 +202,7 @@ export function TimelineTagToolbar({ anchorRect, onAskAI, onRunPipe, templatePip
 			setSelectionRange(null);
 			setShowDeleteConfirm(false);
 			clearTextCache();
-			await invalidateTimelineCache({ clearFrames: true });
+			await invalidateTimelineCache({ clearFrames: true, restartStream: true });
 			window.location.reload();
 		} catch (e) {
 			toast({ title: "deletion failed", description: String(e), variant: "destructive" });

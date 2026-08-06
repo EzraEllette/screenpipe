@@ -58,7 +58,10 @@ type DeleteRangeResponse = {
 export async function deleteRecentTimelineData(
   minutes: number,
   request: typeof localFetch = localFetch,
-  invalidateTimelineCache: (options: { clearFrames: boolean }) => Promise<void> =
+  invalidateTimelineCache: (options: {
+    clearFrames: boolean;
+    restartStream: boolean;
+  }) => Promise<void> =
     useTimelineStore.getState().invalidateTimelineCache,
 ): Promise<DeleteRangeResponse> {
   const end = new Date();
@@ -77,7 +80,7 @@ export async function deleteRecentTimelineData(
     throw new Error(error.error || `request failed (${response.status})`);
   }
   const result = (await response.json()) as DeleteRangeResponse;
-  await invalidateTimelineCache({ clearFrames: true });
+  await invalidateTimelineCache({ clearFrames: true, restartStream: true });
   return result;
 }
 

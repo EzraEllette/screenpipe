@@ -51,6 +51,7 @@ const RECONNECT_MAX_DELAY_MS = 30000;
 // callers landing in that gap (e.g. the watchdog firing while an onclose-
 // scheduled reconnect is mid-await) would each build a socket and orphan one.
 let isConnecting = false;
+let connectAttemptSequence = 0;
 
 // Reset the backoff counters so the next connectWebSocket reconnects promptly
 // instead of inheriting a long delay. Kept as one helper so the two "reconnect
@@ -83,6 +84,7 @@ let currentWsId = 0;
 
 // Cache save debounce
 let cacheSaveTimer: ReturnType<typeof setTimeout> | null = null;
+const cacheSavePromises = new Set<Promise<void>>();
 const CACHE_SAVE_DEBOUNCE_MS = 2000; // Save cache 2s after last frame update
 let cacheLoadRequestId = 0;
 const CACHE_SOURCE_READY_RETRY_MS = 100;
@@ -90,6 +92,17 @@ const CACHE_SOURCE_READY_MAX_ATTEMPTS = 50;
 let streamRequestSequence = 0;
 let frameMessageVersion = 0;
 let activeInitialSnapshot: { requestId: string; frameVersion: number } | null = null;
+
+function trackTimelineCacheSave(
+	frames: StreamTimeSeriesResponse[],
+	date: Date,
+	sourceId: string,
+) {
+	const save = saveFramesToCache(frames, date, sourceId)
+		.catch((error) => console.warn("Failed to save timeline cache:", error))
+		.finally(() => cacheSavePromises.delete(save));
+	cacheSavePromises.add(save);
+}
 
 interface InitialSnapshotCompleteSignal {
 	request_id: string;
@@ -152,7 +165,10 @@ interface TimelineState {
 	clearSentRequestForDate: (date: Date) => void;
 	clearFramesForNavigation: () => void; // Clear frames when navigating to new date
 	loadFromCache: () => Promise<void>; // Load cached frames on startup
-	invalidateTimelineCache: (options?: { clearFrames?: boolean }) => Promise<void>;
+	invalidateTimelineCache: (options?: {
+		clearFrames?: boolean;
+		restartStream?: boolean;
+	}) => Promise<void>;
 	handleAuthoritativeEmptySnapshot: () => Promise<void>;
 	prepareForTimelineSourceChange: () => void;
 }
@@ -267,10 +283,32 @@ export const useTimelineStore = create<TimelineState>((set, get) => ({
 		}
 	},
 
-	invalidateTimelineCache: async ({ clearFrames = false } = {}) => {
+	invalidateTimelineCache: async ({ clearFrames = false, restartStream = false } = {}) => {
+		const sourceId = get().cacheSourceId;
+		if (restartStream) {
+			// Establish the fail-closed barrier before clearing visible or persisted
+			// state. Handlers from the old socket reject all later deliveries.
+			currentWsId++;
+			connectAttemptSequence++;
+			isConnecting = false;
+			cacheLoadRequestId++;
+			activeInitialSnapshot = null;
+			get().websocket?.close();
+		}
 		if (cacheSaveTimer) {
 			clearTimeout(cacheSaveTimer);
 			cacheSaveTimer = null;
+		}
+		if (restartStream) {
+			for (const timer of [flushTimer, progressUpdateTimer, requestTimeoutTimer, reconnectTimeout, errorGraceTimer]) {
+				if (timer) clearTimeout(timer);
+			}
+			flushTimer = null;
+			progressUpdateTimer = null;
+			requestTimeoutTimer = null;
+			reconnectTimeout = null;
+			errorGraceTimer = null;
+			requestRetryCount = 0;
 		}
 		if (clearFrames) {
 			frameBuffer = [];
@@ -278,9 +316,20 @@ export const useTimelineStore = create<TimelineState>((set, get) => ({
 				frames: [],
 				frameTimestamps: new Set<string>(),
 				hasCachedData: false,
+				...(restartStream ? {
+					websocket: null,
+					sentRequests: new Set<string>(),
+					isConnected: false,
+					pendingDateSwap: false,
+					loadingProgress: { loaded: 0, isStreaming: false },
+				} : {}),
 			});
 		}
-		await clearTimelineCache(get().cacheSourceId);
+		// A native save dispatched before the barrier cannot be cancelled. Drain
+		// it before clearing so it cannot recreate deleted transcript data.
+		await Promise.allSettled([...cacheSavePromises]);
+		await clearTimelineCache(sourceId);
+		if (restartStream) get().connectWebSocket();
 	},
 
 	handleAuthoritativeEmptySnapshot: async () => {
@@ -289,6 +338,8 @@ export const useTimelineStore = create<TimelineState>((set, get) => ({
 
 	prepareForTimelineSourceChange: () => {
 		cacheLoadRequestId++;
+		connectAttemptSequence++;
+		isConnecting = false;
 		for (const timer of [cacheSaveTimer, flushTimer, progressUpdateTimer, requestTimeoutTimer, reconnectTimeout]) {
 			if (timer) clearTimeout(timer);
 		}
@@ -298,6 +349,7 @@ export const useTimelineStore = create<TimelineState>((set, get) => ({
 		requestTimeoutTimer = null;
 		reconnectTimeout = null;
 		frameBuffer = [];
+		activeInitialSnapshot = null;
 		requestRetryCount = 0;
 		currentWsId++;
 		get().websocket?.close();
@@ -383,8 +435,7 @@ export const useTimelineStore = create<TimelineState>((set, get) => ({
 				cacheSaveTimer = setTimeout(() => {
 					cacheSaveTimer = null;
 					if (sourceId) {
-						void saveFramesToCache(merged.frames, state.currentDate, sourceId)
-							.catch((error) => console.warn("Failed to save timeline cache:", error));
+						trackTimelineCacheSave(merged.frames, state.currentDate, sourceId);
 					}
 				}, CACHE_SAVE_DEBOUNCE_MS);
 
@@ -428,8 +479,7 @@ export const useTimelineStore = create<TimelineState>((set, get) => ({
 			cacheSaveTimer = setTimeout(() => {
 				cacheSaveTimer = null;
 				if (sourceId) {
-					void saveFramesToCache(merged.frames, state.currentDate, sourceId)
-						.catch((error) => console.warn("Failed to save timeline cache:", error));
+					trackTimelineCacheSave(merged.frames, state.currentDate, sourceId);
 				}
 			}, CACHE_SAVE_DEBOUNCE_MS);
 
@@ -456,13 +506,15 @@ export const useTimelineStore = create<TimelineState>((set, get) => ({
 		// exists — ensureApiReady is the only await; the rest runs synchronously.
 		if (isConnecting) return;
 		isConnecting = true;
+		const connectAttemptId = ++connectAttemptSequence;
 		void (async () => {
 			try {
 				await ensureApiReady();
 			} catch {
-				isConnecting = false;
+				if (connectAttemptId === connectAttemptSequence) isConnecting = false;
 				return;
 			}
+			if (connectAttemptId !== connectAttemptSequence) return;
 
 			// Cancel any pending reconnect timeout to prevent cascade
 			if (reconnectTimeout) {
