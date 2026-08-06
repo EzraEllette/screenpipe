@@ -4,9 +4,14 @@
 
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { useRef, useState } from "react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { emit } from "@tauri-apps/api/event";
 import type { Message } from "@/lib/chat/types";
+import {
+  applyChatSessionActivity,
+  useChatStore,
+  type ChatSessionActivityPayload,
+} from "@/lib/stores/chat-store";
 
 vi.mock("@tauri-apps/api/event", () => ({
   emit: vi.fn(async () => undefined),
@@ -47,6 +52,7 @@ function useForegroundErrorHarness() {
   const [isLoading, setIsLoading] = useState(true);
   const [isStreaming, setIsStreaming] = useState(true);
   const handlerRef = useRef<((payload: unknown) => void) | null>(null);
+  const piLastErrorRef = useRef<string | null>(null);
 
   usePiForegroundEvents({
     activePreset: { provider: "screenpipe-cloud", model: "auto" },
@@ -76,7 +82,7 @@ function useForegroundErrorHarness() {
     piFirstCallRetried: useRef(false),
     piIntentionallyStoppedPidsRef: useRef(new Set<number>()),
     piLastCrashRef: useRef(0),
-    piLastErrorRef: useRef<string | null>(null),
+    piLastErrorRef,
     piMessageIdRef: useRef<string | null>("assistant-1"),
     piRateLimitRetries: useRef(0),
     piRunningConfigRef: useRef(null),
@@ -100,43 +106,118 @@ function useForegroundErrorHarness() {
     turnIntentTextValuesMatch: vi.fn(),
   } as any);
 
-  return { handlerRef, messages, isLoading, isStreaming };
+  return { handlerRef, messages, isLoading, isStreaming, piLastErrorRef };
 }
 
 describe("foreground chat provider errors", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useChatStore.setState({ sessions: {} });
+  });
+
   afterEach(() => {
     vi.restoreAllMocks();
   });
 
-  it("renders sanitized sensitive-content guidance without the provider payload", async () => {
-    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
-    const { result } = renderHook(() => useForegroundErrorHarness());
-
-    await waitFor(() => expect(result.current.handlerRef.current).toBeTypeOf("function"));
-    act(() => {
-      result.current.handlerRef.current?.({
+  const sensitiveProviderFailures = [
+    {
+      name: "response(false)",
+      event: { type: "response", success: false, error: RAW_PROVIDER_ERROR },
+    },
+    {
+      name: "auto_retry_end(false)",
+      event: { type: "auto_retry_end", success: false, finalError: RAW_PROVIDER_ERROR },
+    },
+    {
+      name: "message_update(error)",
+      event: {
         type: "message_update",
         assistantMessageEvent: {
           type: "error",
           reason: "provider request failed",
           error: RAW_PROVIDER_ERROR,
         },
+      },
+    },
+    {
+      name: "assistant message_start(error)",
+      event: {
+        type: "message_start",
+        message: {
+          role: "assistant",
+          stopReason: "error",
+          errorMessage: RAW_PROVIDER_ERROR,
+        },
+      },
+    },
+    {
+      name: "assistant message_end(error)",
+      event: {
+        type: "message_end",
+        message: {
+          role: "assistant",
+          stopReason: "error",
+          errorMessage: RAW_PROVIDER_ERROR,
+        },
+      },
+    },
+  ];
+
+  it.each(sensitiveProviderFailures)(
+    "sanitizes sensitive provider diagnostics from $name",
+    async ({ event }) => {
+      const consoleSpies = (["debug", "error", "info", "log", "warn"] as const).map((method) =>
+        vi.spyOn(console, method).mockImplementation(() => undefined)
+      );
+      const { result } = renderHook(() => useForegroundErrorHarness());
+
+      await waitFor(() => expect(result.current.handlerRef.current).toBeTypeOf("function"));
+      act(() => {
+        result.current.handlerRef.current?.(event);
+      });
+
+      await waitFor(() => {
+        const assistant = result.current.messages.find((message) => message.id === "assistant-1");
+        expect(assistant?.content).toBe(SAFE_MESSAGE);
+        expect(assistant?.retryPrompt).toBe("help");
+      });
+
+      const activityPayloads = vi.mocked(emit).mock.calls
+        .filter(([eventName]) => eventName === "chat-session-activity")
+        .map(([, payload]) => payload as ChatSessionActivityPayload);
+      for (const payload of activityPayloads) {
+        applyChatSessionActivity(useChatStore.getState(), payload);
+      }
+
+      const diagnosticSurfaces = JSON.stringify({
+        console: consoleSpies.flatMap((spy) => spy.mock.calls),
+        emits: vi.mocked(emit).mock.calls,
+        piLastError: result.current.piLastErrorRef.current,
+        renderedMessages: result.current.messages,
+        persistedLastError:
+          useChatStore.getState().sessions["sensitive-refusal-chat"]?.lastError,
+      });
+      expect(diagnosticSurfaces).not.toContain("req_private_123");
+      expect(diagnosticSurfaces).not.toContain("sensitive_words_detected");
+    }
+  );
+
+  it("keeps the generic unrelated 5xx response presentation", async () => {
+    const { result } = renderHook(() => useForegroundErrorHarness());
+
+    await waitFor(() => expect(result.current.handlerRef.current).toBeTypeOf("function"));
+    act(() => {
+      result.current.handlerRef.current?.({
+        type: "response",
+        success: false,
+        error: "500 Internal server error",
       });
     });
 
     await waitFor(() => {
       const assistant = result.current.messages.find((message) => message.id === "assistant-1");
-      expect(assistant?.content).toBe(SAFE_MESSAGE);
-      expect(assistant?.content).not.toContain("req_private_123");
-      expect(assistant?.content).not.toContain("sensitive_words_detected");
+      expect(assistant?.content).toBe("Something went wrong on the server.");
       expect(assistant?.retryPrompt).toBe("help");
     });
-
-    const diagnosticSurfaces = JSON.stringify([
-      ...consoleError.mock.calls,
-      ...vi.mocked(emit).mock.calls,
-    ]);
-    expect(diagnosticSurfaces).not.toContain("req_private_123");
-    expect(diagnosticSurfaces).not.toContain("sensitive_words_detected");
   });
 });

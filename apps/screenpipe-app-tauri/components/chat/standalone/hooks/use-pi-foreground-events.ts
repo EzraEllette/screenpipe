@@ -944,11 +944,13 @@ export function usePiForegroundEvents({
           }
         } else if (data.type === "response" && data.success === false) {
           const errorStr = stringValue(data.error, "Unknown error");
-          emitSessionActivity({ status: "error", lastError: errorStr });
+          const providerError = buildProviderErrorPresentation(errorStr, getActivePreset());
+          const diagnosticError = providerError?.message ?? errorStr;
+          emitSessionActivity({ status: "error", lastError: diagnosticError });
           // Pi agent first-call bug (pi-mono#2461) — first RPC prompt crashes.
           // Auto-retry the same prompt once. The second call works.
           if (errorStr.includes("startsWith") || errorStr.includes("text.startsWith")) {
-            console.warn("[Pi] first-call bug hit, auto-retrying prompt:", errorStr);
+            console.warn("[Pi] first-call bug hit, auto-retrying prompt:", diagnosticError);
             if (piMessageIdRef.current && !piFirstCallRetried.current) {
               piFirstCallRetried.current = true;
               // Re-send the last prompt
@@ -975,7 +977,7 @@ export function usePiForegroundEvents({
             const waitSecs = parseRateLimitWaitSeconds(errorStr);
             const retrySession = piSessionIdRef.current;
             const retryPrompt = lastUserMessageRef.current;
-            console.warn(`[Pi] rate limited, auto-retry ${attempt}/${PI_MAX_RATE_LIMIT_RETRIES} in ${waitSecs}s:`, errorStr);
+            console.warn(`[Pi] rate limited, auto-retry ${attempt}/${PI_MAX_RATE_LIMIT_RETRIES} in ${waitSecs}s:`, diagnosticError);
             // Reset the in-flight buffers so the retried turn renders cleanly into
             // the same bubble instead of appending onto any pre-429 partial output.
             piStreamingTextRef.current = "";
@@ -1023,7 +1025,6 @@ export function usePiForegroundEvents({
                 prev.map((m) => m.id === msgId ? { ...m, content: "This model requires an upgrade to Screenpipe Business. Switch to Auto to keep going." } : m)
               );
             } else {
-              const providerError = buildProviderErrorPresentation(errorStr, getActivePreset());
               if (providerError) {
                 setMessages((prev) =>
                   prev.map((m) => m.id === msgId
@@ -1037,7 +1038,7 @@ export function usePiForegroundEvents({
                     : m)
                 );
               } else if (errorStr.includes("already processing")) {
-                console.warn("[Pi] already-processing race in response event:", errorStr);
+                console.warn("[Pi] already-processing race in response event:", diagnosticError);
                 setMessages((prev) =>
                   prev.map((m) => m.id === msgId ? {
                     ...m,
@@ -1056,7 +1057,7 @@ export function usePiForegroundEvents({
                 );
               } else {
                 setMessages((prev) =>
-                  prev.map((m) => m.id === msgId ? { ...m, content: `Error: ${errorStr}` } : m)
+                  prev.map((m) => m.id === msgId ? { ...m, content: `Error: ${diagnosticError}` } : m)
                 );
               }
             }
