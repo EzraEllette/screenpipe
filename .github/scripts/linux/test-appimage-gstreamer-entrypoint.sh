@@ -109,6 +109,8 @@ Type=Application
 Name=screenpipe
 Exec=screenpipe-app --from-desktop %U
 DESKTOP
+cp "${package_appdir}/usr/share/applications/screenpipe.desktop" \
+  "${package_appdir}/screenpipe.desktop"
 cat >"${package_appdir}/AppRun" <<'GENERATED_APPRUN'
 #!/bin/sh
 set -eu
@@ -117,28 +119,31 @@ export GST_PLUGIN_SYSTEM_PATH_1_0="${APPDIR}/usr/lib/gstreamer-1.0:"
 exec "${APPDIR}/AppRun.wrapped" "$@"
 GENERATED_APPRUN
 chmod 0755 "${package_appdir}/AppRun"
-ln -s 'usr/bin/screenpipe-app' "${package_appdir}/AppRun.wrapped"
+cat >"${package_appdir}/AppRun.wrapped" <<'LINUXDEPLOY_APPRUN'
+#!/bin/sh
+set -eu
+command="$(sed -n 's/^Exec=\([^[:space:]]*\).*/\1/p' "${APPDIR}/screenpipe.desktop")"
+cd "${APPDIR}"
+exec "${APPDIR}/usr/bin/${command}" "$@"
+LINUXDEPLOY_APPRUN
+chmod 0755 "${package_appdir}/AppRun.wrapped"
+cp "${package_appdir}/AppRun.wrapped" "${tmpdir}/AppRun.wrapped.before"
 
 bash "${bundle_script}" "${package_appdir}" --prepare-appimage-launchers-only
 
 test -x "${package_appdir}/usr/bin/screenpipe-app-appimage-entrypoint"
-if [ "$(readlink "${package_appdir}/AppRun.wrapped")" != 'usr/bin/screenpipe-app-appimage-entrypoint' ]; then
-  echo "expected AppRun.wrapped to dispatch through the GStreamer entrypoint" >&2
-  exit 1
-fi
 assert_line 'Exec=screenpipe-app-appimage-entrypoint --from-desktop %U' \
   "${package_appdir}/usr/share/applications/screenpipe.desktop"
+assert_line 'Exec=screenpipe-app-appimage-entrypoint --from-desktop %U' \
+  "${package_appdir}/screenpipe.desktop"
+cmp "${tmpdir}/AppRun.wrapped.before" "${package_appdir}/AppRun.wrapped"
 
 cp "${package_appdir}/usr/share/applications/screenpipe.desktop" "${tmpdir}/desktop.after-first"
 cp "${package_appdir}/usr/bin/screenpipe-app-appimage-entrypoint" "${tmpdir}/entrypoint.after-first"
-wrapped_target_after_first="$(readlink "${package_appdir}/AppRun.wrapped")"
 bash "${bundle_script}" "${package_appdir}" --prepare-appimage-launchers-only
 cmp "${tmpdir}/desktop.after-first" "${package_appdir}/usr/share/applications/screenpipe.desktop"
 cmp "${tmpdir}/entrypoint.after-first" "${package_appdir}/usr/bin/screenpipe-app-appimage-entrypoint"
-if [ "$(readlink "${package_appdir}/AppRun.wrapped")" != "${wrapped_target_after_first}" ]; then
-  echo "AppRun.wrapped redirect changed on a repeated launcher preparation" >&2
-  exit 1
-fi
+cmp "${tmpdir}/AppRun.wrapped.before" "${package_appdir}/AppRun.wrapped"
 
 cat >"${package_appdir}/usr/share/applications/screenpipe-beta.desktop" <<'DESKTOP'
 [Desktop Entry]
@@ -160,6 +165,18 @@ env \
   "${package_appdir}/AppRun"
 assert_line 'GST_PLUGIN_SYSTEM_PATH=<unset>' "${default_wrapped_output}"
 assert_line 'GST_PLUGIN_SYSTEM_PATH_1_0=<unset>' "${default_wrapped_output}"
+
+relative_output="${tmpdir}/relative.out"
+(
+  cd "${tmpdir}"
+  env \
+    -u GST_PLUGIN_SYSTEM_PATH -u GST_PLUGIN_SYSTEM_PATH_1_0 \
+    APPDIR=PackageAppDir \
+    PROBE_OUTPUT="${relative_output}" \
+    ./PackageAppDir/AppRun
+)
+assert_line 'GST_PLUGIN_SYSTEM_PATH=<unset>' "${relative_output}"
+assert_line 'GST_PLUGIN_SYSTEM_PATH_1_0=<unset>' "${relative_output}"
 
 wrapped_output="${tmpdir}/wrapped.out"
 env \

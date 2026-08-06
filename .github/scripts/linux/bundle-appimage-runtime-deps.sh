@@ -161,6 +161,8 @@ appdir="${APPDIR:-}"
 if [ -z "${appdir}" ]; then
   appdir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 fi
+appdir="$(CDPATH= cd -- "${appdir}" && pwd)"
+export APPDIR="${appdir}"
 
 bundled_spa_dir="${appdir}/usr/lib/spa-0.2"
 if [ -n "${SPA_PLUGIN_DIR:-}" ]; then
@@ -196,15 +198,12 @@ install_system_gstreamer_entrypoint() {
   local source_entrypoint="${SCRIPT_DIR}/screenpipe-appimage-entrypoint.sh"
   local target_entrypoint="${APPDIR}/usr/bin/screenpipe-app-appimage-entrypoint"
   local native_app="${APPDIR}/usr/bin/screenpipe-app"
-  local wrapped_launcher="${APPDIR}/AppRun.wrapped"
-  local native_wrapped_target='usr/bin/screenpipe-app'
-  local entrypoint_wrapped_target='usr/bin/screenpipe-app-appimage-entrypoint'
-  local wrapped_target
-  local temp_link_dir
   local desktop_dir="${APPDIR}/usr/share/applications"
   local desktop
+  local root_desktop
   local temp_desktop
   local -a matching_desktops=()
+  local -a launcher_desktops=()
 
   if [ ! -x "${native_app}" ]; then
     echo "::error::native AppImage binary is missing or not executable: ${native_app}" >&2
@@ -226,6 +225,11 @@ install_system_gstreamer_entrypoint() {
     return 1
   fi
   desktop="${matching_desktops[0]}"
+  launcher_desktops+=("${desktop}")
+  root_desktop="${APPDIR}/$(basename "${desktop}")"
+  if [ -f "${root_desktop}" ]; then
+    launcher_desktops+=("${root_desktop}")
+  fi
 
   if [ -e "${target_entrypoint}" ]; then
     if ! grep -q 'screenpipe system GStreamer AppImage entrypoint' "${target_entrypoint}" 2>/dev/null; then
@@ -239,69 +243,39 @@ install_system_gstreamer_entrypoint() {
     install -m 0755 "${source_entrypoint}" "${target_entrypoint}"
   fi
 
-  if [ ! -L "${wrapped_launcher}" ]; then
-    echo "::error::expected linuxdeploy AppRun target symlink: ${wrapped_launcher}" >&2
-    return 1
-  fi
-  wrapped_target="$(readlink "${wrapped_launcher}")"
-  case "${wrapped_target}" in
-    "${entrypoint_wrapped_target}")
-      ;;
-    "${native_wrapped_target}")
-      if ! temp_link_dir="$(mktemp -d "${APPDIR}/.screenpipe-AppRun-wrapped.XXXXXX")"; then
-        echo "::error::could not create a secure AppRun target temporary directory" >&2
+  for desktop in "${launcher_desktops[@]}"; do
+    if grep -Eq '^Exec=screenpipe-app([[:space:]]|$)' "${desktop}"; then
+      if ! temp_desktop="$(mktemp "${desktop}.screenpipe-tmp.XXXXXX")"; then
+        echo "::error::could not create a secure desktop-entry temporary file" >&2
         return 1
       fi
-      if ! ln -s "${entrypoint_wrapped_target}" "${temp_link_dir}/AppRun.wrapped"; then
-        rmdir -- "${temp_link_dir}" 2>/dev/null || true
-        echo "::error::could not create redirected AppRun target" >&2
+      if ! awk '
+        /^Exec=screenpipe-app([[:space:]]|$)/ {
+          sub(/^Exec=screenpipe-app/, "Exec=screenpipe-app-appimage-entrypoint")
+        }
+        { print }
+      ' "${desktop}" >"${temp_desktop}"; then
+        rm -f -- "${temp_desktop}"
+        echo "::error::could not rewrite AppImage desktop entry: ${desktop}" >&2
         return 1
       fi
-      if ! mv -T -- "${temp_link_dir}/AppRun.wrapped" "${wrapped_launcher}"; then
-        rm -f -- "${temp_link_dir}/AppRun.wrapped"
-        rmdir -- "${temp_link_dir}" 2>/dev/null || true
-        echo "::error::could not install redirected AppRun target" >&2
+      if ! chmod --reference="${desktop}" "${temp_desktop}"; then
+        rm -f -- "${temp_desktop}"
+        echo "::error::could not preserve AppImage desktop-entry mode" >&2
         return 1
       fi
-      rmdir -- "${temp_link_dir}"
-      ;;
-    *)
-      echo "::error::refusing to redirect unexpected ${wrapped_launcher} target: ${wrapped_target}" >&2
-      return 1
-      ;;
-  esac
+      if ! mv -- "${temp_desktop}" "${desktop}"; then
+        rm -f -- "${temp_desktop}"
+        echo "::error::could not install rewritten AppImage desktop entry" >&2
+        return 1
+      fi
+    fi
 
-  if grep -Eq '^Exec=screenpipe-app([[:space:]]|$)' "${desktop}"; then
-    if ! temp_desktop="$(mktemp "${desktop}.screenpipe-tmp.XXXXXX")"; then
-      echo "::error::could not create a secure desktop-entry temporary file" >&2
+    if ! grep -Eq '^Exec=screenpipe-app-appimage-entrypoint([[:space:]]|$)' "${desktop}"; then
+      echo "::error::AppImage desktop entry was not redirected: ${desktop}" >&2
       return 1
     fi
-    if ! awk '
-      /^Exec=screenpipe-app([[:space:]]|$)/ {
-        sub(/^Exec=screenpipe-app/, "Exec=screenpipe-app-appimage-entrypoint")
-      }
-      { print }
-    ' "${desktop}" >"${temp_desktop}"; then
-      rm -f -- "${temp_desktop}"
-      echo "::error::could not rewrite AppImage desktop entry: ${desktop}" >&2
-      return 1
-    fi
-    if ! chmod --reference="${desktop}" "${temp_desktop}"; then
-      rm -f -- "${temp_desktop}"
-      echo "::error::could not preserve AppImage desktop-entry mode" >&2
-      return 1
-    fi
-    if ! mv -- "${temp_desktop}" "${desktop}"; then
-      rm -f -- "${temp_desktop}"
-      echo "::error::could not install rewritten AppImage desktop entry" >&2
-      return 1
-    fi
-  fi
-
-  if ! grep -Eq '^Exec=screenpipe-app-appimage-entrypoint([[:space:]]|$)' "${desktop}"; then
-    echo "::error::AppImage desktop entry was not redirected: ${desktop}" >&2
-    return 1
-  fi
+  done
 }
 
 if [ "${2:-}" = "--prepare-appimage-launchers-only" ]; then
