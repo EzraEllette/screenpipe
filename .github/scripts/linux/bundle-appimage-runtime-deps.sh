@@ -263,7 +263,7 @@ export SPA_PLUGIN_DIR="${appdir}/usr/lib/spa-0.2"
 export PIPEWIRE_MODULE_DIR="${appdir}/usr/lib/pipewire-0.3"
 export PIPEWIRE_CONFIG_NAME="${appdir}/usr/share/pipewire/client.conf"
 unset PIPEWIRE_CONFIG_DIR
-export LD_LIBRARY_PATH="${appdir}/usr/lib/pipewire-0.3:${LD_LIBRARY_PATH:-${appdir}/usr/lib}"
+export LD_LIBRARY_PATH="${appdir}/usr/lib/pipewire-0.3:${appdir}/usr/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 
 exec "${appdir}/AppRun.screenpipe-original" "$@"
 APPRUN
