@@ -410,6 +410,7 @@
       "label": "Database frames, timeline, and storage joins",
       "crate": "screenpipe-db",
       "files": [
+        "src/db/database_identity.rs",
         "src/db/feedback.rs",
         "src/db/maintenance.rs",
         "src/db/setup.rs",
