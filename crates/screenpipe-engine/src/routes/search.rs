@@ -11,6 +11,7 @@ use axum::{
 use oasgen::{oasgen, OaSchema};
 use screenpipe_core::pipes::permissions::PipePermissions;
 
+use super::request_origin::ExplicitApiClient;
 use super::response_format::{
     is_passthrough, parse_fields, parse_format, render_list, rows_from, OutputFormat,
 };
@@ -45,8 +46,11 @@ impl<S: Send + Sync> FromRequestParts<S> for OptionalPipePerms {
 
 impl oasgen::OaParameter for OptionalPipePerms {}
 
-use chrono::{DateTime, Utc};
-use screenpipe_db::{ContentType, DatabaseManager, Order, SearchResult};
+use chrono::{DateTime, Datelike, Local, Timelike, Utc};
+use screenpipe_db::{
+    ContentType, DatabaseManager, Order, SearchResult, SemanticContextQuery, SemanticFrameContext,
+};
+use screenpipe_semantic::{IdentityQuality, SemanticKind};
 
 use futures::stream::{self, StreamExt};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -70,17 +74,59 @@ use crate::server::AppState;
 use crate::video_utils::extract_frame;
 
 use super::content::{
-    AudioContent, ContentItem, InputContent, MemoryContent, OCRContent, PaginationInfo, UiContent,
+    AudioContent, ContentItem, InputContent, MemoryContent, OCRContent, PaginationInfo,
+    ParsedActorReference, ParsedContent, ParsedItem, UiContent,
 };
 
-// Update the SearchQuery struct
+#[derive(OaSchema, Debug, Deserialize, PartialEq, Default, Clone)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum SearchContentType {
+    #[default]
+    #[serde(alias = "All")]
+    All,
+    OCR,
+    Audio,
+    Input,
+    Accessibility,
+    Memory,
+    /// App-specific records parsed from accessibility frames.
+    #[serde(alias = "semantic", alias = "Semantic", alias = "Parsed")]
+    Parsed,
+}
+
+impl SearchContentType {
+    fn database_type(&self) -> Option<ContentType> {
+        match self {
+            Self::All => Some(ContentType::All),
+            Self::OCR => Some(ContentType::OCR),
+            Self::Audio => Some(ContentType::Audio),
+            Self::Input => Some(ContentType::Input),
+            Self::Accessibility => Some(ContentType::Accessibility),
+            Self::Memory => Some(ContentType::Memory),
+            Self::Parsed => None,
+        }
+    }
+
+    fn permission_name(&self) -> Option<&'static str> {
+        match self {
+            Self::All => None,
+            Self::OCR => Some("ocr"),
+            Self::Audio => Some("audio"),
+            Self::Input => Some("input"),
+            Self::Accessibility => Some("accessibility"),
+            Self::Memory => Some("memory"),
+            Self::Parsed => Some("parsed"),
+        }
+    }
+}
+
 #[derive(OaSchema, Deserialize)]
 pub(crate) struct SearchQuery {
     q: Option<String>,
     #[serde(flatten)]
     pagination: PaginationQuery,
     #[serde(default)]
-    content_type: ContentType,
+    content_type: SearchContentType,
     /// Result ordering. Defaults to newest-first for existing callers; sync
     /// consumers use ascending order so a bounded page cannot skip backlog.
     #[serde(default)]
@@ -103,6 +149,12 @@ pub(crate) struct SearchQuery {
     app_name: Option<String>,
     #[serde(default)]
     window_name: Option<String>,
+    /// Exact source frame. Only valid with `content_type=parsed`.
+    #[serde(default)]
+    frame_id: Option<i64>,
+    /// Corrected parsed actor identity. Only valid with `content_type=parsed`.
+    #[serde(default)]
+    actor_id: Option<i64>,
     #[serde(default)]
     frame_name: Option<String>,
     #[serde(default, deserialize_with = "deserialize_flexible_bool")]
@@ -145,7 +197,8 @@ pub(crate) struct SearchQuery {
     #[serde(default)]
     machine_id: Option<String>,
     /// Redact PII from text-bearing fields (ocr `text`, audio `transcription`,
-    /// ui `text`, input `text_content`, memory `content`) before returning.
+    /// ui `text`, input `text_content`, memory `content`, parsed text/items/actors)
+    /// before returning.
     /// Routed through the attested Tinfoil enclave; adds latency so leave it
     /// off unless the caller will forward these results to an LLM.
     #[serde(default, deserialize_with = "deserialize_flexible_bool")]
@@ -188,6 +241,109 @@ pub(crate) struct PaginationQuery {
     #[serde(default)]
     #[serde(deserialize_with = "deserialize_number_from_string")]
     offset: u32,
+}
+
+fn validate_pipe_search_permissions(
+    permissions: &PipePermissions,
+    query: &SearchQuery,
+) -> Result<(), String> {
+    if permissions.has_content_type_restrictions() {
+        let Some(content_type) = query.content_type.permission_name() else {
+            return Err(
+                "content_type must be specified explicitly when Pipe content permissions are active"
+                    .to_string(),
+            );
+        };
+        if !permissions.is_content_type_allowed(content_type) {
+            return Err(format!(
+                "content type \"{content_type}\" is not permitted for this Pipe"
+            ));
+        }
+    }
+
+    if let Some(app_name) = query.app_name.as_deref() {
+        if !permissions.is_app_allowed(app_name) {
+            return Err(format!(
+                "access to app \"{app_name}\" is not permitted for this Pipe"
+            ));
+        }
+    }
+    if let Some(window_name) = query.window_name.as_deref() {
+        if !permissions.is_window_allowed(window_name) {
+            return Err(format!(
+                "access to window \"{window_name}\" is not permitted for this Pipe"
+            ));
+        }
+    }
+    if query.include_related && permissions.has_data_restrictions() {
+        return Err(
+            "include_related is unavailable when Pipe data permissions are active".to_string(),
+        );
+    }
+
+    Ok(())
+}
+
+fn pipe_can_access_content_item(permissions: &PipePermissions, item: &ContentItem) -> bool {
+    let (app_name, window_name, content_type, timestamp) = match item {
+        ContentItem::OCR(content) => (
+            Some(content.app_name.as_str()),
+            Some(content.window_name.as_str()),
+            if content
+                .text_source
+                .as_deref()
+                .is_some_and(|source| source.eq_ignore_ascii_case("accessibility"))
+            {
+                "accessibility"
+            } else {
+                "ocr"
+            },
+            Some(content.timestamp),
+        ),
+        ContentItem::Audio(content) => (None, None, "audio", Some(content.timestamp)),
+        ContentItem::UI(content) => (
+            Some(content.app_name.as_str()),
+            Some(content.window_name.as_str()),
+            "accessibility",
+            Some(content.timestamp),
+        ),
+        ContentItem::Input(content) => (
+            content.app_name.as_deref(),
+            content.window_title.as_deref(),
+            "input",
+            Some(content.timestamp),
+        ),
+        ContentItem::Memory(content) => (
+            None,
+            None,
+            "memory",
+            DateTime::parse_from_rfc3339(&content.created_at)
+                .ok()
+                .map(|timestamp| timestamp.with_timezone(&Utc)),
+        ),
+        ContentItem::Parsed(content) => (
+            Some(content.app_name.as_str()),
+            Some(content.window_name.as_str()),
+            "parsed",
+            Some(content.timestamp),
+        ),
+    };
+
+    let timestamp = match timestamp {
+        Some(timestamp) => timestamp,
+        None if permissions.time_range.is_some() || permissions.days.is_some() => return false,
+        None => Utc::now(),
+    };
+
+    let local_timestamp = timestamp.with_timezone(&Local);
+    permissions.is_item_allowed(
+        app_name,
+        window_name,
+        content_type,
+        local_timestamp.hour(),
+        local_timestamp.minute(),
+        local_timestamp.weekday(),
+    )
 }
 
 pub(crate) fn deserialize_number_from_string<'de, D>(deserializer: D) -> Result<u32, D::Error>
@@ -363,6 +519,7 @@ fn group_related_tags(rows: Vec<(String, i64)>) -> std::collections::HashMap<Str
 
 pub struct SearchCacheEntry {
     json_body: Bytes,
+    result_count: usize,
 }
 
 const SEARCH_CACHE_MAX_ITEMS: usize = 200;
@@ -387,7 +544,19 @@ fn build_search_cache_entry(response: &SearchResponse) -> Option<SearchCacheEntr
     }
     Some(SearchCacheEntry {
         json_body: Bytes::from(json_body),
+        result_count: response.data.len(),
     })
+}
+
+fn capture_direct_api_search_value(client: &ExplicitApiClient, result_count: usize) {
+    if client.is_direct_api() && result_count > 0 {
+        analytics::capture_event_nonblocking(
+            "qualified_value_event",
+            crate::qualified_value::api_outcome_properties(
+                crate::qualified_value::ApiOutcomeKind::SearchResult,
+            ),
+        );
+    }
 }
 
 /// Middle-truncate a string to at most `max_chars` characters.
@@ -531,6 +700,88 @@ pub fn search_result_to_content_item(
     }
 }
 
+fn semantic_kind_name(kind: SemanticKind) -> &'static str {
+    match kind {
+        SemanticKind::Conversation => "conversation",
+        SemanticKind::Message => "message",
+        SemanticKind::Document => "document",
+        SemanticKind::Task => "task",
+        SemanticKind::CalendarEvent => "calendar_event",
+        SemanticKind::Page => "page",
+    }
+}
+
+fn identity_quality_name(quality: IdentityQuality) -> &'static str {
+    match quality {
+        IdentityQuality::Stable => "stable",
+        IdentityQuality::Derived => "derived",
+        IdentityQuality::Ephemeral => "ephemeral",
+    }
+}
+
+fn semantic_context_to_parsed_content(
+    context: SemanticFrameContext,
+    max_content_length: Option<usize>,
+) -> ParsedContent {
+    let truncate = |text: String| match max_content_length {
+        Some(max) => truncate_middle(&text, max),
+        None => text,
+    };
+    let text = truncate(context.render_compact());
+    let items = context
+        .items
+        .into_iter()
+        .map(|item| ParsedItem {
+            local_id: item.local_id,
+            parent_local_id: item.parent_local_id,
+            kind: semantic_kind_name(item.kind).to_string(),
+            item_key: item.item_key,
+            identity_quality: identity_quality_name(item.identity_quality).to_string(),
+            title: item.title.map(&truncate),
+            body: item.body.map(&truncate),
+            actor: item.actor,
+            occurred_at: item.occurred_at,
+            timestamp_precision: item.timestamp_precision,
+            status: item.status,
+            metadata: item.metadata.into_iter().collect(),
+            source_nodes: item.source_nodes.into_iter().map(|node| node.0).collect(),
+        })
+        .collect();
+    let actors = context
+        .actors
+        .into_iter()
+        .map(|actor| ParsedActorReference {
+            item_id: actor.item_id,
+            local_id: actor.local_id,
+            actor_id: actor.actor_id,
+            name: actor.name,
+            observed_name: actor.observed_name,
+            assignment_source: actor.assignment_source,
+        })
+        .collect();
+
+    ParsedContent {
+        frame_id: context.frame_id,
+        timestamp: context.timestamp,
+        app_name: context.app_name,
+        window_name: context.window_name,
+        browser_url: context.browser_url,
+        text,
+        run_id: context.run_id,
+        parser_id: context.parser_id,
+        parser_version: context.parser_version,
+        schema_version: context.schema_version,
+        app_platform: format!("{:?}", context.app_platform).to_ascii_lowercase(),
+        app_id: context.app_id,
+        app_executable: context.app_executable,
+        app_version: context.app_version,
+        parse_duration_us: context.parse_duration_us,
+        text_bytes: context.text_bytes,
+        items,
+        actors,
+    }
+}
+
 /// Collapse accessibility (`UI`) duplicates into their matching OCR row.
 ///
 /// The accessibility leg cannot simply be removed from `content_type=all`:
@@ -595,6 +846,8 @@ pub(crate) fn compute_search_cache_key(query: &SearchQuery) -> u64 {
     query.end_time.map(|t| t.timestamp()).hash(&mut hasher);
     query.app_name.hash(&mut hasher);
     query.window_name.hash(&mut hasher);
+    query.frame_id.hash(&mut hasher);
+    query.actor_id.hash(&mut hasher);
     query.frame_name.hash(&mut hasher);
     query.min_length.hash(&mut hasher);
     query.max_length.hash(&mut hasher);
@@ -700,6 +953,7 @@ pub(crate) async fn search(
     Query(mut query): Query<SearchQuery>,
     State(state): State<Arc<AppState>>,
     OptionalPipePerms(pipe_perms): OptionalPipePerms,
+    api_client: ExplicitApiClient,
 ) -> Result<Response<Body>, (StatusCode, JsonResponse<serde_json::Value>)> {
     // Presentation-only: parsed up front so a bad `format` 400s before any
     // DB work. Only the default JSON representation is cached; alternate
@@ -709,12 +963,23 @@ pub(crate) async fn search(
     let fields = parse_fields(&query.fields);
     let cacheable_render = is_passthrough(format, &fields);
 
-    // Server-authoritative privacy filter: if the request comes from a
+    let pipe_data_restricted = pipe_perms
+        .as_ref()
+        .map(|permissions| permissions.has_data_restrictions())
+        .unwrap_or(false);
+
+    // Server-authoritative permission validation and privacy filter: if the request comes from a
     // pipe whose manifest declares `privacy_filter: true`, force PII
     // redaction regardless of what the request payload says. The pipe's
     // LLM agent has no schema-level way to bypass this — the permissions
     // are looked up from the bearer token by `pipe_permissions_middleware`.
     if let Some(perms) = &pipe_perms {
+        validate_pipe_search_permissions(perms, &query).map_err(|message| {
+            (
+                StatusCode::FORBIDDEN,
+                JsonResponse(json!({ "error": message })),
+            )
+        })?;
         if perms.privacy_filter {
             query.filter_pii = true;
         }
@@ -739,9 +1004,10 @@ pub(crate) async fn search(
 
     // Check cache first (only for queries without frame extraction)
     let cache_key = compute_search_cache_key(&query);
-    if !query.include_frames && cacheable_render {
+    if !query.include_frames && cacheable_render && !pipe_data_restricted {
         if let Some(cached) = state.search_cache.get(&cache_key).await {
             debug!("search cache hit for key {}", cache_key);
+            capture_direct_api_search_value(&api_client, cached.result_count);
             return Ok(render_cached_search(&cached));
         }
     }
@@ -760,14 +1026,57 @@ pub(crate) async fn search(
 
     let query_str = query.q.as_deref().unwrap_or("");
 
-    let content_type = query.content_type.clone();
     let tags = query.tags.as_deref().unwrap_or(&[]);
+    let parsed_search = query.content_type == SearchContentType::Parsed;
+    if !parsed_search && (query.frame_id.is_some() || query.actor_id.is_some()) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            JsonResponse(json!({
+                "error": "frame_id and actor_id require content_type=parsed",
+            })),
+        ));
+    }
+    if parsed_search && !tags.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            JsonResponse(json!({
+                "error": "tags are not supported for content_type=parsed",
+            })),
+        ));
+    }
+
+    enum SearchPage {
+        Standard(Vec<SearchResult>),
+        Parsed(Vec<SemanticFrameContext>),
+    }
 
     // Keep the exact `pagination.total` contract, but do not launch another
     // unbounded scan beside the page query. Serial execution halves the number
     // of simultaneous SQLite statements per admitted request while the outer
     // deadline still covers the complete operation.
     let search_and_count = async {
+        if parsed_search {
+            let parsed_query = SemanticContextQuery {
+                frame_id: query.frame_id,
+                q: query.q.clone(),
+                start_time: query.start_time,
+                end_time: query.end_time,
+                app_name: query.app_name.clone(),
+                window_name: query.window_name.clone(),
+                actor_id: query.actor_id,
+                limit: query.pagination.limit,
+                offset: query.pagination.offset,
+                order: query.order,
+            };
+            let results = state.db.search_semantic_context(&parsed_query).await?;
+            let total = state.db.count_semantic_context(&parsed_query).await?;
+            return Ok::<_, sqlx::Error>((SearchPage::Parsed(results), total));
+        }
+
+        let content_type = query
+            .content_type
+            .database_type()
+            .expect("non-parsed search type must map to a database content type");
         let results = state
             .db
             .search_with_tags_ordered_lightweight(
@@ -815,7 +1124,7 @@ pub(crate) async fn search(
                 tags,
             )
             .await?;
-        Ok::<_, sqlx::Error>((results, total))
+        Ok::<_, sqlx::Error>((SearchPage::Standard(results), total))
     };
 
     let database_result = match timeout(Duration::from_secs(30), search_and_count).await {
@@ -826,7 +1135,7 @@ pub(crate) async fn search(
         }
     };
 
-    let (results, total) = match database_result {
+    let (results, mut total) = match database_result {
         Ok(result) => result,
         Err(error) => {
             if let Some(response) = classified_search_database_response(&error) {
@@ -880,21 +1189,43 @@ pub(crate) async fn search(
     // cloud metadata lookup, and response shaping.
     drop(search_permit);
 
-    let mut content_items: Vec<ContentItem> = results
-        .iter()
-        // Filter out screenpipe results at display time
-        .filter(|result| match result {
-            SearchResult::OCR(ocr) => !is_screenpipe_app(&ocr.app_name),
-            SearchResult::Audio(_) => true, // Audio doesn't have app_name
-            SearchResult::UI(ui) => !is_screenpipe_app(&ui.app_name),
-            SearchResult::Input(input) => input
-                .app_name
-                .as_ref()
-                .is_none_or(|app| !is_screenpipe_app(app)),
-            SearchResult::Memory(_) => true,
-        })
-        .map(|result| search_result_to_content_item(result, query.max_content_length))
-        .collect();
+    let mut content_items: Vec<ContentItem> = match results {
+        SearchPage::Standard(results) => results
+            .iter()
+            // Filter out screenpipe results at display time
+            .filter(|result| match result {
+                SearchResult::OCR(ocr) => !is_screenpipe_app(&ocr.app_name),
+                SearchResult::Audio(_) => true, // Audio doesn't have app_name
+                SearchResult::UI(ui) => !is_screenpipe_app(&ui.app_name),
+                SearchResult::Input(input) => input
+                    .app_name
+                    .as_ref()
+                    .is_none_or(|app| !is_screenpipe_app(app)),
+                SearchResult::Memory(_) => true,
+            })
+            .map(|result| search_result_to_content_item(result, query.max_content_length))
+            .collect(),
+        SearchPage::Parsed(contexts) => contexts
+            .into_iter()
+            .filter(|context| !is_screenpipe_app(&context.app_name))
+            .map(|context| {
+                ContentItem::Parsed(semantic_context_to_parsed_content(
+                    context,
+                    query.max_content_length,
+                ))
+            })
+            .collect(),
+    };
+
+    if let Some(permissions) = &pipe_perms {
+        content_items.retain(|item| pipe_can_access_content_item(permissions, item));
+        if pipe_data_restricted {
+            // The unrestricted DB count can reveal denied rows. A fully accurate
+            // restricted count requires pushing every rule into SQL, so return
+            // only the visible page size until that exists.
+            total = content_items.len() as _;
+        }
+    }
 
     deduplicate_ocr_and_ui(&mut content_items);
 
@@ -906,13 +1237,19 @@ pub(crate) async fn search(
 
         // Collect the text to filter, along with (index, kind) back-pointers
         // so we can splice the redacted strings into the right fields.
-        #[derive(Clone, Copy)]
         enum Field {
             Ocr,
             Audio,
             Ui,
             Input,
             Memory,
+            ParsedText,
+            ParsedItemTitle(usize),
+            ParsedItemBody(usize),
+            ParsedItemActor(usize),
+            ParsedItemMetadata { item: usize, key: String },
+            ParsedActorName(usize),
+            ParsedActorObservedName(usize),
         }
         let mut targets: Vec<(usize, Field)> = Vec::with_capacity(content_items.len());
         let mut texts: Vec<String> = Vec::with_capacity(content_items.len());
@@ -940,6 +1277,40 @@ pub(crate) async fn search(
                     targets.push((i, Field::Memory));
                     texts.push(c.content.clone());
                 }
+                ContentItem::Parsed(c) => {
+                    targets.push((i, Field::ParsedText));
+                    texts.push(c.text.clone());
+                    for (item_index, item) in c.items.iter().enumerate() {
+                        if let Some(value) = &item.title {
+                            targets.push((i, Field::ParsedItemTitle(item_index)));
+                            texts.push(value.clone());
+                        }
+                        if let Some(value) = &item.body {
+                            targets.push((i, Field::ParsedItemBody(item_index)));
+                            texts.push(value.clone());
+                        }
+                        if let Some(value) = &item.actor {
+                            targets.push((i, Field::ParsedItemActor(item_index)));
+                            texts.push(value.clone());
+                        }
+                        for (key, value) in &item.metadata {
+                            targets.push((
+                                i,
+                                Field::ParsedItemMetadata {
+                                    item: item_index,
+                                    key: key.clone(),
+                                },
+                            ));
+                            texts.push(value.clone());
+                        }
+                    }
+                    for (actor_index, actor) in c.actors.iter().enumerate() {
+                        targets.push((i, Field::ParsedActorName(actor_index)));
+                        texts.push(actor.name.clone());
+                        targets.push((i, Field::ParsedActorObservedName(actor_index)));
+                        texts.push(actor.observed_name.clone());
+                    }
+                }
             }
         }
 
@@ -961,6 +1332,27 @@ pub(crate) async fn search(
                 (Field::Ui, ContentItem::UI(c)) => c.text = new_text,
                 (Field::Input, ContentItem::Input(c)) => c.text_content = Some(new_text),
                 (Field::Memory, ContentItem::Memory(c)) => c.content = new_text,
+                (Field::ParsedText, ContentItem::Parsed(c)) => c.text = new_text,
+                (Field::ParsedItemTitle(item), ContentItem::Parsed(c)) => {
+                    c.items[item].title = Some(new_text)
+                }
+                (Field::ParsedItemBody(item), ContentItem::Parsed(c)) => {
+                    c.items[item].body = Some(new_text)
+                }
+                (Field::ParsedItemActor(item), ContentItem::Parsed(c)) => {
+                    c.items[item].actor = Some(new_text)
+                }
+                (Field::ParsedItemMetadata { item, key }, ContentItem::Parsed(c)) => {
+                    if let Some(value) = c.items[item].metadata.get_mut(&key) {
+                        *value = new_text;
+                    }
+                }
+                (Field::ParsedActorName(actor), ContentItem::Parsed(c)) => {
+                    c.actors[actor].name = new_text
+                }
+                (Field::ParsedActorObservedName(actor), ContentItem::Parsed(c)) => {
+                    c.actors[actor].observed_name = new_text
+                }
                 _ => {}
             }
         }
@@ -1022,10 +1414,12 @@ pub(crate) async fn search(
         related,
     };
 
+    capture_direct_api_search_value(&api_client, response.data.len());
+
     // Cache the result (only for queries without frame extraction). Cache hits
     // serve the pre-serialized JSON bytes directly for the common response
     // shape, avoiding repeated deep clones of text-heavy search payloads.
-    if !query.include_frames && cacheable_render {
+    if !query.include_frames && cacheable_render && !pipe_data_restricted {
         if let Some(cache_entry) = build_search_cache_entry(&response) {
             let rendered = render_cached_search(&cache_entry);
             state
@@ -1199,6 +1593,61 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use screenpipe_core::pipes::permissions::PermissionRule;
+
+    fn restricted_pipe_permissions(
+        allow_rules: Vec<PermissionRule>,
+        deny_rules: Vec<PermissionRule>,
+    ) -> PipePermissions {
+        PipePermissions {
+            pipe_name: "test-pipe".to_string(),
+            allow_rules,
+            deny_rules,
+            use_default_allowlist: true,
+            time_range: None,
+            days: None,
+            pipe_token: Some("sp_pipe_test".to_string()),
+            pipe_dir: None,
+            privacy_filter: false,
+        }
+    }
+
+    fn search_query(content_type: SearchContentType, app_name: Option<&str>) -> SearchQuery {
+        SearchQuery {
+            q: None,
+            pagination: PaginationQuery {
+                limit: 20,
+                offset: 0,
+            },
+            content_type,
+            order: Order::Descending,
+            input_context_only: false,
+            start_time: None,
+            end_time: None,
+            app_name: app_name.map(str::to_string),
+            window_name: None,
+            frame_id: None,
+            actor_id: None,
+            frame_name: None,
+            include_frames: false,
+            min_length: None,
+            max_length: None,
+            speaker_ids: None,
+            focused: None,
+            on_screen: None,
+            browser_url: None,
+            speaker_name: None,
+            include_cloud: false,
+            max_content_length: None,
+            device_name: None,
+            machine_id: None,
+            filter_pii: false,
+            tags: None,
+            include_related: false,
+            format: None,
+            fields: None,
+        }
+    }
 
     #[derive(Debug)]
     struct InterruptedDatabaseError;
@@ -1283,6 +1732,65 @@ mod tests {
             created_at: Utc::now().to_rfc3339(),
             updated_at: Utc::now().to_rfc3339(),
         }
+    }
+
+    #[test]
+    fn pipe_search_rejects_broad_and_denied_content_types() {
+        let permissions = restricted_pipe_permissions(
+            vec![],
+            vec![PermissionRule::Content {
+                value: "input".to_string(),
+            }],
+        );
+
+        assert!(validate_pipe_search_permissions(
+            &permissions,
+            &search_query(SearchContentType::All, None)
+        )
+        .unwrap_err()
+        .contains("specified explicitly"));
+        assert!(validate_pipe_search_permissions(
+            &permissions,
+            &search_query(SearchContentType::Input, None)
+        )
+        .unwrap_err()
+        .contains("not permitted"));
+        assert!(validate_pipe_search_permissions(
+            &permissions,
+            &search_query(SearchContentType::OCR, None)
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn pipe_search_rejects_denied_app_filters_and_rows() {
+        let permissions = restricted_pipe_permissions(
+            vec![PermissionRule::App {
+                value: "slack".to_string(),
+            }],
+            vec![],
+        );
+
+        assert!(validate_pipe_search_permissions(
+            &permissions,
+            &search_query(SearchContentType::OCR, Some("1Password"))
+        )
+        .unwrap_err()
+        .contains("not permitted"));
+
+        let mut denied = test_ocr(1, "denied.mp4");
+        denied.app_name = "1Password".to_string();
+        assert!(!pipe_can_access_content_item(
+            &permissions,
+            &ContentItem::OCR(denied)
+        ));
+
+        let mut allowed = test_ocr(2, "allowed.mp4");
+        allowed.app_name = "Slack".to_string();
+        assert!(pipe_can_access_content_item(
+            &permissions,
+            &ContentItem::OCR(allowed)
+        ));
     }
 
     #[test]
@@ -1555,13 +2063,15 @@ mod tests {
                 limit: 10,
                 offset: 0,
             },
-            content_type: ContentType::All,
+            content_type: SearchContentType::All,
             order: Order::Descending,
             input_context_only: false,
             start_time: None,
             end_time: None,
             app_name: Some("chrome".to_string()),
             window_name: None,
+            frame_id: None,
+            actor_id: None,
             frame_name: None,
             include_frames: false,
             min_length: None,
@@ -1588,13 +2098,15 @@ mod tests {
                 limit: 10,
                 offset: 0,
             },
-            content_type: ContentType::All,
+            content_type: SearchContentType::All,
             order: Order::Descending,
             input_context_only: false,
             start_time: None,
             end_time: None,
             app_name: Some("chrome".to_string()),
             window_name: None,
+            frame_id: None,
+            actor_id: None,
             frame_name: None,
             include_frames: false,
             min_length: None,
@@ -1629,13 +2141,15 @@ mod tests {
                 limit: 10,
                 offset: 0,
             },
-            content_type: ContentType::All,
+            content_type: SearchContentType::All,
             order: Order::Descending,
             input_context_only: false,
             start_time: None,
             end_time: None,
             app_name: None,
             window_name: None,
+            frame_id: None,
+            actor_id: None,
             frame_name: None,
             include_frames: false,
             min_length: None,
@@ -1662,13 +2176,15 @@ mod tests {
                 limit: 10,
                 offset: 0,
             },
-            content_type: ContentType::All,
+            content_type: SearchContentType::All,
             order: Order::Descending,
             input_context_only: false,
             start_time: None,
             end_time: None,
             app_name: None,
             window_name: None,
+            frame_id: None,
+            actor_id: None,
             frame_name: None,
             include_frames: false,
             min_length: None,
@@ -1710,13 +2226,15 @@ mod tests {
                 limit: 10,
                 offset: 0,
             },
-            content_type: ContentType::All,
+            content_type: SearchContentType::All,
             order: Order::Descending,
             input_context_only: false,
             start_time: None,
             end_time: None,
             app_name: None,
             window_name: None,
+            frame_id: None,
+            actor_id: None,
             frame_name: None,
             include_frames: false,
             min_length: None,
@@ -1754,13 +2272,15 @@ mod tests {
                 limit: 10,
                 offset: 0,
             },
-            content_type: ContentType::All,
+            content_type: SearchContentType::All,
             order: Order::Descending,
             input_context_only: false,
             start_time: None,
             end_time: None,
             app_name: None,
             window_name: None,
+            frame_id: None,
+            actor_id: None,
             frame_name: None,
             include_frames: false,
             min_length: None,

@@ -17,7 +17,13 @@ import { toast } from "@/components/ui/use-toast";
 import type { AIPreset, JsonValue } from "@/lib/utils/tauri";
 // OpenAI SDK no longer used directly — all providers route through Pi agent
 import posthog from "posthog-js";
+import { useFeatureFlagEnabled } from "posthog-js/react";
 import { commands } from "@/lib/utils/tauri";
+import {
+  ACP_AGENTS_FLAG,
+  filterAcpPresets,
+  isAcpRolloutEnabled,
+} from "@/lib/acp-rollout";
 import { useChatConversations } from "@/components/hooks/use-chat-conversations";
 import { usePlatform } from "@/lib/hooks/use-platform";
 import { useHardcodedTiles } from "@/lib/hooks/use-hardcoded-tiles";
@@ -37,6 +43,7 @@ import {
   buildInvalidatedAuthTokenMessage,
 } from "@/lib/chat/auth-errors";
 import { usePipes } from "@/lib/hooks/use-pipes";
+import { continuousPipeChatPolicy } from "@/lib/pipe-chat-policy";
 import { connectInlineConnection, type InlineConnectStatus } from "@/lib/connections/inline-connect";
 import {
   computeChatCitationPlan,
@@ -124,6 +131,16 @@ export function StandaloneChat({
   sidebarCollapsed?: boolean;
 } = {}) {
   const { settings, updateSettings, isSettingsLoaded, reloadStore } = useSettings();
+  const acpFlag = useFeatureFlagEnabled(ACP_AGENTS_FLAG);
+  const acpEnabled = isAcpRolloutEnabled(acpFlag);
+  const availableAiPresets = React.useMemo(
+    () => filterAcpPresets(settings.aiPresets, acpEnabled),
+    [settings.aiPresets, acpEnabled],
+  );
+  const rolloutSettings = React.useMemo(
+    () => ({ ...settings, aiPresets: availableAiPresets }) as typeof settings,
+    [settings, availableAiPresets],
+  );
   const { isMac, isWindows, isLoading: isPlatformLoading } = usePlatform();
   const hardcodedConnectionTiles = useHardcodedTiles();
   // Drop the macOS traffic-light reservation when the window is fullscreen
@@ -133,7 +150,13 @@ export function StandaloneChat({
   const { items: appItems, isLoading: appsLoading, refresh: refreshAppItems } = useSqlAutocomplete("app");
   const { items: tagItems, isLoading: tagsLoading, refresh: refreshTagItems } = useTagAutocomplete();
   const { suggestions: autoSuggestions, refreshing: suggestionsRefreshing, forceRefresh: refreshSuggestions } = useAutoSuggestions();
-  const { pipes, templatePipes } = usePipes();
+  const {
+    pipes,
+    templatePipes,
+    loading: pipesLoading,
+    error: pipesError,
+    refetch: refetchPipes,
+  } = usePipes();
   // Connected integrations (google-calendar, google-docs, slack, etc.) surfaced in the
   // filter popover so users can mention them directly with @id — helps the
   // agent pick the right connection for a query instead of having to guess.
@@ -652,6 +675,7 @@ export function StandaloneChat({
     queuedScrollRef,
     queuedPrompts,
     restoreQueuedDisplay,
+    restoreQueuedPrompt,
     takeQueuedDisplayById,
     consumeQueuedDisplayForStartedMessage,
     getQueuedDisplayBySession,
@@ -752,7 +776,7 @@ export function StandaloneChat({
     pastedImagesRef,
     attachedDocsRef,
     pendingDocsRef,
-    settings,
+    settings: rolloutSettings,
     selectedPreset: activePreset ?? null,
     selectedPresetRef: activePresetRef,
     inlineHistoryEnabled: !hideInlineHistory,
@@ -805,7 +829,7 @@ export function StandaloneChat({
     setIsStreaming,
   });
   useChatWindowSyncEvents({
-    aiPresets: settings?.aiPresets,
+    aiPresets: availableAiPresets,
     setActivePreset: handleSetActivePreset,
   });
 
@@ -848,7 +872,7 @@ export function StandaloneChat({
   } = usePiSessionLifecycle({
     activePreset,
     setActivePreset: handleSetActivePreset,
-    aiPresets: settings.aiPresets,
+    aiPresets: availableAiPresets,
     isSettingsLoaded,
     shouldFreezePresetSelection: Boolean(activePipeExecution),
     userToken: settings.user?.token,
@@ -868,6 +892,31 @@ export function StandaloneChat({
     piStoppedIntentionallyRef,
     piPresetSwitchPromiseRef,
   });
+  useEffect(() => {
+    const stablePipeChat = continuousPipeChatPolicy({
+      conversationId,
+      pipes: [],
+      pipesLoaded: false,
+    });
+    if (stablePipeChat) void refetchPipes();
+  }, [conversationId, refetchPipes]);
+
+  const continuousPipeChat = React.useMemo(
+    () =>
+      continuousPipeChatPolicy({
+        conversationId,
+        pipes,
+        pipesLoaded: !pipesLoading && !pipesError,
+      }),
+    [conversationId, pipes, pipesError, pipesLoading],
+  );
+  const canSendChatMessage =
+    canChat &&
+    !activePipeExecution &&
+    !continuousPipeChat?.replyDisabledReason;
+  const composerDisabledReason = activePipeExecution
+    ? `${activePipeExecution.name} is running. Reply after this run finishes.`
+    : continuousPipeChat?.replyDisabledReason || disabledReason;
 
   useChatPanelEffects({
     inputRef,
@@ -887,7 +936,7 @@ export function StandaloneChat({
   });
 
   usePipeWatchSession({
-    aiPresets: settings.aiPresets,
+    aiPresets: availableAiPresets,
     setActivePreset: handleSetActivePreset,
     startPipeExecution,
     clearPipeExecution,
@@ -913,7 +962,7 @@ export function StandaloneChat({
     autoSendBypassRef,
     setConversationId,
     buildProviderConfig,
-    canChat,
+    canChat: canSendChatMessage,
     cancelStreamingMessageRender,
     consumePendingAttachments,
     currentQueueSessionId,
@@ -953,6 +1002,7 @@ export function StandaloneChat({
     removeTurnIntent,
     restartCurrentPiSession,
     restoreQueuedDisplay,
+    restoreQueuedPrompt,
     saveConversation,
     sendDispatchInFlightRef,
     sendMessageRef,
@@ -967,7 +1017,7 @@ export function StandaloneChat({
     setPrefillContext,
     setPrefillFrameId,
     setRunningConfigFromProviderConfig,
-    settings,
+    settings: rolloutSettings,
     stagePendingAttachments,
     syncThinkingLevelAfterStart,
     takeQueuedDisplayById,
@@ -1177,7 +1227,7 @@ export function StandaloneChat({
     setIsStreaming,
     setMessages,
     setPiInfo,
-    settings,
+    settings: rolloutSettings,
     syncThinkingLevelAfterStart,
     turnIntentTextValuesMatch,
   });
@@ -1369,6 +1419,7 @@ export function StandaloneChat({
         messages={messages}
         isPreparingPrefill={isPreparingPrefill}
         activePipeExecution={activePipeExecution}
+        continuousPipeChat={continuousPipeChat}
         isLoading={isLoading}
         isStreaming={isStreaming}
         disabledReason={disabledReason}
@@ -1380,6 +1431,9 @@ export function StandaloneChat({
         }}
         onOpenSettings={async () => {
           await commands.showWindow({ Home: { page: null } });
+        }}
+        onOpenPipeSettings={async () => {
+          await commands.showWindow({ Home: { page: "pipes" } });
         }}
         summaryCardsProps={{
           onSendMessage: (message, displayLabel, entrySource, entryCard) =>
@@ -1454,8 +1508,8 @@ export function StandaloneChat({
           sectionRef: inputSectionRef,
           inputRef,
           value: input,
-          disabledReason,
-          canChat: Boolean(canChat),
+          disabledReason: composerDisabledReason,
+          canChat: Boolean(canSendChatMessage),
           isLoading,
           isStreaming,
           isEmbedded,
@@ -1521,7 +1575,7 @@ export function StandaloneChat({
           onPickFiles: handleFilePicker,
         }}
         modelControls={{
-          settings,
+          settings: rolloutSettings,
           activePreset,
           activePipeExecution,
           currentQueueSessionId,

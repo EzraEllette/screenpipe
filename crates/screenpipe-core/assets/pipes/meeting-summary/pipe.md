@@ -3,6 +3,7 @@ schedule: manual
 enabled: true
 preset:
   - screenpipe-cloud
+timeout: 300
 trigger:
   events:
     - meeting_ended
@@ -26,16 +27,23 @@ Keep memory healthy so it never drifts:
 
 a meeting just ended. find it, summarize it, and save the summary back onto its record so the user sees it next time they open the meeting.
 
-keep the wording of this prompt in sync with `buildMeetingSummarizeInstructions` in `apps/screenpipe-app-tauri/lib/utils/meeting-context.ts` (used by the in-app "summarize with AI" button) — the two surfaces should produce the same behavior.
+the instructions below are complete. screenpipe API search is required: use the meeting id and exact meeting time window with the named local HTTP endpoints below. do not inspect app source or recursively search the filesystem; never run recursive `find` or `grep` over the user's home or `~/.screenpipe`.
 
 read the screenpipe skill first so you know the meetings + search endpoints.
 
-step 1 — find the meeting that just ended:
+step 1 — find the meeting that just ended. when the scheduler woke you for an event it wrote `./.trigger-context.json` in this pipe's folder; read it first and use the meeting id it names:
+
+  cat ./.trigger-context.json   # {"event": "meeting_ended", "key": "<MEETING_ID>", ...}
+
+  curl -s -H "Authorization: Bearer $SCREENPIPE_LOCAL_API_KEY" \
+    "http://localhost:3030/meetings/<MEETING_ID>"
+
+only if that file is missing (a manual run) fall back to the most recent row:
 
   curl -s -H "Authorization: Bearer $SCREENPIPE_LOCAL_API_KEY" \
     "http://localhost:3030/meetings?limit=1"
 
-the most recent row is the one that just ended. capture its `id`, `meeting_start`, `meeting_end`, `title`, `note`, `meeting_app`, and `attendees`.
+either way, capture the meeting's `id`, `meeting_start`, `meeting_end`, `title`, `note`, `meeting_app`, and `attendees`. prefer the id from the trigger file — "most recent" picks the wrong meeting when two end close together.
 
 step 2 — search screenpipe for what happened during this meeting and summarize it: key topics, decisions, action items. scope your searches to the meeting's `meeting_start`/`meeting_end` window. prefer `content_type=audio` for transcripts.
 
@@ -73,7 +81,7 @@ rank the connected targets by relevance — an app used during the meeting first
 
   curl -s -X POST "http://localhost:11435/notify" \
     -H "Content-Type: application/json" \
-    -d '{"title": "<TITLE> summarized", "body": "<one-line recap> — push it somewhere?", "actions": [
+    -d '{"title": "<TITLE> summarized", "body": "<one-line recap> — push it somewhere?", "priority": "high", "actions": [
           {"label": "push to notion", "type": "api", "method": "POST", "url": "http://localhost:3030/connections/notion/proxy/v1/pages", "body": { /* page payload built from the summary */ }},
           {"label": "review in chat", "type": "pipe", "pipe": "meeting-summary", "open_in_chat": true, "context": {"meeting_id": <ID>}},
           {"label": "dismiss", "type": "dismiss"}

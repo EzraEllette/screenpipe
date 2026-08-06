@@ -27,10 +27,8 @@ use screenpipe_screen::OcrGateDecision;
 
 use crate::ocr_gate::{OcrDecision, OcrGate};
 use std::sync::Arc;
-#[cfg(not(target_os = "windows"))]
 use std::sync::OnceLock;
 use std::time::Instant;
-#[cfg(not(target_os = "windows"))]
 use tokio::sync::Semaphore;
 use tracing::{debug, warn};
 
@@ -50,10 +48,28 @@ fn strip_gutter_noise(text: &str) -> String {
 
 /// Limits concurrent OCR tasks to avoid CPU spikes when multiple monitors
 /// trigger capture simultaneously.
-#[cfg(not(target_os = "windows"))]
+///
+/// Process-global and shared with on-demand OCR (`POST /frames/{id}/text`),
+/// which search uses to verify that a hit is actually visible in the
+/// screenshot. Without a shared gate the two producers each enforce their own
+/// limit and still add up: capture stays at one job while a burst of search
+/// verifications runs alongside it. Sharing one permit makes capture immune to
+/// search load.
+///
+/// Defined on every platform, but capture only acquires it off Windows:
+/// `perform_ocr_windows` already serializes every caller through its own
+/// global permit, so a second gate around capture would be redundant. Windows
+/// is therefore bounded either way — this semaphore is the equivalent gate for
+/// the Apple and Tesseract paths, which have no such internal limit.
 static OCR_SEMAPHORE: OnceLock<Semaphore> = OnceLock::new();
-#[cfg(not(target_os = "windows"))]
-fn ocr_semaphore() -> &'static Semaphore {
+
+/// The shared OCR permit. Hold it across the *whole* expensive span (frame
+/// extraction plus OCR), and — for the blocking-pool paths — move the permit
+/// into the blocking closure so it is released when OCR truly finishes rather
+/// than when the caller stops waiting. A client that aborts its request drops
+/// the handler future, but the blocking task keeps running; releasing on drop
+/// would hand the slot away while the CPU is still busy.
+pub fn ocr_semaphore() -> &'static Semaphore {
     OCR_SEMAPHORE.get_or_init(|| Semaphore::new(1))
 }
 
@@ -451,7 +467,8 @@ pub async fn paired_capture(
             Some(r) => Arc::new(ctx.image.crop_imm(r.x, r.y, r.width, r.height)),
             None => ctx.image.clone(),
         };
-        // Windows native OCR is async, so call it directly (not inside spawn_blocking)
+        // The Windows wrapper serializes native OCR and runs its blocking
+        // WinRT waits on Tokio's blocking pool.
         #[cfg(target_os = "windows")]
         let raw = {
             match screenpipe_screen::perform_ocr_windows(&ocr_input, &ctx.languages).await {
@@ -1123,6 +1140,9 @@ mod tests {
 
         let snap = TreeSnapshot {
             app_name: "Safari".to_string(),
+            app_id: Some("com.apple.Safari".into()),
+            executable: None,
+            app_version: None,
             window_name: "Example Page".to_string(),
             text_content: "Hello World - Example Page".to_string(),
             nodes: vec![AccessibilityTreeNode {
@@ -1132,6 +1152,7 @@ mod tests {
                 bounds: None,
                 ..Default::default()
             }],
+            semantic_nodes: vec![],
             browser_url: Some("https://example.com".to_string()),
             document_path: None,
             timestamp: now,
@@ -1191,9 +1212,13 @@ mod tests {
         // Empty accessibility text should be treated as no text
         let snap = TreeSnapshot {
             app_name: "TestApp".to_string(),
+            app_id: None,
+            executable: None,
+            app_version: None,
             window_name: String::new(),
             text_content: String::new(),
             nodes: vec![],
+            semantic_nodes: vec![],
             browser_url: None,
             document_path: None,
             timestamp: now,
@@ -1305,9 +1330,13 @@ mod tests {
             .join("\n");
         TreeSnapshot {
             app_name: "Test".to_string(),
+            app_id: None,
+            executable: None,
+            app_version: None,
             window_name: "Test Window".to_string(),
             text_content: text,
             nodes,
+            semantic_nodes: vec![],
             browser_url: None,
             document_path: None,
             timestamp: Utc::now(),

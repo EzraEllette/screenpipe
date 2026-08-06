@@ -30,6 +30,7 @@ import {
   waitForLocalApi,
   type LocalApiConfig,
 } from "../helpers/api-utils.js";
+import { invokeOrThrow } from "../helpers/tauri.js";
 
 const seedFlags = E2E_SEED_FLAGS.split(",").map((s) => s.trim().toLowerCase());
 const recordingDisabled = seedFlags.includes("no-recording");
@@ -37,6 +38,12 @@ const canRun = process.platform === "win32" && !recordingDisabled;
 const eventTriggerCaptureEnabled = seedFlags.includes("event-trigger-capture");
 const canRunEventTriggerCapture = canRun && eventTriggerCaptureEnabled;
 const keyboardDbCaptureEnabled = seedFlags.includes("keyboard-db-capture");
+const FOCUS_PORT = Number(process.env.SCREENPIPE_FOCUS_PORT ?? "11436");
+
+type NotificationHistoryEntry = {
+  title?: string;
+  body?: string;
+};
 
 type HealthBody = {
   status?: string;
@@ -761,6 +768,13 @@ async function openTimeline(): Promise<void> {
   await timelineSection.waitForExist({ timeout: t(20_000) });
 }
 
+async function readNotificationHistory(): Promise<NotificationHistoryEntry[]> {
+  const result = await fetchJson(`http://127.0.0.1:${FOCUS_PORT}/notifications`);
+  return Array.isArray(result.body)
+    ? (result.body as NotificationHistoryEntry[])
+    : [];
+}
+
 describe("Windows core recording pipeline", function () {
   this.timeout(180_000);
   this.retries(0);
@@ -774,8 +788,8 @@ describe("Windows core recording pipeline", function () {
     if (!canRun) return;
 
     await openHomeWindow();
-    await waitForLocalApi();
     cfg = await getLocalApiConfig();
+    await waitForLocalApi(cfg.port);
   });
 
   async function probeMarkerIndexing(): Promise<MarkerProbe> {
@@ -1098,5 +1112,90 @@ describe("Windows core recording pipeline", function () {
 
     const scrubScreenshot = await saveScreenshot("windows-core-recording-timeline-scrub");
     expect(existsSync(scrubScreenshot)).toBe(true);
+  });
+
+  it("stops a real capture session on low disk while keeping search available", async function () {
+    if (!canRun || !cfg) this.skip();
+    const activeCfg = cfg;
+
+    // This assertion is deliberately not frame-dependent: even hosted runners
+    // without capturable desktop pixels must have constructed the real
+    // CaptureSession in this recording-enabled lane.
+    expect(
+      await invokeOrThrow<boolean>("plugin:e2e|capture_session_running"),
+    ).toBe(true);
+    await invokeOrThrow("plugin:e2e|reset_disk_pressure_notification_latch");
+    const initialLowDiskNotifications = (await readNotificationHistory()).filter(
+      (entry) => entry.title === "recording stopped — disk almost full",
+    ).length;
+
+    try {
+      await invokeOrThrow("plugin:e2e|set_low_disk_guard_enabled", { enabled: true });
+      await invokeOrThrow("plugin:e2e|set_notification_master_enabled", {
+        enabled: false,
+      });
+
+      expect(
+        await invokeOrThrow<string>("plugin:e2e|handle_disk_space_low", {
+          availableBytes: 1024 * 1024 * 1024,
+        }),
+      ).toBe("capture_stopped");
+      expect(
+        await invokeOrThrow<boolean>("plugin:e2e|capture_session_running"),
+      ).toBe(false);
+      expect(await invokeOrThrow<boolean>("is_capture_paused")).toBe(true);
+
+      await browser.waitUntil(
+        async () =>
+          (await readNotificationHistory()).filter(
+            (entry) => entry.title === "recording stopped — disk almost full",
+          ).length > initialLowDiskNotifications,
+        {
+          timeout: t(15_000),
+          interval: 250,
+          timeoutMsg:
+            "critical low-disk notification was not persisted with notifications disabled",
+        },
+      );
+
+      // A user restart attempt while the same disk incident is active still
+      // stops capture intent, but must not append or display another alert.
+      await invokeOrThrow("plugin:e2e|mark_capture_intended");
+      expect(
+        await invokeOrThrow<string>("plugin:e2e|handle_disk_space_low", {
+          availableBytes: 1024 * 1024 * 1024,
+        }),
+      ).toBe("capture_stopped_notification_suppressed");
+      expect(
+        (await readNotificationHistory()).filter(
+          (entry) => entry.title === "recording stopped — disk almost full",
+        ),
+      ).toHaveLength(initialLowDiskNotifications + 1);
+
+      const health = await requireHealthyLocalApi(activeCfg);
+      expect(typeof health.status).toBe("string");
+      await browser.waitUntil(
+        async () => {
+          const search = await fetchJson(
+            apiUrl(activeCfg, "/search?limit=1&content_type=ocr"),
+            authHeaders(activeCfg.key),
+          );
+          return search.ok && typeof search.body === "object" && search.body !== null
+            ? Object.hasOwn(search.body, "data")
+            : false;
+        },
+        {
+          timeout: t(30_000),
+          interval: 500,
+          timeoutMsg: "authenticated search did not stay available after capture stopped",
+        },
+      );
+    } finally {
+      await invokeOrThrow("plugin:e2e|set_low_disk_guard_enabled", { enabled: false });
+      await invokeOrThrow("plugin:e2e|set_notification_master_enabled", {
+        enabled: true,
+      });
+      await invokeOrThrow("plugin:e2e|reset_disk_pressure_notification_latch");
+    }
   });
 });

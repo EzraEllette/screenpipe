@@ -230,7 +230,9 @@ Search through recorded content with content type filtering:
 - `audio` — Audio transcriptions
 - `input` — User actions (clicks, keystrokes, clipboard, app switches)
 - `accessibility` — Accessibility tree text
+- `parsed` — Compact app-specific messages, emails, tasks, documents, and code review (experimental; may be empty when parsing is disabled or unsupported)
 - Time range, app/window, and speaker filtering
+- Parsed data can also be filtered by `frame_id` or resolved `actor_id`
 - Pagination support
 
 ### export-video
@@ -254,9 +256,16 @@ Search structured UI elements (accessibility tree nodes and OCR text blocks):
 - Returns a compact `outline` view by default — a deduped, indented tree of the
   text-bearing nodes (`#id` refs, `(off-screen)` flags), ~91% fewer tokens than
   raw element JSON
+- Pass `purpose: "automation"` for automation targeting context with response-local
+  refs, best-effort stable keys, state, bounds, and allowed actions. Refresh it
+  before each action; historical database ids are not live control handles.
+  `computer-use` remains a legacy alias.
+- If `purpose` is omitted, the MCP follows the desktop `AI context use` setting.
+  The backward-compatible default remains the read/memory outline.
 
 ### get-frame-elements
-The whole element tree for one frame, as the same compact outline.
+The whole element tree for one frame, as the same compact outline. Pass
+`purpose: "automation"` for the automation targeting view.
 
 ### frame-context
 Get accessibility text, parsed tree nodes, and extracted URLs for a specific frame.
@@ -295,7 +304,7 @@ List available monitors/screens for capture.
 Manage pipes — scheduled AI automations that run a markdown prompt on a schedule (e.g. "every day at 9am"). `list-pipes` shows enabled state + schedule; `create-pipe` creates one; `run-pipe` triggers a one-off test run; `pipe-logs` fetches recent execution output.
 
 ### team-search / team-devices / team-records
-Team-tier tools, registered only when an enterprise admin token is configured. `team-search` runs substring search across the entire org's telemetry, `team-devices` lists enrolled devices (hostname, OS), and `team-records` dumps chronological org data for a time window. Orgs running their own query gateway must also set `SCREENPIPE_TEAM_API_URL` — see [Enterprise team tools](#enterprise-team-tools-team-) for the full precedence order.
+Team-tier tools, registered only when an enterprise admin token is configured. `team-search` runs substring search across the entire org's telemetry, `team-devices` lists enrolled devices (hostname, OS), and `team-records` dumps chronological frame, parsed-app, or audio data for a time window. Orgs running their own query gateway must also set `SCREENPIPE_TEAM_API_URL` — see [Enterprise team tools](#enterprise-team-tools-team-) for the full precedence order.
 
 ## Example Queries in Claude
 
@@ -318,7 +327,7 @@ Team-tier tools, registered only when an enterprise admin token is configured. `
 - All timestamps are handled in UTC
 - Results are formatted for readability in Claude's interface
 - macOS automation features require accessibility permissions
-- The MCP tools already return compact, readable text (the element tools default to the `outline` view). If you instead call the underlying screenpipe REST API directly (e.g. via `curl`), the list endpoints (`/search`, `/elements`, `/frames/{id}/elements`) accept `?format=csv|tsv` for a columnar table (column names written once) and `?fields=a,b,c` to select only the columns you need (dotted paths like `content.text`); the element endpoints also accept `?format=outline` (the same tree the MCP tools return, ~91% fewer tokens than JSON). On list-shaped results that is a 70–91% token cut versus the default JSON, which stays unchanged when no param is set.
+- The MCP tools already return compact, readable text (the element tools follow the desktop capture profile unless the caller sets a purpose). If you instead call the underlying screenpipe REST API directly (e.g. via `curl`), the list endpoints (`/search`, `/elements`, `/frames/{id}/elements`) accept `?format=csv|tsv` for a columnar table (column names written once) and `?fields=a,b,c` to select only the columns you need (dotted paths like `content.text`); the element endpoints also accept `?format=outline` (~91% fewer tokens than JSON) or `?format=automation` for fresh refs, best-effort keys, actions, state, and bounds. On list-shaped results that is a 70–91% token cut versus the default JSON, which stays unchanged when no param is set.
 
 ## Privacy Policy
 

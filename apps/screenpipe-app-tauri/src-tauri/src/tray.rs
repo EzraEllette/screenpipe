@@ -6,7 +6,8 @@ use crate::commands::{hide_main_window, show_main_window};
 use crate::enterprise_policy::{is_app_ui_hidden, is_tray_item_hidden};
 use crate::health::{
     get_audio_device_status, get_high_fps_status, get_recording_info, get_recording_status,
-    get_vision_device_status, set_high_fps_status, DeviceKind, HighFpsCacheEntry, RecordingStatus,
+    get_vision_device_status, set_high_fps_status, AudioCaptureStatus, DeviceKind,
+    HighFpsCacheEntry, RecordingStatus,
 };
 use crate::process_exit;
 use crate::recording::{local_api_context_from_app, RecordingState};
@@ -396,6 +397,7 @@ fn install_tray_menu(tray: &TrayIcon, menu: tauri::menu::Menu<Wry>) -> Result<()
     Ok(())
 }
 
+#[cfg(feature = "e2e")]
 pub(crate) fn installed_recording_status_text() -> Result<Option<String>> {
     let menu = ACTIVE_TRAY_MENU
         .lock()
@@ -474,6 +476,7 @@ fn snapshot_menu_state(data: &TrayMenuData, effective_status: RecordingStatus) -
             m
         },
         recording_status: Some(effective_status),
+        audio_capture_status: recording_info.audio_capture_status,
         onboarding_completed: data.onboarding_completed,
         has_permission_issue: data.has_permission_issue,
         devices: recording_info
@@ -626,6 +629,7 @@ mod menu_refresh_observer {
 struct MenuState {
     shortcuts: HashMap<String, String>,
     recording_status: Option<RecordingStatus>,
+    audio_capture_status: Option<AudioCaptureStatus>,
     onboarding_completed: bool,
     has_permission_issue: bool,
     /// Device names + active status for change detection
@@ -819,6 +823,30 @@ fn set_autosave_name(_tray: &TrayIcon<Wry>) {
 #[cfg(not(target_os = "macos"))]
 fn set_autosave_name(_tray: &TrayIcon<Wry>) {}
 
+fn recording_status_text(
+    status: RecordingStatus,
+    all_capture_disabled: bool,
+    audio_capture_status: Option<AudioCaptureStatus>,
+) -> &'static str {
+    match (status, all_capture_disabled, audio_capture_status) {
+        (RecordingStatus::Recording, true, _) => "○ Stopped",
+        (RecordingStatus::Recording, false, Some(AudioCaptureStatus::WaitingForMeeting)) => {
+            "● Screen recording · audio waiting for meeting"
+        }
+        (
+            RecordingStatus::Recording,
+            false,
+            Some(AudioCaptureStatus::MeetingDetectorUnavailable),
+        ) => "● Screen recording · meeting detection unavailable",
+        (RecordingStatus::Starting, _, _) => "○ Starting…",
+        (RecordingStatus::Recording, _, _) => "● Recording",
+        (RecordingStatus::Paused, _, _) => "◐ Paused",
+        (RecordingStatus::ScheduledPause, _, _) => "○ Outside work hours",
+        (RecordingStatus::Stopped, _, _) => "○ Stopped",
+        (RecordingStatus::Error, _, _) => "○ Error",
+    }
+}
+
 fn create_dynamic_menu(
     app: &AppHandle,
     _state: &MenuState,
@@ -888,15 +916,12 @@ fn create_dynamic_menu(
     // --- Recording status + devices ---
     let all_capture_disabled = data.all_capture_disabled;
     let effective_status = get_effective_recording_status();
-    let status_text = match effective_status {
-        RecordingStatus::Recording if all_capture_disabled => "○ Stopped",
-        RecordingStatus::Starting => "○ Starting…",
-        RecordingStatus::Recording => "● Recording",
-        RecordingStatus::Paused => "◐ Paused",
-        RecordingStatus::ScheduledPause => "○ Outside work hours",
-        RecordingStatus::Stopped => "○ Stopped",
-        RecordingStatus::Error => "○ Error",
-    };
+    let info = get_recording_info();
+    let status_text = recording_status_text(
+        effective_status,
+        all_capture_disabled,
+        info.audio_capture_status,
+    );
     menu_builder = menu_builder.item(&PredefinedMenuItem::separator(app)?);
 
     if !all_capture_disabled
@@ -917,8 +942,6 @@ fn create_dynamic_menu(
     );
 
     if !all_capture_disabled {
-        let info = get_recording_info();
-
         // Monitors: CheckMenuItem when the sidecar reports a numeric id (per-display
         // pause via /vision/device/*). Older sidecars stay display-only.
         let vision_status = get_vision_device_status();
@@ -1733,8 +1756,17 @@ async fn update_menu_if_needed(
     // ("paused, resumes in 12m") needs to tick down even when no other state
     // has changed. Cheap: just an NSString swap on the existing status item.
     let has_perm_issue = new_state.has_permission_issue;
+    let audio_capture_status = get_recording_info().audio_capture_status;
     let tooltip: String = if has_perm_issue {
         "screenpipe — ⚠️ permissions needed".to_string()
+    } else if effective_status == RecordingStatus::Recording
+        && audio_capture_status == Some(AudioCaptureStatus::MeetingDetectorUnavailable)
+    {
+        "screenpipe — screen recording; meeting detection unavailable".to_string()
+    } else if effective_status == RecordingStatus::Recording
+        && audio_capture_status == Some(AudioCaptureStatus::WaitingForMeeting)
+    {
+        "screenpipe — screen recording; audio waiting for meeting".to_string()
     } else if effective_status == RecordingStatus::Paused {
         match pause_remaining() {
             Some(d) => format!("screenpipe — paused, resumes in {}", format_remaining(d)),
@@ -1828,6 +1860,7 @@ async fn update_menu_if_needed(
     Ok(())
 }
 
+#[cfg(feature = "e2e")]
 pub(crate) async fn refresh_tray_menu_now(app: &AppHandle) -> Result<()> {
     let update_item = UPDATE_MENU_ITEM
         .lock()
@@ -1836,11 +1869,11 @@ pub(crate) async fn refresh_tray_menu_now(app: &AppHandle) -> Result<()> {
     update_menu_if_needed(app, update_item.as_ref()).await
 }
 
-pub(crate) async fn set_tray_recording_status_for_e2e(
+#[cfg(feature = "e2e")]
+pub(crate) async fn set_recording_status_from_harness(
     app: &AppHandle,
     status: RecordingStatus,
 ) -> Result<()> {
-    anyhow::ensure!(cfg!(feature = "e2e"), "E2E feature is disabled");
     crate::health::set_recording_status(status);
     set_optimistic_status(status);
     refresh_tray_menu_now(app).await
@@ -1880,6 +1913,30 @@ fn to_accelerator(shortcut: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recording_status_text_distinguishes_meetings_only_audio_states() {
+        assert_eq!(
+            recording_status_text(
+                RecordingStatus::Recording,
+                false,
+                Some(AudioCaptureStatus::WaitingForMeeting),
+            ),
+            "● Screen recording · audio waiting for meeting"
+        );
+        assert_eq!(
+            recording_status_text(
+                RecordingStatus::Recording,
+                false,
+                Some(AudioCaptureStatus::MeetingDetectorUnavailable),
+            ),
+            "● Screen recording · meeting detection unavailable"
+        );
+        assert_eq!(
+            recording_status_text(RecordingStatus::Recording, false, None),
+            "● Recording"
+        );
+    }
 
     #[test]
     fn enterprise_tray_refreshes_recording_status_without_an_update_item() {
