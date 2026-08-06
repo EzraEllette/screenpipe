@@ -31,8 +31,8 @@ import {
 } from "@xyflow/react";
 import {
   ArrowRight,
+  Check,
   ChevronLeft,
-  ChevronRight,
   Hand,
   LayoutGrid,
   Maximize2,
@@ -43,6 +43,7 @@ import {
   Trash2,
   ZoomIn,
   ZoomOut,
+  X,
 } from "lucide-react";
 import {
   LiveViewCard,
@@ -93,6 +94,11 @@ type LiveViewFlowNodeData = CanvasNodeActions & {
   feedback: "up" | "down" | null;
   feedbackCorrection: string | null;
   aiEditing: boolean;
+  proposal: {
+    kind: "add" | "update" | "remove";
+    status: "pending" | "accepted" | "rejected";
+  } | null;
+  onProposalDecision: (decision: "accepted" | "rejected") => void;
   onFeedback: (
     rating: "up" | "down" | null,
     correction?: string,
@@ -137,6 +143,29 @@ const RESIZE_HANDLE_STYLE: React.CSSProperties = {
   borderRadius: 0,
   background: "hsl(var(--background))",
 };
+
+const PROPOSAL_FOCUS_DURATION_MS = 360;
+
+export function interpolateCanvasFocusViewport(
+  from: Viewport,
+  to: Viewport,
+  progress: number,
+  reduceMotion = false,
+): Viewport {
+  const boundedProgress = Math.max(0, Math.min(1, progress));
+  const easedProgress = reduceMotion ? 1 : 1 - Math.pow(1 - boundedProgress, 3);
+  return {
+    x: from.x + (to.x - from.x) * easedProgress,
+    y: from.y + (to.y - from.y) * easedProgress,
+    zoom: from.zoom + (to.zoom - from.zoom) * easedProgress,
+  };
+}
+
+export function isTrustedCanvasMove(
+  event: MouseEvent | TouchEvent | null,
+): boolean {
+  return event?.isTrusted === true;
+}
 
 function sameSelection(left: string[], right: string[]): boolean {
   if (left.length !== right.length) return false;
@@ -213,7 +242,13 @@ function LiveViewBlockNode({ id, data }: NodeProps<LiveViewFlowNode>) {
     <article
       data-canvas-node
       data-testid={`canvas-block-${slot.id}`}
-      className={`h-full w-full bg-background ${
+      className={`h-full w-full bg-background transition-[outline,opacity] ${
+        data.proposal?.status === "rejected" ? "opacity-45" : ""
+      } ${
+        data.proposal?.status === "pending"
+          ? "outline outline-2 outline-amber-500 outline-offset-2"
+          : ""
+      } ${
         data.selected || data.connectPending
           ? "outline outline-2 outline-foreground outline-offset-2"
           : ""
@@ -257,6 +292,48 @@ function LiveViewBlockNode({ id, data }: NodeProps<LiveViewFlowNode>) {
           )}
           <span className="truncate">{slot.title}</span>
         </button>
+        {data.proposal && (
+          <div
+            data-testid={`canvas-proposal-controls-${slot.id}`}
+            className="nodrag nopan ml-1 flex shrink-0 items-center gap-1"
+          >
+            <span className="px-1 font-mono text-[9px] uppercase text-muted-foreground">
+              {data.proposal.kind}
+            </span>
+            <Button
+              data-testid={`canvas-proposal-accept-${slot.id}`}
+              type="button"
+              size="icon"
+              variant={
+                data.proposal.status === "accepted" ? "default" : "ghost"
+              }
+              className="h-6 w-6 rounded-none"
+              aria-label={`accept change to ${slot.title}`}
+              onClick={(event) => {
+                event.stopPropagation();
+                data.onProposalDecision("accepted");
+              }}
+            >
+              <Check className="h-3 w-3" />
+            </Button>
+            <Button
+              data-testid={`canvas-proposal-reject-${slot.id}`}
+              type="button"
+              size="icon"
+              variant={
+                data.proposal.status === "rejected" ? "destructive" : "ghost"
+              }
+              className="h-6 w-6 rounded-none"
+              aria-label={`reject change to ${slot.title}`}
+              onClick={(event) => {
+                event.stopPropagation();
+                data.onProposalDecision("rejected");
+              }}
+            >
+              <X className="h-3 w-3" />
+            </Button>
+          </div>
+        )}
       </div>
       <div className="nowheel h-[calc(100%-2rem)] overflow-auto border border-t-0 border-border [&>article]:min-h-full">
         <LiveViewCard
@@ -356,6 +433,9 @@ export function LiveViewCanvas({
   onAiEdit,
   onItemAction,
   onItemHandoff,
+  proposals = new Map(),
+  focusSlotId = null,
+  onProposalDecision = () => {},
 }: {
   document: BrainViewCanvasDocument;
   slots: BrainViewSlot[];
@@ -375,6 +455,18 @@ export function LiveViewCanvas({
     request: LiveViewItemActionRequest,
   ) => Promise<boolean>;
   onItemHandoff: (slot: BrainViewSlot, item: LiveViewListItem) => void;
+  proposals?: Map<
+    string,
+    {
+      kind: "add" | "update" | "remove";
+      status: "pending" | "accepted" | "rejected";
+    }
+  >;
+  focusSlotId?: string | null;
+  onProposalDecision?: (
+    slotId: string,
+    decision: "accepted" | "rejected",
+  ) => void;
 }) {
   const [tool, setTool] = useState<CanvasTool>("select");
   const [toolsOpen, setToolsOpen] = useState(false);
@@ -385,8 +477,40 @@ export function LiveViewCanvas({
   );
   const surfaceRef = useRef<HTMLDivElement | null>(null);
   const drawSessionRef = useRef<DrawSession | null>(null);
+  const focusAnimationFrameRef = useRef<number | null>(null);
+  const focusAnimationTimeoutRef = useRef<number | null>(null);
+  const [focusViewport, setFocusViewport] = useState<Viewport | null>(null);
+  const focusViewportRef = useRef<Viewport | null>(null);
   const latestDocumentRef = useRef(document);
+  latestDocumentRef.current = document;
+  const focusBlockGeometry = useMemo(() => {
+    if (!focusSlotId) return null;
+    const block = document.blocks.find(
+      (candidate) => candidate.slotId === focusSlotId,
+    );
+    return block
+      ? `${block.slotId}:${block.x}:${block.y}:${block.width}:${block.height}`
+      : null;
+  }, [document.blocks, focusSlotId]);
   const isMountedRef = useRef(true);
+  const callbacksRef = useRef({
+    onChange,
+    onFeedback,
+    onRegenerate,
+    onAiEdit,
+    onItemAction,
+    onItemHandoff,
+    onProposalDecision,
+  });
+  callbacksRef.current = {
+    onChange,
+    onFeedback,
+    onRegenerate,
+    onAiEdit,
+    onItemAction,
+    onItemHandoff,
+    onProposalDecision,
+  };
   const slotsById = useMemo(
     () => new Map(slots.map((slot) => [slot.id, slot])),
     [slots],
@@ -399,10 +523,6 @@ export function LiveViewCanvas({
     };
   }, []);
 
-  useEffect(() => {
-    latestDocumentRef.current = document;
-  }, [document]);
-
   const setCanvasSelection = useCallback((next: string[]) => {
     setSelection((current) => (sameSelection(current, next) ? current : next));
   }, []);
@@ -411,10 +531,122 @@ export function LiveViewCanvas({
     (next: BrainViewCanvasDocument, persist: boolean) => {
       if (!isMountedRef.current) return;
       latestDocumentRef.current = next;
-      onChange(next, { persist });
+      callbacksRef.current.onChange(next, { persist });
     },
-    [onChange],
+    [],
   );
+
+  const cancelFocusAnimation = useCallback(() => {
+    if (focusAnimationFrameRef.current !== null) {
+      window.cancelAnimationFrame(focusAnimationFrameRef.current);
+      focusAnimationFrameRef.current = null;
+    }
+    if (focusAnimationTimeoutRef.current !== null) {
+      window.clearTimeout(focusAnimationTimeoutRef.current);
+      focusAnimationTimeoutRef.current = null;
+    }
+    focusViewportRef.current = null;
+    if (isMountedRef.current) setFocusViewport(null);
+  }, []);
+
+  useEffect(() => {
+    if (!focusSlotId) {
+      cancelFocusAnimation();
+      return;
+    }
+    const block = latestDocumentRef.current.blocks.find(
+      (candidate) => candidate.slotId === focusSlotId,
+    );
+    const surface = surfaceRef.current?.getBoundingClientRect();
+    if (!block || !surface) return;
+    const zoom = clampCanvasZoom(
+      Math.min(
+        1,
+        (surface.width - 96) / block.width,
+        (surface.height - 96) / block.height,
+      ),
+    );
+    const from = { ...latestDocumentRef.current.viewport };
+    const to = {
+      zoom,
+      x: surface.width / 2 - (block.x + block.width / 2) * zoom,
+      y: surface.height / 2 - (block.y + block.height / 2) * zoom,
+    };
+    setCanvasSelection([canvasBlockNodeId(focusSlotId)]);
+    cancelFocusAnimation();
+
+    const reduceMotion =
+      window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+    if (reduceMotion) {
+      applyDocument(
+        {
+          ...latestDocumentRef.current,
+          viewport: interpolateCanvasFocusViewport(from, to, 1, true),
+        },
+        false,
+      );
+      return;
+    }
+
+    const startedAt = performance.now();
+    const updateFocusViewport = (viewport: Viewport) => {
+      focusViewportRef.current = viewport;
+      setFocusViewport(viewport);
+    };
+    const finishFocusAnimation = () => {
+      if (!isMountedRef.current) return;
+      if (focusAnimationFrameRef.current !== null) {
+        window.cancelAnimationFrame(focusAnimationFrameRef.current);
+        focusAnimationFrameRef.current = null;
+      }
+      if (focusAnimationTimeoutRef.current !== null) {
+        window.clearTimeout(focusAnimationTimeoutRef.current);
+        focusAnimationTimeoutRef.current = null;
+      }
+      const viewport = interpolateCanvasFocusViewport(from, to, 1);
+      focusViewportRef.current = viewport;
+      applyDocument(
+        {
+          ...latestDocumentRef.current,
+          viewport,
+        },
+        false,
+      );
+      focusViewportRef.current = null;
+      setFocusViewport(null);
+    };
+    const animate = (timestamp: number) => {
+      if (!isMountedRef.current) return;
+      const progress = Math.min(
+        1,
+        (timestamp - startedAt) / PROPOSAL_FOCUS_DURATION_MS,
+      );
+      updateFocusViewport(
+        interpolateCanvasFocusViewport(from, to, progress),
+      );
+      if (progress < 1) {
+        focusAnimationFrameRef.current = window.requestAnimationFrame(animate);
+      } else {
+        finishFocusAnimation();
+      }
+    };
+    focusAnimationFrameRef.current = window.requestAnimationFrame(animate);
+    // Background tabs and automated WebKit sessions can suspend animation
+    // frames mid-transition. Preserve smooth rAF updates in the foreground,
+    // but guarantee that focus still reaches its target on time.
+    focusAnimationTimeoutRef.current = window.setTimeout(() => {
+      focusAnimationTimeoutRef.current = null;
+      finishFocusAnimation();
+    }, PROPOSAL_FOCUS_DURATION_MS);
+  }, [
+    applyDocument,
+    cancelFocusAnimation,
+    focusBlockGeometry,
+    focusSlotId,
+    setCanvasSelection,
+  ]);
+
+  useEffect(() => cancelFocusAnimation, [cancelFocusAnimation]);
 
   const updateNodeGeometry = useCallback(
     (
@@ -600,6 +832,9 @@ export function LiveViewCanvas({
             feedback: slot.feedback?.current?.rating ?? null,
             feedbackCorrection: slot.feedback?.current?.correction ?? null,
             aiEditing: aiEditingSlotId === slot.id,
+            proposal: proposals.get(slot.id) ?? null,
+            onProposalDecision: (decision) =>
+              callbacksRef.current.onProposalDecision(slot.id, decision),
             tool,
             selected: selection.includes(id),
             connectPending: arrowSource === id,
@@ -607,11 +842,13 @@ export function LiveViewCanvas({
             onConnectIntent: connectNode,
             onResize: updateNodeGeometry,
             onFeedback: (rating, correction) =>
-              onFeedback(slot, rating, correction),
-            onRegenerate: () => onRegenerate(slot),
-            onAiEdit: (prompt) => onAiEdit(slot, prompt),
-            onItemAction: (request) => onItemAction(slot, request),
-            onItemHandoff: (item) => onItemHandoff(slot, item),
+              callbacksRef.current.onFeedback(slot, rating, correction),
+            onRegenerate: () => callbacksRef.current.onRegenerate(slot),
+            onAiEdit: (prompt) => callbacksRef.current.onAiEdit(slot, prompt),
+            onItemAction: (request) =>
+              callbacksRef.current.onItemAction(slot, request),
+            onItemHandoff: (item) =>
+              callbacksRef.current.onItemHandoff(slot, item),
           },
         },
       ];
@@ -667,11 +904,7 @@ export function LiveViewCanvas({
     connectNode,
     document.blocks,
     document.notes,
-    onAiEdit,
-    onFeedback,
-    onItemAction,
-    onItemHandoff,
-    onRegenerate,
+    proposals,
     refreshingSlotIds,
     selection,
     setCanvasSelection,
@@ -1077,6 +1310,7 @@ export function LiveViewCanvas({
 
   const handleViewportChange = useCallback(
     (viewport: Viewport) => {
+      if (focusViewportRef.current) return;
       const current = latestDocumentRef.current;
       if (
         current.viewport.x === viewport.x &&
@@ -1090,9 +1324,16 @@ export function LiveViewCanvas({
     [applyDocument],
   );
 
+  const handleMoveStart = useCallback(
+    (event: MouseEvent | TouchEvent | null) => {
+      if (isTrustedCanvasMove(event)) cancelFocusAnimation();
+    },
+    [cancelFocusAnimation],
+  );
+
   const handleMoveEnd = useCallback(
     (event: MouseEvent | TouchEvent | null, viewport: Viewport) => {
-      if (!event) return;
+      if (!isTrustedCanvasMove(event)) return;
       const current = latestDocumentRef.current;
       applyDocument({ ...current, viewport }, true);
     },
@@ -1127,7 +1368,7 @@ export function LiveViewCanvas({
           nodes={nodes}
           edges={edges}
           nodeTypes={CANVAS_NODE_TYPES}
-          viewport={document.viewport}
+          viewport={focusViewport ?? document.viewport}
           minZoom={0.25}
           maxZoom={2.5}
           snapToGrid
@@ -1165,6 +1406,7 @@ export function LiveViewCanvas({
             setCanvasSelection([]);
             setArrowSource(null);
           }}
+          onMoveStart={handleMoveStart}
           onViewportChange={handleViewportChange}
           onMoveEnd={handleMoveEnd}
         >
@@ -1366,17 +1608,11 @@ export function LiveViewCanvas({
             data-testid="canvas-tools-toggle"
             aria-label={`open canvas tools. ${activeTool.label} tool active`}
             aria-expanded="false"
-            className="flex h-8 max-w-32 items-center gap-2 px-2 font-mono text-[10px] uppercase tracking-wide text-muted-foreground transition-colors hover:bg-foreground hover:text-background focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-1 focus-visible:outline-foreground"
+            title={`open canvas tools · ${activeTool.label} active`}
+            className="flex h-8 w-8 items-center justify-center text-muted-foreground transition-colors hover:bg-foreground hover:text-background focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-1 focus-visible:outline-foreground"
             onClick={() => setToolsOpen(true)}
           >
-            <ActiveToolIcon
-              className="h-3.5 w-3.5 shrink-0"
-              aria-hidden="true"
-            />
-            <span className="truncate">
-              {tool === "select" ? "tools" : activeTool.label}
-            </span>
-            <ChevronRight className="h-3 w-3 shrink-0" aria-hidden="true" />
+            <ActiveToolIcon className="h-4 w-4 shrink-0" aria-hidden="true" />
           </button>
         )}
       </div>

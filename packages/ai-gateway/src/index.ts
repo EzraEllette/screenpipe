@@ -90,8 +90,7 @@ import {
 } from './services/cloudflare-ai-gateway';
 import { getCloudflareHostedChatUsage } from './services/cloudflare-ai-gateway-usage';
 import {
-	ARGUS_BACKGROUND_FALLBACK_MODEL,
-	shouldUseArgusBackgroundFallback,
+	resolveArgusBackgroundFallbackBody,
 } from './services/background-limit-fallback';
 // import { handleTTSWebSocketUpgrade } from './handlers/voice-ws';
 
@@ -107,6 +106,14 @@ export function shouldEnableArgusBackgroundFallback(
 	authResult: AuthResult,
 ): boolean {
 	return isBackgroundRequest(request) && hasPaidHostedAiPlan(authResult);
+}
+
+export function shouldEnableArgusSafetyRefusalFallback(
+	request: Request,
+	authResult: AuthResult,
+): boolean {
+	return shouldEnableArgusBackgroundFallback(request, authResult)
+		&& request.headers.get('x-screenpipe-workload')?.toLowerCase() === 'pipe';
 }
 
 type BoundedJsonRead =
@@ -617,14 +624,15 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 					status: 429,
 					code: creditsExhausted ? 'credits_exhausted' : 'daily_limit_exceeded',
 				};
-				if (shouldUseArgusBackgroundFallback({
+				const argusFallbackBody = resolveArgusBackgroundFallbackBody({
 					enabled: isBackgroundRequest(request) && hasPaidHostedAiPlan(authResult),
 					error: allowanceError,
 					body,
 					env,
-				})) {
+				});
+				if (argusFallbackBody) {
 					legacyArgusFallback = true;
-					body = { ...body, model: ARGUS_BACKGROUND_FALLBACK_MODEL };
+					body = argusFallbackBody;
 				} else return addCorsHeaders(createErrorResponse(429, JSON.stringify({
 					...buildDailyUsageLimitError(
 						usage,
@@ -704,14 +712,15 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 						status: costReservation.response.status,
 					});
 					const allowanceError = { status: costReservation.response.status, code: rejectionReason };
-					if (shouldUseArgusBackgroundFallback({
+					const argusFallbackBody = resolveArgusBackgroundFallbackBody({
 						enabled: isBackgroundRequest(request) && hasPaidHostedAiPlan(authResult),
 						error: allowanceError,
 						body,
 						env,
-					})) {
+					});
+					if (argusFallbackBody) {
 						legacyArgusFallback = true;
-						body = { ...body, model: ARGUS_BACKGROUND_FALLBACK_MODEL };
+						body = argusFallbackBody;
 					} else {
 						if (freeChatLease) await releaseFreeChatLease(env, freeChatLease);
 						return costReservation.response;
@@ -761,6 +770,7 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 						efficientOnly: getHostedAiPlan(authResult.accountPlan) !== 'business',
 						gatewayContext,
 						argusBackgroundFallback: shouldEnableArgusBackgroundFallback(request, authResult),
+						argusSafetyRefusalFallback: shouldEnableArgusSafetyRefusalFallback(request, authResult),
 					},
 				);
 				if (response.status === 429 && body.stream) {

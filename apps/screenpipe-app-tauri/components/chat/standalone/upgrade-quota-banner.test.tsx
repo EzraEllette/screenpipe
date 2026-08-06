@@ -69,6 +69,7 @@ describe("UpgradeQuotaBanner", () => {
       resets_at: "2026-07-31T00:00:00.000Z",
       upsell_banner: true,
       upgrade_eligible: true,
+      cost_limit_reached: false,
     };
     mocks.gateState = false;
     mocks.seenEligibility = undefined;
@@ -272,6 +273,41 @@ describe("UpgradeQuotaBanner", () => {
       ),
     );
     expect(mocks.openBusinessUpgradeSurface).not.toHaveBeenCalled();
+  });
+
+  it("offers the upgrade inline (no modal) from polled legacy cost exhaustion", async () => {
+    mocks.usageState = {
+      ...mocks.usageState,
+      tier: "subscribed",
+      remaining: 999_876,
+      upsell_banner: false,
+      upgrade_eligible: false,
+      cost_limit_reached: true,
+      hosted_ai: {
+        plan: "business",
+        allowances: null,
+        upgrade: {
+          requiredPlan: "business_max",
+          upgradeUrl:
+            "https://screenpipe.com/account/billing?target_plan=pro_max&interval=month",
+          resetsAt: null,
+        },
+      },
+    };
+
+    render(<UpgradeQuotaBanner />);
+
+    expect(screen.getByTestId("hosted-ai-cost-limit-banner")).toBeTruthy();
+    // The blocking dialog is gone — the banner carries the recovery action.
+    expect(screen.queryByTestId("ai-usage-limit-modal")).toBeNull();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Upgrade to Business Max" }),
+    );
+    await waitFor(() =>
+      expect(mocks.openExternalUrl).toHaveBeenCalledWith(
+        "https://screenpipe.com/account/billing?target_plan=pro_max&interval=month",
+      ),
+    );
   });
 
   it("uses the server's Basic target for a Free-plan limit", async () => {

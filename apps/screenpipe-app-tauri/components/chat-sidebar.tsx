@@ -105,13 +105,23 @@ import { toast } from "@/components/ui/use-toast";
 import { normalizeQueueEventPayload } from "@/lib/chat-queue-controls";
 import { Skeleton } from "@/components/ui/skeleton";
 import { localFetch } from "@/lib/api";
-import { pipeExecutionToConversation } from "@/lib/pipe-ndjson-to-chat";
+import {
+  materializePipeExecutionConversation,
+  pipeConversationNeedsRefresh,
+  pipeExecutionErrorMessage,
+  pipeExecutionFinishedAtMs,
+} from "@/lib/pipe-conversation";
 import {
   buildPipeExecutionHistoryPage,
+  isPipeExecutionDeleted,
   isTerminalPipeExecutionStatus,
+  pipeConversationDeletionKey,
+  pipeExecutionConversationId,
+  pipeExecutionDeletionKey,
   shouldReloadPipeExecutionHistory,
+  uniquePipeExecutionConversations,
 } from "@/lib/pipe-execution-status";
-import { parsePipeSessionId, pipeSessionId } from "@/lib/events/types";
+import { parsePipeSessionId } from "@/lib/events/types";
 import type { ChatConversation } from "@/lib/hooks/use-settings";
 import {
   PIPES_SIDEBAR_COLLAPSED_EVENT,
@@ -152,45 +162,7 @@ interface SidebarPipeExecution {
   stdout: string;
   stderr: string;
   error_message: string | null;
-}
-
-function pipeExecutionConversation(execution: SidebarPipeExecution): ChatConversation {
-  const conversation = pipeExecutionToConversation(
-    execution.pipe_name,
-    execution.id,
-    execution.stdout || execution.stderr || "",
-    execution.started_at,
-  );
-  const startedAt = execution.started_at ?? execution.finished_at ?? new Date().toISOString();
-  const finishedAtMs = execution.finished_at
-    ? new Date(execution.finished_at).getTime()
-    : conversation.updatedAt;
-
-  conversation.id = pipeSessionId(execution.pipe_name, execution.id);
-  conversation.kind = "pipe-run";
-  conversation.titleSource = "user";
-  conversation.pipeContext = {
-    pipeName: execution.pipe_name,
-    executionId: execution.id,
-    startedAt,
-  };
-  conversation.updatedAt = Number.isFinite(finishedAtMs)
-    ? finishedAtMs
-    : conversation.updatedAt;
-
-  if (conversation.messages.length === 0) {
-    const detail =
-      execution.error_message?.trim() ||
-      execution.stderr?.trim() ||
-      `scheduled task execution ${execution.status}`;
-    conversation.messages = [{
-      id: `pipe-execution-status-${execution.id}`,
-      role: "assistant",
-      content: detail,
-      timestamp: conversation.updatedAt,
-    }];
-  }
-  return conversation;
+  conversation_id: string | null;
 }
 
 function mergePipeRunRecords(
@@ -434,11 +406,11 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
       );
       unlistenFns.push(unlistenSaved);
 
-      const unlistenDeleted = await listen<{ id: string }>("chat-deleted", (event) => {
-        const id = event.payload?.id;
+      const unlistenDeleted = await listen<{ id: string; deletionKey?: string }>("chat-deleted", (event) => {
+        const { id, deletionKey } = event.payload ?? {};
         if (!id) return;
         if (parsePipeSessionId(id)) {
-          deletedPipeExecutionIdsRef.current.add(id);
+          deletedPipeExecutionIdsRef.current.add(deletionKey ?? id);
           persistDeletedPipeExecutionIds(deletedPipeExecutionIdsRef.current);
         }
         useChatStore.getState().actions.drop(id);
@@ -670,23 +642,47 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
         hasMore,
         nextCursor,
       } = buildPipeExecutionHistoryPage(executions, PIPE_RUNS_PER_GROUP);
-      const visibleExecutions = terminalExecutions.filter(
-        (execution) =>
-          !deletedPipeExecutionIdsRef.current.has(
-            pipeSessionId(execution.pipe_name, execution.id),
-          ),
+      const alreadyLoadedIds = append
+        ? new Set((loadedPipeRuns[pipeName] ?? []).map((run) => run.id))
+        : undefined;
+      const visibleExecutions = uniquePipeExecutionConversations(
+        terminalExecutions,
+        alreadyLoadedIds,
+      ).filter(
+        (execution) => !isPipeExecutionDeleted(
+          execution,
+          deletedPipeExecutionIdsRef.current,
+        ),
       );
       const candidates = await Promise.all(visibleExecutions.map(async (execution) => {
-        const sessionId = pipeSessionId(execution.pipe_name, execution.id);
+        const sessionId = pipeExecutionConversationId(execution);
         executionMetadataRef.current.set(sessionId, execution);
         const savedConversation = await loadConversationFile(sessionId);
-        const conversation = savedConversation ?? pipeExecutionConversation(execution);
+        const conversation = savedConversation ??
+          materializePipeExecutionConversation(execution);
         if (!savedConversation) syntheticExecutionIdsRef.current.add(sessionId);
         const meta = conversationMetaFromJson(conversation);
         if (!meta) return null;
         executionConversationsRef.current.set(conversation.id, conversation);
+        const record = sessionRecordFromMeta(meta);
+        const executionUpdatedAt = pipeExecutionFinishedAtMs(execution);
+        const needsRefresh = pipeConversationNeedsRefresh(
+          savedConversation,
+          execution,
+        );
+        record.updatedAt = Math.max(record.updatedAt, executionUpdatedAt);
+        record.pipeContext = {
+          pipeName: execution.pipe_name,
+          executionId: execution.id,
+          startedAt:
+            execution.started_at ?? execution.finished_at ?? undefined,
+        };
+        if (needsRefresh) record.lastContentAt = executionUpdatedAt;
+        const executionError = pipeExecutionErrorMessage(execution);
+        record.status = executionError ? "error" : "idle";
+        record.lastError = executionError;
         return {
-          record: sessionRecordFromMeta(meta),
+          record,
           belongsInPipeGroup: !meta.hidden && !meta.pinned,
         };
       }));
@@ -983,23 +979,16 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
     metadata: SidebarPipeExecution,
   ): Promise<boolean> => {
     const existing = await loadConversationFile(id);
-    if (existing) return true;
+    if (!pipeConversationNeedsRefresh(existing, metadata)) return true;
 
     let fullExecution: SidebarPipeExecution | undefined;
     try {
-      const params = new URLSearchParams({
-        limit: "1",
-        before_id: String(metadata.id + 1),
-      });
       const response = await localFetch(
-        `/pipes/${encodeURIComponent(metadata.pipe_name)}/executions?${params.toString()}`,
+        `/pipes/${encodeURIComponent(metadata.pipe_name)}/executions/${metadata.id}`,
       );
       if (response.ok) {
         const payload = await response.json();
-        fullExecution = Array.isArray(payload.data)
-          ? (payload.data as SidebarPipeExecution[])
-              .find((execution) => execution.id === metadata.id)
-          : undefined;
+        fullExecution = payload?.data as SidebarPipeExecution | undefined;
       }
     } catch {
       // Report the same bounded failure below. Do not persist the metadata-only
@@ -1017,7 +1006,10 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
       return false;
     }
 
-    const conversation = pipeExecutionConversation(fullExecution);
+    const conversation = materializePipeExecutionConversation(
+      fullExecution,
+      existing,
+    );
     executionConversationsRef.current.set(id, conversation);
     await saveConversationFile(conversation);
     syntheticExecutionIdsRef.current.delete(id);
@@ -1112,8 +1104,15 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
   };
 
   const handleDeleteConfirmed = async (id: string) => {
-    if (parsePipeSessionId(id)) {
-      deletedPipeExecutionIdsRef.current.add(id);
+    const parsedPipeSession = parsePipeSessionId(id);
+    let pipeDeletionKey: string | undefined;
+    if (parsedPipeSession) {
+      const executionMetadata = executionMetadataRef.current.get(id);
+      const session = useChatStore.getState().sessions[id];
+      pipeDeletionKey = executionMetadata
+        ? pipeExecutionDeletionKey(executionMetadata)
+        : pipeConversationDeletionKey(id, session?.pipeContext?.executionId) ?? id;
+      deletedPipeExecutionIdsRef.current.add(pipeDeletionKey);
       persistDeletedPipeExecutionIds(deletedPipeExecutionIdsRef.current);
       executionConversationsRef.current.delete(id);
       executionMetadataRef.current.delete(id);
@@ -1126,7 +1125,7 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
       // ignore
     }
     try {
-      await emit("chat-deleted", { id });
+      await emit("chat-deleted", { id, deletionKey: pipeDeletionKey });
     } catch {
       // ignore
     }
@@ -1293,8 +1292,8 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
                     "opacity-0 group-hover/recents:opacity-100",
                     (recentsCollapsed || !hasAnythingToView) && "hidden",
                     onViewAll
-                      ? "text-muted-foreground/70 hover:text-muted-foreground cursor-pointer"
-                      : "text-muted-foreground/30 cursor-default"
+                      ? "sidebar-text-secondary hover:text-foreground cursor-pointer"
+                      : "text-foreground/[0.35] cursor-default"
                   )}
                   onClick={(e) => {
                     e.stopPropagation();
@@ -1323,7 +1322,7 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
                   ))}
                 </div>
               ) : recents.length === 0 ? (
-                <div className="px-2.5 py-2 text-xs text-muted-foreground/70 italic">
+                <div className="px-2.5 py-2 text-xs sidebar-text-secondary italic">
                   {pinned.length === 0 && pipes.length === 0
                     ? "no chats yet — click + to start"
                     : "no recent chats"}
@@ -1359,7 +1358,7 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
                 collapsed={pipesCollapsed}
                 onCollapsedChange={updatePipesCollapsed}
                 headerAction={
-                  <Timer className="h-3 w-3 text-muted-foreground/60" aria-hidden />
+                  <Timer className="h-3 w-3 sidebar-text-tertiary" aria-hidden />
                 }
                 bodyClassName=""
               >
@@ -1370,7 +1369,7 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
                     ))}
                   </div>
                 ) : pipeItems.length === 0 ? (
-                  <div className="px-2.5 py-2 text-xs text-muted-foreground/70 italic">
+                  <div className="px-2.5 py-2 text-xs sidebar-text-secondary italic">
                     no scheduled runs yet
                   </div>
                 ) : pipeItems.map((item) => (
@@ -1402,7 +1401,7 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
                 {pipeInventoryHasMore && (
                   <button
                     type="button"
-                    className="w-full px-2.5 py-1.5 text-left text-[10px] uppercase tracking-wider text-muted-foreground/70 hover:text-foreground transition-colors"
+                    className="w-full px-2.5 py-1.5 text-left text-[10px] uppercase tracking-wider sidebar-text-secondary hover:text-foreground transition-colors"
                     onClick={() => void fetchPipeInventory(true)}
                     disabled={pipeInventoryLoadingMore}
                   >
@@ -1810,6 +1809,7 @@ function Section({
     <div className="flex flex-col min-h-0">
       <button
         type="button"
+        data-testid={`sidebar-section-${title}`}
         onClick={() => onCollapsedChange(!collapsed)}
         className={cn(
           // Light header row — avoid the "boxed section" look.
@@ -1824,8 +1824,8 @@ function Section({
         <span
           className={cn(
             "text-[10px] uppercase tracking-wider flex-1",
-            tone === "subtle" ? "text-muted-foreground/55" : "text-muted-foreground/70",
-            "group-hover/section:text-muted-foreground group-focus-within/section:text-muted-foreground"
+            "sidebar-text-tertiary",
+            "group-hover/section:text-foreground/[0.75] group-focus-within/section:text-foreground/[0.75]"
           )}
         >
           <span className="inline-flex items-center gap-1">
@@ -1842,16 +1842,16 @@ function Section({
                 <ChevronRight
                   className={cn(
                     "h-3 w-3",
-                    tone === "subtle" ? "text-muted-foreground/55" : "text-muted-foreground/70",
-                    "group-hover/section:text-muted-foreground group-focus-visible/section:text-muted-foreground"
+                    "sidebar-text-tertiary",
+                    "group-hover/section:text-foreground/[0.75] group-focus-visible/section:text-foreground/[0.75]"
                   )}
                 />
               ) : (
                 <ChevronDown
                   className={cn(
                     "h-3 w-3",
-                    tone === "subtle" ? "text-muted-foreground/55" : "text-muted-foreground/70",
-                    "group-hover/section:text-muted-foreground group-focus-visible/section:text-muted-foreground"
+                    "sidebar-text-tertiary",
+                    "group-hover/section:text-foreground/[0.75] group-focus-visible/section:text-foreground/[0.75]"
                   )}
                 />
               )}
@@ -1863,7 +1863,7 @@ function Section({
           <span
             className={cn(
               "text-[10px] tabular-nums",
-              tone === "subtle" ? "text-muted-foreground/40" : "text-muted-foreground/60"
+              "sidebar-text-tertiary"
             )}
           >
             {count}
@@ -1991,13 +1991,13 @@ function RecentsBody({
                 )}
                 aria-expanded={!isCollapsed}
               >
-                <span className="text-[10px] uppercase tracking-wider text-muted-foreground/60 flex-1">
+                <span className="text-[10px] uppercase tracking-wider sidebar-text-tertiary flex-1">
                   {section.title}
                 </span>
                 {isCollapsed ? (
-                  <ChevronRight className="h-3 w-3 shrink-0 text-muted-foreground/55" aria-hidden />
+                  <ChevronRight className="h-3 w-3 shrink-0 sidebar-text-tertiary" aria-hidden />
                 ) : (
-                  <ChevronDown className="h-3 w-3 shrink-0 text-muted-foreground/55" aria-hidden />
+                  <ChevronDown className="h-3 w-3 shrink-0 sidebar-text-tertiary" aria-hidden />
                 )}
               </button>
             )}
@@ -2068,14 +2068,14 @@ function PipeGroupRow({
         onClick={onToggleExpand}
         className={cn(
           "group/pipe w-full flex items-center gap-2 px-2.5 py-1 rounded-md text-left select-none",
-          "text-muted-foreground hover:bg-muted/20 transition-colors"
+          "sidebar-text-secondary hover:bg-muted/20 transition-colors"
         )}
         aria-expanded={expanded}
       >
         <span className="truncate flex-1 text-xs">{item.title}</span>
         <span className="relative inline-flex items-center justify-end shrink-0 w-6 h-4">
           {lastRunAge && !expanded && (
-            <span className="absolute inset-0 flex items-center justify-end text-[10px] tabular-nums text-muted-foreground/60 opacity-100 group-hover/pipe:opacity-0 transition-opacity duration-150">
+            <span className="absolute inset-0 flex items-center justify-end text-[10px] tabular-nums sidebar-text-tertiary opacity-100 group-hover/pipe:opacity-0 transition-opacity duration-150">
               {lastRunAge}
             </span>
           )}
@@ -2084,9 +2084,9 @@ function PipeGroupRow({
             expanded ? "opacity-100" : "opacity-0 group-hover/pipe:opacity-100"
           )}>
             {expanded ? (
-              <ChevronDown className="h-3 w-3 text-muted-foreground/60" aria-hidden />
+              <ChevronDown className="h-3 w-3 sidebar-text-tertiary" aria-hidden />
             ) : (
-              <ChevronRight className="h-3 w-3 text-muted-foreground/60" aria-hidden />
+              <ChevronRight className="h-3 w-3 sidebar-text-tertiary" aria-hidden />
             )}
           </span>
         </span>
@@ -2100,7 +2100,7 @@ function PipeGroupRow({
               ))}
             </div>
           ) : runsLoaded && item.sessions.length === 0 ? (
-            <div className="px-2 py-1.5 text-[11px] text-muted-foreground/60 italic">
+            <div className="px-2 py-1.5 text-[11px] sidebar-text-tertiary italic">
               no visible runs
             </div>
           ) : item.sessions.map((s) => (
@@ -2123,7 +2123,7 @@ function PipeGroupRow({
           {runsLoaded && hasMoreRuns && onLoadMore && (
             <button
               type="button"
-              className="w-full px-2 py-1.5 text-left text-[10px] uppercase tracking-wider text-muted-foreground/70 hover:text-foreground transition-colors"
+              className="w-full px-2 py-1.5 text-left text-[10px] uppercase tracking-wider sidebar-text-secondary hover:text-foreground transition-colors"
               onClick={onLoadMore}
               disabled={runsLoading}
             >
@@ -2477,11 +2477,11 @@ export function SidebarChatRow({
           ? "border-foreground bg-foreground/[0.08] text-foreground"
           : disableHover
             ? tone === "subtle"
-              ? "border-transparent text-muted-foreground/75"
-              : "border-transparent text-muted-foreground"
+              ? "border-transparent sidebar-text-tertiary"
+              : "border-transparent sidebar-text-secondary"
             : tone === "subtle"
-              ? "border-transparent text-muted-foreground/75 hover:bg-muted/12"
-              : "border-transparent text-muted-foreground hover:bg-muted/20"
+              ? "border-transparent sidebar-text-tertiary hover:bg-muted/12"
+              : "border-transparent sidebar-text-secondary hover:bg-muted/20"
       )}
       data-testid={`chat-row-${session.id}`}
       data-current={isCurrent ? "true" : undefined}
@@ -2497,7 +2497,7 @@ export function SidebarChatRow({
         }}
       >
         {!insideGroup && (session.kind === "pipe-run" || session.kind === "pipe-watch") && (
-          <Timer className="h-3 w-3 shrink-0 text-muted-foreground/60" aria-hidden />
+          <Timer className="h-3 w-3 shrink-0 sidebar-text-tertiary" aria-hidden />
         )}
         <span
           className={cn(
@@ -2507,8 +2507,8 @@ export function SidebarChatRow({
               : isCurrent
                 ? "font-medium text-foreground"
                 : tone === "subtle"
-                  ? "text-muted-foreground/70"
-                : "text-muted-foreground"
+                  ? "sidebar-text-tertiary"
+                : "sidebar-text-secondary"
           )}
         >
           {session.streamingTitle || (isInjectedTitle(session.title) ? undefined : session.title) || "untitled"}
@@ -2648,7 +2648,7 @@ function RowRightSignal({
     if (age) {
       return {
         content: (
-          <span className="text-[10px] text-muted-foreground/60 tabular-nums">
+          <span className="text-[10px] sidebar-text-tertiary tabular-nums">
             {age}
           </span>
         ),
