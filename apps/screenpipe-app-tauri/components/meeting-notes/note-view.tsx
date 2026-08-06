@@ -121,6 +121,7 @@ import {
   type MeetingSummaryExecution,
   type MeetingSummaryLifecycle,
 } from "./meeting-summary-lifecycle";
+import { MeetingSummaryTransition } from "./meeting-summary-transition";
 
 const AUTOSAVE_DEBOUNCE_MS = 800;
 
@@ -204,6 +205,7 @@ export function NoteView({
   );
   const [summaryLifecycle, setSummaryLifecycle] =
     useState<MeetingSummaryLifecycle>({ kind: "idle" });
+  const [summaryRevealKey, setSummaryRevealKey] = useState(0);
   const [meetingCtx, setMeetingCtx] = useState<MeetingContext | null>(null);
   const [transcriptOpen, setTranscriptOpenState] = useState(() =>
     resolveTranscriptOpen(
@@ -229,6 +231,11 @@ export function NoteView({
     summaryLifecycle.kind === "finalizing" ||
     summaryLifecycle.kind === "queued" ||
     summaryLifecycle.kind === "running";
+  const summaryRevealPendingRef = useRef(false);
+
+  useEffect(() => {
+    if (summaryWorking) summaryRevealPendingRef.current = true;
+  }, [summaryWorking]);
 
   useEffect(() => {
     let cancelled = false;
@@ -292,7 +299,18 @@ export function NoteView({
           refreshedSummaryExecutionRef.current = next.execution.id;
           const meetingResponse = await localFetch(`/meetings/${meeting.id}`);
           if (meetingResponse.ok && !cancelled) {
-            onSavedRef.current((await meetingResponse.json()) as MeetingRecord);
+            const updatedMeeting =
+              (await meetingResponse.json()) as MeetingRecord;
+            if (
+              summaryRevealPendingRef.current &&
+              updatedMeeting.note !== meeting.note
+            ) {
+              summaryRevealPendingRef.current = false;
+              setSummaryRevealKey((key) => key + 1);
+            } else {
+              summaryRevealPendingRef.current = false;
+            }
+            onSavedRef.current(updatedMeeting);
           }
         }
 
@@ -327,6 +345,7 @@ export function NoteView({
     isLive,
     meeting.id,
     meeting.meeting_end,
+    meeting.note,
     summaryPipeSlug,
   ]);
 
@@ -645,7 +664,13 @@ export function NoteView({
     }
     if (last.note === note) {
       const next = meeting.note ?? "";
-      if (next !== note) setNote(next);
+      if (next !== note) {
+        setNote(next);
+        if (summaryRevealPendingRef.current) {
+          summaryRevealPendingRef.current = false;
+          setSummaryRevealKey((key) => key + 1);
+        }
+      }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [meeting.title, meeting.attendees, meeting.note]);
@@ -1242,6 +1267,11 @@ export function NoteView({
       : autoSummaryEnabled === false
         ? "stop meeting"
         : "stop and summarize";
+  const summaryTransitionPhase = summaryWorking
+    ? summaryLifecycle.kind === "finalizing"
+      ? "finalizing"
+      : "writing"
+    : null;
 
   return (
     <div ref={rootRef} className="relative flex h-full flex-col bg-background">
@@ -1365,14 +1395,23 @@ export function NoteView({
             )}
           </div>
 
-          <NoteEditor
-            ref={noteEditorRef}
-            key={meeting.id}
-            value={note}
-            onChange={setNote}
-            placeholder={'write notes, or type "/" for blocks'}
-            className="mt-10 [&_.ProseMirror]:min-h-[50vh] [&_.ProseMirror]:text-[15px] [&_.ProseMirror]:leading-7"
-          />
+          <div className="mt-10">
+            <NoteEditor
+              ref={noteEditorRef}
+              key={meeting.id}
+              value={note}
+              onChange={setNote}
+              placeholder={'write notes, or type "/" for blocks'}
+              readOnly={summaryWorking}
+              summaryRevealKey={summaryRevealKey}
+              className="[&_.ProseMirror]:min-h-[50vh] [&_.ProseMirror]:text-[15px] [&_.ProseMirror]:leading-7"
+            />
+            <MeetingSummaryTransition
+              phase={summaryTransitionPhase}
+              transcriptOpen={transcriptOpen}
+              onTranscriptToggle={() => setTranscriptOpen((open) => !open)}
+            />
+          </div>
 
           {meetingCtx?.activity && (
             <div className="mt-10 space-y-6">
@@ -1445,7 +1484,7 @@ export function NoteView({
                       summaryLifecycle.kind === "queued" ||
                       summaryLifecycle.kind === "running" ||
                       summaryLifecycle.kind === "completed"
-                    ? "border-[#4A6B00] bg-[#C7FF3E] text-black"
+                    ? "border-foreground bg-foreground text-background"
                     : summaryLifecycle.kind === "failed"
                     ? "bg-amber-500/15 text-amber-700 dark:text-amber-300"
                     : "bg-muted text-muted-foreground",
@@ -1511,17 +1550,17 @@ export function NoteView({
                 {!isLive && (
                   <MeetingControlTooltip label={summaryActionLabel}>
                     <Button
-                      variant="outline"
+                      variant={
+                        summaryLifecycle.kind === "idle" ||
+                        summaryLifecycle.kind === "failed"
+                          ? "default"
+                          : "outline"
+                      }
                       size="sm"
                       onClick={handleSummaryAction}
                       disabled={summaryWorking || !canSummarizeMeeting}
                       aria-label={summaryActionLabel}
-                      className={cn(
-                        "h-9 w-9 rounded-none p-0",
-                        (summaryLifecycle.kind === "idle" ||
-                          summaryLifecycle.kind === "failed") &&
-                          "border-[#4A6B00] bg-[#C7FF3E] text-black hover:border-black hover:bg-black hover:text-[#C7FF3E]",
-                      )}
+                      className="h-9 w-9 rounded-none p-0"
                     >
                       {summaryWorking ? (
                         <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -1599,11 +1638,7 @@ export function NoteView({
                       onClick={() => void handleStopClick()}
                       disabled={stopping || savingBeforeStop}
                       aria-label={stopActionLabel}
-                      className={cn(
-                        "h-9 w-9 rounded-none border-[#4A6B00] bg-[#C7FF3E] p-0 text-black hover:border-black hover:bg-black hover:text-[#C7FF3E] active:bg-black disabled:border-border disabled:bg-muted/40 disabled:text-muted-foreground disabled:opacity-100",
-                        autoSummaryEnabled === false &&
-                          "border-foreground bg-foreground text-background hover:bg-background hover:text-foreground",
-                      )}
+                      className="h-9 w-9 rounded-none p-0 disabled:border-border disabled:bg-muted/40 disabled:text-muted-foreground disabled:opacity-100"
                     >
                       {stopping || savingBeforeStop ? (
                         <Loader2 className="h-3.5 w-3.5 animate-spin" />

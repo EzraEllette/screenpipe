@@ -1421,6 +1421,18 @@ fn ensure_screenpipe_skill(project_dir: &str) -> Result<(), String> {
         .map_err(|e| format!("Failed to install screenpipe skills: {}", e))
 }
 
+/// Stage the Enterprise-only team skill outside Pi's auto-discovery tree.
+/// Consumer builds return `None` without touching this path; the Enterprise
+/// app passes the returned file explicitly with `--skill` for this process.
+fn ensure_enterprise_team_skill(project_dir: &str) -> Result<Option<std::path::PathBuf>, String> {
+    use screenpipe_core::agents::pi::PiExecutor;
+    let skill_root = std::path::Path::new(project_dir)
+        .join(".screenpipe")
+        .join("enterprise-skills");
+    PiExecutor::ensure_screenpipe_team_skill(&skill_root)
+        .map_err(|e| format!("Failed to install Enterprise team skill: {}", e))
+}
+
 /// Ensure the web-search extension exists in the project's .pi/extensions directory
 /// Install or remove the web-search extension based on provider.
 /// Web search uses the screenpipe cloud backend (Gemini + Google Search),
@@ -1444,7 +1456,9 @@ fn ensure_web_search_extension(
         std::fs::create_dir_all(&ext_dir)
             .map_err(|e| format!("Failed to create extensions dir: {}", e))?;
 
-        let ext_content = include_str!("../assets/extensions/web-search.ts");
+        let api_url = crate::config::screenpipe_ai_gateway_url()?;
+        let ext_content = include_str!("../assets/extensions/web-search.ts")
+            .replace(SCREENPIPE_API_URL, &api_url);
         std::fs::write(&ext_path, ext_content)
             .map_err(|e| format!("Failed to write web-search extension: {}", e))?;
 
@@ -1586,6 +1600,10 @@ pub struct PiProviderConfig {
     /// Optional system prompt from AI preset (appended to Pi's built-in system prompt)
     #[serde(default)]
     pub system_prompt: Option<String>,
+    /// Optional exact Pi tool allowlist for bounded agent surfaces. `None`
+    /// preserves the normal Chat tool surface; an empty list disables tools.
+    #[serde(default)]
+    pub allowed_tools: Option<Vec<String>>,
 }
 
 fn default_max_tokens() -> i32 {
@@ -1641,6 +1659,23 @@ fn pi_launch_fingerprint(
         Option::<u8>::None.hash(&mut hasher);
     }
     hasher.finish()
+}
+
+fn apply_pi_tool_allowlist(command: &mut Command, provider_config: Option<&PiProviderConfig>) {
+    let Some(allowed_tools) = provider_config.and_then(|config| config.allowed_tools.as_ref())
+    else {
+        return;
+    };
+    let allowed_tools = allowed_tools
+        .iter()
+        .map(|tool| tool.trim())
+        .filter(|tool| !tool.is_empty())
+        .collect::<Vec<_>>();
+    if allowed_tools.is_empty() {
+        command.arg("--no-tools");
+    } else {
+        command.arg("--tools").arg(allowed_tools.join(","));
+    }
 }
 
 fn model_supports_reasoning(provider: &str, model: &str) -> bool {
@@ -1700,9 +1735,18 @@ fn anthropic_model_requires_adaptive_thinking(model: &str) -> bool {
 /// Returns a map of provider entries to merge into the existing models.json.
 /// We merge instead of rebuilding from scratch to avoid a race condition where
 /// concurrent pipes overwrite each other's providers.
+#[cfg(test)]
 async fn build_models_json(
     user_token: Option<&str>,
     provider_config: Option<&PiProviderConfig>,
+) -> serde_json::Value {
+    build_models_json_with_api_url(user_token, provider_config, SCREENPIPE_API_URL).await
+}
+
+async fn build_models_json_with_api_url(
+    user_token: Option<&str>,
+    provider_config: Option<&PiProviderConfig>,
+    api_url: &str,
 ) -> serde_json::Value {
     let mut providers_map = serde_json::Map::new();
 
@@ -1710,9 +1754,9 @@ async fn build_models_json(
     // literal; the logged-out fallback must use `$` env-var syntax (pi >= 0.80
     // treats bare names as literal keys).
     let api_key_value = user_token.unwrap_or("$SCREENPIPE_API_KEY");
-    let models = screenpipe_cloud_models(SCREENPIPE_API_URL, user_token).await;
+    let models = screenpipe_cloud_models(api_url, user_token).await;
     let screenpipe_provider = json!({
-        "baseUrl": SCREENPIPE_API_URL,
+        "baseUrl": api_url,
         "api": "openai-completions",
         "apiKey": api_key_value,
         "authHeader": true,
@@ -1855,7 +1899,9 @@ async fn ensure_pi_config(
     std::fs::create_dir_all(&config_dir)
         .map_err(|e| format!("Failed to create pi config dir: {}", e))?;
 
-    let new_providers = build_models_json(user_token, provider_config).await;
+    let api_url = crate::config::screenpipe_ai_gateway_url()?;
+    let new_providers =
+        build_models_json_with_api_url(user_token, provider_config, &api_url).await;
 
     // Merge into existing models.json to avoid race conditions with concurrent pipes
     let models_path = config_dir.join("models.json");
@@ -1981,6 +2027,35 @@ pub async fn pi_start(
 ) -> Result<PiInfo, String> {
     let sid = session_id.unwrap_or_else(|| "chat".to_string());
     pi_start_inner(app, &state, &sid, project_dir, user_token, provider_config).await
+}
+
+/// Start a private Pi session and submit its first prompt as one operation.
+/// Foreground surfaces that only care about agent events should not have to
+/// round-trip through WebView between process readiness and prompt acceptance.
+#[tauri::command]
+#[specta::specta]
+pub async fn pi_start_and_prompt(
+    app: AppHandle,
+    state: State<'_, PiState>,
+    session_id: String,
+    project_dir: String,
+    user_token: Option<String>,
+    provider_config: Option<PiProviderConfig>,
+    message: String,
+) -> Result<String, String> {
+    let started = pi_start_inner(
+        app.clone(),
+        state.inner(),
+        &session_id,
+        project_dir,
+        user_token,
+        provider_config,
+    )
+    .await?;
+    if !started.running {
+        return Err("Pi did not start".to_string());
+    }
+    pi_prompt_inner(&app, state.inner(), &session_id, message, None, None).await
 }
 
 /// Kill orphan Pi RPC processes left over from a previous app crash.
@@ -2153,6 +2228,7 @@ pub async fn pi_start_inner(
 
     // Ensure screenpipe skills exist in project
     ensure_screenpipe_skill(&project_dir)?;
+    let enterprise_team_skill = ensure_enterprise_team_skill(&project_dir)?;
 
     if !use_acp {
         // These extensions and package/config checks belong to the native Pi
@@ -2365,6 +2441,13 @@ pub async fn pi_start_inner(
             "--model",
             &pi_model,
         ]);
+        if let Some(skill_path) = enterprise_team_skill.as_ref() {
+            command.arg("--skill").arg(skill_path);
+            info!(
+                "Injected Enterprise team skill for native Pi session from {:?}",
+                skill_path
+            );
+        }
         if extension_safe_mode {
             warn!(
                 "Starting Pi in extension safe mode for '{}'; third-party extension packages are disabled",
@@ -2372,6 +2455,7 @@ pub async fn pi_start_inner(
             );
             apply_pi_extension_safe_mode(&mut command, &project_dir);
         }
+        apply_pi_tool_allowlist(&mut command, provider_config.as_ref());
         command
     };
 
@@ -3003,8 +3087,10 @@ pub async fn pi_start_inner(
             debug!("Pi readiness timeout after {:?} (pid: {}), checking if alive", PI_READY_TIMEOUT, pid);
         }
     }
-    {
-        let mut pool = state.0.lock().await;
+    // This is a best-effort diagnostic only. The stdout reader can briefly own
+    // the session pool while the child becomes ready; never block the command
+    // response (and therefore the first prompt) waiting for that lock.
+    if let Ok(mut pool) = state.0.try_lock() {
         if let Some(m) = pool.sessions.get_mut(&sid) {
             if let Some(ref mut child) = m.child {
                 match child.try_wait() {
@@ -3038,6 +3124,11 @@ pub async fn pi_start_inner(
                 }
             }
         }
+    } else {
+        debug!(
+            "Pi post-start exit check skipped while the session pool is busy (pid: {}, session: {})",
+            pid, sid
+        );
     }
 
     // Pi agent bug (pi-mono#2461): first RPC prompt fails with "startsWith" error.
@@ -3101,12 +3192,7 @@ async fn await_prompt_start(
 
 async fn open_secret_store_for_connection_context() -> Option<screenpipe_secrets::SecretStore> {
     let data_dir = screenpipe_core::paths::default_screenpipe_data_dir();
-    let db_path = data_dir.join("db.sqlite");
-    let secret_key = match crate::secrets::get_key_if_encryption_enabled() {
-        crate::secrets::KeyResult::Found(k) => Some(k),
-        _ => None,
-    };
-    screenpipe_secrets::SecretStore::open(&db_path.to_string_lossy(), secret_key)
+    screenpipe_secrets::SecretStore::open_for_data_dir_with_vault_key(&data_dir)
         .await
         .ok()
 }
@@ -3223,13 +3309,32 @@ pub async fn pi_prompt(
     display_preview: Option<String>,
 ) -> Result<String, String> {
     let sid = session_id.unwrap_or_else(|| "chat".to_string());
-    let mut conversation = acquire_pi_conversation_lease(state.inner(), &sid).await?;
+    pi_prompt_inner(
+        &app,
+        state.inner(),
+        &sid,
+        message,
+        images,
+        display_preview,
+    )
+    .await
+}
+
+async fn pi_prompt_inner(
+    app: &AppHandle,
+    state: &PiState,
+    sid: &str,
+    message: String,
+    images: Option<Vec<PiImageContent>>,
+    display_preview: Option<String>,
+) -> Result<String, String> {
+    let mut conversation = acquire_pi_conversation_lease(state, sid).await?;
     let message = conversation.prepare_prompt(message);
 
     let preview = display_preview.unwrap_or_else(|| message.clone());
-    let message = attach_foreground_connections_context(&app, &sid, message).await;
+    let message = attach_foreground_connections_context(app, sid, message).await;
     #[cfg(feature = "e2e")]
-    emit_e2e_pi_wire_prompt(&app, &sid, "prompt", &message);
+    emit_e2e_pi_wire_prompt(app, sid, "prompt", &message);
     let cmd = build_prompt_command(message, images)?;
     let (queue_id, rx) = conversation
         .queue
@@ -3240,7 +3345,7 @@ pub async fn pi_prompt(
             false,
         )
         .await?;
-    await_prompt_start(state.inner(), &sid, rx).await?;
+    await_prompt_start(state, sid, rx).await?;
     conversation.mark_synced();
     Ok(queue_id)
 }
@@ -4290,24 +4395,13 @@ pub async fn cleanup_pi(state: &PiState) {
 }
 
 /// Find bun executable (shared by pi_install and ensure_pi_installed_background)
-fn find_bun_executable() -> Option<String> {
+pub(crate) fn find_bun_executable() -> Option<String> {
     // Pre-AVX2 CPU: the bundled/stock bun.exe requires AVX2 and dies with
-    // 0xC000001D at spawn. Prefer the baseline build screenpipe-core
-    // downloads; if it isn't on disk yet, kick the background download and
-    // fall through to the stock bun for this run (the next spawn picks the
-    // baseline up). Mirrors screenpipe_core::agents::pi::find_bun_executable.
+    // 0xC000001D at spawn. Delegate to screenpipe-core, which waits for the
+    // verified baseline build and fails closed instead of returning stock bun.
     #[cfg(windows)]
     if !screenpipe_core::cpu_features::has_avx2() {
-        if let Some(baseline) = screenpipe_core::agents::pi::baseline_bun_path() {
-            if baseline.exists() {
-                info!(
-                    "Found baseline bun (non-AVX2 CPU) at: {}",
-                    baseline.display()
-                );
-                return Some(baseline.to_string_lossy().to_string());
-            }
-        }
-        screenpipe_core::agents::pi::spawn_baseline_bun_download();
+        return screenpipe_core::agents::pi::find_bun_executable();
     }
 
     // First check next to our own executable (bundled bun in AppData/Local/screenpipe/)
@@ -4613,6 +4707,7 @@ mod tests {
             max_tokens: 4096,
             max_context_chars: Some(512_000),
             system_prompt: Some("system context".to_string()),
+            allowed_tools: None,
         };
         let first = super::pi_launch_fingerprint("/tmp/pi-chat", Some("token"), Some(&config));
         let duplicate = super::pi_launch_fingerprint("/tmp/pi-chat", Some("token"), Some(&config));
@@ -5810,7 +5905,9 @@ error: InstallFailed extracting tarball"#;
 
     // -- build_models_json tests --
 
-    use super::{build_models_json, resolve_pi_model, PiProviderConfig};
+    use super::{
+        build_models_json, build_models_json_with_api_url, resolve_pi_model, PiProviderConfig,
+    };
 
     fn make_provider_config(provider: &str, model: &str) -> PiProviderConfig {
         PiProviderConfig {
@@ -5823,6 +5920,7 @@ error: InstallFailed extracting tarball"#;
             max_tokens: 4096,
             max_context_chars: Some(512_000),
             system_prompt: None,
+            allowed_tools: None,
         }
     }
 
@@ -5857,6 +5955,16 @@ error: InstallFailed extracting tarball"#;
         assert_eq!(sp["apiKey"], "$SCREENPIPE_API_KEY");
         assert_eq!(sp["authHeader"], true);
         assert!(sp["models"].as_array().unwrap().len() > 0);
+    }
+
+    #[tokio::test]
+    async fn test_build_models_json_uses_resolved_gateway_url() {
+        let config =
+            build_models_json_with_api_url(None, None, "http://127.0.0.1:8787/v1").await;
+        assert_eq!(
+            config["providers"]["screenpipe"]["baseUrl"],
+            "http://127.0.0.1:8787/v1"
+        );
     }
 
     #[tokio::test]
@@ -5944,6 +6052,34 @@ error: InstallFailed extracting tarball"#;
         assert!(args.iter().any(|arg| arg.ends_with("mcp-bridge.ts")));
         assert!(args.iter().any(|arg| arg.ends_with("live-views.ts")));
         assert!(!args.iter().any(|arg| arg.ends_with("third-party.ts")));
+    }
+
+    #[test]
+    fn test_tool_allowlist_restricts_bounded_pi_sessions() {
+        let mut config = make_provider_config("screenpipe-cloud", "auto");
+        config.allowed_tools = Some(vec!["screenpipe_live_view".to_string()]);
+        let mut command = Command::new("pi");
+        super::apply_pi_tool_allowlist(&mut command, Some(&config));
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert_eq!(args, vec!["--tools", "screenpipe_live_view"]);
+    }
+
+    #[test]
+    fn test_empty_tool_allowlist_disables_all_pi_tools() {
+        let mut config = make_provider_config("screenpipe-cloud", "auto");
+        config.allowed_tools = Some(vec![]);
+        let mut command = Command::new("pi");
+        super::apply_pi_tool_allowlist(&mut command, Some(&config));
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert_eq!(args, vec!["--no-tools"]);
     }
 
     #[tokio::test]

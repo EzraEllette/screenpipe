@@ -512,9 +512,9 @@ async fn main() {
     let store_path = screenpipe_core::paths::default_screenpipe_data_dir().join("store.bin");
     let store_json = std::fs::read(&store_path).ok().and_then(|data| {
         if data.len() >= 8 && &data[..8] == b"SPSTORE1" {
-            // Encrypted store — try to decrypt with keychain key
-            // Only attempt if encryption is enabled (file being encrypted is the signal)
-            let key = match secrets::get_key_if_encryption_enabled() {
+            // The encrypted file is authoritative: every reader asks the OS
+            // vault for its existing key instead of relying on a separate flag.
+            let key = match secrets::get_key() {
                 secrets::KeyResult::Found(k) => k,
                 _ => return None,
             };
@@ -1218,16 +1218,32 @@ async fn main() {
                 store.recording.disable_audio = true;
                 info!("E2E seed: audio disabled");
             }
+            if e2e_flags.iter().any(|f| f == "sck-capture-hang-once") {
+                // The CoreGraphics recovery path cannot enforce SCK window-id
+                // exclusions. This isolated lane deliberately removes filters
+                // so it can prove the availability fallback without weakening
+                // the production fail-closed privacy rule.
+                store.recording.ignored_windows.clear();
+                store.recording.included_windows.clear();
+                info!("E2E seed: window filters cleared for unfiltered CoreGraphics recovery probe");
+            }
             if e2e_flags
                 .iter()
-                .any(|f| f == "recording-health-return-race")
+                .any(|f| {
+                    matches!(
+                        f.as_str(),
+                        "recording-health-return-race"
+                            | "capture-loop-silent-once"
+                            | "focus-cold-heartbeat"
+                    )
+                })
             {
                 store.show_restart_notifications = true;
                 store.extra.insert(
                     "restartNotificationsDefaultedOff".to_string(),
                     serde_json::Value::Bool(true),
                 );
-                info!("E2E seed: recording health alerts enabled for return-race regression");
+                info!("E2E seed: recording health alerts enabled for liveness regression");
             }
             if e2e_flags.iter().any(|f| f == "event-trigger-capture") {
                 store.recording.capture_on_keystroke = Some(true);
@@ -1298,8 +1314,8 @@ async fn main() {
             // hit a split: the engine (server_core) reads its SecretStore from
             // `config.data_dir` (the custom path) while OAuth token writes
             // (`open_secret_store`, chatgpt_oauth, …) went to the default
-            // `~/.screenpipe`. Tokens landed in one db.sqlite and were read from
-            // another → "no credentials found … cannot authenticate" 401s on
+            // `~/.screenpipe`. Tokens landed in one data directory and were read
+            // from another → "no credentials found … cannot authenticate" 401s on
             // every Microsoft 365 / Google / ChatGPT call, reconnecting forever
             // never helping. Setting the env var here (before any OAuth callback
             // can fire) makes `default_screenpipe_data_dir()` self-consistent and
@@ -1523,6 +1539,20 @@ async fn main() {
 
             let app_ui_hidden = crate::enterprise_policy::is_app_ui_hidden();
             let from_autostart = launched_from_autostart();
+
+            // The old connection slide blocked onboarding on work that can be
+            // done safely and idempotently by Rust. During first-run setup,
+            // wire detected local AI tools in the background; after onboarding
+            // completes this no longer runs, so an explicit Settings removal
+            // remains removed on future launches.
+            if !onboarding_store.is_completed && !app_ui_hidden {
+                let local_api = recording::local_api_context_from_app(&app.handle());
+                skills::connect_detected_ai_tools_in_background(
+                    store.recording.api_auth,
+                    local_api.port,
+                );
+            }
+
             // Enterprise hidden-UI deployments always run headless with the
             // recorder only, regardless of user settings or onboarding state.
             let headless_startup = app_ui_hidden
@@ -2090,15 +2120,12 @@ async fn main() {
                 // A new process must preserve the same fail-closed state as the
                 // process that observed the hard fault. Start the notification
                 // subscriber first, then publish recovery-required immediately.
-                tauri::async_runtime::spawn(async {
-                    crate::db_relaunch::surface_manual_recovery(
-                        "durable SQLite quarantine was present at app launch",
-                    )
-                    .await;
+                tauri::async_runtime::spawn(async move {
+                    crate::db_relaunch::surface_quarantined_recovery_at_launch(&launch_db_path)
+                        .await;
                 });
                 if !app_ui_hidden && !headless_startup {
-                    crate::db_recovery_notifications::prompt_for_quarantined_database(
-                        app_handle.clone(),
+                    crate::db_recovery_notifications::notify_quarantined_database(
                         data_dir.clone(),
                     );
                 }

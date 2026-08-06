@@ -14,7 +14,12 @@ mock.module('@clerk/backend', () => ({
 	verifyToken: verifyTokenMock,
 }));
 
-const { handleRequest } = await import('../index');
+const {
+	handleRequest,
+	shouldEnableArgusBackgroundFallback,
+	shouldEnableArgusSafetyRefusalFallback,
+} = await import('../index');
+const { resolveLatencyClass } = await import('../utils/latency');
 
 describe('/v1/chat/completions free-plan route policy', () => {
 	const originalFetch = globalThis.fetch;
@@ -40,12 +45,24 @@ describe('/v1/chat/completions free-plan route policy', () => {
 		DB: {
 			prepare: (sql: string) => ({
 				bind: (...values: unknown[]) => ({
+					sql,
+					values,
 					first: async () => sql.includes('INSERT OR IGNORE INTO usage')
 						? { reservation_key: values[0] }
 						: null,
 					run: async () => ({ success: true, meta: { changes: 1 } }),
 				}),
 			}),
+			batch: async (statements: Array<{ sql: string; values: unknown[] }>) => {
+				const last = statements.at(-1);
+				return statements.map((_, index) => ({
+					success: true,
+					meta: { changes: 1 },
+					results: index === statements.length - 1 && last?.sql.includes('hosted_ai_settlements')
+						? [{ settlement_id: last.values[0], applied_at: new Date().toISOString() }]
+						: [],
+				}));
+			},
 		},
 	} as unknown as Env;
 	const ctx = {
@@ -145,6 +162,46 @@ describe('/v1/chat/completions free-plan route policy', () => {
 		// the machine identity cleared both human-user guards and paid-model gates.
 		expect(response.status).toBe(503);
 		expect(await response.text()).not.toContain('authentication_required');
+	});
+
+	it('keeps the paid background Argus rescue enabled when the flex-tier kill switch is off', () => {
+		const backgroundRequest = request({
+			'x-screenpipe-latency': 'background',
+		});
+		const flexDisabledEnv = {
+			...env,
+			FLEX_TIER_ENABLED: 'false',
+		} as unknown as Env;
+
+		// The flex switch may force standard provider latency, but it must not
+		// turn a paid Pipe into interactive traffic for allowance rescue.
+		expect(resolveLatencyClass(backgroundRequest, {
+			model: 'auto',
+			messages: [{ role: 'user', content: 'hello' }],
+		}, flexDisabledEnv)).toBe('interactive');
+		expect(shouldEnableArgusBackgroundFallback(backgroundRequest, {
+			isValid: true,
+			tier: 'subscribed',
+			accountPlan: 'basic',
+			deviceId: 'pipe-device',
+		})).toBe(true);
+		expect(shouldEnableArgusSafetyRefusalFallback(backgroundRequest, {
+			isValid: true,
+			tier: 'subscribed',
+			accountPlan: 'basic',
+			deviceId: 'pipe-device',
+		})).toBe(false);
+
+		const pipeRequest = request({
+			'x-screenpipe-latency': 'background',
+			'x-screenpipe-workload': 'pipe',
+		});
+		expect(shouldEnableArgusSafetyRefusalFallback(pipeRequest, {
+			isValid: true,
+			tier: 'subscribed',
+			accountPlan: 'basic',
+			deviceId: 'pipe-device',
+		})).toBe(true);
 	});
 
 	it('blocks a free hosted background request instead of trusting its header', async () => {
@@ -444,33 +501,246 @@ describe('/v1/chat/completions free-plan route policy', () => {
 		expect(await errorCode(response)).toBe('cost_control_unavailable');
 	});
 
-	it('returns the Max capacity tier from the authenticated usage route', async () => {
-		verifyTokenMock.mockImplementation(async () => ({ sub: 'user_pro_max' }) as any);
-		globalThis.fetch = mock(async () => new Response(JSON.stringify({
-			success: true,
-			user: {
-				clerk_id: 'user_pro_max',
-				cloud_subscribed: true,
-				app_entitled: true,
-				subscription_plan: 'pro_max',
-				entitlement: { active: true, plan: 'pro_max', features: { app: true } },
-			},
-		}), { status: 200 })) as typeof fetch;
+	it.each([
+		['Free', 'free', 'free', 'free', false],
+		['Basic', 'standard', 'standard', 'basic', false],
+		['Business', 'pro', 'pro', 'business', true],
+		['Max', 'pro', 'pro_max', 'business_max', true],
+		['Ultra', 'pro', 'pro_ultra', 'business_ultra', true],
+	] as const)('reports Cloudflare %s utilization without exposing provider amounts', async (
+		_label,
+		subscriptionPlan,
+		billingPlan,
+		cloudflarePlan,
+		cloudSubscribed,
+	) => {
+		const gatewayId = `hosted-chat-${cloudflarePlan}-test`;
+		globalThis.fetch = mock(async (input: RequestInfo | URL, init?: RequestInit) => {
+			const url = String(input);
+			if (url === 'https://screenpipe.com/api/user') {
+				return new Response(JSON.stringify({
+					success: true,
+					user: {
+						clerk_id: 'user_cloudflare_usage',
+						cloud_subscribed: cloudSubscribed,
+						app_entitled: cloudflarePlan !== 'free',
+						subscription_plan: subscriptionPlan,
+						billing_plan: billingPlan,
+						entitlement: cloudflarePlan === 'free'
+							? null
+							: { active: true, plan: subscriptionPlan, features: { app: true } },
+					},
+				}), { status: 200 });
+			}
+			if (url.startsWith('https://supabase.test/rest/v1/user_credits')) {
+				return new Response('[]', { status: 200 });
+			}
+			if (url.includes(`/ai-gateway/gateways/${gatewayId}`)) {
+				return new Response(JSON.stringify({
+					success: true,
+					result: {
+						spend_limits: {
+							enabled: true,
+							rules: [{
+								id: `${cloudflarePlan}-auto`,
+								enabled: true,
+								limit: 8,
+								limitType: 'cost',
+								window: 2_592_000,
+								technique: 'fixed',
+								metadata: {
+									user_id: { mode: 'partition' },
+									plan: { mode: 'filter', values: [cloudflarePlan] },
+									lane: { mode: 'filter', values: ['auto'] },
+								},
+							}],
+						},
+					},
+				}), { status: 200 });
+			}
+			if (url.endsWith('/graphql')) {
+				const request = JSON.parse(String(init?.body)) as {
+					variables: { metadata: string };
+				};
+				const hashedUserId = request.variables.metadata.replaceAll('%', '');
+				return new Response(JSON.stringify({
+					data: {
+						viewer: {
+							accounts: [{
+								window0: [{
+									dimensions: {
+										metadataRaw: JSON.stringify({
+											user_id: hashedUserId,
+											plan: cloudflarePlan,
+											lane: 'auto',
+											workload: 'interactive',
+										}),
+									},
+									sum: { cost: 8 },
+								}],
+							}],
+						},
+					},
+				}), { status: 200 });
+			}
+			throw new Error(`unexpected fetch: ${url}`);
+		}) as typeof fetch;
+		const cloudflareEnv = {
+			...env,
+			HOSTED_CHAT_GATEWAY_MODE: 'cloudflare',
+			CLOUDFLARE_AI_GATEWAY_ID: gatewayId,
+			CLOUDFLARE_ACCOUNT_ID: '9850df1eb8fd807eb8e06f4057b473f1',
+			CLOUDFLARE_API_TOKEN: 'read-only-token',
+			DB: { prepare: () => { throw new Error('legacy cost storage unavailable'); } },
+		} as unknown as Env;
 
 		const response = await handleRequest(new Request('https://gateway.test/v1/usage', {
-			headers: { Authorization: 'Bearer eyJ.pro-max.paid' },
-		}), env, ctx);
-		const body = await response.json() as Record<string, unknown>;
+			headers: { Authorization: 'Bearer eyJ.cloudflare.usage' },
+		}), cloudflareEnv, ctx);
+		const body = await response.json() as any;
+		const expectedUpgrade = {
+			free: {
+				requiredPlan: 'basic',
+				upgradeUrl: 'https://screenpi.pe/account/billing',
+			},
+			basic: {
+				requiredPlan: 'business',
+				upgradeUrl: 'https://screenpi.pe/account/billing',
+			},
+			business: {
+				requiredPlan: 'business_max',
+				upgradeUrl: 'https://screenpipe.com/account/billing?target_plan=pro_max&interval=month',
+			},
+			business_max: {
+				requiredPlan: 'business_ultra',
+				upgradeUrl: 'https://screenpipe.com/account/billing?target_plan=pro_ultra&interval=month',
+			},
+			business_ultra: null,
+		}[cloudflarePlan];
 
 		expect(response.status).toBe(200);
-		expect(body).toMatchObject({
-			tier: 'business_max',
-			limit_today: 120,
-			remaining: 120,
-			upsell_banner: false,
-			upgrade_eligible: false,
-			cost_limit_reached: false,
+		expect(body.upsell_banner).toBe(expectedUpgrade !== null);
+		expect(body.cost_limit_reached).toBe(true);
+		expect(body.upgrade_eligible).toBe(expectedUpgrade !== null);
+		expect(body.hosted_ai).toMatchObject({
+			plan: cloudflarePlan,
+			allowance_managed_by: 'cloudflare',
+			included_credits: null,
+			used_credits: null,
+			remaining_credits: null,
+			allowances: [{
+				lane: 'auto',
+				used_percent: 100,
+				remaining_percent: 0,
+			}],
 		});
+		expect(body.hosted_ai.required_plan).toBe(expectedUpgrade?.requiredPlan ?? null);
+		expect(body.hosted_ai.upgrade_url).toBe(expectedUpgrade?.upgradeUrl ?? null);
+		expect(JSON.stringify(body.hosted_ai)).not.toMatch(/(?:limit|used|remaining)_usd/);
+		expect(Object.keys(body.hosted_ai.allowances[0]).sort()).toEqual([
+			'lane',
+			'remaining_percent',
+			'resets_at',
+			'technique',
+			'used_percent',
+			'window_seconds',
+		]);
+	});
+
+	it('bypasses legacy paid admission and reaches Gateway routing when D1 is unavailable', async () => {
+		let gatewayCalls = 0;
+		const d1Statements: string[] = [];
+		globalThis.fetch = mock(async (input: RequestInfo | URL) => {
+			const url = String(input);
+			if (url === 'https://screenpipe.com/api/user') {
+				return new Response(JSON.stringify({
+					success: true,
+					user: {
+						clerk_id: 'user_cloudflare_chat',
+						cloud_subscribed: false,
+						app_entitled: true,
+						subscription_plan: 'standard',
+						entitlement: { active: true, plan: 'standard', features: { app: true } },
+					},
+				}), { status: 200 });
+			}
+			throw new Error(`unexpected fetch: ${url}`);
+		}) as typeof fetch;
+		const cloudflareEnv = {
+			...env,
+			HOSTED_CHAT_GATEWAY_MODE: 'cloudflare',
+			CLOUDFLARE_AI_GATEWAY_ID: 'hosted-chat-test',
+			OPENAI_API_KEY: '',
+			AI: {
+				gateway: () => ({
+					getUrl: async () => {
+						gatewayCalls++;
+						throw Object.assign(new Error('test reached Cloudflare Gateway routing'), { status: 502 });
+					},
+				}),
+			},
+			// trackUsage/reserveDailyCostCap would fail before inference. The
+			// completed-cost write is intentionally best-effort in this mode.
+			DB: {
+				prepare: (query: string) => {
+					d1Statements.push(query);
+					throw new Error('legacy admission storage unavailable');
+				},
+			},
+		} as unknown as Env;
+
+		const response = await handleRequest(
+			request(
+				{ Authorization: 'Bearer eyJ.cloudflare.chat' },
+				'/v1/chat/completions',
+				'gpt-5.6-luna',
+			),
+			cloudflareEnv,
+			ctx,
+		);
+
+		// A legacy admission read would return cost_control_unavailable before
+		// provider routing. The intentional 502 proves Gateway resolution ran.
+		expect(response.status).toBe(502);
+		expect(gatewayCalls).toBeGreaterThan(0);
+		expect(await response.text()).not.toContain('cost_control_unavailable');
+		expect(d1Statements.some((query) => query.includes('INSERT INTO cost_daily'))).toBe(false);
+	});
+
+	it('returns canonical Max and Ultra capacity from desktop-compatible user responses', async () => {
+		for (const [billingPlan, usageTier, dailyLimit] of [
+			['pro_max', 'business_max', 120],
+			['pro_ultra', 'business_ultra', 240],
+		] as const) {
+			const clerkId = `user_${billingPlan}`;
+			verifyTokenMock.mockImplementation(async () => ({ sub: clerkId }) as any);
+			globalThis.fetch = mock(async () => new Response(JSON.stringify({
+				success: true,
+				user: {
+					clerk_id: clerkId,
+					cloud_subscribed: true,
+					app_entitled: true,
+					subscription_plan: 'pro',
+					billing_plan: billingPlan,
+					entitlement: { active: true, plan: 'pro', features: { app: true } },
+				},
+			}), { status: 200 })) as typeof fetch;
+
+			const response = await handleRequest(new Request('https://gateway.test/v1/usage', {
+				headers: { Authorization: `Bearer eyJ.${billingPlan}.paid` },
+			}), env, ctx);
+			const body = await response.json() as Record<string, unknown>;
+
+			expect(response.status).toBe(200);
+			expect(body).toMatchObject({
+				tier: usageTier,
+				limit_today: dailyLimit,
+				remaining: dailyLimit,
+				upsell_banner: false,
+				upgrade_eligible: false,
+				cost_limit_reached: false,
+			});
+		}
 	});
 
 	it('normalizes a removed model before gating and reaches the fallback provider', async () => {
