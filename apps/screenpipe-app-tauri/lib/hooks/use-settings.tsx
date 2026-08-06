@@ -340,8 +340,9 @@ export type Settings = SettingsStore & {
 	disableKeyboardCapture?: boolean;
 	/** Skip mouse-click rows in the UI recorder. Defaults to false (click capture ON) — clicks carry no text payload and drive workflow/task mining. Clicks still wake event-driven capture when disabled. */
 	disableClickCapture?: boolean;
-	/** Experimental: capture System Audio via CoreAudio Process Tap (macOS 14.4+) instead of ScreenCaptureKit.
-	 *  On by default. Ignored on macOS <14.4 and non-macOS — falls back to SCK. */
+	/** Capture System Audio via CoreAudio Process Tap on macOS 14.4+ instead of ScreenCaptureKit.
+	 *  Desktop migration V3 enables it automatically. Initial tap failures fall back to SCK;
+	 *  ignored on macOS <14.4 and non-macOS. */
 	experimentalCoreaudioSystemAudio?: boolean;
 	/** Beta ("Smart recording" in the app): during meetings, capture only the meeting app's audio
 	 *  and the microphone it actually uses (per-process piggyback). Off by default. Engages in ANY
@@ -792,7 +793,7 @@ let DEFAULT_SETTINGS: Settings = {
 			disableClickCapture: false,
 			keepComputerAwake: false,
 			showRestartNotifications: false,
-			experimentalCoreaudioSystemAudio: true,
+			experimentalCoreaudioSystemAudio: false,
 			experimentalMeetingPiggyback: false,
 			alwaysRecordBluetoothMic: false,
 			windowsInputAecEnabled: false,
@@ -854,6 +855,24 @@ export function normalizeSettingsArrays(settings: Settings): boolean {
 	}
 
 	return changed;
+}
+
+type CoreaudioTapMigrationSettings = {
+	experimentalCoreaudioSystemAudio: boolean;
+	coreaudioTapMigrationV4?: boolean;
+};
+
+/**
+ * Restore ScreenCaptureKit as the safe default exactly once. The marker is
+ * written with the change so a later explicit CLI/managed opt-in is preserved.
+ */
+export function applyCoreaudioTapOptInMigration(
+	settings: CoreaudioTapMigrationSettings,
+): boolean {
+	if (settings.coreaudioTapMigrationV4) return false;
+	settings.experimentalCoreaudioSystemAudio = false;
+	settings.coreaudioTapMigrationV4 = true;
+	return true;
 }
 
 // Store singleton
@@ -1077,12 +1096,10 @@ function createSettingsStore() {
 			needsUpdate = true;
 		}
 
-		// One-time migration (V3 — supersedes V2): flip CoreAudio Process Tap
-		// back ON. The VoiceProcessing AudioUnit issue from V2 is resolved;
-		// toggle removed from UI, auto-enabled when available (#5236).
-		if (!(settings as any).coreaudioTapMigrationV3) {
-			settings.experimentalCoreaudioSystemAudio = true;
-			(settings as any).coreaudioTapMigrationV3 = true;
+		// V4 supersedes the unsafe V3 rollout. Process Tap can initialize while
+		// still receiving zeroed VoiceProcessing AudioUnit buffers in calls, so
+		// successful initialization is not evidence that it is safe by default.
+		if (applyCoreaudioTapOptInMigration(settings as CoreaudioTapMigrationSettings)) {
 			needsUpdate = true;
 		}
 

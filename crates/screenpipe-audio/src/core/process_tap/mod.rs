@@ -9,11 +9,9 @@ pub struct DefaultAudioExclusion {
     pub name: &'static str,
 }
 
-/// Safe macOS defaults with stable bundle identifiers. Windows exclusions use
-/// one absolute executable path, so they cannot share a portable multi-app
-/// default; Linux has no process-tap exclusion support.
-#[cfg(target_os = "macos")]
-pub const DEFAULT_AUDIO_EXCLUSIONS: &[DefaultAudioExclusion] = &[
+/// Safe macOS defaults with stable bundle identifiers. Kept platform-neutral
+/// so the exact product list is covered by tests on every CI host.
+pub const MACOS_DEFAULT_AUDIO_EXCLUSIONS: &[DefaultAudioExclusion] = &[
     DefaultAudioExclusion {
         bundle_id: "com.spotify.client",
         name: "Spotify",
@@ -28,18 +26,22 @@ pub const DEFAULT_AUDIO_EXCLUSIONS: &[DefaultAudioExclusion] = &[
     },
 ];
 
+/// Windows exclusions use one absolute executable path, so they cannot share a
+/// portable multi-app default; Linux has no process-tap exclusion support.
+#[cfg(target_os = "macos")]
+pub const DEFAULT_AUDIO_EXCLUSIONS: &[DefaultAudioExclusion] = MACOS_DEFAULT_AUDIO_EXCLUSIONS;
+
 #[cfg(not(target_os = "macos"))]
 pub const DEFAULT_AUDIO_EXCLUSIONS: &[DefaultAudioExclusion] = &[];
 
 #[cfg(test)]
 mod default_exclusion_tests {
-    use super::DEFAULT_AUDIO_EXCLUSIONS;
+    use super::{DEFAULT_AUDIO_EXCLUSIONS, MACOS_DEFAULT_AUDIO_EXCLUSIONS};
 
     #[test]
-    fn defaults_match_the_platform_contract() {
-        #[cfg(target_os = "macos")]
+    fn macos_defaults_include_common_music_apps() {
         assert_eq!(
-            DEFAULT_AUDIO_EXCLUSIONS
+            MACOS_DEFAULT_AUDIO_EXCLUSIONS
                 .iter()
                 .map(|app| (app.bundle_id, app.name))
                 .collect::<Vec<_>>(),
@@ -49,6 +51,12 @@ mod default_exclusion_tests {
                 ("com.github.th-ch.youtube-music", "YouTube Music"),
             ]
         );
+    }
+
+    #[test]
+    fn defaults_match_the_platform_contract() {
+        #[cfg(target_os = "macos")]
+        assert_eq!(DEFAULT_AUDIO_EXCLUSIONS.len(), 3);
 
         #[cfg(not(target_os = "macos"))]
         assert!(DEFAULT_AUDIO_EXCLUSIONS.is_empty());

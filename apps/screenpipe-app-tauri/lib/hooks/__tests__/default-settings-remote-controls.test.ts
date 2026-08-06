@@ -14,7 +14,7 @@ describe("default settings: remote controls", () => {
     const settings = createDefaultSettingsObject();
 
     expect(settings.enableSemanticContext).toBe(false);
-    expect(settings.experimentalCoreaudioSystemAudio).toBe(true);
+    expect(settings.experimentalCoreaudioSystemAudio).toBe(false);
     expect(settings.experimentalMeetingPiggyback).toBe(false);
     expect(settings.filterMusic).toBe(true);
     expect(settings.prioritizeInputLatency).toBe(false);

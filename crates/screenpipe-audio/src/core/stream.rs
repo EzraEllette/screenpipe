@@ -76,8 +76,8 @@ pub struct AudioStream {
     stream_control: mpsc::Sender<StreamControl>,
     stream_thread: Option<Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>>,
     pub is_disconnected: Arc<AtomicBool>,
-    /// True when this stream is backed by the cpal/ScreenCaptureKit path,
-    /// false when it is backed by the CoreAudio Process Tap.
+    /// True when this stream is backed by the cpal/ScreenCaptureKit path
+    /// (the default), false when it is backed by the CoreAudio Process Tap.
     /// The macOS System Audio liveness watchdog ([`super::sck_output_watchdog`])
     /// keys off a display-anchor signal that is meaningless for the tap (which
     /// is anchored to the default output *device*, not a display), so it must
@@ -133,11 +133,12 @@ impl StreamControl {
 impl AudioStream {
     /// Build an AudioStream for `device`.
     ///
-    /// `use_coreaudio_tap` is a user-level backend preference. When true AND
+    /// `use_coreaudio_tap` is a user-level experimental flag. When true AND
     /// the target is System Audio on macOS 14.4+, the stream is backed by a
     /// CoreAudio Process Tap (no ScreenCaptureKit session). In every other
     /// case (flag off, non-macOS, macOS <14.4, mic input, specific output)
-    /// the existing cpal/SCK path runs unchanged.
+    /// the existing cpal/SCK path runs unchanged — existing users see no
+    /// behavior change.
     pub async fn from_device(
         device: Arc<AudioDevice>,
         is_running: Arc<AtomicBool>,
@@ -175,8 +176,8 @@ impl AudioStream {
         let (audio_config, stream_thread, is_sck_backed) = {
             // macOS 14.4+: try CoreAudio Process Tap for System Audio.
             // Bypasses SCK display enumeration which fails after sleep/wake.
-            // Gated behind `use_coreaudio_tap`; unsupported macOS versions
-            // stay on SCK even though the user-level preference defaults on.
+            // Gated behind `use_coreaudio_tap` so the SCK path stays the
+            // default until the experimental flag is explicitly turned on.
             #[cfg(target_os = "macos")]
             let use_process_tap = {
                 use super::device::{DeviceType, MACOS_OUTPUT_AUDIO_DEVICE_NAME};

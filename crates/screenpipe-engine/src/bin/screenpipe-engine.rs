@@ -90,10 +90,7 @@ async fn doctor_check_system_audio_capture() -> bool {
                 terminal
             );
             eprintln!(
-                "    normal recording uses the CoreAudio Process Tap by default where supported;"
-            );
-            eprintln!(
-                "    this check verifies that the ScreenCaptureKit fallback is also available."
+                "    if you only need a workaround: screenpipe record --experimental-coreaudio-system-audio"
             );
             eprintln!("    underlying error: {e}");
             false

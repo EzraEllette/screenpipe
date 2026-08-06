@@ -446,9 +446,10 @@ pub struct RecordArgs {
     #[arg(long, action = ArgAction::Set, num_args = 0..=1, default_value_t = true, default_missing_value = "true")]
     pub use_system_default_audio: bool,
 
-    /// [macOS 14.4+] Capture System Audio via CoreAudio Process Tap instead of
-    /// ScreenCaptureKit. On by default; ignored on older macOS and non-macOS.
-    #[arg(long, action = ArgAction::Set, num_args = 0..=1, default_value_t = true, default_missing_value = "true")]
+    /// [experimental, macOS 14.4+] Capture System Audio via CoreAudio Process
+    /// Tap instead of ScreenCaptureKit. Off by default; ignored on older macOS
+    /// and non-macOS.
+    #[arg(long, default_value_t = false)]
     pub experimental_coreaudio_system_audio: bool,
 
     /// Beta: meeting-driven per-process audio capture (piggyback; "Smart
@@ -3176,8 +3177,20 @@ mod tests {
         assert!(args.api_auth);
         assert!(args.use_all_monitors);
         assert!(args.use_system_default_audio);
-        assert!(args.experimental_coreaudio_system_audio);
         assert!(args.filter_music);
+    }
+
+    #[test]
+    fn test_coreaudio_process_tap_cli_remains_opt_in() {
+        let defaults = record_args(["screenpipe", "record"]);
+        assert!(!defaults.experimental_coreaudio_system_audio);
+
+        let enabled = record_args([
+            "screenpipe",
+            "record",
+            "--experimental-coreaudio-system-audio",
+        ]);
+        assert!(enabled.experimental_coreaudio_system_audio);
     }
 
     #[test]
@@ -3189,7 +3202,6 @@ mod tests {
             "--api-auth=false",
             "--use-all-monitors=false",
             "--use-system-default-audio=false",
-            "--experimental-coreaudio-system-audio=false",
             "--filter-music=false",
         ]);
         assert!(
@@ -3205,7 +3217,6 @@ mod tests {
             !args.use_system_default_audio,
             "--use-system-default-audio=false must disable"
         );
-        assert!(!args.experimental_coreaudio_system_audio);
         assert!(!args.filter_music);
     }
 

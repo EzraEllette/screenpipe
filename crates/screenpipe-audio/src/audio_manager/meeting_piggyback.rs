@@ -59,10 +59,9 @@
 //!
 //! **"Stable path" = whatever the user's existing settings produce**, not a
 //! specific backend: their enabled/pinned/default-follow devices, with the
-//! System Audio backend chosen by their own configuration at start time (the
-//! CoreAudio global tap by default where supported, SCK when the preference is
-//! off or the tap is unavailable, or anything added later — see
-//! `AudioStream::from_device`). This
+//! System Audio backend chosen by their own configuration at start time (SCK
+//! by default, the CoreAudio global tap when `experimental_coreaudio_system_audio`
+//! is on, or anything added later — see `AudioStream::from_device`). This
 //! sweep suspends and resumes devices by NAME only; the observations carry no
 //! backend information, so backend neutrality is structural — the fallback can
 //! never be coupled to one capture method.

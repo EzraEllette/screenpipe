@@ -639,6 +639,26 @@
       "notes": "Seeds and opens a long meeting note, checks editor shell click focus behavior, then clicks the bottom editor line."
     },
     {
+      "spec": "meeting-workspace-tabs.spec.ts",
+      "platforms": ["windows", "macos", "linux"],
+      "layers": ["real-ui-e2e", "local-api"],
+      "features": ["meeting-notes"],
+      "criticality": "high",
+      "confidence": "strong",
+      "ux": "real-user-flow",
+      "notes": "Seeds a meeting with notes and summary, switches persistent tabs, resizes to 640x560, checks footer separation and horizontal overflow, then captures a review screenshot."
+    },
+    {
+      "spec": "meeting-summary-recovery.spec.ts",
+      "platforms": ["windows", "macos", "linux"],
+      "layers": ["real-ui-e2e", "local-api"],
+      "features": ["meeting-notes", "meeting-summary-recovery"],
+      "criticality": "high",
+      "confidence": "strong",
+      "ux": "real-user-flow",
+      "notes": "Seeds an ended meeting through the isolated API and verifies persistent saved-audio retranscription, its replacement warning, and completed-summary rerun without launching hosted AI."
+    },
+    {
       "spec": "meetings-only-audio-lifecycle.spec.ts",
       "platforms": ["windows", "macos"],
       "layers": ["audio-device", "local-api", "real-ui-e2e"],
@@ -687,6 +707,16 @@
       "confidence": "conditional",
       "ux": "real-user-flow",
       "notes": "Opt-in no-onboarding seed verifies onboarding redirect."
+    },
+    {
+      "spec": "screen-recording-restart.spec.ts",
+      "platforms": ["macos"],
+      "layers": ["onboarding", "os-integration", "real-ui-e2e", "tauri-command"],
+      "features": ["onboarding", "permission-recovery"],
+      "criticality": "high",
+      "confidence": "conditional",
+      "ux": "real-user-flow",
+      "notes": "A deterministic post-Later TCC mismatch drives the packaged onboarding UI through the explicit restart button and into the native restart command without destroying the WebDriver session."
     },
     {
       "spec": "owned-browser.spec.ts",
