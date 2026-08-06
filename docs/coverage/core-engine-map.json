@@ -176,6 +176,7 @@
         "src/pipe_stream.rs",
         "src/routes/activity_summary.rs",
         "src/routes/artifacts.rs",
+        "src/routes/connect_broker.rs",
         "src/routes/content.rs",
         "src/routes/data.rs",
         "src/routes/elements.rs",
@@ -471,6 +472,7 @@
         "tests/audio_search_speaker_join_test.rs",
         "tests/chunk_outcome_test.rs",
         "tests/meeting_context_test.rs",
+        "tests/meeting_end_generation_test.rs",
         "tests/meeting_end_reason_test.rs",
         "tests/meeting_transcript_dedup_test.rs",
         "tests/output_audio_liveness_test.rs",
@@ -488,7 +490,7 @@
       "criticality": "high",
       "confidence": "strong",
       "kind": "integration",
-      "notes": "Audio transcript dedupe, live meeting mirroring, open meeting invariants, liveness, and speaker reassignment coverage."
+      "notes": "Audio transcript dedupe, live meeting mirroring, end-generation and open-meeting invariants, liveness, and speaker reassignment coverage."
     },
     {
       "id": "db-accessibility-ui-events",
@@ -519,6 +521,7 @@
         "src/core/engine.rs",
         "src/core/run_record_and_transcribe.rs",
         "src/transcription/deepgram/batch.rs",
+        "src/transcription/deepgram/mod.rs",
         "src/transcription/engine.rs",
         "src/transcription/openai_compatible/batch.rs",
         "src/transcription/transcription_result.rs",
