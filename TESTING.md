@@ -376,7 +376,7 @@ commits: `87abb00d`, `9464fdc9`, `0f9e43aa`, `7ea15f32`, `bf1f1004`
 
 - [ ] **fresh install flow** — onboarding appears, permissions requested, user completes setup.
 - [ ] **auto-advance after engine starts** — status screen advances automatically after 15-20 seconds once engine is running (`87abb00d`, `9464fdc9`).
-- [ ] **skip onboarding** — user can skip and get to main app. settings use defaults.
+- [ ] **required onboarding permissions** — user cannot continue until every displayed permission is granted.
 - [ ] **Onboarding completion destination** — After completing onboarding, verify that the home window opens instead of the timeline overlay. (`6ddc33a94`, `3cf668c76`)
 - [ ] **shortcut gate** — onboarding teaches the shortcut. user must press it to proceed (`0f9e43aa`).
 - [ ] **onboarding window size** — window is correctly sized, no overflow (`7ea15f32`).
@@ -387,7 +387,7 @@ commits: `87abb00d`, `9464fdc9`, `0f9e43aa`, `7ea15f32`
 
 - [ ] **fresh install flow** — onboarding appears, permissions requested, user completes setup.
 - [ ] **auto-advance after engine starts** — status screen advances automatically after 15-20 seconds once engine is running (`87abb00d`, `9464fdc9`).
-- [ ] **skip onboarding** — user can skip and get to main app. settings use defaults.
+- [ ] **required onboarding permissions** — user cannot continue until every displayed permission is granted.
 - [ ] **shortcut gate** — onboarding teaches the shortcut. user must press it to proceed (`0f9e43aa`).
 - [ ] **onboarding window size** — window is correctly sized, no overflow (`7ea15f32`).
 - [ ] **onboarding doesn't re-show** — after completing onboarding, restart app. main window shows, not onboarding.

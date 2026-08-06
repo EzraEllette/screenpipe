@@ -22,6 +22,15 @@ const mocks = vi.hoisted(() => ({
   capture: vi.fn(),
 }));
 
+const localStorageValues = new Map<string, string>();
+const localStorageMock = {
+  getItem: (key: string) => localStorageValues.get(key) ?? null,
+  setItem: (key: string, value: string) =>
+    localStorageValues.set(key, value),
+  removeItem: (key: string) => localStorageValues.delete(key),
+  clear: () => localStorageValues.clear(),
+};
+
 vi.mock("@/lib/hooks/use-onboarding", () => ({
   useOnboarding: () => ({
     completeOnboarding: mocks.completeOnboarding,
@@ -107,6 +116,11 @@ function successfulSetup() {
 describe("FirstDashboard", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    Object.defineProperty(window, "localStorage", {
+      configurable: true,
+      value: localStorageMock,
+    });
+    localStorageMock.clear();
     mocks.completeOnboarding.mockResolvedValue(undefined);
     mocks.updateSettings.mockResolvedValue(undefined);
     mocks.listBrainViews.mockResolvedValue({ status: "ok", data: [] });
@@ -124,6 +138,39 @@ describe("FirstDashboard", () => {
       updatedAt: "2026-07-25T00:00:00Z",
     });
     successfulSetup();
+  });
+
+  it("collects the existing intent before permissions and builds it later", async () => {
+    const handleNextSlide = vi.fn();
+    const intentView = render(
+      <FirstDashboard mode="intent" handleNextSlide={handleNextSlide} />,
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: /review my day/i,
+      }),
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: /build my first Live View/i }),
+    );
+
+    expect(handleNextSlide).toHaveBeenCalledTimes(1);
+    expect(mocks.listBrainViews).not.toHaveBeenCalled();
+    expect(mocks.createOnboardingLiveView).not.toHaveBeenCalled();
+    expect(mocks.completeOnboarding).not.toHaveBeenCalled();
+
+    intentView.unmount();
+    render(<FirstDashboard />);
+
+    await waitFor(() =>
+      expect(mocks.createOnboardingLiveView).toHaveBeenCalledWith(
+        expect.objectContaining({
+          goal: expect.stringContaining("daily review dashboard"),
+          goalCategory: "work_patterns",
+        }),
+      ),
+    );
   });
 
   afterEach(() => {

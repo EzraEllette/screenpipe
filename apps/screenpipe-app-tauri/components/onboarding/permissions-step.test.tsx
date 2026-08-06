@@ -135,8 +135,24 @@ describe("onboarding permission wheel", () => {
       screen.queryByRole("button", { name: /capture browser urls/i })
     ).toBeNull();
     expect(
-      screen.getByText("Three permissions unlock recording. Optional access can wait.")
+      screen.getByText("Grant all three permissions to continue.")
     ).toBeInTheDocument();
+  });
+
+  it("never offers a bypass while required permissions are denied", async () => {
+    vi.useFakeTimers();
+    const handleNextSlide = vi.fn();
+
+    render(<PermissionsStep handleNextSlide={handleNextSlide} />);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(30_000);
+    });
+
+    expect(
+      screen.queryByRole("button", { name: /continue without all permissions/i })
+    ).toBeNull();
+    expect(handleNextSlide).not.toHaveBeenCalled();
   });
 
   it("advances focus and refocuses the window when the poller detects a grant", async () => {

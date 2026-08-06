@@ -21,6 +21,7 @@ import { onboardingFunnel } from "@/lib/analytics/onboarding-funnel";
 
 type SlideKey =
   | "login"
+  | "intent"
   | "permissions"
   | "timeline"
   | "engine"
@@ -29,6 +30,7 @@ type SlideKey =
 const SLIDE_WINDOW_SIZES: Record<SlideKey, { width: number; height: number }> =
   {
     login: { width: 500, height: 480 },
+    intent: { width: 500, height: 720 },
     permissions: { width: 500, height: 560 },
     timeline: { width: 500, height: 680 },
     engine: { width: 500, height: 620 },
@@ -39,13 +41,14 @@ const SLIDE_WINDOW_SIZES: Record<SlideKey, { width: number; height: number }> =
 // persisted before the engine spawns and reads it — no restart needed.
 const SLIDE_ORDER: SlideKey[] = [
   "login",
+  "intent",
   "permissions",
   "timeline",
   "engine",
   "first-dashboard",
 ];
 
-// endowed progress: the bar first renders on permissions with login already
+// endowed progress: the bar first renders on intent with login already
 // counted done, so it always starts above zero. When the current step reports
 // sub-progress (e.g. one sub per permission grant), its segment splits so the
 // bar advances with every grant instead of stalling for the whole step.
@@ -170,6 +173,20 @@ export default function OnboardingPage() {
   // low-tier device can briefly look unknown and a saved timeline step would
   // be skipped before the real hardware tier arrives.
   useEffect(() => {
+    // Redirect if already completed
+    if (onboardingData.isCompleted) {
+      if (completedForHiddenUiRef.current) {
+        window.close();
+        return;
+      }
+      commands
+        .showWindow({ Home: { page: "brain" } })
+        .then(() => window.close())
+        .catch(() => {});
+    }
+  }, [onboardingData.isCompleted]);
+
+  useEffect(() => {
     if (!isSettingsLoaded || !isManagedDeploymentResolved) return;
 
     const init = async () => {
@@ -182,6 +199,7 @@ export default function OnboardingPage() {
         // Map old and new step names
         const stepMap: Record<string, SlideKey> = {
           login: "login",
+          intent: "intent",
           permissions: "permissions",
           timeline: "timeline",
           engine: "engine",
@@ -250,20 +268,6 @@ export default function OnboardingPage() {
     setIsVisible(true);
     posthog.capture(`onboarding_${currentSlide}_viewed`);
   }, [currentSlide]);
-
-  // Redirect if already completed
-  useEffect(() => {
-    if (onboardingData.isCompleted) {
-      if (completedForHiddenUiRef.current) {
-        window.close();
-        return;
-      }
-      commands
-        .showWindow({ Home: { page: "brain" } })
-        .then(() => window.close())
-        .catch(() => {});
-    }
-  }, [onboardingData.isCompleted]);
 
   useEffect(() => {
     // nothing needed for error state currently
@@ -454,6 +458,12 @@ export default function OnboardingPage() {
             ) : (
               <OnboardingLogin handleNextSlide={handleNextSlide} />
             ))}
+          {currentSlide === "intent" && (
+            <FirstDashboard
+              mode="intent"
+              handleNextSlide={handleNextSlide}
+            />
+          )}
           {currentSlide === "permissions" && (
             <PermissionsStep
               handleNextSlide={handleNextSlide}

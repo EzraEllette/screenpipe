@@ -51,6 +51,8 @@ import {
 
 const STALLED_BUILD_ESCAPE_DELAY_MS = 12_000;
 const SHELL_PREPARE_TIMEOUT_MS = 8_000;
+const PENDING_ONBOARDING_INTENT_KEY =
+  "screenpipe.onboarding.pending-intent.v1";
 
 const AI_CONTEXT_CHOICE = {
   category: "ai_context" as const,
@@ -64,6 +66,61 @@ const GOAL_ICONS: Partial<Record<OnboardingChoiceCategory, LucideIcon>> = {
   process_automation: Workflow,
   ai_context: Bot,
 };
+
+type PendingOnboardingIntent = {
+  goal: string;
+  goalCategory: OnboardingChoiceCategory;
+};
+
+const ONBOARDING_INTENT_CATEGORIES = new Set<OnboardingChoiceCategory>([
+  ...ONBOARDING_GOAL_CHOICES.map((choice) => choice.category),
+  "ai_context",
+  "custom",
+]);
+
+function readPendingOnboardingIntent(): PendingOnboardingIntent | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem(PENDING_ONBOARDING_INTENT_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<PendingOnboardingIntent>;
+    if (
+      typeof parsed.goal !== "string" ||
+      typeof parsed.goalCategory !== "string" ||
+      !ONBOARDING_INTENT_CATEGORIES.has(
+        parsed.goalCategory as OnboardingChoiceCategory,
+      )
+    ) {
+      return null;
+    }
+    return {
+      goal: parsed.goal,
+      goalCategory: parsed.goalCategory as OnboardingChoiceCategory,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function writePendingOnboardingIntent(intent: PendingOnboardingIntent): void {
+  try {
+    window.localStorage.setItem(
+      PENDING_ONBOARDING_INTENT_KEY,
+      JSON.stringify(intent),
+    );
+  } catch {
+    // The current page still advances; the final step will ask again if local
+    // persistence is unavailable.
+  }
+}
+
+function clearPendingOnboardingIntent(): void {
+  try {
+    window.localStorage.removeItem(PENDING_ONBOARDING_INTENT_KEY);
+  } catch {
+    // A stale local-only intent is harmless.
+  }
+}
 
 async function withTimeout<T>(
   operation: Promise<T>,
@@ -194,13 +251,27 @@ function ScreenpipeBuildVisual({ currentIndex }: { currentIndex: number }) {
   );
 }
 
-export default function FirstDashboard() {
+type FirstDashboardProps = {
+  mode?: "intent" | "setup";
+  handleNextSlide?: () => void;
+};
+
+export default function FirstDashboard({
+  mode = "setup",
+  handleNextSlide,
+}: FirstDashboardProps = {}) {
+  const isIntentStep = mode === "intent";
+  const initialIntent = useMemo(readPendingOnboardingIntent, []);
   const { completeOnboarding } = useOnboarding();
   const { settings, updateSettings, isSettingsLoaded } = useSettings();
-  const [goal, setGoal] = useState("");
+  const [goal, setGoal] = useState(initialIntent?.goal ?? "");
   const [goalCategory, setGoalCategory] =
-    useState<OnboardingChoiceCategory | null>(null);
-  const [showCustomGoal, setShowCustomGoal] = useState(false);
+    useState<OnboardingChoiceCategory | null>(
+      initialIntent?.goalCategory ?? null,
+    );
+  const [showCustomGoal, setShowCustomGoal] = useState(
+    initialIntent?.goalCategory === "custom",
+  );
   const [stage, setStage] = useState<OnboardingLiveViewStage | null>(null);
   const [selectedPipes, setSelectedPipes] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -212,7 +283,7 @@ export default function FirstDashboard() {
   const [existingViews, setExistingViews] = useState<BrainViewDefinition[]>([]);
   const [existingViewsStatus, setExistingViewsStatus] = useState<
     "loading" | "ready" | "error"
-  >("loading");
+  >(isIntentStep ? "ready" : "loading");
   const [selectedExistingViewId, setSelectedExistingViewId] = useState<
     string | null
   >(null);
@@ -225,6 +296,7 @@ export default function FirstDashboard() {
   const existingViewsLoadAttemptRef = useRef(0);
   const viewedFlowRef = useRef<string | null>(null);
   const dashboardIdRef = useRef<string | null>(null);
+  const submittedPendingIntentRef = useRef(false);
 
   const defaultPreset = useMemo(() => {
     const presets = (settings.aiPresets ?? []) as AIPreset[];
@@ -233,10 +305,12 @@ export default function FirstDashboard() {
 
   const flowProperties = useMemo<OnboardingLiveViewFlowProperties | null>(
     () =>
-      existingViewsStatus === "ready"
-        ? onboardingLiveViewFlowProperties(existingViews.length)
-        : null,
-    [existingViews.length, existingViewsStatus],
+      isIntentStep
+        ? onboardingLiveViewFlowProperties(0)
+        : existingViewsStatus === "ready"
+          ? onboardingLiveViewFlowProperties(existingViews.length)
+          : null,
+    [existingViews.length, existingViewsStatus, isIntentStep],
   );
 
   const loadExistingViews = useCallback(async () => {
@@ -265,11 +339,12 @@ export default function FirstDashboard() {
   }, []);
 
   useEffect(() => {
+    if (isIntentStep) return;
     void loadExistingViews();
     return () => {
       existingViewsLoadAttemptRef.current += 1;
     };
-  }, [loadExistingViews]);
+  }, [isIntentStep, loadExistingViews]);
 
   const isBuilding = stage !== null;
   useEffect(() => {
@@ -441,6 +516,7 @@ export default function FirstDashboard() {
         goalCategory: selectedGoalCategory,
         ...flowProperties,
       });
+      clearPendingOnboardingIntent();
     } catch (setupError) {
       if (createAttemptRef.current !== attemptId) return;
       const knownError =
@@ -504,11 +580,60 @@ export default function FirstDashboard() {
         goalCategory: "ai_context",
         ...flowProperties,
       });
+      clearPendingOnboardingIntent();
     } catch {
       completingRef.current = false;
       setError("Could not open Connections. Try again.");
     }
   }, [completeOnboarding, flowProperties, goalCategory]);
+
+  const handleIntentContinue = useCallback(() => {
+    const normalizedGoal = goal.trim();
+    if (
+      !handleNextSlide ||
+      !goalCategory ||
+      (goalCategory !== "ai_context" && !normalizedGoal)
+    ) {
+      return;
+    }
+    writePendingOnboardingIntent({
+      goal: normalizedGoal,
+      goalCategory,
+    });
+    handleNextSlide();
+  }, [goal, goalCategory, handleNextSlide]);
+
+  const handleIntentSkip = useCallback(() => {
+    clearPendingOnboardingIntent();
+    handleNextSlide?.();
+  }, [handleNextSlide]);
+
+  useEffect(() => {
+    if (
+      isIntentStep ||
+      !initialIntent ||
+      submittedPendingIntentRef.current ||
+      existingViewsStatus !== "ready" ||
+      existingViews.length > 0 ||
+      !isSettingsLoaded
+    ) {
+      return;
+    }
+    submittedPendingIntentRef.current = true;
+    if (initialIntent.goalCategory === "ai_context") {
+      void handleUseWithAi();
+    } else {
+      void handleCreate();
+    }
+  }, [
+    existingViewsStatus,
+    existingViews.length,
+    handleCreate,
+    handleUseWithAi,
+    initialIntent,
+    isIntentStep,
+    isSettingsLoaded,
+  ]);
 
   const handleContinueWithoutWaiting = useCallback(async () => {
     if (
@@ -951,7 +1076,11 @@ export default function FirstDashboard() {
         <button
           type="button"
           onClick={
-            goalCategory === "ai_context" ? handleUseWithAi : handleCreate
+            isIntentStep
+              ? handleIntentContinue
+              : goalCategory === "ai_context"
+                ? handleUseWithAi
+                : handleCreate
           }
           disabled={
             !isSettingsLoaded ||
@@ -968,7 +1097,7 @@ export default function FirstDashboard() {
         </button>
         <button
           type="button"
-          onClick={handleSkip}
+          onClick={isIntentStep ? handleIntentSkip : handleSkip}
           className="mt-3 w-full py-1 font-mono text-[10px] text-muted-foreground transition-colors hover:text-foreground"
         >
           skip for now

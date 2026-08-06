@@ -854,7 +854,8 @@ fn create_dynamic_menu(
 ) -> Result<tauri::menu::Menu<Wry>> {
     let mut menu_builder = MenuBuilder::new(app);
 
-    // During onboarding: show minimal menu (version + skip + quit)
+    // During onboarding: show only version and quit. Required permissions
+    // cannot be bypassed from the tray.
     if !data.onboarding_completed && !data.app_ui_hidden {
         menu_builder = menu_builder
             .item(
@@ -869,8 +870,6 @@ fn create_dynamic_menu(
                 .enabled(false)
                 .build(app)?,
             )
-            .item(&PredefinedMenuItem::separator(app)?)
-            .item(&MenuItemBuilder::with_id("skip_onboarding", "Skip onboarding").build(app)?)
             .item(&PredefinedMenuItem::separator(app)?)
             .item(&MenuItemBuilder::with_id("quit", "Quit screenpipe").build(app)?);
 
@@ -1266,7 +1265,6 @@ fn handle_menu_event(app_handle: &AppHandle, event: tauri::menu::MenuEvent) {
                 | "settings"
                 | "upgrade"
                 | "onboarding"
-                | "skip_onboarding"
         )
     {
         info!(
@@ -1677,22 +1675,6 @@ fn handle_menu_event(app_handle: &AppHandle, event: tauri::menu::MenuEvent) {
                 let _ = app
                     .opener()
                     .open_url("https://cal.com/team/screenpipe/chat", None::<&str>);
-            });
-        }
-        "skip_onboarding" => {
-            let app = app_handle.clone();
-            let _ = app_handle.run_on_main_thread(move || {
-                crate::headless::wake_from_tray(&app);
-                info!("skip onboarding requested from tray menu");
-                let _ = OnboardingStore::update(&app, |onboarding| {
-                    onboarding.complete();
-                });
-                // Close onboarding window if open
-                if let Some(win) = app.get_webview_window("onboarding") {
-                    let _ = win.close();
-                }
-                // Show the main window
-                show_main_window(app.clone());
             });
         }
         "onboarding" => {

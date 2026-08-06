@@ -136,7 +136,6 @@ export default function PermissionsStep({
   const { isMac, isLoading: isPlatformLoading } = usePlatform();
   const [statuses, setStatuses] = useState<Record<string, boolean>>({});
   const [requesting, setRequesting] = useState(false);
-  const [showSkip, setShowSkip] = useState(false);
   const hasAdvancedRef = useRef(false);
   const mountTimeRef = useRef(Date.now());
   const statusesRef = useRef<Record<string, boolean>>({});
@@ -323,12 +322,6 @@ export default function PermissionsStep({
     }
   }, [allRequiredGranted, isPlatformLoading, handleNextSlide, statuses]);
 
-  // Show skip after 8s
-  useEffect(() => {
-    const timer = setTimeout(() => setShowSkip(true), 8000);
-    return () => clearTimeout(timer);
-  }, []);
-
   // Handle grant click with immediate refresh
   const handleGrant = async (perm: PermissionDef) => {
     if (requesting || perm.id !== focusedPerm?.id) return;
@@ -369,7 +362,7 @@ export default function PermissionsStep({
           Unlock the full experience
         </h1>
         <p className="font-mono text-[10px] text-muted-foreground mt-1 text-center max-w-xs">
-          Three permissions unlock recording. Optional access can wait.
+          Grant all three permissions to continue.
         </p>
       </div>
 
@@ -390,27 +383,6 @@ export default function PermissionsStep({
         ))}
       </div>
 
-      {/* Skip link */}
-      {showSkip && !allRequiredGranted && (
-        <motion.button
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          onClick={() => {
-            posthog.capture("onboarding_permission_skipped", {
-              time_spent_ms: Date.now() - mountTimeRef.current,
-              statuses,
-              unresolved_permissions: activePermissions
-                .filter((permission) => statuses[permission.id] !== true)
-                .map((permission) => permission.id),
-            });
-            hasAdvancedRef.current = true;
-            handleNextSlide();
-          }}
-          className="mt-5 font-mono text-[10px] text-muted-foreground/50 hover:text-foreground transition-colors"
-        >
-          continue without all permissions →
-        </motion.button>
-      )}
     </motion.div>
   );
 }

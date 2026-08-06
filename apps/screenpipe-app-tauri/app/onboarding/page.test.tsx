@@ -100,7 +100,18 @@ vi.mock("@/components/onboarding/engine-startup", () => ({
   ),
 }));
 vi.mock("@/components/onboarding/first-dashboard", () => ({
-  default: () => <div>first dashboard</div>,
+  default: ({
+    mode,
+    handleNextSlide,
+  }: {
+    mode?: "intent" | "setup";
+    handleNextSlide?: () => void;
+  }) =>
+    mode === "intent" ? (
+      <button onClick={handleNextSlide}>finish intent</button>
+    ) : (
+      <div>first dashboard</div>
+    ),
 }));
 vi.mock("@/lib/utils/tauri", () => ({
   commands: {
@@ -177,7 +188,7 @@ describe("enterprise onboarding authentication", () => {
     );
 
     await waitFor(() =>
-      expect(mocks.setOnboardingStep).toHaveBeenCalledWith("permissions"),
+      expect(mocks.setOnboardingStep).toHaveBeenCalledWith("intent"),
     );
     expect(
       mocks.capture.mock.calls.filter(
@@ -189,6 +200,25 @@ describe("enterprise onboarding authentication", () => {
         ([event]) => event === "onboarding_step_reached",
       ),
     ).toHaveLength(1);
+  });
+
+  it("shows the existing intent choice before permissions", async () => {
+    mocks.enterprisePolicy.isManagedDeployment = false;
+    render(<OnboardingPage />);
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /complete regular sign in/i }),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: /finish intent/i }),
+    );
+
+    await waitFor(() =>
+      expect(mocks.setOnboardingStep).toHaveBeenCalledWith("permissions"),
+    );
+    expect(
+      await screen.findByRole("button", { name: /finish permissions/i }),
+    ).toBeInTheDocument();
   });
 
   it("does not start the standard funnel for managed onboarding", () => {
@@ -263,7 +293,7 @@ describe("enterprise onboarding authentication", () => {
     render(<OnboardingPage />);
 
     await waitFor(() =>
-      expect(mocks.setOnboardingStep).toHaveBeenCalledWith("permissions"),
+      expect(mocks.setOnboardingStep).toHaveBeenCalledWith("intent"),
     );
   });
 
