@@ -40,6 +40,8 @@ const QUOTA_EXHAUSTED_TOKENS = [
   "quota_exhausted",
   "quota exceeded",
   "exceeded your current quota",
+  "trial_cost_limit_exceeded",
+  "request_cost_limit_exceeded",
   "billing_hard_limit",
   "billing_not_active",
   "check your plan and billing",
@@ -48,6 +50,16 @@ const QUOTA_EXHAUSTED_TOKENS = [
 
 function hasQuotaExhaustedToken(text: string): boolean {
   return QUOTA_EXHAUSTED_TOKENS.some((token) => text.includes(token));
+}
+
+function terminalCostLimitMessage(text: string): string | null {
+  if (text.includes("trial_cost_limit_exceeded")) {
+    return "hosted AI trial allowance exhausted";
+  }
+  if (text.includes("request_cost_limit_exceeded")) {
+    return "request is too large for hosted AI plan";
+  }
+  return null;
 }
 
 export function parsePipeError(stderr: string): ParsedPipeError {
@@ -82,6 +94,13 @@ export function parsePipeError(stderr: string): ParsedPipeError {
     return {
       type: "model_not_allowed",
       message: "uses a model that needs business — switch to a free model (auto) or upgrade",
+    };
+  }
+  const terminalCostLimit = terminalCostLimitMessage(normalized);
+  if (terminalCostLimit) {
+    return {
+      type: "quota_exhausted",
+      message: terminalCostLimit,
     };
   }
   if (hasQuotaExhaustedToken(normalized)) {
@@ -175,6 +194,13 @@ function classifyStructuredPipeError(value: unknown): ParsedPipeError | null {
     return {
       type: "model_not_allowed",
       message: "uses a model that needs business — switch to a free model (auto) or upgrade",
+    };
+  }
+  const terminalCostLimit = terminalCostLimitMessage(combined);
+  if (terminalCostLimit) {
+    return {
+      type: "quota_exhausted",
+      message: terminalCostLimit,
     };
   }
   if (hasQuotaExhaustedToken(combined)) {

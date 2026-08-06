@@ -567,6 +567,20 @@ mod tests {
         assert_eq!(registry.pick_preset(&presets), Some(("test", 0)));
     }
 
+    #[test]
+    fn test_terminal_cost_limit_output_does_not_trip_breaker() {
+        for code in ["trial_cost_limit_exceeded", "request_cost_limit_exceeded"] {
+            let registry = fresh_registry(code);
+            assert!(!registry.record_failure_from_output(
+                "test",
+                &format!(r#"429 {{"error":{{"code":"{code}"}}}}"#),
+                "",
+            ));
+            let presets = vec!["test".to_string()];
+            assert_eq!(registry.pick_preset(&presets), Some(("test", 0)));
+        }
+    }
+
     /// Hermetic registry in a unique temp dir so persisted state can't leak
     /// between tests (or between repeated runs).
     fn fresh_registry(tag: &str) -> PresetFallbackRegistry {

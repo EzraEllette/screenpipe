@@ -36,6 +36,7 @@ describe("classifyQuotaError", () => {
     expect(classifyQuotaError("daily_cost_limit_exceeded")).toBe("daily");
     expect(classifyQuotaError("monthly_cost_limit_exceeded")).toBe("daily");
     expect(classifyQuotaError("trial_cost_limit_exceeded")).toBe("daily");
+    expect(classifyQuotaError("request_cost_limit_exceeded")).toBe("daily");
     // case-insensitive
     expect(classifyQuotaError("DAILY_LIMIT_EXCEEDED")).toBe("daily");
   });
@@ -144,6 +145,27 @@ describe("buildDailyLimitMessage", () => {
     expect(msg).toContain("Background scheduled tasks share this budget");
     // must not leak a raw dollar cap
     expect(msg).not.toMatch(/\$\d/);
+  });
+
+  it.each([
+    ["trial_cost_limit_exceeded", "hosted AI allowance for this trial"],
+    [
+      "request_cost_limit_exceeded",
+      "request is too large for your hosted AI plan",
+    ],
+  ])("uses fixed sanitized copy for %s", (code, expected) => {
+    const error = JSON.stringify({
+      error: {
+        code,
+        message:
+          "provider=vendor-x cap=$12.34 account=private-tenant detail=private-diagnostic",
+      },
+    });
+    const message = buildDailyLimitMessage(error);
+    expect(message).toContain(expected);
+    expect(message).not.toMatch(
+      /vendor-x|\$12\.34|private-tenant|private-diagnostic/,
+    );
   });
 
   it("defers structured Business recovery to the persistent action panel", () => {
@@ -366,6 +388,22 @@ describe("presentQuotaError", () => {
       resetsAt: "2026-08-06T00:00:00Z",
     });
   });
+
+  it.each(["trial_cost_limit_exceeded", "request_cost_limit_exceeded"])(
+    "presents %s as a terminal sanitized usage limit",
+    (code) => {
+      const presented = presentQuotaError(
+        `HTTP 429 ${JSON.stringify({
+          error: {
+            code,
+            message: "provider=vendor-x private-diagnostic",
+          },
+        })}`,
+      );
+      expect(presented.kind).toBe("daily");
+      expect(presented.message).not.toMatch(/vendor-x|private-diagnostic/);
+    },
+  );
 
   it("keeps the allowance-specific copy for hosted allowance exhaustion", () => {
     const presented = presentQuotaError(

@@ -1932,6 +1932,8 @@ pub(crate) const QUOTA_EXHAUSTED_TOKENS: &[&str] = &[
     "quota_exhausted",
     "quota exceeded",
     "exceeded your current quota",
+    "trial_cost_limit_exceeded",
+    "request_cost_limit_exceeded",
     "billing_hard_limit",
     "billing_not_active",
     "check your plan and billing",
@@ -1943,6 +1945,16 @@ pub(crate) fn has_quota_exhausted_token(text: &str) -> bool {
     QUOTA_EXHAUSTED_TOKENS
         .iter()
         .any(|token| text.contains(token))
+}
+
+fn terminal_cost_limit_message(text: &str) -> Option<&'static str> {
+    if text.contains("trial_cost_limit_exceeded") {
+        return Some("hosted AI trial allowance exhausted");
+    }
+    if text.contains("request_cost_limit_exceeded") {
+        return Some("request is too large for hosted AI plan");
+    }
+    None
 }
 
 /// Parse structured error types from a single output string.
@@ -1979,6 +1991,12 @@ fn parse_error_type(stderr: &str) -> (Option<String>, Option<String>) {
         return (
             Some("model_not_allowed".to_string()),
             Some("model not available on current tier".to_string()),
+        );
+    }
+    if let Some(message) = terminal_cost_limit_message(&lower) {
+        return (
+            Some("quota_exhausted".to_string()),
+            Some(message.to_string()),
         );
     }
     if has_quota_exhausted_token(&lower) {
@@ -2109,6 +2127,12 @@ fn classify_llm_error_value(value: &serde_json::Value) -> Option<(Option<String>
         return Some((
             Some("model_not_allowed".to_string()),
             Some(message.unwrap_or_else(|| "model not available on current tier".to_string())),
+        ));
+    }
+    if let Some(message) = terminal_cost_limit_message(&combined) {
+        return Some((
+            Some("quota_exhausted".to_string()),
+            Some(message.to_string()),
         ));
     }
     if has_quota_exhausted_token(&combined) {
@@ -9161,6 +9185,36 @@ mod tests {
         let (etype, msg) = parse_error_type(r#"429 "daily_cost_limit_exceeded""#);
         assert_eq!(etype.as_deref(), Some("daily_limit"));
         assert_eq!(msg.as_deref(), Some("daily AI usage limit reached"));
+    }
+
+    #[test]
+    fn test_terminal_cost_limits_are_sanitized_and_do_not_try_fallback() {
+        for (code, expected_message) in [
+            (
+                "trial_cost_limit_exceeded",
+                "hosted AI trial allowance exhausted",
+            ),
+            (
+                "request_cost_limit_exceeded",
+                "request is too large for hosted AI plan",
+            ),
+        ] {
+            let hostile_message =
+                "provider=vendor-x cap=$12.34 account=private-tenant detail=private-diagnostic";
+            let stderr =
+                format!(r#"429 {{"error":{{"code":"{code}","message":"{hostile_message}"}}}}"#);
+            let (etype, message) = parse_error_type(&stderr);
+            assert_eq!(etype.as_deref(), Some("quota_exhausted"));
+            assert_eq!(message.as_deref(), Some(expected_message));
+            for marker in ["vendor-x", "$12.34", "private-tenant", "private-diagnostic"] {
+                assert!(!message.as_deref().unwrap_or_default().contains(marker));
+            }
+            assert!(!should_try_fallback_preset(etype.as_deref()));
+
+            let (code_only_type, code_only_message) = parse_error_type(&format!(r#"429 "{code}""#));
+            assert_eq!(code_only_type.as_deref(), Some("quota_exhausted"));
+            assert_eq!(code_only_message.as_deref(), Some(expected_message));
+        }
     }
 
     #[test]

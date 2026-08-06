@@ -4676,6 +4676,12 @@ mod tests {
         assert!(!is_rate_limit_error(r#"429 "daily_cost_limit_exceeded""#));
         assert!(!is_rate_limit_error(r#"429 "credits_exhausted""#));
         assert!(!is_rate_limit_error(
+            r#"429 {"error":{"code":"trial_cost_limit_exceeded"}}"#
+        ));
+        assert!(!is_rate_limit_error(
+            r#"429 {"error":{"code":"request_cost_limit_exceeded"}}"#
+        ));
+        assert!(!is_rate_limit_error(
             r#"429 {"error":{"type":"insufficient_quota"}}"#
         ));
     }

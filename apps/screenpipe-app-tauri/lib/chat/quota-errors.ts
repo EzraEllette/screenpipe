@@ -61,6 +61,11 @@ const COST_LIMIT_CODES = [
   "trial_cost_limit_exceeded",
 ] as const;
 
+const TERMINAL_COST_LIMIT_CODES = [
+  ...COST_LIMIT_CODES,
+  "request_cost_limit_exceeded",
+] as const;
+
 const UPGRADE_LIMIT_CODES = [
   ...COST_LIMIT_CODES,
   "hosted_ai_allowance_exceeded",
@@ -108,6 +113,15 @@ export function parseQuotaUpgradeAction(
 export function buildDailyLimitMessage(errorStr: string): string {
   try {
     const normalized = errorStr.toLowerCase();
+    if (
+      normalized.includes("trial_cost_limit_exceeded") &&
+      !parseQuotaUpgradeAction(errorStr)
+    ) {
+      return "You've used the hosted AI allowance for this trial. Upgrade, switch to a local model, or use your own provider key.";
+    }
+    if (normalized.includes("request_cost_limit_exceeded")) {
+      return "This request is too large for your hosted AI plan. Shorten the context, switch to a local model, or use your own provider key.";
+    }
     if (normalized.includes("hosted_ai_allowance_exceeded")) {
       const lane = structuredString(errorStr, "lane")?.toLowerCase();
       const plan = structuredString(errorStr, "plan")?.toLowerCase();
@@ -190,7 +204,7 @@ export function classifyQuotaError(errorStr: string): QuotaErrorType {
     normalized.includes("free_chat_turn_request_limit_exceeded") ||
     normalized.includes("credits_exhausted") ||
     normalized.includes("daily_limit_exceeded") ||
-    isCostLimitError(normalized);
+    TERMINAL_COST_LIMIT_CODES.some((code) => normalized.includes(code));
   if (isDailyLimit) {
     return "daily";
   }

@@ -25,6 +25,27 @@ describe("parsePipeError", () => {
     expect(parsePipeError(`429 "daily_cost_limit_exceeded"`).type).toBe("daily_limit");
   });
 
+  it.each([
+    ["trial_cost_limit_exceeded", "hosted AI trial allowance exhausted"],
+    ["request_cost_limit_exceeded", "request is too large for hosted AI plan"],
+  ])("classifies and sanitizes terminal cost limit %s", (code, expected) => {
+    const r = parsePipeError(
+      `429 ${JSON.stringify({
+        error: {
+          code,
+          message:
+            "provider=vendor-x cap=$12.34 account=private-tenant detail=private-diagnostic",
+        },
+      })}`,
+    );
+    expect(r.type).toBe("quota_exhausted");
+    expect(r.message).toBe(expected);
+    expect(r.message).not.toMatch(
+      /vendor-x|\$12\.34|private-tenant|private-diagnostic/,
+    );
+    expect(isActionablePipeError(r.type)).toBe(true);
+  });
+
   it("classifies unescaped gateway JSON and preserves its message", () => {
     const r = parsePipeError(
       `429 ${JSON.stringify({
