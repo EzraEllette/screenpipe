@@ -584,23 +584,15 @@ fn build_store_at<R: tauri::Runtime>(
             "store.bin is encrypted and the keychain key is unavailable",
         );
         if !restored {
-            // No snapshot to restore. init_store will treat the empty store
-            // as a fresh install and save defaults at boot — move the blob
-            // aside (in addition to .encrypted.bak) so that save lands on a
-            // genuinely fresh file instead of overwriting ciphertext.
-            let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S");
-            let aside = store_path.with_extension(format!("bin.locked-{}", ts));
-            match std::fs::rename(&store_path, &aside) {
-                Ok(()) => tracing::error!(
-                    "settings recovery: no healthy snapshot — moved unreadable \
-                     encrypted store.bin to {}; starting fresh",
-                    aside.display()
-                ),
-                Err(e) => tracing::error!(
-                    "settings recovery: failed to move locked store.bin aside: {}",
-                    e
-                ),
-            }
+            // No snapshot to restore. Fail closed before the store plugin can
+            // register an EMPTY store that init_store would treat as fresh and
+            // persist over the user's settings. The canonical ciphertext (and
+            // decrypt_store_file's forensic backup) remains available for a
+            // later keychain recovery instead of being replaced by defaults.
+            return Err(anyhow::anyhow!(
+                "encrypted settings are locked and no healthy recovery snapshot exists at {}",
+                store_path.display()
+            ));
         }
     }
 
@@ -3201,6 +3193,40 @@ mod tests {
             std::fs::read(&store_path).unwrap(),
             blob,
             "file must be untouched when there is nothing to restore from"
+        );
+    }
+
+    #[test]
+    fn existing_install_locked_store_without_snapshot_fails_closed() {
+        use tauri_plugin_store::StoreExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("db.sqlite"), b"existing recordings").unwrap();
+        let store_path = tmp.path().join("store.bin");
+        let mut ciphertext = STORE_MAGIC.to_vec();
+        ciphertext.extend_from_slice(b"ciphertext whose key is unavailable");
+        std::fs::write(&store_path, &ciphertext).unwrap();
+
+        let app = tauri::test::mock_builder()
+            .plugin(tauri_plugin_store::Builder::default().build())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("failed to build mock app");
+
+        let result = build_store_at(app.handle(), store_path.clone());
+        let canonical = std::fs::read(&store_path).ok();
+        let forensic_backup = std::fs::read(store_path.with_extension("bin.encrypted.bak")).ok();
+        let registered = app.get_store(&store_path);
+
+        assert!(
+            result.is_err()
+                && canonical.as_deref() == Some(ciphertext.as_slice())
+                && forensic_backup.as_deref() == Some(ciphertext.as_slice())
+                && registered.is_none(),
+            "locked existing install must return an error, preserve canonical and forensic ciphertext, and register no wipe-primed store; result_ok={}, canonical_preserved={}, forensic_backup_preserved={}, store_registered={}",
+            result.is_ok(),
+            canonical.as_deref() == Some(ciphertext.as_slice()),
+            forensic_backup.as_deref() == Some(ciphertext.as_slice()),
+            registered.is_some(),
         );
     }
 
