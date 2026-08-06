@@ -69,8 +69,8 @@ use crate::{
         },
         streaming::stream_frames_handler,
         websocket::{
-            ws_events_handler, ws_health_handler, ws_meeting_status_handler, ws_metrics_handler,
-            WebSocketLifecycle,
+            ws_events_handler, ws_health_handler, ws_meeting_overlay_handler,
+            ws_meeting_status_handler, ws_metrics_handler, WebSocketLifecycle,
         },
     },
     sync_api::{self, SyncState},
@@ -1350,6 +1350,7 @@ impl SCServer {
             .route("/stream/frames", get(stream_frames_handler))
             .route("/ws/events", get(ws_events_handler))
             .route("/ws/health", get(ws_health_handler))
+            .route("/ws/meeting-overlay", get(ws_meeting_overlay_handler))
             .route("/ws/meeting-status", get(ws_meeting_status_handler))
             .route("/ws/metrics", get(ws_metrics_handler))
             // Browser extension bridge — DEPRECATED top-level paths.

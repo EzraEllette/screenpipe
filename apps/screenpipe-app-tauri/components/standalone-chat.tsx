@@ -32,6 +32,7 @@ import { useChatFilePreview } from "@/lib/hooks/use-chat-file-preview";
 import { useChatInspector } from "@/lib/hooks/use-chat-inspector";
 import { ChatInspector } from "@/components/chat/chat-inspector";
 import { useSqlAutocomplete, useTagAutocomplete } from "@/lib/hooks/use-sql-autocomplete";
+import { loadConversationFile } from "@/lib/chat-storage";
 import {
   buildAppMentionSuggestions,
   buildTagMentionSuggestions,
@@ -305,6 +306,9 @@ export function StandaloneChat({
     }
     return map;
   }, [appMentionSuggestions]);
+  const openMentionConversationRef = useRef<
+    ((conversationId: string) => void | Promise<void>) | null
+  >(null);
 
   const atMentionSuggestions = React.useMemo(
     () => [...STATIC_MENTION_SUGGESTIONS, ...appMentionSuggestions],
@@ -360,6 +364,8 @@ export function StandaloneChat({
     atMentionSuggestions,
     tagMentionSuggestions,
     allTagMentionSuggestions,
+    onOpenConversation: (targetConversationId) =>
+      openMentionConversationRef.current?.(targetConversationId),
   });
   const dropdownRef = useRef<HTMLDivElement>(null);
   // Root of the chat surface. The webview drag-drop event is window-global and
@@ -785,6 +791,12 @@ export function StandaloneChat({
   const startNewConversationRef = useRef(startNewConversation);
   loadConversationRef.current = loadConversation;
   startNewConversationRef.current = startNewConversation;
+  openMentionConversationRef.current = async (targetConversationId) => {
+    const conversation = await loadConversationFile(targetConversationId);
+    if (conversation) {
+      await loadConversationRef.current(conversation);
+    }
+  };
 
   usePipeGenerationCompletion({ isLoading });
   useChatPrefillListener({
@@ -1259,7 +1271,7 @@ export function StandaloneChat({
     isMac,
     isComposing,
     mentions: {
-      isOpen: showMentionDropdown,
+      isOpen: showMentionDropdown && filteredMentions.length > 0,
       selectedIndex: selectedMentionIndex,
       suggestions: filteredMentions,
     },

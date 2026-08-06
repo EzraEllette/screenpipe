@@ -6,9 +6,9 @@ and layer declared in the manifest, weighted by confidence and criticality.
 
 - Manifest: `e2e/coverage-map.json`
 - Specs directory: `e2e/specs`
-- Mapped specs: 98
-- Declared test blocks: 269
-- Weighted coverage points: 208.7
+- Mapped specs: 99
+- Declared test blocks: 270
+- Weighted coverage points: 209.7
 
 Confidence weights: strong=1.0, partial=0.7, conditional=0.4, smoke=0.3.
 Criticality weights: high=1.0, medium=0.7, low=0.4.
@@ -19,9 +19,9 @@ can execute more runtime cases than this number shows.
 
 | Platform | Specs | Declared tests | Weighted points | Layers | Features | Critical score |
 | --- | --- | --- | --- | --- | --- | --- |
-| windows | 76 | 231 | 188.2 | 15 | 78 | 91% |
-| macos | 94 | 232 | 179.5 | 17 | 80 | 89% |
-| linux | 66 | 191 | 158.0 | 14 | 73 | 88% |
+| windows | 77 | 232 | 189.2 | 15 | 79 | 91% |
+| macos | 95 | 233 | 180.5 | 17 | 81 | 89% |
+| linux | 67 | 192 | 159.0 | 14 | 74 | 88% |
 
 ## Runtime Results
 
@@ -39,7 +39,7 @@ pass/fail/skip counts.
 | capture-ocr | 2 specs / 16 tests / 6.4 pts | 7 specs / 11 tests / 4.4 pts | 1 specs / 3 tests / 1.2 pts |
 | chat-ai | 23 specs / 37 tests / 28.1 pts | 32 specs / 56 tests / 39.7 pts | 22 specs / 36 tests / 27.6 pts |
 | entitlement | - | 1 specs / 1 tests / 1.0 pts | - |
-| local-api | 20 specs / 105 tests / 87.8 pts | 24 specs / 89 tests / 75.4 pts | 16 specs / 76 tests / 67.2 pts |
+| local-api | 21 specs / 106 tests / 88.8 pts | 25 specs / 90 tests / 76.4 pts | 17 specs / 77 tests / 68.2 pts |
 | notifications | 4 specs / 25 tests / 16.3 pts | 3 specs / 5 tests / 3.4 pts | 2 specs / 4 tests / 3.1 pts |
 | onboarding | 4 specs / 10 tests / 7.6 pts | 5 specs / 11 tests / 8.0 pts | 4 specs / 10 tests / 7.6 pts |
 | os-integration | 6 specs / 18 tests / 17.1 pts | 11 specs / 13 tests / 6.7 pts | 1 specs / 1 tests / 1.0 pts |
@@ -48,7 +48,7 @@ pass/fail/skip counts.
 | real-ui-e2e | 53 specs / 148 tests / 121.0 pts | 62 specs / 147 tests / 120.1 pts | 49 specs / 126 tests / 107.4 pts |
 | settings | 14 specs / 37 tests / 34.0 pts | 16 specs / 32 tests / 27.7 pts | 13 specs / 29 tests / 26.0 pts |
 | storage-privacy | 9 specs / 39 tests / 30.3 pts | 9 specs / 25 tests / 24.1 pts | 6 specs / 18 tests / 17.1 pts |
-| tauri-command | 13 specs / 22 tests / 15.3 pts | 17 specs / 27 tests / 18.2 pts | 12 specs / 21 tests / 14.3 pts |
+| tauri-command | 14 specs / 23 tests / 16.3 pts | 18 specs / 28 tests / 19.2 pts | 13 specs / 22 tests / 15.3 pts |
 | window-lifecycle | 18 specs / 62 tests / 52.6 pts | 18 specs / 43 tests / 31.0 pts | 13 specs / 38 tests / 29.5 pts |
 
 ## Critical Feature Matrix
@@ -153,6 +153,7 @@ pass/fail/skip counts.
 | main-window.spec.ts | windows, macos, linux | window-lifecycle, tauri-command | window-lifecycle, main-window | medium | partial | command | 2 | Main window show/hide dedupe. |
 | meeting-apps-picker.spec.ts | windows, macos, linux | settings, real-ui-e2e | settings-recording, meeting-detector-ignored-apps | medium | strong | real-user-flow | 3 | Per-app meeting-detection ignore picker: open, toggle, count badge, persistence across reopen (#3882 / #3847). |
 | meeting-note-bottom-click.spec.ts | windows, macos, linux | real-ui-e2e, local-api | meeting-notes | high | strong | real-user-flow | 3 | Seeds and opens a long meeting note, checks editor shell click focus behavior, then clicks the bottom editor line. |
+| meeting-overlay-stream.spec.ts | windows, macos, linux | local-api, tauri-command | meeting-notes, meeting-overlay-stream | high | strong | mixed | 1 | Starts a real isolated meeting, verifies bounded snapshot plus deterministic delta/final transcript frames, and proves the stream clears on the authoritative stop edge. |
 | meeting-summary-recovery.spec.ts | windows, macos, linux | real-ui-e2e, local-api | meeting-notes, meeting-summary-recovery | high | strong | real-user-flow | 1 | Seeds an ended meeting through the isolated API and verifies persistent saved-audio retranscription, its replacement warning, and completed-summary rerun without launching hosted AI. |
 | meeting-workspace-tabs.spec.ts | windows, macos, linux | real-ui-e2e, local-api | meeting-notes | high | strong | real-user-flow | 1 | Seeds a meeting with notes and summary, switches persistent tabs, resizes to 640x560, checks footer separation and horizontal overflow, then captures a review screenshot. |
 | meetings-only-audio-lifecycle.spec.ts | windows, macos | audio-device, local-api, real-ui-e2e | meetings-only-audio-lifecycle, audio-device-health | high | conditional | real-user-flow | 1 | Opt-in real-audio lifecycle lane: configured devices stay closed outside meetings and open only across a manual meeting edge. |
