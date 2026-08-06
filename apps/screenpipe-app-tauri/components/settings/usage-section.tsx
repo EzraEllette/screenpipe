@@ -145,7 +145,12 @@ function getTimeSince(range: TimeRange): number | undefined {
 }
 
 function AllowanceMeter({ allowance }: { allowance: HostedAiAllowance }) {
-  const laneLabel = allowance.lane === "auto" ? "auto" : "manual";
+  const laneLabel =
+    allowance.lane === "combined"
+      ? "all models"
+      : allowance.lane === "auto"
+        ? "auto"
+        : "manual";
   const windowLabel = formatAllowanceWindow(allowance.window_seconds);
   const resetLabel = allowance.resets_at
     ? formatAllowanceReset(allowance.resets_at)
@@ -156,7 +161,9 @@ function AllowanceMeter({ allowance }: { allowance: HostedAiAllowance }) {
   return (
     <div className="space-y-2">
       <div className="flex items-center justify-between text-sm">
-        <span className="font-medium capitalize">{laneLabel} model</span>
+        <span className="font-medium capitalize">
+          {allowance.lane === "combined" ? laneLabel : `${laneLabel} model`}
+        </span>
         <span
           className={`font-mono text-xs ${
             isExhausted
