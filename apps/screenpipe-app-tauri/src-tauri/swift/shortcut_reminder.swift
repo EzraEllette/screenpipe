@@ -845,6 +845,16 @@ class ShortcutReminderController: NSObject {
     private var metricsWsUrl = "ws://127.0.0.1:3030/ws/metrics"
     private var eventsWsUrl = "ws://127.0.0.1:3030/ws/meeting-overlay"
     private var isVisible = false
+    private var capturable = false
+
+    func setCapturable(_ value: Bool) {
+        DispatchQueue.main.async { [self] in
+            capturable = value
+            let sharingType: NSWindow.SharingType = value ? .readOnly : .none
+            panel?.sharingType = sharingType
+            transcriptPanel?.sharingType = sharingType
+        }
+    }
 
     private var healthToolTip: String? {
         guard metrics.healthState == "failure" else { return nil }
@@ -1227,7 +1237,7 @@ class ShortcutReminderController: NSObject {
         p.isMovableByWindowBackground = true
         p.acceptsMouseMovedEvents = true
         p.isReleasedWhenClosed = false
-        p.sharingType = .readOnly
+        p.sharingType = capturable ? .readOnly : .none
 
         let tracking = ReminderTrackingView(frame: NSRect(x: 0, y: 0, width: Int(w), height: Int(h)))
         tracking.autoresizingMask = [.width, .height]
@@ -1316,7 +1326,7 @@ class ShortcutReminderController: NSObject {
         preview.hidesOnDeactivate = false
         preview.acceptsMouseMovedEvents = true
         preview.isReleasedWhenClosed = false
-        preview.sharingType = .readOnly
+        preview.sharingType = capturable ? .readOnly : .none
 
         let tracking = ReminderTrackingView(
             frame: NSRect(x: 0, y: 0, width: Int(w), height: Int(h))
@@ -1565,6 +1575,13 @@ public func shortcutHide() -> Int32 {
         return 0
     }
     return -2
+}
+
+@_cdecl("shortcut_set_capturable")
+public func shortcutSetCapturable(_ capturable: Int32) {
+    if #available(macOS 13.0, *) {
+        ShortcutReminderController.shared.setCapturable(capturable != 0)
+    }
 }
 
 @_cdecl("shortcut_is_available")

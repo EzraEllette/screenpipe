@@ -2763,6 +2763,9 @@ pub(crate) async fn show_shortcut_reminder_impl(
 
         if native_shortcut_reminder::is_available() {
             info!("Using native SwiftUI shortcut reminder");
+            native_shortcut_reminder::set_capturable(crate::window::app_windows_are_capturable(
+                &app_handle,
+            ));
             use crate::recording::RecordingState;
             use std::time::Duration;
 

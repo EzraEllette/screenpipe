@@ -111,6 +111,9 @@ pub fn set_app_screen_capture_protection(
         .flatten()
         .unwrap_or_default();
     settings.hide_app_in_screen_share = hidden;
+    crate::native_shortcut_reminder::set_capturable(
+        !hidden || crate::config::is_e2e_mode(),
+    );
 
     let mut errors = Vec::new();
     for window in app_handle.webview_windows().values() {
