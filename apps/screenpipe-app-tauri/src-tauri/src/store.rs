@@ -3285,6 +3285,63 @@ mod tests {
         );
         assert_eq!(std::fs::read(&store_path).unwrap(), ciphertext);
         assert_eq!(std::fs::read(&backup_path).unwrap(), ciphertext);
+
+        // Model the next launch after the user unlocks the credential store:
+        // decrypt_store_file has made the canonical settings readable again.
+        // The retry must load that canonical state rather than the empty handle
+        // the plugin would have registered during the locked launch.
+        let recovered = json!({
+            "settings": {
+                "aiPresets": presets_n(2),
+                "audioTranscriptionEngine": "openai-compatible",
+                "openaiCompatibleEndpoint": "https://stt.example.test/v1/audio/transcriptions",
+                "openaiCompatibleApiKey": "preserved-api-key",
+                "openaiCompatibleModel": "preserved-stt-model"
+            }
+        });
+        std::fs::write(&store_path, serde_json::to_vec_pretty(&recovered).unwrap()).unwrap();
+
+        let unlocked_store = build_store_at(app.handle(), store_path.clone())
+            .expect("startup retry should load the unlocked canonical store");
+        let settings = unlocked_store
+            .get("settings")
+            .expect("unlocked settings must be registered");
+        assert_eq!(
+            settings
+                .get("audioTranscriptionEngine")
+                .and_then(Value::as_str),
+            Some("openai-compatible")
+        );
+        assert_eq!(
+            settings
+                .get("openaiCompatibleEndpoint")
+                .and_then(Value::as_str),
+            Some("https://stt.example.test/v1/audio/transcriptions")
+        );
+        assert_eq!(
+            settings
+                .get("openaiCompatibleApiKey")
+                .and_then(Value::as_str),
+            Some("preserved-api-key")
+        );
+        assert_eq!(
+            settings
+                .get("openaiCompatibleModel")
+                .and_then(Value::as_str),
+            Some("preserved-stt-model")
+        );
+
+        unlocked_store
+            .save()
+            .expect("recovered settings should remain saveable");
+        let persisted: Value =
+            serde_json::from_slice(&std::fs::read(&store_path).unwrap()).unwrap();
+        assert_eq!(persisted, recovered);
+        assert_eq!(
+            std::fs::read(&backup_path).unwrap(),
+            ciphertext,
+            "the locked-launch forensic backup must survive recovery"
+        );
     }
 
     #[test]
