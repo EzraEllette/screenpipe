@@ -228,7 +228,15 @@ export async function startApp(
   }
 
   if (options.resetDataDir !== false) {
-    rmSync(activeDataDir, { recursive: true, force: true });
+    // Windows can keep the prior app's Pi sidecar files briefly locked after a
+    // preceding E2E phase exits. Let Node retry EBUSY/EPERM/ENOTEMPTY instead of
+    // starting the next WebDriver run with a half-cleaned data directory.
+    rmSync(activeDataDir, {
+      recursive: true,
+      force: true,
+      maxRetries: 20,
+      retryDelay: 250,
+    });
   }
   mkdirSync(activeDataDir, { recursive: true });
   removeSpotlightExclusion(activeDataDir);
