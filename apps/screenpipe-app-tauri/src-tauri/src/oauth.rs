@@ -16,10 +16,10 @@ use screenpipe_connect::oauth::{
     PENDING_OAUTH,
 };
 use serde::{Deserialize, Serialize};
-use tauri::AppHandle;
+use tauri::{AppHandle, WebviewWindow};
 use tauri_plugin_opener::OpenerExt;
 use tokio::sync::oneshot;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 #[derive(Serialize, Deserialize, specta::Type, Clone)]
 pub struct OAuthStatus {
@@ -45,16 +45,61 @@ pub struct OAuthInstanceInfo {
 
 async fn open_secret_store() -> Option<screenpipe_secrets::SecretStore> {
     let data_dir = screenpipe_core::paths::default_screenpipe_data_dir();
-    let db_path = data_dir.join("db.sqlite");
-    let secret_key = match crate::secrets::get_key_if_encryption_enabled() {
-        crate::secrets::KeyResult::Found(k) => Some(k),
-        _ => None,
-    };
-    // Shared, engine-matched pool — never an ad-hoc per-call connection, which
-    // churns the WAL-index and corrupts db.sqlite (#4263).
-    screenpipe_secrets::SecretStore::open(&db_path.to_string_lossy(), secret_key)
+    screenpipe_secrets::SecretStore::open_for_data_dir_with_vault_key(&data_dir)
         .await
         .ok()
+}
+
+/// Activate screenpipe after an external OAuth flow completes.
+///
+/// macOS can activate the application as a whole and let AppKit restore the
+/// user's last active Screenpipe window. Windows and Linux require a concrete
+/// top-level window, so they focus the window that initiated OAuth. We do not
+/// show, unminimize, navigate, or otherwise alter the window's saved state.
+/// Activation is best-effort because OAuth is already complete at this point.
+pub(crate) fn activate_app_after_oauth_impl(app_handle: &AppHandle, window: &WebviewWindow) {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = window;
+        // App activation can emit a Space-change notification. Suppress the
+        // overlay monitor briefly so it does not immediately hide the window
+        // that OAuth is returning to.
+        crate::space_monitor::suppress_space_monitor(750);
+        if let Err(e) = app_handle.run_on_main_thread(|| {
+            crate::window::with_autorelease_pool(|| {
+                use objc::{msg_send, sel, sel_impl};
+                use tauri_nspanel::cocoa::base::id;
+
+                unsafe {
+                    let ns_app: id = msg_send![objc::class!(NSApplication), sharedApplication];
+                    let _: () = msg_send![ns_app, activateIgnoringOtherApps: true];
+                }
+            });
+        }) {
+            warn!("OAuth connected but could not activate screenpipe: {e}");
+        } else {
+            info!("OAuth connected; activated screenpipe");
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app_handle;
+        let label = window.label().to_string();
+        if let Err(e) = window.set_focus() {
+            warn!("OAuth connected but could not focus window '{label}': {e}");
+        } else {
+            info!("OAuth connected; focused initiating window '{label}'");
+        }
+    }
+}
+
+/// Frontend hook for browser OAuth flows that complete by polling (MCP and
+/// Composio). Generic integration OAuth calls the same mechanism directly.
+#[tauri::command]
+#[specta::specta]
+pub fn activate_app_after_oauth(app_handle: AppHandle, window: WebviewWindow) {
+    activate_app_after_oauth_impl(&app_handle, &window);
 }
 
 // ---------------------------------------------------------------------------
@@ -68,6 +113,7 @@ async fn open_secret_store() -> Option<screenpipe_secrets::SecretStore> {
 #[specta::specta]
 pub async fn oauth_connect(
     app_handle: AppHandle,
+    window: WebviewWindow,
     integration_id: String,
     instance: Option<String>,
     variant: Option<String>,
@@ -555,6 +601,8 @@ pub async fn oauth_connect(
     if integration_id == "google-calendar" {
         crate::google_calendar::poke();
     }
+
+    activate_app_after_oauth_impl(&app_handle, &window);
 
     Ok(OAuthStatus {
         connected: true,

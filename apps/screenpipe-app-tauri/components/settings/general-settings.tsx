@@ -10,7 +10,7 @@ import { Switch } from "@/components/ui/switch";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
-import { Rocket, Moon, Sun, Monitor, FlaskConical, ExternalLink, Layers, RefreshCw, MonitorOff } from "lucide-react";
+import { Rocket, Moon, Sun, Monitor, FlaskConical, ExternalLink, Layers, RefreshCw } from "lucide-react";
 import { useToast } from "@/components/ui/use-toast";
 import { Button } from "@/components/ui/button";
 import {
@@ -39,11 +39,9 @@ export const searchIndex: SettingsField[] = [
   { label: "Auto-start", keywords: ["autostart", "launch", "startup"] },
   { label: "Auto-update", keywords: ["updates"] },
   { label: "Check for updates", keywords: ["version"] },
-  { label: "Auto-Update Pipes" },
+  { label: "Auto-Update Scheduled" },
   { label: "Reset Onboarding", keywords: ["setup"] },
   { label: "Your goal", keywords: ["onboarding", "purpose", "personalization"] },
-  { label: "Headless", keywords: ["low resource", "tray only", "memory", "webview"] },
-  { label: "Record only", keywords: ["headless", "pipes", "scheduler", "automation"] },
 ];
 import { useManagedPolicy } from "@/lib/hooks/use-managed-policy";
 import { screenpipeWebUrl } from "@/lib/web-url";
@@ -53,9 +51,12 @@ import {
   describeEnterpriseUpdateMode,
   normalizeEnterpriseAppUpdatePolicy,
 } from "@/lib/enterprise/app-update-policy";
+import { getRemoteAutoUpdatePolicy } from "@/lib/desktop-remote-control";
+import { useEnterpriseBuildStatus } from "@/lib/hooks/use-is-enterprise-build";
 
 export default function GeneralSettings() {
   const { isManagedDeployment } = useManagedPolicy();
+  const enterpriseBuild = useEnterpriseBuildStatus();
   const { settings, updateSettings } = useSettings();
   const resetOnboarding = useOnboarding((state) => state.resetOnboarding);
   const { toast } = useToast();
@@ -65,6 +66,11 @@ export default function GeneralSettings() {
   const userGoal =
     normalizeUserGoalCategory(settings.userGoalCategory) ??
     DEFAULT_USER_GOAL_CATEGORY;
+  const autoUpdateRemotePolicy = getRemoteAutoUpdatePolicy(settings);
+  const autoUpdateForcedByRemote =
+    enterpriseBuild.resolved &&
+    !enterpriseBuild.isEnterprise &&
+    autoUpdateRemotePolicy.forceEnabled;
 
   const handleUserGoalChange = async (category: UserGoalCategory) => {
     try {
@@ -261,12 +267,17 @@ export default function GeneralSettings() {
                   <RefreshCw className="h-4 w-4 text-muted-foreground shrink-0" />
                   <div>
                     <h3 className="text-sm font-medium text-foreground">Auto-update</h3>
-                    <p className="text-xs text-muted-foreground">Restart automatically when an update is downloaded. Off: a &quot;restart to update&quot; banner appears instead.</p>
+                    <p className="text-xs text-muted-foreground">
+                      {autoUpdateForcedByRemote
+                        ? "Required temporarily so this installation receives reliability fixes."
+                        : "Restart automatically when an update is downloaded. Off: a \"restart to update\" banner appears instead."}
+                    </p>
                   </div>
                 </div>
                 <Switch
                   id="auto-update-toggle"
-                  checked={settings?.autoUpdate ?? false}
+                  checked={settings?.autoUpdate ?? true}
+                  disabled={autoUpdateForcedByRemote}
                   onCheckedChange={(checked) =>
                     handleSettingsChange({ autoUpdate: checked })
                   }
@@ -338,8 +349,8 @@ export default function GeneralSettings() {
               <div className="flex items-center space-x-2.5">
                 <RefreshCw className="h-4 w-4 text-muted-foreground shrink-0" />
                 <div>
-                  <h3 className="text-sm font-medium text-foreground">Auto-Update Pipes</h3>
-                  <p className="text-xs text-muted-foreground">Update store pipes you haven&apos;t modified</p>
+                  <h3 className="text-sm font-medium text-foreground">Auto-Update Scheduled</h3>
+                  <p className="text-xs text-muted-foreground">Update Store tasks you haven&apos;t modified</p>
                 </div>
               </div>
               <Switch
@@ -441,49 +452,6 @@ export default function GeneralSettings() {
               {isResettingOnboarding ? "resetting..." : "reset"}
             </Button>
           </div>
-        </CardContent>
-      </Card>
-
-      <Card className="border-border bg-card" data-testid="headless-setting">
-        <CardContent className="px-3 py-2.5">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center space-x-2.5">
-              <MonitorOff className="h-4 w-4 text-muted-foreground shrink-0" />
-              <div>
-                <h3 className="text-sm font-medium text-foreground">Headless</h3>
-                <p className="text-xs text-muted-foreground">
-                  Close the app UI completely while recording continues in the tray
-                </p>
-                <p className="text-[10px] text-muted-foreground/60 mt-0.5">
-                  App shortcuts and the UI are unavailable until you open screenpipe from the tray.
-                </p>
-              </div>
-            </div>
-            <Switch
-              id="headless-toggle"
-              checked={settings?.headless ?? false}
-              onCheckedChange={(checked) => handleSettingsChange({ headless: checked })}
-              className="ml-4"
-            />
-          </div>
-          {settings?.headless && (
-            <div className="ml-6 mt-2 border-l border-border pl-3 pt-2 flex items-center justify-between">
-              <div>
-                <h4 className="text-xs font-medium text-foreground">Record only</h4>
-                <p className="text-[10px] text-muted-foreground mt-0.5">
-                  Skip scheduled pipe runs while the UI is headless
-                </p>
-              </div>
-              <Switch
-                id="headless-record-only-toggle"
-                checked={settings?.headlessRecordOnly ?? false}
-                onCheckedChange={(checked) =>
-                  handleSettingsChange({ headlessRecordOnly: checked })
-                }
-                className="ml-4"
-              />
-            </div>
-          )}
         </CardContent>
       </Card>
 

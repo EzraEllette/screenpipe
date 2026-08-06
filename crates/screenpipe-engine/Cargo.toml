@@ -28,6 +28,8 @@ screenpipe-config = { path = "../screenpipe-config" }
 screenpipe-connect = { path = "../screenpipe-connect" }
 screenpipe-vault = { path = "../screenpipe-vault" }
 screenpipe-secrets = { path = "../screenpipe-secrets" }
+screenpipe-semantic = { path = "../screenpipe-semantic" }
+screenpipe-sqlite-recovery = { path = "../screenpipe-sqlite-recovery" }
 
 
 # Image processing
@@ -41,6 +43,7 @@ sqlx = { workspace = true, features = [
     "chrono",
     "migrate",
 ] }
+rusqlite = { workspace = true }
 
 anyhow = { workspace = true }
 async-trait = { workspace = true }
@@ -52,6 +55,9 @@ sentry = { workspace = true }
 # Server
 axum = { workspace = true }
 http-body-util = "0.1"
+hyper = "1"
+hyper-util = { version = "0.1", features = ["server-auto", "tokio", "service"] }
+tower = { version = "0.4", default-features = false }
 tokio = { workspace = true }
 tower-http = { version = "0.5.2", features = ["cors", "trace"] }
 
@@ -71,6 +77,7 @@ colored = "2.0"
 
 # Plugins
 futures = { workspace = true, features = ["std"] }
+tokio-stream = { workspace = true, features = ["sync"] }
 
 # Directory management
 dirs = { workspace = true }
@@ -137,6 +144,7 @@ env_logger = { workspace = true }
 tempfile = { workspace = true }
 tokio-tungstenite = { workspace = true }
 tower = { version = "0.4", features = ["util"] }
+tiktoken-rs = "0.11.0"
 
 # Lock-free queue used by tests/consumer_sleep_test.rs to reproduce the
 # OCR frame-drop bug (see the test's docstring). Not needed by the crate

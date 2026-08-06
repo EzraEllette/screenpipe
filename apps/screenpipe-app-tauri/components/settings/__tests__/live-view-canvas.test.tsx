@@ -33,6 +33,7 @@ const view: BrainViewDefinition = {
       intent: "Show focused work time",
       binding: { pipeName: "daily-summary" },
       feedback: { upCount: 0, downCount: 0, current: null },
+      itemActions: { items: [] },
       value: {
         payload: { value: 4.5, unit: "hours", delta: "+45m" },
         evidence: [
@@ -59,6 +60,7 @@ const view: BrainViewDefinition = {
       intent: "Show today's meetings",
       binding: { pipeName: "daily-summary" },
       feedback: { upCount: 0, downCount: 0, current: null },
+      itemActions: { items: [] },
       value: {
         payload: { items: [{ title: "Canvas review", status: "done" }] },
         evidence: [],
@@ -106,6 +108,11 @@ function CanvasHarness({
   );
 }
 
+function openCanvasTools() {
+  fireEvent.click(screen.getByTestId("canvas-tools-toggle"));
+  return screen.getByTestId("canvas-tools-panel");
+}
+
 beforeEach(() => {
   vi.stubGlobal("PointerEvent", PointerEventMock);
   HTMLElement.prototype.setPointerCapture = vi.fn();
@@ -145,12 +152,74 @@ describe("LiveViewCanvas", () => {
     ).toBeTruthy();
   });
 
+  it("keeps canvas tools compact until opened and preserves the active tool", () => {
+    render(<CanvasHarness />);
+
+    const toggle = screen.getByTestId("canvas-tools-toggle");
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(toggle.getAttribute("aria-label")).toContain("select tool active");
+    expect(toggle.getAttribute("title")).toContain("select active");
+    expect(toggle.textContent).toBe("");
+    expect(toggle.className).toContain("w-8");
+    expect(screen.queryByTestId("canvas-tools-panel")).toBeNull();
+    expect(screen.getByTestId("canvas-interaction-hint")).toBeTruthy();
+
+    const panel = openCanvasTools();
+    expect(panel).toBeTruthy();
+    expect(screen.getByTestId("canvas-tool-pan")).toBeTruthy();
+    expect(screen.queryByTestId("canvas-interaction-hint")).toBeNull();
+
+    fireEvent.click(screen.getByTestId("canvas-tool-pan"));
+    expect(screen.queryByTestId("canvas-tools-panel")).toBeNull();
+    expect(
+      screen.getByTestId("canvas-tools-toggle").getAttribute("aria-label"),
+    ).toContain("pan tool active");
+    expect(screen.getByTestId("canvas-interaction-hint")).toBeTruthy();
+
+    openCanvasTools();
+    fireEvent.keyDown(screen.getByTestId("canvas-tools-panel"), {
+      key: "Escape",
+    });
+    expect(screen.queryByTestId("canvas-tools-panel")).toBeNull();
+  });
+
   it("does not persist React Flow's programmatic mount viewport", async () => {
     const onPersist = vi.fn();
     render(<CanvasHarness onPersist={onPersist} />);
 
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(onPersist).not.toHaveBeenCalled();
+  });
+
+  it("ignores React Flow's delayed move-end callback after unmount", async () => {
+    const onChange = vi.fn();
+    const result = render(
+      <React.StrictMode>
+        <LiveViewCanvas
+          document={createCanvasDocument(view)}
+          slots={view.slots}
+          timeRange="today"
+          refreshingSlotIds={new Set()}
+          aiEditingSlotId={null}
+          onChange={onChange}
+          onFeedback={vi.fn().mockResolvedValue(true)}
+          onRegenerate={vi.fn()}
+          onAiEdit={vi.fn().mockResolvedValue(true)}
+        />
+      </React.StrictMode>,
+    );
+
+    fireEvent.wheel(screen.getByTestId("rf__wrapper"), {
+      deltaX: 24,
+      deltaY: 24,
+    });
+    await waitFor(() => expect(onChange).toHaveBeenCalled());
+    const callsBeforeUnmount = onChange.mock.calls.length;
+
+    result.unmount();
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    expect(onChange).toHaveBeenCalledTimes(callsBeforeUnmount);
   });
 
   it("resizes a Block from its current size on the first drag", async () => {
@@ -226,6 +295,7 @@ describe("LiveViewCanvas", () => {
     const onPersist = vi.fn();
     render(<CanvasHarness onPersist={onPersist} />);
 
+    openCanvasTools();
     fireEvent.click(screen.getByTestId("canvas-tool-note"));
     fireEvent.pointerDown(screen.getByTestId("live-view-canvas-surface"), {
       clientX: 320,
@@ -244,6 +314,7 @@ describe("LiveViewCanvas", () => {
       );
     });
 
+    openCanvasTools();
     fireEvent.click(screen.getByTestId("canvas-delete-selection"));
     expect(screen.queryByLabelText("Canvas note")).toBeNull();
     expect(onPersist).toHaveBeenLastCalledWith(
@@ -255,6 +326,7 @@ describe("LiveViewCanvas", () => {
     const onPersist = vi.fn();
     render(<CanvasHarness onPersist={onPersist} />);
 
+    openCanvasTools();
     fireEvent.click(screen.getByTestId("canvas-tool-arrow"));
     fireEvent.pointerDown(screen.getByTestId("canvas-move-focus-time"), {
       pointerId: 3,
@@ -277,6 +349,7 @@ describe("LiveViewCanvas", () => {
     });
     const arrow = screen.getByTestId(/^canvas-arrow-/);
     fireEvent.pointerDown(arrow, { pointerId: 5 });
+    openCanvasTools();
     fireEvent.click(screen.getByTestId("canvas-delete-selection"));
     expect(screen.queryByTestId(/^canvas-arrow-/)).toBeNull();
   });
@@ -314,6 +387,7 @@ describe("LiveViewCanvas", () => {
       }),
     );
 
+    openCanvasTools();
     fireEvent.click(screen.getByTestId("canvas-tool-draw"));
     fireEvent.pointerDown(surface, {
       pointerId: 10,
@@ -332,6 +406,7 @@ describe("LiveViewCanvas", () => {
     });
     expect(screen.getByTestId(/^canvas-stroke-/)).toBeTruthy();
 
+    openCanvasTools();
     for (let index = 0; index < 20; index += 1) {
       fireEvent.click(screen.getByLabelText("zoom out"));
     }
@@ -343,6 +418,7 @@ describe("LiveViewCanvas", () => {
     const surface = screen.getByTestId("live-view-canvas-surface");
     const pane = surface.querySelector<HTMLElement>(".react-flow__pane");
     expect(pane).toBeTruthy();
+    openCanvasTools();
 
     fireEvent.wheel(pane!, { deltaY: -100, clientX: 500, clientY: 350 });
     expect(screen.getByText("100%")).toBeTruthy();

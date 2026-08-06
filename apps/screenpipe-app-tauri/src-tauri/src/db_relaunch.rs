@@ -15,7 +15,9 @@
 //! [`surface_manual_recovery`] publishes the "needs manual recovery" event once
 //! so the notification layer can tell the user what happened.
 
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use tracing::{error, warn};
 
@@ -25,13 +27,20 @@ use tracing::{error, warn};
 const DB_BOOT_FAILURES_BEFORE_RECOVERY_ALERT: u32 = 2;
 
 static DB_BOOT_FAILURES: AtomicU32 = AtomicU32::new(0);
-/// Dedupe for the recovery notification (once per process lifetime is plenty —
-/// the state only clears with the restart or recovery the user must perform).
+/// Dedupe for the recovery notification and gate for automatic engine
+/// respawns. A confirmed healthy server clears it after recovery.
 static GAVE_UP_NOTIFIED: AtomicBool = AtomicBool::new(false);
 
 /// Call when an engine respawn succeeds — a healthy boot ends the episode.
 pub fn reset_db_boot_failures() {
     DB_BOOT_FAILURES.store(0, Ordering::SeqCst);
+    GAVE_UP_NOTIFIED.store(false, Ordering::SeqCst);
+}
+
+/// Whether automatic engine restarts must stay disabled until a manual repair
+/// produces a confirmed healthy server (or the app process restarts).
+pub fn manual_recovery_required() -> bool {
+    GAVE_UP_NOTIFIED.load(Ordering::SeqCst)
 }
 
 /// Does this spawn error look like the DB layer failing to open/init (the
@@ -79,9 +88,60 @@ pub async fn surface_manual_recovery(reason: &str) {
     let _ = screenpipe_events::send_event(evt.event_name(), evt);
 }
 
+/// Report a durable quarantine found at launch through the existing Sentry
+/// tracing layer. Only bounded marker metadata is attached: never its path,
+/// file identity, or free-form reason.
+pub async fn surface_quarantined_recovery_at_launch(database_path: &Path) {
+    if GAVE_UP_NOTIFIED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+
+    let marker = screenpipe_db::read_sqlite_quarantine(database_path)
+        .ok()
+        .flatten();
+    let sqlite_code = marker.as_ref().and_then(|marker| marker.sqlite_code);
+    let marker_age = marker
+        .as_ref()
+        .map(|marker| quarantine_age_bucket(marker.detected_at_unix_ms))
+        .unwrap_or("unknown");
+
+    error!(
+        sqlite_quarantine_state = "active_at_launch",
+        sqlite_marker_metadata = if marker.is_some() { "readable" } else { "unreadable" },
+        sqlite_extended_code = sqlite_code.unwrap_or(-1),
+        sqlite_primary_code = sqlite_code.map(|code| code & 0xff).unwrap_or(-1),
+        sqlite_marker_age = marker_age,
+        "db recovery: durable SQLite quarantine was present at app launch"
+    );
+    let evt = screenpipe_events::DbRecoveryEvent::needs_recovery();
+    let _ = screenpipe_events::send_event(evt.event_name(), evt);
+}
+
+fn quarantine_age_bucket(detected_at_unix_ms: u64) -> &'static str {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0);
+    let Some(age) = now.checked_sub(detected_at_unix_ms) else {
+        return "clock_skew";
+    };
+
+    const HOUR: u64 = 60 * 60 * 1_000;
+    const DAY: u64 = 24 * HOUR;
+    const WEEK: u64 = 7 * DAY;
+    match age {
+        0..HOUR => "under_1h",
+        HOUR..DAY => "1h_to_1d",
+        DAY..=WEEK => "1d_to_7d",
+        _ => "over_7d",
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::is_db_shaped;
+    use super::{
+        is_db_shaped, manual_recovery_required, reset_db_boot_failures, surface_manual_recovery,
+    };
 
     #[test]
     fn db_shaped_errors_match() {
@@ -94,5 +154,15 @@ mod tests {
         ));
         assert!(!is_db_shaped("Failed to bind port 3030: address in use"));
         assert!(!is_db_shaped("screen recording permission denied"));
+    }
+
+    #[tokio::test]
+    async fn recovery_alert_gates_retries_until_a_healthy_boot_resets_it() {
+        reset_db_boot_failures();
+        surface_manual_recovery("test hard fault").await;
+        assert!(manual_recovery_required());
+
+        reset_db_boot_failures();
+        assert!(!manual_recovery_required());
     }
 }
