@@ -446,6 +446,15 @@ impl DatabaseManager {
         // upgraded across that migration boundary may have skipped it.
         Self::ensure_memories_sync_columns(pool).await?;
 
+        // Self-heal the speakers + speaker_embeddings tables. The migration
+        // (20241108202826) depends on sqlite-vec being loaded for the vec_length
+        // CHECK constraint. If an older engine ran that migration without
+        // sqlite-vec, sqlx recorded it as applied but the CREATE TABLE failed —
+        // subsequent launches skip the "already applied" migration, so the table
+        // stays missing and every transcription errors with "no such table:
+        // speaker_embeddings".
+        Self::ensure_speaker_tables(pool).await?;
+
         Ok(())
     }
 
@@ -621,6 +630,69 @@ impl DatabaseManager {
         )
         .execute(pool)
         .await?;
+        Ok(())
+    }
+
+    /// Self-heal the `speakers` and `speaker_embeddings` tables. The original
+    /// migration (20241108202826) uses `vec_length()` in a CHECK constraint,
+    /// which requires the sqlite-vec extension. If the migration was applied by
+    /// an engine build where sqlite-vec wasn't loaded (or failed to load), sqlx
+    /// recorded the migration version but the DDL silently failed — the tables
+    /// don't exist despite the migration being "applied". Re-issuing the
+    /// `CREATE TABLE IF NOT EXISTS` statements fixes this for all subsequent
+    /// launches now that sqlite-vec is always registered as an auto-extension.
+    async fn ensure_speaker_tables(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+        let speakers_exists: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'speakers'",
+        )
+        .fetch_one(pool)
+        .await?;
+
+        if speakers_exists.0 == 0 {
+            tracing::info!("Self-healing missing speakers table");
+            sqlx::query(
+                "CREATE TABLE IF NOT EXISTS speakers (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT,
+                    metadata JSON
+                )",
+            )
+            .execute(pool)
+            .await?;
+        }
+
+        let embeddings_exists: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'speaker_embeddings'",
+        )
+        .fetch_one(pool)
+        .await?;
+
+        if embeddings_exists.0 == 0 {
+            tracing::info!("Self-healing missing speaker_embeddings table");
+            sqlx::query(
+                "CREATE TABLE IF NOT EXISTS speaker_embeddings (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    embedding FLOAT[512] NOT NULL
+                    check(
+                      typeof(embedding) == 'blob'
+                      and vec_length(embedding) == 512
+                    ),
+                    speaker_id INTEGER REFERENCES speakers(id)
+                )",
+            )
+            .execute(pool)
+            .await?;
+
+            // Also create the index from the later migration (20260423000000)
+            // since it would also have been skipped.
+            sqlx::query(
+                "CREATE INDEX IF NOT EXISTS idx_speaker_embeddings_speaker_id \
+                 ON speaker_embeddings(speaker_id)",
+            )
+            .execute(pool)
+            .await?;
+        }
+
         Ok(())
     }
 
