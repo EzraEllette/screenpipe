@@ -4,7 +4,8 @@
 
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { useRef, useState } from "react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { emit } from "@tauri-apps/api/event";
 import type { Message } from "@/lib/chat/types";
 
 vi.mock("@tauri-apps/api/event", () => ({
@@ -103,7 +104,12 @@ function useForegroundErrorHarness() {
 }
 
 describe("foreground chat provider errors", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it("renders sanitized sensitive-content guidance without the provider payload", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const { result } = renderHook(() => useForegroundErrorHarness());
 
     await waitFor(() => expect(result.current.handlerRef.current).toBeTypeOf("function"));
@@ -125,5 +131,12 @@ describe("foreground chat provider errors", () => {
       expect(assistant?.content).not.toContain("sensitive_words_detected");
       expect(assistant?.retryPrompt).toBe("help");
     });
+
+    const diagnosticSurfaces = JSON.stringify([
+      ...consoleError.mock.calls,
+      ...vi.mocked(emit).mock.calls,
+    ]);
+    expect(diagnosticSurfaces).not.toContain("req_private_123");
+    expect(diagnosticSurfaces).not.toContain("sensitive_words_detected");
   });
 });

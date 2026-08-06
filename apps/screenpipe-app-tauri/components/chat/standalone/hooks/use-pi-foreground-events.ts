@@ -414,12 +414,14 @@ export function usePiForegroundEvents({
           // Pi exhausted retries on a transient error (rate limit, overloaded, etc.)
           const errorStr = stringValue(data.finalError, "Request failed after retries");
           const quotaErrorType = classifyQuotaError(errorStr);
+          const providerError = buildProviderErrorPresentation(errorStr, getActivePreset());
+          const diagnosticError = providerError?.message ?? errorStr;
           const logAutoRetryFailure = quotaErrorType === "daily" || quotaErrorType === "hosted_busy" || quotaErrorType === "rate" || errorStr.includes("model_not_allowed")
             ? console.warn
             : console.error;
-          logAutoRetryFailure("[Pi] Auto-retry failed:", errorStr);
-          piLastErrorRef.current = errorStr;
-          emitSessionActivity({ status: "error", lastError: errorStr });
+          logAutoRetryFailure("[Pi] Auto-retry failed:", diagnosticError);
+          piLastErrorRef.current = diagnosticError;
+          emitSessionActivity({ status: "error", lastError: diagnosticError });
 
           // Detect rate limit or daily limit from the error
           if (quotaErrorType === "daily" || quotaErrorType === "hosted_busy" || quotaErrorType === "rate") {
@@ -446,7 +448,6 @@ export function usePiForegroundEvents({
               );
             }
           } else {
-            const providerError = buildProviderErrorPresentation(errorStr, getActivePreset());
             if (providerError && piMessageIdRef.current) {
               const msgId = piMessageIdRef.current;
               setMessages((prev) =>
@@ -475,13 +476,15 @@ export function usePiForegroundEvents({
           // Pi's LLM returned an error (e.g. rate limit, overloaded)
           const reason = stringValue(data.assistantMessageEvent.reason);
           const errorDetail = stringValue(data.assistantMessageEvent.error);
-          console.error("[Pi] Message error:", reason, errorDetail);
-          emitSessionActivity({ status: "error", lastError: `${reason} ${errorDetail}`.trim() || undefined });
+          const fullError = `${reason} ${errorDetail}`.trim();
+          const providerError = buildProviderErrorPresentation(fullError, getActivePreset());
+          const diagnosticError = providerError?.message ?? fullError;
+          console.error("[Pi] Message error:", diagnosticError);
+          emitSessionActivity({ status: "error", lastError: diagnosticError || undefined });
 
           if (piMessageIdRef.current) {
             const msgId = piMessageIdRef.current;
-            const fullError = `${reason} ${errorDetail}`.trim();
-            piLastErrorRef.current = fullError;
+            piLastErrorRef.current = diagnosticError;
 
             const quotaErrorType = classifyQuotaError(fullError);
             if (quotaErrorType === "daily" || quotaErrorType === "hosted_busy" || quotaErrorType === "rate") {
@@ -504,7 +507,6 @@ export function usePiForegroundEvents({
                 prev.map((m) => m.id === msgId ? { ...m, content: "This model requires an upgrade to Screenpipe Business. Switch to Auto to keep going." } : m)
               );
             } else {
-              const providerError = buildProviderErrorPresentation(fullError, getActivePreset());
               if (providerError) {
                 setMessages((prev) =>
                   prev.map((m) => m.id === msgId
@@ -700,12 +702,14 @@ export function usePiForegroundEvents({
           // LLM returned an error (credits_exhausted, rate limit, provider error, etc.)
           const errMsg = stringValue(data.message.errorMessage, stringValue(data.message.error, "Unknown error"));
           const quotaErrorType = classifyQuotaError(errMsg);
+          const providerError = buildProviderErrorPresentation(errMsg, getActivePreset());
+          const diagnosticError = providerError?.message ?? errMsg;
           const logLlmError = quotaErrorType === "daily" || quotaErrorType === "hosted_busy" || quotaErrorType === "rate" || errMsg.includes("model_not_allowed")
             ? console.warn
             : console.error;
-          logLlmError("[Pi] LLM error via", data.type, ":", errMsg);
-          piLastErrorRef.current = errMsg;
-          emitSessionActivity({ status: "error", lastError: errMsg });
+          logLlmError("[Pi] LLM error via", data.type, ":", diagnosticError);
+          piLastErrorRef.current = diagnosticError;
+          emitSessionActivity({ status: "error", lastError: diagnosticError });
           const authTokenInvalidated = isInvalidatedAuthTokenError(errMsg);
           if (authTokenInvalidated) {
             void handleInvalidatedAuthToken();
@@ -713,8 +717,6 @@ export function usePiForegroundEvents({
 
           if (piMessageIdRef.current) {
             const msgId = piMessageIdRef.current;
-
-            const providerError = buildProviderErrorPresentation(errMsg, getActivePreset());
             if (authTokenInvalidated) {
               setMessages((prev) =>
                 prev.map((m) => m.id === msgId ? { ...m, content: buildInvalidatedAuthTokenMessage() } : m)
