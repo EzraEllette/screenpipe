@@ -6,7 +6,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { remote, type Browser } from "webdriverio";
-import { getAppPid, startApp, stopAppAndWait, WEBDRIVER_PORT } from "../helpers/app-launcher.js";
+import { getAppPid, startApp, stopApp, WEBDRIVER_PORT } from "../helpers/app-launcher.js";
 
 const SENTINEL = "stale transcript sentinel";
 const dataDir = resolve(process.env.SCREENPIPE_E2E_DATA_DIR ?? "/tmp/screenpipe-scr459-e2e");
@@ -51,7 +51,7 @@ async function main() {
   const writer = databaseState();
   evidence.writer = { appPid: getAppPid(), ...writer, sentinelRendered: true };
   await browser.deleteSession();
-  await stopAppAndWait();
+  await stopApp();
 
   await startApp(WEBDRIVER_PORT, {
     dataDir,
@@ -66,7 +66,7 @@ async function main() {
     sentinelRendered: true,
   };
   await browser.deleteSession();
-  await stopAppAndWait();
+  await stopApp();
 
   execFileSync("python3", [
     "-c",
@@ -98,7 +98,7 @@ async function main() {
     throw new Error("matching-generation empty database retained the transcript sentinel");
   }
   await browser.deleteSession();
-  await stopAppAndWait();
+  await stopApp();
 
   const backupDir = resolve(dataDir, "old-database");
   mkdirSync(backupDir, { recursive: true });
@@ -124,11 +124,11 @@ async function main() {
   if (sentinelRendered) throw new Error("replacement DB rendered the prior transcript sentinel");
   console.log(`SCR459_E2E_PASS evidence=${evidencePath}`);
   await browser.deleteSession();
-  await stopAppAndWait();
+  await stopApp();
 }
 
 main().catch(async (error) => {
-  await stopAppAndWait().catch(() => {});
+  await stopApp().catch(() => {});
   console.error(error);
   process.exitCode = 1;
 });
