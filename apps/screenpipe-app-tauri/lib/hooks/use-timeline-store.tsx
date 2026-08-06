@@ -87,6 +87,30 @@ const CACHE_SAVE_DEBOUNCE_MS = 2000; // Save cache 2s after last frame update
 let cacheLoadRequestId = 0;
 const CACHE_SOURCE_READY_RETRY_MS = 100;
 const CACHE_SOURCE_READY_MAX_ATTEMPTS = 50;
+let streamRequestSequence = 0;
+let frameMessageVersion = 0;
+let activeInitialSnapshot: { requestId: string; frameVersion: number } | null = null;
+
+interface InitialSnapshotCompleteSignal {
+	request_id: string;
+	empty: boolean;
+}
+
+export function shouldInvalidateForInitialSnapshot({
+	activeRequestId,
+	requestFrameVersion,
+	currentFrameVersion,
+	signal,
+}: {
+	activeRequestId: string | null;
+	requestFrameVersion: number;
+	currentFrameVersion: number;
+	signal: InitialSnapshotCompleteSignal;
+}): boolean {
+	return signal.empty
+		&& signal.request_id === activeRequestId
+		&& currentFrameVersion === requestFrameVersion;
+}
 
 interface TimelineState {
 	frames: StreamTimeSeriesResponse[];
@@ -474,6 +498,7 @@ export const useTimelineStore = create<TimelineState>((set, get) => ({
 			});
 			
 			frameBuffer = [];
+			activeInitialSnapshot = null;
 			requestRetryCount = 0; // Reset retry counter on reconnection
 			if (progressUpdateTimer) {
 				clearTimeout(progressUpdateTimer);
@@ -584,6 +609,29 @@ export const useTimelineStore = create<TimelineState>((set, get) => ({
 					return;
 				}
 
+				if (data?.type === "initial_snapshot_complete") {
+					const signal = data as InitialSnapshotCompleteSignal;
+					const active = activeInitialSnapshot;
+					if (!active || signal.request_id !== active.requestId) return;
+					activeInitialSnapshot = null;
+					if (requestTimeoutTimer) {
+						clearTimeout(requestTimeoutTimer);
+						requestTimeoutTimer = null;
+					}
+					requestRetryCount = 0;
+					if (shouldInvalidateForInitialSnapshot({
+						activeRequestId: active.requestId,
+						requestFrameVersion: active.frameVersion,
+						currentFrameVersion: frameMessageVersion,
+						signal,
+					})) {
+						void get().handleAuthoritativeEmptySnapshot().catch((error) =>
+							console.warn("Failed to invalidate empty timeline snapshot:", error),
+						);
+					}
+					return;
+				}
+
 				// Handle error messages
 				if (data.error) {
 					get().flushFrameBuffer(); // Flush before error
@@ -627,13 +675,8 @@ export const useTimelineStore = create<TimelineState>((set, get) => ({
 
 				// Handle batched frames - OPTIMIZED: buffer and flush periodically
 				if (Array.isArray(data)) {
-					if (data.length === 0) {
-						void get().handleAuthoritativeEmptySnapshot().catch((error) =>
-							console.warn("Failed to invalidate empty timeline snapshot:", error),
-						);
-						return;
-					}
 					if (data.length > 0) {
+						frameMessageVersion++;
 						requestRetryCount = 0;
 					}
 					// Add to buffer instead of immediate state update
@@ -666,6 +709,7 @@ export const useTimelineStore = create<TimelineState>((set, get) => ({
 
 				// Handle single frame (legacy support)
 				if (data.timestamp && data.devices) {
+					frameMessageVersion++;
 					requestRetryCount = 0;
 					frameBuffer.push(data);
 
@@ -819,12 +863,18 @@ export const useTimelineStore = create<TimelineState>((set, get) => ({
 			}
 
 			if (websocket && websocket.readyState === WebSocket.OPEN) {
+				const requestId = `${currentWsId}:${++streamRequestSequence}`;
+				activeInitialSnapshot = {
+					requestId,
+					frameVersion: frameMessageVersion,
+				};
 				websocket.send(
 					JSON.stringify({
 						start_time: startTime.toISOString(),
 						end_time: endTime.toISOString(),
 						order: "descending",
 						limit: TIMELINE_STREAM_FRAME_LIMIT,
+						request_id: requestId,
 					}),
 				);
 
@@ -920,12 +970,18 @@ export const useTimelineStore = create<TimelineState>((set, get) => ({
 		}
 
 		if (websocket && websocket.readyState === WebSocket.OPEN) {
+			const requestId = `${currentWsId}:${++streamRequestSequence}`;
+			activeInitialSnapshot = {
+				requestId,
+				frameVersion: frameMessageVersion,
+			};
 			websocket.send(
 				JSON.stringify({
 					start_time: nextDay.toISOString(),
 					end_time: endTime.toISOString(),
 					order: "descending",
 					limit: TIMELINE_STREAM_FRAME_LIMIT,
+					request_id: requestId,
 				}),
 			);
 			set((state) => ({

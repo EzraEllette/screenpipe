@@ -68,6 +68,38 @@ async function main() {
   await browser.deleteSession();
   await stopAppAndWait();
 
+  execFileSync("python3", [
+    "-c",
+    "import sqlite3,sys; db=sqlite3.connect(sys.argv[1]); db.execute('PRAGMA foreign_keys=OFF'); [db.execute('DELETE FROM ' + table) for table in ('ocr_text','frames','audio_transcriptions','audio_chunks','video_chunks')]; db.commit()",
+    resolve(dataDir, "db.sqlite"),
+  ]);
+
+  await startApp(WEBDRIVER_PORT, {
+    dataDir,
+    resetDataDir: false,
+    seedFlags: "onboarding,no-recording",
+  });
+  browser = await session();
+  await browser.pause(3_000);
+  const matchingGenerationEmpty = databaseState();
+  const matchingGenerationSentinelRendered = await bodyContains(browser, SENTINEL);
+  evidence.matchingGenerationEmptyRestart = {
+    appPid: getAppPid(),
+    ...matchingGenerationEmpty,
+    sentinelRendered: matchingGenerationSentinelRendered,
+  };
+  if (matchingGenerationEmpty.generationId !== writer.generationId) {
+    throw new Error("same database changed generation ID after row deletion");
+  }
+  if (matchingGenerationEmpty.sourceRows !== 0) {
+    throw new Error(`same database is not empty: ${matchingGenerationEmpty.sourceRows}`);
+  }
+  if (matchingGenerationSentinelRendered) {
+    throw new Error("matching-generation empty database retained the transcript sentinel");
+  }
+  await browser.deleteSession();
+  await stopAppAndWait();
+
   const backupDir = resolve(dataDir, "old-database");
   mkdirSync(backupDir, { recursive: true });
   for (const name of ["db.sqlite", "db.sqlite-wal", "db.sqlite-shm"]) {

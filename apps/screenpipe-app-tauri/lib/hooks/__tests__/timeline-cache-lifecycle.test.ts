@@ -28,7 +28,10 @@ vi.mock("@/lib/api", () => ({
   redactApiUrlForLogs: (value: string) => value,
 }));
 
-import { useTimelineStore } from "../use-timeline-store";
+import {
+  shouldInvalidateForInitialSnapshot,
+  useTimelineStore,
+} from "../use-timeline-store";
 
 const transcriptFrame = {
   timestamp: new Date().toISOString(),
@@ -140,5 +143,60 @@ describe("timeline cache source lifecycle", () => {
     expect(clearTimelineCache).toHaveBeenCalledWith("database-a");
     expect(useTimelineStore.getState().frames).toEqual([]);
     expect(useTimelineStore.getState().hasCachedData).toBe(false);
+  });
+
+  it("accepts only the matching request-scoped empty completion", () => {
+    expect(shouldInvalidateForInitialSnapshot({
+      activeRequestId: "request-2",
+      requestFrameVersion: 4,
+      currentFrameVersion: 4,
+      signal: { request_id: "request-1", empty: true },
+    })).toBe(false);
+    expect(shouldInvalidateForInitialSnapshot({
+      activeRequestId: "request-2",
+      requestFrameVersion: 4,
+      currentFrameVersion: 4,
+      signal: { request_id: "request-2", empty: true },
+    })).toBe(true);
+  });
+
+  it("does not clear a live frame received after the matching request", () => {
+    expect(shouldInvalidateForInitialSnapshot({
+      activeRequestId: "request-2",
+      requestFrameVersion: 4,
+      currentFrameVersion: 5,
+      signal: { request_id: "request-2", empty: true },
+    })).toBe(false);
+  });
+
+  it("does not invalidate for a nonempty matching completion", () => {
+    expect(shouldInvalidateForInitialSnapshot({
+      activeRequestId: "request-2",
+      requestFrameVersion: 4,
+      currentFrameVersion: 4,
+      signal: { request_id: "request-2", empty: false },
+    })).toBe(false);
+  });
+
+  it("assigns distinct request ids to overlapping websocket requests", async () => {
+    const send = vi.fn();
+    useTimelineStore.setState({
+      websocket: { readyState: WebSocket.OPEN, send, close: vi.fn() },
+      sentRequests: new Set<string>(),
+    } as any);
+    const firstStart = new Date("2026-08-04T00:00:00.000Z");
+    const firstEnd = new Date("2026-08-04T23:59:59.999Z");
+    const secondStart = new Date("2026-08-05T00:00:00.000Z");
+    const secondEnd = new Date("2026-08-05T23:59:59.999Z");
+
+    await useTimelineStore.getState().fetchTimeRange(firstStart, firstEnd);
+    await useTimelineStore.getState().fetchTimeRange(secondStart, secondEnd);
+
+    const first = JSON.parse(send.mock.calls[0][0]);
+    const second = JSON.parse(send.mock.calls[1][0]);
+    expect(first.request_id).toMatch(/^\d+:\d+$/);
+    expect(second.request_id).toMatch(/^\d+:\d+$/);
+    expect(second.request_id).not.toBe(first.request_id);
+    useTimelineStore.getState().prepareForTimelineSourceChange();
   });
 });
