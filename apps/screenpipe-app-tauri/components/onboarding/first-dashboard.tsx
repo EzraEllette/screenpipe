@@ -1090,7 +1090,9 @@ export default function FirstDashboard({
           className="mt-4 w-full border border-foreground bg-foreground px-3 py-3 font-mono text-xs font-semibold uppercase tracking-wide text-background transition-colors hover:bg-background hover:text-foreground disabled:cursor-not-allowed disabled:opacity-35"
         >
           {isSettingsLoaded
-            ? goalCategory === "ai_context"
+            ? isIntentStep
+              ? "continue"
+              : goalCategory === "ai_context"
               ? "connect my AI"
               : `build ${isAdditionalViewFlow ? "another" : "my first"} Live View`
             : "loading AI"}

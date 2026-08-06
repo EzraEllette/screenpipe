@@ -152,7 +152,7 @@ describe("FirstDashboard", () => {
       }),
     );
     fireEvent.click(
-      screen.getByRole("button", { name: /build my first Live View/i }),
+      screen.getByRole("button", { name: /^continue$/i }),
     );
 
     expect(handleNextSlide).toHaveBeenCalledTimes(1);
