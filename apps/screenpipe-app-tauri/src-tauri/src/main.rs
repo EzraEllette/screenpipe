@@ -1178,15 +1178,16 @@ async fn main() {
             let posthog_api_key = "phc_z7FZXE8vmXtdTQ78LMy3j1BQWW4zP6PGDUP46rgcdnb".to_string();
             let interval_hours = 6;
 
-            // Store setup and initialization - must be done first
+            // Store setup and initialization - must be done first. A locked
+            // encrypted store is fatal: continuing would let the webview load
+            // an empty plugin handle and save defaults over the ciphertext.
             // Note: StoreBuilder handles file creation internally — pre-creating
             // store.bin here caused TOCTOU race conditions ("File exists" os error 17).
-            // Use unwrap_or_default to prevent crashes from corrupted stores
             #[allow(unused_mut)] // E2E seeds mutate the store in feature builds.
-            let mut store = store::init_store(&app.handle()).unwrap_or_else(|e| {
-                error!("Failed to init settings store, using defaults: {}", e);
-                store::SettingsStore::default()
-            });
+            let mut store = store::init_store(&app.handle()).map_err(|e| {
+                error!("Failed to init settings store; aborting startup: {}", e);
+                std::io::Error::other(e)
+            })?;
 
             #[cfg(feature = "e2e")]
             e2e::seeds::apply_settings(app.handle(), &mut store);

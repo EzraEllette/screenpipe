@@ -756,6 +756,18 @@ fn build_store_at<R: tauri::Runtime>(
     })
 }
 
+/// Convert store-plugin access into the fail-closed startup contract.
+///
+/// `init_store` may use defaults for a settings *deserialization* error, but it
+/// must never turn an unavailable store handle into defaults: for locked
+/// ciphertext that would let the frontend register an empty plugin store and
+/// save over the user's canonical file.
+fn require_store_access<R: tauri::Runtime>(
+    result: anyhow::Result<Arc<tauri_plugin_store::Store<R>>>,
+) -> Result<Arc<tauri_plugin_store::Store<R>>, String> {
+    result.map_err(|error| format!("Failed to access settings store: {error}"))
+}
+
 pub fn get_store(
     app: &AppHandle,
     _profile_name: Option<String>, // Keep parameter for API compatibility but ignore it
@@ -1988,9 +2000,12 @@ fn restore_headed_mode_for_consumer(
 pub fn init_store(app: &AppHandle) -> Result<SettingsStore, String> {
     println!("Initializing settings store");
 
-    let raw_obj = get_store(app, None)
-        .ok()
-        .and_then(|store| store.get("settings"))
+    // Access errors are not deserialization errors. In particular, the locked
+    // encrypted-store path must reach the setup caller so startup aborts before
+    // any webview can invoke the plugin's unguarded load/save commands.
+    let store_handle = require_store_access(get_store(app, None))?;
+    let raw_obj = store_handle
+        .get("settings")
         .and_then(|raw| raw.as_object().cloned());
 
     let should_persist_restart_notification_migration = raw_obj
@@ -3228,6 +3243,48 @@ mod tests {
             forensic_backup.as_deref() == Some(ciphertext.as_slice()),
             registered.is_some(),
         );
+    }
+
+    #[test]
+    fn locked_store_aborts_startup_before_plugin_load_and_save() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_path = tmp.path().join("store.bin");
+        let backup_path = store_path.with_extension("bin.encrypted.bak");
+        let mut ciphertext = STORE_MAGIC.to_vec();
+        ciphertext.extend_from_slice(b"ciphertext whose key is unavailable");
+        std::fs::write(&store_path, &ciphertext).unwrap();
+
+        let app = tauri::test::mock_builder()
+            .plugin(tauri_plugin_store::Builder::default().build())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("failed to build mock app");
+
+        let init_result = build_store_at(app.handle(), store_path.clone());
+        assert!(
+            init_result.is_err(),
+            "precondition: encrypted store is locked"
+        );
+
+        // Exercise the exact startup access gate before the frontend can invoke
+        // plugin:store|load. If the locked-store error is converted to defaults,
+        // reproduce the webview's load followed by an ordinary settings save.
+        let startup_store = require_store_access(init_result);
+        if startup_store.is_ok() {
+            let webview_store = StoreBuilder::new(app.handle(), store_path.clone())
+                .build()
+                .expect("plugin load silently creates an empty handle");
+            webview_store.set("settings", json!(SettingsStore::default()));
+            webview_store
+                .save()
+                .expect("ordinary plugin save overwrites the canonical file");
+        }
+
+        assert!(
+            startup_store.is_err(),
+            "startup must abort before a webview can load the locked store"
+        );
+        assert_eq!(std::fs::read(&store_path).unwrap(), ciphertext);
+        assert_eq!(std::fs::read(&backup_path).unwrap(), ciphertext);
     }
 
     #[test]
