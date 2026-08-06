@@ -9,18 +9,18 @@ export const SEMANTIC_CONTEXT_MODE_COPY: Record<
   { label: string; description: string }
 > = {
   memory: {
-    label: "memory",
+    label: "Memory",
     description:
-      "For recall, search, summaries, and pipes. Uses fewer prompt tokens for reading; adds a low-priority parser and deduplicated semantic rows.",
+      "For finding past work, creating summaries, and running scheduled tasks. This keeps the information sent to AI smaller.",
   },
   computerUse: {
-    label: "automation",
+    label: "Automation",
     description:
-      "For agents that click and type. Skips the memory parser, but keeps extra controls, state, and bounds, so capture storage and automation prompts are larger.",
+      "For AI agents that click and type in apps. This keeps extra details about buttons and fields, so it uses more storage.",
   },
   both: {
-    label: "memory + automation",
+    label: "Memory + automation",
     description:
-      "One capture feeds both with no duplicate raw tree. This combines both background workloads and uses the most CPU and storage; token use follows the view each agent requests.",
+      "For finding past work and letting AI agents click and type. Screenpipe records everything once, but this uses the most processing power and storage.",
   },
 };

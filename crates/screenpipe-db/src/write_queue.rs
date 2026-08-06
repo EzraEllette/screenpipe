@@ -206,6 +206,17 @@ pub(crate) enum BatchOutcome {
     HardFault,
 }
 
+#[derive(Clone, Copy)]
+struct BatchTimeouts {
+    write_semaphore: Duration,
+    write_pool: Duration,
+}
+
+const BATCH_TIMEOUTS: BatchTimeouts = BatchTimeouts {
+    write_semaphore: Duration::from_secs(30),
+    write_pool: Duration::from_secs(5),
+};
+
 /// Shared, cloneable health/observability for the write queue. The app polls this
 /// (or reacts to the persistent-failure hook) to surface degradation and recover.
 #[derive(Clone, Default)]
@@ -226,19 +237,35 @@ struct WriteQueueHealthInner {
     /// value before its debounce and cancels a stale restart when it changes.
     fatal_run_recovery_epoch: std::sync::atomic::AtomicU64,
     hard_faulted: AtomicBool,
+    /// Canonicalized by the coordinator when used. None keeps isolated unit
+    /// tests independent; production managers always bind health to a path.
+    hard_fault_path: Option<Arc<str>>,
     degraded: AtomicBool,
     last_success_unix_ms: std::sync::atomic::AtomicI64,
 }
 
 impl WriteQueueHealth {
+    pub(crate) fn for_database_path(database_path: impl Into<Arc<str>>) -> Self {
+        Self {
+            inner: Arc::new(WriteQueueHealthInner {
+                hard_fault_path: Some(database_path.into()),
+                ..Default::default()
+            }),
+        }
+    }
+
     /// True once the write path has failed and needs operator attention.
     pub fn is_degraded(&self) -> bool {
         self.inner.degraded.load(Ordering::SeqCst)
     }
     /// True once SQLite reports an unrecoverable hard fault for this manager.
-    /// The latch never clears; recovery requires a new `DatabaseManager`.
+    /// The latch never clears; recovery requires an offline, verified fresh
+    /// physical database generation, not merely a new `DatabaseManager`.
     pub fn is_hard_faulted(&self) -> bool {
         self.inner.hard_faulted.load(Ordering::SeqCst)
+            || self.inner.hard_fault_path.as_ref().is_some_and(|path| {
+                screenpipe_sqlite_coordinator::registered_sqlite_hard_fault(path.as_ref()).is_some()
+            })
     }
     /// Consecutive fatal batches right now (0 when healthy).
     pub fn consecutive_fatal_batches(&self) -> u64 {
@@ -307,9 +334,24 @@ impl WriteQueueHealth {
     /// Latch the first hard fault while the caller still owns the write
     /// coordinator. This ordering lets checkpoint maintenance acquire the same
     /// coordinator later and reliably observe the quarantine boundary.
-    pub(crate) fn latch_hard_fault(&self) -> bool {
+    pub(crate) fn latch_hard_fault(&self, error: &sqlx::Error) -> bool {
+        crate::sqlite_error::sqlite_hard_fault_code(error)
+            .is_some_and(|code| self.latch_hard_fault_code(code))
+    }
+
+    /// Latch an already-classified SQLite extended result code. This is used
+    /// when SQLx no longer owns the statement error but SQLite still exposes
+    /// it through `sqlite3_extended_errcode()` on the connection handle.
+    pub(crate) fn latch_hard_fault_code(&self, code: i32) -> bool {
+        if !crate::sqlite_error::is_sqlite_hard_fault_code(code) {
+            return false;
+        }
         self.inner.degraded.store(true, Ordering::SeqCst);
-        !self.inner.hard_faulted.swap(true, Ordering::SeqCst)
+        let first_for_manager = !self.inner.hard_faulted.swap(true, Ordering::SeqCst);
+        if let Some(path) = self.inner.hard_fault_path.as_ref() {
+            screenpipe_sqlite_coordinator::latch_sqlite_hard_fault(path.as_ref(), code);
+        }
+        first_for_manager
     }
     fn note_reopen(&self) {
         self.inner.write_pool_reopens.fetch_add(1, Ordering::SeqCst);
@@ -333,12 +375,55 @@ pub type PersistentFailureHook = Arc<dyn Fn() + Send + Sync>;
 /// A slot the app fills (after `DatabaseManager` is built) with the
 /// persistent-failure hook. Shared so the drain loop reads whatever the app
 /// last set; empty until wired.
-pub(crate) type PersistentFailureSlot = Arc<std::sync::Mutex<Option<PersistentFailureHook>>>;
+pub(crate) struct PersistentFailureState {
+    hook: std::sync::Mutex<Option<PersistentFailureHook>>,
+    hard_fault_signaled: AtomicBool,
+}
+
+pub(crate) type PersistentFailureSlot = Arc<PersistentFailureState>;
+
+impl PersistentFailureState {
+    pub(crate) fn hook(&self) -> Option<PersistentFailureHook> {
+        self.hook.lock().unwrap().clone()
+    }
+
+    pub(crate) fn set_hook(&self, hook: PersistentFailureHook) {
+        *self.hook.lock().unwrap() = Some(hook);
+    }
+
+    /// Return the installed hook exactly once for a hard-fault generation.
+    /// If no hook is installed yet, leave the gate open so late app wiring can
+    /// deliver the already-observed startup fault.
+    pub(crate) fn take_hard_fault_hook(&self) -> Option<PersistentFailureHook> {
+        let hook = self.hook()?;
+        self.hard_fault_signaled
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .ok()
+            .map(|_| hook)
+    }
+}
 
 pub(crate) fn persistent_failure_slot(
     hook: Option<PersistentFailureHook>,
 ) -> PersistentFailureSlot {
-    Arc::new(std::sync::Mutex::new(hook))
+    Arc::new(PersistentFailureState {
+        hook: std::sync::Mutex::new(hook),
+        hard_fault_signaled: AtomicBool::new(false),
+    })
+}
+
+/// Pool defaults for the long-lived capture database.
+///
+/// SQLx otherwise retires idle connections after 10 minutes and every
+/// connection after 30 minutes. Recycling the full set can tear down and
+/// recreate SQLite's memory-mapped WAL index while the process is active. On
+/// POSIX filesystems, touching a mapping after its `-shm` file was shortened
+/// terminates the process with SIGBUS. `DatabaseManager::close()` is the
+/// authoritative connection lifecycle, so capture pools must not self-reap.
+pub(crate) fn capture_pool_options() -> sqlx::sqlite::SqlitePoolOptions {
+    sqlx::sqlite::SqlitePoolOptions::new()
+        .idle_timeout(None)
+        .max_lifetime(None)
 }
 
 /// Rebuilds the write pool from the same options used at startup, so the drain
@@ -366,7 +451,7 @@ impl WritePoolRebuilder {
         }
     }
     async fn rebuild(&self) -> Result<Pool<Sqlite>, sqlx::Error> {
-        sqlx::sqlite::SqlitePoolOptions::new()
+        capture_pool_options()
             .max_connections(self.max_connections)
             .min_connections(self.min_connections)
             .acquire_timeout(self.acquire_timeout)
@@ -850,8 +935,15 @@ async fn drain_loop(
         }
 
         debug!("write_queue: draining batch of {} writes", batch.len());
-        let outcome =
-            execute_batch(&write_pool, &write_semaphore, &mut batch, &db_path, &health).await;
+        let outcome = execute_batch(
+            &write_pool,
+            &write_semaphore,
+            &mut batch,
+            &db_path,
+            &health,
+            BATCH_TIMEOUTS,
+        )
+        .await;
         batch.clear();
 
         match outcome {
@@ -930,7 +1022,7 @@ async fn drain_loop(
                         escalation.fatal_in_run,
                         escalation.run_elapsed(now)
                     );
-                    let hook = on_persistent_failure.lock().unwrap().clone();
+                    let hook = on_persistent_failure.hook();
                     if let Some(hook) = hook {
                         hook();
                     }
@@ -955,7 +1047,7 @@ async fn drain_loop(
                 // recovery hook. The hard-fault latch was set inside
                 // execute_batch while the shared write coordinator was held.
                 shutdown.cancel();
-                let hook = on_persistent_failure.lock().unwrap().clone();
+                let hook = on_persistent_failure.take_hard_fault_hook();
                 if let Some(hook) = hook {
                     hook();
                 }
@@ -979,6 +1071,7 @@ async fn drain_loop(
             &mut tail_batch,
             &db_path,
             &health,
+            BATCH_TIMEOUTS,
         )
         .await;
         tail_batch.clear();
@@ -992,10 +1085,11 @@ async fn execute_batch(
     batch: &mut Vec<PendingWrite>,
     db_path: &str,
     health: &WriteQueueHealth,
+    timeouts: BatchTimeouts,
 ) -> BatchOutcome {
     // Acquire write semaphore once for the entire batch
     let _permit: OwnedSemaphorePermit = match tokio::time::timeout(
-        Duration::from_secs(30),
+        timeouts.write_semaphore,
         Arc::clone(write_semaphore).acquire_owned(),
     )
     .await
@@ -1009,7 +1103,10 @@ async fn execute_batch(
         Err(_) => {
             warn!("write_queue: semaphore acquisition timed out for batch");
             send_error_to_all(batch, sqlx::Error::PoolTimedOut);
-            return BatchOutcome::Healthy;
+            // Another serialized writer still owns admission. Rebuilding the
+            // pool cannot release that owner, but calling this healthy clears
+            // degradation and suppresses the sustained-contention signal.
+            return BatchOutcome::Contention;
         }
     };
 
@@ -1026,12 +1123,12 @@ async fn execute_batch(
         // Bind the timeout result first: inlining it into `match` puts this
         // construct right at rustfmt's width boundary, where the formatter is
         // non-idempotent (it flip-flops the layout, failing `fmt --check`).
-        let acquired = tokio::time::timeout(Duration::from_secs(5), write_pool.acquire()).await;
+        let acquired = tokio::time::timeout(timeouts.write_pool, write_pool.acquire()).await;
         let mut conn = match acquired {
             Ok(Ok(conn)) => conn,
             Ok(Err(e)) => {
                 if is_hard_fault(&e) {
-                    health.latch_hard_fault();
+                    health.latch_hard_fault(&e);
                     send_error_to_all(batch, e);
                     return BatchOutcome::HardFault;
                 }
@@ -1063,7 +1160,11 @@ async fn execute_batch(
             }
             Err(_) => {
                 send_error_to_all(batch, sqlx::Error::PoolTimedOut);
-                return BatchOutcome::Healthy;
+                // We already own the single write coordinator, so every normal
+                // writer is excluded. Exhausting the connection wait here means
+                // the pool itself is starved; drive the existing reopen/restart
+                // recovery instead of incorrectly resetting health.
+                return BatchOutcome::FatalConnection;
             }
         };
 
@@ -1090,7 +1191,7 @@ async fn execute_batch(
                 );
             }
             Err(e) if is_hard_fault(&e) => {
-                health.latch_hard_fault();
+                health.latch_hard_fault(&e);
                 let _raw = conn.detach();
                 send_error_to_all(batch, e);
                 return BatchOutcome::HardFault;
@@ -1104,7 +1205,7 @@ async fn execute_batch(
                 break;
             }
             Err(e) if is_hard_fault(&e) => {
-                health.latch_hard_fault();
+                health.latch_hard_fault(&e);
                 let _raw = conn.detach();
                 send_error_to_all(batch, e);
                 return BatchOutcome::HardFault;
@@ -1199,7 +1300,7 @@ async fn execute_batch(
             let contention = is_busy_error(&e);
             let fatal = should_recycle_sqlite_connection(&e) || is_nested_transaction_error(&e);
             if hard_fault {
-                health.latch_hard_fault();
+                health.latch_hard_fault(&e);
             }
             send_error_to_all(batch, e);
             return if hard_fault {
@@ -1231,7 +1332,7 @@ async fn execute_batch(
                 if is_connection_error(&e) {
                     warn!("write_queue: fatal connection error during batch: {}", e);
                     if is_hard_fault(&e) {
-                        health.latch_hard_fault();
+                        health.latch_hard_fault(&e);
                         any_hard_fault = true;
                     }
                     any_fatal = true;
@@ -1257,7 +1358,7 @@ async fn execute_batch(
         if let Err(e) = sqlx::query("ROLLBACK").execute(&mut *conn).await {
             warn!("write_queue: ROLLBACK failed: {}, detaching connection", e);
             if is_hard_fault(&e) {
-                health.latch_hard_fault();
+                health.latch_hard_fault(&e);
                 outcome = BatchOutcome::HardFault;
             }
             let _raw = conn.detach();
@@ -1272,7 +1373,7 @@ async fn execute_batch(
         let hard_fault = is_hard_fault(&e);
         let fatal = is_connection_error(&e);
         if hard_fault {
-            health.latch_hard_fault();
+            health.latch_hard_fault(&e);
         }
         warn!("write_queue: COMMIT failed: {}", e);
         // Always detach. The previous code skipped detaching when the
@@ -2339,6 +2440,13 @@ async fn ensure_db_openable(db_path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capture_pool_connections_live_until_authoritative_shutdown() {
+        let options = capture_pool_options();
+        assert_eq!(options.get_idle_timeout(), None);
+        assert_eq!(options.get_max_lifetime(), None);
+    }
     use sqlx::sqlite::SqlitePoolOptions;
 
     // ── FatalRunEscalation (count / wall-clock / refire rules) ──────────
@@ -2722,6 +2830,80 @@ mod tests {
         health.record_success();
         assert!(!health.is_degraded());
         assert_eq!(health.consecutive_contention_batches(), 0);
+    }
+
+    #[tokio::test]
+    async fn semaphore_timeout_is_contention_not_healthy() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let semaphore = Arc::new(Semaphore::new(1));
+        let _active_writer = semaphore.acquire().await.unwrap();
+        let health = WriteQueueHealth::default();
+        let (respond, response) = tokio::sync::oneshot::channel();
+        let mut batch = vec![PendingWrite {
+            op: WriteOp::InsertAudioChunk {
+                file_path: "/tmp/semaphore-timeout.wav".to_string(),
+                timestamp: None,
+            },
+            respond,
+        }];
+
+        let outcome = execute_batch(
+            &pool,
+            &semaphore,
+            &mut batch,
+            "sqlite::memory:",
+            &health,
+            BatchTimeouts {
+                write_semaphore: Duration::from_millis(10),
+                write_pool: Duration::from_millis(10),
+            },
+        )
+        .await;
+
+        assert_eq!(outcome, BatchOutcome::Contention);
+        let error = response.await.unwrap().unwrap_err();
+        assert!(error.to_string().contains("pool timed out"));
+    }
+
+    #[tokio::test]
+    async fn write_pool_timeout_is_fatal_connection() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let _starved_connection = pool.acquire().await.unwrap();
+        let semaphore = Arc::new(Semaphore::new(1));
+        let health = WriteQueueHealth::default();
+        let (respond, response) = tokio::sync::oneshot::channel();
+        let mut batch = vec![PendingWrite {
+            op: WriteOp::InsertAudioChunk {
+                file_path: "/tmp/pool-timeout.wav".to_string(),
+                timestamp: None,
+            },
+            respond,
+        }];
+
+        let outcome = execute_batch(
+            &pool,
+            &semaphore,
+            &mut batch,
+            "sqlite::memory:",
+            &health,
+            BatchTimeouts {
+                write_semaphore: Duration::from_millis(10),
+                write_pool: Duration::from_millis(10),
+            },
+        )
+        .await;
+
+        assert_eq!(outcome, BatchOutcome::FatalConnection);
+        let error = response.await.unwrap().unwrap_err();
+        assert!(error.to_string().contains("pool timed out"));
     }
 
     #[tokio::test]

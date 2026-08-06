@@ -24,13 +24,14 @@ pub(crate) mod store_file;
 pub mod survey;
 pub mod sync;
 pub mod team;
+pub mod team_pipes;
 pub mod vault;
 pub mod view;
 pub mod vision;
 
 use clap::parser::ValueSource;
 use clap::{ArgAction, ArgMatches, ValueEnum};
-use clap::{Parser, Subcommand, ValueHint};
+use clap::{Args, Parser, Subcommand, ValueHint};
 use screenpipe_audio::{
     audio_manager::builder::TranscriptionMode,
     core::engine::AudioTranscriptionEngine as CoreAudioTranscriptionEngine,
@@ -145,6 +146,31 @@ impl From<CliTranscriptionMode> for TranscriptionMode {
     }
 }
 
+#[derive(Clone, Copy, Debug, ValueEnum, PartialEq, Eq)]
+pub enum CliAppContext {
+    /// Disable structured app context
+    Off,
+    /// Build compact context for search, summaries, and pipes
+    Memory,
+    /// Keep action controls, state, and bounds for computer-use agents
+    Automation,
+    /// Build both the memory and automation projections from one capture
+    Both,
+}
+
+impl CliAppContext {
+    fn resolved(self) -> (bool, screenpipe_config::SemanticContextMode) {
+        use screenpipe_config::SemanticContextMode;
+
+        match self {
+            Self::Off => (false, SemanticContextMode::Memory),
+            Self::Memory => (true, SemanticContextMode::Memory),
+            Self::Automation => (true, SemanticContextMode::ComputerUse),
+            Self::Both => (true, SemanticContextMode::Both),
+        }
+    }
+}
+
 #[derive(Clone, Debug, ValueEnum, PartialEq)]
 pub enum OutputFormat {
     Text,
@@ -208,8 +234,8 @@ pub enum Command {
     Search(SearchArgs),
 
     /// Enterprise: query teammates' screen + audio history via
-    /// `screenpipe.com/api/enterprise/v1/*`. Admin-only — needs a
-    /// `team_api_token` minted at https://screenpipe.com/enterprise?tab=tokens.
+    /// `screenpi.pe/api/enterprise/v1/*`. Admin-only — needs a
+    /// `team_api_token` minted at https://screenpi.pe/enterprise?tab=tokens.
     Team {
         #[command(subcommand)]
         subcommand: TeamCommand,
@@ -296,7 +322,7 @@ pub enum Command {
     /// Authenticate with screenpipe cloud
     Login,
 
-    /// Sign out of screenpipe cloud (clears the auth token from store.bin)
+    /// Sign out of screenpipe cloud
     Logout,
 
     /// Show current auth status
@@ -564,9 +590,18 @@ pub struct RecordArgs {
     #[arg(long, default_value_t = false)]
     pub disable_screenshots: bool,
 
+    /// Select structured app context: off, memory, automation, or both.
+    /// Memory builds compact context for retrieval and pipes; automation keeps
+    /// action controls, state, and bounds for computer-use agents. Off by default.
+    #[arg(long, value_enum)]
+    pub app_context: Option<CliAppContext>,
+
     /// Enable experimental normalized semantic context parsing. Parsing runs
     /// after durable frame capture in a bounded background worker. Off by
     /// default, preserving the historical capture and retrieval behavior.
+    /// Kept for compatibility; equivalent to `--app-context memory` on a
+    /// fresh CLI configuration. `--app-context` takes precedence when
+    /// both are supplied.
     #[arg(
         long,
         env = "SCREENPIPE_ENABLE_SEMANTIC_CONTEXT",
@@ -848,6 +883,7 @@ pub struct RecordArgSources {
     pub filter_music: bool,
     pub disable_vision: bool,
     pub disable_screenshots: bool,
+    pub app_context: bool,
     pub enable_semantic_context: bool,
     pub ignored_windows: bool,
     pub included_windows: bool,
@@ -911,6 +947,7 @@ impl RecordArgSources {
             filter_music: from_command_line(record, "filter_music"),
             disable_vision: from_command_line(record, "disable_vision"),
             disable_screenshots: from_command_line(record, "disable_screenshots"),
+            app_context: from_command_line(record, "app_context"),
             enable_semantic_context: from_command_line(record, "enable_semantic_context"),
             ignored_windows: from_command_line(record, "ignored_windows"),
             included_windows: from_command_line(record, "included_windows"),
@@ -963,6 +1000,7 @@ impl RecordArgSources {
             || self.filter_music
             || self.disable_vision
             || self.disable_screenshots
+            || self.app_context
             || self.enable_semantic_context
             || self.ignored_windows
             || self.included_windows
@@ -1103,6 +1141,11 @@ impl RecordArgs {
         } else {
             screenpipe_config::AecMode::Off
         };
+        let (enable_semantic_context, semantic_context_mode) =
+            self.app_context.map(CliAppContext::resolved).unwrap_or((
+                self.enable_semantic_context,
+                screenpipe_config::SemanticContextMode::Memory,
+            ));
 
         screenpipe_config::RecordingSettings {
             audio_chunk_duration: self.audio_chunk_duration as i32,
@@ -1110,7 +1153,8 @@ impl RecordArgs {
             disable_audio: self.disable_audio,
             disable_vision: self.disable_vision,
             disable_screenshots: self.disable_screenshots,
-            enable_semantic_context: self.enable_semantic_context,
+            enable_semantic_context,
+            semantic_context_mode,
             // CLI has no --disable-timeline flag; the desktop app drives this
             // toggle. Default to enabled (timeline on) for the engine binary.
             disable_timeline: false,
@@ -1432,7 +1476,14 @@ impl RecordArgs {
         if sources.disable_screenshots {
             settings.disable_screenshots = self.disable_screenshots;
         }
-        if sources.enable_semantic_context {
+        if sources.app_context {
+            let (enabled, mode) = self
+                .app_context
+                .expect("explicit app context source must have a value")
+                .resolved();
+            settings.enable_semantic_context = enabled;
+            settings.semantic_context_mode = mode;
+        } else if sources.enable_semantic_context {
             settings.enable_semantic_context = self.enable_semantic_context;
         }
         // An explicit --monitor-id or --use-all-monitors means the user wants
@@ -1890,13 +1941,14 @@ pub enum VaultCommand {
 pub enum DbCommand {
     /// Run PRAGMA quick_check on the live db.sqlite
     Check,
-    /// Recover a corrupt db.sqlite via SQLite's `.recover` page-level scan.
-    /// Snapshots the corrupt file aside, repairs into a sidecar, integrity-checks,
-    /// and atomically swaps in the recovered db. Refuses to run while screenpipe
-    /// is open (the desktop app would race the swap).
+    /// Recover a quarantined db.sqlite onto a verified fresh physical file.
+    /// Preserves the exact DB/WAL/SHM generation, repairs only a working copy,
+    /// verifies integrity, foreign keys, and a durable write canary, then swaps.
+    /// Refuses to run while screenpipe is open.
     Recover {
-        /// Run even if the screenpipe HTTP server is reachable. Dangerous —
-        /// quitting the app cleanly is preferred.
+        /// Deprecated compatibility flag. Recovery still refuses to race a
+        /// reachable screenpipe server because that cannot preserve one exact
+        /// DB/WAL/SHM generation.
         #[arg(long)]
         force: bool,
     },
@@ -2040,8 +2092,8 @@ pub struct SearchArgs {
 // Team (enterprise) subcommands
 // =============================================================================
 
-/// Mirrors the `screenpipe-team` skill 1:1 — same endpoints, same vocabulary.
-/// All three variants hit `https://screenpipe.com/api/enterprise/v1/*` directly
+/// Mirrors the `screenpipe-team` skill — same endpoints, same vocabulary.
+/// All variants hit `https://screenpi.pe/api/enterprise/v1/*` directly
 /// with the admin's `team_api_token` from `~/.screenpipe/enterprise.json`
 /// (or `SCREENPIPE_TEAM_API_TOKEN` env override). No daemon needed.
 #[derive(Subcommand, Debug)]
@@ -2053,6 +2105,122 @@ pub enum TeamCommand {
     /// Chronological dump for one device — use after `devices` + `search`
     /// have narrowed down a person and a moment
     Records(TeamRecordsArgs),
+    /// Manage the organization's hosted Pipes
+    Pipes {
+        #[command(subcommand)]
+        subcommand: TeamPipeCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum TeamPipeCommand {
+    /// List managed Pipes and their deployed versions
+    List(TeamPipeListArgs),
+    /// Preview a pipe.md deployment without changing the organization
+    Preview(TeamPipePreviewArgs),
+    /// Preview, confirm, and deploy a pipe.md to the organization
+    Deploy(TeamPipeDeployArgs),
+    /// Preview, confirm, and change an existing managed Pipe's schedule
+    Schedule(TeamPipeScheduleArgs),
+}
+
+#[derive(Parser, Clone, Debug)]
+pub struct TeamPipeListArgs {
+    /// Emit the complete API response as JSON instead of a compact table
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Clone, Debug)]
+pub struct TeamPipeSpecArgs {
+    /// Path to pipe.md, or a directory containing pipe.md
+    #[arg(value_hint = ValueHint::FilePath)]
+    pub source: PathBuf,
+
+    /// Managed Pipe slug. Defaults to the pipe.md parent directory name
+    #[arg(long)]
+    pub name: Option<String>,
+
+    /// Human-readable name. Defaults to frontmatter title or the slug
+    #[arg(long)]
+    pub display_name: Option<String>,
+
+    /// Override the pipe.md schedule, e.g. "every 30m" or "0 9 * * *"
+    #[arg(long)]
+    pub schedule: Option<String>,
+
+    /// Execution timeout in seconds (5-3600)
+    #[arg(long)]
+    pub timeout: Option<u64>,
+
+    /// Organization AI preset id. Defaults to the organization's configured preset
+    #[arg(long)]
+    pub ai_preset: Option<String>,
+
+    /// Deploy disabled instead of using the pipe.md enabled state
+    #[arg(long)]
+    pub disabled: bool,
+
+    /// Target every enrolled device and Cloud Runner
+    #[arg(long)]
+    pub all_runtimes: bool,
+
+    /// Target one enrolled device id. Repeat for multiple devices
+    #[arg(long)]
+    pub device: Vec<String>,
+
+    /// Target one member email. Repeat for multiple members
+    #[arg(long)]
+    pub member: Vec<String>,
+
+    /// Include Cloud Runner with selected device targets
+    #[arg(long)]
+    pub cloud: bool,
+
+    /// Require this currently deployed version (0 means the Pipe must not exist)
+    #[arg(long)]
+    pub expected_version: Option<u64>,
+
+    /// Emit API receipts as JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Parser, Clone, Debug)]
+pub struct TeamPipePreviewArgs {
+    #[command(flatten)]
+    pub spec: TeamPipeSpecArgs,
+}
+
+#[derive(Parser, Clone, Debug)]
+pub struct TeamPipeDeployArgs {
+    #[command(flatten)]
+    pub spec: TeamPipeSpecArgs,
+
+    /// Deploy after preview without an interactive confirmation prompt
+    #[arg(long)]
+    pub yes: bool,
+}
+
+#[derive(Parser, Clone, Debug)]
+pub struct TeamPipeScheduleArgs {
+    /// Existing managed Pipe slug
+    pub name: String,
+
+    /// New schedule, e.g. "every 30m" or "0 9 * * *"
+    pub schedule: String,
+
+    /// Require this currently deployed version
+    #[arg(long)]
+    pub expected_version: Option<u64>,
+
+    /// Apply after preview without an interactive confirmation prompt
+    #[arg(long)]
+    pub yes: bool,
+
+    /// Emit API receipts as JSON
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Parser, Clone, Debug)]
@@ -2104,7 +2272,8 @@ pub struct TeamRecordsArgs {
     #[arg(long)]
     pub device_id: String,
 
-    /// Record kind: `frame` (screen) / `audio` / `all`. Default `all`.
+    /// Record kind: `frame` (screen) / `parsed` (structured app data) /
+    /// `audio` / `all`. Default `all`.
     #[arg(long, default_value = "all")]
     pub kind: String,
 
@@ -2341,9 +2510,16 @@ mod tests {
         match cli.command {
             Command::Record(args) => {
                 assert!(!args.pause_on_drm_content, "default should be false");
+                assert!(args.app_context.is_none());
                 assert!(
                     !args.enable_semantic_context,
                     "semantic parsing must remain opt-in"
+                );
+                let settings = args.to_recording_settings();
+                assert!(!settings.enable_semantic_context);
+                assert_eq!(
+                    settings.semantic_context_mode,
+                    screenpipe_config::SemanticContextMode::Memory
                 );
             }
             _ => panic!("expected Record command"),
@@ -2357,7 +2533,66 @@ mod tests {
         match cli.command {
             Command::Record(args) => {
                 assert!(args.enable_semantic_context);
-                assert!(args.to_recording_settings().enable_semantic_context);
+                let settings = args.to_recording_settings();
+                assert!(settings.enable_semantic_context);
+                assert_eq!(
+                    settings.semantic_context_mode,
+                    screenpipe_config::SemanticContextMode::Memory
+                );
+            }
+            _ => panic!("expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_app_context_modes_flow_to_recording_settings() {
+        use screenpipe_config::SemanticContextMode;
+
+        let cases = [
+            ("off", false, SemanticContextMode::Memory),
+            ("memory", true, SemanticContextMode::Memory),
+            ("automation", true, SemanticContextMode::ComputerUse),
+            ("both", true, SemanticContextMode::Both),
+        ];
+
+        for (value, enabled, mode) in cases {
+            let cli =
+                Cli::try_parse_from(["screenpipe", "record", "--app-context", value]).unwrap();
+            match cli.command {
+                Command::Record(args) => {
+                    let settings = args.to_recording_settings();
+                    assert_eq!(settings.enable_semantic_context, enabled, "mode: {value}");
+                    assert_eq!(settings.semantic_context_mode, mode, "mode: {value}");
+                    assert!(
+                        record_sources(["screenpipe", "record", "--app-context", value,])
+                            .app_context,
+                        "mode should register as an explicit CLI source: {value}"
+                    );
+                }
+                _ => panic!("expected Record command"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_app_context_argument_takes_precedence_over_legacy_enable_flag() {
+        let cli = Cli::try_parse_from([
+            "screenpipe",
+            "record",
+            "--enable-semantic-context",
+            "--app-context",
+            "off",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Command::Record(args) => {
+                let settings = args.to_recording_settings();
+                assert!(!settings.enable_semantic_context);
+                assert_eq!(
+                    settings.semantic_context_mode,
+                    screenpipe_config::SemanticContextMode::Memory
+                );
             }
             _ => panic!("expected Record command"),
         }
@@ -2684,6 +2919,77 @@ mod tests {
             !settings.use_pii_removal,
             "absent CLI defaults must not overwrite app settings"
         );
+    }
+
+    #[test]
+    fn test_app_context_off_overrides_persisted_enabled_mode() {
+        let args = ["screenpipe", "record", "--app-context", "off"];
+        let cli = Cli::try_parse_from(args).unwrap();
+        let sources = record_sources(args);
+        let mut settings = screenpipe_config::RecordingSettings {
+            enable_semantic_context: true,
+            semantic_context_mode: screenpipe_config::SemanticContextMode::Both,
+            ..Default::default()
+        };
+
+        match cli.command {
+            Command::Record(args) => args.apply_explicit_overrides(&mut settings, &sources),
+            _ => panic!("expected Record command"),
+        }
+
+        assert!(!settings.enable_semantic_context);
+        assert_eq!(
+            settings.semantic_context_mode,
+            screenpipe_config::SemanticContextMode::Memory
+        );
+    }
+
+    #[test]
+    fn test_app_context_automation_overrides_persisted_disabled_mode() {
+        let args = ["screenpipe", "record", "--app-context", "automation"];
+        let cli = Cli::try_parse_from(args).unwrap();
+        let sources = record_sources(args);
+        let mut settings = screenpipe_config::RecordingSettings {
+            enable_semantic_context: false,
+            semantic_context_mode: screenpipe_config::SemanticContextMode::Memory,
+            ..Default::default()
+        };
+
+        match cli.command {
+            Command::Record(args) => args.apply_explicit_overrides(&mut settings, &sources),
+            _ => panic!("expected Record command"),
+        }
+
+        assert!(settings.enable_semantic_context);
+        assert_eq!(
+            settings.semantic_context_mode,
+            screenpipe_config::SemanticContextMode::ComputerUse
+        );
+    }
+
+    #[test]
+    fn test_absent_app_context_arguments_preserve_persisted_settings() {
+        let args = ["screenpipe", "record", "--port", "4040"];
+        let cli = Cli::try_parse_from(args).unwrap();
+        let sources = record_sources(args);
+        let mut settings = screenpipe_config::RecordingSettings {
+            enable_semantic_context: true,
+            semantic_context_mode: screenpipe_config::SemanticContextMode::Both,
+            ..Default::default()
+        };
+
+        match cli.command {
+            Command::Record(args) => args.apply_explicit_overrides(&mut settings, &sources),
+            _ => panic!("expected Record command"),
+        }
+
+        assert!(settings.enable_semantic_context);
+        assert_eq!(
+            settings.semantic_context_mode,
+            screenpipe_config::SemanticContextMode::Both
+        );
+        assert!(!sources.app_context);
+        assert!(!sources.enable_semantic_context);
     }
 
     #[test]

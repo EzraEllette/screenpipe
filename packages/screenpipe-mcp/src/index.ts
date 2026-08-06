@@ -26,7 +26,10 @@ import {
   flushMcpTelemetry,
   initMcpTelemetry,
 } from "./telemetry";
-import { createMcpQualifiedValueReporter } from "./qualified-value";
+import {
+  createMcpQualifiedValueReporter,
+  resolveMcpClient,
+} from "./qualified-value";
 import { discoverTeamApiBase, discoverTeamToken } from "./team-config";
 import { PKG_VERSION } from "./version";
 import { formatForElementPurpose } from "./element-format";
@@ -375,32 +378,10 @@ const server = new Server(
 // ---------------------------------------------------------------------------
 const TOOLS: Tool[] = [
   {
-    name: "semantic-context",
-    description:
-      "Read compact app-specific context parsed from supported apps, such as conversations, emails, tasks, documents, and code review. " +
-      "USE WHEN: structured app context is enabled and you want higher-signal, lower-token output than raw accessibility text. " +
-      "This experimental capture path is off by default. If it returns no data, use search-content or activity-summary for the unchanged historical behavior.",
-    annotations: { title: "Semantic Context", readOnlyHint: true, openWorldHint: false, idempotentHint: true },
-    inputSchema: {
-      type: "object",
-      properties: {
-        frame_id: { type: "integer", description: "Return semantic context attached to one frame." },
-        q: { type: "string", description: "Filter compact semantic items by text." },
-        start_time: {
-          type: "string",
-          description: "ISO 8601 UTC or relative time such as '2h ago'. Always provide unless frame_id is set.",
-        },
-        end_time: { type: "string", description: "ISO 8601 UTC or relative time. Defaults to now." },
-        app_name: { type: "string", description: "Filter by app display name." },
-        limit: { type: "integer", description: "Maximum frame contexts (default 10, max 100).", default: 10 },
-      },
-    },
-  },
-  {
     name: "search-content",
     description:
-      "Search screen text, audio transcriptions, input events, and memories. Returns timestamped results with app context. " +
-      "USE WHEN: you need the actual text/content of a moment — quotes, OCR snippets, transcript lines — or want to filter by speaker/window. " +
+      "Search screen text, audio transcriptions, input events, memories, and parsed app data. Returns timestamped results with app context. " +
+      "USE WHEN: you need the actual text/content of a moment — quotes, screen text, transcript lines, or compact parsed messages, emails, tasks, documents, and code review — or want to filter by speaker/window. " +
       "DO NOT USE for: broad questions like 'what was I doing?' (use activity-summary, it pre-summarizes apps + windows + transcripts). " +
       "Also DO NOT USE for: targeted UI controls (use search-elements). " +
       "Start with limit=5, increase only if needed. Per-result text is auto-truncated to 1000 chars; pass max_content_length=0 to opt out, or a custom integer to override.",
@@ -414,9 +395,9 @@ const TOOLS: Tool[] = [
         },
         content_type: {
           type: "string",
-          enum: ["all", "ocr", "audio", "input", "accessibility", "memory"],
+          enum: ["all", "ocr", "audio", "input", "accessibility", "memory", "parsed"],
           description:
-            "Filter by content type. NOTE on screen text: 'ocr' is a legacy label — it returns ALL screen-text rows, which are accessibility-derived for most apps (the result tag [Screen·a11y] vs [Screen·ocr] tells you which). Use 'ocr' for screen text (covers both paths), 'audio' for transcriptions, 'input' for keyboard/mouse events, 'memory' for stored facts. Default: 'all'.",
+            "Filter by content type. Use 'parsed' for compact app-specific records such as messages, emails, tasks, documents, and code review; it is experimental and may be empty when parsing is disabled or unsupported. NOTE on screen text: 'ocr' is a legacy label — it returns ALL screen-text rows, which are accessibility-derived for most apps (the result tag [Screen·a11y] vs [Screen·ocr] tells you which). Use 'ocr' for screen text (covers both paths), 'audio' for transcriptions, 'input' for keyboard/mouse events, 'memory' for stored facts. Default: 'all'.",
           default: "all",
         },
         limit: { type: "integer", description: "Max results (default 10, max 20). Start with 5 for exploration.", default: 10 },
@@ -431,6 +412,8 @@ const TOOLS: Tool[] = [
         },
         app_name: { type: "string", description: "Filter by app name (e.g. 'Google Chrome', 'Slack', 'zoom.us'). Case-sensitive." },
         window_name: { type: "string", description: "Filter by window title substring" },
+        frame_id: { type: "integer", description: "With content_type='parsed', return parsed data attached to one frame." },
+        actor_id: { type: "integer", description: "With content_type='parsed', filter items by a resolved actor identity." },
         min_length: { type: "integer", description: "Min content length in characters" },
         max_length: { type: "integer", description: "Max content length in characters" },
         include_frames: {
@@ -443,7 +426,7 @@ const TOOLS: Tool[] = [
         tags: {
           type: "string",
           description:
-            "Comma-separated tags; returns only items carrying ALL of them (e.g. 'person:ada,project:atlas'). Works for screen + audio (content_type 'ocr'/'audio'/'all', tags written by add-tags) AND memories (content_type 'memory', tags written by update-memory). Same tag string links across all three, so two items sharing a tag are connected. Use namespaced tags (person:, project:, topic:) to link people/projects/topics. content_type 'input' and 'accessibility' have no tags and return nothing when this is set.",
+            "Comma-separated tags; returns only items carrying ALL of them (e.g. 'person:ada,project:atlas'). Works for screen + audio (content_type 'ocr'/'audio'/'all', tags written by add-tags) AND memories (content_type 'memory', tags written by update-memory). Same tag string links across all three, so two items sharing a tag are connected. Use namespaced tags (person:, project:, topic:) to link people/projects/topics. content_type 'input' and 'accessibility' have no tags and return nothing when this is set; 'parsed' does not support tags.",
         },
         include_related: {
           type: "boolean",
@@ -586,10 +569,53 @@ const TOOLS: Tool[] = [
     },
   },
   {
+    name: "get-feedback",
+    description:
+      "Search local user ratings and written comments attached to AI-produced notifications, chats, memories, blocks, artifacts, and other targets. " +
+      "Use before generating related work so you preserve what earned up ratings and correct what earned down ratings.",
+    annotations: { title: "Get AI Feedback", readOnlyHint: true, openWorldHint: false, idempotentHint: true },
+    inputSchema: {
+      type: "object",
+      properties: {
+        kind: {
+          type: "string",
+          description: "Optional target kind, such as notification, chat, memory, block, artifact, or structured_output.",
+        },
+        target_id: {
+          type: "string",
+          description: "Optional exact target id.",
+        },
+        producer: {
+          type: "string",
+          description: "Optional producer reference, for example pipe:daily-recap. Pipe tokens are always restricted to themselves.",
+        },
+        rating: {
+          type: "string",
+          enum: ["up", "down"],
+          description: "Optional rating filter.",
+        },
+        q: {
+          type: "string",
+          description: "Optional text search across comments, snapshots, target ids, producers, and context.",
+        },
+        since: {
+          type: "string",
+          description: "Optional RFC3339 lower bound on updated_at.",
+        },
+        limit: {
+          type: "integer",
+          description: "Maximum records (default 50, max 500).",
+          default: 50,
+        },
+      },
+    },
+  },
+  {
     name: "send-notification",
     description:
       "Send a notification to the screenpipe desktop UI. " +
-      "Use to alert the user about findings, completed tasks, or actions needing attention.",
+      "Use high priority only for time-sensitive failures or decisions needing human attention; " +
+      "routine findings and completed tasks should be normal or low.",
     annotations: { title: "Send Notification", readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     inputSchema: {
       type: "object",
@@ -597,6 +623,12 @@ const TOOLS: Tool[] = [
         title: { type: "string", description: "Notification title (short, descriptive)" },
         body: { type: "string", description: "Notification body (markdown supported)" },
         pipe_name: { type: "string", description: "Name of the pipe/tool sending this notification" },
+        priority: {
+          type: "string",
+          enum: ["high", "normal", "low"],
+          description: "High interrupts and appears in the focused Priority view. Normal (default) and low remain available in All without interrupting.",
+          default: "normal",
+        },
         timeout_secs: { type: "integer", description: "Auto-dismiss after N seconds (default 20). Use 0 for persistent.", default: 20 },
         actions: {
           type: "array",
@@ -963,7 +995,7 @@ const TEAM_TOOLS: Tool[] = [
     name: "team-records",
     description:
       "Chronological dump of the org's data for a time window — both raw " +
-      "telemetry (frame/audio) and the structured outputs of the enterprise-" +
+      "telemetry (frame/parsed/audio/feedback) and the structured outputs of the enterprise-" +
       "worker pipes (sop/skill/trajectory/memory/workflow). " +
       "Raw kinds return oldest → newest (vs team-search which is recency-ranked). " +
       "Synthesized kinds return one record per device's latest run by default " +
@@ -980,9 +1012,9 @@ const TEAM_TOOLS: Tool[] = [
         device_id: { type: "string", description: "Restrict to one device (optional). Raw kinds only." },
         kind: {
           type: "string",
-          enum: ["frame", "audio", "all", "sop", "skill", "trajectory", "memory", "workflow"],
+          enum: ["frame", "parsed", "audio", "feedback", "all", "sop", "skill", "trajectory", "memory", "workflow"],
           description:
-            "What to return. Raw: frame|audio|all (telemetry). " +
+            "What to return. Raw: frame|parsed|audio|feedback|all (telemetry and human feedback). " +
             "Synthesized: sop|skill|trajectory|memory|workflow (pipe outputs). " +
             "Default: all.",
           default: "all",
@@ -1093,10 +1125,9 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
 | Step | Tool | When to use |
 |------|------|-------------|
 | 1 | activity-summary | Broad questions: "what was I doing?", "which apps?", "how long on X?" |
-| 2 | semantic-context | Need compact messages, emails, tasks, docs, or code context when experimental structured context is enabled |
-| 3 | search-content | Need specific text, transcriptions, or content, or semantic-context returned no data |
-| 4 | search-elements | Need UI structure: buttons, links, form fields |
-| 5 | frame-context | Need full detail for a specific moment (use frame_id from step 3) |
+| 2 | search-content | Need specific text, transcriptions, memories, or compact app data (use content_type=parsed) |
+| 3 | search-elements | Need UI structure: buttons, links, form fields |
+| 4 | frame-context | Need full detail for a specific moment (use frame_id from step 2) |
 
 ## Search Strategy
 
@@ -1280,6 +1311,11 @@ const qualifiedValue = createMcpQualifiedValueReporter((payload) =>
     method: "POST",
     body: JSON.stringify(payload),
   }),
+  () =>
+    resolveMcpClient(
+      process.env.SCREENPIPE_MCP_CLIENT,
+      server.getClientVersion()?.name,
+    ),
 );
 
 // Server's deserialize_flexible_datetime accepts ISO 8601 + "Nh ago" / "Nd ago"
@@ -1590,6 +1626,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 `${content.created_at || ""}\n` +
                 `${truncateMiddle(content.content || "", effectiveCap)}`
             );
+          } else if (result.type === "Parsed") {
+            formattedResults.push(
+              `[Parsed] ${content.app_name || "?"} | ${content.window_name || "?"} | frame ${content.frame_id || "?"}\n` +
+                `${content.timestamp || ""}\n` +
+                `${truncateMiddle(content.text || "", effectiveCap)}`
+            );
           }
         }
 
@@ -1621,28 +1663,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
 
         return { content: contentItems };
-      }
-
-      case "semantic-context": {
-        const normalized = normalizeTimeFields(args);
-        const params = new URLSearchParams();
-        for (const key of ["frame_id", "q", "start_time", "end_time", "app_name", "limit"] as const) {
-          const value = normalized[key];
-          if (value !== null && value !== undefined && value !== "") {
-            params.append(key, String(value));
-          }
-        }
-        const response = await callAPI(`/semantic/context?${params.toString()}`);
-        const text = (await response.text()).trim();
-        return {
-          content: [
-            {
-              type: "text",
-              text: text ||
-                "No structured app context found. The experimental parser may be disabled, the time range may contain no supported apps, or the parser may have abstained. Use search-content or activity-summary for the unchanged capture data.",
-            },
-          ],
-        };
       }
 
       case "list-meetings": {
@@ -1998,6 +2018,36 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const notifResult = await notifResponse.json();
         return {
           content: [{ type: "text", text: `Notification sent: ${notifResult.message}` }],
+        };
+      }
+
+      case "get-feedback": {
+        const params = new URLSearchParams();
+        if (typeof args.kind === "string" && args.kind) {
+          params.set("kind", args.kind);
+        }
+        if (typeof args.target_id === "string" && args.target_id) {
+          params.set("target_id", args.target_id);
+        }
+        if (typeof args.producer === "string" && args.producer) {
+          params.set("producer", args.producer);
+        }
+        if (typeof args.rating === "string" && args.rating) {
+          params.set("rating", args.rating);
+        }
+        if (typeof args.q === "string" && args.q) {
+          params.set("q", args.q);
+        }
+        if (typeof args.since === "string" && args.since) {
+          params.set("since", args.since);
+        }
+        if (args.limit !== undefined) {
+          params.set("limit", String(args.limit));
+        }
+        const response = await callAPI(`/feedback${params.size ? `?${params}` : ""}`);
+        const feedback = await response.json();
+        return {
+          content: [{ type: "text", text: JSON.stringify(feedback, null, 2) }],
         };
       }
 

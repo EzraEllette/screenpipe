@@ -9,19 +9,21 @@ describe("semantic context mode copy", () => {
   it("presents memory and automation as the user-facing choices", () => {
     expect(
       Object.values(SEMANTIC_CONTEXT_MODE_COPY).map(({ label }) => label),
-    ).toEqual(["memory", "automation", "memory + automation"]);
+    ).toEqual(["Memory", "Automation", "Memory + automation"]);
   });
 
-  it("explains resource and token tradeoffs without renaming persisted values", () => {
+  it("explains the choices in plain language", () => {
     expect(SEMANTIC_CONTEXT_MODE_COPY.memory.description).toContain(
-      "fewer prompt tokens",
+      "information sent to AI",
     );
     expect(SEMANTIC_CONTEXT_MODE_COPY.computerUse.description).toContain(
-      "capture storage",
+      "buttons and fields",
     );
-    expect(SEMANTIC_CONTEXT_MODE_COPY.both.description).toContain("most CPU");
     expect(SEMANTIC_CONTEXT_MODE_COPY.both.description).toContain(
-      "view each agent requests",
+      "records everything once",
+    );
+    expect(SEMANTIC_CONTEXT_MODE_COPY.both.description).toContain(
+      "most processing power and storage",
     );
   });
 });

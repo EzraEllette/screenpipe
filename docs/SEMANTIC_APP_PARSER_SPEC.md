@@ -96,19 +96,19 @@ of app definitions.
 
 ### Built-in catalog and reference family parsers
 
-The built-in catalog covers 47 app targets using public app identities, URL
+The built-in catalog covers 49 app targets using public app identities, URL
 patterns, and stable accessibility contracts. Implementations remain
 Screenpipe-owned parser families and exact app overrides.
 
 | Family | Built-in profiles |
 |---|---|
-| Conversation | Antigravity, Antigravity IDE, ChatGPT, ChatGPT legacy, ChatGPT web, Claude, Claude macOS, ClickUp, ClickUp web, Cursor, Discord, Gemini desktop, Gemini web, Messages, Messenger, Microsoft Teams, Slack, WhatsApp, WhatsApp web, Windsurf |
+| Conversation | Antigravity, Antigravity IDE, ChatGPT, ChatGPT legacy, ChatGPT web, Claude, Claude macOS, ClickUp, ClickUp web, Codex, Cursor, Discord, Gemini desktop, Gemini web, Messages, Messenger, Microsoft Teams, Slack, WhatsApp, WhatsApp web, Windsurf |
 | Mail | Gmail, Mail, Microsoft Outlook, Spark Desktop, Spark Mail Classic, Superhuman |
 | Editor | Antigravity IDE, Cursor, VS Code, Windsurf, Xcode |
 | Document | Antigravity IDE, Claude macOS, ClickUp, ClickUp web, Microsoft Outlook, Microsoft Word, Microsoft Word web, Notes, Notion, Obsidian, Pages, TextEdit, Xcode |
 | Task | Antigravity, Asana, Asana web, ClickUp, ClickUp web, Microsoft To Do, OmniFocus, Todoist, Toggl |
 | Calendar | Calendar, Fantastical |
-| Terminal | Ghostty, iTerm2, Terminal, Warp |
+| Terminal | Ghostty, iTerm2, Terminal, Warp, Windows Terminal |
 
 Profiles may belong to more than one family because the same app can expose
 different semantic surfaces. The registry still runs at most four matching
@@ -397,11 +397,13 @@ frame and time.
 ## 8. Retrieval
 
 The database API supports exact-frame and bounded time/app/full-text queries.
-`GET /semantic/context` exposes grouped compact text by default and typed JSON
-with parser provenance when `format=json` is passed. `actor_id` filters context
-by the current reconciled actor. Compact output uses the corrected canonical
-name, while JSON retains the raw parser label and returns the mutable actor
-reference separately.
+`GET /search?content_type=parsed` exposes parsed app data through the existing
+search contract, including its authentication, time/app/window filters,
+pagination, output formats, field selection, truncation, and redaction. Each
+`Parsed` result contains compact corrected `text`, typed `items`, parser
+provenance, and mutable actor references kept separately from raw parser labels.
+`frame_id` selects one parsed frame and `actor_id` filters by the current
+reconciled actor.
 
 Actor reconciliation uses the same local API shape as speaker correction:
 
@@ -418,9 +420,10 @@ These endpoints are sufficient for a local reconciliation Pipe. It can inspect
 actors and source-backed JSON, propose or apply merges, then retrieve all context
 for the corrected actor without rewriting historical parser evidence.
 
-The `semantic-context` MCP tool wraps the same bounded endpoint and returns
-compact plain text. When no semantic records exist, it directs the agent back to
-`search-content` or `activity-summary`, preserving the old retrieval behavior.
+The MCP `search-content` tool exposes the same path with
+`content_type=parsed`; it does not add a second read tool. When no parsed records
+exist, agents can use another `content_type` or `activity-summary`, preserving
+the original capture behavior.
 
 Element endpoints expose three explicit projections:
 
@@ -523,8 +526,8 @@ microbenchmarks, not the older-hardware or real-disk acceptance test.
 ## 11. Rollout
 
 1. Ship normalized writes, synchronous PII removal, the latest-wins worker, and
-   the MCP tool behind `enableSemanticContext`, default false. Complete in this
-   change.
+   parsed retrieval through `/search` and its existing MCP tool behind
+   `enableSemanticContext`, default false. Complete in this change.
 2. Measure the opt-in path on an older Intel Mac and a representative Windows
    enterprise laptop, including steady RSS and an eight-hour CPU trace.
 3. Retain parser-requested structural containers selectively in the existing

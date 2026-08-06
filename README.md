@@ -1,3 +1,4 @@
+<h1 align="center"><a href="https://screenpipe.com/how-to-install?download=1">DOWNLOAD SCREENPIPE</a></h1>
 
 <img width="1500" height="500" alt="image" src="https://github.com/user-attachments/assets/058a44b8-fcad-4a37-92d8-830167dbd400" />
 
@@ -21,12 +22,6 @@
 
 <p align="center">
 <a align="center" href="https://trendshift.io/repositories/20386" target="_blank"><img align="center" src="https://trendshift.io/api/badge/repositories/20386" alt="screenpipe%2Fscreenpipe | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
-</p>
-
-<p align="center">
-  <a href="https://screenpi.pe/onboarding" target="_blank">
-    <img src="https://img.shields.io/badge/download-desktop%20app-black?style=for-the-badge" alt="download">
-  </a>
 </p>
 
 <p align="center">
@@ -91,7 +86,7 @@ screenpipe turns your computer into a personal AI that knows everything you've d
 
 ## install
 
-[download the desktop app](https://screenpi.pe/onboarding) — all features, auto-updates
+[download the desktop app](https://screenpipe.com/how-to-install?download=1) — all features, auto-updates
 
 or run the CLI:
 
@@ -133,7 +128,7 @@ then ask claude `what did i see in the last 5 mins?` or `summarize today convers
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines, maintainers, and how to submit PRs. AI/vibe-coded PRs welcome!
+See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines, maintainers, and how to submit PRs.
 
 Thanks to all contributors:
 
@@ -150,6 +145,7 @@ Thanks to all contributors:
 - [Português BR (Brazilian Portuguese)](docs/translations/README-pt_BR.md)
 - [Deutsch (German)](docs/translations/README-de.md)
 - [Українська (Ukrainian)](docs/translations/README-uk.md)
+- [한국어 (Korean)](docs/translations/README-ko.md)
 
 Want to translate screenpipe into another language? See [`docs/translations/`](docs/translations/README.md).
 

@@ -112,11 +112,33 @@ describe("pi-event-router: status mirroring for backgrounded sessions", () => {
     expect(useChatStore.getState().sessions.A.status).toBe("streaming");
   });
 
-  it("flips status to idle on agent_end", async () => {
+  it("flips status to idle on terminal agent_end", async () => {
     seed("A", { status: "streaming" });
     useChatStore.setState({ currentId: "B" });
     await handlePiEvent(piEvt("A", { type: "agent_end" }));
     expect(useChatStore.getState().sessions.A.status).toBe("idle");
+  });
+
+  it("stays streaming while agent_end is followed by an automatic retry", async () => {
+    seed("A", { status: "streaming" });
+    useChatStore.setState({ currentId: "B" });
+    await handlePiEvent(piEvt("A", { type: "agent_end", willRetry: true }));
+    expect(useChatStore.getState().sessions.A.status).toBe("streaming");
+
+    await handlePiEvent(piEvt("A", {
+      type: "auto_retry_start",
+      attempt: 1,
+      maxAttempts: 3,
+      delayMs: 2_000,
+    }));
+    expect(useChatStore.getState().sessions.A.status).toBe("streaming");
+  });
+
+  it("marks an exhausted automatic retry as an error", async () => {
+    seed("A", { status: "streaming" });
+    useChatStore.setState({ currentId: "B" });
+    await handlePiEvent(piEvt("A", { type: "auto_retry_end", success: false }));
+    expect(useChatStore.getState().sessions.A.status).toBe("error");
   });
 
   it("lazy-creates a row for an unknown session id", async () => {
@@ -456,5 +478,70 @@ describe("pi-event-router: agent_terminated", () => {
         ],
       })
     );
+  });
+});
+
+describe("pi-event-router: live tool output", () => {
+  beforeEach(reset);
+
+  it("stores the tail of a running tool's streamed partial output", async () => {
+    seed("A");
+    useChatStore.setState({ currentId: "B" });
+    await handlePiEvent(
+      piEvt("A", { type: "message_start", message: { role: "assistant" } }),
+    );
+    await handlePiEvent(
+      piEvt("A", {
+        type: "tool_execution_start",
+        toolCallId: "t1",
+        toolName: "bash",
+        args: {},
+      } as unknown as AgentInnerEvent),
+    );
+    await handlePiEvent(
+      piEvt("A", {
+        type: "tool_execution_update",
+        toolCallId: "t1",
+        toolName: "bash",
+        partialResult: { content: [{ type: "text", text: "line 1\nline 2\n" }] },
+      } as unknown as AgentInnerEvent),
+    );
+
+    const session = useChatStore.getState().sessions.A;
+    const tool = (session.contentBlocks as any[]).find(
+      (b) => b.type === "tool" && b.toolCall.id === "t1",
+    ).toolCall;
+    expect(tool.progress).toBe("line 1\nline 2\n");
+    expect(tool.isRunning).toBe(true);
+  });
+
+  it("caps the stored output at 4000 chars", async () => {
+    seed("A");
+    useChatStore.setState({ currentId: "B" });
+    await handlePiEvent(
+      piEvt("A", { type: "message_start", message: { role: "assistant" } }),
+    );
+    await handlePiEvent(
+      piEvt("A", {
+        type: "tool_execution_start",
+        toolCallId: "t1",
+        toolName: "bash",
+        args: {},
+      } as unknown as AgentInnerEvent),
+    );
+    await handlePiEvent(
+      piEvt("A", {
+        type: "tool_execution_update",
+        toolCallId: "t1",
+        toolName: "bash",
+        partialResult: { content: [{ type: "text", text: "x".repeat(9000) }] },
+      } as unknown as AgentInnerEvent),
+    );
+
+    const session = useChatStore.getState().sessions.A;
+    const tool = (session.contentBlocks as any[]).find(
+      (b) => b.type === "tool" && b.toolCall.id === "t1",
+    ).toolCall;
+    expect(tool.progress.length).toBe(4000);
   });
 });

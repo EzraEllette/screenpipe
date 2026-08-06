@@ -27,12 +27,8 @@
   },
   "tools": [
     {
-      "name": "semantic-context",
-      "description": "Read compact app-specific context parsed from supported apps when experimental structured context is enabled"
-    },
-    {
       "name": "search-content",
-      "description": "Search through recorded screen content, audio transcriptions, and UI elements with speaker filtering"
+      "description": "Search recorded screen content, audio, memories, and parsed app data through one filtering surface"
     },
     {
       "name": "export-video",

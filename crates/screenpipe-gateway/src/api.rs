@@ -563,6 +563,72 @@ async fn query_frames(db: &DatabaseManager, kq: &KindQuery<'_>) -> Result<Vec<Va
         .collect())
 }
 
+async fn query_parsed(db: &DatabaseManager, kq: &KindQuery<'_>) -> Result<Vec<Value>, sqlx::Error> {
+    let fts = kq.q.and_then(fts_expression);
+    let order = if kq.newest_first { "DESC" } else { "ASC" };
+    let sql = format!(
+        r#"SELECT p.device_id, p.device_label, p.timestamp, p.app_name,
+                  p.window_name, p.browser_url, p.text, p.frame_id
+           FROM gateway_parsed_records p
+           {fts_join}
+           WHERE datetime(p.timestamp) >= datetime(?1) AND datetime(p.timestamp) <= datetime(?2)
+             AND (?3 IS NULL OR p.device_id = ?3)
+             AND (?4 IS NULL OR lower(p.app_name) = lower(?4))
+           ORDER BY datetime(p.timestamp) {order}
+           LIMIT ?5"#,
+        fts_join = if fts.is_some() {
+            "JOIN gateway_parsed_records_fts fts ON fts.rowid = p.rowid AND gateway_parsed_records_fts MATCH ?6"
+        } else {
+            ""
+        },
+    );
+    let mut query = sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            String,
+            String,
+            String,
+            Option<String>,
+            String,
+            i64,
+        ),
+    >(sqlx::AssertSqlSafe(sql))
+    .bind(&kq.since)
+    .bind(&kq.until)
+    .bind(kq.device_id)
+    .bind(kq.app_name)
+    .bind(kq.limit);
+    if let Some(f) = &fts {
+        query = query.bind(f.clone());
+    }
+    let rows = query.fetch_all(&db.pool).await?;
+    Ok(rows
+        .into_iter()
+        .map(|(device_id, label, ts, app, window, url, text, frame_id)| {
+            record_summary(
+                "parsed",
+                Some(ts),
+                Some(label),
+                Some(device_id),
+                Some(app),
+                Some(window),
+                url,
+                Some(text),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(frame_id),
+                None,
+            )
+        })
+        .collect())
+}
+
 async fn query_audio(db: &DatabaseManager, kq: &KindQuery<'_>) -> Result<Vec<Value>, sqlx::Error> {
     let fts = kq.q.and_then(fts_expression);
     let order = if kq.newest_first { "DESC" } else { "ASC" };
@@ -772,6 +838,112 @@ async fn query_memories(
         .collect())
 }
 
+async fn query_feedback(
+    db: &DatabaseManager,
+    kq: &KindQuery<'_>,
+) -> Result<Vec<Value>, sqlx::Error> {
+    let order = if kq.newest_first { "DESC" } else { "ASC" };
+    let sql = format!(
+        r#"SELECT f.id, f.device_id, gd.device_label, f.updated_at,
+                  f.target_kind, f.target_id, NULLIF(f.target_version, ''),
+                  f.producer_ref, f.actor_id, f.rating, f.comment, f.snapshot,
+                  f.context, f.created_at
+           FROM feedback f
+           LEFT JOIN gateway_devices gd ON gd.device_id = f.device_id
+           WHERE f.device_id != ''
+             AND datetime(f.updated_at) >= datetime(?1) AND datetime(f.updated_at) <= datetime(?2)
+             AND (?3 IS NULL OR f.device_id = ?3)
+             AND (?4 IS NULL OR lower(f.target_id) LIKE '%' || lower(?4) || '%'
+                 OR lower(COALESCE(f.producer_ref, '')) LIKE '%' || lower(?4) || '%'
+                 OR lower(COALESCE(f.comment, '')) LIKE '%' || lower(?4) || '%'
+                 OR lower(COALESCE(f.snapshot, '')) LIKE '%' || lower(?4) || '%'
+                 OR lower(f.context) LIKE '%' || lower(?4) || '%')
+           ORDER BY datetime(f.updated_at) {order}
+           LIMIT ?5"#,
+    );
+    let rows = sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            Option<String>,
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            String,
+            String,
+        ),
+    >(sqlx::AssertSqlSafe(sql))
+    .bind(&kq.since)
+    .bind(&kq.until)
+    .bind(kq.device_id)
+    .bind(kq.q)
+    .bind(kq.limit)
+    .fetch_all(&db.pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(
+            |(
+                id,
+                device_id,
+                device,
+                updated_at,
+                target_kind,
+                target_id,
+                target_version,
+                producer_ref,
+                actor_id,
+                rating,
+                comment,
+                snapshot,
+                context,
+                created_at,
+            )| {
+                json!({
+                    "kind": "feedback",
+                    "t": updated_at,
+                    "device": device,
+                    "device_id": device_id,
+                    "app": null,
+                    "window": null,
+                    "url": null,
+                    "text": comment,
+                    "transcription": null,
+                    "speaker": null,
+                    "content": comment,
+                    "importance": null,
+                    "tags": null,
+                    "source": producer_ref,
+                    "frame_id": null,
+                    "memory_id": null,
+                    "feedback_id": id
+                        .split_once(":feedback:")
+                        .map(|(_, source_id)| source_id)
+                        .unwrap_or(&id),
+                    "target_kind": target_kind,
+                    "target_id": target_id,
+                    "target_version": target_version,
+                    "producer_ref": producer_ref,
+                    "actor_id": actor_id,
+                    "rating": rating,
+                    "comment": comment,
+                    "snapshot": snapshot.and_then(|value| serde_json::from_str::<Value>(&value).ok()),
+                    "context": serde_json::from_str::<Value>(&context).unwrap_or_else(|_| json!({})),
+                    "created_at": created_at,
+                    "updated_at": updated_at,
+                })
+            },
+        )
+        .collect())
+}
+
 async fn query_kinds(
     db: &DatabaseManager,
     kinds: &[&str],
@@ -781,9 +953,11 @@ async fn query_kinds(
     for kind in kinds {
         let mut part = match *kind {
             "frame" => query_frames(db, kq).await?,
+            "parsed" => query_parsed(db, kq).await?,
             "audio" => query_audio(db, kq).await?,
             "ui" => query_ui(db, kq).await?,
             "memory" => query_memories(db, kq).await?,
+            "feedback" => query_feedback(db, kq).await?,
             // Snapshots are files + frames.snapshot_path, not records.
             _ => Vec::new(),
         };
@@ -852,7 +1026,13 @@ async fn search(
         limit,
         newest_first: true,
     };
-    let mut results = match query_kinds(&state.db, &["frame", "audio", "ui", "memory"], &kq).await {
+    let mut results = match query_kinds(
+        &state.db,
+        &["frame", "parsed", "audio", "ui", "memory", "feedback"],
+        &kq,
+    )
+    .await
+    {
         Ok(r) => r,
         Err(e) => return err_json(StatusCode::INTERNAL_SERVER_ERROR, &format!("search: {e}")),
     };
@@ -895,7 +1075,7 @@ async fn records(
     };
 
     let kinds: Vec<&str> = match kind_filter.as_str() {
-        "all" => vec!["frame", "audio", "ui", "memory"],
+        "all" => vec!["frame", "parsed", "audio", "ui", "memory", "feedback"],
         k => vec![k],
     };
     let kq = KindQuery {
@@ -1188,7 +1368,10 @@ mod tests {
     use http_body_util::BodyExt;
     use object_store::memory::InMemory;
     use screenpipe_config::DbConfig;
-    use screenpipe_telemetry_wire::{build_jsonl, direct_batch_key, AudioRow, FrameRow, MemoryRow};
+    use screenpipe_telemetry_wire::{
+        build_jsonl, build_jsonl_with_parsed, direct_batch_key, AudioRow, FrameRow, MemoryRow,
+        ParsedRow,
+    };
     use tower::util::ServiceExt;
 
     use crate::ingest::Ingestor;
@@ -1533,7 +1716,7 @@ mod tests {
             ("dev-a", "alice-mbp", "quarterly roadmap alpha", "10"),
             ("dev-b", "bob-mbp", "quarterly roadmap bravo", "11"),
         ] {
-            let body = build_jsonl(
+            let body = build_jsonl_with_parsed(
                 dev,
                 label,
                 &[FrameRow {
@@ -1543,6 +1726,26 @@ mod tests {
                     window_name: Some("planning".to_string()),
                     browser_url: None,
                     text: Some(text.to_string()),
+                }],
+                &[ParsedRow {
+                    frame_id: 1,
+                    timestamp: format!("2026-07-22T{hour}:00:00Z"),
+                    app_name: "Slack".to_string(),
+                    window_name: "planning".to_string(),
+                    browser_url: None,
+                    text: format!("Ada: {text} structured"),
+                    run_id: 7,
+                    parser_id: "slack.messages".to_string(),
+                    parser_version: "1.0.0".to_string(),
+                    schema_version: 1,
+                    app_platform: "macos".to_string(),
+                    app_id: None,
+                    app_executable: None,
+                    app_version: None,
+                    parse_duration_us: 300,
+                    text_bytes: text.len(),
+                    items: vec![json!({"kind": "message", "body": text})],
+                    actors: vec![json!({"name": "Ada Lovelace"})],
                 }],
                 &[AudioRow {
                     transcription_id: 1,
@@ -1691,6 +1894,36 @@ mod tests {
         sorted.sort();
         assert_eq!(ts, sorted, "records are ascending by t");
         assert_eq!(records[0]["memory_id"], 1);
+    }
+
+    #[tokio::test]
+    async fn parsed_records_are_searchable_and_kind_filterable() {
+        let dir = tempfile::tempdir().unwrap();
+        let router = seeded_router(&dir).await;
+
+        let (status, body) = get_json(
+            &router,
+            "/api/enterprise/v1/search?q=structured&since=2026-07-22T00:00:00Z",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let results = body["results"].as_array().unwrap();
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|record| record["kind"] == "parsed"));
+
+        let (status, body) = get_json(
+            &router,
+            "/api/enterprise/v1/records?kind=parsed&since=2026-07-22T00:00:00Z",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let records = body["records"].as_array().unwrap();
+        assert_eq!(records.len(), 2);
+        assert!(records.iter().all(|record| {
+            record["kind"] == "parsed"
+                && record["parser_id"].is_null()
+                && record["text"].as_str().unwrap().contains("structured")
+        }));
     }
 
     #[tokio::test]

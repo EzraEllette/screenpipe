@@ -33,8 +33,8 @@ import {
 } from "@/lib/app-entitlement";
 import { useSettings } from "@/lib/hooks/use-settings";
 import { useManagedPolicy } from "@/lib/hooks/use-managed-policy";
+import { isPrimaryWindow } from "@/lib/utils/is-primary-window";
 import { commands } from "@/lib/utils/tauri";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import { EnterpriseLicensePrompt } from "@/components/enterprise-license-prompt";
 
 const E2E_ACCOUNT_USER_KEY = "screenpipe_e2e_account_user";
@@ -44,27 +44,6 @@ const E2E_ACCOUNT_USER_EVENT = "screenpipe-e2e-seed-account-user";
 const E2E_ACCOUNT_SEED_ENABLED =
   process.env.NEXT_PUBLIC_SCREENPIPE_E2E === "true";
 const POLICY_CLOCK_CHECK_INTERVAL_MS = 60_000;
-
-// Drive the resume from exactly ONE window — the main CONTENT window — so
-// multiple webviews don't fire overlapping spawns that race each other (and a
-// reconnect teardown) and wedge the recorder at "Starting capture session".
-//
-// The content-window label differs by platform: on macOS it is "home" (the
-// "main" window there is the NSPanel overlay, which must NOT drive recording —
-// gating on "main" was why macOS never resumed after login). On Windows/Linux
-// the content window is "main-window" (window overlay mode) or "main". This
-// must match the window that actually handles the sign-in deep link, so its
-// gate observes the entitled flip.
-function isPrimaryWindow(): boolean {
-  try {
-    const label = getCurrentWindow().label;
-    const ua = typeof navigator !== "undefined" ? navigator.userAgent : "";
-    if (/Mac/i.test(ua)) return label === "home";
-    return label === "main-window" || label === "main";
-  } catch {
-    return false;
-  }
-}
 
 function getDownloadPlatform(): string | null {
   try {
@@ -130,6 +109,7 @@ export function AppEntitlementGate({
   const {
     isManagedDeployment,
     isManagedDeploymentResolved,
+    managedDeploymentResolutionError,
     authenticationState,
     authenticationError,
     isManagedAuthenticated,
@@ -324,13 +304,18 @@ export function AppEntitlementGate({
     gateReportedRef.current = true;
     posthog.capture("app_entitlement_gate_shown", {
       logged_in: Boolean(user?.token),
+      // Must follow the same precedence as the render branches below (and as
+      // `gate_path`). Checking unknown-policy before enterprise-app reported
+      // "plan_verification_required" for users who were actually looking at the
+      // "enterprise app required" screen — both flags are true at once, since an
+      // unknown plan is what clears hasConsumerAppSubscription in the first place.
       reason: shouldGateForEnterpriseLogin
         ? "enterprise_login_required"
-        : shouldGateForConsumerLogin
-          ? "consumer_login_required"
-          : shouldGateForUnknownConsumerPolicy
-            ? "plan_verification_required"
-            : "enterprise_app_required",
+        : shouldGateForEnterpriseApp
+          ? "enterprise_app_required"
+          : shouldGateForConsumerLogin
+            ? "consumer_login_required"
+            : "plan_verification_required",
       plan: user?.subscription_plan ?? null,
       app_entitled: user?.app_entitled ?? null,
       // Diagnostics for the enterprise post-update loop (SCR-132).
@@ -690,6 +675,22 @@ export function AppEntitlementGate({
   }
 
   if (!isManagedDeploymentResolved) {
+    if (managedDeploymentResolutionError) {
+      return (
+        <EntitlementShell
+          title="couldn't check access"
+          description="screenpipe could not confirm which build is installed. it will retry automatically."
+        >
+          <Button
+            onClick={() => window.location.reload()}
+            variant="secondary"
+            className="w-full"
+          >
+            reload and retry
+          </Button>
+        </EntitlementShell>
+      );
+    }
     return (
       <EntitlementShell
         title="checking access"
