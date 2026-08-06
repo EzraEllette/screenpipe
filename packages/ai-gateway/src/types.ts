@@ -148,6 +148,10 @@ export interface Env {
 	CLOUDFLARE_AI_GATEWAY_BASE_URL?: string;
 	/** Local-dev only: authenticate provider-native fetches made off-platform. */
 	CLOUDFLARE_AI_GATEWAY_TOKEN?: string;
+	/** Cloudflare account that owns the hosted-chat Gateway and Analytics data. */
+	CLOUDFLARE_ACCOUNT_ID?: string;
+	/** Read-only token for Gateway configuration and Account Analytics. */
+	CLOUDFLARE_API_TOKEN?: string;
 	OPENAI_API_KEY: string;
 	/** Runner-only bearer for trusted backend jobs. Stored as a Worker secret. */
 	AI_GATEWAY_SERVICE_TOKEN?: string;
@@ -298,6 +302,8 @@ export interface AuthResult {
 	hostedAiTrial?: boolean;
 	deviceId: string;
 	userId?: string;
+	/** Clerk subject proven by Clerk JWT verification or an authenticated /api/user response. */
+	clerkUserId?: string;
 	/** True only for the dedicated backend service bearer. */
 	service?: boolean;
 	error?: string;

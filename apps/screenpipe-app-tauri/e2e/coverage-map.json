@@ -639,6 +639,26 @@
       "notes": "Seeds and opens a long meeting note, checks editor shell click focus behavior, then clicks the bottom editor line."
     },
     {
+      "spec": "meeting-workspace-tabs.spec.ts",
+      "platforms": ["windows", "macos", "linux"],
+      "layers": ["real-ui-e2e", "local-api"],
+      "features": ["meeting-notes"],
+      "criticality": "high",
+      "confidence": "strong",
+      "ux": "real-user-flow",
+      "notes": "Seeds a meeting with notes and summary, switches persistent tabs, resizes to 640x560, checks footer separation and horizontal overflow, then captures a review screenshot."
+    },
+    {
+      "spec": "meeting-summary-recovery.spec.ts",
+      "platforms": ["windows", "macos", "linux"],
+      "layers": ["real-ui-e2e", "local-api"],
+      "features": ["meeting-notes", "meeting-summary-recovery"],
+      "criticality": "high",
+      "confidence": "strong",
+      "ux": "real-user-flow",
+      "notes": "Seeds an ended meeting through the isolated API and verifies persistent saved-audio retranscription, its replacement warning, and completed-summary rerun without launching hosted AI."
+    },
+    {
       "spec": "meetings-only-audio-lifecycle.spec.ts",
       "platforms": ["windows", "macos"],
       "layers": ["audio-device", "local-api", "real-ui-e2e"],
@@ -667,6 +687,16 @@
       "confidence": "strong",
       "ux": "real-user-flow",
       "notes": "Isolated agent-home CI lane verifies private native config writes, the resolved local API credential, a real authenticated MCP tool call, skills setup, and removal of the connection slide."
+    },
+    {
+      "spec": "onboarding-h1-follow-up.spec.ts",
+      "platforms": ["windows", "macos", "linux"],
+      "layers": ["onboarding", "notifications", "pipes", "real-ui-e2e"],
+      "features": ["onboarding", "notifications", "pipes"],
+      "criticality": "high",
+      "confidence": "strong",
+      "ux": "real-user-flow",
+      "notes": "A due H1 activation runs its real Pipe, sends one visible prompt through the app-control notification server, and remains exactly-once across repeated scheduler ticks."
     },
     {
       "spec": "onboarding-redirect.spec.ts",
@@ -717,6 +747,26 @@
       "confidence": "conditional",
       "ux": "api",
       "notes": "Opt-in macOS fault injection wedges a visual-change probe; asserts the bounded probe keeps the capture loop and its /health heartbeat live (no false stale/incident)."
+    },
+    {
+      "spec": "capture-stall-recovery.spec.ts",
+      "platforms": ["macos"],
+      "layers": ["capture-ocr", "local-api", "os-integration", "real-ui-e2e"],
+      "features": ["app-launch", "capture-ocr", "health", "recording-health-alerts"],
+      "criticality": "high",
+      "confidence": "conditional",
+      "ux": "mixed",
+      "notes": "Opt-in macOS full-stack lane proves all selected user-paused monitors remain an intentional disabled/normal state and resume cleanly, bounds a wedged SCK frame worker, proves the privacy-gated CoreGraphics fallback, reproduces a status-Running capture loop going silent, verifies stale and the failure pill, independent per-monitor stall detection with a VisionManager restart and resumed terminal capture progress, same-process UI recovery, and bounded id-based SCK lookup retry."
+    },
+    {
+      "spec": "recording-health-focus-cold.spec.ts",
+      "platforms": ["macos"],
+      "layers": ["capture-ocr", "local-api", "os-integration", "real-ui-e2e"],
+      "features": ["app-launch", "capture-ocr", "health", "recording-health-alerts"],
+      "criticality": "high",
+      "confidence": "conditional",
+      "ux": "mixed",
+      "notes": "Opt-in macOS focus-aware Cold-state reproduction proves capture attempts can remain intentionally flat while the independent loop heartbeat advances, /health stays ok, and the recording-health overlay remains normal in the original process."
     },
     {
       "spec": "recording-health-return-race.spec.ts",

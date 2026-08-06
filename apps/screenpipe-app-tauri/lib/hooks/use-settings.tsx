@@ -47,6 +47,14 @@ import {
 	readLegacyUserGoalCategory,
 	type UserGoalCategory,
 } from "@/lib/live-views/onboarding-activation";
+import {
+	LOCAL_DESKTOP_REMOTE_POLICY,
+	NEW_INSTALL_REMOTE_CONTROL_PREFERENCES,
+	normalizeDesktopRemotePolicySnapshot,
+	normalizeDesktopRemotePreferences,
+	type DesktopRemotePolicySnapshot,
+	type DesktopRemotePreferences,
+} from "@/lib/desktop-remote-control";
 export type VadSensitivity = "low" | "medium" | "high";
 
 export type AIProviderType =
@@ -244,6 +252,12 @@ export type Settings = SettingsStore & {
 	deviceId?: string;
 	/** Device-key values enforced by the current enterprise policy. */
 	enterpriseManagedSettings?: Record<string, ManagedSettingValue>;
+	/** @deprecated PR #5878 transition field; migrated into remoteControlPreferences. */
+	semanticContextPreference?: boolean | null;
+	/** Explicit local choices. null means inherit that control's remote rollout default. */
+	remoteControlPreferences?: DesktopRemotePreferences;
+	/** Last valid bounded policies, persisted for offline restarts and Rust enforcement. */
+	remoteControlPolicy?: DesktopRemotePolicySnapshot;
 	updateChannel?: UpdateChannel;
 	chatHistory?: ChatHistoryStore;
 	ignoredUrls?: string[];
@@ -326,8 +340,9 @@ export type Settings = SettingsStore & {
 	disableKeyboardCapture?: boolean;
 	/** Skip mouse-click rows in the UI recorder. Defaults to false (click capture ON) — clicks carry no text payload and drive workflow/task mining. Clicks still wake event-driven capture when disabled. */
 	disableClickCapture?: boolean;
-	/** Experimental: capture System Audio via CoreAudio Process Tap (macOS 14.4+) instead of ScreenCaptureKit.
-	 *  Off by default. Ignored on macOS <14.4 and non-macOS — falls back to SCK. */
+	/** Capture System Audio via CoreAudio Process Tap on macOS 14.4+ instead of ScreenCaptureKit.
+	 *  Desktop migration V3 enables it automatically. Initial tap failures fall back to SCK;
+	 *  ignored on macOS <14.4 and non-macOS. */
 	experimentalCoreaudioSystemAudio?: boolean;
 	/** Beta ("Smart recording" in the app): during meetings, capture only the meeting app's audio
 	 *  and the microphone it actually uses (per-process piggyback). Off by default. Engages in ANY
@@ -688,7 +703,7 @@ let DEFAULT_SETTINGS: Settings = {
 				port: 11434,
 			},
 		updateChannel: "stable",
-			autoUpdate: false,
+			autoUpdate: true,
 			autoUpdatePipes: true,
 			autoStartEnabled: true,
 			platform: "unknown",
@@ -726,6 +741,31 @@ let DEFAULT_SETTINGS: Settings = {
 			disableVision: false,
 			disableScreenshots: false,
 			enableSemanticContext: false,
+			remoteControlPreferences: {
+				...NEW_INSTALL_REMOTE_CONTROL_PREFERENCES,
+			},
+			remoteControlPolicy: {
+				schemaVersion: 1,
+				boolean: {
+					semanticContext: {
+						...LOCAL_DESKTOP_REMOTE_POLICY.boolean.semanticContext,
+					},
+					coreAudioSystemAudio: {
+						...LOCAL_DESKTOP_REMOTE_POLICY.boolean.coreAudioSystemAudio,
+					},
+					smartRecording: {
+						...LOCAL_DESKTOP_REMOTE_POLICY.boolean.smartRecording,
+					},
+					filterMusic: {
+						...LOCAL_DESKTOP_REMOTE_POLICY.boolean.filterMusic,
+					},
+					prioritizeInputLatency: {
+						...LOCAL_DESKTOP_REMOTE_POLICY.boolean.prioritizeInputLatency,
+					},
+				},
+				aecMode: { ...LOCAL_DESKTOP_REMOTE_POLICY.aecMode },
+				autoUpdate: { ...LOCAL_DESKTOP_REMOTE_POLICY.autoUpdate },
+			},
 			semanticContextMode: "memory",
 			useAllMonitors: true,
 			showShortcutOverlay: true,
@@ -744,6 +784,7 @@ let DEFAULT_SETTINGS: Settings = {
 			cloudArchiveRetentionDays: 7,
 			meetingSummaryPipeSlug: "meeting-summary",
 			filterMusic: true,
+			prioritizeInputLatency: false,
 			ignoreIncognitoWindows: true,
 			enhancedIncognitoDetection: false,
 			pauseOnDrmContent: false,
@@ -1038,11 +1079,55 @@ function createSettingsStore() {
 		}
 
 		// One-time migration (V3 — supersedes V2): flip CoreAudio Process Tap
-		// back ON. The VoiceProcessing AudioUnit issue from V2 is resolved;
-		// toggle removed from UI, auto-enabled when available (#5236).
+		// back ON. The toggle was removed from the UI and the runtime falls back
+		// through normal backend selection if tap initialization fails (#5236).
 		if (!(settings as any).coreaudioTapMigrationV3) {
 			settings.experimentalCoreaudioSystemAudio = true;
 			(settings as any).coreaudioTapMigrationV3 = true;
+			needsUpdate = true;
+		}
+
+		// Existing installs predate the typed remote-control registry. Preserve
+		// the post-migration effective values as explicit choices. Rust seeds an
+		// all-null object for genuinely new installs, so those can inherit rollout
+		// defaults without changing any established user preference.
+		const normalizedRemotePreferences = normalizeDesktopRemotePreferences(settings);
+		if (
+			JSON.stringify(settings.remoteControlPreferences) !==
+			JSON.stringify(normalizedRemotePreferences)
+		) {
+			settings.remoteControlPreferences = normalizedRemotePreferences;
+			needsUpdate = true;
+		}
+		const legacyRemoteSettings = settings as Settings & {
+			semanticContextRemoteDefault?: boolean;
+			semanticContextRemoteForceDisabled?: boolean;
+		};
+		const normalizedRemotePolicy = normalizeDesktopRemotePolicySnapshot(
+			settings.remoteControlPolicy,
+			{
+				defaultEnabled: legacyRemoteSettings.semanticContextRemoteDefault,
+				forceDisabled:
+					legacyRemoteSettings.semanticContextRemoteForceDisabled,
+			},
+		);
+		if (
+			JSON.stringify(settings.remoteControlPolicy) !==
+			JSON.stringify(normalizedRemotePolicy)
+		) {
+			settings.remoteControlPolicy = normalizedRemotePolicy;
+			needsUpdate = true;
+		}
+		if (settings.semanticContextPreference !== undefined) {
+			delete settings.semanticContextPreference;
+			needsUpdate = true;
+		}
+		if (legacyRemoteSettings.semanticContextRemoteDefault !== undefined) {
+			delete legacyRemoteSettings.semanticContextRemoteDefault;
+			needsUpdate = true;
+		}
+		if (legacyRemoteSettings.semanticContextRemoteForceDisabled !== undefined) {
+			delete legacyRemoteSettings.semanticContextRemoteForceDisabled;
 			needsUpdate = true;
 		}
 

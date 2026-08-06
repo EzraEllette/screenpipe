@@ -389,237 +389,6 @@ async disableOverlayClickThrough() : Promise<Result<null, string>> {
 async doPermissionsCheck(initialCheck: boolean) : Promise<OSPermissionsCheck> {
     return await TAURI_INVOKE("do_permissions_check", { initialCheck });
 },
-/**
- * E2E helper: distinguish a real CaptureSession from capture intent alone.
- */
-async e2eCaptureSessionRunning() : Promise<Result<boolean, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("e2e_capture_session_running") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Read-only lifecycle snapshot for the packaged desktop regression.
- */
-async e2eDbHardFaultState() : Promise<Result<JsonValue, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("e2e_db_hard_fault_state") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * E2E helper: emit a deterministic chat stream from the Rust side.
- *
- * This keeps chat performance tests close to production's Pi stdout path:
- * one backend command starts the stream, then the app emits `agent_event`
- * envelopes into the WebView. Tests avoid the extra WebView→Rust→WebView
- * bridge hop that would come from calling `plugin:event|emit` for every token.
- */
-async e2eEmitAgentStream(sessionId: string, deltaCount: number) : Promise<Result<E2eAgentStreamResult, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("e2e_emit_agent_stream", { sessionId, deltaCount }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * E2E helper: publish the same typed core event as the real disk probe.
- */
-async e2eEmitDiskSpaceLow(availableBytes: number) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("e2e_emit_disk_space_low", { availableBytes }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * E2E helper for the scheduled-pipe path: feed synthetic pipe stdout
- * through the same Rust-side callback adapter production uses, then let the
- * frontend's default pipe handlers record it as a completed pipe run.
- */
-async e2eEmitPipeStream(pipeName: string, executionId: number, deltaCount: number) : Promise<Result<E2eAgentStreamResult, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("e2e_emit_pipe_stream", { pipeName, executionId, deltaCount }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * E2E helper for an extension-triggered turn that begins after the original
- * assistant response has settled. This matches pi-subagents async completion:
- * Pi persists a visible custom message, then `triggerTurn: true` starts a new
- * assistant turn without a new user `message_start` event.
- */
-async e2eEmitSettledAgentFollowUp(sessionId: string) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("e2e_emit_settled_agent_follow_up", { sessionId }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * E2E helper: execute the production policy handler directly and return its
- * explicit outcome. This avoids sleep-based assertions; the settings E2E also
- * publishes through the typed event bus to cover the production subscription.
- */
-async e2eHandleDiskSpaceLow(availableBytes: number) : Promise<Result<DiskPressureOutcome, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("e2e_handle_disk_space_low", { availableBytes }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Damage only an E2E-owned table in the disposable database, then route the
- * real SQLITE_CORRUPT result through the production manager and app hook.
- */
-async e2eInjectDbHardFault() : Promise<Result<JsonValue, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("e2e_inject_db_hard_fault") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * E2E helper: read the status text from the menu that was successfully
- * installed into the native tray, not merely the desired health state.
- */
-async e2eInstalledTrayRecordingStatus() : Promise<Result<string | null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("e2e_installed_tray_recording_status") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * E2E helper: read back the persisted guard value before publishing an event.
- */
-async e2eLowDiskGuardEnabled() : Promise<Result<boolean, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("e2e_low_disk_guard_enabled") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * E2E helper: report whether the main overlay is logically visible.
- *
- * The main window uses platform-specific "hide" semantics (macOS NSPanel with
- * alpha=0, Windows/Linux hidden WebviewWindow). Tests need a stable signal that
- * the overlay has been dismissed when opening other surfaces (e.g. search).
- */
-async e2eMainOverlayVisible() : Promise<boolean> {
-    return await TAURI_INVOKE("e2e_main_overlay_visible");
-},
-/**
- * E2E helper: model an active capture intent without requiring physical
- * screen/audio devices on the CI runner.
- */
-async e2eMarkCaptureIntended() : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("e2e_mark_capture_intended") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * E2E-only: detach and close the owned-browser child webview, resetting the
- * singleton to its "no child attached" state. Lets
- * `zzz-owned-browser-headless.spec.ts` establish a deterministic baseline so it
- * can prove that a *fresh* background (headless) eval actually creates a
- * working webview — not merely reuse one a prior spec left attached. Mirrors
- * `e2e_owned_browser_visible`'s gating: a no-op in production binaries, only
- * active under the `e2e` feature.
- */
-async e2eOwnedBrowserDetach() : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("e2e_owned_browser_detach") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * E2E-only probe: whether the owned-browser native webview is currently shown.
- * Mirrors `e2e_main_overlay_visible` — internal visibility state stays hidden
- * in production binaries and is only exposed under the `e2e` feature. Used by
- * `zz-owned-browser-background-nav.spec.ts` to assert a background agent/pipe
- * navigation does not reveal the browser over a non-chat view.
- */
-async e2eOwnedBrowserVisible() : Promise<boolean> {
-    return await TAURI_INVOKE("e2e_owned_browser_visible");
-},
-/**
- * E2E-only accelerated reproduction of an idle capture heartbeat pause that
- * recovers as the user returns. The real incident accumulated 114 idle stale
- * checks, then the first input both woke capture and crossed the attended
- * alert threshold before the next healthy check arrived.
- */
-async e2eRecordingHealthReturnRace() : Promise<Result<JsonValue, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("e2e_recording_health_return_race") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * E2E helper: update the native store without depending on a mounted settings
- * webview. Used by the recording-enabled Windows lane.
- */
-async e2eSetLowDiskGuardEnabled(enabled: boolean) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("e2e_set_low_disk_guard_enabled", { enabled }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * E2E helper: prove critical recording-stopped alerts bypass the user's
- * ordinary notification master switch.
- */
-async e2eSetNotificationMasterEnabled(enabled: boolean) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("e2e_set_notification_master_enabled", { enabled }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * E2E helper: drive the health-to-native-tray status transition.
- */
-async e2eSetTrayRecordingStatus(status: string) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("e2e_set_tray_recording_status", { status }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * E2E helper: report whether the shortcut reminder overlay is visibly shown.
- *
- * The reminder window is hidden rather than destroyed, so WebDriver can keep a
- * stale handle after users disable it from Settings > Display.
- */
-async e2eShortcutReminderVisible() : Promise<boolean> {
-    return await TAURI_INVOKE("e2e_shortcut_reminder_visible");
-},
 async enableKeychainEncryption() : Promise<Result<KeychainStatus, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("enable_keychain_encryption") };
@@ -808,13 +577,6 @@ async getDiskUsage(forceRefresh: boolean | null, dataDir: string | null) : Promi
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
-},
-/**
- * Returns which E2E seeds are requested (env SCREENPIPE_E2E_SEED, comma-separated).
- * Rust uses "onboarding" in setup to complete onboarding at startup.
- */
-async getE2eSeedFlags() : Promise<string[]> {
-    return await TAURI_INVOKE("get_e2e_seed_flags");
 },
 async getEnterpriseHostIdentity() : Promise<EnterpriseHostIdentity> {
     return await TAURI_INVOKE("get_enterprise_host_identity");
@@ -1741,6 +1503,19 @@ async piStart(sessionId: string | null, projectDir: string, userToken: string | 
 }
 },
 /**
+ * Start a private Pi session and submit its first prompt as one operation.
+ * Foreground surfaces that only care about agent events should not have to
+ * round-trip through WebView between process readiness and prompt acceptance.
+ */
+async piStartAndPrompt(sessionId: string, projectDir: string, userToken: string | null, providerConfig: PiProviderConfig | null, message: string) : Promise<Result<string, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("pi_start_and_prompt", { sessionId, projectDir, userToken, providerConfig, message }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Steer the active Pi reply using Pi's native steering command.
  * Unlike `pi_prompt`, this is intentionally not added to the follow-up queue:
  * Pi interrupts the current stream and resumes with the steering instruction.
@@ -2183,12 +1958,13 @@ async saveEnterpriseLicenseKey(licenseKey: string) : Promise<Result<null, string
 },
 /**
  * Persist the user's enterprise admin status, team API token, and the org's
- * team API base URL so the pi-agent's `screenpipe-team` skill knows whether
- * to install itself and where to point.
+ * team API base URL. The Enterprise app uses the role/license/token fields to
+ * decide whether to inject `screenpipe-team`; the native CLI resolves the API
+ * base and token from the same file when that skill invokes it.
  *
  * Called by the frontend right after a policy fetch confirms admin
  * role. Storing this alongside the license key in `enterprise.json`
- * keeps everything pi-agent needs in one file the skill can read
+ * keeps the Enterprise app and native CLI on one local configuration contract
  * without a Tauri round-trip.
  *
  * All fields are optional so callers can update one at a time —
@@ -2945,8 +2721,6 @@ export type DiscoveredHost = { host: string; port: number; user: string | null; 
  * Only set when `HostName` resolves to an IP different from the alias.
  */
 alias?: string | null }
-export type DiskPressureOutcome = "guard_disabled" | "capture_already_stopped" | "capture_stopped" | "stop_failed"
-export type E2eAgentStreamResult = { emitted_deltas: number; emit_ms: number }
 export type EmbeddedLLM = { enabled: boolean; model: string; port: number }
 export type EngineEvent = { name: string; data: JsonValue }
 export type EnterpriseHostIdentity = { machine_id_hash: string | null; os_user_id_hash: string | null }
@@ -3068,7 +2842,12 @@ maxContextChars?: number | null;
 /**
  * Optional system prompt from AI preset (appended to Pi's built-in system prompt)
  */
-systemPrompt?: string | null }
+systemPrompt?: string | null;
+/**
+ * Optional exact Pi tool allowlist for bounded agent surfaces. `None`
+ * preserves the normal Chat tool surface; an empty list disables tools.
+ */
+allowedTools?: string[] | null }
 /**
  * A user prompt that's been enqueued but not yet written to Pi's stdin.
  * Surfaced to the UI so the chat can render "queued" cards while a prior
@@ -3232,20 +3011,13 @@ audioDevices: string[];
  */
 useSystemDefaultAudio: boolean;
 /**
- * Experimental: capture System Audio via the CoreAudio Process Tap API
- * (macOS 14.4+) instead of ScreenCaptureKit. The tap sidesteps SCK's
- * display-enumeration failures after sleep/wake and the GPU/compositor
- * wake overhead, but it cannot see audio rendered through a
- * VoiceProcessing AudioUnit (Zoom / Google Meet / Microsoft Teams all
- * use one for echo cancellation), so on meeting audio it silently
- * captures zeroed buffers even though tap creation succeeds.
- *
- * Default `false` (see `default_experimental_coreaudio_system_audio`).
- * SCK captures at the display compositor, which does see VoiceProcessing
- * output, so it is the right default for anyone on calls. Users who hit
- * SCK's sleep/wake display-enumeration bug can still opt in; when the tap
- * is on and creation fails (permission, macOS <14.4, OS quirk), stream.rs
- * falls back to the SCK path automatically. Ignored on non-macOS platforms.
+ * Capture System Audio via the CoreAudio Process Tap API on macOS 14.4+
+ * instead of ScreenCaptureKit. The Rust deserialization default remains
+ * `false` for headless/non-desktop callers, while desktop settings migration
+ * V3 enables it automatically. Initial tap creation failures fall back to
+ * SCK; runtime failures disconnect the stream so the device manager can
+ * reconstruct it through the same backend-selection path. Ignored on
+ * non-macOS platforms.
  */
 experimentalCoreaudioSystemAudio?: boolean;
 /**
@@ -3792,7 +3564,7 @@ chatAlwaysOnTop?: boolean;
 showRestartNotifications?: boolean;
 /**
  * Stop capture before the data volume is completely full. Search, pipes,
- * and the local API remain available. Explicitly opt-in for now.
+ * and the local API remain available. Safety-on unless explicitly disabled.
  */
 stopRecordingOnLowDisk?: boolean;
 /**
