@@ -1186,6 +1186,13 @@ async fn main() {
             #[allow(unused_mut)] // E2E seeds mutate the store in feature builds.
             let mut store = store::init_store(&app.handle()).map_err(|e| {
                 error!("Failed to init settings store; aborting startup: {}", e);
+                // A log line is invisible to the user: without this the app just
+                // silently refuses to launch. Say why, and say the settings are
+                // intact, before the process goes away.
+                store::show_fatal_startup_alert(
+                    "screenpipe cannot start",
+                    &store::locked_store_alert_message(&e),
+                );
                 std::io::Error::other(e)
             })?;
 

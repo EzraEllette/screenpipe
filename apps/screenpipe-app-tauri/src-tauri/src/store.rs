@@ -2261,6 +2261,125 @@ impl IcsCalendarSettingsStore {
     }
 }
 
+/// What the user is told when settings cannot be opened and startup stops.
+///
+/// The failure is deliberately fail-closed: the encrypted `store.bin` is intact
+/// and is *not* replaced with defaults. Without a message the user just sees an
+/// app that refuses to launch, so name the cause, promise the data is safe, and
+/// give the one action that usually fixes it.
+pub fn locked_store_alert_message(detail: &str) -> String {
+    format!(
+        "screenpipe could not open your settings, so it stopped before starting.\n\n\
+         Your settings file is encrypted and screenpipe needs the system keychain \
+         to unlock it. This usually means the keychain is locked or was not \
+         available yet, often right after a restart or an OS update.\n\n\
+         Nothing was deleted or overwritten. Your settings are still on disk.\n\n\
+         Unlock your login keychain, then open screenpipe again. If it keeps \
+         happening, send this to support:\n{detail}"
+    )
+}
+
+/// Show a fatal startup alert without depending on the Tauri event loop.
+///
+/// `tauri_plugin_dialog` needs a running event loop, which does not exist when
+/// `setup` aborts, so a plugin dialog would never paint. Shell out to the
+/// platform's own alert instead. Best effort by design: the log line remains the
+/// source of truth and a missing helper must never turn into a hang or a panic
+/// on top of an already-fatal error.
+pub fn show_fatal_startup_alert(title: &str, message: &str) {
+    use std::process::Command;
+
+    let spawned = if cfg!(target_os = "macos") {
+        // `display alert` with an escaped literal — never interpolate the
+        // message into the script body unescaped.
+        let script = format!(
+            "display alert {} message {} as critical",
+            applescript_string(title),
+            applescript_string(message)
+        );
+        Command::new("osascript").arg("-e").arg(script).spawn()
+    } else if cfg!(target_os = "windows") {
+        Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-WindowStyle",
+                "Hidden",
+                "-Command",
+                &format!(
+                    "Add-Type -AssemblyName PresentationFramework; \
+                     [System.Windows.MessageBox]::Show({}, {}) | Out-Null",
+                    powershell_string(message),
+                    powershell_string(title)
+                ),
+            ])
+            .spawn()
+    } else {
+        Command::new("zenity")
+            .args(["--error", "--title", title, "--text", message])
+            .spawn()
+    };
+
+    match spawned {
+        // Wait so the alert is readable before the process exits, but never
+        // block forever on a wedged helper.
+        Ok(mut child) => {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+            loop {
+                match child.try_wait() {
+                    Ok(Some(_)) => break,
+                    Ok(None) if std::time::Instant::now() >= deadline => {
+                        let _ = child.kill();
+                        break;
+                    }
+                    Ok(None) => std::thread::sleep(std::time::Duration::from_millis(100)),
+                    Err(_) => break,
+                }
+            }
+        }
+        Err(e) => warn!("could not show fatal startup alert ({e}); message was: {message}"),
+    }
+}
+
+/// Quote a string as an AppleScript literal.
+fn applescript_string(value: &str) -> String {
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+/// Quote a string as a PowerShell single-quoted literal.
+fn powershell_string(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+#[cfg(test)]
+mod fatal_alert_tests {
+    use super::*;
+
+    #[test]
+    fn alert_says_the_settings_survived_and_what_to_do() {
+        let message = locked_store_alert_message("store locked at /tmp/store.bin");
+        // The whole point of failing closed is that nothing was overwritten;
+        // if the user is not told that, they will assume data loss.
+        assert!(message.contains("Nothing was deleted or overwritten"));
+        assert!(message.to_lowercase().contains("keychain"));
+        assert!(message.contains("store locked at /tmp/store.bin"));
+    }
+
+    #[test]
+    fn applescript_literals_cannot_break_out_of_the_string() {
+        // The detail carries a filesystem path and an arbitrary error string,
+        // so an embedded quote must not terminate the literal and let the rest
+        // run as script.
+        let quoted = applescript_string("say \"hi\" \\ bye");
+        assert_eq!(quoted, "\"say \\\"hi\\\" \\\\ bye\"");
+        assert!(quoted.starts_with('"') && quoted.ends_with('"'));
+    }
+
+    #[test]
+    fn powershell_literals_escape_embedded_quotes() {
+        assert_eq!(powershell_string("it's fine"), "'it''s fine'");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
