@@ -310,10 +310,7 @@ export class OpenAIProvider implements AIProvider {
 		});
 	}
 
-	async createStreamingCompletion(
-		body: RequestBody,
-		signal?: AbortSignal,
-	): Promise<ReadableStream<Uint8Array>> {
+	async createStreamingCompletion(body: RequestBody): Promise<ReadableStream> {
 		const params: ChatCompletionCreateParams = {
 			model: body.model,
 			messages: this.formatMessages(body.messages),
@@ -340,10 +337,7 @@ export class OpenAIProvider implements AIProvider {
 		await applyGpt56PromptCaching(params);
 
 		const stream = (await this.createWithUnsupportedParamRetry(params, (p) =>
-			this.client.chat.completions.create(
-				p as ChatCompletionCreateParams & { stream: true },
-				{ signal },
-			),
+			this.client.chat.completions.create(p as ChatCompletionCreateParams & { stream: true }),
 		)) as OpenAIChatStream;
 
 		// OpenAI-compatible SDK streams are lazy: the HTTP request can succeed at
@@ -464,19 +458,17 @@ export class OpenAIProvider implements AIProvider {
 					// event, so without this the client sees "random error"
 					// and we have no server-side trace. Tags let you filter
 					// by model (e.g. gemma4-31b) or provider (e.g. tinfoil).
-					if (!signal?.aborted && error?.name !== 'AbortError') {
-						try {
-							captureException(error, {
-								tags: {
-									model: modelForTags,
-									base_url: baseURLForTags,
-									error_path: 'openai_streaming',
-									status: String(error?.status ?? 'unknown'),
-								},
-								level: 'warning',
-							});
-						} catch {}
-					}
+					try {
+						captureException(error, {
+							tags: {
+								model: modelForTags,
+								base_url: baseURLForTags,
+								error_path: 'openai_streaming',
+								status: String(error?.status ?? 'unknown'),
+							},
+							level: 'warning',
+						});
+					} catch {}
 					const errorMessage = error?.message || 'Unknown streaming error';
 					const errorStatus = error?.status || 500;
 					try {

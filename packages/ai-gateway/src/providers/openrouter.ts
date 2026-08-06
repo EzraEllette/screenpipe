@@ -79,23 +79,17 @@ export class OpenRouterProvider implements AIProvider {
 		});
 	}
 
-	async createStreamingCompletion(
-		body: RequestBody,
-		signal?: AbortSignal,
-	): Promise<ReadableStream<Uint8Array>> {
-		const stream = await this.client.chat.completions.create(
-			{
-				model: body.model,
-				messages: this.formatMessages(body.messages),
-				temperature: body.temperature,
-				stream: true,
-				stream_options: { include_usage: true },
-				response_format: this.formatResponseFormat(body.response_format),
-				tools: body.tools as ChatCompletionCreateParams['tools'],
-				...this.zdrConfig,
-			} as ChatCompletionCreateParams & { stream: true },
-			{ signal },
-		);
+	async createStreamingCompletion(body: RequestBody): Promise<ReadableStream> {
+		const stream = await this.client.chat.completions.create({
+			model: body.model,
+			messages: this.formatMessages(body.messages),
+			temperature: body.temperature,
+			stream: true,
+			stream_options: { include_usage: true },
+			response_format: this.formatResponseFormat(body.response_format),
+			tools: body.tools as ChatCompletionCreateParams['tools'],
+			...this.zdrConfig,
+		} as ChatCompletionCreateParams & { stream: true });
 
 		return new ReadableStream({
 			async start(controller) {
