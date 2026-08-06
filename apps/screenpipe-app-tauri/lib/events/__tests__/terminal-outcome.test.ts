@@ -77,6 +77,20 @@ describe("terminalAgentOutcome", () => {
     ).toEqual({ kind: "failure", error: "provider unavailable" });
   });
 
+  it.each([
+    [{ type: "error", finalError: "provider timed out" }, "provider timed out"],
+    [
+      { type: "error", message: { errorMessage: "429 rate limit" } },
+      "429 rate limit",
+    ],
+    [{ type: "error", message: { error: "aborted" } }, "aborted"],
+  ] as const)(
+    "preserves fallback error detail from the event envelope",
+    (event, error) => {
+      expect(outcome(event)).toEqual({ kind: "failure", error });
+    },
+  );
+
   it("keeps unrelated streaming events pending", () => {
     expect(outcome({ type: "text_delta", delta: "hello" })).toEqual({
       kind: "pending",
