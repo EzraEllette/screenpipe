@@ -72,6 +72,23 @@ describe("parsePipeError", () => {
     expect(parsePipeError(stderr(429, { error: "rate limit exceeded" })).type).toBe("rate_limit");
   });
 
+  it("classifies Pi's content-filter finish reason as a safety refusal", () => {
+    const r = parsePipeError("Error: Provider finish_reason: content_filter");
+    expect(r.type).toBe("safety_refusal");
+    expect(r.message).toBe("AI provider declined this Pipe under its safety policy");
+  });
+
+  it("classifies a structured provider safety refusal", () => {
+    const r = parsePipeError(JSON.stringify({
+      error: {
+        code: "content_filter",
+        message: "Request blocked by provider safety policy",
+      },
+    }));
+    expect(r.type).toBe("safety_refusal");
+    expect(r.message).toBe("Request blocked by provider safety policy");
+  });
+
   it("keeps a transient rate limit that merely mentions quota/billing as rate_limit", () => {
     // quota is classified before rate_limit, so a bare "quota"/"billing"
     // substring match here would wrongly suppress the retry.
@@ -110,6 +127,7 @@ describe("isActionablePipeError — what's worth a proactive advisory", () => {
 
   it("false for rate_limit (auto-retries) and unknown (noise)", () => {
     expect(isActionablePipeError("rate_limit")).toBe(false);
+    expect(isActionablePipeError("safety_refusal")).toBe(false);
     expect(isActionablePipeError("unknown")).toBe(false);
   });
 });
