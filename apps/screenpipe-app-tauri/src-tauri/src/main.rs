@@ -32,6 +32,7 @@ use tracing_oslog::OsLogger;
 use updates::start_update_check;
 use window::ShowRewindWindow;
 
+mod acp_runtime;
 mod analytics;
 mod auth_session;
 #[allow(deprecated)]
@@ -41,6 +42,7 @@ mod agent_event_emitter;
 mod audio_exclusions;
 mod auth_token;
 mod brain_views;
+mod browser_login;
 mod calendar;
 mod capture_session;
 mod chatgpt_oauth;
@@ -83,7 +85,6 @@ mod engine_events;
 mod monitor_events;
 mod owned_browser_cookies;
 mod permissions;
-mod acp_runtime;
 mod pi;
 mod pi_command_queue;
 mod power_awake;
@@ -149,8 +150,8 @@ use sentry;
 use tauri::AppHandle;
 #[cfg(target_os = "macos")]
 mod dock_menu;
-mod health;
 mod headless;
+mod health;
 mod log_files;
 mod media_commands;
 mod native_notification;
@@ -304,9 +305,6 @@ macro_rules! define_specta_builder {
 
 #[tokio::main]
 async fn main() {
-    // The ACP agent runs as a hidden mode of this same signed executable, so no
-    // second sidecar or hand-written protocol ships. These paths must exit
-    // before any Tauri, database, or recording setup.
     if acp_runtime::is_process_guard_mode() {
         let exit_code = match acp_runtime::run_process_guard() {
             Ok(exit_code) => exit_code,
@@ -317,6 +315,10 @@ async fn main() {
         };
         std::process::exit(exit_code);
     }
+
+    // ACP runs in a hidden mode of this same executable. Keeping the protocol
+    // runtime in Rust avoids shipping a second sidecar while ensuring this path
+    // exits before any Tauri, database, or recording initialization.
     if acp_runtime::is_runtime_mode() {
         let exit_code = match acp_runtime::run_from_env().await {
             Ok(()) => 0,
@@ -326,8 +328,10 @@ async fn main() {
                 let _ = writeln!(
                     stdout,
                     "{}",
-                    serde_json::json!({ "type": "error", "message": error })
+                    serde_json::json!({ "type": "acp_fatal", "error": error })
                 );
+                let _ = stdout.flush();
+                eprintln!("[acp-runtime] {error}");
                 1
             }
         };
@@ -524,7 +528,9 @@ async fn main() {
         .map(|enabled| !enabled)
         .unwrap_or(false)
         || screenpipe_engine::analytics::telemetry_disabled_by_env();
-    let _posthog_disabled = telemetry_disabled;
+    // The webview gets this same decision through the
+    // `is_telemetry_disabled_by_env` command (see commands.rs); it cannot read
+    // the process env itself.
 
     let app_version = env!("CARGO_PKG_VERSION");
     let sentry_guard = if !telemetry_disabled {
@@ -802,6 +808,13 @@ async fn main() {
             tauri::WindowEvent::Focused(true) => {
                 let app = window.app_handle().clone();
                 tauri::async_runtime::spawn(async move {
+                    let capture_intended = app
+                        .try_state::<RecordingState>()
+                        .map(|s| s.capture_intended())
+                        .unwrap_or(false);
+                    if !capture_intended {
+                        return;
+                    }
                     let permission_granted =
                         permissions::check_microphone_permission().permitted();
                     let audio_devices_empty = health::get_audio_device_status().is_empty();
@@ -975,6 +988,7 @@ async fn main() {
     let sync_scheduler = screenpipe_connect::sync_scheduler::SyncScheduler::new();
 
     let app = app.manage(recording_state)
+        .manage(disk_pressure_notifications::DiskPressureNotificationState::default())
         .manage(pi_state)
         .manage(suggestions_state)
         .manage(sync_scheduler)
@@ -1672,7 +1686,7 @@ async fn main() {
 
                 // Pipe output callback. Stage 5: legacy `pipe_event`
                 // topic dropped — every pipe stdout line goes out on
-                // `agent_event` with sessionId `pipe:<name>:<execId>`.
+                // `agent_event` with a per-run or stable continued session id.
                 let app_for_pipe = app_handle.clone();
                 // Separate clone for the owned-browser install path — the
                 // on_pipe_output closure below captures app_for_pipe by
@@ -1682,8 +1696,8 @@ async fn main() {
                 let pipe_agent_events =
                     crate::agent_event_emitter::PipeAgentEventEmitter::new(app_for_pipe);
                 let on_pipe_output: Option<screenpipe_core::pipes::OnPipeOutputLine> = Some(
-                    std::sync::Arc::new(move |pipe_name: &str, exec_id: i64, line: &str| {
-                        pipe_agent_events.emit_line(pipe_name, exec_id, line);
+                    std::sync::Arc::new(move |pipe_name: &str, exec_id: i64, continues_chat: bool, line: &str| {
+                        pipe_agent_events.emit_line(pipe_name, exec_id, continues_chat, line);
                     }),
                 );
 
@@ -2284,8 +2298,7 @@ async fn main() {
                 tauri::RunEvent::Reopen { .. } => {
                     // Defer off the event stack so run handler stays panic-free.
                     // Open the settings/app window (not the timeline overlay).
-                    if crate::enterprise_policy::is_app_ui_hidden()
-                        || crate::headless::is_dormant()
+                    if crate::enterprise_policy::is_app_ui_hidden() || crate::headless::is_dormant()
                     {
                         return;
                     }
@@ -2316,7 +2329,10 @@ mod autostart_arg_tests {
     #[test]
     fn ignores_unrelated_args() {
         assert!(!args_contain_autostart(["screenpipe"]));
-        assert!(!args_contain_autostart(["screenpipe", "--check-arc-automation"]));
+        assert!(!args_contain_autostart([
+            "screenpipe",
+            "--check-arc-automation"
+        ]));
         assert!(!args_contain_autostart(["screenpipe", "--autostarted"]));
     }
 }
