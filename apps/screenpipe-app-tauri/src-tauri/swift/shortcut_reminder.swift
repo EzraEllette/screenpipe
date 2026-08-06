@@ -84,6 +84,10 @@ final class OverlayMetrics: ObservableObject {
     @Published var isHovering: Bool = false
     /// Set by click in failure state to expand the restart UI.
     @Published var forceExpanded: Bool = false
+    /// Progressive disclosure opens away from the nearest screen edge.
+    @Published var disclosureDown: Bool = true
+    /// Control under the pointer in the expanded seven-cell dock.
+    @Published var hoveredControl: String? = nil
 }
 
 struct MeetingOverlayTranscriptItem: Identifiable, Equatable {
@@ -291,10 +295,13 @@ struct ScreenMatrixView: View {
 // Concept #4: Audio-reactive pill that expands on hover
 
 // Base sizes — multiplied by gOverlayScale at panel creation
-private let kBaseCollapsedW: CGFloat = 62
-private let kBaseCollapsedH: CGFloat = 22
-private let kBaseExpandedW: CGFloat = 200
-private let kBaseExpandedH: CGFloat = 26
+private let kBaseCollapsedW: CGFloat = 68
+private let kBaseCollapsedH: CGFloat = 24
+private let kBaseExpandedW: CGFloat = 224
+private let kBaseExpandedH: CGFloat = 58
+private let kBaseDockH: CGFloat = 30
+private let kBaseDisclosureH: CGFloat = 22
+private let kBaseDisclosureGap: CGFloat = 4
 private let kBaseTranscriptW: CGFloat = 280
 private let kBaseTranscriptH: CGFloat = 142
 private let kAnimDur: Double = 0.2
@@ -318,6 +325,26 @@ struct ShortcutReminderView: View {
     // Scaled helpers
     private func s(_ v: CGFloat) -> CGFloat { v * scale }
 
+    private var panelAlignment: Alignment {
+        guard metrics.healthState == "normal" else { return .center }
+        return metrics.disclosureDown ? .top : .bottom
+    }
+
+    private var disclosureLabel: (String, String?)? {
+        switch metrics.hoveredControl {
+        case "timeline": return ("timeline", overlayShortcut)
+        case "chat": return ("ask chat", chatShortcut)
+        case "search": return ("search", searchShortcut)
+        case "audio": return ("mic capture", metrics.audioActive ? "live" : "idle")
+        case "screen":
+            let fps = metrics.screenActive ? String(format: "%.0f fps", metrics.captureFps) : "idle"
+            return ("screen capture", fps)
+        case "inbox": return ("notifications", metrics.inboxUnread ? "new" : nil)
+        case "close": return ("hide dock", "Esc")
+        default: return nil
+        }
+    }
+
     var body: some View {
         ZStack {
             if metrics.healthState == "failure" {
@@ -328,17 +355,17 @@ struct ShortcutReminderView: View {
                 recoveredView
             } else if isExpanded {
                 expandedView
-                    .transition(.opacity.combined(with: .scale(scale: 0.8, anchor: .trailing)))
+                    .transition(.opacity)
             } else {
                 collapsedView
-                    .transition(.opacity.combined(with: .scale(scale: 1.2, anchor: .trailing)))
+                    .transition(.opacity)
             }
         }
         .fixedSize()
         .accessibilityHidden(true)
         .animation(.easeInOut(duration: kAnimDur), value: isExpanded)
         .animation(.easeInOut(duration: kAnimDur), value: metrics.healthState)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: panelAlignment)
     }
 
     // MARK: - Recording-health states (issue #5127)
@@ -515,58 +542,94 @@ struct ShortcutReminderView: View {
             )
             .padding(.trailing, s(5))
         }
-        .frame(height: kBaseCollapsedH * scale)
-        .background(Capsule().fill(Color.black.opacity(0.75)))
-        .overlay(Capsule().stroke(.white.opacity(0.15), lineWidth: 0.5))
+        .frame(width: kBaseCollapsedW * scale, height: kBaseCollapsedH * scale)
+        .background(Rectangle().fill(Color.black.opacity(0.82)))
+        .overlay(Rectangle().stroke(.white.opacity(0.28), lineWidth: 1))
     }
 
     // MARK: - Expanded bar
     private var expandedView: some View {
+        VStack(spacing: s(kBaseDisclosureGap)) {
+            if metrics.disclosureDown {
+                dockView
+                disclosureView
+            } else {
+                disclosureView
+                dockView
+            }
+        }
+        .frame(width: kBaseExpandedW * scale, height: kBaseExpandedH * scale)
+    }
+
+    private var disclosureView: some View {
+        Group {
+            if let (label, value) = disclosureLabel {
+                HStack(spacing: s(6)) {
+                    Text(label)
+                        .font(Brand.swiftUIMonoFont(size: 8 * scale))
+                        .foregroundColor(.white.opacity(0.72))
+                    if let value = value, !value.isEmpty {
+                        Text(value)
+                            .font(Brand.swiftUIMonoFont(size: 8 * scale, weight: .semibold))
+                            .foregroundColor(.white)
+                            .padding(.horizontal, s(5))
+                            .frame(height: s(16))
+                            .overlay(Rectangle().stroke(.white.opacity(0.35), lineWidth: 1))
+                    }
+                }
+                .padding(.horizontal, s(8))
+                .frame(height: kBaseDisclosureH * scale)
+                .background(Color.black.opacity(0.92))
+                .overlay(Rectangle().stroke(.white.opacity(0.32), lineWidth: 1))
+                .fixedSize(horizontal: true, vertical: false)
+            } else {
+                Color.clear.frame(height: kBaseDisclosureH * scale)
+            }
+        }
+    }
+
+    private var dockView: some View {
         HStack(spacing: 0) {
-            ShortcutCellButton(icon: "rectangle", label: overlayShortcut, colW: nil, edge: .leading, scale: scale) {
+            DockIconButton(icon: "rectangle.split.1x2", active: metrics.hoveredControl == "timeline", scale: scale) {
                 onAction("open_timeline")
             }
-            Rectangle().fill(.white.opacity(0.15)).frame(width: 0.5)
-            ShortcutCellButton(icon: "bubble.left", label: chatShortcut, colW: nil, edge: nil, scale: scale) {
+            DockIconButton(icon: "bubble.left.fill", active: metrics.hoveredControl == "chat", scale: scale) {
                 onAction("open_chat")
             }
-            Rectangle().fill(.white.opacity(0.15)).frame(width: 0.5)
-            ShortcutCellButton(icon: "magnifyingglass", label: searchShortcut, colW: nil, edge: nil, scale: scale) {
+            DockIconButton(icon: "magnifyingglass", active: metrics.hoveredControl == "search", scale: scale) {
                 onAction("open_search")
             }
 
-            Rectangle().fill(.white.opacity(0.15)).frame(width: 0.5)
+            Rectangle().fill(.white.opacity(0.28)).frame(width: 1).padding(.vertical, s(4))
 
-            AudioEqualizerView(active: metrics.audioActive, speechRatio: metrics.speechRatio)
-                .frame(width: s(24), height: s(12))
-                .padding(.horizontal, s(3))
-
-            ZStack(alignment: .topTrailing) {
-                ScreenMatrixView(active: metrics.screenActive, captureFps: metrics.captureFps)
-                    .frame(width: s(24), height: s(12))
-                if metrics.meetingActive {
-                    Circle()
-                        .fill(Color.red)
-                        .frame(width: s(5), height: s(5))
-                        .overlay(Circle().stroke(Color.black.opacity(0.75), lineWidth: s(1)))
-                        .offset(x: s(1), y: -s(2))
+            DockStatusCell(active: metrics.hoveredControl == "audio") {
+                AudioEqualizerView(active: metrics.audioActive, speechRatio: metrics.speechRatio)
+                    .frame(width: s(22), height: s(14))
+            }
+            DockStatusCell(active: metrics.hoveredControl == "screen") {
+                ZStack(alignment: .topTrailing) {
+                    ScreenMatrixView(active: metrics.screenActive, captureFps: metrics.captureFps)
+                        .frame(width: s(22), height: s(14))
+                    if metrics.meetingActive {
+                        Circle().fill(Color.red)
+                            .frame(width: s(5), height: s(5))
+                            .offset(x: s(2), y: -s(2))
+                    }
                 }
             }
-            .padding(.trailing, s(2))
 
-            Rectangle().fill(.white.opacity(0.15)).frame(width: 0.5)
+            Rectangle().fill(.white.opacity(0.28)).frame(width: 1).padding(.vertical, s(4))
 
-            HoverIconButton(icon: "bell.fill", isActive: metrics.inboxUnread, edge: nil, scale: scale) {
+            DockIconButton(icon: "bell.fill", active: metrics.hoveredControl == "inbox", emphasized: metrics.inboxUnread, scale: scale) {
                 onAction("open_inbox")
             }
-            HoverIconButton(icon: "xmark", isActive: false, edge: .trailing, scale: scale) {
+            DockIconButton(icon: "xmark", active: metrics.hoveredControl == "close", scale: scale) {
                 onAction("close")
             }
         }
-        .frame(height: kBaseExpandedH * scale)
-        .background(Capsule().fill(Color.black.opacity(0.8)))
-        .overlay(Capsule().stroke(.white.opacity(0.15), lineWidth: 0.5))
-        .clipShape(Capsule())
+        .frame(width: kBaseExpandedW * scale, height: kBaseDockH * scale)
+        .background(Color.black.opacity(0.88))
+        .overlay(Rectangle().stroke(.white.opacity(0.32), lineWidth: 1))
     }
 }
 
@@ -679,39 +742,47 @@ struct MeetingTranscriptPreview: View {
 // MARK: - Hover-aware button components
 
 @available(macOS 13.0, *)
-struct ShortcutCellButton: View {
+private struct DockIconButton: View {
     let icon: String
-    let label: String
-    let colW: CGFloat?
-    let edge: HorizontalEdge?
+    let active: Bool
+    var emphasized: Bool = false
     let scale: CGFloat
     let action: () -> Void
-    @State private var hovered = false
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 1) {
+            ZStack(alignment: .topTrailing) {
                 Image(systemName: icon)
-                    .font(.system(size: 5 * scale))
-                    .foregroundColor(.white.opacity(0.5))
-                Text(label)
-                    .font(Brand.swiftUIMonoFont(size: 7 * scale, weight: .medium))
-                    .foregroundColor(.white.opacity(0.8))
-                    .lineLimit(1)
-                    .fixedSize()
+                    .font(.system(size: 10 * scale, weight: .medium))
+                    .foregroundColor(emphasized ? .white : .white.opacity(active ? 1 : 0.68))
+                if emphasized {
+                    Circle().fill(.white)
+                        .frame(width: 4 * scale, height: 4 * scale)
+                        .offset(x: 3 * scale, y: -3 * scale)
+                }
             }
-            .padding(.horizontal, 6 * scale)
-            .frame(width: colW).frame(maxHeight: .infinity)
-            .background(hovered ? Color.white.opacity(0.12) : Color.clear)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(active ? Color.white.opacity(0.14) : Color.clear)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .onHover { h in hovered = h }
     }
 }
 
-// App icon button shown in the collapsed pill. Click opens the timeline;
-// hovering it does NOT expand the bar — same rationale as the phone button.
+@available(macOS 13.0, *)
+private struct DockStatusCell<Content: View>: View {
+    let active: Bool
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        content()
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(active ? Color.white.opacity(0.14) : Color.clear)
+            .contentShape(Rectangle())
+    }
+}
+
+// App icon button shown in the collapsed pill. Click opens the timeline.
 @available(macOS 13.0, *)
 struct CollapsedAppIconButton: View {
     let scale: CGFloat
@@ -772,36 +843,6 @@ struct CollapsedBellButton: View {
     }
 }
 
-@available(macOS 13.0, *)
-struct HoverIconButton: View {
-    let icon: String
-    let isActive: Bool
-    let edge: HorizontalEdge?
-    let scale: CGFloat
-    let action: () -> Void
-    @State private var hovered = false
-
-    var body: some View {
-        Button(action: action) {
-            ZStack(alignment: .topTrailing) {
-                Image(systemName: icon)
-                    .font(.system(size: 5 * scale, weight: icon == "xmark" ? .medium : .regular))
-                    .foregroundColor(isActive ? .white : (hovered ? .white : .white.opacity(0.4)))
-                if isActive {
-                    Circle().fill(.white)
-                        .frame(width: 3 * scale, height: 3 * scale)
-                        .offset(x: 1, y: -1)
-                }
-            }
-            .frame(width: 16 * scale).frame(maxHeight: .infinity)
-            .background(hovered ? Color.white.opacity(0.12) : Color.clear)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .onHover { h in hovered = h }
-    }
-}
-
 // MARK: - Overlay scale
 
 private var gOverlayScale: CGFloat = 1.0
@@ -817,7 +858,7 @@ private func setOverlayScale(_ size: String?) {
 // MARK: - Panel controller
 
 @available(macOS 13.0, *)
-class ShortcutReminderController: NSObject {
+class ShortcutReminderController: NSObject, NSWindowDelegate {
     static let shared = ShortcutReminderController()
 
     private var panel: NSPanel?
@@ -900,6 +941,7 @@ class ShortcutReminderController: NSObject {
             transcriptHovering = false
             metrics.isHovering = false
             metrics.forceExpanded = false
+            metrics.hoveredControl = nil
             AnimationTick.shared.setVisible(false, hasActiveSignal: false)
             disconnectWebSocket()
             disconnectMeetingEventsWebSocket()
@@ -1228,11 +1270,15 @@ class ShortcutReminderController: NSObject {
         p.acceptsMouseMovedEvents = true
         p.isReleasedWhenClosed = false
         p.sharingType = .readOnly
+        p.delegate = self
 
         let tracking = ReminderTrackingView(frame: NSRect(x: 0, y: 0, width: Int(w), height: Int(h)))
         tracking.autoresizingMask = [.width, .height]
         tracking.onHoverChanged = { [weak self] hovering in
             self?.setPillHovering(hovering)
+        }
+        tracking.onPointerMoved = { [weak self] point in
+            self?.updateHoveredControl(at: point)
         }
         p.contentView = tracking
         self.trackingView = tracking
@@ -1249,7 +1295,28 @@ class ShortcutReminderController: NSObject {
             metrics.isHovering = true
             refreshTranscriptPanelVisibility()
         } else {
+            metrics.hoveredControl = nil
             scheduleHoverExit()
+        }
+    }
+
+    private func updateHoveredControl(at point: NSPoint?) {
+        guard metrics.isHovering, let point = point else {
+            metrics.hoveredControl = nil
+            return
+        }
+        let cellWidth = (kBaseExpandedW * gOverlayScale) / 7
+        let dockHeight = kBaseDockH * gOverlayScale
+        let panelHeight = kBaseExpandedH * gOverlayScale
+        let pointerIsInDock = metrics.disclosureDown
+            ? point.y >= panelHeight - dockHeight
+            : point.y <= dockHeight
+        guard pointerIsInDock else { return }
+        let index = min(6, max(0, Int(point.x / cellWidth)))
+        let controls = ["timeline", "chat", "search", "audio", "screen", "inbox", "close"]
+        let control = controls[index]
+        if metrics.hoveredControl != control {
+            metrics.hoveredControl = control
         }
     }
 
@@ -1271,6 +1338,7 @@ class ShortcutReminderController: NSObject {
             guard let self = self, !self.pillHovering, !self.transcriptHovering else { return }
             self.metrics.isHovering = false
             self.metrics.forceExpanded = false
+            self.metrics.hoveredControl = nil
             self.transcriptPanel?.orderOut(nil)
         }
         hoverHideWorkItem = work
@@ -1356,9 +1424,23 @@ class ShortcutReminderController: NSObject {
         let height = transcriptPanel.frame.height
         let centeredX = panel.frame.midX - width / 2
         let x = min(max(centeredX, visible.minX + 4), visible.maxX - width - 4)
-        let belowY = panel.frame.minY - height - 4
-        let y = max(belowY, visible.minY + 4)
+        let preferredY = metrics.disclosureDown
+            ? panel.frame.minY - height - 4
+            : panel.frame.maxY + 4
+        let y = min(max(preferredY, visible.minY + 4), visible.maxY - height - 4)
         transcriptPanel.setFrameOrigin(NSPoint(x: x, y: y))
+    }
+
+    private func updateDisclosureDirection() {
+        guard let panel = panel else { return }
+        let visible = panel.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? panel.frame
+        let disclosureDown = panel.frame.midY >= visible.midY
+        if metrics.disclosureDown != disclosureDown {
+            metrics.disclosureDown = disclosureDown
+            if transcriptPanel?.isVisible == true {
+                positionTranscriptPanel()
+            }
+        }
     }
 
     private func positionPanel() {
@@ -1372,6 +1454,7 @@ class ShortcutReminderController: NSObject {
                 let x = screen.frame.origin.x + (screen.frame.size.width - w) / 2
                 let y = visible.origin.y + visible.size.height - h - 4
                 panel.setFrameOrigin(NSPoint(x: x, y: y))
+                updateDisclosureDirection()
                 if transcriptPanel?.isVisible == true {
                     positionTranscriptPanel()
                 }
@@ -1402,6 +1485,7 @@ class ShortcutReminderController: NSObject {
                 self?.transcriptHovering = false
                 self?.metrics.isHovering = false
                 self?.metrics.forceExpanded = false
+                self?.metrics.hoveredControl = nil
                 self?.transcriptPanel?.orderOut(nil)
             }
             hosting.frame = contentView.bounds
@@ -1423,6 +1507,10 @@ class ShortcutReminderController: NSObject {
         guard isVisible, let panel = panel else { return nil }
         return panel.frame
     }
+
+    func windowDidMove(_ notification: Notification) {
+        updateDisclosureDirection()
+    }
 }
 
 // MARK: - Tracking view for hover
@@ -1434,6 +1522,7 @@ private class ReminderTrackingView: NSView {
     /// fire for non-activating panels when the app is in the background
     /// (its tracking areas use .activeInActiveApp, not .activeAlways).
     var onHoverChanged: ((Bool) -> Void)?
+    var onPointerMoved: ((NSPoint?) -> Void)?
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
         return true
@@ -1454,15 +1543,18 @@ private class ReminderTrackingView: NSView {
         window?.disableCursorRects()
         NSCursor.pointingHand.set()
         onHoverChanged?(true)
+        onPointerMoved?(convert(event.locationInWindow, from: nil))
     }
 
     override func mouseMoved(with event: NSEvent) {
         NSCursor.pointingHand.set()
+        onPointerMoved?(convert(event.locationInWindow, from: nil))
     }
 
     override func mouseExited(with event: NSEvent) {
         window?.enableCursorRects()
         NSCursor.arrow.set()
+        onPointerMoved?(nil)
         onHoverChanged?(false)
     }
 }
