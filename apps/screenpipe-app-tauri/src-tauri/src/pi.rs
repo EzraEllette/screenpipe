@@ -1262,11 +1262,16 @@ fn format_install_failure(tool: &str, output: &Output) -> String {
 
 fn should_retry_install_with_npm(stderr: &str) -> bool {
     let lower = stderr.to_lowercase();
-    lower.contains("eperm")
+    let eperm_failure = lower.contains("eperm")
         && (lower.contains("ntsetinformationfile")
             || lower.contains("cache dir")
             || lower.contains("extracting tarball")
-            || lower.contains("moving"))
+            || lower.contains("moving"));
+    let crash_failure = lower.contains("segmentation fault")
+        || lower.contains("bun has crashed")
+        || lower.contains("panic")
+        || lower.contains("avx support");
+    eperm_failure || crash_failure
 }
 
 fn npm_install_command(install_dir: &Path) -> Command {
@@ -1372,7 +1377,7 @@ fn run_pi_package_install_once(install_dir: &Path, bun: &str) -> Result<(), Stri
             let bun_failure = format_install_failure("bun", &output);
             if should_retry_install_with_npm(&combined_output) {
                 warn!(
-                    "Pi bun install hit cache/EPERM failure; retrying with npm: {}",
+                    "Pi bun install hit EPERM or crash/hardware-incompatibility failure; retrying with npm: {}",
                     bun_failure
                 );
                 match run_command_output(npm_install_command(install_dir)) {
