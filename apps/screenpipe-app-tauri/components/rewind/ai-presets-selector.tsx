@@ -32,6 +32,7 @@ import {
   CommandItem,
   CommandList,
 } from "@/components/ui/command";
+import { ModelIdentifierInput } from "@/components/ui/model-identifier-input";
 import { Popover, PopoverContent, PopoverTrigger } from "./ui/popover";
 import {
   Dialog,
@@ -837,7 +838,7 @@ export function AIProviderConfig({
             <div className="space-y-1">
               <Label htmlFor="model" className="text-xs">model</Label>
               <div className="relative">
-                <Input
+                <ModelIdentifierInput
                   id="model"
                   type="text"
                   list="ollama-models"
@@ -914,7 +915,7 @@ export function AIProviderConfig({
             <div className="space-y-1">
               <Label htmlFor="model" className="text-xs">model</Label>
               <div className="relative">
-                <Input
+                <ModelIdentifierInput
                   id="model"
                   type="text"
                   list="custom-models"
@@ -945,7 +946,7 @@ export function AIProviderConfig({
             </div>
             <div className="space-y-1">
               <Label htmlFor="model" className="text-xs">model</Label>
-              <Input
+              <ModelIdentifierInput
                 id="model"
                 type="text"
                 list="chatgpt-models"

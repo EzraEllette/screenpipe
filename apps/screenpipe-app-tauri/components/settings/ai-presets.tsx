@@ -35,6 +35,7 @@ import { testAiPresetConnection } from "@/lib/utils/ai-preset-connection";
 import { openBusinessUpgradeSurface } from "@/lib/upgrade-flow";
 import { Label } from "../ui/label";
 import { Input } from "../ui/input";
+import { ModelIdentifierCommandInput } from "../ui/model-identifier-input";
 import {
   ACP_ADAPTERS,
   generatePresetName,
@@ -98,7 +99,6 @@ import {
   Command,
   CommandEmpty,
   CommandGroup,
-  CommandInput,
   CommandItem,
   CommandList,
 } from "../ui/command";
@@ -1614,7 +1614,7 @@ const AISection = ({
             </PopoverTrigger>
             <PopoverContent className="w-full p-0">
               <Command>
-                <CommandInput
+                <ModelIdentifierCommandInput
                   value={modelSearch}
                   placeholder="Select or type model name" 
                   onKeyDown={(e) => {

@@ -7,6 +7,7 @@
 const DEFAULT_OPENAI_COMPATIBLE_ENDPOINT = "http://127.0.0.1:8080";
 
 import React, { useEffect, useState, useMemo, useCallback, useRef } from "react";
+import { ModelIdentifierInput } from "@/components/ui/model-identifier-input";
 import { useEventListener } from "@/lib/hooks/use-event-listener";
 import { useInterval } from "@/lib/hooks/use-interval";
 import { useSettingsIndexDriftCheck, type SettingsField } from "./settings-search";
@@ -3040,7 +3041,7 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
                 {/* Model Input — editable with dropdown suggestions */}
                 <div className="space-y-1.5">
                   <div className="relative">
-                    <Input
+                    <ModelIdentifierInput
                       value={openAICompatibleDraft.model}
                       onChange={(e) => updateOpenAICompatibleDraft({ model: e.target.value })}
                       placeholder={isLoadingModels ? "Loading models..." : "Model name (e.g., whisper-large-v3-turbo)"}
