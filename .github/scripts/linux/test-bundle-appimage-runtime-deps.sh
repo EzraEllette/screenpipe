@@ -11,7 +11,7 @@ CONTEXT_SMOKE="${SCRIPT_DIR}/pipewire-context-smoke.c"
 TEST_ROOT="$(mktemp -d)"
 trap 'rm -rf "${TEST_ROOT}"' EXIT
 
-APPDIR="${TEST_ROOT}/AppDir"
+APPDIR="${TEST_ROOT}/Package AppDir"
 OUTPUT="${TEST_ROOT}/apprun-output"
 WRAPPED_MARKER="${TEST_ROOT}/wrapped-ran"
 mkdir -p "${APPDIR}/usr/bin" "${APPDIR}/usr/share/applications" \
@@ -20,19 +20,22 @@ mkdir -p "${APPDIR}/usr/bin" "${APPDIR}/usr/share/applications" \
 cat > "${APPDIR}/AppRun" <<'APPRUN'
 #!/bin/sh
 set -eu
-appdir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 export LINUXDEPLOY_SENTINEL=preserved
-for hook in "${appdir}"/apprun-hooks/*.sh; do
+export GST_PLUGIN_SYSTEM_PATH="${APPDIR}/usr/lib/gstreamer:"
+export GST_PLUGIN_SYSTEM_PATH_1_0="${APPDIR}/usr/lib/gstreamer-1.0:"
+for hook in "${APPDIR}"/apprun-hooks/*.sh; do
   [ -f "${hook}" ] || continue
   . "${hook}"
 done
-exec "${appdir}/usr/bin/screenpipe-app" "$@"
+exec "${APPDIR}/AppRun.wrapped" "$@"
 APPRUN
 cat > "${APPDIR}/AppRun.wrapped" <<'WRAPPED'
 #!/bin/sh
 set -eu
 : > "${SCREENPIPE_WRAPPED_MARKER:?}"
-exit 97
+command="$(sed -n 's/^Exec=\([^[:space:]]*\).*/\1/p' "${APPDIR}/screenpipe.desktop")"
+cd "${APPDIR}"
+exec "${APPDIR}/usr/bin/${command}" "$@"
 WRAPPED
 cat > "${APPDIR}/apprun-hooks/linuxdeploy-existing-hook.sh" <<'HOOK'
 #!/bin/sh
@@ -61,6 +64,7 @@ set -eu
     index=$((index + 1))
   done
 } > "${SCREENPIPE_TEST_OUTPUT:?}"
+exit "${SCREENPIPE_TEST_EXIT:-0}"
 APP
 cat > "${APPDIR}/usr/share/applications/screenpipe.desktop" <<'DESKTOP'
 [Desktop Entry]
@@ -68,6 +72,8 @@ Type=Application
 Name=screenpipe
 Exec=screenpipe-app
 DESKTOP
+cp "${APPDIR}/usr/share/applications/screenpipe.desktop" \
+  "${APPDIR}/screenpipe.desktop"
 chmod 0755 "${APPDIR}/AppRun" "${APPDIR}/AppRun.wrapped" \
   "${APPDIR}/apprun-hooks/linuxdeploy-existing-hook.sh" \
   "${APPDIR}/usr/bin/screenpipe-app"
@@ -126,7 +132,10 @@ if [ "$(grep -c 'screenpipe coherent bundled PipeWire runtime' "${APPDIR}/AppRun
 fi
 [ "$(sha256sum "${APPDIR}/AppRun.wrapped")" = "${wrapped_before}" ]
 [ "$(sha256sum "${APPDIR}/apprun-hooks/linuxdeploy-existing-hook.sh")" = "${hook_before}" ]
+grep -Fxq 'Exec=screenpipe-app-launcher' "${APPDIR}/usr/share/applications/screenpipe.desktop"
+grep -Fxq 'Exec=screenpipe-app-launcher' "${APPDIR}/screenpipe.desktop"
 
+set +e
 SCREENPIPE_TEST_OUTPUT="${OUTPUT}" \
 SCREENPIPE_WRAPPED_MARKER="${WRAPPED_MARKER}" \
 SPA_PLUGIN_DIR=/poisoned/spa \
@@ -137,7 +146,14 @@ LD_LIBRARY_PATH=/caller/lib \
 PIPEWIRE_REMOTE=preserved-remote \
 PIPEWIRE_DEBUG=preserved-debug \
 SCREENPIPE_OTHER_ENV=preserved-other \
+SCREENPIPE_TEST_EXIT=23 \
+GST_PLUGIN_SYSTEM_PATH=/caller/poisoned-gst \
+GST_PLUGIN_SYSTEM_PATH_1_0=/caller/poisoned-gst-1.0 \
 "${APPDIR}/AppRun" --portal "two words"
+apprun_status=$?
+set -e
+
+[ "${apprun_status}" -eq 23 ]
 
 grep -Fxq "sentinel=preserved" "${OUTPUT}"
 grep -Fxq "hook-sentinel=preserved" "${OUTPUT}"
@@ -149,13 +165,39 @@ grep -Fxq "ld-library-path=${module_dir}:${APPDIR}/usr/lib:/caller/lib" "${OUTPU
 grep -Fxq "remote=preserved-remote" "${OUTPUT}"
 grep -Fxq "debug=preserved-debug" "${OUTPUT}"
 grep -Fxq "other=preserved-other" "${OUTPUT}"
+grep -Fxq "gst=" "${OUTPUT}"
+grep -Fxq "gst-1.0=" "${OUTPUT}"
 grep -Fxq "argc=2" "${OUTPUT}"
 grep -Fxq "arg[0]=--portal" "${OUTPUT}"
 grep -Fxq "arg[1]=two words" "${OUTPUT}"
-if [ -e "${WRAPPED_MARKER}" ]; then
-  echo "AppRun invoked AppRun.wrapped instead of the original launcher" >&2
+if [ ! -e "${WRAPPED_MARKER}" ]; then
+  echo "AppRun did not preserve the linuxdeploy AppRun.wrapped dispatcher" >&2
   exit 1
 fi
+
+rm -f "${WRAPPED_MARKER}"
+set +e
+(
+  cd "${TEST_ROOT}"
+  SCREENPIPE_TEST_OUTPUT="${OUTPUT}" \
+  SCREENPIPE_WRAPPED_MARKER="${WRAPPED_MARKER}" \
+  SCREENPIPE_OTHER_ENV=relative-preserved \
+  SCREENPIPE_TEST_EXIT=29 \
+  GST_PLUGIN_SYSTEM_PATH=/relative/poisoned-gst \
+  GST_PLUGIN_SYSTEM_PATH_1_0=/relative/poisoned-gst-1.0 \
+  APPDIR='Package AppDir' \
+  './Package AppDir/AppRun' --relative "spaced argument"
+)
+relative_status=$?
+set -e
+
+[ "${relative_status}" -eq 29 ]
+grep -Fxq "other=relative-preserved" "${OUTPUT}"
+grep -Fxq "gst=" "${OUTPUT}"
+grep -Fxq "gst-1.0=" "${OUTPUT}"
+grep -Fxq "arg[0]=--relative" "${OUTPUT}"
+grep -Fxq "arg[1]=spaced argument" "${OUTPUT}"
+[ -e "${WRAPPED_MARKER}" ]
 
 SCREENPIPE_TEST_OUTPUT="${OUTPUT}" \
 APPDIR="${APPDIR}" \
@@ -191,7 +233,12 @@ audit_elf() {
         return 1
         ;;
     esac
-  done < <(awk '/=>/ && $3 ~ /^\// { print $3; next } $1 ~ /^\// { print $1 }' <<<"${deps}")
+  done < <(
+    sed -n -E \
+      -e 's|^.*=> (/.*) \(0x[[:xdigit:]]+\)$|\1|p' \
+      -e 's|^[[:space:]]*(/.*) \(0x[[:xdigit:]]+\)$|\1|p' \
+      <<<"${deps}"
+  )
 }
 
 for module in "${modules[@]}"; do
@@ -210,24 +257,31 @@ if readelf -d "${client_node}" | grep -q 'libpipewire-module-protocol-native.so'
     grep -F "libpipewire-module-protocol-native.so => ${module_dir}/libpipewire-module-protocol-native.so"
 fi
 
-cc -Wall -Wextra -Werror \
-  $(pkg-config --cflags libpipewire-0.3) \
-  "${CONTEXT_SMOKE}" -o "${TEST_ROOT}/pipewire-context-smoke" \
-  $(pkg-config --libs libpipewire-0.3)
-context_log="${TEST_ROOT}/pipewire-context.log"
-LD_LIBRARY_PATH="${module_dir}:${APPDIR}/usr/lib" \
-SPA_PLUGIN_DIR="${spa_dir}" \
-PIPEWIRE_MODULE_DIR="${module_dir}" \
-PIPEWIRE_CONFIG_NAME="${config}" \
-PIPEWIRE_CONFIG_DIR=/poisoned/config-dir \
-PIPEWIRE_DEBUG=4 \
-"${TEST_ROOT}/pipewire-context-smoke" >"${context_log}" 2>&1
-grep -Fxq 'PASS pw_main_loop_new' "${context_log}"
-grep -Fxq 'PASS pw_context_new' "${context_log}"
-if grep -E '/(usr|lib)(/[^/]+)*/pipewire-0\.3/libpipewire-module-' "${context_log}" | \
-  grep -Fv "${module_dir}/"; then
-  echo "context probe loaded a host PipeWire module" >&2
+if pkg-config --exists libpipewire-0.3; then
+  cc -Wall -Wextra -Werror \
+    $(pkg-config --cflags libpipewire-0.3) \
+    "${CONTEXT_SMOKE}" -o "${TEST_ROOT}/pipewire-context-smoke" \
+    $(pkg-config --libs libpipewire-0.3)
+  context_log="${TEST_ROOT}/pipewire-context.log"
+  LD_LIBRARY_PATH="${module_dir}:${APPDIR}/usr/lib" \
+  SPA_PLUGIN_DIR="${spa_dir}" \
+  PIPEWIRE_MODULE_DIR="${module_dir}" \
+  PIPEWIRE_CONFIG_NAME="${config}" \
+  PIPEWIRE_CONFIG_DIR=/poisoned/config-dir \
+  PIPEWIRE_DEBUG=4 \
+  "${TEST_ROOT}/pipewire-context-smoke" >"${context_log}" 2>&1
+  grep -Fxq 'PASS pw_main_loop_new' "${context_log}"
+  grep -Fxq 'PASS pw_context_new' "${context_log}"
+  if grep -E '/(usr|lib)(/[^/]+)*/pipewire-0\.3/libpipewire-module-' "${context_log}" | \
+    grep -Fv "${module_dir}/"; then
+    echo "context probe loaded a host PipeWire module" >&2
+    exit 1
+  fi
+elif [ "${CI:-}" = true ]; then
+  echo "CI host is missing required libpipewire-0.3 development files" >&2
   exit 1
+else
+  echo "SKIP: libpipewire-0.3 development files unavailable for context smoke" >&2
 fi
 
 snapshot_before="${TEST_ROOT}/snapshot-before"
@@ -242,5 +296,50 @@ snapshot_after="${TEST_ROOT}/snapshot-after"
   find . -type f -print0 | sort -z | xargs -0 sha256sum
 ) > "${snapshot_after}"
 cmp "${snapshot_before}" "${snapshot_after}"
+
+mv "${APPDIR}/usr/share/applications/screenpipe.desktop" \
+  "${APPDIR}/usr/share/applications/screenpipe enterprise.desktop"
+mv "${APPDIR}/screenpipe.desktop" "${APPDIR}/screenpipe enterprise.desktop"
+sed -i 's|/screenpipe\.desktop|/screenpipe enterprise.desktop|' "${APPDIR}/AppRun.wrapped"
+wrapped_before="$(sha256sum "${APPDIR}/AppRun.wrapped")"
+hook_before="$(sha256sum "${APPDIR}/apprun-hooks/linuxdeploy-existing-hook.sh")"
+"${BUNDLER}" "${APPDIR}"
+grep -Fxq 'Exec=screenpipe-app-launcher' \
+  "${APPDIR}/usr/share/applications/screenpipe enterprise.desktop"
+grep -Fxq 'Exec=screenpipe-app-launcher' "${APPDIR}/screenpipe enterprise.desktop"
+[ "$(sha256sum "${APPDIR}/AppRun.wrapped")" = "${wrapped_before}" ]
+[ "$(sha256sum "${APPDIR}/apprun-hooks/linuxdeploy-existing-hook.sh")" = "${hook_before}" ]
+
+set +e
+SCREENPIPE_TEST_OUTPUT="${OUTPUT}" \
+SCREENPIPE_WRAPPED_MARKER="${WRAPPED_MARKER}" \
+SCREENPIPE_TEST_EXIT=31 \
+GST_PLUGIN_SYSTEM_PATH=/enterprise/poisoned-gst \
+GST_PLUGIN_SYSTEM_PATH_1_0=/enterprise/poisoned-gst-1.0 \
+"${APPDIR}/AppRun" --enterprise "enterprise argument"
+enterprise_status=$?
+set -e
+[ "${enterprise_status}" -eq 31 ]
+grep -Fxq "gst=" "${OUTPUT}"
+grep -Fxq "gst-1.0=" "${OUTPUT}"
+grep -Fxq "arg[0]=--enterprise" "${OUTPUT}"
+grep -Fxq "arg[1]=enterprise argument" "${OUTPUT}"
+
+missing_root="${TEST_ROOT}/missing-root"
+cp -a "${APPDIR}" "${missing_root}"
+rm "${missing_root}/screenpipe enterprise.desktop"
+if "${BUNDLER}" "${missing_root}" >"${TEST_ROOT}/missing-root.log" 2>&1; then
+  echo "bundler accepted a missing root desktop dispatcher input" >&2
+  exit 1
+fi
+
+ambiguous="${TEST_ROOT}/ambiguous"
+cp -a "${APPDIR}" "${ambiguous}"
+cp "${ambiguous}/usr/share/applications/screenpipe enterprise.desktop" \
+  "${ambiguous}/usr/share/applications/screenpipe-beta.desktop"
+if "${BUNDLER}" "${ambiguous}" >"${TEST_ROOT}/ambiguous.log" 2>&1; then
+  echo "bundler accepted ambiguous desktop dispatcher inputs" >&2
+  exit 1
+fi
 
 printf 'PASS: coherent PipeWire AppImage runtime packaging\n'
