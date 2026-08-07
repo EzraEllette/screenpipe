@@ -42,7 +42,6 @@ mod agent_event_emitter;
 mod audio_exclusions;
 mod auth_token;
 mod brain_views;
-mod browser_login;
 mod calendar;
 mod capture_session;
 mod chatgpt_oauth;

@@ -13,6 +13,8 @@ use crate::{
 };
 use sha2::{Digest, Sha256};
 use tauri::{Emitter, Manager};
+#[cfg(not(target_os = "macos"))]
+use tauri_plugin_opener::OpenerExt;
 use tracing::{debug, error, info, warn};
 
 /// Log a `WebviewWindowBuilder::build()` failure with structured context.
@@ -1715,18 +1717,31 @@ pub async fn open_login_window(
         // WebView: it needs an isolated profile directory, which we cannot
         // force in the user's default browser.
         if !fresh_session {
-            match crate::browser_login::start_browser_login(
-                app_handle.clone(),
-                crate::web_base::screenpipe_web_base(),
-                deep_link_scheme().to_string(),
-            )
-            .await
+            // Open the user's real browser at the ordinary login URL and let the
+            // website deep-link `screenpipe://auth?api_key=…` straight back.
+            //
+            // #5936 correctly wanted the real browser here — the embedded
+            // WebView is a cold browser with no cookies, SSO or password
+            // manager — but reached for the CLI's device-code flow to get it,
+            // which made the user read an 8-character code out of the app and
+            // type it into a page telling them to look in a terminal. The
+            // redirect the WebView path already relies on works just as well
+            // from the default browser, so none of that is necessary: the
+            // deep-link handler (mounted outside the entitlement gate) receives
+            // the token exactly as it does today.
+            let login_url = format!("{}?return_scheme={}", login_url(), deep_link_scheme());
+            match app_handle
+                .opener()
+                .open_url(login_url.as_str(), None::<&str>)
             {
-                Ok(code) => return Ok(code),
+                Ok(()) => {
+                    info!("opened system browser for login");
+                    return Ok(String::new());
+                }
                 Err(e) => {
                     // No usable default browser — fall through to the WebView
                     // rather than stranding the user with no way to sign in.
-                    warn!("browser login unavailable, falling back to webview: {e}");
+                    warn!("could not open system browser, falling back to webview: {e}");
                 }
             }
         }

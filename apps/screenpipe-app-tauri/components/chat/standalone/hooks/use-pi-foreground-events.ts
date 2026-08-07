@@ -116,6 +116,14 @@ export function usePiForegroundEvents({
   turnIntentTextValuesMatch,
 }: PiForegroundEventsOptions) {
   const getActivePreset = () => activePresetRef?.current ?? activePreset;
+  // Error classification names the agent rather than saying "the agent", so a
+  // refusal from the agent's own service reads as that agent's answer.
+  const presetWithAgentName = () => {
+    const preset = getActivePreset();
+    if (!preset) return preset;
+    if (preset.provider !== "acp") return preset;
+    return { ...preset, agentName: acpAdapterInfo(preset.acpAgent?.id).name };
+  };
   const dailyLimitMessage = (errorStr: string) => {
     setQuotaUpgradeFromError(errorStr);
     // No-op unless this is the free-plan wall (free_chat_limit_exceeded).
@@ -619,7 +627,7 @@ export function usePiForegroundEvents({
               );
             }
           } else {
-            const providerError = buildProviderErrorPresentation(errorStr, getActivePreset());
+            const providerError = buildProviderErrorPresentation(errorStr, presetWithAgentName());
             if (providerError && piMessageIdRef.current) {
               const msgId = piMessageIdRef.current;
               setMessages((prev) =>
@@ -677,7 +685,7 @@ export function usePiForegroundEvents({
                 prev.map((m) => m.id === msgId ? { ...m, content: "This model requires an upgrade to Screenpipe Business. Switch to Auto to keep going." } : m)
               );
             } else {
-              const providerError = buildProviderErrorPresentation(fullError, getActivePreset());
+              const providerError = buildProviderErrorPresentation(fullError, presetWithAgentName());
               if (providerError) {
                 setMessages((prev) =>
                   prev.map((m) => m.id === msgId
@@ -1215,7 +1223,7 @@ export function usePiForegroundEvents({
                 prev.map((m) => m.id === msgId ? { ...m, content: "This model requires an upgrade to Screenpipe Business. Switch to Auto to keep going." } : m)
               );
             } else {
-              const providerError = buildProviderErrorPresentation(errorStr, getActivePreset());
+              const providerError = buildProviderErrorPresentation(errorStr, presetWithAgentName());
               if (providerError) {
                 setMessages((prev) =>
                   prev.map((m) => m.id === msgId
