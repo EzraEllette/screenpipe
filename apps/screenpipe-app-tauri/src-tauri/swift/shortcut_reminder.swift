@@ -306,6 +306,78 @@ private let kBaseTranscriptW: CGFloat = 280
 private let kBaseTranscriptH: CGFloat = 142
 private let kAnimDur: Double = 0.2
 
+func disclosureContent(
+    for control: String?,
+    overlayShortcut: String,
+    chatShortcut: String,
+    searchShortcut: String,
+    metrics: OverlayMetrics
+) -> (String, String?)? {
+    switch control {
+    case "timeline": return ("timeline", overlayShortcut)
+    case "chat": return ("ask chat", chatShortcut)
+    case "search": return ("search", searchShortcut)
+    case "audio": return ("mic capture", metrics.audioActive ? "live" : "idle")
+    case "screen":
+        let fps = metrics.screenActive ? String(format: "%.0f fps", metrics.captureFps) : "idle"
+        return ("screen capture", fps)
+    case "inbox": return ("notifications", metrics.inboxUnread ? "new" : nil)
+    case "close": return ("hide dock", "Esc")
+    default: return nil
+    }
+}
+
+func disclosurePanelOrigin(
+    dockFrame: NSRect,
+    disclosureSize: NSSize,
+    index: Int,
+    controlCount: Int,
+    disclosureDown: Bool,
+    scale: CGFloat,
+    visibleFrame: NSRect
+) -> NSPoint {
+    let cellWidth = dockFrame.width / CGFloat(controlCount)
+    let anchorX = dockFrame.minX + (CGFloat(index) + 0.5) * cellWidth
+    let unclampedX = anchorX - disclosureSize.width / 2
+    let x = min(max(unclampedX, visibleFrame.minX), visibleFrame.maxX - disclosureSize.width)
+    let dockHeight = kBaseDockH * scale
+    let gap = kBaseDisclosureGap * scale
+    let y = disclosureDown
+        ? dockFrame.maxY - dockHeight - gap - disclosureSize.height
+        : dockFrame.minY + dockHeight + gap
+    return NSPoint(x: x, y: y)
+}
+
+@available(macOS 13.0, *)
+struct ShortcutDisclosureView: View {
+    let label: String
+    let value: String?
+    let scale: CGFloat
+
+    private func s(_ value: CGFloat) -> CGFloat { value * scale }
+
+    var body: some View {
+        HStack(spacing: s(6)) {
+            Text(label)
+                .font(Brand.swiftUIMonoFont(size: 8 * scale))
+                .foregroundColor(.white.opacity(0.72))
+            if let value = value, !value.isEmpty {
+                Text(value)
+                    .font(Brand.swiftUIMonoFont(size: 8 * scale, weight: .semibold))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, s(5))
+                    .frame(height: s(16))
+                    .overlay(Rectangle().stroke(.white.opacity(0.35), lineWidth: 1))
+            }
+        }
+        .padding(.horizontal, s(8))
+        .frame(height: kBaseDisclosureH * scale)
+        .background(Color.black.opacity(0.92))
+        .overlay(Rectangle().stroke(.white.opacity(0.32), lineWidth: 1))
+        .fixedSize(horizontal: true, vertical: false)
+    }
+}
+
 @available(macOS 13.0, *)
 struct ShortcutReminderView: View {
     let overlayShortcut: String
@@ -328,21 +400,6 @@ struct ShortcutReminderView: View {
     private var panelAlignment: Alignment {
         guard metrics.healthState == "normal" else { return .center }
         return metrics.disclosureDown ? .top : .bottom
-    }
-
-    private var disclosureLabel: (String, String?)? {
-        switch metrics.hoveredControl {
-        case "timeline": return ("timeline", overlayShortcut)
-        case "chat": return ("ask chat", chatShortcut)
-        case "search": return ("search", searchShortcut)
-        case "audio": return ("mic capture", metrics.audioActive ? "live" : "idle")
-        case "screen":
-            let fps = metrics.screenActive ? String(format: "%.0f fps", metrics.captureFps) : "idle"
-            return ("screen capture", fps)
-        case "inbox": return ("notifications", metrics.inboxUnread ? "new" : nil)
-        case "close": return ("hide dock", "Esc")
-        default: return nil
-        }
     }
 
     var body: some View {
@@ -562,30 +619,7 @@ struct ShortcutReminderView: View {
     }
 
     private var disclosureView: some View {
-        Group {
-            if let (label, value) = disclosureLabel {
-                HStack(spacing: s(6)) {
-                    Text(label)
-                        .font(Brand.swiftUIMonoFont(size: 8 * scale))
-                        .foregroundColor(.white.opacity(0.72))
-                    if let value = value, !value.isEmpty {
-                        Text(value)
-                            .font(Brand.swiftUIMonoFont(size: 8 * scale, weight: .semibold))
-                            .foregroundColor(.white)
-                            .padding(.horizontal, s(5))
-                            .frame(height: s(16))
-                            .overlay(Rectangle().stroke(.white.opacity(0.35), lineWidth: 1))
-                    }
-                }
-                .padding(.horizontal, s(8))
-                .frame(height: kBaseDisclosureH * scale)
-                .background(Color.black.opacity(0.92))
-                .overlay(Rectangle().stroke(.white.opacity(0.32), lineWidth: 1))
-                .fixedSize(horizontal: true, vertical: false)
-            } else {
-                Color.clear.frame(height: kBaseDisclosureH * scale)
-            }
-        }
+        Color.clear.frame(height: kBaseDisclosureH * scale)
     }
 
     private var dockView: some View {
@@ -864,6 +898,7 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
     private var panel: NSPanel?
     private var hostingView: DraggableHostingView<AnyView>?
     private var trackingView: ReminderTrackingView?
+    private var disclosurePanel: NSPanel?
     private var transcriptPanel: NSPanel?
     private var transcriptHostingView: NSHostingView<AnyView>?
     private var transcriptTrackingView: ReminderTrackingView?
@@ -909,10 +944,12 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
             }
             if panel == nil || prevScale != gOverlayScale {
                 panel?.orderOut(nil)
+                disclosurePanel?.orderOut(nil)
                 transcriptPanel?.orderOut(nil)
                 panel = nil
                 hostingView = nil
                 trackingView = nil
+                disclosurePanel = nil
                 transcriptPanel = nil
                 transcriptHostingView = nil
                 transcriptTrackingView = nil
@@ -945,6 +982,7 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
             AnimationTick.shared.setVisible(false, hasActiveSignal: false)
             disconnectWebSocket()
             disconnectMeetingEventsWebSocket()
+            disclosurePanel?.orderOut(nil)
             transcriptPanel?.orderOut(nil)
             panel?.orderOut(nil)
         }
@@ -1211,6 +1249,10 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
                 // Health states replace the hover-expand UI; reset the
                 // click-to-expand flag so it doesn't stay stuck expanded.
                 self.metrics.forceExpanded = false
+                if state != "normal" {
+                    self.metrics.hoveredControl = nil
+                    self.disclosurePanel?.orderOut(nil)
+                }
             }
             self.updateHealthToolTip()
             self.refreshTranscriptPanelVisibility()
@@ -1298,6 +1340,7 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
             refreshTranscriptPanelVisibility()
         } else {
             metrics.hoveredControl = nil
+            disclosurePanel?.orderOut(nil)
             scheduleHoverExit()
         }
     }
@@ -1319,7 +1362,75 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
         let control = controls[index]
         if metrics.hoveredControl != control {
             metrics.hoveredControl = control
+            showDisclosurePanel(for: control, index: index)
         }
+    }
+
+    private func showDisclosurePanel(for control: String, index: Int) {
+        guard metrics.healthState == "normal",
+              let panel = panel,
+              let (label, value) = disclosureContent(
+                  for: control,
+                  overlayShortcut: overlayShortcut,
+                  chatShortcut: chatShortcut,
+                  searchShortcut: searchShortcut,
+                  metrics: metrics
+              ) else {
+            disclosurePanel?.orderOut(nil)
+            return
+        }
+
+        let rootView = AnyView(ShortcutDisclosureView(label: label, value: value, scale: gOverlayScale))
+        let hosting = NSHostingView(rootView: rootView)
+        let size = hosting.fittingSize
+        hosting.frame = NSRect(origin: .zero, size: size)
+
+        let disclosure: NSPanel
+        if let existing = disclosurePanel {
+            disclosure = existing
+        } else {
+            disclosure = NSPanel(
+                contentRect: NSRect(origin: .zero, size: size),
+                styleMask: [.nonactivatingPanel, .borderless],
+                backing: .buffered,
+                defer: false
+            )
+            disclosure.isFloatingPanel = true
+            disclosure.level = NSWindow.Level(rawValue: panel.level.rawValue + 1)
+            disclosure.collectionBehavior = [.canJoinAllSpaces, .ignoresCycle, .fullScreenAuxiliary]
+            disclosure.isOpaque = false
+            disclosure.backgroundColor = .clear
+            disclosure.hasShadow = false
+            disclosure.hidesOnDeactivate = false
+            disclosure.ignoresMouseEvents = true
+            disclosure.isReleasedWhenClosed = false
+            disclosure.sharingType = .readOnly
+            disclosurePanel = disclosure
+        }
+
+        disclosure.contentView = hosting
+        disclosure.setContentSize(size)
+        positionDisclosurePanel(index: index)
+        disclosure.orderFrontRegardless()
+    }
+
+    private func positionDisclosurePanel(index: Int? = nil) {
+        guard let panel = panel, let disclosure = disclosurePanel else { return }
+        let controls = ["timeline", "chat", "search", "audio", "screen", "inbox", "close"]
+        guard let resolvedIndex = index ?? metrics.hoveredControl.flatMap({ controls.firstIndex(of: $0) }) else {
+            return
+        }
+
+        let visible = panel.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? panel.frame
+        disclosure.setFrameOrigin(disclosurePanelOrigin(
+            dockFrame: panel.frame,
+            disclosureSize: disclosure.frame.size,
+            index: resolvedIndex,
+            controlCount: controls.count,
+            disclosureDown: metrics.disclosureDown,
+            scale: gOverlayScale,
+            visibleFrame: visible
+        ))
     }
 
     private func setTranscriptHovering(_ hovering: Bool) {
@@ -1341,6 +1452,7 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
             self.metrics.isHovering = false
             self.metrics.forceExpanded = false
             self.metrics.hoveredControl = nil
+            self.disclosurePanel?.orderOut(nil)
             self.transcriptPanel?.orderOut(nil)
         }
         hoverHideWorkItem = work
@@ -1439,6 +1551,7 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
         let disclosureDown = panel.frame.midY >= visible.midY
         if metrics.disclosureDown != disclosureDown {
             metrics.disclosureDown = disclosureDown
+            positionDisclosurePanel()
             if transcriptPanel?.isVisible == true {
                 positionTranscriptPanel()
             }
@@ -1488,6 +1601,7 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
                 self?.metrics.isHovering = false
                 self?.metrics.forceExpanded = false
                 self?.metrics.hoveredControl = nil
+                self?.disclosurePanel?.orderOut(nil)
                 self?.transcriptPanel?.orderOut(nil)
             }
             hosting.frame = contentView.bounds
@@ -1512,6 +1626,7 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
 
     func windowDidMove(_ notification: Notification) {
         updateDisclosureDirection()
+        positionDisclosurePanel()
     }
 }
 
