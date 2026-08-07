@@ -296,7 +296,7 @@ struct ScreenMatrixView: View {
 
 // Base sizes — multiplied by gOverlayScale at panel creation
 private let kBaseCollapsedW: CGFloat = 81
-private let kBaseCollapsedH: CGFloat = 24
+private let kBaseCollapsedH: CGFloat = 18
 private let kBaseExpandedW: CGFloat = 224
 private let kBaseExpandedH: CGFloat = 62
 private let kBaseDockH: CGFloat = 30
@@ -619,8 +619,8 @@ struct ShortcutReminderView: View {
             .padding(.trailing, c(5))
         }
         .frame(width: kBaseCollapsedW * collapsedScale, height: kBaseCollapsedH * collapsedScale)
-        .background(Color.black)
-        .overlay(Rectangle().stroke(.white.opacity(0.4), lineWidth: 1))
+        .background(Color.black.opacity(0.46))
+        .overlay(Rectangle().stroke(.white.opacity(0.24), lineWidth: 1))
     }
 
     // MARK: - Expanded bar
