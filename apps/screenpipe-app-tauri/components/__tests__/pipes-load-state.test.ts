@@ -4,8 +4,10 @@
 
 import { describe, expect, it } from "vitest";
 import {
+  ApiPollCoalescer,
   ApiRequestSequence,
   isCurrentPipesRequest,
+  liveOutputKeyForApi,
   pipesForApi,
   shouldShowPipesLoadError,
 } from "../settings/pipes-section";
@@ -129,5 +131,59 @@ describe("scheduled task load state", () => {
     expect(displayedTasks).toEqual(["cached task"]);
     expect(successfulApi).toBe(localApi);
     expect(shouldShowPipesLoadError("temporary poll failure", localApi, successfulApi)).toBe(false);
+  });
+
+  it("coalesces an overlapping task-list poll so a slow response can complete", async () => {
+    const polls = new ApiPollCoalescer<string[]>();
+    const slowResponse = deferred<string[]>();
+    let requestsStarted = 0;
+    let displayedTasks: string[] = [];
+
+    const firstPoll = polls.run(localApi, async () => {
+      requestsStarted += 1;
+      const tasks = await slowResponse.promise;
+      displayedTasks = tasks;
+      return tasks;
+    });
+    const intervalPoll = polls.run(localApi, async () => {
+      requestsStarted += 1;
+      displayedTasks = ["newer task"];
+      return displayedTasks;
+    });
+
+    expect(requestsStarted).toBe(1);
+    expect(intervalPoll).toBe(firstPoll);
+
+    slowResponse.resolve(["slow task"]);
+    await intervalPoll;
+
+    expect(displayedTasks).toEqual(["slow task"]);
+  });
+
+  it("keeps cached and late logs isolated across an API switch", async () => {
+    const requests = new ApiRequestSequence();
+    const oldLogs = deferred<string[]>();
+    let currentApi = localApi;
+    let logs = ["cached local log"];
+    const logsApiBase: string | null = localApi;
+    const oldRequest = requests.begin(localApi);
+
+    const completion = oldLogs.promise.then((nextLogs) => {
+      if (requests.isCurrent(oldRequest, currentApi)) logs = nextLogs;
+    });
+
+    currentApi = remoteApi;
+    requests.begin(remoteApi);
+    oldLogs.resolve(["late local log"]);
+    await completion;
+
+    expect(pipesForApi(logs, logsApiBase, remoteApi)).toEqual([]);
+  });
+
+  it("uses different live-output slots for the same execution key on different APIs", () => {
+    const localKey = liveOutputKeyForApi(localApi, "daily", 7);
+    const remoteKey = liveOutputKeyForApi(remoteApi, "daily", 7);
+
+    expect(remoteKey).not.toBe(localKey);
   });
 });

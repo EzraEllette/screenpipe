@@ -186,6 +186,28 @@ export class ApiRequestSequence {
   }
 }
 
+export class ApiPollCoalescer<T> {
+  private active: { apiBase: string; promise: Promise<T> } | null = null;
+
+  run(apiBase: string, task: () => Promise<T>): Promise<T> {
+    if (this.active?.apiBase === apiBase) return this.active.promise;
+
+    const promise = task().finally(() => {
+      if (this.active?.promise === promise) this.active = null;
+    });
+    this.active = { apiBase, promise };
+    return promise;
+  }
+}
+
+export function liveOutputKeyForApi(
+  apiBase: string,
+  pipeName: string,
+  executionId: number,
+): string {
+  return `${apiBase}|${pipeName}:${executionId}`;
+}
+
 export function pipesForApi<T>(pipes: T[], pipesApiBase: string | null, apiBase: string): T[] {
   return pipesApiBase === apiBase ? pipes : [];
 }
@@ -1101,6 +1123,7 @@ export function PipesSection() {
   const [creating, setCreating] = useState(false);
   const expandedRef = useRef<string | null>(null);
   const [logs, setLogs] = useState<PipeRunLog[]>([]);
+  const [logsApiBase, setLogsApiBase] = useState<string | null>(null);
   const [executions, setExecutions] = useState<PipeExecution[]>([]);
   const [executionsLoading, setExecutionsLoading] = useState(false);
   const [hasMoreExecutions, setHasMoreExecutions] = useState(false);
@@ -1113,9 +1136,11 @@ export function PipesSection() {
   const lastSuccessfulPipesApiBase = useRef<string | null>(null);
   const currentApiBase = useRef("");
   const pipesRequests = useRef(new ApiRequestSequence());
+  const pipesPolls = useRef(new ApiPollCoalescer<boolean>());
   const polledExecutionsRequests = useRef(new ApiRequestSequence());
   const executionsRequests = useRef(new ApiRequestSequence());
   const olderExecutionsRequests = useRef(new ApiRequestSequence());
+  const logsRequests = useRef(new ApiRequestSequence());
   const [runningPipe, setRunningPipe] = useState<string | null>(null);
   const [stoppingPipe, setStoppingPipe] = useState<string | null>(null);
   const [promptDrafts, setPromptDrafts] = useState<Record<string, string>>({});
@@ -1161,7 +1186,7 @@ export function PipesSection() {
     installedVersion: number;
     latestVersion: number;
   } | null>(null);
-  // Live streaming output for running executions: key = "pipeName:executionId"
+  // Live streaming output for running executions: key = "apiBase|pipeName:executionId"
   const [liveOutput, setLiveOutput] = useState<Record<string, string[]>>({});
   const liveOutputRef = useRef<Record<string, string[]>>({});
   // Single create-pipe entry point shared by the create box and the example
@@ -1209,6 +1234,7 @@ export function PipesSection() {
   const isRemote = !!selectedDevice;
   currentApiBase.current = apiBase;
   const displayedPipes = pipesForApi(pipes, pipesApiBase, apiBase);
+  const displayedLogs = pipesForApi(logs, logsApiBase, apiBase);
 
   const filteredPipes = React.useMemo(
     () =>
@@ -1286,7 +1312,7 @@ export function PipesSection() {
     }
   };
 
-  const fetchPipes = useCallback(async () => {
+  const fetchPipes = useCallback(() => pipesPolls.current.run(apiBase, async () => {
     const requestApiBase = apiBase;
     const request = pipesRequests.current.begin(requestApiBase);
     const isCurrentRequest = () => pipesRequests.current.isCurrent(request, currentApiBase.current);
@@ -1367,7 +1393,7 @@ export function PipesSection() {
         setLoading(false);
       }
     }
-  }, [apiBase, isRemote]);
+  }), [apiBase, isRemote]);
 
   const fetchConnections = useCallback(async () => {
     try {
@@ -1902,10 +1928,15 @@ export function PipesSection() {
   useEffect(() => {
     expandedRef.current = null;
     setExpanded(null);
+    logsRequests.current.begin(apiBase);
+    setLogs([]);
+    setLogsApiBase(null);
     setExecutions([]);
     setHasMoreExecutions(false);
     setExecutionsLoading(false);
     setLoadingMoreExecutions(false);
+    liveOutputRef.current = {};
+    setLiveOutput({});
   }, [apiBase]);
 
   const pollRunningPipe = useCallback(async () => {
@@ -1927,7 +1958,7 @@ export function PipesSection() {
           setHasMoreExecutions(nextExecutions.length === PIPE_EXECUTIONS_PAGE_LIMIT);
           const finishedKeys = (execData.data || [])
             .filter((e: PipeExecution) => e.status !== "running")
-            .map((e: PipeExecution) => `${e.pipe_name}:${e.id}`);
+            .map((e: PipeExecution) => liveOutputKeyForApi(apiBase, e.pipe_name, e.id));
           if (finishedKeys.length > 0) {
             const updated = { ...liveOutputRef.current };
             let changed = false;
@@ -1955,12 +1986,18 @@ export function PipesSection() {
   // Note: executions are fetched inside fetchPipes to avoid waterfall
 
   const fetchLogs = async (name: string) => {
+    const requestApiBase = apiBase;
+    const request = logsRequests.current.begin(requestApiBase);
+    const isCurrentRequest = () => logsRequests.current.isCurrent(request, currentApiBase.current);
     try {
       const res = await fetch(`${apiBase}/pipes/${name}/logs`);
       const data = await res.json();
-      setLogs(data.data || []);
+      if (isCurrentRequest()) {
+        setLogsApiBase(requestApiBase);
+        setLogs(data.data || []);
+      }
     } catch (e) {
-      console.error("failed to fetch logs:", e);
+      if (isCurrentRequest()) console.error("failed to fetch logs:", e);
     }
   };
 
@@ -2315,6 +2352,7 @@ export function PipesSection() {
       if (!mounted) return;
       off = registerDefault((envelope) => {
       if (!mounted) return;
+      if (currentApiBase.current !== apiBase || apiBase !== getApiBaseUrl()) return;
       if (envelope.source !== "pipe") return;
       const parsed = parsePipeSessionId(envelope.sessionId);
       if (!parsed) return;
@@ -2323,7 +2361,7 @@ export function PipesSection() {
       if (executionId == null) return;
       const pipeEvent = envelope.event;
 
-      const key = `${pipeName}:${executionId}`;
+      const key = liveOutputKeyForApi(apiBase, pipeName, executionId);
       let text = "";
       if (pipeEvent?.type === "raw_line") {
         text = (pipeEvent as any).text || "";
@@ -2363,7 +2401,7 @@ export function PipesSection() {
       mounted = false;
       try { off?.(); } catch { /* ignore */ }
     };
-  }, []);
+  }, [apiBase]);
 
   const selectedDeviceInfo = selectedDevice ? devices.find((d) => d.address === selectedDevice) : null;
   if (selectedDeviceInfo?.status === "offline") {
@@ -3425,7 +3463,7 @@ export function PipesSection() {
                                 </div>
                               ))}
                             </div>
-                          ) : executions.length === 0 && logs.length === 0 ? (
+                          ) : executions.length === 0 && displayedLogs.length === 0 ? (
                             <p className="text-xs text-muted-foreground py-4 text-center">
                               no runs yet — click ▶ to run manually
                             </p>
@@ -3483,7 +3521,7 @@ export function PipesSection() {
                                   <pre className="text-xs text-muted-foreground whitespace-pre-wrap break-words max-h-96 overflow-y-auto scrollbar-hide">{exec.stderr}</pre>
                                 )}
                                 {exec.status === "running" && (() => {
-                                  const key = `${exec.pipe_name}:${exec.id}`;
+                                  const key = liveOutputKeyForApi(apiBase, exec.pipe_name, exec.id);
                                   const lines = liveOutput[key];
                                   if (!lines || lines.length === 0) return null;
                                   return (
@@ -3516,7 +3554,7 @@ export function PipesSection() {
                               )}
                             </>
                           ) : (
-                            logs.slice().reverse().map((log, i) => (
+                            displayedLogs.slice().reverse().map((log, i) => (
                               // see contain: layout paint comment above
                               <div key={i} className="border p-2 space-y-1" style={{ contain: "layout paint" }}>
                                 <div className="flex items-center gap-2 text-xs font-mono">
@@ -3763,7 +3801,7 @@ export function PipesSection() {
                     {/* old runs kept for backward compat — hidden, data already in Runs tab */}
                     <div className="hidden">
                       <div className="mt-1 space-y-2 max-h-64 overflow-y-auto">
-                        {executions.length === 0 && logs.length === 0 ? (
+                        {executions.length === 0 && displayedLogs.length === 0 ? (
                           <p className="text-xs text-muted-foreground">
                             no runs yet
                           </p>
@@ -3833,7 +3871,7 @@ export function PipesSection() {
                                 </p>
                               )}
                               {exec.status === "running" && (() => {
-                                const key = `${exec.pipe_name}:${exec.id}`;
+                                const key = liveOutputKeyForApi(apiBase, exec.pipe_name, exec.id);
                                 const lines = liveOutput[key];
                                 if (!lines || lines.length === 0) return null;
                                 return (
@@ -3860,7 +3898,7 @@ export function PipesSection() {
                           ))
                         ) : (
                           /* Fallback to in-memory logs if no executions from DB */
-                          logs
+                          displayedLogs
                             .slice()
                             .reverse()
                             .map((log, i) => (
