@@ -383,6 +383,36 @@ describe("app entitlement", () => {
     expect(hasAppEntitlement(normalized)).toBe(false);
   });
 
+  it("keeps a partial newer entitlement unknown instead of synthesizing verified free", () => {
+    const normalized = normalizeAppUser(
+      {
+        id: "user_partial_entitlement",
+        cloud_subscribed: false,
+        entitlement: { plan: "none" },
+      },
+      "token",
+    );
+
+    expect(getLocalPlanPolicy(normalized)).toBe("unknown");
+  });
+
+  it("requires explicit feature denials before accepting newer free evidence", () => {
+    const normalized = normalizeAppUser(
+      {
+        id: "user_incomplete_free",
+        cloud_subscribed: false,
+        entitlement: {
+          active: false,
+          plan: "none",
+          source: "none",
+        },
+      },
+      "token",
+    );
+
+    expect(getLocalPlanPolicy(normalized)).toBe("unknown");
+  });
+
   // The server computes `subscription_plan` per request and may omit it while
   // still returning a complete entitlement. Falling back to an invented label
   // ("pro"/"standard") then contradicted the entitlement's own plan, and
@@ -557,13 +587,13 @@ describe("isAuthenticatedFreeUser", () => {
     return user({
       id: "user_free",
       subscription_plan: "none",
-      app_entitled: true,
+      app_entitled: false,
       entitlement: {
-        active: true,
+        active: false,
         plan: "none",
         source: "none",
         checked_at: "2026-06-05T11:00:00.000Z",
-        features: { app: true },
+        features: { app: false, cloud: false },
       },
       ...overrides,
     });
@@ -587,14 +617,21 @@ describe("isAuthenticatedFreeUser", () => {
       isAuthenticatedFreeUser(
         explicitFree({
           entitlement: {
-            active: true,
+            active: false,
             plan: "none",
             source: "none",
             checked_at: "2026-06-01T11:59:59.000Z",
+            features: { app: false, cloud: false },
           },
         }),
       ),
     ).toBe(true);
+  });
+
+  it("rejects a whitespace-only authentication token", () => {
+    expect(isAuthenticatedFreeUser(explicitFree({ token: "   " }))).toBe(
+      false,
+    );
   });
 
   it("fails safe on missing or conflicting plan fields", () => {

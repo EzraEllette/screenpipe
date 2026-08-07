@@ -196,7 +196,7 @@ function isEntitlementFresh(entitlement: AppEntitlement | null) {
  */
 function hasVerifiedFreePlan(user: AppUser | null | undefined): boolean {
   const stableAccountId = getStableAccountId(user);
-  if (!user || !stableAccountId || user.cloud_subscribed === true) return false;
+  if (!user || !stableAccountId || user.cloud_subscribed !== false) return false;
 
   const entitlement = asEntitlement(user.entitlement);
   // Once verified, free limits persist offline; merely waiting 72 hours must
@@ -221,10 +221,10 @@ function hasVerifiedFreePlan(user: AppUser | null | undefined): boolean {
       ? entitlement.source.trim().toLowerCase()
       : null;
   if (
-    source === "manual" ||
-    source === "enterprise" ||
-    source === "lifetime" ||
-    source === "dev" ||
+    source !== "none" ||
+    entitlement?.active !== false ||
+    entitlement.features?.app !== false ||
+    entitlement.features?.cloud !== false ||
     hasFutureGrace(entitlement)
   ) {
     return false;
@@ -253,7 +253,11 @@ export function hasFreePlanPolicy(user: AppUser | null | undefined): boolean {
 export function isAuthenticatedFreeUser(
   user: AppUser | null | undefined,
 ): boolean {
-  return Boolean(user?.token) && hasFreePlanPolicy(user);
+  return (
+    typeof user?.token === "string" &&
+    user.token.trim().length > 0 &&
+    hasFreePlanPolicy(user)
+  );
 }
 
 function hasVerifiedPaidPlanAt(
