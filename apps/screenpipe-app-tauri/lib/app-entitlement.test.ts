@@ -396,7 +396,7 @@ describe("app entitlement", () => {
     expect(getLocalPlanPolicy(normalized)).toBe("unknown");
   });
 
-  it("requires explicit feature denials before accepting newer free evidence", () => {
+  it("requires explicit feature evidence before accepting newer free evidence", () => {
     const normalized = normalizeAppUser(
       {
         id: "user_incomplete_free",
