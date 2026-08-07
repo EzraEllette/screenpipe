@@ -695,12 +695,10 @@ impl VisionManager {
         let high_fps_controller = self.high_fps_controller.clone();
         let semantic_tx = self.semantic_tx.clone();
 
-        // Spawn the decoupled high-fps HD recorder alongside this monitor's
-        // capture loop. It idles until an HD session is active, then records a
-        // CFR H.264 chunk with NO OCR (the event loop above keeps indexing
-        // sparsely). Shares the same Arc<SafeMonitor> + HighFpsController; runs
-        // on its own task, aborted in `stop_monitor`.
-        {
+        // Spawn the decoupled high-fps HD recorder only when screen pixels are
+        // enabled. Otherwise an active meeting could open its own OS capture
+        // stream despite `disableScreenshots`.
+        if !self.config.disable_screenshots {
             let hd_config = crate::hd_recorder::HdRecorderConfig {
                 ignored_windows: self.config.ignored_windows.clone(),
                 included_windows: self.config.included_windows.clone(),
