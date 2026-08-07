@@ -139,12 +139,12 @@ vi.mock("@/components/rewind/ai-presets-selector", () => ({
     onControlledSelect,
   }: {
     controlledPresetId: string | null;
-    onControlledSelect?: (presetId: string | null) => void;
+    onControlledSelect?: (preset: { id: string } | null) => void;
   }) => (
     <button
       type="button"
       data-testid="model-selector"
-      onClick={() => onControlledSelect?.("quality")}
+      onClick={() => onControlledSelect?.({ id: "quality" })}
     >
       {controlledPresetId ?? "model"}
     </button>

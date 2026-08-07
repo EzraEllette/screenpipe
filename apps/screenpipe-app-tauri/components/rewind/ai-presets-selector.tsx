@@ -1186,8 +1186,8 @@ interface AIPresetsSelectorProps {
   showLoginCta?: boolean;
   /** Controlled mode: override which preset id is shown as selected */
   controlledPresetId?: string | null;
-  /** Controlled mode: callback when user picks a preset (null = "none") */
-  onControlledSelect?: (presetId: string | null) => void;
+  /** Controlled mode: callback when user picks or creates a preset (null = "none") */
+  onControlledSelect?: (preset: AIPreset | null) => void;
   /** Show a "none" option at the top of the list */
   allowNone?: boolean;
   /** Label shown for the none option */
@@ -1381,7 +1381,7 @@ export const AIPresetsSelector = ({
         if (isControlled) {
           // Controlled (e.g. chat composer): cycle the host's local selection
           // without rewriting the user's default preset in settings.
-          onControlledSelect?.(nextPreset.id);
+          onControlledSelect?.(nextPreset);
         } else {
           const updatedPresets = aiPresets.map((p) => ({
             ...p,
@@ -1422,6 +1422,8 @@ export const AIPresetsSelector = ({
       });
       return;
     }
+
+    let createdPreset: AIPreset | undefined;
 
     // If we're editing an existing preset
     if (selectedPresetToEdit) {
@@ -1495,24 +1497,25 @@ export const AIPresetsSelector = ({
 
       // Handle first preset creation
       if (settings.aiPresets.length === 0) {
-        const newPreset = {
+        createdPreset = {
           ...preset,
           defaultPreset: true,
         } as AIPreset;
 
         updateSettings({
-          aiPresets: [newPreset],
+          aiPresets: [createdPreset],
          
         });
       } else {
         // Adding a new preset
+        createdPreset = {
+          ...preset,
+          defaultPreset: false,
+        } as AIPreset;
         updateSettings({
           aiPresets: [
             ...settings.aiPresets,
-            {
-              ...preset,
-              defaultPreset: false,
-            } as AIPreset,
+            createdPreset,
           ],
         });
       }
@@ -1520,6 +1523,17 @@ export const AIPresetsSelector = ({
       toast.success("Preset created", {
         description: "New preset has been added",
       });
+    }
+
+    // A newly created preset belongs to the controlled surface that created
+    // it. Pass the full value so the host can activate it immediately without
+    // waiting for the settings store to publish the updated preset list.
+    if (
+      isControlled &&
+      createdPreset &&
+      (includeAgentPresets || createdPreset.provider !== "acp")
+    ) {
+      onControlledSelect(createdPreset);
     }
 
     // Notify parent to restart Pi only when the edited preset is the one in use.
@@ -1868,7 +1882,7 @@ export const AIPresetsSelector = ({
                         // so string comparison against preset.id would fail
                         if (isGated) return;
                         if (isControlled) {
-                          onControlledSelect(preset.id);
+                          onControlledSelect(preset);
                         } else if (preset.id !== selectedPreset && !aiPresetPolicy.lock_default_preset) {
                           const updatedPresets = (settings.aiPresets || []).map((p) => ({
                             ...p,
