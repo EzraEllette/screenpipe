@@ -9,6 +9,7 @@ import {
   isCurrentPipesRequest,
   liveOutputKeyForApi,
   pipesForApi,
+  shouldFetchPipesForApi,
   shouldShowPipesLoadError,
 } from "../settings/pipes-section";
 
@@ -49,6 +50,11 @@ describe("scheduled task load state", () => {
     expect(
       shouldShowPipesLoadError("failed to fetch remote scheduled tasks", remoteApi, remoteApi),
     ).toBe(false);
+  });
+
+  it("does not let a previous API callback start a poll after switching devices", () => {
+    expect(shouldFetchPipesForApi(localApi, remoteApi)).toBe(false);
+    expect(shouldFetchPipesForApi(remoteApi, remoteApi)).toBe(true);
   });
 
   it("rejects a late response from the previous API after switching devices", async () => {

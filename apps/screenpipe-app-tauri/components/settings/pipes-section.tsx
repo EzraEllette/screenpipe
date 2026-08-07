@@ -166,6 +166,13 @@ export function isCurrentPipesRequest(
   return requestApiBase === currentApiBase && requestId === latestRequestId;
 }
 
+export function shouldFetchPipesForApi(
+  requestApiBase: string,
+  currentApiBase: string,
+): boolean {
+  return requestApiBase === currentApiBase;
+}
+
 export class ApiRequestSequence {
   private latestRequestId = 0;
 
@@ -1312,7 +1319,11 @@ export function PipesSection() {
     }
   };
 
-  const fetchPipes = useCallback(() => pipesPolls.current.run(apiBase, async () => {
+  const fetchPipes = useCallback(() => {
+    if (!shouldFetchPipesForApi(apiBase, currentApiBase.current)) {
+      return Promise.resolve(false);
+    }
+    return pipesPolls.current.run(apiBase, async () => {
     const requestApiBase = apiBase;
     const request = pipesRequests.current.begin(requestApiBase);
     const isCurrentRequest = () => pipesRequests.current.isCurrent(request, currentApiBase.current);
@@ -1393,7 +1404,8 @@ export function PipesSection() {
         setLoading(false);
       }
     }
-  }), [apiBase, isRemote]);
+    });
+  }, [apiBase, isRemote]);
 
   const fetchConnections = useCallback(async () => {
     try {
