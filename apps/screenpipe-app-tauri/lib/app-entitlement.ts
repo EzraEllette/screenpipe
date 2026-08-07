@@ -222,9 +222,9 @@ function hasVerifiedFreePlan(user: AppUser | null | undefined): boolean {
       : null;
   if (
     source !== "none" ||
-    entitlement?.active !== false ||
-    entitlement.features?.app !== false ||
-    entitlement.features?.cloud !== false ||
+    typeof entitlement?.active !== "boolean" ||
+    typeof entitlement.features?.app !== "boolean" ||
+    entitlement.features.cloud === true ||
     hasFutureGrace(entitlement)
   ) {
     return false;

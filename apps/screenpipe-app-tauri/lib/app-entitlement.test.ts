@@ -587,13 +587,13 @@ describe("isAuthenticatedFreeUser", () => {
     return user({
       id: "user_free",
       subscription_plan: "none",
-      app_entitled: false,
+      app_entitled: true,
       entitlement: {
-        active: false,
+        active: true,
         plan: "none",
         source: "none",
         checked_at: "2026-06-05T11:00:00.000Z",
-        features: { app: false, cloud: false },
+        features: { app: true },
       },
       ...overrides,
     });
@@ -617,11 +617,11 @@ describe("isAuthenticatedFreeUser", () => {
       isAuthenticatedFreeUser(
         explicitFree({
           entitlement: {
-            active: false,
+            active: true,
             plan: "none",
             source: "none",
             checked_at: "2026-06-01T11:59:59.000Z",
-            features: { app: false, cloud: false },
+            features: { app: true },
           },
         }),
       ),
