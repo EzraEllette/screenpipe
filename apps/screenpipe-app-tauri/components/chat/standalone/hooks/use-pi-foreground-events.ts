@@ -116,6 +116,8 @@ export function usePiForegroundEvents({
   turnIntentTextValuesMatch,
 }: PiForegroundEventsOptions) {
   const getActivePreset = () => activePresetRef?.current ?? activePreset;
+  const sessionActivityErrorMessage = (errorStr: string) =>
+    buildProviderErrorPresentation(errorStr, getActivePreset())?.message ?? errorStr;
   const dailyLimitMessage = (errorStr: string) => {
     setQuotaUpgradeFromError(errorStr);
     // No-op unless this is the free-plan wall (free_chat_limit_exceeded).
@@ -319,7 +321,9 @@ export function usePiForegroundEvents({
             const status = partial.status ?? null;
             const preview = partial.preview?.replace(/\s+/g, " ").trim();
             const title = partial.title?.trim();
-            const lastError = partial.lastError;
+            const lastError = partial.lastError
+              ? sessionActivityErrorMessage(partial.lastError)
+              : partial.lastError;
             const unreadHint = partial.unreadHint === true;
             const updatedAt = Date.now();
             const sig = `${status ?? ""}|${preview ?? ""}|${title ?? ""}|${lastError ?? ""}|${unreadHint ? "1" : "0"}`;
@@ -648,12 +652,12 @@ export function usePiForegroundEvents({
           // Pi's LLM returned an error (e.g. rate limit, overloaded)
           const reason = stringValue(data.assistantMessageEvent.reason);
           const errorDetail = stringValue(data.assistantMessageEvent.error);
+          const fullError = `${reason} ${errorDetail}`.trim();
           console.error("[Pi] Message error:", reason, errorDetail);
-          emitSessionActivity({ status: "error", lastError: `${reason} ${errorDetail}`.trim() || undefined });
+          emitSessionActivity({ status: "error", lastError: fullError || undefined });
 
           if (piMessageIdRef.current) {
             const msgId = piMessageIdRef.current;
-            const fullError = `${reason} ${errorDetail}`.trim();
             piLastErrorRef.current = fullError;
 
             const quotaErrorType = classifyQuotaError(fullError);
