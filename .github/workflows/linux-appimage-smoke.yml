@@ -9,12 +9,14 @@ on:
   pull_request:
     branches: [main]
     paths:
-      - ".github/scripts/linux/appimage-gstreamer-smoke.sh"
       - ".github/scripts/linux/bundle-appimage-runtime-deps.sh"
-      - ".github/scripts/linux/pipewire-loop-smoke.c"
-      - ".github/scripts/linux/screenpipe-appimage-entrypoint.sh"
-      - ".github/scripts/linux/test-appimage-gstreamer-entrypoint.sh"
+      - ".github/scripts/linux/pipewire-context-smoke.c"
+      - ".github/scripts/linux/test-bundle-appimage-runtime-deps.sh"
+      - ".github/scripts/linux/test-verify-pipewire-runtime-packages.sh"
+      - ".github/scripts/linux/verify-pipewire-runtime-packages.sh"
       - ".github/workflows/linux-appimage-smoke.yml"
+      - ".github/workflows/release-app.yml"
+      - ".github/workflows/release-enterprise.yml"
       - "apps/screenpipe-app-tauri/scripts/pre_build.js"
       - "apps/screenpipe-app-tauri/src-tauri/**"
       - "apps/screenpipe-app-tauri/package.json"
@@ -38,9 +40,6 @@ jobs:
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
-
-      - name: Test AppImage GStreamer entrypoint
-        run: bash .github/scripts/linux/test-appimage-gstreamer-entrypoint.sh
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -79,8 +78,6 @@ jobs:
           sudo apt-get install -y \
             g++ \
             ffmpeg \
-            gstreamer1.0-plugins-good \
-            gstreamer1.0-tools \
             tesseract-ocr \
             cmake \
             clang \
@@ -112,6 +109,9 @@ jobs:
             libsamplerate-dev \
             libwebrtc-audio-processing-dev \
             libpipewire-0.3-dev \
+            libpipewire-0.3-modules \
+            libspa-0.2-modules \
+            pipewire-bin \
             libgtk-3-dev \
             librsvg2-dev \
             patchelf \
@@ -124,6 +124,16 @@ jobs:
           sudo ln -sf /usr/lib/x86_64-linux-gnu/libopenblas.so /usr/lib/x86_64-linux-gnu/openblas/lib/liblibopenblas.so
           sudo ln -sf /usr/lib/x86_64-linux-gnu/libopenblas.a /usr/lib/x86_64-linux-gnu/openblas/lib/liblibopenblas.a
           echo "OPENBLAS_PATH=/usr/lib/x86_64-linux-gnu/openblas" >> "$GITHUB_ENV"
+
+          bash .github/scripts/linux/verify-pipewire-runtime-packages.sh
+
+      - name: Test release PipeWire runtime prerequisites
+        shell: bash
+        run: bash .github/scripts/linux/test-verify-pipewire-runtime-packages.sh
+
+      - name: Test AppImage runtime dependency bundler
+        shell: bash
+        run: bash .github/scripts/linux/test-bundle-appimage-runtime-deps.sh
 
       - name: Install frontend dependencies
         working-directory: apps/screenpipe-app-tauri
@@ -241,9 +251,12 @@ jobs:
           set -euxo pipefail
           mkdir -p /tmp/screenpipe-appimage-smoke
           cp "apps/screenpipe-app-tauri/${APPIMAGE}" /tmp/screenpipe-appimage-smoke/screenpipe.AppImage
-          cp .github/scripts/linux/appimage-gstreamer-smoke.sh /tmp/screenpipe-appimage-smoke/
 
+          # GITHUB_ACTIONS/CI do not cross the container boundary, so
+          # telemetry_disabled_by_env() cannot see them. Without this the smoke
+          # run reports as a real install and pollutes PostHog retention.
           docker run --rm \
+            -e SCREENPIPE_DISABLE_TELEMETRY=1 \
             -v /tmp/screenpipe-appimage-smoke:/smoke \
             debian:trixie \
             bash -euxo pipefail -c '
@@ -253,8 +266,6 @@ jobs:
                 dbus \
                 dbus-x11 \
                 desktop-file-utils \
-                gstreamer1.0-plugins-good \
-                gstreamer1.0-tools \
                 libasound2t64 \
                 libayatana-appindicator3-1 \
                 libgtk-3-0 \
@@ -275,9 +286,38 @@ jobs:
               cd /smoke
               chmod +x screenpipe.AppImage
               ./screenpipe.AppImage --appimage-extract >/dev/null
-              /smoke/appimage-gstreamer-smoke.sh \
-                squashfs-root \
-                /usr/lib/x86_64-linux-gnu/gstreamer-1.0
+
+              desktop=""
+              for candidate in squashfs-root/usr/share/applications/*.desktop; do
+                [ -f "${candidate}" ] || continue
+                if grep -Eq "^Exec=screenpipe-app-launcher([[:space:]]|$)" "${candidate}"; then
+                  desktop="${candidate}"
+                  break
+                fi
+              done
+              test -n "${desktop}"
+              launcher=squashfs-root/usr/bin/screenpipe-app-launcher
+              test -x "${launcher}"
+              grep -qx "Exec=screenpipe-app-launcher" "${desktop}"
+              grep -qx "unset GST_PLUGIN_SYSTEM_PATH" "${launcher}"
+              grep -qx "unset GST_PLUGIN_SYSTEM_PATH_1_0" "${launcher}"
+              sh -n "${launcher}"
+
+              launcher_probe=/tmp/screenpipe-launcher-probe
+              install -D -m 0755 "${launcher}" "${launcher_probe}/usr/bin/screenpipe-app-launcher"
+              ln -s /bin/sh "${launcher_probe}/usr/bin/screenpipe-app"
+              launcher_env="$(
+                APPDIR="${launcher_probe}" \
+                  GST_PLUGIN_SYSTEM_PATH=/poisoned \
+                  GST_PLUGIN_SYSTEM_PATH_1_0=/poisoned-1.0 \
+                  SCREENPIPE_LAUNCHER_PROBE=preserved \
+                  "${launcher_probe}/usr/bin/screenpipe-app-launcher" -c env
+              )"
+              if grep -q "^GST_PLUGIN_SYSTEM_PATH" <<<"${launcher_env}"; then
+                echo "Launcher did not clear the GStreamer system plugin paths"
+                exit 1
+              fi
+              grep -qx "SCREENPIPE_LAUNCHER_PROBE=preserved" <<<"${launcher_env}"
 
               # GStreamer plugins are intentionally supplied by the host. If a
               # future build bundles any, the launcher policy must be revisited.
@@ -355,10 +395,12 @@ jobs:
           # must launch here.
           mkdir -p /tmp/screenpipe-appimage-arch
           cp "apps/screenpipe-app-tauri/${APPIMAGE}" /tmp/screenpipe-appimage-arch/screenpipe.AppImage
-          cp .github/scripts/linux/appimage-gstreamer-smoke.sh /tmp/screenpipe-appimage-arch/
-          cp .github/scripts/linux/pipewire-loop-smoke.c /tmp/screenpipe-appimage-arch/
+          cp .github/scripts/linux/pipewire-context-smoke.c /tmp/screenpipe-appimage-arch/
 
+          # See the Debian smoke step: the container does not inherit
+          # GITHUB_ACTIONS/CI, so telemetry must be disabled explicitly.
           docker run --rm \
+            -e SCREENPIPE_DISABLE_TELEMETRY=1 \
             -v /tmp/screenpipe-appimage-arch:/smoke \
             archlinux:latest \
             bash -euxo pipefail -c '
@@ -376,8 +418,6 @@ jobs:
                 xdotool \
                 pipewire \
                 gcc \
-                gstreamer \
-                gst-plugins-good \
                 pkgconf \
                 dbus \
                 xorg-server-xvfb \
@@ -394,27 +434,65 @@ jobs:
               cd /smoke
               chmod +x screenpipe.AppImage
               ./screenpipe.AppImage --appimage-extract >/dev/null
-              /smoke/appimage-gstreamer-smoke.sh \
-                squashfs-root \
-                /usr/lib/gstreamer-1.0
 
-              # The Ubuntu-built libpipewire uses a Debian multiarch SPA plugin
-              # path that does not exist on Arch. The AppImage must carry the
-              # matching support.system implementation and configure AppRun to
-              # use it before the Rust PipeWire main loop is created.
+              # The Ubuntu-built PipeWire client must use its matching config,
+              # context modules, and SPA support plugins instead of Arch ones.
               spa_dir=/smoke/squashfs-root/usr/lib/spa-0.2
-              spa_support="${spa_dir}/support/libspa-support.so"
-              test -f "${spa_support}"
-              grep -q "screenpipe bundled SPA runtime" squashfs-root/AppRun
+              module_dir=/smoke/squashfs-root/usr/lib/pipewire-0.3
+              config=/smoke/squashfs-root/usr/share/pipewire/client.conf
+              client=/smoke/squashfs-root/usr/lib/libpipewire-0.3.so.0
+              test -f "${client}"
+              test -f "${config}"
+              test -d "${module_dir}"
+              test -f "${spa_dir}/support/libspa-support.so"
+              for module in \
+                protocol-native client-node client-device adapter metadata session-manager; do
+                test -f "${module_dir}/libpipewire-module-${module}.so"
+              done
+              grep -q "screenpipe coherent bundled PipeWire runtime" squashfs-root/AppRun
               grep -q "SPA_PLUGIN_DIR" squashfs-root/AppRun
+              grep -q "PIPEWIRE_MODULE_DIR" squashfs-root/AppRun
+              grep -q "PIPEWIRE_CONFIG_NAME" squashfs-root/AppRun
 
               cc $(pkg-config --cflags libpipewire-0.3) \
-                /smoke/pipewire-loop-smoke.c \
-                -o /tmp/pipewire-loop-smoke \
+                /smoke/pipewire-context-smoke.c \
+                -o /tmp/pipewire-context-smoke \
                 $(pkg-config --libs libpipewire-0.3)
-              LD_LIBRARY_PATH=/smoke/squashfs-root/usr/lib \
+              LD_LIBRARY_PATH="${module_dir}:/smoke/squashfs-root/usr/lib" \
                 SPA_PLUGIN_DIR="${spa_dir}" \
-                /tmp/pipewire-loop-smoke
+                PIPEWIRE_MODULE_DIR="${module_dir}" \
+                PIPEWIRE_CONFIG_NAME="${config}" \
+                PIPEWIRE_DEBUG=4 \
+                /tmp/pipewire-context-smoke 2>&1 | tee /tmp/pipewire-context.log
+              grep -Fxq "PASS pw_main_loop_new" /tmp/pipewire-context.log
+              grep -Fxq "PASS pw_context_new" /tmp/pipewire-context.log
+              if grep -E "[( :](/usr/lib|/lib)/[^[:space:]]*/pipewire-0\\.3/libpipewire-module-" \
+                /tmp/pipewire-context.log; then
+                echo "PipeWire context loaded a host module"
+                exit 1
+              fi
+              if grep -E "undefined symbol|could not load mandatory module" /tmp/pipewire-context.log; then
+                echo "PipeWire context reported a loader failure"
+                exit 1
+              fi
+
+              for member in "${module_dir}"/*.so "${spa_dir}"/support/*.so; do
+                deps="$(LD_LIBRARY_PATH="${module_dir}:/smoke/squashfs-root/usr/lib" ldd "${member}")"
+                printf "%s\n" "${deps}"
+                if grep -q "not found" <<<"${deps}"; then
+                  exit 1
+                fi
+                if grep -E "libpipewire-0\\.3\\.so\\.0 => /usr/lib|libpipewire-module-.* => /usr/lib" <<<"${deps}"; then
+                  echo "PipeWire runtime member resolved from the Arch host"
+                  exit 1
+                fi
+              done
+              client_node="${module_dir}/libpipewire-module-client-node.so"
+              if readelf -d "${client_node}" | grep -q "libpipewire-module-protocol-native.so"; then
+                LD_LIBRARY_PATH="${module_dir}:/smoke/squashfs-root/usr/lib" \
+                  ldd "${client_node}" | \
+                  grep -F "libpipewire-module-protocol-native.so => ${module_dir}/libpipewire-module-protocol-native.so"
+              fi
 
               # The fix strips these from the bundle; they must NOT be back.
               if ls squashfs-root/usr/lib/libsharpyuv.so* squashfs-root/usr/lib/libavif.so* 2>/dev/null; then

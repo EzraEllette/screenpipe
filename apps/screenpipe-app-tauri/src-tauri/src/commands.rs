@@ -285,6 +285,22 @@ pub fn is_enterprise_build_cmd(app_handle: tauri::AppHandle) -> bool {
     is_enterprise_build(&app_handle)
 }
 
+/// Whether an automated environment has force-disabled telemetry
+/// (`SCREENPIPE_DISABLE_TELEMETRY` / `GITHUB_ACTIONS` / `CI`).
+///
+/// The Rust senders already consult
+/// [`screenpipe_engine::analytics::telemetry_disabled_by_env`] directly, but the
+/// webview cannot: its PostHog gate in `app/providers.tsx` only sees build-time
+/// `process.env`, so a runtime env var never reaches it. Without this command a
+/// CI run of the shipped bundle still fires `$identify` and mints a real
+/// PostHog person — which is exactly how the Docker AppImage smoke test came to
+/// account for a quarter of weekly "app users".
+#[tauri::command]
+#[specta::specta]
+pub fn is_telemetry_disabled_by_env() -> bool {
+    screenpipe_engine::analytics::telemetry_disabled_by_env()
+}
+
 /// Return the macOS bundle identifier of the running app
 /// (e.g. `screenpi.pe`, `screenpi.pe.beta`, `screenpi.pe.dev`,
 /// `screenpi.pe.enterprise`). The onboarding stuck-screen surfaces this so
@@ -475,7 +491,7 @@ pub fn get_chats_dir() -> Result<String, String> {
 /// in the screenpipe-api skill that Pi installs on every run.
 ///
 /// Mechanism: the screenpipe-core `Pi::ensure_screenpipe_skill` reads
-/// `~/.screenpipe/cloud_media_analysis.disabled` at install time and
+/// `<data_dir>/cloud_media_analysis.disabled` at install time and
 /// conditionally appends the Gemma 4 E4B confidential-enclave section
 /// to `<project>/.pi/skills/screenpipe-api/SKILL.md`. Default (no
 /// marker) = enabled. This command just creates or removes the marker.
@@ -490,8 +506,10 @@ pub fn get_chats_dir() -> Result<String, String> {
 #[tauri::command]
 #[specta::specta]
 pub fn set_cloud_media_analysis_skill(enabled: bool) -> Result<(), String> {
-    let home = dirs::home_dir().ok_or_else(|| "no home directory".to_string())?;
-    let dir = home.join(".screenpipe");
+    // Resolve through the data dir rather than hardcoding ~/.screenpipe, so a
+    // dev or relocated instance writes the marker its own Pi will read. Same
+    // path as before for a default production install.
+    let dir = screenpipe_core::paths::default_screenpipe_data_dir();
     let marker = dir.join("cloud_media_analysis.disabled");
 
     if enabled {
@@ -1640,10 +1658,19 @@ fn reset_existing_login_window<R: tauri::Runtime>(
 /// reusing Safari cookies, and Windows/Linux use a throwaway webview profile.
 #[tauri::command]
 #[specta::specta]
+/// Returns the device code when this call started the browser device-code flow,
+/// and an empty string for every path that needs no out-of-band confirmation
+/// (macOS auth session, embedded WebView fallback).
+///
+/// The code is returned as well as broadcast on `login-browser-pending` so a
+/// caller never has to depend on a global event to render it. #5936 changed
+/// this shared command to require the user read a code out of the app, but only
+/// taught onboarding to show one; every other login surface silently opened a
+/// browser asking for a code nothing displayed.
 pub async fn open_login_window(
     app_handle: tauri::AppHandle,
     fresh_session: Option<bool>,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let fresh_session = fresh_session.unwrap_or(false);
     #[cfg(target_os = "macos")]
     {
@@ -1661,7 +1688,7 @@ pub async fn open_login_window(
             Ok(url) => url,
             Err(e) if e == "user_cancelled" => {
                 info!("login auth session cancelled");
-                return Ok(());
+                return Ok(String::new());
             }
             Err(e) => return Err(e),
         };
@@ -1671,12 +1698,38 @@ pub async fn open_login_window(
             .emit("deep-link-received", callback_url)
             .map_err(|e| e.to_string())?;
 
-        return Ok(());
+        return Ok(String::new());
     }
 
     #[cfg(not(target_os = "macos"))]
     {
         use tauri::{WebviewUrl, WebviewWindowBuilder};
+
+        // Prefer the user's real browser. The embedded WebView below is a cold
+        // browser — no cookies, no password manager, no live SSO session — so
+        // every Windows/Linux user re-typed credentials that their default
+        // browser already holds. macOS never had this problem because
+        // ASWebAuthenticationSession runs inside Safari's own session.
+        //
+        // `fresh_session` ("use different account") deliberately stays on the
+        // WebView: it needs an isolated profile directory, which we cannot
+        // force in the user's default browser.
+        if !fresh_session {
+            match crate::browser_login::start_browser_login(
+                app_handle.clone(),
+                crate::web_base::screenpipe_web_base(),
+                deep_link_scheme().to_string(),
+            )
+            .await
+            {
+                Ok(code) => return Ok(code),
+                Err(e) => {
+                    // No usable default browser — fall through to the WebView
+                    // rather than stranding the user with no way to sign in.
+                    warn!("browser login unavailable, falling back to webview: {e}");
+                }
+            }
+        }
 
         let label = if fresh_session {
             let id = std::time::SystemTime::now()
@@ -1700,7 +1753,7 @@ pub async fn open_login_window(
         } else if let Some(w) = app_handle.get_webview_window(&label) {
             info!("resetting existing login window");
             reset_existing_login_window(&w, parsed_login_url)?;
-            return Ok(());
+            return Ok(String::new());
         }
 
         let app_for_nav = app_handle.clone();
@@ -1740,7 +1793,9 @@ pub async fn open_login_window(
                 e.to_string()
             })?;
 
-        Ok(())
+        // The embedded WebView completes the whole flow in-window, so there is
+        // no code for the user to read back.
+        Ok(String::new())
     }
 }
 
@@ -2760,7 +2815,7 @@ pub(crate) async fn show_shortcut_reminder_impl(
                 if let Some(ref core) = *guard {
                     let mut metrics_ws_url = format!("ws://127.0.0.1:{}/ws/metrics", core.port);
                     let mut events_ws_url =
-                        format!("ws://127.0.0.1:{}/ws/meeting-status", core.port);
+                        format!("ws://127.0.0.1:{}/ws/meeting-overlay", core.port);
                     if let Some(ref key) = core.local_api_key {
                         let enc = urlencoding::encode(key);
                         metrics_ws_url = format!("{}?token={}", metrics_ws_url, enc);
@@ -2933,6 +2988,7 @@ pub(crate) async fn show_shortcut_reminder_impl(
 
             // Clone window to pass into main thread closure
             let window_clone = window.clone();
+            let capturable = crate::window::app_windows_are_capturable(&app_handle);
             let _ = app_handle.run_on_main_thread(move || {
                 use tauri_nspanel::cocoa::appkit::NSWindowCollectionBehavior;
 
@@ -2950,8 +3006,8 @@ pub(crate) async fn show_shortcut_reminder_impl(
                     // Don't hide when app deactivates (default is YES for NSPanel)
                     panel.set_hides_on_deactivate(false);
 
-                    // Visible in screen capture (NSWindowSharingReadOnly = 1)
-                    let _: () = unsafe { msg_send![&*panel, setSharingType: 1_u64] };
+                    let sharing: u64 = if capturable { 1 } else { 0 };
+                    let _: () = unsafe { msg_send![&*panel, setSharingType: sharing] };
 
                     // Accept mouse events without requiring click-to-activate
                     let _: () = unsafe { msg_send![&*panel, setAcceptsMouseMovedEvents: true] };
@@ -3410,6 +3466,7 @@ pub async fn show_notification_panel(
             // steals focus. orderFront: in the main thread block handles visibility.
 
             let window_clone = window.clone();
+            let capturable = crate::window::app_windows_are_capturable(&app_handle);
             let _ = app_handle.run_on_main_thread(move || {
                 use tauri_nspanel::cocoa::appkit::NSWindowCollectionBehavior;
 
@@ -3420,8 +3477,8 @@ pub async fn show_notification_panel(
                     panel.set_style_mask(128);
                     panel.set_hides_on_deactivate(false);
 
-                    // Visible in screen capture (NSWindowSharingReadOnly = 1)
-                    let _: () = unsafe { msg_send![&*panel, setSharingType: 1_u64] };
+                    let sharing: u64 = if capturable { 1 } else { 0 };
+                    let _: () = unsafe { msg_send![&*panel, setSharingType: sharing] };
 
                     // Accept mouse events without requiring click-to-activate.
                     // NSNonactivatingPanelMask prevents the panel from becoming key,
