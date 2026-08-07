@@ -872,9 +872,9 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
     private var hoverHideWorkItem: DispatchWorkItem?
     private var meetingStopTimeoutWorkItem: DispatchWorkItem?
 
-    private var overlayShortcut = "⌘⌃S"
-    private var chatShortcut = "⌘⌃L"
-    private var searchShortcut = "⌘⌃K"
+    private var overlayShortcut = "Cmd+Ctrl+S"
+    private var chatShortcut = "Cmd+Ctrl+L"
+    private var searchShortcut = "Cmd+Ctrl+K"
     private var metrics = OverlayMetrics()
     private var wsTask: URLSessionWebSocketTask?
     private var wsRetryTimer: Timer?
@@ -1229,23 +1229,25 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
         if let s = dict["events_ws_url"] { eventsWsUrl = s }
     }
 
-    /// Convert "Super+Ctrl+S" → "⌘⌃S" for compact overlay display.
+    /// Convert configured modifiers to readable macOS abbreviations.
     private func prettifyShortcut(_ raw: String) -> String {
-        // Already contains symbols — return as-is
-        if raw.contains("⌘") || raw.contains("⌃") || raw.contains("⌥") || raw.contains("⇧") { return raw }
-        let parts = raw.split(separator: "+").map(String.init)
-        var symbols = ""
-        var key = ""
-        for part in parts {
-            switch part.lowercased() {
-            case "super", "cmd", "command", "meta":  symbols += "⌘"
-            case "ctrl", "control":                   symbols += "⌃"
-            case "alt", "option", "opt":              symbols += "⌥"
-            case "shift":                             symbols += "⇧"
-            default:                                  key = part.uppercased()
+        let normalized = raw
+            .replacingOccurrences(of: "⌘", with: "Cmd+")
+            .replacingOccurrences(of: "⌃", with: "Ctrl+")
+            .replacingOccurrences(of: "⌥", with: "Opt+")
+            .replacingOccurrences(of: "⇧", with: "Shift+")
+        return normalized
+            .split(separator: "+", omittingEmptySubsequences: true)
+            .map { part in
+                switch part.trimmingCharacters(in: .whitespaces).lowercased() {
+                case "super", "cmd", "command", "meta": return "Cmd"
+                case "ctrl", "control": return "Ctrl"
+                case "alt", "option", "opt": return "Opt"
+                case "shift": return "Shift"
+                default: return part.uppercased()
+                }
             }
-        }
-        return symbols + key
+            .joined(separator: "+")
     }
 
     private func createPanel() {
