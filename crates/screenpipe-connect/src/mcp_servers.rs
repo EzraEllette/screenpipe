@@ -261,6 +261,7 @@ impl OAuthAttemptRegistry {
     fn take_active(&mut self, attempt_id: &str) -> Option<McpOAuthAttempt> {
         let attempt = self.attempts.get(attempt_id)?;
         if attempt.expires_at <= chrono::Utc::now().timestamp()
+            || self.status(attempt_id) != McpOAuthAttemptStatus::Pending
             || self
                 .active_by_server
                 .get(&attempt.pending.server_id)
@@ -269,13 +270,54 @@ impl OAuthAttemptRegistry {
         {
             return None;
         }
-        let attempt = self.attempts.remove(attempt_id)?;
-        self.active_by_server.remove(&attempt.pending.server_id);
+        let attempt = attempt.clone();
         self.statuses.insert(
             attempt_id.to_string(),
             (McpOAuthAttemptStatus::Exchanging, attempt.expires_at),
         );
         Some(attempt)
+    }
+
+    fn server_id(&self, attempt_id: &str) -> Option<String> {
+        self.attempts
+            .get(attempt_id)
+            .map(|attempt| attempt.pending.server_id.clone())
+    }
+
+    fn active_for_persistence(&mut self, attempt_id: &str, server_id: &str) -> bool {
+        let Some(attempt) = self.attempts.get(attempt_id) else {
+            return false;
+        };
+        if attempt.expires_at <= chrono::Utc::now().timestamp() {
+            let expires_at = attempt.expires_at;
+            self.attempts.remove(attempt_id);
+            if self.active_by_server.get(server_id).map(String::as_str) == Some(attempt_id) {
+                self.active_by_server.remove(server_id);
+            }
+            self.statuses.insert(
+                attempt_id.to_string(),
+                (McpOAuthAttemptStatus::Expired, expires_at),
+            );
+            return false;
+        }
+        self.active_by_server.get(server_id).map(String::as_str) == Some(attempt_id)
+            && self.status(attempt_id) == McpOAuthAttemptStatus::Exchanging
+    }
+
+    fn finish(&mut self, attempt_id: &str, status: McpOAuthAttemptStatus) {
+        let Some(attempt) = self.attempts.remove(attempt_id) else {
+            return;
+        };
+        if self
+            .active_by_server
+            .get(&attempt.pending.server_id)
+            .map(String::as_str)
+            == Some(attempt_id)
+        {
+            self.active_by_server.remove(&attempt.pending.server_id);
+        }
+        self.statuses
+            .insert(attempt_id.to_string(), (status, attempt.expires_at));
     }
 
     fn cancel(&mut self, attempt_id: &str) -> Option<McpOAuthAttempt> {
@@ -498,7 +540,8 @@ pub struct McpServerStore {
     /// interleave or see a half-written file.
     file_lock: Arc<Mutex<()>>,
     oauth_attempts: Arc<Mutex<OAuthAttemptRegistry>>,
-    oauth_start_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    oauth_lifecycle_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    oauth_relay_base: String,
 }
 
 impl McpServerStore {
@@ -519,7 +562,8 @@ impl McpServerStore {
             call_locks: Arc::new(Mutex::new(HashMap::new())),
             file_lock: Arc::new(Mutex::new(())),
             oauth_attempts: Arc::new(Mutex::new(OAuthAttemptRegistry::default())),
-            oauth_start_locks: Arc::new(Mutex::new(HashMap::new())),
+            oauth_lifecycle_locks: Arc::new(Mutex::new(HashMap::new())),
+            oauth_relay_base: MCP_OAUTH_RELAY_BASE.to_string(),
         }
     }
 
@@ -531,8 +575,8 @@ impl McpServerStore {
             .clone()
     }
 
-    async fn oauth_start_lock_for(&self, id: &str) -> Arc<Mutex<()>> {
-        let mut guard = self.oauth_start_locks.lock().await;
+    async fn oauth_lifecycle_lock_for(&self, id: &str) -> Arc<Mutex<()>> {
+        let mut guard = self.oauth_lifecycle_locks.lock().await;
         guard
             .entry(id.to_string())
             .or_insert_with(|| Arc::new(Mutex::new(())))
@@ -705,8 +749,8 @@ impl McpServerStore {
         if std::env::var("SCREENPIPE_MCP_OAUTH_RELAY_ENABLED").as_deref() == Ok("0") {
             return Err(anyhow!("MCP OAuth sign-in is temporarily disabled"));
         }
-        let start_lock = self.oauth_start_lock_for(&cfg.id).await;
-        let _start_guard = start_lock.lock().await;
+        let lifecycle_lock = self.oauth_lifecycle_lock_for(&cfg.id).await;
+        let lifecycle_guard = lifecycle_lock.lock().await;
         let discovered = self.discover_oauth(&cfg).await?;
         require_s256(&discovered.code_challenge_methods_supported)?;
         let (client_id, client_secret) = match cfg
@@ -781,6 +825,7 @@ impl McpServerStore {
             pending,
         };
         let superseded = self.oauth_attempts.lock().await.insert(attempt);
+        drop(lifecycle_guard);
         if let Some(old) = superseded {
             self.cancel_relay(&old).await;
         }
@@ -804,7 +849,13 @@ impl McpServerStore {
     }
 
     pub async fn cancel_oauth_attempt(&self, attempt_id: &str) {
+        let Some(server_id) = self.oauth_attempts.lock().await.server_id(attempt_id) else {
+            return;
+        };
+        let lifecycle_lock = self.oauth_lifecycle_lock_for(&server_id).await;
+        let lifecycle_guard = lifecycle_lock.lock().await;
         let attempt = self.oauth_attempts.lock().await.cancel(attempt_id);
+        drop(lifecycle_guard);
         if let Some(attempt) = attempt {
             self.cancel_relay(&attempt).await;
         }
@@ -825,7 +876,7 @@ impl McpServerStore {
             self.oauth_attempts
                 .lock()
                 .await
-                .set_status(attempt_id, McpOAuthAttemptStatus::Failed);
+                .finish(attempt_id, McpOAuthAttemptStatus::Failed);
             return Err(anyhow!("OAuth authorization was not completed"));
         }
         if let Some(returned_issuer) = result.iss.as_deref() {
@@ -833,29 +884,66 @@ impl McpServerStore {
                 self.oauth_attempts
                     .lock()
                     .await
-                    .set_status(attempt_id, McpOAuthAttemptStatus::Failed);
+                    .finish(attempt_id, McpOAuthAttemptStatus::Failed);
                 return Err(anyhow!("OAuth issuer mismatch"));
             }
         }
-        let code = result
-            .code
-            .as_deref()
-            .ok_or_else(|| anyhow!("OAuth callback did not contain a code"))?;
+        let Some(code) = result.code.as_deref() else {
+            self.oauth_attempts
+                .lock()
+                .await
+                .finish(attempt_id, McpOAuthAttemptStatus::Failed);
+            return Err(anyhow!("OAuth callback did not contain a code"));
+        };
         let server_id = attempt.pending.server_id.clone();
-        let exchange = self.exchange_oauth(attempt.pending, code).await;
-        self.oauth_attempts.lock().await.set_status(
+        let token = match self.exchange_oauth_token(&attempt.pending, code).await {
+            Ok(token) => token,
+            Err(error) => {
+                self.oauth_attempts
+                    .lock()
+                    .await
+                    .finish(attempt_id, McpOAuthAttemptStatus::Failed);
+                return Err(error);
+            }
+        };
+
+        // Starting, canceling, and persisting one server share this lock. The
+        // token request and probe stay concurrent across servers, but the exact
+        // attempt is revalidated immediately before its writes and cannot be
+        // superseded or canceled halfway through persistence.
+        let lifecycle_lock = self.oauth_lifecycle_lock_for(&server_id).await;
+        let _lifecycle_guard = lifecycle_lock.lock().await;
+        if !self
+            .oauth_attempts
+            .lock()
+            .await
+            .active_for_persistence(attempt_id, &server_id)
+        {
+            return Err(anyhow!("OAuth attempt is no longer active"));
+        }
+        let persistence = self.persist_oauth(attempt.pending, token).await;
+        self.oauth_attempts.lock().await.finish(
             attempt_id,
-            if exchange.is_ok() {
+            if persistence.is_ok() {
                 McpOAuthAttemptStatus::Completed
             } else {
                 McpOAuthAttemptStatus::Failed
             },
         );
-        exchange?;
+        persistence?;
         Ok(server_id)
     }
 
     async fn exchange_oauth(&self, pending: McpOAuthPending, code: &str) -> Result<()> {
+        let token = self.exchange_oauth_token(&pending, code).await?;
+        self.persist_oauth(pending, token).await
+    }
+
+    async fn exchange_oauth_token(
+        &self,
+        pending: &McpOAuthPending,
+        code: &str,
+    ) -> Result<McpOAuthToken> {
         let mut token_form: Vec<(&str, &str)> = vec![
             ("grant_type", "authorization_code"),
             ("code", code),
@@ -922,6 +1010,10 @@ impl McpServerStore {
                 pending.server_id
             );
         }
+        Ok(token)
+    }
+
+    async fn persist_oauth(&self, pending: McpOAuthPending, token: McpOAuthToken) -> Result<()> {
         self.write_oauth_token(&pending.server_id, token).await?;
         if let Some(mut cfg) = pending.create_config {
             cfg.auth_mode = McpAuthMode::OAuth;
@@ -937,7 +1029,7 @@ impl McpServerStore {
         let claim_hash = hex_sha256(claim_secret);
         let response = self
             .client
-            .post(format!("{MCP_OAUTH_RELAY_BASE}/register"))
+            .post(format!("{}/register", self.oauth_relay_base))
             .json(&RelayRegisterRequest {
                 state,
                 claim_hash,
@@ -955,7 +1047,7 @@ impl McpServerStore {
     async fn cancel_relay(&self, attempt: &McpOAuthAttempt) {
         let _ = self
             .client
-            .post(format!("{MCP_OAUTH_RELAY_BASE}/cancel"))
+            .post(format!("{}/cancel", self.oauth_relay_base))
             .json(&RelayCredentialRequest {
                 state: &attempt.state,
                 claim_secret: &attempt.claim_secret,
@@ -987,7 +1079,7 @@ impl McpServerStore {
             };
             let response = self
                 .client
-                .post(format!("{MCP_OAUTH_RELAY_BASE}/claim"))
+                .post(format!("{}/claim", self.oauth_relay_base))
                 .json(&RelayCredentialRequest {
                     state: &credentials.0,
                     claim_secret: &credentials.1,
@@ -2597,7 +2689,35 @@ mod tests {
     // -----------------------------------------------------------------
 
     use wiremock::matchers::{method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
+
+    struct PausedTokenEndpoint {
+        started: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        release: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+    }
+
+    impl Respond for PausedTokenEndpoint {
+        fn respond(&self, _request: &Request) -> ResponseTemplate {
+            if let Some(started) = self.started.lock().unwrap().take() {
+                let _ = started.send(());
+            }
+            let (released, wake) = &*self.release;
+            let mut released = released.lock().unwrap();
+            while !*released {
+                let (guard, timeout) = wake.wait_timeout(released, Duration::from_secs(5)).unwrap();
+                assert!(
+                    !timeout.timed_out(),
+                    "paused token endpoint was not released"
+                );
+                released = guard;
+            }
+            ResponseTemplate::new(200).set_body_json(json!({
+                "access_token": "stale-access-token",
+                "token_type": "Bearer",
+                "expires_in": 3600,
+            }))
+        }
+    }
 
     #[tokio::test]
     async fn probe_against_mock_returns_tools() {
@@ -3132,6 +3252,169 @@ mod tests {
                 create_headers: vec![],
             },
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn cancel_during_token_exchange_prevents_token_and_config_persistence() {
+        use sqlx::SqlitePool;
+
+        let token_server = MockServer::start().await;
+        let relay_server = MockServer::start().await;
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let release = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(PausedTokenEndpoint {
+                started: std::sync::Mutex::new(Some(started_tx)),
+                release: release.clone(),
+            })
+            .mount(&token_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/mcp"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0",
+                "id": "test",
+                "result": { "tools": [] }
+            })))
+            .mount(&token_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/cancel"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&relay_server)
+            .await;
+
+        let pool = SqlitePool::connect(":memory:").await.unwrap();
+        let secrets = Arc::new(SecretStore::new(pool, None).await.unwrap());
+        let dir = temp_dir();
+        let mut store = McpServerStore::new(dir.clone(), Some(secrets));
+        store.oauth_relay_base = relay_server.uri();
+        let mut attempt = test_oauth_attempt("attempt-a", "notion");
+        attempt.pending.token_url = format!("{}/token", token_server.uri());
+        let mut config = sample_config("notion");
+        config.url = format!("{}/mcp", token_server.uri());
+        attempt.pending.create_config = Some(config);
+        store.oauth_attempts.lock().await.insert(attempt);
+
+        let completing_store = store.clone();
+        let completion = tokio::spawn(async move {
+            completing_store
+                .complete_oauth_attempt(
+                    "attempt-a",
+                    RelayOAuthResult {
+                        code: Some("authorization-code".to_string()),
+                        error: None,
+                        iss: Some("https://issuer.example".to_string()),
+                    },
+                )
+                .await
+        });
+        started_rx.await.expect("token exchange should start");
+
+        store.cancel_oauth_attempt("attempt-a").await;
+        {
+            let (released, wake) = &*release;
+            *released.lock().unwrap() = true;
+            wake.notify_all();
+        }
+
+        assert!(completion.await.unwrap().is_err());
+        assert!(store.read_oauth_token("notion").await.unwrap().is_none());
+        assert!(store.get("notion").await.unwrap().is_none());
+        assert_eq!(
+            store.oauth_attempt_status("attempt-a").await.status,
+            McpOAuthAttemptStatus::Canceled
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn supersede_during_token_exchange_keeps_only_new_attempt_active() {
+        use sqlx::SqlitePool;
+
+        let token_server = MockServer::start().await;
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let release = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(PausedTokenEndpoint {
+                started: std::sync::Mutex::new(Some(started_tx)),
+                release: release.clone(),
+            })
+            .mount(&token_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/mcp"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0",
+                "id": "test",
+                "result": { "tools": [] }
+            })))
+            .mount(&token_server)
+            .await;
+
+        let pool = SqlitePool::connect(":memory:").await.unwrap();
+        let secrets = Arc::new(SecretStore::new(pool, None).await.unwrap());
+        let dir = temp_dir();
+        let store = McpServerStore::new(dir.clone(), Some(secrets));
+        let mut attempt_a = test_oauth_attempt("attempt-a", "notion");
+        attempt_a.pending.token_url = format!("{}/token", token_server.uri());
+        let mut config = sample_config("notion");
+        config.url = format!("{}/mcp", token_server.uri());
+        attempt_a.pending.create_config = Some(config);
+        store.oauth_attempts.lock().await.insert(attempt_a);
+
+        let completing_store = store.clone();
+        let completion = tokio::spawn(async move {
+            completing_store
+                .complete_oauth_attempt(
+                    "attempt-a",
+                    RelayOAuthResult {
+                        code: Some("authorization-code".to_string()),
+                        error: None,
+                        iss: Some("https://issuer.example".to_string()),
+                    },
+                )
+                .await
+        });
+        started_rx.await.expect("token exchange should start");
+
+        let lifecycle_lock = store.oauth_lifecycle_lock_for("notion").await;
+        let _lifecycle_guard = lifecycle_lock.lock().await;
+        let superseded = store
+            .oauth_attempts
+            .lock()
+            .await
+            .insert(test_oauth_attempt("attempt-b", "notion"));
+        assert_eq!(superseded.unwrap().attempt_id, "attempt-a");
+        drop(_lifecycle_guard);
+        {
+            let (released, wake) = &*release;
+            *released.lock().unwrap() = true;
+            wake.notify_all();
+        }
+
+        assert!(completion.await.unwrap().is_err());
+        assert!(store.read_oauth_token("notion").await.unwrap().is_none());
+        assert!(store.get("notion").await.unwrap().is_none());
+        let registry = store.oauth_attempts.lock().await;
+        assert_eq!(
+            registry.active_by_server.get("notion").map(String::as_str),
+            Some("attempt-b")
+        );
+        assert_eq!(registry.attempts.len(), 1);
+        assert!(registry.attempts.contains_key("attempt-b"));
+        assert_eq!(
+            registry.status("attempt-a"),
+            McpOAuthAttemptStatus::Canceled
+        );
+        assert_eq!(registry.status("attempt-b"), McpOAuthAttemptStatus::Pending);
+        drop(registry);
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
