@@ -20,7 +20,11 @@ import { useToast } from "@/components/ui/use-toast";
 import { ensureChatGptPreset } from "@/lib/utils/chatgpt-preset";
 import { notifyConnectionsUpdated } from "@/lib/connections-events";
 import { foregroundAfterOAuth } from "@/lib/connections/foreground-oauth";
-import { appDeepLinkScheme } from "@/lib/connections/mcp-oauth";
+import {
+  cancelMcpOAuthAttempt,
+  pollMcpOAuthAttempt,
+  startMcpOAuthAttempt,
+} from "@/lib/connections/mcp-oauth-attempt";
 import {
   connectionResponseState,
   visibleConnectionCredentials,
@@ -3270,15 +3274,8 @@ function OAuthMcpPanel({
   const [busy, setBusy] = useState(false);
   const [waiting, setWaiting] = useState(false);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
-  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const cancelledRef = useRef(false);
-
-  const clearTimer = () => {
-    if (timerRef.current) {
-      clearTimeout(timerRef.current);
-      timerRef.current = null;
-    }
-  };
+  const attemptRef = useRef<string | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
 
   // Reflect reality on open: find this provider's MCP server created by a prior
   // connect and read its OAuth status.
@@ -3310,80 +3307,50 @@ function OAuthMcpPanel({
   useEffect(() => {
     loadStatus();
     return () => {
-      cancelledRef.current = true;
-      clearTimer();
+      abortRef.current?.abort();
+      if (attemptRef.current) void cancelMcpOAuthAttempt(attemptRef.current);
     };
   }, [loadStatus]);
 
   const handleConnect = async () => {
     setBusy(true);
     setStatusMsg(null);
-    cancelledRef.current = false;
-    clearTimer();
+    abortRef.current?.abort();
+    const abort = new AbortController();
+    abortRef.current = abort;
     try {
       // Reuse an existing server if present; otherwise create-on-complete
       // (the server is persisted only when OAuth succeeds).
       const targetId = serverId ?? mcpRandomId();
       const isNew = !serverId;
-      const appScheme = await appDeepLinkScheme();
-      const res = await localFetch(
-        `/mcp-servers/${encodeURIComponent(targetId)}/oauth/start`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(
-            isNew
-              ? {
-                  name,
-                  url: mcpUrl,
-                  headers: [],
-                  enabled: true,
-                  app_scheme: appScheme,
-                }
-              : { app_scheme: appScheme }
-          ),
-        }
+      const attemptId = await startMcpOAuthAttempt(
+        targetId,
+        isNew
+          ? {
+              name,
+              url: mcpUrl,
+              headers: [],
+              enabled: true,
+            }
+          : {},
       );
-      const body = await res.json();
-      if (!res.ok) {
-        setStatusMsg(body?.error ?? `Sign-in failed (HTTP ${res.status})`);
-        return;
-      }
-      await openUrl(body.data.auth_url);
+      attemptRef.current = attemptId;
       setWaiting(true);
       setStatusMsg("Finish sign-in in the browser…");
-      const started = Date.now();
-      const poll = async () => {
-        if (cancelledRef.current) return;
-        try {
-          const sr = await localFetch(
-            `/mcp-servers/${encodeURIComponent(targetId)}/oauth/status`
-          );
-          if (sr.ok) {
-            const sb = await sr.json();
-            if (sb?.data?.connected) {
-              clearTimer();
-              setWaiting(false);
-              setConnected(true);
-              setServerId(targetId);
-              setStatusMsg(null);
-              await foregroundAfterOAuth();
-              notifyConnectionsUpdated();
-              onConnected?.();
-              return;
-            }
-          }
-        } catch {}
-        if (Date.now() - started < 120_000) {
-          timerRef.current = setTimeout(poll, 2000);
-        } else {
-          setWaiting(false);
-          setStatusMsg(
-            "Sign-in was not completed — if your browser blocks http://localhost (e.g. Safari HTTPS-Only mode), click \"Open screenpipe\" on the confirmation page"
-          );
-        }
-      };
-      timerRef.current = setTimeout(poll, 2000);
+      const status = await pollMcpOAuthAttempt(attemptId, { signal: abort.signal });
+      if (attemptRef.current !== attemptId) return;
+      attemptRef.current = null;
+      setWaiting(false);
+      if (status === "completed") {
+        setConnected(true);
+        setServerId(targetId);
+        setStatusMsg(null);
+        await foregroundAfterOAuth();
+        notifyConnectionsUpdated();
+        onConnected?.();
+      } else {
+        setStatusMsg(status === "canceled" ? "Sign-in cancelled" : "Sign-in was not completed");
+      }
     } catch (e: any) {
       setWaiting(false);
       setStatusMsg(e?.message ?? String(e));
@@ -3392,9 +3359,11 @@ function OAuthMcpPanel({
     }
   };
 
-  const handleCancel = () => {
-    cancelledRef.current = true;
-    clearTimer();
+  const handleCancel = async () => {
+    const attemptId = attemptRef.current;
+    attemptRef.current = null;
+    abortRef.current?.abort();
+    if (attemptId) await cancelMcpOAuthAttempt(attemptId);
     setWaiting(false);
     setBusy(false);
     setStatusMsg("Sign-in cancelled");

@@ -348,7 +348,6 @@ fn is_api_auth_exempt_path(path: &str) -> bool {
         || path == "/audio/device/status"
         || path == "/vision/device/status"
         || path == "/connections/oauth/callback"
-        || (path.starts_with("/mcp-servers/") && path.ends_with("/oauth/callback"))
         || path == "/connections/browser/pair/start"
         || path == "/connections/browser/pair/status"
         || path == "/notify"
@@ -1459,9 +1458,8 @@ impl SCServer {
                             // Allow specific endpoints without auth:
                             // - /health: device monitor, tray status, startup polling
                             //   (called before frontend loads API key via IPC)
-                            // - /connections/oauth/callback and
-                            //   /mcp-servers/:id/oauth/callback: browser redirect from
-                            //   OAuth providers (no bearer token in redirect)
+                            // - /connections/oauth/callback: browser redirect from
+                            //   non-MCP OAuth providers (no bearer token in redirect)
                             // - /pipes/store/*: onboarding can fire pipe install before
                             //   the frontend's IPC key-fetch completes on cold start /
                             //   reinstall. Install/list/detail/update proxy the public
@@ -1836,8 +1834,8 @@ mod tests {
             "/health",
             "/ws/health",
             "/audio/device/status",
+            "/vision/device/status",
             "/connections/oauth/callback",
-            "/mcp-servers/example/oauth/callback",
             "/connections/browser/pair/start",
             "/connections/browser/pair/status",
             "/notify",
@@ -1846,6 +1844,9 @@ mod tests {
         ] {
             assert!(is_api_auth_exempt_path(path));
         }
+        assert!(!is_api_auth_exempt_path(
+            "/mcp-servers/oauth/attempt/example/status"
+        ));
     }
 
     #[test]

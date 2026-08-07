@@ -205,9 +205,10 @@ export function DeeplinkHandler() {
       // Safari's HTTPS-Only mode blocks plain-http localhost navigations, so
       // the relay finishes on https and hands the provider params back here:
       //   screenpipe[-enterprise]://oauth/connections/callback?code=...&state=...
-      //   screenpipe[-enterprise]://oauth/mcp/<serverId>/callback?code=...&state=...
       // This deep link is the relay's only delivery path. Forward it to the
-      // same engine endpoint the browser would have reached on localhost.
+      // same non-MCP engine endpoint the browser would have reached on localhost.
+      // MCP OAuth uses the dedicated one-time HTTPS relay and never places
+      // provider callback parameters in a desktop deep link.
       if (parsedUrl.host === "oauth") {
         const oauthPath = parsedUrl.pathname?.replace(/^\/+/, "") ?? "";
         const search = parsedUrl.searchParams.toString();
@@ -217,16 +218,6 @@ export function DeeplinkHandler() {
             const response = await localFetch(`/connections/oauth/callback${query}`);
             if (!response.ok) throw new Error(`callback failed (HTTP ${response.status})`);
             await foregroundAfterOAuth();
-          } else {
-            const mcpMatch = oauthPath.match(/^mcp\/([^/]+)\/callback$/);
-            if (mcpMatch) {
-              // mcpMatch[1] is already a percent-encoded path segment.
-              const response = await localFetch(
-                `/mcp-servers/${mcpMatch[1]}/oauth/callback${query}`,
-              );
-              if (!response.ok) throw new Error(`callback failed (HTTP ${response.status})`);
-              await foregroundAfterOAuth();
-            }
           }
         } catch (error) {
           const msg = error instanceof Error ? error.message : String(error);

@@ -26,11 +26,15 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { openUrl } from "@tauri-apps/plugin-opener";
+
 import { localFetch } from "@/lib/api";
 import { notifyConnectionsUpdated } from "@/lib/connections-events";
 import { foregroundAfterOAuth } from "@/lib/connections/foreground-oauth";
-import { appDeepLinkScheme } from "@/lib/connections/mcp-oauth";
+import {
+  cancelMcpOAuthAttempt,
+  pollMcpOAuthAttempt,
+  startMcpOAuthAttempt,
+} from "@/lib/connections/mcp-oauth-attempt";
 import { RegistryBrowser } from "./registry-browser";
 import type { McpHeader, McpServer, McpServerDraft } from "@/lib/mcp-registry";
 
@@ -483,8 +487,8 @@ function ServerEditor({
   const [oauthBusy, setOauthBusy] = useState(false);
   const [oauthWaiting, setOauthWaiting] = useState(false);
   const [oauthMessage, setOauthMessage] = useState<string | null>(null);
-  const oauthTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const oauthCancelledRef = useRef(false);
+  const oauthAttemptRef = useRef<string | null>(null);
+  const oauthAbortRef = useRef<AbortController | null>(null);
 
   const authHeader = initialHeaders.find(
     (h) => h.name.toLowerCase() === "authorization"
@@ -506,19 +510,14 @@ function ServerEditor({
     | null
   >(null);
 
-  const clearOAuthTimer = useCallback(() => {
-    if (oauthTimerRef.current) {
-      clearTimeout(oauthTimerRef.current);
-      oauthTimerRef.current = null;
-    }
-  }, []);
-
   useEffect(() => {
     return () => {
-      oauthCancelledRef.current = true;
-      clearOAuthTimer();
+      oauthAbortRef.current?.abort();
+      if (oauthAttemptRef.current) {
+        void cancelMcpOAuthAttempt(oauthAttemptRef.current);
+      }
     };
-  }, [clearOAuthTimer]);
+  }, []);
 
   const loadOAuthStatus = useCallback(async () => {
     try {
@@ -715,78 +714,41 @@ function ServerEditor({
     setOauthBusy(true);
     setOauthWaiting(false);
     setOauthMessage(null);
-    oauthCancelledRef.current = false;
-    clearOAuthTimer();
+    oauthAbortRef.current?.abort();
+    const abort = new AbortController();
+    oauthAbortRef.current = abort;
     setTestResult(null);
     try {
       if (!effectiveName || !url.trim()) return;
       const targetId = duplicateServer?.id ?? initial.id;
       if (mode === "edit" && !(await saveConfig())) return;
-      // A manual (non-DCR) client_id is registered against the engine's
-      // localhost callback, so only DCR flows go through the HTTPS relay.
-      const manualClientId = Boolean(initial.oauth?.client_id?.trim());
-      const appScheme = manualClientId ? undefined : await appDeepLinkScheme();
-      const res = await localFetch(
-        `/mcp-servers/${encodeURIComponent(targetId)}/oauth/start`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(
-            mode === "create" && !duplicateServer
-              ? {
-                  name: effectiveName,
-                  url: url.trim(),
-                  headers: headersForRequest(),
-                  enabled,
-                  app_scheme: appScheme,
-                }
-              : { app_scheme: appScheme }
-          ),
-        }
+      const attemptId = await startMcpOAuthAttempt(
+        targetId,
+        mode === "create" && !duplicateServer
+          ? {
+              name: effectiveName,
+              url: url.trim(),
+              headers: headersForRequest(),
+              enabled,
+            }
+          : {},
       );
-      const body = await res.json();
-      if (!res.ok) {
-        setTestResult({
-          kind: "err",
-          message: body?.error ?? `OAuth start failed (HTTP ${res.status})`,
-        });
-        return;
-      }
-      await openUrl(body.data.auth_url);
+      oauthAttemptRef.current = attemptId;
       setOauthWaiting(true);
       setOauthMessage("Finish sign-in in the browser");
       setOauthStatus({ connected: false, has_refresh_token: false });
-      const started = Date.now();
-      const poll = async () => {
-        if (oauthCancelledRef.current) return;
-        try {
-          const statusRes = await localFetch(
-            `/mcp-servers/${encodeURIComponent(targetId)}/oauth/status`
-          );
-          if (statusRes.ok) {
-            const statusBody = await statusRes.json();
-            const status = statusBody.data as McpOAuthStatus;
-            setOauthStatus(status);
-            if (status.connected) {
-              clearOAuthTimer();
-              setOauthWaiting(false);
-              setOauthMessage("OAuth connected");
-              await foregroundAfterOAuth();
-              onSaved();
-              return;
-            }
-          }
-        } catch {}
-        if (Date.now() - started < 120_000) {
-          oauthTimerRef.current = setTimeout(poll, 2000);
-        } else {
-          setOauthWaiting(false);
-          setOauthMessage(
-            "Sign-in was not completed — if your browser blocks http://localhost (e.g. Safari HTTPS-Only mode), click \"Open screenpipe\" on the confirmation page"
-          );
-        }
-      };
-      oauthTimerRef.current = setTimeout(poll, 2000);
+      const status = await pollMcpOAuthAttempt(attemptId, { signal: abort.signal });
+      if (oauthAttemptRef.current !== attemptId) return;
+      oauthAttemptRef.current = null;
+      setOauthWaiting(false);
+      if (status === "completed") {
+        setOauthMessage("OAuth connected");
+        await loadOAuthStatus();
+        await foregroundAfterOAuth();
+        onSaved();
+      } else {
+        setOauthMessage(status === "canceled" ? "Sign-in was cancelled" : "Sign-in was not completed");
+      }
     } catch (e: any) {
       setOauthWaiting(false);
       setOauthMessage(null);
@@ -796,9 +758,11 @@ function ServerEditor({
     }
   };
 
-  const handleOAuthCancel = () => {
-    oauthCancelledRef.current = true;
-    clearOAuthTimer();
+  const handleOAuthCancel = async () => {
+    const attemptId = oauthAttemptRef.current;
+    oauthAttemptRef.current = null;
+    oauthAbortRef.current?.abort();
+    if (attemptId) await cancelMcpOAuthAttempt(attemptId);
     setOauthWaiting(false);
     setOauthBusy(false);
     setOauthMessage("Sign-in was cancelled");

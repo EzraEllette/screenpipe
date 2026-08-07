@@ -15,7 +15,8 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::Utc;
 
-use crate::oauth_result_page::render_oauth_result_page;
+#[cfg(test)]
+use screenpipe_connect::mcp_servers::MCP_OAUTH_REDIRECT_URI;
 use screenpipe_connect::mcp_servers::{
     McpAuthMode, McpHeader, McpServerConfig, McpServerStore, McpTransport,
 };
@@ -101,8 +102,6 @@ pub struct RegistryQuery {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OAuthStartBody {
-    #[serde(default)]
-    pub app_scheme: Option<String>,
     #[serde(default)]
     pub name: Option<String>,
     #[serde(default)]
@@ -437,10 +436,6 @@ async fn oauth_start(
     Path(id): Path<String>,
     Json(body): Json<OAuthStartBody>,
 ) -> Response {
-    let redirect_uri = match mcp_oauth_redirect_uri(&id, body.app_scheme.as_deref()) {
-        Ok(uri) => uri,
-        Err(message) => return bad_request(message),
-    };
     let result = if let Some(url) = body.url.as_deref().map(str::trim).filter(|u| !u.is_empty()) {
         let name = body.name.as_deref().unwrap_or("").trim().to_string();
         if name.is_empty() {
@@ -465,12 +460,9 @@ async fn oauth_start(
             enabled: body.enabled,
             created_at: Utc::now().timestamp(),
         };
-        state
-            .store
-            .start_oauth_for_config(cfg, supplied, redirect_uri)
-            .await
+        state.store.start_oauth_for_config(cfg, supplied).await
     } else {
-        state.store.start_oauth(&id, redirect_uri).await
+        state.store.start_oauth(&id).await
     };
     match result {
         Ok(start) => Json(json!({ "data": start })).into_response(),
@@ -478,44 +470,21 @@ async fn oauth_start(
     }
 }
 
-/// GET /mcp-servers/:id/oauth/callback — browser redirect target.
-async fn oauth_callback(
+/// GET /mcp-servers/oauth/attempt/:attempt_id/status — exact attempt state.
+async fn oauth_attempt_status(
     State(state): State<McpServersState>,
-    Path(id): Path<String>,
-    Query(query): Query<HashMap<String, String>>,
+    Path(attempt_id): Path<String>,
 ) -> Response {
-    if let Some(error) = query.get("error") {
-        return html_response(
-            StatusCode::BAD_REQUEST,
-            &format!("screenpipe MCP OAuth failed: {}", error),
-        );
-    }
-    let Some(state_value) = query.get("state") else {
-        return html_response(
-            StatusCode::BAD_REQUEST,
-            "screenpipe MCP OAuth failed: missing state",
-        );
-    };
-    let Some(code) = query.get("code") else {
-        return html_response(
-            StatusCode::BAD_REQUEST,
-            "screenpipe MCP OAuth failed: missing code",
-        );
-    };
-    match state.store.complete_oauth(state_value, code).await {
-        Ok(server_id) if server_id == id => html_response(
-            StatusCode::OK,
-            "screenpipe MCP OAuth connected. You can close this tab.",
-        ),
-        Ok(_) => html_response(
-            StatusCode::BAD_REQUEST,
-            "screenpipe MCP OAuth failed: callback server mismatch",
-        ),
-        Err(e) => html_response(
-            StatusCode::BAD_REQUEST,
-            &format!("screenpipe MCP OAuth failed: {}", e),
-        ),
-    }
+    Json(json!({ "data": state.store.oauth_attempt_status(&attempt_id).await })).into_response()
+}
+
+/// POST /mcp-servers/oauth/attempt/:attempt_id/cancel — idempotent exact cancel.
+async fn oauth_attempt_cancel(
+    State(state): State<McpServersState>,
+    Path(attempt_id): Path<String>,
+) -> Response {
+    state.store.cancel_oauth_attempt(&attempt_id).await;
+    Json(json!({ "success": true })).into_response()
 }
 
 /// POST /mcp-servers/:id/oauth/disconnect — wipe stored token.
@@ -679,55 +648,6 @@ fn not_found(id: &str) -> Response {
         .into_response()
 }
 
-fn html_response(status: StatusCode, message: &str) -> Response {
-    let ok = status.is_success();
-    let title = if ok {
-        "MCP connected"
-    } else {
-        "Connection needs attention"
-    };
-    let detail = if ok {
-        "screenpipe can now use this MCP server."
-    } else {
-        "screenpipe could not finish the MCP OAuth flow."
-    };
-    (
-        status,
-        [("content-type", "text/html; charset=utf-8")],
-        render_oauth_result_page("screenpipe MCP OAuth", title, detail, message, ok),
-    )
-        .into_response()
-}
-
-fn url_path_segment(value: &str) -> String {
-    value
-        .bytes()
-        .flat_map(|b| {
-            if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
-                vec![b as char]
-            } else {
-                format!("%{:02X}", b).chars().collect()
-            }
-        })
-        .collect()
-}
-
-fn mcp_oauth_redirect_uri(
-    server_id: &str,
-    app_scheme: Option<&str>,
-) -> Result<String, &'static str> {
-    let server_id = url_path_segment(server_id);
-    match app_scheme {
-        None => Ok(format!(
-            "http://localhost:3030/mcp-servers/{server_id}/oauth/callback"
-        )),
-        Some(scheme @ ("screenpipe" | "screenpipe-enterprise")) => Ok(format!(
-            "https://screenpi.pe/api/oauth/mcp/{server_id}/callback?app_scheme={scheme}"
-        )),
-        Some(_) => Err("app_scheme must be screenpipe or screenpipe-enterprise"),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Router
 // ---------------------------------------------------------------------------
@@ -755,8 +675,15 @@ where
         .route("/:id/tools", get(list_tools))
         .route("/:id/call", post(call_tool))
         .route("/:id/oauth/status", get(oauth_status))
+        .route(
+            "/oauth/attempt/:attempt_id/status",
+            get(oauth_attempt_status),
+        )
+        .route(
+            "/oauth/attempt/:attempt_id/cancel",
+            post(oauth_attempt_cancel),
+        )
         .route("/:id/oauth/start", post(oauth_start))
-        .route("/:id/oauth/callback", get(oauth_callback))
         .route("/:id/oauth/disconnect", post(oauth_disconnect))
         .route(
             "/:id",
@@ -911,31 +838,21 @@ mod tests {
     }
 
     #[test]
-    fn oauth_redirect_defaults_to_encoded_local_callback() {
+    fn oauth_redirect_is_one_fixed_claimed_https_uri() {
         assert_eq!(
-            mcp_oauth_redirect_uri("a/b c", None).unwrap(),
-            "http://localhost:3030/mcp-servers/a%2Fb%20c/oauth/callback"
+            MCP_OAUTH_REDIRECT_URI,
+            "https://screenpi.pe/api/mcp/oauth/callback"
         );
-    }
-
-    #[test]
-    fn oauth_redirect_allows_only_exact_app_schemes() {
-        assert_eq!(
-            mcp_oauth_redirect_uri("linear", Some("screenpipe")).unwrap(),
-            "https://screenpi.pe/api/oauth/mcp/linear/callback?app_scheme=screenpipe"
-        );
-        assert_eq!(
-            mcp_oauth_redirect_uri("linear", Some("screenpipe-enterprise")).unwrap(),
-            "https://screenpi.pe/api/oauth/mcp/linear/callback?app_scheme=screenpipe-enterprise"
-        );
-        assert!(mcp_oauth_redirect_uri("linear", Some("https")).is_err());
-        assert!(mcp_oauth_redirect_uri("linear", Some("screenpipe://evil")).is_err());
     }
 
     #[test]
     fn oauth_start_body_rejects_caller_supplied_redirect_uri() {
         let body = serde_json::from_value::<OAuthStartBody>(json!({
             "redirect_uri": "https://attacker.example/callback"
+        }));
+        assert!(body.is_err());
+        let body = serde_json::from_value::<OAuthStartBody>(json!({
+            "app_scheme": "screenpipe"
         }));
         assert!(body.is_err());
     }
