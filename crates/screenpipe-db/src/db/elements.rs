@@ -168,24 +168,39 @@ LIMIT ? OFFSET ?
 
         Ok(rows
             .iter()
-            .map(|row| {
-                let mut positions = if !query.is_empty() {
-                    let ocr_blocks: Vec<OcrTextBlock> =
-                        serde_json::from_str(&row.text_json).unwrap_or_default();
+            .filter_map(|row| {
+                let origins = matching_origins(
+                    query,
+                    fuzzy_match,
+                    &row.ocr_text,
+                    &row.text_json,
+                    row.accessibility_tree_json.as_deref(),
+                    &row.app_name,
+                    &row.window_name,
+                    &row.url,
+                );
+                if !query.is_empty() && !origins.any() {
+                    return None;
+                }
+
+                let ocr_blocks: Vec<OcrTextBlock> =
+                    serde_json::from_str(&row.text_json).unwrap_or_default();
+                let mut positions = if origins.ocr && !query.is_empty() {
                     find_matching_positions(&ocr_blocks, query)
                 } else {
                     Vec::new()
                 };
 
-                // Fallback: when OCR yields no positions, search accessibility
-                // tree nodes for the query and use their bounding boxes
-                if positions.is_empty() && !query.is_empty() {
+                // AX text qualifies only when this frame's current tree marks
+                // the matching node on-screen. Missing visibility is unknown,
+                // not proof that the user saw it.
+                if positions.is_empty() && origins.a11y && !query.is_empty() {
                     if let Some(tree_json) = &row.accessibility_tree_json {
-                        positions = find_matching_a11y_positions(tree_json, query);
+                        positions = find_matching_on_screen_a11y_positions(tree_json, query);
                     }
                 }
 
-                SearchMatch {
+                Some(SearchMatch {
                     frame_id: row.id,
                     timestamp: row.timestamp,
                     text_positions: positions.clone(),
@@ -195,7 +210,7 @@ LIMIT ? OFFSET ?
                     text: row.ocr_text.clone(),
                     url: row.url.clone(),
                     text_source: row.text_source.clone(),
-                }
+                })
             })
             .collect())
     }
@@ -377,10 +392,9 @@ LIMIT ? OFFSET ?
         Ok(rows.into_iter().map(Element::from).collect())
     }
 
-    /// Lightweight search for grouped results — skips text/text_json columns entirely.
-    /// Returns SearchMatch with empty text, text_positions, and zero confidence.
-    /// ~10x faster than search_with_text_positions because it avoids reading and
-    /// parsing large OCR text blobs.
+    /// Search candidates for grouping without returning frame text or positions.
+    /// Candidate validation still reads each frame's OCR boxes and current AX
+    /// tree so grouped search cannot restore hidden-only matches.
     #[allow(clippy::too_many_arguments)]
     pub async fn search_for_grouping(
         &self,
@@ -442,13 +456,16 @@ LIMIT ? OFFSET ?
         let sql = if let Some(cap) = max_per_app {
             format!(
                 r#"
-SELECT id, timestamp, url, app_name, window_name FROM (
+SELECT id, timestamp, url, app_name, window_name, ocr_text, text_json, accessibility_tree_json FROM (
     SELECT
         f.id,
         f.timestamp,
         f.browser_url as url,
         COALESCE(f.app_name, '') as app_name,
         COALESCE(f.window_name, '') as window_name,
+        COALESCE(f.full_text, f.accessibility_text, '') as ocr_text,
+        COALESCE(f.text_json, '') as text_json,
+        f.accessibility_tree_json,
         ROW_NUMBER() OVER (
             PARTITION BY COALESCE(f.app_name, '')
             ORDER BY f.timestamp {order_dir}
@@ -472,7 +489,10 @@ SELECT
     f.timestamp,
     f.browser_url as url,
     COALESCE(f.app_name, '') as app_name,
-    COALESCE(f.window_name, '') as window_name
+    COALESCE(f.window_name, '') as window_name,
+    COALESCE(f.full_text, f.accessibility_text, '') as ocr_text,
+    COALESCE(f.text_json, '') as text_json,
+    f.accessibility_tree_json
 FROM frames f
 WHERE {}
 ORDER BY f.timestamp {}
@@ -509,6 +529,20 @@ LIMIT ? OFFSET ?
 
         Ok(rows
             .into_iter()
+            .filter(|row| {
+                query.is_empty()
+                    || matching_origins(
+                        query,
+                        fuzzy_match,
+                        &row.ocr_text,
+                        &row.text_json,
+                        row.accessibility_tree_json.as_deref(),
+                        &row.app_name,
+                        &row.window_name,
+                        &row.url,
+                    )
+                    .any()
+            })
             .map(|row| SearchMatch {
                 frame_id: row.id,
                 timestamp: row.timestamp,
@@ -589,6 +623,46 @@ LIMIT ? OFFSET ?
         }
 
         groups
+    }
+}
+
+struct MatchingOrigins {
+    ocr: bool,
+    a11y: bool,
+    metadata: bool,
+}
+
+impl MatchingOrigins {
+    fn any(&self) -> bool {
+        self.ocr || self.a11y || self.metadata
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn matching_origins(
+    query: &str,
+    fuzzy_match: bool,
+    ocr_text: &str,
+    text_json: &str,
+    accessibility_tree_json: Option<&str>,
+    app_name: &str,
+    window_name: &str,
+    url: &str,
+) -> MatchingOrigins {
+    let ocr_blocks: Vec<OcrTextBlock> = serde_json::from_str(text_json).unwrap_or_default();
+    let ocr = ocr_blocks.iter().any(|block| {
+        crate::text_normalizer::text_matches_search_query(&block.text, query, fuzzy_match)
+    }) || (accessibility_tree_json.is_none()
+        && crate::text_normalizer::text_matches_search_query(ocr_text, query, fuzzy_match));
+    let a11y = accessibility_tree_json
+        .is_some_and(|tree| on_screen_a11y_matches_query(tree, query, fuzzy_match));
+    let metadata = [app_name, window_name, url]
+        .iter()
+        .any(|value| crate::text_normalizer::text_matches_search_query(value, query, fuzzy_match));
+    MatchingOrigins {
+        ocr,
+        a11y,
+        metadata,
     }
 }
 

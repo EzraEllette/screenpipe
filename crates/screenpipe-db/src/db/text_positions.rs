@@ -93,6 +93,45 @@ pub(crate) fn narrow_bbox_to_needle(
 /// Search accessibility tree JSON nodes for a query and return matching positions.
 /// Used as fallback when OCR text_json has no bounding boxes for a frame.
 pub fn find_matching_a11y_positions(tree_json: &str, query: &str) -> Vec<TextPosition> {
+    find_matching_a11y_positions_where(tree_json, query, |_| true)
+}
+
+/// Search only accessibility nodes proven visible in the captured frame.
+/// Missing `on_screen` is intentionally not treated as visible.
+pub(crate) fn find_matching_on_screen_a11y_positions(
+    tree_json: &str,
+    query: &str,
+) -> Vec<TextPosition> {
+    find_matching_a11y_positions_where(tree_json, query, |node| {
+        node.get("on_screen").and_then(serde_json::Value::as_bool) == Some(true)
+    })
+}
+
+pub(crate) fn on_screen_a11y_matches_query(
+    tree_json: &str,
+    query: &str,
+    fuzzy_match: bool,
+) -> bool {
+    let nodes: Vec<serde_json::Value> = match serde_json::from_str(tree_json) {
+        Ok(nodes) => nodes,
+        Err(_) => return false,
+    };
+    nodes.iter().any(|node| {
+        node.get("on_screen").and_then(serde_json::Value::as_bool) == Some(true)
+            && node
+                .get("text")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|text| {
+                    crate::text_normalizer::text_matches_search_query(text, query, fuzzy_match)
+                })
+    })
+}
+
+fn find_matching_a11y_positions_where(
+    tree_json: &str,
+    query: &str,
+    include: impl Fn(&serde_json::Value) -> bool,
+) -> Vec<TextPosition> {
     let nodes: Vec<serde_json::Value> = match serde_json::from_str(tree_json) {
         Ok(n) => n,
         Err(_) => return Vec::new(),
@@ -103,6 +142,7 @@ pub fn find_matching_a11y_positions(tree_json: &str, query: &str) -> Vec<TextPos
 
     let mut matches: Vec<TextPosition> = nodes
         .iter()
+        .filter(|node| include(node))
         .filter_map(|n| {
             let text = n.get("text")?.as_str()?;
             if text.trim().is_empty() {

@@ -631,6 +631,9 @@ pub struct FrameRowLight {
     pub url: String,
     pub app_name: String,
     pub window_name: String,
+    pub ocr_text: String,
+    pub text_json: String,
+    pub accessibility_tree_json: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, OaSchema, PartialEq, Default)]
