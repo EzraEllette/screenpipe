@@ -453,6 +453,17 @@ fn a11y_match_uses_line_for_line_3_when_multiline_capture_complete() {
     assert!((p.bounds.height - 0.06).abs() < 0.001);
 }
 
+#[test]
+fn on_screen_a11y_match_requires_explicit_true_without_requiring_bounds() {
+    let visible = r#"[{"text":"needle","on_screen":true}]"#;
+    let hidden = r#"[{"text":"needle","on_screen":false}]"#;
+    let unknown = r#"[{"text":"needle"}]"#;
+
+    assert!(match_on_screen_a11y(visible, "needle", true).matched);
+    assert!(!match_on_screen_a11y(hidden, "needle", true).matched);
+    assert!(!match_on_screen_a11y(unknown, "needle", true).matched);
+}
+
 fn make_search_match(
     frame_id: i64,
     timestamp_secs: i64,
