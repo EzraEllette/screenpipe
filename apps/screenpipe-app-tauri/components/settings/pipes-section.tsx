@@ -990,8 +990,8 @@ function PipePresetSelector({
           allowNone
           includeAgentPresets={false}
           controlledPresetId={primaryPreset}
-          onControlledSelect={(presetId) =>
-            savePresets(presetId || null, fallbackPreset)
+          onControlledSelect={(preset) =>
+            savePresets(preset?.id ?? null, fallbackPreset)
           }
         />
       </div>
@@ -1015,8 +1015,8 @@ function PipePresetSelector({
             allowNone
             includeAgentPresets={false}
             controlledPresetId={fallbackPreset}
-            onControlledSelect={(presetId) =>
-              savePresets(primaryPreset, presetId || null)
+            onControlledSelect={(preset) =>
+              savePresets(primaryPreset, preset?.id ?? null)
             }
           />
           <p className="text-[10px] text-muted-foreground mt-1">
