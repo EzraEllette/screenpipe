@@ -26,7 +26,7 @@ import {
   promptWithConversationHistory,
 } from "@/components/chat/standalone/hooks/pi-message-preparation";
 import type { ChatSendOptions, Message } from "@/lib/chat/types";
-import { normalizeComposerTimeRangesForModel } from "@/lib/chat-utils";
+import { normalizeComposerMentionsForModel } from "@/lib/chat-utils";
 import { chatSendTelemetryContext } from "@/lib/chat/response-feedback";
 import type { PiSendTransportOptions } from "@/components/chat/standalone/hooks/pi-types";
 
@@ -108,6 +108,7 @@ export function usePiSendTransport(options: PiSendTransportOptions) {
     prefillContext,
     prefillFrameId,
     prefillSource,
+    resolveComposerMentions,
     restartCurrentPiSession,
     saveConversation,
     sendDispatchInFlightRef,
@@ -831,11 +832,21 @@ export function usePiSendTransport(options: PiSendTransportOptions) {
   ) {
     if ((!canChat && !autoSendBypassRef.current) || (!getActivePreset() && !autoSendBypassRef.current)) return;
     const originalTrimmed = userMessage.trim();
-    const normalizedTimeRanges = normalizeComposerTimeRangesForModel(originalTrimmed);
-    const trimmed = normalizedTimeRanges.modelInput.trim();
-    const resolvedDisplayLabel = normalizedTimeRanges.timeRanges.length > 0
-      ? (displayLabel ?? originalTrimmed)
-      : displayLabel;
+    // Composer mentions (`@app`, `@audio`, `@"speaker"`, `#tag`, `~range`,
+    // `$skill`) are resolved into an explicit context block here. Without this
+    // the model receives the raw token and has to guess what the chips above
+    // the input already decided. `resolveComposerMentions` is supplied by the
+    // chat surface because the app-tag map and installed skills live there;
+    // the pure fallback still covers the static aliases.
+    const normalizedMentions = resolveComposerMentions
+      ? await resolveComposerMentions(originalTrimmed)
+      : normalizeComposerMentionsForModel(originalTrimmed);
+    const trimmed = normalizedMentions.modelInput.trim();
+    // The bubble keeps the sentence the user actually typed; only the wire
+    // payload carries the resolved block.
+    const resolvedDisplayLabel = trimmed === originalTrimmed
+      ? displayLabel
+      : (displayLabel ?? originalTrimmed);
     const outgoingImages = imageDataUrls ?? pastedImages;
     const queuedDocs = attachedDocsRef.current;
     if (!trimmed && outgoingImages.length === 0 && queuedDocs.length === 0) return;

@@ -12,7 +12,7 @@ import {
   findComposerMention,
   filterMentionSuggestions,
   mentionSuggestionIdentity,
-  normalizeComposerTimeRangesForModel,
+  normalizeComposerMentionsForModel,
   parseMentions,
   resolvePinnedMentionIndex,
   TIME_RANGE_MENTION_SUGGESTIONS,
@@ -306,7 +306,7 @@ describe("global chat mentions", () => {
   it("sends exact ISO boundaries instead of an ambiguous date token", () => {
     const expectedStart = new Date(2025, 3, 3, 0, 0, 0, 0).toISOString();
     const expectedEnd = new Date(2025, 3, 3, 23, 59, 59, 999).toISOString();
-    const normalized = normalizeComposerTimeRangesForModel(
+    const normalized = normalizeComposerMentionsForModel(
       "summarize activity ~(03/04/2025)",
       { now: new Date(2026, 6, 30, 12, 0, 0) },
     );
@@ -315,7 +315,25 @@ describe("global chat mentions", () => {
     expect(normalized.modelInput).toContain(`start_time: ${expectedStart}`);
     expect(normalized.modelInput).toContain(`end_time: ${expectedEnd}`);
     expect(normalized.modelInput).toContain("summarize activity");
-    expect(normalized.timeRanges).toHaveLength(1);
+    expect(normalized.context.timeRanges).toHaveLength(1);
+  });
+
+  it("sends the filter chips as resolved values, not raw tokens", () => {
+    // The regression: the chips said "audio / Slack / #project" while the
+    // model only ever saw the literal characters and had to guess.
+    const normalized = normalizeComposerMentionsForModel(
+      "@audio @slack #project what did we decide",
+      { now: new Date(2026, 6, 30, 12, 0, 0) },
+    );
+
+    expect(normalized.modelInput).toContain("content_type: audio");
+    expect(normalized.modelInput).toContain("app_name: Slack");
+    expect(normalized.modelInput).toContain("tags: project");
+
+    const sentence = normalized.modelInput
+      .split("</screenpipe_query_context>")[1]
+      ?.trim();
+    expect(sentence).toBe("what did we decide");
   });
 
   it("keeps a keyboard-selected filter pinned when recent chats arrive", () => {

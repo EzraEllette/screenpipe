@@ -11,6 +11,7 @@ import type {
   PiQueuedPrompt,
 } from "@/lib/utils/tauri";
 import type { ExtractedDoc } from "@/lib/pi/extract-document";
+import type { ComposerMentionContext } from "@/lib/chat-utils";
 import type {
   ChatAttachment,
   ChatSendOptions,
@@ -210,6 +211,15 @@ export type PiSendTransportOptions = {
   prefillContext: string | null;
   prefillFrameId: number | null;
   prefillSource: string;
+  /**
+   * Resolves composer mention tokens into a `<screenpipe_query_context>` block
+   * before the turn is sent. Owned by the chat surface because it needs the
+   * live app-tag map and the installed skill list. Omit it and the transport
+   * falls back to the pure resolver (static app aliases only).
+   */
+  resolveComposerMentions?: (
+    input: string,
+  ) => Promise<{ modelInput: string; context: ComposerMentionContext }>;
   queuedPrompts: PiQueuedPrompt[];
   registerTurnIntent: TurnIntentActions["registerTurnIntent"];
   markTurnIntentConsumed: TurnIntentActions["markTurnIntentConsumed"];

@@ -577,43 +577,143 @@ export interface ComposerTimeRangeContext {
   endTime: string;
 }
 
-export function normalizeComposerTimeRangesForModel(
+export interface ComposerSkillReference {
+  /** Folder key used as the `$tag`, e.g. `deep-research` for `$deep-research`. */
+  name: string;
+  /** Absolute path to the skill so the agent can load it without searching. */
+  path: string;
+}
+
+export interface ComposerMentionContext {
+  timeRanges: ComposerTimeRangeContext[];
+  contentType: string | null;
+  appName: string | null;
+  speakerName: string | null;
+  tagNames: string[];
+  skills: ComposerSkillReference[];
+}
+
+export interface NormalizeComposerMentionsOptions extends ParseMentionsOptions {
+  /** Installed skills, used to turn a bare `$name` into a loadable path. */
+  skills?: ComposerSkillReference[];
+}
+
+const SKILL_MENTION_PATTERN = /(^|\s)\$([\w:.-]+)/g;
+
+function emptyMentionContext(): ComposerMentionContext {
+  return {
+    timeRanges: [],
+    contentType: null,
+    appName: null,
+    speakerName: null,
+    tagNames: [],
+    skills: [],
+  };
+}
+
+/**
+ * Turn composer mention tokens into an explicit contract the model can act on.
+ *
+ * The composer is plain text, so `@audio`, `@slack`, `@"John Doe"`, `#tag`,
+ * `~lastweek` and `$skill` are just characters by the time a turn is sent. The
+ * chips above the input promise a filter; without this step the model only
+ * receives the raw token and has to guess what it meant. That guess is the bug:
+ * a mention that renders as an active filter must arrive as a resolved value.
+ *
+ * So every token the UI already resolved for its chips is resolved again here,
+ * emitted as a `<screenpipe_query_context>` block, and removed from the
+ * user-visible sentence (the same split Claude Code and Codex use: resolved
+ * context travels beside the prompt, never inside it). Tokens that could not be
+ * resolved are left untouched so nothing silently disappears.
+ */
+export function normalizeComposerMentionsForModel(
   input: string,
-  options?: { now?: Date },
+  options?: NormalizeComposerMentionsOptions,
 ): {
   modelInput: string;
-  timeRanges: ComposerTimeRangeContext[];
+  context: ComposerMentionContext;
 } {
-  const now = options?.now ? new Date(options.now) : new Date();
-  const parsed = parseExplicitTimeRanges(input, now);
-  const timeRanges = parsed.ranges.map((range) => ({
+  const parsed = parseMentions(input, options);
+  const timeRanges = parsed.timeRanges.map((range) => ({
     label: range.label,
     startTime: range.start.toISOString(),
     endTime: range.end.toISOString(),
   }));
 
-  if (timeRanges.length === 0) {
-    return { modelInput: input, timeRanges };
+  // `$skill` is an action, not a filter, so parseMentions leaves it alone.
+  // Resolve it against the installed set; an unknown `$foo` stays in the
+  // sentence rather than vanishing into a context block that means nothing.
+  const installedSkills = options?.skills ?? [];
+  const skills: ComposerSkillReference[] = [];
+  let cleanedInput = parsed.cleanedInput;
+  if (installedSkills.length > 0) {
+    cleanedInput = cleanedInput.replace(
+      SKILL_MENTION_PATTERN,
+      (match, leading: string, name: string) => {
+        const skill = installedSkills.find(
+          (candidate) => candidate.name.toLowerCase() === name.toLowerCase(),
+        );
+        if (!skill) return match;
+        if (!skills.some((existing) => existing.name === skill.name)) {
+          skills.push(skill);
+        }
+        return leading;
+      },
+    );
   }
 
-  const queryContext = timeRanges.flatMap((range, index) => [
-    `time_range_${index + 1}:`,
-    `  label: ${range.label}`,
-    `  start_time: ${range.startTime}`,
-    `  end_time: ${range.endTime}`,
-  ]);
+  const context: ComposerMentionContext = {
+    timeRanges,
+    contentType: parsed.contentType,
+    appName: parsed.appName,
+    speakerName: parsed.speakerName,
+    tagNames: parsed.tagNames,
+    skills,
+  };
+
+  const hasResolvedMention =
+    timeRanges.length > 0 ||
+    Boolean(parsed.contentType) ||
+    Boolean(parsed.appName) ||
+    Boolean(parsed.speakerName) ||
+    parsed.tagNames.length > 0 ||
+    skills.length > 0;
+
+  if (!hasResolvedMention) {
+    return { modelInput: input, context: emptyMentionContext() };
+  }
+
+  const lines: string[] = [];
+  for (const [index, range] of timeRanges.entries()) {
+    lines.push(
+      `time_range_${index + 1}:`,
+      `  label: ${range.label}`,
+      `  start_time: ${range.startTime}`,
+      `  end_time: ${range.endTime}`,
+    );
+  }
+  if (context.contentType) lines.push(`content_type: ${context.contentType}`);
+  if (context.appName) lines.push(`app_name: ${context.appName}`);
+  if (context.speakerName) lines.push(`speaker: ${context.speakerName}`);
+  if (context.tagNames.length > 0) lines.push(`tags: ${context.tagNames.join(", ")}`);
+  for (const [index, skill] of skills.entries()) {
+    lines.push(`skill_${index + 1}:`, `  name: ${skill.name}`, `  path: ${skill.path}`);
+  }
+  if (skills.length > 0) {
+    lines.push("Load each listed skill from its path before answering.");
+  }
 
   return {
     modelInput: [
       "<screenpipe_query_context>",
-      "Use these exact ISO 8601 boundaries for screenpipe queries; do not reinterpret the original date token.",
-      ...queryContext,
+      "The user selected these filters in the composer. Use these exact values when querying screenpipe; do not reinterpret the original tokens.",
+      ...lines,
       "</screenpipe_query_context>",
-      parsed.cleanedInput,
+      cleanedInput.replace(/\s+/g, " ").trim(),
     ]
       .filter(Boolean)
       .join("\n"),
-    timeRanges,
+    context,
   };
 }
 
@@ -890,18 +990,32 @@ export function buildChatMentionSuggestions(
     }));
 }
 
+/**
+ * The `$tag` a skill is addressed by. Shared so the dropdown and the send-time
+ * resolver agree on the key; if they drift, `$name` stops resolving to a path.
+ */
+export function skillMentionKey(item: SkillMentionItem): string {
+  const pathParts = item.path.split(/[\\/]/).filter(Boolean);
+  const folderName = pathParts.at(-1);
+  const fallbackName = item.name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return folderName || fallbackName || "skill";
+}
+
+export function buildComposerSkillReferences(
+  items: SkillMentionItem[],
+): ComposerSkillReference[] {
+  return items.map((item) => ({ name: skillMentionKey(item), path: item.path }));
+}
+
 export function buildSkillMentionSuggestions(
   items: SkillMentionItem[],
 ): MentionSuggestion[] {
   return items.map((item) => {
-    const pathParts = item.path.split(/[\\/]/).filter(Boolean);
-    const folderName = pathParts.at(-1);
-    const fallbackName = item.name
-      .trim()
-      .toLowerCase()
-      .replace(/[^a-z0-9._-]+/g, "-")
-      .replace(/^-+|-+$/g, "");
-    const skillKey = folderName || fallbackName || "skill";
+    const skillKey = skillMentionKey(item);
     return {
       tag: `$${skillKey}`,
       label: item.name.trim() || skillKey,

@@ -39,8 +39,11 @@ import { loadConversationFile } from "@/lib/chat-storage";
 import {
   buildAppMentionSuggestions,
   buildTagMentionSuggestions,
+  buildComposerSkillReferences,
   isConversationHistorySyncPrompt,
   isInjectedTitleSourcePrompt,
+  normalizeComposerMentionsForModel,
+  type ComposerSkillReference,
 } from "@/lib/chat-utils";
 import { useAutoSuggestions } from "@/lib/hooks/use-auto-suggestions";
 import {
@@ -364,6 +367,29 @@ export function StandaloneChat({
     }
     return map;
   }, [appMentionSuggestions]);
+  // Installed skills are only needed to turn a typed `$name` into a loadable
+  // path, so they are fetched on the first turn that actually contains a `$`
+  // token and cached for the rest of the session.
+  const composerSkillsRef = useRef<ComposerSkillReference[] | null>(null);
+  const resolveComposerMentions = React.useCallback(
+    async (text: string) => {
+      let skills = composerSkillsRef.current ?? [];
+      if (/(^|\s)\$[\w:.-]+/.test(text) && composerSkillsRef.current === null) {
+        try {
+          const result = await commands.listImportedSkills();
+          skills = result.status === "ok"
+            ? buildComposerSkillReferences(result.data)
+            : [];
+        } catch {
+          skills = [];
+        }
+        composerSkillsRef.current = skills;
+      }
+      return normalizeComposerMentionsForModel(text, { appTagMap, skills });
+    },
+    [appTagMap],
+  );
+
   const openMentionConversationRef = useRef<
     ((conversationId: string) => void | Promise<void>) | null
   >(null);
@@ -1016,7 +1042,7 @@ export function StandaloneChat({
 
   useChatPanelEffects({
     inputRef,
-    showMentionDropdown,
+    mentionDropdownIsOpen: showMentionDropdown && filteredMentions.length > 0,
     isLoading,
     isStreaming,
     piActiveStopRequestedRef,
@@ -1091,6 +1117,7 @@ export function StandaloneChat({
     prefillContext,
     prefillFrameId,
     prefillSource,
+    resolveComposerMentions,
     queuedPrompts,
     registerTurnIntent,
     markTurnIntentConsumed,
