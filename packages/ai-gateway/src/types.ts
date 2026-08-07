@@ -302,6 +302,14 @@ export interface AuthResult {
 	hostedAiTrial?: boolean;
 	deviceId: string;
 	userId?: string;
+	/** Clerk subject proven by Clerk JWT verification or an authenticated /api/user response. */
+	clerkUserId?: string;
+	/**
+	 * True when `clerkUserId` was proven by verifying a Clerk JWT in this
+	 * request; false/absent when it was read from the website's user row, where
+	 * a stale value must not be treated as proof the Clerk account is gone.
+	 */
+	clerkUserIdVerified?: boolean;
 	/** True only for the dedicated backend service bearer. */
 	service?: boolean;
 	error?: string;
