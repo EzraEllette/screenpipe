@@ -368,6 +368,21 @@ describe("app entitlement", () => {
     expect(hasCloudEntitlement(normalized)).toBe(true);
   });
 
+  it("normalizes an authenticated legacy cloud denial as verified free", () => {
+    const normalized = normalizeAppUser(
+      {
+        id: "user_legacy_free",
+        cloud_subscribed: false,
+      },
+      "token",
+    );
+
+    expect(getLocalPlanPolicy(normalized)).toBe("verified-free");
+    expect(isAuthenticatedFreeUser(normalized)).toBe(true);
+    expect(hasVerifiedPaidPlan(normalized)).toBe(false);
+    expect(hasAppEntitlement(normalized)).toBe(false);
+  });
+
   // The server computes `subscription_plan` per request and may omit it while
   // still returning a complete entitlement. Falling back to an invented label
   // ("pro"/"standard") then contradicted the entitlement's own plan, and
