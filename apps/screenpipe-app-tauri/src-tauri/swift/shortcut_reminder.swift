@@ -295,16 +295,33 @@ struct ScreenMatrixView: View {
 // Concept #4: Audio-reactive pill that expands on hover
 
 // Base sizes — multiplied by gOverlayScale at panel creation
-private let kBaseCollapsedW: CGFloat = 68
+private let kBaseCollapsedW: CGFloat = 81
 private let kBaseCollapsedH: CGFloat = 24
 private let kBaseExpandedW: CGFloat = 224
-private let kBaseExpandedH: CGFloat = 58
+private let kBaseExpandedH: CGFloat = 62
 private let kBaseDockH: CGFloat = 30
-private let kBaseDisclosureH: CGFloat = 22
+private let kBaseDisclosureH: CGFloat = 26
 private let kBaseDisclosureGap: CGFloat = 4
 private let kBaseTranscriptW: CGFloat = 280
 private let kBaseTranscriptH: CGFloat = 142
 private let kAnimDur: Double = 0.2
+
+func overlayHoverRect(
+    in bounds: NSRect,
+    expanded: Bool,
+    disclosureDown: Bool,
+    scale: CGFloat
+) -> NSRect {
+    let collapsedScale = 1 + (scale - 1) * 0.2
+    let width = expanded ? kBaseExpandedW * scale : kBaseCollapsedW * collapsedScale
+    let height = expanded ? kBaseDockH * scale : kBaseCollapsedH * collapsedScale
+    return NSRect(
+        x: bounds.midX - width / 2,
+        y: disclosureDown ? bounds.maxY - height : bounds.minY,
+        width: width,
+        height: height
+    )
+}
 
 func disclosureContent(
     for control: String?,
@@ -359,21 +376,21 @@ struct ShortcutDisclosureView: View {
     var body: some View {
         HStack(spacing: s(6)) {
             Text(label)
-                .font(Brand.swiftUIMonoFont(size: 8 * scale))
-                .foregroundColor(.white.opacity(0.72))
+                .font(Brand.swiftUIMonoFont(size: 10 * scale))
+                .foregroundColor(.white.opacity(0.86))
             if let value = value, !value.isEmpty {
                 Text(value)
-                    .font(Brand.swiftUIMonoFont(size: 8 * scale, weight: .semibold))
+                    .font(Brand.swiftUIMonoFont(size: 10 * scale, weight: .semibold))
                     .foregroundColor(.white)
-                    .padding(.horizontal, s(5))
-                    .frame(height: s(16))
-                    .overlay(Rectangle().stroke(.white.opacity(0.35), lineWidth: 1))
+                    .padding(.horizontal, s(6))
+                    .frame(height: s(20))
+                    .overlay(Rectangle().stroke(.white.opacity(0.5), lineWidth: 1))
             }
         }
         .padding(.horizontal, s(8))
         .frame(height: kBaseDisclosureH * scale)
-        .background(Color.black.opacity(0.92))
-        .overlay(Rectangle().stroke(.white.opacity(0.32), lineWidth: 1))
+        .background(Color.black)
+        .overlay(Rectangle().stroke(.white.opacity(0.42), lineWidth: 1))
         .fixedSize(horizontal: true, vertical: false)
     }
 }
@@ -396,6 +413,8 @@ struct ShortcutReminderView: View {
 
     // Scaled helpers
     private func s(_ v: CGFloat) -> CGFloat { v * scale }
+    private var collapsedScale: CGFloat { 1 + (scale - 1) * 0.2 }
+    private func c(_ v: CGFloat) -> CGFloat { v * collapsedScale }
 
     private var panelAlignment: Alignment {
         guard metrics.healthState == "normal" else { return .center }
@@ -560,48 +579,48 @@ struct ShortcutReminderView: View {
     }
 
     // MARK: - Collapsed pill
-    // Hovering anywhere on the panel area expands to the full bar (driven
-    // by ReminderTrackingView's .activeAlways NSTrackingArea). The app icon
-    // opens the timeline; the bell opens the notification inbox.
+    // Hovering the visible pill expands to the full bar (driven by
+    // ReminderTrackingView's .activeAlways NSTrackingArea). The app icon opens
+    // the timeline; the bell opens the notification inbox.
     private var collapsedView: some View {
         HStack(spacing: 0) {
             CollapsedAppIconButton(
-                scale: scale,
+                scale: collapsedScale,
                 action: { onAction("open_timeline") }
             )
-            .padding(.leading, s(5))
+            .padding(.leading, c(5))
 
-            HStack(spacing: s(3)) {
+            HStack(spacing: c(3)) {
                 AudioEqualizerView(active: metrics.audioActive, speechRatio: metrics.speechRatio)
-                    .frame(width: s(18), height: s(12))
+                    .frame(width: c(18), height: c(12))
                 ZStack(alignment: .topTrailing) {
                     ScreenMatrixView(active: metrics.screenActive, captureFps: metrics.captureFps)
-                        .frame(width: s(18), height: s(12))
+                        .frame(width: c(18), height: c(12))
                         .clipShape(RoundedRectangle(cornerRadius: 1))
                     if metrics.meetingActive {
                         Circle()
                             .fill(Color.red)
-                            .frame(width: s(5), height: s(5))
-                            .overlay(Circle().stroke(Color.black.opacity(0.75), lineWidth: s(1)))
-                            .offset(x: s(2), y: -s(2))
+                            .frame(width: c(5), height: c(5))
+                            .overlay(Circle().stroke(Color.black.opacity(0.75), lineWidth: c(1)))
+                            .offset(x: c(2), y: -c(2))
                             .help("meeting live — hover for transcript")
                     }
                 }
             }
-            .padding(.horizontal, s(3))
+            .padding(.horizontal, c(3))
             .frame(maxHeight: .infinity)
             .contentShape(Rectangle())
 
             CollapsedBellButton(
                 unread: metrics.inboxUnread,
-                scale: scale,
+                scale: collapsedScale,
                 action: { onAction("open_inbox") }
             )
-            .padding(.trailing, s(5))
+            .padding(.trailing, c(5))
         }
-        .frame(width: kBaseCollapsedW * scale, height: kBaseCollapsedH * scale)
-        .background(Rectangle().fill(Color.black.opacity(0.82)))
-        .overlay(Rectangle().stroke(.white.opacity(0.28), lineWidth: 1))
+        .frame(width: kBaseCollapsedW * collapsedScale, height: kBaseCollapsedH * collapsedScale)
+        .background(Color.black)
+        .overlay(Rectangle().stroke(.white.opacity(0.4), lineWidth: 1))
     }
 
     // MARK: - Expanded bar
@@ -662,8 +681,8 @@ struct ShortcutReminderView: View {
             }
         }
         .frame(width: kBaseExpandedW * scale, height: kBaseDockH * scale)
-        .background(Color.black.opacity(0.88))
-        .overlay(Rectangle().stroke(.white.opacity(0.32), lineWidth: 1))
+        .background(Color.black)
+        .overlay(Rectangle().stroke(.white.opacity(0.42), lineWidth: 1))
     }
 }
 
@@ -1293,8 +1312,8 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
     }
 
     private func createPanel() {
-        // Start with expanded size — the content will be smaller but the panel
-        // needs room so the hover area catches mouse events during animation
+        // Keep a stable expanded-size panel so animation and mouse routing do
+        // not require resizing the nonactivating panel.
         let w = kBaseExpandedW * gOverlayScale
         let h = kBaseExpandedH * gOverlayScale
         let p = NSPanel(
@@ -1323,6 +1342,16 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
         }
         tracking.onPointerMoved = { [weak self] point in
             self?.updateHoveredControl(at: point)
+        }
+        tracking.hoverRectProvider = { [weak self, weak tracking] in
+            guard let self = self, let bounds = tracking?.bounds else { return .zero }
+            guard self.metrics.healthState == "normal" else { return bounds }
+            return overlayHoverRect(
+                in: bounds,
+                expanded: self.metrics.isHovering || self.metrics.forceExpanded,
+                disclosureDown: self.metrics.disclosureDown,
+                scale: gOverlayScale
+            )
         }
         p.contentView = tracking
         self.trackingView = tracking
@@ -1640,6 +1669,8 @@ private class ReminderTrackingView: NSView {
     /// (its tracking areas use .activeInActiveApp, not .activeAlways).
     var onHoverChanged: ((Bool) -> Void)?
     var onPointerMoved: ((NSPoint?) -> Void)?
+    var hoverRectProvider: (() -> NSRect)?
+    private var pointerIsInsideHoverRect = false
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
         return true
@@ -1657,22 +1688,35 @@ private class ReminderTrackingView: NSView {
     }
 
     override func mouseEntered(with event: NSEvent) {
-        window?.disableCursorRects()
-        NSCursor.pointingHand.set()
-        onHoverChanged?(true)
-        onPointerMoved?(convert(event.locationInWindow, from: nil))
+        updateHover(at: convert(event.locationInWindow, from: nil))
     }
 
     override func mouseMoved(with event: NSEvent) {
-        NSCursor.pointingHand.set()
-        onPointerMoved?(convert(event.locationInWindow, from: nil))
+        updateHover(at: convert(event.locationInWindow, from: nil))
     }
 
     override func mouseExited(with event: NSEvent) {
-        window?.enableCursorRects()
-        NSCursor.arrow.set()
-        onPointerMoved?(nil)
-        onHoverChanged?(false)
+        setHovering(false, point: nil)
+    }
+
+    private func updateHover(at point: NSPoint) {
+        let hoverRect = hoverRectProvider?() ?? bounds
+        setHovering(hoverRect.contains(point), point: point)
+    }
+
+    private func setHovering(_ hovering: Bool, point: NSPoint?) {
+        if hovering != pointerIsInsideHoverRect {
+            pointerIsInsideHoverRect = hovering
+            if hovering {
+                window?.disableCursorRects()
+                NSCursor.pointingHand.set()
+            } else {
+                window?.enableCursorRects()
+                NSCursor.arrow.set()
+            }
+            onHoverChanged?(hovering)
+        }
+        onPointerMoved?(hovering ? point : nil)
     }
 }
 
