@@ -619,8 +619,8 @@ struct ShortcutReminderView: View {
             .padding(.trailing, c(5))
         }
         .frame(width: kBaseCollapsedW * collapsedScale, height: kBaseCollapsedH * collapsedScale)
-        .background(Color.black.opacity(0.82))
-        .overlay(Rectangle().stroke(.white.opacity(0.24), lineWidth: 1))
+        .background(Capsule().fill(Color.black.opacity(0.82)))
+        .overlay(Capsule().stroke(.white.opacity(0.24), lineWidth: 1))
     }
 
     // MARK: - Expanded bar
