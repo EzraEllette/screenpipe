@@ -99,13 +99,43 @@ describe("generateLiveViewWithPi runtime", () => {
     );
   });
 
-  it("still parses a successful terminal response", async () => {
-    const generated = JSON.stringify({
+  it("still accepts a successful proposal before terminal completion", async () => {
+    const generated = {
       title: "My day",
-      blocks: [{ title: "Highlights", component: "markdown.v1" }],
-    });
+      timeRange: "today",
+      blocks: [
+        {
+          title: "Highlights",
+          intent: "Highlights from today",
+          component: "markdown.v1",
+          width: 12,
+          pipeName: null,
+        },
+      ],
+    };
     mocks.piPrompt.mockImplementation(async () => {
       queueMicrotask(() => {
+        handler?.({
+          source: "pi",
+          sessionId: "live-view",
+          event: {
+            type: "tool_execution_start",
+            toolName: "screenpipe_live_view_propose",
+            toolCallId: "proposal-1",
+            args: generated,
+          },
+        });
+        handler?.({
+          source: "pi",
+          sessionId: "live-view",
+          event: {
+            type: "tool_execution_end",
+            toolName: "screenpipe_live_view_propose",
+            toolCallId: "proposal-1",
+            result: { ok: true },
+            isError: false,
+          },
+        });
         handler?.({
           source: "pi",
           sessionId: "live-view",
@@ -114,7 +144,7 @@ describe("generateLiveViewWithPi runtime", () => {
             messages: [
               {
                 role: "assistant",
-                content: [{ type: "text", text: generated }],
+                content: [],
               },
             ],
           },

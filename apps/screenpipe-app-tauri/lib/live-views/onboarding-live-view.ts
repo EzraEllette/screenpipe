@@ -13,6 +13,11 @@ import {
   type OnboardingGoalCategory,
 } from "@/lib/live-views/onboarding-goals";
 import {
+  buildFallbackLiveViewPlan,
+  type OnboardingPlanFallbackReason,
+  type OnboardingPlanSource,
+} from "@/lib/live-views/onboarding-fallback-plan";
+import {
   markOnboardingLiveViewSetupNeedsRetry,
   markOnboardingLiveViewSetupReady,
   startOnboardingLiveViewActivation,
@@ -70,6 +75,8 @@ export type OnboardingLiveViewProgress = {
   timeRange?: GeneratedLiveView["timeRange"];
   installed?: boolean;
   refreshStartedCount?: number;
+  planSource?: OnboardingPlanSource;
+  planFallbackReason?: OnboardingPlanFallbackReason;
 };
 
 const GOAL_SHELLS: Record<
@@ -91,6 +98,8 @@ export type OnboardingLiveViewResult = {
   pipeSlugs: string[];
   blockCount: number;
   refreshStartedCount: number;
+  planSource: OnboardingPlanSource;
+  planFallbackReason: OnboardingPlanFallbackReason | null;
 };
 
 export type OnboardingLiveViewFailureCode =
@@ -474,6 +483,16 @@ async function ensurePipeReady(
   return { name: installedName, installed: true };
 }
 
+function boundPipeSlugs(generated: GeneratedLiveView): string[] {
+  return Array.from(
+    new Set(
+      generated.blocks
+        .map((block) => block.pipeName)
+        .filter((name): name is string => Boolean(name)),
+    ),
+  );
+}
+
 function slotInputs(
   generated: GeneratedLiveView,
   readyPipeNames: Map<string, string>,
@@ -708,9 +727,16 @@ export async function createOnboardingLiveView(options: {
       options.goalCategory,
     );
 
-    let generated: GeneratedLiveView;
+    // The AI plan is preferred, never required. A model that is unreachable or
+    // that returns a plan we cannot bind to Store scheduled tasks costs the
+    // user a better dashboard, not their entire first run.
+    let generated: GeneratedLiveView | null = null;
+    let planSource: OnboardingPlanSource = "ai";
+    let planFallbackReason: OnboardingPlanFallbackReason | null = null;
+    let planFailureDetail = "AI could not design the dashboard.";
+
     try {
-      generated = await generateLiveViewWithPi({
+      const aiPlan = await generateLiveViewWithPi({
         prompt: options.goal,
         scope: "dashboard",
         preset: options.preset,
@@ -721,28 +747,51 @@ export async function createOnboardingLiveView(options: {
         requirePipeBinding: true,
         currentView: null,
       });
+      const aiPipeSlugs = boundPipeSlugs(aiPlan);
+      if (aiPipeSlugs.length === 0 || aiPipeSlugs.length > MAX_SELECTED_PIPES) {
+        planFallbackReason = "ai_plan_invalid";
+        planFailureDetail = "AI did not choose a valid scheduled task set.";
+      } else {
+        generated = aiPlan;
+      }
     } catch (error) {
-      throw new OnboardingLiveViewSetupError(
-        "ai_plan_failed",
-        "planning",
-        friendlyPlanningError(error),
-      );
+      if (
+        error instanceof Error &&
+        aiCapacityFailureKind(error.message) !== null
+      ) {
+        throw new OnboardingLiveViewSetupError(
+          "ai_plan_failed",
+          "planning",
+          friendlyPlanningError(error),
+        );
+      }
+      planFallbackReason = "ai_plan_call_failed";
+      if (error instanceof Error && error.message) {
+        planFailureDetail = error.message;
+      }
     }
 
-    const pipeSlugs = Array.from(
-      new Set(
-        generated.blocks
-          .map((block) => block.pipeName)
-          .filter((name): name is string => Boolean(name)),
-      ),
-    );
-    if (pipeSlugs.length === 0 || pipeSlugs.length > MAX_SELECTED_PIPES) {
-      throw new OnboardingLiveViewSetupError(
-        "ai_plan_failed",
-        "planning",
-        "AI did not choose a valid scheduled task set.",
-      );
+    if (!generated) {
+      const fallback = buildFallbackLiveViewPlan({
+        goal: options.goal,
+        goalCategory: options.goalCategory,
+        candidateSlugs: candidates.map((candidate) => candidate.slug),
+        maxSelectedPipes: MAX_SELECTED_PIPES,
+      });
+      if (!fallback) {
+        // Only a genuine dead end reaches the user now: the AI plan is unusable
+        // and the Store gave us nothing to build a dashboard from either.
+        throw new OnboardingLiveViewSetupError(
+          "ai_plan_failed",
+          "planning",
+          planFailureDetail,
+        );
+      }
+      generated = fallback;
+      planSource = "fallback";
     }
+
+    const pipeSlugs = boundPipeSlugs(generated);
 
     report({
       stage: "plan_ready",
@@ -751,6 +800,8 @@ export async function createOnboardingLiveView(options: {
       pipeCount: pipeSlugs.length,
       blockCount: generated.blocks.length,
       timeRange: generated.timeRange,
+      planSource,
+      ...(planFallbackReason ? { planFallbackReason } : {}),
     });
 
     const readyPipeNames = new Map<string, string>();
@@ -810,12 +861,16 @@ export async function createOnboardingLiveView(options: {
       blockCount: view.slots.length,
       timeRange: view.timeRange,
       refreshStartedCount,
+      planSource,
+      ...(planFallbackReason ? { planFallbackReason } : {}),
     });
     return {
       view,
       pipeSlugs,
       blockCount: view.slots.length,
       refreshStartedCount,
+      planSource,
+      planFallbackReason,
     };
   } catch (error) {
     markOnboardingLiveViewSetupNeedsRetry(
