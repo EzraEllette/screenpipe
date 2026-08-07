@@ -69,6 +69,10 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
+  ModelPicker,
+  type ModelDiscoveryStatus,
+} from "@/components/ui/model-picker";
+import {
   Select,
   SelectContent,
   SelectItem,
@@ -204,7 +208,11 @@ export function AIProviderConfig({
   const { settings } = useSettings();
   const [isLoading, setIsLoading] = useState(false);
   const [openaiModels, setOpenAIModels] = useState<OpenAIModel[]>([]);
-  const [isLoadingModels, setIsLoadingModels] = useState(false);
+  const [modelDiscoveryStatus, setModelDiscoveryStatus] =
+    useState<ModelDiscoveryStatus>("idle");
+  const [modelDiscoveryError, setModelDiscoveryError] = useState<string | null>(
+    null,
+  );
   const [idError, setIdError] = useState<string | null>(null);
   const [showApiKey, setShowApiKey] = useState(false);
   const { isManagedDeployment, policy: enterprisePolicy } = useManagedPolicy();
@@ -399,7 +407,8 @@ export function AIProviderConfig({
   };
 
   const fetchOpenAIModels = async (baseUrl: string, apiKey?: string | null) => {
-    setIsLoadingModels(true);
+    setModelDiscoveryStatus("loading");
+    setModelDiscoveryError(null);
     try {
       const response = await tauriFetchWithDeadline(aiEndpointUrl(baseUrl, "models"), {
         headers: apiKey
@@ -413,16 +422,20 @@ export function AIProviderConfig({
 
       const data = await response.json();
       setOpenAIModels(data.data || []);
+      setModelDiscoveryStatus("ready");
     } catch (error) {
       console.error("error fetching models:", error);
       setOpenAIModels([]);
-    } finally {
-      setIsLoadingModels(false);
+      setModelDiscoveryStatus("error");
+      setModelDiscoveryError(
+        "couldn't discover models — type a model name manually",
+      );
     }
   };
 
   const fetchOllamaModels = async (baseUrl: string) => {
-    setIsLoadingModels(true);
+    setModelDiscoveryStatus("loading");
+    setModelDiscoveryError(null);
     try {
       // native HTTP (Rust-side): a browser fetch from the tauri://localhost
       // webview to a local Ollama server is blocked by WKWebView (mixed-content).
@@ -436,16 +449,21 @@ export function AIProviderConfig({
         data: OpenAIModel[];
       };
       setOpenAIModels(data.data || []);
+      setModelDiscoveryStatus("ready");
     } catch (error) {
       console.error("error fetching ollama models:", error);
       setOpenAIModels([]);
-    } finally {
-      setIsLoadingModels(false);
+      setModelDiscoveryStatus("error");
+      setModelDiscoveryError(
+        "couldn't reach Ollama — type a model name manually",
+      );
     }
   };
 
   useEffect(() => {
     setOpenAIModels([]);
+    setModelDiscoveryStatus("idle");
+    setModelDiscoveryError(null);
     if (selectedProvider === "openai" && formData.apiKey) {
       // Fetch the live model catalog from the user's OpenAI account so the
       // dropdown reflects whatever they actually have access to (gpt-5*,
@@ -453,7 +471,7 @@ export function AIProviderConfig({
       // request fails (offline / bad key) so the dropdown still has
       // something usable instead of an empty menu.
       (async () => {
-        setIsLoadingModels(true);
+        setModelDiscoveryStatus("loading");
         try {
           const resp = await tauriFetchWithDeadline("https://api.openai.com/v1/models", {
             headers: {
@@ -463,11 +481,9 @@ export function AIProviderConfig({
           });
           if (resp.ok) {
             const data = await resp.json();
-            if (data?.data?.length > 0) {
-              setOpenAIModels(data.data);
-              setIsLoadingModels(false);
-              return;
-            }
+            setOpenAIModels(data?.data || []);
+            setModelDiscoveryStatus("ready");
+            return;
           }
         } catch {
           /* fall through to fallback */
@@ -485,7 +501,10 @@ export function AIProviderConfig({
           { id: "gpt-4" },
           { id: "gpt-3.5-turbo" },
         ]);
-        setIsLoadingModels(false);
+        setModelDiscoveryStatus("error");
+        setModelDiscoveryError(
+          "couldn't load live models — showing known models",
+        );
       })();
     } else if (selectedProvider === "native-ollama") {
       const baseUrl = "http://localhost:11434/v1";
@@ -499,7 +518,7 @@ export function AIProviderConfig({
     } else if (selectedProvider === "openai-chatgpt") {
       // Try fetching from API, fall back to known models
       (async () => {
-        setIsLoadingModels(true);
+        setModelDiscoveryStatus("loading");
         try {
           const tokenResult = await commands.chatgptOauthGetToken();
           if (tokenResult.status === "ok") {
@@ -509,11 +528,9 @@ export function AIProviderConfig({
             if (resp.ok) {
               const data = await resp.json();
               const uniqueModels = (data.data as { id: string }[]).filter((m, idx, arr) => arr.findIndex((x) => x.id === m.id) === idx);
-              if (uniqueModels.length > 0) {
-                setOpenAIModels(uniqueModels);
-                setIsLoadingModels(false);
-                return;
-              }
+              setOpenAIModels(uniqueModels);
+              setModelDiscoveryStatus("ready");
+              return;
             }
           }
         } catch { /* ignore */ }
@@ -525,7 +542,10 @@ export function AIProviderConfig({
           { id: "gpt-5.2-codex" }, { id: "gpt-5.2" }, { id: "gpt-5.1-codex-max" },
           { id: "gpt-5.1" }, { id: "gpt-5.1-codex-mini" },
         ]);
-        setIsLoadingModels(false);
+        setModelDiscoveryStatus("error");
+        setModelDiscoveryError(
+          "couldn't load live ChatGPT models — showing known models",
+        );
       })();
     }
   }, [selectedProvider, formData.apiKey, formData.url, connectionFieldErrors.url]);
@@ -788,33 +808,17 @@ export function AIProviderConfig({
             </div>
             <div className="space-y-1">
               <Label htmlFor="model" className="text-xs">model</Label>
-              <Select
+              <ModelPicker
+                id="model"
                 value={formData.model}
-                onValueChange={(value) =>
-                  setFormData({ ...formData, model: value })
-                }
-              >
-                <SelectTrigger className="h-8 text-sm">
-                  <SelectValue
-                    placeholder={
-                      isLoadingModels ? "loading models..." : "select model"
-                    }
-                  />
-                </SelectTrigger>
-                <SelectContent>
-                  {openaiModels.length > 0 ? (
-                    openaiModels.map((model) => (
-                      <SelectItem key={model.id} value={model.id}>
-                        {model.id}
-                      </SelectItem>
-                    ))
-                  ) : (
-                    <SelectItem value="no-models" disabled>
-                      {isLoadingModels ? "loading..." : "no models found"}
-                    </SelectItem>
-                  )}
-                </SelectContent>
-              </Select>
+                models={openaiModels.map((model) => model.id)}
+                onValueChange={(model) => setFormData({ ...formData, model })}
+                status={modelDiscoveryStatus}
+                errorMessage={modelDiscoveryError}
+                idleMessage="enter an API key to discover models"
+                emptyMessage="no models available for this API key"
+                disabled={!formData.apiKey}
+              />
             </div>
           </div>
         )}
@@ -836,31 +840,17 @@ export function AIProviderConfig({
             </div>
             <div className="space-y-1">
               <Label htmlFor="model" className="text-xs">model</Label>
-              <div className="relative">
-                <Input
-                  id="model"
-                  type="text"
-                  list="ollama-models"
-                  placeholder={isLoadingModels ? "loading..." : "e.g. qwen3.5:9b"}
-                  value={formData.model || ""}
-                  onChange={(e) =>
-                    setFormData({ ...formData, model: e.target.value })
-                  }
-                  className="h-8 text-sm"
-                />
-                {openaiModels.length > 0 && (
-                  <datalist id="ollama-models">
-                    {openaiModels.map((model) => (
-                      <option key={model.id} value={model.id} />
-                    ))}
-                  </datalist>
-                )}
-              </div>
-              {!isLoadingModels && openaiModels.length === 0 && (
-                <p className="text-[10px] text-muted-foreground">
-                  ollama not detected — type model name manually
-                </p>
-              )}
+              <ModelPicker
+                id="model"
+                value={formData.model}
+                models={openaiModels.map((model) => model.id)}
+                onValueChange={(model) => setFormData({ ...formData, model })}
+                status={modelDiscoveryStatus}
+                errorMessage={modelDiscoveryError}
+                placeholder="e.g. qwen3.5:9b"
+                emptyMessage="no Ollama models installed — type a model name manually"
+                allowManualEntry
+              />
               <p className="text-[10px] text-muted-foreground">
                 recommended: qwen3.5:9b, glm-4.7:9b, qwen3.5:4b (tool calling). GPU required.
               </p>
@@ -913,26 +903,18 @@ export function AIProviderConfig({
             </div>
             <div className="space-y-1">
               <Label htmlFor="model" className="text-xs">model</Label>
-              <div className="relative">
-                <Input
-                  id="model"
-                  type="text"
-                  list="custom-models"
-                  placeholder={isLoadingModels ? "loading..." : "type or select model"}
-                  value={formData.model || ""}
-                  onChange={(e) =>
-                    setFormData({ ...formData, model: e.target.value })
-                  }
-                  className="h-8 text-sm"
-                />
-                {openaiModels.length > 0 && (
-                  <datalist id="custom-models">
-                    {openaiModels.map((model) => (
-                      <option key={model.id} value={model.id} />
-                    ))}
-                  </datalist>
-                )}
-              </div>
+              <ModelPicker
+                id="model"
+                value={formData.model}
+                models={openaiModels.map((model) => model.id)}
+                onValueChange={(model) => setFormData({ ...formData, model })}
+                status={modelDiscoveryStatus}
+                errorMessage={modelDiscoveryError}
+                idleMessage="enter a valid base URL to discover models"
+                placeholder="type or select model"
+                emptyMessage="no models discovered — type a model name manually"
+                allowManualEntry
+              />
             </div>
           </div>
         )}
@@ -945,24 +927,17 @@ export function AIProviderConfig({
             </div>
             <div className="space-y-1">
               <Label htmlFor="model" className="text-xs">model</Label>
-              <Input
+              <ModelPicker
                 id="model"
-                type="text"
-                list="chatgpt-models"
+                value={formData.model}
+                models={openaiModels.map((model) => model.id)}
+                onValueChange={(model) => setFormData({ ...formData, model })}
+                status={modelDiscoveryStatus}
+                errorMessage={modelDiscoveryError}
                 placeholder="gpt-5.6-terra"
-                value={formData.model || ""}
-                onChange={(e) =>
-                  setFormData({ ...formData, model: e.target.value })
-                }
-                className="h-8 text-sm"
+                emptyMessage="no ChatGPT models discovered — type a model name manually"
+                allowManualEntry
               />
-              {openaiModels.length > 0 && (
-                <datalist id="chatgpt-models">
-                  {openaiModels.map((model) => (
-                    <option key={model.id} value={model.id} />
-                  ))}
-                </datalist>
-              )}
             </div>
           </div>
         )}
