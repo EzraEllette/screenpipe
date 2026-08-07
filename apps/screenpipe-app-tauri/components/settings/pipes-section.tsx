@@ -149,6 +149,14 @@ import { requestPipeStop } from "@/lib/pipe-stop";
 
 const PIPE_EXECUTIONS_PAGE_LIMIT = 10;
 
+export function shouldShowPipesLoadError(
+  loadError: string | null,
+  currentApiBase: string,
+  lastSuccessfulApiBase: string | null,
+): boolean {
+  return loadError !== null && lastSuccessfulApiBase !== currentApiBase;
+}
+
 function pipeExecutionsUrl(apiBase: string, pipeName: string, beforeId?: number) {
   const params = new URLSearchParams({
     limit: String(PIPE_EXECUTIONS_PAGE_LIMIT),
@@ -1066,6 +1074,7 @@ export function PipesSection() {
   const [pipeExecutions, setPipeExecutions] = useState<Record<string, PipeExecution[]>>({});
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const lastSuccessfulPipesApiBase = useRef<string | null>(null);
   const [runningPipe, setRunningPipe] = useState<string | null>(null);
   const [stoppingPipe, setStoppingPipe] = useState<string | null>(null);
   const [promptDrafts, setPromptDrafts] = useState<Record<string, string>>({});
@@ -1262,6 +1271,7 @@ export function PipesSection() {
         fetched.push(pipe);
         results[pipe.config.name] = recent_executions || [];
       }
+      lastSuccessfulPipesApiBase.current = apiBase;
       // Preserve optimistic UI for pipes with in-flight config saves
       const pendingNames = Object.keys(pendingConfigSaves.current);
       if (pendingNames.length > 0) {
@@ -2438,7 +2448,7 @@ export function PipesSection() {
             </Card>
           ))}
         </div>
-      ) : loadError ? (
+      ) : shouldShowPipesLoadError(loadError, apiBase, lastSuccessfulPipesApiBase.current) ? (
         <Card>
           <CardContent className="py-8 text-center">
             <div className="mx-auto max-w-md space-y-4 text-muted-foreground">
