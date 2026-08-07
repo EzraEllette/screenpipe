@@ -5,7 +5,7 @@
 import type { Options } from '@wdio/types';
 import { mkdirSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { Agent, setGlobalDispatcher } from 'undici';
 import { startApp, stopApp, WEBDRIVER_PORT } from './helpers/app-launcher.js';
 import { getReporters, getMochaTimeout } from './helpers/reporter-utils.js';
@@ -27,12 +27,62 @@ const sessionRecorder = shouldRecordDesktopSession ? new TestRecorder() : null;
 const sessionVideoDir = resolve(__dirname, 'videos', 'session');
 const isCi = Boolean(process.env.CI);
 const isWindowsCi = isCi && process.platform === 'win32';
+const isDestructiveDbFaultRun = (process.env.SCREENPIPE_E2E_SEED ?? '')
+  .split(',')
+  .some((flag) => flag.trim().toLowerCase() === 'db-hard-fault');
 const allSpecs = [resolve(__dirname, 'specs', '**', '*.spec.ts')];
 const windowsCiSpecs = [
   'brain-overview.spec.ts',
+  'acp-backend.spec.ts',
+  'search/search-bugs-4645.spec.ts',
+  'settings-sections.spec.ts',
   'windows-system-integration.spec.ts',
   'windows-user-journey.spec.ts',
 ].map((spec) => resolve(__dirname, 'specs', spec));
+
+interface LocalGatewayLifecycle {
+  baseUrl: string;
+  assertNoUnexpectedOutboundRequests(): void;
+  dispose(): Promise<void>;
+}
+
+let localGateway: LocalGatewayLifecycle | null = null;
+
+async function startLocalGatewayIfRequested(): Promise<void> {
+  if (process.env.SCREENPIPE_E2E_LOCAL_AI_GATEWAY !== 'true') return;
+  // Keep the optional cross-workspace test helper outside the default E2E
+  // TypeScript graph. It is loaded only for the dedicated local-gateway lane.
+  const gatewayHarnessUrl = pathToFileURL(
+    resolve(
+      __dirname,
+      '../../../packages/ai-gateway/src/test/local-gateway-harness.ts',
+    ),
+  ).href;
+  const gatewayModule = await import(gatewayHarnessUrl);
+  const startedGateway: LocalGatewayLifecycle =
+    await gatewayModule.LocalGatewayHarness.start({
+      providerReply: 'local gateway app e2e ok',
+    });
+  localGateway = startedGateway;
+  process.env.SCREENPIPE_E2E_AI_GATEWAY_URL = startedGateway.baseUrl;
+  process.env.SCREENPIPE_E2E_LOCAL_AI_GATEWAY_TOKEN =
+    gatewayModule.LOCAL_GATEWAY_SERVICE_TOKEN;
+  console.log('Local hosted-AI gateway ready at %s', startedGateway.baseUrl);
+}
+
+async function stopLocalGateway(): Promise<void> {
+  const gateway = localGateway;
+  localGateway = null;
+  if (!gateway) return;
+  let assertionError: unknown;
+  try {
+    gateway.assertNoUnexpectedOutboundRequests();
+  } catch (error) {
+    assertionError = error;
+  }
+  await gateway.dispose();
+  if (assertionError) throw assertionError;
+}
 
 type TestrunnerConfig = Options.Testrunner & Record<string, unknown> & {
   autoCompileOpts?: {
@@ -77,18 +127,27 @@ export const config: TestrunnerConfig = {
   // make a genuine flake (which passes most of the time) very unlikely to
   // survive, while a truly broken spec still fails every attempt.
   // Local runs skip retries so flakes surface immediately during development.
-  specFileRetries: isCi ? 3 : 0,
+  // A destructive DB-fault spec cannot reuse the same quarantined process for
+  // a file retry. Focused fault runs start clean once and fail directly.
+  specFileRetries: isCi && !isDestructiveDbFaultRun ? 3 : 0,
   specFileRetriesDelay: 5,
   framework: 'mocha',
   reporters: getReporters() as Options.Testrunner['reporters'],
   mochaOpts: { ui: 'bdd', timeout: getMochaTimeout() },
   onPrepare: async () => {
     console.log('Starting Screenpipe app (WebDriver on port %s)...', WEBDRIVER_PORT);
-    await startApp(WEBDRIVER_PORT);
+    await startLocalGatewayIfRequested();
+    try {
+      await startApp(WEBDRIVER_PORT);
+    } catch (error) {
+      await stopLocalGateway();
+      throw error;
+    }
   },
-  onComplete: () => {
+  onComplete: async () => {
     console.log('Stopping app...');
-    stopApp();
+    await stopApp();
+    await stopLocalGateway();
   },
   beforeSession: async () => {
     if (!sessionRecorder) {

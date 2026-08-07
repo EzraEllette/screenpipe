@@ -228,6 +228,12 @@ this FAQ is organized around the questions people ask support most often: what t
   if it still shows the wrong plan, contact support with the purchase email, current signed-in email, and a screenshot of the account page.
 </Expandable>
 
+<Expandable title="why does my AI provider say rate limited when my screenpipe plan has credits?">
+  screenpipe billing and provider rate limits are separate. A plan or credit balance does not guarantee that the selected AI provider will accept every request immediately. The provider may be temporarily throttling requests, or the provider account configured in the IDE may be different from the account shown on the screenpipe billing page.
+
+  wait for the retry interval shown by the error, then retry. If the error persists, check which provider and account the IDE is using, or switch to another configured model/provider. Do not start a second screenpipe subscription to fix a provider-side rate limit.
+</Expandable>
+
 <Expandable title="do cloud credits, Claude, ChatGPT, or API keys replace a screenpipe license?">
   no. AI provider access and screenpipe licensing are separate.
 
@@ -468,7 +474,7 @@ this FAQ is organized around the questions people ask support most often: what t
 <Expandable title="my pipe was working but stopped firing after a screenpipe update.">
   app updates can disconnect scheduled pipes, integration tokens, or pi-agent. check in this order:
 
-  1. **settings → pipes** → confirm the toggle is still on.
+  1. **Pipes → My Pipes** → confirm the pipe is still enabled.
   2. open the pipe and run it manually. if it fails, the logs show the actual error.
   3. for Telegram, Slack, Notion, or other integrations: reconnect the account in **settings → connections** — tokens can expire silently.
   4. confirm the local API is healthy: `curl http://localhost:3030/health`.
@@ -732,7 +738,7 @@ this FAQ is organized around the questions people ask support most often: what t
   almost always one of two things:
 
   - **local whisper transcription** is keeping the CPU/Neural Engine hot. switch to cloud transcription in settings → AI models.
-  - **a pipe is in a tight loop** or the embedded chrome timeline is open. open settings → pipes and disable any pipe you do not need; close the timeline tab.
+  - **a pipe is in a tight loop** or the embedded chrome timeline is open. open **Pipes → My Pipes** and disable any pipe you do not need; close the timeline tab.
 
   on Intel Macs, even with these tuned, fans run more than on Apple Silicon. consider cloud-only transcription on Intel.
 </Expandable>

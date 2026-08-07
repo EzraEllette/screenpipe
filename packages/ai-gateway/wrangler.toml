@@ -5,6 +5,9 @@ compatibility_date = "2024-10-11"
 workers_dev = true
 compatibility_flags = ["nodejs_compat"]
 upload_source_maps = true
+# Production-only policy bindings are managed outside this repository. Preserve
+# them when Wrangler deploys the public configuration below.
+keep_vars = true
 
 # Custom domain
 routes = [
@@ -58,15 +61,20 @@ SELF_HOSTED_TRANSCRIPTION_URL = "https://audio.screenpi.pe"
 # deliberate default across redeploys; FLEX_TIER_ENABLED remains the master switch.
 GEMINI_FLEX_INTERACTIVE = "false"
 
-# 2026-07-31 emergency spend containment. Fable and Opus are rerouted to Sonnet
-# in code; reject frontier-priced background work. The epoch preserves today's
-# incident ledger while giving legitimate chats a fresh post-containment budget.
-# Effective text-AI caps: $0.16 anonymous / $0.32 Free+Basic / $35 Business.
-COST_CAP_EPOCH = "anthropic-incident-2026-07-31-v2"
-MAX_DAILY_TEXT_COST_PER_USER = "0.5"
-MAX_DAILY_SUBSCRIBED_TEXT_COST = "35"
+# Hosted AI model policy is public. Operational spend-control values are private
+# production bindings and must never be committed to this file.
 MODEL_GATING_ENABLED = "true"
 PIPE_FRONTIER_POLICY = "reject"
+
+# Hosted-chat AI Gateway rollout is managed in Worker dashboard variables so a
+# deploy cannot flip production (keep_vars=true above):
+# - HOSTED_CHAT_GATEWAY_MODE: "legacy" (default/rollback) or "cloudflare".
+# - CLOUDFLARE_AI_GATEWAY_ID: same-account Gateway with default OpenAI and
+#   Anthropic BYOK keys. See CLOUDFLARE_AI_GATEWAY_ROLLOUT.md.
+# - CLOUDFLARE_ACCOUNT_ID: account that owns the Gateway and Analytics data.
+# - CLOUDFLARE_API_TOKEN: read-only AI Gateway + Account Analytics token used
+#   by /v1/usage to calculate per-user allowance percentages. Raw provider
+#   amounts are never returned to the client.
 
 # Cost / flex tuning knobs — read with a code default, so they live in the CF
 # dashboard (Settings → Variables), not here, and take effect with no redeploy:
@@ -74,12 +82,6 @@ PIPE_FRONTIER_POLICY = "reject"
 # - GEMINI_FLEX_INTERACTIVE ("true"): also flex interactive Gemini, not just
 #   background. Set "false" to revert to background-only flex if best-effort
 #   latency hurts user-facing chat.
-# - MAX_DAILY_TEXT_COST_PER_USER ("5"): base per-user daily text-AI $ cap; ×7 subscribed,
-#   ×0.64 logged_in, ×0.32 anonymous (getTierDailyCostCap).
-# - MAX_DAILY_SUBSCRIBED_TEXT_COST: optional absolute Business/Team/Enterprise
-#   text-AI cap. This keeps paid users available without raising Free/Basic.
-# - MAX_DAILY_COST_PER_USER ("5"): legacy transcription base cap. Keep this
-#   separate from text containment so chat policy cannot disrupt audio capture.
 # - ROUTER_MODE ("off"): interactive auto difficulty router. "off" = GPT-5.6 Luna
 #   (today's behavior). "heuristic" = regex tiering (0 latency). "embedding" =
 #   bge centroid via Workers AI (best accuracy, +1 embed call). See difficulty-router.ts.
@@ -98,6 +100,9 @@ PIPE_FRONTIER_POLICY = "reject"
 # @cf/baai/bge-base-en-v1.5 prompt embedding. Harmless when ROUTER_MODE is off.
 [ai]
 binding = "AI"
+# AI has no local simulator. During `wrangler dev`, keep Worker code, D1, and
+# Durable Objects local while connecting only this binding to Cloudflare.
+remote = true
 
 # Bind an Analytics Engine dataset. Use Analytics Engine to write analytics within your Pages Function.
 # Docs: https://developers.cloudflare.com/workers/wrangler/configuration/#analytics-engine-datasets

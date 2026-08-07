@@ -64,7 +64,9 @@ step 2d — name the speakers from the screen (do this every run, don't ask firs
 
 only rename when the on-screen evidence is unambiguous — never guess from voice alone. note which speakers you renamed (and which you left as-is) in your final message.
 
-step 3 — if your summary is worth saving, append it to the meeting note (and refresh the title in the same call) via:
+step 3 — before saving, write the proposed summary in your response starting on a line with exactly `## Summary`. put only summary content after that heading and use that same markdown in `<YOUR_SUMMARY>`. the meeting UI streams this section while you write it, so do not put planning, tool narration, or save confirmations after the heading.
+
+if your summary is worth saving, append it to the meeting note (and refresh the title in the same call) via:
 
   curl -s -X PUT "http://localhost:3030/meetings/<MEETING_ID>" \
     -H "Authorization: Bearer $SCREENPIPE_LOCAL_API_KEY" \
@@ -81,7 +83,7 @@ rank the connected targets by relevance — an app used during the meeting first
 
   curl -s -X POST "http://localhost:11435/notify" \
     -H "Content-Type: application/json" \
-    -d '{"title": "<TITLE> summarized", "body": "<one-line recap> — push it somewhere?", "actions": [
+    -d '{"title": "<TITLE> summarized", "body": "<one-line recap> — push it somewhere?", "priority": "high", "actions": [
           {"label": "push to notion", "type": "api", "method": "POST", "url": "http://localhost:3030/connections/notion/proxy/v1/pages", "body": { /* page payload built from the summary */ }},
           {"label": "review in chat", "type": "pipe", "pipe": "meeting-summary", "open_in_chat": true, "context": {"meeting_id": <ID>}},
           {"label": "dismiss", "type": "dismiss"}

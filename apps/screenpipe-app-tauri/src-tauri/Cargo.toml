@@ -3,7 +3,7 @@ members = ["wer-dump-helper"]
 
 [package]
 name = "screenpipe-app"
-version = "2.5.158"
+version = "2.5.190"
 description = "24/7 memory for your desktop. 100% local."
 authors = ["you"]
 license = ""
@@ -117,6 +117,7 @@ raw-window-handle = "0.6"
 
 notify = "8.0.0"
 futures = "0.3.30"
+agent-client-protocol = { version = "=1.2.0", features = ["unstable_auth_methods"] }
 tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
 
 chrono = "0.4.39"
@@ -143,6 +144,7 @@ screenpipe-vault = { path = "../../../crates/screenpipe-vault" }
 screenpipe-connect = { path = "../../../crates/screenpipe-connect", features = ["specta"] }
 screenpipe-secrets = { path = "../../../crates/screenpipe-secrets" }
 screenpipe-events = { path = "../../../crates/screenpipe-events" }
+sqlx = { version = "=0.9.0", default-features = false, features = ["sqlite", "runtime-tokio"], optional = true }
 eventkit-rs = { git = "https://github.com/divanshu-go/eventkit-rs", rev = "9dd52787c8435d734ed443e2d5641f45b0177cae", default-features = false, features = ["events"] }
 # Async PII reconciliation (issue #3185 / PR #3188). `onnx-coreml` is
 # the right execution-provider for Apple Silicon (image PII via
@@ -175,6 +177,9 @@ screenpipe-telemetry-wire = { path = "../../../crates/screenpipe-telemetry-wire"
 # jemalloc — aggressively returns freed pages to OS, reducing RSS bloat
 [target.'cfg(not(target_os = "windows"))'.dependencies]
 tikv-jemallocator = { version = "0.6", optional = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [target."cfg(not(any(target_os = \"android\", target_os = \"ios\")))".dependencies]
 tauri-plugin-cli = "2.4.1"
@@ -268,7 +273,7 @@ pulseaudio = ["screenpipe-audio/pulseaudio"]
 directml = ["screenpipe-engine/directml"]
 vulkan = ["screenpipe-audio/vulkan"]
 cargo-clippy = []
-e2e = ["tauri-plugin-webdriver"]
+e2e = ["tauri-plugin-webdriver", "dep:sqlx"]
 
 # DO NOT REMOVE!!
 custom-protocol = ["tauri/custom-protocol"]
@@ -284,7 +289,12 @@ official-build = []
 # Source for the sync lives under `apps/screenpipe-app-tauri/src-tauri/src/enterprise/sync.rs` (EE-licensed).
 # Consumer builds never compile this code.
 # Do NOT add official-build here — enterprise has its own policy-gated updater.
-enterprise-build = ["dep:thiserror", "dep:screenpipe-sync", "dep:screenpipe-telemetry-wire"]
+enterprise-build = [
+    "dep:thiserror",
+    "dep:screenpipe-sync",
+    "dep:screenpipe-telemetry-wire",
+    "screenpipe-core/enterprise-build",
+]
 
 qwen3-asr = ["screenpipe-engine/qwen3-asr"]
 parakeet = ["screenpipe-engine/parakeet"]

@@ -24,9 +24,17 @@ import {
 } from "@/components/ui/popover";
 import { useRouter } from "next/navigation";
 import { showChatWithPrefill } from "@/lib/chat-utils";
-import { invoke } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
-import { notificationAnalyticsProperties } from "@/lib/notification-analytics";
+import {
+  notificationActionAnalyticsProperties,
+  notificationAnalyticsProperties,
+} from "@/lib/notification-analytics";
+import { NotificationFeedback } from "@/components/notification-feedback";
+import {
+  isHighPriorityNotification,
+  type NotificationPriority,
+} from "@/lib/notifications/priority";
+import { appServerFetch } from "@/lib/notifications/app-server";
 
 interface NotificationEntry {
   id: string;
@@ -39,11 +47,8 @@ interface NotificationEntry {
   source_url?: string;
   timestamp: string;
   read: boolean;
+  priority?: NotificationPriority | string;
   actions?: NotificationAction[];
-}
-
-interface AppServerConfig {
-  port: number;
 }
 
 // Actions worth rendering as buttons in the bell. `dismiss` is excluded — the
@@ -67,23 +72,6 @@ function SectionLabel({ children }: { children: ReactNode }) {
       {children}
     </div>
   );
-}
-
-let appServerBaseUrl: Promise<string> | null = null;
-
-async function getAppServerBaseUrl(): Promise<string> {
-  appServerBaseUrl ??= invoke<AppServerConfig>("get_app_server_config")
-    .then((config) => `http://localhost:${config.port || 11435}`)
-    .catch(() => "http://localhost:11435");
-  return appServerBaseUrl;
-}
-
-async function notificationFetch(
-  path: string,
-  init?: RequestInit,
-): Promise<Response> {
-  const baseUrl = await getAppServerBaseUrl();
-  return fetch(`${baseUrl}${path.startsWith("/") ? path : `/${path}`}`, init);
 }
 
 async function openNotificationLink(href: string) {
@@ -166,6 +154,7 @@ export function NotificationInboxPanel({
   surface = "pipe_store",
 }: NotificationInboxPanelProps) {
   const [history, setHistory] = useState<NotificationEntry[]>([]);
+  const [inboxView, setInboxView] = useState<"priority" | "all">("priority");
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const copiedResetRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -179,7 +168,7 @@ export function NotificationInboxPanel({
 
   const loadHistory = useCallback(async () => {
     try {
-      const res = await notificationFetch("/notifications");
+      const res = await appServerFetch("/notifications");
       if (res.ok) {
         const entries: NotificationEntry[] = await res.json();
         setHistory(entries);
@@ -207,7 +196,7 @@ export function NotificationInboxPanel({
     );
     if (!wasUnread) return;
     try {
-      await notificationFetch(`/notifications/${encodeURIComponent(id)}/read`, {
+      await appServerFetch(`/notifications/${encodeURIComponent(id)}/read`, {
         method: "POST",
       });
     } catch {}
@@ -217,7 +206,7 @@ export function NotificationInboxPanel({
     posthog.capture("notification_bell_clear_all", { count: history.length, surface });
     setHistory([]);
     try {
-      await notificationFetch("/notifications", { method: "DELETE" });
+      await appServerFetch("/notifications", { method: "DELETE" });
     } catch {}
   };
 
@@ -225,7 +214,7 @@ export function NotificationInboxPanel({
     setHistory((prev) => prev.filter((n) => n.id !== id));
     setExpandedId((prev) => (prev === id ? null : prev));
     try {
-      await notificationFetch(`/notifications/${encodeURIComponent(id)}`, { method: "DELETE" });
+      await appServerFetch(`/notifications/${encodeURIComponent(id)}`, { method: "DELETE" });
     } catch {}
   }, []);
 
@@ -240,8 +229,7 @@ export function NotificationInboxPanel({
 
   const runAction = async (entry: NotificationEntry, action: NotificationAction) => {
     posthog.capture("notification_bell_action", {
-      action: action.action,
-      action_type: action.type,
+      ...notificationActionAnalyticsProperties(action.type),
       ...notificationAnalyticsProperties(entry, "bell"),
       surface,
     });
@@ -268,10 +256,8 @@ export function NotificationInboxPanel({
       // user it worked when the pipe never ran. Surface it instead.
       console.error("notification action failed", { action: action.action, type: action.type }, err);
       posthog.capture("notification_bell_action_error", {
-        action: action.action,
-        action_type: action.type,
+        ...notificationActionAnalyticsProperties(action.type),
         ...notificationAnalyticsProperties(entry, "bell"),
-        error: String(err),
         surface,
       });
       return;
@@ -290,56 +276,110 @@ export function NotificationInboxPanel({
     return d.toLocaleDateString();
   };
 
-  // Float notifications that carry actions ("needs you") above passive ones
-  // ("earlier") — mirrors how Linear / Slack surface actionable items first.
-  const needsYou = history.filter((n) => actionsFor(n).length > 0);
-  const earlier = history.filter((n) => actionsFor(n).length === 0);
-  const displayed = [...needsYou, ...earlier];
+  const highPriority = history.filter(isHighPriorityNotification);
+  const otherUpdates = history.filter((entry) => !isHighPriorityNotification(entry));
+  const displayed = inboxView === "priority"
+    ? highPriority
+    : [...highPriority, ...otherUpdates];
 
   return (
     <div className={cn(fullHeight && "flex flex-col h-full min-h-0")}>
       {/* Header */}
-      <div className="flex items-center justify-between px-3 py-2 border-b border-border">
-        <span className="text-xs font-medium text-foreground">
-          notifications
-        </span>
-        {history.length > 0 && (
-          <button
-            data-testid="notification-bell-clear-all"
-            onClick={clearAll}
-            className="text-[10px] text-muted-foreground hover:text-foreground transition-colors"
-          >
-            clear all
-          </button>
-        )}
+      <div className="border-b border-border px-3 pt-2.5 pb-2">
+        <div className="flex items-center justify-between">
+          <span className="text-xs font-medium text-foreground">inbox</span>
+          {/* Clears both tabs, so it stays reachable from either one — being
+              sent to All just to empty the inbox was busywork. */}
+          {history.length > 0 && (
+            <button
+              data-testid="notification-bell-clear-all"
+              onClick={clearAll}
+              className="text-[10px] text-muted-foreground hover:text-foreground transition-colors"
+            >
+              clear all
+            </button>
+          )}
+        </div>
+        <div
+          className="mt-2 grid grid-cols-2 rounded-md bg-muted/45 p-0.5"
+          role="tablist"
+          aria-label="notification view"
+        >
+          {(["priority", "all"] as const).map((view) => {
+            const count = view === "priority" ? highPriority.length : history.length;
+            const selected = inboxView === view;
+            return (
+              <button
+                key={view}
+                role="tab"
+                aria-selected={selected}
+                data-testid={`notification-bell-view-${view}`}
+                onClick={() => {
+                  setInboxView(view);
+                  posthog.capture("notification_bell_view_changed", {
+                    view,
+                    high_priority_count: highPriority.length,
+                    total_count: history.length,
+                    surface,
+                  });
+                }}
+                className={cn(
+                  "rounded px-2 py-1 text-[10px] transition-colors",
+                  selected
+                    ? "bg-background text-foreground shadow-sm"
+                    : "text-muted-foreground hover:text-foreground",
+                )}
+              >
+                {view === "priority" ? "priority" : "all"}
+                <span className="ml-1 text-[9px] tabular-nums opacity-60">{count}</span>
+              </button>
+            );
+          })}
+        </div>
       </div>
 
       {/* List */}
       <div className={cn("overflow-y-auto", fullHeight ? "flex-1 min-h-0" : "max-h-[360px]")}>
-        {history.length === 0 ? (
+        {displayed.length === 0 ? (
           <div
             data-testid="notification-bell-empty"
             className="px-3 py-6 text-center text-xs text-muted-foreground"
           >
-            no notifications yet
+            <div className="font-medium text-foreground/80">
+              {history.length === 0 ? "no notifications yet" : "you’re caught up"}
+            </div>
+            {history.length > 0 && (
+              <button
+                onClick={() => setInboxView("all")}
+                className="mt-1 text-[10px] hover:text-foreground transition-colors"
+              >
+                {history.length} other {history.length === 1 ? "update" : "updates"} in all
+              </button>
+            )}
           </div>
         ) : (
           displayed.map((entry, idx) => {
             const isExpanded = expandedId === entry.id;
             const rowActions = actionsFor(entry);
+            const isHighPriority = isHighPriorityNotification(entry);
             return (
               <Fragment key={entry.id}>
-                {idx === 0 && needsYou.length > 0 && (
-                  <SectionLabel>needs you</SectionLabel>
+                {idx === 0 && highPriority.length > 0 && (
+                  <SectionLabel>
+                    {inboxView === "priority" ? "needs your attention" : "high priority"}
+                  </SectionLabel>
                 )}
-                {idx === needsYou.length &&
-                  needsYou.length > 0 &&
-                  earlier.length > 0 && (
-                    <SectionLabel>earlier</SectionLabel>
+                {inboxView === "all" &&
+                  idx === highPriority.length &&
+                  otherUpdates.length > 0 && (
+                    <SectionLabel>other updates</SectionLabel>
                   )}
                 <div
                   data-notification-id={entry.id}
-                  className="border-b border-border/50 last:border-0"
+                  className={cn(
+                    "border-b border-border/50 last:border-0",
+                    isHighPriority && "border-l-2 border-l-foreground/60 bg-muted/10",
+                  )}
                 >
                 <div
                   data-testid={`notification-bell-item-${entry.id}`}
@@ -386,6 +426,11 @@ export function NotificationInboxPanel({
                         <span className="text-[11px] font-medium text-foreground truncate">
                           {entry.title}
                         </span>
+                        {isHighPriority && (
+                          <span className="rounded-full border border-border px-1.5 py-px text-[8px] leading-none text-foreground/70 shrink-0">
+                            high
+                          </span>
+                        )}
                       </div>
                       {!isExpanded && entry.body && (
                         <div className="select-text text-[10px] text-muted-foreground mt-0.5 line-clamp-2 pl-4 [&_p]:inline [&_strong]:text-foreground [&_a]:underline">
@@ -556,6 +601,7 @@ export function NotificationInboxPanel({
                         ask ai
                       </button>
                     </div>
+                    <NotificationFeedback notification={entry} variant="inbox" />
                   </div>
                 )}
                 </div>
@@ -592,10 +638,10 @@ export function NotificationBell() {
   // own full history while open.
   const pollUnread = useCallback(async () => {
     try {
-      const res = await notificationFetch("/notifications");
+      const res = await appServerFetch("/notifications");
       if (res.ok) {
         const entries: NotificationEntry[] = await res.json();
-        setUnreadCount(entries.filter((n) => !n.read).length);
+        setUnreadCount(entries.filter((n) => !n.read && isHighPriorityNotification(n)).length);
       }
     } catch {
       // server not ready yet
@@ -614,7 +660,7 @@ export function NotificationBell() {
         setOpen(o);
         if (o) {
           posthog.capture("notification_bell_opened", {
-            unread_count: unreadCount,
+            high_priority_unread_count: unreadCount,
             surface: "pipe_store",
           });
         } else {
@@ -624,13 +670,12 @@ export function NotificationBell() {
     >
       <PopoverTrigger asChild>
         <button
-          aria-label={unreadCount > 0 ? `notifications, ${unreadCount} unread` : "notifications"}
+          aria-label={unreadCount > 0 ? `notifications, ${unreadCount} high priority unread` : "notifications"}
           data-testid="notification-bell-trigger"
           className="relative p-1.5 rounded-md hover:bg-muted/60 transition-colors"
         >
           <Bell className="h-3.5 w-3.5 text-muted-foreground" />
-          {/* Quiet unread marker — a dot, not a count. Chrome only
-              signals "something new"; detail lives in the popover. */}
+          {/* Only high-priority unread work interrupts the app chrome. */}
           {unreadCount > 0 && (
             <span
               data-testid="notification-bell-unread-dot"

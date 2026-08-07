@@ -64,9 +64,21 @@ export class AnthropicProvider implements AIProvider {
 	supportsVision = true;
 	supportsJson = true;
 	private client: Anthropic;
+	private requestHeaders?: Record<string, string | null>;
 
-	constructor(apiKey: string) {
-		this.client = new Anthropic({ apiKey });
+	constructor(
+		apiKey: string,
+		baseURL?: string,
+		defaultHeaders?: Record<string, string | null | undefined>,
+		maxRetries?: number,
+	) {
+		this.client = new Anthropic({ apiKey, ...(baseURL ? { baseURL } : {}), defaultHeaders, maxRetries });
+		// The Anthropic SDK validates auth omission against per-request headers,
+		// even when the constructor default already removed X-Api-Key. Repeat only
+		// that null marker here; Gateway metadata remains in defaultHeaders.
+		if (defaultHeaders?.['x-api-key'] === null) {
+			this.requestHeaders = { 'x-api-key': null };
+		}
 	}
 
 	/**
@@ -178,7 +190,7 @@ export class AnthropicProvider implements AIProvider {
 			temperature: this.temperatureForModel(body),
 			system: this.buildSystemPrompt(body),
 			tools: body.tools ? this.formatTools(body.tools) : undefined,
-		});
+		}, this.requestHeaders ? { headers: this.requestHeaders } : undefined);
 
 		return new Response(JSON.stringify(this.formatResponse(response)), {
 			headers: { 'Content-Type': 'application/json' },
@@ -194,10 +206,15 @@ export class AnthropicProvider implements AIProvider {
 			temperature: this.temperatureForModel(body),
 			system: this.buildSystemPrompt(body),
 			tools: body.tools ? this.formatTools(body.tools) : undefined,
-		});
+		}, this.requestHeaders ? { headers: this.requestHeaders } : undefined);
 
+		let cancelled = false;
 		return new ReadableStream({
-			async start(controller) {
+			start(controller) {
+				// Do not keep the underlying-source start promise pending for the whole
+				// generation: a pending start can delay cancel(), allowing provider work
+				// to continue after the client disconnects.
+				void (async () => {
 				try {
 					let currentToolCall: { index: number; id: string; name: string; arguments: string } | null = null;
 					let toolCallIndex = 0;
@@ -326,6 +343,7 @@ export class AnthropicProvider implements AIProvider {
 					controller.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
 					controller.close();
 				} catch (error: any) {
+					if (cancelled || stream.controller.signal.aborted) return;
 					// Send error as SSE event so the client can parse it instead of a broken stream
 					const errorMessage = error?.message || 'Unknown streaming error';
 					const errorStatus = error?.status || 500;
@@ -351,6 +369,11 @@ export class AnthropicProvider implements AIProvider {
 						controller.error(error);
 					}
 				}
+				})();
+			},
+			cancel(reason) {
+				cancelled = true;
+				stream.controller.abort(reason);
 			},
 		});
 	}

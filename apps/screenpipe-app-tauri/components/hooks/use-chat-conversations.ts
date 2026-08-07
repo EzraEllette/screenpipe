@@ -16,6 +16,7 @@ import {
 import { emit, listen } from "@tauri-apps/api/event";
 import { ChatConversation } from "@/lib/hooks/use-settings";
 import { titleCreatedByAI } from "@/lib/utils/generate-title-with-preset";
+import { isPendingAgentActionMessage } from "@/lib/chat/message-rendering";
 import {
   deriveFallbackConversationTitle,
   isFallbackLikeTitle,
@@ -42,6 +43,7 @@ import {
   updateConversationFlags,
   type ConversationMeta,
 } from "@/lib/chat-storage";
+import { pipeConversationDeletionKey } from "@/lib/pipe-execution-status";
 import type { ContentBlock, Message } from "@/lib/chat/types";
 import {
   savedTurnEventState,
@@ -66,6 +68,12 @@ interface UseChatConversationsOpts {
   piContentBlocksRef: MutableRefObject<ContentBlock[]>;
   piSessionSyncedRef: MutableRefObject<boolean>;
   piSessionIdRef: MutableRefObject<string>;
+  /** Composer dispatch guards owned by the Pi send transport. Optional so
+   *  non-StandaloneChat call-sites don't have to thread them; when present,
+   *  starting or loading a conversation releases them so the incoming chat
+   *  never inherits the outgoing turn's queue-only mode. */
+  forceQueueModeRef?: MutableRefObject<boolean>;
+  sendDispatchInFlightRef?: MutableRefObject<boolean>;
   setIsLoading: Dispatch<SetStateAction<boolean>>;
   setIsStreaming: Dispatch<SetStateAction<boolean>>;
   setPastedImages: Dispatch<SetStateAction<string[]>>;
@@ -123,8 +131,7 @@ function newestUserMessageTimestamp(messages: Message[]): number | undefined {
 
 /** Module-scope guard for AI title generation — survives component remounts
  *  and is shared across all hook instances so two StandaloneChat mounts
- *  (chat window + home page) never both fire for the same conversation.
- *  Entries are removed on failure/null to allow retry. */
+ *  (chat window + home page) never both fire for the same conversation. */
 const aiTitleAttempted = new Set<string>();
 
 export function useChatConversations(opts: UseChatConversationsOpts) {
@@ -142,6 +149,8 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
     piContentBlocksRef,
     piSessionSyncedRef,
     piSessionIdRef,
+    forceQueueModeRef,
+    sendDispatchInFlightRef,
     setIsLoading,
     setIsStreaming,
     setPastedImages,
@@ -161,8 +170,13 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
       : opts.selectedPreset;
   const componentUnmountedRef = useRef(false);
   const currentMessagesRef = useRef(messages);
+  // Keep cross-window listeners mounted while chats switch. Re-registering
+  // them on every conversationId change leaves a gap where sibling saves can
+  // be dropped, so handlers read the current id through this stable ref.
+  const currentConversationIdRef = useRef(conversationId);
   const latestSavedEventAtRef = useRef(new Map<string, number>());
   currentMessagesRef.current = messages;
+  currentConversationIdRef.current = conversationId;
 
   const [showHistory, setShowHistoryRaw] = useState(() => {
     try { return localStorage.getItem("screenpipe:chat-history-open") === "true"; } catch { return false; }
@@ -397,7 +411,7 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
           if (!id) return;
           invalidateConversationListCache();
           setFileConversations((prev) => prev.filter((c) => c.id !== id));
-          if (conversationId === id) {
+          if (currentConversationIdRef.current === id) {
             setMessages([]);
             setConversationId(null);
           }
@@ -447,7 +461,10 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
           // panel still renders a blank canvas. Hydrate only when disk is
           // strictly more complete so a stale save never rolls back a live
           // foreground stream.
-          if (id === conversationId || id === piSessionIdRef.current) {
+          if (
+            id === currentConversationIdRef.current ||
+            id === piSessionIdRef.current
+          ) {
             // Publish the stable assistant identity before any disk/title
             // awaits below. Pi can echo the user prompt within milliseconds;
             // without this synchronous handoff a sibling treats that echo as
@@ -586,7 +603,6 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
       for (const unlisten of unlistenFns) unlisten();
     };
   }, [
-    conversationId,
     piContentBlocksRef,
     piMessageIdRef,
     piSessionIdRef,
@@ -703,15 +719,32 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
     // Only allow AI titles when the user manually renames (titleSource
     // would be "user" at that point, so this gate is a no-op for renames).
     const isPipeChat = existing?.kind === "pipe-run" || existing?.kind === "pipe-watch";
+    const turnIsActive = options.turnState
+      ? options.turnState.isLoading || options.turnState.isStreaming
+      : isLoading || isStreaming;
     if (
       autoTitleEnabled &&
       !isPipeChat &&
+      // Title generation uses a second hosted request. Starting it beside the
+      // first answer competes with the user's chat for the account-wide hosted
+      // request slot, so wait until that answer has actually settled.
+      !turnIsActive &&
       titleSource === "fallback" &&
       rawContent &&
       hasValidPreset &&
       !aiTitleAttempted.has(convId)
     ) {
       aiTitleAttempted.add(convId);
+
+      // Never send an ACP chat's message to a different provider for titling.
+      // The user picked that agent's own provider deliberately (a privacy /
+      // account boundary), so shipping the first prompt to a non-ACP default
+      // (e.g. Screenpipe Cloud) to make a "smart" title would silently leak it.
+      // Keep currentPreset — titleCreatedByAI is a no-op for ACP presets — so
+      // an ACP chat keeps its local fallback title (deriveFallbackConversation-
+      // Title). This matches how other ACP clients (e.g. Zed) title threads
+      // locally; the user can still rename manually.
+      const titlePreset = currentPreset;
 
       // Generate title in background (non-blocking)
       // Pass the full raw user message — the AI can parse wrapper tags
@@ -720,7 +753,7 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
         try {
           const aiTitle = await titleCreatedByAI(
             rawContent,
-            currentPreset,
+            titlePreset,
             settings?.user?.token ?? null,
             async (partial) => {
               try {
@@ -790,16 +823,16 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
               } catch {}
             }
           } else {
-            // AI returned null — clear streaming state, allow retry.
-            aiTitleAttempted.delete(convId);
+            // AI returned null — clear streaming state. Keep the once-per-chat
+            // guard so later autosaves do not repeatedly consume hosted slots.
             try {
               const { useChatStore } = await import("@/lib/stores/chat-store");
               useChatStore.getState().actions.patch(convId, { streamingTitle: undefined });
             } catch {}
           }
         } catch (error) {
-          // Clear streamingTitle on error, allow retry.
-          aiTitleAttempted.delete(convId);
+          // Clear streamingTitle on error. Keep the once-per-chat guard so an
+          // unavailable title provider cannot retry on every autosave.
           try {
             const { useChatStore } = await import("@/lib/stores/chat-store");
             useChatStore.getState().actions.patch(convId, { streamingTitle: undefined });
@@ -821,14 +854,18 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
       // past 100 messages walked forward and lost its early history. If
       // file size becomes a problem for power users we cap at the render
       // layer, never on disk.
-      messages: msgs.map(m => {
-        // For tool-only responses, content may be empty but contentBlocks has the data.
+      // Drop pending permission/sign-in cards: ephemeral UI tied to a live
+      // runtime waiter, never valid to rehydrate (see pi-event-router save).
+      messages: msgs.filter((m) => !isPendingAgentActionMessage(m)).map(m => {
+        // Tool-only responses have no text; content stays empty (the tool
+        // activity is preserved via contentBlocks) rather than a placeholder
+        // that would render as an assistant text bubble.
         let content = m.content;
         if (!content && m.contentBlocks?.length) {
           content = m.contentBlocks
             .filter((b: any) => b.type === "text")
             .map((b: any) => b.text)
-            .join("\n") || "(tool result)";
+            .join("\n");
         }
         // Persist contentBlocks so tool calls/results survive reload.
         // Strip isRunning (stale) and cap result length to keep file small.
@@ -1126,6 +1163,11 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
 
   // ---- deleteConversation ----
   const deleteConversation = async (convId: string) => {
+    const metadata = fileConversations.find((conversation) => conversation.id === convId);
+    const deletionKey = pipeConversationDeletionKey(
+      convId,
+      metadata?.pipeContext?.executionId,
+    );
     await deleteConversationFile(convId);
     await refreshFileConversations();
 
@@ -1153,7 +1195,7 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
 
     // Broadcast so other windows (home sidebar / overlay) update immediately.
     try {
-      await emit("chat-deleted", { id: convId });
+      await emit("chat-deleted", { id: convId, deletionKey });
     } catch (e) {
       console.warn("[chat] failed to broadcast delete:", e);
     }
@@ -1225,6 +1267,10 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
     piStreamingTextRef.current = "";
     piMessageIdRef.current = null;
     piContentBlocksRef.current = [];
+    // Dispatch guards are panel-local too: leaving them set makes the chat we
+    // are switching INTO inherit the outgoing turn's queue-only composer.
+    if (forceQueueModeRef) forceQueueModeRef.current = false;
+    if (sendDispatchInFlightRef) sendDispatchInFlightRef.current = false;
     setIsLoading(false);
     setIsStreaming(false);
     // Composer state (text, images, docs) is scoped to the chat the user
@@ -1275,6 +1321,14 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
     if (needsPersistedSync) {
       const { loadConversationFile } = await import("@/lib/chat-storage");
       persisted = await loadConversationFile(conv.id);
+      // Seed the prior ACP session id so the first cold-start spawn for this
+      // reopened chat reattaches (session/resume) instead of starting fresh.
+      const priorAcpSessionId =
+        persisted?.acpSessionId ?? (conv as ChatConversation).acpSessionId;
+      if (priorAcpSessionId) {
+        const { useAcpSessionConfig } = await import("@/lib/stores/acp-session-config");
+        useAcpSessionConfig.getState().seedSessionId(conv.id, priorAcpSessionId);
+      }
       if (persisted) {
         if (!store.sessions[conv.id]) {
           store.actions.upsert({
@@ -1530,7 +1584,7 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
           content = m.contentBlocks
             .filter((b: any) => b.type === "text")
             .map((b: any) => b.text)
-            .join("\n") || "(tool result)";
+            .join("\n");
         }
         const blocks = m.contentBlocks?.map((b: any) => {
           if (b.type === "tool") {
@@ -1676,6 +1730,14 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
     piStreamingTextRef.current = "";
     piMessageIdRef.current = null;
     piContentBlocksRef.current = [];
+    // Release the composer's dispatch guards with the rest of the turn state.
+    // These are set on every send and previously cleared only by `agent_end`
+    // or Stop, so a chat left mid-turn handed its queue-only mode to the NEW
+    // chat: the first message went to `pi_queue_prompt` against a session with
+    // no Pi process, which fails and restores the input — "I can't start a new
+    // chat, everything is stuck".
+    if (forceQueueModeRef) forceQueueModeRef.current = false;
+    if (sendDispatchInFlightRef) sendDispatchInFlightRef.current = false;
     setIsLoading(false);
     setIsStreaming(false);
     setMessages([]);

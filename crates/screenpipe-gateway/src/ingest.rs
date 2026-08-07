@@ -29,10 +29,12 @@
 //! | wire kind | rows | device carrier |
 //! |---|---|---|
 //! | frame     | `video_chunks` (virtual, `gw://` path) + `frames` (`full_text`) | `frames.machine_id` |
+//! | parsed    | `gateway_parsed_records` + FTS (full wire payload retained) | `device_id` |
 //! | audio     | `audio_chunks` (`gw://` path) + `audio_transcriptions` (+ speaker by name) | `audio_chunks.machine_id` |
 //! | ui        | `ui_events` | `ui_events.machine_id` |
 //! | snapshot  | JPEG on disk + `frames.snapshot_path` on the matching frame row | via frame row |
 //! | memory    | `memories` upsert on `sync_uuid` | `memories.sync_modified_by` |
+//! | feedback  | `feedback` upsert by device + feedback id | `feedback.device_id` |
 //!
 //! `gw://` (not the cloud sync's `cloud://`) is load-bearing: several
 //! search paths exclude `cloud://%` chunks, which would make gateway rows
@@ -46,8 +48,8 @@ use base64::Engine;
 use screenpipe_db::DatabaseManager;
 use screenpipe_sync::{BlobSource, ListRequest};
 use screenpipe_telemetry_wire::{
-    org_telemetry_prefix, parse_jsonl, parse_telemetry_key, AudioRow, FrameRow, MemoryRow,
-    SnapshotRow, TelemetryRecord, UiEventRow,
+    org_telemetry_prefix, parse_jsonl, parse_telemetry_key, AudioRow, FeedbackRow, FrameRow,
+    MemoryRow, ParsedRow, SnapshotRow, TelemetryRecord, UiEventRow,
 };
 use tracing::{debug, info, warn};
 
@@ -164,6 +166,42 @@ pub async fn ensure_gateway_schema(db: &DatabaseManager) -> Result<(), GatewayEr
             enrolled_at TEXT NOT NULL,
             last_seen TEXT NOT NULL
         )"#,
+    )
+    .execute(&mut **tx.conn())
+    .await?;
+    // Parsed projections intentionally live in a gateway-owned table rather
+    // than being folded into OCR rows. The full versioned wire payload stays
+    // recoverable while scalar columns and FTS make the v1 surface useful.
+    sqlx::query(
+        r#"CREATE TABLE IF NOT EXISTS gateway_parsed_records (
+            sync_id TEXT PRIMARY KEY,
+            device_id TEXT NOT NULL,
+            device_label TEXT NOT NULL,
+            frame_id INTEGER NOT NULL,
+            timestamp TEXT NOT NULL,
+            app_name TEXT NOT NULL,
+            window_name TEXT NOT NULL,
+            browser_url TEXT,
+            text TEXT NOT NULL,
+            parser_id TEXT NOT NULL,
+            parser_version TEXT NOT NULL,
+            schema_version INTEGER NOT NULL,
+            payload_json TEXT NOT NULL
+        )"#,
+    )
+    .execute(&mut **tx.conn())
+    .await?;
+    sqlx::query(
+        r#"CREATE VIRTUAL TABLE IF NOT EXISTS gateway_parsed_records_fts
+           USING fts5(text, app_name, window_name, content='gateway_parsed_records', content_rowid='rowid')"#,
+    )
+    .execute(&mut **tx.conn())
+    .await?;
+    sqlx::query(
+        r#"CREATE TRIGGER IF NOT EXISTS gateway_parsed_records_ai AFTER INSERT ON gateway_parsed_records BEGIN
+             INSERT INTO gateway_parsed_records_fts(rowid, text, app_name, window_name)
+             VALUES (new.rowid, new.text, new.app_name, new.window_name);
+           END"#,
     )
     .execute(&mut **tx.conn())
     .await?;
@@ -413,6 +451,11 @@ impl Ingestor {
                     device_label,
                     frame,
                 } => insert_frame(conn, device_id, device_label, frame).await?,
+                TelemetryRecord::Parsed {
+                    device_id,
+                    device_label,
+                    parsed,
+                } => insert_parsed(conn, device_id, device_label, parsed).await?,
                 TelemetryRecord::Audio {
                     device_id, audio, ..
                 } => insert_audio(conn, device_id, audio).await?,
@@ -427,6 +470,11 @@ impl Ingestor {
                 TelemetryRecord::Memory {
                     device_id, memory, ..
                 } => insert_memory(conn, device_id, memory).await?,
+                TelemetryRecord::Feedback {
+                    device_id,
+                    feedback,
+                    ..
+                } => insert_feedback(conn, device_id, feedback).await?,
             };
             if did_insert {
                 inserted += 1;
@@ -467,6 +515,39 @@ async fn frame_row_id_by_sync_id(conn: &mut Conn, sid: &str) -> Result<Option<i6
         .fetch_optional(&mut **conn)
         .await?;
     Ok(row.map(|r| r.0))
+}
+
+async fn insert_parsed(
+    conn: &mut Conn,
+    device_id: &str,
+    device_label: &str,
+    parsed: &ParsedRow,
+) -> Result<bool, GatewayError> {
+    let sid = sync_id(device_id, "parsed", parsed.frame_id);
+    let payload_json = serde_json::to_string(parsed)
+        .map_err(|error| GatewayError::DbWrite(format!("serialize parsed row: {error}")))?;
+    let result = sqlx::query(
+        r#"INSERT OR IGNORE INTO gateway_parsed_records
+           (sync_id, device_id, device_label, frame_id, timestamp, app_name, window_name,
+            browser_url, text, parser_id, parser_version, schema_version, payload_json)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)"#,
+    )
+    .bind(sid)
+    .bind(device_id)
+    .bind(device_label)
+    .bind(parsed.frame_id)
+    .bind(&parsed.timestamp)
+    .bind(&parsed.app_name)
+    .bind(&parsed.window_name)
+    .bind(parsed.browser_url.as_deref())
+    .bind(&parsed.text)
+    .bind(&parsed.parser_id)
+    .bind(&parsed.parser_version)
+    .bind(i64::from(parsed.schema_version))
+    .bind(payload_json)
+    .execute(&mut **conn)
+    .await?;
+    Ok(result.rows_affected() > 0)
 }
 
 /// frame → virtual `gw://` video chunk + frames row (full_text carries the
@@ -699,12 +780,68 @@ async fn insert_memory(
     Ok(result.rows_affected() > 0)
 }
 
+/// feedback → generic feedback table. A source feedback id is only unique on
+/// its originating device, so the gateway prefixes it before using it as the
+/// org-wide primary key. Re-ratings update in place by `updated_at`.
+async fn insert_feedback(
+    conn: &mut Conn,
+    device_id: &str,
+    feedback: &FeedbackRow,
+) -> Result<bool, GatewayError> {
+    let id = format!("{device_id}:feedback:{}", feedback.feedback_id);
+    let snapshot = feedback
+        .snapshot
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|error| GatewayError::DbWrite(error.to_string()))?;
+    let context = serde_json::to_string(&feedback.context)
+        .map_err(|error| GatewayError::DbWrite(error.to_string()))?;
+    let result = sqlx::query(
+        r#"INSERT INTO feedback
+           (id, target_kind, target_id, target_version, producer_ref, actor_id,
+            rating, comment, snapshot, context, device_id, created_at, updated_at)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+           ON CONFLICT(id) DO UPDATE SET
+             target_kind = excluded.target_kind,
+             target_id = excluded.target_id,
+             target_version = excluded.target_version,
+             producer_ref = excluded.producer_ref,
+             actor_id = excluded.actor_id,
+             rating = excluded.rating,
+             comment = excluded.comment,
+             snapshot = excluded.snapshot,
+             context = excluded.context,
+             created_at = excluded.created_at,
+             updated_at = excluded.updated_at
+           WHERE excluded.updated_at > feedback.updated_at"#,
+    )
+    .bind(&id)
+    .bind(&feedback.target_kind)
+    .bind(&feedback.target_id)
+    .bind(feedback.target_version.as_deref().unwrap_or(""))
+    .bind(&feedback.producer_ref)
+    .bind(&feedback.actor_id)
+    .bind(&feedback.rating)
+    .bind(&feedback.comment)
+    .bind(snapshot)
+    .bind(context)
+    .bind(device_id)
+    .bind(&feedback.created_at)
+    .bind(&feedback.updated_at)
+    .execute(&mut **conn)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use object_store::memory::InMemory;
     use screenpipe_config::DbConfig;
-    use screenpipe_telemetry_wire::{build_jsonl, direct_batch_key};
+    use screenpipe_telemetry_wire::{
+        build_feedback_jsonl, build_jsonl, build_jsonl_with_parsed, direct_batch_key,
+    };
 
     use crate::source::S3BlobSource;
 
@@ -718,7 +855,7 @@ mod tests {
     }
 
     fn device_batch(device: &str, label: &str, text: &str) -> Vec<u8> {
-        build_jsonl(
+        build_jsonl_with_parsed(
             device,
             label,
             &[FrameRow {
@@ -728,6 +865,33 @@ mod tests {
                 window_name: Some("roadmap".to_string()),
                 browser_url: None,
                 text: Some(text.to_string()),
+            }],
+            &[ParsedRow {
+                frame_id: 1,
+                timestamp: "2026-07-22T10:00:00Z".to_string(),
+                app_name: "Slack".to_string(),
+                window_name: "roadmap".to_string(),
+                browser_url: None,
+                text: format!("Ada: {text} structured message"),
+                run_id: 7,
+                parser_id: "slack.messages".to_string(),
+                parser_version: "1.0.0".to_string(),
+                schema_version: 1,
+                app_platform: "macos".to_string(),
+                app_id: Some("com.tinyspeck.slackmacgap".to_string()),
+                app_executable: None,
+                app_version: None,
+                parse_duration_us: 300,
+                text_bytes: text.len(),
+                items: vec![serde_json::json!({
+                    "local_id": "message:1",
+                    "kind": "message",
+                    "body": text
+                })],
+                actors: vec![serde_json::json!({
+                    "local_id": "message:1",
+                    "name": "Ada Lovelace"
+                })],
             }],
             &[AudioRow {
                 transcription_id: 1,
@@ -796,7 +960,7 @@ mod tests {
 
         let report = ingestor.run_once().await.unwrap();
         assert_eq!(report.objects_ingested, 2);
-        assert_eq!(report.records_inserted, 8, "4 records × 2 devices");
+        assert_eq!(report.records_inserted, 10, "5 records × 2 devices");
         assert_eq!(report.objects_failed, 0);
         assert!(report.cursor.is_some());
 
@@ -828,6 +992,19 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(results.len(), 2, "one frame per device");
+
+        let parsed_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM gateway_parsed_records")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+        assert_eq!(parsed_rows, 2, "one parsed projection per device");
+        let parsed_fts: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM gateway_parsed_records_fts WHERE gateway_parsed_records_fts MATCH 'structured'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(parsed_fts, 2, "parsed text is indexed for gateway search");
 
         // Device-scoped via machine_id.
         let scoped = db
@@ -889,12 +1066,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn feedback_ingests_into_the_shared_feedback_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = test_db(&dir).await;
+        let src = Arc::new(S3BlobSource::from_store(Arc::new(InMemory::new()), None));
+        let body = build_feedback_jsonl(
+            "dev-a",
+            "alice-mbp",
+            &[FeedbackRow {
+                feedback_id: "feedback-1".to_string(),
+                target_kind: "notification".to_string(),
+                target_id: "daily-recap".to_string(),
+                target_version: None,
+                producer_ref: Some("pipe:daily-recap".to_string()),
+                actor_id: "local-user".to_string(),
+                rating: "down".to_string(),
+                comment: Some("include project names".to_string()),
+                snapshot: Some(serde_json::json!({"title": "today"})),
+                context: serde_json::json!({"session_id": "s-1"}),
+                created_at: "2026-07-30T10:00:00Z".to_string(),
+                updated_at: "2026-07-30T10:00:00Z".to_string(),
+            }],
+        );
+        src.put_for_tests(&direct_batch_key("lic-1", "dev-a", "feedback-batch"), body)
+            .await
+            .unwrap();
+        let ingestor = Ingestor::new(
+            src as Arc<dyn BlobSource>,
+            db.clone(),
+            "lic-1".to_string(),
+            dir.path().join("snapshots"),
+        )
+        .await
+        .unwrap();
+
+        let report = ingestor.run_once().await.unwrap();
+        assert_eq!(report.records_inserted, 1);
+        let records = db
+            .list_feedback(
+                Some("notification"),
+                None,
+                Some("pipe:daily-recap"),
+                Some("down"),
+                Some("project names"),
+                None,
+                false,
+                None,
+                false,
+                20,
+            )
+            .await
+            .unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].device_id.as_deref(), Some("dev-a"));
+    }
+
+    #[tokio::test]
     async fn rerunning_ingest_over_same_objects_is_a_noop() {
         let dir = tempfile::tempdir().unwrap();
         let (ingestor, db, src) = seeded_ingestor(&dir).await;
 
         let first = ingestor.run_once().await.unwrap();
-        assert_eq!(first.records_inserted, 8);
+        assert_eq!(first.records_inserted, 10);
 
         let second = ingestor.run_once().await.unwrap();
         assert_eq!(second.objects_ingested, 0);
@@ -912,7 +1145,7 @@ mod tests {
         let third = ingestor.run_once().await.unwrap();
         assert_eq!(third.objects_ingested, 1);
         assert_eq!(third.records_inserted, 0, "all records deduped by sync_id");
-        assert_eq!(third.records_deduped, 4);
+        assert_eq!(third.records_deduped, 5);
 
         let frames: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM frames")
             .fetch_one(&db.pool)

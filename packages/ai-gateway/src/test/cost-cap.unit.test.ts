@@ -12,9 +12,11 @@
 import { describe, expect, it } from 'bun:test';
 import { enforceDailyCostCap, reserveDailyCostCap } from '../services/cost-cap';
 import { Env } from '../types';
+import { TEST_PRIVATE_COST_CONTROLS } from './fixtures/private-cost-controls';
 
-function dbEnv(dailyCost: number | null): Env {
+function dbEnv(dailyCost: number | null, withPrivateControls = true): Env {
 	return {
+		...(withPrivateControls ? TEST_PRIVATE_COST_CONTROLS : {}),
 		DB: {
 			prepare(sql: string) {
 				return {
@@ -42,28 +44,91 @@ describe('enforceDailyCostCap', () => {
 
 	it('caps a weight-zero but priced model once over the ceiling', async () => {
 		const response = await enforceDailyCostCap(
-			dbEnv(40), 'dev', 'subscribed', 'gemini-3.5-flash',
+			dbEnv(5), 'dev', 'subscribed', 'gemini-3.5-flash',
 		);
 		expect(response?.status).toBe(429);
 		expect(await response!.text()).toContain('daily_cost_limit_exceeded');
 	});
 
+	it('returns a Business recovery action for a Basic account even when its access tier is subscribed', async () => {
+		const response = await enforceDailyCostCap(
+			dbEnv(200), 'dev', 'subscribed', 'gemini-3.5-flash', 'basic',
+		);
+		expect(response?.status).toBe(429);
+		const wireBody = await response!.json() as { error: string };
+		expect(JSON.parse(wireBody.error)).toMatchObject({
+			error: 'daily_cost_limit_exceeded',
+			plan: 'basic',
+			required_plan: 'business',
+			upgrade_url: 'https://screenpi.pe/account/billing',
+			can_buy_credits: false,
+		});
+	});
+
+	it.each([
+		['business', 'business_max', 'https://screenpipe.com/account/billing?target_plan=pro_max&interval=month'],
+		['business_max', 'business_ultra', 'https://screenpipe.com/account/billing?target_plan=pro_ultra&interval=month'],
+	] as const)('returns the next capacity action when %s reaches its cost budget', async (
+		plan,
+		requiredPlan,
+		upgradeUrl,
+	) => {
+		const response = await enforceDailyCostCap(
+			dbEnv(200), 'dev', 'subscribed', 'gemini-3.5-flash', plan,
+		);
+		expect(response?.status).toBe(429);
+		const wireBody = await response!.json() as { error: string };
+		expect(JSON.parse(wireBody.error)).toMatchObject({
+			error: 'daily_cost_limit_exceeded',
+			plan,
+			required_plan: requiredPlan,
+			upgrade_url: upgradeUrl,
+			can_buy_credits: false,
+		});
+	});
+
+	it.each(['business_ultra', 'team', 'enterprise'] as const)(
+		'does not offer a false self-serve upgrade when %s reaches its cost budget',
+		async (plan) => {
+			const response = await enforceDailyCostCap(
+				dbEnv(200), 'dev', 'subscribed', 'gemini-3.5-flash', plan,
+			);
+			expect(response?.status).toBe(429);
+			const wireBody = await response!.json() as { error: string };
+			expect(JSON.parse(wireBody.error)).toMatchObject({
+				error: 'daily_cost_limit_exceeded',
+				plan,
+				required_plan: null,
+				upgrade_url: null,
+				can_buy_credits: false,
+			});
+		},
+		);
+
 	it('allows the same priced model while under the ceiling', async () => {
 		expect(
-			await enforceDailyCostCap(dbEnv(10), 'dev', 'subscribed', 'gemini-3.5-flash'),
+			await enforceDailyCostCap(dbEnv(3), 'dev', 'subscribed', 'gemini-3.5-flash'),
 		).toBeNull();
 	});
 
 	it('uses lower anonymous and logged-in ceilings than the subscribed tier', async () => {
 		expect(
-			(await enforceDailyCostCap(dbEnv(5), 'dev', 'anonymous', 'gemini-3.5-flash'))?.status,
+			(await enforceDailyCostCap(dbEnv(2), 'dev', 'anonymous', 'gemini-3.5-flash'))?.status,
 		).toBe(429);
 		expect(
-			(await enforceDailyCostCap(dbEnv(5), 'dev', 'logged_in', 'gemini-3.5-flash'))?.status,
+			(await enforceDailyCostCap(dbEnv(2), 'dev', 'logged_in', 'gemini-3.5-flash'))?.status,
 		).toBe(429);
 		expect(
-			await enforceDailyCostCap(dbEnv(5), 'dev', 'subscribed', 'gemini-3.5-flash'),
+			await enforceDailyCostCap(dbEnv(2), 'dev', 'subscribed', 'gemini-3.5-flash'),
 		).toBeNull();
+	});
+
+	it('fails closed when private controls are missing', async () => {
+		const response = await enforceDailyCostCap(
+			dbEnv(0, false), 'dev', 'subscribed', 'gemini-3.5-flash',
+		);
+		expect(response?.status).toBe(503);
+		expect(await response!.text()).toContain('cost_control_unavailable');
 	});
 
 	it('fails closed when accounting storage is unavailable', async () => {

@@ -216,6 +216,41 @@ fn native_notif_action_callback_inner(json_ptr: *const std::os::raw::c_char) {
         return;
     }
 
+    // Human rating of the exact notification output. Persist through the
+    // engine's local feedback ledger so the native Swift panel and webview
+    // panel share one contract, and so this works even when no React listener
+    // is mounted. The rating, correction, and rated output stay local.
+    if action_type == Some("feedback") {
+        let Some(payload) = parsed.clone() else {
+            warn!("invalid native notification feedback payload: {}", json);
+            return;
+        };
+        let app_clone = app.clone();
+        std::thread::spawn(move || {
+            use crate::recording::local_api_context_from_app;
+            let api = local_api_context_from_app(&app_clone);
+            let client = reqwest::blocking::Client::new();
+            let request = api.apply_auth_blocking(
+                client
+                    .post(api.url("/feedback"))
+                    .header("Content-Type", "application/json")
+                    .body(payload.to_string()),
+            );
+            match request.send() {
+                Ok(response) if response.status().is_success() => {}
+                Ok(response) => error!(
+                    status = %response.status(),
+                    "failed to persist native notification feedback"
+                ),
+                Err(error) => error!(
+                    "failed to reach local feedback API from native notification: {}",
+                    error
+                ),
+            }
+        });
+        return;
+    }
+
     // Source actions open the originating surface. Accept several field names
     // because producers have used both URL-shaped and source-shaped payloads.
     if action_type == Some("source") {
@@ -547,6 +582,66 @@ extern "C" fn native_shortcut_action_callback(action_ptr: *const std::os::raw::c
     }));
 }
 
+fn stop_native_overlay_meeting(app: &tauri::AppHandle) -> Result<(), String> {
+    use crate::recording::local_api_context_from_app;
+
+    let api = local_api_context_from_app(app);
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|error| format!("meeting stop client failed: {error}"))?;
+    let status_response = api
+        .apply_auth_blocking(client.get(api.url("/meetings/status")))
+        .send()
+        .map_err(|error| format!("meeting status request failed: {error}"))?
+        .error_for_status()
+        .map_err(|error| format!("meeting status request failed: {error}"))?;
+    let status = status_response
+        .json::<serde_json::Value>()
+        .map_err(|error| format!("meeting status response was invalid: {error}"))?;
+
+    if status["active"].as_bool() != Some(true) {
+        native_shortcut_reminder::set_meeting_active(false);
+        native_shortcut_reminder::set_meeting_stop_result(true);
+        return Ok(());
+    }
+
+    let stoppable_id = status["stoppableMeetingId"]
+        .as_i64()
+        .or_else(|| status["activeMeetingId"].as_i64())
+        .ok_or_else(|| "active meeting had no stoppable id".to_string())?;
+    api.apply_auth_blocking(
+        client
+            .post(api.url("/meetings/stop"))
+            .header("Content-Type", "application/json")
+            .body(serde_json::json!({ "id": stoppable_id }).to_string()),
+    )
+    .send()
+    .map_err(|error| format!("meeting stop request failed: {error}"))?
+    .error_for_status()
+    .map_err(|error| format!("meeting stop request failed: {error}"))?;
+
+    track_native_overlay_event(
+        app,
+        "shortcut_reminder_meeting_toggled",
+        serde_json::json!({ "active": false, "control": "transcript_preview" }),
+    );
+    native_shortcut_reminder::set_meeting_stop_result(true);
+    native_shortcut_reminder::set_meeting_active(false);
+    let _ = app.emit(
+        "native-shortcut-toggle-meeting",
+        serde_json::json!({
+            "active": false,
+            "manualActive": false,
+            "activeMeetingId": serde_json::Value::Null,
+            "stoppableMeetingId": serde_json::Value::Null,
+            "meetingApp": serde_json::Value::Null,
+            "detectionSource": serde_json::Value::Null,
+        }),
+    );
+    Ok(())
+}
+
 fn native_shortcut_action_callback_inner(action_ptr: *const std::os::raw::c_char) {
     if action_ptr.is_null() {
         return;
@@ -625,6 +720,12 @@ fn native_shortcut_action_callback_inner(action_ptr: *const std::os::raw::c_char
                         let _ = crate::commands::show_notification_inbox(app).await;
                     });
                 }
+                "stop_meeting" => {
+                    if let Err(error) = stop_native_overlay_meeting(&app_clone) {
+                        warn!("native overlay meeting stop failed: {}", error);
+                        native_shortcut_reminder::set_meeting_stop_result(false);
+                    }
+                }
                 "toggle_meeting" => {
                     // Directly call the meetings API instead of relying on JS
                     // (the Main window may not be loaded when using the Swift overlay)
@@ -638,35 +739,11 @@ fn native_shortcut_action_callback_inner(action_ptr: *const std::os::raw::c_char
                         .ok()
                         .and_then(|r| r.json::<serde_json::Value>().ok());
                     let is_active = status.as_ref().and_then(|v| v["active"].as_bool());
-                    let stoppable_id = status
-                        .as_ref()
-                        .and_then(|v| v["stoppableMeetingId"].as_i64());
                     match status {
                         Some(_) if is_active == Some(true) => {
-                            let req = api.apply_auth_blocking(
-                                client
-                                    .post(api.url("/meetings/stop"))
-                                    .header("Content-Type", "application/json")
-                                    .body(serde_json::json!({ "id": stoppable_id }).to_string()),
-                            );
-                            if req.send().is_ok() {
-                                track_native_overlay_event(
-                                    &app_clone,
-                                    "shortcut_reminder_meeting_toggled",
-                                    serde_json::json!({ "active": false }),
-                                );
-                                native_shortcut_reminder::set_meeting_active(false);
-                                let _ = app_clone.emit(
-                                    "native-shortcut-toggle-meeting",
-                                    serde_json::json!({
-                                        "active": false,
-                                        "manualActive": false,
-                                        "activeMeetingId": serde_json::Value::Null,
-                                        "stoppableMeetingId": serde_json::Value::Null,
-                                        "meetingApp": serde_json::Value::Null,
-                                        "detectionSource": serde_json::Value::Null,
-                                    }),
-                                );
+                            if let Err(error) = stop_native_overlay_meeting(&app_clone) {
+                                warn!("native overlay legacy meeting stop failed: {}", error);
+                                native_shortcut_reminder::set_meeting_stop_result(false);
                             }
                         }
                         Some(_) if is_active == Some(false) => {

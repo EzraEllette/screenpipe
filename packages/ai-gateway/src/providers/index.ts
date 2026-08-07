@@ -8,12 +8,19 @@ import { ScreenpipeEnclaveProvider, isScreenpipeEnclaveModel } from './screenpip
 import { AIProvider } from './base';
 import { Env } from '../types';
 
+export interface ProviderConnectionOptions {
+	baseURL?: string;
+	apiKey?: string;
+	maxRetries?: number;
+	defaultHeaders?: Record<string, string | null | undefined>;
+	chatTemplateKwargs?: Record<string, unknown>;
+}
+
 // Retired/removed hosted model IDs stay accepted so saved presets and old pipes
 // do not fail. They are normalized before gating, metering, provider selection,
 // and cost attribution, so callers transparently receive a current model and we
 // never send another request to the old Google/OpenRouter/Tinfoil lanes.
 export const RETIRED_HOSTED_MODEL_FALLBACK = 'gpt-5.6-luna';
-export const EMERGENCY_ANTHROPIC_FALLBACK = 'claude-sonnet-5';
 
 const RETIRED_HOSTED_MODEL_IDS = new Set([
 	// Retired Anthropic shortcuts used by older presets and integrations.
@@ -53,13 +60,6 @@ const RETIRED_HOSTED_MODEL_IDS = new Set([
  */
 export function resolveModelAlias(model: string): string {
 	const lower = model.toLowerCase();
-	// Fable and Opus produced an abnormal provider-spend incident on 2026-07-31.
-	// Keep saved presets working, but serve the substantially cheaper current
-	// Claude model until cancellation-safe accounting and global breakers are live.
-	if (lower.startsWith('claude-fable-') || lower.startsWith('claude-opus-')) {
-		console.log(`[router] emergency hosted model ${model} → ${EMERGENCY_ANTHROPIC_FALLBACK}`);
-		return EMERGENCY_ANTHROPIC_FALLBACK;
-	}
 	if (isRetiredHostedModel(lower)) {
 		console.log(`[router] retired hosted model ${model} → ${RETIRED_HOSTED_MODEL_FALLBACK}`);
 		return RETIRED_HOSTED_MODEL_FALLBACK;
@@ -129,7 +129,7 @@ function requireSecret(value: unknown, message: string): string {
 	return value.trim();
 }
 
-export function createProvider(model: string, env: Env): AIProvider {
+export function createProvider(model: string, env: Env, connection?: ProviderConnectionOptions): AIProvider {
 	// SCREENPIPE-AI-PROXY-1R: model can arrive undefined/empty on malformed
 	// request paths; fail with a clear message instead of a cryptic
 	// "Cannot read properties of undefined (reading 'toLowerCase')".
@@ -145,8 +145,27 @@ export function createProvider(model: string, env: Env): AIProvider {
 		const vllmUrl = env.EVENT_CLASSIFIER_URL || 'http://34.122.128.37:8080/v1';
 		return new OpenAIProvider('none', vllmUrl);
 	}
+	// Internal background-only rescue model. Normal model access policy never
+	// exposes this ID; chat.ts selects it only for a paid, text-only Pipe after
+	// an account allowance or provider billing quota is exhausted.
+	if (model === 'argus-trace-1') {
+		const provider = new OpenAIProvider(
+			requireSecret(env.SCREENPIPE_QWEN35_API_KEY, 'Argus Trace API key not configured'),
+			requireSecret(env.SCREENPIPE_QWEN35_URL, 'Argus Trace endpoint not configured'),
+			undefined,
+			0,
+			{ enable_thinking: false },
+		);
+		provider.supportsVision = false;
+		return provider;
+	}
 	if (model.toLowerCase().includes('claude')) {
-		return new AnthropicProvider(requireSecret(env.ANTHROPIC_API_KEY, 'Anthropic API key not configured'));
+		return new AnthropicProvider(
+			connection?.apiKey ?? requireSecret(env.ANTHROPIC_API_KEY, 'Anthropic API key not configured'),
+			connection?.baseURL,
+			connection?.defaultHeaders,
+			connection?.maxRetries,
+		);
 	}
 	// Screenpipe enclave — our own Tinfoil-hosted CVM serving Gemma 4 E4B
 	// (audio + vision + chat) alongside the privacy-filter. Tinfoil tokens
@@ -158,7 +177,13 @@ export function createProvider(model: string, env: Env): AIProvider {
 			: env.TINFOIL_API_KEY;
 		return new ScreenpipeEnclaveProvider(requireSecret(key, 'No Tinfoil API key configured (need SCREENPIPE_ENCLAVE_API_KEY or TINFOIL_API_KEY)'));
 	}
-	return new OpenAIProvider(requireSecret(env.OPENAI_API_KEY, 'OpenAI API key not configured'));
+	return new OpenAIProvider(
+		connection?.apiKey ?? requireSecret(env.OPENAI_API_KEY, 'OpenAI API key not configured'),
+		connection?.baseURL,
+		connection?.defaultHeaders,
+		connection?.maxRetries,
+		connection?.chatTemplateKwargs,
+	);
 }
 
 export type { AIProvider };

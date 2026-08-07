@@ -14,7 +14,17 @@ mock.module('@clerk/backend', () => ({
   verifyToken: verifyTokenMock,
 }));
 
-const { validateAuth, __resetAuthEntitlementCacheForTests } = await import('./auth');
+const { validateAuth, __resetAuthEntitlementCacheForTests, resolveUsageTier } = await import('./auth');
+
+describe('resolveUsageTier', () => {
+	it('grants power capacity only when the authenticated model tier is subscribed', () => {
+		expect(resolveUsageTier('business_max', 'subscribed')).toBe('business_max');
+		expect(resolveUsageTier('business_ultra', 'subscribed')).toBe('business_ultra');
+		expect(resolveUsageTier('business_max', 'logged_in')).toBe('logged_in');
+		expect(resolveUsageTier('business_ultra', 'anonymous')).toBe('anonymous');
+		expect(resolveUsageTier('business', 'subscribed')).toBe('subscribed');
+	});
+});
 
 // Canceling a subscription must not strip Pro access before the paid period
 // ends. Stripe stamps canceled_at / flips status to canceled the moment a
@@ -122,12 +132,44 @@ describe('validateAuth — verified identities only', () => {
   });
 
   it('does not authenticate an arbitrary Clerk user ID', async () => {
+    const fetchMock = mock(async () => new Response(JSON.stringify([{ id: 'active-subscription' }])));
+    globalThis.fetch = fetchMock as typeof fetch;
+
     expect(await validateAuth(requestFor('user_attackerchosen'), env)).toEqual({
       isValid: true,
       tier: 'anonymous',
       accountPlan: 'unknown',
       deviceId: 'device-from-header',
     });
+    // No subscription lookup may be keyed on an unauthenticated identifier:
+    // the answer would be "yes, that account is subscribed" for any account
+    // name the caller can guess.
+    expect(fetchMock).toHaveBeenCalledTimes(0);
+  });
+
+  // The reported bypass was a code path that read a bare account identifier
+  // and returned a subscription verdict. It is gone; this keeps the module
+  // from re-growing an entry point that skips Clerk verification.
+  it('exposes no identifier-only authentication entry point', async () => {
+    const authModule = await import('./auth');
+
+    expect(Object.keys(authModule).sort()).toEqual([
+      '__resetAuthEntitlementCacheForTests',
+      'resolveUsageTier',
+      'validateAuth',
+      'verifyClerkToken',
+    ]);
+  });
+
+  // `subscription.ts` also held an unreachable `validateSubscription(env,
+  // userId)` that returned `true` — subscribed — for *any* string matching
+  // /^user_[a-zA-Z0-9]+$/, with no lookup at all, and cached that verdict.
+  // Nothing called it, but it was a working bypass waiting to be wired up.
+  // Only the pure PostgREST filter survives.
+  it('leaves no subscription helper that trusts a bare identifier', async () => {
+    const subscriptionModule = await import('./subscription');
+
+    expect(Object.keys(subscriptionModule)).toEqual(['activeSubscriptionFilter']);
   });
 
   it('does not grant the former development test token in any environment', async () => {
@@ -174,6 +216,8 @@ describe('validateAuth — verified identities only', () => {
       accountPlan: 'free',
       deviceId: 'user_verified',
       userId: 'user_verified',
+      clerkUserId: 'user_verified',
+      clerkUserIdVerified: true,
     } as const;
 
     expect(await validateAuth(requestFor('eyJ.verified.clerk.1'), env)).toEqual(expected);
@@ -207,6 +251,8 @@ describe('validateAuth — verified identities only', () => {
       accountPlan: 'free',
       deviceId: 'user_refunded',
       userId: 'user_refunded',
+      clerkUserId: 'user_refunded',
+      clerkUserIdVerified: true,
     });
   });
 
@@ -242,6 +288,8 @@ describe('validateAuth — verified identities only', () => {
       accountPlan: 'basic',
       deviceId: 'user_basic',
       userId: 'user_basic',
+      clerkUserId: 'user_basic',
+      clerkUserIdVerified: true,
     } as const;
 
     expect(await validateAuth(requestFor('eyJ.basic.clerk.1'), env)).toEqual(expected);
@@ -276,6 +324,8 @@ describe('validateAuth — verified identities only', () => {
       accountPlan: 'basic',
       deviceId: 'user_lifetime',
       userId: 'user_lifetime',
+      clerkUserId: 'user_lifetime',
+      clerkUserIdVerified: true,
     });
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
@@ -306,6 +356,8 @@ describe('validateAuth — verified identities only', () => {
       accountPlan: 'unknown',
       deviceId: 'user_unknown',
       userId: 'user_unknown',
+      clerkUserId: 'user_unknown',
+      clerkUserIdVerified: true,
     } as const;
 
     expect(await validateAuth(requestFor('eyJ.unknown.clerk.1'), env)).toEqual(expected);
@@ -323,6 +375,8 @@ describe('validateAuth — verified identities only', () => {
       accountPlan: 'unknown',
       deviceId: 'user_retry',
       userId: 'user_retry',
+      clerkUserId: 'user_retry',
+      clerkUserIdVerified: true,
     } as const;
 
     expect(await validateAuth(requestFor('eyJ.retry.clerk.1'), env)).toEqual(expected);
@@ -362,6 +416,8 @@ describe('validateAuth — verified identities only', () => {
         accountPlan: 'business',
         deviceId: 'user_concurrent',
         userId: 'user_concurrent',
+        clerkUserId: 'user_concurrent',
+        clerkUserIdVerified: true,
       },
       {
         isValid: true,
@@ -369,6 +425,8 @@ describe('validateAuth — verified identities only', () => {
         accountPlan: 'business',
         deviceId: 'user_concurrent',
         userId: 'user_concurrent',
+        clerkUserId: 'user_concurrent',
+        clerkUserIdVerified: true,
       },
     ]);
     expect(verifyTokenMock).toHaveBeenCalledTimes(2);
@@ -406,7 +464,139 @@ describe('validateAuth — verified identities only', () => {
       accountPlan: 'business',
       deviceId: 'user_subscribed',
       userId: 'user_subscribed',
+      clerkUserId: 'user_subscribed',
+      clerkUserIdVerified: true,
     });
+  });
+
+	it('propagates only a server-verified hosted AI trial marker', async () => {
+		verifyTokenMock.mockImplementation(async () => ({ sub: 'user_trial' }) as any);
+		globalThis.fetch = mock(async () => new Response(JSON.stringify({
+			success: true,
+			user: {
+				clerk_id: 'user_trial',
+				cloud_subscribed: true,
+				app_entitled: true,
+				subscription_plan: 'pro',
+				hosted_ai_trial: true,
+				entitlement: { active: true, plan: 'pro', features: { app: true } },
+			},
+		}), { status: 200 })) as typeof fetch;
+
+		expect(await validateAuth(requestFor('eyJ.trial.clerk'), env)).toEqual({
+			isValid: true,
+			tier: 'subscribed',
+			accountPlan: 'business',
+			hostedAiTrial: true,
+			deviceId: 'user_trial',
+			userId: 'user_trial',
+			clerkUserId: 'user_trial',
+			clerkUserIdVerified: true,
+		});
+	});
+
+  it('uses canonical Max and Ultra billing plans with desktop-compatible access labels', async () => {
+    for (const [plan, accountPlan, usageTier] of [
+      ['pro_max', 'business_max', 'business_max'],
+      ['pro_ultra', 'business_ultra', 'business_ultra'],
+    ] as const) {
+      __resetAuthEntitlementCacheForTests();
+      const clerkId = `user_${plan}`;
+      verifyTokenMock.mockImplementation(async () => ({ sub: clerkId }) as any);
+      globalThis.fetch = mock(async () => new Response(JSON.stringify({
+        success: true,
+        user: {
+          clerk_id: clerkId,
+          cloud_subscribed: true,
+          app_entitled: true,
+          subscription_plan: 'pro',
+          billing_plan: plan,
+          entitlement: { active: true, plan: 'pro', features: { app: true } },
+        },
+      }), { status: 200 })) as typeof fetch;
+
+      expect(await validateAuth(requestFor(`eyJ.${plan}.clerk`), env)).toEqual({
+        isValid: true,
+        tier: 'subscribed',
+        usageTier,
+        accountPlan,
+        deviceId: clerkId,
+        userId: clerkId,
+        clerkUserId: clerkId,
+        clerkUserIdVerified: true,
+      });
+    }
+  });
+
+  it('continues accepting exact legacy power-plan entitlement tuples', async () => {
+    for (const [plan, accountPlan, usageTier] of [
+      ['pro_max', 'business_max', 'business_max'],
+      ['pro_ultra', 'business_ultra', 'business_ultra'],
+    ] as const) {
+      __resetAuthEntitlementCacheForTests();
+      const clerkId = `user_legacy_${plan}`;
+      verifyTokenMock.mockImplementation(async () => ({ sub: clerkId }) as any);
+      globalThis.fetch = mock(async () => new Response(JSON.stringify({
+        success: true,
+        user: {
+          clerk_id: clerkId,
+          cloud_subscribed: true,
+          app_entitled: true,
+          subscription_plan: plan,
+          entitlement: { active: true, plan, features: { app: true } },
+        },
+      }), { status: 200 })) as typeof fetch;
+
+      expect(await validateAuth(requestFor(`eyJ.legacy.${plan}.clerk`), env)).toEqual({
+        isValid: true,
+        tier: 'subscribed',
+        usageTier,
+        accountPlan,
+        deviceId: clerkId,
+        userId: clerkId,
+        clerkUserId: clerkId,
+        clerkUserIdVerified: true,
+      });
+    }
+  });
+
+  it('fails plan truth closed for malformed or contradictory billing plans', async () => {
+    for (const [suffix, accessPlan, billingPlan] of [
+      ['null', 'pro', null],
+      ['free', 'pro', 'free'],
+      ['unknown', 'pro', 'premium'],
+      ['wrong-access', 'standard', 'pro_max'],
+    ] as const) {
+      __resetAuthEntitlementCacheForTests();
+      const clerkId = `user_bad_billing_${suffix}`;
+      verifyTokenMock.mockImplementation(async () => ({ sub: clerkId }) as any);
+      const fetchMock = mock(async () => new Response(JSON.stringify({
+        success: true,
+        user: {
+          clerk_id: clerkId,
+          cloud_subscribed: true,
+          app_entitled: true,
+          subscription_plan: accessPlan,
+          billing_plan: billingPlan,
+          entitlement: { active: true, plan: accessPlan, features: { app: true } },
+        },
+      }), { status: 200 }));
+      globalThis.fetch = fetchMock as typeof fetch;
+
+      const expected = {
+        isValid: true,
+        tier: 'subscribed',
+        accountPlan: 'unknown',
+        deviceId: clerkId,
+        userId: clerkId,
+        clerkUserId: clerkId,
+        clerkUserIdVerified: true,
+      } as const;
+      expect(await validateAuth(requestFor(`eyJ.bad-billing.${suffix}.1`), env)).toEqual(expected);
+      expect(await validateAuth(requestFor(`eyJ.bad-billing.${suffix}.2`), env)).toEqual(expected);
+      // Unknown plan truth must never be cached; the next request revalidates it.
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    }
   });
 
   it('does not trust paid plan data for a different Clerk subject', async () => {
@@ -432,6 +622,8 @@ describe('validateAuth — verified identities only', () => {
       accountPlan: 'unknown',
       deviceId: 'user_verified_caller',
       userId: 'user_verified_caller',
+      clerkUserId: 'user_verified_caller',
+      clerkUserIdVerified: true,
     } as const;
 
     expect(await validateAuth(requestFor('eyJ.verified.mismatch.1'), env)).toEqual(expected);
@@ -461,6 +653,8 @@ describe('validateAuth — verified identities only', () => {
       accountPlan: 'unknown',
       deviceId: 'user_verified_caller',
       userId: 'user_verified_caller',
+      clerkUserId: 'user_verified_caller',
+      clerkUserIdVerified: true,
     });
   });
 
@@ -485,6 +679,8 @@ describe('validateAuth — verified identities only', () => {
       accountPlan: 'business',
       deviceId: 'user_legacy',
       userId: 'user_legacy',
+      clerkUserId: 'user_legacy',
+      clerkUserIdVerified: false,
     });
   });
 

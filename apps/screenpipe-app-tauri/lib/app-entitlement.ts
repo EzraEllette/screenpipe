@@ -9,6 +9,8 @@ export type AppEntitlementPlan =
   | "none"
   | "standard"
   | "pro"
+  | "pro_max"
+  | "pro_ultra"
   | "team"
   | "enterprise"
   | "lifetime";
@@ -72,6 +74,8 @@ export const ENTERPRISE_DOWNLOAD_URL = screenpipeWebUrl("/api/download", "https:
 const VERIFIED_PAID_PLAN_IDS = new Set([
   "standard",
   "pro",
+  "pro_max",
+  "pro_ultra",
   "team",
   "enterprise",
   "lifetime",
@@ -499,6 +503,12 @@ export function planDisplayName(
       return "Basic";
     case "pro":
       return "Business";
+    case "pro_max":
+    case "business_max":
+      return "Business Max";
+    case "pro_ultra":
+    case "business_ultra":
+      return "Business Ultra";
     case "team":
       return isEnterpriseBuild ? "Team" : "Business";
     case "enterprise":
@@ -507,6 +517,34 @@ export function planDisplayName(
       return "Lifetime";
     default:
       return "Free";
+  }
+}
+
+export type BusinessCapacityUpgrade = {
+  targetPlan: "pro_max" | "pro_ultra";
+  name: "Business Max" | "Business Ultra";
+  monthlyPrice: 100 | 200;
+};
+
+/** Return the next self-serve capacity tier without upselling org plans. */
+export function getBusinessCapacityUpgrade(
+  plan: string | null | undefined,
+): BusinessCapacityUpgrade | null {
+  switch ((plan || "").trim().toLowerCase()) {
+    case "pro":
+    case "business":
+    case "monthly":
+    case "annual":
+      return { targetPlan: "pro_max", name: "Business Max", monthlyPrice: 100 };
+    case "pro_max":
+    case "business_max":
+      return {
+        targetPlan: "pro_ultra",
+        name: "Business Ultra",
+        monthlyPrice: 200,
+      };
+    default:
+      return null;
   }
 }
 
@@ -523,9 +561,23 @@ export function normalizeAppUser(rawUser: any, token: string): AppUser {
   // Explicit server denial is stronger than a stale users.plan label left by a
   // canceled or refunded account.
   const explicitlyFree = rawUser?.app_entitled === false && !cloudSubscribed;
+  // The server computes `subscription_plan` per request and can omit it while
+  // still returning a full entitlement. The cloud_subscribed/app_entitled
+  // fallbacks below invent a *label* ("pro"/"standard"), and the entitlement is
+  // passed through verbatim — so inventing one when the entitlement already
+  // names a plan guarantees the two disagree. hasVerifiedPaidPlanAt requires
+  // them to be exactly equal, so that mismatch collapses the account to
+  // "unknown" policy, which in turn clears hasConsumerAppSubscription and trips
+  // the enterprise-app gate for a fully paid consumer account. Prefer the
+  // entitlement's own plan so the two sides cannot diverge.
+  const rawEntitlementPlan =
+    typeof rawEntitlement?.plan === "string" && rawEntitlement.plan.trim()
+      ? rawEntitlement.plan
+      : null;
   const subscriptionPlan = explicitlyFree
     ? "none"
     : (rawUser?.subscription_plan ??
+      rawEntitlementPlan ??
       (cloudSubscribed ? "pro" : appEntitled ? "standard" : null));
   const entitlement = explicitlyFree
     ? {
