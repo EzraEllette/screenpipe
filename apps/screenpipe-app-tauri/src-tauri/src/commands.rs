@@ -2763,9 +2763,7 @@ pub(crate) async fn show_shortcut_reminder_impl(
 
         if native_shortcut_reminder::is_available() {
             info!("Using native SwiftUI shortcut reminder");
-            native_shortcut_reminder::set_capturable(crate::window::app_windows_are_capturable(
-                &app_handle,
-            ));
+            native_shortcut_reminder::configure_capture_for_build();
             use crate::recording::RecordingState;
             use std::time::Duration;
 
@@ -2978,7 +2976,7 @@ pub(crate) async fn show_shortcut_reminder_impl(
 
             // Clone window to pass into main thread closure
             let window_clone = window.clone();
-            let capturable = crate::window::app_windows_are_capturable(&app_handle);
+            let capturable = crate::config::is_e2e_mode();
             let _ = app_handle.run_on_main_thread(move || {
                 use tauri_nspanel::cocoa::appkit::NSWindowCollectionBehavior;
 

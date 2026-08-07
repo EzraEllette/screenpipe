@@ -90,9 +90,11 @@ mod ffi {
         }
     }
 
-    pub fn set_capturable(capturable: bool) {
+    /// Keep the native shortcut and transcript overlays private in normal
+    /// builds. E2E builds opt into capture for visual assertions.
+    pub fn configure_capture_for_build() {
         unsafe {
-            shortcut_set_capturable(if capturable { 1 } else { 0 });
+            shortcut_set_capturable(if crate::config::is_e2e_mode() { 1 } else { 0 });
         }
     }
 
@@ -137,7 +139,7 @@ mod ffi {
     pub fn set_meeting_active(_active: bool) {}
     pub fn set_meeting_stop_result(_succeeded: bool) {}
     pub fn set_inbox_unread(_count: i32) {}
-    pub fn set_capturable(_capturable: bool) {}
+    pub fn configure_capture_for_build() {}
     pub fn get_frame() -> Option<(f64, f64, f64, f64)> {
         None
     }
