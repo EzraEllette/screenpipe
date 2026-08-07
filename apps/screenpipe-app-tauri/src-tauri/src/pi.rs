@@ -7,8 +7,8 @@
 //! Manages the pi coding agent via RPC mode (stdin/stdout JSON protocol).
 
 use screenpipe_core::agents::pi::{
-    apply_custom_provider_compat, screenpipe_cloud_models, PI_AI_PACKAGE, PI_NAMESPACE_DIR,
-    PI_PACKAGE, SCREENPIPE_API_URL,
+    anthropic_preset_base_url, apply_custom_provider_compat, screenpipe_cloud_models,
+    PI_AI_PACKAGE, PI_NAMESPACE_DIR, PI_PACKAGE, SCREENPIPE_API_URL,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -1928,8 +1928,8 @@ async fn build_models_json_with_api_url(
                 "http://localhost:11434/v1".to_string()
             } else if config.provider == "openai-chatgpt" {
                 "https://chatgpt.com/backend-api".to_string()
-            } else if config.provider == "anthropic" && config.url.is_empty() {
-                "https://api.anthropic.com".to_string()
+            } else if config.provider == "anthropic" {
+                anthropic_preset_base_url(&config.url)
             } else if config.provider == "openai" && config.url.is_empty() {
                 "https://api.openai.com/v1".to_string()
             } else {
@@ -6872,6 +6872,19 @@ error: InstallFailed extracting tarball"#;
             "https://api.anthropic.com"
         );
         assert_eq!(providers["anthropic-byok"]["api"], "anthropic-messages");
+    }
+
+    #[tokio::test]
+    async fn test_build_models_json_anthropic_normalizes_stale_openai_url() {
+        let mut pc = make_provider_config("anthropic", "claude-sonnet-5");
+        pc.url = "https://api.openai.com/v1".to_string();
+
+        let config = build_models_json(None, Some(&pc)).await;
+
+        assert_eq!(
+            config["providers"]["anthropic-byok"]["baseUrl"],
+            "https://api.anthropic.com"
+        );
     }
 
     #[tokio::test]

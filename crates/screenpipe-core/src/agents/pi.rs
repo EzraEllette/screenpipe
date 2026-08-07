@@ -65,6 +65,18 @@ pub fn apply_custom_provider_compat(provider: &mut serde_json::Value) {
     }
 }
 
+/// Repair the stale OpenAI default that older desktop presets could retain
+/// after switching to Anthropic, while preserving intentional compatible
+/// proxy URLs.
+pub fn anthropic_preset_base_url(saved_url: &str) -> String {
+    let normalized = saved_url.trim().trim_end_matches('/');
+    if normalized.is_empty() || normalized.eq_ignore_ascii_case("https://api.openai.com/v1") {
+        "https://api.anthropic.com".to_string()
+    } else {
+        saved_url.to_string()
+    }
+}
+
 /// Windows creation flags for background agent spawns: CREATE_NO_WINDOW
 /// (0x08000000) so no console flashes, plus BELOW_NORMAL_PRIORITY_CLASS
 /// (0x00004000) so the bun→pi→tool-call subtree yields CPU to whatever the
@@ -5085,6 +5097,23 @@ mod tests {
         assert_eq!(provider["headers"]["user-agent"], "my-client");
         assert_eq!(provider["headers"]["x-tenant"], "tenant-1");
         assert_eq!(provider["headers"].as_object().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn anthropic_preset_url_repairs_stale_openai_default() {
+        assert_eq!(anthropic_preset_base_url(""), "https://api.anthropic.com");
+        assert_eq!(
+            anthropic_preset_base_url("https://api.openai.com/v1"),
+            "https://api.anthropic.com"
+        );
+        assert_eq!(
+            anthropic_preset_base_url("https://api.openai.com/v1/"),
+            "https://api.anthropic.com"
+        );
+        assert_eq!(
+            anthropic_preset_base_url("https://anthropic-proxy.example.com"),
+            "https://anthropic-proxy.example.com"
+        );
     }
 
     #[tokio::test]
