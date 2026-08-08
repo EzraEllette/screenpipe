@@ -191,19 +191,34 @@ describe('Cloudflare hosted-chat usage', () => {
 		});
 	});
 
-	it('returns every matching time window as a separate, ordered allowance', async () => {
+	it('returns fixed weekly and monthly plan rules as separate allowances', async () => {
 		globalThis.fetch = mock(async (input: RequestInfo | URL) => {
 			const url = String(input);
 			if (url.includes('/ai-gateway/gateways/multiple-window-test')) {
 				return gatewayResponse([
-					laneRule('monthly-auto', 'auto', 20, 'fixed', 2_592_000),
-					laneRule('daily-auto', 'auto', 4, 'fixed', 86_400),
+					{
+						...laneRule('basic-weekly', 'auto', 20, 'fixed', 604_800),
+						metadata: {
+							user_id: { mode: 'partition' },
+							plan: { mode: 'filter', values: ['basic'] },
+						},
+					},
+					{
+						...laneRule('basic-monthly', 'auto', 4, 'fixed', 2_592_000),
+						metadata: {
+							user_id: { mode: 'partition' },
+							plan: { mode: 'filter', values: ['basic'] },
+						},
+					},
 				]);
 			}
 			return new Response(JSON.stringify({
 				data: {
 					viewer: {
-						accounts: [{ window0: [], window1: [] }],
+						accounts: [{
+							window0: [usageRow('auto', 'interactive', 14)],
+							window1: [usageRow('auto', 'interactive', 3)],
+						}],
 					},
 				},
 			}), { status: 200 });
@@ -217,11 +232,12 @@ describe('Cloudflare hosted-chat usage', () => {
 
 		expect(result?.allowances.map((allowance) => ({
 			lane: allowance.lane,
+			used_percent: allowance.used_percent,
 			window_seconds: allowance.window_seconds,
 			technique: allowance.technique,
 		}))).toEqual([
-			{ lane: 'auto', window_seconds: 86_400, technique: 'fixed' },
-			{ lane: 'auto', window_seconds: 2_592_000, technique: 'fixed' },
+			{ lane: 'combined', used_percent: 70, window_seconds: 604_800, technique: 'fixed' },
+			{ lane: 'combined', used_percent: 75, window_seconds: 2_592_000, technique: 'fixed' },
 		]);
 	});
 
