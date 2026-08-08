@@ -68,7 +68,10 @@ type UsageInterval = {
 const RULE_CACHE_TTL_MS = 5 * 60 * 1000;
 const ruleCache = new TtlSingleFlightCache<SpendRuleSet>({
 	maxEntries: 8,
-	ttlForValue: () => RULE_CACHE_TTL_MS,
+	// A transient empty/disabled response must not hide newly-created rules for
+	// five minutes. Successful rule sets are stable enough to cache; negative
+	// discovery is retried on the next desktop poll.
+	ttlForValue: (_key, value) => value.rules.length > 0 ? RULE_CACHE_TTL_MS : null,
 });
 const loggedEmptyRuleSelections = new Set<string>();
 

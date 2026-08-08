@@ -312,4 +312,49 @@ describe('Cloudflare hosted-chat usage', () => {
 		expect(result).toBeNull();
 		expect(globalThis.fetch).not.toHaveBeenCalled();
 	});
+
+	it('retries an empty rule discovery instead of caching it for five minutes', async () => {
+		let gatewayReads = 0;
+		globalThis.fetch = mock(async (input: RequestInfo | URL) => {
+			const url = String(input);
+			if (url.includes('/ai-gateway/gateways/empty-rule-retry-test')) {
+				gatewayReads += 1;
+				if (gatewayReads === 1) return gatewayResponse([]);
+				return gatewayResponse([{
+					...laneRule('basic-weekly-retry', 'auto', 20, 'fixed', 604_800),
+					metadata: {
+						user_id: { mode: 'partition' },
+						plan: { mode: 'filter', values: ['basic'] },
+					},
+				}]);
+			}
+			if (url.endsWith('/graphql')) {
+				return new Response(JSON.stringify({
+					data: { viewer: { accounts: [{ window0: [] }] } },
+				}), { status: 200 });
+			}
+			throw new Error(`unexpected fetch: ${url}`);
+		}) as typeof fetch;
+
+		const first = await getCloudflareHostedChatUsage(
+			env('empty-rule-retry-test'),
+			context,
+			new Date('2026-08-04T16:30:00.000Z'),
+		);
+		const second = await getCloudflareHostedChatUsage(
+			env('empty-rule-retry-test'),
+			context,
+			new Date('2026-08-04T16:31:00.000Z'),
+		);
+
+		expect(first?.allowances).toEqual([]);
+		expect(second?.allowances).toEqual([
+			expect.objectContaining({
+				lane: 'combined',
+				remaining_percent: 100,
+				window_seconds: 604_800,
+			}),
+		]);
+		expect(gatewayReads).toBe(2);
+	});
 });
