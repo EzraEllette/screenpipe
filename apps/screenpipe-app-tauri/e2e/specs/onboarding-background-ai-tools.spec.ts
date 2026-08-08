@@ -237,8 +237,14 @@ async function callActivitySummaryThroughMcp(
       );
     });
 
-    it("migrates a saved connection slide directly to the goal step", async () => {
+    it("resumes a saved connection slide at the engine step and finishes setup", async () => {
+      // Retries must start from an incomplete store. The engine slide finishes
+      // setup on its own, and once `isCompleted` is true `show_window` correctly
+      // routes Onboarding to Home — so without this reset, attempt 2 would fail
+      // waiting for an `onboarding` handle that must never appear again.
+      await invokeOrThrow("reset_onboarding");
       await invokeOrThrow("set_onboarding_step", { step: "connect-apps" });
+
       await showWindow({ Home: { page: "home" } });
       await waitForWindowHandle("home", t(10_000));
       await browser.switchToWindow("home");
@@ -250,30 +256,54 @@ async function callActivitySummaryThroughMcp(
       await browser.switchToWindow("onboarding");
       await waitForWindowUrl("/onboarding", undefined, t(15_000));
 
+      // Best effort: the engine slide completes setup on its own, so the window
+      // can go away while this runs. The contract below is what actually gates.
+      try {
+        await saveScreenshot("onboarding-legacy-connect-apps-resume");
+      } catch {
+        // window already closed by completion; not a failure
+      }
+
+      // The contract: a saved `connect-apps` install must not get stuck on the
+      // removed slide — it resumes at the engine and finishes. Sample the body
+      // while the window is alive so we can prove the removed slides never
+      // rendered, and stop as soon as the store says setup completed.
+      const seen: string[] = [];
       await browser.waitUntil(
-        async () =>
-          (
-            (await browser.execute(
-              () => document.body?.innerText || "",
-            )) as string
-          )
-            .toLowerCase()
-            .includes("what do you want first?"),
+        async () => {
+          const status = await invokeOrThrow<{ isCompleted: boolean }>(
+            "get_onboarding_status",
+          );
+          if (status.isCompleted) return true;
+          try {
+            seen.push(
+              (
+                (await browser.execute(
+                  () => document.body?.innerText || "",
+                )) as string
+              ).toLowerCase(),
+            );
+          } catch {
+            // window closed underneath the sample; the status check above is
+            // authoritative and will settle this on the next pass
+          }
+          return false;
+        },
         {
-          timeout: t(15_000),
+          timeout: t(30_000),
           interval: 250,
-          timeoutMsg: "legacy connection step did not resume at the goal step",
+          timeoutMsg:
+            "legacy connect-apps step never resumed at the engine slide and finished setup",
         },
       );
-      const body = (
-        (await browser.execute(() => document.body?.innerText || "")) as string
-      ).toLowerCase();
-      expect(body).not.toContain("connect detected tools");
 
-      const screenshot = await saveScreenshot(
-        "onboarding-no-connections-slide",
+      // The goal picker and the connection slide are both gone from the flow.
+      expect(seen.some((text) => text.includes("what do you want first"))).toBe(
+        false,
       );
-      expect(existsSync(screenshot)).toBe(true);
+      expect(seen.some((text) => text.includes("connect detected tools"))).toBe(
+        false,
+      );
     });
   },
 );
