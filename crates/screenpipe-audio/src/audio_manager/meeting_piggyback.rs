@@ -232,6 +232,22 @@ impl MicFollow {
     pub(crate) fn tick(&mut self, obs: &MicFollowObservation) -> Vec<MicFollowAction> {
         let mut actions = Vec::new();
 
+        // One resolved replacement is a handoff, not an additional mic. Retire
+        // the previous session before opening it so the handoff never feeds
+        // two mic streams.
+        if let [replacement] = obs.resolved_inputs.as_slice() {
+            if !self.entries.contains_key(replacement) {
+                let mut previous: Vec<String> = self.entries.keys().cloned().collect();
+                previous.sort();
+                for old in previous {
+                    self.entries.remove(&old);
+                    if obs.session_devices.contains(&old) {
+                        actions.push(MicFollowAction::CloseSessionInput(old));
+                    }
+                }
+            }
+        }
+
         // 1. Enroll newly resolved mics and decide their phase on this very
         //    pass — there is no confirm delay. The observation naming a
         //    resolved mic was produced either by a CoreAudio property event
@@ -2214,6 +2230,32 @@ mod tests {
         obs.session_streaming = [new.clone()].into();
         let actions = m.tick(&obs);
         assert_eq!(actions, vec![MicFollowAction::SuspendInput(old.clone())]);
+    }
+
+    #[test]
+    fn verified_handoff_closes_old_session_before_opening_new_one() {
+        let mut m = MicFollow::default();
+        let old = "MacBook Pro Microphone (input)".to_string();
+        let new = "Ezra's AirPods Max (input)".to_string();
+        let mut obs = mf_obs(TICK_MS);
+        obs.resolved_inputs = vec![old.clone()];
+        assert_eq!(
+            m.tick(&obs),
+            vec![MicFollowAction::OpenSessionInput(old.clone())]
+        );
+        assert!(!m.note_open_result(&old, true, obs.now_ms));
+
+        obs.now_ms += TICK_MS;
+        obs.resolved_inputs = vec![new.clone()];
+        obs.session_devices = [old.clone()].into();
+        obs.session_streaming = [old.clone()].into();
+        assert_eq!(
+            m.tick(&obs),
+            vec![
+                MicFollowAction::CloseSessionInput(old),
+                MicFollowAction::OpenSessionInput(new),
+            ]
+        );
     }
 
     #[test]
