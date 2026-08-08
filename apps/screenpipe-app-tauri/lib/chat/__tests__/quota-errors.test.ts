@@ -391,4 +391,51 @@ describe("presentQuotaError", () => {
       upgrade: null,
     });
   });
+  it("does not tell a monthly cap to retry in a few seconds", () => {
+    // The bug: a monthly spend cap whose body also mentions a rate limit fell
+    // into the transient branch and told the user to wait seconds for a limit
+    // that does not move until next month.
+    const error = JSON.stringify({
+      error: "monthly_cost_limit_exceeded",
+      message: "Rate limited - try again in a moment or switch to a different model.",
+      resets_at: null,
+    });
+    const msg = buildDailyLimitMessage(error);
+    expect(msg).not.toContain("few seconds");
+    expect(msg).not.toContain("temporarily rate-limited");
+    expect(msg).toContain("this month");
+  });
+
+  it("never promises a reset for a trial allowance that does not refill", () => {
+    const error = JSON.stringify({
+      error: "trial_cost_limit_exceeded",
+      resets_at: null,
+    });
+    const msg = buildDailyLimitMessage(error);
+    expect(msg).toContain("doesn't refill");
+    expect(msg).not.toMatch(/resets (at|on|tomorrow)/);
+    expect(msg).not.toContain("few seconds");
+  });
+
+  it("uses the gateway reset timestamp instead of inventing one", () => {
+    const soon = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    const msg = buildDailyLimitMessage(
+      JSON.stringify({ error: "daily_cost_limit_exceeded", resets_at: soon }),
+    );
+    expect(msg).toMatch(/It resets at /);
+  });
+
+  it("falls back to a vague window when resets_at is unparseable", () => {
+    const msg = buildDailyLimitMessage(
+      JSON.stringify({ error: "daily_cost_limit_exceeded", resets_at: "not-a-date" }),
+    );
+    expect(msg).toContain("It resets tomorrow");
+    expect(msg).not.toContain("Invalid Date");
+  });
+
+  it("still treats a genuine provider rate limit as transient", () => {
+    const msg = buildDailyLimitMessage("429 rate_limit from upstream provider");
+    expect(msg).toContain("temporarily rate-limited");
+  });
+
 });

@@ -18,6 +18,7 @@ import { acpAdapterInfo } from "@/lib/utils/preset-appearance";
 import { BrowserSidebar } from "@/components/browser-sidebar";
 import { toast } from "@/components/ui/use-toast";
 import type { AIPreset, JsonValue } from "@/lib/utils/tauri";
+import { pickPipePreset } from "@/lib/utils/pick-pipe-preset";
 // OpenAI SDK no longer used directly — all providers route through Pi agent
 import posthog from "posthog-js";
 import { useAcpWarmup } from "@/components/chat/standalone/hooks/use-acp-warmup";
@@ -161,6 +162,13 @@ export function StandaloneChat({
   const rolloutSettings = React.useMemo(
     () => ({ ...settings, aiPresets: availableAiPresets }) as typeof settings,
     [settings, availableAiPresets],
+  );
+  // Preset the first-run summary is written with. Sourced from the
+  // rollout-filtered list so it inherits the ACP gate, and passed down as a
+  // prop so the pane and banner below stay renderable without a provider.
+  const firstRunAiPreset = React.useMemo(
+    () => pickPipePreset(availableAiPresets as AIPreset[]),
+    [availableAiPresets],
   );
   const { isMac, isWindows, isLoading: isPlatformLoading } = usePlatform();
   const hardcodedConnectionTiles = useHardcodedTiles();
@@ -2021,6 +2029,8 @@ export function StandaloneChat({
       <div className="flex-1 flex min-h-0" data-browser-panel-host>
       <div className="flex-1 flex flex-col min-w-0" data-firstrun-target="messages">
       <ChatMainPane
+        firstRunAiPreset={firstRunAiPreset}
+        firstRunUserToken={settings?.user?.token ?? null}
         hideInlineHistory={hideInlineHistory}
         showHistory={showHistory}
         onCloseHistory={() => setShowHistory(false)}
