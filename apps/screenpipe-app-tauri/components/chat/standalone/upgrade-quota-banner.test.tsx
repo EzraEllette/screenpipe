@@ -358,6 +358,29 @@ describe("UpgradeQuotaBanner", () => {
     },
   );
 
+  it("stays generic for a required plan this build predates", async () => {
+    // The gateway can name a plan shipped after this build. Printing the raw
+    // id ("Upgrade to business_titan") invents a plan name, so both the CTA
+    // and the sentence fall back rather than guess.
+    mocks.blockedUpgrade = {
+      requiredPlan: "business_titan" as never,
+      upgradeUrl: "https://screenpipe.com/account/billing",
+      resetsAt: null,
+    };
+
+    render(<UpgradeQuotaBanner />);
+
+    expect(screen.queryByText(/business_titan/i)).toBeNull();
+    expect(screen.getByText(/upgrade to a higher plan/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "See plans" }));
+
+    await waitFor(() =>
+      expect(mocks.openExternalUrl).toHaveBeenCalledWith(
+        "https://screenpipe.com/account/billing",
+      ),
+    );
+  });
+
   it("dismisses the blocked action without suppressing future server rejections", () => {
     mocks.blockedUpgrade = {
       requiredPlan: "business",

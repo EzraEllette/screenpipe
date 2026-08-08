@@ -89,19 +89,92 @@ final class OverlayMetrics: ObservableObject {
 struct MeetingOverlayTranscriptItem: Identifiable, Equatable {
     let meetingId: Int64
     let itemId: String
+    let deviceName: String
     let deviceType: String
     let speakerName: String?
     let text: String
     let capturedAt: String
     let isFinal: Bool
 
-    var id: String { itemId }
+    /// Providers namespace `item_id` per connection, not per device, so the mic
+    /// and system-audio streams routinely mint the same id (`deepgram:0:1500`).
+    /// Identity must include the device or one stream replaces the other.
+    var id: String { "\(deviceName):\(deviceType):\(itemId)" }
 
     var displaySpeaker: String {
         if let speakerName = speakerName, !speakerName.trimmingCharacters(in: .whitespaces).isEmpty {
             return speakerName
         }
         return deviceType == "input" ? "me" : "speaker"
+    }
+}
+
+/// Cross-device echo suppression, matching `app/shortcut-reminder/use-meeting-overlay.ts`
+/// and `components/meeting-notes/transcript-panel.tsx`.
+///
+/// Without headphones the mic ("input") picks up the speaker output, so a remote
+/// participant's words arrive on BOTH the input stream and the clean system-audio
+/// ("output") stream. macOS VoiceProcessingIO AEC does not remove this (it has no
+/// downlink reference) and the engine's cross-device dedup only runs on the
+/// deferred durable path, so during a live meeting both copies reach the overlay
+/// and the same sentence renders twice. The output capture is the clean source, so
+/// drop an input item when most of its words are covered by a nearby output item.
+/// Short utterances are never suppressed: "yeah" / "ok" overlap by chance far too
+/// often to judge.
+enum MeetingTranscriptEcho {
+    static let windowSeconds: TimeInterval = 6
+    static let coverage: Double = 0.6
+    static let minCharacters = 24
+
+    private static let isoWithFraction: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+    private static let iso: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter
+    }()
+
+    static func timestamp(_ raw: String) -> Date? {
+        isoWithFraction.date(from: raw) ?? iso.date(from: raw)
+    }
+
+    static func normalize(_ text: String) -> String {
+        text.lowercased()
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+    }
+
+    static func suppress(
+        _ items: [MeetingOverlayTranscriptItem]
+    ) -> [MeetingOverlayTranscriptItem] {
+        let outputs = items
+            .filter { $0.deviceType.lowercased() == "output" }
+            .map { (date: timestamp($0.capturedAt), words: Set(normalize($0.text).split(separator: " "))) }
+        if outputs.isEmpty { return items }
+
+        return items.filter { item in
+            guard item.deviceType.lowercased() == "input" else { return true }
+            let normalized = normalize(item.text)
+            if normalized.count < minCharacters { return true }
+            guard let itemDate = timestamp(item.capturedAt) else { return true }
+
+            var reference = Set<Substring>()
+            for output in outputs {
+                guard let outputDate = output.date,
+                      abs(outputDate.timeIntervalSince(itemDate)) <= windowSeconds else { continue }
+                reference.formUnion(output.words)
+            }
+            if reference.isEmpty { return true }
+
+            let words = normalized.split(separator: " ")
+            if words.isEmpty { return true }
+            let covered = words.filter { reference.contains($0) }.count
+            return Double(covered) / Double(words.count) < coverage
+        }
     }
 }
 
@@ -490,19 +563,9 @@ struct ShortcutReminderView: View {
             HStack(spacing: s(3)) {
                 AudioEqualizerView(active: metrics.audioActive, speechRatio: metrics.speechRatio)
                     .frame(width: s(18), height: s(12))
-                ZStack(alignment: .topTrailing) {
-                    ScreenMatrixView(active: metrics.screenActive, captureFps: metrics.captureFps)
-                        .frame(width: s(18), height: s(12))
-                        .clipShape(RoundedRectangle(cornerRadius: 1))
-                    if metrics.meetingActive {
-                        Circle()
-                            .fill(Color.red)
-                            .frame(width: s(5), height: s(5))
-                            .overlay(Circle().stroke(Color.black.opacity(0.75), lineWidth: s(1)))
-                            .offset(x: s(2), y: -s(2))
-                            .help("meeting live — hover for transcript")
-                    }
-                }
+                ScreenMatrixView(active: metrics.screenActive, captureFps: metrics.captureFps)
+                    .frame(width: s(18), height: s(12))
+                    .clipShape(RoundedRectangle(cornerRadius: 1))
             }
             .padding(.horizontal, s(3))
             .frame(maxHeight: .infinity)
@@ -510,6 +573,7 @@ struct ShortcutReminderView: View {
 
             CollapsedBellButton(
                 unread: metrics.inboxUnread,
+                meetingActive: metrics.meetingActive,
                 scale: scale,
                 action: { onAction("open_inbox") }
             )
@@ -541,6 +605,9 @@ struct ShortcutReminderView: View {
                 .frame(width: s(24), height: s(12))
                 .padding(.horizontal, s(3))
 
+            // The expanded bar keeps the meeting dot on the screen matrix: its
+            // bell already carries an unread dot at an unscaled 1pt offset, so
+            // a second dot there collides with the glyph at larger sizes.
             ZStack(alignment: .topTrailing) {
                 ScreenMatrixView(active: metrics.screenActive, captureFps: metrics.captureFps)
                     .frame(width: s(24), height: s(12))
@@ -578,8 +645,11 @@ struct MeetingTranscriptPreview: View {
 
     private func s(_ value: CGFloat) -> CGFloat { value * scale }
 
+    /// Suppress before slicing, so a dropped mic echo does not consume one of the
+    /// four visible rows. State keeps every raw item, so an output copy arriving
+    /// after the echo still retroactively suppresses it.
     private var visibleItems: ArraySlice<MeetingOverlayTranscriptItem> {
-        metrics.meetingTranscriptItems.suffix(4)
+        MeetingTranscriptEcho.suppress(metrics.meetingTranscriptItems).suffix(4)
     }
 
     var body: some View {
@@ -741,9 +811,15 @@ struct CollapsedAppIconButton: View {
 // inbox; the dot mirrors the pipes-store bell's unread marker. Crucially:
 // no .onHover wired to isExpanded — clicking it opens the inbox without
 // forcing the user through the expanded layout.
+//
+// Both live signals sit in one column on the bell: unread notifications is
+// the white dot above it, a live meeting is the red dot mirrored below it.
+// Before, the meeting dot floated over the screen matrix mid-pill, so "we
+// are live" moved around depending on which signal fired.
 @available(macOS 13.0, *)
 struct CollapsedBellButton: View {
     let unread: Bool
+    let meetingActive: Bool
     let scale: CGFloat
     let action: () -> Void
     @State private var hovered = false
@@ -761,6 +837,12 @@ struct CollapsedBellButton: View {
                     Circle().fill(.white)
                         .frame(width: 4 * scale, height: 4 * scale)
                         .offset(x: 5 * scale, y: -5 * scale)
+                }
+                if meetingActive {
+                    Circle().fill(Color.red)
+                        .frame(width: 4 * scale, height: 4 * scale)
+                        .offset(x: 5 * scale, y: 5 * scale)
+                        .help("meeting live — hover for transcript")
                 }
             }
             .frame(width: 14 * scale)
@@ -1064,7 +1146,7 @@ class ShortcutReminderController: NSObject {
                 guard let item = parseTranscriptItem(message),
                       metrics.activeMeetingId == item.meetingId else { return }
                 var items = metrics.meetingTranscriptItems
-                if let index = items.firstIndex(where: { $0.itemId == item.itemId }) {
+                if let index = items.firstIndex(where: { $0.id == item.id }) {
                     items[index] = item
                 } else {
                     items.append(item)
@@ -1085,6 +1167,7 @@ class ShortcutReminderController: NSObject {
         return MeetingOverlayTranscriptItem(
             meetingId: meetingId,
             itemId: itemId,
+            deviceName: raw["deviceName"] as? String ?? "",
             deviceType: raw["deviceType"] as? String ?? "output",
             speakerName: raw["speakerName"] as? String,
             text: text,

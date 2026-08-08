@@ -471,7 +471,7 @@ describe("Windows user journey", function () {
         const sectionText = (await screenSection.getText()).toLowerCase();
         return (
           sectionText.includes("screen context capture") &&
-          sectionText.includes("screenshot images") &&
+          sectionText.includes("screen recording") &&
           !sectionText.includes("audio recording")
         );
       },

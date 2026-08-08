@@ -185,6 +185,8 @@ fn emit_meeting_overlay_transcript(
     item_id: String,
     text: String,
     is_final: bool,
+    device_name: Option<String>,
+    device_type: Option<String>,
 ) -> Result<(), String> {
     let event_name = if is_final {
         "meeting_transcript_final"
@@ -194,8 +196,8 @@ fn emit_meeting_overlay_transcript(
     let mut data = serde_json::json!({
         "meeting_id": meeting_id,
         "item_id": item_id,
-        "device_name": "e2e-output",
-        "device_type": "output",
+        "device_name": device_name.unwrap_or_else(|| "e2e-output".to_string()),
+        "device_type": device_type.unwrap_or_else(|| "output".to_string()),
         "provider": "e2e",
         "model": "deterministic",
         "captured_at": chrono::Utc::now().to_rfc3339(),

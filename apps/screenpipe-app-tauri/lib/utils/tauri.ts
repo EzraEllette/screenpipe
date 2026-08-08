@@ -547,8 +547,10 @@ async getCachedSuggestions() : Promise<Result<CachedSuggestions, string>> {
  *
  * One-time migration: for a relocated data dir whose `chats/` is still empty,
  * copy conversations from the legacy `~/.screenpipe/chats` so history isn't
- * orphaned. Skipped under e2e (`SCREENPIPE_E2E_SEED` set) so isolated runs
- * stay empty.
+ * orphaned. Skipped under e2e (`SCREENPIPE_E2E_SEED` set) and under dev
+ * isolation so isolated runs stay empty — otherwise `bun tauri dev` copies the
+ * developer's entire production chat history into `~/.screenpipe-dev`, which
+ * is exactly the state sharing dev isolation exists to prevent.
  */
 async getChatsDir() : Promise<Result<string, string>> {
     try {
@@ -3627,7 +3629,9 @@ keepComputerAwake?: boolean;
  */
 useChineseMirror: boolean;
 /**
- * Enable anonymous analytics (PostHog).
+ * Enable product analytics (PostHog). Events carry only a random device
+ * ID when signed out; when signed in they are linked to the account,
+ * including its email. Never includes recordings, audio, or OCR text.
  */
 analyticsEnabled: boolean;
 /**

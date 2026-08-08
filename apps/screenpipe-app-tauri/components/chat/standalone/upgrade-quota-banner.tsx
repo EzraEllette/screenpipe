@@ -18,13 +18,8 @@ import { useModelUpsellGating } from "@/lib/hooks/use-model-upsell-gating";
 import { clearQuotaUpgrade, useQuotaUpgrade } from "@/lib/chat/quota-upgrade";
 import { openExternalUrl } from "@/lib/open-external-url";
 import { openBusinessUpgradeSurface } from "@/lib/upgrade-flow";
+import { quotaPlanLabel } from "@/lib/chat/quota-errors";
 
-const PLAN_LABELS = {
-  basic: "Basic",
-  business: "Business",
-  business_max: "Business Max",
-  business_ultra: "Business Ultra",
-} as const;
 
 /**
  * At-the-cap upgrade prompt (the "intensity" lever). Appears in the composer
@@ -121,9 +116,13 @@ export function UpgradeQuotaBanner() {
     }
   };
 
+  // One label map (quotaPlanLabel) instead of a second copy that drifts.
+  // Null when the gateway names a plan this build predates — the sentence still
+  // has to read, so prose falls back to a generic phrase instead of a blank.
   const requiredPlanLabel = activeUpgrade
-    ? PLAN_LABELS[activeUpgrade.requiredPlan]
-    : "Business";
+    ? quotaPlanLabel(activeUpgrade.requiredPlan)
+    : null;
+  const requiredPlanProse = requiredPlanLabel ?? "a higher plan";
   const blockedTitle = cloudflareBlocked
     ? `${cloudflareAllowance.lane === "auto" ? "Auto" : "Explicit model"} hosted AI limit reached`
     : "Hosted AI usage limit reached";
@@ -165,7 +164,7 @@ export function UpgradeQuotaBanner() {
               ) : legacyCostBlocked ? (
                 activeUpgrade ? (
                   <>
-                    Upgrade to {requiredPlanLabel} for a higher hosted AI allowance,
+                    Upgrade to {requiredPlanProse} for a higher hosted AI allowance,
                     or switch to a local or own-key AI preset.
                   </>
                 ) : (
@@ -174,7 +173,7 @@ export function UpgradeQuotaBanner() {
               ) : blockedUpgrade ? (
                 <>
                   {resets ? `Resets ${resets}. ` : ""}
-                  Upgrade to {requiredPlanLabel} for a higher limit, or switch to a
+                  Upgrade to {requiredPlanProse} for a higher limit, or switch to a
                   local or own-key AI preset.
                 </>
               ) : (
@@ -192,9 +191,14 @@ export function UpgradeQuotaBanner() {
                 onClick={onUpgrade}
                 disabled={busy}
               >
-                {activeUpgrade
+                {/* Name where the click actually goes. With no server upgrade
+                    this opens the Business offer, so it says so; only an
+                    upgrade to a plan this build cannot name is generic. */}
+                {requiredPlanLabel
                   ? `Upgrade to ${requiredPlanLabel}`
-                  : "View Business"}
+                  : activeUpgrade
+                    ? "See plans"
+                    : "View Business"}
               </Button>
             )}
             <button
