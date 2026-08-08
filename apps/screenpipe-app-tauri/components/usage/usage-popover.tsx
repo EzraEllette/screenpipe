@@ -125,15 +125,17 @@ export function UsagePopover() {
           </div>
         )}
 
-        <Button
-          type="button"
-          variant="ghost"
-          className="h-8 w-full justify-between rounded-none border-t border-border px-0 pt-3 text-xs lowercase tracking-wide"
-          onClick={() => router.push("/settings?section=usage")}
-        >
-          view usage settings
-          <ArrowRight className="h-3.5 w-3.5" aria-hidden />
-        </Button>
+        <div className="border-t border-border pt-2">
+          <Button
+            type="button"
+            variant="ghost"
+            className="h-8 w-full justify-between rounded-none px-2 text-xs lowercase tracking-wide"
+            onClick={() => router.push("/settings?section=usage")}
+          >
+            view usage settings
+            <ArrowRight className="h-3.5 w-3.5" aria-hidden />
+          </Button>
+        </div>
       </PopoverContent>
     </Popover>
   );
