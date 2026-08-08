@@ -6,6 +6,7 @@
 
 import { Check } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { planDisplayName } from "@/lib/app-entitlement";
 import type { SelectablePlan } from "@/lib/upgrade-flow";
 
 /**
@@ -57,6 +58,31 @@ export const ACCOUNT_PLANS: PlanRow[] = [
   },
 ];
 
+// Business is one family with capacity levels stacked above the $50 seat, so a
+// Max or Ultra subscriber belongs on the business card. They must not be shown
+// Business's price as their own, though: before this, a Business Max account
+// read "$50 / seat / month" under a "your plan" badge while actually paying
+// $100. Prices mirror `BusinessCapacityUpgrade` in lib/app-entitlement.ts.
+const BUSINESS_CAPACITY_MONTHLY: Record<string, number> = {
+  pro_max: 100,
+  business_max: 100,
+  pro_ultra: 200,
+  business_ultra: 200,
+};
+
+/**
+ * The capacity level an entitlement actually sits at, when it is above the
+ * base Business seat. Returns null for every plan the business card already
+ * describes correctly.
+ */
+export function businessCapacityTier(
+  plan: string | null | undefined,
+): { name: string; monthly: number } | null {
+  const monthly = BUSINESS_CAPACITY_MONTHLY[(plan || "").trim().toLowerCase()];
+  if (monthly === undefined) return null;
+  return { name: planDisplayName(plan).toLowerCase(), monthly };
+}
+
 /** Which card to mark "current" for an entitlement plan (users.plan). */
 export function accountPlanForEntitlement(
   plan: string | null | undefined,
@@ -85,12 +111,16 @@ export function accountPlanForEntitlement(
 
 export function AccountPlanOptions({
   current,
+  entitlementPlan,
   fallbackTo,
   busy = false,
   disabledReason,
   onChoose,
 }: {
   current: AccountPlanId;
+  /** Raw entitlement (users.plan), so a Business capacity level above the base
+   *  seat can state its own name and price instead of Business's. */
+  entitlementPlan?: string | null;
   /** Plan the account drops to when a trial or grant ends. */
   fallbackTo?: AccountPlanId;
   busy?: boolean;
@@ -108,6 +138,20 @@ export function AccountPlanOptions({
           plan.id === "free" ? null : plan.id;
         const selectable = paidId !== null && !isCurrent && !disabledReason;
 
+        // Only the card the account is actually on restates itself; the other
+        // cards stay the plain self-serve offer.
+        const capacity =
+          plan.id === "pro" && isCurrent
+            ? businessCapacityTier(entitlementPlan)
+            : null;
+        const displayName = capacity?.name ?? plan.name;
+        const displayMonthly = capacity?.monthly ?? plan.monthly;
+        // The base seat's credit line is wrong for a higher capacity level, and
+        // the exact allowance is not modelled here — say only what is true.
+        const points = capacity
+          ? ["higher monthly AI credit allowance", ...plan.points.slice(1)]
+          : plan.points;
+
         return (
           <div
             key={plan.id}
@@ -119,7 +163,7 @@ export function AccountPlanOptions({
           >
             <div className="flex items-start justify-between gap-2">
               <span className="text-sm font-semibold lowercase">
-                {plan.name}
+                {displayName}
               </span>
               {isCurrent ? (
                 <span className="shrink-0 rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-medium text-primary">
@@ -133,14 +177,14 @@ export function AccountPlanOptions({
             </div>
 
             <div className="mt-1 flex items-baseline gap-1">
-              <span className="text-xl font-bold">${plan.monthly}</span>
+              <span className="text-xl font-bold">${displayMonthly}</span>
               <span className="text-[10px] text-muted-foreground">
                 {plan.cadence}
               </span>
             </div>
 
             <ul className="mt-2 flex-1 space-y-1">
-              {plan.points.map((point) => (
+              {points.map((point) => (
                 <li
                   key={point}
                   className="flex items-start gap-1.5 text-xs text-muted-foreground"

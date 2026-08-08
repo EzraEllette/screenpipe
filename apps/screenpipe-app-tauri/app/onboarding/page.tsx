@@ -186,12 +186,10 @@ export default function OnboardingPage() {
           permissions: "permissions",
           timeline: "timeline",
           engine: "engine",
-          // Native Rust now connects detected AI tools in the background.
-          // Saved installs resume at the goal step instead of getting stuck
-          // on the removed connection slide.
-          // The goal/dashboard slide is gone: setup no longer asks the user to
+          // Native Rust now connects detected AI tools in the background, and
+          // the goal/dashboard slide is gone: setup no longer asks the user to
           // declare intent before anything has been observed. Saved installs
-          // that stopped there resume at the engine and finish from it.
+          // that stopped on either one resume at the engine and finish from it.
           "connect-apps": "engine",
           integrations: "engine",
           connections: "engine",
