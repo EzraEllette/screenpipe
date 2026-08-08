@@ -19,6 +19,7 @@ const mocks = vi.hoisted(() => ({
     items: [] as Array<{
       meetingId: number;
       itemId: string;
+      deviceName: string;
       deviceType: string;
       speakerName: string | null;
       text: string;
@@ -137,6 +138,7 @@ describe("recording health hover detail", () => {
       {
         meetingId: 42,
         itemId: "live-1",
+        deviceName: "system audio",
         deviceType: "output",
         speakerName: "speaker 1",
         text: "the live transcript keeps moving",

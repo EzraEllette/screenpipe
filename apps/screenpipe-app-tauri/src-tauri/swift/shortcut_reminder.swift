@@ -89,19 +89,92 @@ final class OverlayMetrics: ObservableObject {
 struct MeetingOverlayTranscriptItem: Identifiable, Equatable {
     let meetingId: Int64
     let itemId: String
+    let deviceName: String
     let deviceType: String
     let speakerName: String?
     let text: String
     let capturedAt: String
     let isFinal: Bool
 
-    var id: String { itemId }
+    /// Providers namespace `item_id` per connection, not per device, so the mic
+    /// and system-audio streams routinely mint the same id (`deepgram:0:1500`).
+    /// Identity must include the device or one stream replaces the other.
+    var id: String { "\(deviceName):\(deviceType):\(itemId)" }
 
     var displaySpeaker: String {
         if let speakerName = speakerName, !speakerName.trimmingCharacters(in: .whitespaces).isEmpty {
             return speakerName
         }
         return deviceType == "input" ? "me" : "speaker"
+    }
+}
+
+/// Cross-device echo suppression, matching `app/shortcut-reminder/use-meeting-overlay.ts`
+/// and `components/meeting-notes/transcript-panel.tsx`.
+///
+/// Without headphones the mic ("input") picks up the speaker output, so a remote
+/// participant's words arrive on BOTH the input stream and the clean system-audio
+/// ("output") stream. macOS VoiceProcessingIO AEC does not remove this (it has no
+/// downlink reference) and the engine's cross-device dedup only runs on the
+/// deferred durable path, so during a live meeting both copies reach the overlay
+/// and the same sentence renders twice. The output capture is the clean source, so
+/// drop an input item when most of its words are covered by a nearby output item.
+/// Short utterances are never suppressed: "yeah" / "ok" overlap by chance far too
+/// often to judge.
+enum MeetingTranscriptEcho {
+    static let windowSeconds: TimeInterval = 6
+    static let coverage: Double = 0.6
+    static let minCharacters = 24
+
+    private static let isoWithFraction: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+    private static let iso: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter
+    }()
+
+    static func timestamp(_ raw: String) -> Date? {
+        isoWithFraction.date(from: raw) ?? iso.date(from: raw)
+    }
+
+    static func normalize(_ text: String) -> String {
+        text.lowercased()
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+    }
+
+    static func suppress(
+        _ items: [MeetingOverlayTranscriptItem]
+    ) -> [MeetingOverlayTranscriptItem] {
+        let outputs = items
+            .filter { $0.deviceType.lowercased() == "output" }
+            .map { (date: timestamp($0.capturedAt), words: Set(normalize($0.text).split(separator: " "))) }
+        if outputs.isEmpty { return items }
+
+        return items.filter { item in
+            guard item.deviceType.lowercased() == "input" else { return true }
+            let normalized = normalize(item.text)
+            if normalized.count < minCharacters { return true }
+            guard let itemDate = timestamp(item.capturedAt) else { return true }
+
+            var reference = Set<Substring>()
+            for output in outputs {
+                guard let outputDate = output.date,
+                      abs(outputDate.timeIntervalSince(itemDate)) <= windowSeconds else { continue }
+                reference.formUnion(output.words)
+            }
+            if reference.isEmpty { return true }
+
+            let words = normalized.split(separator: " ")
+            if words.isEmpty { return true }
+            let covered = words.filter { reference.contains($0) }.count
+            return Double(covered) / Double(words.count) < coverage
+        }
     }
 }
 
@@ -572,8 +645,11 @@ struct MeetingTranscriptPreview: View {
 
     private func s(_ value: CGFloat) -> CGFloat { value * scale }
 
+    /// Suppress before slicing, so a dropped mic echo does not consume one of the
+    /// four visible rows. State keeps every raw item, so an output copy arriving
+    /// after the echo still retroactively suppresses it.
     private var visibleItems: ArraySlice<MeetingOverlayTranscriptItem> {
-        metrics.meetingTranscriptItems.suffix(4)
+        MeetingTranscriptEcho.suppress(metrics.meetingTranscriptItems).suffix(4)
     }
 
     var body: some View {
@@ -1070,7 +1146,7 @@ class ShortcutReminderController: NSObject {
                 guard let item = parseTranscriptItem(message),
                       metrics.activeMeetingId == item.meetingId else { return }
                 var items = metrics.meetingTranscriptItems
-                if let index = items.firstIndex(where: { $0.itemId == item.itemId }) {
+                if let index = items.firstIndex(where: { $0.id == item.id }) {
                     items[index] = item
                 } else {
                     items.append(item)
@@ -1091,6 +1167,7 @@ class ShortcutReminderController: NSObject {
         return MeetingOverlayTranscriptItem(
             meetingId: meetingId,
             itemId: itemId,
+            deviceName: raw["deviceName"] as? String ?? "",
             deviceType: raw["deviceType"] as? String ?? "output",
             speakerName: raw["speakerName"] as? String,
             text: text,
