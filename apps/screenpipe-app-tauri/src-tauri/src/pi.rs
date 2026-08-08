@@ -55,6 +55,8 @@ const TITLE_SESSION_PREFIX: &str = "__title:";
 const REQUIRED_PI_EXTENSION_PACKAGE: &str = "npm:pi-subagents";
 const CONVERSATION_HISTORY_OPEN: &str = "<conversation_history>";
 const CONVERSATION_HISTORY_CLOSE: &str = "</conversation_history>";
+const PI_INSTALL_ARGS: [&str; 2] = ["install", "--ignore-scripts"];
+const NPM_INSTALL_ARGS: [&str; 4] = ["install", "--ignore-scripts", "--no-audit", "--no-fund"];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PiConversationSyncState {
@@ -1278,7 +1280,8 @@ fn npm_install_command(install_dir: &Path) -> Command {
     #[cfg(windows)]
     {
         let mut cmd = Command::new("cmd.exe");
-        cmd.args(["/C", "npm", "install", "--no-audit", "--no-fund"])
+        cmd.args(["/C", "npm"])
+            .args(NPM_INSTALL_ARGS)
             .current_dir(install_dir);
         cmd
     }
@@ -1286,8 +1289,7 @@ fn npm_install_command(install_dir: &Path) -> Command {
     #[cfg(not(windows))]
     {
         let mut cmd = Command::new("npm");
-        cmd.args(["install", "--no-audit", "--no-fund"])
-            .current_dir(install_dir);
+        cmd.args(NPM_INSTALL_ARGS).current_dir(install_dir);
         cmd
     }
 }
@@ -1356,8 +1358,9 @@ fn run_pi_package_install_once(install_dir: &Path, bun: &str) -> Result<(), Stri
     // from the log alone; a bun that can't even execute (e.g. SIGILL on an
     // unsupported CPU) shows up right here as the version probe failing.
     info!(
-        "Running Pi dependency install: {} install (cwd: {}, bun version: {})",
+        "Running Pi dependency install: {} {} (cwd: {}, bun version: {})",
         bun,
+        PI_INSTALL_ARGS.join(" "),
         install_dir.display(),
         screenpipe_core::agents::pi::bun_version_string(bun),
     );
@@ -1366,7 +1369,10 @@ fn run_pi_package_install_once(install_dir: &Path, bun: &str) -> Result<(), Stri
     bun_cmd
         .current_dir(install_dir)
         .env("BUN_INSTALL_CACHE_DIR", &cache_dir)
-        .args(["install"]);
+        // CREATE_NO_WINDOW only applies to this Bun process. Lifecycle scripts
+        // can launch fresh console processes, so disable them for ScreenPipe's
+        // app-managed dependency set as well.
+        .args(PI_INSTALL_ARGS);
 
     match run_command_output(bun_cmd) {
         Ok(output) if output.status.success() => verify_pi_package_install(install_dir),
@@ -5398,6 +5404,12 @@ mod tests {
 
     const REPLAYED_HISTORY: &str =
         "<conversation_history>\nuser: hello\nassistant: hi\n</conversation_history>\n\nwhat next?";
+
+    #[test]
+    fn managed_pi_installs_disable_dependency_lifecycle_scripts() {
+        assert!(super::PI_INSTALL_ARGS.contains(&"--ignore-scripts"));
+        assert!(super::NPM_INSTALL_ARGS.contains(&"--ignore-scripts"));
+    }
 
     #[test]
     fn prepares_prompt_for_pi_conversation_state() {
