@@ -8,6 +8,7 @@ import type { HostedChatGatewayContext } from '../services/cloudflare-ai-gateway
 import { getCloudflareHostedChatUsage } from '../services/cloudflare-ai-gateway-usage';
 
 const originalFetch = globalThis.fetch;
+const originalWarn = console.warn;
 
 const context: HostedChatGatewayContext = {
 	user_id: 'a'.repeat(64),
@@ -71,6 +72,7 @@ function usageRow(lane: 'auto' | 'explicit', workload: 'interactive' | 'backgrou
 
 afterEach(() => {
 	globalThis.fetch = originalFetch;
+	console.warn = originalWarn;
 });
 
 describe('Cloudflare hosted-chat usage', () => {
@@ -140,6 +142,8 @@ describe('Cloudflare hosted-chat usage', () => {
 	});
 
 	it('does not collapse provider, model, or extra partition buckets into lane usage', async () => {
+		const warnings: unknown[][] = [];
+		console.warn = mock((...args: unknown[]) => warnings.push(args));
 		globalThis.fetch = mock(async (input: RequestInfo | URL) => {
 			const url = String(input);
 			if (url.includes('/ai-gateway/gateways/scoped-rule-test')) {
@@ -165,6 +169,14 @@ describe('Cloudflare hosted-chat usage', () => {
 		);
 		expect(result?.allowances).toEqual([]);
 		expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+		expect(warnings).toHaveLength(1);
+		expect(warnings[0][1]).toMatchObject({
+			plan: 'basic',
+			spend_limits_enabled: true,
+			raw_rule_count: 3,
+			normalized_rule_count: 3,
+		});
+		expect(JSON.stringify(warnings[0])).not.toContain('"limit"');
 	});
 
 	it('reports a sliding rule without inventing a reset timestamp', async () => {

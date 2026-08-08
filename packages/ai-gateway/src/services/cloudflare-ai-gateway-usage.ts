@@ -32,6 +32,12 @@ type ApplicableSpendRule = CloudflareSpendRule & {
 	lane: AllowanceLane;
 };
 
+type SpendRuleSet = {
+	rules: CloudflareSpendRule[];
+	rawRuleCount: number;
+	spendLimitsEnabled: boolean;
+};
+
 export interface HostedChatUsageAllowance {
 	lane: AllowanceLane;
 	used_percent: number;
@@ -60,10 +66,11 @@ type UsageInterval = {
 };
 
 const RULE_CACHE_TTL_MS = 5 * 60 * 1000;
-const ruleCache = new TtlSingleFlightCache<CloudflareSpendRule[]>({
+const ruleCache = new TtlSingleFlightCache<SpendRuleSet>({
 	maxEntries: 8,
 	ttlForValue: () => RULE_CACHE_TTL_MS,
 });
+const loggedEmptyRuleSelections = new Set<string>();
 
 function cloudflareSettings(env: Env): {
 	accountId: string;
@@ -128,7 +135,7 @@ function normalizeSpendRule(value: unknown): CloudflareSpendRule | null {
 
 async function fetchSpendRules(
 	settings: NonNullable<ReturnType<typeof cloudflareSettings>>,
-): Promise<CloudflareSpendRule[]> {
+): Promise<SpendRuleSet> {
 	const cacheKey = `${settings.accountId}:${settings.gatewayId}`;
 	return ruleCache.getOrLoad(cacheKey, async () => {
 		const url = `https://api.cloudflare.com/client/v4/accounts/${settings.accountId}/ai-gateway/gateways/${encodeURIComponent(settings.gatewayId)}`;
@@ -140,12 +147,21 @@ async function fetchSpendRules(
 			success?: unknown;
 			result?: { spend_limits?: { enabled?: unknown; rules?: unknown } };
 		};
-		if (payload.success !== true || payload.result?.spend_limits?.enabled !== true) return [];
-		const rawRules = payload.result.spend_limits.rules;
-		if (!Array.isArray(rawRules)) return [];
-		return rawRules
+		const spendLimitsEnabled = payload.result?.spend_limits?.enabled === true;
+		if (payload.success !== true || !spendLimitsEnabled) {
+			return { rules: [], rawRuleCount: 0, spendLimitsEnabled };
+		}
+		const rawRules = payload.result?.spend_limits?.rules;
+		if (!Array.isArray(rawRules)) {
+			return { rules: [], rawRuleCount: 0, spendLimitsEnabled };
+		}
+		return {
+			rules: rawRules
 			.map(normalizeSpendRule)
-			.filter((rule): rule is CloudflareSpendRule => rule !== null);
+			.filter((rule): rule is CloudflareSpendRule => rule !== null),
+			rawRuleCount: rawRules.length,
+			spendLimitsEnabled,
+		};
 	});
 }
 
@@ -188,6 +204,55 @@ function applicableLaneRules(
 		const unsupportedMetadata = Object.keys(rule.metadata)
 			.some((key) => !['user_id', 'plan', 'lane'].includes(key));
 		return unsupportedMetadata ? [] : [{ ...rule, lane }];
+	});
+}
+
+function ruleSelectionReason(
+	rule: CloudflareSpendRule,
+	context: HostedChatGatewayContext,
+): string {
+	if (rule.model || rule.provider) return 'provider_or_model_dimension';
+	if (rule.metadata.user_id?.mode !== 'partition') return 'missing_user_id_partition';
+	if (Object.entries(rule.metadata).some(([key, dimension]) =>
+		dimension.mode === 'partition' && key !== 'user_id')) return 'extra_partition_dimension';
+	if (!filterMatches(rule.metadata.plan, context.plan)) return 'plan_filter_mismatch';
+	const lane = rule.metadata.lane;
+	if (lane && (lane.mode !== 'filter' || lane.values?.length !== 1 ||
+		!['auto', 'explicit'].includes(lane.values[0]))) return 'unsupported_lane_dimension';
+	if (Object.keys(rule.metadata).some((key) => !['user_id', 'plan', 'lane'].includes(key))) {
+		return 'unsupported_metadata_dimension';
+	}
+	return 'matched';
+}
+
+function logEmptyRuleSelection(
+	settings: NonNullable<ReturnType<typeof cloudflareSettings>>,
+	ruleSet: SpendRuleSet,
+	context: HostedChatGatewayContext,
+): void {
+	const logKey = `${settings.gatewayId}:${context.plan}`;
+	if (loggedEmptyRuleSelections.has(logKey)) return;
+	loggedEmptyRuleSelections.add(logKey);
+	console.warn('Cloudflare spend rules yielded no desktop usage allowances', {
+		plan: context.plan,
+		spend_limits_enabled: ruleSet.spendLimitsEnabled,
+		raw_rule_count: ruleSet.rawRuleCount,
+		normalized_rule_count: ruleSet.rules.length,
+		rules: ruleSet.rules.map((rule) => ({
+			id: rule.id,
+			window_seconds: rule.window,
+			technique: rule.technique,
+			metadata: Object.fromEntries(Object.entries(rule.metadata).map(([key, dimension]) => [
+				key,
+				{
+					mode: dimension.mode,
+					...(key === 'plan' || key === 'lane' ? { values: dimension.values } : {}),
+				},
+			])),
+			has_model_dimension: rule.model !== undefined,
+			has_provider_dimension: rule.provider !== undefined,
+			reason: ruleSelectionReason(rule, context),
+		})),
 	});
 }
 
@@ -307,7 +372,9 @@ export async function getCloudflareHostedChatUsage(
 ): Promise<HostedChatUsageSnapshot | null> {
 	const settings = cloudflareSettings(env);
 	if (!settings) return null;
-	const rules = applicableLaneRules(await fetchSpendRules(settings), context);
+	const ruleSet = await fetchSpendRules(settings);
+	const rules = applicableLaneRules(ruleSet.rules, context);
+	if (rules.length === 0) logEmptyRuleSelection(settings, ruleSet, context);
 	const intervalsByKey = new Map<string, UsageInterval>();
 	for (const rule of rules) {
 		const interval = intervalForRule(rule, now);
