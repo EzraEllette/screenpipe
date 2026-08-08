@@ -473,6 +473,7 @@ export function usePiForegroundEvents({
               startedAtMs: Date.now(),
               ...(toolKind ? { kind: toolKind } : {}),
               ...(parentToolCallId ? { parentToolCallId } : {}),
+              ...(data.subagent === true ? { subagent: true } : {}),
             };
             // Add tool block (text before it is already its own block)
             piContentBlocksRef.current.push({ type: "tool", toolCall });

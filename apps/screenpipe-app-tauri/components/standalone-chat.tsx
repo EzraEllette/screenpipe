@@ -43,6 +43,7 @@ import {
   isConversationHistorySyncPrompt,
   isInjectedTitleSourcePrompt,
   normalizeComposerMentionsForModel,
+  type ComposerCommandId,
   type ComposerSkillReference,
 } from "@/lib/chat-utils";
 import { useAutoSuggestions } from "@/lib/hooks/use-auto-suggestions";
@@ -418,6 +419,11 @@ export function StandaloneChat({
   const openMentionConversationRef = useRef<
     ((conversationId: string) => void | Promise<void>) | null
   >(null);
+  // `/` commands run handlers that are declared further down this component, so
+  // they are reached through a ref rather than reordering the whole file.
+  const runComposerCommandRef = useRef<
+    ((commandId: ComposerCommandId) => void | Promise<void>) | null
+  >(null);
 
   const atMentionSuggestions = React.useMemo(
     () => [...STATIC_MENTION_SUGGESTIONS, ...appMentionSuggestions],
@@ -475,6 +481,7 @@ export function StandaloneChat({
     allTagMentionSuggestions,
     onOpenConversation: (targetConversationId) =>
       openMentionConversationRef.current?.(targetConversationId),
+    onRunCommand: (commandId) => runComposerCommandRef.current?.(commandId),
   });
   const dropdownRef = useRef<HTMLDivElement>(null);
   // Root of the chat surface. The webview drag-drop event is window-global and
@@ -1200,6 +1207,25 @@ export function StandaloneChat({
   if (typeof window !== "undefined") {
     (window as any).__e2eStopChat = handleStop;
   }
+
+  // Render assignment, matching openMentionConversationRef above: every handler
+  // a `/` command needs is defined by this point.
+  runComposerCommandRef.current = async (commandId: ComposerCommandId) => {
+    switch (commandId) {
+      case "new-chat":
+        await startNewConversationRef.current?.();
+        return;
+      case "stop":
+        await handleStop();
+        return;
+      case "inspector":
+        toggleInspector();
+        return;
+      case "pipes":
+        await commands.showWindow({ Home: { page: "pipes" } });
+        return;
+    }
+  };
 
 
   const answerPiExtensionUiRequest = useCallback(async (

@@ -490,19 +490,9 @@ struct ShortcutReminderView: View {
             HStack(spacing: s(3)) {
                 AudioEqualizerView(active: metrics.audioActive, speechRatio: metrics.speechRatio)
                     .frame(width: s(18), height: s(12))
-                ZStack(alignment: .topTrailing) {
-                    ScreenMatrixView(active: metrics.screenActive, captureFps: metrics.captureFps)
-                        .frame(width: s(18), height: s(12))
-                        .clipShape(RoundedRectangle(cornerRadius: 1))
-                    if metrics.meetingActive {
-                        Circle()
-                            .fill(Color.red)
-                            .frame(width: s(5), height: s(5))
-                            .overlay(Circle().stroke(Color.black.opacity(0.75), lineWidth: s(1)))
-                            .offset(x: s(2), y: -s(2))
-                            .help("meeting live — hover for transcript")
-                    }
-                }
+                ScreenMatrixView(active: metrics.screenActive, captureFps: metrics.captureFps)
+                    .frame(width: s(18), height: s(12))
+                    .clipShape(RoundedRectangle(cornerRadius: 1))
             }
             .padding(.horizontal, s(3))
             .frame(maxHeight: .infinity)
@@ -510,6 +500,7 @@ struct ShortcutReminderView: View {
 
             CollapsedBellButton(
                 unread: metrics.inboxUnread,
+                meetingActive: metrics.meetingActive,
                 scale: scale,
                 action: { onAction("open_inbox") }
             )
@@ -541,6 +532,9 @@ struct ShortcutReminderView: View {
                 .frame(width: s(24), height: s(12))
                 .padding(.horizontal, s(3))
 
+            // The expanded bar keeps the meeting dot on the screen matrix: its
+            // bell already carries an unread dot at an unscaled 1pt offset, so
+            // a second dot there collides with the glyph at larger sizes.
             ZStack(alignment: .topTrailing) {
                 ScreenMatrixView(active: metrics.screenActive, captureFps: metrics.captureFps)
                     .frame(width: s(24), height: s(12))
@@ -741,9 +735,15 @@ struct CollapsedAppIconButton: View {
 // inbox; the dot mirrors the pipes-store bell's unread marker. Crucially:
 // no .onHover wired to isExpanded — clicking it opens the inbox without
 // forcing the user through the expanded layout.
+//
+// Both live signals sit in one column on the bell: unread notifications is
+// the white dot above it, a live meeting is the red dot mirrored below it.
+// Before, the meeting dot floated over the screen matrix mid-pill, so "we
+// are live" moved around depending on which signal fired.
 @available(macOS 13.0, *)
 struct CollapsedBellButton: View {
     let unread: Bool
+    let meetingActive: Bool
     let scale: CGFloat
     let action: () -> Void
     @State private var hovered = false
@@ -761,6 +761,12 @@ struct CollapsedBellButton: View {
                     Circle().fill(.white)
                         .frame(width: 4 * scale, height: 4 * scale)
                         .offset(x: 5 * scale, y: -5 * scale)
+                }
+                if meetingActive {
+                    Circle().fill(Color.red)
+                        .frame(width: 4 * scale, height: 4 * scale)
+                        .offset(x: 5 * scale, y: 5 * scale)
+                        .help("meeting live — hover for transcript")
                 }
             }
             .frame(width: 14 * scale)

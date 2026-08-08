@@ -1591,6 +1591,25 @@
       "notes": "Opt-in macOS fault injection wedges a visual-change probe; asserts the bounded probe keeps the capture loop and its /health heartbeat live (no false stale/incident)."
     },
     {
+      "spec": "capture-stall-stage-marker.spec.ts",
+      "platforms": [
+        "macos"
+      ],
+      "layers": [
+        "capture-ocr",
+        "local-api",
+        "os-integration"
+      ],
+      "features": [
+        "app-launch",
+        "capture-ocr"
+      ],
+      "criticality": "high",
+      "confidence": "conditional",
+      "ux": "api",
+      "notes": "Opt-in macOS fault injection parks the capture loop; asserts /health names the frozen CaptureLoopStage with an advancing age while frame_status is stale, and that the stage age collapses once the watchdog recovers capture."
+    },
+    {
       "spec": "capture-stall-recovery.spec.ts",
       "platforms": [
         "macos"

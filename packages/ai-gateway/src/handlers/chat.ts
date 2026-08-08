@@ -173,6 +173,24 @@ export function isProviderUsageCapped(status: number, msg: string): boolean {
   return status === 400 && PROVIDER_USAGE_CAP_PATTERN.test(msg);
 }
 
+export function usageLimitMessage(status: number, msg: string): string | null {
+  if (!isProviderUsageCapped(status, msg)) return null;
+  const reset = msg.match(/regain access on (\d{4}-\d{2}-\d{2} at \d{2}:\d{2} UTC)\b/i)?.[1];
+  if (!reset) return null;
+  return `The AI provider's usage limit has been reached. Access will reset on ${reset}. Try again after that time or use a different provider.`;
+}
+
+export function selectCascadeError(previous: any, current: any): any {
+  // Account gates and safety refusals stop the chain and must be the surfaced
+  // result, even when an earlier provider cap carried a useful reset time.
+  if (isHostedChatAllowanceError(current) || isSafetyRefusalError(current)) return current;
+  const priority = (error: any): number => {
+    if (usageLimitMessage(error?.status, String(error?.message ?? ''))) return 2;
+    return error?.userMessage ? 1 : 0;
+  };
+  return priority(previous) > priority(current) ? previous : current;
+}
+
 export function isUserInputTooLarge(status: number, msg: string): boolean {
   if (status !== 400 && status !== 413) return false;
   return USER_INPUT_TOO_LARGE_PATTERNS.some((re) => re.test(msg));
@@ -342,7 +360,8 @@ async function tryModel(
     // skip it — the cost dashboards and model-health log still see it.
     if (isProviderUsageCapped(status, msg)) {
       error.transient = true;
-      error.userMessage = `${model} is temporarily at capacity (the provider's usage limit was reached). Pick Auto or a model from a different provider, or try again later.`;
+      error.userMessage = usageLimitMessage(status, msg)
+        ?? `${model} is temporarily at capacity (the provider's usage limit was reached). Pick Auto or a model from a different provider, or try again later.`;
       console.warn(`${ctx}: ${model} provider usage cap hit (400), cascading`);
       logModelOutcome(env, { model, outcome: 'error' }).catch(() => {});
       throw error;
@@ -439,7 +458,7 @@ export async function runChain(
       logModelOutcome(env, { model, outcome: 'ok' }).catch(() => {});
       return { response, model };
     } catch (error: any) {
-      lastError = error;
+      lastError = selectCascadeError(lastError, error);
       if (isHostedChatAllowanceError(error) || isProviderQuotaOrBillingLimitError(error)) {
         limitError = error;
       }
