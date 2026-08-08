@@ -59,6 +59,9 @@ export interface ToolCall {
   endedAtMs?: number;
   /** Spawning Task's tool call id for subagent child calls (ACP `_meta`). */
   parentToolCallId?: string;
+  /** This call is the launch of a subagent (Claude's Task/Agent tool), so it
+   *  is a container for the nested transcript rather than a step of its own. */
+  subagent?: boolean;
   /** Agent-reported elapsed seconds from the latest progress heartbeat. */
   elapsedSeconds?: number;
   /** Subagent type from the heartbeat, e.g. "researcher". */
