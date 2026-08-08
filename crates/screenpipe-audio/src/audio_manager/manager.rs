@@ -1003,7 +1003,11 @@ impl AudioManager {
                     .start_device_with_tap_pids(device, pids)
                     .await
             }
-            None => self.device_manager.start_device(device).await,
+            None => {
+                self.device_manager
+                    .start_process_resolved_device(device)
+                    .await
+            }
         };
         if let Err(e) = start_result {
             let err_str = e.to_string();
