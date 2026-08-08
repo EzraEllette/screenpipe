@@ -549,6 +549,7 @@ export function AccountSection() {
           <div className="mt-4">
             <AccountPlanOptions
               current={accountPlanForEntitlement(subscriptionPlan, true)}
+              entitlementPlan={subscriptionPlan}
               fallbackTo={hasExpiringProfilePlan ? "free" : undefined}
               busy={checkoutBusy}
               onChoose={(plan) =>
@@ -870,6 +871,7 @@ export function AccountSection() {
               <div className="mt-4">
                 <AccountPlanOptions
                   current={accountPlanForEntitlement(subscriptionPlan, true)}
+                  entitlementPlan={subscriptionPlan}
                   fallbackTo={hasExpiringProfilePlan ? "free" : undefined}
                   busy={checkoutBusy}
                   onChoose={(plan) =>
