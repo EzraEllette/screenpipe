@@ -59,15 +59,24 @@ describe("UsagePopover", () => {
     mocks.query.usage.hosted_ai.allowances = originalAllowances;
   });
 
-  it("shows every Cloudflare window, with the tightest percentage in the trigger", () => {
+  it("opens on hover and shows every Cloudflare window", () => {
     render(<UsagePopover />);
 
-    fireEvent.click(screen.getByRole("button", { name: "AI usage, 62% used" }));
+    fireEvent.pointerEnter(screen.getByRole("button", { name: "AI usage, 62% used" }));
 
     expect(screen.getByText("30-day limit")).toBeTruthy();
     expect(screen.getByText("Weekly · all models")).toBeTruthy();
     expect(screen.getByText("30%")).toBeTruthy();
     expect(document.body.textContent).not.toContain("$");
+  });
+
+  it("renders the usage settings action in lowercase", () => {
+    render(<UsagePopover />);
+    fireEvent.pointerEnter(screen.getByRole("button", { name: "AI usage, 62% used" }));
+
+    const action = screen.getByRole("button", { name: "view usage settings" });
+    expect(action.className).toContain("lowercase");
+    expect(action.className).not.toContain("uppercase");
   });
 
   it("opens the full usage settings page", () => {
