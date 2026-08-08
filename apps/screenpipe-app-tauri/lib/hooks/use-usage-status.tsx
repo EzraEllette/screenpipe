@@ -76,7 +76,7 @@ export interface UsageStatusQuery {
 
 /** Poll interval — 30s is frequent enough that a user who sends a burst
  *  sees the chip appear promptly, rare enough not to hammer the worker. */
-const POLL_INTERVAL_MS = 30_000;
+const POLL_INTERVAL_MS = 5 * 60_000;
 
 function parseHostedAiAllowance(value: unknown): HostedAiAllowance | null {
   if (!value || typeof value !== "object") return null;

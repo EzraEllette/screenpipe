@@ -9,6 +9,7 @@ import { getCloudflareHostedChatUsage } from '../services/cloudflare-ai-gateway-
 
 const originalFetch = globalThis.fetch;
 const originalWarn = console.warn;
+const originalCachesDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'caches');
 
 const context: HostedChatGatewayContext = {
 	user_id: 'a'.repeat(64),
@@ -73,7 +74,27 @@ function usageRow(lane: 'auto' | 'explicit', workload: 'interactive' | 'backgrou
 afterEach(() => {
 	globalThis.fetch = originalFetch;
 	console.warn = originalWarn;
+	if (originalCachesDescriptor) {
+		Object.defineProperty(globalThis, 'caches', originalCachesDescriptor);
+	} else {
+		delete (globalThis as typeof globalThis & { caches?: CacheStorage }).caches;
+	}
 });
+
+function installSharedCache(): void {
+	const entries = new Map<string, Response>();
+	const keyFor = (request: RequestInfo | URL) => request instanceof Request ? request.url : String(request);
+	const cache = {
+		match: async (request: RequestInfo | URL) => entries.get(keyFor(request))?.clone(),
+		put: async (request: RequestInfo | URL, response: Response) => {
+			entries.set(keyFor(request), response.clone());
+		},
+	} as unknown as Cache;
+	Object.defineProperty(globalThis, 'caches', {
+		configurable: true,
+		value: { default: cache },
+	});
+}
 
 describe('Cloudflare hosted-chat usage', () => {
 	it('reduces Gateway rules and per-user analytics to percentages', async () => {
@@ -356,5 +377,38 @@ describe('Cloudflare hosted-chat usage', () => {
 			}),
 		]);
 		expect(gatewayReads).toBe(2);
+	});
+
+	it('shares a successful user snapshot across Worker isolates', async () => {
+		installSharedCache();
+		let providerReads = 0;
+		globalThis.fetch = mock(async (input: RequestInfo | URL) => {
+			providerReads += 1;
+			const url = String(input);
+			if (url.includes('/ai-gateway/gateways/shared-snapshot-cache-test')) {
+				return gatewayResponse([{
+					...laneRule('basic-weekly-shared', 'auto', 20, 'fixed', 604_800),
+					metadata: {
+						user_id: { mode: 'partition' },
+						plan: { mode: 'filter', values: ['basic'] },
+					},
+				}]);
+			}
+			if (url.endsWith('/graphql')) {
+				return new Response(JSON.stringify({
+					data: { viewer: { accounts: [{ window0: [usageRow('auto', 'interactive', 5)] }] } },
+				}), { status: 200 });
+			}
+			throw new Error(`unexpected fetch: ${url}`);
+		}) as typeof fetch;
+
+		const first = await getCloudflareHostedChatUsage(
+			env('shared-snapshot-cache-test'), context, new Date('2026-08-04T16:30:00.000Z'));
+		const second = await getCloudflareHostedChatUsage(
+			env('shared-snapshot-cache-test'), context, new Date('2026-08-04T16:31:00.000Z'));
+
+		expect(first?.allowances[0].used_percent).toBe(25);
+		expect(second).toEqual(first);
+		expect(providerReads).toBe(2);
 	});
 });
