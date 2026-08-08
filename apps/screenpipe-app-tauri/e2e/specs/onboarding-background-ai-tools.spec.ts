@@ -268,26 +268,48 @@ async function callActivitySummaryThroughMcp(
       // removed slide — it resumes at the engine and finishes. Sample the body
       // while the window is alive so we can prove the removed slides never
       // rendered, and stop as soon as the store says setup completed.
+      //
+      // Which window each half runs in is load-bearing. `invoke` executes in
+      // whichever window is currently switched to, and the engine slide closes
+      // Onboarding the moment it finishes setup. Polling the store from the
+      // onboarding handle therefore races its own success condition: completion
+      // destroys the context the completion check runs in, and the driver fails
+      // the whole `waitUntil` with "No window could be found" instead of
+      // reporting `isCompleted: true`. So the store is read from Home, which is
+      // opened above and outlives Onboarding, and only the body sample runs
+      // against Onboarding while that handle still exists.
       const seen: string[] = [];
       await browser.waitUntil(
         async () => {
+          // Driver-level, so it stays valid even with no live current window.
+          const handles = await browser.getWindowHandles();
+          if (!handles.includes("home")) {
+            throw new Error(
+              "home window disappeared; it is the surviving context this poll reads the onboarding store from",
+            );
+          }
+
+          if (handles.includes("onboarding")) {
+            try {
+              await browser.switchToWindow("onboarding");
+              seen.push(
+                (
+                  (await browser.execute(
+                    () => document.body?.innerText || "",
+                  )) as string
+                ).toLowerCase(),
+              );
+            } catch {
+              // Window closed underneath the sample. Expected once setup
+              // completes; the status check below settles it.
+            }
+          }
+
+          await browser.switchToWindow("home");
           const status = await invokeOrThrow<{ isCompleted: boolean }>(
             "get_onboarding_status",
           );
-          if (status.isCompleted) return true;
-          try {
-            seen.push(
-              (
-                (await browser.execute(
-                  () => document.body?.innerText || "",
-                )) as string
-              ).toLowerCase(),
-            );
-          } catch {
-            // window closed underneath the sample; the status check above is
-            // authoritative and will settle this on the next pass
-          }
-          return false;
+          return status.isCompleted;
         },
         {
           timeout: t(30_000),
