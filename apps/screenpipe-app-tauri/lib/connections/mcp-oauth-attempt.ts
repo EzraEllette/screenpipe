@@ -123,7 +123,10 @@ export async function pollMcpOAuthAttempt(
     }
     const status = payload.data.status as McpOAuthAttemptStatus;
     if (status !== "pending" && status !== "exchanging") {
-      return ["completed", "canceled", "expired", "failed"].includes(status)
+      if (status === "failed") {
+        return failMcpOAuthAttempt(attemptId, fetcher);
+      }
+      return ["completed", "canceled", "expired"].includes(status)
         ? status
         : await failMcpOAuthAttempt(attemptId, fetcher);
     }

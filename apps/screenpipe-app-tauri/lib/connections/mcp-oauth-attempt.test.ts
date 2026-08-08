@@ -107,6 +107,24 @@ describe("exact MCP OAuth attempts", () => {
     );
   });
 
+  it("cancels the exact attempt when polling reports failure", async () => {
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(
+        response({ data: { attempt_id: "attempt-a", status: "failed" } }),
+      )
+      .mockRejectedValueOnce(new Error("cleanup unavailable"));
+
+    await expect(
+      pollMcpOAuthAttempt("attempt-a", { fetcher, intervalMs: 0, timeoutMs: 50 }),
+    ).resolves.toBe("failed");
+    expect(fetcher).toHaveBeenLastCalledWith(
+      "/mcp-servers/oauth/attempt/attempt-a/cancel",
+      { method: "POST" },
+    );
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
   it("awaits exact cancellation on abort and timeout", async () => {
     const controller = new AbortController();
     const fetcher = vi.fn(async (path: string, init?: RequestInit) => {
