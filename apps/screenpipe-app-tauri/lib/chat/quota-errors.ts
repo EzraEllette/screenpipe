@@ -73,6 +73,57 @@ function isCostLimitError(errorStr: string): boolean {
   return COST_LIMIT_CODES.some((code) => normalized.includes(code));
 }
 
+type CostLimitWindow = "day" | "month" | "trial" | "unknown";
+
+function costLimitWindow(errorStr: string): CostLimitWindow {
+  const normalized = errorStr.toLowerCase();
+  if (normalized.includes("trial_cost_limit_exceeded")) return "trial";
+  if (normalized.includes("monthly_cost_limit_exceeded")) return "month";
+  if (normalized.includes("daily_cost_limit_exceeded")) return "day";
+  return "unknown";
+}
+
+/**
+ * Say when the allowance actually comes back.
+ *
+ * The gateway sends `resets_at: null` for a trial cap because a trial budget is
+ * cumulative and never resets. Rendering that as "try again shortly" sends the
+ * user to wait for something that cannot happen, so each window states its own
+ * truth and only a real timestamp is ever turned into a time.
+ */
+function costLimitReason(window: CostLimitWindow, errorStr: string): string {
+  const resetsAt = structuredString(errorStr, "resets_at");
+  const resetTime = formatResetMoment(resetsAt);
+  // Background pipes draw on the same budget, which is why this fires for
+  // people who feel they barely used chat. Keep saying so.
+  const shared = "Background scheduled tasks share this budget.";
+  switch (window) {
+    case "trial":
+      return `you've used the hosted AI allowance included with your trial. It doesn't refill during the trial. ${shared}`;
+    case "month":
+      return resetTime
+        ? `you've used this month's hosted AI usage limit. It resets ${resetTime}. ${shared}`
+        : `you've used this month's hosted AI usage limit. It resets at the start of next month. ${shared}`;
+    case "day":
+      return resetTime
+        ? `you've used today's hosted AI usage limit. It resets ${resetTime}. ${shared}`
+        : `you've used today's hosted AI usage limit. It resets tomorrow. ${shared}`;
+    default:
+      return `your plan's hosted AI usage limit is reached. ${shared}`;
+  }
+}
+
+/** Only a parseable timestamp becomes a time. Never invent one. */
+function formatResetMoment(resetsAt: string | null): string | null {
+  if (!resetsAt) return null;
+  const at = new Date(resetsAt);
+  if (Number.isNaN(at.getTime())) return null;
+  const withinADay = at.getTime() - Date.now() < 24 * 60 * 60 * 1000;
+  return withinADay
+    ? `at ${at.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}`
+    : `on ${at.toLocaleDateString(undefined, { month: "short", day: "numeric" })}`;
+}
+
 function isUpgradeLimitError(errorStr: string): boolean {
   const normalized = errorStr.toLowerCase();
   return UPGRADE_LIMIT_CODES.some((code) => normalized.includes(code));
@@ -129,22 +180,25 @@ export function buildDailyLimitMessage(errorStr: string): string {
     const isRateLimit =
       normalized.includes("rate limit") || normalized.includes("rate_limit");
 
-    if (isRateLimit) {
-      return "This model is temporarily rate-limited. Try again in a few seconds, or switch to a different model.";
-    }
-
+    // A spend cap is terminal for its whole window; a provider rate limit
+    // clears in seconds. These must never be confused, so the cap is matched
+    // FIRST. A monthly cap body that merely mentions "rate limit" used to fall
+    // into the transient branch and tell the user to retry in a few seconds —
+    // for a limit that does not move until the 1st of the month.
     if (isCostLimit) {
       // Don't leak the raw dollar cap — that's our internal margin. Frame it
       // as an account-wide budget so the user understands why it fired even
       // when they "didn't use much" (background pipes consume it too).
-      const upgrade = parseQuotaUpgradeAction(errorStr);
-      if (upgrade) {
-        // The persistent recovery panel owns the explanation and actions. Keep
-        // the transcript entry short so the same technical paragraph is not
-        // repeated immediately above it.
-        return "Hosted AI didn't run this request because your plan's usage limit is reached. Choose a recovery option below.";
-      }
-      return "Hosted AI didn't run this request because your plan's usage limit is reached. Background scheduled tasks share this budget. Switch to a local model or your own provider key to keep working.";
+      const window = costLimitWindow(errorStr);
+      const recovery = parseQuotaUpgradeAction(errorStr)
+        ? // The persistent recovery panel owns the explanation and actions.
+          "Choose a recovery option below."
+        : "Switch to a local model or your own provider key to keep working.";
+      return `Hosted AI didn't run this request because ${costLimitReason(window, errorStr)} ${recovery}`;
+    }
+
+    if (isRateLimit) {
+      return "This model is temporarily rate-limited. Try again in a few seconds, or switch to a different model.";
     }
 
     if (parseQuotaUpgradeAction(errorStr)) {
