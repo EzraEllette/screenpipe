@@ -24,7 +24,44 @@ describe("exact MCP OAuth attempts", () => {
       startMcpOAuthAttempt("server", { name: "Notion" }, { fetcher, open }),
     ).resolves.toBe("attempt-b");
     expect(open).toHaveBeenCalledWith("https://issuer.example/authorize");
+    expect(fetcher).toHaveBeenCalledTimes(1);
     expect(JSON.parse(String(fetcher.mock.calls[0][1].body))).toEqual({ name: "Notion" });
+  });
+
+  it("cancels the exact registered attempt when opening the browser fails", async () => {
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(
+        response({ data: { auth_url: "https://issuer.example/authorize", attempt_id: "attempt-b" } }),
+      )
+      .mockRejectedValueOnce(new Error("cleanup unavailable"));
+    const openError = new Error("browser unavailable");
+    const open = vi.fn().mockRejectedValue(openError);
+
+    await expect(
+      startMcpOAuthAttempt("server", { name: "Notion" }, { fetcher, open }),
+    ).rejects.toBe(openError);
+    expect(fetcher).toHaveBeenLastCalledWith(
+      "/mcp-servers/oauth/attempt/attempt-b/cancel",
+      { method: "POST" },
+    );
+  });
+
+  it("cancels the exact registered attempt when the start result is malformed", async () => {
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(response({ data: { auth_url: null, attempt_id: "attempt-b" } }))
+      .mockResolvedValueOnce(response({ success: true }));
+    const open = vi.fn();
+
+    await expect(
+      startMcpOAuthAttempt("server", { name: "Notion" }, { fetcher, open }),
+    ).rejects.toThrow("OAuth start returned an invalid attempt");
+    expect(open).not.toHaveBeenCalled();
+    expect(fetcher).toHaveBeenLastCalledWith(
+      "/mcp-servers/oauth/attempt/attempt-b/cancel",
+      { method: "POST" },
+    );
   });
 
   it("polls the exact attempt so stale server tokens cannot complete it", async () => {
@@ -36,6 +73,38 @@ describe("exact MCP OAuth attempts", () => {
       pollMcpOAuthAttempt("attempt-a", { fetcher, intervalMs: 0, timeoutMs: 50 }),
     ).resolves.toBe("failed");
     expect(fetcher.mock.calls.every(([path]) => String(path).includes("attempt-a"))).toBe(true);
+  });
+
+  it("cancels the exact attempt when status polling fails", async () => {
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(response({ error: "unavailable" }, false))
+      .mockResolvedValueOnce(response({ success: true }));
+
+    await expect(
+      pollMcpOAuthAttempt("attempt-a", { fetcher, intervalMs: 0, timeoutMs: 50 }),
+    ).resolves.toBe("failed");
+    expect(fetcher).toHaveBeenLastCalledWith(
+      "/mcp-servers/oauth/attempt/attempt-a/cancel",
+      { method: "POST" },
+    );
+  });
+
+  it("cancels the exact attempt when the status result is malformed", async () => {
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(
+        response({ data: { attempt_id: "attempt-a", status: "unexpected" } }),
+      )
+      .mockResolvedValueOnce(response({ success: true }));
+
+    await expect(
+      pollMcpOAuthAttempt("attempt-a", { fetcher, intervalMs: 0, timeoutMs: 50 }),
+    ).resolves.toBe("failed");
+    expect(fetcher).toHaveBeenLastCalledWith(
+      "/mcp-servers/oauth/attempt/attempt-a/cancel",
+      { method: "POST" },
+    );
   });
 
   it("awaits exact cancellation on abort and timeout", async () => {

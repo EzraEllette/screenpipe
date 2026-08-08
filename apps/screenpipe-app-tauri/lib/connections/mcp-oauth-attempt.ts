@@ -20,6 +20,19 @@ type StartDependencies = {
   open?: (url: string) => Promise<unknown>;
 };
 
+async function cancelMcpOAuthAttemptBestEffort(attemptId: string, fetcher: Fetcher): Promise<void> {
+  try {
+    await cancelMcpOAuthAttempt(attemptId, fetcher);
+  } catch {
+    // Cleanup must not hide the primary start or polling failure.
+  }
+}
+
+async function failMcpOAuthAttempt(attemptId: string, fetcher: Fetcher): Promise<"failed"> {
+  await cancelMcpOAuthAttemptBestEffort(attemptId, fetcher);
+  return "failed";
+}
+
 export async function startMcpOAuthAttempt(
   serverId: string,
   body: Record<string, unknown>,
@@ -41,10 +54,19 @@ export async function startMcpOAuthAttempt(
   }
   const attemptId = payload?.data?.attempt_id;
   const authUrl = payload?.data?.auth_url;
-  if (typeof attemptId !== "string" || !attemptId || typeof authUrl !== "string") {
+  if (typeof attemptId !== "string" || !attemptId) {
     throw new Error("OAuth start returned an invalid attempt");
   }
-  await open(authUrl);
+  if (typeof authUrl !== "string" || !authUrl) {
+    await cancelMcpOAuthAttemptBestEffort(attemptId, fetcher);
+    throw new Error("OAuth start returned an invalid attempt");
+  }
+  try {
+    await open(authUrl);
+  } catch (error) {
+    await cancelMcpOAuthAttemptBestEffort(attemptId, fetcher);
+    throw error;
+  }
   return attemptId;
 }
 
@@ -81,17 +103,29 @@ export async function pollMcpOAuthAttempt(
       await cancelMcpOAuthAttempt(attemptId, fetcher);
       return "canceled";
     }
-    const response = await fetcher(
-      `/mcp-servers/oauth/attempt/${encodeURIComponent(attemptId)}/status`,
-    );
-    if (!response.ok) return "failed";
-    const payload = await response.json();
-    if (payload?.data?.attempt_id !== attemptId) return "failed";
-    const status = payload?.data?.status as McpOAuthAttemptStatus;
+    let response: Response;
+    try {
+      response = await fetcher(
+        `/mcp-servers/oauth/attempt/${encodeURIComponent(attemptId)}/status`,
+      );
+    } catch {
+      return failMcpOAuthAttempt(attemptId, fetcher);
+    }
+    if (!response.ok) return failMcpOAuthAttempt(attemptId, fetcher);
+    let payload: { data?: { attempt_id?: unknown; status?: unknown } } | null;
+    try {
+      payload = await response.json();
+    } catch {
+      return failMcpOAuthAttempt(attemptId, fetcher);
+    }
+    if (payload?.data?.attempt_id !== attemptId) {
+      return failMcpOAuthAttempt(attemptId, fetcher);
+    }
+    const status = payload.data.status as McpOAuthAttemptStatus;
     if (status !== "pending" && status !== "exchanging") {
       return ["completed", "canceled", "expired", "failed"].includes(status)
         ? status
-        : "failed";
+        : await failMcpOAuthAttempt(attemptId, fetcher);
     }
     if (intervalMs > 0) await delay(intervalMs);
   }

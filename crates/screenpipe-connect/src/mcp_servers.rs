@@ -337,6 +337,11 @@ impl OAuthAttemptRegistry {
         Some(attempt)
     }
 
+    fn cancel_server(&mut self, server_id: &str) -> Option<McpOAuthAttempt> {
+        let attempt_id = self.active_by_server.get(server_id)?.clone();
+        self.cancel(&attempt_id)
+    }
+
     fn set_status(&mut self, attempt_id: &str, status: McpOAuthAttemptStatus) {
         let expires_at = self
             .statuses
@@ -625,21 +630,30 @@ impl McpServerStore {
     /// Remove a server. Best-effort wipes any cached header secrets.
     pub async fn delete(&self, id: &str) -> Result<()> {
         let lifecycle_lock = self.oauth_lifecycle_lock_for(id).await;
-        let _lifecycle_guard = lifecycle_lock.lock().await;
-        {
-            let _lock = self.file_lock.lock().await;
-            let mut file = load_file(&self.screenpipe_dir).await?;
-            let before = file.servers.len();
-            file.servers.retain(|s| s.id != id);
-            if file.servers.len() != before {
-                save_file(&self.screenpipe_dir, &file).await?;
+        let lifecycle_guard = lifecycle_lock.lock().await;
+        let canceled = self.oauth_attempts.lock().await.cancel_server(id);
+        let result = async {
+            {
+                let _lock = self.file_lock.lock().await;
+                let mut file = load_file(&self.screenpipe_dir).await?;
+                let before = file.servers.len();
+                file.servers.retain(|s| s.id != id);
+                if file.servers.len() != before {
+                    save_file(&self.screenpipe_dir, &file).await?;
+                }
             }
+            if let Some(ss) = &self.secret_store {
+                let _ = ss.delete(&secret_key(id)).await;
+                let _ = ss.delete(&oauth_token_key(id)).await;
+            }
+            Ok(())
         }
-        if let Some(ss) = &self.secret_store {
-            let _ = ss.delete(&secret_key(id)).await;
-            let _ = ss.delete(&oauth_token_key(id)).await;
+        .await;
+        drop(lifecycle_guard);
+        if let Some(attempt) = canceled {
+            self.cancel_relay(&attempt).await;
         }
-        Ok(())
+        result
     }
 
     /// Return header (name, value) pairs for a given server. Names
@@ -704,19 +718,27 @@ impl McpServerStore {
     }
 
     pub async fn disconnect_oauth(&self, id: &str) -> Result<()> {
-        let Some(ss) = &self.secret_store else {
-            return Ok(());
-        };
         let lifecycle_lock = self.oauth_lifecycle_lock_for(id).await;
-        let _lifecycle_guard = lifecycle_lock.lock().await;
-        let _ = ss.delete(&oauth_token_key(id)).await;
-        let _lock = self.file_lock.lock().await;
-        let mut file = load_file(&self.screenpipe_dir).await?;
-        if let Some(cfg) = file.servers.iter_mut().find(|s| s.id == id) {
-            cfg.auth_mode = McpAuthMode::Headers;
-            save_file(&self.screenpipe_dir, &file).await?;
+        let lifecycle_guard = lifecycle_lock.lock().await;
+        let canceled = self.oauth_attempts.lock().await.cancel_server(id);
+        let result = async {
+            if let Some(ss) = &self.secret_store {
+                let _ = ss.delete(&oauth_token_key(id)).await;
+            }
+            let _lock = self.file_lock.lock().await;
+            let mut file = load_file(&self.screenpipe_dir).await?;
+            if let Some(cfg) = file.servers.iter_mut().find(|s| s.id == id) {
+                cfg.auth_mode = McpAuthMode::Headers;
+                save_file(&self.screenpipe_dir, &file).await?;
+            }
+            Ok(())
         }
-        Ok(())
+        .await;
+        drop(lifecycle_guard);
+        if let Some(attempt) = canceled {
+            self.cancel_relay(&attempt).await;
+        }
+        result
     }
 
     pub async fn start_oauth(&self, id: &str) -> Result<McpOAuthStart> {
@@ -1201,10 +1223,13 @@ impl McpServerStore {
     async fn mark_oauth_connected(&self, id: &str) -> Result<()> {
         let _lock = self.file_lock.lock().await;
         let mut file = load_file(&self.screenpipe_dir).await?;
-        if let Some(cfg) = file.servers.iter_mut().find(|s| s.id == id) {
-            cfg.auth_mode = McpAuthMode::OAuth;
-            save_file(&self.screenpipe_dir, &file).await?;
-        }
+        let cfg = file
+            .servers
+            .iter_mut()
+            .find(|s| s.id == id)
+            .ok_or_else(|| anyhow!("unknown MCP server: {}", id))?;
+        cfg.auth_mode = McpAuthMode::OAuth;
+        save_file(&self.screenpipe_dir, &file).await?;
         Ok(())
     }
 
@@ -3455,6 +3480,154 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn disconnect_during_token_exchange_prevents_oauth_resurrection() {
+        use sqlx::SqlitePool;
+
+        let token_server = MockServer::start().await;
+        let relay_server = MockServer::start().await;
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let release = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(PausedTokenEndpoint {
+                started: std::sync::Mutex::new(Some(started_tx)),
+                release: release.clone(),
+            })
+            .mount(&token_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/mcp"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0",
+                "id": "test",
+                "result": { "tools": [] }
+            })))
+            .mount(&token_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/cancel"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&relay_server)
+            .await;
+
+        let pool = SqlitePool::connect(":memory:").await.unwrap();
+        let secrets = Arc::new(SecretStore::new(pool, None).await.unwrap());
+        let dir = temp_dir();
+        let mut store = McpServerStore::new(dir.clone(), Some(secrets));
+        store.oauth_relay_base = relay_server.uri();
+        let mut config = sample_config("notion");
+        config.url = format!("{}/mcp", token_server.uri());
+        config.auth_mode = McpAuthMode::OAuth;
+        store.upsert(config, None).await.unwrap();
+        let mut attempt = test_oauth_attempt("attempt-a", "notion");
+        attempt.pending.token_url = format!("{}/token", token_server.uri());
+        store.oauth_attempts.lock().await.insert(attempt);
+
+        let completing_store = store.clone();
+        let completion = tokio::spawn(async move {
+            completing_store
+                .complete_oauth_attempt(
+                    "attempt-a",
+                    RelayOAuthResult {
+                        code: Some("authorization-code".to_string()),
+                        error: None,
+                        iss: Some("https://issuer.example".to_string()),
+                    },
+                )
+                .await
+        });
+        started_rx.await.expect("token exchange should start");
+
+        store.disconnect_oauth("notion").await.unwrap();
+        {
+            let (released, wake) = &*release;
+            *released.lock().unwrap() = true;
+            wake.notify_all();
+        }
+
+        assert!(completion.await.unwrap().is_err());
+        assert!(store.read_oauth_token("notion").await.unwrap().is_none());
+        assert_eq!(
+            store.get("notion").await.unwrap().unwrap().auth_mode,
+            McpAuthMode::Headers
+        );
+        assert_eq!(
+            store.oauth_attempt_status("attempt-a").await.status,
+            McpOAuthAttemptStatus::Canceled
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn delete_during_token_exchange_prevents_oauth_resurrection() {
+        use sqlx::SqlitePool;
+
+        let token_server = MockServer::start().await;
+        let relay_server = MockServer::start().await;
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let release = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(PausedTokenEndpoint {
+                started: std::sync::Mutex::new(Some(started_tx)),
+                release: release.clone(),
+            })
+            .mount(&token_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/cancel"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&relay_server)
+            .await;
+
+        let pool = SqlitePool::connect(":memory:").await.unwrap();
+        let secrets = Arc::new(SecretStore::new(pool, None).await.unwrap());
+        let dir = temp_dir();
+        let mut store = McpServerStore::new(dir.clone(), Some(secrets));
+        store.oauth_relay_base = relay_server.uri();
+        let mut config = sample_config("notion");
+        config.url = format!("{}/mcp", token_server.uri());
+        config.auth_mode = McpAuthMode::OAuth;
+        store.upsert(config, None).await.unwrap();
+        let mut attempt = test_oauth_attempt("attempt-a", "notion");
+        attempt.pending.token_url = format!("{}/token", token_server.uri());
+        store.oauth_attempts.lock().await.insert(attempt);
+
+        let completing_store = store.clone();
+        let completion = tokio::spawn(async move {
+            completing_store
+                .complete_oauth_attempt(
+                    "attempt-a",
+                    RelayOAuthResult {
+                        code: Some("authorization-code".to_string()),
+                        error: None,
+                        iss: Some("https://issuer.example".to_string()),
+                    },
+                )
+                .await
+        });
+        started_rx.await.expect("token exchange should start");
+
+        store.delete("notion").await.unwrap();
+        {
+            let (released, wake) = &*release;
+            *released.lock().unwrap() = true;
+            wake.notify_all();
+        }
+
+        assert!(completion.await.unwrap().is_err());
+        assert!(store.read_oauth_token("notion").await.unwrap().is_none());
+        assert!(store.get("notion").await.unwrap().is_none());
+        assert_eq!(
+            store.oauth_attempt_status("attempt-a").await.status,
+            McpOAuthAttemptStatus::Canceled
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn supersede_during_token_exchange_keeps_only_new_attempt_active() {
         use sqlx::SqlitePool;
 
@@ -3706,6 +3879,36 @@ mod tests {
         );
         drop(registry);
         store.cancel_oauth_attempt(&slow_start.attempt_id).await;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn existing_server_oauth_persistence_fails_closed_when_config_is_absent() {
+        use sqlx::SqlitePool;
+
+        let pool = SqlitePool::connect(":memory:").await.unwrap();
+        let secrets = Arc::new(SecretStore::new(pool, None).await.unwrap());
+        let dir = temp_dir();
+        let store = McpServerStore::new(dir.clone(), Some(secrets));
+        let mut pending = test_oauth_attempt("attempt", "notion").pending;
+        pending.create_config = None;
+        let token = token_from_response(
+            OAuthTokenResponse {
+                access_token: "new-access-token".to_string(),
+                refresh_token: None,
+                token_type: Some("Bearer".to_string()),
+                expires_in: Some(3600),
+                scope: None,
+            },
+            None,
+            "https://issuer.example/token".to_string(),
+            "client".to_string(),
+            String::new(),
+            None,
+        );
+
+        assert!(store.persist_oauth(pending, token).await.is_err());
+        assert!(store.read_oauth_token("notion").await.unwrap().is_none());
         let _ = std::fs::remove_dir_all(dir);
     }
 
