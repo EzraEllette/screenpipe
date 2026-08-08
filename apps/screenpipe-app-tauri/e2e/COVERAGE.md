@@ -6,9 +6,9 @@ and layer declared in the manifest, weighted by confidence and criticality.
 
 - Manifest: `e2e/coverage-map.json`
 - Specs directory: `e2e/specs`
-- Mapped specs: 102
-- Declared test blocks: 286
-- Weighted coverage points: 220.3
+- Mapped specs: 104
+- Declared test blocks: 299
+- Weighted coverage points: 233.3
 
 Confidence weights: strong=1.0, partial=0.7, conditional=0.4, smoke=0.3.
 Criticality weights: high=1.0, medium=0.7, low=0.4.
@@ -19,9 +19,9 @@ can execute more runtime cases than this number shows.
 
 | Platform | Specs | Declared tests | Weighted points | Layers | Features | Critical score |
 | --- | --- | --- | --- | --- | --- | --- |
-| windows | 79 | 247 | 199.4 | 15 | 88 | 91% |
-| macos | 98 | 249 | 191.1 | 17 | 90 | 90% |
-| linux | 69 | 207 | 169.2 | 14 | 83 | 88% |
+| windows | 81 | 260 | 212.4 | 15 | 89 | 91% |
+| macos | 100 | 262 | 204.1 | 17 | 91 | 90% |
+| linux | 71 | 220 | 182.2 | 14 | 84 | 88% |
 
 ## Runtime Results
 
@@ -41,14 +41,14 @@ pass/fail/skip counts.
 | entitlement | - | 1 specs / 1 tests / 1.0 pts | - |
 | local-api | 21 specs / 106 tests / 88.8 pts | 26 specs / 91 tests / 76.8 pts | 17 specs / 77 tests / 68.2 pts |
 | notifications | 4 specs / 25 tests / 16.3 pts | 3 specs / 5 tests / 3.4 pts | 2 specs / 4 tests / 3.1 pts |
-| onboarding | 4 specs / 11 tests / 8.0 pts | 5 specs / 12 tests / 8.4 pts | 4 specs / 11 tests / 8.0 pts |
+| onboarding | 6 specs / 24 tests / 21.0 pts | 7 specs / 25 tests / 21.4 pts | 6 specs / 24 tests / 21.0 pts |
 | os-integration | 7 specs / 29 tests / 24.8 pts | 13 specs / 25 tests / 14.8 pts | 2 specs / 12 tests / 8.7 pts |
 | performance | 2 specs / 44 tests / 44.0 pts | 4 specs / 34 tests / 30.5 pts | 1 specs / 29 tests / 29.0 pts |
 | pipes | 6 specs / 19 tests / 19.0 pts | 7 specs / 24 tests / 24.0 pts | 6 specs / 19 tests / 19.0 pts |
-| real-ui-e2e | 54 specs / 152 tests / 123.8 pts | 63 specs / 151 tests / 122.9 pts | 50 specs / 130 tests / 110.2 pts |
+| real-ui-e2e | 56 specs / 165 tests / 136.8 pts | 65 specs / 164 tests / 135.9 pts | 52 specs / 143 tests / 123.2 pts |
 | settings | 14 specs / 38 tests / 35.0 pts | 16 specs / 33 tests / 28.7 pts | 13 specs / 30 tests / 27.0 pts |
 | storage-privacy | 9 specs / 40 tests / 31.3 pts | 9 specs / 26 tests / 25.1 pts | 6 specs / 19 tests / 18.1 pts |
-| tauri-command | 15 specs / 35 tests / 24.4 pts | 19 specs / 40 tests / 27.3 pts | 14 specs / 34 tests / 23.4 pts |
+| tauri-command | 16 specs / 42 tests / 31.4 pts | 20 specs / 47 tests / 34.3 pts | 15 specs / 41 tests / 30.4 pts |
 | window-lifecycle | 18 specs / 63 tests / 53.0 pts | 18 specs / 44 tests / 31.4 pts | 13 specs / 39 tests / 29.9 pts |
 
 ## Critical Feature Matrix
@@ -145,6 +145,7 @@ pass/fail/skip counts.
 | chat-within-session-context-loss.spec.ts | macos | chat-ai | chat, chat-context | medium | conditional | synthetic | 5 | macOS-only within-chat context retention regression. |
 | db-hard-fault-fail-closed.spec.ts | windows, macos, linux | local-api, tauri-command, real-ui-e2e | database-hard-fault-containment, app-launch | high | strong | mixed | 1 | Opt-in packaged-desktop regression: causes real SQLITE_CORRUPT in the isolated E2E database, then proves the engine API and database owners stop while the desktop stays alive and does not respawn across the watchdog window. |
 | first-run-guide.spec.ts | windows, macos, linux | onboarding, chat-ai, real-ui-e2e | onboarding, chat, first-run-guide | high | strong | real-user-flow | 3 | Replayed first-run guide verifies the composer remains focused and clickable above its scrim, fails open when stacking defeats the lift, and remembers decline across reloads. |
+| first-run-learning-window.spec.ts | windows, macos, linux | onboarding, real-ui-e2e | onboarding, first-run-learning | high | strong | real-user-flow | 6 | Post-setup learning window on Home under the authenticated seed: opens from a real complete_onboarding with nothing seeded (guards the cross-window webview localStorage handoff), live countdown, settles to the real engine-reported reason when nothing was captured, stays dismissed across a reload, offers a ready summary and clears after use, and never renders in idle or done. |
 | focus-server.spec.ts | windows, macos, linux | local-api, window-lifecycle, tauri-command | window-lifecycle, focus-server, deeplink | medium | partial | api | 2 | Focus server opens windows and forwards deeplink args. |
 | hd-recording-pipeline.spec.ts | macos | capture-ocr, local-api, performance | capture-ocr, hd-recording, timeline | high | conditional | api | 1 | Opt-in macOS HD capture and OCR indexing. |
 | help-discord-link.spec.ts | windows, macos, linux | real-ui-e2e | help | low | smoke | real-user-flow | 2 | Help section Discord invite link. |
@@ -163,6 +164,7 @@ pass/fail/skip counts.
 | meetings-only-audio-lifecycle.spec.ts | windows, macos | audio-device, local-api, real-ui-e2e | meetings-only-audio-lifecycle, audio-device-health | high | conditional | real-user-flow | 1 | Opt-in real-audio lifecycle lane: configured devices stay closed outside meetings and open only across a manual meeting edge. |
 | notification-viewer-link.spec.ts | windows, macos, linux | notifications, local-api, window-lifecycle | notifications, viewer-deeplink | high | partial | mixed | 3 | Notification local file links rewrite into in-app viewer links. |
 | onboarding-background-ai-tools.spec.ts | windows, macos, linux | onboarding, real-ui-e2e, storage-privacy | onboarding, settings-ai | high | strong | real-user-flow | 2 | Isolated agent-home CI lane verifies private native config writes, the resolved local API credential, a real authenticated MCP tool call, skills setup, and removal of the connection slide. |
+| onboarding-first-run.spec.ts | windows, macos, linux | onboarding, real-ui-e2e, tauri-command | onboarding, first-run-learning, settings-persistence | high | strong | real-user-flow | 7 | Fresh-install setup walk: the acquisition slide is reachable in the shipped slide order and counted by the progress bar, offers no free-text field, one tap persists through to store.bin via the real settings command, skip records nothing, and the engine slide is the last one with no goal picker after it. |
 | onboarding-h1-follow-up.spec.ts | windows, macos, linux | onboarding, notifications, pipes, real-ui-e2e | onboarding, notifications, pipes | high | strong | real-user-flow | 1 | A due H1 activation runs its real Pipe, sends one visible prompt through the app-control notification server, and remains exactly-once across repeated scheduler ticks. |
 | onboarding-redirect.spec.ts | windows, macos, linux | onboarding, real-ui-e2e, window-lifecycle | onboarding, app-launch | high | conditional | real-user-flow | 5 | Opt-in no-onboarding seed verifies onboarding redirect. |
 | owned-browser.spec.ts | windows, macos | os-integration, window-lifecycle | owned-browser, window-lifecycle | low | smoke | command | 1 | Embedded agent browser hides safely without an attached child. |
