@@ -749,14 +749,10 @@ function errorResponse(body: RequestBody, status: number, message: string): Resp
   }));
 }
 
-function allowanceMessage(allowance: HostedChatAllowanceExceededError['allowance']): string {
-  if (allowance.lane === 'explicit') {
-    return 'Your current hosted AI allowance for explicit models is used up. Switch to Auto, or use a local model or your own provider key.';
-  }
-  if (allowance.plan === 'free') {
-    return 'Your current hosted AI allowance for Auto is used up. Upgrade, or use a local model or your own provider key.';
-  }
-  return 'Your current hosted AI allowance for Auto is used up. Choose an explicit hosted model, or use a local model or your own provider key.';
+function allowanceMessage(canUpgrade: boolean): string {
+  return canUpgrade
+    ? 'Your hosted AI usage limit is reached. Switch to Auto or upgrade.'
+    : 'Your hosted AI usage limit is reached. Switch to Auto.';
 }
 
 /** Render the stable terminal contract Pi uses to avoid generic 429 retries. */
@@ -766,7 +762,7 @@ export function allowanceErrorResponse(body: RequestBody, error: HostedChatAllow
     : getHostedAiCapacityUpgrade(error.allowance.plan);
   const payload = {
     error: {
-      message: allowanceMessage(error.allowance),
+      message: allowanceMessage(upgrade !== null),
       type: 'insufficient_quota',
       code: 'hosted_ai_allowance_exceeded',
     },

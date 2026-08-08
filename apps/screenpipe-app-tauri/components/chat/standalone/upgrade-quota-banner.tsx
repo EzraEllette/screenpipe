@@ -9,7 +9,6 @@ import posthog from "posthog-js";
 import { Button } from "@/components/ui/button";
 import {
   formatAllowanceReset,
-  formatAllowanceWindow,
   formatResetTime,
   formatUsagePercent,
   useUsageStatus,
@@ -123,8 +122,10 @@ export function UpgradeQuotaBanner() {
     ? quotaPlanLabel(activeUpgrade.requiredPlan)
     : null;
   const requiredPlanProse = requiredPlanLabel ?? "a higher plan";
-  const blockedTitle = cloudflareBlocked
-    ? `${cloudflareAllowance.lane === "auto" ? "Auto" : "Explicit model"} hosted AI limit reached`
+  const weeklyAllowance =
+    cloudflareBlocked && cloudflareAllowance.window_seconds === 7 * 86_400;
+  const blockedTitle = weeklyAllowance
+    ? "Weekly hosted AI limit reached"
     : "Hosted AI usage limit reached";
 
   return (
@@ -153,13 +154,10 @@ export function UpgradeQuotaBanner() {
             <div className="mt-0.5 text-muted-foreground">
               {cloudflareBlocked ? (
                 <>
-                  {formatUsagePercent(cloudflareAllowance.used_percent)} used for this{" "}
-                  {formatAllowanceWindow(cloudflareAllowance.window_seconds)}{" "}
-                  {cloudflareAllowance.technique} period.
+                  {formatUsagePercent(cloudflareAllowance.used_percent)} used
+                  {weeklyAllowance ? " this week." : "."}
                   {resets ? ` Resets ${resets}.` : " Usage falls as the window moves."}{" "}
-                  {cloudflareAllowance.lane === "auto"
-                    ? "Choose an explicit hosted model, or use a local or own-key preset."
-                    : "Switch to Auto, or use a local or own-key preset."}
+                  {activeUpgrade ? "Switch to Auto or upgrade." : "Switch to Auto."}
                 </>
               ) : legacyCostBlocked ? (
                 activeUpgrade ? (
