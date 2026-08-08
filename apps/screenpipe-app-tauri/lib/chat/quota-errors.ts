@@ -160,15 +160,9 @@ export function buildDailyLimitMessage(errorStr: string): string {
   try {
     const normalized = errorStr.toLowerCase();
     if (normalized.includes("hosted_ai_allowance_exceeded")) {
-      const lane = structuredString(errorStr, "lane")?.toLowerCase();
-      const plan = structuredString(errorStr, "plan")?.toLowerCase();
-      if (lane === "explicit") {
-        return "Your current hosted AI allowance for explicit models is used up. Switch to Auto, or use Ollama, Claude, Codex, or your own provider key.";
-      }
-      if (plan === "free") {
-        return "Your current hosted AI allowance for Auto is used up. Upgrade, or switch your AI preset to Ollama, Claude, Codex, or your own provider key.";
-      }
-      return "Your current hosted AI allowance for Auto is used up. Choose an explicit hosted model, or use Ollama, Claude, Codex, or your own provider key.";
+      return parseQuotaUpgradeAction(errorStr)
+        ? "Your hosted AI usage limit is reached. Switch to Auto or upgrade."
+        : "Your hosted AI usage limit is reached. Switch to Auto.";
     }
     if (normalized.includes("free_chat_limit_exceeded")) {
       return "You've used today's 2 free hosted AI messages. Try again tomorrow, upgrade, or switch your AI preset to Ollama, Claude, Codex, or your own provider key.";
