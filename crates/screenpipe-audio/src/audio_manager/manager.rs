@@ -131,6 +131,13 @@ fn meetings_only_capture_waiting(
     matches!(capture_mode, AudioCaptureMode::MeetingsOnly) && meeting_state != Some(true)
 }
 
+fn meeting_piggyback_owns_normal_capture(
+    piggyback_enabled: bool,
+    meeting_state: Option<bool>,
+) -> bool {
+    piggyback_enabled && meeting_state == Some(true)
+}
+
 /// Final privacy boundary before an audio chunk can reach disk or
 /// transcription. Meetings-only capture fails closed when its detector is
 /// absent. A registered session stream may flush while a confirmed meeting is
@@ -868,8 +875,8 @@ impl AudioManager {
         }
 
         // Suspended by the piggyback sweep for the duration of a meeting (a
-        // session stream replaces this device). The sweep resumes it on
-        // meeting end / fallback; nothing else may start it meanwhile. This is
+        // session stream replaces this device). The sweep resumes it when the
+        // meeting ends; nothing else may start it meanwhile. This is
         // the single choke point so every monitor path that could restart a
         // suspended device is blocked at once.
         if self
@@ -879,6 +886,18 @@ impl AudioManager {
             .contains(&device.to_string())
         {
             debug!("skipping start of piggyback-suspended device: {}", device);
+            return Ok(());
+        }
+
+        // Smart recording is Screenpipe's single capture owner for the
+        // duration of a detected meeting. Normal configured/default-follow streams all
+        // enter through this choke point; meeting-scoped mic/tap streams use
+        // `start_session_device` and deliberately bypass it.
+        if self.meeting_piggyback_owns_normal_capture().await {
+            debug!(
+                "skipping normal audio device start while meeting piggyback owns capture: {}",
+                device
+            );
             return Ok(());
         }
 
@@ -895,7 +914,6 @@ impl AudioManager {
             );
             return Ok(());
         }
-
         // Bluetooth mics always force the paired device's audio link out of
         // A2DP into SCO, degrading the user's headphone/speaker output — a
         // macOS/OS-level tradeoff with no external workaround (issue #3750).
@@ -926,6 +944,17 @@ impl AudioManager {
             self.stop_device_recording(device).await?;
             debug!(
                 "stopped newly-opened audio device after meeting ended during startup: {}",
+                device
+            );
+            return Ok(());
+        }
+
+        // Close the race where meeting detection changes while the backend is
+        // opening a normal stream. Session streams never pass through here.
+        if self.meeting_piggyback_owns_normal_capture().await {
+            self.stop_device_recording(device).await?;
+            debug!(
+                "stopped newly-opened normal audio device after meeting piggyback engaged: {}",
                 device
             );
             return Ok(());
@@ -1823,6 +1852,18 @@ impl AudioManager {
         self.options.read().await.experimental_meeting_piggyback
     }
 
+    /// Whether a detected meeting currently makes piggyback Screenpipe's
+    /// single capture owner. This is only an internal ownership gate: it does
+    /// not request exclusive access from CoreAudio or affect other apps.
+    pub(crate) async fn meeting_piggyback_owns_normal_capture(&self) -> bool {
+        let enabled = self.piggyback_enabled().await;
+        let meeting_state = self
+            .meeting_detector()
+            .await
+            .map(|detector| detector.is_in_meeting());
+        meeting_piggyback_owns_normal_capture(enabled, meeting_state)
+    }
+
     /// Whether Bluetooth mics are exempt from the meeting gate (see
     /// `start_device`'s Bluetooth check and the device monitor's
     /// `run_bluetooth_mic_gate_sweep`). Consumed outside this module, so
@@ -2367,6 +2408,14 @@ mod tests {
             &AudioCaptureMode::Always,
             Some(false)
         ));
+    }
+
+    #[test]
+    fn piggyback_ownership_requires_both_flag_and_confirmed_meeting() {
+        assert!(meeting_piggyback_owns_normal_capture(true, Some(true)));
+        assert!(!meeting_piggyback_owns_normal_capture(false, Some(true)));
+        assert!(!meeting_piggyback_owns_normal_capture(true, Some(false)));
+        assert!(!meeting_piggyback_owns_normal_capture(true, None));
     }
 
     #[test]
