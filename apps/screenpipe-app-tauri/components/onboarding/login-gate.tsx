@@ -4,18 +4,11 @@
 "use client";
 
 import React, { useEffect, useRef, useState, useCallback } from "react";
-import { listen } from "@tauri-apps/api/event";
 import { useSettings } from "@/lib/hooks/use-settings";
 import { commands } from "@/lib/utils/tauri";
 import { motion, AnimatePresence } from "framer-motion";
 import posthog from "posthog-js";
 import { isDevBillingBypassEnabled } from "@/lib/app-entitlement";
-
-/// Emitted only by the system-browser login path (Windows/Linux). macOS uses
-/// ASWebAuthenticationSession and never emits these, so the waiting UI below
-/// simply never activates there.
-const LOGIN_BROWSER_PENDING = "login-browser-pending";
-const LOGIN_BROWSER_FAILED = "login-browser-failed";
 
 const FAILURE_COPY: Record<string, string> = {
   cancelled: "sign in was cancelled in your browser.",
@@ -247,7 +240,7 @@ const OnboardingLogin: React.FC<OnboardingLoginProps> = ({
   const [showSkip, setShowSkip] = useState(false);
   const [isHovered, setIsHovered] = useState(false);
   // Non-null once the system browser has been handed the login (Windows/Linux).
-  const [browserCode, setBrowserCode] = useState<string | null>(null);
+  const [awaitingBrowser, setAwaitingBrowser] = useState(false);
   const [browserFailure, setBrowserFailure] = useState<string | null>(null);
   const bgRef = useRef<HTMLCanvasElement>(null);
   const btnRef = useRef<HTMLCanvasElement>(null);
@@ -287,53 +280,30 @@ const OnboardingLogin: React.FC<OnboardingLoginProps> = ({
     }
   }, [handleNextSlide, isLoggedIn, isSettingsLoaded, suppressAutoAdvance]);
 
-  // Windows/Linux hand off to the user's real browser and poll for the result,
-  // so the app needs to say what it is waiting for. macOS resolves inside
-  // ASWebAuthenticationSession and never enters this state.
-  useEffect(() => {
-    let cancelled = false;
-    // `listen` rejects wherever Tauri IPC is absent (vitest, browser dev mock).
-    // Login must not depend on these events existing, so failures are inert.
-    const noop = () => {};
-    const subscribe = <T,>(name: string, handler: (payload: T) => void) =>
-      listen<T>(name, (event) => {
-        if (!cancelled) handler(event.payload);
-      }).catch(() => noop);
-
-    const subscriptions = [
-      subscribe<{ code?: string }>(LOGIN_BROWSER_PENDING, (payload) => {
-        setBrowserFailure(null);
-        setBrowserCode(payload?.code ?? "");
-      }),
-      subscribe<{ reason?: string }>(LOGIN_BROWSER_FAILED, (payload) => {
-        setBrowserCode(null);
-        setBrowserFailure(payload?.reason ?? "failed");
-      }),
-    ];
-
-    return () => {
-      cancelled = true;
-      subscriptions.forEach((p) => p.then((fn) => fn()).catch(() => {}));
-    };
-  }, []);
-
   const handleLogin = useCallback(() => {
     posthog.capture("onboarding_login_clicked");
     setBrowserFailure(null);
     // macOS: ASWebAuthenticationSession (shares Safari's session).
-    // Windows/Linux: the user's default browser + device-code polling, so the
-    // session they already have with Google/etc. is reused instead of asking
-    // them to re-type credentials into a cold embedded WebView.
-    commands.openLoginWindow(null);
+    // Windows/Linux: the user's real default browser, so the session they
+    // already have with Google/etc. is reused instead of asking them to
+    // re-type credentials into a cold embedded WebView. Either way the token
+    // comes back on the screenpipe:// deep link; nothing is typed by hand.
+    void commands
+      .openLoginWindow(null)
+      .then((result) => {
+        if (result.status === "ok") setAwaitingBrowser(true);
+        else setBrowserFailure("failed");
+      })
+      .catch(() => setBrowserFailure("failed"));
   }, []);
 
   // Escape hatch when the default browser is unusable or the user never
   // returns to it — falls back to the in-app WebView.
   const handleUseAppWindow = useCallback(() => {
     posthog.capture("onboarding_login_webview_fallback_clicked");
-    setBrowserCode(null);
+    setAwaitingBrowser(false);
     setBrowserFailure(null);
-    commands.openLoginWindow(true);
+    void commands.openLoginWindow(true);
   }, []);
 
   const handleSkip = useCallback(() => {
@@ -388,8 +358,8 @@ const OnboardingLogin: React.FC<OnboardingLoginProps> = ({
               ✓ signed in as {settings.user?.email || "user"}
             </span>
           </motion.div>
-        ) : browserCode !== null ? (
-          /* System-browser handoff in flight (Windows/Linux). */
+        ) : awaitingBrowser ? (
+          /* Sign-in handed off to the browser; the token returns on the deep link. */
           <motion.div
             data-testid="login-browser-waiting"
             className="flex flex-col items-center gap-4"
@@ -404,14 +374,6 @@ const OnboardingLogin: React.FC<OnboardingLoginProps> = ({
               finish signing in there, then come back. this window updates on
               its own.
             </p>
-            {browserCode ? (
-              <span
-                data-testid="login-browser-code"
-                className="font-mono text-lg tracking-[0.4em] text-foreground border border-foreground/25 px-4 py-2"
-              >
-                {browserCode}
-              </span>
-            ) : null}
             <div className="flex flex-col items-center gap-2 mt-2">
               <button
                 onClick={handleLogin}

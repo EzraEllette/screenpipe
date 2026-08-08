@@ -5,7 +5,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { AgentEventEnvelope } from "./events/types";
-import { runDailySummaryWithPi } from "./daily-summary-pi";
+import {
+  buildDailySummaryProviderConfig,
+  runDailySummaryWithPi,
+} from "./daily-summary-pi";
 
 const PRESET = {
   id: "pipes",
@@ -56,6 +59,21 @@ describe("runDailySummaryWithPi", () => {
       data: { running: true },
     });
     mocks.piStop.mockResolvedValue({ status: "ok", data: { running: false } });
+  });
+
+  it("uses known model metadata instead of legacy saved defaults", () => {
+    const config = buildDailySummaryProviderConfig({
+      ...PRESET,
+      provider: "openai",
+      model: "gpt-5.6-terra",
+      apiKey: "test-key",
+      maxContextChars: 512_000,
+      maxTokens: 4_096,
+    });
+
+    expect(config.maxContextChars).toBe(4_200_000);
+    // Daily summaries intentionally cap the model's 128K output budget at 8K.
+    expect(config.maxTokens).toBe(8_192);
   });
 
   it("starts an isolated Pi session and returns only the final assistant response", async () => {

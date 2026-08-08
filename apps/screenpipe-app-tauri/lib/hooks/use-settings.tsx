@@ -267,6 +267,9 @@ export interface ChatHistoryStore {
 export type Settings = SettingsStore & {
 	/** Goal used to prioritize the Home cards. Persisted in store.bin. */
 	userGoalCategory?: UserGoalCategory;
+	/** Where the user says they found screenpipe, answered once during setup.
+	 *  A fixed enum from the onboarding step — never free text. */
+	acquisitionSource?: string;
 	/** Internal marker/snapshot used to unwind the forced free-plan policy. */
 	_freePlanRetentionApplied?: boolean;
 	_preFreePlanRetention?: LocalRetentionPreference | null;

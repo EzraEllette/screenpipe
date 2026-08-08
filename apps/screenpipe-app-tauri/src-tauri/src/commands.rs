@@ -13,6 +13,8 @@ use crate::{
 };
 use sha2::{Digest, Sha256};
 use tauri::{Emitter, Manager};
+#[cfg(not(target_os = "macos"))]
+use tauri_plugin_opener::OpenerExt;
 use tracing::{debug, error, info, warn};
 
 /// Log a `WebviewWindowBuilder::build()` failure with structured context.
@@ -458,8 +460,10 @@ fn dir_has_conversations(dir: &std::path::Path) -> bool {
 ///
 /// One-time migration: for a relocated data dir whose `chats/` is still empty,
 /// copy conversations from the legacy `~/.screenpipe/chats` so history isn't
-/// orphaned. Skipped under e2e (`SCREENPIPE_E2E_SEED` set) so isolated runs
-/// stay empty.
+/// orphaned. Skipped under e2e (`SCREENPIPE_E2E_SEED` set) and under dev
+/// isolation so isolated runs stay empty — otherwise `bun tauri dev` copies the
+/// developer's entire production chat history into `~/.screenpipe-dev`, which
+/// is exactly the state sharing dev isolation exists to prevent.
 #[tauri::command]
 #[specta::specta]
 pub fn get_chats_dir() -> Result<String, String> {
@@ -467,8 +471,9 @@ pub fn get_chats_dir() -> Result<String, String> {
     let chats = data_dir.join("chats");
     std::fs::create_dir_all(&chats).map_err(|e| e.to_string())?;
 
-    let is_e2e = std::env::var("SCREENPIPE_E2E_SEED").is_ok();
-    if !is_e2e {
+    let is_isolated = std::env::var("SCREENPIPE_E2E_SEED").is_ok()
+        || crate::dev_isolation::is_active();
+    if !is_isolated {
         if let Some(home) = dirs::home_dir() {
             let legacy = home.join(".screenpipe").join("chats");
             if legacy != chats
@@ -558,6 +563,9 @@ struct RecoveredEnterpriseDeviceConfig {
 }
 
 impl EnterpriseFileConfig {
+    /// Assertion helper for the `enterprise.json` parser tests — production
+    /// code branches on the individual fields instead.
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.license_key.is_none() && self.ingest_url.is_none()
     }
@@ -1658,10 +1666,19 @@ fn reset_existing_login_window<R: tauri::Runtime>(
 /// reusing Safari cookies, and Windows/Linux use a throwaway webview profile.
 #[tauri::command]
 #[specta::specta]
+/// Returns the device code when this call started the browser device-code flow,
+/// and an empty string for every path that needs no out-of-band confirmation
+/// (macOS auth session, embedded WebView fallback).
+///
+/// The code is returned as well as broadcast on `login-browser-pending` so a
+/// caller never has to depend on a global event to render it. #5936 changed
+/// this shared command to require the user read a code out of the app, but only
+/// taught onboarding to show one; every other login surface silently opened a
+/// browser asking for a code nothing displayed.
 pub async fn open_login_window(
     app_handle: tauri::AppHandle,
     fresh_session: Option<bool>,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let fresh_session = fresh_session.unwrap_or(false);
     #[cfg(target_os = "macos")]
     {
@@ -1679,7 +1696,7 @@ pub async fn open_login_window(
             Ok(url) => url,
             Err(e) if e == "user_cancelled" => {
                 info!("login auth session cancelled");
-                return Ok(());
+                return Ok(String::new());
             }
             Err(e) => return Err(e),
         };
@@ -1689,7 +1706,7 @@ pub async fn open_login_window(
             .emit("deep-link-received", callback_url)
             .map_err(|e| e.to_string())?;
 
-        return Ok(());
+        return Ok(String::new());
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -1706,18 +1723,31 @@ pub async fn open_login_window(
         // WebView: it needs an isolated profile directory, which we cannot
         // force in the user's default browser.
         if !fresh_session {
-            match crate::browser_login::start_browser_login(
-                app_handle.clone(),
-                crate::web_base::screenpipe_web_base(),
-                deep_link_scheme().to_string(),
-            )
-            .await
+            // Open the user's real browser at the ordinary login URL and let the
+            // website deep-link `screenpipe://auth?api_key=…` straight back.
+            //
+            // #5936 correctly wanted the real browser here — the embedded
+            // WebView is a cold browser with no cookies, SSO or password
+            // manager — but reached for the CLI's device-code flow to get it,
+            // which made the user read an 8-character code out of the app and
+            // type it into a page telling them to look in a terminal. The
+            // redirect the WebView path already relies on works just as well
+            // from the default browser, so none of that is necessary: the
+            // deep-link handler (mounted outside the entitlement gate) receives
+            // the token exactly as it does today.
+            let login_url = format!("{}?return_scheme={}", login_url(), deep_link_scheme());
+            match app_handle
+                .opener()
+                .open_url(login_url.as_str(), None::<&str>)
             {
-                Ok(_) => return Ok(()),
+                Ok(()) => {
+                    info!("opened system browser for login");
+                    return Ok(String::new());
+                }
                 Err(e) => {
                     // No usable default browser — fall through to the WebView
                     // rather than stranding the user with no way to sign in.
-                    warn!("browser login unavailable, falling back to webview: {e}");
+                    warn!("could not open system browser, falling back to webview: {e}");
                 }
             }
         }
@@ -1744,7 +1774,7 @@ pub async fn open_login_window(
         } else if let Some(w) = app_handle.get_webview_window(&label) {
             info!("resetting existing login window");
             reset_existing_login_window(&w, parsed_login_url)?;
-            return Ok(());
+            return Ok(String::new());
         }
 
         let app_for_nav = app_handle.clone();
@@ -1784,7 +1814,9 @@ pub async fn open_login_window(
                 e.to_string()
             })?;
 
-        Ok(())
+        // The embedded WebView completes the whole flow in-window, so there is
+        // no code for the user to read back.
+        Ok(String::new())
     }
 }
 
@@ -2383,13 +2415,14 @@ pub async fn complete_onboarding(app_handle: tauri::AppHandle) -> Result<(), Str
         return Ok(());
     }
 
-    // Setup ends at Brain. If the user built a first Live View it is selected
-    // there; if they skipped, Brain presents the honest create-your-first-view
-    // state instead of dropping them into an unrelated chat screen.
+    // Setup ends at Home. It no longer builds a first Live View, so opening
+    // Brain would land the user on an empty container before anything has been
+    // captured. Home always has something to render, and it is where the
+    // first-run learning window runs and where its summary chat appears.
     show_window(
         app_handle.clone(),
         ShowRewindWindow::Home {
-            page: Some("brain".to_string()),
+            page: Some("home".to_string()),
         },
     )
     .await?;
@@ -2739,6 +2772,11 @@ pub(crate) async fn show_shortcut_reminder_impl(
     wait_for_server: bool,
 ) -> Result<(), String> {
     use tauri::{Emitter, WebviewWindowBuilder};
+
+    // Only the macOS native-reminder path below performs the wait-for-server
+    // handshake; the webview fallback shows immediately on every platform.
+    #[cfg(not(target_os = "macos"))]
+    let _ = wait_for_server;
 
     let label = "shortcut-reminder";
 
