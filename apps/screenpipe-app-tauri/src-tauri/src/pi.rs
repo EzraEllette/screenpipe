@@ -154,8 +154,7 @@ use tracing::{debug, error, info, warn};
 
 /// Signals that the background Pi install has finished (success or failure).
 static PI_INSTALL_DONE: AtomicBool = AtomicBool::new(false);
-static REQUIRED_PI_PACKAGE_INSTALL_LOCK: std::sync::OnceLock<Mutex<()>> =
-    std::sync::OnceLock::new();
+static PI_PACKAGE_OPERATION_LOCK: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
 static PI_EXTENSION_SAFE_MODE_PROJECTS: std::sync::OnceLock<std::sync::Mutex<HashSet<String>>> =
     std::sync::OnceLock::new();
 
@@ -901,6 +900,19 @@ impl PiManager {
 /// and https://github.com/screenpipe/screenpipe/issues/3812.
 fn get_pi_config_dir() -> Result<PathBuf, String> {
     screenpipe_core::agents::pi::pi_config_dir().map_err(|e| e.to_string())
+}
+
+fn sanitize_pi_package_stores() -> Result<usize, String> {
+    let agent_dir = get_pi_config_dir()?;
+    crate::pi_package_sanitizer::sanitize_package_stores(&agent_dir)
+        .map_err(|error| format!("Failed to sanitize Pi package metadata: {}", error))
+}
+
+async fn sanitize_pi_package_stores_before_start() -> Result<(), String> {
+    let lock = PI_PACKAGE_OPERATION_LOCK.get_or_init(|| Mutex::new(()));
+    let _guard = lock.lock().await;
+    sanitize_pi_package_stores()?;
+    Ok(())
 }
 
 fn remove_screenpipe_auth_from_path(auth_path: &Path) -> Result<(), String> {
@@ -2466,6 +2478,8 @@ pub async fn pi_start_inner(
         ensure_pi_config(user_token.as_deref(), provider_config.as_ref()).await?;
         if !extension_safe_mode {
             ensure_required_pi_extension_package().await?;
+        } else {
+            sanitize_pi_package_stores_before_start().await?;
         }
     } else if is_pi_acp {
         // Same pi as native — seed the project-local extensions so its tools
@@ -2503,6 +2517,8 @@ pub async fn pi_start_inner(
         ensure_pi_config(user_token.as_deref(), provider_config.as_ref()).await?;
         if !extension_safe_mode {
             ensure_required_pi_extension_package().await?;
+        } else {
+            sanitize_pi_package_stores_before_start().await?;
         }
     }
 
@@ -4842,8 +4858,9 @@ async fn run_pi_package_command(args: Vec<String>) -> Result<(), String> {
 }
 
 async fn ensure_required_pi_extension_package() -> Result<(), String> {
-    let lock = REQUIRED_PI_PACKAGE_INSTALL_LOCK.get_or_init(|| Mutex::new(()));
+    let lock = PI_PACKAGE_OPERATION_LOCK.get_or_init(|| Mutex::new(()));
     let _guard = lock.lock().await;
+    sanitize_pi_package_stores()?;
     ensure_required_pi_extension_setting()?;
     if pi_package_source_looks_installed(REQUIRED_PI_EXTENSION_PACKAGE) {
         return Ok(());
@@ -4852,7 +4869,9 @@ async fn ensure_required_pi_extension_package() -> Result<(), String> {
         "install".to_string(),
         REQUIRED_PI_EXTENSION_PACKAGE.to_string(),
     ])
-    .await
+    .await?;
+    sanitize_pi_package_stores()?;
+    Ok(())
 }
 
 async fn stop_idle_pi_sessions_for_package_change(state: &PiState) -> Result<(), String> {
@@ -4896,7 +4915,11 @@ pub async fn pi_install_extension_package(
 ) -> Result<Vec<PiExtensionPackage>, String> {
     let source = validate_pi_extension_package_source(&source)?;
     stop_idle_pi_sessions_for_package_change(&state).await?;
+    let lock = PI_PACKAGE_OPERATION_LOCK.get_or_init(|| Mutex::new(()));
+    let _guard = lock.lock().await;
+    sanitize_pi_package_stores()?;
     run_pi_package_command(vec!["install".to_string(), source]).await?;
+    sanitize_pi_package_stores()?;
     stop_idle_pi_sessions_for_package_change(&state).await?;
     pi_list_extension_packages().await
 }
@@ -4912,6 +4935,9 @@ pub async fn pi_remove_extension_package(
         return Err("Subagents are required by screenpipe and cannot be disabled".to_string());
     }
     stop_idle_pi_sessions_for_package_change(&state).await?;
+    let lock = PI_PACKAGE_OPERATION_LOCK.get_or_init(|| Mutex::new(()));
+    let _guard = lock.lock().await;
+    sanitize_pi_package_stores()?;
     run_pi_package_command(vec!["remove".to_string(), source]).await?;
     stop_idle_pi_sessions_for_package_change(&state).await?;
     pi_list_extension_packages().await

@@ -87,6 +87,7 @@ mod owned_browser_cookies;
 mod permissions;
 mod pi;
 mod pi_command_queue;
+mod pi_package_sanitizer;
 mod power_awake;
 mod process_exit;
 mod recording;
