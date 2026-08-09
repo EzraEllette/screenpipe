@@ -15,6 +15,18 @@ const PI_ENTRY_KEYS: [&str; 4] = ["extensions", "skills", "prompts", "themes"];
 /// Repairs Pi package metadata only within the isolated agent directory's
 /// package stores. Directory entries are inspected without following links.
 pub(crate) fn sanitize_package_stores(agent_dir: &Path) -> io::Result<usize> {
+    match fs::symlink_metadata(agent_dir) {
+        Ok(metadata) if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Pi agent directory is not a regular directory",
+            ));
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error),
+    }
+
     let mut manifests = Vec::new();
     let npm_root = agent_dir.join("npm");
     if is_regular_dir(&npm_root)? {
@@ -182,6 +194,12 @@ fn replace_file(temp: &Path, destination: &Path) -> io::Result<()> {
 
 #[cfg(windows)]
 fn replace_file(temp: &Path, destination: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+
     let metadata = fs::symlink_metadata(destination)?;
     if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
         return Err(io::Error::new(
@@ -189,31 +207,32 @@ fn replace_file(temp: &Path, destination: &Path) -> io::Result<()> {
             "manifest changed before replacement",
         ));
     }
-    let parent = destination
-        .parent()
-        .ok_or_else(|| io::Error::other("manifest has no parent"))?;
-    let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let backup = parent.join(format!(
-        ".package.json.screenpipe-{}-{}.backup",
-        std::process::id(),
-        sequence
-    ));
-    fs::rename(destination, &backup)?;
-    match fs::rename(temp, destination) {
-        Ok(()) => {
-            let _ = fs::remove_file(backup);
-            Ok(())
-        }
-        Err(error) => {
-            let _ = fs::rename(backup, destination);
-            Err(error)
-        }
+
+    let temp_wide = temp
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let destination_wide = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    unsafe {
+        MoveFileExW(
+            PCWSTR(temp_wide.as_ptr()),
+            PCWSTR(destination_wide.as_ptr()),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
     }
+    .map_err(|_| io::Error::last_os_error())
 }
 
 #[cfg(test)]
 mod tests {
     use super::sanitize_package_stores;
+    #[cfg(windows)]
+    use super::{replace_file, replace_regular_file};
     use serde_json::{json, Value};
     use std::fs;
 
@@ -294,6 +313,27 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn refuses_symlinked_agent_directory() {
+        use std::io::ErrorKind;
+        use std::os::unix::fs::symlink;
+
+        let link_parent = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let outside_manifest = outside.path().join("npm/node_modules/pkg/package.json");
+        write_manifest(&outside_manifest, &json!({"pi":{"extensions":false}}));
+        let agent_dir = link_parent.path().join("agent");
+        symlink(outside.path(), &agent_dir).unwrap();
+
+        let error = sanitize_package_stores(&agent_dir).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&fs::read(outside_manifest).unwrap()).unwrap(),
+            json!({"pi":{"extensions":false}})
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn refuses_symlinked_package_paths_and_manifests() {
         use std::os::unix::fs::symlink;
 
@@ -325,5 +365,49 @@ mod tests {
             serde_json::from_slice::<Value>(&fs::read(outside_manifest).unwrap()).unwrap(),
             json!({"pi":{"extensions":false}})
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn replacement_never_exposes_a_missing_or_partial_manifest() {
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
+
+        let root = tempfile::tempdir().unwrap();
+        let manifest = Arc::new(root.path().join("package.json"));
+        fs::write(&*manifest, br#"{"generation":0}"#).unwrap();
+        let writing = Arc::new(AtomicBool::new(true));
+        let reader_path = Arc::clone(&manifest);
+        let reader_writing = Arc::clone(&writing);
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            while reader_writing.load(Ordering::Acquire) {
+                let bytes = fs::read(&*reader_path).unwrap();
+                serde_json::from_slice::<Value>(&bytes).unwrap();
+            }
+        });
+
+        started_rx.recv().unwrap();
+        for generation in 1..=1_000 {
+            let contents = serde_json::to_vec(&json!({"generation": generation})).unwrap();
+            replace_regular_file(&manifest, &contents).unwrap();
+        }
+        writing.store(false, Ordering::Release);
+        reader.join().unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn failed_replacement_preserves_the_existing_manifest() {
+        let root = tempfile::tempdir().unwrap();
+        let manifest = root.path().join("package.json");
+        let missing_temp = root.path().join("missing.tmp");
+        fs::write(&manifest, b"original").unwrap();
+
+        assert!(replace_file(&missing_temp, &manifest).is_err());
+        assert_eq!(fs::read(&manifest).unwrap(), b"original");
     }
 }

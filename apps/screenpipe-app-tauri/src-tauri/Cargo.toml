@@ -247,6 +247,7 @@ windows = { version = "0.58", features = [
     "Win32_System_Com",
     "Win32_System_ErrorReporting",
     "Win32_System_Registry",
+    "Win32_Storage_FileSystem",
     "Win32_System_Threading",
     "Win32_Security_Cryptography",
     # GetLastInputInfo/GetTickCount for the recording-health user-presence tier
