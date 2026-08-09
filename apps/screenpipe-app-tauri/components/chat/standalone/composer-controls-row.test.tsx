@@ -38,8 +38,6 @@ vi.mock("@/components/chat/standalone/acp-config-selector", () => ({
 vi.mock("@/components/thinking-level-selector", () => ({
   ThinkingLevelSelector: () => null,
 }));
-// UsagePopover needs an app router, a SettingsProvider, and a query client.
-// This suite covers preset selection only, so stub it like the other siblings.
 vi.mock("@/components/usage/usage-popover", () => ({
   UsagePopover: () => null,
 }));
