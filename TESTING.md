@@ -65,6 +65,9 @@ commits that broke this area: `0752ea59`, `d89c5f14`, `4a64fd1a`, `fa591d6e`, `8
 - [ ] **Notification panel order_out** — verify no ghost clicks after hiding notification/shortcut panels. (`32fed7c8c`)
 - [ ] **Excluded windows from screenshots** — Verify that windows specified in the ignore list are correctly excluded from full-monitor screenshots taken via ScreenCaptureKit (SCK). (`61212c429`)
 - [ ] **Swift overlay meeting toggle** — Verify that the meeting toggle in the Swift-based overlay works correctly and reflects the recording state. (`e5e955aa6`)
+- [ ] **shortcut reminder dot anchor** — with a meeting live, hover the red dot on the pill. the dot must NOT move (it stays on the bell in both states) and the transcript card drops under it. collapsed pill stays screen-centred; the expanded bar grows leftwards only. re-check at all three overlay sizes.
+- [ ] **shortcut reminder hover target** — while collapsed, move the cursor across the top of the screen ~150pt to the LEFT of the pill. the bar must NOT pop open — only the visible pill is hover-tracked.
+- [ ] **shortcut reminder health states stay centred** — trigger a recording failure. the "recording needs help" pill is centred on screen (not anchored right), and returns to the centred collapsed pill after recovery.
 
 
 ### 2. dock icon & tray icon (macOS)

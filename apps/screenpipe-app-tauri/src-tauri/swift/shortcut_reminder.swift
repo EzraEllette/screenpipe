@@ -371,6 +371,11 @@ private let kBaseExpandedH: CGFloat = 26
 private let kBaseTranscriptW: CGFloat = 280
 private let kBaseTranscriptH: CGFloat = 142
 private let kAnimDur: Double = 0.2
+/// Distance from the pill's trailing edge to the centre of the live-meeting
+/// dot. The collapsed pill and the expanded bar both end with `OverlayBellButton`
+/// + `.padding(.trailing, s(5))`, which lands the dot here in both states — so
+/// hovering the dot never moves it out from under the cursor.
+private let kBaseMeetingDotInset: CGFloat = 7
 
 @available(macOS 13.0, *)
 struct ShortcutReminderView: View {
@@ -411,7 +416,19 @@ struct ShortcutReminderView: View {
         .accessibilityHidden(true)
         .animation(.easeInOut(duration: kAnimDur), value: isExpanded)
         .animation(.easeInOut(duration: kAnimDur), value: metrics.healthState)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+        // Trailing-aligned so the collapsed pill and the expanded bar share one
+        // right edge. Centre alignment used to grow the bar out of both sides,
+        // which slid the live-meeting dot ~33pt sideways the moment you hovered
+        // it — the cursor ended up over a shortcut cell and the transcript card
+        // flickered. `positionPanel` shifts the window left by the hidden part
+        // so the collapsed pill still sits dead centre on screen.
+        // Health pills keep the centred layout: their width is intrinsic, so
+        // there is no fixed edge to anchor them to.
+        .frame(
+            maxWidth: .infinity,
+            maxHeight: .infinity,
+            alignment: metrics.healthState == "normal" ? .trailing : .center
+        )
     }
 
     // MARK: - Recording-health states (issue #5127)
@@ -571,7 +588,7 @@ struct ShortcutReminderView: View {
             .frame(maxHeight: .infinity)
             .contentShape(Rectangle())
 
-            CollapsedBellButton(
+            OverlayBellButton(
                 unread: metrics.inboxUnread,
                 meetingActive: metrics.meetingActive,
                 scale: scale,
@@ -605,30 +622,28 @@ struct ShortcutReminderView: View {
                 .frame(width: s(24), height: s(12))
                 .padding(.horizontal, s(3))
 
-            // The expanded bar keeps the meeting dot on the screen matrix: its
-            // bell already carries an unread dot at an unscaled 1pt offset, so
-            // a second dot there collides with the glyph at larger sizes.
-            ZStack(alignment: .topTrailing) {
-                ScreenMatrixView(active: metrics.screenActive, captureFps: metrics.captureFps)
-                    .frame(width: s(24), height: s(12))
-                if metrics.meetingActive {
-                    Circle()
-                        .fill(Color.red)
-                        .frame(width: s(5), height: s(5))
-                        .overlay(Circle().stroke(Color.black.opacity(0.75), lineWidth: s(1)))
-                        .offset(x: s(1), y: -s(2))
-                }
-            }
-            .padding(.trailing, s(2))
+            // The meeting dot rides the bell in both states now — it used to
+            // live here on the screen matrix, which is a different x from the
+            // collapsed bell and so moved under the cursor on hover.
+            ScreenMatrixView(active: metrics.screenActive, captureFps: metrics.captureFps)
+                .frame(width: s(24), height: s(12))
+                .padding(.trailing, s(2))
 
             Rectangle().fill(.white.opacity(0.15)).frame(width: 0.5)
 
-            HoverIconButton(icon: "bell.fill", isActive: metrics.inboxUnread, edge: nil, scale: scale) {
-                onAction("open_inbox")
-            }
-            HoverIconButton(icon: "xmark", isActive: false, edge: .trailing, scale: scale) {
+            // Close sits inboard of the bell so the bell keeps the trailing slot
+            // it holds while collapsed, at the same padding — that is what pins
+            // the meeting dot to `kBaseMeetingDotInset` in both states.
+            HoverIconButton(icon: "xmark", isActive: false, edge: nil, scale: scale) {
                 onAction("close")
             }
+            OverlayBellButton(
+                unread: metrics.inboxUnread,
+                meetingActive: metrics.meetingActive,
+                scale: scale,
+                action: { onAction("open_inbox") }
+            )
+            .padding(.trailing, s(5))
         }
         .frame(height: kBaseExpandedH * scale)
         .background(Capsule().fill(Color.black.opacity(0.8)))
@@ -817,7 +832,11 @@ struct CollapsedAppIconButton: View {
 // Before, the meeting dot floated over the screen matrix mid-pill, so "we
 // are live" moved around depending on which signal fired.
 @available(macOS 13.0, *)
-struct CollapsedBellButton: View {
+/// Bell plus its two status dots, shared by the collapsed pill and the expanded
+/// bar. Both call sites place it last with `.padding(.trailing, s(5))`, so the
+/// red meeting dot always lands `kBaseMeetingDotInset` from the pill's trailing
+/// edge regardless of which state is showing.
+struct OverlayBellButton: View {
     let unread: Bool
     let meetingActive: Bool
     let scale: CGFloat
@@ -961,6 +980,7 @@ class ShortcutReminderController: NSObject {
             }
             updateContent()
             positionPanel()
+            refreshHoverTarget()
             panel?.orderFrontRegardless()
             AnimationTick.shared.setVisible(
                 true,
@@ -1248,10 +1268,17 @@ class ShortcutReminderController: NSObject {
                 self.metrics.healthDetail = detail
             }
             if self.metrics.healthState != state {
+                let normalityChanged = (self.metrics.healthState == "normal") != (state == "normal")
                 self.metrics.healthState = state
                 // Health states replace the hover-expand UI; reset the
                 // click-to-expand flag so it doesn't stay stuck expanded.
                 self.metrics.forceExpanded = false
+                self.refreshHoverTarget()
+                // Normal states are trailing-anchored, health states centred —
+                // the window origin differs, so re-place it on that boundary.
+                if normalityChanged, self.isVisible {
+                    self.positionPanel()
+                }
             }
             self.updateHealthToolTip()
             self.refreshTranscriptPanelVisibility()
@@ -1324,12 +1351,23 @@ class ShortcutReminderController: NSObject {
         updateHealthToolTip()
     }
 
+    /// Keep the hover target on the pixels the user can actually see. The panel
+    /// window is always expanded-width and the content is trailing-aligned, so
+    /// while collapsed only the trailing strip should react to the cursor.
+    private func refreshHoverTarget() {
+        let wide = metrics.isHovering
+            || metrics.forceExpanded
+            || metrics.healthState != "normal"
+        trackingView?.hoverWidth = wide ? nil : kBaseCollapsedW * gOverlayScale
+    }
+
     private func setPillHovering(_ hovering: Bool) {
         pillHovering = hovering
         if hovering {
             hoverHideWorkItem?.cancel()
             hoverHideWorkItem = nil
             metrics.isHovering = true
+            refreshHoverTarget()
             refreshTranscriptPanelVisibility()
         } else {
             scheduleHoverExit()
@@ -1354,6 +1392,7 @@ class ShortcutReminderController: NSObject {
             guard let self = self, !self.pillHovering, !self.transcriptHovering else { return }
             self.metrics.isHovering = false
             self.metrics.forceExpanded = false
+            self.refreshHoverTarget()
             self.transcriptPanel?.orderOut(nil)
         }
         hoverHideWorkItem = work
@@ -1437,11 +1476,31 @@ class ShortcutReminderController: NSObject {
         let visible = panel.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? panel.frame
         let width = transcriptPanel.frame.width
         let height = transcriptPanel.frame.height
-        let centeredX = panel.frame.midX - width / 2
-        let x = min(max(centeredX, visible.minX + 4), visible.maxX - width - 4)
+        // Hang the card off the same right edge the pill is anchored to, not the
+        // window's centre — the window extends well to the left of the collapsed
+        // pill, so a centred card would sit off to one side of its own trigger.
+        let anchoredX = panel.frame.maxX - width
+        let x = min(max(anchoredX, visible.minX + 4), visible.maxX - width - 4)
         let belowY = panel.frame.minY - height - 4
         let y = max(belowY, visible.minY + 4)
         transcriptPanel.setFrameOrigin(NSPoint(x: x, y: y))
+    }
+
+    /// Left edge of the panel window. The content is trailing-aligned, so the
+    /// window sits further left than the pixels the user sees: offsetting it by
+    /// the hidden part of the expanded bar puts the collapsed pill dead centre
+    /// on screen while every wider state grows leftwards from one right edge.
+    /// Health pills are centre-aligned inside the panel, so they keep the plain
+    /// centred origin and look exactly as they did before.
+    private func anchoredOriginX(on screen: NSScreen) -> CGFloat {
+        let expanded = kBaseExpandedW * gOverlayScale
+        guard metrics.healthState == "normal" else {
+            return screen.frame.origin.x + (screen.frame.size.width - expanded) / 2
+        }
+        let collapsed = kBaseCollapsedW * gOverlayScale
+        return screen.frame.origin.x
+            + (screen.frame.size.width + collapsed) / 2
+            - expanded
     }
 
     private func positionPanel() {
@@ -1450,9 +1509,8 @@ class ShortcutReminderController: NSObject {
         for screen in NSScreen.screens {
             if NSMouseInRect(mouseLocation, screen.frame, false) {
                 let visible = screen.visibleFrame
-                let w = kBaseExpandedW * gOverlayScale
                 let h = kBaseExpandedH * gOverlayScale
-                let x = screen.frame.origin.x + (screen.frame.size.width - w) / 2
+                let x = max(visible.minX, anchoredOriginX(on: screen))
                 let y = visible.origin.y + visible.size.height - h - 4
                 panel.setFrameOrigin(NSPoint(x: x, y: y))
                 if transcriptPanel?.isVisible == true {
@@ -1500,11 +1558,24 @@ class ShortcutReminderController: NSObject {
         action.withCString { cb($0) }
     }
 
-    /// Current panel frame in screen coords, or nil while hidden — lets the
-    /// notification inbox anchor itself under the (draggable) pill.
+    /// Frame of the *visible* pill in screen coords, or nil while hidden — lets
+    /// the notification inbox anchor itself under the (draggable) pill. The
+    /// window is wider than the collapsed pill and the content hugs its trailing
+    /// edge, so reporting the raw window frame would drop the inbox to the left
+    /// of the bell that opened it.
     func panelFrameIfVisible() -> NSRect? {
         guard isVisible, let panel = panel else { return nil }
-        return panel.frame
+        let frame = panel.frame
+        guard metrics.healthState == "normal",
+              !metrics.isHovering,
+              !metrics.forceExpanded else { return frame }
+        let collapsed = min(kBaseCollapsedW * gOverlayScale, frame.width)
+        return NSRect(
+            x: frame.maxX - collapsed,
+            y: frame.minY,
+            width: collapsed,
+            height: frame.height
+        )
     }
 }
 
@@ -1518,6 +1589,17 @@ private class ReminderTrackingView: NSView {
     /// (its tracking areas use .activeInActiveApp, not .activeAlways).
     var onHoverChanged: ((Bool) -> Void)?
 
+    /// Width of the tracked strip, measured from the trailing edge; nil tracks
+    /// the whole view. The window is always expanded-width while the collapsed
+    /// pill only paints its trailing 62pt, so tracking the full bounds would pop
+    /// the bar open from ~140pt of empty space to the left of anything visible.
+    var hoverWidth: CGFloat? {
+        didSet {
+            guard oldValue != hoverWidth else { return }
+            updateTrackingAreas()
+        }
+    }
+
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
         return true
     }
@@ -1525,9 +1607,20 @@ private class ReminderTrackingView: NSView {
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         for ta in trackingAreas { removeTrackingArea(ta) }
+        var rect = bounds
+        if let hoverWidth = hoverWidth, hoverWidth > 0, hoverWidth < bounds.width {
+            rect = NSRect(
+                x: bounds.maxX - hoverWidth,
+                y: bounds.minY,
+                width: hoverWidth,
+                height: bounds.height
+            )
+        }
+        // No .inVisibleRect: it ignores `rect` and tracks the whole visible area.
+        // The panel is never resized, so bounds-derived rects stay valid.
         addTrackingArea(NSTrackingArea(
-            rect: bounds,
-            options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways, .inVisibleRect],
+            rect: rect,
+            options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways],
             owner: self,
             userInfo: nil
         ))
