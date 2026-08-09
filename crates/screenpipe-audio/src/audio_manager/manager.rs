@@ -894,8 +894,13 @@ impl AudioManager {
         // enter through this choke point; meeting-scoped mic/tap streams use
         // `start_session_device` and deliberately bypass it.
         if self.meeting_piggyback_owns_normal_capture().await {
-            debug!(
-                "skipping normal audio device start while meeting piggyback owns capture: {}",
+            // INFO, not DEBUG. This gate suppresses the user's normal capture
+            // for the whole meeting, and if the Meeting Tap never builds
+            // nothing records at all. Released builds log at INFO, so at DEBUG
+            // the only user-visible symptom of a silent meeting was an empty
+            // transcript with no trace anywhere in the log.
+            info!(
+                "smart recording owns capture for this meeting — not starting normal audio device: {}",
                 device
             );
             return Ok(());
@@ -953,8 +958,8 @@ impl AudioManager {
         // opening a normal stream. Session streams never pass through here.
         if self.meeting_piggyback_owns_normal_capture().await {
             self.stop_device_recording(device).await?;
-            debug!(
-                "stopped newly-opened normal audio device after meeting piggyback engaged: {}",
+            info!(
+                "smart recording engaged mid-open — stopped normal audio device: {}",
                 device
             );
             return Ok(());
