@@ -826,9 +826,27 @@ pub(crate) struct PiggybackMeetingSummary {
     pub meeting_app_bundle_id: Option<String>,
     pub pid_known: bool,
     pub manual: bool,
+    /// True when the piggyback owned capture for a meeting and delivered
+    /// nothing: the tap never streamed AND no meeting mic session ever
+    /// started. Normal capture is suspended for the meeting duration, so this
+    /// is the signal that the meeting recorded no audio at all.
+    ///
+    /// The `outcome` strings cannot carry this. `stable_fallback`,
+    /// `no_pid` and `unavailable` are all reported for meetings that captured
+    /// nothing, and all three read as benign, so a silent meeting is
+    /// indistinguishable from a healthy one in the dashboards without this
+    /// field. Additive on purpose — renaming an outcome would break the
+    /// existing insights.
+    pub captured_no_audio: bool,
     pub platform: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub os_version: Option<String>,
+}
+
+/// Whether the piggyback delivered no audio at all for a meeting it owned.
+/// Pure so the invariant is unit-testable without a sweep.
+pub(crate) fn captured_no_audio(t: &MeetingTelemetry) -> bool {
+    t.meeting_seen && t.tap_streaming_ticks == 0 && !t.mic_session_started
 }
 
 pub(crate) fn classify_outcome(t: &MeetingTelemetry) -> &'static str {
@@ -865,6 +883,7 @@ pub(crate) fn build_meeting_summary(t: &MeetingTelemetry) -> PiggybackMeetingSum
         meeting_app_bundle_id: t.bundle_id.clone(),
         pid_known: t.pid_known,
         manual: t.manual,
+        captured_no_audio: captured_no_audio(t),
         platform: std::env::consts::OS,
         os_version: os_version_string(),
     }
@@ -2326,6 +2345,55 @@ mod tests {
     fn outcome_stable_fallback_when_tap_never_streamed() {
         let t = telem(); // tap_streaming_ticks == 0
         assert_eq!(classify_outcome(&t), "stable_fallback");
+    }
+
+    /// The three outcomes reported for meetings that captured nothing all read
+    /// as benign, so `outcome` alone cannot surface a silent meeting. Observed
+    /// live on 2.6.1: an 86s meeting produced 3,584 samples (~0.22s) and an
+    /// empty transcript while reporting `stable_fallback`.
+    #[test]
+    fn silent_meeting_is_flagged_under_every_benign_outcome() {
+        for (label, mutate) in [
+            (
+                "stable_fallback",
+                (|_: &mut MeetingTelemetry| {}) as fn(&mut MeetingTelemetry),
+            ),
+            ("no_pid", |t: &mut MeetingTelemetry| t.pid_known = false),
+            ("unavailable", |t: &mut MeetingTelemetry| {
+                t.unavailable = true
+            }),
+        ] {
+            let mut t = telem();
+            mutate(&mut t);
+            assert_eq!(classify_outcome(&t), label, "outcome for {label}");
+            assert!(
+                captured_no_audio(&t),
+                "{label} captured nothing but was not flagged"
+            );
+            assert!(build_meeting_summary(&t).captured_no_audio);
+        }
+    }
+
+    #[test]
+    fn a_streaming_tap_is_not_a_silent_meeting() {
+        let mut t = telem();
+        t.tap_streaming_ticks = 1;
+        assert!(!captured_no_audio(&t));
+    }
+
+    /// A resolved meeting mic carries the audio even when the far-end tap never
+    /// streams, so that is a real fallback rather than silence.
+    #[test]
+    fn a_resolved_meeting_mic_is_not_a_silent_meeting() {
+        let mut t = telem();
+        t.mic_session_started = true;
+        assert!(!captured_no_audio(&t));
+    }
+
+    #[test]
+    fn no_meeting_is_never_flagged_silent() {
+        let t = MeetingTelemetry::default(); // meeting_seen == false
+        assert!(!captured_no_audio(&t));
     }
 
     #[test]

@@ -4,12 +4,26 @@
 
 import {
   formatAllowanceLabel,
-  formatAllowanceReset,
+  formatAllowanceResetPhrase,
   formatUsagePercent,
+  usageAllowanceState,
   type HostedAiAllowance,
 } from "@/lib/hooks/use-usage-status";
 import { cn } from "@/lib/utils";
 
+/** A spent allowance is notched rather than recoloured. The palette is
+ *  monochrome by design, so state has to survive in shape and in the text
+ *  beside it — never in hue alone. */
+const SPENT_FILL_STYLE = {
+  backgroundImage:
+    "repeating-linear-gradient(135deg, transparent 0 3px, hsl(var(--background)) 3px 4px)",
+} as const;
+
+/**
+ * One allowance, rendered as a scannable pair of lines: everything you read
+ * (what it is, when it comes back, how much is gone) sits on one line, and the
+ * bar underneath is the only thing you have to look at to compare rows.
+ */
 export function UsageLimitRow({
   allowance,
   compact = false,
@@ -18,46 +32,71 @@ export function UsageLimitRow({
   compact?: boolean;
 }) {
   const percent = Math.min(100, Math.max(0, allowance.used_percent));
-  const reset = formatAllowanceReset(allowance.resets_at);
+  const state = usageAllowanceState(percent);
+  const label = formatAllowanceLabel(allowance);
+
+  // The meta slot is deliberately just the reset. How much is gone is already
+  // stated losslessly by the percentage and the fill, so spending the line on
+  // "approaching limit" only truncates the two facts that aren't recoverable
+  // from the bar: which allowance this is, and when it comes back.
+  const meta =
+    formatAllowanceResetPhrase(allowance.resets_at) ||
+    (allowance.technique === "sliding" ? "rolling window" : "");
   const status =
-    percent >= 100
+    state === "reached"
       ? "limit reached"
-      : percent >= 80
+      : state === "approaching"
         ? "approaching limit"
         : null;
 
   return (
-    <div className={cn("space-y-2", compact && "space-y-1.5")}>
-      <div className="flex min-w-0 items-baseline justify-between gap-4 text-sm">
-        <span className="truncate font-medium">
-          {formatAllowanceLabel(allowance)}
-        </span>
-        <span className="shrink-0 font-mono text-muted-foreground">
+    <div
+      className={cn("space-y-2", compact && "space-y-1.5")}
+      data-testid="usage-limit-row"
+      data-state={state}
+    >
+      <div
+        className={cn(
+          "flex items-baseline gap-3",
+          compact ? "text-xs" : "text-sm",
+        )}
+      >
+        <span className="min-w-0 truncate font-medium">{label}</span>
+        {meta && (
+          <span className="ml-auto min-w-0 truncate text-right text-muted-foreground">
+            {meta}
+          </span>
+        )}
+        <span
+          className={cn(
+            "shrink-0 font-mono tabular-nums",
+            !meta && "ml-auto",
+            state === "ok" ? "text-muted-foreground" : "text-foreground",
+          )}
+        >
           {formatUsagePercent(percent)}
         </span>
       </div>
       <div
-        className={cn("h-1.5 bg-muted", compact && "h-1")}
+        className="h-1 w-full bg-muted"
         role="progressbar"
-        aria-label={formatAllowanceLabel(allowance)}
+        aria-label={label}
         aria-valuemin={0}
         aria-valuemax={100}
         aria-valuenow={Math.round(percent)}
+        // Sighted users read the state off the number, the fill and the notching;
+        // spell it out for anyone who only gets the value.
+        aria-valuetext={[formatUsagePercent(percent), status, meta]
+          .filter(Boolean)
+          .join(", ")}
       >
         <div
           className="h-full bg-foreground transition-[width] duration-150"
-          style={{ width: `${percent}%` }}
+          style={{
+            width: `${percent}%`,
+            ...(state === "reached" ? SPENT_FILL_STYLE : {}),
+          }}
         />
-      </div>
-      <div className="flex min-w-0 justify-between gap-3 text-[11px] text-muted-foreground">
-        <span>{status ?? "included with your plan"}</span>
-        <span className="shrink-0 font-mono">
-          {reset
-            ? `resets ${reset}`
-            : allowance.technique === "sliding"
-              ? "rolling window"
-              : "reset unavailable"}
-        </span>
       </div>
     </div>
   );

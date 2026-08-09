@@ -1135,7 +1135,7 @@ export const COMPOSER_COMMAND_SUGGESTIONS: MentionSuggestion[] = [
   {
     tag: "/pipes",
     label: "/pipes",
-    description: "open pipes",
+    description: "open scheduled tasks",
     category: "command",
     commandId: "pipes",
   },

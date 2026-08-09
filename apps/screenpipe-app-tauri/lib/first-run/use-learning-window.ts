@@ -16,13 +16,14 @@ import {
   canResolveYet,
   capturedAppsFrom,
   claimLearningSeed,
+  classifyEmptyReason,
   hasEnoughEvidence,
+  learningWindowOpening,
   learningWindowRemainingMs,
   markLearningDone,
   markLearningEmpty,
   markLearningReady,
   releaseLearningSeed,
-  normalizeEmptyReason,
   readLearningWindow,
   type FirstRunCapturedApp,
   type FirstRunLearningState,
@@ -82,15 +83,14 @@ export function useLearningWindow(
       try {
         const result = await commands.getOnboardingStatus();
         if (cancelled || result.status !== "ok") return;
-        const completedAt = result.data.completedAt;
-        if (!completedAt) return;
-        const elapsed = Date.now() - Date.parse(completedAt);
-        // Only a setup that just finished opens a window. Anything older is a
-        // returning user, who must never see a first-run banner.
-        if (!Number.isFinite(elapsed) || elapsed < 0) return;
-        if (elapsed > LEARNING_WINDOW_CEILING_MS) return;
+        const opening = learningWindowOpening(result.data.completedAt);
+        if (opening.kind === "none") return;
         if (readLearningWindow().phase !== "idle") return;
-        setState(beginLearningWindow(completedAt));
+        // The only signal that a window ever opened. Without it an absent
+        // outcome is indistinguishable from a window that never started, and
+        // "never started" was by far the most common outcome.
+        posthog.capture("first_run_learning_started", { opening: opening.kind });
+        setState(beginLearningWindow(opening.anchor));
       } catch {
         // Without a status read there is no window; the app is unaffected.
       }
@@ -222,8 +222,14 @@ export function useLearningWindow(
     const settle = async () => {
       if (seedingRef.current) return;
       const activity = await fetchRecentActivity(startedAt);
-      const reason = normalizeEmptyReason(activity?.data_status);
-      posthog.capture("first_run_learning_empty", { reason });
+      const reason = classifyEmptyReason(activity);
+      posthog.capture("first_run_learning_empty", {
+        reason,
+        // The raw engine verdict alongside the derived one, so a future engine
+        // status cannot be silently folded into a local guess.
+        data_status: activity?.data_status ?? "none",
+        frame_count: Number(activity?.total_frames ?? 0),
+      });
       setState(markLearningEmpty(reason));
     };
 

@@ -56,6 +56,10 @@ import {
 	type DesktopRemotePolicySnapshot,
 	type DesktopRemotePreferences,
 } from "@/lib/desktop-remote-control";
+import {
+	DEFAULT_SIDEBAR_NAV_LAYOUT,
+	type SidebarNavLayout,
+} from "@/lib/utils/sidebar-nav-layout";
 export type VadSensitivity = "low" | "medium" | "high";
 
 export type AIProviderType =
@@ -407,6 +411,15 @@ export type Settings = SettingsStore & {
 	localRetentionMode?: "media" | "lean" | "all";
 	/** Apply macOS vibrancy effect to sidebar for a translucent glass look */
 	translucentSidebar?: boolean;
+	/** User-customized Home sidebar: row order plus the ids kept out of it.
+	 *  Meetings ships hidden, which is what puts its compact icon in the
+	 *  top-left chrome strip instead. See `lib/utils/sidebar-nav-layout`. */
+	sidebarNavLayout?: SidebarNavLayout;
+	/** Rollout gate for right-click + drag sidebar customization. Owned by the
+	 *  typed PostHog registry (`sidebar-customization-control`); a persisted
+	 *  layout is still honored when the gate is off, so turning the flag off
+	 *  removes the editing affordances without resetting anyone's sidebar. */
+	enableSidebarCustomization?: boolean;
 	/** Show the chat suggestion chips above the input — the "follow up"
 	 *  questions and the connection-aware suggested prompts. The single inline
 	 *  X on the chips flips this to false; re-enable from Settings → Display.
@@ -789,6 +802,9 @@ let DEFAULT_SETTINGS: Settings = {
 					prioritizeInputLatency: {
 						...LOCAL_DESKTOP_REMOTE_POLICY.boolean.prioritizeInputLatency,
 					},
+					sidebarCustomization: {
+						...LOCAL_DESKTOP_REMOTE_POLICY.boolean.sidebarCustomization,
+					},
 				},
 				aecMode: { ...LOCAL_DESKTOP_REMOTE_POLICY.aecMode },
 				autoUpdate: { ...LOCAL_DESKTOP_REMOTE_POLICY.autoUpdate },
@@ -813,6 +829,8 @@ let DEFAULT_SETTINGS: Settings = {
 			meetingSummaryPipeSlug: "meeting-summary",
 			filterMusic: true,
 			prioritizeInputLatency: false,
+			enableSidebarCustomization: false,
+			sidebarNavLayout: { ...DEFAULT_SIDEBAR_NAV_LAYOUT },
 			ignoreIncognitoWindows: true,
 			enhancedIncognitoDetection: false,
 			pauseOnDrmContent: false,

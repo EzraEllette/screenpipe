@@ -657,6 +657,7 @@
         "tests/live_coverage_marker_test.rs",
         "tests/orphan_chunk_null_poisoning_test.rs",
         "tests/outputs_saf_test.rs",
+        "tests/range_export_frame_sources_test.rs",
         "tests/semantic_storage_test.rs",
         "tests/suggestions_frames_table_test.rs",
         "tests/timeline_frameless_audio_test.rs",
