@@ -1192,6 +1192,16 @@ fn local_pi_install_integrity_error(install_dir: &Path) -> Option<String> {
     if !cli_js.exists() {
         return Some(format!("missing Pi entrypoint at {}", cli_js.display()));
     }
+    let agent_session_runtime = pi_dir
+        .join("dist")
+        .join("core")
+        .join("agent-session-runtime.js");
+    if !agent_session_runtime.is_file() {
+        return Some(format!(
+            "missing Pi runtime artifact at {}",
+            agent_session_runtime.display()
+        ));
+    }
 
     if !is_local_pi_version_current(install_dir) {
         return Some(format!("Pi package version is not {}", PI_PACKAGE));
@@ -6062,8 +6072,13 @@ printf '%s\n' '{"type":"agent_end"}'
             super::PI_PACKAGE.rsplit('@').next().unwrap_or(""),
         );
         let dist = pi_dir.join("dist");
-        std::fs::create_dir_all(&dist).expect("create dist");
+        std::fs::create_dir_all(dist.join("core")).expect("create dist");
         std::fs::write(dist.join("cli.js"), "console.log('pi')").expect("write cli");
+        std::fs::write(
+            dist.join("core").join("agent-session-runtime.js"),
+            "export class AgentSessionRuntime {}",
+        )
+        .expect("write agent session runtime");
     }
 
     /// Regression guard for the empty "Pi background install failed: " log
@@ -6181,6 +6196,44 @@ printf '%s\n' '{"type":"agent_end"}'
             .expect("missing pi-ai should make install unhealthy");
         assert!(
             error.contains("@earendil-works/pi-ai"),
+            "unexpected integrity error: {}",
+            error
+        );
+    }
+
+    #[test]
+    fn local_pi_integrity_detects_missing_agent_session_runtime() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let install_dir = dir.path();
+        let pi_dir = super::pi_package_dir(install_dir);
+        write_pi_package(install_dir);
+        write_package_json(
+            &super::node_module_package_dir(install_dir, "@earendil-works/pi-ai"),
+            "@earendil-works/pi-ai",
+            super::PI_AI_PACKAGE.rsplit('@').next().unwrap_or(""),
+        );
+        write_package_json(
+            &super::node_module_package_dir(install_dir, "@anthropic-ai/sdk"),
+            "@anthropic-ai/sdk",
+            "0.91.1",
+        );
+        write_package_json(
+            &super::node_module_package_dir(install_dir, "cross-spawn"),
+            "cross-spawn",
+            "7.0.6",
+        );
+        std::fs::remove_file(
+            pi_dir
+                .join("dist")
+                .join("core")
+                .join("agent-session-runtime.js"),
+        )
+        .expect("remove agent session runtime");
+
+        let error = super::local_pi_install_integrity_error(install_dir)
+            .expect("missing agent session runtime should make install unhealthy");
+        assert!(
+            error.contains("agent-session-runtime.js"),
             "unexpected integrity error: {}",
             error
         );
