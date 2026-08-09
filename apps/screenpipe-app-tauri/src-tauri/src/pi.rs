@@ -908,11 +908,33 @@ fn sanitize_pi_package_stores() -> Result<usize, String> {
         .map_err(|error| format!("Failed to sanitize Pi package metadata: {}", error))
 }
 
-async fn sanitize_pi_package_stores_before_start() -> Result<(), String> {
+/// Repair malformed third-party Pi manifests without ever blocking the caller.
+///
+/// This is a workaround for an upstream Pi bug: `collectManifestFiles` calls
+/// `entries.filter(..)` on any truthy `pi.extensions`/`skills`/`prompts`/
+/// `themes` value, so a string manifest entry throws `TypeError: entries.filter
+/// is not a function` and crash-loops the agent at startup. Present in the
+/// pinned `PI_PACKAGE` (0.83.0); drop this once that call site is guarded
+/// upstream.
+///
+/// Best-effort by design. Sanitation walks package directories screenpipe does
+/// not own, so an unreadable or unwritable third-party package must degrade to
+/// a log line, never stop Pi from starting or block an extension install or
+/// removal. Failing closed here would turn a niche third-party defect into a
+/// hard startup failure, which is the crash class this whole path exists to
+/// remove.
+fn sanitize_pi_package_stores_best_effort() {
+    match sanitize_pi_package_stores() {
+        Ok(0) => {}
+        Ok(repaired) => info!("Repaired {} malformed Pi package manifest(s)", repaired),
+        Err(error) => warn!("Skipping Pi package manifest repair: {}", error),
+    }
+}
+
+async fn sanitize_pi_package_stores_before_start() {
     let lock = PI_PACKAGE_OPERATION_LOCK.get_or_init(|| Mutex::new(()));
     let _guard = lock.lock().await;
-    sanitize_pi_package_stores()?;
-    Ok(())
+    sanitize_pi_package_stores_best_effort();
 }
 
 fn remove_screenpipe_auth_from_path(auth_path: &Path) -> Result<(), String> {
@@ -2479,7 +2501,7 @@ pub async fn pi_start_inner(
         if !extension_safe_mode {
             ensure_required_pi_extension_package().await?;
         } else {
-            sanitize_pi_package_stores_before_start().await?;
+            sanitize_pi_package_stores_before_start().await;
         }
     } else if is_pi_acp {
         // Same pi as native — seed the project-local extensions so its tools
@@ -2518,7 +2540,7 @@ pub async fn pi_start_inner(
         if !extension_safe_mode {
             ensure_required_pi_extension_package().await?;
         } else {
-            sanitize_pi_package_stores_before_start().await?;
+            sanitize_pi_package_stores_before_start().await;
         }
     }
 
@@ -4860,7 +4882,7 @@ async fn run_pi_package_command(args: Vec<String>) -> Result<(), String> {
 async fn ensure_required_pi_extension_package() -> Result<(), String> {
     let lock = PI_PACKAGE_OPERATION_LOCK.get_or_init(|| Mutex::new(()));
     let _guard = lock.lock().await;
-    sanitize_pi_package_stores()?;
+    sanitize_pi_package_stores_best_effort();
     ensure_required_pi_extension_setting()?;
     if pi_package_source_looks_installed(REQUIRED_PI_EXTENSION_PACKAGE) {
         return Ok(());
@@ -4870,7 +4892,7 @@ async fn ensure_required_pi_extension_package() -> Result<(), String> {
         REQUIRED_PI_EXTENSION_PACKAGE.to_string(),
     ])
     .await?;
-    sanitize_pi_package_stores()?;
+    sanitize_pi_package_stores_best_effort();
     Ok(())
 }
 
@@ -4917,9 +4939,9 @@ pub async fn pi_install_extension_package(
     stop_idle_pi_sessions_for_package_change(&state).await?;
     let lock = PI_PACKAGE_OPERATION_LOCK.get_or_init(|| Mutex::new(()));
     let _guard = lock.lock().await;
-    sanitize_pi_package_stores()?;
+    sanitize_pi_package_stores_best_effort();
     run_pi_package_command(vec!["install".to_string(), source]).await?;
-    sanitize_pi_package_stores()?;
+    sanitize_pi_package_stores_best_effort();
     stop_idle_pi_sessions_for_package_change(&state).await?;
     pi_list_extension_packages().await
 }
@@ -4937,7 +4959,7 @@ pub async fn pi_remove_extension_package(
     stop_idle_pi_sessions_for_package_change(&state).await?;
     let lock = PI_PACKAGE_OPERATION_LOCK.get_or_init(|| Mutex::new(()));
     let _guard = lock.lock().await;
-    sanitize_pi_package_stores()?;
+    sanitize_pi_package_stores_best_effort();
     run_pi_package_command(vec!["remove".to_string(), source]).await?;
     stop_idle_pi_sessions_for_package_change(&state).await?;
     pi_list_extension_packages().await
