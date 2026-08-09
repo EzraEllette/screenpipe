@@ -13,7 +13,7 @@ export const searchIndex: SettingsField[] = [
   { label: "Sign in to Screenpipe", keywords: ["login", "log in", "sign in"] },
   { label: "Logout", keywords: ["signout", "sign out", "log out"] },
   { label: "Screenpipe Business", keywords: ["subscription", "billing", "plan", "pro", "business", "max", "ultra", "upgrade", "manage"] },
-  { label: "scheduled sync across devices", keywords: ["scheduled sync", "pipe sync", "sync"] },
+  { label: "sync scheduled tasks across devices", keywords: ["scheduled sync", "pipe sync", "sync"] },
   { label: "memories sync across devices", keywords: ["memories sync", "sync", "facts"] },
   { label: "connection sync across devices", keywords: ["connection sync", "sync", "slack", "notion"] },
 ];
@@ -590,7 +590,7 @@ export function AccountSection() {
           <div className="mt-4 pt-4 border-t border-border/50">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-sm font-medium">scheduled sync across devices</p>
+                <p className="text-sm font-medium">sync scheduled tasks across devices</p>
                 <p className="text-xs text-muted-foreground">
                   sync your scheduled tasks & configs to all devices linked to your account
                 </p>
@@ -603,7 +603,7 @@ export function AccountSection() {
                     onCheckedChange={async (checked) => {
                       await updateSettings({ pipeSyncEnabled: checked });
                       toast({
-                        title: checked ? "scheduled sync enabled" : "scheduled sync disabled",
+                        title: checked ? "scheduled task sync enabled" : "scheduled task sync disabled",
                         description: checked
                           ? "scheduled tasks will sync across your devices"
                           : "scheduled tasks will no longer sync",
@@ -830,7 +830,7 @@ export function AccountSection() {
           <Card className="p-4 opacity-75">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-sm font-medium">scheduled sync across devices</p>
+                <p className="text-sm font-medium">sync scheduled tasks across devices</p>
                 <p className="text-xs text-muted-foreground">
                   sync your scheduled tasks & configs to all devices linked to your account
                 </p>
@@ -927,7 +927,7 @@ export function AccountSection() {
           <Card className="p-4 opacity-75">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-sm font-medium">scheduled sync across devices</p>
+                <p className="text-sm font-medium">sync scheduled tasks across devices</p>
                 <p className="text-xs text-muted-foreground">
                   sync your scheduled tasks & configs to all devices linked to your account
                 </p>
