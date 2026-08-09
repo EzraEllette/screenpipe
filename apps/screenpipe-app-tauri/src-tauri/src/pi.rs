@@ -1262,16 +1262,22 @@ fn format_install_failure(tool: &str, output: &Output) -> String {
 
 fn should_retry_install_with_npm(stderr: &str) -> bool {
     let lower = stderr.to_lowercase();
-    let eperm_failure = lower.contains("eperm")
-        && (lower.contains("ntsetinformationfile")
-            || lower.contains("cache dir")
-            || lower.contains("extracting tarball")
-            || lower.contains("moving"));
+    let locked_file_context = lower.contains("ntsetinformationfile")
+        || lower.contains("cache dir")
+        || lower.contains("extracting tarball")
+        || lower.contains("moving")
+        || lower.contains("copying files from cache");
+    // EPERM and EBUSY are the same class of Windows failure: another handle
+    // (Defender, Search indexer, a previous bun) holds a file bun is copying
+    // out of its cache. Only EPERM was matched before, so an EBUSY install
+    // failed hard and left node_modules half-populated.
+    let locked_file_failure =
+        (lower.contains("eperm") || lower.contains("ebusy")) && locked_file_context;
     let crash_failure = lower.contains("segmentation fault")
         || lower.contains("bun has crashed")
         || lower.contains("panic")
         || lower.contains("avx support");
-    eperm_failure || crash_failure
+    locked_file_failure || crash_failure
 }
 
 fn npm_install_command(install_dir: &Path) -> Command {
@@ -1310,10 +1316,31 @@ fn verify_pi_package_install(install_dir: &Path) -> Result<(), String> {
 /// permanent until node_modules is cleared. Never ask the user to delete
 /// directories: retry once with node_modules+lockfiles cleared, then once
 /// more with the bun cache wiped too, before reporting failure.
+/// Whether a failed install left a tree that only clearing node_modules can fix.
+///
+/// A verification failure says so explicitly. But a Windows file-lock abort
+/// (EPERM/EBUSY, typically Defender or the Search indexer holding a file bun is
+/// copying out of its cache) fails the install *before* verification runs, and
+/// leaves node_modules half-populated. The next `bun install` then trusts
+/// bun.lock ("no changes") and never re-copies the missing files, so Pi fails at
+/// runtime with `Cannot find package '<dep>'` until node_modules is cleared.
+/// Both cases need the same self-heal, so treat them the same.
+fn install_failure_is_self_healable(install_dir: &Path, error: &str) -> bool {
+    if error.contains("dependency verification failed") {
+        return true;
+    }
+    let lower = error.to_lowercase();
+    let locked_file_failure = lower.contains("eperm")
+        || lower.contains("ebusy")
+        || lower.contains("enotempty")
+        || lower.contains("copying files from cache");
+    locked_file_failure && local_pi_install_integrity_error(install_dir).is_some()
+}
+
 fn run_pi_package_install(install_dir: &Path, bun: &str) -> Result<(), String> {
     let first = run_pi_package_install_once(install_dir, bun);
     let Err(e) = first else { return Ok(()) };
-    if !e.contains("dependency verification failed") {
+    if !install_failure_is_self_healable(install_dir, &e) {
         return Err(e);
     }
 
@@ -1328,7 +1355,7 @@ fn run_pi_package_install(install_dir: &Path, bun: &str) -> Result<(), String> {
         info!("Pi install self-heal succeeded after clearing node_modules");
         return Ok(());
     };
-    if !e.contains("dependency verification failed") {
+    if !install_failure_is_self_healable(install_dir, &e) {
         return Err(e);
     }
 
@@ -6181,6 +6208,41 @@ error: InstallFailed extracting tarball"#;
         assert!(super::should_retry_install_with_npm(stderr));
         assert!(!super::should_retry_install_with_npm(
             "error: package not found @earendil-works/nope"
+        ));
+    }
+
+    /// The exact stderr from the Windows E2E runner. EBUSY was not matched, so
+    /// the install failed hard with no npm fallback and no self-heal.
+    #[test]
+    fn detects_bun_windows_ebusy_cache_copy_failures() {
+        let stderr =
+            "EBUSY: failed copying files from cache to destination for package @aws-sdk/nested-clients";
+
+        assert!(super::should_retry_install_with_npm(stderr));
+    }
+
+    #[test]
+    fn self_heals_a_failed_install_that_left_a_broken_dependency_tree() {
+        let temp = tempfile::tempdir().unwrap();
+        let install_dir = temp.path();
+
+        // A verification failure is self-healable regardless of tree state.
+        assert!(super::install_failure_is_self_healable(
+            install_dir,
+            "Pi install completed but dependency verification failed: missing Pi entrypoint"
+        ));
+
+        // An EBUSY abort fails before verification runs, but leaves the tree
+        // unusable — same corruption, so it must take the same self-heal path.
+        assert!(super::install_failure_is_self_healable(
+            install_dir,
+            "bun install failed (exit code 1). output: EBUSY: failed copying files from cache to destination for package @aws-sdk/nested-clients"
+        ));
+
+        // A genuine resolution failure must NOT burn three install attempts.
+        assert!(!super::install_failure_is_self_healable(
+            install_dir,
+            "bun install failed (exit code 1). output: error: package not found @earendil-works/nope"
         ));
     }
 
