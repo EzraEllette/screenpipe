@@ -6,6 +6,8 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { UsagePopover } from "./usage-popover";
 
+// Resets are expressed relative to now so the fixture keeps exercising the
+// live countdown/weekday phrasing instead of decaying into elapsed dates.
 const mocks = vi.hoisted(() => ({
   push: vi.fn(),
   query: {
@@ -13,7 +15,7 @@ const mocks = vi.hoisted(() => ({
       hosted_ai: {
         plan: "business",
         allowance_managed_by: "cloudflare" as const,
-        usage_as_of: "2026-08-07T18:00:00.000Z",
+        usage_as_of: new Date(Date.now() - 120_000).toISOString(),
         allowances: [
           {
             lane: "combined" as const,
@@ -21,15 +23,15 @@ const mocks = vi.hoisted(() => ({
             remaining_percent: 70,
             window_seconds: 604_800,
             technique: "fixed" as const,
-            resets_at: "2026-08-13T00:00:00.000Z",
+            resets_at: new Date(Date.now() + 50 * 3_600_000).toISOString(),
           },
           {
-            lane: "combined" as const,
+            lane: "explicit" as const,
             used_percent: 62,
             remaining_percent: 38,
-            window_seconds: 2_592_000,
+            window_seconds: 604_800,
             technique: "fixed" as const,
-            resets_at: "2026-08-07T20:00:00.000Z",
+            resets_at: new Date(Date.now() + 2 * 3_600_000).toISOString(),
           },
         ],
         upgrade: null,
@@ -64,25 +66,47 @@ describe("UsagePopover", () => {
 
     fireEvent.pointerEnter(screen.getByRole("button", { name: "AI usage, 62% used" }));
 
-    expect(screen.getByText("30-day limit")).toBeTruthy();
+    expect(screen.getByText("Weekly · explicit models")).toBeTruthy();
     expect(screen.getByText("Weekly · all models")).toBeTruthy();
     expect(screen.getByText("30%")).toBeTruthy();
     expect(document.body.textContent).not.toContain("$");
   });
 
-  it("renders the usage settings action in lowercase", () => {
+  it("names the plan in the header and keeps it lowercase", () => {
     render(<UsagePopover />);
     fireEvent.pointerEnter(screen.getByRole("button", { name: "AI usage, 62% used" }));
 
-    const action = screen.getByRole("button", { name: "view usage settings" });
-    expect(action.className).toContain("lowercase");
-    expect(action.className).not.toContain("uppercase");
+    const header = screen.getByRole("button", {
+      name: /plan usage limits · Business/i,
+    });
+    expect(header.textContent).toContain("plan usage limits");
+    expect(header.querySelector(".lowercase")?.textContent).toBe(
+      "plan usage limits",
+    );
+    // The plan is a product name and keeps its own casing.
+    expect(header.textContent).toContain("Business");
   });
 
-  it("opens the full usage settings page", () => {
+  it("puts each allowance's reset and percent on the row itself", () => {
+    render(<UsagePopover />);
+    fireEvent.pointerEnter(screen.getByRole("button", { name: "AI usage, 62% used" }));
+
+    const rows = screen.getAllByTestId("usage-limit-row");
+    expect(rows).toHaveLength(2);
+    // Label, reset and percent share one line; the bar is the only other child.
+    for (const row of rows) {
+      expect(row.children).toHaveLength(2);
+      expect(row.textContent).toMatch(/resets/);
+      expect(row.textContent).toMatch(/\d+%/);
+    }
+  });
+
+  it("opens the full usage settings page from the header", () => {
     render(<UsagePopover />);
     fireEvent.click(screen.getByRole("button", { name: "AI usage, 62% used" }));
-    fireEvent.click(screen.getByRole("button", { name: /view usage settings/i }));
+    fireEvent.click(
+      screen.getByRole("button", { name: /plan usage limits · Business/i }),
+    );
     expect(mocks.push).toHaveBeenCalledWith("/settings?section=usage");
   });
 

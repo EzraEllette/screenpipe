@@ -307,6 +307,91 @@ export function formatAllowanceReset(iso: string | null): string {
   }
 }
 
+/** An allowance is "approaching" once four fifths of it is gone. Below that a
+ *  user still has room to keep working, so the row stays visually quiet. */
+export const USAGE_APPROACHING_PERCENT = 80;
+
+export type UsageAllowanceState = "ok" | "approaching" | "reached";
+
+export function usageAllowanceState(percent: number): UsageAllowanceState {
+  if (percent >= 100) return "reached";
+  if (percent >= USAGE_APPROACHING_PERCENT) return "approaching";
+  return "ok";
+}
+
+const MINUTE_MS = 60_000;
+const HOUR_MS = 60 * MINUTE_MS;
+const DAY_MS = 24 * HOUR_MS;
+
+/**
+ * Reset phrasing that answers "when do I get this back?" at the precision the
+ * answer is actually useful at. A reset that lands in the next day is a
+ * countdown you can wait out ("resets in 1 hr 23 min"); one inside the week is
+ * a weekday you can plan around ("resets Thu 5:59 AM"); anything further is a
+ * calendar date. Absolute timestamps for imminent resets read as precise but
+ * force the reader to do the subtraction themselves.
+ *
+ * `now` is injectable so the phrasing is testable without freezing the clock.
+ */
+export function formatAllowanceResetPhrase(
+  iso: string | null,
+  now: number = Date.now(),
+): string {
+  if (!iso) return "";
+  const target = new Date(iso).getTime();
+  if (!Number.isFinite(target)) return "";
+
+  const remaining = target - now;
+  // A reset that already elapsed means the snapshot is behind the window, not
+  // that the allowance is refilling right now. Say nothing rather than assert a
+  // state the gateway has not confirmed.
+  if (remaining <= 0) return "";
+
+  if (remaining < HOUR_MS) {
+    const minutes = Math.max(1, Math.round(remaining / MINUTE_MS));
+    return `resets in ${minutes} min`;
+  }
+
+  if (remaining < DAY_MS) {
+    const hours = Math.floor(remaining / HOUR_MS);
+    const minutes = Math.round((remaining % HOUR_MS) / MINUTE_MS);
+    // 59.7 minutes rounds to 60; roll it into the hour instead of "1 hr 60 min".
+    if (minutes === 60) return `resets in ${hours + 1} hr`;
+    return minutes > 0
+      ? `resets in ${hours} hr ${minutes} min`
+      : `resets in ${hours} hr`;
+  }
+
+  try {
+    const options: Intl.DateTimeFormatOptions =
+      remaining < 7 * DAY_MS
+        ? { weekday: "short", hour: "numeric", minute: "2-digit" }
+        : { month: "short", day: "numeric" };
+    return `resets ${new Date(target).toLocaleString([], options)}`;
+  } catch {
+    return "";
+  }
+}
+
+/** Freshness hint for the refresh control, so a stale number is legible as
+ *  stale rather than silently wrong. */
+export function formatUsageUpdatedAt(
+  iso: string | null | undefined,
+  now: number = Date.now(),
+): string {
+  if (!iso) return "";
+  const fetched = new Date(iso).getTime();
+  if (!Number.isFinite(fetched)) return "";
+
+  const elapsed = now - fetched;
+  if (elapsed < MINUTE_MS) return "updated just now";
+  const minutes = Math.floor(elapsed / MINUTE_MS);
+  if (minutes < 60) return `updated ${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `updated ${hours}h ago`;
+  return `updated ${Math.floor(hours / 24)}d ago`;
+}
+
 /**
  * Compute how many messages a user has left for a specific weighted model.
  * Returns null when the concept doesn't apply (unknown/zero weight, no
