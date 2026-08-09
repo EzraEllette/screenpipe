@@ -38,6 +38,9 @@ vi.mock("@/components/chat/standalone/acp-config-selector", () => ({
 vi.mock("@/components/thinking-level-selector", () => ({
   ThinkingLevelSelector: () => null,
 }));
+vi.mock("@/components/usage/usage-popover", () => ({
+  UsagePopover: () => null,
+}));
 
 import { ComposerControlsRow } from "./composer-controls-row";
 
