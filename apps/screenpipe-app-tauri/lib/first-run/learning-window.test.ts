@@ -5,9 +5,12 @@
 import { beforeEach, describe, expect, it, vi, afterEach } from "vitest";
 import {
   LEARNING_WINDOW_CEILING_MS,
+  LEARNING_WINDOW_GRACE_MS,
   MIN_LEARNING_MS,
   beginLearningWindow,
   canResolveYet,
+  classifyEmptyReason,
+  learningWindowOpening,
   buildLearningSummary,
   capturedAppsFrom,
   claimLearningSeed,
@@ -383,5 +386,106 @@ describe("countdown", () => {
     expect(formatCountdown(61_000)).toBe("1:01");
     expect(formatCountdown(0)).toBe("0:00");
     expect(formatCountdown(-1)).toBe("0:00");
+  });
+});
+
+describe("learningWindowOpening", () => {
+  const now = Date.parse("2026-08-08T12:00:00.000Z");
+  const ago = (ms: number) => new Date(now - ms).toISOString();
+
+  it("opens immediately and summarizes from the moment setup ended", () => {
+    const completedAt = ago(60_000);
+    expect(learningWindowOpening(completedAt, now)).toEqual({
+      kind: "immediate",
+      anchor: completedAt,
+    });
+  });
+
+  it("still opens for someone who closed the app and came back later", () => {
+    // The regression this exists for: past the ceiling the window used to be
+    // abandoned silently, so finishing setup and closing the app cost the user
+    // their first summary permanently.
+    const opening = learningWindowOpening(ago(3 * 60 * 60 * 1_000), now);
+    expect(opening.kind).toBe("late");
+    // Anchored at the visit, not at completion: nothing was captured while the
+    // app was shut, so summarizing from completion would report an empty gap.
+    expect(opening).toEqual({ kind: "late", anchor: new Date(now).toISOString() });
+  });
+
+  it("switches from immediate to late exactly at the ceiling", () => {
+    expect(learningWindowOpening(ago(LEARNING_WINDOW_CEILING_MS), now).kind).toBe(
+      "immediate",
+    );
+    expect(
+      learningWindowOpening(ago(LEARNING_WINDOW_CEILING_MS + 1), now).kind,
+    ).toBe("late");
+  });
+
+  it("never opens for an ordinary returning user", () => {
+    expect(learningWindowOpening(ago(LEARNING_WINDOW_GRACE_MS), now).kind).toBe(
+      "late",
+    );
+    expect(
+      learningWindowOpening(ago(LEARNING_WINDOW_GRACE_MS + 1), now).kind,
+    ).toBe("none");
+    expect(learningWindowOpening(null, now)).toEqual({ kind: "none" });
+    expect(learningWindowOpening(undefined, now)).toEqual({ kind: "none" });
+    expect(learningWindowOpening("not-a-date", now)).toEqual({ kind: "none" });
+  });
+
+  it("treats a completion in the future as a clock problem, not a fresh setup", () => {
+    expect(learningWindowOpening(new Date(now + 60_000).toISOString(), now)).toEqual(
+      { kind: "none" },
+    );
+  });
+});
+
+describe("classifyEmptyReason", () => {
+  it("keeps a definite engine verdict", () => {
+    expect(classifyEmptyReason({ data_status: "not_recording" })).toBe(
+      "not_recording",
+    );
+    expect(classifyEmptyReason({ data_status: "no_capture_in_range" })).toBe(
+      "no_capture_in_range",
+    );
+  });
+
+  it("separates 'captured nothing' from the engine's catch-all unknown", () => {
+    // The whole point: every empty window used to report `unknown`, so it was
+    // impossible to tell broken capture from an idle user.
+    expect(classifyEmptyReason({ data_status: "ok", total_frames: 0 })).toBe(
+      "no_frames_captured",
+    );
+    expect(classifyEmptyReason({ data_status: "ok" })).toBe("no_frames_captured");
+  });
+
+  it("names which floor was missed", () => {
+    expect(classifyEmptyReason({ data_status: "ok", total_frames: 3 })).toBe(
+      "below_frame_floor",
+    );
+    expect(
+      classifyEmptyReason({
+        data_status: "ok",
+        total_frames: 7,
+        apps: [{ name: "Chrome", frame_count: 7 }],
+      }),
+    ).toBe("single_app_below_floor");
+  });
+
+  it("falls back to unknown when the counts do not explain it", () => {
+    // Enough frames across enough apps to have resolved — if we still land
+    // here the cause is not a floor, and guessing one would be a lie.
+    expect(
+      classifyEmptyReason({
+        data_status: "ok",
+        total_frames: 40,
+        apps: [
+          { name: "Chrome", frame_count: 20 },
+          { name: "Slack", frame_count: 20 },
+        ],
+      }),
+    ).toBe("unknown");
+    expect(classifyEmptyReason(null)).toBe("unknown");
+    expect(classifyEmptyReason(undefined)).toBe("unknown");
   });
 });

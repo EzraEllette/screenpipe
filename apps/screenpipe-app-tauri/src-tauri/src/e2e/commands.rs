@@ -39,6 +39,28 @@ fn main_overlay_visible(app_handle: tauri::AppHandle) -> bool {
     }
 }
 
+/// E2E helper: backdate the recorded setup completion.
+///
+/// The first-run window keys off how long ago setup finished, and the two
+/// branches that matter (a fresh finish vs. someone who closed the app and came
+/// back) are minutes and hours apart. `complete_onboarding` can only stamp
+/// "now", so without this the late-return branch is untestable in the real app
+/// short of making a spec sleep for the ceiling.
+#[command]
+fn set_onboarding_completed_ago(
+    app_handle: tauri::AppHandle,
+    seconds: i64,
+) -> Result<String, String> {
+    let stamp = (chrono::Utc::now() - chrono::Duration::seconds(seconds)).to_rfc3339();
+    let persisted = stamp.clone();
+    crate::store::OnboardingStore::update(&app_handle, move |onboarding| {
+        onboarding.is_completed = true;
+        onboarding.completed_at = Some(persisted.clone());
+    })
+    .map_err(|error| error.to_string())?;
+    Ok(stamp)
+}
+
 /// E2E helper: model an active capture intent without requiring physical
 /// screen/audio devices on the CI runner.
 #[command]
@@ -619,6 +641,7 @@ pub(super) fn plugin() -> TauriPlugin<Wry> {
             db_hard_fault_state,
             seed_flags,
             capture_pi_start_error,
+            set_onboarding_completed_ago,
         ])
         .build()
 }
