@@ -219,9 +219,6 @@ export function HostedUsageLimits({ query }: { query: UsageStatusQuery }) {
         <div className="flex items-baseline justify-between gap-4 border-b border-border pb-4">
           <div>
             <h2 className="text-base font-medium lowercase">your usage limits</h2>
-            <p className="mt-1 text-xs text-muted-foreground">
-              each listed allowance applies independently.
-            </p>
           </div>
           {plan && (
             <span className="shrink-0 font-mono text-xs text-muted-foreground">

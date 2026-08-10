@@ -54,6 +54,7 @@ describe("HostedUsageLimits", () => {
     expect(screen.getByText("Weekly · all models")).toBeTruthy();
     expect(screen.getByText("42%")).toBeTruthy();
     expect(screen.getByText("9%")).toBeTruthy();
+    expect(screen.queryByText("each listed allowance applies independently.")).toBeNull();
     expect(document.body.textContent).not.toContain("$");
   });
 
