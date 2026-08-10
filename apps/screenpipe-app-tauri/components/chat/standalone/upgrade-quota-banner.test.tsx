@@ -147,7 +147,7 @@ describe("UpgradeQuotaBanner", () => {
     render(<UpgradeQuotaBanner />);
 
     expect(screen.getByTestId("hosted-ai-allowance-banner")).toBeTruthy();
-    expect(screen.getByText("Weekly hosted AI limit reached")).toBeTruthy();
+    expect(screen.getByText("Weekly AI limit reached")).toBeTruthy();
     expect(screen.getByText(/100% used this week/i)).toBeTruthy();
     expect(screen.getByText(/resets Aug 17, 5:00 PM/i)).toBeTruthy();
     expect(screen.getByText(/Switch to Auto or upgrade/i)).toBeTruthy();
@@ -302,7 +302,7 @@ describe("UpgradeQuotaBanner", () => {
 
     render(<UpgradeQuotaBanner />);
     expect(screen.getByTestId("cost-limit-upgrade-banner")).toBeTruthy();
-    expect(screen.getByText(/hosted AI usage limit reached/i)).toBeTruthy();
+    expect(screen.getByText(/AI usage limit reached/i)).toBeTruthy();
     expect(
       screen.getByText(/resets 5:00 PM/i),
     ).toBeTruthy();

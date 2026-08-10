@@ -26,12 +26,12 @@ const COPY: Record<
 > = {
   login: {
     title: "Start your 7-day Business trial",
-    body: "Full access to hosted AI, unlimited pipes, and cloud transcription. Cancel anytime before day 7 and you are not charged.",
+    body: "Full access to AI, unlimited pipes, and cloud transcription. Cancel anytime before day 7 and you are not charged.",
     cta: "Start trial",
   },
   first_value: {
     title: "Keep this running",
-    body: "You just got your first result. A 7-day Business trial keeps hosted AI, pipes, and transcription running at full capacity. Cancel anytime before day 7 and you are not charged.",
+    body: "You just got your first result. A 7-day Business trial keeps AI, pipes, and transcription running at full capacity. Cancel anytime before day 7 and you are not charged.",
     cta: "Start trial",
   },
   limit: {
@@ -43,7 +43,7 @@ const COPY: Record<
   // one is nonsense to them; the real ask is to keep what they already have.
   grant_expiry: {
     title: "Your trial ends soon",
-    body: "Add a card to keep hosted AI, pipes, and transcription running. Nothing is charged until your trial ends, and you can cancel before then.",
+    body: "Add a card to keep AI, pipes, and transcription running. Nothing is charged until your trial ends, and you can cancel before then.",
     cta: "Keep Business",
   },
 };

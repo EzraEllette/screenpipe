@@ -125,8 +125,8 @@ export function UpgradeQuotaBanner() {
   const weeklyAllowance =
     cloudflareBlocked && cloudflareAllowance.window_seconds === 7 * 86_400;
   const blockedTitle = weeklyAllowance
-    ? "Weekly hosted AI limit reached"
-    : "Hosted AI usage limit reached";
+    ? "Weekly AI limit reached"
+    : "AI usage limit reached";
 
   return (
     <>
@@ -162,7 +162,7 @@ export function UpgradeQuotaBanner() {
               ) : legacyCostBlocked ? (
                 activeUpgrade ? (
                   <>
-                    Upgrade to {requiredPlanProse} for a higher hosted AI allowance,
+                    Upgrade to {requiredPlanProse} for a higher AI allowance,
                     or switch to a local or own-key AI preset.
                   </>
                 ) : (

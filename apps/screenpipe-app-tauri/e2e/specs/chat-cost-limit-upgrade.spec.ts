@@ -162,7 +162,7 @@ describe("Hosted AI usage-limit Business Max recovery", function () {
       error: JSON.stringify({
         error: "daily_limit_exceeded",
         message:
-          "You've used your daily hosted AI allowance. Background scheduled tasks share this allowance.",
+          "You've used your daily AI allowance. Background scheduled tasks share this allowance.",
         resets_at: "2026-08-02T00:00:00.000Z",
         plan: "business",
         required_plan: "business_max",
@@ -189,7 +189,7 @@ describe("Hosted AI usage-limit Business Max recovery", function () {
 
     const banner = await $('[data-testid="cost-limit-upgrade-banner"]');
     await banner.waitForDisplayed({ timeout: t(10_000) });
-    expect(await banner.getText()).toContain("Hosted AI usage limit reached");
+    expect(await banner.getText()).toContain("AI usage limit reached");
     expect(await banner.getText()).toContain("Resets");
 
     // The recovery action lives inline on the banner — no blocking dialog.

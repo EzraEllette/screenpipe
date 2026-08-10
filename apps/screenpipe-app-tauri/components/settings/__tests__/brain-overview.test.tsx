@@ -912,7 +912,7 @@ describe("BrainOverview", () => {
       "live-view-ai-prompt",
     )) as HTMLTextAreaElement;
     expect(prompt).toBeDisabled();
-    expect(prompt.placeholder).toBe("Hosted AI limit reached");
+    expect(prompt.placeholder).toBe("AI limit reached");
     expect(screen.getByTestId("live-view-ai-options")).toHaveAttribute(
       "aria-hidden",
       "true",

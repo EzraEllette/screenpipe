@@ -95,7 +95,7 @@ describe("buildDailyLimitMessage", () => {
       '{"error":{"code":"hosted_ai_allowance_exceeded"},"allowance":{"lane":"auto","plan":"basic","managed_by":"cloudflare"}}',
     );
     expect(message).toBe(
-      "Your hosted AI usage limit is reached. Switch to Auto.",
+      "Your AI usage limit is reached. Switch to Auto.",
     );
     expect(message).not.toContain("explicit");
     expect(message).not.toMatch(/\$\d/);
@@ -106,7 +106,7 @@ describe("buildDailyLimitMessage", () => {
       '{"error":{"code":"hosted_ai_allowance_exceeded"},"allowance":{"lane":"explicit","plan":"business","managed_by":"cloudflare"},"required_plan":"business_max","upgrade_url":"https://screenpipe.com/account/billing?target_plan=pro_max&interval=month"}',
     );
     expect(message).toBe(
-      "Your hosted AI usage limit is reached. Switch to Auto or upgrade.",
+      "Your AI usage limit is reached. Switch to Auto or upgrade.",
     );
     expect(message).not.toContain("explicit");
   });
@@ -120,7 +120,7 @@ describe("buildDailyLimitMessage", () => {
 
   it("shows the daily free message wall without immediate retry copy", () => {
     const message = buildDailyLimitMessage("free_chat_limit_exceeded");
-    expect(message).toContain("2 free hosted AI messages");
+    expect(message).toContain("2 free AI messages");
     expect(message).toContain("tomorrow");
     expect(message).toContain("Claude");
     expect(message).toContain("Codex");
@@ -245,7 +245,7 @@ describe("buildDailyLimitMessage", () => {
     });
     expect(parseQuotaUpgradeAction(error)?.requiredPlan).toBe("business_max");
     expect(buildDailyLimitMessage(error)).toBe(
-      "Your hosted AI usage limit is reached. Switch to Auto or upgrade.",
+      "Your AI usage limit is reached. Switch to Auto or upgrade.",
     );
   });
 
@@ -378,7 +378,7 @@ describe("presentQuotaError", () => {
     );
     expect(presented.kind).toBe("daily");
     expect(presented.message).toBe(
-      "Your hosted AI usage limit is reached. Switch to Auto.",
+      "Your AI usage limit is reached. Switch to Auto.",
     );
     expect(presented.message).not.toContain("explicit");
   });

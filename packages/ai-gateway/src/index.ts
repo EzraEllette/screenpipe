@@ -423,7 +423,7 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 				console.error('usage cost control configuration unavailable', error);
 				return addCorsHeaders(createErrorResponse(503, JSON.stringify({
 					error: 'cost_control_unavailable',
-					message: 'Hosted AI usage controls are temporarily unavailable. Try again shortly.',
+					message: 'AI usage controls are temporarily unavailable. Try again shortly.',
 				})));
 			}
 			let monthlyCost: number | null = null;
@@ -503,7 +503,7 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 				return freeChatErrorResponse({
 					status: 401,
 					code: 'authentication_required',
-					message: 'Sign in to use screenpipe hosted AI.',
+					message: 'Sign in to use screenpipe AI.',
 				});
 			}
 			if (!hasPaidHostedAiPlan(authResult) && authResult.accountPlan !== 'free') {
@@ -524,7 +524,7 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 							return freeChatErrorResponse({
 								status: 413,
 								code: 'free_chat_request_too_large',
-								message: `Free hosted chat requests are limited to ${FREE_CHAT_MAX_REQUEST_BYTES} bytes.`,
+								message: `Free AI chat requests are limited to ${FREE_CHAT_MAX_REQUEST_BYTES} bytes.`,
 							});
 						}
 						throw new Error('invalid JSON');
@@ -650,7 +650,7 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 						},
 						subscribe: {
 							url: 'https://screenpi.pe/onboarding',
-							benefit: 'Frontier Claude and GPT models, higher hosted AI limits, and encrypted sync',
+							benefit: 'Frontier Claude and GPT models, higher AI limits, and encrypted sync',
 							price: '$29/mo',
 						},
 					},
@@ -1000,13 +1000,13 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 				console.error('transcription cost control unavailable', error);
 				return addCorsHeaders(createErrorResponse(503, JSON.stringify({
 					error: 'cost_control_unavailable',
-					message: 'Hosted transcription controls are temporarily unavailable. Local transcription still works.',
+					message: 'Cloud transcription controls are temporarily unavailable. Local transcription still works.',
 				})));
 			}
 			if (dailyCost >= maxCost) {
 				return addCorsHeaders(createErrorResponse(429, JSON.stringify({
 					error: 'daily_cost_limit_exceeded',
-					message: "You've reached today's hosted transcription allowance. Audio will be transcribed locally until tomorrow.",
+					message: "You've reached today's cloud transcription allowance. Audio will be transcribed locally until tomorrow.",
 				})));
 			}
 
@@ -1048,14 +1048,14 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 				if (dailyCost >= maxCost) {
 					return addCorsHeaders(createErrorResponse(429, JSON.stringify({
 						error: 'daily_cost_limit_exceeded',
-						message: "You've reached today's hosted transcription allowance. Use local transcription or try again tomorrow.",
+						message: "You've reached today's cloud transcription allowance. Use local transcription or try again tomorrow.",
 					})));
 				}
 			} catch (error) {
 				console.error('realtime transcription cost control unavailable', error);
 				return addCorsHeaders(createErrorResponse(503, JSON.stringify({
 					error: 'cost_control_unavailable',
-					message: 'Hosted transcription controls are temporarily unavailable. Local transcription still works.',
+					message: 'Cloud transcription controls are temporarily unavailable. Local transcription still works.',
 				})));
 			}
 			return await handleRealtimeTranscriptionUpgrade(request, env, ctx, authResult);

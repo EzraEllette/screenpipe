@@ -751,8 +751,8 @@ function errorResponse(body: RequestBody, status: number, message: string): Resp
 
 function allowanceMessage(canUpgrade: boolean): string {
   return canUpgrade
-    ? 'Your hosted AI usage limit is reached. Switch to Auto or upgrade.'
-    : 'Your hosted AI usage limit is reached. Switch to Auto.';
+    ? 'Your AI usage limit is reached. Switch to Auto or upgrade.'
+    : 'Your AI usage limit is reached. Switch to Auto.';
 }
 
 /** Render the stable terminal contract Pi uses to avoid generic 429 retries. */
