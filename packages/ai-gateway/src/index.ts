@@ -31,6 +31,7 @@ import {
 	getStreamSettlementCost,
 	getSpendSummary,
 	inferProvider,
+	isFrontierModel,
 	logCost,
 	monthlyCostKey,
 	trialCostKey,
@@ -374,6 +375,9 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 				}
 				const allowanceExhausted = cloudflareUsage?.allowances
 					.some((allowance) => allowance.remaining_percent <= 0) ?? null;
+				const totalAllowanceExhausted = cloudflareUsage?.allowances
+					.some((allowance) =>
+						allowance.lane === 'combined' && allowance.remaining_percent <= 0) ?? null;
 				const capacityUpgrade = getHostedAiCapacityUpgrade(usageAccountPlan);
 				const upgradeEligible = capacityUpgrade !== null;
 				const enriched = {
@@ -382,7 +386,7 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 					// legacy query counters remain in the compatibility envelope, but
 					// cannot be presented as a live provider-cost meter.
 					upsell_banner: allowanceExhausted === true && upgradeEligible,
-					cost_limit_reached: allowanceExhausted,
+					cost_limit_reached: totalAllowanceExhausted,
 					upgrade_eligible: upgradeEligible,
 					hosted_ai: {
 						// Use the exact plan sent to Cloudflare. Max and Ultra have
@@ -396,6 +400,8 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 						usage_as_of: cloudflareUsage?.usage_as_of ?? null,
 						allowances: cloudflareUsage?.allowances ?? null,
 						model_access: [...getHostedAiAllowedModels(usageAccountPlan)],
+						frontier_models: getHostedAiAllowedModels(usageAccountPlan)
+							.filter((model) => isFrontierModel(model)),
 						required_plan: capacityUpgrade?.requiredPlan ?? null,
 						upgrade_url: capacityUpgrade?.upgradeUrl ?? null,
 						can_buy_credits: false,
@@ -458,6 +464,8 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 						? null
 						: Math.max(0, includedCredits - usedCredits),
 					model_access: [...getHostedAiAllowedModels(usageAccountPlan)],
+					frontier_models: getHostedAiAllowedModels(usageAccountPlan)
+						.filter((model) => isFrontierModel(model)),
 					required_plan: capacityUpgrade?.requiredPlan ?? null,
 					upgrade_url: capacityUpgrade?.upgradeUrl ?? null,
 					// Legacy query credits do not raise the provider-cost ceiling yet.
