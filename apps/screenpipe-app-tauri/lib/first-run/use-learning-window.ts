@@ -32,6 +32,7 @@ import { fetchRecentActivity } from "@/lib/first-run/recent-activity";
 import {
   fetchFirstRunMedia,
   mediaMarkdown,
+  preserveFirstRunMedia,
 } from "@/lib/first-run/recent-media";
 import { seedFirstRunSummaryChat } from "@/lib/first-run/seed-summary-chat";
 import { summarizeFirstRunWithAi } from "@/lib/first-run/summarize-with-ai";
@@ -171,7 +172,12 @@ export function useLearningWindow(
       // is the thing itself. Appended after whichever text won so a media
       // failure can never cost the user the summary — and skipped entirely
       // when screenshots are off, where frame rows exist but pixels do not.
-      const media = await fetchFirstRunMedia(startedAt);
+      // Preserved before embedding, never after: the capture path is live and
+      // snapshot compaction deletes stills once they are ten minutes old, so a
+      // summary that links capture directly loses its proof long before most
+      // users open it — silently, because a broken local image hides itself.
+      const found = await fetchFirstRunMedia(startedAt);
+      const media = found ? await preserveFirstRunMedia(found) : null;
       const summary = media
         ? `${written ?? fallback}\n\n${mediaMarkdown(media)}`
         : (written ?? fallback);
@@ -202,6 +208,12 @@ export function useLearningWindow(
         // first impression and the part most likely to be silently absent.
         has_media: Boolean(media),
         media_kind: media?.kind ?? "none",
+        // Whether the proof will still be there when the user opens the chat.
+        // `has_media` alone counted images that compaction was about to
+        // delete, so it read as success for a summary that arrived empty.
+        media_durable: media
+          ? media.kind === "video" || media.path !== found?.path
+          : false,
       });
       setState(markLearningReady(chatId));
     };
