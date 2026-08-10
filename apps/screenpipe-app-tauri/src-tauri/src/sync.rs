@@ -431,6 +431,21 @@ pub async fn auto_start_archive(app: &AppHandle) {
 }
 
 /// Auto-start local data retention on app launch if previously enabled.
+/// Which `RetentionMode` a stored `localRetentionMode` means.
+///
+/// Every variant the engine accepts is listed here. An earlier version omitted
+/// `lean`, so picking it silently ran `media` instead — that frees disk files
+/// but leaves db.sqlite exactly as large, the opposite of what `lean` is for.
+/// Unknown/missing values stay on the conservative `media`, which only deletes
+/// media files and never database rows.
+fn retention_mode_from_settings(stored: Option<&serde_json::Value>) -> &'static str {
+    match stored.and_then(|v| v.as_str()) {
+        Some("all") => "all",
+        Some("lean") => "lean",
+        _ => "media",
+    }
+}
+
 pub async fn auto_start_retention(app: &AppHandle) {
     let settings = match SettingsStore::get(app) {
         Ok(Some(s)) => s,
@@ -478,12 +493,7 @@ pub async fn auto_start_retention(app: &AppHandle) {
     let mode = if is_free_plan {
         "all"
     } else {
-        settings
-            .extra
-            .get("localRetentionMode")
-            .and_then(|v| v.as_str())
-            .filter(|s| *s == "media" || *s == "all")
-            .unwrap_or("media")
+        retention_mode_from_settings(settings.extra.get("localRetentionMode"))
     };
 
     let client = reqwest::Client::new();
@@ -528,4 +538,29 @@ pub async fn delete_cloud_data(state: State<'_, SyncState>) -> Result<(), String
             .map_err(|e| format!("failed to delete cloud data: {}", e))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::retention_mode_from_settings;
+    use serde_json::json;
+
+    #[test]
+    fn retention_mode_accepts_every_engine_variant() {
+        assert_eq!(retention_mode_from_settings(Some(&json!("media"))), "media");
+        assert_eq!(retention_mode_from_settings(Some(&json!("all"))), "all");
+        // Regression: "lean" used to fall through to "media", so the one mode
+        // that shrinks db.sqlite quietly did nothing.
+        assert_eq!(retention_mode_from_settings(Some(&json!("lean"))), "lean");
+    }
+
+    #[test]
+    fn retention_mode_falls_back_to_the_non_destructive_default() {
+        // Unset, wrong type, or a value this build doesn't know must never
+        // escalate to row deletion.
+        assert_eq!(retention_mode_from_settings(None), "media");
+        assert_eq!(retention_mode_from_settings(Some(&json!(7))), "media");
+        assert_eq!(retention_mode_from_settings(Some(&json!("wipe"))), "media");
+        assert_eq!(retention_mode_from_settings(Some(&json!(null))), "media");
+    }
 }

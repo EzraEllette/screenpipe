@@ -200,6 +200,39 @@ describe("computeManagedSettingUpdates", () => {
     expect(r.liveChanged).toBe(true);
   });
 
+  // Regression: an org with the Storage tab hidden had no reachable retention
+  // control — the policy column existed but never reached the device, so local
+  // databases grew unbounded for months.
+  it("enforces local retention (enabled + window + mode) as engine settings", () => {
+    const r = computeManagedSettingUpdates(
+      {
+        localRetentionEnabled: "true",
+        localRetentionDays: 7,
+        localRetentionMode: "all",
+      },
+      { localRetentionEnabled: false, localRetentionDays: 14, localRetentionMode: "media" },
+    );
+    expect(r.engineUpdates.localRetentionEnabled).toBe(true);
+    expect(r.engineUpdates.localRetentionDays).toBe(7);
+    expect(r.engineUpdates.localRetentionMode).toBe("all");
+    // The recorder restart is what re-runs auto_start_retention on device.
+    expect(r.engineChanged).toBe(true);
+  });
+
+  it("accepts every retention mode and rejects an out-of-range window", () => {
+    for (const mode of ["media", "lean", "all"]) {
+      const r = computeManagedSettingUpdates({ localRetentionMode: mode }, {});
+      expect(r.engineUpdates.localRetentionMode).toBe(mode);
+    }
+    expect(
+      computeManagedSettingUpdates({ localRetentionMode: "wipe" }, {}).engineUpdates,
+    ).not.toHaveProperty("localRetentionMode");
+    // 0 days would mean "delete everything, right now".
+    expect(
+      computeManagedSettingUpdates({ localRetentionDays: 0 }, {}).engineUpdates,
+    ).not.toHaveProperty("localRetentionDays");
+  });
+
   it("has unique policy and device keys", () => {
     const policyKeys = MANAGED_SETTING_DEFINITIONS.map((definition) => definition.policyKey);
     const deviceKeys = MANAGED_SETTING_DEFINITIONS.map((definition) => definition.deviceKey);
