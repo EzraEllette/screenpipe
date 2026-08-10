@@ -120,6 +120,7 @@ import { mountAgentEventBus, registerObserver } from "@/lib/events/bus";
 import { parsePipeSessionId } from "@/lib/events/types";
 import { writeBrowserLogNow } from "@/lib/logging/browser-log";
 import { copyMeetingToClipboard } from "./copy-meeting";
+import { copyMeetingSummary, emailMeetingSummary } from "./share-summary";
 import {
   resolveTranscriptOpen,
   type TranscriptOpenIntent,
@@ -144,6 +145,7 @@ import {
   type MeetingSummaryStreamState,
 } from "./meeting-summary-stream";
 import {
+  extractMeetingSummary,
   MEETING_QUIET_CONTROL_CLASS,
   MEETING_READING_COLUMN_CLASS,
   MEETING_SHELL_CLASS,
@@ -229,6 +231,7 @@ export function NoteView({
   const [exporting, setExporting] = useState(false);
   const [copying, setCopying] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [summaryCopied, setSummaryCopied] = useState(false);
   const [resumingCapture, setResumingCapture] = useState(false);
   const [savingBeforeStop, setSavingBeforeStop] = useState(false);
   const [autoSummaryEnabled, setAutoSummaryEnabled] = useState<boolean | null>(
@@ -1122,16 +1125,20 @@ export function NoteView({
     }
   };
 
+  // Editor state is ahead of the saved record between autosaves, so every share
+  // reads the title/attendees/note the user is looking at right now.
+  const currentMeeting = (): MeetingRecord => ({
+    ...meeting,
+    title: title || null,
+    attendees: attendees || null,
+    note: note || null,
+  });
+
   const handleCopy = async () => {
     if (copying) return;
     setCopying(true);
     try {
-      const fresh: MeetingRecord = {
-        ...meeting,
-        title: title || null,
-        attendees: attendees || null,
-        note: note || null,
-      };
+      const fresh = currentMeeting();
       // Re-fetch context + transcript so the clipboard reflects what the
       // user sees right now (live meetings update; speaker rename can
       // happen without re-rendering ReplayStrip).
@@ -1149,6 +1156,49 @@ export function NoteView({
       });
     } finally {
       setCopying(false);
+    }
+  };
+
+  // The summary share path is deliberately local: everything it needs is
+  // already in the note on screen, so there is no fetch between the click and
+  // the clipboard, and no transcript in the payload.
+  const handleCopySummary = async () => {
+    try {
+      const shared = await copyMeetingSummary(
+        currentMeeting(),
+        extractMeetingSummary(note),
+      );
+      if (!shared) {
+        toast({ title: "no summary to copy yet" });
+        return;
+      }
+      setSummaryCopied(true);
+      window.setTimeout(() => setSummaryCopied(false), 2000);
+      toast({ title: "summary copied", description: "paste it anywhere" });
+    } catch (err) {
+      console.error("failed to copy meeting summary", err);
+      toast({
+        title: "couldn't copy summary",
+        description: String(err),
+        variant: "destructive",
+      });
+    }
+  };
+
+  const handleEmailSummary = async () => {
+    try {
+      const shared = await emailMeetingSummary(
+        currentMeeting(),
+        extractMeetingSummary(note),
+      );
+      if (!shared) toast({ title: "no summary to send yet" });
+    } catch (err) {
+      console.error("failed to open email draft", err);
+      toast({
+        title: "couldn't open your email app",
+        description: String(err),
+        variant: "destructive",
+      });
     }
   };
 
@@ -1596,6 +1646,9 @@ export function NoteView({
             canGenerate={
               canSummarizeMeeting && !summaryWorking && !retranscribing
             }
+            onCopySummary={() => void handleCopySummary()}
+            onEmailSummary={() => void handleEmailSummary()}
+            summaryCopied={summaryCopied}
           />
         )}
       </main>

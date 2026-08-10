@@ -315,6 +315,21 @@ async copyFrameToClipboard(frameId: number) : Promise<Result<null, string>> {
 }
 },
 /**
+ * Copy rich text to the system clipboard: HTML plus a plain-text alternative
+ * on the same clipboard write. Pasting into Gmail, Notion, Slack, or Docs keeps
+ * headings, bold, and lists; plain-text targets get `text` instead. Used by the
+ * meeting summary share actions so a summary lands formatted, not as raw
+ * markdown.
+ */
+async copyRichTextToClipboard(html: string, text: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("copy_rich_text_to_clipboard", { html, text }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Copy arbitrary text to the system clipboard (native API, works in Tauri webview).
  * Use this instead of navigator.clipboard.writeText() which fails after async operations.
  */

@@ -3931,6 +3931,22 @@ pub async fn copy_text_to_clipboard(text: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Copy rich text to the system clipboard: HTML plus a plain-text alternative
+/// on the same clipboard write. Pasting into Gmail, Notion, Slack, or Docs keeps
+/// headings, bold, and lists; plain-text targets get `text` instead. Used by the
+/// meeting summary share actions so a summary lands formatted, not as raw
+/// markdown.
+#[tauri::command]
+#[specta::specta]
+pub async fn copy_rich_text_to_clipboard(html: String, text: String) -> Result<(), String> {
+    let mut clipboard = arboard::Clipboard::new().map_err(|e| format!("clipboard error: {}", e))?;
+    clipboard
+        .set()
+        .html(html, Some(text))
+        .map_err(|e| format!("failed to set clipboard: {}", e))?;
+    Ok(())
+}
+
 /// Open a local markdown note in Obsidian (if available), then fallback to OS default app.
 #[tauri::command]
 #[specta::specta]

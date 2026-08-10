@@ -181,3 +181,120 @@ describe("meeting summary surface", () => {
     expect(screen.getByTestId("meeting-summary-stream-cursor")).toBeVisible();
   });
 });
+
+// Sharing a summary used to mean the copy-everything button plus deleting the
+// transcript by hand. The share action lives in the summary header so it is on
+// screen the moment the agent finishes.
+//
+// One trigger, destinations one level down. Two peer buttons would have put
+// three same-weight controls in this header, against the rule the footer
+// cluster already follows. Granola (share-menu / share-popover surfaces) and
+// Notion (one share_summary_from_meeting_notes origin fanning out to
+// copy-contents / email / slack) both settled on the same shape.
+describe("meeting summary share actions", () => {
+  const shareProps = {
+    detail: "saved locally",
+    onGenerate: vi.fn(),
+    canGenerate: true,
+  };
+
+  it("keeps one share control in the header, not a button per destination", () => {
+    render(
+      <MeetingSummarySurface
+        note={"notes\n\n## Summary\nShip on friday."}
+        state="ready"
+        {...shareProps}
+        onCopySummary={vi.fn()}
+        onEmailSummary={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "share summary" })).toBeVisible();
+    // Destinations stay behind the trigger until the user asks for them.
+    expect(screen.queryByText("copy summary")).not.toBeInTheDocument();
+    expect(screen.queryByText("email summary")).not.toBeInTheDocument();
+  });
+
+  it("offers copy and email as destinations once opened", async () => {
+    const onCopySummary = vi.fn();
+
+    render(
+      <MeetingSummarySurface
+        note={"## Summary\nShip on friday."}
+        state="ready"
+        {...shareProps}
+        onCopySummary={onCopySummary}
+        onEmailSummary={vi.fn()}
+      />,
+    );
+
+    // Keyboard open, which also pins the trigger as reachable without a mouse.
+    fireEvent.keyDown(screen.getByRole("button", { name: "share summary" }), {
+      key: "Enter",
+    });
+
+    const copyItem = await screen.findByRole("menuitem", {
+      name: /copy summary/,
+    });
+    expect(
+      await screen.findByRole("menuitem", { name: /email summary/ }),
+    ).toBeVisible();
+    // Copy is listed first: it is the destination people reach for.
+    expect(copyItem.compareDocumentPosition(
+      screen.getByRole("menuitem", { name: /email summary/ }),
+    ) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    fireEvent.click(copyItem);
+    expect(onCopySummary).toHaveBeenCalledTimes(1);
+  });
+
+  it("confirms the copy on the trigger itself", () => {
+    render(
+      <MeetingSummarySurface
+        note={"## Summary\nShip on friday."}
+        state="ready"
+        {...shareProps}
+        onCopySummary={vi.fn()}
+        onEmailSummary={vi.fn()}
+        summaryCopied
+      />,
+    );
+
+    expect(
+      screen.getByRole("button", { name: "share summary" }),
+    ).toHaveTextContent("copied");
+  });
+
+  it("hides sharing until there is a summary to share", () => {
+    render(
+      <MeetingSummarySurface
+        note="notes only"
+        state="idle"
+        {...shareProps}
+        onCopySummary={vi.fn()}
+        onEmailSummary={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.queryByRole("button", { name: "share summary" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("withholds sharing mid-stream so a partial summary cannot be sent", () => {
+    render(
+      <MeetingSummarySurface
+        note={"## Summary\nEarlier summary."}
+        state="working"
+        {...shareProps}
+        streamedSummary="Half a sen"
+        onCopySummary={vi.fn()}
+        onEmailSummary={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.queryByRole("button", { name: "share summary" }),
+    ).not.toBeInTheDocument();
+  });
+});
