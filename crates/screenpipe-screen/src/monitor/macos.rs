@@ -736,11 +736,42 @@ async fn fallback_after_sck_monitor_error(
         "ScreenCaptureKit monitor enumeration failed ({}); trying bounded CoreGraphics fallback",
         sck_error
     );
+    note_capture_backend_fallback();
     enumerate_xcap_monitors_bounded().await.map_err(|cg_error| {
         MonitorListError::Other(format!(
             "ScreenCaptureKit enumeration failed ({sck_error}); CoreGraphics fallback failed ({cg_error})"
         ))
     })
+}
+
+/// Unix seconds of the last ScreenCaptureKit-to-CoreGraphics fallback, or 0.
+///
+/// Capture degrading to the CoreGraphics fallback is invisible to `/health`:
+/// frames keep arriving, so `frame_status` stays healthy while the primary
+/// backend is wedged and frames are being silently lost. Recording the fact
+/// lets the stall detail name the real cause instead of listing candidates.
+static LAST_CAPTURE_BACKEND_FALLBACK: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+fn note_capture_backend_fallback() {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    LAST_CAPTURE_BACKEND_FALLBACK.store(now, Ordering::Release);
+}
+
+/// Seconds since capture last fell back off ScreenCaptureKit, if ever.
+pub fn secs_since_capture_backend_fallback() -> Option<u64> {
+    let at = LAST_CAPTURE_BACKEND_FALLBACK.load(Ordering::Acquire);
+    if at == 0 {
+        return None;
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    Some(now.saturating_sub(at))
 }
 
 fn sck_monitor_error_allows_fallback(error: &MonitorListError) -> bool {
