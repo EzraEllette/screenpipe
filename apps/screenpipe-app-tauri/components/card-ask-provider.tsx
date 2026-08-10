@@ -42,12 +42,24 @@ export function CardAskProvider() {
   const { settings, isSettingsLoaded } = useSettings();
   const os = useMemo(normalizeOs, []);
 
-  // Fire the login trigger once the arm has resolved. The controller's
-  // shown-list makes this idempotent across mounts and restarts.
+  // Fire the login trigger once the arm has resolved *and* the account is
+  // actually known.
+  //
+  // The arm comes from a synchronous localStorage read, the user comes from an
+  // async store load, so the arm almost always resolves first. Emitting on
+  // `arm` alone therefore fired into `isCardAskEligible(user, false)`, which
+  // correctly refuses to judge an unloaded account — and because the bus is
+  // fire-and-forget with no replay, that emission was simply lost for the
+  // session. `at_login` would have read as a dead arm.
+  //
+  // Depending on the user as well also covers signing in after Home is already
+  // mounted. Re-emission is safe: the controller's shown-list keeps it to one
+  // ask per install, and an ineligible emission is a dropped no-op.
   useEffect(() => {
     if (arm !== "at_login") return;
+    if (!isSettingsLoaded) return;
     emitCardAskTrigger("login");
-  }, [arm]);
+  }, [arm, isSettingsLoaded, settings?.user]);
 
   // Expiring cardless grant: the highest-intent moment in the funnel. The
   // grant still works, the user is still active, and in a couple of days
