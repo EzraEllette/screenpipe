@@ -9,8 +9,8 @@ use anyhow::Result;
 use image::DynamicImage;
 use once_cell::sync::Lazy;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
 
 /// Healthy macOS captures stay single-file, but a timed-out `spawn_blocking`
 /// task cannot be cancelled while Apple owns the callback. Keep the serializer
@@ -607,6 +607,67 @@ fn enumerate_sck_monitors_for_lookup() -> std::result::Result<Vec<SafeMonitor>, 
     enumerate_sck_monitors()
 }
 
+/// How long a successful enumeration may answer `get_monitor_by_id`.
+///
+/// Monitor topology changes on the order of minutes; `get_monitor_by_id` was
+/// being called several times a second by callers that only need a display's
+/// geometry to open a stream, and each call is a full `SCShareableContent`
+/// round-trip. On a Mac whose ScreenCaptureKit daemon answers slower than
+/// [`monitor_lookup_timeout`], those calls time out, leak a wedged worker
+/// apiece, and saturate the shared cap so real capture is refused.
+///
+/// Only the *lookup* path reads this cache. `list_monitors_detailed` always
+/// enumerates fresh and overwrites it, so display connect/disconnect detection
+/// in the monitor watcher keeps its existing accuracy.
+const MONITOR_LOOKUP_CACHE_TTL: Duration = Duration::from_secs(10);
+
+struct CachedMonitorList {
+    monitors: Vec<SafeMonitor>,
+    captured_at: Instant,
+}
+
+static MONITOR_LOOKUP_CACHE: Lazy<RwLock<Option<CachedMonitorList>>> =
+    Lazy::new(|| RwLock::new(None));
+
+/// Record a fresh enumeration as the answer for subsequent lookups.
+fn store_monitor_lookup_cache(monitors: &[SafeMonitor]) {
+    let mut guard = MONITOR_LOOKUP_CACHE
+        .write()
+        .unwrap_or_else(|e| e.into_inner());
+    *guard = Some(CachedMonitorList {
+        monitors: monitors.to_vec(),
+        captured_at: Instant::now(),
+    });
+}
+
+/// Look `id` up in the cache when the entry is younger than the TTL.
+fn cached_monitor_by_id(id: u32, now: Instant) -> Option<SafeMonitor> {
+    let guard = MONITOR_LOOKUP_CACHE
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
+    let cached = guard.as_ref()?;
+    if now.duration_since(cached.captured_at) >= MONITOR_LOOKUP_CACHE_TTL {
+        return None;
+    }
+    cached
+        .monitors
+        .iter()
+        .find(|monitor| monitor.id() == id)
+        .cloned()
+}
+
+/// Drop the lookup cache.
+///
+/// Production has no caller by design: `list_monitors_detailed` overwrites the
+/// cache on every successful enumeration, so the watcher's own polling is the
+/// invalidation path.
+#[cfg(test)]
+fn invalidate_monitor_lookup_cache() {
+    *MONITOR_LOOKUP_CACHE
+        .write()
+        .unwrap_or_else(|e| e.into_inner()) = None;
+}
+
 fn monitor_lookup_timeout() -> Duration {
     #[cfg(debug_assertions)]
     if e2e_lookup_hang_enabled() {
@@ -717,6 +778,9 @@ pub async fn list_monitors_detailed() -> std::result::Result<Vec<SafeMonitor>, M
 
     if let Ok(monitors) = &result {
         update_monitor_cache(monitors);
+        // Fresh truth from the full enumeration also answers pending lookups,
+        // so the watcher's own polling keeps the lookup cache warm.
+        store_monitor_lookup_cache(monitors);
     }
     result
 }
@@ -753,6 +817,12 @@ pub async fn get_default_monitor() -> Option<SafeMonitor> {
 }
 
 pub async fn get_monitor_by_id(id: u32) -> Option<SafeMonitor> {
+    // Serve a recent enumeration instead of a fresh SCK round-trip. Callers hit
+    // this several times a second only to read a display's geometry, and on a
+    // slow ScreenCaptureKit daemon each miss leaks a wedged worker.
+    if let Some(monitor) = cached_monitor_by_id(id, Instant::now()) {
+        return Some(monitor);
+    }
     if use_sck_rs() {
         match run_bounded_sck_enumeration(
             &SCK_MONITOR_ENUMERATION_SERIALIZER,
@@ -762,22 +832,24 @@ pub async fn get_monitor_by_id(id: u32) -> Option<SafeMonitor> {
         )
         .await
         {
-            Ok(monitors) => monitors.into_iter().find(|monitor| monitor.id() == id),
+            Ok(monitors) => {
+                store_monitor_lookup_cache(&monitors);
+                monitors.into_iter().find(|monitor| monitor.id() == id)
+            }
             Err(e) => {
                 tracing::warn!("bounded SCK lookup for monitor {} failed: {}", id, e);
-                fallback_after_sck_monitor_error(e)
-                    .await
-                    .ok()?
-                    .into_iter()
-                    .find(|monitor| monitor.id() == id)
+                let monitors = fallback_after_sck_monitor_error(e).await.ok()?;
+                // The CoreGraphics fallback is a valid answer for lookups, and
+                // caching it is what keeps a wedged SCK daemon from being asked
+                // again on the very next call.
+                store_monitor_lookup_cache(&monitors);
+                monitors.into_iter().find(|monitor| monitor.id() == id)
             }
         }
     } else {
-        enumerate_xcap_monitors_bounded()
-            .await
-            .ok()?
-            .into_iter()
-            .find(|monitor| monitor.id() == id)
+        let monitors = enumerate_xcap_monitors_bounded().await.ok()?;
+        store_monitor_lookup_cache(&monitors);
+        monitors.into_iter().find(|monitor| monitor.id() == id)
     }
 }
 
@@ -859,6 +931,96 @@ impl SafeMonitor {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// `MONITOR_LOOKUP_CACHE` is process-global, so the cache tests below must
+    /// not interleave with each other.
+    static LOOKUP_CACHE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn lock_lookup_cache_tests() -> std::sync::MutexGuard<'static, ()> {
+        LOOKUP_CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn cache_test_monitor(id: u32) -> SafeMonitor {
+        SafeMonitor {
+            monitor_id: id,
+            monitor_data: Arc::new(MonitorData {
+                width: 1728,
+                height: 1117,
+                x: 0,
+                y: 0,
+                name: format!("Display {id}"),
+                is_primary: true,
+            }),
+            use_sck: false,
+            cached_sck: None,
+            cached_xcap: None,
+            prefer_xcap_fallback: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// The production failure this cache exists for: a caller asking for the
+    /// same display several times a second must not produce one
+    /// `SCShareableContent` round-trip per call.
+    #[test]
+    fn monitor_lookup_is_served_from_a_recent_enumeration() {
+        let _guard = lock_lookup_cache_tests();
+        invalidate_monitor_lookup_cache();
+        let now = Instant::now();
+        assert!(cached_monitor_by_id(1, now).is_none());
+
+        store_monitor_lookup_cache(&[cache_test_monitor(1), cache_test_monitor(2)]);
+
+        assert_eq!(
+            cached_monitor_by_id(1, Instant::now()).map(|m| m.id()),
+            Some(1)
+        );
+        assert_eq!(
+            cached_monitor_by_id(2, Instant::now()).map(|m| m.id()),
+            Some(2)
+        );
+        // A display that was not in the enumeration must still miss, so the
+        // caller re-enumerates rather than silently failing.
+        assert!(cached_monitor_by_id(99, Instant::now()).is_none());
+
+        invalidate_monitor_lookup_cache();
+    }
+
+    #[test]
+    fn monitor_lookup_cache_expires_and_can_be_invalidated() {
+        let _guard = lock_lookup_cache_tests();
+        invalidate_monitor_lookup_cache();
+        store_monitor_lookup_cache(&[cache_test_monitor(7)]);
+        let stored_at = Instant::now();
+
+        assert!(cached_monitor_by_id(7, stored_at).is_some());
+        assert!(cached_monitor_by_id(7, stored_at + MONITOR_LOOKUP_CACHE_TTL / 2).is_some());
+        // Stale entries must not answer, or a disconnected display would keep
+        // being handed out forever.
+        assert!(cached_monitor_by_id(7, stored_at + MONITOR_LOOKUP_CACHE_TTL).is_none());
+        assert!(cached_monitor_by_id(7, stored_at + MONITOR_LOOKUP_CACHE_TTL * 2).is_none());
+
+        store_monitor_lookup_cache(&[cache_test_monitor(7)]);
+        assert!(cached_monitor_by_id(7, Instant::now()).is_some());
+        invalidate_monitor_lookup_cache();
+        assert!(cached_monitor_by_id(7, Instant::now()).is_none());
+    }
+
+    /// A later enumeration is authoritative: a display that disappeared must
+    /// stop resolving as soon as `list_monitors_detailed` says so.
+    #[test]
+    fn newer_enumeration_replaces_the_cached_set() {
+        let _guard = lock_lookup_cache_tests();
+        invalidate_monitor_lookup_cache();
+        store_monitor_lookup_cache(&[cache_test_monitor(1), cache_test_monitor(2)]);
+        store_monitor_lookup_cache(&[cache_test_monitor(1)]);
+
+        assert!(cached_monitor_by_id(1, Instant::now()).is_some());
+        assert!(cached_monitor_by_id(2, Instant::now()).is_none());
+
+        invalidate_monitor_lookup_cache();
+    }
 
     #[test]
     fn macos_version_boundary_keeps_pre_12_3_on_legacy_xcap() {
