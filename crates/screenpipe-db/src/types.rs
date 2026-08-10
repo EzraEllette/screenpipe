@@ -628,6 +628,7 @@ pub struct FrameRow {
 pub struct FrameRowLight {
     pub id: i64,
     pub timestamp: DateTime<Utc>,
+    pub device_name: String,
     pub url: String,
     pub app_name: String,
     pub window_name: String,

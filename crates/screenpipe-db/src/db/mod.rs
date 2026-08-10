@@ -461,7 +461,7 @@ pub use self::semantic::{
     SemanticCleanupResult, SemanticContextQuery, SemanticFrameContext,
     SemanticProjectionWriteResult,
 };
-pub(crate) use self::text_positions::calculate_confidence;
+pub(crate) use self::text_positions::{calculate_confidence, match_on_screen_a11y};
 pub use self::text_positions::{
     find_matching_a11y_positions, find_matching_positions, parse_all_text_positions,
 };
