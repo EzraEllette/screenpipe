@@ -129,6 +129,14 @@ describe("AIPresetsSelector controlled preset creation", () => {
         }),
       );
     });
+    expect(mocks.updateSettings).toHaveBeenCalledWith({
+      aiPresets: expect.arrayContaining([
+        expect.objectContaining({
+          id: "new chat preset",
+          modelOutputLimitPublished: false,
+        }),
+      ]),
+    });
     expect(screen.queryByRole("button", { name: "continue" })).not.toBeInTheDocument();
     expect(screen.getByRole("combobox")).toHaveTextContent("gpt-5.6-terra");
   });

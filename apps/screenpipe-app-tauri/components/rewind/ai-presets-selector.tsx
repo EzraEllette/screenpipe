@@ -93,6 +93,10 @@ import {
   ollamaContextWindowFromShow,
   resolveModelLimits,
 } from "@/lib/model-metadata";
+import {
+  buildRewindPresetFromProviderData,
+  rewindPresetDialogDefaults,
+} from "./rewind-preset-persistence";
 
 // Helper to detect UUID-like strings and format preset names nicely
 const formatPresetName = (name: string): string => {
@@ -262,6 +266,8 @@ export function AIProviderConfig({
     acpAgent: defaultPreset?.acpAgent,
     maxContextChars: defaultPreset?.maxContextChars || 512000,
     maxTokens: defaultPreset?.maxTokens ?? 4096,
+    modelOutputLimitPublished:
+      defaultPreset?.modelOutputLimitPublished ?? null,
     prompt: defaultPreset?.prompt || DEFAULT_PROMPT,
     id: defaultPreset?.id || "",
     defaultPreset: defaultPreset?.defaultPreset || false,
@@ -1281,53 +1287,12 @@ export const AIPresetDialog = ({
   preset,
   showLoginCta = true,
 }: AIPresetDialogProps) => {
-  const handleProviderSubmit = (providerData: any) => {
-    const newPreset: Partial<AIPreset> = {
-      ...preset,
-      provider: providerData.provider,
-      url: providerData.url,      // Fixed: was providerData.baseUrl
-      model: providerData.model,  // Fixed: was providerData.modelName
-      id: providerData.id,
-      maxContextChars: providerData.maxContextChars,
-      prompt: providerData.prompt,
-      // Coding agent presets are defined by their agent config; dropping it
-      // here saved presets with provider "acp" but no agent.
-      acpAgent: providerData.provider === "acp" ? providerData.acpAgent : undefined,
-    };
-
-    // Screenpipe Cloud gets its output budget from the gateway catalog. Direct
-    // providers retain the resolved value or the user's unknown-model fallback.
-    if (providerData.provider !== "screenpipe-cloud") {
-      (newPreset as any).maxTokens = (providerData as any).maxTokens ?? 4096;
-    }
-
-    // Add apiKey for providers that require it
-    if (
-      providerData.provider === "openai" ||
-      providerData.provider === "custom" ||
-      providerData.provider === "anthropic"
-    ) {
-      (newPreset as any).apiKey = providerData.apiKey;
-    }
-
-    onSave(newPreset);
+  const handleProviderSubmit = (providerData: AIPreset) => {
+    onSave(buildRewindPresetFromProviderData(preset, providerData));
   };
 
   const defaultPreset = preset
-    ? {
-        id: preset.id,
-        provider: preset.provider,
-        url: preset.url,
-        model: preset.model,
-        acpAgent: preset.acpAgent,
-        maxContextChars: preset.maxContextChars,
-        ...(preset.provider !== "screenpipe-cloud"
-          ? { maxTokens: (preset as any).maxTokens ?? 4096 }
-          : {}),
-        prompt: preset.prompt,
-        defaultPreset: preset.defaultPreset,
-        apiKey: preset.apiKey || null,
-      }
+    ? rewindPresetDialogDefaults(preset)
     : undefined;
 
   return (
