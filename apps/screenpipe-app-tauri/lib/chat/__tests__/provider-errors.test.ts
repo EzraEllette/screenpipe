@@ -275,6 +275,20 @@ describe("provider error copy", () => {
     }
   );
 
+  it.each([
+    ["openai", "gpt-4o"],
+    ["anthropic", "claude-opus-4-8"],
+  ])(
+    "omits Max Output Tokens guidance when %s publishes limits for %s",
+    (provider, model) => {
+      const raw = 'Error: 400 data: {"error":{"message":"400 Could not finish the message because max_tokens or model output limit was reached. Please try again with higher max_tokens.","type":"api_error","code":"400"}} data: [DONE]';
+
+      expect(buildProviderErrorMessage(raw, { provider, model })).toBe(
+        "The model reached its output limit. Ask for a shorter response."
+      );
+    }
+  );
+
   it("explains llama.cpp context mismatches with reported token counts", () => {
     const raw = 'Engine protocol predict request returned 400: {"error":{"code":400,"message":"request (13069 tokens) exceeds the available context size (8192 tokens), try increasing it","type":"exceed_context_size_error","n_prompt_tokens":13069,"n_ctx":8192}}';
     expect(
