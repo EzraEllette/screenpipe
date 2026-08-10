@@ -76,11 +76,22 @@ export function CardAskModal({
   const [busy, setBusy] = useState(false);
   const open = trigger !== null && arm !== null;
 
+  // Which opening has already been reported. `isFirstAsk` is derived from a
+  // mutable ref in useCardAsk, so it can flip true -> false on a later render
+  // while this modal stays open — on a user's second ask it always does. That
+  // changes this effect's deps and re-runs it, emitting a second
+  // `card_ask_shown` for a single modal and inflating the exposure
+  // denominator every rate is computed from.
+  const reportedTriggerRef = useRef<CardAskTrigger | null>(null);
+
   useEffect(() => {
     if (!open || !trigger || !arm) {
       shownAtRef.current = null;
+      reportedTriggerRef.current = null;
       return;
     }
+    if (reportedTriggerRef.current === trigger) return;
+    reportedTriggerRef.current = trigger;
     shownAtRef.current = Date.now();
     cardAskEvents.shown({ arm, trigger, os, isFirstAsk });
   }, [open, trigger, arm, os, isFirstAsk]);

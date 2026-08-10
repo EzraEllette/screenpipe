@@ -165,3 +165,33 @@ describe("CardAskModal", () => {
     await waitFor(() => expect(openUrl).toHaveBeenCalledTimes(1));
   });
 });
+
+describe("CardAskModal shown-event idempotence", () => {
+  // Regression: `isFirstAsk` is derived from a mutable ref in useCardAsk and is
+  // in this effect's dependency array. On a user's second ask it flips
+  // true -> false, the deps change while the modal is still open, and the
+  // effect re-runs — emitting card_ask_shown twice for ONE modal.
+  //
+  // Observed in production: one user, trigger grant_expiry, two events at the
+  // same second from one machine. It inflates the exposure denominator, so
+  // every rate computed from card_ask_shown reads low.
+  it("emits card_ask_shown once per opening when isFirstAsk flips", () => {
+    const { rerender } = render(
+      <CardAskModal {...base} trigger="grant_expiry" isFirstAsk={true} />,
+    );
+    expect(names().filter((n) => n === "card_ask_shown")).toHaveLength(1);
+
+    // Same modal, still open, isFirstAsk recomputed to false.
+    rerender(<CardAskModal {...base} trigger="grant_expiry" isFirstAsk={false} />);
+    expect(names().filter((n) => n === "card_ask_shown")).toHaveLength(1);
+  });
+
+  it("still reports a genuinely new opening", () => {
+    const { rerender } = render(
+      <CardAskModal {...base} trigger="first_value" isFirstAsk={true} />,
+    );
+    rerender(<CardAskModal {...base} trigger={null} isFirstAsk={true} />);
+    rerender(<CardAskModal {...base} trigger="grant_expiry" isFirstAsk={false} />);
+    expect(names().filter((n) => n === "card_ask_shown")).toHaveLength(2);
+  });
+});
