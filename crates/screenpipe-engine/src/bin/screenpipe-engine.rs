@@ -139,7 +139,9 @@ fn get_base_dir(custom_path: &Option<String>) -> anyhow::Result<PathBuf> {
     let data_dir = base_dir.join("data");
 
     fs::create_dir_all(&data_dir)?;
-    paths::ensure_spotlight_excluded(&base_dir)?;
+    // Best effort: a failed Spotlight exclusion must not stop the recorder from
+    // starting — capture is the job, the exclusion is hardening around it.
+    paths::ensure_spotlight_excluded_best_effort(&base_dir);
     Ok(base_dir)
 }
 
@@ -556,6 +558,11 @@ async fn main() -> anyhow::Result<()> {
                             r"Library not loaded.*libx265\.",
                             // Linux system library missing — distro-local, not our bug
                             r"Failed to load ayatana-appindicator3 or appindicator3 dynamic library",
+                            // libwayshot reports an older Wayland compositor's wl_output
+                            // protocol as an error even though it deliberately ignores that
+                            // output and continues (CLI-ZY: 130 duplicate events, one user).
+                            // Keep the local log for diagnosis, but do not send it to Sentry.
+                            r"^Ignoring a wl_output with version < 4\.$",
                             // Deepgram DNS / connectivity blips — already logged locally
                             r"deepgram transcription failed: Cannot resolve audio transcription server",
                         ]
@@ -1336,50 +1343,28 @@ async fn main() -> anyhow::Result<()> {
     // Initialize secret store for unified credential management
     let encryption_requested =
         config.encrypt_secrets || screenpipe_secrets::is_encryption_requested(&local_data_dir);
-
     {
-        // Read-only keychain access: pick up existing key without triggering modals.
-        // Use --encrypt-secrets / explicit on-disk opt-in to create/use a key.
-        let secret_key = if encryption_requested {
-            if config.encrypt_secrets {
-                match screenpipe_secrets::keychain::get_or_create_key() {
-                    Some(k) => {
-                        info!("keychain: encryption key ready (--encrypt-secrets)");
-                        if let Err(e) = screenpipe_secrets::mark_encryption_enabled(&local_data_dir)
-                        {
-                            warn!("keychain: failed to persist encryption opt-in flag: {}", e);
-                        }
-                        Some(k)
+        // Explicit --encrypt-secrets may create a key. Every other reader uses
+        // the same existing OS-vault key as desktop and CLI without creating
+        // one, so optional encryption behavior remains unchanged.
+        let secret_store_result = if config.encrypt_secrets {
+            let secret_key = match screenpipe_secrets::keychain::get_or_create_key() {
+                Some(k) => {
+                    info!("keychain: encryption key ready (--encrypt-secrets)");
+                    if let Err(e) = screenpipe_secrets::mark_encryption_enabled(&local_data_dir) {
+                        warn!("keychain: failed to persist encryption opt-in flag: {}", e);
                     }
-                    None => {
-                        warn!("keychain: failed to create encryption key — secrets will be stored unencrypted");
-                        None
-                    }
+                    Some(k)
                 }
-            } else {
-                match screenpipe_secrets::keychain::get_key() {
-                    screenpipe_secrets::keychain::KeyResult::Found(k) => {
-                        info!("keychain: using existing encryption key");
-                        Some(k)
-                    }
-                    _ => None,
+                None => {
+                    warn!("keychain: failed to create encryption key — secrets will be stored unencrypted");
+                    None
                 }
-            }
+            };
+            screenpipe_secrets::SecretStore::open_for_data_dir(&local_data_dir, secret_key).await
         } else {
-            None
+            screenpipe_secrets::SecretStore::open_for_data_dir_with_vault_key(&local_data_dir).await
         };
-        let database_error_hook: screenpipe_secrets::DatabaseErrorHook = {
-            let db = Arc::clone(&db);
-            Arc::new(move |error| {
-                db.report_sqlite_error(error);
-            })
-        };
-        let secret_store_result = screenpipe_secrets::SecretStore::new_with_database_error_hook(
-            db.pool.clone(),
-            secret_key,
-            Some(database_error_hook),
-        )
-        .await;
         match secret_store_result {
             Ok(store) => {
                 // Run startup permission sweep
@@ -1513,6 +1498,20 @@ async fn main() -> anyhow::Result<()> {
             Box::pin(async move {
                 screenpipe_connect::missing_pipe_connections(ss.as_deref(), &dir, &required).await
             })
+        }));
+    }
+    // Give scheduled runs the same Live View target authority the foreground
+    // refresh button sends, so a Pipe feeding several dashboards refreshes all
+    // of them instead of leaving the ones it skipped stale until a manual click.
+    {
+        let screenpipe_dir_for_live_views = local_data_dir.clone();
+        pipe_manager.set_scheduled_run_context(std::sync::Arc::new(move |pipe_name: &str| {
+            screenpipe_engine::live_views::scheduled_live_view_run_context_for_dir(
+                &screenpipe_dir_for_live_views,
+                pipe_name,
+                chrono::Local::now(),
+            )
+            .map(|context| screenpipe_engine::pipes_api::format_run_context(&context))
         }));
     }
     // Inject local API key so pipe subprocesses can authenticate to localhost

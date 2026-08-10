@@ -361,7 +361,6 @@ export function createBrowserIpcMock(options: BrowserIpcMockOptions) {
       case "get_enterprise_team_api_token":
       case "get_pending_update":
         return null;
-      case "get_e2e_seed_flags":
       case "get_installed_browsers":
       case "get_missing_permissions":
       case "pi_pending":
@@ -429,6 +428,8 @@ export function createBrowserIpcMock(options: BrowserIpcMockOptions) {
           managed: false,
           detected_by: [],
         };
+      case "get_screenpipe_ai_gateway_url":
+        return "https://api.screenpipe.com/v1";
       case "is_enterprise_build_cmd":
       case "is_capture_paused":
         return false;

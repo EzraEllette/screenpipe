@@ -4,7 +4,11 @@
 
 import { waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { useKeywordSearchStore } from "../use-keyword-search-store";
+import {
+	queryHighlightTokens,
+	useKeywordSearchStore,
+	visibleMatchingPositions,
+} from "../use-keyword-search-store";
 import { localFetch } from "@/lib/api";
 
 const mocks = vi.hoisted(() => ({
@@ -86,12 +90,17 @@ describe("useKeywordSearchStore search scheduling", () => {
 				{
 					frame_id: 1,
 					timestamp: "2026-06-19T00:00:00.000Z",
-					text_positions: [],
+					text_positions: [{
+						text: "screenpipe",
+						confidence: 1,
+						bounds: { left: 0.1, top: 0.1, width: 0.2, height: 0.05 },
+					}],
 					app_name: "Cursor",
 					window_name: "screenpipe",
 					confidence: 1,
 					text: "screenpipe search result",
 					url: "",
+					text_source: "ocr",
 				},
 			]),
 		);
@@ -174,28 +183,276 @@ describe("useKeywordSearchStore search scheduling", () => {
 		newResponse.resolve(jsonResponse([{
 			frame_id: 2,
 			timestamp: "2026-07-13T01:00:00.000Z",
-			text_positions: [],
+			text_positions: [{
+				text: "new-query",
+				confidence: 1,
+				bounds: { left: 0.1, top: 0.1, width: 0.2, height: 0.05 },
+			}],
 			app_name: "New app",
 			window_name: "new result",
 			confidence: 1,
 			text: "new result",
 			url: "",
+			text_source: "ocr",
 		}]));
 		await newSearch;
 
 		oldResponse.resolve(jsonResponse([{
 			frame_id: 1,
 			timestamp: "2026-07-13T00:00:00.000Z",
-			text_positions: [],
+			text_positions: [{
+				text: "old-query",
+				confidence: 1,
+				bounds: { left: 0.1, top: 0.1, width: 0.2, height: 0.05 },
+			}],
 			app_name: "Old app",
 			window_name: "old result",
 			confidence: 1,
 			text: "old result",
 			url: "",
+			text_source: "ocr",
 		}]));
 		await oldSearch;
 
 		expect(useKeywordSearchStore.getState().searchQuery).toBe("new-query");
 		expect(useKeywordSearchStore.getState().searchResults.map((item) => item.frame_id)).toEqual([2]);
+	});
+
+	it("keeps an OCR candidate whose visible text matches a fuzzy prefix", async () => {
+		vi.mocked(localFetch).mockImplementation((input) => {
+			const url = String(input);
+			if (url.startsWith("/search/keyword?")) {
+				return Promise.resolve(jsonResponse([{
+					frame_id: 566,
+					timestamp: "2026-07-30T03:27:38.299898Z",
+					text_positions: [{
+						text: "100% Deterministic",
+						confidence: 1,
+						bounds: {
+							left: 0.1,
+							top: 0.1,
+							width: 0.2,
+							height: 0.05,
+						},
+					}],
+					app_name: "ChatGPT",
+					window_name: "ChatGPT",
+					confidence: 1,
+					text: "Deterministic",
+					url: "",
+					text_source: "ocr",
+				}]));
+			}
+			if (url.startsWith("/search?")) {
+				return Promise.resolve(jsonResponse({ data: [] }));
+			}
+			throw new Error(`unexpected request: ${url}`);
+		});
+
+		await useKeywordSearchStore.getState().searchKeywords("determ");
+
+		expect(
+			useKeywordSearchStore
+				.getState()
+				.searchResults.map((result) => result.frame_id),
+		).toEqual([566]);
+	});
+
+	it("keeps accessibility candidates instead of re-verifying them with screenshot OCR", async () => {
+		// Accessibility is the primary capture source and dominates real result
+		// sets. Gating it on a screenshot-OCR second opinion deleted correct results
+		// and competed with the recorder for the single shared capture OCR permit.
+		const candidates = Array.from({ length: 5 }, (_, index) => ({
+			frame_id: index + 1,
+			timestamp: "2026-07-30T03:27:38.299898Z",
+			text_positions: [{
+				text: "quarterly retention review",
+				confidence: 1,
+				bounds: { left: 0.1, top: 0.1, width: 0.4, height: 0.05 },
+			}],
+			app_name: "Notion",
+			window_name: "Notion",
+			confidence: 1,
+			text: "quarterly retention review",
+			url: "",
+			text_source: "accessibility" as const,
+		}));
+		const requestedUrls: string[] = [];
+		vi.mocked(localFetch).mockImplementation((input) => {
+			const url = String(input);
+			requestedUrls.push(url);
+			if (url.startsWith("/search/keyword?")) {
+				return Promise.resolve(jsonResponse(candidates));
+			}
+			if (url.startsWith("/search?")) {
+				return Promise.resolve(jsonResponse({ data: [] }));
+			}
+			throw new Error(`unexpected request: ${url}`);
+		});
+
+		await useKeywordSearchStore.getState().searchKeywords("retention");
+
+		expect(
+			useKeywordSearchStore
+				.getState()
+				.searchResults.map((result) => result.frame_id),
+		).toEqual([1, 2, 3, 4, 5]);
+		expect(
+			requestedUrls.some((url) => url.includes("/text?persist=false")),
+		).toBe(false);
+	});
+
+	it("keeps a result whose match spans a larger element than any single position", async () => {
+		// Accessibility bounds are element-level: one box can cover a whole block of
+		// text. A coarse highlight is acceptable; deleting the row is not.
+		const position = {
+			text: "a long accessibility block with the term buried inside it",
+			confidence: 1,
+			bounds: { left: 0, top: 0, width: 1, height: 0.2 },
+		};
+		vi.mocked(localFetch).mockImplementation((input) => {
+			const url = String(input);
+			if (url.startsWith("/search/keyword?")) {
+				return Promise.resolve(jsonResponse([{
+					frame_id: 99,
+					timestamp: "2026-07-30T03:27:38.299898Z",
+					text_positions: [position],
+					app_name: "Arc",
+					window_name: "Arc",
+					confidence: 1,
+					text: position.text,
+					url: "",
+					text_source: "accessibility" as const,
+				}]));
+			}
+			if (url.startsWith("/search?")) {
+				return Promise.resolve(jsonResponse({ data: [] }));
+			}
+			throw new Error(`unexpected request: ${url}`);
+		});
+
+		await useKeywordSearchStore.getState().searchKeywords("unrelatedtoken");
+
+		const results = useKeywordSearchStore.getState().searchResults;
+		expect(results.map((result) => result.frame_id)).toEqual([99]);
+		expect(results[0].text_positions).toEqual([position]);
+	});
+});
+
+describe("visibleMatchingPositions", () => {
+	it("normalizes quoted query terms for verification and rendering", () => {
+		expect(queryHighlightTokens(`"offset" 'code'`)).toEqual([
+			"offset",
+			"code",
+		]);
+	});
+
+	it("matches visible word prefixes without matching inside another word", () => {
+		const positions = [
+			{
+				text: "concatenate",
+				confidence: 1,
+				bounds: { left: 0.1, top: 0.1, width: 0.2, height: 0.05 },
+			},
+			{
+				text: "category",
+				confidence: 1,
+				bounds: { left: 0.3, top: 0.1, width: 0.1, height: 0.05 },
+			},
+			{
+				text: "bobcat",
+				confidence: 1,
+				bounds: { left: 0.4, top: 0.1, width: 0.1, height: 0.05 },
+			},
+			{
+				text: "cat",
+				confidence: 1,
+				bounds: { left: 0.6, top: 0.1, width: 0.05, height: 0.05 },
+			},
+		];
+
+		expect(visibleMatchingPositions(positions, "cat")).toEqual([
+			positions[1],
+			positions[3],
+		]);
+	});
+
+	it("keeps the real fuzzy-prefix case determ matching Deterministic", () => {
+		const position = {
+			text: "100% Deterministic",
+			confidence: 1,
+			bounds: { left: 0.1, top: 0.1, width: 0.2, height: 0.05 },
+		};
+
+		expect(visibleMatchingPositions([position], "determ")).toEqual([position]);
+	});
+
+	it("mirrors backend compound-token expansion", () => {
+		expect(queryHighlightTokens("ActivityPerformance")).toEqual([
+			"activityperformance",
+			"activity",
+			"performance",
+		]);
+
+		const position = {
+			text: "Performance",
+			confidence: 1,
+			bounds: { left: 0.1, top: 0.1, width: 0.2, height: 0.05 },
+		};
+		expect(
+			visibleMatchingPositions([position], "ActivityPerformance"),
+		).toEqual([position]);
+	});
+
+	it("mirrors the backend OR semantics across query words", () => {
+		const position = {
+			text: "worldwide",
+			confidence: 1,
+			bounds: { left: 0.1, top: 0.1, width: 0.2, height: 0.05 },
+		};
+
+		expect(visibleMatchingPositions([position], "hello world")).toEqual([
+			position,
+		]);
+	});
+});
+
+describe("unavailable search results", () => {
+	beforeEach(() => {
+		useKeywordSearchStore.getState().resetSearch();
+	});
+
+	it("removes a failed frame from both the grid and timeline navigation", () => {
+		const result = (frameId: number) => ({
+			frame_id: frameId,
+			timestamp: `2026-07-30T07:4${frameId}:00.000Z`,
+			text_positions: [],
+			app_name: "cmux",
+			window_name: "code",
+			confidence: 1,
+			text: "code",
+			url: "",
+			text_source: "ocr" as const,
+		});
+		const results = [result(1), result(2), result(3)];
+
+		useKeywordSearchStore.setState({
+			searchResults: results,
+			searchGroups: results.map((item) => ({
+				representative: item,
+				group_size: 1,
+				start_time: item.timestamp,
+				end_time: item.timestamp,
+				frame_ids: [item.frame_id],
+			})),
+			currentResultIndex: 2,
+		});
+
+		useKeywordSearchStore.getState().removeSearchResult(2);
+
+		const state = useKeywordSearchStore.getState();
+		expect(state.searchResults.map((item) => item.frame_id)).toEqual([1, 3]);
+		expect(state.searchGroups.map((group) => group.representative.frame_id)).toEqual([1, 3]);
+		expect(state.currentResultIndex).toBe(1);
 	});
 });

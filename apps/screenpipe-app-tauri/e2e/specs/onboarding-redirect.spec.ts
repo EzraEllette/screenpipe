@@ -87,6 +87,47 @@ const canRun = !seedFlags.includes("onboarding");
       expect(bodyText).toContain("ai finally knows what you");
     });
 
+    // ─── system-browser login handoff ────────────────────────────────────
+    //
+    // Windows and Linux do not sign in through a cold embedded WebView.
+    // `open_login_window` opens the user's real browser at the ordinary login
+    // URL and the website deep-links `screenpipe://auth?api_key=…` back, so
+    // the user never reads or types anything.
+    //
+    // What can only be proven in the real app is that clicking sign in moves
+    // the UI into an explicit waiting state and never asks for a code. A
+    // regression here leaves the user staring at an unchanged "sign in"
+    // button while their browser waits, which is indistinguishable from a
+    // hang — or reintroduces the code prompt this flow exists to remove.
+
+    const waitForBodyText = async (needle: string, present: boolean) => {
+      await browser.waitUntil(
+        async () => {
+          const text = ((await browser.execute(
+            () => document.body?.innerText || "",
+          )) as string).toLowerCase();
+          return text.includes(needle) === present;
+        },
+        {
+          timeout: t(10_000),
+          timeoutMsg: `expected body text to ${present ? "contain" : "not contain"} "${needle}"`,
+        },
+      );
+    };
+
+    it("never asks the user to type a login code", async () => {
+      // The whole point of the flow: the browser carries the session and the
+      // deep link carries the token. Onboarding must not show a code prompt.
+      const bodyText = ((await browser.execute(
+        () => document.body?.innerText || "",
+      )) as string).toLowerCase();
+      expect(bodyText).not.toContain("enter the code");
+      expect(bodyText).not.toContain("confirmation code");
+
+      const filepath = await saveScreenshot("onboarding-login-no-code");
+      expect(existsSync(filepath)).toBe(true);
+    });
+
     it("does not open a home window alongside onboarding", async () => {
       // Regression guard: the redirect logic in app/onboarding/page.tsx
       // calls showWindow({Home: …}) only when onboardingData.isCompleted.

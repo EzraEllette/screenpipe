@@ -70,6 +70,8 @@ export interface KeywordSearchState {
 	isSearching: boolean;
 	searchQuery: string;
 	error: string | null;
+	lastCandidatePageSize: number;
+	unavailableFrameIds: Set<number>;
 	lastRequest: SearchRequest | null;
 	activeRequestId: string | null;
 	currentAbortController: AbortController | null;
@@ -92,6 +94,8 @@ export interface KeywordSearchState {
 		signal?: AbortSignal,
 	) => Promise<void>;
 	setCurrentResultIndex: (index: number) => void;
+	removeSearchResult: (frameId: number) => void;
+	prepareForReplacementSearch: (replacementQuery: string) => void;
 	resetSearch: () => void;
 	nextResult: () => void;
 	previousResult: () => void;
@@ -99,6 +103,85 @@ export interface KeywordSearchState {
 
 const fuzzy_default = true;
 const offset_default = 0;
+export function queryHighlightTokens(query: string): string[] {
+	return query
+		.trim()
+		.split(/\s+/)
+		.flatMap((token) => {
+			const cleaned = token
+				.replace(/[\\"]/g, "")
+				.replace(/^'+|'+$/g, "");
+			const split = cleaned
+				.replace(/([a-z])([A-Z])/g, "$1 $2")
+				.replace(/([0-9])([a-zA-Z])/g, "$1 $2")
+				.replace(/([a-zA-Z])([0-9])/g, "$1 $2")
+				.split(/\s+/);
+
+			return split.length > 1
+				? [cleaned, ...split.filter((part) => part.length >= 2)]
+				: [cleaned];
+		})
+		.map((token) => token.toLowerCase())
+		.filter(Boolean);
+}
+
+function textContainsToken(text: string, token: string): boolean {
+	const normalizedText = text.toLowerCase();
+	if (!/^[\p{L}\p{N}_]+$/u.test(token)) {
+		return normalizedText.includes(token);
+	}
+
+	const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	return new RegExp(
+		`(^|[^\\p{L}\\p{N}_])${escaped}`,
+		"iu",
+	).test(normalizedText);
+}
+
+export function visibleMatchingPositions(
+	positions: SearchMatch["text_positions"],
+	query: string,
+): SearchMatch["text_positions"] {
+	const tokens = queryHighlightTokens(query);
+	if (tokens.length === 0) return [];
+
+	// Selects the positions worth highlighting, using the same prefix and
+	// compound-token alternatives that backend fuzzy search joins with OR.
+	// Returning nothing means "no position is precise enough to highlight",
+	// never "this result should be discarded" — see narrowSearchMatchHighlights.
+	return positions.filter((position) =>
+		tokens.some((token) => textContainsToken(position.text, token)),
+	);
+}
+
+/**
+ * Narrow each result's highlight to the positions that match the query.
+ *
+ * A backend match is authoritative. Accessibility is the primary capture
+ * source, so a result is never dropped for failing a secondary check against a
+ * fallback source. Screenshot OCR is deliberately not consulted here: it ran on
+ * the single capture-shared permit, competed with the recorder, and silently
+ * deleted correct results whose text was captured from the accessibility tree
+ * but was not legible as pixels.
+ *
+ * When no individual position matches, the token sits inside a larger element
+ * whose bounds cover the whole block. The result is kept with its original
+ * positions and highlights coarsely rather than disappearing.
+ */
+export function narrowSearchMatchHighlights(
+	results: SearchMatch[],
+	query: string,
+): SearchMatch[] {
+	return results.map((result) => {
+		const matchingPositions = visibleMatchingPositions(
+			result.text_positions,
+			query,
+		);
+		return matchingPositions.length > 0
+			? { ...result, text_positions: matchingPositions }
+			: result;
+	});
+}
 
 export const useKeywordSearchStore = create<KeywordSearchState>((set, get) => ({
 	searchResults: [],
@@ -109,6 +192,8 @@ export const useKeywordSearchStore = create<KeywordSearchState>((set, get) => ({
 	isSearching: false,
 	searchQuery: "",
 	error: null,
+	lastCandidatePageSize: 0,
+	unavailableFrameIds: new Set(),
 	lastRequest: null,
 	activeRequestId: null,
 	currentAbortController: null,
@@ -178,6 +263,8 @@ export const useKeywordSearchStore = create<KeywordSearchState>((set, get) => ({
 				activeRequestId: requestId,
 				isSearching: true,
 				error: null,
+				lastCandidatePageSize: 0,
+				unavailableFrameIds: new Set(),
 			});
 		} else {
 			set((state) => ({
@@ -188,7 +275,7 @@ export const useKeywordSearchStore = create<KeywordSearchState>((set, get) => ({
 			}));
 		}
 
-		const { searchResults } = get();
+		const { searchResults: searchResultsBeforeRequest } = get();
 
 		const searchRequest: SearchRequest = {
 			query,
@@ -307,60 +394,68 @@ export const useKeywordSearchStore = create<KeywordSearchState>((set, get) => ({
 			}
 
 			const rawResults: SearchMatch[] = await response.json();
-			const results = rawResults;
-			// Wrap each flat result as a single-item group for UI compatibility
-			const groups: SearchMatchGroup[] = results.map((m) => ({
-				representative: m,
-				group_size: 1,
-				start_time: m.timestamp,
-				end_time: m.timestamp,
-				frame_ids: [m.frame_id],
-			}));
+			loadUiEventsAfterKeyword();
+				const results = narrowSearchMatchHighlights(rawResults, query);
 
 			if (get().activeRequestId === requestId) {
+				const { unavailableFrameIds } = get();
+				const baseResults = isInitialSearch
+					? []
+					: searchResultsBeforeRequest.filter(
+							(result) => !unavailableFrameIds.has(result.frame_id),
+						);
+				const existingFrameIds = new Set(
+					baseResults.map((result) => result.frame_id),
+				);
+				const finalPageResults = results.filter(
+					(result) =>
+						!existingFrameIds.has(result.frame_id) &&
+						!unavailableFrameIds.has(result.frame_id),
+				);
+				const finalResults = [...baseResults, ...finalPageResults];
+				const finalGroups: SearchMatchGroup[] = finalResults.map((match) => ({
+					representative: match,
+					group_size: 1,
+					start_time: match.timestamp,
+					end_time: match.timestamp,
+					frame_ids: [match.frame_id],
+				}));
 				if (isInitialSearch) {
 					posthog.capture("search_ui_keyword_completed", {
 						...analyticsProperties,
 						duration_ms: Date.now() - analyticsStartedAt,
-						screen_result_count: results.length,
-						has_screen_results: results.length > 0,
+						screen_result_count: finalResults.length,
+						has_screen_results: finalResults.length > 0,
 					});
 				}
-				if (!isInitialSearch) {
-					const existingFrameIds = new Set(
-						searchResults.map((r) => r.frame_id),
-					);
-					const uniqueNewResults = results.filter(
-						(result: SearchMatch) => !existingFrameIds.has(result.frame_id),
-					);
-					const { searchGroups: existingGroups } = get();
-
-					set({
-						searchResults: [...searchResults, ...uniqueNewResults],
-						searchGroups: [...existingGroups, ...groups.filter(
-							(g: SearchMatchGroup) => !existingFrameIds.has(g.representative.frame_id),
-						)],
-						currentResultIndex: get().currentResultIndex,
-						searchQuery: query,
-						isSearching: false,
-						lastRequest: searchRequest,
-						currentAbortController: null,
-					});
-				} else {
-					set({
-						searchResults: results,
-						searchGroups: groups,
-						currentResultIndex: results.length > 0 ? 0 : -1,
-						searchQuery: query,
-						isSearching: false,
-						lastRequest: searchRequest,
-						currentAbortController: null,
-					});
-					loadUiEventsAfterKeyword();
-				}
+				set({
+					searchResults: finalResults,
+					searchGroups: finalGroups,
+					currentResultIndex:
+						finalResults.length === 0
+							? -1
+							: isInitialSearch
+								? 0
+								: Math.min(
+										Math.max(get().currentResultIndex, 0),
+										finalResults.length - 1,
+									),
+					searchQuery: query,
+					isSearching: false,
+					lastCandidatePageSize: rawResults.length,
+					lastRequest: searchRequest,
+					currentAbortController: null,
+				});
 			}
 		} catch (error) {
 			if (error instanceof Error && error.name === "AbortError") {
+				if (get().activeRequestId === requestId) {
+					set({
+						activeRequestId: null,
+						isSearching: false,
+						currentAbortController: null,
+					});
+				}
 				return;
 			}
 
@@ -386,6 +481,72 @@ export const useKeywordSearchStore = create<KeywordSearchState>((set, get) => ({
 		set({ currentResultIndex: index });
 	},
 
+	removeSearchResult: (frameId) => {
+		set((state) => {
+			const removedIndex = state.searchResults.findIndex(
+				(result) => result.frame_id === frameId,
+			);
+			if (removedIndex === -1) return state;
+
+			const searchResults = state.searchResults.filter(
+				(result) => result.frame_id !== frameId,
+			);
+			let currentResultIndex = state.currentResultIndex;
+			if (searchResults.length === 0) {
+				currentResultIndex = -1;
+			} else if (currentResultIndex > removedIndex) {
+				currentResultIndex -= 1;
+			} else if (currentResultIndex >= searchResults.length) {
+				currentResultIndex = searchResults.length - 1;
+			}
+
+			return {
+				searchResults,
+				searchGroups: state.searchGroups.filter(
+					(group) => group.representative.frame_id !== frameId,
+				),
+				currentResultIndex,
+				unavailableFrameIds: new Set([
+					...state.unavailableFrameIds,
+					frameId,
+				]),
+			};
+		});
+	},
+
+	prepareForReplacementSearch: (replacementQuery) => {
+		const { currentAbortController } = get();
+		currentAbortController?.abort();
+		const trimmedQuery = replacementQuery.trim();
+		const willRunKeywordSearch =
+			trimmedQuery.length >= 3 &&
+			!trimmedQuery.startsWith("#") &&
+			!trimmedQuery.startsWith("@");
+		if (!willRunKeywordSearch) {
+		}
+
+		// Clear the superseded epoch immediately, but keep frame reads alive until
+		// an eligible replacement keyword response identifies which frames it still
+		// needs. This lets consecutive queries share OCR for the same frame while
+		// the replacement search aborts different-frame work. Queries that cannot
+		// start keyword search cancel all frame work above.
+		set({
+			searchResults: [],
+			searchGroups: [],
+			uiEventResults: [],
+			isSearchingUiEvents: false,
+			currentResultIndex: -1,
+			isSearching: false,
+			searchQuery: "",
+			error: null,
+			lastCandidatePageSize: 0,
+			unavailableFrameIds: new Set(),
+			lastRequest: null,
+			activeRequestId: null,
+			currentAbortController: null,
+		});
+	},
+
 	resetSearch: () => {
 		const { currentAbortController } = get();
 		if (currentAbortController) {
@@ -401,6 +562,8 @@ export const useKeywordSearchStore = create<KeywordSearchState>((set, get) => ({
 			isSearching: false,
 			searchQuery: "",
 			error: null,
+			lastCandidatePageSize: 0,
+			unavailableFrameIds: new Set(),
 			lastRequest: null,
 			activeRequestId: null,
 			currentAbortController: null,

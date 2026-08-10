@@ -9,7 +9,7 @@ use screenpipe_config::DbConfig;
 use sqlite_vec::sqlite3_vec_init;
 use sqlx::migrate::MigrateDatabase;
 use sqlx::pool::PoolConnection;
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePool};
 use sqlx::Column;
 use sqlx::ConnectOptions;
 use sqlx::Connection;
@@ -457,8 +457,9 @@ mod text_positions;
 mod write_ops;
 
 pub use self::semantic::{
-    SemanticActor, SemanticActorAlias, SemanticActorReference, SemanticCleanupResult,
-    SemanticContextQuery, SemanticFrameContext, SemanticProjectionWriteResult,
+    SemanticActor, SemanticActorAlias, SemanticActorReference, SemanticAttachResult,
+    SemanticCleanupResult, SemanticContextQuery, SemanticFrameContext,
+    SemanticProjectionWriteResult,
 };
 pub(crate) use self::text_positions::calculate_confidence;
 pub use self::text_positions::{

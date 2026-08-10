@@ -8,6 +8,7 @@ import { getTierConfig, getModelWeight, isModelGatingEnabled } from '../services
 import { getHostedAiAllowedModels, getHostedAiPlan } from '../services/hosted-ai-policy';
 import { getModelHealth, ModelHealthStatus } from '../services/model-health';
 import { isGooglePolicyBlockedModel } from '../utils/model-policy';
+import { isHostedChatGatewayEnabled } from '../services/cloudflare-ai-gateway';
 
 /** Enriched model metadata — OpenAI-compatible (extra fields ignored by standard clients) */
 interface ModelEntry {
@@ -19,6 +20,8 @@ interface ModelEntry {
   tags: string[];
   free: boolean;
   context_window: number;
+  /** Maximum completion budget clients should request from this model. */
+  max_output_tokens?: number;
   best_for: string[];
   speed: 'fast' | 'medium' | 'slow';
   intelligence: 'standard' | 'high' | 'highest';
@@ -43,6 +46,8 @@ interface ModelEntry {
    * How many "daily query" units one message on this model consumes.
    * 0 = doesn't count against the user's daily query cap (`auto`). Higher =
    * fewer messages before the cap; the separate cash cap still applies.
+   * Cloudflare Gateway mode publishes 0 for every hosted-chat model because
+   * provider spend rules replace this proactive legacy query meter.
    * UI uses `floor(remaining / query_weight)` to warn when the user is
    * about to run out for a weighted model. Populated server-side from
    * `getModelWeight()` so client doesn't have to mirror the table.
@@ -70,6 +75,7 @@ const CURATED_MODELS: ModelEntry[] = [
     tags: ['free', 'auto', 'recommended'],
     free: true,
     context_window: 200000,
+    max_output_tokens: 128000,
     best_for: ['general', 'pipes', 'chat'],
     speed: 'fast',
     intelligence: 'highest',
@@ -86,6 +92,7 @@ const CURATED_MODELS: ModelEntry[] = [
     tags: ['premium', 'reasoning', 'coding', 'vision', 'new'],
     free: false,
     context_window: 1050000,
+    max_output_tokens: 128000,
     best_for: ['hard reasoning', 'agentic coding', 'complex analysis', 'vision'],
     speed: 'slow',
     intelligence: 'highest',
@@ -103,6 +110,7 @@ const CURATED_MODELS: ModelEntry[] = [
     tags: ['premium', 'reasoning', 'coding', 'vision', 'new'],
     free: false,
     context_window: 1050000,
+    max_output_tokens: 128000,
     best_for: ['professional work', 'coding', 'analysis', 'vision'],
     speed: 'medium',
     intelligence: 'highest',
@@ -120,6 +128,7 @@ const CURATED_MODELS: ModelEntry[] = [
     tags: ['premium', 'fast', 'vision', 'new'],
     free: false,
     context_window: 1050000,
+    max_output_tokens: 128000,
     best_for: ['high-volume', 'extraction', 'classification', 'vision'],
     speed: 'fast',
     intelligence: 'high',
@@ -136,6 +145,7 @@ const CURATED_MODELS: ModelEntry[] = [
     tags: ['premium', 'reasoning', 'coding', 'vision', 'new'],
     free: false,
     context_window: 1050000,
+    max_output_tokens: 128000,
     best_for: ['complex tasks', 'coding', 'analysis', 'vision'],
     speed: 'fast',
     intelligence: 'highest',
@@ -153,6 +163,7 @@ const CURATED_MODELS: ModelEntry[] = [
     tags: ['premium', 'reasoning', 'coding', 'vision', 'pro'],
     free: false,
     context_window: 1050000,
+    max_output_tokens: 128000,
     best_for: ['hard reasoning', 'coding', 'analysis', 'vision'],
     speed: 'slow',
     intelligence: 'highest',
@@ -170,6 +181,7 @@ const CURATED_MODELS: ModelEntry[] = [
     tags: ['premium', 'reasoning', 'coding', 'vision'],
     free: false,
     context_window: 1050000,
+    max_output_tokens: 128000,
     best_for: ['professional work', 'coding', 'analysis', 'vision'],
     speed: 'medium',
     intelligence: 'highest',
@@ -187,6 +199,7 @@ const CURATED_MODELS: ModelEntry[] = [
     tags: ['premium', 'reasoning', 'coding', 'vision', 'pro'],
     free: false,
     context_window: 1050000,
+    max_output_tokens: 128000,
     best_for: ['hard reasoning', 'coding', 'analysis', 'vision'],
     speed: 'slow',
     intelligence: 'highest',
@@ -208,6 +221,7 @@ const CURATED_MODELS: ModelEntry[] = [
     tags: ['premium', 'fast', 'coding', 'vision'],
     free: false,
     context_window: 400000,
+    max_output_tokens: 128000,
     best_for: ['coding', 'subagents', 'high-volume', 'vision'],
     speed: 'fast',
     intelligence: 'high',
@@ -224,6 +238,7 @@ const CURATED_MODELS: ModelEntry[] = [
     tags: ['premium', 'cheap', 'fast', 'vision'],
     free: false,
     context_window: 400000,
+    max_output_tokens: 128000,
     best_for: ['classification', 'extraction', 'ranking', 'subagents'],
     speed: 'fast',
     intelligence: 'standard',
@@ -241,6 +256,7 @@ const CURATED_MODELS: ModelEntry[] = [
     tags: ['premium', 'balanced', 'agentic', 'new'],
     free: false,
     context_window: 1000000,
+    max_output_tokens: 128000,
     best_for: ['agentic work', 'coding', 'computer use', 'complex analysis'],
     speed: 'medium',
     intelligence: 'highest',
@@ -257,6 +273,7 @@ const CURATED_MODELS: ModelEntry[] = [
     tags: ['business', 'frontier', 'agentic', 'new'],
     free: false,
     context_window: 1000000,
+    max_output_tokens: 128000,
     best_for: ['hard reasoning', 'agentic coding', 'complex analysis'],
     speed: 'slow',
     intelligence: 'highest',
@@ -273,6 +290,7 @@ const CURATED_MODELS: ModelEntry[] = [
     tags: ['business', 'frontier', 'agentic', 'new'],
     free: false,
     context_window: 1000000,
+    max_output_tokens: 128000,
     best_for: ['hard reasoning', 'agentic coding', 'complex analysis'],
     speed: 'slow',
     intelligence: 'highest',
@@ -301,7 +319,12 @@ export async function handleModelListing(
 
     // Avoid advertising models that would immediately fail because their
     // provider secret is not configured in the Worker environment yet.
-    models = models.filter(model => !model.requires_env || hasConfiguredSecret(env[model.requires_env]));
+    const cloudflareGateway = isHostedChatGatewayEnabled(env);
+    models = models.filter(model =>
+      !model.requires_env ||
+      hasConfiguredSecret(env[model.requires_env]) ||
+      (cloudflareGateway && model.requires_env === 'OPENAI_API_KEY')
+    );
     models = models.filter(model => !isGooglePolicyBlockedModel(model.id));
 
     // Non-Business tiers used to have above-tier models filtered OUT of the
@@ -326,7 +349,7 @@ export async function handleModelListing(
 
       // Attach per-message query weight so UIs can warn the user before
       // they run out for a weighted model. 0 means "doesn't count."
-      model.query_weight = getModelWeight(model.id);
+      model.query_weight = cloudflareGateway ? 0 : getModelWeight(model.id);
     }
 
     const responseModels = models.map(({ requires_env, ...model }) => {

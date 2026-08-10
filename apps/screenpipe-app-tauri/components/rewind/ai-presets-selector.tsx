@@ -4,10 +4,27 @@
 
 import { tauriFetchWithDeadline } from "@/lib/http/tauri-fetch";
 import { aiEndpointUrl } from "@/lib/utils/ai-endpoint-url";
+import { testAiPresetConnection } from "@/lib/utils/ai-preset-connection";
+import {
+  aiPresetConnectionFingerprint,
+  isAiApiKeyRequired,
+  requiresAiPresetConnectionTest,
+  shouldRequireAiPresetConnectionTest,
+  validateAiPresetConnectionFields,
+} from "@/lib/utils/validation";
 import { useSettings } from "@/lib/hooks/use-settings";
 import { useModelUpsellGating } from "@/lib/hooks/use-model-upsell-gating";
 import { usePiModels } from "@/lib/hooks/use-pi-models";
-import { useMemo, useState, useEffect, useCallback } from "react";
+import { modelAllowanceNotice } from "@/lib/chat/model-allowance-cost";
+import { useMemo, useState, useEffect, useCallback, useRef } from "react";
+import {
+  acpAdapterInfo,
+  generatePresetName,
+  presetImageClass,
+  presetImageSrc,
+} from "@/lib/utils/preset-appearance";
+import { AcpAgentPicker } from "@/components/settings/acp-agent-picker";
+import { useAcpRolloutEnabled } from "@/lib/acp-rollout";
 import {
   Command,
   CommandEmpty,
@@ -53,6 +70,10 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
+  ModelPicker,
+  type ModelDiscoveryStatus,
+} from "@/components/ui/model-picker";
+import {
   Select,
   SelectContent,
   SelectItem,
@@ -67,6 +88,11 @@ import {
   filterPresetsForEnterprisePolicy,
   isEnterpriseManagedPreset,
 } from "@/lib/enterprise-ai-preset-policy";
+import {
+  applyResolvedModelLimits,
+  ollamaContextWindowFromShow,
+  resolveModelLimits,
+} from "@/lib/model-metadata";
 
 // Helper to detect UUID-like strings and format preset names nicely
 const formatPresetName = (name: string): string => {
@@ -121,6 +147,10 @@ interface OpenAIModel {
   id: string;
   created?: number;
   owned_by?: string;
+  context_window?: number;
+  max_output_tokens?: number;
+  max_input_tokens?: number;
+  max_tokens?: number;
 }
 
 export const DEFAULT_PROMPT = `Rules:
@@ -188,7 +218,11 @@ export function AIProviderConfig({
   const { settings } = useSettings();
   const [isLoading, setIsLoading] = useState(false);
   const [openaiModels, setOpenAIModels] = useState<OpenAIModel[]>([]);
-  const [isLoadingModels, setIsLoadingModels] = useState(false);
+  const [modelDiscoveryStatus, setModelDiscoveryStatus] =
+    useState<ModelDiscoveryStatus>("idle");
+  const [modelDiscoveryError, setModelDiscoveryError] = useState<string | null>(
+    null,
+  );
   const [idError, setIdError] = useState<string | null>(null);
   const [showApiKey, setShowApiKey] = useState(false);
   const { isManagedDeployment, policy: enterprisePolicy } = useManagedPolicy();
@@ -225,16 +259,135 @@ export function AIProviderConfig({
     apiKey: defaultPreset?.apiKey || "",
     url: defaultPreset?.url || "",
     model: defaultPreset?.model || "",
+    acpAgent: defaultPreset?.acpAgent,
     maxContextChars: defaultPreset?.maxContextChars || 512000,
+    maxTokens: defaultPreset?.maxTokens ?? 4096,
     prompt: defaultPreset?.prompt || DEFAULT_PROMPT,
     id: defaultPreset?.id || "",
     defaultPreset: defaultPreset?.defaultPreset || false,
   });
+  const [connectionTestStatus, setConnectionTestStatus] = useState<
+    "idle" | "testing" | "pass" | "fail"
+  >("idle");
+  const [connectionTestMessage, setConnectionTestMessage] = useState("");
+  const [lastTestedConnectionFingerprint, setLastTestedConnectionFingerprint] = useState<string | null>(null);
+  const [lastValidatedConnectionFingerprint, setLastValidatedConnectionFingerprint] = useState<string | null>(null);
+
+  const connectionFieldErrors = useMemo(
+    () => validateAiPresetConnectionFields(formData),
+    [formData],
+  );
+  const currentConnectionFingerprint = useMemo(
+    () => aiPresetConnectionFingerprint(formData),
+    [formData],
+  );
+  const originalPreset = defaultPreset && settings.aiPresets.some(
+    (preset) => preset.id === defaultPreset.id,
+  )
+    ? defaultPreset
+    : null;
+  const connectionTestRequired = shouldRequireAiPresetConnectionTest(
+    formData,
+    originalPreset,
+  );
+  const connectionTestPassed =
+    lastValidatedConnectionFingerprint === currentConnectionFingerprint;
+  const apiKeyRequired = isAiApiKeyRequired(formData);
+  const connectionTestResultIsCurrent =
+    lastTestedConnectionFingerprint === currentConnectionFingerprint;
+
+  const handleConnectionTest = async () => {
+    if (Object.keys(connectionFieldErrors).length > 0) return;
+    const testedFingerprint = currentConnectionFingerprint;
+    setLastTestedConnectionFingerprint(testedFingerprint);
+    setLastValidatedConnectionFingerprint(null);
+    setConnectionTestStatus("testing");
+    setConnectionTestMessage("checking endpoint, credentials, and model...");
+    try {
+      const result = await testAiPresetConnection(formData);
+      setLastValidatedConnectionFingerprint(testedFingerprint);
+      setConnectionTestStatus("pass");
+      setConnectionTestMessage(`connected in ${result.latencyMs}ms`);
+    } catch (error) {
+      setConnectionTestStatus("fail");
+      setConnectionTestMessage(
+        error instanceof Error ? error.message : "connection test failed",
+      );
+    }
+  };
+  // Set by AcpInstallGate: true when the selected binary agent's CLI is missing.
+  const [acpInstallBlocked, setAcpInstallBlocked] = useState(false);
+
+  // Second ACP entry point (the first is Settings → AI presets). Same
+  // fail-closed rollout gate, otherwise this selector would hand every user a
+  // coding-agent provider the settings page deliberately hides.
+  const acpEnabled = useAcpRolloutEnabled();
+
+  // A preset saved while the flag was on must not leave this editor stuck on a
+  // provider whose picker is no longer rendered.
+  useEffect(() => {
+    if (!acpEnabled && selectedProvider === "acp") {
+      setSelectedProvider("screenpipe-cloud");
+    }
+  }, [acpEnabled, selectedProvider]);
+
+  // Last name this dialog generated itself. While the field still holds it
+  // (or is empty) selection changes keep regenerating it; a name the user
+  // typed is never overwritten. Empty names get generated on submit.
+  const lastAutoNameRef = useRef<string | null>(null);
+
+  // Live auto-naming: write the generated name straight into the name field
+  // whenever the selection (provider, model, agent) changes. Name-field
+  // edits themselves never trigger this, so typing is never fought.
+  useEffect(() => {
+    if (defaultPreset?.id) return;
+    const currentName = formData.id || "";
+    if (currentName && currentName !== lastAutoNameRef.current) return;
+    const autoName = generatePresetName(
+      {
+        provider: formData.provider,
+        acpAgentId: formData.acpAgent?.id,
+        model: formData.model,
+      },
+      (settings?.aiPresets ?? []).map((preset) => preset.id),
+    );
+    if (autoName === currentName) return;
+    lastAutoNameRef.current = autoName;
+    setFormData((prev) => ({ ...prev, id: autoName }));
+    setIdError(null);
+    // formData.id is read but intentionally not a dependency: clearing or
+    // retyping the name must not refill it mid-edit.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    formData.provider,
+    formData.model,
+    formData.acpAgent?.id,
+    defaultPreset?.id,
+    settings?.aiPresets,
+  ]);
+
+  // A cleared name refills when the field loses focus, so it never sits
+  // empty even when the selection itself does not change again.
+  const refillEmptyName = () => {
+    if (defaultPreset?.id || formData.id?.trim()) return;
+    const autoName = generatePresetName(
+      {
+        provider: formData.provider,
+        acpAgentId: formData.acpAgent?.id,
+        model: formData.model,
+      },
+      (settings?.aiPresets ?? []).map((preset) => preset.id),
+    );
+    lastAutoNameRef.current = autoName;
+    setFormData((prev) => ({ ...prev, id: autoName }));
+    setIdError(null);
+  };
 
   const validateId = (id: string | undefined): boolean => {
     if (!id?.trim()) {
-      setIdError("name is required");
-      return false;
+      // Empty is fine: a name is generated from the selection on submit.
+      setIdError(null);
+      return true;
     }
 
     // Check if ID ends with 'copy' (case insensitive)
@@ -264,14 +417,14 @@ export function AIProviderConfig({
     validateId(value);
   };
 
-  const fetchOpenAIModels = async (baseUrl: string, apiKey: string) => {
-    setIsLoadingModels(true);
+  const fetchOpenAIModels = async (baseUrl: string, apiKey?: string | null) => {
+    setModelDiscoveryStatus("loading");
+    setModelDiscoveryError(null);
     try {
-      const response = await fetch(aiEndpointUrl(baseUrl, "models"), {
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          "Content-Type": "application/json",
-        },
+      const response = await tauriFetchWithDeadline(aiEndpointUrl(baseUrl, "models"), {
+        headers: apiKey
+          ? { Authorization: `Bearer ${apiKey}` }
+          : {},
       });
 
       if (!response.ok) {
@@ -280,16 +433,20 @@ export function AIProviderConfig({
 
       const data = await response.json();
       setOpenAIModels(data.data || []);
+      setModelDiscoveryStatus("ready");
     } catch (error) {
       console.error("error fetching models:", error);
       setOpenAIModels([]);
-    } finally {
-      setIsLoadingModels(false);
+      setModelDiscoveryStatus("error");
+      setModelDiscoveryError(
+        "couldn't discover models — type a model name manually",
+      );
     }
   };
 
   const fetchOllamaModels = async (baseUrl: string) => {
-    setIsLoadingModels(true);
+    setModelDiscoveryStatus("loading");
+    setModelDiscoveryError(null);
     try {
       // native HTTP (Rust-side): a browser fetch from the tauri://localhost
       // webview to a local Ollama server is blocked by WKWebView (mixed-content).
@@ -303,16 +460,21 @@ export function AIProviderConfig({
         data: OpenAIModel[];
       };
       setOpenAIModels(data.data || []);
+      setModelDiscoveryStatus("ready");
     } catch (error) {
       console.error("error fetching ollama models:", error);
       setOpenAIModels([]);
-    } finally {
-      setIsLoadingModels(false);
+      setModelDiscoveryStatus("error");
+      setModelDiscoveryError(
+        "couldn't reach Ollama — type a model name manually",
+      );
     }
   };
 
   useEffect(() => {
     setOpenAIModels([]);
+    setModelDiscoveryStatus("idle");
+    setModelDiscoveryError(null);
     if (selectedProvider === "openai" && formData.apiKey) {
       // Fetch the live model catalog from the user's OpenAI account so the
       // dropdown reflects whatever they actually have access to (gpt-5*,
@@ -320,9 +482,9 @@ export function AIProviderConfig({
       // request fails (offline / bad key) so the dropdown still has
       // something usable instead of an empty menu.
       (async () => {
-        setIsLoadingModels(true);
+        setModelDiscoveryStatus("loading");
         try {
-          const resp = await fetch("https://api.openai.com/v1/models", {
+          const resp = await tauriFetchWithDeadline("https://api.openai.com/v1/models", {
             headers: {
               Authorization: `Bearer ${formData.apiKey}`,
               "Content-Type": "application/json",
@@ -330,11 +492,9 @@ export function AIProviderConfig({
           });
           if (resp.ok) {
             const data = await resp.json();
-            if (data?.data?.length > 0) {
-              setOpenAIModels(data.data);
-              setIsLoadingModels(false);
-              return;
-            }
+            setOpenAIModels(data?.data || []);
+            setModelDiscoveryStatus("ready");
+            return;
           }
         } catch {
           /* fall through to fallback */
@@ -352,7 +512,10 @@ export function AIProviderConfig({
           { id: "gpt-4" },
           { id: "gpt-3.5-turbo" },
         ]);
-        setIsLoadingModels(false);
+        setModelDiscoveryStatus("error");
+        setModelDiscoveryError(
+          "couldn't load live models — showing known models",
+        );
       })();
     } else if (selectedProvider === "native-ollama") {
       const baseUrl = "http://localhost:11434/v1";
@@ -360,27 +523,25 @@ export function AIProviderConfig({
     } else if (
       selectedProvider === "custom" &&
       formData.url &&
-      formData.apiKey
+      !connectionFieldErrors.url
     ) {
       fetchOpenAIModels(formData.url, formData.apiKey);
     } else if (selectedProvider === "openai-chatgpt") {
       // Try fetching from API, fall back to known models
       (async () => {
-        setIsLoadingModels(true);
+        setModelDiscoveryStatus("loading");
         try {
           const tokenResult = await commands.chatgptOauthGetToken();
           if (tokenResult.status === "ok") {
-            const resp = await fetch("https://api.openai.com/v1/models", {
+            const resp = await tauriFetchWithDeadline("https://api.openai.com/v1/models", {
               headers: { Authorization: `Bearer ${tokenResult.data}` },
             });
             if (resp.ok) {
               const data = await resp.json();
               const uniqueModels = (data.data as { id: string }[]).filter((m, idx, arr) => arr.findIndex((x) => x.id === m.id) === idx);
-              if (uniqueModels.length > 0) {
-                setOpenAIModels(uniqueModels);
-                setIsLoadingModels(false);
-                return;
-              }
+              setOpenAIModels(uniqueModels);
+              setModelDiscoveryStatus("ready");
+              return;
             }
           }
         } catch { /* ignore */ }
@@ -392,10 +553,58 @@ export function AIProviderConfig({
           { id: "gpt-5.2-codex" }, { id: "gpt-5.2" }, { id: "gpt-5.1-codex-max" },
           { id: "gpt-5.1" }, { id: "gpt-5.1-codex-mini" },
         ]);
-        setIsLoadingModels(false);
+        setModelDiscoveryStatus("error");
+        setModelDiscoveryError(
+          "couldn't load live ChatGPT models — showing known models",
+        );
       })();
     }
-  }, [selectedProvider, formData.apiKey, formData.url]);
+  }, [selectedProvider, formData.apiKey, formData.url, connectionFieldErrors.url]);
+
+  useEffect(() => {
+    if (selectedProvider !== "native-ollama" || !formData.model) return;
+    let cancelled = false;
+    const ollamaBaseUrl = (formData.url || "http://localhost:11434/v1")
+      .replace(/\/v1\/?$/, "")
+      .replace(/\/$/, "");
+    void tauriFetchWithDeadline(`${ollamaBaseUrl}/api/show`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: formData.model }),
+    }).then(async (response) => {
+      if (!response.ok || cancelled) return;
+      const contextWindow = ollamaContextWindowFromShow(await response.json());
+      if (!contextWindow || cancelled) return;
+      setOpenAIModels((current) => current.some((model) => model.id === formData.model)
+        ? current.map((model) => model.id === formData.model
+          ? { ...model, context_window: contextWindow }
+          : model)
+        : [...current, { id: formData.model!, context_window: contextWindow }]);
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [selectedProvider, formData.model, formData.url]);
+
+  const selectedModelMetadata = useMemo(
+    () => selectedProvider === "screenpipe-cloud"
+      ? piModels.find((candidate) => candidate.id === formData.model)
+      : openaiModels.find((candidate) => candidate.id === formData.model),
+    [selectedProvider, piModels, openaiModels, formData.model],
+  );
+  const resolvedModelLimits = useMemo(
+    () => resolveModelLimits(formData.provider, formData.model, selectedModelMetadata),
+    [formData.provider, formData.model, selectedModelMetadata],
+  );
+
+  useEffect(() => {
+    if (!resolvedModelLimits) return;
+    setFormData((current) => {
+      const resolved = applyResolvedModelLimits(current, selectedModelMetadata);
+      return resolved.maxContextChars === current.maxContextChars &&
+        resolved.maxTokens === current.maxTokens
+        ? current
+        : resolved as AIPreset;
+    });
+  }, [resolvedModelLimits, selectedModelMetadata]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -404,11 +613,33 @@ export function AIProviderConfig({
       return;
     }
 
+    if (Object.keys(connectionFieldErrors).length > 0) {
+      toast.error("Fix the connection fields", {
+        description: Object.values(connectionFieldErrors)[0],
+      });
+      return;
+    }
+
+    if (connectionTestRequired && !connectionTestPassed) {
+      toast.error("Test the connection before saving");
+      return;
+    }
+
     setIsLoading(true);
     try {
       onSubmit({
         ...formData,
-        id: formData.id?.trim() || "",
+        id:
+          formData.id?.trim() ||
+          generatePresetName(
+            {
+              provider: formData.provider,
+              acpAgentId: formData.acpAgent?.id,
+              model: formData.model,
+            },
+            (settings?.aiPresets ?? []).map((preset) => preset.id),
+            defaultPreset?.id,
+          ),
       });
     } finally {
       setIsLoading(false);
@@ -440,9 +671,10 @@ export function AIProviderConfig({
           <Input
             id="name"
             type="text"
-            placeholder="enter preset name"
-            value={formData.id || undefined}
+            placeholder="preset name"
+            value={formData.id ?? ""}
             onChange={(e) => handleIdChange(e.target.value)}
+            onBlur={refillEmptyName}
             className={cn(
               "font-mono h-8 text-sm",
               idError && "border-destructive focus-visible:ring-destructive",
@@ -458,10 +690,7 @@ export function AIProviderConfig({
           />
         </div>
 
-        <div className={cn(
-          "grid gap-2",
-          piAvailable ? "grid-cols-3" : "grid-cols-4"
-        )}>
+        <div className="grid grid-cols-3 gap-2">
           {piAvailable && (
             <Button
               type="button"
@@ -557,12 +786,56 @@ export function AIProviderConfig({
             <img src="/images/claude-ai.svg" alt="Claude API" className="h-3.5 w-3.5 rounded-sm" />
             <span>claude api</span>
           </Button>
+
+          {acpEnabled && (
+          <Button
+            type="button"
+            variant={selectedProvider === "acp" ? "default" : "outline"}
+            className="flex h-8 items-center justify-center gap-1.5 text-xs px-3"
+            onClick={() => {
+              if (selectedProvider === "acp") return;
+              setSelectedProvider("acp");
+              const agentId = formData.acpAgent?.id || "pi-acp";
+              setFormData({
+                ...formData,
+                provider: "acp",
+                url: "",
+                model: agentId,
+                acpAgent: formData.acpAgent || { id: "pi-acp" },
+              });
+            }}
+          >
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src="/images/acp.svg"
+              alt="Coding agent"
+              className={cn(
+                "h-3.5 w-3.5 rounded-sm dark:invert",
+                selectedProvider === "acp" && "invert dark:invert-0",
+              )}
+            />
+            <span>coding agent</span>
+          </Button>
+          )}
         </div>
+
+        {acpEnabled && selectedProvider === "acp" && (
+          <AcpAgentPicker
+            compact
+            agent={formData.acpAgent}
+            onChange={(next) =>
+              setFormData({ ...formData, provider: "acp", model: next.id, acpAgent: next })
+            }
+            onInstallBlockedChange={setAcpInstallBlocked}
+          />
+        )}
 
         {selectedProvider === "openai" && (
           <div className="space-y-1">
             <div className="space-y-1">
-              <Label htmlFor="apiKey" className="text-xs">api key</Label>
+              <Label htmlFor="apiKey" className="text-xs">
+                api key{apiKeyRequired && <span className="text-destructive"> *</span>}
+              </Label>
               <div className="relative">
                 <Input
                   id="apiKey"
@@ -591,33 +864,17 @@ export function AIProviderConfig({
             </div>
             <div className="space-y-1">
               <Label htmlFor="model" className="text-xs">model</Label>
-              <Select
+              <ModelPicker
+                id="model"
                 value={formData.model}
-                onValueChange={(value) =>
-                  setFormData({ ...formData, model: value })
-                }
-              >
-                <SelectTrigger className="h-8 text-sm">
-                  <SelectValue
-                    placeholder={
-                      isLoadingModels ? "loading models..." : "select model"
-                    }
-                  />
-                </SelectTrigger>
-                <SelectContent>
-                  {openaiModels.length > 0 ? (
-                    openaiModels.map((model) => (
-                      <SelectItem key={model.id} value={model.id}>
-                        {model.id}
-                      </SelectItem>
-                    ))
-                  ) : (
-                    <SelectItem value="no-models" disabled>
-                      {isLoadingModels ? "loading..." : "no models found"}
-                    </SelectItem>
-                  )}
-                </SelectContent>
-              </Select>
+                models={openaiModels.map((model) => model.id)}
+                onValueChange={(model) => setFormData({ ...formData, model })}
+                status={modelDiscoveryStatus}
+                errorMessage={modelDiscoveryError}
+                idleMessage="enter an API key to discover models"
+                emptyMessage="no models available for this API key"
+                disabled={!formData.apiKey}
+              />
             </div>
           </div>
         )}
@@ -639,31 +896,17 @@ export function AIProviderConfig({
             </div>
             <div className="space-y-1">
               <Label htmlFor="model" className="text-xs">model</Label>
-              <div className="relative">
-                <Input
-                  id="model"
-                  type="text"
-                  list="ollama-models"
-                  placeholder={isLoadingModels ? "loading..." : "e.g. qwen3.5:9b"}
-                  value={formData.model || ""}
-                  onChange={(e) =>
-                    setFormData({ ...formData, model: e.target.value })
-                  }
-                  className="h-8 text-sm"
-                />
-                {openaiModels.length > 0 && (
-                  <datalist id="ollama-models">
-                    {openaiModels.map((model) => (
-                      <option key={model.id} value={model.id} />
-                    ))}
-                  </datalist>
-                )}
-              </div>
-              {!isLoadingModels && openaiModels.length === 0 && (
-                <p className="text-[10px] text-muted-foreground">
-                  ollama not detected — type model name manually
-                </p>
-              )}
+              <ModelPicker
+                id="model"
+                value={formData.model}
+                models={openaiModels.map((model) => model.id)}
+                onValueChange={(model) => setFormData({ ...formData, model })}
+                status={modelDiscoveryStatus}
+                errorMessage={modelDiscoveryError}
+                placeholder="e.g. qwen3.5:9b"
+                emptyMessage="no Ollama models installed — type a model name manually"
+                allowManualEntry
+              />
               <p className="text-[10px] text-muted-foreground">
                 recommended: qwen3.5:9b, glm-4.7:9b, qwen3.5:4b (tool calling). GPU required.
               </p>
@@ -716,26 +959,18 @@ export function AIProviderConfig({
             </div>
             <div className="space-y-1">
               <Label htmlFor="model" className="text-xs">model</Label>
-              <div className="relative">
-                <Input
-                  id="model"
-                  type="text"
-                  list="custom-models"
-                  placeholder={isLoadingModels ? "loading..." : "type or select model"}
-                  value={formData.model || ""}
-                  onChange={(e) =>
-                    setFormData({ ...formData, model: e.target.value })
-                  }
-                  className="h-8 text-sm"
-                />
-                {openaiModels.length > 0 && (
-                  <datalist id="custom-models">
-                    {openaiModels.map((model) => (
-                      <option key={model.id} value={model.id} />
-                    ))}
-                  </datalist>
-                )}
-              </div>
+              <ModelPicker
+                id="model"
+                value={formData.model}
+                models={openaiModels.map((model) => model.id)}
+                onValueChange={(model) => setFormData({ ...formData, model })}
+                status={modelDiscoveryStatus}
+                errorMessage={modelDiscoveryError}
+                idleMessage="enter a valid base URL to discover models"
+                placeholder="type or select model"
+                emptyMessage="no models discovered — type a model name manually"
+                allowManualEntry
+              />
             </div>
           </div>
         )}
@@ -748,24 +983,17 @@ export function AIProviderConfig({
             </div>
             <div className="space-y-1">
               <Label htmlFor="model" className="text-xs">model</Label>
-              <Input
+              <ModelPicker
                 id="model"
-                type="text"
-                list="chatgpt-models"
+                value={formData.model}
+                models={openaiModels.map((model) => model.id)}
+                onValueChange={(model) => setFormData({ ...formData, model })}
+                status={modelDiscoveryStatus}
+                errorMessage={modelDiscoveryError}
                 placeholder="gpt-5.6-terra"
-                value={formData.model || ""}
-                onChange={(e) =>
-                  setFormData({ ...formData, model: e.target.value })
-                }
-                className="h-8 text-sm"
+                emptyMessage="no ChatGPT models discovered — type a model name manually"
+                allowManualEntry
               />
-              {openaiModels.length > 0 && (
-                <datalist id="chatgpt-models">
-                  {openaiModels.map((model) => (
-                    <option key={model.id} value={model.id} />
-                  ))}
-                </datalist>
-              )}
             </div>
           </div>
         )}
@@ -841,7 +1069,7 @@ export function AIProviderConfig({
                       {m.name}{m.free ? " (free)" : ""}
                       {locked && <span className="text-[9px] font-medium text-muted-foreground border rounded px-1">business</span>}
                       {!locked && costLabel && <span className="text-[9px] font-medium text-muted-foreground">{costLabel}</span>}
-                      {m.recommended_for?.includes('pipes') && <span className="text-[9px] text-muted-foreground bg-muted rounded px-1">pipes</span>}
+                      {m.recommended_for?.includes('pipes') && <span className="text-[9px] text-muted-foreground bg-muted rounded px-1">tasks</span>}
                       {m.health?.status === 'down' && <span className="text-[9px] text-red-400 ml-1">overloaded</span>}
                     </span>
                   </SelectItem>
@@ -863,6 +1091,50 @@ export function AIProviderConfig({
           </div>
         )}
 
+        {requiresAiPresetConnectionTest(selectedProvider) && (
+          <div className="space-y-2 border p-2.5">
+            <div className="flex items-center justify-between gap-2">
+              <div>
+                <p className="text-xs font-medium">connection test</p>
+                <p className={cn(
+                  "text-[10px]",
+                  (connectionTestStatus === "fail" && connectionTestResultIsCurrent) ||
+                    (connectionTestRequired && !connectionTestPassed)
+                    ? "text-destructive"
+                    : "text-muted-foreground",
+                )}>
+                  {Object.values(connectionFieldErrors)[0] ||
+                    (connectionTestPassed
+                      ? connectionTestMessage
+                      : connectionTestStatus === "testing"
+                      ? connectionTestMessage
+                      : connectionTestStatus === "fail" && connectionTestResultIsCurrent
+                      ? connectionTestMessage
+                      : connectionTestRequired
+                      ? "required before saving"
+                      : "optional for unchanged settings")}
+                </p>
+              </div>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="h-7 text-xs"
+                onClick={handleConnectionTest}
+                disabled={
+                  connectionTestStatus === "testing" ||
+                  Object.keys(connectionFieldErrors).length > 0
+                }
+              >
+                {connectionTestStatus === "testing" && (
+                  <Loader2 className="mr-1.5 h-3 w-3 animate-spin" />
+                )}
+                {connectionTestPassed ? "retest" : "test connection"}
+              </Button>
+            </div>
+          </div>
+        )}
+
         <button
           type="button"
           className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
@@ -874,43 +1146,52 @@ export function AIProviderConfig({
 
         {showAdvanced && (
           <div className="space-y-1.5">
-            {selectedProvider !== "screenpipe-cloud" && (
-              <>
-                <div className="space-y-1">
-                  <Label htmlFor="maxContextTokens" className="text-xs">model context tokens</Label>
-                  <Input
-                    id="maxContextTokens"
-                    type="number"
-                    min={32768}
-                    max={500000}
-                    step={1024}
-                    value={Math.ceil((formData.maxContextChars || 512000) / 4)}
-                    onChange={(e) => {
-                      const tokens = parseInt(e.target.value) || 128000;
-                      setFormData({ ...formData, maxContextChars: tokens * 4 });
-                    }}
-                    className="h-6 text-[10px]"
-                  />
-                  <p className="text-[10px] text-muted-foreground">
-                    match your provider&apos;s context window (for example, Ollama num_ctx); Screenpipe agents need at least 32,768
-                  </p>
-                </div>
-                <div className="space-y-1">
-                  <Label htmlFor="maxTokens" className="text-xs">max output tokens</Label>
-                  <Input
-                    id="maxTokens"
-                    type="number"
-                    min={256}
-                    max={128000}
-                    step={256}
-                    value={(formData as any).maxTokens ?? 4096}
-                    onChange={(e) =>
-                      setFormData({ ...formData, maxTokens: parseInt(e.target.value) || 4096 } as any)
-                    }
-                    className="h-6 text-[10px]"
-                  />
-                </div>
-              </>
+            {resolvedModelLimits && (
+              <p className="text-[10px] text-muted-foreground">
+                known model limits are configured automatically
+              </p>
+            )}
+            {selectedProvider !== "screenpipe-cloud" &&
+              selectedProvider !== "acp" &&
+              !resolvedModelLimits?.contextWindow && (
+              <div className="space-y-1">
+                <Label htmlFor="maxContextTokens" className="text-xs">model context tokens</Label>
+                <Input
+                  id="maxContextTokens"
+                  type="number"
+                  min={32768}
+                  max={2000000}
+                  step={1024}
+                  value={Math.ceil((formData.maxContextChars || 512000) / 4)}
+                  onChange={(e) => {
+                    const tokens = parseInt(e.target.value) || 128000;
+                    setFormData({ ...formData, maxContextChars: tokens * 4 });
+                  }}
+                  className="h-6 text-[10px]"
+                />
+                <p className="text-[10px] text-muted-foreground">
+                  use this only when the endpoint does not publish a context window; Screenpipe agents need at least 32,768
+                </p>
+              </div>
+            )}
+            {selectedProvider !== "screenpipe-cloud" &&
+              selectedProvider !== "acp" &&
+              !resolvedModelLimits?.maxOutputTokens && (
+              <div className="space-y-1">
+                <Label htmlFor="maxTokens" className="text-xs">max output tokens</Label>
+                <Input
+                  id="maxTokens"
+                  type="number"
+                  min={256}
+                  max={128000}
+                  step={256}
+                  value={formData.maxTokens ?? 4096}
+                  onChange={(e) =>
+                    setFormData({ ...formData, maxTokens: parseInt(e.target.value) || 4096 })
+                  }
+                  className="h-6 text-[10px]"
+                />
+              </div>
             )}
             <div className="space-y-1">
               <Label htmlFor="prompt" className="text-xs">prompt</Label>
@@ -932,7 +1213,15 @@ export function AIProviderConfig({
           className="w-full h-7 text-xs"
           disabled={
             isLoading ||
-            Boolean(!formData.id?.length || !formData.model?.length)
+            Boolean(idError) ||
+            !formData.id?.length ||
+            !formData.model?.length ||
+            Object.keys(connectionFieldErrors).length > 0 ||
+            (connectionTestRequired && !connectionTestPassed) ||
+            (formData.provider === "acp" &&
+              formData.acpAgent?.id === "custom" &&
+              !formData.acpAgent?.command?.trim()) ||
+            (formData.provider === "acp" && acpInstallBlocked)
           }
         >
           {isLoading ? (
@@ -962,8 +1251,8 @@ interface AIPresetsSelectorProps {
   showLoginCta?: boolean;
   /** Controlled mode: override which preset id is shown as selected */
   controlledPresetId?: string | null;
-  /** Controlled mode: callback when user picks a preset (null = "none") */
-  onControlledSelect?: (presetId: string | null) => void;
+  /** Controlled mode: callback when user picks or creates a preset (null = "none") */
+  onControlledSelect?: (preset: AIPreset | null) => void;
   /** Show a "none" option at the top of the list */
   allowNone?: boolean;
   /** Label shown for the none option */
@@ -976,6 +1265,10 @@ interface AIPresetsSelectorProps {
   triggerClassName?: string;
   /** For tight composer UIs, show the active model instead of preset details. */
   showModelOnly?: boolean;
+  /** Notify parent surfaces when the preset popover opens or closes. */
+  onOpenChange?: (open: boolean) => void;
+  /** Scheduled pipes still run through raw Pi and cannot execute ACP adapters. */
+  includeAgentPresets?: boolean;
 }
 
 export const AIPresetDialog = ({
@@ -994,10 +1287,13 @@ export const AIPresetDialog = ({
       id: providerData.id,
       maxContextChars: providerData.maxContextChars,
       prompt: providerData.prompt,
+      // Coding agent presets are defined by their agent config; dropping it
+      // here saved presets with provider "acp" but no agent.
+      acpAgent: providerData.provider === "acp" ? providerData.acpAgent : undefined,
     };
 
-    // Screenpipe Cloud: max output is defined per model in the gateway catalog (see screenpipe_cloud_models in Rust).
-    // Do not persist or override maxTokens from this dialog — avoids defaulting to 4096 and matches Settings.
+    // Screenpipe Cloud gets its output budget from the gateway catalog. Direct
+    // providers retain the resolved value or the user's unknown-model fallback.
     if (providerData.provider !== "screenpipe-cloud") {
       (newPreset as any).maxTokens = (providerData as any).maxTokens ?? 4096;
     }
@@ -1020,6 +1316,7 @@ export const AIPresetDialog = ({
         provider: preset.provider,
         url: preset.url,
         model: preset.model,
+        acpAgent: preset.acpAgent,
         maxContextChars: preset.maxContextChars,
         ...(preset.provider !== "screenpipe-cloud"
           ? { maxTokens: (preset as any).maxTokens ?? 4096 }
@@ -1062,11 +1359,13 @@ export const AIPresetsSelector = ({
   controlledPresetId,
   onControlledSelect,
   allowNone = false,
-  noneLabel = "none (use pipe defaults)",
+  noneLabel = "none (use scheduled task defaults)",
   compact = false,
   containerClassName,
   triggerClassName,
   showModelOnly = false,
+  onOpenChange,
+  includeAgentPresets = true,
 }: AIPresetsSelectorProps) => {
   const { settings, updateSettings } = useSettings();
   const [open, setOpen] = useState(false);
@@ -1081,15 +1380,31 @@ export const AIPresetsSelector = ({
 
   const { piModels, upgradeEligible } = usePiModels();
   const showUpsell = useModelUpsellGating(upgradeEligible);
+  const handleOpenChange = useCallback(
+    (nextOpen: boolean) => {
+      setOpen(nextOpen);
+      onOpenChange?.(nextOpen);
+    },
+    [onOpenChange],
+  );
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const aiPresets = useMemo(() => {
     const presets = (settings?.aiPresets || []) as AIPreset[];
-    return isManagedDeployment ? filterPresetsForEnterprisePolicy(presets, aiPresetPolicy) : presets;
-  }, [settings?.aiPresets, isManagedDeployment, aiPresetPolicy]);
+    const policyPresets = isManagedDeployment
+      ? filterPresetsForEnterprisePolicy(presets, aiPresetPolicy)
+      : presets;
+    return includeAgentPresets
+      ? policyPresets
+      : policyPresets.filter((preset) => preset.provider !== "acp");
+  }, [settings?.aiPresets, isManagedDeployment, aiPresetPolicy, includeAgentPresets]);
 
   const selectedPreset = useMemo(() => {
-    if (isControlled) return controlledPresetId ?? undefined;
+    if (isControlled) {
+      return aiPresets.some((preset) => preset.id === controlledPresetId)
+        ? controlledPresetId ?? undefined
+        : undefined;
+    }
     // Use the first preset or default preset
     const defaultPreset = aiPresets.find(
       (preset) => preset.defaultPreset,
@@ -1106,6 +1421,18 @@ export const AIPresetsSelector = ({
   const selectedPresetData = useMemo(
     () => aiPresets.find((p) => p.id === selectedPreset),
     [aiPresets, selectedPreset]
+  );
+
+  // Hosted frontier models burn the monthly AI allowance several times faster
+  // than the efficient lane. Surface that next to the model name so the user
+  // learns it before sending, not from a limit error days later.
+  const selectedModelAllowanceNotice = useMemo(
+    () =>
+      modelAllowanceNotice(
+        selectedPresetData?.provider,
+        selectedPresetData?.model,
+      ),
+    [selectedPresetData?.provider, selectedPresetData?.model]
   );
 
   useEffect(() => {
@@ -1131,7 +1458,7 @@ export const AIPresetsSelector = ({
         if (isControlled) {
           // Controlled (e.g. chat composer): cycle the host's local selection
           // without rewriting the user's default preset in settings.
-          onControlledSelect?.(nextPreset.id);
+          onControlledSelect?.(nextPreset);
         } else {
           const updatedPresets = aiPresets.map((p) => ({
             ...p,
@@ -1172,6 +1499,8 @@ export const AIPresetsSelector = ({
       });
       return;
     }
+
+    let createdPreset: AIPreset | undefined;
 
     // If we're editing an existing preset
     if (selectedPresetToEdit) {
@@ -1245,24 +1574,25 @@ export const AIPresetsSelector = ({
 
       // Handle first preset creation
       if (settings.aiPresets.length === 0) {
-        const newPreset = {
+        createdPreset = {
           ...preset,
           defaultPreset: true,
         } as AIPreset;
 
         updateSettings({
-          aiPresets: [newPreset],
+          aiPresets: [createdPreset],
          
         });
       } else {
         // Adding a new preset
+        createdPreset = {
+          ...preset,
+          defaultPreset: false,
+        } as AIPreset;
         updateSettings({
           aiPresets: [
             ...settings.aiPresets,
-            {
-              ...preset,
-              defaultPreset: false,
-            } as AIPreset,
+            createdPreset,
           ],
         });
       }
@@ -1270,6 +1600,17 @@ export const AIPresetsSelector = ({
       toast.success("Preset created", {
         description: "New preset has been added",
       });
+    }
+
+    // A newly created preset belongs to the controlled surface that created
+    // it. Pass the full value so the host can activate it immediately without
+    // waiting for the settings store to publish the updated preset list.
+    if (
+      isControlled &&
+      createdPreset &&
+      (includeAgentPresets || createdPreset.provider !== "acp")
+    ) {
+      onControlledSelect(createdPreset);
     }
 
     // Notify parent to restart Pi only when the edited preset is the one in use.
@@ -1371,14 +1712,12 @@ export const AIPresetsSelector = ({
       }
     }
 
-    if (preset.defaultPreset) {
-      toast.error("Cannot delete default preset", {
-        description: "Please set another preset as default first",
-      });
-      return;
+    let updatedPresets = settings.aiPresets.filter((p) => p.id !== preset.id);
+    // Deleting the default is allowed; promote the first remaining preset so
+    // there is always exactly one default and the user is never stuck.
+    if (preset.defaultPreset && updatedPresets.length > 0 && !updatedPresets.some((p) => p.defaultPreset)) {
+      updatedPresets = updatedPresets.map((p, index) => ({ ...p, defaultPreset: index === 0 }));
     }
-
-    const updatedPresets = settings.aiPresets.filter((p) => p.id !== preset.id);
     updateSettings({
       aiPresets: updatedPresets,
     });
@@ -1421,7 +1760,7 @@ export const AIPresetsSelector = ({
           </div>
         )}
         <div className="flex w-full items-center gap-2">
-        <Popover open={open} onOpenChange={setOpen}>
+        <Popover open={open} onOpenChange={handleOpenChange}>
           <TooltipProvider>
             <Tooltip>
               <PopoverTrigger asChild>
@@ -1451,8 +1790,40 @@ export const AIPresetsSelector = ({
                               : undefined
                           }
                         >
-                          {selectedPresetData?.model || formatPresetName(selectedPreset)}
+                          {/* ACP presets store the adapter id in `model`, so the
+                              raw slug ("claude-acp") is what showed here. Name
+                              the agent instead; the config control beside it
+                              names the model the agent is running. */}
+                          {selectedPresetData?.provider === "acp"
+                            ? acpAdapterInfo(selectedPresetData.acpAgent?.id).name
+                            : selectedPresetData?.model ||
+                              formatPresetName(selectedPreset)}
                         </span>
+                        {selectedModelAllowanceNotice && (
+                          <TooltipProvider>
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <span
+                                  data-testid="model-allowance-notice"
+                                  aria-label={selectedModelAllowanceNotice.description}
+                                  className={cn(
+                                    "shrink-0 rounded-sm px-1 py-px text-[10px] font-medium leading-none",
+                                    selectedModelAllowanceNotice.tier === "highest"
+                                      ? "bg-amber-500/15 text-amber-600 dark:text-amber-500"
+                                      : "bg-muted text-muted-foreground",
+                                  )}
+                                >
+                                  {selectedModelAllowanceNotice.tier === "highest"
+                                    ? "$$"
+                                    : "$"}
+                                </span>
+                              </TooltipTrigger>
+                              <TooltipContent side="top" className="max-w-[260px]">
+                                {selectedModelAllowanceNotice.description}
+                              </TooltipContent>
+                            </Tooltip>
+                          </TooltipProvider>
+                        )}
                       </div>
                     ) : (
                       <div className="flex w-full items-center justify-between gap-2 overflow-hidden min-w-0">
@@ -1518,7 +1889,7 @@ export const AIPresetsSelector = ({
                         if (isControlled) {
                           onControlledSelect(null);
                         }
-                        setOpen(false);
+                        handleOpenChange(false);
                       }}
                     >
                       <Check
@@ -1613,7 +1984,7 @@ export const AIPresetsSelector = ({
                         // so string comparison against preset.id would fail
                         if (isGated) return;
                         if (isControlled) {
-                          onControlledSelect(preset.id);
+                          onControlledSelect(preset);
                         } else if (preset.id !== selectedPreset && !aiPresetPolicy.lock_default_preset) {
                           const updatedPresets = (settings.aiPresets || []).map((p) => ({
                             ...p,
@@ -1630,7 +2001,7 @@ export const AIPresetsSelector = ({
                             description: `${preset.id} is now active`,
                           });
                         }
-                        setOpen(false);
+                        handleOpenChange(false);
                       }}
                       className="flex py-2"
                     >
@@ -1642,6 +2013,15 @@ export const AIPresetsSelector = ({
                               selectedPreset === preset.id
                                 ? "opacity-100"
                                 : "opacity-0",
+                            )}
+                          />
+                          {/* eslint-disable-next-line @next/next/no-img-element */}
+                          <img
+                            src={presetImageSrc(preset.provider, preset.acpAgent?.id)}
+                            alt=""
+                            className={cn(
+                              "h-4 w-4 rounded-sm shrink-0 opacity-80",
+                              presetImageClass(preset.provider, preset.acpAgent?.id),
                             )}
                           />
                           <span className="font-medium truncate max-w-[120px]" title={preset.id}>
@@ -1664,7 +2044,9 @@ export const AIPresetsSelector = ({
                               {preset.provider}
                             </span>
                             <span className="truncate max-w-[120px]">
-                              {preset.model}
+                              {preset.provider === "acp"
+                                ? acpAdapterInfo(preset.acpAgent?.id).name
+                                : preset.model}
                             </span>
                           </div>
                           <div className="flex items-center gap-1">
@@ -1707,7 +2089,7 @@ export const AIPresetsSelector = ({
                                 <Star className="h-3.5 w-3.5" />
                               </Button>
                             )}
-                            {!preset.defaultPreset && canManageEmployeePresets && !isEnterpriseManagedPreset(preset) && !isLastCloudPreset(preset) && (
+                            {canManageEmployeePresets && !isEnterpriseManagedPreset(preset) && !isLastCloudPreset(preset) && (
                               <Button
                                 variant="ghost"
                                 size="icon"
@@ -1731,7 +2113,7 @@ export const AIPresetsSelector = ({
                   <CommandGroup>
                     <CommandItem
                       onSelect={() => {
-                        setOpen(false);
+                        handleOpenChange(false);
                         setSelectedPresetToEdit(undefined);
                         setDialogOpen(true);
                       }}

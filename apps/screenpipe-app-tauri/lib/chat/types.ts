@@ -8,6 +8,7 @@ export type ChatEntrySource = "home_card" | "normal_chat";
 
 export type ChatEntryCard =
   | "automate_my_work"
+  | "contextual_suggestion"
   | "day_recap"
   | "other_builtin"
   | "custom"
@@ -16,9 +17,23 @@ export type ChatEntryCard =
 
 export type ChatResponsePosition = "initial" | "followup";
 
+/**
+ * Who wrote the prompt that was sent.
+ *
+ * The experiment's thesis is that a prefilled, editable starter teaches people
+ * to phrase their own questions. A click-through rate cannot show that — only
+ * the split between sending a starter untouched and reworking it can, so this
+ * is recorded as its own dimension. Content-free: never carries prompt text.
+ */
+export type ChatComposerAuthorship =
+  | "user_authored"
+  | "template_unmodified"
+  | "template_edited";
+
 export type ChatSendOptions = {
   entrySource?: ChatEntrySource;
   entryCard?: ChatEntryCard;
+  composerAuthorship?: ChatComposerAuthorship;
 };
 
 // Per-message attachment metadata. The extracted text lives inside the message
@@ -33,18 +48,52 @@ export type ChatAttachment = {
 export interface ToolCall {
   id: string;
   toolName: string;
+  /** ACP tool-call kind (read/edit/execute/fetch/search/think/…) when the agent
+   *  provides one; drives a sensible activity label for native ACP tools. */
+  kind?: string;
   args: Record<string, any>;
   result?: string;
   isError?: boolean;
   isRunning: boolean;
   startedAtMs?: number;
   endedAtMs?: number;
+  /** Spawning Task's tool call id for subagent child calls (ACP `_meta`). */
+  parentToolCallId?: string;
+  /** This call is the launch of a subagent (Claude's Task/Agent tool), so it
+   *  is a container for the nested transcript rather than a step of its own. */
+  subagent?: boolean;
+  /** Agent-reported elapsed seconds from the latest progress heartbeat. */
+  elapsedSeconds?: number;
+  /** Subagent type from the heartbeat, e.g. "researcher". */
+  subagentType?: string;
+  /** Raw retry info when the agent reports a stalled/retrying spawn. */
+  retry?: unknown;
+  /** Rolling tail of streamed output while running (capped). */
+  progress?: string;
 }
+
+export type AgentActionOption = {
+  optionId: string;
+  name: string;
+  kind?: string;
+  description?: string;
+};
 
 export type ContentBlock =
   | { type: "text"; text: string }
   | { type: "tool"; toolCall: ToolCall }
   | { type: "thinking"; text: string; isThinking: boolean; durationMs?: number }
+  | {
+      type: "agent_action";
+      actionKind: "permission" | "auth";
+      requestId: string;
+      sessionId: string;
+      title: string;
+      message?: string;
+      options: AgentActionOption[];
+      /** Exact command / target shown verbatim as a code block under the title. */
+      detail?: string;
+    }
   | {
       type: "connection_action";
       connectionId: string;
@@ -55,6 +104,10 @@ export type ContentBlock =
       pendingActionPrompt?: string;
       extensionRequestId?: string;
       extensionReason?: string;
+      // Set when the card was raised by the ACP connect broker
+      // (POST /v1/connect-request). The connect/decline handlers echo the
+      // outcome back to the blocked agent via POST /v1/connect-response.
+      connectRequestId?: string;
     };
 
 export interface Message {
@@ -80,6 +133,10 @@ export interface Message {
   entrySource?: ChatEntrySource;
   /** Allowlisted home-card category. Never contains a title, prompt, or user-authored value. */
   entryCard?: ChatEntryCard;
+  /** The app quit while this assistant turn was still streaming; its
+   *  running tools never reported completion and are shown as interrupted
+   *  rather than silently marked done. */
+  interruptedByQuit?: boolean;
 }
 
 export type QueuedDisplayPayload = {

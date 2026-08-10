@@ -20,8 +20,10 @@ import { DeeplinkHandler } from "@/components/deeplink-handler";
 import { LiveViewOnboardingFollowUp } from "@/components/live-view-onboarding-follow-up";
 import { usePathname } from "next/navigation";
 import { readCachedAnalyticsId, readCachedAnalyticsEnabled } from "@/lib/analytics-id";
+import { resolveTelemetryDisabledByEnv } from "@/lib/telemetry-env";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { queryClient } from "@/lib/query-client";
+import { DesktopRemoteControl } from "@/components/desktop-remote-control";
 
 /// Global mount point for the updater event listener. Lives here (not in
 /// per-page hooks) so the listener is registered for the lifetime of the
@@ -52,6 +54,7 @@ export const Providers = forwardRef<
   // succeeds; the post-mount effect flips mounted=true and the real tree
   // renders client-only without a hydration step.
   const [mounted, setMounted] = useState(false);
+  const [posthogReady, setPosthogReady] = useState(false);
   // The deep-link handler (which turns the screenpipe:// login callback into a
   // loadUser call) MUST stay mounted outside the entitlement gate. Otherwise the
   // "sign in required" screen unmounts it and the login token is dropped, so
@@ -99,6 +102,16 @@ export const Providers = forwardRef<
       } else {
         posthog.opt_in_capturing();
       }
+      // The cached preference above is the only SYNCHRONOUS signal available.
+      // An automated environment (CI, SCREENPIPE_DISABLE_TELEMETRY) is known
+      // only to Rust, so ask for it and opt out as soon as it answers. This
+      // lands well before the identify() effect in use-settings — which is what
+      // actually mints a PostHog person under `person_profiles: identified_only`
+      // — so a CI run never becomes a "user". See lib/telemetry-env.
+      void resolveTelemetryDisabledByEnv().then((envDisabled) => {
+        if (envDisabled) posthog.opt_out_capturing();
+      });
+      setPosthogReady(true);
     }
   }, []);
 
@@ -119,6 +132,7 @@ export const Providers = forwardRef<
                       <PostHogProvider client={posthog}>
                         {mounted ? (
                           <>
+                            <DesktopRemoteControl enabled={posthogReady} />
                             {!isOverlay && <DeeplinkHandler />}
                             {!isOverlay && <LiveViewOnboardingFollowUp />}
                             <AppEntitlementGate>{children}</AppEntitlementGate>

@@ -4,16 +4,20 @@
 "use client";
 
 import * as React from "react";
-import { ChevronDown, Loader2, Settings } from "lucide-react";
+import { ChevronDown, Loader2, Settings, Workflow } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { SummaryCards } from "@/components/chat/summary-cards";
+import { FirstRunLearningBanner } from "@/components/first-run/learning-banner";
+import { HomeStarterSurface } from "@/components/chat/home-starter-surface";
 import { PipeContextBanner } from "@/components/chat/pipe-context-banner";
 import { PipeAIIconLarge } from "@/components/pipe-ai-icon";
 import { InlineChatHistory } from "@/components/chat/standalone/inline-chat-history";
 import { ChatMessageList, type ChatMessageListProps } from "@/components/chat/standalone/chat-message-list";
 import type { ConversationMeta } from "@/lib/chat-storage";
+import type { AIPreset } from "@/lib/utils/tauri";
 import { cn } from "@/lib/utils";
 import type { Message } from "@/lib/chat/types";
+import type { ContinuousPipeChatPolicy } from "@/lib/pipe-chat-policy";
 
 const CHAT_RAIL_CLASS = "max-w-4xl mx-auto w-full";
 
@@ -23,6 +27,11 @@ type ActivePipeExecution = {
 } | null;
 
 interface ChatMainPaneProps {
+  /** Preset the first-run summary is written with, and the token it needs.
+   *  Passed down rather than read here so this pane (and the banner below it)
+   *  stay renderable without a settings provider. */
+  firstRunAiPreset?: AIPreset | null;
+  firstRunUserToken?: string | null;
   hideInlineHistory?: boolean;
   showHistory: boolean;
   onCloseHistory: () => void;
@@ -40,6 +49,7 @@ interface ChatMainPaneProps {
   messages: Message[];
   isPreparingPrefill: boolean;
   activePipeExecution: ActivePipeExecution;
+  continuousPipeChat: ContinuousPipeChatPolicy | null;
   isLoading: boolean;
   isStreaming: boolean;
   disabledReason: string | null;
@@ -48,7 +58,12 @@ interface ChatMainPaneProps {
   needsLogin: boolean;
   onOpenLogin: () => void | Promise<void>;
   onOpenSettings: () => void | Promise<void>;
+  onOpenPipeSettings: () => void | Promise<void>;
   summaryCardsProps: React.ComponentProps<typeof SummaryCards>;
+  homeStarterProps: Omit<
+    React.ComponentProps<typeof HomeStarterSurface>,
+    "summaryCardsProps"
+  >;
   messageListProps: ChatMessageListProps;
   isUserScrolledUp: boolean;
   scrollToBottom: () => void;
@@ -72,6 +87,7 @@ export function ChatMainPane({
   messages,
   isPreparingPrefill,
   activePipeExecution,
+  continuousPipeChat,
   isLoading,
   isStreaming,
   disabledReason,
@@ -80,10 +96,14 @@ export function ChatMainPane({
   needsLogin,
   onOpenLogin,
   onOpenSettings,
+  onOpenPipeSettings,
   summaryCardsProps,
+  homeStarterProps,
   messageListProps,
   isUserScrolledUp,
   scrollToBottom,
+  firstRunAiPreset,
+  firstRunUserToken,
 }: ChatMainPaneProps) {
   return (
     <div className="flex-1 flex overflow-hidden">
@@ -114,6 +134,45 @@ export function ChatMainPane({
             messages.length === 0 && !isPreparingPrefill && !activePipeExecution
               && "min-h-full flex flex-col items-center justify-center"
           )}>
+            {continuousPipeChat && (
+              <div
+                data-testid="pipe-continuous-chat-state"
+                role="status"
+                aria-live="polite"
+                className="flex items-start gap-3 border border-border/60 bg-muted/30 px-3 py-2.5"
+              >
+                <Workflow className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+                <div className="min-w-0 flex-1">
+                  <p className="text-xs font-medium">
+                    {continuousPipeChat.state === "on"
+                      ? "one chat"
+                      : continuousPipeChat.state === "off"
+                        ? "memory paused"
+                        : continuousPipeChat.state === "missing"
+                          ? "scheduled task unavailable"
+                          : "checking one-chat memory"}
+                  </p>
+                  <p className="mt-0.5 text-[11px] text-muted-foreground">
+                    {continuousPipeChat.state === "on"
+                      ? "Future runs and your replies share context here."
+                      : continuousPipeChat.state === "off"
+                        ? "Future runs start separate chats. Saved context stays here until you clear it."
+                        : continuousPipeChat.state === "missing"
+                          ? "This transcript is kept, but replies are disabled until you reinstall the task."
+                          : "The saved transcript is available while screenpipe checks the current task setting."}
+                  </p>
+                </div>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 shrink-0 px-2 text-[11px]"
+                  onClick={onOpenPipeSettings}
+                >
+                  manage
+                </Button>
+              </div>
+            )}
             {activePipeExecution && (
               <PipeContextBanner
                 pipeName={activePipeExecution.name}
@@ -188,14 +247,37 @@ export function ChatMainPane({
                   )}
                 </div>
               )}
+            {/* Post-setup learning window. Renders only while the window is
+                open, so it is inert for everyone else. It sits on the empty
+                chat because that is where setup now lands and where the
+                summary chat appears once the window resolves. */}
+            {messages.length === 0 && !activePipeExecution && (
+              <div className="mx-auto w-full max-w-3xl px-4 pb-4">
+                <FirstRunLearningBanner
+                  aiPreset={firstRunAiPreset}
+                  userToken={firstRunUserToken}
+                />
+              </div>
+            )}
             {messages.length === 0 &&
               !isPreparingPrefill &&
               !activePipeExecution &&
               !isLoading &&
               !isStreaming &&
               hasPresets &&
-              hasValidModel && <SummaryCards {...summaryCardsProps} />}
-            <ChatMessageList {...messageListProps} />
+              hasValidModel && (
+                <HomeStarterSurface
+                  summaryCardsProps={summaryCardsProps}
+                  {...homeStarterProps}
+                />
+              )}
+            {/* A conversation switch is a hard visual boundary. Remounting the
+                list prevents AnimatePresence from carrying an outgoing chat's
+                exit nodes into the new chat's empty state. */}
+            <ChatMessageList
+              key={conversationId ?? "blank-chat"}
+              {...messageListProps}
+            />
 
             <div ref={messagesEndRef} />
           </div>

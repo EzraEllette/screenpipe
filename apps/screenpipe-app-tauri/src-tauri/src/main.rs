@@ -32,6 +32,7 @@ use tracing_oslog::OsLogger;
 use updates::start_update_check;
 use window::ShowRewindWindow;
 
+mod acp_runtime;
 mod analytics;
 mod auth_session;
 #[allow(deprecated)]
@@ -48,10 +49,12 @@ mod chatgpt_oauth;
 mod commands;
 mod db_recovery_notifications;
 mod db_relaunch;
+mod dev_isolation;
 mod diagnostic_logs;
 mod disk_usage;
 mod disk_pressure_notifications;
-mod e2e_seed;
+#[cfg(feature = "e2e")]
+mod e2e;
 mod embedded_server;
 mod enterprise;
 mod enterprise_host_identity;
@@ -82,7 +85,6 @@ mod engine_events;
 mod monitor_events;
 mod owned_browser_cookies;
 mod permissions;
-mod acp_runtime;
 mod pi;
 mod pi_command_queue;
 mod power_awake;
@@ -148,8 +150,8 @@ use sentry;
 use tauri::AppHandle;
 #[cfg(target_os = "macos")]
 mod dock_menu;
-mod health;
 mod headless;
+mod health;
 mod log_files;
 mod media_commands;
 mod native_notification;
@@ -158,6 +160,10 @@ mod notifications;
 mod safe_icon;
 mod shortcuts;
 mod skills;
+// Binding generation runs from `cargo test` (`bun run bindings:generate` /
+// `bindings:check`) and from the debug-build refresh in `async_main`. Release
+// binaries never export TypeScript, so the whole module stays out of them.
+#[cfg(any(debug_assertions, test))]
 mod specta_bindings;
 mod vault;
 mod viewer;
@@ -211,23 +217,6 @@ use window::RewindWindowId;
 #[specta::specta]
 fn get_env(name: &str) -> String {
     std::env::var(String::from(name)).unwrap_or(String::from(""))
-}
-
-/// Returns which E2E seeds are requested (env SCREENPIPE_E2E_SEED, comma-separated).
-/// Rust uses "onboarding" in setup to complete onboarding at startup.
-#[tauri::command]
-#[specta::specta]
-fn get_e2e_seed_flags() -> Vec<String> {
-    std::env::var("SCREENPIPE_E2E_SEED")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .map(|s| {
-            s.split(',')
-                .map(|part| part.trim().to_lowercase())
-                .filter(|part| !part.is_empty())
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default()
 }
 
 /// Returns true when SCREENPIPE_SKIP_ONBOARDING is set to a truthy value
@@ -285,7 +274,9 @@ const _: () = assert!(
     "generated Tauri command registry must not be empty"
 );
 
-/// Shared tauri-specta registry body.
+/// Shared tauri-specta registry body. Only the debug-build binding refresh and
+/// the `cfg(test)` exporter build the registry — release binaries never do.
+#[cfg(any(debug_assertions, test))]
 macro_rules! define_specta_builder {
     () => {{
         use crate::store::{OnboardingStore, SettingsStore};
@@ -320,9 +311,6 @@ macro_rules! define_specta_builder {
 
 #[tokio::main]
 async fn main() {
-    // The ACP agent runs as a hidden mode of this same signed executable, so no
-    // second sidecar or hand-written protocol ships. These paths must exit
-    // before any Tauri, database, or recording setup.
     if acp_runtime::is_process_guard_mode() {
         let exit_code = match acp_runtime::run_process_guard() {
             Ok(exit_code) => exit_code,
@@ -333,6 +321,10 @@ async fn main() {
         };
         std::process::exit(exit_code);
     }
+
+    // ACP runs in a hidden mode of this same executable. Keeping the protocol
+    // runtime in Rust avoids shipping a second sidecar while ensuring this path
+    // exits before any Tauri, database, or recording initialization.
     if acp_runtime::is_runtime_mode() {
         let exit_code = match acp_runtime::run_from_env().await {
             Ok(()) => 0,
@@ -342,13 +334,22 @@ async fn main() {
                 let _ = writeln!(
                     stdout,
                     "{}",
-                    serde_json::json!({ "type": "error", "message": error })
+                    serde_json::json!({ "type": "acp_fatal", "error": error })
                 );
+                let _ = stdout.flush();
+                eprintln!("[acp-runtime] {error}");
                 1
             }
         };
         std::process::exit(exit_code);
     }
+
+    // Point debug builds at their own data dir and ports so `bun tauri dev`
+    // can't hand off to (or kill) an installed production app. Must run before
+    // the DB-recovery-lock check, the /focus single-instance handoff and the
+    // telemetry store read below — all of which resolve the data directory or
+    // the focus port. No-op in release builds. See `dev_isolation`.
+    dev_isolation::apply();
 
     #[cfg(target_os = "linux")]
     linux_webkit_env::configure();
@@ -512,9 +513,9 @@ async fn main() {
     let store_path = screenpipe_core::paths::default_screenpipe_data_dir().join("store.bin");
     let store_json = std::fs::read(&store_path).ok().and_then(|data| {
         if data.len() >= 8 && &data[..8] == b"SPSTORE1" {
-            // Encrypted store — try to decrypt with keychain key
-            // Only attempt if encryption is enabled (file being encrypted is the signal)
-            let key = match secrets::get_key_if_encryption_enabled() {
+            // The encrypted file is authoritative: every reader asks the OS
+            // vault for its existing key instead of relying on a separate flag.
+            let key = match secrets::get_key() {
                 secrets::KeyResult::Found(k) => k,
                 _ => return None,
             };
@@ -540,7 +541,9 @@ async fn main() {
         .map(|enabled| !enabled)
         .unwrap_or(false)
         || screenpipe_engine::analytics::telemetry_disabled_by_env();
-    let _posthog_disabled = telemetry_disabled;
+    // The webview gets this same decision through the
+    // `is_telemetry_disabled_by_env` command (see commands.rs); it cannot read
+    // the process env itself.
 
     let app_version = env!("CARGO_PKG_VERSION");
     let sentry_guard = if !telemetry_disabled {
@@ -818,6 +821,13 @@ async fn main() {
             tauri::WindowEvent::Focused(true) => {
                 let app = window.app_handle().clone();
                 tauri::async_runtime::spawn(async move {
+                    let capture_intended = app
+                        .try_state::<RecordingState>()
+                        .map(|s| s.capture_intended())
+                        .unwrap_or(false);
+                    if !capture_intended {
+                        return;
+                    }
                     let permission_granted =
                         permissions::check_microphone_permission().permitted();
                     let audio_devices_empty = health::get_audio_device_status().is_empty();
@@ -973,7 +983,9 @@ async fn main() {
     let app = app.plugin(tauri_plugin_global_shortcut::Builder::new().build());
 
     #[cfg(feature = "e2e")]
-    let app = app.plugin(tauri_plugin_webdriver::init());
+    let app = app
+        .plugin(tauri_plugin_webdriver::init())
+        .plugin(e2e::plugin());
 
     // Only add Sentry plugin if telemetry is enabled
     let app = if let Some(ref _guard) = sentry_guard {
@@ -989,6 +1001,7 @@ async fn main() {
     let sync_scheduler = screenpipe_connect::sync_scheduler::SyncScheduler::new();
 
     let app = app.manage(recording_state)
+        .manage(disk_pressure_notifications::DiskPressureNotificationState::default())
         .manage(pi_state)
         .manage(suggestions_state)
         .manage(sync_scheduler)
@@ -1192,93 +1205,26 @@ async fn main() {
             let posthog_api_key = "phc_z7FZXE8vmXtdTQ78LMy3j1BQWW4zP6PGDUP46rgcdnb".to_string();
             let interval_hours = 6;
 
-            // Store setup and initialization - must be done first
+            // Store setup and initialization - must be done first. A locked
+            // encrypted store is fatal: continuing would let the webview load
+            // an empty plugin handle and save defaults over the ciphertext.
             // Note: StoreBuilder handles file creation internally — pre-creating
             // store.bin here caused TOCTOU race conditions ("File exists" os error 17).
-            // Use unwrap_or_default to prevent crashes from corrupted stores
-            let mut store = store::init_store(&app.handle()).unwrap_or_else(|e| {
-                error!("Failed to init settings store, using defaults: {}", e);
-                store::SettingsStore::default()
-            });
-
-            // E2E seed: when SCREENPIPE_E2E_SEED contains "no-recording", flip
-            // disable_vision + disable_audio so the e2e harness can drive the
-            // app without granting Screen Recording / Microphone TCC. The
-            // server (DB + HTTP) still boots; only SCK + audio capture skip.
-            // "no-audio" keeps vision enabled while disabling only audio, which
-            // lets Windows hosted runners exercise OCR without booting Whisper.
-            // See get_e2e_seed_flags above for parsing.
-            let e2e_flags = get_e2e_seed_flags();
-            if e2e_flags.iter().any(|f| f == "no-recording") {
-                store.recording.disable_audio = true;
-                store.recording.disable_vision = true;
-                info!("E2E seed: recording disabled (vision + audio)");
-            }
-            if e2e_flags.iter().any(|f| f == "no-audio") {
-                store.recording.disable_audio = true;
-                info!("E2E seed: audio disabled");
-            }
-            if e2e_flags
-                .iter()
-                .any(|f| f == "recording-health-return-race")
-            {
-                store.show_restart_notifications = true;
-                store.extra.insert(
-                    "restartNotificationsDefaultedOff".to_string(),
-                    serde_json::Value::Bool(true),
+            #[allow(unused_mut)] // E2E seeds mutate the store in feature builds.
+            let mut store = store::init_store(&app.handle()).map_err(|e| {
+                error!("Failed to init settings store; aborting startup: {}", e);
+                // A log line is invisible to the user: without this the app just
+                // silently refuses to launch. Say why, and say the settings are
+                // intact, before the process goes away.
+                store::show_fatal_startup_alert(
+                    "screenpipe cannot start",
+                    &store::locked_store_alert_message(&e),
                 );
-                info!("E2E seed: recording health alerts enabled for return-race regression");
-            }
-            if e2e_flags.iter().any(|f| f == "event-trigger-capture") {
-                store.recording.capture_on_keystroke = Some(true);
-                store.recording.capture_on_clipboard = Some(true);
-                store.recording.min_capture_interval_ms = Some(50);
-                store.recording.disable_keyboard_capture = true;
-                store.recording.disable_clipboard_capture = true;
-                info!("E2E seed: event-trigger capture enabled with keyboard/clipboard DB rows disabled");
-            }
-            if e2e_flags.iter().any(|f| f == "keyboard-db-capture") {
-                store.recording.disable_keyboard_capture = false;
-                info!("E2E seed: keyboard DB capture enabled");
-            }
-            if e2e_flags.iter().any(|f| f == "cloud-audio-fallback") {
-                store.recording.disable_audio = false;
-                store.recording.disable_vision = true;
-                store.recording.audio_transcription_engine = "screenpipe-cloud".to_string();
-                store.user = store::User::default();
-                store
-                    .extra
-                    .insert("_parakeetDefaultMigrationDone".to_string(), json!(true));
-                store
-                    .extra
-                    .insert("_proCloudMigrationDone".to_string(), json!(true));
-                info!("E2E seed: screenpipe cloud audio fallback");
-            }
-            if e2e_flags.iter().any(|f| f == "meetings-only-audio") {
-                // Real audio lifecycle lane for meetings-only capture. Keep
-                // vision and transcription disabled so the spec isolates OS
-                // device ownership without loading OCR/STT models.
-                store.recording.disable_audio = false;
-                store.recording.disable_vision = true;
-                store.recording.audio_capture_mode = "meetings-only".to_string();
-                store.recording.audio_transcription_engine = "disabled".to_string();
-                // Emit a real segment quickly enough for the lifecycle spec to
-                // verify the first capture callback without a 30-second wait.
-                store.recording.audio_chunk_duration = 5;
-                store.recording.experimental_meeting_piggyback = false;
-                info!("E2E seed: meetings-only audio device lifecycle");
-            }
+                std::io::Error::other(e)
+            })?;
 
-            // The frontend reads settings from the Tauri store rather than the
-            // managed Rust copy below. Persist E2E mutations so both sides see
-            // the same seeded recording state (for example, `no-recording`
-            // must disable recent-recording actions in the Help UI too).
             #[cfg(feature = "e2e")]
-            if !e2e_flags.is_empty() {
-                if let Err(e) = store.save(&app.handle()) {
-                    warn!("Failed to persist E2E settings seed: {}", e);
-                }
-            }
+            e2e::seeds::apply_settings(app.handle(), &mut store);
 
             app.manage(store.clone());
 
@@ -1298,8 +1244,8 @@ async fn main() {
             // hit a split: the engine (server_core) reads its SecretStore from
             // `config.data_dir` (the custom path) while OAuth token writes
             // (`open_secret_store`, chatgpt_oauth, …) went to the default
-            // `~/.screenpipe`. Tokens landed in one db.sqlite and were read from
-            // another → "no credentials found … cannot authenticate" 401s on
+            // `~/.screenpipe`. Tokens landed in one data directory and were read
+            // from another → "no credentials found … cannot authenticate" 401s on
             // every Microsoft 365 / Google / ChatGPT call, reconnecting forever
             // never helping. Setting the env var here (before any OAuth callback
             // can fire) makes `default_screenpipe_data_dir()` self-consistent and
@@ -1405,15 +1351,8 @@ async fn main() {
             });
             app.manage(onboarding_store.clone());
 
-            // E2E seed: when SCREENPIPE_E2E_SEED contains "onboarding", mark onboarding complete
-            let e2e_flags = get_e2e_seed_flags();
-            if e2e_flags.iter().any(|f| f == "onboarding") {
-                if let Err(e) = store::OnboardingStore::update(&app.handle(), |o| o.complete()) {
-                    error!("E2E seed: failed to complete onboarding: {}", e);
-                } else {
-                    info!("E2E seed: onboarding marked complete");
-                }
-            }
+            #[cfg(feature = "e2e")]
+            e2e::seeds::apply_onboarding(app.handle());
 
             // Escape hatch: SCREENPIPE_SKIP_ONBOARDING=1 marks onboarding complete
             // at startup so corp/VDI/headless environments (where the interactive
@@ -1523,6 +1462,20 @@ async fn main() {
 
             let app_ui_hidden = crate::enterprise_policy::is_app_ui_hidden();
             let from_autostart = launched_from_autostart();
+
+            // The old connection slide blocked onboarding on work that can be
+            // done safely and idempotently by Rust. During first-run setup,
+            // wire detected local AI tools in the background; after onboarding
+            // completes this no longer runs, so an explicit Settings removal
+            // remains removed on future launches.
+            if !onboarding_store.is_completed && !app_ui_hidden {
+                let local_api = recording::local_api_context_from_app(&app.handle());
+                skills::connect_detected_ai_tools_in_background(
+                    store.recording.api_auth,
+                    local_api.port,
+                );
+            }
+
             // Enterprise hidden-UI deployments always run headless with the
             // recorder only, regardless of user settings or onboarding state.
             let headless_startup = app_ui_hidden
@@ -1746,7 +1699,7 @@ async fn main() {
 
                 // Pipe output callback. Stage 5: legacy `pipe_event`
                 // topic dropped — every pipe stdout line goes out on
-                // `agent_event` with sessionId `pipe:<name>:<execId>`.
+                // `agent_event` with a per-run or stable continued session id.
                 let app_for_pipe = app_handle.clone();
                 // Separate clone for the owned-browser install path — the
                 // on_pipe_output closure below captures app_for_pipe by
@@ -1756,8 +1709,8 @@ async fn main() {
                 let pipe_agent_events =
                     crate::agent_event_emitter::PipeAgentEventEmitter::new(app_for_pipe);
                 let on_pipe_output: Option<screenpipe_core::pipes::OnPipeOutputLine> = Some(
-                    std::sync::Arc::new(move |pipe_name: &str, exec_id: i64, line: &str| {
-                        pipe_agent_events.emit_line(pipe_name, exec_id, line);
+                    std::sync::Arc::new(move |pipe_name: &str, exec_id: i64, continues_chat: bool, line: &str| {
+                        pipe_agent_events.emit_line(pipe_name, exec_id, continues_chat, line);
                     }),
                 );
 
@@ -1916,12 +1869,8 @@ async fn main() {
                                 ),
                             );
 
-                            // E2E: seed deterministic searchable frames so the
-                            // search-UI repro tests run against real data with
-                            // no recording required (SCREENPIPE_E2E_SEED=...,search-fixture).
-                            if get_e2e_seed_flags().iter().any(|f| f == "search-fixture") {
-                                crate::e2e_seed::seed_search_fixture(&server.db).await;
-                            }
+                            #[cfg(feature = "e2e")]
+                            e2e::seeds::seed_database(&server.db).await;
 
                             // Phase 2: use the latest capture intent, not the
                             // value from app launch. Hold the slot across
@@ -2014,7 +1963,14 @@ async fn main() {
             let is_autostart_enabled = store
                 .auto_start_enabled;
 
-            if is_autostart_enabled {
+            // `auto_start_enabled` defaults to true, so an isolated dev profile
+            // would register a login item pointing at target/debug — launching a
+            // development build at every login alongside the real app. Never
+            // touch the OS login item from a dev build; leave whatever the
+            // installed app registered exactly as it is.
+            if crate::dev_isolation::is_active() {
+                debug!("dev isolation active, skipping autostart registration");
+            } else if is_autostart_enabled {
                 let _ = autostart_manager.enable();
             } else {
                 let _ = autostart_manager.disable();
@@ -2090,15 +2046,12 @@ async fn main() {
                 // A new process must preserve the same fail-closed state as the
                 // process that observed the hard fault. Start the notification
                 // subscriber first, then publish recovery-required immediately.
-                tauri::async_runtime::spawn(async {
-                    crate::db_relaunch::surface_manual_recovery(
-                        "durable SQLite quarantine was present at app launch",
-                    )
-                    .await;
+                tauri::async_runtime::spawn(async move {
+                    crate::db_relaunch::surface_quarantined_recovery_at_launch(&launch_db_path)
+                        .await;
                 });
                 if !app_ui_hidden && !headless_startup {
-                    crate::db_recovery_notifications::prompt_for_quarantined_database(
-                        app_handle.clone(),
+                    crate::db_recovery_notifications::notify_quarantined_database(
                         data_dir.clone(),
                     );
                 }
@@ -2365,8 +2318,7 @@ async fn main() {
                 tauri::RunEvent::Reopen { .. } => {
                     // Defer off the event stack so run handler stays panic-free.
                     // Open the settings/app window (not the timeline overlay).
-                    if crate::enterprise_policy::is_app_ui_hidden()
-                        || crate::headless::is_dormant()
+                    if crate::enterprise_policy::is_app_ui_hidden() || crate::headless::is_dormant()
                     {
                         return;
                     }
@@ -2397,7 +2349,10 @@ mod autostart_arg_tests {
     #[test]
     fn ignores_unrelated_args() {
         assert!(!args_contain_autostart(["screenpipe"]));
-        assert!(!args_contain_autostart(["screenpipe", "--check-arc-automation"]));
+        assert!(!args_contain_autostart([
+            "screenpipe",
+            "--check-arc-automation"
+        ]));
         assert!(!args_contain_autostart(["screenpipe", "--autostarted"]));
     }
 }

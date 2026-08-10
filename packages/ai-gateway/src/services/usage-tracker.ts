@@ -6,6 +6,7 @@ import { Env, UserTier, UsageTier, TierLimits, UsageResult, UsageStatus, type Ac
 import { isGooglePolicyBlockedModel } from '../utils/model-policy';
 import {
   getHostedAiAllowedModels,
+  getHostedAiCapacityUpgrade,
   getHostedAiPlan,
   isHostedAiModelAllowed,
 } from './hosted-ai-policy';
@@ -347,6 +348,29 @@ async function resolveDailyLimitExceeded(
   };
 }
 
+/** Build one additive 429 contract for every hosted-AI daily-query endpoint. */
+export function buildDailyUsageLimitError(
+  usage: UsageResult,
+  tier: UsageTier,
+  accountPlan: AccountPlan,
+  message: string,
+) {
+  const upgrade = getHostedAiCapacityUpgrade(accountPlan);
+  return {
+    error: (usage.creditsRemaining ?? 0) <= 0
+      ? 'credits_exhausted'
+      : 'daily_limit_exceeded',
+    message,
+    used_today: usage.used,
+    limit_today: usage.limit,
+    resets_at: usage.resetsAt,
+    tier,
+    credits_remaining: usage.creditsRemaining ?? 0,
+    required_plan: upgrade?.requiredPlan ?? null,
+    upgrade_url: upgrade?.upgradeUrl ?? null,
+  };
+}
+
 /**
  * Track a request and check if it's within limits
  * Also checks IP-based limits to prevent device ID spoofing abuse
@@ -478,22 +502,25 @@ export async function getUsageStatus(
   tier: UsageTier,
   userId?: string,
   accountPlan: AccountPlan = defaultAccountPlanForUsageTier(tier),
+  options: { readLegacyDailyCounter?: boolean } = {},
 ): Promise<UsageStatus> {
   const today = getTodayUTC();
   const limits = getTierConfig(env)[tier];
 
   let usedToday = 0;
 
-  try {
-    const existing = await env.DB.prepare(
-      'SELECT daily_count, last_reset FROM usage WHERE device_id = ?'
-    ).bind(deviceId).first<{ daily_count: number; last_reset: string }>();
+  if (options.readLegacyDailyCounter !== false) {
+    try {
+      const existing = await env.DB.prepare(
+        'SELECT daily_count, last_reset FROM usage WHERE device_id = ?'
+      ).bind(deviceId).first<{ daily_count: number; last_reset: string }>();
 
-    if (existing && existing.last_reset >= today) {
-      usedToday = existing.daily_count;
+      if (existing && existing.last_reset >= today) {
+        usedToday = existing.daily_count;
+      }
+    } catch (error) {
+      console.error('Error getting usage status:', error);
     }
-  } catch (error) {
-    console.error('Error getting usage status:', error);
   }
 
   const limitToday = limits.dailyQueries;

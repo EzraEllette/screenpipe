@@ -10,6 +10,11 @@ import { motion, AnimatePresence } from "framer-motion";
 import posthog from "posthog-js";
 import { isDevBillingBypassEnabled } from "@/lib/app-entitlement";
 
+const FAILURE_COPY: Record<string, string> = {
+  cancelled: "sign in was cancelled in your browser.",
+  timeout: "that sign-in link expired.",
+};
+
 interface OnboardingLoginProps {
   handleNextSlide: () => void;
   suppressAutoAdvance?: boolean;
@@ -234,6 +239,9 @@ const OnboardingLogin: React.FC<OnboardingLoginProps> = ({
   const hasAdvanced = useRef(false);
   const [showSkip, setShowSkip] = useState(false);
   const [isHovered, setIsHovered] = useState(false);
+  // Non-null once the system browser has been handed the login (Windows/Linux).
+  const [awaitingBrowser, setAwaitingBrowser] = useState(false);
+  const [browserFailure, setBrowserFailure] = useState<string | null>(null);
   const bgRef = useRef<HTMLCanvasElement>(null);
   const btnRef = useRef<HTMLCanvasElement>(null);
   const canSkipLogin = isDevBillingBypassEnabled();
@@ -274,9 +282,28 @@ const OnboardingLogin: React.FC<OnboardingLoginProps> = ({
 
   const handleLogin = useCallback(() => {
     posthog.capture("onboarding_login_clicked");
-    // Open login in an in-app WebView instead of Safari so we can intercept
-    // the screenpipe:// deep-link redirect (Safari blocks custom-scheme redirects)
-    commands.openLoginWindow(null);
+    setBrowserFailure(null);
+    // macOS: ASWebAuthenticationSession (shares Safari's session).
+    // Windows/Linux: the user's real default browser, so the session they
+    // already have with Google/etc. is reused instead of asking them to
+    // re-type credentials into a cold embedded WebView. Either way the token
+    // comes back on the screenpipe:// deep link; nothing is typed by hand.
+    void commands
+      .openLoginWindow(null)
+      .then((result) => {
+        if (result.status === "ok") setAwaitingBrowser(true);
+        else setBrowserFailure("failed");
+      })
+      .catch(() => setBrowserFailure("failed"));
+  }, []);
+
+  // Escape hatch when the default browser is unusable or the user never
+  // returns to it — falls back to the in-app WebView.
+  const handleUseAppWindow = useCallback(() => {
+    posthog.capture("onboarding_login_webview_fallback_clicked");
+    setAwaitingBrowser(false);
+    setBrowserFailure(null);
+    void commands.openLoginWindow(true);
   }, []);
 
   const handleSkip = useCallback(() => {
@@ -331,10 +358,54 @@ const OnboardingLogin: React.FC<OnboardingLoginProps> = ({
               ✓ signed in as {settings.user?.email || "user"}
             </span>
           </motion.div>
+        ) : awaitingBrowser ? (
+          /* Sign-in handed off to the browser; the token returns on the deep link. */
+          <motion.div
+            data-testid="login-browser-waiting"
+            className="flex flex-col items-center gap-4"
+            initial={{ opacity: 0, y: 6 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.35 }}
+          >
+            <span className="font-mono text-sm tracking-[0.18em] uppercase text-foreground/80">
+              waiting for your browser
+            </span>
+            <p className="font-mono text-[10px] text-muted-foreground/50 tracking-wide max-w-[280px] text-center leading-relaxed">
+              finish signing in there, then come back. this window updates on
+              its own.
+            </p>
+            <div className="flex flex-col items-center gap-2 mt-2">
+              <button
+                onClick={handleLogin}
+                className="font-mono text-[10px] text-muted-foreground/70 hover:text-foreground underline underline-offset-4 transition-colors tracking-wide"
+              >
+                open browser again
+              </button>
+              <button
+                data-testid="login-webview-fallback"
+                onClick={handleUseAppWindow}
+                className="font-mono text-[10px] text-muted-foreground/50 hover:text-foreground underline underline-offset-4 transition-colors tracking-wide"
+              >
+                sign in inside screenpipe instead
+              </button>
+            </div>
+          </motion.div>
         ) : (
           <>
+            {browserFailure ? (
+              <motion.p
+                data-testid="login-browser-failure"
+                className="font-mono text-[10px] text-muted-foreground/70 mb-4 tracking-wide text-center max-w-[280px]"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+              >
+                {FAILURE_COPY[browserFailure] ?? "sign in did not finish."}{" "}
+                try again.
+              </motion.p>
+            ) : null}
             {/* Button with internal geometry canvas */}
             <motion.button
+              data-testid="login-cta"
               onClick={handleLogin}
               onMouseEnter={() => setIsHovered(true)}
               onMouseLeave={() => setIsHovered(false)}
@@ -354,7 +425,12 @@ const OnboardingLogin: React.FC<OnboardingLoginProps> = ({
 
               {/* Text */}
               <span className="relative z-10 font-mono text-sm tracking-[0.25em] uppercase font-medium text-foreground group-hover:text-background transition-colors duration-150">
-                sign in
+                {/* Enterprise users are handed an existing account by their
+                    admin, so "sign in" is literally correct there. Everyone
+                    else on this slide is a fresh install with no account yet,
+                    and "sign in" reads as an instruction for people who
+                    already have one. */}
+                {suppressAutoAdvance ? "sign in" : "get started"}
               </span>
 
               {/* Corner marks */}
@@ -373,7 +449,7 @@ const OnboardingLogin: React.FC<OnboardingLoginProps> = ({
             >
               {suppressAutoAdvance
                 ? "sign in with your enterprise account"
-                : "sign in to start free"}
+                : "sign in or create a free account"}
             </motion.p>
           </>
         )}

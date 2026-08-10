@@ -20,7 +20,15 @@ pub const PI_PACKAGE: &str = "@earendil-works/pi-coding-agent@0.83.0";
 pub const PI_AI_PACKAGE: &str = "@earendil-works/pi-ai@0.83.0";
 pub const PI_NAMESPACE_DIR: &str = "@earendil-works";
 pub const SCREENPIPE_API_URL: &str = "https://api.screenpipe.com/v1";
+const PI_INSTALL_ARGS: [&str; 5] = [
+    "add",
+    "--ignore-scripts",
+    PI_PACKAGE,
+    PI_AI_PACKAGE,
+    "@anthropic-ai/sdk",
+];
 const CUSTOM_PROVIDER_USER_AGENT: &str = "screenpipe";
+const DEFAULT_CLOUD_MAX_OUTPUT_TOKENS: u64 = 32_000;
 
 /// Apply compatibility settings required by OpenAI-compatible custom endpoints.
 ///
@@ -153,21 +161,43 @@ const MAX_RATE_LIMIT_RETRIES: usize = 3;
 const RATE_LIMIT_DEFAULT_WAIT_SECS: u64 = 10;
 /// Cap so an oversized `reset_in` can't stall a pipe run indefinitely.
 const RATE_LIMIT_MAX_WAIT_SECS: u64 = 60;
+/// Total time budget for retrying `hosted_ai_capacity_reserved` contention.
+/// Unlike a provider rate limit this error means a sibling chat/pipe is briefly
+/// holding the shared hosted-AI slot, not that anything is wrong, so it gets a
+/// time budget instead of `MAX_RATE_LIMIT_RETRIES`.
+///
+/// This must stay well below the run's enclosing timeout
+/// (`pipes::DEFAULT_TIMEOUT_SECS`, 600s). Waiting for the gateway's full
+/// reservation TTL would let contention alone consume the entire budget, so the
+/// outer `tokio::time::timeout` would kill the run at the same moment the slot
+/// freed up: the user waits the full timeout and still gets nothing done. A
+/// fraction of the timeout keeps contention survivable while leaving the
+/// majority of the run for actual work.
+const CAPACITY_RESERVED_MAX_WAIT_SECS: u64 = 180;
+
+/// Parse a `"field": <digits>` JSON number out of a pi error payload.
+fn parse_json_number_field(text: &str, field: &str) -> Option<u64> {
+    let needle = format!("\"{field}\"");
+    let idx = text.find(&needle)?;
+    let rest = &text[idx + needle.len()..];
+    let rest = rest.trim_start_matches(|c: char| c == ':' || c.is_whitespace());
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse::<u64>().ok()
+}
 
 /// Parse the rate-limit retry hint (in seconds) from a pi error payload.
 ///
-/// The cloud gateway returns a 429 body containing `"reset_in":<secs>` plus a
-/// human-readable "Please wait N seconds". We prefer the structured `reset_in`
-/// field and fall back to the prose. Returns `None` when no hint is present.
+/// The cloud gateway returns a 429 body containing `"reset_in":<secs>` for
+/// provider rate limits, or `"retry_after_seconds":<secs>` for
+/// `hosted_ai_capacity_reserved` contention, plus a human-readable "Please
+/// wait N seconds". We prefer the structured fields and fall back to the
+/// prose. Returns `None` when no hint is present.
 fn parse_rate_limit_reset_secs(text: &str) -> Option<u64> {
-    // Prefer the structured "reset_in" field.
-    if let Some(idx) = text.find("\"reset_in\"") {
-        let rest = &text[idx + "\"reset_in\"".len()..];
-        let rest = rest.trim_start_matches(|c: char| c == ':' || c.is_whitespace());
-        let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-        if let Ok(secs) = digits.parse::<u64>() {
-            return Some(secs);
-        }
+    if let Some(secs) = parse_json_number_field(text, "reset_in") {
+        return Some(secs);
+    }
+    if let Some(secs) = parse_json_number_field(text, "retry_after_seconds") {
+        return Some(secs);
     }
     // Fall back to the human-readable "wait N seconds".
     let lower = text.to_lowercase();
@@ -198,6 +228,129 @@ fn is_rate_limit_error(text: &str) -> bool {
         || lower.contains("requests per minute")
         || lower.contains("too many requests")
         || lower.contains("\"reset_in\"")
+        || lower.contains("hosted_ai_capacity_reserved")
+}
+
+/// Whether a pi failure is hosted-AI capacity contention
+/// (`hosted_ai_capacity_reserved`) rather than a real provider rate limit.
+///
+/// The shared hosted-AI slot is briefly held by a sibling chat or pipe; the
+/// gateway's `retry_after_seconds` hint is honored until it clears or the
+/// reservation TTL (`CAPACITY_RESERVED_MAX_WAIT_SECS`) expires, instead of
+/// the fixed `MAX_RATE_LIMIT_RETRIES` used for other rate limits.
+fn is_capacity_reserved_error(text: &str) -> bool {
+    text.to_lowercase().contains("hosted_ai_capacity_reserved")
+}
+
+/// Outcome of [`next_rate_limit_retry`]: retry after `wait_secs`, tagged with
+/// whether this was hosted-AI capacity contention (for logging/telemetry).
+struct RateLimitRetryDecision {
+    wait_secs: u64,
+    capacity_reserved: bool,
+}
+
+/// Decide whether a failed pi run should be retried, and for how long to wait.
+///
+/// Pure retry policy, isolated from the I/O loop in `run_streaming` so it can
+/// be exercised without spawning a real pi subprocess. `plain_rate_limit_retries`
+/// and `capacity_reserved_waited_secs` are independent budget counters
+/// accumulated *before* this attempt — kept separate so a run that alternates
+/// between the two error classes doesn't let one exhaust the other's budget.
+/// Returns `None` once the applicable budget is exhausted:
+/// `MAX_RATE_LIMIT_RETRIES` attempts for a generic rate limit, or
+/// `CAPACITY_RESERVED_MAX_WAIT_SECS` of total wait for
+/// `hosted_ai_capacity_reserved` contention.
+fn next_rate_limit_retry(
+    stderr: &str,
+    plain_rate_limit_retries: usize,
+    capacity_reserved_waited_secs: u64,
+) -> Option<RateLimitRetryDecision> {
+    if !is_rate_limit_error(stderr) {
+        return None;
+    }
+    let capacity_reserved = is_capacity_reserved_error(stderr);
+    if capacity_reserved {
+        if capacity_reserved_waited_secs >= CAPACITY_RESERVED_MAX_WAIT_SECS {
+            return None;
+        }
+    } else if plain_rate_limit_retries >= MAX_RATE_LIMIT_RETRIES {
+        return None;
+    }
+    let wait_secs = parse_rate_limit_reset_secs(stderr)
+        .unwrap_or(RATE_LIMIT_DEFAULT_WAIT_SECS)
+        .clamp(1, RATE_LIMIT_MAX_WAIT_SECS);
+    Some(RateLimitRetryDecision {
+        wait_secs,
+        capacity_reserved,
+    })
+}
+
+/// Drive a failed pi run through rate-limit / capacity-contention retries
+/// until it succeeds or `next_rate_limit_retry` exhausts the applicable
+/// budget.
+///
+/// Extracted out of `run_streaming` so the retry *loop* — not just the pure
+/// `next_rate_limit_retry` policy — can be driven directly in tests via a
+/// fake `respawn`, under tokio's virtual clock, instead of only exercising
+/// the policy function in isolation.
+async fn retry_rate_limited_output<F, Fut>(
+    mut output: AgentOutput,
+    line_tx: &tokio::sync::mpsc::UnboundedSender<String>,
+    mut respawn: F,
+) -> Result<AgentOutput>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<AgentOutput>>,
+{
+    // `attempt` is a monotonic counter for logging only. The two retry
+    // budgets below stay independent so a run that alternates between plain
+    // rate limits and capacity contention can't have one exhaust the other's
+    // allowance.
+    let mut attempt = 0usize;
+    let mut plain_rate_limit_retries = 0usize;
+    let mut capacity_reserved_waited_secs = 0u64;
+    loop {
+        if output.success {
+            break;
+        }
+        let Some(decision) = next_rate_limit_retry(
+            &output.stderr,
+            plain_rate_limit_retries,
+            capacity_reserved_waited_secs,
+        ) else {
+            break;
+        };
+        attempt += 1;
+        let wait_secs = decision.wait_secs;
+        if decision.capacity_reserved {
+            capacity_reserved_waited_secs += wait_secs;
+            warn!(
+                "pi hit hosted AI capacity contention (attempt {}, {}/{}s waited), waiting {}s before retry (stderr: {})",
+                attempt,
+                capacity_reserved_waited_secs,
+                CAPACITY_RESERVED_MAX_WAIT_SECS,
+                wait_secs,
+                output.stderr.trim()
+            );
+        } else {
+            plain_rate_limit_retries += 1;
+            warn!(
+                "pi rate limited (attempt {}/{}), waiting {}s before retry (stderr: {})",
+                plain_rate_limit_retries,
+                MAX_RATE_LIMIT_RETRIES,
+                wait_secs,
+                output.stderr.trim()
+            );
+        }
+        // Surface the wait to any UI/log consumer draining line_tx.
+        let _ = line_tx.send(format!(
+            r#"{{"type":"status","kind":"rate_limit_retry","wait_secs":{},"attempt":{},"max_attempts":{},"capacity_reserved":{}}}"#,
+            wait_secs, attempt, MAX_RATE_LIMIT_RETRIES, decision.capacity_reserved
+        ));
+        tokio::time::sleep(std::time::Duration::from_secs(wait_secs)).await;
+        output = respawn().await?;
+    }
+    Ok(output)
 }
 
 /// Fetch the model catalog from the Cloudflare Worker gateway and convert
@@ -263,7 +416,14 @@ fn gateway_models_to_pi_models(data: &[serde_json::Value]) -> Vec<serde_json::Va
             let ctx = m
                 .get("context_window")
                 .and_then(|v| v.as_u64())
+                .filter(|value| *value > 0)
                 .unwrap_or(128000);
+            let max_tokens = m
+                .get("max_output_tokens")
+                .and_then(|v| v.as_u64())
+                .filter(|value| *value > 0)
+                .unwrap_or(DEFAULT_CLOUD_MAX_OUTPUT_TOKENS)
+                .min(ctx);
             let intelligence = m
                 .get("intelligence")
                 .and_then(|v| v.as_str())
@@ -277,7 +437,7 @@ fn gateway_models_to_pi_models(data: &[serde_json::Value]) -> Vec<serde_json::Va
                 "input": ["text", "image"],
                 "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
                 "contextWindow": ctx,
-                "maxTokens": 32000,
+                "maxTokens": max_tokens,
                 // Pi sends its stable agent session ID as x-session-affinity.
                 // The hosted gateway uses that plus the user-message ordinal to
                 // count one visible turn once across a multi-call tool loop.
@@ -299,8 +459,43 @@ fn selectable_gateway_models(data: &[serde_json::Value]) -> Option<Vec<serde_jso
 /// Only auto — if the gateway is down, nothing works anyway.
 fn fallback_cloud_models() -> serde_json::Value {
     json!([
-        {"id": "auto", "name": "Auto (recommended)", "reasoning": true, "input": ["text", "image"], "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}, "contextWindow": 128000, "maxTokens": 32000, "compat": {"sendSessionAffinityHeaders": true}},
+        {"id": "auto", "name": "Auto (recommended)", "reasoning": true, "input": ["text", "image"], "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}, "contextWindow": 128000, "maxTokens": DEFAULT_CLOUD_MAX_OUTPUT_TOKENS, "compat": {"sendSessionAffinityHeaders": true}},
     ])
+}
+
+pub(crate) const MALFORMED_TOOL_USE_ERROR: &str =
+    "provider_protocol_error: assistant ended with toolUse but emitted no executable tool call";
+
+pub(crate) fn pi_event_protocol_error(event: &serde_json::Value) -> Option<&'static str> {
+    if event.get("type").and_then(|value| value.as_str()) != Some("message_end") {
+        return None;
+    }
+    let message = event.get("message")?;
+    if message.get("role").and_then(|value| value.as_str()) != Some("assistant")
+        || message.get("stopReason").and_then(|value| value.as_str()) != Some("toolUse")
+    {
+        return None;
+    }
+
+    let has_executable_call = message
+        .get("content")
+        .and_then(|value| value.as_array())
+        .map(|content| {
+            content.iter().any(|block| {
+                block.get("type").and_then(|value| value.as_str()) == Some("toolCall")
+                    && block
+                        .get("id")
+                        .and_then(|value| value.as_str())
+                        .is_some_and(|id| !id.trim().is_empty())
+                    && block
+                        .get("name")
+                        .and_then(|value| value.as_str())
+                        .is_some_and(|name| !name.trim().is_empty())
+            })
+        })
+        .unwrap_or(false);
+
+    (!has_executable_call).then_some(MALFORMED_TOOL_USE_ERROR)
 }
 
 /// Pi agent executor.
@@ -375,8 +570,15 @@ impl PiExecutor {
         self
     }
 
+    /// Override the hosted-AI base URL supplied by the app. Production callers
+    /// use the default; the desktop app exposes a loopback-only E2E resolver.
+    pub fn with_api_url(mut self, api_url: String) -> Self {
+        self.api_url = api_url;
+        self
+    }
+
     /// User policy: when the marker file
-    /// `~/.screenpipe/cloud_media_analysis.disabled` exists, the
+    /// `<data_dir>/cloud_media_analysis.disabled` exists, the
     /// screenpipe-api skill is installed WITHOUT the Gemma 4 E4B
     /// confidential-enclave block. Default (no marker) = enabled, so
     /// fresh installs ship the capability documented and Pi knows to
@@ -387,12 +589,10 @@ impl PiExecutor {
     /// the rendered SKILL.md after the fact — those copies get
     /// overwritten on every Pi run, so post-install edits don't stick.
     fn cloud_media_analysis_enabled() -> bool {
-        let home = match dirs::home_dir() {
-            Some(h) => h,
-            None => return true,
-        };
-        !home
-            .join(".screenpipe")
+        // Data-dir scoped, not `~/.screenpipe` scoped: a dev or relocated
+        // instance must read the marker its own Settings toggle wrote, not
+        // another install's. Identical path for a default install.
+        !crate::paths::default_screenpipe_data_dir()
             .join("cloud_media_analysis.disabled")
             .exists()
     }
@@ -416,43 +616,45 @@ impl PiExecutor {
         s
     }
 
-    /// Install or wipe the `screenpipe-team` enterprise-admin skill in
-    /// `project_dir/.pi/skills/screenpipe-team/`.
+    /// Install or wipe the `screenpipe-team` enterprise-admin skill under an
+    /// app-owned, non-discovered root and return its exact skill file.
     ///
     /// This skill teaches pi how to query org-wide telemetry (devices,
     /// search, records) via `https://screenpi.pe/api/enterprise/v1/*`. It
-    /// MUST only be present when the user is an enterprise admin with an
-    /// active license, because exposing the prompts to non-admins is
-    /// misleading (every call would 403) and dropping it onto a personal
-    /// build leaks our enterprise affordances.
+    /// MUST only be present inside the separately distributed Enterprise app
+    /// when the user is an admin with an active license, because exposing the
+    /// prompts to non-admins is misleading (every call would 403) and dropping
+    /// it onto the consumer app leaks our enterprise affordances.
     ///
     /// Source of truth: `~/.screenpipe/enterprise.json`. The Tauri host
     /// keeps that file populated with `{is_admin, license_active,
     /// team_api_token, ...}` based on the user's current license + role.
-    /// We re-check on every pi-agent boot, so role downgrades + license
-    /// expirations wipe the skill automatically.
-    pub fn ensure_screenpipe_team_skill(project_dir: &Path) -> Result<()> {
-        let skill_dir = project_dir
-            .join(".pi")
-            .join("skills")
-            .join("screenpipe-team");
+    /// The caller must pass the returned path to Pi with `--skill`. Keeping
+    /// this outside `.pi/skills` prevents the consumer and Enterprise apps,
+    /// which intentionally share chat history, from discovering or deleting
+    /// each other's Enterprise capability during concurrent starts.
+    ///
+    /// Consumer builds return before touching the directory. Enterprise builds
+    /// re-check on every Pi boot, so role downgrades and license expirations
+    /// remove the app-owned copy automatically.
+    pub fn ensure_screenpipe_team_skill(skill_root: &Path) -> Result<Option<PathBuf>> {
+        if !cfg!(feature = "enterprise-build") {
+            return Ok(None);
+        }
+
+        let skill_dir = skill_root.join("screenpipe-team");
         let skill_path = skill_dir.join("SKILL.md");
 
         let should_install = Self::is_enterprise_admin();
 
         if should_install {
             std::fs::create_dir_all(&skill_dir)?;
-            // Gateway orgs (write-only archive tier) query their own gateway
-            // inside the customer network — the hosted base has no read path
-            // to their data. Substitute the org's base URL at install time;
-            // hosted orgs get the asset verbatim.
-            let mut skill =
-                include_str!("../../assets/skills/screenpipe-team/SKILL.md").to_string();
-            if let Some(base) = Self::team_api_base_override() {
-                skill = skill.replace("https://screenpi.pe/api/enterprise/v1", &base);
-            }
-            std::fs::write(&skill_path, skill)?;
+            std::fs::write(
+                &skill_path,
+                include_str!("../../assets/skills/screenpipe-team/SKILL.md"),
+            )?;
             debug!("screenpipe-team skill installed at {:?}", skill_path);
+            return Ok(Some(skill_path));
         } else if skill_dir.exists() {
             // Wipe the whole dir — defense against partial state if a user
             // hand-edited or we ever ship sub-files in the future.
@@ -462,29 +664,13 @@ impl PiExecutor {
             );
         }
 
-        Ok(())
+        Ok(None)
     }
 
-    /// The org's team-API base URL from `~/.screenpipe/enterprise.json`
-    /// (`gateway_url`, written by the desktop app from the storage
-    /// binding's gateway URL). `None` = hosted org, keep the baked base.
-    fn team_api_base_override() -> Option<String> {
-        let home = dirs::home_dir()?;
-        let raw = std::fs::read_to_string(home.join(".screenpipe").join("enterprise.json")).ok()?;
-        let parsed: serde_json::Value = serde_json::from_str(&raw).ok()?;
-        let base = parsed.get("gateway_url")?.as_str()?.trim();
-        let base = base.trim_end_matches('/');
-        if base.starts_with("http://") || base.starts_with("https://") {
-            Some(base.to_string())
-        } else {
-            None
-        }
-    }
-
-    /// True when `~/.screenpipe/enterprise.json` declares this user as an
-    /// active admin AND the user is signed into screenpipe cloud (the
-    /// Clerk JWT at `~/.screenpipe/auth.json` is what authenticates the
-    /// skill's HTTP calls to `screenpi.pe/api/enterprise/v1`).
+    /// True only in the Enterprise app when `~/.screenpipe/enterprise.json`
+    /// declares this user as an active admin with a license key and dedicated
+    /// team API token. The app-build check matters when the consumer and
+    /// Enterprise apps share `~/.screenpipe` on one machine.
     ///
     /// Conservative: any I/O or parse error means "no" so we fail closed —
     /// we'd rather under-install the skill than show team affordances to
@@ -493,6 +679,10 @@ impl PiExecutor {
     /// admin status on every call and returns 403, so this client-side
     /// check is defense-in-depth, not the security boundary.
     fn is_enterprise_admin() -> bool {
+        if !cfg!(feature = "enterprise-build") {
+            return false;
+        }
+
         let home = match dirs::home_dir() {
             Some(h) => h,
             None => return false,
@@ -588,9 +778,15 @@ impl PiExecutor {
             debug!("{} skill installed at {:?}", name, skill_path);
         }
 
-        // Conditional: enterprise admins get the team skill, others get it
-        // wiped if a stale copy exists (e.g. after a role downgrade).
-        Self::ensure_screenpipe_team_skill(project_dir)?;
+        // Migration cleanup only. Enterprise capabilities are injected by the
+        // Enterprise app with Pi's explicit `--skill` flag from a path outside
+        // `.pi/skills`; they must never be auto-discovered by shared chat or
+        // background-Pipe projects.
+        let legacy_team_skill = skills_root.join("screenpipe-team");
+        if legacy_team_skill.exists() {
+            std::fs::remove_dir_all(&legacy_team_skill)?;
+            debug!("removed legacy auto-discovered team skill");
+        }
 
         // Mirror user-imported skills (Settings → Connections → Skills) into
         // this session. Best-effort; never blocks a run.
@@ -608,7 +804,7 @@ impl PiExecutor {
     const USER_SKILL_MARKER: &'static str = ".screenpipe-managed";
 
     /// Baseline skills screenpipe writes into every session itself
-    /// ([`Self::ensure_screenpipe_skill`] / [`Self::ensure_screenpipe_team_skill`]).
+    /// ([`Self::ensure_screenpipe_skill`]).
     /// A store entry under one of these names must never be mirrored: it would
     /// clobber the real baseline and, once stamped with
     /// [`Self::USER_SKILL_MARKER`], be deleted by a later sync. The desktop
@@ -778,11 +974,16 @@ impl PiExecutor {
             }
         }
 
-        // Enterprise-admin team skill is orthogonal to pipe permissions —
-        // it gates on the user's license role, not on what the pipe is
-        // allowed to do. Run it after the permission-filtered baseline so
-        // it correctly mirrors the user's current admin/license state.
-        Self::ensure_screenpipe_team_skill(project_dir)?;
+        // Migration cleanup only. A background Pipe must never inherit the
+        // Enterprise app's team-administration capability.
+        let legacy_team_skill = project_dir
+            .join(".pi")
+            .join("skills")
+            .join("screenpipe-team");
+        if legacy_team_skill.exists() {
+            std::fs::remove_dir_all(&legacy_team_skill)?;
+            debug!("removed legacy auto-discovered team skill");
+        }
 
         // Mirror user-imported skills into this session too (best-effort).
         if let Err(e) = Self::sync_user_skills(project_dir) {
@@ -896,6 +1097,14 @@ impl PiExecutor {
     /// for screenpipe-cloud to avoid sending data to our backend when the
     /// user chose a local/custom provider.
     pub fn ensure_web_search_extension(project_dir: &Path, provider: Option<&str>) -> Result<()> {
+        Self::ensure_web_search_extension_with_api_url(project_dir, provider, SCREENPIPE_API_URL)
+    }
+
+    fn ensure_web_search_extension_with_api_url(
+        project_dir: &Path,
+        provider: Option<&str>,
+        api_url: &str,
+    ) -> Result<()> {
         let ext_dir = project_dir.join(".pi").join("extensions");
         let ext_path = ext_dir.join("web-search.ts");
 
@@ -906,7 +1115,8 @@ impl PiExecutor {
 
         if is_screenpipe_cloud {
             std::fs::create_dir_all(&ext_dir)?;
-            let ext_content = include_str!("../../assets/extensions/web-search.ts");
+            let ext_content = include_str!("../../assets/extensions/web-search.ts")
+                .replace(SCREENPIPE_API_URL, api_url);
             std::fs::write(&ext_path, ext_content)?;
             debug!("web-search extension installed at {:?}", ext_path);
         } else if ext_path.exists() {
@@ -990,7 +1200,9 @@ impl PiExecutor {
             // PiExecutor only runs pipes (PipeManager: scheduled / run-now),
             // which are latency-tolerant, so tag every cloud LLM call as
             // background. The gateway then serves it on the cheaper, best-effort
-            // Vertex flex tier (resolveLatencyClass). Pi merges provider
+            // Vertex flex tier (resolveLatencyClass). The workload marker keeps
+            // safety-refusal rescue scoped to unattended Pipes rather than
+            // interactive chat or other background helpers. Pi merges provider
             // `headers` into each request (see pi-coding-agent model-registry),
             // and an old gateway simply ignores the unknown header (→ standard),
             // so there's no deploy-order coupling.
@@ -999,7 +1211,10 @@ impl PiExecutor {
                 "api": "openai-completions",
                 "apiKey": api_key_value,
                 "authHeader": true,
-                "headers": { "x-screenpipe-latency": "background" },
+                "headers": {
+                    "x-screenpipe-latency": "background",
+                    "x-screenpipe-workload": "pipe"
+                },
                 "models": models
             });
 
@@ -1662,11 +1877,15 @@ impl PiExecutor {
             let line = String::from_utf8_lossy(&line_bytes).into_owned();
             let _ = line_tx.send(line.clone());
 
-            // Detect LLM-level errors (e.g. credits_exhausted) even when
+            // Detect LLM/protocol errors even when
             // the process exits 0.  We look for assistant message events
-            // with stopReason "error".
+            // with stopReason "error", and fail closed when a provider says
+            // toolUse without producing an executable structured call.
             if llm_error.is_none() {
                 if let Ok(evt) = serde_json::from_str::<serde_json::Value>(&line) {
+                    if let Some(error) = pi_event_protocol_error(&evt) {
+                        llm_error = Some(error.to_string());
+                    }
                     let is_assistant = evt
                         .get("message")
                         .and_then(|m| m.get("role"))
@@ -1676,7 +1895,7 @@ impl PiExecutor {
                         .get("message")
                         .and_then(|m| m.get("stopReason"))
                         .and_then(|r| r.as_str());
-                    if is_assistant && stop_reason == Some("error") {
+                    if llm_error.is_none() && is_assistant && stop_reason == Some("error") {
                         llm_error = evt
                             .get("message")
                             .and_then(|m| m.get("errorMessage"))
@@ -1767,7 +1986,11 @@ impl AgentExecutor for PiExecutor {
         // Use filtered skills if permissions are configured, unfiltered otherwise
         Self::ensure_screenpipe_skill_auto(working_dir)?;
 
-        Self::ensure_web_search_extension(working_dir, Some(&resolved_provider))?;
+        Self::ensure_web_search_extension_with_api_url(
+            working_dir,
+            Some(&resolved_provider),
+            &self.api_url,
+        )?;
         Self::ensure_context_pruning_extension(working_dir)?;
         Self::ensure_orphan_guard_extension(working_dir)?;
         Self::ensure_mcp_bridge_extension(working_dir)?;
@@ -1882,7 +2105,11 @@ impl AgentExecutor for PiExecutor {
         .await?;
         // Use filtered skills if permissions are configured, unfiltered otherwise
         Self::ensure_screenpipe_skill_auto(working_dir)?;
-        Self::ensure_web_search_extension(working_dir, Some(&resolved_provider))?;
+        Self::ensure_web_search_extension_with_api_url(
+            working_dir,
+            Some(&resolved_provider),
+            &self.api_url,
+        )?;
         Self::ensure_context_pruning_extension(working_dir)?;
         Self::ensure_orphan_guard_extension(working_dir)?;
         Self::ensure_mcp_bridge_extension(working_dir)?;
@@ -1952,54 +2179,41 @@ impl AgentExecutor for PiExecutor {
                 .await?;
         }
 
-        // Retry on provider rate limiting (HTTP 429). The cloud gateway caps
+        // Retry on provider rate limiting (HTTP 429) and on hosted-AI capacity
+        // contention (`hosted_ai_capacity_reserved`). The cloud gateway caps
         // requests per minute; concurrent scheduler pressure or a single busy
-        // run can trip it. pi exits 0 but surfaces the 429 as an assistant
-        // error, so `output.success` is false with the payload (including
-        // "reset_in") in stderr. Honor that hint, wait, and re-run instead of
-        // failing the whole pipe — which previously left automations silently
-        // doing nothing. (Runs that legitimately exceed the per-minute budget
-        // also need scheduler pacing, but a wait-and-retry still beats a hard
-        // stop.)
-        let mut rate_limit_retries = 0usize;
-        while !output.success
-            && rate_limit_retries < MAX_RATE_LIMIT_RETRIES
-            && is_rate_limit_error(&output.stderr)
-        {
-            rate_limit_retries += 1;
-            let wait_secs = parse_rate_limit_reset_secs(&output.stderr)
-                .unwrap_or(RATE_LIMIT_DEFAULT_WAIT_SECS)
-                .clamp(1, RATE_LIMIT_MAX_WAIT_SECS);
-            warn!(
-                "pi rate limited (attempt {}/{}), waiting {}s before retry (stderr: {})",
-                rate_limit_retries,
-                MAX_RATE_LIMIT_RETRIES,
-                wait_secs,
-                output.stderr.trim()
-            );
-            // Surface the wait to any UI/log consumer draining line_tx.
-            let _ = line_tx.send(format!(
-                r#"{{"type":"status","kind":"rate_limit_retry","wait_secs":{},"attempt":{},"max_attempts":{}}}"#,
-                wait_secs, rate_limit_retries, MAX_RATE_LIMIT_RETRIES
-            ));
-            tokio::time::sleep(std::time::Duration::from_secs(wait_secs)).await;
-            output = self
-                .spawn_pi_streaming(
-                    &pi_path,
-                    prompt,
-                    &resolved_model,
-                    working_dir,
-                    &resolved_provider,
-                    provider_api_key,
-                    None,
-                    line_tx.clone(),
-                    continue_session,
-                    pipe_system_prompt,
-                    mcp_server_allowlist,
-                    session_owner,
-                )
-                .await?;
-        }
+        // run can trip it, and the shared hosted-AI slot can briefly be held
+        // by a sibling chat or pipe. pi exits 0 but surfaces the 429 as an
+        // assistant error, so `output.success` is false with the payload
+        // (including "reset_in" or "retry_after_seconds") in stderr. Honor
+        // that hint, wait, and re-run instead of failing the whole run —
+        // which previously left automations silently doing nothing.
+        //
+        // Capacity contention isn't a real error — someone else is just using
+        // the shared slot — so it gets a time budget
+        // (`CAPACITY_RESERVED_MAX_WAIT_SECS`) instead of
+        // `MAX_RATE_LIMIT_RETRIES`: contention outlasting three short waits
+        // would otherwise kill the run even though the slot frees up shortly
+        // after. That budget is deliberately a fraction of the enclosing run
+        // timeout so waiting can never consume the whole run.
+        // See `retry_rate_limited_output`.
+        output = retry_rate_limited_output(output, &line_tx, || {
+            self.spawn_pi_streaming(
+                &pi_path,
+                prompt,
+                &resolved_model,
+                working_dir,
+                &resolved_provider,
+                provider_api_key,
+                None,
+                line_tx.clone(),
+                continue_session,
+                pipe_system_prompt,
+                mcp_server_allowlist,
+                session_owner,
+            )
+        })
+        .await?;
 
         Ok(output)
     }
@@ -2039,20 +2253,21 @@ impl AgentExecutor for PiExecutor {
         // Log the exact command + bun version up front so a failed install is
         // reproducible from the log alone (and a bun that can't even run —
         // e.g. SIGILL on an unsupported CPU — is exposed before the install).
-        let args = ["add", PI_PACKAGE, PI_AI_PACKAGE, "@anthropic-ai/sdk"];
         info!(
             "installing pi into {} via bun at {} (version: {}); command: bun {}",
             install_dir.display(),
             bun,
             bun_version_string(&bun),
-            args.join(" "),
+            PI_INSTALL_ARGS.join(" "),
         );
 
         // Seed package.json with overrides to fix lru-cache resolution on Windows
         seed_pi_package_json(&install_dir);
 
         let mut cmd = tokio_bun_command(&bun);
-        cmd.current_dir(&install_dir).args(args);
+        // CREATE_NO_WINDOW only covers this Bun process. Lifecycle scripts can
+        // launch new consoles, so disable them for this pinned managed install.
+        cmd.current_dir(&install_dir).args(PI_INSTALL_ARGS);
 
         #[cfg(windows)]
         {
@@ -2101,6 +2316,10 @@ impl AgentExecutor for PiExecutor {
 
     fn user_token(&self) -> Option<String> {
         self.current_user_token()
+    }
+
+    fn screenpipe_api_url(&self) -> &str {
+        &self.api_url
     }
 }
 
@@ -2499,21 +2718,17 @@ fn remove_screenpipe_auth_from_path(auth_path: &Path) -> Result<()> {
     write_auth_json(auth_path, &auth)
 }
 
+fn stock_bun_is_safe(is_windows: bool, has_avx2: bool) -> bool {
+    !is_windows || has_avx2
+}
+
 pub fn find_bun_executable() -> Option<String> {
-    // Pre-AVX2 CPU: the bundled/stock bun.exe requires AVX2 and dies with
-    // 0xC000001D (STATUS_ILLEGAL_INSTRUCTION) at spawn. Prefer the
-    // runtime-downloaded baseline build; if it isn't on disk yet, kick off
-    // the download in the background and fall through to the stock bun for
-    // this run (its failure is diagnosed by describe_exit_status_code; the
-    // next spawn picks up the baseline).
-    #[cfg(windows)]
-    if !crate::cpu_features::has_avx2() {
-        if let Some(baseline) = baseline_bun_path() {
-            if baseline.exists() {
-                return Some(baseline.to_string_lossy().to_string());
-            }
-        }
-        spawn_baseline_bun_download();
+    // Stock bun.exe requires AVX2. On older Windows CPUs, wait for the
+    // verified baseline build instead of returning a binary that will die
+    // immediately with STATUS_ILLEGAL_INSTRUCTION.
+    if !stock_bun_is_safe(cfg!(windows), crate::cpu_features::has_avx2()) {
+        #[cfg(windows)]
+        return ensure_baseline_bun_available();
     }
 
     // Check next to our own executable (bundled bun)
@@ -2584,11 +2799,11 @@ pub fn describe_exit_status_code(code: i32) -> String {
         // 0xC000001D == STATUS_ILLEGAL_INSTRUCTION == exit code -1073741795.
         // The stock bun.exe requires AVX2; on pre-AVX2 CPUs it dies with this
         // code before writing a single byte to stderr — exactly the case that
-        // used to surface as an empty error. find_bun_executable downloads
-        // bun's official baseline build in the background on such CPUs.
+        // used to surface as an empty error. Current installs fail closed onto
+        // bun's official baseline build before any subprocess is launched.
         if code == -1073741795i32 {
             return format!(
-                "exit code {code} (0xC000001D, illegal instruction; this CPU may lack AVX2 — the stock bun build requires it; the baseline bun variant will be used after download)"
+                "exit code {code} (0xC000001D, illegal instruction; this CPU may lack AVX2 — the stock bun build requires it; use the baseline bun variant)"
             );
         }
     }
@@ -2717,6 +2932,8 @@ pub fn pi_child_path(existing_path: &OsStr) -> Option<OsString> {
     std::env::join_paths(paths).ok()
 }
 
+// Windows builds its own PATH inline in the .cmd-shim branch below.
+#[cfg(not(windows))]
 fn apply_pi_child_path(cmd: &mut tokio::process::Command) {
     let current_path = std::env::var_os("PATH").unwrap_or_default();
     if let Some(path) = pi_child_path(&current_path) {
@@ -3435,25 +3652,35 @@ pub fn baseline_bun_path() -> Option<PathBuf> {
     )
 }
 
-/// One-shot guard for the background baseline-bun download (per process).
+/// One-shot guard for baseline-bun setup. Concurrent callers wait for the
+/// same verified result instead of launching stock bun while setup is active.
 #[cfg(windows)]
-static BASELINE_BUN_DOWNLOAD_ONCE: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+static BASELINE_BUN_PATH_ONCE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
 
-/// Kick off (at most once per process) a background download of bun's
-/// official baseline Windows build. Non-blocking on purpose: the caller
-/// falls through to the stock bun for the current run, and the next spawn
-/// picks up the baseline from disk.
+/// Ensure bun's official baseline Windows build is ready. This blocks only on
+/// non-AVX2 Windows CPUs and is normally called by the existing Pi install
+/// worker. Returning `None` prevents an unsafe stock-bun fallback.
 #[cfg(windows)]
-pub fn spawn_baseline_bun_download() {
-    BASELINE_BUN_DOWNLOAD_ONCE.get_or_init(|| {
-        std::thread::spawn(|| match download_baseline_bun() {
-            Ok(path) => info!("baseline bun installed at: {}", path),
-            Err(e) => warn!(
-                "baseline bun download failed (pipes/AI chat may not work on this pre-AVX2 CPU): {}",
-                e
-            ),
-        });
-    });
+fn ensure_baseline_bun_available() -> Option<String> {
+    if let Some(path) = baseline_bun_path().filter(|path| path.exists()) {
+        return Some(path.to_string_lossy().to_string());
+    }
+
+    BASELINE_BUN_PATH_ONCE
+        .get_or_init(|| match download_baseline_bun() {
+            Ok(path) => {
+                info!("baseline bun installed at: {}", path);
+                Some(path)
+            }
+            Err(e) => {
+                warn!(
+                    "baseline bun setup failed (pipes/AI chat cannot run on this pre-AVX2 CPU): {}",
+                    e
+                );
+                None
+            }
+        })
+        .clone()
 }
 
 /// Download bun's official `windows-x64-baseline` build (runs on any x86-64,
@@ -3635,6 +3862,77 @@ pub fn ensure_bash_available() -> Option<String> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn managed_pi_install_disables_dependency_lifecycle_scripts() {
+        assert!(PI_INSTALL_ARGS.contains(&"--ignore-scripts"));
+    }
+
+    #[test]
+    fn tool_use_without_an_executable_call_is_a_protocol_error() {
+        let malformed = json!({
+            "type": "message_end",
+            "message": {
+                "role": "assistant",
+                "stopReason": "toolUse",
+                "content": []
+            }
+        });
+        assert_eq!(
+            pi_event_protocol_error(&malformed),
+            Some(MALFORMED_TOOL_USE_ERROR)
+        );
+
+        let valid = json!({
+            "type": "message_end",
+            "message": {
+                "role": "assistant",
+                "stopReason": "toolUse",
+                "content": [{
+                    "type": "toolCall",
+                    "id": "call-1",
+                    "name": "bash",
+                    "arguments": {"command": "pwd"}
+                }]
+            }
+        });
+        assert_eq!(pi_event_protocol_error(&valid), None);
+    }
+
+    #[test]
+    fn managed_pipe_guidance_only_ships_in_enterprise_team_skill() {
+        let consumer_skill = include_str!("../../assets/skills/screenpipe-cli/SKILL.md");
+        let enterprise_skill = include_str!("../../assets/skills/screenpipe-team/SKILL.md");
+
+        assert!(!consumer_skill.contains("Enterprise Team Pipes"));
+        assert!(!consumer_skill.contains("screenpipe team pipes"));
+        assert!(enterprise_skill.contains("screenpipe team pipes list"));
+        assert!(enterprise_skill.contains("screenpipe team pipes schedule"));
+        assert!(enterprise_skill.contains("Injected only by the Enterprise app"));
+        assert!(!enterprise_skill.contains("curl "));
+        assert!(
+            enterprise_skill.lines().count() <= 60,
+            "Enterprise skill should stay compact; use the native CLI instead of duplicating its contract"
+        );
+    }
+
+    #[cfg(not(feature = "enterprise-build"))]
+    #[test]
+    fn consumer_build_never_enables_enterprise_team_skill() {
+        assert!(!PiExecutor::is_enterprise_admin());
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let sentinel = root.path().join("screenpipe-team").join("KEEP");
+        std::fs::create_dir_all(sentinel.parent().expect("sentinel parent")).unwrap();
+        std::fs::write(&sentinel, b"owned by a concurrently running Enterprise app").unwrap();
+
+        let installed = PiExecutor::ensure_screenpipe_team_skill(root.path()).unwrap();
+        assert!(installed.is_none());
+        assert!(
+            sentinel.exists(),
+            "consumer builds must not race Enterprise by deleting its app-scoped skill"
+        );
+    }
+
     #[cfg(windows)]
     #[test]
     fn describe_exit_status_flags_illegal_instruction() {
@@ -3642,6 +3940,13 @@ mod tests {
         let s = describe_exit_status_code(-1073741795);
         assert!(s.contains("illegal instruction"));
         assert!(s.to_lowercase().contains("avx2"));
+    }
+
+    #[test]
+    fn stock_bun_is_never_selected_on_windows_without_avx2() {
+        assert!(!stock_bun_is_safe(true, false));
+        assert!(stock_bun_is_safe(true, true));
+        assert!(stock_bun_is_safe(false, false));
     }
 
     #[cfg(windows)]
@@ -3689,6 +3994,29 @@ mod tests {
     fn describe_exit_status_code_plain_codes_unchanged() {
         assert_eq!(describe_exit_status_code(0), "exit code 0");
         assert_eq!(describe_exit_status_code(1), "exit code 1");
+    }
+
+    #[test]
+    fn web_search_extension_uses_executor_gateway_url() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let api_url = "http://127.0.0.1:8787/v1";
+
+        PiExecutor::ensure_web_search_extension_with_api_url(
+            dir.path(),
+            Some("screenpipe"),
+            api_url,
+        )
+        .expect("install web-search extension");
+
+        let content = std::fs::read_to_string(
+            dir.path()
+                .join(".pi")
+                .join("extensions")
+                .join("web-search.ts"),
+        )
+        .expect("read web-search extension");
+        assert!(content.contains("http://127.0.0.1:8787/v1/web-search"));
+        assert!(!content.contains(SCREENPIPE_API_URL));
     }
 
     #[test]
@@ -4279,6 +4607,10 @@ mod tests {
 
         // Unrelated error carries no hint.
         assert_eq!(parse_rate_limit_reset_secs("model not found"), None);
+
+        // hosted_ai_capacity_reserved uses "retry_after_seconds", not "reset_in".
+        let capacity_reserved = r#"429 {"error":"hosted_ai_capacity_reserved","message":"Other hosted AI chats are still running. Wait for one to finish, then retry.","retry_after_seconds":5}"#;
+        assert_eq!(parse_rate_limit_reset_secs(capacity_reserved), Some(5));
     }
 
     #[test]
@@ -4392,6 +4724,70 @@ mod tests {
         .is_none());
     }
 
+    #[test]
+    fn gateway_catalog_uses_advertised_output_budget_with_safe_fallback() {
+        let models = gateway_models_to_pi_models(&[
+            json!({
+                "id": "claude-sonnet-5",
+                "context_window": 1_000_000,
+                "max_output_tokens": 128_000,
+            }),
+            json!({
+                "id": "legacy-model-without-output-metadata",
+                "context_window": 128_000,
+            }),
+            json!({
+                "id": "invalid-model-budget",
+                "context_window": 64_000,
+                "max_output_tokens": 0,
+            }),
+            json!({
+                "id": "oversized-model-budget",
+                "context_window": 64_000,
+                "max_output_tokens": 128_000,
+            }),
+        ]);
+
+        assert_eq!(models[0].get("maxTokens"), Some(&json!(128_000)));
+        assert_eq!(models[1].get("maxTokens"), Some(&json!(32_000)));
+        assert_eq!(models[2].get("maxTokens"), Some(&json!(32_000)));
+        assert_eq!(models[3].get("maxTokens"), Some(&json!(64_000)));
+    }
+
+    #[tokio::test]
+    async fn gateway_output_budget_flows_from_http_to_pi_catalog() {
+        use wiremock::{
+            matchers::{method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": [
+                    {
+                        "id": "claude-sonnet-5",
+                        "name": "Claude Sonnet 5",
+                        "context_window": 1_000_000,
+                        "max_output_tokens": 128_000,
+                        "intelligence": "highest",
+                    },
+                    {
+                        "id": "legacy-model",
+                        "name": "Legacy model",
+                        "context_window": 128_000,
+                    },
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let models = screenpipe_cloud_models(&server.uri(), None).await;
+        assert_eq!(models.pointer("/0/maxTokens"), Some(&json!(128_000)));
+        assert_eq!(models.pointer("/1/maxTokens"), Some(&json!(32_000)));
+    }
+
     #[tokio::test]
     async fn all_locked_gateway_catalog_uses_auto_fallback() {
         use wiremock::{
@@ -4424,6 +4820,9 @@ mod tests {
             "You've exceeded 25 requests per minute"
         ));
         assert!(is_rate_limit_error(r#"{"reset_in":12}"#));
+        assert!(is_rate_limit_error(
+            r#"429 {"error":"hosted_ai_capacity_reserved","retry_after_seconds":5}"#
+        ));
         assert!(!is_rate_limit_error("model not found"));
         assert!(!is_rate_limit_error("credits_exhausted"));
         assert!(!is_rate_limit_error(r#"429 "daily_cost_limit_exceeded""#));
@@ -4431,6 +4830,248 @@ mod tests {
         assert!(!is_rate_limit_error(
             r#"429 {"error":{"type":"insufficient_quota"}}"#
         ));
+    }
+
+    #[test]
+    fn test_is_capacity_reserved_error() {
+        assert!(is_capacity_reserved_error(
+            r#"429 {"error":"hosted_ai_capacity_reserved","retry_after_seconds":5}"#
+        ));
+        assert!(!is_capacity_reserved_error("HTTP 429 Too Many Requests"));
+        assert!(!is_capacity_reserved_error(
+            r#"429 "daily_cost_limit_exceeded""#
+        ));
+    }
+
+    // These exercise `next_rate_limit_retry`, the pure decision function
+    // shared by both `run_streaming` call sites (interactive chat and
+    // scheduled pipes both execute through it — see the caller in
+    // `PiExecutor::run_streaming`) — so one set of cases here covers the
+    // "chat" and "pipe executor" scenarios from #5673 without duplicating
+    // the same assertions against two entry points.
+
+    #[test]
+    fn test_next_rate_limit_retry_capacity_reserved_outlasts_fixed_retry_cap() {
+        // Real gateway payload for contention on the shared hosted-AI slot.
+        let stderr = r#"429 {"error":"hosted_ai_capacity_reserved","message":"Other hosted AI chats are still running. Wait for one to finish, then retry.","retry_after_seconds":5}"#;
+
+        // Simulate holding capacity for 35s (7 retries at 5s each) — longer
+        // than the fixed MAX_RATE_LIMIT_RETRIES=3 a generic rate limit gets.
+        let mut retries = 0usize;
+        let mut waited = 0u64;
+        for _ in 0..7 {
+            let decision = next_rate_limit_retry(stderr, retries, waited)
+                .expect("capacity contention must keep retrying past the fixed attempt cap");
+            assert!(decision.capacity_reserved);
+            assert_eq!(decision.wait_secs, 5);
+            retries += 1;
+            waited += decision.wait_secs;
+        }
+        assert!(retries > MAX_RATE_LIMIT_RETRIES);
+        assert_eq!(waited, 35);
+    }
+
+    #[test]
+    fn capacity_retry_budget_leaves_room_under_the_run_timeout() {
+        // The retry budget and the enclosing pipe timeout were both 600s, so
+        // contention alone could burn the entire run: the outer
+        // `tokio::time::timeout` would fire at the exact moment the slot freed
+        // up and the pipe would do no work at all. Keep the budget a minority
+        // of the timeout so a contended run still has time to finish.
+        let run_timeout = crate::pipes::DEFAULT_TIMEOUT_SECS;
+        assert!(
+            CAPACITY_RESERVED_MAX_WAIT_SECS * 2 < run_timeout,
+            "capacity retry budget ({CAPACITY_RESERVED_MAX_WAIT_SECS}s) must stay well under the \
+             run timeout ({run_timeout}s), or waiting consumes the whole run"
+        );
+    }
+
+    #[test]
+    fn test_next_rate_limit_retry_capacity_reserved_stops_at_reservation_ttl() {
+        let stderr = r#"429 {"error":"hosted_ai_capacity_reserved","retry_after_seconds":5}"#;
+        assert!(next_rate_limit_retry(stderr, 100, CAPACITY_RESERVED_MAX_WAIT_SECS).is_none());
+        assert!(next_rate_limit_retry(stderr, 100, CAPACITY_RESERVED_MAX_WAIT_SECS - 1).is_some());
+    }
+
+    #[test]
+    fn test_next_rate_limit_retry_generic_rate_limit_still_capped_at_three() {
+        let stderr = "HTTP 429 Too Many Requests";
+        for retries in 0..MAX_RATE_LIMIT_RETRIES {
+            let decision = next_rate_limit_retry(stderr, retries, 0)
+                .expect("generic rate limit should retry up to MAX_RATE_LIMIT_RETRIES");
+            assert!(!decision.capacity_reserved);
+        }
+        assert!(next_rate_limit_retry(stderr, MAX_RATE_LIMIT_RETRIES, 0).is_none());
+    }
+
+    #[test]
+    fn test_next_rate_limit_retry_budgets_are_independent_across_error_classes() {
+        // A run that alternates between capacity contention and a plain rate
+        // limit must not let one error class's retries consume the other's
+        // budget.
+        let capacity_stderr =
+            r#"429 {"error":"hosted_ai_capacity_reserved","retry_after_seconds":5}"#;
+        let plain_stderr = "HTTP 429 Too Many Requests";
+
+        let mut plain_retries = 0usize;
+        let mut capacity_waited = 0u64;
+
+        // Three capacity-reserved retries must not touch the plain budget.
+        for _ in 0..3 {
+            let decision = next_rate_limit_retry(capacity_stderr, plain_retries, capacity_waited)
+                .expect("capacity contention should retry");
+            assert!(decision.capacity_reserved);
+            capacity_waited += decision.wait_secs;
+        }
+        assert_eq!(plain_retries, 0);
+
+        // The plain rate-limit budget is still fully available afterwards.
+        for _ in 0..MAX_RATE_LIMIT_RETRIES {
+            let decision = next_rate_limit_retry(plain_stderr, plain_retries, capacity_waited)
+                .expect("plain rate limit budget must be untouched by capacity retries");
+            assert!(!decision.capacity_reserved);
+            plain_retries += 1;
+        }
+        assert!(next_rate_limit_retry(plain_stderr, plain_retries, capacity_waited).is_none());
+    }
+
+    #[test]
+    fn test_next_rate_limit_retry_daily_cap_is_terminal() {
+        // daily_cost_limit_exceeded must never retry, regardless of counters.
+        let stderr = r#"429 "daily_cost_limit_exceeded""#;
+        assert!(next_rate_limit_retry(stderr, 0, 0).is_none());
+    }
+
+    // The tests below drive `retry_rate_limited_output` itself — the actual
+    // loop `run_streaming` calls in production (both interactive chat and
+    // scheduled pipes go through it) — rather than only the extracted
+    // `next_rate_limit_retry` policy function above. `start_paused` runs
+    // tokio's virtual clock, so every real `tokio::time::sleep` the loop
+    // performs (including a full simulated 600s reservation TTL) resolves
+    // instantly instead of blocking the test for real wall-clock time.
+
+    fn fake_agent_output(stderr: &str, success: bool) -> AgentOutput {
+        AgentOutput {
+            stdout: String::new(),
+            stderr: stderr.to_string(),
+            success,
+            pid: None,
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_retry_rate_limited_output_capacity_reserved_succeeds_after_more_than_three_retries(
+    ) {
+        // Simulate the shared hosted-AI slot staying busy for 4 attempts —
+        // one more than MAX_RATE_LIMIT_RETRIES=3 — before it frees up.
+        let capacity_stderr = r#"429 {"error":"hosted_ai_capacity_reserved","message":"Other hosted AI chats are still running. Wait for one to finish, then retry.","retry_after_seconds":5}"#;
+        let calls = std::cell::RefCell::new(0u32);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let result =
+            retry_rate_limited_output(fake_agent_output(capacity_stderr, false), &tx, || {
+                *calls.borrow_mut() += 1;
+                let attempt = *calls.borrow();
+                async move {
+                    Ok(if attempt <= 4 {
+                        fake_agent_output(capacity_stderr, false)
+                    } else {
+                        fake_agent_output("", true)
+                    })
+                }
+            })
+            .await
+            .expect("retry loop must not error");
+
+        assert!(result.success);
+        assert_eq!(*calls.borrow(), 5);
+        assert!(*calls.borrow() as usize > MAX_RATE_LIMIT_RETRIES);
+
+        // The status channel actually received one event per retry — proves
+        // the line_tx wiring executed, not just the retry decision.
+        drop(tx);
+        let mut status_events = 0;
+        while let Some(msg) = rx.recv().await {
+            assert!(msg.contains("rate_limit_retry"));
+            assert!(msg.contains("\"capacity_reserved\":true"));
+            status_events += 1;
+        }
+        assert_eq!(status_events, 5);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_retry_rate_limited_output_generic_rate_limit_gives_up_after_max_retries() {
+        let plain_stderr = "HTTP 429 Too Many Requests";
+        let calls = std::cell::RefCell::new(0u32);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let result = retry_rate_limited_output(fake_agent_output(plain_stderr, false), &tx, || {
+            *calls.borrow_mut() += 1;
+            async move { Ok(fake_agent_output(plain_stderr, false)) }
+        })
+        .await
+        .expect("retry loop must not error even when it gives up");
+
+        assert!(!result.success);
+        assert_eq!(*calls.borrow() as usize, MAX_RATE_LIMIT_RETRIES);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_retry_rate_limited_output_daily_cap_never_retries() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let calls = std::cell::RefCell::new(0u32);
+
+        let result = retry_rate_limited_output(
+            fake_agent_output(r#"429 "daily_cost_limit_exceeded""#, false),
+            &tx,
+            || {
+                *calls.borrow_mut() += 1;
+                async move { Ok(fake_agent_output("", true)) }
+            },
+        )
+        .await
+        .expect("retry loop must not error");
+
+        assert!(!result.success);
+        assert_eq!(
+            *calls.borrow(),
+            0,
+            "must not retry a terminal daily-cap error"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_retry_rate_limited_output_capacity_reserved_stops_at_reservation_ttl_live() {
+        // The gateway's hint (100s here) is clamped to RATE_LIMIT_MAX_WAIT_SECS
+        // (60s) — same safety clamp a generic rate limit gets, so an oversized
+        // hint can't stall a run — leaving 60s waits until the budget is spent.
+        // This is exactly the kind of interaction between two
+        // independently-reasonable pieces of logic that only a live run of the
+        // loop (not the isolated policy function) catches: this assertion's
+        // first draft assumed 100s waits, and the live test caught the clamp.
+        // Derived from the constants so retuning the budget updates the
+        // expectation instead of silently failing here.
+        let expected_retries = CAPACITY_RESERVED_MAX_WAIT_SECS / RATE_LIMIT_MAX_WAIT_SECS;
+        let expected_elapsed = expected_retries * RATE_LIMIT_MAX_WAIT_SECS;
+        let capacity_stderr = r#"429 {"error":"hosted_ai_capacity_reserved","message":"still busy","retry_after_seconds":100}"#;
+        let calls = std::cell::RefCell::new(0u32);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let start = tokio::time::Instant::now();
+        let result =
+            retry_rate_limited_output(fake_agent_output(capacity_stderr, false), &tx, || {
+                *calls.borrow_mut() += 1;
+                async move { Ok(fake_agent_output(capacity_stderr, false)) }
+            })
+            .await
+            .expect("retry loop must not error");
+
+        assert!(!result.success);
+        assert_eq!(*calls.borrow(), expected_retries as u32);
+        assert_eq!(
+            start.elapsed(),
+            std::time::Duration::from_secs(expected_elapsed)
+        );
     }
 
     #[test]

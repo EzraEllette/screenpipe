@@ -7,11 +7,10 @@
 import React, { useState, useEffect, useCallback, useMemo } from "react";
 import { useToast } from "@/components/ui/use-toast";
 import OnboardingLogin from "@/components/onboarding/login-gate";
+import AcquisitionStep from "@/components/onboarding/acquisition-step";
 import PermissionsStep from "@/components/onboarding/permissions-step";
 import TimelineChoice from "@/components/onboarding/timeline-choice";
 import EngineStartup from "@/components/onboarding/engine-startup";
-import ConnectApps from "@/components/onboarding/connect-apps";
-import FirstDashboard from "@/components/onboarding/first-dashboard";
 import { useOnboarding } from "@/lib/hooks/use-onboarding";
 import { useManagedPolicy } from "@/lib/hooks/use-managed-policy";
 import { useSettings } from "@/lib/hooks/use-settings";
@@ -22,31 +21,28 @@ import { onboardingFunnel } from "@/lib/analytics/onboarding-funnel";
 
 type SlideKey =
   | "login"
+  | "acquisition"
   | "permissions"
   | "timeline"
-  | "engine"
-  | "connect-apps"
-  | "first-dashboard";
+  | "engine";
 
 const SLIDE_WINDOW_SIZES: Record<SlideKey, { width: number; height: number }> =
   {
     login: { width: 500, height: 480 },
+    acquisition: { width: 500, height: 560 },
     permissions: { width: 500, height: 560 },
     timeline: { width: 500, height: 680 },
     engine: { width: 500, height: 620 },
-    "connect-apps": { width: 500, height: 680 },
-    "first-dashboard": { width: 500, height: 720 },
   };
 
 // When shown, the timeline choice sits before "engine" so disableTimeline is
 // persisted before the engine spawns and reads it — no restart needed.
 const SLIDE_ORDER: SlideKey[] = [
   "login",
+  "acquisition",
   "permissions",
   "timeline",
   "engine",
-  "connect-apps",
-  "first-dashboard",
 ];
 
 // endowed progress: the bar first renders on permissions with login already
@@ -186,18 +182,23 @@ export default function OnboardingPage() {
         // Map old and new step names
         const stepMap: Record<string, SlideKey> = {
           login: "login",
+          acquisition: "acquisition",
           permissions: "permissions",
           timeline: "timeline",
           engine: "engine",
-          "connect-apps": "connect-apps",
-          integrations: "connect-apps",
-          connections: "connect-apps",
-          "first-dashboard": "first-dashboard",
-          pipe: "first-dashboard",
+          // Native Rust now connects detected AI tools in the background, and
+          // the goal/dashboard slide is gone: setup no longer asks the user to
+          // declare intent before anything has been observed. Saved installs
+          // that stopped on either one resume at the engine and finish from it.
+          "connect-apps": "engine",
+          integrations: "engine",
+          connections: "engine",
+          "first-dashboard": "engine",
+          pipe: "engine",
           // backwards compat with old onboarding
           encrypt: "engine",
-          read: "first-dashboard",
-          shortcut: "first-dashboard",
+          read: "engine",
+          shortcut: "engine",
           welcome: "login",
           intro: "login",
           usecases: "permissions",
@@ -331,9 +332,18 @@ export default function OnboardingPage() {
 
     // Walk SLIDE_ORDER (never the filtered list) so the index stays valid even
     // for a slide that policy hides, then land on the next visible slide.
-    const nextSlide =
-      SLIDE_ORDER.slice(currentIdx + 1).find((s) => visibleOrder.includes(s)) ||
-      "first-dashboard";
+    // The engine slide is the last one. Finishing it completes setup rather
+    // than advancing, so the first thing after setup is the learning window
+    // and not a dashboard built before anything has been captured.
+    const nextSlide = SLIDE_ORDER.slice(currentIdx + 1).find((s) =>
+      visibleOrder.includes(s),
+    );
+    if (!nextSlide) {
+      await completeOnboarding({ method: "setup_finished" });
+      transitioningRef.current = false;
+      setIsTransitioning(false);
+      return;
+    }
     try {
       await commands.setOnboardingStep(nextSlide);
     } catch {
@@ -455,6 +465,9 @@ export default function OnboardingPage() {
             ) : (
               <OnboardingLogin handleNextSlide={handleNextSlide} />
             ))}
+          {currentSlide === "acquisition" && (
+            <AcquisitionStep handleNextSlide={handleNextSlide} />
+          )}
           {currentSlide === "permissions" && (
             <PermissionsStep
               handleNextSlide={handleNextSlide}
@@ -467,10 +480,6 @@ export default function OnboardingPage() {
           {currentSlide === "engine" && (
             <EngineStartup handleNextSlide={handleNextSlide} />
           )}
-          {currentSlide === "connect-apps" && (
-            <ConnectApps handleNextSlide={handleNextSlide} />
-          )}
-          {currentSlide === "first-dashboard" && <FirstDashboard />}
         </div>
       </div>
     </div>
