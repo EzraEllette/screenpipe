@@ -5,13 +5,12 @@
 
 import { Activity } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-} from "@/components/ui/popover";
+  HoverCard,
+  HoverCardContent,
+  HoverCardTrigger,
+} from "@/components/ui/hover-card";
 import { UsageLimitsPanel } from "@/components/usage/usage-limits-panel";
 import { quotaPlanLabel } from "@/lib/chat/quota-errors";
 import {
@@ -26,29 +25,10 @@ import { cn } from "@/lib/utils";
 export function UsagePopover() {
   const router = useRouter();
   const query = useUsageStatusQuery();
-  const [open, setOpen] = useState(false);
-  const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const { usage } = query;
   const hosted = usage?.hosted_ai;
   const allowances = hosted?.allowances ?? [];
   const tightest = tightestHostedAiAllowance(allowances);
-  const cancelClose = () => {
-    if (closeTimer.current) clearTimeout(closeTimer.current);
-    closeTimer.current = null;
-  };
-  const openPopover = () => {
-    cancelClose();
-    setOpen(true);
-  };
-  const scheduleClose = () => {
-    cancelClose();
-    closeTimer.current = setTimeout(() => setOpen(false), 120);
-  };
-
-  useEffect(() => () => {
-    if (closeTimer.current) clearTimeout(closeTimer.current);
-  }, []);
-
   if (hosted?.allowance_managed_by !== "cloudflare") {
     return null;
   }
@@ -61,8 +41,8 @@ export function UsagePopover() {
     : "usage data is unavailable. try refreshing.";
 
   return (
-    <Popover open={open} onOpenChange={setOpen}>
-      <PopoverTrigger asChild>
+    <HoverCard openDelay={0} closeDelay={0}>
+      <HoverCardTrigger asChild>
         <Button
           type="button"
           variant="ghost"
@@ -78,24 +58,19 @@ export function UsagePopover() {
           aria-label={percent ? `AI usage, ${percent} used` : "AI usage unavailable"}
           data-testid="usage-popover-trigger"
           data-state-usage={state}
-          onPointerEnter={openPopover}
-          onPointerLeave={scheduleClose}
-          onFocus={openPopover}
         >
           <Activity className="h-3.5 w-3.5" aria-hidden />
           <span className="hidden font-mono tabular-nums sm:inline">
             {percent ?? "—"}
           </span>
         </Button>
-      </PopoverTrigger>
-      <PopoverContent
+      </HoverCardTrigger>
+      <HoverCardContent
         align="end"
         side="top"
         sideOffset={6}
         className="w-[min(360px,calc(100vw-24px))] rounded-none border-border p-3.5 shadow-lg shadow-black/5"
         data-testid="usage-popover-content"
-        onPointerEnter={cancelClose}
-        onPointerLeave={scheduleClose}
       >
         <UsageLimitsPanel
           planLabel={plan}
@@ -106,7 +81,7 @@ export function UsagePopover() {
           onRefresh={hosted.plan === "unknown" ? undefined : query.refresh}
           onOpenSettings={() => router.push("/settings?section=usage")}
         />
-      </PopoverContent>
-    </Popover>
+      </HoverCardContent>
+    </HoverCard>
   );
 }
