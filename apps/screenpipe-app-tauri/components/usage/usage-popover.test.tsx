@@ -26,7 +26,7 @@ const mocks = vi.hoisted(() => ({
             resets_at: new Date(Date.now() + 50 * 3_600_000).toISOString(),
           },
           {
-            lane: "explicit" as const,
+            lane: "frontier" as const,
             used_percent: 62,
             remaining_percent: 38,
             window_seconds: 604_800,
@@ -66,8 +66,8 @@ describe("UsagePopover", () => {
 
     fireEvent.pointerEnter(screen.getByRole("button", { name: "AI usage, 62% used" }));
 
-    expect(screen.getByText("Weekly · explicit models")).toBeTruthy();
-    expect(screen.getByText("Weekly · all models")).toBeTruthy();
+    expect(screen.getByText("Frontier models")).toBeTruthy();
+    expect(screen.getByText("Weekly AI allowance")).toBeTruthy();
     expect(screen.getByText("30%")).toBeTruthy();
     expect(document.body.textContent).not.toContain("$");
   });
