@@ -164,6 +164,22 @@ pub(crate) fn now_ms() -> u64 {
 
 #[derive(Clone)]
 pub struct AudioManager {
+    /// Liveness token for `Drop`. Every field below is shared (`Arc`), so a
+    /// dropped *clone* used to tear down the runtime of the manager that is
+    /// still live: `Drop` aborted the recording/transcription handles, stopped
+    /// every device, and killed the process-global device monitor.
+    ///
+    /// `start_internal` clones self (`Arc::new(self.clone())`) to hand the
+    /// monitor an owned handle, so a capture-session restart reliably produced
+    /// a short-lived clone whose `Drop` landed *after* the fresh monitor had
+    /// registered — leaving no monitor, so nothing ever restarted the
+    /// microphone. Observed on 2.6.1: apply a recording setting, and only
+    /// System Audio comes back; the mic never does, and never recovers.
+    ///
+    /// Counting strong references to this token is the cheapest way to ask
+    /// "am I the last instance?" — clones share it, so `Drop` can skip the
+    /// teardown while any other clone is still alive.
+    liveness: Arc<()>,
     options: Arc<RwLock<AudioManagerOptions>>,
     device_manager: Arc<DeviceManager>,
     segmentation_manager: Arc<SegmentationManager>,
@@ -386,6 +402,7 @@ impl AudioManager {
             MeetingAudioTap::new(meeting_audio_tx, Arc::new(AtomicBool::new(false)));
 
         let manager = Self {
+            liveness: Arc::new(()),
             options: Arc::new(RwLock::new(options)),
             device_manager: Arc::new(device_manager),
             segmentation_manager,
@@ -2357,8 +2374,29 @@ async fn run_meeting_speaker_constraint_loop(
     }
 }
 
+/// Whether the instance being dropped owns teardown, given how many clones
+/// still share its liveness token. Only the last one does.
+///
+/// Pure so the invariant is unit-testable: constructing a real `AudioManager`
+/// needs a database, VAD and device initialisation, which no test in this
+/// crate does.
+pub(crate) fn drop_owns_teardown(liveness_strong_count: usize) -> bool {
+    liveness_strong_count <= 1
+}
+
 impl Drop for AudioManager {
     fn drop(&mut self) {
+        // Only the LAST instance owns teardown. Every field is shared, so a
+        // dropped clone would otherwise abort the live manager's recording and
+        // transcription handles, stop all of its devices, and kill the
+        // process-global device monitor — see `liveness` on the struct.
+        //
+        // `Drop` runs once per instance and the token is never cloned outside
+        // `Clone`, so a count of 1 here means this really is the last one.
+        if !drop_owns_teardown(Arc::strong_count(&self.liveness)) {
+            return;
+        }
+
         let rec = self.recording_handles.clone();
         let recording = self.recording_receiver_handle.clone();
         let transcript = self.transcription_receiver_handle.clone();
@@ -2394,6 +2432,59 @@ mod tests {
         Arc,
     };
     use tokio::sync::{Barrier, Notify, Semaphore};
+
+    /// Regression: a dropped clone used to tear down the live manager.
+    ///
+    /// Every `AudioManager` field is shared, and `start_internal` clones self
+    /// to hand the device monitor an owned handle. On a capture-session
+    /// restart that short-lived clone's `Drop` landed after the fresh monitor
+    /// had registered and killed it, so nothing restarted the microphone.
+    /// Observed on 2.6.1: after applying a recording setting only System Audio
+    /// came back, and the mic never recovered.
+    #[test]
+    fn only_the_last_instance_tears_down() {
+        assert!(drop_owns_teardown(1), "sole instance must tear down");
+        assert!(!drop_owns_teardown(2), "a live clone must block teardown");
+        assert!(!drop_owns_teardown(9));
+    }
+
+    /// The guard reads a live `Arc` count, so exercise it through real
+    /// clone/drop cycles rather than hardcoded numbers.
+    #[test]
+    fn liveness_token_tracks_clone_lifetime() {
+        let liveness = Arc::new(());
+        assert!(drop_owns_teardown(Arc::strong_count(&liveness)));
+
+        let clone = liveness.clone();
+        assert!(
+            !drop_owns_teardown(Arc::strong_count(&liveness)),
+            "with a clone alive, neither instance may tear down"
+        );
+
+        drop(clone);
+        assert!(
+            drop_owns_teardown(Arc::strong_count(&liveness)),
+            "once the clone is gone the survivor owns teardown"
+        );
+    }
+
+    /// The restart shape that produced the bug: a manager is cloned, the clone
+    /// outlives a monitor start, then dies. The survivor must keep running.
+    #[test]
+    fn dropping_a_restart_clone_leaves_the_original_live() {
+        let manager = Arc::new(());
+        let restart_clone = manager.clone();
+        let monitor_handle = manager.clone(); // what start_internal hands the monitor
+
+        drop(restart_clone);
+        assert!(
+            !drop_owns_teardown(Arc::strong_count(&manager)),
+            "monitor's handle still alive — teardown must not fire"
+        );
+
+        drop(monitor_handle);
+        assert!(drop_owns_teardown(Arc::strong_count(&manager)));
+    }
 
     #[test]
     fn meetings_only_waits_until_a_meeting_is_confirmed() {

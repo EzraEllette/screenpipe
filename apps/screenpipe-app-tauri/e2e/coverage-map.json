@@ -1407,6 +1407,25 @@
       "notes": "Opt-in real-audio lifecycle lane: configured devices stay closed outside meetings and open only across a manual meeting edge."
     },
     {
+      "spec": "capture-restart-device-recovery.spec.ts",
+      "platforms": [
+        "windows",
+        "macos"
+      ],
+      "layers": [
+        "audio-device",
+        "local-api",
+        "real-ui-e2e"
+      ],
+      "features": [
+        "audio-device-health"
+      ],
+      "criticality": "high",
+      "confidence": "conditional",
+      "ux": "real-user-flow",
+      "notes": "Opt-in real-audio continuous lane for #6089: a capture-session restart must bring back the same running device set, and the device monitor must survive to recover a device stopped afterwards."
+    },
+    {
       "spec": "notification-viewer-link.spec.ts",
       "platforms": [
         "windows",
