@@ -8,6 +8,8 @@ type ProviderLike = {
   provider?: string | null;
   url?: string | null;
   model?: string | null;
+  maxTokens?: number | null;
+  modelOutputLimitPublished?: boolean | null;
   /** Display name of the ACP agent, so a refusal names it instead of saying
    *  "the agent". Absent for non-ACP presets. */
   agentName?: string | null;
@@ -276,11 +278,14 @@ function buildGenericProviderErrorMessage(
   }
 
   if (isOutputLimitError(errorStr)) {
-    const publishedOutputLimit = resolveModelLimits(
-      provider || undefined,
-      model,
-    )?.maxOutputTokens;
-    if (provider === "screenpipe-cloud" || provider === "acp" || publishedOutputLimit) {
+    const publishedOutputLimit = preset?.modelOutputLimitPublished ?? Boolean(
+      resolveModelLimits(provider || undefined, model)?.maxOutputTokens,
+    );
+    if (
+      provider === "screenpipe-cloud" ||
+      provider === "acp" ||
+      publishedOutputLimit
+    ) {
       return "The model reached its output limit. Ask for a shorter response.";
     }
     return "The model reached its output limit. Increase Max Output Tokens in Settings → AI, or ask for a shorter response.";

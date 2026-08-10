@@ -629,6 +629,8 @@ export function usePiForegroundEvents({
               );
             }
           } else {
+            // The persisted preset carries whether provider discovery published
+            // an output limit, matching the Settings control-visibility rule.
             const providerError = buildProviderErrorPresentation(errorStr, presetWithAgentName());
             if (providerError && piMessageIdRef.current) {
               const msgId = piMessageIdRef.current;
@@ -687,6 +689,8 @@ export function usePiForegroundEvents({
                 prev.map((m) => m.id === msgId ? { ...m, content: "This model requires an upgrade to Screenpipe Business. Switch to Auto to keep going." } : m)
               );
             } else {
+              // Keep foreground event errors on the same discovered-metadata
+              // decision as immediate send failures.
               const providerError = buildProviderErrorPresentation(fullError, presetWithAgentName());
               if (providerError) {
                 setMessages((prev) =>

@@ -289,6 +289,46 @@ describe("provider error copy", () => {
     }
   );
 
+  it("omits hidden-control guidance for discovered custom output limits", () => {
+    const raw = 'Error: 400 data: {"error":{"message":"400 Could not finish the message because max_tokens or model output limit was reached. Please try again with higher max_tokens.","type":"api_error","code":"400"}} data: [DONE]';
+
+    expect(buildProviderErrorMessage(raw, {
+      provider: "custom",
+      model: "private-model",
+      modelOutputLimitPublished: true,
+    })).toBe("The model reached its output limit. Ask for a shorter response.");
+  });
+
+  it("keeps editable-control guidance for unknown custom models without metadata", () => {
+    const raw = 'Error: 400 data: {"error":{"message":"400 Could not finish the message because max_tokens or model output limit was reached. Please try again with higher max_tokens.","type":"api_error","code":"400"}} data: [DONE]';
+
+    expect(buildProviderErrorMessage(raw, {
+      provider: "custom",
+      model: "private-model",
+      maxTokens: 8_192,
+      modelOutputLimitPublished: false,
+    })).toBe(
+      "The model reached its output limit. Increase Max Output Tokens in Settings → AI, or ask for a shorter response."
+    );
+  });
+
+  it("prefers the persisted Settings decision over static metadata", () => {
+    const raw = 'Error: 400 data: {"error":{"message":"400 Could not finish the message because max_tokens or model output limit was reached. Please try again with higher max_tokens.","type":"api_error","code":"400"}} data: [DONE]';
+
+    expect(buildProviderErrorMessage(raw, {
+      provider: "openai",
+      model: "gpt-4o",
+      modelOutputLimitPublished: false,
+    })).toContain("Increase Max Output Tokens");
+  });
+
+  it("does not classify a near-match as the sanitized output-limit signature", () => {
+    expect(buildProviderErrorMessage(
+      "Could not finish the message because max_tokens was reached",
+      { provider: "custom", modelOutputLimitPublished: true },
+    )).toBeNull();
+  });
+
   it("explains llama.cpp context mismatches with reported token counts", () => {
     const raw = 'Engine protocol predict request returned 400: {"error":{"code":400,"message":"request (13069 tokens) exceeds the available context size (8192 tokens), try increasing it","type":"exceed_context_size_error","n_prompt_tokens":13069,"n_ctx":8192}}';
     expect(

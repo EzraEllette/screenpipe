@@ -722,15 +722,20 @@ const AISection = ({
   // Known limits are runtime facts, not user preferences. Re-resolve existing
   // presets too, so old generic defaults stop constraining current models.
   useEffect(() => {
-    if (!resolvedModelLimits || !settingsPreset) return;
-    const resolved = applyResolvedModelLimits(settingsPreset, selectedModelMetadata);
+    if (!settingsPreset) return;
+    const modelOutputLimitPublished = Boolean(resolvedModelLimits?.maxOutputTokens);
+    const resolved = resolvedModelLimits
+      ? applyResolvedModelLimits(settingsPreset, selectedModelMetadata)
+      : settingsPreset;
     if (
       resolved.maxContextChars === settingsPreset.maxContextChars &&
-      resolved.maxTokens === settingsPreset.maxTokens
+      resolved.maxTokens === settingsPreset.maxTokens &&
+      settingsPreset.modelOutputLimitPublished === modelOutputLimitPublished
     ) return;
     updateSettingsPreset({
       maxContextChars: resolved.maxContextChars,
       maxTokens: resolved.maxTokens,
+      modelOutputLimitPublished,
     });
   }, [resolvedModelLimits, selectedModelMetadata, settingsPreset, updateSettingsPreset]);
 

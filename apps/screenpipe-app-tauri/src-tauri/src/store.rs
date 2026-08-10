@@ -1133,6 +1133,12 @@ pub struct AIPreset {
     pub max_context_chars: i32,
     #[serde(rename = "maxTokens", default = "default_max_tokens")]
     pub max_tokens: i32,
+    #[serde(
+        rename = "modelOutputLimitPublished",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub model_output_limit_published: Option<bool>,
 }
 
 fn default_max_tokens() -> i32 {
@@ -1152,6 +1158,7 @@ impl Default for AIPreset {
             api_key: None,
             max_context_chars: 512000,
             max_tokens: 4096,
+            model_output_limit_published: None,
         }
     }
 }
@@ -1421,6 +1428,7 @@ Rules:
             api_key: None,
             max_context_chars: 128000,
             max_tokens: 4096,
+            model_output_limit_published: None,
         };
 
         // Rust persists store.bin before the frontend mounts. All-null values

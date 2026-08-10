@@ -735,6 +735,8 @@ export function usePiSendTransport(options: PiSendTransportOptions) {
         let errorMsg: string;
         let retryPrompt: string | undefined;
         const currentPreset = getActivePreset();
+        // Settings persists output-limit publication separately from the
+        // user-editable numeric maxTokens value; pass that fact through here.
         const providerError = buildProviderErrorPresentation(rawError, currentPreset);
 
         if (isPiPromptStartTimeout(rawError)) {
@@ -794,6 +796,7 @@ export function usePiSendTransport(options: PiSendTransportOptions) {
       if (timeoutId) clearTimeout(timeoutId);
       piMessageIdRef.current = null;
       const rawError = error instanceof Error ? error.message : "Unknown error";
+      // Preserve the same active-preset metadata on thrown transport errors.
       const providerError = buildProviderErrorPresentation(rawError, getActivePreset());
       setMessages((prev) =>
         prev.map((m) =>

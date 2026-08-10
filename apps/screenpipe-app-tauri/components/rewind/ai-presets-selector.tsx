@@ -596,13 +596,16 @@ export function AIProviderConfig({
   );
 
   useEffect(() => {
-    if (!resolvedModelLimits) return;
+    const modelOutputLimitPublished = Boolean(resolvedModelLimits?.maxOutputTokens);
     setFormData((current) => {
-      const resolved = applyResolvedModelLimits(current, selectedModelMetadata);
+      const resolved = resolvedModelLimits
+        ? applyResolvedModelLimits(current, selectedModelMetadata)
+        : current;
       return resolved.maxContextChars === current.maxContextChars &&
-        resolved.maxTokens === current.maxTokens
+        resolved.maxTokens === current.maxTokens &&
+        current.modelOutputLimitPublished === modelOutputLimitPublished
         ? current
-        : resolved as AIPreset;
+        : { ...resolved, modelOutputLimitPublished } as AIPreset;
     });
   }, [resolvedModelLimits, selectedModelMetadata]);
 
