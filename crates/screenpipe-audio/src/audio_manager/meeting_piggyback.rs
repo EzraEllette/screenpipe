@@ -474,6 +474,14 @@ pub(crate) struct PiggybackObservation {
     pub stable_outputs: Vec<String>,
     pub tap_strikes: u32,
     pub tap_cooldown_elapsed: bool,
+    /// Whether a Meeting Tap has started at any point in THIS meeting.
+    ///
+    /// Distinguishes a transient gap under a working piggyback (keep every
+    /// suspension — resuming would re-create the device churn this feature
+    /// exists to prevent) from a piggyback that has never delivered at all
+    /// (holding capture suspended just makes the meeting silent). See
+    /// [`piggyback_may_own_capture`].
+    pub tap_ever_started: bool,
     /// Pids the currently-registered Meeting Tap was built over (sorted).
     /// Empty when no tap is registered. Lets the decider notice the
     /// mic-holder set changing mid-meeting (manual meetings track it live)
@@ -509,6 +517,43 @@ pub(crate) enum PiggybackAction {
 /// Pure decision function. Given a snapshot of everything relevant this tick,
 /// returns the actions the sweep must apply. No OS, no manager, no locks —
 /// exhaustively unit-tested against the decision matrix.
+/// Whether the piggyback is entitled to own (and therefore suspend) the user's
+/// normal capture for this tick.
+///
+/// #6072 made the piggyback the sole capture owner for a confirmed meeting so
+/// two subsystems could never fight over the same devices — the churn behind
+/// the Bluetooth SCO storms that starved Zoom and Meet. It took ownership
+/// unconditionally though, so when the tap could not be built the meeting
+/// recorded *nothing*: measured live on 2.6.1, an 86s manual meeting produced
+/// 3,584 samples (~0.22s) and an empty transcript, where 2.5.x manual meetings
+/// captured millions.
+///
+/// Ownership is kept whenever the piggyback is delivering or has delivered:
+/// `tap_ever_started` means a real tap exists for this meeting, so a pid gap is
+/// transient and resuming normal capture would reintroduce exactly the churn
+/// #6072 removed.
+///
+/// It is released only when the piggyback has never delivered AND cannot
+/// contend for anything right now:
+///   * no meeting pids — nothing is holding the devices, so normal capture
+///     cannot fight anyone, and staying suspended only produces silence;
+///   * no tap support on this OS — the tap never opens, so there is likewise
+///     nothing to contend with.
+///
+/// Deliberately NOT released on exhausted strikes: there the meeting app really
+/// is holding devices, so resuming would put two recorders back on the same
+/// hardware. That case needs device-level validation before it changes.
+pub(crate) fn piggyback_may_own_capture(
+    tap_available: bool,
+    meeting_pid_count: usize,
+    tap_ever_started: bool,
+) -> bool {
+    if tap_ever_started {
+        return true;
+    }
+    tap_available && meeting_pid_count > 0
+}
+
 pub(crate) fn decide_piggyback(obs: &PiggybackObservation) -> Vec<PiggybackAction> {
     let mut actions = Vec::new();
     let engaged = obs.flag_on;
@@ -528,6 +573,24 @@ pub(crate) fn decide_piggyback(obs: &PiggybackObservation) -> Vec<PiggybackActio
         }
         for dev in &obs.suspended {
             actions.push(PiggybackAction::Resume(dev.clone()));
+        }
+        return actions;
+    }
+
+    // Release capture entirely when the piggyback has never delivered and has
+    // nothing to contend with (see `piggyback_may_own_capture`). Placed BEFORE
+    // the suspend pass so those ticks never suspend-then-resume: the user's
+    // configured capture simply keeps running, and the meeting is recorded by
+    // the normal path instead of being silent.
+    if !piggyback_may_own_capture(obs.tap_available, meeting_pids.len(), obs.tap_ever_started) {
+        for dev in &obs.session_devices {
+            actions.push(PiggybackAction::StopSessionDevice(dev.clone()));
+        }
+        for dev in &obs.suspended {
+            actions.push(PiggybackAction::Resume(dev.clone()));
+        }
+        if !meeting_pids.is_empty() && !obs.tap_available {
+            actions.push(PiggybackAction::WarnUnavailableOnce);
         }
         return actions;
     }
@@ -1161,9 +1224,26 @@ pub(crate) async fn run_meeting_piggyback_sweep(
         stable_outputs,
         tap_strikes: state.tap_strikes,
         tap_cooldown_elapsed: cooldown_elapsed,
+        tap_ever_started: state.telemetry.tap_started_count > 0,
         tap_built_pids: state.tap_pids.clone(),
         retap_target_pids,
     };
+
+    // Publish ownership for the manager's device-start gate. That gate only
+    // sees the flag and the meeting state; this sweep is the only place that
+    // knows whether a tap exists, so without this handoff the gate suspends
+    // normal capture even when the piggyback cannot deliver, and the meeting
+    // records nothing. Ownership requires an active meeting too — outside one
+    // the gate must never hold capture.
+    audio_manager.set_piggyback_owns_capture(
+        flag_on
+            && obs.meeting.is_some()
+            && piggyback_may_own_capture(
+                obs.tap_available,
+                obs.meeting.as_deref().unwrap_or(&[]).len(),
+                obs.tap_ever_started,
+            ),
+    );
 
     let tap_device_str = format!("{} (output)", MEETING_TAP_DEVICE_NAME);
     let tap_streaming = session_streaming.contains(&tap_device_str);
@@ -1498,12 +1578,54 @@ mod tests {
     }
 
     #[test]
-    fn meeting_without_pid_keeps_normal_capture_suspended() {
+    /// With no meeting pids nothing is holding the devices, so there is no
+    /// contention for the piggyback to prevent — suspending here only produced
+    /// a silent meeting. Reproduced on 2.6.1: an 86s manual meeting captured
+    /// 3,584 samples (~0.22s) with an empty transcript.
+    fn meeting_without_pid_leaves_normal_capture_running() {
         let mut obs = base();
         obs.meeting = Some(vec![]);
-        let actions = decide_piggyback(&obs);
+        assert_eq!(decide_piggyback(&obs), vec![]);
+    }
+
+    #[test]
+    fn ownership_matrix() {
+        // delivering, or has delivered -> owns capture
+        assert!(piggyback_may_own_capture(true, 1, false));
+        assert!(piggyback_may_own_capture(true, 1, true));
+        // a gap after a working tap is transient -> still owns
+        assert!(piggyback_may_own_capture(true, 0, true));
+        assert!(piggyback_may_own_capture(false, 0, true));
+        // never delivered and nothing to contend with -> releases
+        assert!(!piggyback_may_own_capture(true, 0, false));
+        assert!(!piggyback_may_own_capture(false, 1, false));
+        assert!(!piggyback_may_own_capture(false, 0, false));
+    }
+
+    /// Devices already suspended when the piggyback turns out to be unable to
+    /// deliver must be released, not merely left alone — otherwise capture
+    /// stays dead for the rest of the meeting.
+    #[test]
+    fn releasing_ownership_resumes_devices_already_suspended() {
+        let mut obs = base();
+        obs.meeting = Some(vec![]);
+        obs.suspended = HashSet::from(["System Audio (output)".to_string()]);
         assert_eq!(
-            actions,
+            decide_piggyback(&obs),
+            vec![PiggybackAction::Resume("System Audio (output)".to_string())]
+        );
+    }
+
+    /// Once a tap has worked this meeting, a pid gap is transient: keep every
+    /// suspension rather than churning devices back on, which is the behaviour
+    /// #6072 introduced to stop Bluetooth SCO storms.
+    #[test]
+    fn pid_gap_after_a_working_tap_keeps_capture_suspended() {
+        let mut obs = base();
+        obs.meeting = Some(vec![]);
+        obs.tap_ever_started = true;
+        assert_eq!(
+            decide_piggyback(&obs),
             vec![PiggybackAction::Suspend(
                 "System Audio (output)".to_string()
             )]
@@ -1657,15 +1779,15 @@ mod tests {
     }
 
     #[test]
-    fn platform_unavailable_warns_and_keeps_normal_capture_suspended() {
+    /// On an OS without per-process capture the tap never opens, so there is
+    /// nothing to contend with and nothing to wait for. Holding capture there
+    /// guaranteed a silent meeting on every macOS <14.4 / Windows <20348 host.
+    fn platform_unavailable_warns_and_leaves_normal_capture_running() {
         let mut obs = base();
         obs.tap_available = false;
         assert_eq!(
             decide_piggyback(&obs),
-            vec![
-                PiggybackAction::Suspend("System Audio (output)".to_string()),
-                PiggybackAction::WarnUnavailableOnce,
-            ]
+            vec![PiggybackAction::WarnUnavailableOnce]
         );
     }
 
@@ -1682,12 +1804,11 @@ mod tests {
         let mut obs = base();
         obs.meeting = Some(vec![100, 200]);
         obs.tap_available = false;
+        // Riding the stable path now means literally that: normal capture is
+        // left running. Previously this suspended it and recorded nothing.
         assert_eq!(
             decide_piggyback(&obs),
-            vec![
-                PiggybackAction::Suspend("System Audio (output)".to_string()),
-                PiggybackAction::WarnUnavailableOnce,
-            ]
+            vec![PiggybackAction::WarnUnavailableOnce]
         );
     }
 

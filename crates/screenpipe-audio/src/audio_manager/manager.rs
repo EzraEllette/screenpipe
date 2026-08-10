@@ -131,11 +131,19 @@ fn meetings_only_capture_waiting(
     matches!(capture_mode, AudioCaptureMode::MeetingsOnly) && meeting_state != Some(true)
 }
 
+/// Whether smart recording currently owns the user's normal capture.
+///
+/// `sweep_owns_capture` is the piggyback sweep's answer to "can I actually
+/// deliver this meeting" (see `meeting_piggyback::piggyback_may_own_capture`).
+/// Without it this gate suspended normal capture for every confirmed meeting
+/// regardless of whether the Meeting Tap had been built, so a meeting whose tap
+/// never came up recorded nothing at all.
 fn meeting_piggyback_owns_normal_capture(
     piggyback_enabled: bool,
     meeting_state: Option<bool>,
+    sweep_owns_capture: bool,
 ) -> bool {
-    piggyback_enabled && meeting_state == Some(true)
+    piggyback_enabled && meeting_state == Some(true) && sweep_owns_capture
 }
 
 /// Final privacy boundary before an audio chunk can reach disk or
@@ -180,6 +188,18 @@ pub struct AudioManager {
     /// "am I the last instance?" — clones share it, so `Drop` can skip the
     /// teardown while any other clone is still alive.
     liveness: Arc<()>,
+    /// Published by the piggyback sweep each tick: whether the piggyback is
+    /// currently entitled to own the user's normal capture.
+    ///
+    /// The ownership gate cannot decide this alone — it only sees the flag and
+    /// the meeting state, which is why #6072 suspended normal capture even
+    /// when the Meeting Tap could not be built and the meeting then recorded
+    /// nothing. The sweep is the only place that knows whether a tap exists,
+    /// so it publishes the answer here.
+    ///
+    /// Defaults to false so the window between a meeting starting and the
+    /// first sweep keeps the user's capture running rather than dropping it.
+    piggyback_owns_capture: Arc<AtomicBool>,
     options: Arc<RwLock<AudioManagerOptions>>,
     device_manager: Arc<DeviceManager>,
     segmentation_manager: Arc<SegmentationManager>,
@@ -403,6 +423,7 @@ impl AudioManager {
 
         let manager = Self {
             liveness: Arc::new(()),
+            piggyback_owns_capture: Arc::new(AtomicBool::new(false)),
             options: Arc::new(RwLock::new(options)),
             device_manager: Arc::new(device_manager),
             segmentation_manager,
@@ -1883,7 +1904,17 @@ impl AudioManager {
             .meeting_detector()
             .await
             .map(|detector| detector.is_in_meeting());
-        meeting_piggyback_owns_normal_capture(enabled, meeting_state)
+        meeting_piggyback_owns_normal_capture(
+            enabled,
+            meeting_state,
+            self.piggyback_owns_capture.load(Ordering::Relaxed),
+        )
+    }
+
+    /// Sweep -> gate handoff for piggyback capture ownership. See the
+    /// `piggyback_owns_capture` field.
+    pub(crate) fn set_piggyback_owns_capture(&self, owns: bool) {
+        self.piggyback_owns_capture.store(owns, Ordering::Relaxed);
     }
 
     /// Whether Bluetooth mics are exempt from the meeting gate (see
@@ -2508,10 +2539,45 @@ mod tests {
 
     #[test]
     fn piggyback_ownership_requires_both_flag_and_confirmed_meeting() {
-        assert!(meeting_piggyback_owns_normal_capture(true, Some(true)));
-        assert!(!meeting_piggyback_owns_normal_capture(false, Some(true)));
-        assert!(!meeting_piggyback_owns_normal_capture(true, Some(false)));
-        assert!(!meeting_piggyback_owns_normal_capture(true, None));
+        assert!(meeting_piggyback_owns_normal_capture(
+            true,
+            Some(true),
+            true
+        ));
+        assert!(!meeting_piggyback_owns_normal_capture(
+            false,
+            Some(true),
+            true
+        ));
+        assert!(!meeting_piggyback_owns_normal_capture(
+            true,
+            Some(false),
+            true
+        ));
+        assert!(!meeting_piggyback_owns_normal_capture(true, None, true));
+    }
+
+    /// Regression: the gate used to hold capture on flag + meeting alone, so a
+    /// meeting whose Meeting Tap never built recorded nothing. Measured on
+    /// 2.6.1: an 86s manual meeting produced 3,584 samples (~0.22s) and an
+    /// empty transcript, where the same audio captured fine with no meeting.
+    #[test]
+    fn a_piggyback_that_cannot_deliver_does_not_hold_capture() {
+        assert!(
+            !meeting_piggyback_owns_normal_capture(true, Some(true), false),
+            "sweep reports it cannot deliver — normal capture must keep running"
+        );
+    }
+
+    /// The flag defaults to false, so the window between a meeting starting
+    /// and the first sweep must not drop the user's capture.
+    #[test]
+    fn capture_is_not_held_before_the_first_sweep_reports() {
+        assert!(!meeting_piggyback_owns_normal_capture(
+            true,
+            Some(true),
+            false
+        ));
     }
 
     #[test]

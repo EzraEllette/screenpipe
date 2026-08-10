@@ -3585,7 +3585,7 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
                     </Badge>
                   </h3>
                   <p className="text-xs text-muted-foreground">
-                    during meetings, records your meeting&apos;s audio and whichever microphone you pick in the meeting app — taking precedence over your other audio settings. while a meeting is running this replaces your normal capture, so if the meeting audio can&apos;t be captured that meeting may record nothing.
+                    during meetings, records your meeting&apos;s audio and whichever microphone you pick in the meeting app — taking precedence over your other audio settings. falls back to your configured capture automatically if unavailable.
                   </p>
                   {settings.disableMeetingDetector && (
                     <p className="text-xs text-amber-600 dark:text-amber-500">
