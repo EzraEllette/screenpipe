@@ -473,6 +473,23 @@ const OnboardingLogin: React.FC<OnboardingLoginProps> = ({
                 ? "sign in with your enterprise account"
                 : "sign in or create a free account"}
             </motion.p>
+
+            {/* Locality promise. This slide is the only one every platform
+                sees: the permissions step auto-advances on non-mac, so
+                without this line Windows and Linux users are never told
+                where their recordings live. Scoped to STORAGE, not
+                transmission, because paid users are auto-switched to cloud
+                transcription (applyProCloudAudioDefaults in use-settings) so
+                any "nothing ever leaves" claim would be false for them. */}
+            <motion.p
+              data-testid="login-locality"
+              className="font-mono text-[10px] text-muted-foreground/40 mt-1.5 tracking-wide"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              transition={{ duration: 0.5, delay: 1.15 }}
+            >
+              your recordings are stored on this computer
+            </motion.p>
           </>
         )}
 
@@ -485,7 +502,7 @@ const OnboardingLogin: React.FC<OnboardingLoginProps> = ({
               onClick={handleSkip}
               className="font-mono text-xs text-muted-foreground/70 hover:text-foreground underline underline-offset-4 decoration-muted-foreground/40 hover:decoration-foreground transition-colors mt-8 tracking-wide"
             >
-              skip for dev — continue without an account
+              skip for dev, continue without an account
             </motion.button>
           )}
         </AnimatePresence>

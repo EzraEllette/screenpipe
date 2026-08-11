@@ -83,6 +83,21 @@ beforeEach(() => {
 afterEach(() => vi.clearAllTimers());
 
 describe("onboarding login gate", () => {
+  // The permissions step auto-advances on non-mac, so this slide is the only
+  // place Windows and Linux users are ever told where their recordings live.
+  // It must not become mac-specific or platform-gated.
+  it("tells every platform that recordings are stored locally", () => {
+    mocks.settings = { user: {} };
+    render(<OnboardingLogin handleNextSlide={vi.fn()} />);
+    const locality = screen.getByTestId("login-locality");
+    expect(locality).toHaveTextContent(
+      "your recordings are stored on this computer",
+    );
+    // Device-neutral: naming one OS would exclude the platforms that only
+    // ever see this slide.
+    expect(locality.textContent ?? "").not.toMatch(/\bmac\b/i);
+  });
+
   it("advances once when signed in AND entitled", async () => {
     mocks.settings = { user: { token: "t1", email: "maribel@bungalow.com" } };
     mocks.hasAppEntitlement.mockReturnValue(true);
