@@ -207,6 +207,19 @@ describe("onboarding login gate", () => {
     expect(screen.getByText(/^get started$/i)).toBeInTheDocument();
   });
 
+  it("makes the consumer get-started action primary and shows a direction icon", () => {
+    mocks.settings = { user: null };
+    mocks.hasAppEntitlement.mockReturnValue(false);
+
+    render(<OnboardingLogin handleNextSlide={vi.fn()} />);
+
+    expect(screen.getByTestId("login-cta")).toHaveClass(
+      "bg-primary",
+      "text-primary-foreground",
+    );
+    expect(screen.getByTestId("login-cta-icon")).toBeInTheDocument();
+  });
+
   // Everyone reaching this slide on a consumer build is a fresh install with
   // no account. Labelling the only affordance "sign in" tells them the app is
   // for people who already have one, and nothing on the slide offered to

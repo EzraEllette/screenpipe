@@ -9,6 +9,7 @@ import { commands } from "@/lib/utils/tauri";
 import { motion, AnimatePresence } from "framer-motion";
 import posthog from "posthog-js";
 import { isDevBillingBypassEnabled } from "@/lib/app-entitlement";
+import { ArrowRight } from "lucide-react";
 
 const FAILURE_COPY: Record<string, string> = {
   cancelled: "sign in was cancelled in your browser.",
@@ -409,7 +410,11 @@ const OnboardingLogin: React.FC<OnboardingLoginProps> = ({
               onClick={handleLogin}
               onMouseEnter={() => setIsHovered(true)}
               onMouseLeave={() => setIsHovered(false)}
-              className="relative overflow-hidden border border-foreground/70 bg-transparent hover:bg-foreground transition-colors duration-150 group"
+              className={`relative overflow-hidden transition-colors duration-150 group ${
+                suppressAutoAdvance
+                  ? "border border-foreground/70 bg-transparent hover:bg-foreground"
+                  : "border border-primary bg-primary text-primary-foreground hover:bg-background hover:text-primary"
+              }`}
               initial={{ opacity: 0, y: 10 }}
               animate={{ opacity: 1, y: 0 }}
               transition={{ duration: 0.4, delay: 0.7 }}
@@ -424,13 +429,30 @@ const OnboardingLogin: React.FC<OnboardingLoginProps> = ({
               />
 
               {/* Text */}
-              <span className="relative z-10 font-mono text-sm tracking-[0.25em] uppercase font-medium text-foreground group-hover:text-background transition-colors duration-150">
+              <span
+                className={`relative z-10 flex items-center justify-center gap-2 font-mono text-sm tracking-[0.25em] uppercase font-medium transition-colors duration-150 ${
+                  suppressAutoAdvance
+                    ? "text-foreground group-hover:text-background"
+                    : "text-primary-foreground group-hover:text-primary"
+                }`}
+              >
                 {/* Enterprise users are handed an existing account by their
                     admin, so "sign in" is literally correct there. Everyone
                     else on this slide is a fresh install with no account yet,
                     and "sign in" reads as an instruction for people who
                     already have one. */}
-                {suppressAutoAdvance ? "sign in" : "get started"}
+                {suppressAutoAdvance ? (
+                  "sign in"
+                ) : (
+                  <>
+                    get started
+                    <ArrowRight
+                      data-testid="login-cta-icon"
+                      className="h-4 w-4"
+                      strokeWidth={2}
+                    />
+                  </>
+                )}
               </span>
 
               {/* Corner marks */}
