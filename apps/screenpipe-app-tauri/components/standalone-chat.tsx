@@ -47,7 +47,11 @@ import {
   type ComposerCommandId,
   type ComposerSkillReference,
 } from "@/lib/chat-utils";
-import { useAutoSuggestions } from "@/lib/hooks/use-auto-suggestions";
+import {
+  useAutoSuggestions,
+  type Suggestion,
+} from "@/lib/hooks/use-auto-suggestions";
+import { postChatSuggestionSendOptions } from "@/lib/chat/suggestion-telemetry";
 import {
   buildInvalidatedAuthTokenMessage,
 } from "@/lib/chat/auth-errors";
@@ -1208,6 +1212,17 @@ export function StandaloneChat({
     [sendMessage],
   );
 
+  const sendPostChatSuggestion = useCallback(
+    (suggestion: Suggestion, position: number) =>
+      sendMessage(
+        suggestion.text,
+        undefined,
+        undefined,
+        postChatSuggestionSendOptions(suggestion, position),
+      ),
+    [sendMessage],
+  );
+
   // E2E-only: expose the stop action so specs can end a turn and drive sends
   // back-to-back without the Pi subprocess staying busy. Render assignment (the
   // repo's preferred pattern over mirror effects); harmless no-op in production.
@@ -2127,7 +2142,7 @@ export function StandaloneChat({
           suggestions: connectionAwareSuggestions,
           inputSectionWidth,
           isRefreshing: suggestionsRefreshing,
-          onSendSuggestion: sendMessage,
+          onSendSuggestion: sendPostChatSuggestion,
           onRefresh: refreshVisibleSuggestions,
           onHide: () => updateSettings({ showChatSuggestions: false }),
         }}
