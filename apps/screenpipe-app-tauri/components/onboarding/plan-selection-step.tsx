@@ -5,38 +5,24 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Check } from "lucide-react";
 import posthog from "posthog-js";
-import { Button } from "@/components/ui/button";
 import { useSettings } from "@/lib/hooks/use-settings";
-import { openExternalUrl } from "@/lib/open-external-url";
 import { screenpipeWebUrl } from "@/lib/web-url";
 
 const CHECKOUT_URL = screenpipeWebUrl(
   "/api/subscription/checkout",
   "https://screenpipe.com",
 );
+const EMBEDDED_CHECKOUT_URL = screenpipeWebUrl(
+  "/embedded-checkout",
+  "https://screenpipe.com",
+);
+const CARDLESS_TRIAL_URL = screenpipeWebUrl(
+  "/api/subscription/onboarding-trial",
+  "https://screenpipe.com",
+);
 
-const PLANS = [
-  {
-    id: "standard" as const,
-    name: "basic",
-    monthly: 25,
-    annual: 250,
-    features: ["150 AI credits / month", "unlimited history and tasks"],
-  },
-  {
-    id: "pro" as const,
-    name: "business",
-    monthly: 50,
-    annual: 500,
-    features: [
-      "400 AI credits / month",
-      "frontier Claude and GPT models",
-      "cloud sync across devices",
-    ],
-  },
-];
+type BillingInterval = "year" | "month";
 
 export default function PlanSelectionStep({
   handleNextSlide,
@@ -44,17 +30,89 @@ export default function PlanSelectionStep({
   handleNextSlide: () => void | Promise<void>;
 }) {
   const { settings, loadUser } = useSettings();
-  const [annual, setAnnual] = useState(true);
-  const [busyPlan, setBusyPlan] = useState<"standard" | "pro" | null>(null);
-  const [checkoutOpen, setCheckoutOpen] = useState(false);
+  const [interval, setInterval] = useState<BillingInterval>("year");
+  const [frameUrl, setFrameUrl] = useState<string | null>(null);
+  const [busy, setBusy] = useState(true);
+  const [completing, setCompleting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [showFree, setShowFree] = useState(false);
+  const [startingCardlessTrial, setStartingCardlessTrial] = useState(false);
+  const iframeRef = useRef<HTMLIFrameElement>(null);
+  const requestRef = useRef(0);
   const advancedRef = useRef(false);
   const loadUserRef = useRef(loadUser);
   const userToken = settings.user?.token;
   loadUserRef.current = loadUser;
 
   useEffect(() => {
-    if (!checkoutOpen || !userToken) return;
+    const timer = setTimeout(() => setShowFree(true), 6_000);
+    return () => clearTimeout(timer);
+  }, []);
+
+  useEffect(() => {
+    if (!userToken) {
+      setBusy(false);
+      setError("sign in to continue");
+      return;
+    }
+
+    const requestId = ++requestRef.current;
+    const controller = new AbortController();
+    setBusy(true);
+    setFrameUrl(null);
+    setError(null);
+    setCompleting(false);
+    posthog.capture("onboarding_card_checkout_started", { interval });
+
+    void fetch(CHECKOUT_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      signal: controller.signal,
+      body: JSON.stringify({
+        plan: "pro",
+        interval,
+        token: userToken,
+        origin: "desktop-onboarding-card-capture",
+        ui_mode: "embedded",
+        source_tracking_id: "desktop-onboarding-business-v2",
+        product_tier: "business",
+        internal_plan: "pro",
+        billing_interval: interval,
+        seats: 1,
+        cta_location: "desktop_onboarding_card_capture",
+        cta_action: "start_trial",
+        destination_type: "stripe_embedded_checkout",
+        business_trial_mode: "new",
+      }),
+    })
+      .then(async (response) => {
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || !data.clientSecret) {
+          throw new Error(data.error || `checkout failed (${response.status})`);
+        }
+        if (requestId !== requestRef.current) return;
+        setFrameUrl(
+          `${EMBEDDED_CHECKOUT_URL}#client_secret=${encodeURIComponent(data.clientSecret)}`,
+        );
+        posthog.capture("onboarding_card_checkout_loaded", { interval });
+      })
+      .catch((checkoutError) => {
+        if (controller.signal.aborted || requestId !== requestRef.current) return;
+        setError(
+          checkoutError instanceof Error
+            ? checkoutError.message
+            : "secure checkout could not be loaded",
+        );
+      })
+      .finally(() => {
+        if (requestId === requestRef.current) setBusy(false);
+      });
+
+    return () => controller.abort();
+  }, [interval, userToken]);
+
+  useEffect(() => {
+    if (!frameUrl || !userToken) return;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
     let attempts = 0;
@@ -70,11 +128,28 @@ export default function PlanSelectionStep({
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, [checkoutOpen, userToken]);
+  }, [frameUrl, userToken]);
+
+  useEffect(() => {
+    const embeddedOrigin = new URL(EMBEDDED_CHECKOUT_URL).origin;
+    const onMessage = (event: MessageEvent) => {
+      if (
+        event.origin !== embeddedOrigin ||
+        event.source !== iframeRef.current?.contentWindow ||
+        event.data?.type !== "screenpipe:checkout-complete"
+      ) {
+        return;
+      }
+      setCompleting(true);
+      posthog.capture("onboarding_card_checkout_completed", { interval });
+      if (userToken) void loadUserRef.current(userToken, true);
+    };
+    window.addEventListener("message", onMessage);
+    return () => window.removeEventListener("message", onMessage);
+  }, [interval, userToken]);
 
   useEffect(() => {
     if (
-      !checkoutOpen ||
       settings.user?.cloud_subscribed !== true ||
       advancedRef.current
     ) {
@@ -85,165 +160,113 @@ export default function PlanSelectionStep({
       plan: settings.user.subscription_plan || "unknown",
     });
     void handleNextSlide();
-  }, [checkoutOpen, handleNextSlide, settings.user]);
+  }, [handleNextSlide, settings.user]);
 
-  const startCheckout = async (plan: "standard" | "pro") => {
-    const token = settings.user?.token;
-    if (!token || busyPlan) return;
-    const interval = annual ? "year" : "month";
-    const startsTrial = plan === "pro" || interval === "month";
-    setBusyPlan(plan);
+  const continueWithoutCard = async () => {
+    if (!userToken || startingCardlessTrial) return;
+    setStartingCardlessTrial(true);
     setError(null);
-    posthog.capture("onboarding_plan_checkout_started", { plan, interval });
     try {
-      const response = await fetch(CHECKOUT_URL, {
+      const response = await fetch(CARDLESS_TRIAL_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          plan,
-          interval,
-          token,
-          origin: "desktop-onboarding-plan-selection",
-          returnUrl: screenpipeWebUrl("/", "https://screenpipe.com"),
-          source_tracking_id: `desktop-onboarding-${plan}-v1`,
-          product_tier: plan === "pro" ? "business" : "basic",
-          internal_plan: plan,
-          billing_interval: interval,
-          seats: 1,
-          cta_location: "desktop_onboarding_plan_selection",
-          cta_action: startsTrial ? "start_trial" : "start_checkout",
-          destination_type: "stripe_checkout",
-          ...(plan === "pro" ? { business_trial_mode: "new" } : {}),
-        }),
+        body: JSON.stringify({ token: userToken }),
       });
       const data = await response.json().catch(() => ({}));
-      if (!response.ok || !data.url) {
-        throw new Error(data.error || `checkout failed (${response.status})`);
+      if (!response.ok) {
+        throw new Error(data.error || `trial activation failed (${response.status})`);
       }
-      await openExternalUrl(data.url);
-      setCheckoutOpen(true);
-      posthog.capture("onboarding_plan_checkout_opened", { plan, interval });
-    } catch (checkoutError) {
+      posthog.capture("onboarding_cardless_trial_started", {
+        activated: data.activated === true,
+      });
+      advancedRef.current = true;
+      try {
+        await loadUserRef.current(userToken, true);
+        await handleNextSlide();
+      } catch (advanceError) {
+        advancedRef.current = false;
+        throw advanceError;
+      }
+    } catch (activationError) {
       setError(
-        checkoutError instanceof Error
-          ? checkoutError.message
-          : "could not open checkout",
+        activationError instanceof Error
+          ? activationError.message
+          : "could not start trial",
       );
     } finally {
-      setBusyPlan(null);
+      setStartingCardlessTrial(false);
     }
   };
 
   return (
     <div
       className="mx-auto w-full max-w-2xl"
-      data-testid="onboarding-plan-selection"
+      data-testid="onboarding-card-capture"
     >
-      <div className="mb-5 text-center">
-        <h2 className="text-xl font-semibold lowercase">choose your plan</h2>
-        <p className="mt-1 text-sm text-muted-foreground">
-          your setup is complete. choose how you want to use screenpipe.
-        </p>
+      <div className="mb-4 text-center">
+        <h2 className="text-xl font-semibold lowercase">
+          add a payment method to keep screenpipe business
+        </h2>
       </div>
 
-      <div className="mb-4 flex justify-center gap-1 font-mono text-[10px] uppercase tracking-widest">
+      <div className="mb-3 flex justify-center gap-1 font-mono text-[10px] uppercase tracking-widest">
         <button
           type="button"
-          onClick={() => setAnnual(true)}
-          className={`border px-3 py-1.5 ${annual ? "bg-foreground text-background" : "text-muted-foreground"}`}
+          onClick={() => setInterval("year")}
+          className={`border px-3 py-1.5 ${interval === "year" ? "bg-foreground text-background" : "text-muted-foreground"}`}
         >
           annual
         </button>
         <button
           type="button"
-          onClick={() => setAnnual(false)}
-          className={`border px-3 py-1.5 ${!annual ? "bg-foreground text-background" : "text-muted-foreground"}`}
+          onClick={() => setInterval("month")}
+          className={`border px-3 py-1.5 ${interval === "month" ? "bg-foreground text-background" : "text-muted-foreground"}`}
         >
           monthly
         </button>
       </div>
 
-      <div className="grid grid-cols-2 gap-3">
-        {PLANS.map((plan) => {
-          const business = plan.id === "pro";
-          const startsTrial = business || !annual;
-          const total = annual ? plan.annual : plan.monthly;
-          const monthlyDisplay = annual
-            ? Math.round(plan.annual / 12)
-            : plan.monthly;
-          return (
-            <div
-              key={plan.id}
-              className={`flex min-h-[280px] flex-col border p-5 ${business ? "border-2 border-foreground bg-foreground text-background" : "border-border"}`}
-            >
-              <div className="flex items-center justify-between">
-                <h3 className="text-lg font-semibold lowercase">{plan.name}</h3>
-                {startsTrial && (
-                  <span className="font-mono text-[9px] uppercase tracking-widest opacity-70">
-                    7 days free
-                  </span>
-                )}
-              </div>
-              <div className="mt-3 flex items-baseline gap-1">
-                <span className="text-3xl font-bold">${monthlyDisplay}</span>
-                <span className="text-[10px] opacity-60">
-                  {business ? "/ seat / month" : "/ month"}
-                </span>
-              </div>
-              <p className="mt-1 font-mono text-[10px] opacity-60">
-                {startsTrial
-                  ? `free for 7 days, then ${annual ? `$${total}/year` : `$${total}/month`}`
-                  : annual
-                    ? `$${total}/year, billed annually`
-                    : `$${total}/month`}
-              </p>
-              <ul className="mt-5 flex-1 space-y-2">
-                {plan.features.map((feature) => (
-                  <li key={feature} className="flex gap-2 text-xs opacity-80">
-                    <Check className="mt-0.5 h-3 w-3 shrink-0" />
-                    <span>{feature}</span>
-                  </li>
-                ))}
-              </ul>
-              <Button
-                variant={business ? "secondary" : "outline"}
-                disabled={busyPlan !== null}
-                onClick={() => startCheckout(plan.id)}
-                data-testid={`onboarding-plan-${plan.id}`}
-              >
-                {busyPlan === plan.id
-                  ? "opening checkout"
-                  : startsTrial
-                    ? "start 7-day free trial"
-                    : "choose basic"}
-              </Button>
-            </div>
-          );
-        })}
+      <div className="relative min-h-[460px] border bg-white">
+        {busy && (
+          <div className="absolute inset-0 flex items-center justify-center font-mono text-[11px] text-muted-foreground">
+            loading secure payment form
+          </div>
+        )}
+        {frameUrl && !completing && (
+          <iframe
+            ref={iframeRef}
+            src={frameUrl}
+            title="secure Stripe payment form"
+            allow="payment"
+            className="h-[520px] w-full border-0"
+            data-testid="onboarding-card-frame"
+          />
+        )}
+        {completing && (
+          <div className="absolute inset-0 flex items-center justify-center font-mono text-[11px] text-muted-foreground">
+            activating your subscription
+          </div>
+        )}
+        {error && (
+          <div className="absolute inset-0 flex items-center justify-center p-8 text-center font-mono text-[11px] text-destructive">
+            {error}
+          </div>
+        )}
       </div>
 
-      {checkoutOpen && (
-        <p className="mt-3 text-center font-mono text-[11px] text-muted-foreground">
-          finish checkout in your browser. this screen will continue automatically.
-        </p>
+      {showFree && (
+        <button
+          type="button"
+          onClick={() => void continueWithoutCard()}
+          disabled={startingCardlessTrial}
+          className="mx-auto mt-4 block font-mono text-[10px] text-muted-foreground/40 underline decoration-muted-foreground/20 underline-offset-4 transition-opacity hover:text-muted-foreground focus:text-muted-foreground"
+          data-testid="onboarding-plan-free"
+        >
+          {startingCardlessTrial
+            ? "starting trial"
+            : "continue with limited free plan"}
+        </button>
       )}
-      {error && (
-        <p className="mt-3 text-center font-mono text-[11px] text-destructive">
-          {error}
-        </p>
-      )}
-
-      <button
-        type="button"
-        onClick={() => {
-          posthog.capture("onboarding_plan_free_selected");
-          void handleNextSlide();
-        }}
-        className="mx-auto mt-5 block font-mono text-[10px] text-muted-foreground/50 underline decoration-muted-foreground/20 underline-offset-4 transition-opacity hover:text-muted-foreground focus:text-muted-foreground"
-        data-testid="onboarding-plan-free"
-      >
-        continue with limited free plan
-      </button>
     </div>
   );
 }
