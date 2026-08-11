@@ -22,7 +22,10 @@ const mocks = vi.hoisted(() => ({
   completeOnboarding: vi.fn(async () => undefined),
   capture: vi.fn(),
   isSettingLocked: vi.fn((_key: string) => false),
-  settings: { deviceTier: "low" as string | null | undefined },
+  settings: {
+    deviceTier: "low" as string | null | undefined,
+    user: null as null | { cloud_subscribed?: boolean },
+  },
   isSettingsLoaded: true,
 }));
 
@@ -99,6 +102,14 @@ vi.mock("@/components/onboarding/engine-startup", () => ({
     </div>
   ),
 }));
+vi.mock("@/components/onboarding/plan-selection-step", () => ({
+  default: ({ handleNextSlide }: { handleNextSlide: () => void }) => (
+    <div>
+      <span>plan selection</span>
+      <button onClick={handleNextSlide}>continue free plan</button>
+    </div>
+  ),
+}));
 vi.mock("@/lib/utils/tauri", () => ({
   commands: {
     setOnboardingStep: mocks.setOnboardingStep,
@@ -126,6 +137,7 @@ describe("enterprise onboarding authentication", () => {
     mocks.applyEnterpriseUiVisibility.mockResolvedValue(false);
     mocks.isSettingLocked.mockImplementation(() => false);
     mocks.settings.deviceTier = "low";
+    mocks.settings.user = null;
     mocks.isSettingsLoaded = true;
   });
 
@@ -225,9 +237,7 @@ describe("enterprise onboarding authentication", () => {
     );
   });
 
-  // The engine slide is the last one: setup no longer asks for a goal or
-  // builds a dashboard, so finishing it completes onboarding outright.
-  it("completes onboarding from the engine slide instead of advancing", async () => {
+  it("managed onboarding completes from engine without consumer pricing", async () => {
     onboardingData.currentStep = "engine";
 
     render(<OnboardingPage />);
@@ -239,6 +249,49 @@ describe("enterprise onboarding authentication", () => {
       }),
     );
     expect(screen.queryByText("connect apps")).not.toBeInTheDocument();
+  });
+
+  it("shows plan selection last for consumer onboarding", async () => {
+    mocks.enterprisePolicy.isManagedDeployment = false;
+    onboardingData.currentStep = "engine";
+
+    render(<OnboardingPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "finish engine" }));
+
+    expect(await screen.findByText("plan selection")).toBeInTheDocument();
+    expect(mocks.completeOnboarding).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "continue free plan" }));
+    await waitFor(() =>
+      expect(mocks.completeOnboarding).toHaveBeenCalledWith({
+        method: "setup_finished",
+      }),
+    );
+  });
+
+  it("does not restore managed onboarding onto consumer pricing", async () => {
+    onboardingData.currentStep = "plan";
+
+    render(<OnboardingPage />);
+
+    expect(await screen.findByText("engine")).toBeInTheDocument();
+    expect(screen.queryByText("plan selection")).not.toBeInTheDocument();
+  });
+
+  it("does not show pricing to an existing paid consumer", async () => {
+    mocks.enterprisePolicy.isManagedDeployment = false;
+    mocks.settings.user = { cloud_subscribed: true };
+    onboardingData.currentStep = "engine";
+
+    render(<OnboardingPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "finish engine" }));
+
+    await waitFor(() =>
+      expect(mocks.completeOnboarding).toHaveBeenCalledWith({
+        method: "setup_finished",
+      }),
+    );
+    expect(screen.queryByText("plan selection")).not.toBeInTheDocument();
   });
 
   it.each(["connect-apps", "integrations", "connections", "first-dashboard"])(
