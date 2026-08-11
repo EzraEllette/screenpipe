@@ -289,14 +289,15 @@ const OnboardingLogin: React.FC<OnboardingLoginProps> = ({
     // already have with Google/etc. is reused instead of asking them to
     // re-type credentials into a cold embedded WebView. Either way the token
     // comes back on the screenpipe:// deep link; nothing is typed by hand.
+    const authMode = suppressAutoAdvance ? "sign-in" : "sign-up";
     void commands
-      .openLoginWindow(null)
+      .openLoginWindow(null, authMode)
       .then((result) => {
         if (result.status === "ok") setAwaitingBrowser(true);
         else setBrowserFailure("failed");
       })
       .catch(() => setBrowserFailure("failed"));
-  }, []);
+  }, [suppressAutoAdvance]);
 
   // Escape hatch when the default browser is unusable or the user never
   // returns to it — falls back to the in-app WebView.
@@ -304,8 +305,9 @@ const OnboardingLogin: React.FC<OnboardingLoginProps> = ({
     posthog.capture("onboarding_login_webview_fallback_clicked");
     setAwaitingBrowser(false);
     setBrowserFailure(null);
-    void commands.openLoginWindow(true);
-  }, []);
+    const authMode = suppressAutoAdvance ? "sign-in" : "sign-up";
+    void commands.openLoginWindow(true, authMode);
+  }, [suppressAutoAdvance]);
 
   const handleSkip = useCallback(() => {
     posthog.capture("onboarding_login_skipped_dev");

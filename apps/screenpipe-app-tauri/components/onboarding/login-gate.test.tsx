@@ -235,6 +235,18 @@ describe("onboarding login gate", () => {
     expect(screen.getByTestId("login-cta-icon")).toBeInTheDocument();
   });
 
+  it("opens account creation directly for consumer onboarding", async () => {
+    mocks.settings = { user: null };
+    mocks.openLoginWindow.mockResolvedValue({ status: "ok", data: "" });
+
+    render(<OnboardingLogin handleNextSlide={vi.fn()} />);
+    fireEvent.click(screen.getByTestId("login-cta"));
+
+    await waitFor(() =>
+      expect(mocks.openLoginWindow).toHaveBeenCalledWith(null, "sign-up"),
+    );
+  });
+
   // Everyone reaching this slide on a consumer build is a fresh install with
   // no account. Labelling the only affordance "sign in" tells them the app is
   // for people who already have one, and nothing on the slide offered to
@@ -264,6 +276,18 @@ describe("onboarding login gate", () => {
     expect(screen.getByText(/^sign in$/i)).toBeInTheDocument();
     expect(screen.queryByText(/^get started$/i)).toBeNull();
     expect(screen.queryByText(/create a free account/i)).toBeNull();
+  });
+
+  it("opens sign in directly for managed enterprise onboarding", async () => {
+    mocks.settings = { user: null };
+    mocks.openLoginWindow.mockResolvedValue({ status: "ok", data: "" });
+
+    render(<OnboardingLogin handleNextSlide={vi.fn()} suppressAutoAdvance />);
+    fireEvent.click(screen.getByTestId("login-cta"));
+
+    await waitFor(() =>
+      expect(mocks.openLoginWindow).toHaveBeenCalledWith(null, "sign-in"),
+    );
   });
 
   it("labels sign-in as the enterprise-account option during enterprise onboarding", () => {
@@ -342,7 +366,7 @@ describe("onboarding login gate", () => {
 
     // `true` requests the isolated-profile WebView, the one path that still
     // works when the default browser is unusable.
-    expect(mocks.openLoginWindow).toHaveBeenCalledWith(true);
+    expect(mocks.openLoginWindow).toHaveBeenCalledWith(true, "sign-up");
     expect(mocks.capture).toHaveBeenCalledWith(
       "onboarding_login_webview_fallback_clicked",
     );
@@ -386,6 +410,6 @@ describe("onboarding login gate", () => {
     await waitFor(() =>
       expect(screen.queryByTestId("login-browser-failure")).toBeNull(),
     );
-    expect(mocks.openLoginWindow).toHaveBeenCalledWith(null);
+    expect(mocks.openLoginWindow).toHaveBeenCalledWith(null, "sign-up");
   });
 });
