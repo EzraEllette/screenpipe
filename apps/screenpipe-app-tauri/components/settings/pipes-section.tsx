@@ -149,6 +149,76 @@ import { requestPipeStop } from "@/lib/pipe-stop";
 
 const PIPE_EXECUTIONS_PAGE_LIMIT = 10;
 
+export function shouldShowPipesLoadError(
+  loadError: string | null,
+  currentApiBase: string,
+  lastSuccessfulApiBase: string | null,
+): boolean {
+  return loadError !== null && lastSuccessfulApiBase !== currentApiBase;
+}
+
+export function isCurrentPipesRequest(
+  requestApiBase: string,
+  requestId: number,
+  currentApiBase: string,
+  latestRequestId: number,
+): boolean {
+  return requestApiBase === currentApiBase && requestId === latestRequestId;
+}
+
+export function shouldFetchPipesForApi(
+  requestApiBase: string,
+  currentApiBase: string,
+): boolean {
+  return requestApiBase === currentApiBase;
+}
+
+export class ApiRequestSequence {
+  private latestRequestId = 0;
+
+  begin(apiBase: string) {
+    return { apiBase, requestId: ++this.latestRequestId };
+  }
+
+  isCurrent(
+    request: { apiBase: string; requestId: number },
+    currentApiBase: string,
+  ): boolean {
+    return isCurrentPipesRequest(
+      request.apiBase,
+      request.requestId,
+      currentApiBase,
+      this.latestRequestId,
+    );
+  }
+}
+
+export class ApiPollCoalescer<T> {
+  private active: { apiBase: string; promise: Promise<T> } | null = null;
+
+  run(apiBase: string, task: () => Promise<T>): Promise<T> {
+    if (this.active?.apiBase === apiBase) return this.active.promise;
+
+    const promise = task().finally(() => {
+      if (this.active?.promise === promise) this.active = null;
+    });
+    this.active = { apiBase, promise };
+    return promise;
+  }
+}
+
+export function liveOutputKeyForApi(
+  apiBase: string,
+  pipeName: string,
+  executionId: number,
+): string {
+  return `${apiBase}|${pipeName}:${executionId}`;
+}
+
+export function pipesForApi<T>(pipes: T[], pipesApiBase: string | null, apiBase: string): T[] {
+  return pipesApiBase === apiBase ? pipes : [];
+}
+
 function pipeExecutionsUrl(apiBase: string, pipeName: string, beforeId?: number) {
   const params = new URLSearchParams({
     limit: String(PIPE_EXECUTIONS_PAGE_LIMIT),
@@ -1052,12 +1122,15 @@ export function PipesSection() {
   const discoverResultTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [pipes, setPipes] = useState<PipeStatus[]>([]);
+  const [pipesApiBase, setPipesApiBase] = useState<string | null>(null);
+  const pipesApiBaseRef = useRef<string | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
   // Creating takes over the detail pane instead of living as a permanent form
   // under the list — you only see the composer when you ask for it.
   const [creating, setCreating] = useState(false);
   const expandedRef = useRef<string | null>(null);
   const [logs, setLogs] = useState<PipeRunLog[]>([]);
+  const [logsApiBase, setLogsApiBase] = useState<string | null>(null);
   const [executions, setExecutions] = useState<PipeExecution[]>([]);
   const [executionsLoading, setExecutionsLoading] = useState(false);
   const [hasMoreExecutions, setHasMoreExecutions] = useState(false);
@@ -1065,7 +1138,16 @@ export function PipesSection() {
   // Per-pipe recent executions (always fetched for all pipes)
   const [pipeExecutions, setPipeExecutions] = useState<Record<string, PipeExecution[]>>({});
   const [loading, setLoading] = useState(true);
+  const [settledApiBase, setSettledApiBase] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const lastSuccessfulPipesApiBase = useRef<string | null>(null);
+  const currentApiBase = useRef("");
+  const pipesRequests = useRef(new ApiRequestSequence());
+  const pipesPolls = useRef(new ApiPollCoalescer<boolean>());
+  const polledExecutionsRequests = useRef(new ApiRequestSequence());
+  const executionsRequests = useRef(new ApiRequestSequence());
+  const olderExecutionsRequests = useRef(new ApiRequestSequence());
+  const logsRequests = useRef(new ApiRequestSequence());
   const [runningPipe, setRunningPipe] = useState<string | null>(null);
   const [stoppingPipe, setStoppingPipe] = useState<string | null>(null);
   const [promptDrafts, setPromptDrafts] = useState<Record<string, string>>({});
@@ -1111,7 +1193,7 @@ export function PipesSection() {
     installedVersion: number;
     latestVersion: number;
   } | null>(null);
-  // Live streaming output for running executions: key = "pipeName:executionId"
+  // Live streaming output for running executions: key = "apiBase|pipeName:executionId"
   const [liveOutput, setLiveOutput] = useState<Record<string, string[]>>({});
   const liveOutputRef = useRef<Record<string, string[]>>({});
   // Single create-pipe entry point shared by the create box and the example
@@ -1155,9 +1237,15 @@ export function PipesSection() {
     });
   };
 
+  const apiBase = selectedDevice ? `http://${selectedDevice}` : getApiBaseUrl();
+  const isRemote = !!selectedDevice;
+  currentApiBase.current = apiBase;
+  const displayedPipes = pipesForApi(pipes, pipesApiBase, apiBase);
+  const displayedLogs = pipesForApi(logs, logsApiBase, apiBase);
+
   const filteredPipes = React.useMemo(
     () =>
-      pipes
+      displayedPipes
         .filter((p) => {
           if (searchQuery) {
             const q = searchQuery.toLowerCase();
@@ -1189,16 +1277,16 @@ export function PipesSection() {
           return 0;
         }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [pipes, searchQuery, pipeTypeFilter, pipeFavorites.showOnly, pipeFavorites.isFavorite, pipeExecutions]
+    [displayedPipes, searchQuery, pipeTypeFilter, pipeFavorites.showOnly, pipeFavorites.isFavorite, pipeExecutions]
   );
 
   // Counts for sub-tab badges — memoized so the filter doesn't re-run on every render
   const tabCounts = React.useMemo(() => {
     return {
-      local: pipes.filter(shouldShowInMyPipes).length,
+      local: displayedPipes.filter(shouldShowInMyPipes).length,
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pipes]);
+  }, [displayedPipes]);
 
   const starredEmptyTitle = React.useMemo(() => {
     if (!pipeFavorites.showOnly) return null;
@@ -1231,12 +1319,18 @@ export function PipesSection() {
     }
   };
 
-  const apiBase = selectedDevice ? `http://${selectedDevice}` : getApiBaseUrl();
-  const isRemote = !!selectedDevice;
-
-  const fetchPipes = useCallback(async () => {
+  const fetchPipes = useCallback(() => {
+    if (!shouldFetchPipesForApi(apiBase, currentApiBase.current)) {
+      return Promise.resolve(false);
+    }
+    return pipesPolls.current.run(apiBase, async () => {
+    const requestApiBase = apiBase;
+    const request = pipesRequests.current.begin(requestApiBase);
+    const isCurrentRequest = () => pipesRequests.current.isCurrent(request, currentApiBase.current);
     try {
-      setLoadError(null);
+      if (isCurrentRequest()) {
+        setLoadError(null);
+      }
       // Load pipes WITH only their newest execution inline so the list shows the real
       // last-run status. Without this the "last run" column always reads
       // "never run" for pipes that have actually run (the badge is driven by
@@ -1262,9 +1356,14 @@ export function PipesSection() {
         fetched.push(pipe);
         results[pipe.config.name] = recent_executions || [];
       }
+      if (!isCurrentRequest()) return false;
+      const previousPipesApiBase = pipesApiBaseRef.current;
+      lastSuccessfulPipesApiBase.current = apiBase;
+      pipesApiBaseRef.current = apiBase;
+      setPipesApiBase(apiBase);
       // Preserve optimistic UI for pipes with in-flight config saves
       const pendingNames = Object.keys(pendingConfigSaves.current);
-      if (pendingNames.length > 0) {
+      if (pendingNames.length > 0 && previousPipesApiBase === apiBase) {
         setPipes((prev) => {
           const prevByName = new Map(prev.map((p) => [p.config.name, p]));
           return fetched.map((p) =>
@@ -1289,6 +1388,7 @@ export function PipesSection() {
         }
         return changed ? next : prev;
       });
+      return true;
     } catch (e) {
       console.error("failed to fetch pipes:", e);
       const message = (e as any)?.name === "AbortError"
@@ -1296,10 +1396,15 @@ export function PipesSection() {
         : e instanceof Error
           ? e.message
           : "failed to fetch pipes";
-      setLoadError(message);
+      if (isCurrentRequest()) setLoadError(message);
+      return false;
     } finally {
-      setLoading(false);
+      if (isCurrentRequest()) {
+        setSettledApiBase(requestApiBase);
+        setLoading(false);
+      }
     }
+    });
   }, [apiBase, isRemote]);
 
   const fetchConnections = useCallback(async () => {
@@ -1794,7 +1899,8 @@ export function PipesSection() {
       })();
     }
 
-    fetchPipes().then(() => {
+    fetchPipes().then((applied) => {
+      if (!applied || currentApiBase.current !== apiBase) return;
       if (!trackedPipesView.current) {
         trackedPipesView.current = true;
         setPipes((current) => {
@@ -1831,21 +1937,40 @@ export function PipesSection() {
     return () => clearInterval(interval);
   }, [fetchPipes]);
 
+  useEffect(() => {
+    expandedRef.current = null;
+    setExpanded(null);
+    logsRequests.current.begin(apiBase);
+    setLogs([]);
+    setLogsApiBase(null);
+    setExecutions([]);
+    setHasMoreExecutions(false);
+    setExecutionsLoading(false);
+    setLoadingMoreExecutions(false);
+    liveOutputRef.current = {};
+    setLiveOutput({});
+  }, [apiBase]);
+
   const pollRunningPipe = useCallback(async () => {
     // Lightweight poll: only refresh pipe statuses + expanded pipe's executions
     try {
-      await fetchPipes();
+      const applied = await fetchPipes();
+      if (!applied) return;
       const exp = expandedRef.current;
       if (exp) {
+        const requestApiBase = apiBase;
+        const request = polledExecutionsRequests.current.begin(requestApiBase);
+        const isCurrentRequest = () => polledExecutionsRequests.current.isCurrent(request, currentApiBase.current);
         try {
           const execRes = await fetch(pipeExecutionsUrl(apiBase, exp));
           const execData = await execRes.json();
+          if (!isCurrentRequest()) return;
           const nextExecutions = execData.data || [];
           setExecutions(nextExecutions);
           setHasMoreExecutions(nextExecutions.length === PIPE_EXECUTIONS_PAGE_LIMIT);
           const finishedKeys = (execData.data || [])
             .filter((e: PipeExecution) => e.status !== "running")
-            .map((e: PipeExecution) => `${e.pipe_name}:${e.id}`);
+            .map((e: PipeExecution) => liveOutputKeyForApi(apiBase, e.pipe_name, e.id));
           if (finishedKeys.length > 0) {
             const updated = { ...liveOutputRef.current };
             let changed = false;
@@ -1867,27 +1992,37 @@ export function PipesSection() {
   }, [fetchPipes, apiBase]);
 
   // Poll faster (3s) when any pipe is running to update status + expanded executions
-  const anyPipeRunning = pipes.some((p) => p.is_running) || runningPipe !== null;
+  const anyPipeRunning = displayedPipes.some((p) => p.is_running) || runningPipe !== null;
   useInterval(() => pollRunningPipe(), anyPipeRunning ? 3000 : null);
 
   // Note: executions are fetched inside fetchPipes to avoid waterfall
 
   const fetchLogs = async (name: string) => {
+    const requestApiBase = apiBase;
+    const request = logsRequests.current.begin(requestApiBase);
+    const isCurrentRequest = () => logsRequests.current.isCurrent(request, currentApiBase.current);
     try {
       const res = await fetch(`${apiBase}/pipes/${name}/logs`);
       const data = await res.json();
-      setLogs(data.data || []);
+      if (isCurrentRequest()) {
+        setLogsApiBase(requestApiBase);
+        setLogs(data.data || []);
+      }
     } catch (e) {
-      console.error("failed to fetch logs:", e);
+      if (isCurrentRequest()) console.error("failed to fetch logs:", e);
     }
   };
 
   const fetchExecutions = async (name: string) => {
+    const requestApiBase = apiBase;
+    const request = executionsRequests.current.begin(requestApiBase);
+    const isCurrentRequest = () => executionsRequests.current.isCurrent(request, currentApiBase.current);
     setExecutionsLoading(true);
     setHasMoreExecutions(false);
     try {
       const res = await fetch(pipeExecutionsUrl(apiBase, name));
       const data = await res.json();
+      if (!isCurrentRequest()) return;
       const nextExecutions = data.data || [];
       setExecutions(nextExecutions);
       const total = pipes.find((pipe) => pipe.config.name === name)?.execution_count;
@@ -1898,10 +2033,12 @@ export function PipesSection() {
       );
     } catch (e) {
       // Executions endpoint may not exist on older servers — fall back silently
-      setExecutions([]);
-      setHasMoreExecutions(false);
+      if (isCurrentRequest()) {
+        setExecutions([]);
+        setHasMoreExecutions(false);
+      }
     } finally {
-      setExecutionsLoading(false);
+      if (isCurrentRequest()) setExecutionsLoading(false);
     }
   };
 
@@ -1910,10 +2047,14 @@ export function PipesSection() {
     const oldestId = executions[executions.length - 1]?.id;
     if (oldestId == null) return;
 
+    const requestApiBase = apiBase;
+    const request = olderExecutionsRequests.current.begin(requestApiBase);
+    const isCurrentRequest = () => olderExecutionsRequests.current.isCurrent(request, currentApiBase.current);
     setLoadingMoreExecutions(true);
     try {
       const res = await fetch(pipeExecutionsUrl(apiBase, name, oldestId));
       const data = await res.json();
+      if (!isCurrentRequest()) return;
       const olderExecutions: PipeExecution[] = data.data || [];
       const total = pipes.find((pipe) => pipe.config.name === name)?.execution_count;
       const seen = new Set(executions.map((exec) => exec.id));
@@ -1928,9 +2069,9 @@ export function PipesSection() {
           : olderExecutions.length === PIPE_EXECUTIONS_PAGE_LIMIT,
       );
     } catch (e) {
-      console.error("failed to fetch older executions:", e);
+      if (isCurrentRequest()) console.error("failed to fetch older executions:", e);
     } finally {
-      setLoadingMoreExecutions(false);
+      if (isCurrentRequest()) setLoadingMoreExecutions(false);
     }
   };
 
@@ -2223,6 +2364,7 @@ export function PipesSection() {
       if (!mounted) return;
       off = registerDefault((envelope) => {
       if (!mounted) return;
+      if (currentApiBase.current !== apiBase || apiBase !== getApiBaseUrl()) return;
       if (envelope.source !== "pipe") return;
       const parsed = parsePipeSessionId(envelope.sessionId);
       if (!parsed) return;
@@ -2231,7 +2373,7 @@ export function PipesSection() {
       if (executionId == null) return;
       const pipeEvent = envelope.event;
 
-      const key = `${pipeName}:${executionId}`;
+      const key = liveOutputKeyForApi(apiBase, pipeName, executionId);
       let text = "";
       if (pipeEvent?.type === "raw_line") {
         text = (pipeEvent as any).text || "";
@@ -2271,7 +2413,7 @@ export function PipesSection() {
       mounted = false;
       try { off?.(); } catch { /* ignore */ }
     };
-  }, []);
+  }, [apiBase]);
 
   const selectedDeviceInfo = selectedDevice ? devices.find((d) => d.address === selectedDevice) : null;
   if (selectedDeviceInfo?.status === "offline") {
@@ -2411,7 +2553,7 @@ export function PipesSection() {
         // infra against centralized data — different data source from the
         // local pipe list, so it renders its own component.
         <CloudPipesTab active />
-      ) : loading ? (
+      ) : loading || settledApiBase !== apiBase ? (
         <div className="space-y-2">
           {[1, 2, 3].map((i) => (
             <Card key={i}>
@@ -2438,7 +2580,7 @@ export function PipesSection() {
             </Card>
           ))}
         </div>
-      ) : loadError ? (
+      ) : shouldShowPipesLoadError(loadError, apiBase, lastSuccessfulPipesApiBase.current) ? (
         <Card>
           <CardContent className="py-8 text-center">
             <div className="mx-auto max-w-md space-y-4 text-muted-foreground">
@@ -3350,7 +3492,7 @@ export function PipesSection() {
                                 </div>
                               ))}
                             </div>
-                          ) : executions.length === 0 && logs.length === 0 ? (
+                          ) : executions.length === 0 && displayedLogs.length === 0 ? (
                             <p className="text-xs text-muted-foreground py-4 text-center">
                               no runs yet — click ▶ to run manually
                             </p>
@@ -3408,7 +3550,7 @@ export function PipesSection() {
                                   <pre className="text-xs text-muted-foreground whitespace-pre-wrap break-words max-h-96 overflow-y-auto scrollbar-hide">{exec.stderr}</pre>
                                 )}
                                 {exec.status === "running" && (() => {
-                                  const key = `${exec.pipe_name}:${exec.id}`;
+                                  const key = liveOutputKeyForApi(apiBase, exec.pipe_name, exec.id);
                                   const lines = liveOutput[key];
                                   if (!lines || lines.length === 0) return null;
                                   return (
@@ -3441,7 +3583,7 @@ export function PipesSection() {
                               )}
                             </>
                           ) : (
-                            logs.slice().reverse().map((log, i) => (
+                            displayedLogs.slice().reverse().map((log, i) => (
                               // see contain: layout paint comment above
                               <div key={i} className="border p-2 space-y-1" style={{ contain: "layout paint" }}>
                                 <div className="flex items-center gap-2 text-xs font-mono">
@@ -3706,7 +3848,7 @@ export function PipesSection() {
                     {/* old runs kept for backward compat — hidden, data already in Runs tab */}
                     <div className="hidden">
                       <div className="mt-1 space-y-2 max-h-64 overflow-y-auto">
-                        {executions.length === 0 && logs.length === 0 ? (
+                        {executions.length === 0 && displayedLogs.length === 0 ? (
                           <p className="text-xs text-muted-foreground">
                             no runs yet
                           </p>
@@ -3776,7 +3918,7 @@ export function PipesSection() {
                                 </p>
                               )}
                               {exec.status === "running" && (() => {
-                                const key = `${exec.pipe_name}:${exec.id}`;
+                                const key = liveOutputKeyForApi(apiBase, exec.pipe_name, exec.id);
                                 const lines = liveOutput[key];
                                 if (!lines || lines.length === 0) return null;
                                 return (
@@ -3803,7 +3945,7 @@ export function PipesSection() {
                           ))
                         ) : (
                           /* Fallback to in-memory logs if no executions from DB */
-                          logs
+                          displayedLogs
                             .slice()
                             .reverse()
                             .map((log, i) => (
