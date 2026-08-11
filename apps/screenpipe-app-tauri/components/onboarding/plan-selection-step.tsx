@@ -165,7 +165,18 @@ export default function PlanSelectionStep({
   }, [handleNextSlide, user?.has_payment_method, user?.subscription_plan]);
 
   const continueWithoutCard = async () => {
-    if (!userToken || startingCardlessTrial) return;
+    if (startingCardlessTrial) return;
+    // This is the last slide, so a no-op here strands the user in onboarding.
+    // With no token there is no account to attach a cardless trial to (the
+    // sign-in guard above has already blocked checkout), so the only correct
+    // move is to let setup finish; the plan is still selectable from Settings.
+    // page.tsx keeps this slide out of visibleOrder without a token, so this
+    // only fires if the token clears while the slide is already mounted.
+    if (!userToken) {
+      advancedRef.current = true;
+      await handleNextSlide();
+      return;
+    }
     setStartingCardlessTrial(true);
     setError(null);
     try {
