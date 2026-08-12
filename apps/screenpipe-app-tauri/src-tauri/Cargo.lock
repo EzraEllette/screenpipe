@@ -11306,6 +11306,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sonora",
+ "sqlx",
  "symphonia",
  "sysinfo",
  "tokio",
