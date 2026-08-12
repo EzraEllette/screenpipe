@@ -49,6 +49,7 @@ mod chatgpt_oauth;
 mod commands;
 mod db_recovery_notifications;
 mod db_relaunch;
+mod db_self_heal;
 mod dev_isolation;
 mod diagnostic_logs;
 mod disk_usage;
@@ -2052,17 +2053,34 @@ async fn main() {
             crate::db_recovery_notifications::start(app_handle.clone());
             if launch_db_quarantined {
                 // A new process must preserve the same fail-closed state as the
-                // process that observed the hard fault. Start the notification
-                // subscriber first, then publish recovery-required immediately.
+                // process that observed the hard fault — unless the fault was
+                // the transient I/O family and this generation still verifies
+                // healthy, in which case the fresh WAL index already undid the
+                // damage and parking recording until a human intervenes costs
+                // hours of capture for nothing. Verification runs off the setup
+                // thread: it reads the whole file, which is seconds on a large
+                // database, and the UI must not wait for it.
+                let self_heal_app = app_handle.clone();
+                let self_heal_db_path = launch_db_path.clone();
+                let notify_data_dir = data_dir.clone();
+                let surface_recovery = !app_ui_hidden && !headless_startup;
                 tauri::async_runtime::spawn(async move {
+                    if crate::db_self_heal::try_self_heal_at_launch(
+                        self_heal_app,
+                        self_heal_db_path,
+                    )
+                    .await
+                    {
+                        return;
+                    }
                     crate::db_relaunch::surface_quarantined_recovery_at_launch(&launch_db_path)
                         .await;
+                    if surface_recovery {
+                        crate::db_recovery_notifications::notify_quarantined_database(
+                            notify_data_dir,
+                        );
+                    }
                 });
-                if !app_ui_hidden && !headless_startup {
-                    crate::db_recovery_notifications::notify_quarantined_database(
-                        data_dir.clone(),
-                    );
-                }
             }
             crate::disk_pressure_notifications::start(app_handle.clone());
 

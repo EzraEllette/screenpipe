@@ -374,6 +374,8 @@ const E2E_COMMANDS: &[&str] = &[
     "set_tray_recording_status",
     "installed_tray_recording_status",
     "shortcut_reminder_visible",
+    "open_auto_meeting",
+    "active_meeting_id",
     "emit_meeting_overlay_transcript",
     "emit_agent_stream",
     "emit_settled_agent_follow_up",
