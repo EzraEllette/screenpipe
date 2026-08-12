@@ -1512,6 +1512,28 @@
       "notes": "Post-setup learning window on Home under the authenticated seed: opens from a real complete_onboarding with nothing seeded (guards the cross-window webview localStorage handoff), live countdown, settles to the real engine-reported reason when nothing was captured, stays dismissed across a reload, offers a ready summary and clears after use, and never renders in idle or done."
     },
     {
+      "spec": "first-run-ai-summary.spec.ts",
+      "platforms": [
+        "macos"
+      ],
+      "layers": [
+        "onboarding",
+        "chat-ai",
+        "real-ui-e2e",
+        "tauri-command"
+      ],
+      "features": [
+        "onboarding",
+        "first-run-learning",
+        "chat"
+      ],
+      "criticality": "high",
+      "confidence": "strong",
+      "ux": "real-user-flow",
+      "tests": 1,
+      "notes": "Opt-in hosted-AI lane for the post-setup summary: the real app starts its own Pi session through the Rust command and the production Worker under Miniflare, and the forwarded provider request is asserted to carry the screen and audio excerpts plus the browser URL, not just app names. Guards the regression where the summary was AI-written but built from containers only, so it read templated. The seeded chat must hold the model's text and never the deterministic opener."
+    },
+    {
       "spec": "onboarding-h1-follow-up.spec.ts",
       "platforms": [
         "windows",

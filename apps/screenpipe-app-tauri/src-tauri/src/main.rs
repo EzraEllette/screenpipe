@@ -1015,6 +1015,16 @@ async fn main() {
             }
             let app_handle = app.handle();
 
+            // Go non-activating before the first window exists. Tauri defaults to
+            // `Regular`, and a launching Regular app is activated by macOS — which
+            // swaps a developer out of their fullscreen Space every time an agent
+            // starts the suite. `reset_to_regular_and_refresh_tray` re-applies this
+            // later in setup; it has to be set here to beat window creation.
+            #[cfg(all(target_os = "macos", feature = "e2e"))]
+            if !crate::window::window_activation_allowed() {
+                let _ = app_handle.set_activation_policy(tauri::ActivationPolicy::Accessory);
+            }
+
             // Create macOS app menu with Settings
             #[cfg(target_os = "macos")]
             {
@@ -1559,22 +1569,20 @@ async fn main() {
             // the chat (standalone-chat.tsx calls pi_start). An idle watchdog in pi.rs
             // auto-stops it after 5 minutes of inactivity to avoid stale processes.
 
-            // Show shortcut reminder overlay on app startup if enabled AND onboarding is completed
-            // Don't show reminder during first-time onboarding to reduce overwhelm.
-            // Skip entirely when the timeline is disabled — the shortcut it
-            // advertises only opens the (now-off) timeline overlay.
-            if store.show_shortcut_overlay
-                && onboarding_store.is_completed
+            // Show the shortcut overlay after onboarding. The command applies
+            // saved snoozes/preferences and the bounded re-show of the smaller
+            // cross-platform design. Skip when the timeline itself is unavailable.
+            if onboarding_store.is_completed
                 && !app_ui_hidden
                 && !headless_startup
                 && !store.recording.disable_timeline
             {
-                let shortcut = store.show_screenpipe_shortcut.clone();
                 let app_handle_reminder = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
                     // Small delay to ensure windows are ready
                     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-                    let _ = commands::show_shortcut_reminder(app_handle_reminder, shortcut).await;
+                    let _ = commands::maybe_show_shortcut_reminder_on_startup(app_handle_reminder)
+                        .await;
                 });
             }
 
