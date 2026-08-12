@@ -8321,6 +8321,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sonora",
+ "sqlx",
  "strsim 0.10.0",
  "symphonia",
  "sysinfo",

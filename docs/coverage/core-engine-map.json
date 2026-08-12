@@ -915,6 +915,7 @@
         "src/audio_manager/meeting_piggyback.rs",
         "src/audio_manager/piggyback_listeners.rs",
         "src/audio_manager/reconciliation.rs",
+        "src/audio_manager/write_retry.rs",
         "src/meeting_detector.rs",
         "src/meeting_processes.rs",
         "src/meeting_streaming/config.rs",
