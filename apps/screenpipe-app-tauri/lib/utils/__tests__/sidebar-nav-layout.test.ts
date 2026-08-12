@@ -22,7 +22,7 @@ describe("normalizeSidebarNavLayout", () => {
     for (const junk of [undefined, null, 42, "layout", [], { order: 3 }]) {
       const layout = normalizeSidebarNavLayout(junk);
       expect(layout.order).toEqual(ALL);
-      expect(layout.hidden).toEqual(["meetings"]);
+      expect(layout.hidden).toEqual([]);
     }
   });
 
@@ -62,9 +62,9 @@ describe("normalizeSidebarNavLayout", () => {
 });
 
 describe("resolveVisibleSidebarNavIds", () => {
-  it("hides meetings by default so the toolbar icon owns it", () => {
+  it("shows every row by default, meetings included", () => {
     const visible = resolveVisibleSidebarNavIds(DEFAULT_SIDEBAR_NAV_LAYOUT, ALL);
-    expect(visible).toEqual(["home", "brain", "pipes", "timeline", "connections"]);
+    expect(visible).toEqual(ALL);
   });
 
   it("lets enterprise policy win over the user layout", () => {
@@ -80,12 +80,15 @@ describe("resolveVisibleSidebarNavIds", () => {
   });
 
   it("reports the hidden-but-restorable ids", () => {
-    expect(resolveHiddenSidebarNavIds(DEFAULT_SIDEBAR_NAV_LAYOUT, ALL)).toEqual([
-      "meetings",
-    ]);
+    expect(resolveHiddenSidebarNavIds(DEFAULT_SIDEBAR_NAV_LAYOUT, ALL)).toEqual([]);
+    const meetingsHidden = normalizeSidebarNavLayout({
+      order: ALL,
+      hidden: ["meetings"],
+    });
+    expect(resolveHiddenSidebarNavIds(meetingsHidden, ALL)).toEqual(["meetings"]);
     // Policy-hidden ids are not offered as "show" targets.
     expect(
-      resolveHiddenSidebarNavIds(DEFAULT_SIDEBAR_NAV_LAYOUT, ["home", "brain"]),
+      resolveHiddenSidebarNavIds(meetingsHidden, ["home", "brain"]),
     ).toEqual([]);
   });
 });
@@ -94,12 +97,16 @@ describe("reordering", () => {
   it("moves an item to an index among the visible rows", () => {
     const next = moveSidebarNavItem(DEFAULT_SIDEBAR_NAV_LAYOUT, ALL, "connections", 0);
     expect(resolveVisibleSidebarNavIds(next, ALL)).toEqual([
-      "connections", "home", "brain", "pipes", "timeline",
+      "connections", "home", "brain", "meetings", "pipes", "timeline",
     ]);
   });
 
   it("keeps hidden ids parked instead of dragging them along", () => {
-    const next = moveSidebarNavItem(DEFAULT_SIDEBAR_NAV_LAYOUT, ALL, "connections", 0);
+    const meetingsHidden = normalizeSidebarNavLayout({
+      order: ALL,
+      hidden: ["meetings"],
+    });
+    const next = moveSidebarNavItem(meetingsHidden, ALL, "connections", 0);
     // meetings stays hidden and still sits between brain and pipes slots.
     expect(next.hidden).toEqual(["meetings"]);
     expect(next.order).toContain("meetings");
@@ -121,15 +128,23 @@ describe("reordering", () => {
   });
 
   it("ignores a move for an id that is not visible", () => {
-    expect(moveSidebarNavItem(DEFAULT_SIDEBAR_NAV_LAYOUT, ALL, "meetings", 0)).toBe(
-      DEFAULT_SIDEBAR_NAV_LAYOUT,
+    const meetingsHidden = normalizeSidebarNavLayout({
+      order: ALL,
+      hidden: ["meetings"],
+    });
+    expect(moveSidebarNavItem(meetingsHidden, ALL, "meetings", 0)).toBe(
+      meetingsHidden,
     );
   });
 });
 
 describe("hide and show", () => {
-  it("shows meetings in the sidebar", () => {
-    const next = setSidebarNavItemHidden(DEFAULT_SIDEBAR_NAV_LAYOUT, ALL, "meetings", false);
+  it("shows meetings in the sidebar again after hiding it", () => {
+    const meetingsHidden = normalizeSidebarNavLayout({
+      order: ALL,
+      hidden: ["meetings"],
+    });
+    const next = setSidebarNavItemHidden(meetingsHidden, ALL, "meetings", false);
     expect(resolveVisibleSidebarNavIds(next, ALL)).toContain("meetings");
     // and it lands in its canonical neighbourhood, right after brain.
     expect(resolveVisibleSidebarNavIds(next, ALL).indexOf("meetings")).toBe(2);
@@ -150,7 +165,7 @@ describe("hide and show", () => {
   });
 
   it("is idempotent", () => {
-    const once = setSidebarNavItemHidden(DEFAULT_SIDEBAR_NAV_LAYOUT, ALL, "meetings", true);
+    const once = setSidebarNavItemHidden(DEFAULT_SIDEBAR_NAV_LAYOUT, ALL, "meetings", false);
     expect(once).toBe(DEFAULT_SIDEBAR_NAV_LAYOUT);
   });
 });
@@ -160,7 +175,7 @@ describe("isSidebarNavLayoutDefault", () => {
     expect(isSidebarNavLayoutDefault(DEFAULT_SIDEBAR_NAV_LAYOUT)).toBe(true);
     expect(
       isSidebarNavLayoutDefault(
-        setSidebarNavItemHidden(DEFAULT_SIDEBAR_NAV_LAYOUT, ALL, "meetings", false),
+        setSidebarNavItemHidden(DEFAULT_SIDEBAR_NAV_LAYOUT, ALL, "meetings", true),
       ),
     ).toBe(false);
     expect(

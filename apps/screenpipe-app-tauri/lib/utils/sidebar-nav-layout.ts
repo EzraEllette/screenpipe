@@ -10,10 +10,10 @@
  * ids are real, what order they fall back to, and what may be hidden lives in
  * one testable place.
  *
- * Meetings is part of the orderable set but ships hidden: hidden means "not a
- * sidebar row", and the Home chrome strip renders its compact icon instead. So
- * "move meetings to the sidebar" and "hide meetings from the sidebar" are the
- * same operation on this layout, not a second parallel preference.
+ * Meetings ships as a visible sidebar row. Hiding it means "not a sidebar
+ * row", and the Home chrome strip renders its compact icon instead. So "move
+ * meetings to the sidebar" and "hide meetings from the sidebar" are the same
+ * operation on this layout, not a second parallel preference.
  */
 
 /** Canonical order — also the fallback for ids a stored layout never mentioned. */
@@ -31,13 +31,13 @@ export type SidebarNavId = (typeof SIDEBAR_NAV_ORDER)[number];
 export type SidebarNavLayout = {
   /** Ids in render order. May omit ids (they fall back to canonical position). */
   order: SidebarNavId[];
-  /** Ids kept out of the sidebar. Meetings is hidden by default. */
+  /** Ids kept out of the sidebar. Nothing is hidden by default. */
   hidden: SidebarNavId[];
 };
 
 export const DEFAULT_SIDEBAR_NAV_LAYOUT: SidebarNavLayout = {
   order: [...SIDEBAR_NAV_ORDER],
-  hidden: ["meetings"],
+  hidden: [],
 };
 
 /** At least one row must stay in the sidebar — an empty nav is a dead end. */

@@ -370,10 +370,10 @@ export function DisplaySection() {
             </div>
           </CardContent>
         </Card>
-        {/* Home sidebar layout. Meetings ships hidden from the sidebar, which
-            is what puts its compact icon in the top-left chrome strip — so
-            this switch and the right-click menu drive the same layout state
-            rather than two competing preferences. */}
+        {/* Home sidebar layout. Meetings ships as a sidebar row; hiding it is
+            what puts its compact icon in the top-left chrome strip — so this
+            switch and the right-click menu drive the same layout state rather
+            than two competing preferences. */}
         <Card className="border-border bg-card">
           <CardContent className="px-3 py-2.5">
             <div className="space-y-2.5">

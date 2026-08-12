@@ -501,21 +501,24 @@ describe("Windows user journey", function () {
     expect(existsSync(audioScreenshot)).toBe(true);
   });
 
-  it("starts and stops a manual meeting note from the Meetings toolbar button", async function () {
+  it("starts and stops a manual meeting note from the Meetings nav entry", async function () {
     if (!isWindows) this.skip();
 
     await openHomeWindow();
 
     const meetingsNav = await $('[data-testid="nav-meetings"]');
     await meetingsNav.waitForDisplayed({ timeout: t(15_000) });
-    expect(await meetingsNav.getAttribute("aria-label")).toContain("meetings");
+    // Meetings ships as a sidebar row (visible text), but a customized layout
+    // renders the compact toolbar icon (aria-label) instead — accept either.
+    const navName = `${(await meetingsNav.getAttribute("aria-label")) ?? ""} ${await meetingsNav.getText()}`;
+    expect(navName.toLowerCase()).toContain("meetings");
     await meetingsNav.click();
     await browser.waitUntil(
       async () => (await meetingsNav.getAttribute("aria-current")) === "page",
       {
         timeout: t(10_000),
         interval: 250,
-        timeoutMsg: "Meetings toolbar button did not become the current page",
+        timeoutMsg: "Meetings nav entry did not become the current page",
       },
     );
 
