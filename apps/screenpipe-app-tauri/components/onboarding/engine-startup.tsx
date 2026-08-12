@@ -57,6 +57,18 @@ type BootPhaseSnapshot = {
 };
 
 const BOOT_PHASE_POLL_MS = 500;
+const DEFERRED_RECOVERY_SETTLE_MS = 3000;
+
+function deferredRecoveryWatchdogMs(
+  bootPhase: BootPhaseSnapshot | null,
+): number | null {
+  if (bootPhase?.phase !== "starting" || !bootPhase.message) return null;
+  const match = bootPhase.message.match(
+    /^restart cooldown; recovery scheduled in (\d+)s$/,
+  );
+  if (!match) return null;
+  return Number(match[1]) * 1000 + DEFERRED_RECOVERY_SETTLE_MS;
+}
 
 type EngineHealthPayload = {
   audio_status?: unknown;
@@ -168,6 +180,12 @@ export default function EngineStartup({ handleNextSlide }: EngineStartupProps) {
         const result = await commands.spawnScreenpipe(null);
         if (result.status === "error") {
           throw new Error(result.error);
+        }
+
+        const phase = (await commands.getBootPhase()) as BootPhaseSnapshot;
+        if (deferredRecoveryWatchdogMs(phase) !== null) {
+          setBootPhase(phase);
+          return;
         }
 
         // spawn_screenpipe resolves only after ServerCore and CaptureSession
@@ -337,6 +355,7 @@ export default function EngineStartup({ handleNextSlide }: EngineStartupProps) {
     // don't want to fire the generic "stuck" path on a timer. The backend's
     // own error path will set phase=error, which we handle separately.
     if (bootPhase?.phase === "error") return;
+    const deferredWatchdogMs = deferredRecoveryWatchdogMs(bootPhase);
     const stuckTimer = setTimeout(() => {
       // Re-check at fire time — state or phase may have advanced.
       setState((current) => {
@@ -360,10 +379,10 @@ export default function EngineStartup({ handleNextSlide }: EngineStartupProps) {
         });
         return "stuck";
       });
-    }, STUCK_TIMEOUT_MS);
+    }, Math.max(STUCK_TIMEOUT_MS, deferredWatchdogMs ?? 0));
     return () => clearTimeout(stuckTimer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state, bootPhase?.phase]);
+  }, [state, bootPhase?.phase, bootPhase?.message]);
 
   const handleSkip = async () => {
     posthog.capture("onboarding_startup_skipped", {

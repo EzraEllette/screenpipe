@@ -826,12 +826,19 @@ async fn spawn_screenpipe_inner(
     if last_spawn > 0 && now_epoch.saturating_sub(last_spawn) < RESTART_COOLDOWN_SECS {
         let remaining = RESTART_COOLDOWN_SECS - now_epoch.saturating_sub(last_spawn);
         warn!("Restart cooldown active ({remaining}s remaining). Deferring spawn.");
+        let recovery_delay = remaining + 1;
+        crate::health::set_boot_phase(
+            "starting",
+            Some(&format!(
+                "restart cooldown; recovery scheduled in {recovery_delay}s"
+            )),
+        );
         let last_spawn_epoch = state.last_spawn_epoch.clone();
         let is_starting = state.is_starting.clone();
         let server_arc = state.server.clone();
         let app_handle = app.clone();
         tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_secs(remaining + 1)).await;
+            tokio::time::sleep(std::time::Duration::from_secs(recovery_delay)).await;
             info!("Cooldown expired, checking if server needs restart");
             let port = configured_local_api_port(&app_handle);
             if let Ok(resp) = reqwest::Client::new()
