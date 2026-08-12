@@ -1047,7 +1047,7 @@
       "criticality": "high",
       "confidence": "strong",
       "ux": "real-user-flow",
-      "notes": "A local provider returns the gateway's structured daily-limit rejection for a Business account; the request crosses the real Pi and foreground-event path, then the UI shows usage-limit copy and a targeted Business Max billing action."
+      "notes": "A local provider returns the gateway's structured daily-limit rejection across the four self-serve upgrade targets; each request crosses the real Pi and foreground-event path, then the UI asserts the phosphor primary CTA, captures a screenshot, and opens the exact billing URL."
     },
     {
       "spec": "chat-local-ai-gateway.spec.ts",
