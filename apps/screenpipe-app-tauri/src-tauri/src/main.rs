@@ -1024,6 +1024,11 @@ async fn main() {
             #[cfg(all(target_os = "macos", feature = "e2e"))]
             if !crate::window::window_activation_allowed() {
                 let _ = app_handle.set_activation_policy(tauri::ActivationPolicy::Accessory);
+                // Accessory alone is not enough: tao activates the app itself in
+                // `applicationDidFinishLaunching`, after this setup hook has already
+                // run, and any ungated path can activate it again mid-run. Hand the
+                // foreground straight back whenever that happens.
+                crate::window::install_non_activating_guard();
             }
 
             // Create macOS app menu with Settings

@@ -13,6 +13,7 @@ use crate::{
 };
 #[cfg(target_os = "macos")]
 use crate::window::GatedPanelPlacement;
+use crate::window::GatedWindowPlacement;
 use sha2::{Digest, Sha256};
 use tauri::{Emitter, Manager};
 #[cfg(not(target_os = "macos"))]
@@ -1567,7 +1568,7 @@ pub async fn open_pipe_window(
     .title(title.clone())
     .inner_size(1200.0, 850.0)
     .min_inner_size(600.0, 400.0)
-    .focused(true)
+    .focused_gated(true)
     .fullscreen(false);
 
     #[cfg(target_os = "macos")]
@@ -1606,9 +1607,7 @@ pub async fn open_pipe_window(
     });
 
     // Only try to manipulate window if creation succeeded
-    if let Err(e) = window.set_focus() {
-        error!("failed to set window focus: {}", e);
-    }
+    crate::window::focus_window(&window);
     if let Err(e) = window.show() {
         error!("failed to show window: {}", e);
     }
@@ -1896,7 +1895,7 @@ pub async fn open_login_window(
         )
         .title("sign in to screenpipe")
         .inner_size(460.0, 700.0)
-        .focused(true);
+        .focused_gated(true);
 
         if fresh_session {
             let profile_dir = std::env::temp_dir().join(&label);
@@ -1971,7 +1970,7 @@ pub async fn open_google_calendar_auth_window(
     // If already open, just focus it
     if let Some(w) = app_handle.get_webview_window(label) {
         let _ = w.show();
-        let _ = w.set_focus();
+        crate::window::focus_window(&w);
         return Ok(());
     }
 
@@ -1982,7 +1981,7 @@ pub async fn open_google_calendar_auth_window(
         WebviewWindowBuilder::new(&app_handle, label, WebviewUrl::External(parsed_url))
             .title("connect google calendar")
             .inner_size(500.0, 700.0)
-            .focused(true);
+            .focused_gated(true);
 
     #[cfg(target_os = "macos")]
     {
@@ -2065,14 +2064,7 @@ pub async fn show_window_activated(
     #[cfg(target_os = "macos")]
     {
         app_handle
-            .run_on_main_thread(|| {
-                use objc::{msg_send, sel, sel_impl};
-                use tauri_nspanel::cocoa::base::id;
-                unsafe {
-                    let ns_app: id = msg_send![objc::class!(NSApplication), sharedApplication];
-                    let _: () = msg_send![ns_app, activateIgnoringOtherApps: true];
-                }
-            })
+            .run_on_main_thread(crate::window::activate_app_if_allowed)
             .map_err(|e| format!("failed to activate app: {}", e))?;
     }
     show_window(app_handle, window).await
@@ -2157,7 +2149,7 @@ pub async fn set_window_always_on_top_native(
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
                         .transition(&label_for_main_thread, current_level, always_on_top);
-                    let _: () = unsafe { msg_send![ns_window, setLevel: target_level] };
+                    unsafe { crate::window::ns::set_level_gated(ns_window as _, target_level) };
                     info!(
                         window_label = %label_for_main_thread,
                         current_level,
@@ -3154,11 +3146,11 @@ pub(crate) async fn show_shortcut_reminder_impl(
     .title("")
     .inner_size(window_width, window_height)
     .position(x, y)
-    .visible_on_all_workspaces(true)
-    .always_on_top(true)
+    .visible_on_all_workspaces_gated(true)
+    .always_on_top_gated(true)
     .decorations(false)
     .skip_taskbar(true)
-    .focused(false)
+    .focused_gated(false)
     .transparent(true)
     .visible(false)
     .shadow(false)
@@ -3425,7 +3417,7 @@ pub async fn show_notification_inbox(app_handle: tauri::AppHandle) -> Result<(),
         }
         let _ = window.set_position(tauri::Position::Logical(tauri::LogicalPosition::new(x, y)));
         let _ = window.show();
-        let _ = window.set_focus();
+        crate::window::focus_window(&window);
         return Ok(());
     }
 
@@ -3437,14 +3429,14 @@ pub async fn show_notification_inbox(app_handle: tauri::AppHandle) -> Result<(),
     .title("")
     .inner_size(window_width, window_height)
     .position(x, y)
-    .visible_on_all_workspaces(true)
-    .always_on_top(true)
+    .visible_on_all_workspaces_gated(true)
+    .always_on_top_gated(true)
     .decorations(false)
     .skip_taskbar(true)
     .transparent(true)
     .shadow(false)
     .resizable(false)
-    .focused(true)
+    .focused_gated(true)
     .build()
     .map(crate::window::finalize_webview_window)
     .map_err(|e| {
@@ -3633,11 +3625,11 @@ pub async fn show_notification_panel(
     .title("")
     .inner_size(window_width, window_height)
     .position(x, y)
-    .visible_on_all_workspaces(true)
-    .always_on_top(true)
+    .visible_on_all_workspaces_gated(true)
+    .always_on_top_gated(true)
     .decorations(false)
     .skip_taskbar(true)
-    .focused(false)
+    .focused_gated(false)
     .transparent(true)
     .visible(false)
     .shadow(false)
