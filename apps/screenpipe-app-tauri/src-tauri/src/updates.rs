@@ -380,7 +380,18 @@ fn failed_version_in_cooldown(
 /// candidate can never claim to be newer.
 fn version_is_newer(current: &str, candidate: &str) -> bool {
     match (Version::parse(current), Version::parse(candidate)) {
-        (Ok(current), Ok(candidate)) => candidate > current,
+        (Ok(mut current), Ok(mut candidate)) => {
+            // SemVer 2.0.0 section 10: build metadata is NOT part of precedence,
+            // but `semver::Version`'s `Ord` compares it anyway. Left in, re-publishing
+            // the same release with fresh build metadata (2.6.11+ci.1 -> 2.6.11+ci.2)
+            // reads as strictly newer, and the unconditional 5-minute re-poll below
+            // would re-adopt, re-download, re-stage and re-notify the identical
+            // bundle forever. The cooldown gate cannot catch that: it only arms on a
+            // version that FAILED to install.
+            current.build = semver::BuildMetadata::EMPTY;
+            candidate.build = semver::BuildMetadata::EMPTY;
+            candidate > current
+        }
         _ => false,
     }
 }
@@ -403,7 +414,11 @@ enum PromoteDecision {
     RetryCandidate,
 }
 
-fn classify_update(pending: Option<&str>, last_failed: Option<&str>, found: &str) -> PromoteDecision {
+fn classify_update(
+    pending: Option<&str>,
+    last_failed: Option<&str>,
+    found: &str,
+) -> PromoteDecision {
     match pending {
         None => PromoteDecision::Adopt,
         Some(pending) if version_is_newer(pending, found) => PromoteDecision::Adopt,
@@ -1697,5 +1712,86 @@ mod tests {
         assert_eq!(RestartGate::Proceed.as_str(), "proceed");
         assert_eq!(RestartGate::Errored.as_str(), "errored");
         assert_eq!(RestartGate::DeferPending.as_str(), "pending");
+    }
+
+    #[test]
+    fn version_newer_rejects_a_v_prefixed_manifest_string() {
+        // The live stable manifest returns a bare semver ("2.6.11"). A manifest that
+        // ever shipped "v2.6.11" must fail closed rather than promote on a parse error.
+        assert!(!version_is_newer("2.5.165", "v2.5.166"));
+        assert!(!version_is_newer("v2.5.165", "2.5.166"));
+    }
+
+    #[test]
+    fn version_newer_rejects_two_component_and_empty_versions() {
+        assert!(!version_is_newer("2.5.165", "2.6"));
+        assert!(!version_is_newer("2.5.165", ""));
+        assert!(!version_is_newer("", "2.5.166"));
+    }
+
+    #[test]
+    fn version_newer_lets_a_release_supersede_its_own_prerelease() {
+        assert!(version_is_newer("2.5.166-beta.1", "2.5.166"));
+        assert!(version_is_newer("2.5.166-beta.1", "2.5.166-beta.2"));
+        // ...and never walks a final release back to a prerelease.
+        assert!(!version_is_newer("2.5.166", "2.5.166-beta.2"));
+    }
+
+    #[test]
+    fn version_newer_ignores_build_metadata() {
+        // Regression: `semver::Version`'s `Ord` compares build metadata even though
+        // SemVer excludes it from precedence. Without the explicit strip in
+        // `version_is_newer`, both of these are `true` and the periodic poll
+        // re-downloads the same bundle every tick.
+        assert!(!version_is_newer("2.5.166", "2.5.166+build.2"));
+        assert!(!version_is_newer("2.5.166+build.1", "2.5.166+build.2"));
+    }
+
+    #[test]
+    fn version_newer_accepts_a_large_forward_jump() {
+        assert!(version_is_newer("2.5.165", "10.0.0"));
+        assert!(matches!(
+            classify_update(Some("2.5.165"), None, "10.0.0"),
+            PromoteDecision::Adopt
+        ));
+    }
+
+    #[test]
+    fn classify_noop_when_an_older_unrelated_version_failed() {
+        // last_failed is OLDER than what is pending: re-polling the pending version
+        // stays a Noop instead of being routed to the retry/cooldown gate.
+        assert!(matches!(
+            classify_update(Some("2.5.165"), Some("2.5.164"), "2.5.165"),
+            PromoteDecision::Noop
+        ));
+    }
+
+    #[test]
+    fn classify_defers_to_the_cooldown_gate_once_pending_was_cleared() {
+        // The failure path sets pending = None, so the next poll classifies Adopt and
+        // the *cooldown* gate is what must stop the re-download. Pin that split.
+        assert!(matches!(
+            classify_update(None, Some("2.5.165"), "2.5.165"),
+            PromoteDecision::Adopt
+        ));
+        assert!(failed_version_in_cooldown(
+            Some(("2.5.165", Duration::from_secs(60))),
+            "2.5.165",
+            UPDATE_FAILURE_COOLDOWN,
+        ));
+    }
+
+    #[test]
+    fn classify_never_promotes_past_a_malformed_pending_version() {
+        // A corrupt pending snapshot must degrade to exact-string comparison, not let
+        // an unrelated version through as "newer".
+        assert!(matches!(
+            classify_update(Some("garbage"), None, "2.5.166"),
+            PromoteDecision::Noop
+        ));
+        assert!(matches!(
+            classify_update(Some("garbage"), None, "garbage"),
+            PromoteDecision::Noop
+        ));
     }
 }
