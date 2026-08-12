@@ -190,8 +190,8 @@ export function UpgradeQuotaBanner() {
               <Button
                 type="button"
                 size="sm"
-                variant="outline"
-                className="h-7 text-[12px]"
+                variant="default"
+                className="h-7 border-[#4A6B00] bg-[#C7FF3E] text-[12px] text-black hover:border-black hover:bg-black hover:text-[#C7FF3E]"
                 onClick={onUpgrade}
                 disabled={busy}
               >
