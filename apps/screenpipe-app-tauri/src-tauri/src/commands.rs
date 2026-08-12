@@ -11,6 +11,8 @@ use crate::{
     updates::is_enterprise_build,
     window::{RewindWindowId, ShowRewindWindow},
 };
+#[cfg(target_os = "macos")]
+use crate::window::GatedPanelPlacement;
 use sha2::{Digest, Sha256};
 use tauri::{Emitter, Manager};
 #[cfg(not(target_os = "macos"))]
@@ -49,8 +51,49 @@ mod tests {
         merge_enterprise_file_configs, persist_enterprise_device_config,
         persist_recovered_enterprise_device_config, read_enterprise_config_from_path,
         recovery_anchor_license_key, save_enterprise_team_config, scan_chat_entries_by_mtime,
-        EnterpriseFileConfig, RecoveredEnterpriseDeviceConfig,
+        shortcut_overlay_startup_decision, EnterpriseFileConfig, RecoveredEnterpriseDeviceConfig,
+        SHORTCUT_OVERLAY_MINIMAL_RESHOW_VERSION,
     };
+
+    #[test]
+    fn minimal_overlay_gets_one_bounded_reshow() {
+        let first = shortcut_overlay_startup_decision(false, 0, None, 100, true);
+        assert!(first.should_show);
+        assert!(first.consume_reshow);
+
+        let second = shortcut_overlay_startup_decision(
+            false,
+            SHORTCUT_OVERLAY_MINIMAL_RESHOW_VERSION,
+            None,
+            100,
+            true,
+        );
+        assert!(!second.should_show);
+        assert!(!second.consume_reshow);
+    }
+
+    #[test]
+    fn active_overlay_snooze_wins_over_reshow() {
+        let decision = shortcut_overlay_startup_decision(false, 0, Some(101), 100, true);
+        assert!(!decision.should_show);
+        assert!(!decision.consume_reshow);
+        assert!(!decision.clear_expired_snooze);
+    }
+
+    #[test]
+    fn expired_overlay_snooze_is_cleared_and_shown() {
+        let decision = shortcut_overlay_startup_decision(true, 0, Some(100), 100, true);
+        assert!(decision.should_show);
+        assert!(decision.consume_reshow);
+        assert!(decision.clear_expired_snooze);
+    }
+
+    #[test]
+    fn minimal_webview_overlay_gets_the_same_bounded_reshow() {
+        let decision = shortcut_overlay_startup_decision(false, 0, None, 100, true);
+        assert!(decision.should_show);
+        assert!(decision.consume_reshow);
+    }
 
     /// The whole point of SCR-300: `gateway_url` is the ONE name the server,
     /// this file, and all three readers use, and this is its only writer.
@@ -2817,12 +2860,80 @@ fn shortcut_reminder_payload(
     map
 }
 
+const SHORTCUT_OVERLAY_MINIMAL_RESHOW_VERSION: u32 = 1;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ShortcutOverlayStartupDecision {
+    should_show: bool,
+    consume_reshow: bool,
+    clear_expired_snooze: bool,
+}
+
+fn shortcut_overlay_startup_decision(
+    setting_enabled: bool,
+    consumed_reshow_version: u32,
+    snoozed_until: Option<i64>,
+    now_unix: i64,
+    allow_minimal_reshow: bool,
+) -> ShortcutOverlayStartupDecision {
+    let snoozed = snoozed_until.is_some_and(|until| until > now_unix);
+    let reintroduce_minimal = allow_minimal_reshow
+        && !snoozed
+        && consumed_reshow_version < SHORTCUT_OVERLAY_MINIMAL_RESHOW_VERSION;
+    ShortcutOverlayStartupDecision {
+        should_show: !snoozed && (setting_enabled || reintroduce_minimal),
+        consume_reshow: reintroduce_minimal,
+        clear_expired_snooze: snoozed_until.is_some_and(|until| until <= now_unix),
+    }
+}
+
+/// Apply the simple startup policy for the minimal overlay on every platform.
+/// Existing dismissals get one bounded re-show; active snoozes always win.
+pub(crate) async fn maybe_show_shortcut_reminder_on_startup(
+    app_handle: tauri::AppHandle,
+) -> Result<(), String> {
+    let mut store = crate::store::SettingsStore::get(&app_handle)?.unwrap_or_default();
+    let decision = shortcut_overlay_startup_decision(
+        store.show_shortcut_overlay,
+        store.shortcut_overlay_minimal_reshow_version,
+        store.shortcut_overlay_snoozed_until,
+        chrono::Utc::now().timestamp(),
+        true,
+    );
+
+    let mut store_changed = false;
+    if decision.clear_expired_snooze {
+        store.shortcut_overlay_snoozed_until = None;
+        store_changed = true;
+    }
+    if decision.consume_reshow {
+        // Commit before rendering so a crash cannot turn this into a loop.
+        store.shortcut_overlay_minimal_reshow_version = SHORTCUT_OVERLAY_MINIMAL_RESHOW_VERSION;
+        store_changed = true;
+    }
+    if store_changed {
+        store.save(&app_handle)?;
+    }
+
+    if !decision.should_show {
+        info!("shortcut overlay suppressed by saved preference or active snooze");
+        return Ok(());
+    }
+
+    show_shortcut_reminder_impl(app_handle, true, true).await
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn show_shortcut_reminder(
     app_handle: tauri::AppHandle,
     _shortcut: String,
 ) -> Result<(), String> {
+    if let Some(mut store) = crate::store::SettingsStore::get(&app_handle)? {
+        if store.shortcut_overlay_snoozed_until.take().is_some() {
+            store.save(&app_handle)?;
+        }
+    }
     show_shortcut_reminder_impl(app_handle, true, true).await
 }
 
@@ -2932,14 +3043,9 @@ pub(crate) async fn show_shortcut_reminder_impl(
                     serde_json::json!({}),
                 );
                 // A recording incident may already be active (e.g. this show IS
-                // the incident reveal) — sync the panel's health state. Same
-                // for the bell's unread dot, which is otherwise only pushed on
-                // notification-store writes.
+                // the incident reveal), so sync the panel's health state.
                 native_shortcut_reminder::set_health_state(
                     &crate::overlay_health::current_state_payload(),
-                );
-                native_shortcut_reminder::set_inbox_unread(
-                    crate::notifications::store::unread_count() as i32,
                 );
                 return Ok(());
             }
@@ -2947,15 +3053,15 @@ pub(crate) async fn show_shortcut_reminder_impl(
         }
     }
 
-    // Window dimensions: 2-row grid (3 shortcuts + activity viz)
-    // Scale based on overlay size setting
+    // The webview fallback matches the native overlay's tiny resting icon.
+    // React grows the real window hit area only while the dock is expanded.
     let scale = match shortcut_overlay_size.as_str() {
         "large" => 2.0_f64,
         "medium" => 1.5,
         _ => 1.0,
     };
-    let window_width = 160.0 * scale;
-    let window_height = 40.0 * scale;
+    let window_width = 22.0 * scale;
+    let window_height = 16.0 * scale;
 
     // Position at top center of the screen where the cursor is
     let (x, y) = {
@@ -3019,10 +3125,10 @@ pub(crate) async fn show_shortcut_reminder_impl(
                     use tauri_nspanel::cocoa::appkit::NSWindowCollectionBehavior;
                     // Re-set level, style mask, and behaviors on every show —
                     // order_out may have cleared the Space association.
-                    panel.set_level(1001);
+                    panel.set_level_gated(1001);
                     panel.set_style_mask(128); // NonActivatingPanel
                     panel.set_hides_on_deactivate(false);
-                    panel.set_collection_behaviour(
+                    panel.set_collection_behaviour_gated(
                         NSWindowCollectionBehavior::NSWindowCollectionBehaviorCanJoinAllSpaces |
                         NSWindowCollectionBehavior::NSWindowCollectionBehaviorIgnoresCycle |
                         NSWindowCollectionBehavior::NSWindowCollectionBehaviorFullScreenAuxiliary
@@ -3091,7 +3197,7 @@ pub(crate) async fn show_shortcut_reminder_impl(
                     use objc::{msg_send, sel, sel_impl};
 
                     // Level 1001 = above CGShieldingWindowLevel, shows over fullscreen
-                    panel.set_level(1001);
+                    panel.set_level_gated(1001);
                     // NonActivatingPanel (128) so the reminder doesn't activate
                     // the app (which would cause Space switching on fullscreen).
                     // style_mask(0) was wrong — it cleared NonActivatingPanel.
@@ -3107,7 +3213,7 @@ pub(crate) async fn show_shortcut_reminder_impl(
 
                     // CanJoinAllSpaces: visible on ALL Spaces simultaneously
                     // (not MoveToActiveSpace which only follows the active Space)
-                    panel.set_collection_behaviour(
+                    panel.set_collection_behaviour_gated(
                         NSWindowCollectionBehavior::NSWindowCollectionBehaviorCanJoinAllSpaces |
                         NSWindowCollectionBehavior::NSWindowCollectionBehaviorIgnoresCycle |
                         NSWindowCollectionBehavior::NSWindowCollectionBehaviorFullScreenAuxiliary
@@ -3139,7 +3245,7 @@ pub(crate) async fn show_shortcut_reminder_impl(
             if let Ok(Some(monitor)) = app_handle_clone.primary_monitor() {
                 let screen_size = monitor.size();
                 let scale_factor = monitor.scale_factor();
-                let new_x = ((screen_size.width as f64 / scale_factor) - 220.0) / 2.0;
+                let new_x = ((screen_size.width as f64 / scale_factor) - window_width) / 2.0;
                 let new_y = 12.0;
 
                 if let Some(window) = app_handle_clone.get_webview_window("shortcut-reminder") {
@@ -3481,10 +3587,10 @@ pub async fn show_notification_panel(
                 if let Ok(panel) = app_clone.get_webview_panel("notification-panel") {
                     use tauri_nspanel::cocoa::appkit::NSWindowCollectionBehavior;
                     use objc::{msg_send, sel, sel_impl};
-                    panel.set_level(1001);
+                    panel.set_level_gated(1001);
                     panel.set_style_mask(128); // NSNonactivatingPanelMask
                     panel.set_hides_on_deactivate(false);
-                    panel.set_collection_behaviour(
+                    panel.set_collection_behaviour_gated(
                         NSWindowCollectionBehavior::NSWindowCollectionBehaviorCanJoinAllSpaces
                             | NSWindowCollectionBehavior::NSWindowCollectionBehaviorIgnoresCycle
                             | NSWindowCollectionBehavior::NSWindowCollectionBehaviorFullScreenAuxiliary,
@@ -3566,7 +3672,7 @@ pub async fn show_notification_panel(
                 if let Ok(panel) = window_clone.to_panel() {
                     use objc::{msg_send, sel, sel_impl};
 
-                    panel.set_level(1001);
+                    panel.set_level_gated(1001);
                     panel.set_style_mask(128);
                     panel.set_hides_on_deactivate(false);
 
@@ -3578,7 +3684,7 @@ pub async fn show_notification_panel(
                     // which blocks webview hover events. This re-enables mouse tracking.
                     let _: () = unsafe { msg_send![&*panel, setAcceptsMouseMovedEvents: true] };
 
-                    panel.set_collection_behaviour(
+                    panel.set_collection_behaviour_gated(
                         NSWindowCollectionBehavior::NSWindowCollectionBehaviorCanJoinAllSpaces
                             | NSWindowCollectionBehavior::NSWindowCollectionBehaviorIgnoresCycle
                             | NSWindowCollectionBehavior::NSWindowCollectionBehaviorFullScreenAuxiliary,
