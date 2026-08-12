@@ -21,11 +21,12 @@ export const FREE_CHAT_MAX_RESPONSE_FORMAT_BYTES = 16 * 1024;
 export const FREE_CHAT_MAX_STRUCTURE_DEPTH = 32;
 export const FREE_CHAT_MAX_IN_FLIGHT = 1;
 export const FREE_CHAT_IN_FLIGHT_LEASE_SECONDS = 10 * 60;
+export const SESSION_AFFINITY_MAX_LENGTH = 512;
+export const INTERNAL_TITLE_SESSION_PREFIX = '__title:';
 
 const FREE_CHAT_USAGE_TIER_PREFIX = 'free_chat_turn_v2';
 const FREE_CHAT_BUDGET_TIER_PREFIX = 'free_chat_budget_v2';
 const FREE_CHAT_LEASE_TIER = 'free_chat_in_flight_v1';
-const INTERNAL_TITLE_SESSION_PREFIX = '__title:';
 
 function requiredPrivatePositiveInteger(value: string | undefined, name: string): number {
 	const normalized = value?.trim();
@@ -96,8 +97,18 @@ function blocked(status: number, code: string, message: string): FreeChatPreflig
 	return { mode: 'blocked', error: { status, code, message } };
 }
 
-function getSessionAffinity(request: Request): string | null {
+export function getSessionAffinity(request: Request): string | null {
 	return request.headers.get('x-session-affinity')?.trim() || null;
+}
+
+/** Normal Pi chat/Pipe sessions are cacheable; one-shot internal titles are not. */
+export function hasHistoryCacheSessionAffinity(request: Request): boolean {
+	const affinity = getSessionAffinity(request);
+	return Boolean(
+		affinity &&
+		affinity.length <= SESSION_AFFINITY_MAX_LENGTH &&
+		!affinity.startsWith(INTERNAL_TITLE_SESSION_PREFIX),
+	);
 }
 
 function utcDay(now: Date): string {
@@ -423,7 +434,7 @@ export async function prepareFreeChatTurn(
 	}
 
 	const affinity = getSessionAffinity(request);
-	if (!affinity || affinity.length > 512) {
+	if (!affinity || affinity.length > SESSION_AFFINITY_MAX_LENGTH) {
 		return blocked(
 			426,
 			'free_chat_client_update_required',

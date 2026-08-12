@@ -1812,6 +1812,25 @@
       "notes": "Five native desktop journeys cover failed-save rollback and retry, stable one-chat continuity across real Pipe runs, a human follow-up carried into the next scheduled run, explicit pause/resume behavior with a read-only old chat, reset rejection during an active human reply, and a confirmed clean run without prior scheduled or human context."
     },
     {
+      "spec": "pipe-local-ai-gateway.spec.ts",
+      "platforms": [
+        "macos"
+      ],
+      "layers": [
+        "pipes",
+        "chat-ai",
+        "local-api",
+        "tauri-command"
+      ],
+      "features": [
+        "pipes"
+      ],
+      "criticality": "high",
+      "confidence": "strong",
+      "ux": "command",
+      "notes": "Opt-in full-stack hosted Pipe coverage records the real Pi request entering the production Worker bundle and verifies the Pipe workload marker plus nonblank session affinity for history-off runs and stable affinity across history-on runs."
+    },
+    {
       "spec": "pipes.spec.ts",
       "platforms": [
         "windows",
