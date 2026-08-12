@@ -9,10 +9,10 @@ confidence, and criticality.
 - Tracked crates: screenpipe-engine, screenpipe-db, screenpipe-sqlite-coordinator, screenpipe-audio, screenpipe-screen, screenpipe-a11y
 - Mapped suites: 32
 - Mapped Rust files: 319
-- Active test blocks: 3031
+- Active test blocks: 3048
 - Ignored/manual test blocks: 137
-- Declared test blocks: 3168
-- Weighted coverage points: 2493.1
+- Declared test blocks: 3185
+- Weighted coverage points: 2508.1
 
 Confidence weights: strong=1.0, partial=0.7, conditional=0.4, smoke=0.3.
 Criticality weights: high=1.0, medium=0.7, low=0.4.
@@ -23,19 +23,19 @@ are explicitly enabled in a runtime lane.
 
 | Platform | Suites | Active tests | Ignored tests | Weighted points | Layers | Flows | Critical score |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| windows | 29 | 2900 | 132 | 2433.2 | 21 | 11 | 100% |
-| macos | 29 | 2954 | 112 | 2444.3 | 22 | 11 | 100% |
-| linux | 25 | 2587 | 105 | 2150.7 | 20 | 11 | 100% |
+| windows | 29 | 2917 | 132 | 2448.1 | 21 | 11 | 100% |
+| macos | 29 | 2971 | 112 | 2459.2 | 22 | 11 | 100% |
+| linux | 25 | 2604 | 105 | 2165.6 | 20 | 11 | 100% |
 
 ## Crate Summary
 
 | Crate | Suites | Integration files | Source unit files | Active tests | Ignored tests | Weighted points | Flows |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | screenpipe-engine | 10 | 18 | 102 | 1439 | 42 | 1103.2 | 10 |
-| screenpipe-db | 5 | 51 | 14 | 431 | 16 | 409.1 | 9 |
+| screenpipe-db | 5 | 51 | 14 | 444 | 16 | 422.1 | 9 |
 | screenpipe-sqlite-coordinator | 1 | 0 | 2 | 11 | 0 | 11.0 | 2 |
 | screenpipe-audio | 6 | 25 | 50 | 580 | 43 | 507.3 | 5 |
-| screenpipe-screen | 6 | 9 | 18 | 237 | 9 | 215.0 | 4 |
+| screenpipe-screen | 6 | 9 | 18 | 241 | 9 | 216.9 | 4 |
 | screenpipe-a11y | 4 | 2 | 28 | 333 | 27 | 247.6 | 3 |
 
 ## Line Coverage
@@ -62,27 +62,27 @@ bun run coverage:core -- --llvm-cov-summary ../../docs/coverage/core-llvm-cov-su
 | Layer | windows | macos | linux |
 | --- | --- | --- | --- |
 | accessibility | 4 suites / 343 active / 29 ignored / 314.8 pts | 4 suites / 393 active / 9 ignored / 320.4 pts | 4 suites / 319 active / 7 ignored / 293.0 pts |
-| audio | 7 suites / 677 active / 44 ignored / 604.3 pts | 7 suites / 677 active / 44 ignored / 604.3 pts | 6 suites / 602 active / 43 ignored / 551.8 pts |
+| audio | 7 suites / 690 active / 44 ignored / 617.3 pts | 7 suites / 690 active / 44 ignored / 617.3 pts | 6 suites / 615 active / 43 ignored / 564.8 pts |
 | audio-device | 2 suites / 211 active / 7 ignored / 188.5 pts | 2 suites / 211 active / 7 ignored / 188.5 pts | 1 suites / 136 active / 6 ignored / 136.0 pts |
 | configuration | 2 suites / 138 active / 3 ignored / 124.2 pts | 2 suites / 138 active / 3 ignored / 124.2 pts | 2 suites / 138 active / 3 ignored / 124.2 pts |
-| database | 6 suites / 345 active / 12 ignored / 323.1 pts | 6 suites / 345 active / 12 ignored / 323.1 pts | 6 suites / 345 active / 12 ignored / 323.1 pts |
+| database | 6 suites / 358 active / 12 ignored / 336.1 pts | 6 suites / 358 active / 12 ignored / 336.1 pts | 6 suites / 358 active / 12 ignored / 336.1 pts |
 | db-search | 2 suites / 111 active / 9 ignored / 111.0 pts | 2 suites / 111 active / 9 ignored / 111.0 pts | 2 suites / 111 active / 9 ignored / 111.0 pts |
 | engine-lifecycle | 6 suites / 203 active / 1 ignored / 178.6 pts | 6 suites / 203 active / 1 ignored / 178.6 pts | 5 suites / 197 active / 1 ignored / 176.9 pts |
 | local-api | 2 suites / 325 active / 9 ignored / 229.3 pts | 2 suites / 325 active / 9 ignored / 229.3 pts | 2 suites / 325 active / 9 ignored / 229.3 pts |
-| meeting | 6 suites / 1387 active / 19 ignored / 1130.2 pts | 6 suites / 1387 active / 19 ignored / 1130.2 pts | 4 suites / 1109 active / 15 ignored / 874.7 pts |
+| meeting | 6 suites / 1400 active / 19 ignored / 1143.2 pts | 6 suites / 1400 active / 19 ignored / 1143.2 pts | 4 suites / 1122 active / 15 ignored / 887.7 pts |
 | ocr | 4 suites / 124 active / 7 ignored / 118.3 pts | 4 suites / 128 active / 7 ignored / 123.8 pts | 3 suites / 119 active / 6 ignored / 114.8 pts |
 | os-integration | 1 suites / 6 active / 0 ignored / 1.7 pts | 1 suites / 6 active / 0 ignored / 1.7 pts | - |
 | performance | 13 suites / 1363 active / 67 ignored / 1203.9 pts | 14 suites / 1461 active / 70 ignored / 1243.1 pts | 13 suites / 1363 active / 67 ignored / 1203.9 pts |
 | pipes | 1 suites / 462 active / 3 ignored / 323.4 pts | 1 suites / 462 active / 3 ignored / 323.4 pts | 1 suites / 462 active / 3 ignored / 323.4 pts |
 | privacy | 5 suites / 870 active / 36 ignored / 706.8 pts | 5 suites / 920 active / 16 ignored / 712.4 pts | 5 suites / 846 active / 14 ignored / 685.0 pts |
 | real-app | - | 1 suites / 98 active / 3 ignored / 39.2 pts | - |
-| speaker | 2 suites / 328 active / 8 ignored / 328.0 pts | 2 suites / 328 active / 8 ignored / 328.0 pts | 2 suites / 328 active / 8 ignored / 328.0 pts |
+| speaker | 2 suites / 341 active / 8 ignored / 341.0 pts | 2 suites / 341 active / 8 ignored / 341.0 pts | 2 suites / 341 active / 8 ignored / 341.0 pts |
 | storage | 3 suites / 470 active / 29 ignored / 381.5 pts | 3 suites / 470 active / 29 ignored / 381.5 pts | 3 suites / 470 active / 29 ignored / 381.5 pts |
 | sync | 1 suites / 462 active / 3 ignored / 323.4 pts | 1 suites / 462 active / 3 ignored / 323.4 pts | 1 suites / 462 active / 3 ignored / 323.4 pts |
 | timeline | 4 suites / 928 active / 33 ignored / 755.2 pts | 4 suites / 928 active / 33 ignored / 755.2 pts | 4 suites / 928 active / 33 ignored / 755.2 pts |
 | transcription | 5 suites / 688 active / 40 ignored / 542.1 pts | 5 suites / 688 active / 40 ignored / 542.1 pts | 5 suites / 688 active / 40 ignored / 542.1 pts |
 | ui-events | 4 suites / 700 active / 28 ignored / 533.2 pts | 3 suites / 652 active / 5 ignored / 499.6 pts | 3 suites / 652 active / 5 ignored / 499.6 pts |
-| vision-capture | 5 suites / 485 active / 32 ignored / 385.9 pts | 5 suites / 489 active / 32 ignored / 391.4 pts | 4 suites / 480 active / 31 ignored / 382.4 pts |
+| vision-capture | 5 suites / 489 active / 32 ignored / 387.8 pts | 5 suites / 493 active / 32 ignored / 393.3 pts | 4 suites / 484 active / 31 ignored / 384.3 pts |
 
 ## Critical Flow Matrix
 
@@ -129,7 +129,7 @@ bun run coverage:core -- --llvm-cov-summary ../../docs/coverage/core-llvm-cov-su
 | audio-platform-output-capture | screenpipe-audio | windows, macos | audio-device, audio, meeting | audio-device-health, audio-record-transcribe, meeting-live-notes | high | partial | unit | 7 | 75 | 1 | OS-specific output/system-audio capture: CoreAudio process tap and SCK output watchdog plus VPIO health policy on macOS, per-process meeting audio taps on both platforms, and the Windows follow-the-audio output watchdog. Platform impl files are cfg-gated to their target OS. |
 | audio-transcription-pipeline | screenpipe-audio | windows, macos, linux | audio, transcription, performance | audio-record-transcribe, meeting-live-notes, performance-liveness | high | partial | mixed | 14 | 96 | 7 | Batch deferral, cleanup, language detection, result normalization, and real recording/transcription tests. Hardware/model-heavy tests are ignored by default. |
 | db-accessibility-ui-events | screenpipe-db | windows, macos, linux | database, configuration, accessibility, ui-events, performance | settings-to-engine-config, accessibility-ui-events, performance-liveness | medium | partial | integration | 7 | 27 | 2 | Elements bulk insert, on-screen filtering, UI event batching, DB tier config, and ignored heavy-read real-DB probes. |
-| db-audio-meetings-speakers | screenpipe-db | windows, macos, linux | database, audio, meeting, speaker | audio-record-transcribe, audio-device-health, meeting-live-notes | high | strong | integration | 15 | 97 | 1 | Audio transcript dedupe, live meeting mirroring, end-generation and open-meeting invariants, liveness, and speaker reassignment coverage. |
+| db-audio-meetings-speakers | screenpipe-db | windows, macos, linux | database, audio, meeting, speaker | audio-record-transcribe, audio-device-health, meeting-live-notes | high | strong | integration | 15 | 110 | 1 | Audio transcript dedupe, live meeting mirroring, end-generation and open-meeting invariants, liveness, and speaker reassignment coverage. |
 | db-runtime-reliability | screenpipe-db | windows, macos, linux | database, performance | performance-liveness | high | partial | mixed | 12 | 27 | 6 | SQLite hard-fault classification, failpoint VFS injection, fresh-identity recovery verification with integrity/FK/write canaries, query cancellation, close-severs-connections regressions, multi-pool WAL parity, runtime version pinning, and WAL chaos plus memory-pressure probes. |
 | db-search-indexing | screenpipe-db | windows, macos, linux | db-search, ocr, accessibility, performance | local-api-search, capture-ocr-pipeline, accessibility-ui-events, performance-liveness | high | strong | mixed | 13 | 105 | 4 | FTS, tokenizer, OCR snapshot search, query planning, ordering, accessibility search, and contention coverage. |
 | db-timeline-frames | screenpipe-db | windows, macos, linux | database, timeline, storage, performance | timeline-streaming, performance-liveness | high | strong | mixed | 18 | 175 | 3 | Frame/audio joins, timeline query shape, suggestions frames, write queue, DB primitives (src/db.rs split into src/db/ modules), feedback record upserts, media eviction anti-join regressions, SAF output registry, semantic storage, and timeline performance. |
@@ -147,7 +147,7 @@ bun run coverage:core -- --llvm-cov-summary ../../docs/coverage/core-llvm-cov-su
 | screen-capture-windowing | screenpipe-screen | windows, macos, linux | vision-capture, timeline, performance, privacy | capture-ocr-pipeline, timeline-streaming, privacy-and-redaction, performance-liveness | high | strong | mixed | 14 | 177 | 0 | Window filtering, empty-window regressions, retry policy, URL timing, monitor cache, OCR cache, snapshots, and image comparison. |
 | screen-custom-ocr | screenpipe-screen | windows, macos, linux | ocr | capture-ocr-pipeline | medium | conditional | manual | 1 | 0 | 2 | Custom OCR tests are ignored by default and only contribute when explicitly run. |
 | screen-macos-ocr | screenpipe-screen | macos | ocr, vision-capture | capture-ocr-pipeline | high | strong | mixed | 2 | 9 | 1 | Apple Vision OCR source/unit coverage and fixture OCR assertions. |
-| screen-monitor-platform | screenpipe-screen | windows, macos, linux | vision-capture | capture-ocr-pipeline | medium | partial | unit | 5 | 32 | 5 | Per-OS monitor enumeration (Windows, macOS, Wayland/portal on Linux) and the persistent Windows.Graphics.Capture session. Each file is cfg-gated and only executes on its target OS. |
+| screen-monitor-platform | screenpipe-screen | windows, macos, linux | vision-capture | capture-ocr-pipeline | medium | partial | unit | 5 | 36 | 5 | Per-OS monitor enumeration (Windows, macOS, Wayland/portal on Linux) and the persistent Windows.Graphics.Capture session. Each file is cfg-gated and only executes on its target OS. |
 | screen-windows-ocr | screenpipe-screen | windows | ocr, vision-capture | capture-ocr-pipeline | high | partial | integration | 2 | 5 | 1 | Windows OCR fixture coverage plus an ignored continuous-capture probe that requires a live desktop. |
 | sqlite-coordinator-durable-quarantine | screenpipe-sqlite-coordinator | windows, macos, linux | database, engine-lifecycle | engine-health-lifecycle, performance-liveness | high | strong | unit | 2 | 11 | 0 | Process-wide single-writer gates, SQLite runtime pinning, atomic hard-fault markers, OS file identity, fail-closed malformed metadata, fresh-identity resolution, and a real cross-process restart test. |
 
@@ -312,7 +312,7 @@ bun run coverage:core -- --llvm-cov-summary ../../docs/coverage/core-llvm-cov-su
 | db-audio-meetings-speakers | screenpipe-db | tests/single_open_meeting_invariant_test.rs | integration | 3 | 0 | 3 |
 | db-audio-meetings-speakers | screenpipe-db | tests/speaker_benchmark.rs | integration | 0 | 1 | 1 |
 | db-audio-meetings-speakers | screenpipe-db | tests/speaker_delete_test.rs | integration | 3 | 0 | 3 |
-| db-audio-meetings-speakers | screenpipe-db | tests/speaker_reassignment_test.rs | integration | 16 | 0 | 16 |
+| db-audio-meetings-speakers | screenpipe-db | tests/speaker_reassignment_test.rs | integration | 29 | 0 | 29 |
 | db-runtime-reliability | screenpipe-db | tests/sqlite_architecture_invariants_test.rs | integration | 2 | 0 | 2 |
 | db-runtime-reliability | screenpipe-db | tests/sqlite_runtime_version.rs | integration | 1 | 0 | 1 |
 | db-timeline-frames | screenpipe-db | tests/suggestions_frames_table_test.rs | integration | 3 | 0 | 3 |
@@ -455,7 +455,7 @@ bun run coverage:core -- --llvm-cov-summary ../../docs/coverage/core-llvm-cov-su
 | screen-capture-windowing | screenpipe-screen | src/monitor.rs | source | 5 | 0 | 5 |
 | screen-monitor-platform | screenpipe-screen | src/monitor/linux_portal.rs | source | 5 | 0 | 5 |
 | screen-monitor-platform | screenpipe-screen | src/monitor/linux_wayland.rs | source | 5 | 0 | 5 |
-| screen-monitor-platform | screenpipe-screen | src/monitor/macos.rs | source | 12 | 2 | 14 |
+| screen-monitor-platform | screenpipe-screen | src/monitor/macos.rs | source | 16 | 2 | 18 |
 | screen-monitor-platform | screenpipe-screen | src/monitor/windows.rs | source | 2 | 1 | 3 |
 | screen-capture-windowing | screenpipe-screen | src/ocr_cache.rs | source | 15 | 0 | 15 |
 | screen-capture-windowing | screenpipe-screen | src/snapshot_writer.rs | source | 4 | 0 | 4 |
