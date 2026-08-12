@@ -6,6 +6,9 @@
 //!
 //! Manages the pi coding agent via RPC mode (stdin/stdout JSON protocol).
 
+#[path = "pi_subagents_health.rs"]
+mod pi_subagents_health;
+
 use screenpipe_core::agents::pi::{
     apply_custom_provider_compat, screenpipe_cloud_models, PI_AI_PACKAGE, PI_NAMESPACE_DIR,
     PI_PACKAGE, SCREENPIPE_API_URL,
@@ -4768,11 +4771,7 @@ fn valid_github_path_part(part: &str) -> bool {
 fn pi_package_source_looks_installed(source: &str) -> bool {
     if let Some(package_name) = npm_package_name_from_source(source) {
         if let Ok(config_dir) = get_pi_config_dir() {
-            return config_dir
-                .join("npm")
-                .join("node_modules")
-                .join(package_name)
-                .exists();
+            return pi_subagents_health::source_is_installed(&config_dir, &package_name);
         }
     }
 
@@ -4888,13 +4887,11 @@ async fn ensure_required_pi_extension_package() -> Result<(), String> {
     let lock = REQUIRED_PI_PACKAGE_INSTALL_LOCK.get_or_init(|| Mutex::new(()));
     let _guard = lock.lock().await;
     ensure_required_pi_extension_setting()?;
-    if pi_package_source_looks_installed(REQUIRED_PI_EXTENSION_PACKAGE) {
-        return Ok(());
-    }
-    run_pi_package_command(vec![
-        "install".to_string(),
-        REQUIRED_PI_EXTENSION_PACKAGE.to_string(),
-    ])
+    pi_subagents_health::repair(
+        || pi_package_source_looks_installed(REQUIRED_PI_EXTENSION_PACKAGE),
+        run_pi_package_command,
+        || async { ensure_required_pi_extension_setting() },
+    )
     .await
 }
 
@@ -5714,6 +5711,53 @@ mod tests {
         assert!(!super::is_required_pi_extension_package_source(
             "npm:pi-subagentura"
         ));
+    }
+
+    fn write_subagents_fixture(root: &std::path::Path, version: &str) {
+        let package_dir = root.join("npm/node_modules/pi-subagents");
+        let yaml_dir = root.join("npm/node_modules/yaml");
+        std::fs::create_dir_all(package_dir).unwrap();
+        std::fs::create_dir_all(&yaml_dir).unwrap();
+        std::fs::write(
+            package_dir.join("package.json"),
+            serde_json::to_vec(&json!({
+                "name": "pi-subagents",
+                "version": version,
+                "dependencies": { "yaml": "^2.8.0" }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            yaml_dir.join("package.json"),
+            serde_json::to_vec(&json!({
+                "name": "yaml",
+                "version": "2.8.3",
+                "main": "dist/index.js"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::create_dir_all(yaml_dir.join("dist")).unwrap();
+        std::fs::write(yaml_dir.join("dist/index.js"), "export {};").unwrap();
+    }
+
+    #[test]
+    fn subagents_health_uses_semver_and_prerelease_precedence() {
+        for (version, expected) in [
+            ("0.33.1", false),
+            ("0.35.0-beta.1", false),
+            ("0.35.0", true),
+            ("0.35.1-beta.1", true),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            write_subagents_fixture(root.path(), version);
+            assert_eq!(
+                super::pi_subagents_health::is_healthy(root.path()),
+                expected,
+                "version {version}"
+            );
+        }
     }
 
     #[test]
