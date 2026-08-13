@@ -2271,8 +2271,8 @@ async setEnhancedAiSuggestions(enabled: boolean, token: string) : Promise<Result
 /**
  * Called by the frontend after fetching the enterprise policy.
  */
-async setEnterprisePolicy(hiddenSections: string[]) : Promise<void> {
-    await TAURI_INVOKE("set_enterprise_policy", { hiddenSections });
+async setEnterprisePolicy(hiddenSections: string[], enforceAutoStart: boolean) : Promise<void> {
+    await TAURI_INVOKE("set_enterprise_policy", { hiddenSections, enforceAutoStart });
 },
 async setKeepAwake(enabled: boolean) : Promise<Result<null, string>> {
     try {
