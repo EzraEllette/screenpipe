@@ -2344,6 +2344,20 @@ fn resolve_capture_metadata_with_policy(
     (app_name, window_name, browser_url, document_path)
 }
 
+/// Final privacy gate for captures that reached metadata resolution without a
+/// conclusive tree-walk skip. Keep this decision in one place so every value
+/// that can reach `paired_capture` is covered by the same policy.
+fn resolved_window_matches_privacy_filters(
+    _ignore_incognito_windows: bool,
+    ignored_patterns: &[WindowPattern],
+    app_name: Option<&str>,
+    window_name: Option<&str>,
+) -> bool {
+    let app_name = app_name.unwrap_or_default().to_lowercase();
+    let window_name = window_name.unwrap_or_default().to_lowercase();
+    window_pattern::matches_any(ignored_patterns, &app_name, &window_name)
+}
+
 /// Rate-limit OCR-heavy apps. Two groups:
 ///
 /// **Terminals** (wezterm/alacritty/…): bypass accessibility entirely and
@@ -3071,24 +3085,27 @@ async fn do_capture(
     // Uses full `window_pattern` semantics, so scoped `App::Title` patterns fire
     // here even though earlier app-only gates intentionally skipped them. Reuses
     // the patterns parsed above.
-    {
+    if resolved_window_matches_privacy_filters(
+        params.tree_walker_config.ignore_incognito_windows,
+        &params.ignored_patterns,
+        app_name_owned.as_deref(),
+        window_name_owned.as_deref(),
+    ) {
         let check_app = app_name_owned.as_deref().unwrap_or_default().to_lowercase();
         let check_win = window_name_owned
             .as_deref()
             .unwrap_or_default()
             .to_lowercase();
-        if window_pattern::matches_any(&params.ignored_patterns, &check_app, &check_win) {
-            debug!(
-                "skipping capture: resolved app='{}' / window='{}' matches ignored pattern on monitor {}",
-                check_app, check_win, params.monitor_id
-            );
-            return Ok(CaptureOutput {
-                result: None,
-                image,
-                elements_deduped: false,
-                corrupt: None,
-            });
-        }
+        debug!(
+            "skipping capture: resolved app='{}' / window='{}' matches ignored pattern on monitor {}",
+            check_app, check_win, params.monitor_id
+        );
+        return Ok(CaptureOutput {
+            result: None,
+            image,
+            elements_deduped: false,
+            corrupt: None,
+        });
     }
 
     // DRM content detection: check if the focused app/URL is a streaming service.
@@ -3816,6 +3833,25 @@ mod tests {
 
         assert_eq!(app_name.as_deref(), Some("Telegram"));
         assert_eq!(window_name.as_deref(), Some("Fresh Title"));
+    }
+
+    #[test]
+    fn incognito_setting_filters_resolved_title_when_tree_walk_is_unavailable() {
+        let trigger = CaptureTrigger::WindowFocus {
+            window_name: "Private search - Google Chrome (Incognito)".into(),
+            target: None,
+        };
+        let (app_name, window_name, _, _) = resolve_capture_metadata(None, &trigger, None);
+
+        assert!(
+            resolved_window_matches_privacy_filters(
+                true,
+                &[],
+                app_name.as_deref(),
+                window_name.as_deref(),
+            ),
+            "ignoreIncognitoWindows must still reject an Incognito title when the AX tree walk is unavailable"
+        );
     }
 
     #[test]
