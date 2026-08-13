@@ -51,49 +51,31 @@ mod tests {
         enterprise_license_key_sha256, fallback_local_api_config, is_login_callback_scheme,
         merge_enterprise_file_configs, persist_enterprise_device_config,
         persist_recovered_enterprise_device_config, read_enterprise_config_from_path,
-        recovery_anchor_license_key, save_enterprise_team_config, scan_chat_entries_by_mtime,
-        shortcut_overlay_startup_decision, EnterpriseFileConfig, RecoveredEnterpriseDeviceConfig,
-        SHORTCUT_OVERLAY_MINIMAL_RESHOW_VERSION,
+        notification_belongs_to_overlay, recovery_anchor_license_key, save_enterprise_team_config,
+        scan_chat_entries_by_mtime, shortcut_overlay_hidden_by_choice, EnterpriseFileConfig,
+        RecoveredEnterpriseDeviceConfig,
     };
 
+    /// The overlay ships unhideable. A stored `showShortcutOverlay: false` —
+    /// whether left over from before this shipped or set while the remote
+    /// capability was on — must stay inert until the flag grants it back.
     #[test]
-    fn minimal_overlay_gets_one_bounded_reshow() {
-        let first = shortcut_overlay_startup_decision(false, 0, None, 100, true);
-        assert!(first.should_show);
-        assert!(first.consume_reshow);
-
-        let second = shortcut_overlay_startup_decision(
-            false,
-            SHORTCUT_OVERLAY_MINIMAL_RESHOW_VERSION,
-            None,
-            100,
-            true,
-        );
-        assert!(!second.should_show);
-        assert!(!second.consume_reshow);
+    fn a_stored_hide_choice_only_counts_once_remote_policy_allows_it() {
+        assert!(!shortcut_overlay_hidden_by_choice(false, false));
+        assert!(!shortcut_overlay_hidden_by_choice(false, true));
+        assert!(shortcut_overlay_hidden_by_choice(true, false));
+        assert!(!shortcut_overlay_hidden_by_choice(true, true));
     }
 
     #[test]
-    fn active_overlay_snooze_wins_over_reshow() {
-        let decision = shortcut_overlay_startup_decision(false, 0, Some(101), 100, true);
-        assert!(!decision.should_show);
-        assert!(!decision.consume_reshow);
-        assert!(!decision.clear_expired_snooze);
-    }
-
-    #[test]
-    fn expired_overlay_snooze_is_cleared_and_shown() {
-        let decision = shortcut_overlay_startup_decision(true, 0, Some(100), 100, true);
-        assert!(decision.should_show);
-        assert!(decision.consume_reshow);
-        assert!(decision.clear_expired_snooze);
-    }
-
-    #[test]
-    fn minimal_webview_overlay_gets_the_same_bounded_reshow() {
-        let decision = shortcut_overlay_startup_decision(false, 0, None, 100, true);
-        assert!(decision.should_show);
-        assert!(decision.consume_reshow);
+    fn only_meeting_alerts_are_routed_through_the_overlay() {
+        // The pill already shows live meeting state, so a meeting alert belongs
+        // there. Everything else keeps the standalone panel, which has room for
+        // long bodies and more than two actions.
+        assert!(notification_belongs_to_overlay(Some("meeting")));
+        assert!(!notification_belongs_to_overlay(Some("capture_stall")));
+        assert!(!notification_belongs_to_overlay(Some("pipe")));
+        assert!(!notification_belongs_to_overlay(None));
     }
 
     /// The whole point of SCR-300: `gateway_url` is the ONE name the server,
@@ -2849,66 +2831,37 @@ fn shortcut_reminder_payload(
         "shortcutOverlaySize".to_string(),
         serde_json::Value::String(settings.shortcut_overlay_size.clone()),
     );
+    map.insert(
+        "shortcutOverlayAnchor".to_string(),
+        serde_json::Value::String(settings.shortcut_overlay_anchor.clone()),
+    );
     map
 }
 
-const SHORTCUT_OVERLAY_MINIMAL_RESHOW_VERSION: u32 = 1;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct ShortcutOverlayStartupDecision {
-    should_show: bool,
-    consume_reshow: bool,
-    clear_expired_snooze: bool,
+/// Whether a stored "keep the overlay hidden" choice may be honored at all.
+/// The overlay is the app's only always-on surface — it carries recording
+/// health, live meeting state and meeting notifications — so it ships
+/// unhideable and a stale stored `false` stays inert. `overlay-hiding-control`
+/// (see `lib/desktop-remote-control.ts`) can grant the capability back
+/// remotely, at which point the user's own choice starts counting again.
+pub(crate) fn shortcut_overlay_hidden_by_choice(
+    allow_hiding: bool,
+    show_overlay: bool,
+) -> bool {
+    allow_hiding && !show_overlay
 }
 
-fn shortcut_overlay_startup_decision(
-    setting_enabled: bool,
-    consumed_reshow_version: u32,
-    snoozed_until: Option<i64>,
-    now_unix: i64,
-    allow_minimal_reshow: bool,
-) -> ShortcutOverlayStartupDecision {
-    let snoozed = snoozed_until.is_some_and(|until| until > now_unix);
-    let reintroduce_minimal = allow_minimal_reshow
-        && !snoozed
-        && consumed_reshow_version < SHORTCUT_OVERLAY_MINIMAL_RESHOW_VERSION;
-    ShortcutOverlayStartupDecision {
-        should_show: !snoozed && (setting_enabled || reintroduce_minimal),
-        consume_reshow: reintroduce_minimal,
-        clear_expired_snooze: snoozed_until.is_some_and(|until| until <= now_unix),
-    }
-}
-
-/// Apply the simple startup policy for the minimal overlay on every platform.
-/// Existing dismissals get one bounded re-show; active snoozes always win.
+/// Suppression is otherwise a system decision (timeline off, headless), never
+/// a stored dismissal.
 pub(crate) async fn maybe_show_shortcut_reminder_on_startup(
     app_handle: tauri::AppHandle,
 ) -> Result<(), String> {
-    let mut store = crate::store::SettingsStore::get(&app_handle)?.unwrap_or_default();
-    let decision = shortcut_overlay_startup_decision(
+    let store = crate::store::SettingsStore::get(&app_handle)?.unwrap_or_default();
+    if shortcut_overlay_hidden_by_choice(
+        store.allow_hiding_shortcut_overlay,
         store.show_shortcut_overlay,
-        store.shortcut_overlay_minimal_reshow_version,
-        store.shortcut_overlay_snoozed_until,
-        chrono::Utc::now().timestamp(),
-        true,
-    );
-
-    let mut store_changed = false;
-    if decision.clear_expired_snooze {
-        store.shortcut_overlay_snoozed_until = None;
-        store_changed = true;
-    }
-    if decision.consume_reshow {
-        // Commit before rendering so a crash cannot turn this into a loop.
-        store.shortcut_overlay_minimal_reshow_version = SHORTCUT_OVERLAY_MINIMAL_RESHOW_VERSION;
-        store_changed = true;
-    }
-    if store_changed {
-        store.save(&app_handle)?;
-    }
-
-    if !decision.should_show {
-        info!("shortcut overlay suppressed by saved preference or active snooze");
+    ) {
+        info!("shortcut overlay stays hidden: remote policy allows it and the user turned it off");
         return Ok(());
     }
 
@@ -2921,11 +2874,6 @@ pub async fn show_shortcut_reminder(
     app_handle: tauri::AppHandle,
     _shortcut: String,
 ) -> Result<(), String> {
-    if let Some(mut store) = crate::store::SettingsStore::get(&app_handle)? {
-        if store.shortcut_overlay_snoozed_until.take().is_some() {
-            store.save(&app_handle)?;
-        }
-    }
     show_shortcut_reminder_impl(app_handle, true, true).await
 }
 
@@ -3457,6 +3405,12 @@ pub async fn show_notification_inbox(app_handle: tauri::AppHandle) -> Result<(),
     Ok(())
 }
 
+/// Notification kinds the pill can host. Kept narrow on purpose: the overlay is
+/// a tiny surface and only earns notifications it already has context for.
+pub(crate) fn notification_belongs_to_overlay(notification_type: Option<&str>) -> bool {
+    matches!(notification_type, Some("meeting"))
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn show_notification_panel(
@@ -3493,6 +3447,18 @@ pub async fn show_notification_panel(
     {
         // Store app handle for the action callback
         native_actions::install_notification_action_callback(&app_handle);
+
+        // A meeting alert is about the thing the overlay is already showing, so
+        // when the pill is on screen it speaks up itself instead of throwing a
+        // second window into the corner. Anything else — and the pill being
+        // hidden — keeps the standalone panel.
+        if notification_belongs_to_overlay(notification_type.as_deref())
+            && native_shortcut_reminder::show_notification(&payload)
+        {
+            info!("meeting notification rendered from the shortcut overlay");
+            let _ = app_handle.emit("native-notification-shown", &payload);
+            return Ok(());
+        }
 
         if native_notification::is_available() {
             info!("Using native SwiftUI notification panel");

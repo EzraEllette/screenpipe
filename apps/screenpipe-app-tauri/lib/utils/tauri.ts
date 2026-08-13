@@ -3694,11 +3694,26 @@ listenOnLan?: boolean }) &
  * that the Rust struct doesn't know about. Without this, `save()` would
  * serialize only known fields and silently wipe frontend-only data.
  */
-({ [key in string]: null | boolean | number | string | JsonValue[] | { [key in string]: JsonValue } }) & { aiPresets: AIPreset[]; isLoading: boolean; devMode: boolean; ocrEngine: string; dataDir: string; embeddedLLM: EmbeddedLLM; autoStartEnabled: boolean; platform: string; disabledShortcuts: string[]; user: User; showScreenpipeShortcut: string; startRecordingShortcut: string; stopRecordingShortcut: string; startAudioShortcut: string; stopAudioShortcut: string; showChatShortcut: string; searchShortcut: string; lockVaultShortcut?: string; showShortcutOverlay?: boolean;
+({ [key in string]: null | boolean | number | string | JsonValue[] | { [key in string]: JsonValue } }) & { aiPresets: AIPreset[]; isLoading: boolean; devMode: boolean; ocrEngine: string; dataDir: string; embeddedLLM: EmbeddedLLM; autoStartEnabled: boolean; platform: string; disabledShortcuts: string[]; user: User; showScreenpipeShortcut: string; startRecordingShortcut: string; stopRecordingShortcut: string; startAudioShortcut: string; stopAudioShortcut: string; showChatShortcut: string; searchShortcut: string; lockVaultShortcut?: string;
 /**
  * Overlay size: "small" (default), "medium" (1.5x), "large" (2x)
  */
 shortcutOverlaySize?: string;
+/**
+ * The user's choice, honored only while `allow_hiding_shortcut_overlay`
+ * is on. The overlay ships unhideable, so this is inert by default.
+ */
+showShortcutOverlay?: boolean;
+/**
+ * Remote-controlled capability (`overlay-hiding-control`), written by the
+ * desktop remote-control registry. False ships; flipping the flag on gives
+ * the Display toggle back without a release.
+ */
+allowHidingShortcutOverlay?: boolean;
+/**
+ * Where the user dragged the overlay: one of top/bottom x left/center/right.
+ */
+shortcutOverlayAnchor?: string;
 /**
  * Unique device ID for AI usage tracking (generated on first launch)
  */
