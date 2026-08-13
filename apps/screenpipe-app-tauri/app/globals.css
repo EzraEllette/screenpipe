@@ -946,3 +946,30 @@
   height: 0;
   pointer-events: none;
 }
+
+/* Reduced motion — global safety net.
+   Individual components opt in today (`.meeting-listening-stick`,
+   `.sp-flow-dot`, `.sp-onboarding-*`), which means every animation added
+   since has to remember to. This catches the rest.
+
+   Durations collapse to 0.01ms rather than `animation: none`, deliberately:
+   `none` never fires `animationend`/`transitionend`, so anything awaiting
+   those events to advance a state machine would hang instead of finishing
+   instantly. Iteration count is left alone for the same reason — an
+   infinite liveness indicator keeps ticking, just imperceptibly, rather
+   than freezing on a frame and reading as "stuck".
+
+   Components needing a *meaningful* static fallback (a recording dot that
+   must still look live) keep their own rule; those still win on the
+   properties they set. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+    animation-delay: 0ms !important;
+    transition-delay: 0ms !important;
+    scroll-behavior: auto !important;
+  }
+}
