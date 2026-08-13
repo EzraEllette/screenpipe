@@ -2299,6 +2299,18 @@ async setOnboardingStep(step: string) : Promise<Result<null, string>> {
 }
 },
 /**
+ * Pin the webview overlay after a drag. The native macOS panel persists the
+ * same two values over the FFI action channel, which the webview cannot use.
+ */
+async setShortcutOverlayAnchor(anchor: string, display: string | null) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_shortcut_overlay_anchor", { anchor, display }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Enable or disable sync.
  */
 async setSyncEnabled(enabled: boolean) : Promise<Result<null, string>> {
@@ -3714,6 +3726,12 @@ allowHidingShortcutOverlay?: boolean;
  * Where the user dragged the overlay: one of top/bottom x left/center/right.
  */
 shortcutOverlayAnchor?: string;
+/**
+ * Display the overlay was pinned to, as a stable per-display UUID. Empty
+ * until the user drags it, and ignored when that display is not attached,
+ * so the pill stays put instead of following the cursor between monitors.
+ */
+shortcutOverlayDisplay?: string;
 /**
  * Unique device ID for AI usage tracking (generated on first launch)
  */
