@@ -69,7 +69,13 @@ const WM_OVERLAY_CMD: u32 = WM_APP + 1;
 const WM_OVERLAY_REPAINT: u32 = WM_APP + 2;
 const ANIM_TIMER: usize = 1;
 const DISMISS_TIMER: usize = 2;
+/// Runs only while the pointer is off every painted surface but still inside
+/// the overlay — see `Layout::is_in_corridor`.
+const HOVER_TIMER: usize = 3;
 const ANIM_MS: u32 = 83; // ~12 Hz, same cadence as the macOS meter.
+/// How often the corridor is rechecked. Short enough that leaving the pill
+/// still feels immediate, long enough to cost nothing.
+const HOVER_POLL_MS: u32 = 90;
 /// Pointer travel before a press on the pill becomes a drag rather than a click.
 const DRAG_THRESHOLD: f32 = 4.0;
 
@@ -208,6 +214,10 @@ struct Ctx {
     /// `DraggableHostingView` contract. Kept out of `OverlayState` because no
     /// caller and no painter needs it.
     press_can_drag: bool,
+    /// The pointer is on the notification row. Kept out of `OverlayState`
+    /// because it must not expand the pill — it only suspends the toast's
+    /// self-dismiss and freezes the expansion the pointer arrived with.
+    toast_hovered: bool,
     dragging: bool,
     drag_offset: (i32, i32),
     animating: bool,
@@ -273,6 +283,7 @@ fn run_message_loop(
             work_area: monitor_work_area_at_cursor(),
             press_origin: None,
             press_can_drag: false,
+            toast_hovered: false,
             dragging: false,
             drag_offset: (0, 0),
             animating: false,
@@ -566,6 +577,11 @@ fn arm_dismiss_timer(hwnd: HWND) {
     unsafe {
         let Some(ctx) = ctx_of(hwnd) else { return };
         let _ = KillTimer(hwnd, DISMISS_TIMER);
+        // A toast under the pointer is being read. Letting it expire mid-aim
+        // would take the click with it, so the countdown restarts on exit.
+        if ctx.toast_hovered {
+            return;
+        }
         if let Some(ms) = ctx
             .state
             .notification
@@ -573,6 +589,39 @@ fn arm_dismiss_timer(hwnd: HWND) {
             .and_then(|n| n.auto_dismiss_ms)
         {
             SetTimer(hwnd, DISMISS_TIMER, ms, None);
+        }
+    }
+}
+
+/// The cursor in client DIP, or `None` when it is outside the window box.
+/// The overlay is a borderless popup, so the client origin is the window
+/// origin and no `ScreenToClient` round-trip is needed.
+fn cursor_in_client(hwnd: HWND) -> Option<(f32, f32)> {
+    unsafe {
+        let mut pt = POINT::default();
+        GetCursorPos(&mut pt).ok()?;
+        let mut rc = RECT::default();
+        GetWindowRect(hwnd, &mut rc).ok()?;
+        let scale = dpi_scale(hwnd);
+        Some((
+            (pt.x - rc.left) as f32 / scale,
+            (pt.y - rc.top) as f32 / scale,
+        ))
+    }
+}
+
+/// Let the pill close: the pointer really is gone.
+fn end_hover(hwnd: HWND) {
+    unsafe {
+        let _ = KillTimer(hwnd, HOVER_TIMER);
+        let Some(ctx) = ctx_of(hwnd) else { return };
+        ctx.state.hovering = false;
+        ctx.state.hovered_control = None;
+        ctx.state.pressed_control = None;
+        let was_reading = std::mem::take(&mut ctx.toast_hovered);
+        apply_state(hwnd);
+        if was_reading {
+            arm_dismiss_timer(hwnd);
         }
     }
 }
@@ -764,13 +813,27 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 }
 
                 // A layered window only receives mouse messages over non-
-                // transparent pixels, so anything that arrives here is a hover.
+                // transparent pixels, so anything that arrives here is a hover
+                // and the corridor no longer has to be watched.
+                let _ = KillTimer(hwnd, HOVER_TIMER);
                 let hovered = ctx.layout.hit_test(x, y);
                 let inside = ctx.layout.is_opaque_at(x, y);
-                if ctx.state.hovering != inside || ctx.state.hovered_control != hovered {
-                    ctx.state.hovering = inside;
+                // Reading the toast holds the pill's expansion instead of
+                // driving it — see `Layout::is_notification_at`. Toggling the
+                // dock here would restack the pill and slide the toast out from
+                // under the pointer mid-aim.
+                let on_toast = ctx.layout.is_notification_at(x, y);
+                let hovering = if on_toast { ctx.state.hovering } else { inside };
+                if ctx.state.hovering != hovering || ctx.state.hovered_control != hovered {
+                    ctx.state.hovering = hovering;
                     ctx.state.hovered_control = hovered;
                     apply_state(hwnd);
+                }
+                // …and it holds the toast open too: a notification that expires
+                // while it is being read takes the click with it.
+                if ctx.toast_hovered != on_toast {
+                    ctx.toast_hovered = on_toast;
+                    arm_dismiss_timer(hwnd);
                 }
                 let mut track = TRACKMOUSEEVENT {
                     cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
@@ -782,13 +845,13 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 LRESULT(0)
             }
 
+            // Not believed on its own: reaching for the card or the toast
+            // crosses a transparent gap, and that arrives here exactly like a
+            // real exit. The corridor timer decides which one it was.
             WM_MOUSELEAVE => {
                 if let Some(ctx) = ctx_of(hwnd) {
                     if !ctx.dragging {
-                        ctx.state.hovering = false;
-                        ctx.state.hovered_control = None;
-                        ctx.state.pressed_control = None;
-                        apply_state(hwnd);
+                        SetTimer(hwnd, HOVER_TIMER, HOVER_POLL_MS, None);
                     }
                 }
                 LRESULT(0)
@@ -869,23 +932,33 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                             update_animation_timer(hwnd);
                         }
                     }
+                    HOVER_TIMER => {
+                        // Still inside the overlay's own box: the pointer is
+                        // between blocks on its way to one, not gone. Only the
+                        // highlight follows it across the gap.
+                        let inside = cursor_in_client(hwnd).filter(|(x, y)| {
+                            ctx_of(hwnd).is_some_and(|c| c.layout.is_in_corridor(*x, *y))
+                        });
+                        match inside {
+                            Some((x, y)) => {
+                                if let Some(ctx) = ctx_of(hwnd) {
+                                    let hovered = ctx.layout.hit_test(x, y);
+                                    if ctx.state.hovered_control != hovered {
+                                        ctx.state.hovered_control = hovered;
+                                        repaint(hwnd);
+                                    }
+                                }
+                            }
+                            None => end_hover(hwnd),
+                        }
+                    }
                     DISMISS_TIMER => {
                         let _ = KillTimer(hwnd, DISMISS_TIMER);
                         if let Some(ctx) = ctx_of(hwnd) {
-                            // Leave an alert the pointer is resting on: the user
-                            // is reading it, and its buttons are under the mouse.
-                            let engaged = ctx.state.hovering
-                                && matches!(
-                                    ctx.state.hovered_control,
-                                    Some(
-                                        Control::NotificationAction0
-                                            | Control::NotificationAction1
-                                            | Control::NotificationDismiss
-                                    )
-                                );
-                            if engaged {
-                                arm_dismiss_timer(hwnd);
-                            } else if ctx.state.notification.take().is_some() {
+                            // A toast under the pointer is being read;
+                            // `arm_dismiss_timer` restarts the countdown when
+                            // the pointer leaves it.
+                            if !ctx.toast_hovered && ctx.state.notification.take().is_some() {
                                 apply_state(hwnd);
                             }
                         }

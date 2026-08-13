@@ -743,7 +743,7 @@ function HomeContent() {
     };
   }, []);
 
-  const toggleMeeting = useCallback(async (seed?: { title?: string; attendees?: string; resumeMeetingId?: number }) => {
+  const toggleMeeting = useCallback(async (seed?: { title?: string; attendees?: string; resumeMeetingId?: number; calendarEventId?: string }) => {
     setMeetingLoading(true);
     try {
       if (meetingState.active) {
@@ -801,6 +801,9 @@ function HomeContent() {
         if (seed?.resumeMeetingId) body.id = seed.resumeMeetingId;
         if (seed?.title) body.title = seed.title;
         if (seed?.attendees) body.attendees = seed.attendees;
+        // Claim the event so it cannot also name a later meeting.
+        if (seed?.calendarEventId)
+          body.calendar_event_id = seed.calendarEventId;
         const res = await localFetch("/meetings/start", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
