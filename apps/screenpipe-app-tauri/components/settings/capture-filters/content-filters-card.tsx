@@ -26,6 +26,7 @@ import {
 import {
 	setCategoryEnabled,
 	type CaptureCategory,
+	type CategoryOwnedFilters,
 	type CategoryTargets,
 } from "@/lib/settings/capture-categories";
 import { AppFilterList } from "./app-filter-list";
@@ -36,6 +37,8 @@ import { WebsiteFilterList, type ObservedDomain } from "./website-filter-list";
 export interface ContentFiltersCardProps {
 	rules: WindowRules;
 	ignoredUrls: string[];
+	/** Entries the category switches created, so turning one off spares the user's own. */
+	categoryOwned?: CategoryOwnedFilters;
 	observedWindows: ObservedWindow[];
 	observedDomains: ObservedDomain[];
 	installedApps: string[];
@@ -61,6 +64,7 @@ export interface ContentFiltersCardProps {
 export function ContentFiltersCard({
 	rules,
 	ignoredUrls,
+	categoryOwned,
 	observedWindows,
 	observedDomains,
 	installedApps,
@@ -145,8 +149,10 @@ export function ContentFiltersCard({
 
 	const handleCategoryToggle = useCallback(
 		(category: CaptureCategory, enabled: boolean) =>
-			onTargetsChange(setCategoryEnabled({ rules, ignoredUrls }, category, enabled)),
-		[rules, ignoredUrls, onTargetsChange],
+			onTargetsChange(
+				setCategoryEnabled({ rules, ignoredUrls, owned: categoryOwned }, category, enabled),
+			),
+		[rules, ignoredUrls, categoryOwned, onTargetsChange],
 	);
 
 	const handleAdvancedChange = useCallback(

@@ -1647,6 +1647,7 @@ export function PrivacySection() {
         <ContentFiltersCard
           rules={windowRules}
           ignoredUrls={settings.ignoredUrls || []}
+          categoryOwned={settings.categoryOwnedFilters}
           observedWindows={windowItems || []}
           observedDomains={urlItems || []}
           installedApps={installedApps}
@@ -1661,6 +1662,7 @@ export function PrivacySection() {
                 ignoredWindows: next.rules.ignored,
                 includedWindows: next.rules.included,
                 ignoredUrls: next.ignoredUrls,
+                categoryOwnedFilters: next.owned ?? { apps: [], domains: [] },
               },
               true
             )

@@ -19,6 +19,12 @@ import { parseRule, resolveAppState, type WindowRules } from "../capture-filters
 
 const empty: CategoryTargets = { rules: { ignored: [], included: [] }, ignoredUrls: [] };
 
+/**
+ * `empty` after a category has been switched on and back off. Identical rules
+ * and domains, plus the emptied record of what the category had created.
+ */
+const cleared: CategoryTargets = { ...empty, owned: { apps: [], domains: [] } };
+
 const passwords = findCategory("password-managers")!;
 const messaging = findCategory("personal-messaging")!;
 const banking = findCategory("banking-finance")!;
@@ -173,7 +179,7 @@ describe("enableCategory", () => {
 describe("disableCategory", () => {
 	it("removes everything it added", () => {
 		const on = enableCategory(empty, passwords);
-		expect(disableCategory(on, passwords)).toEqual(empty);
+		expect(disableCategory(on, passwords)).toEqual(cleared);
 	});
 
 	it("leaves a rule the user wrote by hand for the same app", () => {
@@ -196,7 +202,7 @@ describe("disableCategory", () => {
 	});
 
 	it("is idempotent", () => {
-		expect(disableCategory(empty, passwords)).toEqual(empty);
+		expect(disableCategory(empty, passwords)).toEqual(cleared);
 	});
 
 	it("removes a domain the user wrote in another form", () => {
@@ -212,7 +218,7 @@ describe("setCategoryEnabled", () => {
 	it("round-trips cleanly", () => {
 		const on = setCategoryEnabled(empty, passwords, true);
 		expect(categoryState(passwords, on.rules, on.ignoredUrls)).toBe("on");
-		expect(setCategoryEnabled(on, passwords, false)).toEqual(empty);
+		expect(setCategoryEnabled(on, passwords, false)).toEqual(cleared);
 	});
 
 	it("completes a partial category when switched on", () => {
@@ -273,5 +279,73 @@ describe("category rules survive the filter helpers", () => {
 				expect(resolveAppState(name, targets.rules).state, app).toBe("ignored");
 			}
 		}
+	});
+});
+
+describe("a category never deletes the user's own work", () => {
+	// Regression for the 2026-08-12 chaos finding: enabling a category adopted a
+	// byte-identical entry the user had typed, and disabling it deleted their
+	// privacy exclusion with no warning. Domains are the realistic path — they
+	// have no scoped form, so `chase.com` is `chase.com` whoever wrote it.
+	it("keeps a hand-written domain that a category also ships", () => {
+		const userTyped = banking.domains[0];
+		const mine: CategoryTargets = {
+			rules: { ignored: [], included: [] },
+			ignoredUrls: [userTyped],
+		};
+
+		const on = enableCategory(mine, banking);
+		expect(on.ignoredUrls).toContain(userTyped);
+		expect(on.owned?.domains ?? []).not.toContain(userTyped);
+
+		const off = disableCategory(on, banking);
+		expect(off.ignoredUrls).toContain(userTyped);
+		// and the category's own domains are still cleaned up
+		for (const d of banking.domains.slice(1)) expect(off.ignoredUrls).not.toContain(d);
+	});
+
+	it("keeps a hand-written app rule that a category also ships", () => {
+		const userTyped = passwords.apps[0];
+		const mine: CategoryTargets = {
+			rules: { ignored: [userTyped], included: [] },
+			ignoredUrls: [],
+		};
+
+		const off = disableCategory(enableCategory(mine, passwords), passwords);
+		expect(off.rules.ignored).toContain(userTyped);
+	});
+
+	it("still removes everything it actually created", () => {
+		const off = disableCategory(enableCategory(empty, messaging), messaging);
+		expect(off.rules.ignored).toEqual([]);
+		expect(off.ignoredUrls).toEqual([]);
+		expect(off.owned?.domains ?? []).toEqual([]);
+		expect(off.owned?.apps ?? []).toEqual([]);
+	});
+
+	it("survives the every-category domain sweep that used to fail 5 of 5", () => {
+		for (const category of CAPTURE_CATEGORIES) {
+			if (category.domains.length === 0) continue;
+			const userTyped = category.domains[0];
+			const mine: CategoryTargets = {
+				rules: { ignored: [], included: [] },
+				ignoredUrls: [userTyped],
+			};
+			const off = disableCategory(enableCategory(mine, category), category);
+			expect(off.ignoredUrls, `${category.id} deleted the user's ${userTyped}`).toContain(
+				userTyped,
+			);
+		}
+	});
+
+	it("does not claim an entry a second category already created", () => {
+		const first = enableCategory(empty, banking);
+		const both = enableCategory(first, messaging);
+		expect(both.owned?.domains ?? []).toEqual(
+			expect.arrayContaining([...banking.domains, ...messaging.domains]),
+		);
+		// turning one off leaves the other's entries alone
+		const off = disableCategory(both, banking);
+		for (const d of messaging.domains) expect(off.ignoredUrls).toContain(d);
 	});
 });
