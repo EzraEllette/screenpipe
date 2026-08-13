@@ -35,7 +35,8 @@ use crate::native_shortcut_reminder::MeetingOverlayPanelState;
 static NATIVE: OnceLock<Native> = OnceLock::new();
 static ACTION_CB: Mutex<Option<extern "C" fn(*const c_char)>> = Mutex::new(None);
 static VISIBLE: AtomicBool = AtomicBool::new(false);
-static FEEDERS_STARTED: AtomicBool = AtomicBool::new(false);
+static METRICS_FEED_STARTED: AtomicBool = AtomicBool::new(false);
+static MEETING_FEED_STARTED: AtomicBool = AtomicBool::new(false);
 
 struct Native {
     overlay: Overlay,
@@ -245,18 +246,32 @@ pub fn set_action_callback(cb: extern "C" fn(*const c_char)) {
 
 // MARK: engine feeds
 
-/// Connect the two websockets the pill reads from. Started once; both reconnect
-/// on their own, because the engine restarts far more often than the overlay.
+/// Connect the two websockets the pill reads from. Each is started once and
+/// reconnects on its own, because the engine restarts far more often than the
+/// overlay.
+///
+/// Tracked per feed, and only once a URL actually exists. `show` runs at
+/// startup and the URLs are absent until the engine has bound its port, so a
+/// single shared "already started" flag was consumed by that first empty call
+/// — the sockets were then never opened for the rest of the session. That is a
+/// pill with a dead audio meter and, because meeting state and transcript lines
+/// both arrive on the meeting socket, no live transcript card at all.
 fn start_feeders(metrics_url: Option<&str>, events_url: Option<&str>) {
-    if FEEDERS_STARTED.swap(true, Ordering::SeqCst) {
-        return;
-    }
-    if let Some(url) = metrics_url.map(str::to_string) {
+    if let Some(url) = claim_feed(metrics_url, &METRICS_FEED_STARTED) {
         tauri::async_runtime::spawn(async move { metrics_feeder(url).await });
     }
-    if let Some(url) = events_url.map(str::to_string) {
+    if let Some(url) = claim_feed(events_url, &MEETING_FEED_STARTED) {
         tauri::async_runtime::spawn(async move { meeting_feeder(url).await });
     }
+}
+
+/// The URL to connect, if this call is the one that should open the socket.
+///
+/// The order matters: a missing URL must leave the flag alone. Claiming it
+/// first is what silently disabled both feeds for a whole session.
+fn claim_feed(url: Option<&str>, started: &AtomicBool) -> Option<String> {
+    let url = url?.to_string();
+    (!started.swap(true, Ordering::SeqCst)).then_some(url)
 }
 
 /// Reconnecting websocket loop shared by both feeders.
@@ -410,4 +425,36 @@ async fn meeting_feeder(url: String) {
         }
     })
     .await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `show` runs at startup, before the engine has bound its port, so the
+    /// first call carries no URLs. Claiming the "already started" flag there
+    /// meant the socket was never opened for the rest of the session — a pill
+    /// with a dead audio meter and no live transcript, because meeting state
+    /// and transcript lines both arrive on that socket.
+    #[test]
+    fn a_feed_with_no_url_yet_does_not_burn_its_one_chance() {
+        let started = AtomicBool::new(false);
+
+        assert_eq!(claim_feed(None, &started), None, "nothing to connect to");
+        assert!(
+            !started.load(Ordering::SeqCst),
+            "the flag must survive a call that had no url"
+        );
+
+        assert_eq!(
+            claim_feed(Some("ws://127.0.0.1:3030/ws/metrics"), &started).as_deref(),
+            Some("ws://127.0.0.1:3030/ws/metrics"),
+            "the call that finally has a url opens the socket"
+        );
+        assert_eq!(
+            claim_feed(Some("ws://127.0.0.1:3030/ws/metrics"), &started),
+            None,
+            "and only that one does — the feed reconnects on its own"
+        );
+    }
 }

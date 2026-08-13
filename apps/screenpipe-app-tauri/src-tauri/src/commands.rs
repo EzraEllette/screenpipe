@@ -3455,10 +3455,13 @@ pub async fn show_notification_panel(
     // so gating after them would let a repeat surface on the pill anyway.
     let notification_title =
         crate::notifications::gate::title_from_payload(&payload).unwrap_or_default();
+    let notification_body =
+        crate::notifications::gate::body_from_payload(&payload).unwrap_or_default();
     if crate::notifications::gate::repeat_suppressed_now(
         notification_type.as_deref(),
         notification_pipe.as_deref(),
         &notification_title,
+        &notification_body,
     ) {
         info!(
             "show_notification_panel: suppressed (repeat within cooldown, type={:?})",

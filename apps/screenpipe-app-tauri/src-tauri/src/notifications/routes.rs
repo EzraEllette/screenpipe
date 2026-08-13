@@ -193,13 +193,16 @@ pub async fn send_notification(
         }));
     }
 
-    // Repeat gate: same type + pipe + title, again, inside its cooldown. A
+    // Repeat gate: the same alert, again, inside its cooldown. A
     // condition-driven producer re-fires while its condition holds; drop the
-    // echo here rather than expecting every producer to latch for itself.
+    // echo here rather than expecting every producer to latch for itself. The
+    // body is part of the identity because for some producers it carries the
+    // only thing that tells two distinct alerts apart — see the gate's notes.
     if super::gate::repeat_suppressed_now(
         Some(resolved_type.as_str()),
         source.pipe_name.as_deref(),
         &payload.title,
+        &payload.body,
     ) {
         debug!("notify: skipped (identical alert already shown recently)");
         return Ok(Json(ApiResponse {
