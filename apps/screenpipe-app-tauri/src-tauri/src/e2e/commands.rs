@@ -244,6 +244,30 @@ async fn active_meeting_id(state: State<'_, RecordingState>) -> Result<Option<i6
         .map_err(|error| error.to_string())
 }
 
+/// E2E helper: observed state of the native macOS live-meeting transcript card.
+///
+/// Returns `None` off macOS and whenever the native panel is unavailable, so a
+/// spec can tell "not this platform" apart from "card is hidden".
+#[command]
+fn native_meeting_overlay_state() -> Option<crate::native_shortcut_reminder::MeetingOverlayPanelState>
+{
+    crate::native_shortcut_reminder::meeting_overlay_state()
+}
+
+/// E2E helper: enter or leave the native chip. AppKit does not deliver a
+/// synthetic hover to a nonactivating panel, so this calls the same controller
+/// entry point the `.activeAlways` tracking area uses.
+#[command]
+fn native_shortcut_set_hovering(hovering: bool) -> bool {
+    crate::native_shortcut_reminder::set_pill_hovering(hovering)
+}
+
+/// E2E helper: the same pin toggle the native card's button invokes.
+#[command]
+fn native_toggle_meeting_pin() -> bool {
+    crate::native_shortcut_reminder::toggle_meeting_pin()
+}
+
 /// E2E helper: publish the production live-transcript event shape without
 /// depending on microphone hardware or an external transcription provider.
 #[command]
@@ -686,6 +710,9 @@ pub(super) fn plugin() -> TauriPlugin<Wry> {
             shortcut_reminder_visible,
             open_auto_meeting,
             active_meeting_id,
+            native_meeting_overlay_state,
+            native_shortcut_set_hovering,
+            native_toggle_meeting_pin,
             emit_meeting_overlay_transcript,
             emit_agent_stream,
             emit_settled_agent_follow_up,

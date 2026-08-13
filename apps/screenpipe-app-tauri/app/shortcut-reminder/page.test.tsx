@@ -209,6 +209,80 @@ describe("recording health hover detail", () => {
     expect(mocks.showWindow).toHaveBeenCalledWith({ Home: { page: "display" } });
   });
 
+  it("keeps a pinned transcript open after the pointer leaves", async () => {
+    mocks.getRecordingHealthState.mockResolvedValue("normal");
+    mocks.meetingOverlayState.active = true;
+    mocks.meetingOverlayState.activeMeetingId = 42;
+    mocks.meetingOverlayState.stoppableMeetingId = 42;
+    mocks.meetingOverlayState.meetingApp = "zoom";
+
+    render(<ShortcutReminderPage />);
+
+    await screen.findByRole("status", { name: "Meeting live" });
+    fireEvent.mouseEnter(screen.getByTestId("shortcut-reminder-root"));
+
+    const preview = screen.getByTestId("shortcut-reminder-meeting-preview");
+    expect(preview).toHaveAttribute("data-pinned", "false");
+
+    // Unpinned: leaving closes it, which is the pre-existing behaviour.
+    fireEvent.mouseLeave(preview);
+    expect(screen.queryByTestId("shortcut-reminder-meeting-preview")).toBeNull();
+
+    fireEvent.mouseEnter(screen.getByTestId("shortcut-reminder-root"));
+    fireEvent.click(screen.getByRole("button", { name: "Pin transcript" }));
+
+    const pinned = screen.getByTestId("shortcut-reminder-meeting-preview");
+    expect(pinned).toHaveAttribute("data-pinned", "true");
+    expect(
+      screen.getByRole("button", { name: "Unpin transcript" }),
+    ).toHaveAttribute("aria-pressed", "true");
+
+    fireEvent.mouseLeave(pinned);
+    expect(
+      screen.getByTestId("shortcut-reminder-meeting-preview"),
+    ).toBeVisible();
+    // The transcript is what the pin is for — it has to survive the exit too.
+    expect(screen.getByText("meeting live · zoom")).toBeVisible();
+
+    fireEvent.click(screen.getByRole("button", { name: "Unpin transcript" }));
+    expect(screen.queryByTestId("shortcut-reminder-meeting-preview")).toBeNull();
+  });
+
+  it("hides a pinned transcript when the meeting ends and does not re-pin the next one", async () => {
+    mocks.getRecordingHealthState.mockResolvedValue("normal");
+    mocks.meetingOverlayState.active = true;
+    mocks.meetingOverlayState.activeMeetingId = 42;
+    mocks.meetingOverlayState.stoppableMeetingId = 42;
+
+    const view = render(<ShortcutReminderPage />);
+
+    await screen.findByRole("status", { name: "Meeting live" });
+    fireEvent.mouseEnter(screen.getByTestId("shortcut-reminder-root"));
+    fireEvent.click(screen.getByRole("button", { name: "Pin transcript" }));
+    expect(
+      screen.getByTestId("shortcut-reminder-meeting-preview"),
+    ).toHaveAttribute("data-pinned", "true");
+
+    // The meeting ends while the card is pinned and the pointer is still on it.
+    mocks.meetingOverlayState.active = false;
+    mocks.meetingOverlayState.activeMeetingId = null;
+    mocks.meetingOverlayState.stoppableMeetingId = null;
+    view.rerender(<ShortcutReminderPage />);
+
+    expect(screen.queryByTestId("shortcut-reminder-meeting-preview")).toBeNull();
+    expect(screen.queryByRole("status", { name: "Meeting live" })).toBeNull();
+
+    // A later meeting starts. The retired pin must not reopen the card on its
+    // own — the user has to ask for it again.
+    mocks.meetingOverlayState.active = true;
+    mocks.meetingOverlayState.activeMeetingId = 43;
+    mocks.meetingOverlayState.stoppableMeetingId = 43;
+    view.rerender(<ShortcutReminderPage />);
+
+    expect(screen.queryByTestId("shortcut-reminder-meeting-preview")).toBeNull();
+    expect(screen.getByTestId("shortcut-reminder-root")).toBeVisible();
+  });
+
   it("keeps recording health ahead of the meeting preview", async () => {
     mocks.meetingOverlayState.active = true;
     mocks.meetingOverlayState.activeMeetingId = 42;

@@ -1418,6 +1418,27 @@
       "notes": "Starts a real isolated meeting, verifies bounded snapshot plus deterministic delta/final transcript frames, and proves the stream clears on the authoritative stop edge."
     },
     {
+      "spec": "meeting-overlay-pin.spec.ts",
+      "platforms": [
+        "macos"
+      ],
+      "layers": [
+        "real-ui-e2e",
+        "local-api",
+        "tauri-command",
+        "os-integration"
+      ],
+      "features": [
+        "meeting-notes",
+        "meeting-overlay-stream",
+        "shortcut-overlay"
+      ],
+      "criticality": "medium",
+      "confidence": "partial",
+      "ux": "real-user-flow",
+      "notes": "Pins the native macOS live-transcript card against a real started meeting: it opens on hover, stays visible after the pointer leaves, and the authoritative stop edge hides it and clears the pin, asserted on the AppKit panel's observed visibility. Hover and the pin toggle are driven through the controller entry points the tracking area and pin button use, because AppKit delivers no synthetic hover to a nonactivating panel. The Windows/Linux reminder webview renders the sign-in gate under E2E seeds, so that surface is covered by component tests instead."
+    },
+    {
       "spec": "meetings-only-audio-lifecycle.spec.ts",
       "platforms": [
         "windows",
