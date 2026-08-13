@@ -120,6 +120,7 @@ import { mountAgentEventBus, registerObserver } from "@/lib/events/bus";
 import { parsePipeSessionId } from "@/lib/events/types";
 import { writeBrowserLogNow } from "@/lib/logging/browser-log";
 import { copyMeetingToClipboard } from "./copy-meeting";
+import { copyMeetingSummary, emailMeetingSummary } from "./share-summary";
 import {
   resolveTranscriptOpen,
   type TranscriptOpenIntent,
@@ -144,6 +145,7 @@ import {
   type MeetingSummaryStreamState,
 } from "./meeting-summary-stream";
 import {
+  extractMeetingSummary,
   MEETING_QUIET_CONTROL_CLASS,
   MEETING_READING_COLUMN_CLASS,
   MEETING_SHELL_CLASS,
@@ -229,6 +231,7 @@ export function NoteView({
   const [exporting, setExporting] = useState(false);
   const [copying, setCopying] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [summaryCopied, setSummaryCopied] = useState(false);
   const [resumingCapture, setResumingCapture] = useState(false);
   const [savingBeforeStop, setSavingBeforeStop] = useState(false);
   const [autoSummaryEnabled, setAutoSummaryEnabled] = useState<boolean | null>(
@@ -1122,16 +1125,20 @@ export function NoteView({
     }
   };
 
+  // Editor state is ahead of the saved record between autosaves, so every share
+  // reads the title/attendees/note the user is looking at right now.
+  const currentMeeting = (): MeetingRecord => ({
+    ...meeting,
+    title: title || null,
+    attendees: attendees || null,
+    note: note || null,
+  });
+
   const handleCopy = async () => {
     if (copying) return;
     setCopying(true);
     try {
-      const fresh: MeetingRecord = {
-        ...meeting,
-        title: title || null,
-        attendees: attendees || null,
-        note: note || null,
-      };
+      const fresh = currentMeeting();
       // Re-fetch context + transcript so the clipboard reflects what the
       // user sees right now (live meetings update; speaker rename can
       // happen without re-rendering ReplayStrip).
@@ -1149,6 +1156,49 @@ export function NoteView({
       });
     } finally {
       setCopying(false);
+    }
+  };
+
+  // The summary share path is deliberately local: everything it needs is
+  // already in the note on screen, so there is no fetch between the click and
+  // the clipboard, and no transcript in the payload.
+  const handleCopySummary = async () => {
+    try {
+      const shared = await copyMeetingSummary(
+        currentMeeting(),
+        extractMeetingSummary(note),
+      );
+      if (!shared) {
+        toast({ title: "no summary to copy yet" });
+        return;
+      }
+      setSummaryCopied(true);
+      window.setTimeout(() => setSummaryCopied(false), 2000);
+      toast({ title: "summary copied", description: "paste it anywhere" });
+    } catch (err) {
+      console.error("failed to copy meeting summary", err);
+      toast({
+        title: "couldn't copy summary",
+        description: String(err),
+        variant: "destructive",
+      });
+    }
+  };
+
+  const handleEmailSummary = async () => {
+    try {
+      const shared = await emailMeetingSummary(
+        currentMeeting(),
+        extractMeetingSummary(note),
+      );
+      if (!shared) toast({ title: "no summary to send yet" });
+    } catch (err) {
+      console.error("failed to open email draft", err);
+      toast({
+        title: "couldn't open your email app",
+        description: String(err),
+        variant: "destructive",
+      });
     }
   };
 
@@ -1429,7 +1479,7 @@ export function NoteView({
             meetings
           </Button>
 
-          <div className="group/title mt-1 flex min-w-0 items-center gap-2">
+          <div className="mt-1 flex min-w-0 items-center gap-2">
             <input
               value={title}
               onChange={(event) => setTitle(event.target.value)}
@@ -1438,29 +1488,6 @@ export function NoteView({
               aria-label="meeting title"
               className="min-w-0 flex-1 bg-transparent text-xl font-medium leading-tight tracking-tight text-foreground placeholder:text-muted-foreground/40 focus:outline-none sm:text-2xl"
             />
-            {/* Revealed on intent. Copying is occasional, and a permanent
-                bordered cluster competed with the title for attention. */}
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={handleCopy}
-              disabled={copying}
-              title="copy meeting + transcript to clipboard"
-              aria-label="copy meeting and transcript"
-              className={cn(
-                MEETING_QUIET_CONTROL_CLASS,
-                "h-8 w-8 shrink-0 p-0 opacity-0 focus-visible:opacity-100 group-focus-within/title:opacity-100 group-hover/title:opacity-100",
-                copied && "opacity-100",
-              )}
-            >
-              {copying ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : copied ? (
-                <Check className="h-3.5 w-3.5" />
-              ) : (
-                <Copy className="h-3.5 w-3.5" />
-              )}
-            </Button>
           </div>
 
           <div className="mt-3 flex min-w-0 items-center gap-2 overflow-x-auto pb-3 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
@@ -1503,6 +1530,33 @@ export function NoteView({
               );
             }}
             summaryState={summaryTabState}
+            // Copying the note is what people do after reading it, so the
+            // action lives on the tab rule where it is always visible and
+            // applies to the whole meeting rather than the active tab. It was
+            // previously hidden until the title row was hovered, which made it
+            // undiscoverable and collided with the shortcut overlay.
+            trailing={
+              <button
+                type="button"
+                onClick={handleCopy}
+                disabled={copying}
+                data-testid="meeting-copy-button"
+                title="copy meeting + transcript to clipboard"
+                aria-label="copy meeting and transcript"
+                className="flex h-11 shrink-0 items-center gap-2 border-l border-border px-4 font-mono text-[11px] uppercase tracking-[0.12em] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:z-10 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-foreground disabled:text-muted-foreground/50 disabled:hover:bg-transparent"
+              >
+                {copying ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : copied ? (
+                  <Check className="h-3.5 w-3.5" />
+                ) : (
+                  <Copy className="h-3.5 w-3.5" />
+                )}
+                <span className="hidden sm:inline">
+                  {copied ? "copied" : "copy"}
+                </span>
+              </button>
+            }
           />
         </div>
       </header>
@@ -1596,6 +1650,9 @@ export function NoteView({
             canGenerate={
               canSummarizeMeeting && !summaryWorking && !retranscribing
             }
+            onCopySummary={() => void handleCopySummary()}
+            onEmailSummary={() => void handleEmailSummary()}
+            summaryCopied={summaryCopied}
           />
         )}
       </main>

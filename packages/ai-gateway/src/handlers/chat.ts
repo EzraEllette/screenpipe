@@ -11,6 +11,7 @@ import { routeTier, routerArm, TIER_HEAD } from './difficulty-router';
 import { captureException } from '@sentry/cloudflare';
 import {
   HostedChatAllowanceExceededError,
+  cloudflareSpendLimitRuleId,
   gatewayProviderForModel,
   getHostedChatGatewayConnection,
   isCloudflareSpendLimitError,
@@ -18,6 +19,7 @@ import {
   withHostedChatLane,
   type HostedChatGatewayContext,
 } from '../services/cloudflare-ai-gateway';
+import { classifyCloudflareSpendLimitRule } from '../services/cloudflare-ai-gateway-usage';
 import {
   ARGUS_BACKGROUND_FALLBACK_MODEL,
   SafetyRefusalError,
@@ -251,14 +253,19 @@ async function tryModel(
   flexEligible: boolean = false,
   gatewayContext?: HostedChatGatewayContext,
 ): Promise<Response> {
+  let attemptGatewayContext = gatewayContext;
   try {
     // Resolve legacy aliases up front so both provider selection AND the
     // upstream request body see the canonical name. Otherwise the provider
     // receives a body.model that its registry rejects.
     model = resolveModelAlias(model);
-    const gatewayProvider = gatewayContext ? gatewayProviderForModel(model) : null;
-    const connection = gatewayProvider && gatewayContext
-      ? await getHostedChatGatewayConnection(env, gatewayProvider, gatewayContext)
+    const requestLane = ctx === 'auto' ? 'auto' : 'explicit';
+    attemptGatewayContext = gatewayContext
+      ? withHostedChatLane(gatewayContext, model, requestLane)
+      : undefined;
+    const gatewayProvider = attemptGatewayContext ? gatewayProviderForModel(model) : null;
+    const connection = gatewayProvider && attemptGatewayContext
+      ? await getHostedChatGatewayConnection(env, gatewayProvider, attemptGatewayContext)
       : undefined;
     const provider = createProvider(model, env, connection);
     const reqBody = { ...body, model };
@@ -297,14 +304,20 @@ async function tryModel(
       throw flexErr;
     }
   } catch (error: any) {
-    if (gatewayContext && isCloudflareSpendLimitError(error)) {
-      error = new HostedChatAllowanceExceededError(gatewayContext);
+    if (attemptGatewayContext && isCloudflareSpendLimitError(error)) {
+      const limitScope = await classifyCloudflareSpendLimitRule(
+        env,
+        cloudflareSpendLimitRuleId(error),
+        attemptGatewayContext,
+      );
+      error = new HostedChatAllowanceExceededError(attemptGatewayContext, limitScope);
     }
     if (isHostedChatAllowanceError(error)) {
       console.warn(`${ctx}: Cloudflare hosted AI allowance reached`, {
         model,
         plan: error.allowance.plan,
         lane: error.allowance.lane,
+        limitScope: error.allowance.limit_scope,
       });
       logModelOutcome(env, { model, outcome: 'rate_limited' }).catch(() => {});
       throw error;
@@ -425,9 +438,10 @@ async function tryModel(
  *
  * A chain exists precisely to fall back, so we try every entry and only fail
  * once the chain is exhausted — even on a "fatal" (non-transient) error. The
- * exceptions are account allowance gates and safety refusals: neither is a
- * model-health failure, and paid background safety refusals use the dedicated
- * Argus rescue lane below. A
+ * exceptions are terminal account allowance gates and safety refusals: neither
+ * is a model-health failure. Auto can recover from a frontier-only allowance
+ * gate by skipping the remaining frontier attempts. Paid background safety
+ * refusals use the dedicated Argus rescue lane below. A
  * model-specific reject (e.g. gpt-5.4's stricter tool_call-id length limit, a
  * region block, or a model-not-enabled) routinely succeeds on the next entry
  * (glm-5/Gemini accept what OpenAI rejected). Before, a 400 broke the loop and
@@ -450,19 +464,41 @@ export async function runChain(
 ): Promise<{ response: Response; model: string } | { error: any; lastModel: string; limitError?: any }> {
   let lastError: any = null;
   let limitError: any = null;
+  let frontierPoolExhausted = false;
   let lastModel = chain[0];
   for (const model of boundedModelChain(chain, maxAttempts)) {
+    if (ctx === 'auto' && frontierPoolExhausted && isFrontierModel(model)) continue;
     lastModel = model;
     try {
-      const response = await attemptModel(model, body, env, ctx, flexEligible, gatewayContext);
+      const attemptGatewayContext = gatewayContext
+        ? withHostedChatLane(
+          gatewayContext,
+          model,
+          ctx === 'auto' ? 'auto' : 'explicit',
+        )
+        : undefined;
+      const response = await attemptModel(
+        model,
+        body,
+        env,
+        ctx,
+        flexEligible,
+        attemptGatewayContext,
+      );
       logModelOutcome(env, { model, outcome: 'ok' }).catch(() => {});
       return { response, model };
     } catch (error: any) {
       lastError = selectCascadeError(lastError, error);
-      if (isHostedChatAllowanceError(error) || isProviderQuotaOrBillingLimitError(error)) {
+      if (isHostedChatAllowanceError(error)) {
+        if (ctx === 'auto' && error.allowance?.limit_scope === 'frontier') {
+          frontierPoolExhausted = true;
+          continue;
+        }
         limitError = error;
+        break;
       }
-      if (isHostedChatAllowanceError(error) || isSafetyRefusalError(error)) break;
+      if (isProviderQuotaOrBillingLimitError(error)) limitError = error;
+      if (isSafetyRefusalError(error)) break;
       // keep going — the next model in the chain may accept this request.
     }
   }
@@ -749,14 +785,10 @@ function errorResponse(body: RequestBody, status: number, message: string): Resp
   }));
 }
 
-function allowanceMessage(allowance: HostedChatAllowanceExceededError['allowance']): string {
-  if (allowance.lane === 'explicit') {
-    return 'Your current hosted AI allowance for explicit models is used up. Switch to Auto, or use a local model or your own provider key.';
-  }
-  if (allowance.plan === 'free') {
-    return 'Your current hosted AI allowance for Auto is used up. Upgrade, or use a local model or your own provider key.';
-  }
-  return 'Your current hosted AI allowance for Auto is used up. Choose an explicit hosted model, or use a local model or your own provider key.';
+function allowanceMessage(canUpgrade: boolean): string {
+  return canUpgrade
+    ? 'Your AI usage limit is reached. Switch to Auto or upgrade.'
+    : 'Your AI usage limit is reached. Switch to Auto.';
 }
 
 /** Render the stable terminal contract Pi uses to avoid generic 429 retries. */
@@ -766,7 +798,7 @@ export function allowanceErrorResponse(body: RequestBody, error: HostedChatAllow
     : getHostedAiCapacityUpgrade(error.allowance.plan);
   const payload = {
     error: {
-      message: allowanceMessage(error.allowance),
+      message: allowanceMessage(upgrade !== null),
       type: 'insufficient_quota',
       code: 'hosted_ai_allowance_exceeded',
     },
@@ -858,7 +890,11 @@ export async function handleChatCompletions(
   // this handler. Resolve the lane only after that final rewrite, then keep the
   // same metadata across difficulty routing and every provider fallback.
   const gatewayContext = options.gatewayContext
-    ? withHostedChatLane(options.gatewayContext, body.model)
+    ? withHostedChatLane(
+      options.gatewayContext,
+      body.model,
+      body.model === 'auto' ? 'auto' : 'explicit',
+    )
     : undefined;
 
   const finalizeProviderResponse = async (response: Response, model: string): Promise<Response> => {

@@ -33,6 +33,12 @@ const EMPTY_COPY: Record<FirstRunEmptyReason, string> = {
     "Recording is on but nothing was captured yet. This usually means the screen did not change much.",
   empty_but_recording:
     "Recording is on and still warming up. Nothing has been indexed yet.",
+  no_frames_captured:
+    "Recording is on but no screens were captured in that window. If this keeps happening, check Screen Recording permission.",
+  below_frame_floor:
+    "Only a few screens were captured — not enough to say anything true about your work yet. Keep working and this fills in.",
+  single_app_below_floor:
+    "Everything captured came from a single app, which is too thin to summarize. This fills in as you move between apps.",
   unknown:
     "Nothing was captured in that window. Screenpipe keeps reading in the background as you work.",
 };

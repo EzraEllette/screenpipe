@@ -14,6 +14,7 @@ import { AIPresetsSelector } from "@/components/rewind/ai-presets-selector";
 import { AcpConfigSelector } from "@/components/chat/standalone/acp-config-selector";
 import { ThinkingLevelSelector } from "@/components/thinking-level-selector";
 import { ComposerUtilityMenu } from "@/components/chat/standalone/composer-utility-menu";
+import { UsagePopover } from "@/components/usage/usage-popover";
 import type {
   ComposerFiltersProps,
   ComposerModelControlsProps,
@@ -157,6 +158,10 @@ export function ComposerControlsRow({
           sessionId={modelControls.currentQueueSessionId}
         />
       )}
+      <UsagePopover
+        sessionId={modelControls.currentQueueSessionId}
+        activePreset={modelControls.activePreset}
+      />
       <Button
         type={sendButton.isStopMode ? "button" : "submit"}
         size="icon"

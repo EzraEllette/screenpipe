@@ -657,6 +657,7 @@
         "tests/live_coverage_marker_test.rs",
         "tests/orphan_chunk_null_poisoning_test.rs",
         "tests/outputs_saf_test.rs",
+        "tests/range_export_frame_sources_test.rs",
         "tests/semantic_storage_test.rs",
         "tests/suggestions_frames_table_test.rs",
         "tests/timeline_frameless_audio_test.rs",
@@ -696,6 +697,7 @@
         "tests/close_severs_connections_test.rs",
         "tests/memory_pressure_test.rs",
         "tests/multi_pool_wal_parity_test.rs",
+        "tests/quarantine_self_heal_test.rs",
         "tests/sqlite_architecture_invariants_test.rs",
         "tests/sqlite_runtime_version.rs",
         "tests/wal_chaos_e2e_test.rs"
@@ -715,7 +717,7 @@
       "criticality": "high",
       "confidence": "partial",
       "kind": "mixed",
-      "notes": "SQLite hard-fault classification, failpoint VFS injection, fresh-identity recovery verification with integrity/FK/write canaries, query cancellation, close-severs-connections regressions, multi-pool WAL parity, runtime version pinning, and WAL chaos plus memory-pressure probes."
+      "notes": "SQLite hard-fault classification, failpoint VFS injection, fresh-identity recovery verification with integrity/FK/write canaries, query cancellation, close-severs-connections regressions, multi-pool WAL parity, runtime version pinning, and WAL chaos plus memory-pressure probes, plus read-only quarantine self-heal verification for transient IOERR faults."
     },
     {
       "id": "db-audio-meetings-speakers",
@@ -914,6 +916,7 @@
         "src/audio_manager/meeting_piggyback.rs",
         "src/audio_manager/piggyback_listeners.rs",
         "src/audio_manager/reconciliation.rs",
+        "src/audio_manager/write_retry.rs",
         "src/meeting_detector.rs",
         "src/meeting_processes.rs",
         "src/meeting_streaming/config.rs",

@@ -274,6 +274,72 @@ const learningState = (over: Record<string, unknown> = {}) => ({
     expect(await bannerPhase()).toBe("learning");
   });
 
+  // The bug that made this whole flow miss most people: the window only opened
+  // while the completion was younger than the ceiling, and it was resolved by an
+  // in-memory timer. Finish setup, close the app, come back — no banner, no
+  // empty state, no event, permanently. Measured on 2026-08-08: 35 of 49 people
+  // who finished setup reached no terminal state at all.
+  it("still offers a first summary to someone who comes back later", async () => {
+    await browser.execute((key: string) => {
+      window.localStorage.removeItem(key);
+    }, LEARNING_STORAGE_KEY);
+
+    await invokeOrThrow("reset_onboarding");
+    await invokeOrThrow("complete_onboarding");
+    // Well past the ceiling, well inside the grace: the returning-user case.
+    await invokeOrThrow("plugin:e2e|set_onboarding_completed_ago", {
+      seconds: 3 * 60 * 60,
+    });
+
+    await showWindow({ Home: { page: "home" } });
+    await waitForWindowHandle("home", t(20_000));
+    await browser.switchToWindow("home");
+    await browser.execute(() => {
+      window.location.href = "/home?section=home";
+    });
+
+    await browser.waitUntil(async () => (await bannerCount()) === 1, {
+      timeout: t(40_000),
+      timeoutMsg:
+        "no learning window after a late return — the grace window regressed",
+    });
+    // Learning, not settled: the window is anchored at this visit, so it has
+    // its full budget rather than being instantly expired by the old stamp.
+    expect(await bannerPhase()).toBe("learning");
+
+    const remaining = (await browser.execute(
+      () =>
+        document
+          .querySelector('[data-testid="first-run-learning-banner"]')
+          ?.textContent ?? "",
+    )) as string;
+    expect(remaining.length).toBeGreaterThan(0);
+  });
+
+  it("says which floor was missed instead of a blanket 'unknown'", async () => {
+    // Every empty window used to report `unknown`, so broken capture and an
+    // idle user were indistinguishable. Each reason now has to render copy the
+    // user can act on — a missing entry would render an empty paragraph.
+    for (const emptyReason of [
+      "no_frames_captured",
+      "below_frame_floor",
+      "single_app_below_floor",
+    ]) {
+      await openHomeWith(learningState({ phase: "empty", emptyReason }));
+      await browser.waitUntil(async () => (await bannerPhase()) === "empty", {
+        timeout: t(30_000),
+        timeoutMsg: `banner never settled for ${emptyReason}`,
+      });
+      const copy = (await browser.execute(
+        () =>
+          document.querySelector('[data-testid="first-run-empty-reason"]')
+            ?.textContent ?? "",
+      )) as string;
+      expect(copy.trim().length).toBeGreaterThan(0);
+      expect(copy.toLowerCase()).toMatch(/recording|captured|indexed|apps/);
+    }
+  });
+
   it("never renders for a user who did not just finish setup", async () => {
     // No recent completion is what every existing user looks like. `idle` is
     // included deliberately: it re-opens the window while a completion is

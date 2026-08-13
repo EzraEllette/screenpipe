@@ -55,9 +55,9 @@ const SOURCE_STATUS_LABELS: Record<LiveViewSourceStatus, string | null> = {
 const SOURCE_STATUS_TITLES: Record<LiveViewSourceStatus, string | null> = {
   auto: null,
   manual:
-    "This scheduled task has no schedule, so this block only changes when you press refresh.",
+    "This task has no schedule, so this block only changes when you press refresh.",
   paused:
-    "This scheduled task is turned off, so this block only changes when you press refresh.",
+    "This task is turned off, so this block only changes when you press refresh.",
   unknown: null,
 };
 

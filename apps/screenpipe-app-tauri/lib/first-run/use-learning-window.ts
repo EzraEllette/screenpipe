@@ -16,13 +16,14 @@ import {
   canResolveYet,
   capturedAppsFrom,
   claimLearningSeed,
+  classifyEmptyReason,
   hasEnoughEvidence,
+  learningWindowOpening,
   learningWindowRemainingMs,
   markLearningDone,
   markLearningEmpty,
   markLearningReady,
   releaseLearningSeed,
-  normalizeEmptyReason,
   readLearningWindow,
   type FirstRunCapturedApp,
   type FirstRunLearningState,
@@ -31,6 +32,7 @@ import { fetchRecentActivity } from "@/lib/first-run/recent-activity";
 import {
   fetchFirstRunMedia,
   mediaMarkdown,
+  preserveFirstRunMedia,
 } from "@/lib/first-run/recent-media";
 import { seedFirstRunSummaryChat } from "@/lib/first-run/seed-summary-chat";
 import { summarizeFirstRunWithAi } from "@/lib/first-run/summarize-with-ai";
@@ -47,6 +49,17 @@ export type LearningWindowOptions = {
    *  with something we will not show. */
   aiPreset?: AIPreset | null;
   userToken?: string | null;
+  /**
+   * Whether `aiPreset`/`userToken` are known yet.
+   *
+   * Settings hydrate asynchronously, so before they land both read as absent —
+   * indistinguishable from a user who genuinely has no preset. Resolving in
+   * that gap spends the one-shot seed claim on a deterministic summary and the
+   * account never gets an AI-written one, because the claim is durable and the
+   * window only ever resolves once. Defaults to true so callers that already
+   * pass settled values are unaffected.
+   */
+  aiSettingsLoaded?: boolean;
 };
 
 /**
@@ -82,15 +95,14 @@ export function useLearningWindow(
       try {
         const result = await commands.getOnboardingStatus();
         if (cancelled || result.status !== "ok") return;
-        const completedAt = result.data.completedAt;
-        if (!completedAt) return;
-        const elapsed = Date.now() - Date.parse(completedAt);
-        // Only a setup that just finished opens a window. Anything older is a
-        // returning user, who must never see a first-run banner.
-        if (!Number.isFinite(elapsed) || elapsed < 0) return;
-        if (elapsed > LEARNING_WINDOW_CEILING_MS) return;
+        const opening = learningWindowOpening(result.data.completedAt);
+        if (opening.kind === "none") return;
         if (readLearningWindow().phase !== "idle") return;
-        setState(beginLearningWindow(completedAt));
+        // The only signal that a window ever opened. Without it an absent
+        // outcome is indistinguishable from a window that never started, and
+        // "never started" was by far the most common outcome.
+        posthog.capture("first_run_learning_started", { opening: opening.kind });
+        setState(beginLearningWindow(opening.anchor));
       } catch {
         // Without a status read there is no window; the app is unaffected.
       }
@@ -138,6 +150,12 @@ export function useLearningWindow(
       // Both gates: enough captured, and old enough that the summary is not
       // reporting on a few seconds of work.
       if (!hasEnoughEvidence(activity) || !canResolveYet(startedAt)) return;
+      // Third gate, and the reason it is worth having: the claim below is
+      // one-shot and durable. Resolving while the preset is still unknown
+      // costs the account its only AI-written summary, permanently, for a
+      // reason that resolves itself a moment later. The ceiling still settles
+      // the window if settings somehow never arrive.
+      if (aiRef.current.aiSettingsLoaded === false) return;
       if (seedingRef.current || !claimLearningSeed()) return;
       seedingRef.current = true;
 
@@ -153,10 +171,14 @@ export function useLearningWindow(
       // the same facts. If it declines, errors, times out, or answers with
       // something we will not show, the user still gets a real summary.
       const fallback = buildLearningSummary(detailed, { elapsedMs });
+      let fallbackReason: string | null = null;
       const written = await summarizeFirstRunWithAi(detailed, {
         elapsedMs,
         preset: aiRef.current.aiPreset,
         userToken: aiRef.current.userToken,
+        onFallback: (reason) => {
+          fallbackReason = reason;
+        },
       });
       // Writing the summary can take tens of seconds, and the user is free to
       // close this window or navigate during it. Hand the claim back so the
@@ -171,7 +193,12 @@ export function useLearningWindow(
       // is the thing itself. Appended after whichever text won so a media
       // failure can never cost the user the summary — and skipped entirely
       // when screenshots are off, where frame rows exist but pixels do not.
-      const media = await fetchFirstRunMedia(startedAt);
+      // Preserved before embedding, never after: the capture path is live and
+      // snapshot compaction deletes stills once they are ten minutes old, so a
+      // summary that links capture directly loses its proof long before most
+      // users open it — silently, because a broken local image hides itself.
+      const found = await fetchFirstRunMedia(startedAt);
+      const media = found ? await preserveFirstRunMedia(found) : null;
       const summary = media
         ? `${written ?? fallback}\n\n${mediaMarkdown(media)}`
         : (written ?? fallback);
@@ -198,10 +225,26 @@ export function useLearningWindow(
         frame_count: Number(activity.total_frames ?? 0),
         // Whether the model wrote it or we fell back. Content is never sent.
         summary_source: written ? "ai" : "deterministic",
+        // WHY it fell back. `summary_source` alone said the model did not
+        // write it but never which of "no preset", "signed out", "timed out"
+        // or "output rejected" happened, and those have different fixes.
+        fallback_reason: written ? null : (fallbackReason ?? "unknown"),
+        // Whether the model had anything beyond app names to work with. A
+        // summary written from containers alone reads templated even when a
+        // model wrote it, which is indistinguishable from AI being off.
+        snippet_count: Array.isArray(detailed.snippets)
+          ? detailed.snippets.length
+          : 0,
         // Whether the proof made it in. Media is the strongest part of the
         // first impression and the part most likely to be silently absent.
         has_media: Boolean(media),
         media_kind: media?.kind ?? "none",
+        // Whether the proof will still be there when the user opens the chat.
+        // `has_media` alone counted images that compaction was about to
+        // delete, so it read as success for a summary that arrived empty.
+        media_durable: media
+          ? media.kind === "video" || media.path !== found?.path
+          : false,
       });
       setState(markLearningReady(chatId));
     };
@@ -222,8 +265,14 @@ export function useLearningWindow(
     const settle = async () => {
       if (seedingRef.current) return;
       const activity = await fetchRecentActivity(startedAt);
-      const reason = normalizeEmptyReason(activity?.data_status);
-      posthog.capture("first_run_learning_empty", { reason });
+      const reason = classifyEmptyReason(activity);
+      posthog.capture("first_run_learning_empty", {
+        reason,
+        // The raw engine verdict alongside the derived one, so a future engine
+        // status cannot be silently folded into a local guess.
+        data_status: activity?.data_status ?? "none",
+        frame_count: Number(activity?.total_frames ?? 0),
+      });
       setState(markLearningEmpty(reason));
     };
 

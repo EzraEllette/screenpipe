@@ -42,6 +42,14 @@ export type FirstRunEmptyReason =
   | "not_recording"
   | "no_capture_in_range"
   | "empty_but_recording"
+  // Locally derived. The engine answers `unknown` for a range it simply has no
+  // rows for, which is also what "recording is fine, the user was idle" looks
+  // like — so every empty window used to report `unknown` and the one question
+  // worth answering (is capture broken, or was there nothing to capture?) was
+  // unanswerable. These split that from evidence we already hold.
+  | "no_frames_captured"
+  | "below_frame_floor"
+  | "single_app_below_floor"
   | "unknown";
 
 export type FirstRunCapturedApp = {
@@ -70,6 +78,18 @@ const STORAGE_KEY = "screenpipe.first-run.learning-window.v1";
  * write a truthful sentence about someone's work.
  */
 export const LEARNING_WINDOW_CEILING_MS = 5 * 60 * 1_000;
+
+/**
+ * How long after setup a first summary may still be offered.
+ *
+ * The ceiling is a budget for one sitting; it was also being used to decide
+ * whether the window may open at all, which quietly meant "finish setup and
+ * close the app inside five minutes and you never get a first summary, ever".
+ * That is the common case, not an edge case: setup ends, people leave. Within
+ * this grace the window opens on the next visit instead, anchored at that
+ * visit so the summary still describes work that actually happened.
+ */
+export const LEARNING_WINDOW_GRACE_MS = 24 * 60 * 60 * 1_000;
 
 /** How often we ask the engine what it has captured since the cutoff. */
 export const LEARNING_POLL_INTERVAL_MS = 3_000;
@@ -128,6 +148,21 @@ export type ActivityWindow = {
   minutes?: number;
 };
 
+/**
+ * A bounded, deduped excerpt of what was on screen or said out loud.
+ *
+ * Mirrors the engine's `ActivitySnippet`. This is the only field that carries
+ * what the work actually WAS rather than which container it happened in, which
+ * is why the summary reads like a real observation instead of a window list.
+ */
+export type ActivitySnippet = {
+  /** "screen" | "audio" */
+  source?: string;
+  text?: string;
+  app_name?: string | null;
+  window_name?: string | null;
+};
+
 export type ActivitySnapshot = {
   data_status?: string;
   total_frames?: number;
@@ -135,6 +170,7 @@ export type ActivitySnapshot = {
   apps?: ActivityApp[] | null;
   windows?: ActivityWindow[] | null;
   edited_files?: ActivityEditedFile[] | null;
+  snippets?: ActivitySnippet[] | null;
   // Mirrors the engine's AudioSummary exactly. These are not the names a
   // reasonable guess would produce, and getting them wrong fails silently:
   // the count reads 0 and the audio line simply never appears.
@@ -159,6 +195,37 @@ export function normalizeEmptyReason(
       // all, which is what a very short window looks like straight after boot.
       return "unknown";
   }
+}
+
+/**
+ * Why this window closed empty, using the evidence we already fetched.
+ *
+ * `normalizeEmptyReason` only speaks the engine's language, and the engine says
+ * `unknown` both when capture is broken and when the user simply did not work.
+ * Prefer a definite engine status; otherwise say which floor was missed, so a
+ * threshold can be tuned against data instead of taste.
+ */
+export function classifyEmptyReason(
+  activity: ActivitySnapshot | null | undefined,
+): FirstRunEmptyReason {
+  if (!activity) return "unknown";
+
+  const engineReason = normalizeEmptyReason(activity.data_status);
+  // A definite engine verdict always wins: it knows things the counts cannot
+  // show, such as the recorder being stopped outright.
+  if (engineReason !== "unknown") return engineReason;
+
+  const frames = Number(activity.total_frames ?? 0);
+  if (!Number.isFinite(frames) || frames <= 0) return "no_frames_captured";
+  if (frames < MIN_MULTI_APP_FRAMES) return "below_frame_floor";
+
+  // Enough frames to clear the multi-app floor, but only one app was seen, so
+  // the stricter single-app frame floor is what actually blocked the summary.
+  const appCount = capturedAppsFrom(activity, 0).length;
+  if (frames < MIN_EVIDENCE_FRAMES && appCount < MIN_EVIDENCE_APPS) {
+    return "single_app_below_floor";
+  }
+  return "unknown";
 }
 
 export function capturedAppsFrom(
@@ -193,6 +260,40 @@ export function hasEnoughEvidence(activity: ActivitySnapshot): boolean {
   // Moving between apps says more per frame than sitting in one, so a couple
   // of apps lowers the bar — but never below a real capture floor.
   return frames >= MIN_MULTI_APP_FRAMES && appCount >= MIN_EVIDENCE_APPS;
+}
+
+export type LearningWindowOpening =
+  | { kind: "none" }
+  /** Setup just ended; summarize from the moment it ended. */
+  | { kind: "immediate"; anchor: string }
+  /** Setup ended earlier today; summarize from this visit instead, because
+   *  nothing was captured while the app was closed. */
+  | { kind: "late"; anchor: string };
+
+/**
+ * Whether a completion should open a window now, and what the summary's lower
+ * time bound is. Pure so the decision is testable without a webview.
+ */
+export function learningWindowOpening(
+  completedAt: string | null | undefined,
+  now = Date.now(),
+): LearningWindowOpening {
+  if (!completedAt) return { kind: "none" };
+  const completed = Date.parse(completedAt);
+  if (!Number.isFinite(completed)) return { kind: "none" };
+
+  const elapsed = now - completed;
+  // A completion in the future is a clock problem, not a fresh setup.
+  if (elapsed < 0) return { kind: "none" };
+  if (elapsed <= LEARNING_WINDOW_CEILING_MS) {
+    return { kind: "immediate", anchor: completedAt };
+  }
+  if (elapsed <= LEARNING_WINDOW_GRACE_MS) {
+    return { kind: "late", anchor: new Date(now).toISOString() };
+  }
+  // Past the grace this is an ordinary returning user, who must never be shown
+  // a first-run banner.
+  return { kind: "none" };
 }
 
 /** Whether the window is old enough to resolve at all. */

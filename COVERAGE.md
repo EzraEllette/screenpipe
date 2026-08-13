@@ -18,29 +18,29 @@ results and `cargo llvm-cov` data on top when judging release confidence.
 
 ### Tauri E2E
 
-- Mapped specs: 104
-- Declared test blocks: 299
-- Weighted coverage points: 233.3
+- Mapped specs: 109
+- Declared test blocks: 314
+- Weighted coverage points: 246.5
 
 | Platform | Specs | Declared tests | Weighted points | Layers | Features | Critical score |
 | --- | --- | --- | --- | --- | --- | --- |
-| windows | 81 | 260 | 212.4 | 15 | 89 | 91% |
-| macos | 100 | 262 | 204.1 | 17 | 91 | 90% |
-| linux | 71 | 220 | 182.2 | 14 | 84 | 88% |
+| windows | 85 | 274 | 224.6 | 15 | 90 | 92% |
+| macos | 105 | 277 | 217.3 | 17 | 92 | 90% |
+| linux | 74 | 231 | 193.2 | 14 | 85 | 88% |
 
 ### Core Engine
 
 - Mapped suites: 32
-- Mapped Rust files: 317
-- Active test blocks: 2982
+- Mapped Rust files: 320
+- Active test blocks: 3056
 - Ignored/manual test blocks: 137
-- Weighted coverage points: 2451.4
+- Weighted coverage points: 2515.2
 
 | Platform | Suites | Active tests | Ignored tests | Weighted points | Layers | Flows | Critical score |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| windows | 29 | 2851 | 132 | 2391.4 | 21 | 11 | 100% |
-| macos | 29 | 2905 | 112 | 2402.5 | 22 | 11 | 100% |
-| linux | 25 | 2540 | 105 | 2110.3 | 20 | 11 | 100% |
+| windows | 29 | 2925 | 132 | 2455.2 | 21 | 11 | 100% |
+| macos | 29 | 2979 | 112 | 2466.3 | 22 | 11 | 100% |
+| linux | 25 | 2612 | 105 | 2172.7 | 20 | 11 | 100% |
 
 ## Refresh
 

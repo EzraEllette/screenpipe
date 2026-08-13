@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import {
   ACCOUNT_PLANS,
   accountPlanForEntitlement,
+  businessCapacityTier,
 } from "./account-plan-options";
 
 describe("account plan options", () => {
@@ -21,6 +22,51 @@ describe("account plan options", () => {
     expect(ACCOUNT_PLANS[0].monthly).toBe(0);
     expect(ACCOUNT_PLANS[1].monthly).toBe(25);
     expect(ACCOUNT_PLANS[2].monthly).toBe(50);
+  });
+
+  describe("business capacity levels", () => {
+    it("states Max and Ultra's own price, not the $50 Business seat", () => {
+      // A Business Max account used to read "$50 / seat / month" under a
+      // "your plan" badge while actually paying $100.
+      expect(businessCapacityTier("pro_max")).toEqual({
+        name: "business max",
+        monthly: 100,
+      });
+      expect(businessCapacityTier("pro_ultra")).toEqual({
+        name: "business ultra",
+        monthly: 200,
+      });
+    });
+
+    it("accepts the business_* aliases and is case-insensitive", () => {
+      expect(businessCapacityTier("business_max")?.monthly).toBe(100);
+      expect(businessCapacityTier("BUSINESS_ULTRA")?.monthly).toBe(200);
+      expect(businessCapacityTier("  pro_max  ")?.monthly).toBe(100);
+    });
+
+    it("leaves every plan the business card already describes correctly", () => {
+      // These must stay null or the base card would restate itself.
+      for (const plan of [
+        "pro",
+        "business",
+        "standard",
+        "lifetime",
+        "team",
+        "enterprise",
+        "none",
+        "",
+        null,
+        undefined,
+      ]) {
+        expect(businessCapacityTier(plan)).toBeNull();
+      }
+    });
+
+    it("prices agree with the upgrade path in lib/app-entitlement", () => {
+      // Drift here would quote one price on the card and another at checkout.
+      expect(businessCapacityTier("pro_max")?.monthly).toBe(100);
+      expect(businessCapacityTier("pro_ultra")?.monthly).toBe(200);
+    });
   });
 
   describe("current plan", () => {

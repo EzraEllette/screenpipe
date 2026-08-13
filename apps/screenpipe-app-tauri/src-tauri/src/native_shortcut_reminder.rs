@@ -32,9 +32,9 @@ mod ffi {
         pub fn shortcut_is_available() -> c_int;
         pub fn shortcut_show(json: *const c_char) -> c_int;
         pub fn shortcut_hide() -> c_int;
+        pub fn shortcut_show_notification(json: *const c_char) -> c_int;
         pub fn shortcut_set_meeting_active(active: c_int);
         pub fn shortcut_set_meeting_stop_result(succeeded: c_int);
-        pub fn shortcut_set_inbox_unread(count: c_int);
         pub fn shortcut_set_health_state(state: *const c_char) -> c_int;
         pub fn shortcut_get_frame(
             x: *mut f64,
@@ -74,6 +74,19 @@ mod ffi {
         hidden
     }
 
+    /// Render a notification attached to the pill. False when the pill is not
+    /// on screen or cannot represent the payload, so the caller falls back to
+    /// the standalone notification panel.
+    pub fn show_notification(json: &str) -> bool {
+        if !super::is_reminder_visible() {
+            return false;
+        }
+        match CString::new(json) {
+            Ok(c) => unsafe { shortcut_show_notification(c.as_ptr()) == 0 },
+            Err(_) => false,
+        }
+    }
+
     pub fn set_meeting_active(active: bool) {
         unsafe {
             shortcut_set_meeting_active(if active { 1 } else { 0 });
@@ -83,13 +96,6 @@ mod ffi {
     pub fn set_meeting_stop_result(succeeded: bool) {
         unsafe {
             shortcut_set_meeting_stop_result(if succeeded { 1 } else { 0 });
-        }
-    }
-
-    /// Unread pipe-notification count for the pill's bell dot.
-    pub fn set_inbox_unread(count: i32) {
-        unsafe {
-            shortcut_set_inbox_unread(count);
         }
     }
 
@@ -131,9 +137,11 @@ mod ffi {
     pub fn hide() -> bool {
         false
     }
+    pub fn show_notification(_json: &str) -> bool {
+        false
+    }
     pub fn set_meeting_active(_active: bool) {}
     pub fn set_meeting_stop_result(_succeeded: bool) {}
-    pub fn set_inbox_unread(_count: i32) {}
     pub fn get_frame() -> Option<(f64, f64, f64, f64)> {
         None
     }
