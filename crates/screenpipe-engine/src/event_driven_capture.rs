@@ -2344,6 +2344,30 @@ fn resolve_capture_metadata_with_policy(
     (app_name, window_name, browser_url, document_path)
 }
 
+/// Final privacy gate for captures that reached metadata resolution without a
+/// conclusive tree-walk skip. Keep this decision in one place so every value
+/// that can reach `paired_capture` is covered by the same policy. Built-in
+/// incognito matching is limited to the focus-owning monitor; manual patterns
+/// preserve their existing all-monitor behavior.
+fn resolved_window_matches_privacy_filters(
+    ignore_incognito_windows: bool,
+    resolved_window_hosts_focus: bool,
+    ignored_patterns: &[WindowPattern],
+    app_name: Option<&str>,
+    window_name: Option<&str>,
+) -> bool {
+    if resolved_window_hosts_focus
+        && ignore_incognito_windows
+        && window_name.is_some_and(screenpipe_a11y::incognito::is_title_private)
+    {
+        return true;
+    }
+
+    let app_name = app_name.unwrap_or_default().to_lowercase();
+    let window_name = window_name.unwrap_or_default().to_lowercase();
+    window_pattern::matches_any(ignored_patterns, &app_name, &window_name)
+}
+
 /// Rate-limit OCR-heavy apps. Two groups:
 ///
 /// **Terminals** (wezterm/alacritty/…): bypass accessibility entirely and
@@ -3065,30 +3089,33 @@ async fn do_capture(
         });
     }
 
-    // Final ignored-window gate: check resolved metadata (app + window) against
-    // ignored patterns. This catches edge cases where the tree walk succeeded but
-    // didn't return Skipped (e.g. the trigger carried the app name, not the tree).
-    // Uses full `window_pattern` semantics, so scoped `App::Title` patterns fire
-    // here even though earlier app-only gates intentionally skipped them. Reuses
-    // the patterns parsed above.
-    {
+    // Final privacy gate: apply title-based incognito detection and ignored-window
+    // patterns to resolved metadata. This catches edge cases where the tree walk
+    // returned no verdict while focus ownership remained confirmed (for example,
+    // a WindowFocus trigger still supplied the window title). Uses full
+    // `window_pattern` semantics, so scoped `App::Title` patterns still fire here.
+    if resolved_window_matches_privacy_filters(
+        params.tree_walker_config.ignore_incognito_windows,
+        monitor_hosts_focus,
+        &params.ignored_patterns,
+        app_name_owned.as_deref(),
+        window_name_owned.as_deref(),
+    ) {
         let check_app = app_name_owned.as_deref().unwrap_or_default().to_lowercase();
         let check_win = window_name_owned
             .as_deref()
             .unwrap_or_default()
             .to_lowercase();
-        if window_pattern::matches_any(&params.ignored_patterns, &check_app, &check_win) {
-            debug!(
-                "skipping capture: resolved app='{}' / window='{}' matches ignored pattern on monitor {}",
-                check_app, check_win, params.monitor_id
-            );
-            return Ok(CaptureOutput {
-                result: None,
-                image,
-                elements_deduped: false,
-                corrupt: None,
-            });
-        }
+        debug!(
+            "skipping capture: resolved app='{}' / window='{}' matches privacy filter on monitor {}",
+            check_app, check_win, params.monitor_id
+        );
+        return Ok(CaptureOutput {
+            result: None,
+            image,
+            elements_deduped: false,
+            corrupt: None,
+        });
     }
 
     // DRM content detection: check if the focused app/URL is a streaming service.
@@ -3816,6 +3843,79 @@ mod tests {
 
         assert_eq!(app_name.as_deref(), Some("Telegram"));
         assert_eq!(window_name.as_deref(), Some("Fresh Title"));
+    }
+
+    #[test]
+    fn incognito_setting_filters_resolved_title_when_tree_walk_is_unavailable() {
+        let trigger = CaptureTrigger::WindowFocus {
+            window_name: "Private search - Google Chrome (Incognito)".into(),
+            target: None,
+        };
+        let (app_name, window_name, _, _) = resolve_capture_metadata(None, &trigger, None);
+
+        assert!(
+            resolved_window_matches_privacy_filters(
+                true,
+                true,
+                &[],
+                app_name.as_deref(),
+                window_name.as_deref(),
+            ),
+            "ignoreIncognitoWindows must still reject an Incognito title when the AX tree walk is unavailable"
+        );
+    }
+
+    #[test]
+    fn resolved_incognito_fallback_respects_toggle_and_preserves_other_filters() {
+        let normal_title = "Private API docs - Google Chrome";
+        let private_title = "Private search - Google Chrome (Incognito)";
+
+        assert!(!resolved_window_matches_privacy_filters(
+            true,
+            true,
+            &[],
+            Some("Google Chrome"),
+            Some(normal_title),
+        ));
+        assert!(!resolved_window_matches_privacy_filters(
+            false,
+            true,
+            &[],
+            Some("Google Chrome"),
+            Some(private_title),
+        ));
+
+        let manual_patterns = WindowPattern::parse_list(&["Private API docs".to_string()]);
+        assert!(resolved_window_matches_privacy_filters(
+            false,
+            false,
+            &manual_patterns,
+            Some("Google Chrome"),
+            Some(normal_title),
+        ));
+        assert!(!resolved_window_matches_privacy_filters(
+            true,
+            false,
+            &[],
+            Some("Google Chrome"),
+            Some(private_title),
+        ));
+        assert!(!resolved_window_matches_privacy_filters(
+            true,
+            true,
+            &[],
+            Some("Google Chrome"),
+            None,
+        ));
+
+        let app_patterns = WindowPattern::parse_list(&["Google Chrome".to_string()]);
+        assert!(resolved_window_matches_privacy_filters(
+            true,
+            false,
+            &app_patterns,
+            Some("Google Chrome"),
+            None,
+        ));
     }
 
     #[test]
