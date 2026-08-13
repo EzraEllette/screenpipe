@@ -267,17 +267,19 @@ fn build_command_for_path(path: &str) -> Command {
                 cmd.arg(js);
                 return cmd;
             }
-            // Not a bun shim or resolution failed — run .exe directly
-            Command::new(path)
+            // Not a bun shim or resolution failed — run .exe directly. Still a
+            // console program, so it gets the same treatment as the bun path
+            // above rather than being the one branch that flashes.
+            screenpipe_core::no_window_command(path)
         } else {
-            Command::new(path)
+            screenpipe_core::no_window_command(path)
         }
     } else if let Some(bun) = find_bun_executable() {
         let mut cmd = bun_command(&bun);
         cmd.arg(path);
         cmd
     } else {
-        Command::new(path)
+        screenpipe_core::no_window_command(path)
     }
 }
 
@@ -290,7 +292,9 @@ fn build_command_for_path(path: &str) -> Command {
         cmd.arg(path);
         cmd
     } else {
-        Command::new(path)
+        // A no-op off Windows, kept in the same shape as the windows arm so
+        // both read as "every command this factory returns is guarded".
+        screenpipe_core::no_window_command(path)
     }
 }
 
@@ -1239,7 +1243,12 @@ fn apply_no_window(cmd: &mut Command) {
 }
 
 fn bun_command(bun: &str) -> Command {
-    let mut cmd = Command::new(bun);
+    // No-window at construction, not left to `run_command_output`: bun is a
+    // console program and not every caller runs it through that helper. The
+    // screenpipe-mcp prewarm spawns this directly at every launch and waits up
+    // to two minutes for it, so the missing flag was a terminal sitting on the
+    // user's desktop for the whole startup.
+    let mut cmd = screenpipe_core::no_window_command(bun);
     // Single source of truth in screenpipe-core: on Linux, bun subprocesses
     // must not inherit the app's LD_LIBRARY_PATH, or bundled runtimes like
     // AppImage can make bun crash before it prints diagnostics.

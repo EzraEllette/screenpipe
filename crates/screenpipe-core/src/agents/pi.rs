@@ -2880,14 +2880,18 @@ pub fn scrub_bun_runtime_env(cmd: &mut std::process::Command) {
     }
 }
 
+/// bun is a console program, so the flag belongs here and not at the call
+/// sites. A factory that hands out an unguarded `Command` makes every caller
+/// responsible for remembering it, and the callers that spawn directly instead
+/// of going through a `*_output` helper did not.
 fn std_bun_command(bun: &str) -> std::process::Command {
-    let mut cmd = std::process::Command::new(bun);
+    let mut cmd = crate::no_window::no_window_command(bun);
     scrub_bun_runtime_env(&mut cmd);
     cmd
 }
 
 fn tokio_bun_command(bun: &str) -> tokio::process::Command {
-    let mut cmd = tokio::process::Command::new(bun);
+    let mut cmd = crate::no_window::no_window_command_async(bun);
     if should_scrub_bun_runtime_env() {
         cmd.env_remove("LD_LIBRARY_PATH");
     }
@@ -3210,7 +3214,7 @@ fn build_async_command(path: &str) -> tokio::process::Command {
                 c
             }
         } else {
-            tokio::process::Command::new(path)
+            crate::no_window::no_window_command_async(path)
         };
 
         // Inject bundled bun directory into PATH so node_modules resolve correctly.

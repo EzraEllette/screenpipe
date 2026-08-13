@@ -12,8 +12,14 @@
  *
  * A category is just a named bundle of ordinary rules. Turning it on appends
  * them, turning it off removes exactly the ones it owns, and everything the
- * user wrote by hand is left alone. There is no new stored field and no engine
- * change: the recorder keeps matching the same two string arrays it always did.
+ * user wrote by hand is left alone. There is no engine change: the recorder
+ * keeps matching the same two string arrays it always did.
+ *
+ * Honouring "exactly the ones it owns" does need one stored field. Exact-string
+ * matching cannot separate a category's `chase.com` from the user's, so the
+ * entries a category actually created are recorded alongside them. Without that
+ * record, enabling a category adopted the user's identical entry and disabling
+ * it deleted their privacy exclusion outright.
  *
  * The tradeoff that buys: if a category's contents change in a later release,
  * users who already enabled it keep the rules they got. That is the price of
@@ -185,43 +191,99 @@ export function categoryState(
 	return present === total ? "on" : "partial";
 }
 
+/**
+ * The entries this app added on behalf of a category.
+ *
+ * Exact-string matching is not enough to tell them apart from the user's own
+ * work. `chase.com` typed by hand into the domain blocklist is byte-identical
+ * to the one the banking category ships, so enabling the category silently
+ * adopted it and disabling the category deleted it — a privacy exclusion
+ * vanishing with no warning. Domains have no scoped form to disambiguate,
+ * so provenance has to be recorded.
+ *
+ * Declared as a type alias, not an interface: this is persisted in the
+ * settings store, whose values must satisfy a `JsonValue` index signature, and
+ * only a type alias gets one implicitly.
+ */
+export type CategoryOwnedFilters = {
+	apps: string[];
+	domains: string[];
+};
+
 export interface CategoryTargets {
 	rules: WindowRules;
 	ignoredUrls: string[];
+	/** Absent on state written before provenance was recorded — see `disableCategory`. */
+	owned?: CategoryOwnedFilters;
 }
 
-/** Apply every rule a category owns. Idempotent. */
+/**
+ * Apply every rule a category owns. Idempotent.
+ *
+ * An entry that is already present belongs to the user. The category still
+ * relies on it for matching, but does not claim it, so turning the category
+ * back off leaves it in place.
+ */
 export function enableCategory(
 	targets: CategoryTargets,
 	category: CaptureCategory,
 ): CategoryTargets {
 	let rules = targets.rules;
-	for (const app of category.apps) rules = addRule(rules, app, "ignored");
-
 	let ignoredUrls = [...targets.ignoredUrls];
-	for (const domain of category.domains) ignoredUrls = addDomain(ignoredUrls, domain);
+	const apps = [...(targets.owned?.apps ?? [])];
+	const domains = [...(targets.owned?.domains ?? [])];
 
-	return { rules, ignoredUrls };
+	for (const app of category.apps) {
+		const userAlreadyHadIt = hasRule(rules.ignored, app);
+		rules = addRule(rules, app, "ignored");
+		if (!userAlreadyHadIt && !apps.includes(app)) apps.push(app);
+	}
+
+	for (const domain of category.domains) {
+		const userAlreadyHadIt = hasDomain(ignoredUrls, domain);
+		ignoredUrls = addDomain(ignoredUrls, domain);
+		if (!userAlreadyHadIt && !domains.includes(domain)) domains.push(domain);
+	}
+
+	return { rules, ignoredUrls, owned: { apps, domains } };
 }
 
 /**
- * Remove every rule a category owns, and nothing else.
+ * Remove only the entries this app added, and nothing else.
  *
- * Matching is by exact entry, so a rule the user wrote themselves survives even
- * when it targets the same app. Turning a category off must never delete work
- * the user did by hand.
+ * Turning a category off must never delete work the user did by hand, so an
+ * entry the user already had when the category was switched on is left behind.
+ *
+ * Legacy state carries no provenance, because it was written before this was
+ * recorded. Such a category falls back to removing everything it names, which
+ * is the old behaviour: the alternative is a switch that can never turn off.
+ * A hand-written entry colliding with a category the user enabled *before*
+ * upgrading is therefore still lost on its first disable; from the next enable
+ * onward provenance is recorded and the entry is safe.
  */
 export function disableCategory(
 	targets: CategoryTargets,
 	category: CaptureCategory,
 ): CategoryTargets {
+	const legacyStateWithoutProvenance = targets.owned === undefined;
+	const apps = new Set(targets.owned?.apps ?? []);
+	const domains = new Set(targets.owned?.domains ?? []);
+
 	let rules = targets.rules;
-	for (const app of category.apps) rules = removeRule(rules, app, "ignored");
+	for (const app of category.apps) {
+		if (!legacyStateWithoutProvenance && !apps.has(app)) continue;
+		rules = removeRule(rules, app, "ignored");
+		apps.delete(app);
+	}
 
 	let ignoredUrls = [...targets.ignoredUrls];
-	for (const domain of category.domains) ignoredUrls = removeDomain(ignoredUrls, domain);
+	for (const domain of category.domains) {
+		if (!legacyStateWithoutProvenance && !domains.has(domain)) continue;
+		ignoredUrls = removeDomain(ignoredUrls, domain);
+		domains.delete(domain);
+	}
 
-	return { rules, ignoredUrls };
+	return { rules, ignoredUrls, owned: { apps: [...apps], domains: [...domains] } };
 }
 
 /**

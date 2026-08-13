@@ -284,6 +284,11 @@ export type Settings = SettingsStore & {
 	updateChannel?: UpdateChannel;
 	chatHistory?: ChatHistoryStore;
 	ignoredUrls?: string[];
+	/**
+	 * Entries the capture-category switches created, so turning a category off
+	 * removes only those and never a rule the user wrote by hand.
+	 */
+	categoryOwnedFilters?: { apps: string[]; domains: string[] };
 	searchShortcut?: string;
 	lockVaultShortcut?: string;
 	/** When true, audio devices follow system default and auto-switch on changes */

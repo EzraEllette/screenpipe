@@ -301,13 +301,42 @@ fn parse_anchor(s: &str) -> Option<Anchor> {
     })
 }
 
+/// The started-meeting toast, minus its auto-dismiss so it stays up long enough
+/// to be aimed at. Raised through `show_notification` because `Cmd::Update`
+/// deliberately does not carry a notification — which is why the deepest stack
+/// the pill has (dock, disclosure, card, toast) could not be clicked through in
+/// the preview at all until now.
+const MEETING_TOAST: &str = r#"{
+    "id": "meeting-started-42",
+    "title": "meeting detected",
+    "body": "google meet — product sync",
+    "actions": [
+        {"label": "open note + HD", "action": "record-hd"},
+        {"label": "open note", "action": "deeplink",
+         "url": "screenpipe://meeting/42", "primary": true}
+    ]
+}"#;
+
 /// Drive the real window through the flows so the interaction — not just the
 /// pixels — gets exercised, then leave it up and interactive for a human.
-fn live(anchor: Anchor, cycle: bool) {
+fn live(anchor: Anchor, cycle: bool, toast: bool) {
     let overlay = Overlay::spawn(|action| println!("action: {action}"));
     overlay.show();
 
-    let resting = OverlayState { anchor, ..base() };
+    let resting = if toast {
+        // The deepest stack the pill has, and the only one where every reach is
+        // exercised: chip → disclosure → live card → toast, with the card
+        // unpinned so it exists only while the pointer is on its way to it.
+        OverlayState {
+            anchor,
+            meeting_active: true,
+            meeting_id: Some(42),
+            transcript: meeting_lines(),
+            ..base()
+        }
+    } else {
+        OverlayState { anchor, ..base() }
+    };
 
     if cycle {
         let script: Vec<(u64, OverlayState)> = flows()
@@ -333,6 +362,17 @@ fn live(anchor: Anchor, cycle: bool) {
 
     println!("resting pill is up at {anchor:?} — hover it, click it, drag it. ctrl-c to quit");
     overlay.update(resting.clone());
+    if toast {
+        // `show` is a message to the overlay thread and the toast is refused
+        // until it lands, so wait for the window instead of racing it.
+        while !overlay.is_visible() {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        match overlay.show_notification(MEETING_TOAST) {
+            Ok(()) => println!("toast raised — aim at 'open note' and click"),
+            Err(reason) => eprintln!("toast refused: {reason}"),
+        }
+    }
 
     // Feed a speech-shaped level the way the engine would. Real speech arrives
     // in bursts with gaps; holding one number would tell us nothing about
@@ -374,12 +414,13 @@ pub fn run() -> windows::core::Result<()> {
                 .and_then(|a| parse_anchor(a))
                 .unwrap_or(Anchor::BottomCenter);
             let cycle = !args.iter().any(|a| a == "--no-cycle");
-            live(anchor, cycle);
+            let toast = args.iter().any(|a| a == "--toast");
+            live(anchor, cycle, toast);
             Ok(())
         }
         _ => {
             eprintln!(
-                "usage: overlay-preview shots [dir]\n       overlay-preview live-shots [dir]\n       overlay-preview live [anchor] [--no-cycle]\n\nanchors: top-left top-center top-right middle-left middle-right\n         bottom-left bottom-center bottom-right"
+                "usage: overlay-preview shots [dir]\n       overlay-preview live-shots [dir]\n       overlay-preview live [anchor] [--no-cycle] [--toast]\n\nanchors: top-left top-center top-right middle-left middle-right\n         bottom-left bottom-center bottom-right"
             );
             Ok(())
         }

@@ -137,19 +137,55 @@ impl Layout {
 
     /// True when the point is over any painted surface — what decides whether
     /// the window keeps the pointer or lets it fall through to the desktop.
+    ///
+    /// Every block the renderer draws has to be listed. The disclosure row was
+    /// missing, so resting the pointer on the shortcut hint read as "off the
+    /// pill": the dock collapsed, which took the hint away, which put the
+    /// pointer back on the chip — the pill flickered and its hit zone felt a
+    /// fraction of its size.
     pub fn is_opaque_at(&self, px: f32, py: f32) -> bool {
-        let surfaces = [Some(self.primary), self.transcript, self.notification]
-            .into_iter()
-            .flatten();
-        for r in surfaces {
-            // A couple of DIP of slack keeps the hover from flickering on the
-            // 1px border, which is where the pointer naturally lands.
-            if r.inset(-2.0, -2.0).contains(px, py) {
-                return true;
-            }
-        }
-        false
+        [
+            Some(self.primary),
+            self.disclosure,
+            self.transcript,
+            self.notification,
+        ]
+        .into_iter()
+        .flatten()
+        .any(|r| with_slack(r).contains(px, py))
     }
+
+    /// True when the point is anywhere inside the overlay's own box, painted or
+    /// not — the corridor the pointer travels along to reach an attachment.
+    ///
+    /// The blocks are separated by transparent gaps, and a layered window is
+    /// not sent mouse messages over a transparent pixel: crossing from the pill
+    /// to the card arrives as `WM_MOUSELEAVE`. Collapsing there would take the
+    /// card away mid-reach, so an exit is only believed once the pointer is out
+    /// of this rect. macOS debounces the same crossing in `scheduleHoverExit`.
+    pub fn is_in_corridor(&self, px: f32, py: f32) -> bool {
+        self.window.contains(px, py)
+    }
+
+    /// True when the point is over the notification row.
+    ///
+    /// Reading a toast must neither open nor close the dock. Expanding restacks
+    /// everything between the pill and the toast — the disclosure row, the
+    /// transcript card — which slides the toast out from under the pointer, so
+    /// the click that follows lands on whatever took its place: a dock cell,
+    /// usually the timeline. macOS gives the toast its own panel, where
+    /// hovering it *holds* the pill's expansion rather than driving it; this is
+    /// the same rule expressed in one window.
+    pub fn is_notification_at(&self, px: f32, py: f32) -> bool {
+        self.notification
+            .is_some_and(|r| with_slack(r).contains(px, py))
+    }
+}
+
+/// A couple of DIP of slack keeps the hover from flickering on the 1px border,
+/// which is where the pointer naturally lands.
+fn with_slack(r: Rect) -> Rect {
+    r.inset(-2.0, -2.0)
 }
 
 /// Width of the primary surface for the current state.
@@ -527,6 +563,88 @@ mod tests {
     }
 
     #[test]
+    fn expanding_under_the_pointer_slides_the_toast_off_its_own_button() {
+        // Why the pointer must not expand the pill from the toast: hovering
+        // inserts the dock's extra height, the disclosure row, and the
+        // transcript card between the pill and the toast, so the "open note"
+        // button jumps ~190pt and a dock cell — the timeline — lands where the
+        // pointer already is. This asserts the displacement so the guard in
+        // `is_notification_at` cannot be dropped as redundant.
+        let mut s = OverlayState {
+            anchor: Anchor::BottomRight,
+            meeting_active: true,
+            transcript: vec![TranscriptItem {
+                speaker: "louis".into(),
+                text: "shipping the native overlay".into(),
+                device_type: "input".into(),
+            }],
+            notification: parse(
+                r#"{"id":"m","title":"meeting detected","body":"google meet","actions":[
+                    {"label":"open note","action":"deeplink","primary":true},
+                    {"label":"open note + HD","action":"api"}]}"#,
+            )
+            .ok(),
+            ..Default::default()
+        };
+
+        let resting = compute(&s);
+        let toast = resting.notification.expect("toast");
+        let (control, button) = notification_action_rects(&s, toast, resting.scale)[0];
+        assert_eq!(
+            control,
+            Control::NotificationAction0,
+            "primary is 'open note'"
+        );
+        let (px, py) = (button.x + button.w / 2.0, button.y + button.h / 2.0);
+        assert_eq!(resting.hit_test(px, py), Some(Control::NotificationAction0));
+        assert!(resting.is_notification_at(px, py));
+
+        s.hovering = true;
+        let expanded = compute(&s);
+        // The pill hugs the bottom edge, so the window grows the other way and
+        // a pointer standing still on screen sits this much further down the
+        // client area than it did.
+        let grew = expanded.window.h - resting.window.h;
+        assert!(
+            grew > 100.0,
+            "dock, disclosure and card all wedge in: {grew}"
+        );
+        assert_ne!(
+            expanded.hit_test(px, py + grew),
+            Some(Control::NotificationAction0),
+            "the button the pointer was aiming at moved out from under it"
+        );
+        assert!(
+            !expanded.is_notification_at(px, py + grew),
+            "toast moved away"
+        );
+    }
+
+    #[test]
+    fn the_toast_is_the_only_surface_that_freezes_the_dock() {
+        // The pill and the transcript still drive expansion — only the toast
+        // holds it, so the rule cannot silently swallow the pill's own hover.
+        let mut s = hovered();
+        s.meeting_active = true;
+        s.transcript_pinned = true;
+        s.transcript = vec![TranscriptItem {
+            speaker: "louis".into(),
+            text: "hello".into(),
+            device_type: "input".into(),
+        }];
+        s.notification = parse(r#"{"id":"m","title":"meeting started"}"#).ok();
+        let l = compute(&s);
+        let p = l.primary;
+        assert!(!l.is_notification_at(p.x + p.w / 2.0, p.y + p.h / 2.0));
+        let t = l.transcript.expect("transcript");
+        assert!(!l.is_notification_at(t.x + t.w / 2.0, t.y + t.h / 2.0));
+        assert!(
+            !l.is_notification_at(0.5, 0.5),
+            "shadow ring is not the toast"
+        );
+    }
+
+    #[test]
     fn the_notification_row_hugs_its_content() {
         // Two 14pt text rows, or a 22pt action button, is everything the row
         // has to hold. Whatever is left over reads as an empty black band, so
@@ -651,5 +769,66 @@ mod tests {
         let l = compute(&OverlayState::default());
         assert!(!l.is_opaque_at(0.5, 0.5), "shadow padding is click-through");
         assert!(l.is_opaque_at(l.primary.x + 1.0, l.primary.y + 1.0));
+    }
+
+    #[test]
+    fn every_painted_block_counts_as_the_pill() {
+        // A block the renderer draws but this does not know about reads as "the
+        // pointer left the pill": the dock collapses, which takes that block
+        // away, which flickers the whole overlay. The disclosure row shipped
+        // exactly that way.
+        let mut s = hovered();
+        s.meeting_active = true;
+        s.transcript = vec![TranscriptItem {
+            speaker: "louis".into(),
+            text: "hello".into(),
+            device_type: "input".into(),
+        }];
+        s.notification = parse(r#"{"id":"m","title":"meeting started"}"#).ok();
+        let l = compute(&s);
+        for (name, r) in [
+            ("primary", Some(l.primary)),
+            ("disclosure", l.disclosure),
+            ("transcript", l.transcript),
+            ("notification", l.notification),
+        ] {
+            let r = r.unwrap_or_else(|| panic!("{name} should be laid out"));
+            assert!(
+                l.is_opaque_at(r.x + r.w / 2.0, r.y + r.h / 2.0),
+                "{name} is painted but does not hold the hover"
+            );
+        }
+    }
+
+    #[test]
+    fn the_gaps_between_blocks_are_a_corridor_not_an_exit() {
+        // Reaching the card's buttons means crossing 4pt of transparency, which
+        // a layered window reports as the pointer leaving. Believing that would
+        // close the card mid-reach, so the gap has to stay inside the overlay.
+        let mut s = hovered();
+        s.meeting_active = true;
+        s.transcript = vec![TranscriptItem {
+            speaker: "louis".into(),
+            text: "hello".into(),
+            device_type: "input".into(),
+        }];
+        let l = compute(&s);
+        let card = l.transcript.expect("card");
+        let disclosure = l.disclosure.expect("disclosure");
+        // Bottom anchors stack the card above the disclosure, so the gap is
+        // between the two.
+        let gap_y = (card.bottom() + disclosure.y) / 2.0;
+        let gap_x = l.primary.x + l.primary.w / 2.0;
+        assert!(
+            l.is_in_corridor(gap_x, gap_y),
+            "the gap is still inside the overlay, so hover survives the reach"
+        );
+        // The shadow ring is the honest case: fully transparent, so win32 sends
+        // no message there at all and the pointer's own position is the only
+        // way to tell a reach from an exit.
+        assert!(!l.is_opaque_at(0.5, 0.5), "shadow ring is not painted");
+        assert!(l.is_in_corridor(0.5, 0.5), "but it is not an exit either");
+        assert!(!l.is_in_corridor(-1.0, gap_y), "outside the box is an exit");
+        assert!(!l.is_in_corridor(gap_x, l.window.bottom() + 1.0));
     }
 }
