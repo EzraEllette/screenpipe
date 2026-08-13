@@ -244,10 +244,17 @@ pub fn suppressed_now(
 // So: one ledger of when each distinct alert last surfaced, consulted at the
 // same choke point as the reduced states.
 //
-// Keyed on `(type, pipe, title)`, not on type alone. Our type vocabulary is
-// coarse — `pipe`, `system`, `meeting` — so a type-only cooldown would let one
-// chatty pipe mute every other pipe's alerts. The triple is the narrowest
-// identity that still collapses a genuine repeat.
+// Keyed on `(type, pipe, title, body)`, not on type alone. Our type vocabulary
+// is coarse — `pipe`, `system`, `meeting` — so a type-only cooldown would let
+// one chatty pipe mute every other pipe's alerts.
+//
+// The body is in the identity because for some producers it carries the only
+// thing that differs between two genuinely distinct alerts. A meeting alert
+// with no calendar match is titled "meeting detected" whatever the meeting is
+// and names it in the body, so keying on the title alone made the second
+// meeting inside the five-minute window an "identical repeat" and dropped it —
+// taking its "open note" button with it. Two alerts that agree on all four
+// fields really are the same alert; two that differ in the body are not.
 
 /// How long an identical alert stays muted after it surfaces.
 ///
@@ -277,12 +284,18 @@ pub fn repeat_cooldown_ms(notification_type: Option<&str>) -> i64 {
 
 /// Identity of an alert for repeat purposes. `\u{1}` can't appear in a JSON
 /// string value, so the parts can't run together to forge a collision.
-pub fn repeat_key(notification_type: Option<&str>, pipe_name: Option<&str>, title: &str) -> String {
+pub fn repeat_key(
+    notification_type: Option<&str>,
+    pipe_name: Option<&str>,
+    title: &str,
+    body: &str,
+) -> String {
     format!(
-        "{}\u{1}{}\u{1}{}",
+        "{}\u{1}{}\u{1}{}\u{1}{}",
         notification_type.unwrap_or(""),
         pipe_name.unwrap_or(""),
-        title
+        title,
+        body
     )
 }
 
@@ -351,6 +364,7 @@ pub fn repeat_suppressed_now(
     notification_type: Option<&str>,
     pipe_name: Option<&str>,
     title: &str,
+    body: &str,
 ) -> bool {
     if matches!(notification_type, Some(t) if is_critical_type(t)) {
         return false;
@@ -360,7 +374,7 @@ pub fn repeat_suppressed_now(
     if title.trim().is_empty() {
         return false;
     }
-    let key = repeat_key(notification_type, pipe_name, title);
+    let key = repeat_key(notification_type, pipe_name, title, body);
     let cooldown = repeat_cooldown_ms(notification_type);
     let now_ms = chrono::Local::now().timestamp_millis();
     let mut guard = ledger().lock().unwrap_or_else(|e| e.into_inner());
@@ -375,6 +389,12 @@ pub fn notification_type_from_payload(payload: &str) -> Option<String> {
 /// Extract the `title` field from a notification panel payload JSON string.
 pub fn title_from_payload(payload: &str) -> Option<String> {
     json_field(payload, "title")
+}
+
+/// Extract the `body` field. Part of the repeat identity — see the module
+/// notes above for why the title alone is not enough.
+pub fn body_from_payload(payload: &str) -> Option<String> {
+    json_field(payload, "body")
 }
 
 /// Extract the `pipe_name` field from a notification panel payload JSON string.
@@ -716,33 +736,74 @@ mod tests {
         assert_eq!(repeat_cooldown_ms(None), DEFAULT_REPEAT_COOLDOWN_MS);
     }
 
-    /// The reason the key is a triple: our types are coarse, so two pipes
-    /// posting the same title must not silence each other.
+    /// The reason the key is not just the type: our types are coarse, so two
+    /// pipes posting the same title must not silence each other.
     #[test]
     fn key_separates_pipes_types_and_titles() {
-        let a = repeat_key(Some("pipe"), Some("alpha"), "run finished");
-        let b = repeat_key(Some("pipe"), Some("beta"), "run finished");
-        let c = repeat_key(Some("system"), Some("alpha"), "run finished");
-        let d = repeat_key(Some("pipe"), Some("alpha"), "run failed");
+        let a = repeat_key(Some("pipe"), Some("alpha"), "run finished", "");
+        let b = repeat_key(Some("pipe"), Some("beta"), "run finished", "");
+        let c = repeat_key(Some("system"), Some("alpha"), "run finished", "");
+        let d = repeat_key(Some("pipe"), Some("alpha"), "run failed", "");
         assert_ne!(a, b);
         assert_ne!(a, c);
         assert_ne!(a, d);
-        assert_eq!(a, repeat_key(Some("pipe"), Some("alpha"), "run finished"));
+        assert_eq!(
+            a,
+            repeat_key(Some("pipe"), Some("alpha"), "run finished", "")
+        );
     }
 
     /// Field values can't run together to forge a collision.
     #[test]
     fn key_parts_cannot_be_confused() {
         assert_ne!(
-            repeat_key(Some("pipe"), Some("a"), "b"),
-            repeat_key(Some("pipe"), Some("ab"), "")
+            repeat_key(Some("pipe"), Some("a"), "b", ""),
+            repeat_key(Some("pipe"), Some("ab"), "", "")
+        );
+        assert_ne!(
+            repeat_key(Some("pipe"), Some("p"), "a", "b"),
+            repeat_key(Some("pipe"), Some("p"), "ab", "")
+        );
+    }
+
+    /// A second meeting is not a repeat of the first.
+    ///
+    /// Without a calendar match every meeting alert is titled "meeting
+    /// detected" and names the call in the body, so a title-only identity made
+    /// the next meeting inside the five-minute window an identical repeat and
+    /// dropped it — along with the "open note" button that is the whole point
+    /// of the alert. Observed in the wild before this was keyed on the body.
+    #[test]
+    fn a_different_meeting_is_not_a_repeat() {
+        let mut ledger = empty_ledger();
+        let cooldown = repeat_cooldown_ms(Some("meeting"));
+        let first = repeat_key(
+            Some("meeting"),
+            None,
+            "meeting detected",
+            "screenpipe is saving this meeting for transcription: Google Meet",
+        );
+        let second = repeat_key(
+            Some("meeting"),
+            None,
+            "meeting detected",
+            "screenpipe is saving this meeting for transcription: standup",
+        );
+        assert!(!check_and_record(&mut ledger, first.clone(), 0, cooldown));
+        assert!(
+            !check_and_record(&mut ledger, second, 60_000, cooldown),
+            "a different meeting must still reach the user"
+        );
+        assert!(
+            check_and_record(&mut ledger, first, 60_000, cooldown),
+            "the same meeting re-firing is still collapsed"
         );
     }
 
     #[test]
     fn ledger_drops_the_echo_and_reopens_after_the_cooldown() {
         let mut ledger = empty_ledger();
-        let key = repeat_key(Some("system"), None, "disk filling up");
+        let key = repeat_key(Some("system"), None, "disk filling up", "");
         assert!(!check_and_record(&mut ledger, key.clone(), 0, 600_000));
         assert!(check_and_record(&mut ledger, key.clone(), 60_000, 600_000));
         assert!(check_and_record(&mut ledger, key.clone(), 599_999, 600_000));
@@ -754,7 +815,7 @@ mod tests {
     #[test]
     fn suppressed_echoes_do_not_extend_the_window() {
         let mut ledger = empty_ledger();
-        let key = repeat_key(Some("pipe"), Some("p"), "t");
+        let key = repeat_key(Some("pipe"), Some("p"), "t", "");
         assert!(!check_and_record(&mut ledger, key.clone(), 0, 90_000));
         for t in (10_000..90_000).step_by(10_000) {
             assert!(check_and_record(&mut ledger, key.clone(), t, 90_000));
@@ -769,7 +830,7 @@ mod tests {
     fn ledger_stays_bounded_and_keeps_serving_new_keys() {
         let mut ledger = empty_ledger();
         for i in 0..(MAX_LEDGER_ENTRIES * 2) {
-            let key = repeat_key(Some("pipe"), Some("p"), &format!("title {i}"));
+            let key = repeat_key(Some("pipe"), Some("p"), &format!("title {i}"), "");
             assert!(
                 !check_and_record(&mut ledger, key, i as i64, DEFAULT_REPEAT_COOLDOWN_MS),
                 "a never-seen alert must always be delivered"
@@ -787,9 +848,14 @@ mod tests {
     #[test]
     fn critical_types_are_never_repeat_suppressed() {
         for t in CRITICAL_TYPES {
-            assert!(!repeat_suppressed_now(Some(t), None, "recording stopped"));
+            assert!(!repeat_suppressed_now(
+                Some(t),
+                None,
+                "recording stopped",
+                ""
+            ));
             assert!(
-                !repeat_suppressed_now(Some(t), None, "recording stopped"),
+                !repeat_suppressed_now(Some(t), None, "recording stopped", ""),
                 "{t} must survive an immediate re-fire"
             );
         }
@@ -799,8 +865,8 @@ mod tests {
     /// unrelated alerts into one.
     #[test]
     fn untitled_alerts_are_not_capped() {
-        assert!(!repeat_suppressed_now(Some("pipe"), Some("p"), ""));
-        assert!(!repeat_suppressed_now(Some("pipe"), Some("p"), "   "));
+        assert!(!repeat_suppressed_now(Some("pipe"), Some("p"), "", ""));
+        assert!(!repeat_suppressed_now(Some("pipe"), Some("p"), "   ", ""));
     }
 
     #[test]
