@@ -9,10 +9,10 @@ confidence, and criticality.
 - Tracked crates: screenpipe-engine, screenpipe-db, screenpipe-sqlite-coordinator, screenpipe-audio, screenpipe-screen, screenpipe-a11y
 - Mapped suites: 32
 - Mapped Rust files: 321
-- Active test blocks: 3060
+- Active test blocks: 3061
 - Ignored/manual test blocks: 137
-- Declared test blocks: 3197
-- Weighted coverage points: 2518.3
+- Declared test blocks: 3198
+- Weighted coverage points: 2519.0
 
 Confidence weights: strong=1.0, partial=0.7, conditional=0.4, smoke=0.3.
 Criticality weights: high=1.0, medium=0.7, low=0.4.
@@ -23,7 +23,7 @@ are explicitly enabled in a runtime lane.
 
 | Platform | Suites | Active tests | Ignored tests | Weighted points | Layers | Flows | Critical score |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| windows | 29 | 2929 | 132 | 2458.3 | 21 | 11 | 100% |
+| windows | 29 | 2930 | 132 | 2459.0 | 21 | 11 | 100% |
 | macos | 29 | 2983 | 112 | 2469.4 | 22 | 11 | 100% |
 | linux | 25 | 2616 | 105 | 2175.8 | 20 | 11 | 100% |
 
@@ -36,7 +36,7 @@ are explicitly enabled in a runtime lane.
 | screenpipe-sqlite-coordinator | 1 | 0 | 2 | 16 | 0 | 16.0 | 2 |
 | screenpipe-audio | 6 | 25 | 51 | 584 | 43 | 510.4 | 5 |
 | screenpipe-screen | 6 | 9 | 18 | 241 | 9 | 216.9 | 4 |
-| screenpipe-a11y | 4 | 2 | 28 | 333 | 27 | 247.6 | 3 |
+| screenpipe-a11y | 4 | 2 | 28 | 334 | 27 | 248.3 | 3 |
 
 ## Line Coverage
 
@@ -61,7 +61,7 @@ bun run coverage:core -- --llvm-cov-summary ../../docs/coverage/core-llvm-cov-su
 
 | Layer | windows | macos | linux |
 | --- | --- | --- | --- |
-| accessibility | 4 suites / 343 active / 29 ignored / 314.8 pts | 4 suites / 393 active / 9 ignored / 320.4 pts | 4 suites / 319 active / 7 ignored / 293.0 pts |
+| accessibility | 4 suites / 344 active / 29 ignored / 315.5 pts | 4 suites / 393 active / 9 ignored / 320.4 pts | 4 suites / 319 active / 7 ignored / 293.0 pts |
 | audio | 7 suites / 694 active / 44 ignored / 620.4 pts | 7 suites / 694 active / 44 ignored / 620.4 pts | 6 suites / 619 active / 43 ignored / 567.9 pts |
 | audio-device | 2 suites / 211 active / 7 ignored / 188.5 pts | 2 suites / 211 active / 7 ignored / 188.5 pts | 1 suites / 136 active / 6 ignored / 136.0 pts |
 | configuration | 2 suites / 138 active / 3 ignored / 124.2 pts | 2 suites / 138 active / 3 ignored / 124.2 pts | 2 suites / 138 active / 3 ignored / 124.2 pts |
@@ -74,14 +74,14 @@ bun run coverage:core -- --llvm-cov-summary ../../docs/coverage/core-llvm-cov-su
 | os-integration | 1 suites / 6 active / 0 ignored / 1.7 pts | 1 suites / 6 active / 0 ignored / 1.7 pts | - |
 | performance | 13 suites / 1369 active / 67 ignored / 1208.1 pts | 14 suites / 1467 active / 70 ignored / 1247.3 pts | 13 suites / 1369 active / 67 ignored / 1208.1 pts |
 | pipes | 1 suites / 462 active / 3 ignored / 323.4 pts | 1 suites / 462 active / 3 ignored / 323.4 pts | 1 suites / 462 active / 3 ignored / 323.4 pts |
-| privacy | 5 suites / 870 active / 36 ignored / 706.8 pts | 5 suites / 920 active / 16 ignored / 712.4 pts | 5 suites / 846 active / 14 ignored / 685.0 pts |
+| privacy | 5 suites / 871 active / 36 ignored / 707.5 pts | 5 suites / 920 active / 16 ignored / 712.4 pts | 5 suites / 846 active / 14 ignored / 685.0 pts |
 | real-app | - | 1 suites / 98 active / 3 ignored / 39.2 pts | - |
 | speaker | 2 suites / 342 active / 8 ignored / 342.0 pts | 2 suites / 342 active / 8 ignored / 342.0 pts | 2 suites / 342 active / 8 ignored / 342.0 pts |
 | storage | 3 suites / 470 active / 29 ignored / 381.5 pts | 3 suites / 470 active / 29 ignored / 381.5 pts | 3 suites / 470 active / 29 ignored / 381.5 pts |
 | sync | 1 suites / 462 active / 3 ignored / 323.4 pts | 1 suites / 462 active / 3 ignored / 323.4 pts | 1 suites / 462 active / 3 ignored / 323.4 pts |
 | timeline | 4 suites / 928 active / 33 ignored / 755.2 pts | 4 suites / 928 active / 33 ignored / 755.2 pts | 4 suites / 928 active / 33 ignored / 755.2 pts |
 | transcription | 5 suites / 692 active / 40 ignored / 545.2 pts | 5 suites / 692 active / 40 ignored / 545.2 pts | 5 suites / 692 active / 40 ignored / 545.2 pts |
-| ui-events | 4 suites / 700 active / 28 ignored / 533.2 pts | 3 suites / 652 active / 5 ignored / 499.6 pts | 3 suites / 652 active / 5 ignored / 499.6 pts |
+| ui-events | 4 suites / 701 active / 28 ignored / 533.9 pts | 3 suites / 652 active / 5 ignored / 499.6 pts | 3 suites / 652 active / 5 ignored / 499.6 pts |
 | vision-capture | 5 suites / 489 active / 32 ignored / 387.8 pts | 5 suites / 493 active / 32 ignored / 393.3 pts | 4 suites / 484 active / 31 ignored / 384.3 pts |
 
 ## Critical Flow Matrix
@@ -121,7 +121,7 @@ bun run coverage:core -- --llvm-cov-summary ../../docs/coverage/core-llvm-cov-su
 | a11y-core-tree-cross-platform | screenpipe-a11y | windows, macos, linux | accessibility, ui-events, privacy, performance | accessibility-ui-events, privacy-and-redaction, performance-liveness | high | strong | unit | 14 | 163 | 0 | Cross-platform accessibility config, tree normalization, cache, privacy title matching, events, budget, and activity feed units. |
 | a11y-linux-tree | screenpipe-a11y | linux | accessibility, privacy | accessibility-ui-events, privacy-and-redaction | medium | partial | unit | 4 | 24 | 1 | Linux-specific accessibility/incognito normalization tests. |
 | a11y-macos-tree | screenpipe-a11y | macos | accessibility, privacy, real-app, performance | accessibility-ui-events, privacy-and-redaction, performance-liveness | high | conditional | mixed | 6 | 98 | 3 | macOS AX unit coverage plus real TextEdit/Finder/Obsidian probes. Obsidian tests are ignored by default because they require a local app install and AX permission. |
-| a11y-windows-tree | screenpipe-a11y | windows | accessibility, privacy, ui-events | accessibility-ui-events, privacy-and-redaction | high | partial | unit | 6 | 48 | 23 | Windows UIA/accessibility parsing and privacy matching; some UIA tests are ignored where they require a live desktop. |
+| a11y-windows-tree | screenpipe-a11y | windows | accessibility, privacy, ui-events | accessibility-ui-events, privacy-and-redaction | high | partial | unit | 6 | 49 | 23 | Windows UIA/accessibility parsing and privacy matching; some UIA tests are ignored where they require a live desktop. |
 | audio-device-stream-health | screenpipe-audio | windows, macos, linux | audio-device, audio, performance | audio-device-health, audio-record-transcribe, performance-liveness | high | strong | mixed | 14 | 136 | 6 | Device monitor, device manager, stream buffering, source lag, audio metrics, Bluetooth gap/hallucination regressions, and cross-platform process-tap watchdog counters (process_tap.rs split into src/core/process_tap/ modules). |
 | audio-meetings-speakers-dedup | screenpipe-audio | windows, macos, linux | audio, meeting, speaker, transcription | audio-record-transcribe, meeting-live-notes, performance-liveness | high | strong | mixed | 26 | 232 | 7 | Meeting streaming config/controller logic, speaker embedding state, cross-device dedupe simulations, and overlap cleanup coverage. |
 | audio-models-filtering | screenpipe-audio | windows, macos, linux | audio, transcription, privacy | audio-record-transcribe, privacy-and-redaction | medium | partial | mixed | 6 | 20 | 10 | Model-download/TLS guards, ONNX startup smoke, and music-versus-speech filtering. |
@@ -169,7 +169,7 @@ bun run coverage:core -- --llvm-cov-summary ../../docs/coverage/core-llvm-cov-su
 | a11y-macos-tree | screenpipe-a11y | src/platform/macos.rs | source | 19 | 0 | 19 |
 | a11y-windows-tree | screenpipe-a11y | src/platform/windows_uia_tests.rs | source | 0 | 12 | 12 |
 | a11y-windows-tree | screenpipe-a11y | src/platform/windows_uia.rs | source | 13 | 11 | 24 |
-| a11y-windows-tree | screenpipe-a11y | src/platform/windows.rs | source | 22 | 0 | 22 |
+| a11y-windows-tree | screenpipe-a11y | src/platform/windows.rs | source | 23 | 0 | 23 |
 | a11y-core-tree-cross-platform | screenpipe-a11y | src/scroll.rs | source | 9 | 0 | 9 |
 | a11y-core-tree-cross-platform | screenpipe-a11y | src/tree/app_version.rs | source | 3 | 0 | 3 |
 | a11y-core-tree-cross-platform | screenpipe-a11y | src/tree/cache.rs | source | 6 | 0 | 6 |
