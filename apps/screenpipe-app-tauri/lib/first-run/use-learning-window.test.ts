@@ -33,6 +33,7 @@ vi.mock("@/lib/first-run/summarize-with-ai", () => ({
 import {
   LEARNING_WINDOW_CEILING_MS,
   LEARNING_WINDOW_GRACE_MS,
+  MIN_LEARNING_MS,
   resetLearningWindow,
 } from "./learning-window";
 import { useLearningWindow } from "./use-learning-window";
@@ -169,8 +170,15 @@ describe("useLearningWindow settings race", () => {
       total_frames: 48,
       apps: [{ name: "Arc", frame_count: 30 }, { name: "Obsidian", frame_count: 18 }],
     } as never);
+    // Must sit above MIN_LEARNING_MS and below LEARNING_WINDOW_CEILING_MS, so
+    // the window opens as `immediate` AND is already old enough to resolve.
+    // Was 3 minutes, which cleared the old 90s floor and the old 5 minute
+    // ceiling; both moved, so this is pinned to the constants rather than to a
+    // literal that silently falls out of the band next time they change.
     getOnboardingStatus.mockResolvedValue(
-      okStatus(completedAgo(3 * 60_000)) as never,
+      okStatus(
+        completedAgo((MIN_LEARNING_MS + LEARNING_WINDOW_CEILING_MS) / 2),
+      ) as never,
     );
 
     const { rerender } = renderHook(

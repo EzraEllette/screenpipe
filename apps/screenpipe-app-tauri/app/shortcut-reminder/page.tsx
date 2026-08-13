@@ -17,6 +17,8 @@ import {
   Loader2,
   MessageCircle,
   PanelLeft,
+  Pin,
+  PinOff,
   RotateCw,
   Search,
   Settings,
@@ -52,11 +54,21 @@ export default function ShortcutReminderPage() {
   const [searchShortcut, setSearchShortcut] = useState<string | null>(null);
   const overlayData = useOverlayData();
   const meetingOverlay = useMeetingOverlay();
-  const [meetingHovering, setMeetingHovering] = useState(false);
+  // Hover and pin are stored as the meeting they belong to, not as bare flags.
+  // The card unmounts when a meeting ends without React firing `mouseleave`, so
+  // a flag would stay set and pop the card open on the *next* meeting; a stale
+  // id simply stops matching.
+  const [hoverMeetingId, setHoverMeetingId] = useState<number | null>(null);
+  const [pinnedMeetingId, setPinnedMeetingId] = useState<number | null>(null);
   const [expanded, setExpanded] = useState(false);
   const [hoveredControl, setHoveredControl] = useState<string | null>(null);
   const [overlayScale, setOverlayScale] = useState(1);
   const resizeQueue = useRef(Promise.resolve());
+  // Last size we actually applied. `setSize` sets the *inner* size, so measuring
+  // the window back to re-centre it has to compare like with like — on Windows
+  // the outer size includes frame metrics, and centring against it walked the
+  // overlay sideways on every hover and clipped it at the screen edge.
+  const appliedSizeRef = useRef<{ width: number; height: number } | null>(null);
   const isMacRef = useRef(isMac);
   isMacRef.current = isMac;
 
@@ -142,7 +154,8 @@ export default function ShortcutReminderPage() {
     const unlistenShortcut = listen<string>("shortcut-reminder-update", () => {
       setExpanded(false);
       setHoveredControl(null);
-      setMeetingHovering(false);
+      setHoverMeetingId(null);
+      setPinnedMeetingId(null);
       loadShortcutsFromFile();
     });
 
@@ -196,17 +209,18 @@ export default function ShortcutReminderPage() {
           const appWindow = getCurrentWindow();
           const [physicalPosition, physicalSize, scaleFactor] = await Promise.all([
             appWindow.outerPosition(),
-            appWindow.outerSize(),
+            appWindow.innerSize(),
             appWindow.scaleFactor(),
           ]);
           const position = physicalPosition.toLogical(scaleFactor);
-          const size = physicalSize.toLogical(scaleFactor);
+          const current = appliedSizeRef.current ?? physicalSize.toLogical(scaleFactor);
           const nextPosition = new LogicalPosition(
-            position.x + (size.width - target.width) / 2,
+            position.x + (current.width - target.width) / 2,
             position.y,
           );
           await appWindow.setSize(new LogicalSize(target.width, target.height));
           await appWindow.setPosition(nextPosition);
+          appliedSizeRef.current = target;
         })
         .catch(() => {
           // The overlay can be hidden while a queued resize is resolving.
@@ -215,10 +229,21 @@ export default function ShortcutReminderPage() {
     [overlayScale],
   );
 
+  const liveMeetingId = meetingOverlay.active
+    ? meetingOverlay.activeMeetingId
+    : null;
+  const meetingHovering =
+    liveMeetingId !== null && hoverMeetingId === liveMeetingId;
+  // Pinning keeps the card up after the pointer leaves, so the transcript can be
+  // read while you work in the meeting window. Hover alone still auto-hides.
+  const meetingPinned =
+    liveMeetingId !== null && pinnedMeetingId === liveMeetingId;
+  const meetingCardOpen = meetingHovering || meetingPinned;
+
   useEffect(() => {
     if (healthState !== "normal") {
       resizeOverlay(INCIDENT_SIZE);
-    } else if (meetingOverlay.active && meetingHovering) {
+    } else if (meetingOverlay.active && meetingCardOpen) {
       resizeOverlay(MEETING_SIZE);
     } else if (expanded) {
       resizeOverlay(EXPANDED_SIZE);
@@ -228,7 +253,7 @@ export default function ShortcutReminderPage() {
   }, [
     expanded,
     healthState,
-    meetingHovering,
+    meetingCardOpen,
     meetingOverlay.active,
     resizeOverlay,
   ]);
@@ -415,13 +440,15 @@ export default function ShortcutReminderPage() {
     );
   }
 
-  if (meetingOverlay.active && meetingHovering) {
+  if (meetingOverlay.active && meetingCardOpen) {
     return (
       <div
         data-testid="shortcut-reminder-meeting-preview"
+        data-pinned={meetingPinned ? "true" : "false"}
         className="w-full h-full flex items-center justify-center"
         style={{ background: "transparent" }}
-        onMouseLeave={() => setMeetingHovering(false)}
+        onMouseEnter={() => setHoverMeetingId(liveMeetingId)}
+        onMouseLeave={() => setHoverMeetingId(null)}
       >
         <div
           className="select-none w-full h-full border border-red-500/40"
@@ -442,11 +469,29 @@ export default function ShortcutReminderPage() {
             <button
               onClick={(event) => {
                 event.stopPropagation();
+                setPinnedMeetingId(meetingPinned ? null : liveMeetingId);
+              }}
+              onMouseDown={(event) => event.stopPropagation()}
+              aria-pressed={meetingPinned}
+              className="ml-auto flex items-center justify-center px-1.5 h-full text-white/70 hover:text-white hover:bg-white/10"
+              style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
+              title={meetingPinned ? "Unpin transcript" : "Pin transcript"}
+              aria-label={meetingPinned ? "Unpin transcript" : "Pin transcript"}
+            >
+              {meetingPinned ? (
+                <PinOff style={{ width: `${smIconPx}px`, height: `${smIconPx}px` }} />
+              ) : (
+                <Pin style={{ width: `${smIconPx}px`, height: `${smIconPx}px` }} />
+              )}
+            </button>
+            <button
+              onClick={(event) => {
+                event.stopPropagation();
                 void meetingOverlay.stopMeeting();
               }}
               onMouseDown={(event) => event.stopPropagation()}
               disabled={meetingOverlay.stopping}
-              className="ml-auto flex items-center gap-1 px-1.5 h-full font-mono text-white/70 hover:text-white hover:bg-white/10 disabled:opacity-50"
+              className="flex items-center gap-1 px-1.5 h-full font-mono text-white/70 hover:text-white hover:bg-white/10 disabled:opacity-50"
               style={{ fontSize: `${fontPx}px`, WebkitAppRegion: "no-drag" } as React.CSSProperties}
               title="Stop meeting"
             >
@@ -497,7 +542,7 @@ export default function ShortcutReminderPage() {
         className="relative w-full h-full flex items-center justify-center"
         style={{ background: "transparent" }}
         onMouseEnter={() => {
-          if (meetingOverlay.active) setMeetingHovering(true);
+          if (meetingOverlay.active) setHoverMeetingId(liveMeetingId);
           else setExpanded(true);
         }}
       >

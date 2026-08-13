@@ -58,6 +58,10 @@ final class OverlayMetrics: ObservableObject {
     @Published var meetingTranscriptItems: [MeetingOverlayTranscriptItem] = []
     @Published var meetingStopping: Bool = false
     @Published var meetingStopError: String?
+    /// User pinned the live transcript card, so it survives the pointer leaving.
+    /// Scoped to one meeting: cleared whenever the meeting goes inactive, so the
+    /// next meeting never inherits a card the user pinned for the previous one.
+    @Published var meetingPinned: Bool = false
     /// "normal" | "failure" | "fixing" | "recovered" — set only via
     /// ShortcutReminderController.setHealthState (pushed from Rust).
     @Published var healthState: String = "normal"
@@ -387,7 +391,7 @@ private let kBaseExpandedH: CGFloat = 62
 private let kBaseDockH: CGFloat = 30
 private let kBaseDisclosureH: CGFloat = 26
 private let kBaseDisclosureGap: CGFloat = 4
-private let kBaseTranscriptW: CGFloat = 280
+private let kBaseTranscriptW: CGFloat = 320
 private let kBaseTranscriptH: CGFloat = 142
 private let kBaseNotificationW: CGFloat = 340
 private let kBaseNotificationH: CGFloat = 44
@@ -814,24 +818,39 @@ struct ShortcutReminderView: View {
     }
 
     // MARK: - Collapsed icon
-    // Hovering the visible icon expands to the full dock (driven by
-    // ReminderTrackingView's .activeAlways NSTrackingArea). Clicking opens the
-    // timeline.
+    // Hovering the visible chip expands to the full dock (driven by
+    // ReminderTrackingView's .activeAlways NSTrackingArea). Clicking hides the
+    // overlay — the dock owns timeline, search, chat and settings, but nothing
+    // dismissed the overlay without going through a menu first.
     private var collapsedView: some View {
-        CollapsedAppIconButton(
-            scale: collapsedScale,
-            action: { onAction("open_timeline") }
-        )
-        .frame(width: kBaseCollapsedW * collapsedScale, height: kBaseCollapsedH * collapsedScale)
-        .background(
-            RoundedRectangle(cornerRadius: c(kBaseCollapsedCornerRadius), style: .continuous)
-                .fill(Color.black)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: c(kBaseCollapsedCornerRadius), style: .continuous)
-                .stroke(.white.opacity(0.24), lineWidth: 1)
-        )
-        .opacity(kRestingOpacity)
+        ZStack(alignment: .topTrailing) {
+            CollapsedAppIconButton(
+                scale: collapsedScale,
+                action: { onAction("open_timeline") }
+            )
+            .frame(width: kBaseCollapsedW * collapsedScale, height: kBaseCollapsedH * collapsedScale)
+            .background(
+                RoundedRectangle(cornerRadius: c(kBaseCollapsedCornerRadius), style: .continuous)
+                    .fill(Color.black)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: c(kBaseCollapsedCornerRadius), style: .continuous)
+                    .stroke(.white.opacity(0.24), lineWidth: 1)
+            )
+            .opacity(kRestingOpacity)
+
+            // "A meeting is being recorded" is the one thing the resting overlay
+            // must still say out loud, so the badge sits outside the faded chip
+            // at full strength rather than inheriting kRestingOpacity.
+            if metrics.meetingActive {
+                Circle()
+                    .fill(Color.red)
+                    .frame(width: c(5), height: c(5))
+                    .offset(x: c(2), y: c(-2))
+                    .help("meeting live — hover for transcript")
+                    .accessibilityLabel("meeting live")
+            }
+        }
     }
 
     // MARK: - Expanded bar
@@ -889,6 +908,7 @@ struct MeetingTranscriptPreview: View {
     let scale: CGFloat
     let onOpenNote: () -> Void
     let onStop: () -> Void
+    let onTogglePin: () -> Void
 
     private func s(_ value: CGFloat) -> CGFloat { value * scale }
 
@@ -901,29 +921,60 @@ struct MeetingTranscriptPreview: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: s(6)) {
+            HStack(spacing: s(5)) {
                 Circle()
                     .fill(Color.red)
                     .frame(width: s(7), height: s(7))
                 Text("meeting live")
                     .font(Brand.swiftUIMonoFont(size: 9 * scale, weight: .semibold))
                     .foregroundColor(.white.opacity(0.92))
+                    .lineLimit(1)
+                    .fixedSize()
                 if let app = metrics.meetingApp, !app.isEmpty {
                     Text("· \(app.lowercased())")
                         .font(Brand.swiftUIMonoFont(size: 8 * scale))
                         .foregroundColor(.white.opacity(0.45))
                         .lineLimit(1)
+                        .truncationMode(.tail)
+                        .layoutPriority(-1)
                 }
-                Spacer(minLength: s(8))
+                Spacer(minLength: s(4))
+                Button(action: onTogglePin) {
+                    Image(systemName: metrics.meetingPinned ? "pin.slash.fill" : "pin")
+                        .font(.system(size: 8 * scale, weight: .medium))
+                        .foregroundColor(.white.opacity(metrics.meetingPinned ? 0.92 : 0.62))
+                        .frame(width: s(20), height: s(22))
+                        .background(
+                            metrics.meetingPinned
+                                ? Color.white.opacity(0.14)
+                                : Color.white.opacity(0.06)
+                        )
+                        .overlay(
+                            Rectangle().stroke(
+                                Color.white.opacity(metrics.meetingPinned ? 0.32 : 0.18),
+                                lineWidth: 1
+                            )
+                        )
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(metrics.meetingPinned ? "unpin transcript" : "pin transcript")
+                .help(
+                    metrics.meetingPinned
+                        ? "unpin — the card hides again when the pointer leaves"
+                        : "pin — keep this card open after the pointer leaves"
+                )
                 Button(action: onOpenNote) {
                     HStack(spacing: s(4)) {
                         Image(systemName: "doc.text")
                             .font(.system(size: 8 * scale, weight: .medium))
                         Text("note")
                             .font(Brand.swiftUIMonoFont(size: 8 * scale, weight: .semibold))
+                            .lineLimit(1)
+                            .fixedSize()
                     }
                     .foregroundColor(.white.opacity(0.82))
-                    .padding(.horizontal, s(8))
+                    .padding(.horizontal, s(7))
                     .frame(height: s(22))
                     .background(Color.white.opacity(0.06))
                     .overlay(Rectangle().stroke(Color.white.opacity(0.18), lineWidth: 1))
@@ -943,9 +994,11 @@ struct MeetingTranscriptPreview: View {
                         }
                         Text(metrics.meetingStopping ? "stopping" : "stop")
                             .font(Brand.swiftUIMonoFont(size: 8 * scale, weight: .semibold))
+                            .lineLimit(1)
+                            .fixedSize()
                     }
                     .foregroundColor(.white.opacity(0.82))
-                    .padding(.horizontal, s(8))
+                    .padding(.horizontal, s(7))
                     .frame(height: s(22))
                     .background(Color.white.opacity(0.06))
                     .overlay(Rectangle().stroke(Color.white.opacity(0.18), lineWidth: 1))
@@ -955,7 +1008,7 @@ struct MeetingTranscriptPreview: View {
                 .disabled(metrics.meetingStopping)
                 .help("stop this meeting")
             }
-            .padding(.horizontal, s(12))
+            .padding(.horizontal, s(10))
             .frame(height: s(34))
 
             Rectangle().fill(Color.white.opacity(0.14)).frame(height: 1)
@@ -1123,6 +1176,7 @@ private struct OverlayNotificationView: View {
 
 // App icon button shown at rest. Click opens the timeline.
 @available(macOS 13.0, *)
+// App icon button shown at rest. Click opens the timeline.
 struct CollapsedAppIconButton: View {
     let scale: CGFloat
     let action: () -> Void
@@ -1270,6 +1324,9 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
             isDraggingPill = false
             dismissOverlayNotification()
             hideSnapHint()
+            // Hiding the overlay retires the pin too, so re-showing it later
+            // does not resurrect a card the user has not asked for again.
+            metrics.meetingPinned = false
             AnimationTick.shared.setVisible(false, hasActiveSignal: false)
             disconnectWebSocket()
             disconnectMeetingEventsWebSocket()
@@ -1403,6 +1460,9 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
                     metrics.meetingTranscriptItems = []
                     metrics.meetingStopping = false
                     metrics.meetingStopError = nil
+                    // The pin belonged to the meeting that just ended (or was
+                    // replaced), so drop it — the card must not outlive it.
+                    metrics.meetingPinned = false
                     meetingStopTimeoutWorkItem?.cancel()
                     meetingStopTimeoutWorkItem = nil
                 }
@@ -1456,6 +1516,7 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
                 metrics.meetingTranscriptItems = []
                 metrics.meetingStopping = false
                 metrics.meetingStopError = nil
+                metrics.meetingPinned = false
                 meetingStopTimeoutWorkItem?.cancel()
                 meetingStopTimeoutWorkItem = nil
             }
@@ -1621,6 +1682,13 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
         tracking.hoverRectProvider = { [weak self, weak tracking] in
             guard let self = self, let bounds = tracking?.bounds else { return .zero }
             guard self.metrics.healthState == "normal" else { return bounds }
+            // While the transcript card is on screen it hangs off the window's
+            // far edge, but the chip's hover rect is a small region at the
+            // opposite edge. That left most of the window between them where
+            // neither tracking area was live, so moving the pointer toward the
+            // card read as "left the chip" and closed it before you arrived.
+            // Claim the whole window as the corridor while the card is up.
+            if self.transcriptPanel?.isVisible == true { return bounds }
             return overlayHoverRect(
                 in: bounds,
                 expanded: self.metrics.isHovering || self.metrics.forceExpanded,
@@ -1767,12 +1835,45 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
             self.metrics.forceExpanded = false
             self.metrics.hoveredControl = nil
             self.disclosurePanel?.orderOut(nil)
-            self.transcriptPanel?.orderOut(nil)
+            // A pinned card is the one thing hover exit must not take away.
+            self.refreshTranscriptPanelVisibility()
         }
         hoverHideWorkItem = work
-        // Small bridge between the pill and the card so moving the pointer
-        // downward does not flash-close the transcript panel.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18, execute: work)
+        // Bridge between the chip and the card. The corridor is continuous now,
+        // but AppKit still reports a brief exit as the pointer crosses the
+        // window boundary, and 0.18s was short enough to lose an unhurried
+        // move. Long enough to survive the crossing, short enough that leaving
+        // on purpose still feels immediate.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45, execute: work)
+    }
+
+    /// Observed card state for `shortcut_get_meeting_overlay_state`. `visible`
+    /// is AppKit's answer, not our intent.
+    func meetingOverlayState() -> (visible: Bool, pinned: Bool, hovering: Bool, active: Bool) {
+        (
+            visible: transcriptPanel?.isVisible == true,
+            pinned: metrics.meetingPinned,
+            hovering: pillHovering || transcriptHovering,
+            active: metrics.meetingActive && metrics.activeMeetingId != nil
+        )
+    }
+
+    /// Entry point for `shortcut_set_pill_hovering`; forwards to the very method
+    /// the tracking area uses, including its debounced exit.
+    func setPillHoveringExternally(_ hovering: Bool) {
+        DispatchQueue.main.async { [self] in
+            setPillHovering(hovering)
+        }
+    }
+
+    /// Toggle the pin from the card's own control. Unpinning while the pointer
+    /// is elsewhere closes the card immediately rather than waiting for a hover
+    /// exit that already happened.
+    func toggleMeetingPin() {
+        DispatchQueue.main.async { [self] in
+            metrics.meetingPinned.toggle()
+            refreshTranscriptPanelVisibility()
+        }
     }
 
     private func refreshTranscriptPanelVisibility() {
@@ -1781,7 +1882,7 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
             && metrics.meetingActive
             && metrics.activeMeetingId != nil
             && metrics.healthState == "normal"
-            && hovering
+            && (hovering || metrics.meetingPinned)
         guard shouldShow else {
             transcriptPanel?.orderOut(nil)
             return
@@ -1833,7 +1934,8 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
             metrics: metrics,
             scale: gOverlayScale,
             onOpenNote: { [weak self] in self?.openMeetingNote() },
-            onStop: { [weak self] in self?.beginStopMeeting() }
+            onStop: { [weak self] in self?.beginStopMeeting() },
+            onTogglePin: { [weak self] in self?.toggleMeetingPin() }
         )
         if let hosting = transcriptHostingView {
             hosting.rootView = AnyView(view)
@@ -1851,11 +1953,24 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
         let visible = panel.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? panel.frame
         let width = transcriptPanel.frame.width
         let height = transcriptPanel.frame.height
-        let centeredX = panel.frame.midX - width / 2
+        // Anchor to the *visible* bar, not the window. The window stays at the
+        // expanded size while the resting chip is only 16pt of it, so anchoring
+        // to the window edge left a ~46pt hole between the chip and the card.
+        // This is the same rect the hover tracking uses, so the two stay in sync.
+        let anchor = overlayHoverRect(
+            in: panel.frame,
+            expanded: metrics.isHovering || metrics.forceExpanded,
+            disclosureDown: metrics.disclosureDown,
+            horizontal: metrics.horizontal,
+            scale: gOverlayScale
+        )
+        let centeredX = anchor.midX - width / 2
         let x = min(max(centeredX, visible.minX + 4), visible.maxX - width - 4)
+        // Butt the card against the bar: dead space here is a gap in the hover
+        // corridor, and the pointer crossing it reads as leaving both surfaces.
         let preferredY = metrics.disclosureDown
-            ? panel.frame.minY - height - 4
-            : panel.frame.maxY + 4
+            ? anchor.minY - height
+            : anchor.maxY
         let y = min(max(preferredY, visible.minY + 4), visible.maxY - height - 4)
         transcriptPanel.setFrameOrigin(NSPoint(x: x, y: y))
     }
@@ -2102,6 +2217,9 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
             }
             hosting.onDragEnded = { [weak self] in
                 self?.endPillDrag()
+                // Dragging collapses hover UI, but a pinned card is meant to stay:
+                // bring it back against the pill's new home.
+                self?.refreshTranscriptPanelVisibility()
             }
             hosting.frame = contentView.bounds
             hosting.autoresizingMask = [.width, .height]
@@ -2324,6 +2442,11 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
         if isDraggingPill {
             updateSnapHint()
         }
+        // A pinned card outlives the drag, so it has to follow the chip instead
+        // of being left behind at the old anchor.
+        if transcriptPanel?.isVisible == true {
+            positionTranscriptPanel()
+        }
     }
 }
 
@@ -2510,6 +2633,53 @@ public func shortcutShowNotification(_ jsonPtr: UnsafePointer<CChar>?) -> Int32 
         let work = { shown = ShortcutReminderController.shared.showNotification(json) }
         if Thread.isMainThread { work() } else { DispatchQueue.main.sync(execute: work) }
         return shown ? 0 : -1
+    }
+    return -2
+}
+
+/// Observed state of the live-meeting transcript card: whether its panel is on
+/// screen, whether it is pinned, whether the pointer is inside the chip or the
+/// card, and whether a meeting is active. Reports what AppKit actually shows,
+/// so an automated check cannot pass on intent alone. Returns 0 on success.
+@_cdecl("shortcut_get_meeting_overlay_state")
+public func shortcutGetMeetingOverlayState(
+    _ transcriptVisible: UnsafeMutablePointer<Int32>?,
+    _ pinned: UnsafeMutablePointer<Int32>?,
+    _ hovering: UnsafeMutablePointer<Int32>?,
+    _ meetingActive: UnsafeMutablePointer<Int32>?
+) -> Int32 {
+    if #available(macOS 13.0, *) {
+        var state = (visible: false, pinned: false, hovering: false, active: false)
+        let work = { state = ShortcutReminderController.shared.meetingOverlayState() }
+        if Thread.isMainThread { work() } else { DispatchQueue.main.sync(execute: work) }
+        transcriptVisible?.pointee = state.visible ? 1 : 0
+        pinned?.pointee = state.pinned ? 1 : 0
+        hovering?.pointee = state.hovering ? 1 : 0
+        meetingActive?.pointee = state.active ? 1 : 0
+        return 0
+    }
+    return -2
+}
+
+/// Test seam: enter or leave the chip through the same controller entry point
+/// `ReminderTrackingView`'s `.activeAlways` tracking area calls. AppKit will not
+/// deliver a synthetic hover to a nonactivating panel, so an automated check
+/// drives this instead of the cursor; everything downstream is the real path.
+@_cdecl("shortcut_set_pill_hovering")
+public func shortcutSetPillHovering(_ hovering: Int32) -> Int32 {
+    if #available(macOS 13.0, *) {
+        ShortcutReminderController.shared.setPillHoveringExternally(hovering != 0)
+        return 0
+    }
+    return -2
+}
+
+/// Test seam: the same toggle the card's pin button invokes.
+@_cdecl("shortcut_toggle_meeting_pin")
+public func shortcutToggleMeetingPin() -> Int32 {
+    if #available(macOS 13.0, *) {
+        ShortcutReminderController.shared.toggleMeetingPin()
+        return 0
     }
     return -2
 }

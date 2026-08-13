@@ -61,6 +61,7 @@ import {
 import {
 	FREE_CHAT_MAX_REQUEST_BYTES,
 	applyFreeChatRequestLimits,
+	hasHistoryCacheSessionAffinity,
 	prepareFreeChatTurn,
 	releaseFreeChatLease,
 	reserveFreeChatRequest,
@@ -115,6 +116,16 @@ export function shouldEnableSafetyRefusalFallback(
 ): boolean {
 	return shouldEnableBackgroundFallback(request, authResult)
 		&& request.headers.get('x-screenpipe-workload')?.toLowerCase() === 'pipe';
+}
+
+/**
+ * History caching is a server-authoritative rollout. Only normal Pi sessions
+ * with a bounded affinity header are eligible; raw affinity never leaves this
+ * request boundary.
+ */
+export function shouldEnableGpt56HistoryCache(request: Request, env: Env): boolean {
+	return String(env.GPT56_HISTORY_CACHE_MODE ?? 'system').trim().toLowerCase() === 'history'
+		&& hasHistoryCacheSessionAffinity(request);
 }
 
 type BoundedJsonRead =
@@ -574,6 +585,9 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 				return freeChatErrorResponse(freeChat.error);
 			}
 			applyFreeChatRequestLimits(body, freeChat);
+			// Always overwrite any client-supplied value. Only the Worker rollout
+			// mode and Pi's validated affinity header may enable history breakpoints.
+			body.gpt56HistoryCacheEligible = shouldEnableGpt56HistoryCache(request, env);
 
 			// Gate the model for this tier. Background/automation traffic (pipes,
 			// daily summaries) must never hard-fail — a scheduled pipe pinned to a

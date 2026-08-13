@@ -1418,6 +1418,27 @@
       "notes": "Starts a real isolated meeting, verifies bounded snapshot plus deterministic delta/final transcript frames, and proves the stream clears on the authoritative stop edge."
     },
     {
+      "spec": "meeting-overlay-pin.spec.ts",
+      "platforms": [
+        "macos"
+      ],
+      "layers": [
+        "real-ui-e2e",
+        "local-api",
+        "tauri-command",
+        "os-integration"
+      ],
+      "features": [
+        "meeting-notes",
+        "meeting-overlay-stream",
+        "shortcut-overlay"
+      ],
+      "criticality": "medium",
+      "confidence": "partial",
+      "ux": "real-user-flow",
+      "notes": "Pins the native macOS live-transcript card against a real started meeting: it opens on hover, stays visible after the pointer leaves, and the authoritative stop edge hides it and clears the pin, asserted on the AppKit panel's observed visibility. Hover and the pin toggle are driven through the controller entry points the tracking area and pin button use, because AppKit delivers no synthetic hover to a nonactivating panel. The Windows/Linux reminder webview renders the sign-in gate under E2E seeds, so that surface is covered by component tests instead."
+    },
+    {
       "spec": "meetings-only-audio-lifecycle.spec.ts",
       "platforms": [
         "windows",
@@ -1833,6 +1854,25 @@
       "confidence": "strong",
       "ux": "real-user-flow",
       "notes": "Five native desktop journeys cover failed-save rollback and retry, stable one-chat continuity across real Pipe runs, a human follow-up carried into the next scheduled run, explicit pause/resume behavior with a read-only old chat, reset rejection during an active human reply, and a confirmed clean run without prior scheduled or human context."
+    },
+    {
+      "spec": "pipe-local-ai-gateway.spec.ts",
+      "platforms": [
+        "macos"
+      ],
+      "layers": [
+        "pipes",
+        "chat-ai",
+        "local-api",
+        "tauri-command"
+      ],
+      "features": [
+        "pipes"
+      ],
+      "criticality": "high",
+      "confidence": "strong",
+      "ux": "command",
+      "notes": "Opt-in full-stack hosted Pipe coverage records the real Pi request entering the production Worker bundle and verifies the Pipe workload marker plus nonblank session affinity for history-off runs and stable affinity across history-on runs."
     },
     {
       "spec": "pipes.spec.ts",
