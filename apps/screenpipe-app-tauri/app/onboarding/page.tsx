@@ -29,19 +29,18 @@ type SlideKey =
   | "engine"
   | "plan";
 
-const SLIDE_WINDOW_SIZES: Record<SlideKey, { width: number; height: number }> =
-  {
-    login: { width: 500, height: 480 },
-    acquisition: { width: 500, height: 560 },
-    // Taller than the other 560 slides: the wheel now sits under the data dir
-    // chip and above the pause note, and at 560 the note was clipped by the
-    // window edge (caught by the trust-affordance E2E screenshot, which is why
-    // that spec asserts the note is inside the viewport).
-    permissions: { width: 500, height: 660 },
-    timeline: { width: 500, height: 680 },
-    engine: { width: 500, height: 620 },
-    plan: { width: 760, height: 720 },
-  };
+// One size for the whole flow. Per-slide sizes made the window jump on every
+// step, worst on "plan", which widened to 760 even though the content column is
+// capped at max-w-lg — 124px of dead margin per side — and was still 42px too
+// short to show the free-plan link. 680 is the tallest any slide previously
+// asked for (timeline), so every other step only gains slack: the permissions
+// wheel and its pause note, which the trust-affordance E2E asserts stay inside
+// the viewport, still fit. Steps that need less stay centered by the wrapper's
+// justify-center, and anything taller still scrolls.
+//
+// Must match the inner_size the Rust side creates the window at, in
+// window/show.rs, so opening onboarding doesn't resize on first paint.
+const ONBOARDING_WINDOW_SIZE = { width: 500, height: 680 };
 
 // When shown, the timeline choice sits before "engine" so disableTimeline is
 // persisted before the engine spawns and reads it — no restart needed.
@@ -108,9 +107,12 @@ const EndowedProgress = ({
   </div>
 );
 
-const setWindowSizeForSlide = async (slide: SlideKey) => {
+// Corrective only: Rust already builds the window at this size. It still runs
+// so a window left at an old per-slide size — an install that upgraded midway
+// through onboarding — snaps back to the shared size instead of staying wide.
+const applyOnboardingWindowSize = async () => {
   try {
-    const { width, height } = SLIDE_WINDOW_SIZES[slide];
+    const { width, height } = ONBOARDING_WINDOW_SIZE;
     await commands.setWindowSize("Onboarding", width, height);
   } catch {
     // non-critical
@@ -280,9 +282,13 @@ export default function OnboardingPage() {
     onboardingData.isCompleted,
   ]);
 
-  // Set window size + track view when slide changes
+  // The window is sized once, not per slide, so stepping through setup no
+  // longer resizes it under the user.
   useEffect(() => {
-    setWindowSizeForSlide(currentSlide);
+    void applyOnboardingWindowSize();
+  }, []);
+
+  useEffect(() => {
     setIsVisible(true);
     posthog.capture(`onboarding_${currentSlide}_viewed`);
   }, [currentSlide]);

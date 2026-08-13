@@ -237,11 +237,31 @@ describe("enterprise onboarding authentication", () => {
     render(<OnboardingPage />);
 
     await waitFor(() =>
-      expect(mocks.setWindowSize).toHaveBeenCalledWith("Onboarding", 500, 620),
+      expect(mocks.setWindowSize).toHaveBeenCalledWith("Onboarding", 500, 680),
     );
     expect(screen.getByTestId("onboarding-scroll-region")).toHaveClass(
       "overflow-y-auto",
     );
+  });
+
+  // Per-slide sizes made the window jump on every step and blew up to 760x720
+  // on the payment slide. One size, applied once, for the whole flow.
+  it("sizes the window once instead of resizing per slide", async () => {
+    mocks.enterprisePolicy.isManagedDeployment = false;
+    mocks.settings.user = { has_payment_method: false, token: "tok" };
+    onboardingData.currentStep = "engine";
+
+    render(<OnboardingPage />);
+    await waitFor(() =>
+      expect(mocks.setWindowSize).toHaveBeenCalledWith("Onboarding", 500, 680),
+    );
+
+    // Advancing onto the payment slide, the step that used to widen the window
+    // to 760x720, must not resize it again.
+    fireEvent.click(await screen.findByRole("button", { name: "finish engine" }));
+    expect(await screen.findByText("plan selection")).toBeInTheDocument();
+
+    expect(mocks.setWindowSize).toHaveBeenCalledTimes(1);
   });
 
   it("managed onboarding completes from engine without consumer pricing", async () => {

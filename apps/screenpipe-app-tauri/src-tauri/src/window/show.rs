@@ -1541,13 +1541,16 @@ impl ShowRewindWindow {
                     return ShowRewindWindow::Home { page: None }.show(app);
                 }
 
-                // Clamp onboarding window size to primary monitor to prevent min > max panic
+                // One size for every onboarding slide (see ONBOARDING_WINDOW_SIZE in
+                // app/onboarding/page.tsx) so stepping through setup never resizes
+                // the window. Still clamped to the primary monitor to prevent a
+                // min > max panic on small displays; slides scroll when clamped.
                 let (width, height) = if let Ok(Some(monitor)) = app.primary_monitor() {
                     let logical: tauri::LogicalSize<f64> =
                         monitor.size().to_logical(monitor.scale_factor());
-                    (500.0_f64.min(logical.width), 560.0_f64.min(logical.height))
+                    (500.0_f64.min(logical.width), 680.0_f64.min(logical.height))
                 } else {
-                    (500.0, 560.0)
+                    (500.0, 680.0)
                 };
                 let min = self.id().min_size().unwrap_or((0.0, 0.0));
                 let clamped_min = (min.0.min(width), min.1.min(height));
