@@ -20,16 +20,33 @@
  *    nothing in it. We show a ceiling so the wait is bounded and predictable,
  *    but resolve as soon as there is enough to say something true.
  *
- * 2. The summary is DETERMINISTIC. It is rendered from /activity-summary
- *    fields, with no model call. That keeps the first moment instant, offline,
- *    free (a Free account's entire monthly hosted-AI allowance is small enough
- *    that spending it here would be a poor trade), and — most importantly —
- *    unable to hallucinate on thin evidence.
+ * 2. The summary has a DETERMINISTIC floor. `buildLearningSummary` renders it
+ *    from /activity-summary fields with no model call, so there is always a
+ *    real summary available instantly, offline and free, and one that cannot
+ *    hallucinate on thin evidence.
+ *
+ *    The window does then offer the user's own AI preset a chance to say it
+ *    better, grounded on exactly those same facts (see `summarize-with-ai`),
+ *    and takes the deterministic text whenever the model is absent, declines,
+ *    errors, or returns something the validator rejects. This comment used to
+ *    claim there was no model call at all, which was true of the builder and
+ *    false of the window; the AI attempt is why the `writing` phase exists.
  */
 
 export type FirstRunLearningPhase =
   | "idle"
   | "learning"
+  /**
+   * Evidence is in and the summary is being produced.
+   *
+   * Split out of `learning` because the two are not the same wait and the UI
+   * cannot honestly show the same thing for both. Writing awaits a model, which
+   * the code below notes can take tens of seconds, so the countdown can reach
+   * zero while this is still running — leaving a spinner next to `0:00` and no
+   * explanation. Nothing is owed to the clock any more once we get here: the
+   * window has what it needs and is only waiting on the summary.
+   */
+  | "writing"
   | "ready"
   | "empty"
   | "done";
@@ -511,6 +528,7 @@ function normalize(value: unknown): FirstRunLearningState {
   const state = value as Partial<FirstRunLearningState>;
   const phase: FirstRunLearningPhase =
     state.phase === "learning" ||
+    state.phase === "writing" ||
     state.phase === "ready" ||
     state.phase === "empty" ||
     state.phase === "done"
@@ -534,6 +552,31 @@ function normalize(value: unknown): FirstRunLearningState {
         emptyReason: "unknown",
       };
     }
+  }
+
+  // `writing` cannot survive the process that was doing the writing. The model
+  // call died with it, and the seed claim is already spent, so nothing will
+  // pick the work back up. Resume to whatever actually landed: the chat if it
+  // was seeded before the app went away, otherwise a settled empty state with
+  // a dismiss button. Leaving it as `writing` would restore a spinner that can
+  // never finish, which is the failure this phase exists to remove.
+  if (phase === "writing") {
+    if (typeof state.chatId === "string" && state.chatId) {
+      return {
+        phase: "ready",
+        startedAt,
+        seededAt: typeof state.seededAt === "string" ? state.seededAt : null,
+        chatId: state.chatId,
+        emptyReason: null,
+        capturedApps: [],
+      };
+    }
+    return {
+      ...EMPTY_STATE,
+      phase: "empty",
+      startedAt,
+      emptyReason: "unknown",
+    };
   }
 
   return {
@@ -602,6 +645,17 @@ export function releaseLearningSeed(): void {
   const current = readLearningWindow();
   if (current.phase !== "learning" || !current.seededAt) return;
   writeLearningWindow({ ...current, seededAt: null });
+}
+
+/**
+ * Evidence accepted; the summary is being produced.
+ *
+ * Persisted rather than kept in the hook so a reopened window resumes into the
+ * resolution in `normalize` instead of restoring a countdown it already left.
+ */
+export function markLearningWriting(): FirstRunLearningState {
+  const current = readLearningWindow();
+  return writeLearningWindow({ ...current, phase: "writing" });
 }
 
 export function markLearningReady(chatId: string): FirstRunLearningState {

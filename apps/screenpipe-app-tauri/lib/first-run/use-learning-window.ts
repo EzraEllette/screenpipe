@@ -23,6 +23,7 @@ import {
   markLearningDone,
   markLearningEmpty,
   markLearningReady,
+  markLearningWriting,
   releaseLearningSeed,
   readLearningWindow,
   type FirstRunCapturedApp,
@@ -120,6 +121,16 @@ export function useLearningWindow(
   const seedingRef = useRef(false);
 
   const isLearning = state.phase === "learning";
+  /**
+   * Both phases the resolve effect must stay mounted for.
+   *
+   * `learning` flips to `writing` from inside `resolve`, so keying the effect
+   * on `isLearning` alone would tear it down mid-flight: cleanup sets
+   * `cancelled`, aborts the in-flight detail fetch, and the summary bails and
+   * hands the seed claim back. Keeping both phases truthy means the transition
+   * changes no dependency and the running resolve is left alone.
+   */
+  const isResolving = isLearning || state.phase === "writing";
   const startedAt = state.startedAt;
 
   // Countdown to the ceiling. Purely cosmetic — the window resolves on
@@ -134,12 +145,16 @@ export function useLearningWindow(
 
   // Poll captured activity, resolve when there is enough to say something true.
   useEffect(() => {
-    if (!isLearning || !startedAt) return;
+    if (!isResolving || !startedAt) return;
 
     let cancelled = false;
     const controller = new AbortController();
 
     const resolve = async () => {
+      // Already producing the summary. The interval keeps firing through
+      // `writing` so the effect is not torn down under the in-flight call, but
+      // there is nothing left to poll for.
+      if (seedingRef.current) return;
       const activity = await fetchRecentActivity(startedAt, {
         signal: controller.signal,
       });
@@ -158,6 +173,12 @@ export function useLearningWindow(
       if (aiRef.current.aiSettingsLoaded === false) return;
       if (seedingRef.current || !claimLearningSeed()) return;
       seedingRef.current = true;
+      // Leave `learning` the moment the evidence gate is satisfied, before the
+      // model call below. Everything after this point is producing the summary,
+      // not waiting for something to summarize, and the countdown must stop:
+      // the model can outlive the ceiling, and a spinner beside `0:00` reads as
+      // a hang rather than as work in progress.
+      setState(markLearningWriting());
 
       // Re-fetch with detail now that we are committing to a summary.
       const detailed =
@@ -256,7 +277,7 @@ export function useLearningWindow(
       controller.abort();
       clearInterval(timer);
     };
-  }, [isLearning, startedAt]);
+  }, [isResolving, startedAt]);
 
   // Ceiling: settle honestly if evidence never arrived.
   useEffect(() => {

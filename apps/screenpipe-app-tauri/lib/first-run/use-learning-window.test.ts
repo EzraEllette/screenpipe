@@ -205,3 +205,52 @@ describe("useLearningWindow settings race", () => {
     });
   });
 });
+
+describe("useLearningWindow writing phase", () => {
+  // Regression: `writing` is set from inside the resolve effect. When that
+  // effect was keyed on `isLearning` alone, the transition tore it down,
+  // cleanup set `cancelled`, the in-flight detail fetch aborted and the
+  // summary bailed and released the seed — so the chat was never seeded and
+  // the banner sat on a dead spinner. The phases must share one effect.
+  it("still seeds the chat after flipping out of learning", async () => {
+    const { fetchRecentActivity } = await import(
+      "@/lib/first-run/recent-activity"
+    );
+    const { seedFirstRunSummaryChat } = await import(
+      "@/lib/first-run/seed-summary-chat"
+    );
+    vi.mocked(fetchRecentActivity).mockResolvedValue({
+      data_status: "ok",
+      total_frames: 48,
+      total_active_minutes: 4,
+      apps: [
+        { name: "Arc", frame_count: 30 },
+        { name: "Obsidian", frame_count: 18 },
+      ],
+    } as never);
+    vi.mocked(seedFirstRunSummaryChat).mockResolvedValue("chat-7" as never);
+    // The model must be SLOW for this to test anything. The bug was an effect
+    // tear-down racing an in-flight call; with an instantly-resolving mock the
+    // whole resolve finishes before React processes the state change and the
+    // race never happens, so the test passes against the broken code too.
+    const { summarizeFirstRunWithAi } = await import(
+      "@/lib/first-run/summarize-with-ai"
+    );
+    vi.mocked(summarizeFirstRunWithAi).mockImplementation(
+      () => new Promise((r) => setTimeout(() => r(null as never), 200)),
+    );
+    getOnboardingStatus.mockResolvedValue(
+      okStatus(
+        completedAgo((MIN_LEARNING_MS + LEARNING_WINDOW_CEILING_MS) / 2),
+      ) as never,
+    );
+
+    const { result } = renderHook(() => useLearningWindow());
+
+    await waitFor(() => expect(seedFirstRunSummaryChat).toHaveBeenCalled(), {
+      timeout: 8_000,
+    });
+    await waitFor(() => expect(result.current.phase).toBe("ready"));
+    expect(result.current.chatId).toBe("chat-7");
+  });
+});
