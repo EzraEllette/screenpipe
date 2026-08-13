@@ -2042,6 +2042,33 @@ fn restore_headed_mode_for_consumer(
     true
 }
 
+const WINDOWS_TIMELINE_WINDOW_MODE_MIGRATION: &str =
+    "windowsTimelineWindowModeMigrationV1";
+
+/// Move existing Windows installs off the legacy borderless fullscreen overlay.
+///
+/// The marker makes this a one-time migration: after the first upgraded launch,
+/// users can explicitly switch back to fullscreen without being overridden again.
+fn migrate_windows_timeline_to_window_mode(settings: &mut SettingsStore) -> bool {
+    if settings
+        .extra
+        .get(WINDOWS_TIMELINE_WINDOW_MODE_MIGRATION)
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return false;
+    }
+
+    if settings.overlay_mode == "fullscreen" {
+        settings.overlay_mode = "window".to_string();
+    }
+    settings.extra.insert(
+        WINDOWS_TIMELINE_WINDOW_MODE_MIGRATION.to_string(),
+        Value::Bool(true),
+    );
+    true
+}
+
 pub fn init_store(app: &AppHandle) -> Result<SettingsStore, String> {
     println!("Initializing settings store");
 
@@ -2059,14 +2086,14 @@ pub fn init_store(app: &AppHandle) -> Result<SettingsStore, String> {
         .unwrap_or(false);
 
     let is_new_store;
-    let (mut store, mut should_save) = match SettingsStore::get(app) {
+    let (mut store, mut should_save, can_run_settings_migrations) = match SettingsStore::get(app) {
         Ok(Some(store)) => {
             is_new_store = false;
-            (store, should_persist_restart_notification_migration)
+            (store, should_persist_restart_notification_migration, true)
         }
         Ok(None) => {
             is_new_store = true;
-            (SettingsStore::default(), true) // New store, save defaults
+            (SettingsStore::default(), true, true) // New store, save defaults
         }
         Err(e) => {
             is_new_store = false;
@@ -2078,7 +2105,7 @@ pub fn init_store(app: &AppHandle) -> Result<SettingsStore, String> {
                 "Failed to deserialize settings, using defaults (store not overwritten): {}",
                 e
             );
-            (SettingsStore::default(), false)
+            (SettingsStore::default(), false, false)
         }
     };
 
@@ -2158,6 +2185,16 @@ pub fn init_store(app: &AppHandle) -> Result<SettingsStore, String> {
     if restore_headed_mode_for_consumer(&mut store, cfg!(feature = "enterprise-build")) {
         tracing::info!(
             "settings migration: restored headed UI and scheduled pipe runs for consumer install"
+        );
+        should_save = true;
+    }
+
+    if cfg!(target_os = "windows")
+        && can_run_settings_migrations
+        && migrate_windows_timeline_to_window_mode(&mut store)
+    {
+        tracing::info!(
+            "settings migration: selected window mode for the Windows timeline overlay"
         );
         should_save = true;
     }
@@ -2568,6 +2605,40 @@ mod tests {
         assert!(!restore_headed_mode_for_consumer(&mut enterprise, true));
         assert!(enterprise.headless);
         assert!(enterprise.headless_record_only);
+    }
+
+    #[test]
+    fn windows_timeline_migration_moves_legacy_fullscreen_to_window_once() {
+        let mut settings = SettingsStore {
+            overlay_mode: "fullscreen".to_string(),
+            ..Default::default()
+        };
+
+        assert!(migrate_windows_timeline_to_window_mode(&mut settings));
+        assert_eq!(settings.overlay_mode, "window");
+        assert_eq!(
+            settings.extra.get(WINDOWS_TIMELINE_WINDOW_MODE_MIGRATION),
+            Some(&Value::Bool(true))
+        );
+
+        settings.overlay_mode = "fullscreen".to_string();
+        assert!(!migrate_windows_timeline_to_window_mode(&mut settings));
+        assert_eq!(settings.overlay_mode, "fullscreen");
+    }
+
+    #[test]
+    fn windows_timeline_migration_marks_existing_window_mode_complete() {
+        let mut settings = SettingsStore {
+            overlay_mode: "window".to_string(),
+            ..Default::default()
+        };
+
+        assert!(migrate_windows_timeline_to_window_mode(&mut settings));
+        assert_eq!(settings.overlay_mode, "window");
+        assert_eq!(
+            settings.extra.get(WINDOWS_TIMELINE_WINDOW_MODE_MIGRATION),
+            Some(&Value::Bool(true))
+        );
     }
 
     #[test]

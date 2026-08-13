@@ -3735,6 +3735,10 @@ pub async fn hide_notification_panel(app_handle: tauri::AppHandle) -> Result<(),
 #[tauri::command]
 #[specta::specta]
 pub fn register_window_shortcuts(app_handle: tauri::AppHandle) -> Result<(), String> {
+    register_window_shortcuts_with_generation(app_handle).map(|_| ())
+}
+
+fn register_window_shortcuts_inner(app_handle: tauri::AppHandle) -> Result<(), String> {
     use tauri::Emitter;
     use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Shortcut, ShortcutState};
 
@@ -3743,40 +3747,50 @@ pub fn register_window_shortcuts(app_handle: tauri::AppHandle) -> Result<(), Str
     // Register Escape shortcut — emits event so frontend can decide
     // whether to collapse compact mode or fully close the window
     let escape_shortcut = Shortcut::new(None, Code::Escape);
-    if let Err(e) = global_shortcut.on_shortcut(escape_shortcut, |app, _, event| {
-        if matches!(event.state, ShortcutState::Pressed) {
-            if let Err(e) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                info!("Escape pressed, emitting escape-pressed event");
-                // Target the Main overlay webview explicitly. `app.emit` can be
-                // delivered only to the focused Tauri window; when Home stays
-                // focused while the fullscreen overlay is visible on top, the
-                // overlay never saw escape-pressed (and no keydown reaches it),
-                // so Esc looked broken until a focus change re-routed events.
-                let mut delivered = false;
-                for label in [RewindWindowId::Main.label(), "main-window"] {
-                    if let Some(w) = app.get_webview_window(label) {
-                        if w.is_visible().unwrap_or(false) {
-                            let _ = app.emit_to(label, "escape-pressed", ());
-                            delivered = true;
-                            break;
+    if global_shortcut.is_registered(escape_shortcut) {
+        info!("Window-specific shortcut already registered and verified (Escape)");
+        return Ok(());
+    }
+
+    global_shortcut
+        .on_shortcut(escape_shortcut, |app, _, event| {
+            if matches!(event.state, ShortcutState::Pressed) {
+                if let Err(e) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    info!("Escape pressed, emitting escape-pressed event");
+                    // Target the Main overlay webview explicitly. `app.emit` can be
+                    // delivered only to the focused Tauri window; when Home stays
+                    // focused while the fullscreen overlay is visible on top, the
+                    // overlay never saw escape-pressed (and no keydown reaches it),
+                    // so Esc looked broken until a focus change re-routed events.
+                    let mut delivered = false;
+                    for label in [RewindWindowId::Main.label(), "main-window"] {
+                        if let Some(w) = app.get_webview_window(label) {
+                            if w.is_visible().unwrap_or(false) {
+                                let _ = app.emit_to(label, "escape-pressed", ());
+                                delivered = true;
+                                break;
+                            }
                         }
                     }
+                    if !delivered {
+                        let _ = app.emit("escape-pressed", ());
+                    }
+                })) {
+                    tracing::error!("panic in escape handler: {:?}", e);
                 }
-                if !delivered {
-                    let _ = app.emit("escape-pressed", ());
-                }
-            })) {
-                tracing::error!("panic in escape handler: {:?}", e);
             }
-        }
-    }) {
-        // Ignore "already registered" / duplicate registration errors.
-        // macOS Carbon API returns "RegisterEventHotKey failed" (not "already
-        // registered") when the hotkey is already active, so check both.
-        let msg = e.to_string();
-        if !msg.contains("already registered") && !msg.contains("RegisterEventHotKey failed") {
-            error!("Failed to register Escape shortcut: {}", e);
-        }
+        })
+        .map_err(|e| {
+            let message = format!("Failed to register Escape shortcut: {e}");
+            error!("{}", message);
+            message
+        })?;
+
+    if !global_shortcut.is_registered(escape_shortcut) {
+        let message =
+            "Escape shortcut registration returned success but was not retained".to_string();
+        error!("{}", message);
+        return Err(message);
     }
 
     // NOTE: Search shortcut (Ctrl+Cmd+K) is registered ONLY as a global shortcut
@@ -3784,7 +3798,7 @@ pub fn register_window_shortcuts(app_handle: tauri::AppHandle) -> Result<(), Str
     // Having it in both places caused it to be unregistered globally when the window
     // closed, breaking Ctrl+Cmd+K entirely until app restart.
 
-    info!("Window-specific shortcuts registered (Escape)");
+    info!("Window-specific shortcut registered and verified (Escape)");
     Ok(())
 }
 
@@ -3820,11 +3834,21 @@ pub fn unregister_window_shortcuts(app_handle: tauri::AppHandle) -> Result<(), S
 pub(crate) fn register_window_shortcuts_with_generation(
     app_handle: tauri::AppHandle,
 ) -> Result<u64, String> {
-    register_window_shortcuts(app_handle.clone())?;
+    // Invalidate delayed unregister work before touching the native hotkey.
+    // Bumping afterward leaves a race where an old blur/close task can remove
+    // the newly registered Escape handler between registration and the bump.
     let gen = WINDOW_SHORTCUTS_GEN
         .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
         .saturating_add(1);
-    info!("shortcut-sync: register generation bumped to {}", gen);
+    info!("shortcut-sync: register generation started at {}", gen);
+    register_window_shortcuts_inner(app_handle).map_err(|error| {
+        error!(
+            "shortcut-sync: Escape registration failed at generation {}: {}",
+            gen, error
+        );
+        error
+    })?;
+    info!("shortcut-sync: register generation {} verified", gen);
     Ok(gen)
 }
 
