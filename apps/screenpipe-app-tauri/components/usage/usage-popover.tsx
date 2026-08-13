@@ -13,6 +13,8 @@ import {
 } from "@/components/ui/hover-card";
 import { UsageLimitsPanel } from "@/components/usage/usage-limits-panel";
 import { quotaPlanLabel } from "@/lib/chat/quota-errors";
+import { useContextWindowUsage } from "@/lib/hooks/use-context-window-usage";
+import type { AIPreset } from "@/lib/utils/tauri";
 import {
   formatUsagePercent,
   formatUsageUpdatedAt,
@@ -22,9 +24,17 @@ import {
 } from "@/lib/hooks/use-usage-status";
 import { cn } from "@/lib/utils";
 
-export function UsagePopover() {
+export interface UsagePopoverProps {
+  /** Active chat, so the panel can show how full its context window is. */
+  sessionId?: string | null;
+  /** Preset driving that chat; supplies the window half of the fraction. */
+  activePreset?: AIPreset | null;
+}
+
+export function UsagePopover({ sessionId, activePreset }: UsagePopoverProps = {}) {
   const router = useRouter();
   const query = useUsageStatusQuery();
+  const contextWindow = useContextWindowUsage(sessionId, activePreset);
   const { usage } = query;
   const hosted = usage?.hosted_ai;
   const allowances = hosted?.allowances ?? [];
@@ -75,6 +85,7 @@ export function UsagePopover() {
         <UsageLimitsPanel
           planLabel={plan}
           allowances={allowances}
+          contextWindow={contextWindow}
           updatedLabel={formatUsageUpdatedAt(hosted.usage_as_of)}
           unavailableMessage={unavailableMessage}
           isRefreshing={query.isRefreshing}
