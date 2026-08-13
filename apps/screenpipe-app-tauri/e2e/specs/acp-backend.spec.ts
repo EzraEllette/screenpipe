@@ -198,6 +198,12 @@ async function foregroundChat(sessionId: string): Promise<void> {
 }
 
 function agentActionSelector(kind: "auth" | "permission"): string {
+  // Auth prompts do NOT render as inline cards. standalone-chat.tsx routes
+  // `actionKind === "auth"` to setAcpSignIn() so every ACP sign-in (CLI login
+  // and in-protocol method selection) looks the same in one dialog; only
+  // permission prompts stay inline, because they recur mid-turn and a modal
+  // per approval would be disruptive.
+  if (kind === "auth") return '[data-testid="acp-sign-in-dialog"]';
   return `[data-testid="agent-action-card"][data-agent-action-kind="${kind}"]`;
 }
 
@@ -215,7 +221,7 @@ async function waitForAgentAction(
     }, selector), {
       timeout: t(15_000),
       interval: 100,
-      timeoutMsg: `inline ${kind} card did not appear`,
+      timeoutMsg: `${kind} prompt did not appear`,
     });
   } catch (error) {
     const debug = await browser.execute(() => ({
@@ -223,7 +229,7 @@ async function waitForAgentAction(
       foreground: (window as any).__e2eForegroundReady ?? null,
       body: document.body.innerText.slice(-2_000),
     }));
-    throw new Error(`inline ${kind} card did not appear: ${JSON.stringify(debug)}`, {
+    throw new Error(`${kind} prompt did not appear: ${JSON.stringify(debug)}`, {
       cause: error,
     });
   }
@@ -240,7 +246,13 @@ async function answerAgentAction(
     (input: { selector: string; label: string }) => {
       const card = document.querySelector(input.selector);
       const button = Array.from(card?.querySelectorAll("button") ?? []).find(
-        (candidate) => candidate.textContent?.trim() === input.label,
+        (candidate) => {
+          // Sign-in method buttons nest a title and a description span, so
+          // their textContent is "<title><description>". Match the label as a
+          // prefix so those and single-line buttons ("not now") both resolve.
+          const text = candidate.textContent?.trim() ?? "";
+          return text === input.label || text.startsWith(input.label);
+        },
       ) as HTMLButtonElement | undefined;
       return Boolean(button && !button.disabled);
     },
@@ -254,7 +266,13 @@ async function answerAgentAction(
     (input: { selector: string; label: string }) => {
       const card = document.querySelector(input.selector);
       const button = Array.from(card?.querySelectorAll("button") ?? []).find(
-        (candidate) => candidate.textContent?.trim() === input.label,
+        (candidate) => {
+          // Sign-in method buttons nest a title and a description span, so
+          // their textContent is "<title><description>". Match the label as a
+          // prefix so those and single-line buttons ("not now") both resolve.
+          const text = candidate.textContent?.trim() ?? "";
+          return text === input.label || text.startsWith(input.label);
+        },
       ) as HTMLButtonElement | undefined;
       button?.click();
       return Boolean(button);
@@ -269,14 +287,14 @@ async function answerAgentAction(
     ), {
       timeout: t(10_000),
       interval: 100,
-      timeoutMsg: `inline ${kind} card remained after choosing ${label}`,
+      timeoutMsg: `${kind} prompt remained after choosing ${label}`,
     });
   } catch (error) {
     const debug = await browser.execute((target: string) => ({
       card: document.querySelector(target)?.outerHTML ?? null,
       trace: (window as any).__e2eAgentActionTrace ?? [],
     }), selector);
-    throw new Error(`inline ${kind} card remained after choosing ${label}: ${JSON.stringify(debug)}`, {
+    throw new Error(`${kind} prompt remained after choosing ${label}: ${JSON.stringify(debug)}`, {
       cause: error,
     });
   }
@@ -633,8 +651,11 @@ describe("ACP backend", function () {
     // approving a write without seeing what is being written.
     expect(await permissionCard.getText()).toContain("Edit a file");
     expect(await permissionCard.getText()).toContain("Write mock result");
-    expect(await permissionCard.getText()).toContain("Allow once");
-    await answerAgentAction("permission", "Allow once");
+    // permissionOptionLabel() maps the ACP kind to a lowercase label
+    // ("allow once"), and getText() reflects CSS text-transform on top of that,
+    // so compare case-insensitively rather than pinning a casing.
+    expect((await permissionCard.getText()).toLowerCase()).toContain("allow once");
+    await answerAgentAction("permission", "allow once");
 
     const settled = await waitForPromptDone();
     expect(settled.error).toBeUndefined();
@@ -688,7 +709,7 @@ describe("ACP backend", function () {
       (envelope) => envelope.event?.type === "extension_ui_request",
     );
     expect(new Set(permissionEvents.map((envelope) => envelope.event?.id)).size).toBe(2);
-    await answerAgentAction("permission", "Allow once");
+    await answerAgentAction("permission", "allow once");
     expect((await waitForPromptDone()).error).toBeUndefined();
     await waitForEventCounts(
       normalSession,
