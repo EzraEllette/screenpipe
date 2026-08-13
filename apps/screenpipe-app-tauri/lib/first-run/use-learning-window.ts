@@ -5,12 +5,14 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import posthog from "posthog-js";
 
 import { commands } from "@/lib/utils/tauri";
 import {
   LEARNING_POLL_INTERVAL_MS,
   LEARNING_WINDOW_CEILING_MS,
+  LEARNING_WINDOW_RESET_EVENT,
   beginLearningWindow,
   buildLearningSummary,
   canResolveYet,
@@ -25,6 +27,7 @@ import {
   markLearningReady,
   markLearningWriting,
   releaseLearningSeed,
+  resetLearningWindow,
   readLearningWindow,
   type FirstRunCapturedApp,
   type FirstRunLearningState,
@@ -112,6 +115,7 @@ export function useLearningWindow(
       cancelled = true;
     };
   }, [state.phase]);
+
   const [capturedApps, setCapturedApps] = useState<FirstRunCapturedApp[]>([]);
   const [remainingMs, setRemainingMs] = useState(() =>
     learningWindowRemainingMs(readLearningWindow().startedAt),
@@ -119,6 +123,27 @@ export function useLearningWindow(
   // Guards the seed against a second pass within this mount. The durable guard
   // lives in claimLearningSeed(); this only avoids a redundant round trip.
   const seedingRef = useRef(false);
+
+  // Drop this webview's copy when any webview resets onboarding.
+  //
+  // `resetLearningWindow` in Settings clears only the `home` partition. The
+  // banner also renders in the separate `chat` webview, whose copy kept its
+  // terminal phase and spent seed claim — and the opening effect above returns
+  // immediately unless the phase is `idle`, so that banner never came back no
+  // matter how many times setup was replayed.
+  useEffect(() => {
+    const unlisten = listen(LEARNING_WINDOW_RESET_EVENT, () => {
+      resetLearningWindow();
+      seedingRef.current = false;
+      setCapturedApps([]);
+      // Back to `idle`, which re-arms the opening effect above. It will only
+      // actually open once setup writes a fresh `completedAt`.
+      setState(readLearningWindow());
+    });
+    return () => {
+      void unlisten.then((off) => off()).catch(() => {});
+    };
+  }, []);
 
   const isLearning = state.phase === "learning";
   /**

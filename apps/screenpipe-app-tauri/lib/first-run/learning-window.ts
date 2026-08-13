@@ -684,6 +684,24 @@ export function markLearningDone(): FirstRunLearningState {
   });
 }
 
+/**
+ * Broadcast that every webview must drop its learning-window state.
+ *
+ * `resetLearningWindow` can only clear the partition it runs in, and this
+ * state is not single-partition: the banner renders inside `StandaloneChat`,
+ * which is mounted from both `/home` (the `home` webview) and `/chat` (the
+ * `chat` webview), while Reset Onboarding is clicked in Settings — which
+ * `show.rs` maps onto `home`. So the reset wiped home's copy and left chat's
+ * untouched, still holding `phase: "done"` and a spent seed claim. The opening
+ * effect bails on `phase !== "idle"`, so that webview's banner was dead for
+ * good and no amount of resetting brought it back.
+ *
+ * Same reasoning the module already applies to `completedAt`, which is read
+ * from a fact Rust owns precisely because partitions do not share. Reset needs
+ * the same treatment; an event is the cheaper half of it.
+ */
+export const LEARNING_WINDOW_RESET_EVENT = "first-run-learning-window-reset";
+
 export function resetLearningWindow(): void {
   if (typeof window === "undefined") return;
   try {
