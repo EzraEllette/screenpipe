@@ -75,6 +75,55 @@ describe("meeting workspace tabs", () => {
     expect(transcript).toHaveFocus();
     expect(screen.getByLabelText("summary working")).toBeVisible();
   });
+
+  // The note-wide copy action shares the tab rule so it is visible from every
+  // tab, but it must not become a fourth tab: arrow keys still cycle three
+  // tabs, and screen readers must not announce it as one.
+  it("renders a trailing action outside the tablist without adding a tab", () => {
+    const onValueChange = vi.fn();
+    render(
+      <MeetingWorkspaceTabs
+        value="notes"
+        onValueChange={onValueChange}
+        trailing={
+          <button type="button" aria-label="copy meeting and transcript">
+            copy
+          </button>
+        }
+      />,
+    );
+
+    const copy = screen.getByRole("button", {
+      name: "copy meeting and transcript",
+    });
+    expect(copy).toBeVisible();
+    expect(screen.getAllByRole("tab")).toHaveLength(3);
+    expect(copy.closest('[role="tablist"]')).toBeNull();
+
+    // End must land on the last real tab, not the trailing action.
+    fireEvent.keyDown(screen.getByRole("tab", { name: "notes" }), {
+      key: "End",
+    });
+    expect(onValueChange).toHaveBeenCalledWith("summary");
+    expect(screen.getByRole("tab", { name: "summary" })).toHaveFocus();
+  });
+
+  // Whichever branch renders, the tabs sit on exactly one bottom rule.
+  it("keeps a single bottom rule with and without a trailing action", () => {
+    const { container: plain } = render(
+      <MeetingWorkspaceTabs value="notes" onValueChange={vi.fn()} />,
+    );
+    expect(plain.querySelectorAll(".border-b")).toHaveLength(1);
+
+    const { container: withTrailing } = render(
+      <MeetingWorkspaceTabs
+        value="notes"
+        onValueChange={vi.fn()}
+        trailing={<button type="button">copy</button>}
+      />,
+    );
+    expect(withTrailing.querySelectorAll(".border-b")).toHaveLength(1);
+  });
 });
 
 describe("meeting summary surface", () => {

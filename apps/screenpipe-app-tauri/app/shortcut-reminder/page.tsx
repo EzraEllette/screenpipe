@@ -10,7 +10,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { LogicalPosition, LogicalSize } from "@tauri-apps/api/dpi";
 import posthog from "posthog-js";
 import { usePlatform } from "@/lib/hooks/use-platform";
-import { getStore, saveAndEncrypt } from "@/lib/hooks/use-settings";
+import { getStore } from "@/lib/hooks/use-settings";
 import { commands } from "@/lib/utils/tauri";
 import {
   CheckCircle2,
@@ -40,11 +40,8 @@ type RecordingHealthState = "normal" | "failure" | "fixing" | "recovered";
 
 const COLLAPSED_SIZE = { width: 22, height: 16 };
 const EXPANDED_SIZE = { width: 160, height: 62 };
-const SETTINGS_SIZE = { width: 164, height: 119 };
 const INCIDENT_SIZE = { width: 160, height: 40 };
 const MEETING_SIZE = { width: 280, height: 80 };
-const DAY_SECONDS = 24 * 60 * 60;
-const WEEK_SECONDS = 7 * DAY_SECONDS;
 
 export default function ShortcutReminderPage() {
   const { isMac, isLoading } = usePlatform();
@@ -58,7 +55,6 @@ export default function ShortcutReminderPage() {
   const [meetingHovering, setMeetingHovering] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const [hoveredControl, setHoveredControl] = useState<string | null>(null);
-  const [settingsOpen, setSettingsOpen] = useState(false);
   const [overlayScale, setOverlayScale] = useState(1);
   const resizeQueue = useRef(Promise.resolve());
   const isMacRef = useRef(isMac);
@@ -145,7 +141,6 @@ export default function ShortcutReminderPage() {
     // Listen for explicit shortcut-reminder-update event (from Rust side)
     const unlistenShortcut = listen<string>("shortcut-reminder-update", () => {
       setExpanded(false);
-      setSettingsOpen(false);
       setHoveredControl(null);
       setMeetingHovering(false);
       loadShortcutsFromFile();
@@ -225,8 +220,6 @@ export default function ShortcutReminderPage() {
       resizeOverlay(INCIDENT_SIZE);
     } else if (meetingOverlay.active && meetingHovering) {
       resizeOverlay(MEETING_SIZE);
-    } else if (settingsOpen) {
-      resizeOverlay(SETTINGS_SIZE);
     } else if (expanded) {
       resizeOverlay(EXPANDED_SIZE);
     } else {
@@ -238,7 +231,6 @@ export default function ShortcutReminderPage() {
     meetingHovering,
     meetingOverlay.active,
     resizeOverlay,
-    settingsOpen,
   ]);
 
   const handleRestartRecording = useCallback(async (e: React.MouseEvent) => {
@@ -274,43 +266,9 @@ export default function ShortcutReminderPage() {
     }
   }, []);
 
-  const handleSnooze = useCallback(async (
-    e: React.MouseEvent,
-    scope: "today" | "week",
-  ) => {
-    e.preventDefault();
-    e.stopPropagation();
-
-    const snoozeSeconds = scope === "today" ? DAY_SECONDS : WEEK_SECONDS;
-    try {
-      const store = await getStore();
-      const settings = await store.get<Record<string, unknown>>("settings") || {};
-      await store.set("settings", {
-        ...settings,
-        showShortcutOverlay: true,
-        shortcutOverlaySnoozedUntil:
-          Math.floor(Date.now() / 1000) + snoozeSeconds,
-      });
-      await saveAndEncrypt(store);
-      posthog.capture("shortcut_reminder_dismissed", {
-        dismiss_scope: scope,
-        snooze_hours: snoozeSeconds / 3600,
-      });
-      await commands.hideShortcutReminder();
-    } catch (error) {
-      console.error("Failed to snooze shortcut reminder:", error);
-      try {
-        await getCurrentWindow().hide();
-      } catch {
-        // Ignore fallback hide errors.
-      }
-    }
-  }, []);
-
   const handleOpenSettings = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
-    setSettingsOpen(false);
     posthog.capture("shortcut_reminder_overlay_settings_clicked");
     void commands.showWindow({ Home: { page: "display" } });
   }, []);
@@ -532,7 +490,7 @@ export default function ShortcutReminderPage() {
     posthog.capture("shortcut_reminder_timeline_clicked");
   };
 
-  if (!expanded && !settingsOpen) {
+  if (!expanded) {
     return (
       <div
         data-testid="shortcut-reminder-root"
@@ -596,7 +554,6 @@ export default function ShortcutReminderPage() {
       style={{ background: "transparent" }}
       onMouseLeave={() => {
         setExpanded(false);
-        setSettingsOpen(false);
         setHoveredControl(null);
       }}
     >
@@ -667,70 +624,30 @@ export default function ShortcutReminderPage() {
           style={dockButtonStyle}
           onMouseEnter={() => setHoveredControl("settings")}
           onMouseDown={(e) => e.stopPropagation()}
-          onClick={(e) => {
-            e.stopPropagation();
-            setSettingsOpen((open) => !open);
-          }}
+          onClick={handleOpenSettings}
         >
           <Settings style={{ width: `${12 * overlayScale}px`, height: `${12 * overlayScale}px` }} />
         </button>
       </div>
 
-      {settingsOpen ? (
-        <div
-          className="flex flex-col overflow-hidden border border-white/40 font-mono text-white/85"
-          style={{
-            width: `${164 * overlayScale}px`,
-            height: `${85 * overlayScale}px`,
-            marginTop: `${4 * overlayScale}px`,
-            background: "rgba(0, 0, 0, 0.96)",
-            borderRadius: `${4 * overlayScale}px`,
-            fontSize: `${fontPx}px`,
-          }}
-        >
-          <button
-            className="flex-1 px-2 text-left hover:bg-white/15"
-            title="Hide for today"
-            onClick={(e) => void handleSnooze(e, "today")}
-          >
-            hide for today
-          </button>
-          <button
-            className="flex-1 px-2 text-left hover:bg-white/15"
-            title="Hide for a week"
-            onClick={(e) => void handleSnooze(e, "week")}
-          >
-            hide for a week
-          </button>
-          <div className="mx-2 bg-white/20" style={{ height: "1px" }} />
-          <button
-            className="flex-1 px-2 text-left hover:bg-white/15"
-            title="Open overlay settings"
-            onClick={handleOpenSettings}
-          >
-            overlay settings
-          </button>
-        </div>
-      ) : (
-        <div
-          className="flex items-center justify-center border border-white/25 font-mono text-white/75"
-          style={{
-            width: `${160 * overlayScale}px`,
-            height: `${26 * overlayScale}px`,
-            marginTop: `${4 * overlayScale}px`,
-            background: "rgba(0, 0, 0, 0.9)",
-            borderRadius: `${4 * overlayScale}px`,
-            fontSize: `${fontPx}px`,
-          }}
-        >
-          {disclosure ? (
-            <span>
-              {disclosure[0]}
-              {disclosure[1] ? `  ${disclosure[1]}` : ""}
-            </span>
-          ) : null}
-        </div>
-      )}
+      <div
+        className="flex items-center justify-center border border-white/25 font-mono text-white/75"
+        style={{
+          width: `${160 * overlayScale}px`,
+          height: `${26 * overlayScale}px`,
+          marginTop: `${4 * overlayScale}px`,
+          background: "rgba(0, 0, 0, 0.9)",
+          borderRadius: `${4 * overlayScale}px`,
+          fontSize: `${fontPx}px`,
+        }}
+      >
+        {disclosure ? (
+          <span>
+            {disclosure[0]}
+            {disclosure[1] ? `  ${disclosure[1]}` : ""}
+          </span>
+        ) : null}
+      </div>
     </div>
   );
 }

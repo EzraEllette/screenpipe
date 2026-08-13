@@ -467,7 +467,10 @@ async fn run_terminal_login(
     };
     args.extend(method_args.iter().cloned());
 
-    let mut child = tokio::process::Command::new(program)
+    // No-window: the agent CLI is a console program, and sign-in already has
+    // the user's attention in the app — a terminal blinking beside it for up to
+    // five minutes reads as a crash.
+    let mut child = screenpipe_core::no_window_command_async(program)
         .args(args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -680,7 +683,11 @@ fn supervised_command(program: &str, args: &[String]) -> Result<Command, String>
 #[cfg(windows)]
 fn windows_target_command(program: &str, args: &[String]) -> Result<Command, String> {
     let resolved = resolve_windows_program(program);
-    let mut command = Command::new(resolved);
+    // The guard that spawns this was itself created with CREATE_NO_WINDOW, so
+    // it holds no console — which is precisely why Windows would allocate a
+    // fresh one for a console-subsystem agent here. The flag does not disturb
+    // the inherited stdio the guard relays.
+    let mut command = screenpipe_core::no_window_command(resolved);
     command.args(args);
     Ok(command)
 }

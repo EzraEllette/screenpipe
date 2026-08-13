@@ -647,7 +647,7 @@ describe("Windows user journey", function () {
     expect(existsSync(shortcutsScreenshot)).toBe(true);
   });
 
-  it("shows and hides the shortcut reminder overlay from Display settings", async function () {
+  it("keeps the shortcut reminder overlay on screen and drives its dock actions", async function () {
     if (!isWindows) this.skip();
 
     await openHomeWindow();
@@ -660,26 +660,20 @@ describe("Windows user journey", function () {
     await displayNav.waitForDisplayed({ timeout: t(15_000) });
     await displayNav.click();
 
+    // The overlay carries recording health, live meeting state and meeting
+    // alerts, so it ships unhideable and Display offers only a size. The
+    // `overlay-hiding-control` remote flag can restore the switch, but it is
+    // off by default and E2E never initializes PostHog.
     await waitForBodyText(
       (bodyText) =>
         bodyText.includes("theme, windows, and overlay appearance") &&
-        bodyText.includes("show shortcut reminder") &&
-        bodyText.includes("overlay showing the screenpipe shortcut"),
+        bodyText.includes("shortcut reminder") &&
+        bodyText.includes("overlay size"),
       "Display settings did not show the shortcut reminder controls",
     );
-
-    const shortcutReminderSelector = "#shortcut-overlay";
-    const initiallyChecked = await switchIsChecked(shortcutReminderSelector);
+    expect(await $("#shortcut-overlay").isExisting()).toBe(false);
 
     try {
-      await setSwitchChecked(shortcutReminderSelector, false);
-      await expectShortcutReminderVisible(false, t(20_000));
-      await waitForBodyText(
-        (bodyText) => !bodyText.includes("overlay size"),
-        "Shortcut reminder size controls stayed visible after disabling the reminder",
-      );
-
-      await setSwitchChecked(shortcutReminderSelector, true);
       await expectShortcutReminderVisible(true, t(20_000));
       await waitForWindowHandle("shortcut-reminder", t(20_000));
 
@@ -795,32 +789,15 @@ describe("Windows user journey", function () {
       const overlaySettingsButton = await $('button[title="Overlay settings"]');
       await overlaySettingsButton.waitForDisplayed({ timeout: t(10_000) });
       await overlaySettingsButton.click();
-      const hideForTodayButton = await $('button[title="Hide for today"]');
-      await hideForTodayButton.waitForDisplayed({ timeout: t(10_000) });
-      await hideForTodayButton.click();
 
-      await expectShortcutReminderVisible(false, t(20_000));
-      await browser.switchToWindow("home");
-      await browser.waitUntil(
-        async () => await switchIsChecked(shortcutReminderSelector),
-        {
-          timeout: t(15_000),
-          interval: 250,
-          timeoutMsg: "A bounded overlay snooze unexpectedly disabled the Display setting",
-        },
-      );
+      // The gear opens Display settings; it must not offer to hide the pill,
+      // and the pill must still be on screen afterwards.
+      expect(await $('button[title="Hide for today"]').isExisting()).toBe(false);
+      expect(await $('button[title="Hide for a week"]').isExisting()).toBe(false);
+      await expectShortcutReminderVisible(true, t(20_000));
     } finally {
       if ((await browser.getWindowHandles()).includes("home")) {
         await browser.switchToWindow("home").catch(() => {});
-      }
-      // Toggling off then back on clears any bounded snooze through the
-      // explicit show command, leaving the user's original setting intact.
-      await setSwitchChecked(shortcutReminderSelector, false).catch(() => {});
-      if (initiallyChecked) {
-        await setSwitchChecked(shortcutReminderSelector, true).catch(() => {});
-      }
-      if (!initiallyChecked) {
-        await expectShortcutReminderVisible(false, t(10_000)).catch(() => {});
       }
     }
   });

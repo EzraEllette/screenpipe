@@ -3183,7 +3183,7 @@ fn build_async_command(path: &str) -> tokio::process::Command {
                 debug!("bypassing cmd.exe, running pi via bun: {} {}", bun, js_path);
                 c
             } else {
-                let mut c = tokio::process::Command::new("node");
+                let mut c = crate::no_window::no_window_command_async("node");
                 c.arg(js_path);
                 debug!("bypassing cmd.exe, running pi via node: {}", js_path);
                 c
@@ -3194,7 +3194,7 @@ fn build_async_command(path: &str) -> tokio::process::Command {
                 "could not resolve JS entry from {}, falling back to cmd.exe /C",
                 path
             );
-            let mut c = tokio::process::Command::new("cmd.exe");
+            let mut c = crate::no_window::no_window_command_async("cmd.exe");
             c.args(["/C", path]);
             c
         } else if path.ends_with(".js") {
@@ -3205,7 +3205,7 @@ fn build_async_command(path: &str) -> tokio::process::Command {
                 debug!("running pi JS entrypoint via bun: {} {}", bun, path);
                 c
             } else {
-                let mut c = tokio::process::Command::new("node");
+                let mut c = crate::no_window::no_window_command_async("node");
                 c.arg(path);
                 c
             }

@@ -248,7 +248,11 @@ fn truncate_stderr(stderr: &str) -> String {
 #[cfg(windows)]
 fn build_command_for_path(path: &str) -> Command {
     if path.ends_with(".cmd") || path.ends_with(".bat") {
-        let mut cmd = Command::new("cmd.exe");
+        // No-window here rather than relying on the caller: both of today's
+        // callers do set the flag, but only after ~2500 lines of indirection,
+        // and a third caller that forgets would flash a terminal. Setting it
+        // twice is harmless.
+        let mut cmd = screenpipe_core::no_window_command("cmd.exe");
         cmd.args(["/C", path]);
         cmd
     } else if path.ends_with(".exe") {
@@ -1228,13 +1232,10 @@ fn clear_pi_install_artifacts(install_dir: &Path) {
     let _ = std::fs::remove_file(install_dir.join("package-lock.json"));
 }
 
-fn apply_no_window(_cmd: &mut Command) {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-        _cmd.creation_flags(CREATE_NO_WINDOW);
-    }
+/// Local alias so the many call sites below stay unchanged while there is only
+/// one implementation of the flag, in `screenpipe_core::no_window`.
+fn apply_no_window(cmd: &mut Command) {
+    screenpipe_core::apply_no_window(cmd);
 }
 
 fn bun_command(bun: &str) -> Command {
@@ -1295,7 +1296,10 @@ fn should_retry_install_with_npm(stderr: &str) -> bool {
 fn npm_install_command(install_dir: &Path) -> Command {
     #[cfg(windows)]
     {
-        let mut cmd = Command::new("cmd.exe");
+        // Guarded at construction, not left to `run_command_output`: an npm
+        // fallback install can run for minutes, so a missed flag here is a
+        // terminal sitting on the user's desktop, not a blink.
+        let mut cmd = screenpipe_core::no_window_command("cmd.exe");
         cmd.args(["/C", "npm"])
             .args(NPM_INSTALL_ARGS)
             .current_dir(install_dir);

@@ -16,7 +16,7 @@
 // cloud credential (that stays out of ACP process trees — web search goes
 // through a local engine proxy that injects the cloud JWT server-side).
 
-import { writeFileSync, mkdirSync } from "node:fs";
+import { writeFileSync, mkdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, extname, basename } from "node:path";
 import { Buffer } from "node:buffer";
@@ -374,6 +374,48 @@ const TOOLS = [
     },
   },
   {
+    name: "artifact",
+    description:
+      "List or open artifacts already created in this chat. Use list to resolve every follow-up reference against the complete session artifact set, including corrections such as 'not that one, the other one'. Match the user's description against titles, kinds, filenames, previews, and capabilities visible in previews. Then use get with the returned stable artifact id; never recreate an artifact just to show it. If no candidate is clear, show the returned available artifacts and ask which one they mean.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["list", "get"] },
+        id: { type: "number", description: "Stable artifact id returned by list" },
+      },
+      required: ["action"],
+      additionalProperties: false,
+    },
+    async run(args) {
+      const sessionId = chatSessionId();
+      const res = await fetch(
+        `${apiBase()}/artifacts?source=${encodeURIComponent(sessionId)}&limit=1000`,
+        { headers: authHeaders() },
+      );
+      if (!res.ok) throw new Error(`GET /artifacts returned ${res.status}`);
+      const body = await res.json();
+      const artifacts = (Array.isArray(body?.data) ? body.data : []).filter(
+        (item) => item.registered === true && item.source_type === "chat",
+      );
+      if (args?.action === "list") return JSON.stringify({ artifacts });
+      const artifact = artifacts.find((item) => item.id === args?.id);
+      if (!artifact) {
+        return JSON.stringify({
+          error: `Artifact ${args?.id ?? "(missing id)"} is not available in this chat`,
+          available_artifacts: artifacts.map(({ id, title, kind, path, preview, created_at }) => ({
+            id, title, kind, path, preview, created_at,
+          })),
+        });
+      }
+      const binary = artifact.kind === "image" || artifact.kind === "binary";
+      return JSON.stringify({
+        artifact,
+        encoding: binary ? "base64" : "utf8",
+        content: readFileSync(artifact.path, binary ? "base64" : "utf8"),
+      });
+    },
+  },
+  {
     name: "save_artifact",
     description:
       "Save or update a user-facing deliverable (note, report, summary, todo list, export, document, or image) so it appears in the user's Artifacts library. Use for finished products the user will want to find later, not for scratch or intermediate work. Text kinds (markdown, JSON, text, CSV, code) take plain content; images and other binaries take base64 content with encoding set to base64.",
@@ -429,7 +471,18 @@ const TOOLS = [
         }),
       });
       if (!res.ok) throw new Error(`POST /artifacts/register returned ${res.status}`);
-      return JSON.stringify({ status: "saved", filename, kind });
+      const artifact = await res.json();
+      return JSON.stringify({
+        status: "saved",
+        artifact: {
+          id: artifact.id,
+          title: artifact.title,
+          kind: artifact.kind,
+          path: artifact.output_path,
+          preview: artifact.preview,
+          created_at: artifact.created_at,
+        },
+      });
     },
   },
   {
