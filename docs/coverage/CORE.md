@@ -355,7 +355,7 @@ bun run coverage:core -- --llvm-cov-summary ../../docs/coverage/core-llvm-cov-su
 | engine-meeting-privacy-sync | screenpipe-engine | src/drm_detector.rs | source | 19 | 2 | 21 |
 | engine-capture-timeline | screenpipe-engine | src/event_driven_capture.rs | source | 80 | 0 | 80 |
 | engine-meeting-privacy-sync | screenpipe-engine | src/external_memory_sync.rs | source | 10 | 0 | 10 |
-| engine-capture-timeline | screenpipe-engine | src/focus_aware_controller.rs | source | 12 | 0 | 12 |
+| engine-capture-timeline | screenpipe-engine | src/focus_aware_controller.rs | source | 14 | 0 | 14 |
 | engine-focus-os | screenpipe-engine | src/focus_tracker/darwin.rs | source | 3 | 0 | 3 |
 | engine-focus-os | screenpipe-engine | src/focus_tracker/windows.rs | source | 1 | 0 | 1 |
 | engine-capture-timeline | screenpipe-engine | src/frame_linker_actor.rs | source | 2 | 0 | 2 |
