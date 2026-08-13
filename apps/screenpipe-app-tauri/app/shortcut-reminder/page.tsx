@@ -50,6 +50,17 @@ type ReminderSettings = {
 
 type RecordingHealthState = "normal" | "failure" | "fixing" | "recovered";
 
+// Mirrors the Rust store defaults (`store.rs`). A settings object written
+// before one of these keys existed reads back blank, and a blank chord used to
+// survive all the way to the hover label — the disclosure showed "timeline"
+// with no shortcut next to it, even though the default chord was registered and
+// working. Falling back here keeps the label honest about what actually fires.
+const DEFAULT_SHORTCUTS = {
+  overlay: { mac: "Super+Ctrl+S", other: "Alt+S" },
+  chat: { mac: "Control+Super+L", other: "Alt+L" },
+  search: { mac: "Control+Super+K", other: "Alt+K" },
+} as const;
+
 const COLLAPSED_SIZE = { width: 22, height: 16 };
 const EXPANDED_SIZE = { width: 160, height: 62 };
 const INCIDENT_SIZE = { width: 160, height: 40 };
@@ -89,17 +100,45 @@ export default function ShortcutReminderPage() {
     if (!settings) return;
 
     const disabledShortcuts = new Set(settings.disabledShortcuts ?? []);
-    const formatForReminder = (shortcut: string | undefined, disabledKey: string) => {
+    const formatForReminder = (
+      shortcut: string | undefined,
+      disabledKey: string,
+      fallback: { mac: string; other: string },
+    ) => {
+      // An explicitly disabled shortcut has no chord to show — that blank is
+      // intentional. A missing one just means the stored settings predate the
+      // key, so show the default that is actually registered.
       if (disabledShortcuts.has(disabledKey)) return "";
-      if (!shortcut || shortcut.trim() === "") return "";
-      return formatShortcut(shortcut, isMacRef.current);
+      const raw =
+        shortcut && shortcut.trim() !== ""
+          ? shortcut
+          : isMacRef.current
+            ? fallback.mac
+            : fallback.other;
+      return formatShortcut(raw, isMacRef.current);
     };
 
     setOverlayShortcut(
-      formatForReminder(settings.showScreenpipeShortcut, "showScreenpipeShortcut")
+      formatForReminder(
+        settings.showScreenpipeShortcut,
+        "showScreenpipeShortcut",
+        DEFAULT_SHORTCUTS.overlay,
+      )
     );
-    setChatShortcut(formatForReminder(settings.showChatShortcut, "showChatShortcut"));
-    setSearchShortcut(formatForReminder(settings.searchShortcut, "searchShortcut"));
+    setChatShortcut(
+      formatForReminder(
+        settings.showChatShortcut,
+        "showChatShortcut",
+        DEFAULT_SHORTCUTS.chat,
+      ),
+    );
+    setSearchShortcut(
+      formatForReminder(
+        settings.searchShortcut,
+        "searchShortcut",
+        DEFAULT_SHORTCUTS.search,
+      ),
+    );
 
     if (settings.shortcutOverlaySize) {
       const s = settings.shortcutOverlaySize;
@@ -141,10 +180,13 @@ export default function ShortcutReminderPage() {
 
     // Initial load from file
     loadShortcutsFromFile().then(() => {
-      // Set platform-appropriate defaults if file had no values
-      setOverlayShortcut(prev => prev ?? (isMac ? "⌘⌃S" : "Alt+S"));
-      setChatShortcut(prev => prev ?? (isMac ? "⌘⌃L" : "Alt+L"));
-      setSearchShortcut(prev => prev ?? (isMac ? "⌘⌃K" : "Alt+K"));
+      // Reached when there is no settings object at all (fresh profile, or the
+      // read threw); `applyReminderSettings` covers the partially-filled case.
+      const fallback = (d: { mac: string; other: string }) =>
+        formatShortcut(isMac ? d.mac : d.other, isMac);
+      setOverlayShortcut(prev => prev ?? fallback(DEFAULT_SHORTCUTS.overlay));
+      setChatShortcut(prev => prev ?? fallback(DEFAULT_SHORTCUTS.chat));
+      setSearchShortcut(prev => prev ?? fallback(DEFAULT_SHORTCUTS.search));
     });
 
     // Also listen for store changes via plugin (for live updates when user changes shortcuts).
@@ -257,8 +299,17 @@ export default function ShortcutReminderPage() {
           await appWindow.setPosition(new LogicalPosition(nextX, nextY));
           appliedSizeRef.current = target;
         })
-        .catch(() => {
-          // The overlay can be hidden while a queued resize is resolving.
+        .catch((e) => {
+          // The overlay can be hidden while a queued resize is resolving, so a
+          // failure here is not fatal — but it must not be invisible either.
+          // Swallowing it silently is how a missing `core:window:allow-set-size`
+          // capability went unnoticed: every resize was rejected, the window
+          // stayed at its creation size, and the page kept rendering a larger
+          // layout into it.
+          console.warn(
+            "overlay resize failed:",
+            e instanceof Error ? `${e.name}: ${e.message}` : String(e),
+          );
         });
     },
     [overlayScale],
@@ -697,9 +748,8 @@ export default function ShortcutReminderPage() {
     >
       <div
         onPointerDown={handleMouseDown}
-        className="select-none flex shrink-0 border border-white/40"
+        className="select-none flex w-full shrink-0 border border-white/40"
         style={{
-          width: `${160 * overlayScale}px`,
           height: `${30 * overlayScale}px`,
           background: "rgba(0, 0, 0, 0.94)",
           borderRadius: `${4 * overlayScale}px`,
@@ -772,24 +822,29 @@ export default function ShortcutReminderPage() {
         </button>
       </div>
 
+      {/* The label row only exists while a control is hovered. The native panel
+          keeps this area transparent (`Color.clear`) and floats the label under
+          the hovered icon; painting it unconditionally left an empty black bar
+          hanging under the dock whenever the pointer sat between icons. The
+          reserved height stays either way so the dock never shifts. */}
       <div
-        className="flex items-center justify-center border border-white/25 font-mono text-white/75"
+        className="flex w-full min-h-0 flex-1 items-center justify-center overflow-hidden font-mono text-white/75"
         style={{
-          width: `${160 * overlayScale}px`,
-          height: `${26 * overlayScale}px`,
+          maxHeight: `${26 * overlayScale}px`,
           // The gap belongs between the two rows, and `column-reverse` does not
           // flip which physical side a margin lands on. Keeping it on `top`
           // when the disclosure is drawn above the dock butts the two together
           // and leaves the gap dangling off the end of the stack.
           marginTop: dockAbove ? `${4 * overlayScale}px` : 0,
           marginBottom: dockAbove ? 0 : `${4 * overlayScale}px`,
-          background: "rgba(0, 0, 0, 0.9)",
+          background: disclosure ? "rgba(0, 0, 0, 0.9)" : "transparent",
+          border: `1px solid ${disclosure ? "rgba(255, 255, 255, 0.25)" : "transparent"}`,
           borderRadius: `${4 * overlayScale}px`,
           fontSize: `${fontPx}px`,
         }}
       >
         {disclosure ? (
-          <span>
+          <span className="truncate px-1">
             {disclosure[0]}
             {disclosure[1] ? `  ${disclosure[1]}` : ""}
           </span>

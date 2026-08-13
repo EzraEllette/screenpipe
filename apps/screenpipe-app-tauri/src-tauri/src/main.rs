@@ -157,6 +157,8 @@ mod log_files;
 mod media_commands;
 mod native_notification;
 mod native_shortcut_reminder;
+#[cfg(target_os = "windows")]
+mod native_overlay_win;
 mod notifications;
 mod safe_icon;
 mod shortcuts;

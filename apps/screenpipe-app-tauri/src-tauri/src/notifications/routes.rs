@@ -193,6 +193,21 @@ pub async fn send_notification(
         }));
     }
 
+    // Repeat gate: same type + pipe + title, again, inside its cooldown. A
+    // condition-driven producer re-fires while its condition holds; drop the
+    // echo here rather than expecting every producer to latch for itself.
+    if super::gate::repeat_suppressed_now(
+        Some(resolved_type.as_str()),
+        source.pipe_name.as_deref(),
+        &payload.title,
+    ) {
+        debug!("notify: skipped (identical alert already shown recently)");
+        return Ok(Json(ApiResponse {
+            success: true,
+            message: "duplicate notification suppressed".to_string(),
+        }));
+    }
+
     // Gate pipe-typed alerts behind the `Pipe notifications` toggle.
     // Other types (`system`, `captureStalls`, …) self-gate upstream
     // before they reach `/notify`, so we let them through here to

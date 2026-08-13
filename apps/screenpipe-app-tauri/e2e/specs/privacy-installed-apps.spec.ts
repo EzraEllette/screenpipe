@@ -31,6 +31,13 @@ async function openSettings(): Promise<void> {
   const navSettings = await $('[data-testid="nav-settings"]');
   await navSettings.waitForExist({ timeout: t(10_000) });
   await navSettings.click();
+  // nav-settings reopens the last-visited section (readLastSettingsSection),
+  // which may already be Privacy — and the installed-apps shim below must be
+  // installed while NOT on Privacy so the next mount refetches under it.
+  // Select General explicitly instead of assuming it is where we landed.
+  const navGeneral = await $('[data-testid="settings-nav-general"]');
+  await navGeneral.waitForExist({ timeout: t(10_000) });
+  await navGeneral.click();
   const general = await $('[data-testid="section-settings-general"]');
   await general.waitForExist({ timeout: t(8_000) });
 }
