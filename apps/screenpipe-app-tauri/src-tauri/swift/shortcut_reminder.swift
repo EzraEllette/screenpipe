@@ -437,7 +437,10 @@ private let kBaseDisclosureGap: CGFloat = 4
 private let kBaseTranscriptW: CGFloat = 320
 private let kBaseTranscriptH: CGFloat = 142
 private let kBaseNotificationW: CGFloat = 340
-private let kBaseNotificationH: CGFloat = 44
+/// Title + body measure ~23pt and the action buttons are 22pt, so this leaves a
+/// ~5pt gutter instead of the ~10pt of dead air a 44pt row used to have. Keeps
+/// the toast in the same density family as the 30pt dock it hangs off.
+private let kBaseNotificationH: CGFloat = 34
 private let kRestingOpacity: Double = 0.50
 private let kAnimDur: Double = 0.2
 private let kDockControls = ["search", "chat", "timeline", "audio", "settings"]
@@ -1893,6 +1896,7 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
             hoverHideWorkItem = nil
             metrics.isHovering = true
             refreshTranscriptPanelVisibility()
+            positionNotificationPanelIfVisible()
         } else {
             metrics.hoveredControl = nil
             disclosurePanel?.orderOut(nil)
@@ -2001,6 +2005,7 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
             hoverHideWorkItem = nil
             metrics.isHovering = true
             refreshTranscriptPanelVisibility()
+            positionNotificationPanelIfVisible()
         } else {
             scheduleHoverExit()
         }
@@ -2019,6 +2024,7 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
             self.disclosurePanel?.orderOut(nil)
             // A pinned card is the one thing hover exit must not take away.
             self.refreshTranscriptPanelVisibility()
+            self.positionNotificationPanelIfVisible()
         }
         hoverHideWorkItem = work
         // Bridge between the chip and the card. The corridor is continuous now,
@@ -2598,6 +2604,13 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
         }
     }
 
+    /// The toast hangs off the bar, so it has to move when the bar changes size
+    /// between the resting chip and the hovered dock.
+    private func positionNotificationPanelIfVisible() {
+        guard notificationPanel?.isVisible == true else { return }
+        positionNotificationPanel()
+    }
+
     /// Sit the notification against the pill on the side the disclosure opens,
     /// aligned to the pill's edge so it visibly belongs to it.
     private func positionNotificationPanel() {
@@ -2605,9 +2618,14 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
         let visible = panel.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? panel.frame
         let width = toast.frame.width
         let height = toast.frame.height
+        // Anchor to the *visible* bar, not the window. The window stays at the
+        // expanded size while the resting chip is only 16pt of it, so anchoring
+        // Y to the window edge left a ~46pt hole between the chip and the toast
+        // even though X was already measured off the chip. Same rect the
+        // transcript card uses, so the two attachments hang the same way.
         let pill = overlayHoverRect(
             in: panel.frame,
-            expanded: false,
+            expanded: metrics.isHovering || metrics.forceExpanded,
             disclosureDown: metrics.disclosureDown,
             horizontal: metrics.horizontal,
             scale: gOverlayScale
@@ -2622,8 +2640,8 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
         let margin = anchorMargin(scale: gOverlayScale)
         let x = min(max(preferredX, visible.minX + margin), visible.maxX - width - margin)
         let preferredY = metrics.disclosureDown
-            ? panel.frame.minY - height - margin
-            : panel.frame.maxY + margin
+            ? pill.minY - height - margin
+            : pill.maxY + margin
         let y = min(max(preferredY, visible.minY + margin), visible.maxY - height - margin)
         toast.setFrameOrigin(NSPoint(x: x, y: y))
     }

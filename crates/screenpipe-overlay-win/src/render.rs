@@ -671,11 +671,12 @@ impl Renderer {
         let text_x = r.x + pad + 20.0 * s;
         let text_w = (text_right - text_x - 8.0 * s).max(20.0);
         let has_body = !n.body.is_empty();
-        let title_rect = if has_body {
-            Rect::new(text_x, r.y + 6.0 * s, text_w, 14.0 * s)
-        } else {
-            Rect::new(text_x, r.y, text_w, r.h)
-        };
+        // Centre the text block in whatever height the row has rather than
+        // pinning rows to fixed offsets, so the gutters stay even.
+        let line = 14.0 * s;
+        let block = if has_body { line * 2.0 } else { line };
+        let text_top = r.y + (r.h - block) / 2.0;
+        let title_rect = Rect::new(text_x, text_top, text_w, line);
         // Meeting titles are user data and routinely longer than the row.
         self.mono_text(
             rt,
@@ -693,7 +694,7 @@ impl Renderer {
                 8.5 * s,
                 DWRITE_FONT_WEIGHT_NORMAL,
                 Align::Leading,
-                Rect::new(text_x, r.y + 20.0 * s, text_w, 14.0 * s),
+                Rect::new(text_x, text_top + line, text_w, line),
                 white(0.60),
             );
         }

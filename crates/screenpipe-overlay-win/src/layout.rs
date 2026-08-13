@@ -59,7 +59,10 @@ pub const BASE_GAP: f32 = 4.0;
 pub const BASE_TRANSCRIPT_W: f32 = 320.0;
 pub const BASE_TRANSCRIPT_H: f32 = 142.0;
 pub const BASE_NOTIFICATION_W: f32 = 340.0;
-pub const BASE_NOTIFICATION_H: f32 = 44.0;
+/// Title + body are two 14pt rows and the action buttons are 22pt, so this
+/// leaves a ~3pt gutter instead of the ~8pt of dead air a 44pt row used to
+/// have. Keeps the toast in the same density family as the 30pt dock.
+pub const BASE_NOTIFICATION_H: f32 = 34.0;
 pub const RESTING_OPACITY: f32 = 0.50;
 
 /// Room around the content for the drop shadow. Layered windows composite the
@@ -507,6 +510,36 @@ mod tests {
             );
             assert!(r.x >= n.x, "action button escapes the notification");
         }
+    }
+
+    #[test]
+    fn the_notification_row_hugs_its_content() {
+        // Two 14pt text rows, or a 22pt action button, is everything the row
+        // has to hold. Whatever is left over reads as an empty black band, so
+        // keep the gutter small — this row used to be 44pt tall.
+        let content = (14.0f32 * 2.0).max(22.0);
+        let gutter = BASE_NOTIFICATION_H - content;
+        assert!(
+            (0.0..=8.0).contains(&gutter),
+            "notification row should hug its content, got {gutter}pt of gutter"
+        );
+
+        // And the button has to stay centred in it, whatever the height is.
+        let s = OverlayState {
+            notification: parse(
+                r#"{"id":"m","title":"meeting detected","body":"zoom — product sync","actions":[
+                    {"label":"open note","action":"deeplink","primary":true}]}"#,
+            )
+            .ok(),
+            ..Default::default()
+        };
+        let l = compute(&s);
+        let n = l.notification.unwrap();
+        let (_, btn) = notification_action_rects(&s, n, l.scale)[0];
+        assert!(
+            ((btn.y - n.y) - (n.bottom() - btn.bottom())).abs() < 0.01,
+            "action button is not centred in the row: {btn:?} in {n:?}"
+        );
     }
 
     #[test]
