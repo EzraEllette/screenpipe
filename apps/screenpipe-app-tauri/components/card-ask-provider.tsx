@@ -4,24 +4,13 @@
 "use client";
 
 import { useEffect, useMemo } from "react";
-import { platform } from "@tauri-apps/plugin-os";
+import { normalizeOs } from "@/lib/card-ask/os";
 import { CardAskModal } from "@/components/card-ask-modal";
 import { useCardAsk } from "@/lib/hooks/use-card-ask";
 import { emitCardAskTrigger } from "@/lib/card-ask/trigger-bus";
 import { isExpiringCardlessGrant } from "@/lib/card-ask/gating";
 import { useSettings } from "@/lib/hooks/use-settings";
 import type { AppUser } from "@/lib/app-entitlement";
-
-function normalizeOs(): string {
-  try {
-    const p = platform();
-    if (p === "macos") return "macOS";
-    if (p === "windows") return "Windows";
-    return "Linux";
-  } catch {
-    return "unknown";
-  }
-}
 
 /**
  * Mounts the card-ask experiment in the Home window.

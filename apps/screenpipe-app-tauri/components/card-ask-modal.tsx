@@ -24,9 +24,24 @@ const COPY: Record<
   CardAskTrigger,
   { title: string; body: string; cta: string }
 > = {
+  // The onboarding placement is rendered by PlanSelectionStep, not this modal.
+  // Copy still lives here so the map stays exhaustive over CardAskTrigger and
+  // a remote payload cannot route `onboarding` to the modal and find nothing.
+  onboarding: {
+    title: "Start your 7-day Business trial",
+    body: "Full access to AI, unlimited pipes, and cloud transcription. Cancel anytime before day 7 and you are not charged.",
+    cta: "Start trial",
+  },
   login: {
     title: "Start your 7-day Business trial",
     body: "Full access to AI, unlimited pipes, and cloud transcription. Cancel anytime before day 7 and you are not charged.",
+    cta: "Start trial",
+  },
+  // Mid-journey placement: the user is deep in a session and has seen the app
+  // work, so the ask leads with continuity rather than setup.
+  mid_session: {
+    title: "Keep Business features running",
+    body: "A 7-day Business trial keeps AI, pipes, and cloud transcription at full capacity while you work. Cancel anytime before day 7 and you are not charged.",
     cta: "Start trial",
   },
   first_value: {
