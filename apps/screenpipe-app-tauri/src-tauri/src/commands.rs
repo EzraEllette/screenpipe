@@ -4,6 +4,8 @@
 
 #[cfg(target_os = "macos")]
 mod native_actions;
+// Public so the generated command registry can name the handler by full path.
+pub(crate) mod overlay_anchor;
 
 use crate::{
     native_notification, native_shortcut_reminder,
@@ -2835,6 +2837,10 @@ fn shortcut_reminder_payload(
         "shortcutOverlayAnchor".to_string(),
         serde_json::Value::String(settings.shortcut_overlay_anchor.clone()),
     );
+    map.insert(
+        "shortcutOverlayDisplay".to_string(),
+        serde_json::Value::String(settings.shortcut_overlay_display.clone()),
+    );
     map
 }
 
@@ -3003,56 +3009,35 @@ pub(crate) async fn show_shortcut_reminder_impl(
     let window_width = 22.0 * scale;
     let window_height = 16.0 * scale;
 
-    // Position at top center of the screen where the cursor is
-    let (x, y) = {
-        #[cfg(target_os = "macos")]
-        {
-            use tauri_nspanel::cocoa::appkit::{NSEvent, NSScreen};
-            use tauri_nspanel::cocoa::base::{id, nil};
-            use tauri_nspanel::cocoa::foundation::{NSArray, NSPoint, NSRect};
-            unsafe {
-                let mouse: NSPoint = NSEvent::mouseLocation(nil);
-                let screens: id = NSScreen::screens(nil);
-                let count: u64 = NSArray::count(screens);
-                let mut x = 0.0_f64;
-                let mut y = 12.0_f64;
-                for i in 0..count {
-                    let screen: id = NSArray::objectAtIndex(screens, i);
-                    let frame: NSRect = NSScreen::frame(screen);
-                    if mouse.x >= frame.origin.x
-                        && mouse.x < frame.origin.x + frame.size.width
-                        && mouse.y >= frame.origin.y
-                        && mouse.y < frame.origin.y + frame.size.height
-                    {
-                        x = frame.origin.x + (frame.size.width - window_width) / 2.0;
-                        y = 12.0;
-                        break;
-                    }
-                }
-                (x, y)
-            }
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let monitor = app_handle
-                .primary_monitor()
-                .map_err(|e| e.to_string())?
-                .ok_or("No primary monitor found")?;
-            let screen_size = monitor.size();
-            let scale_factor = monitor.scale_factor();
-            let x = ((screen_size.width as f64 / scale_factor) - window_width) / 2.0;
-            (x, 12.0)
-        }
-    };
+    // Open where the user last dropped the pill, not at a hardcoded top-center.
+    // Physical, because a logical position is resolved against whichever
+    // monitor the window is on today, which is the wrong one until it moves.
+    let anchor_position = overlay_anchor::resolve_overlay_monitor(
+        &app_handle,
+        label,
+        &store.shortcut_overlay_display,
+    )
+    .map(|monitor| {
+        overlay_anchor::overlay_anchor_position(
+            &monitor,
+            &store.shortcut_overlay_anchor,
+            (window_width, window_height),
+            scale,
+        )
+    });
 
     // If window exists, resize, reposition to current screen, and show
     if let Some(window) = app_handle.get_webview_window(label) {
         info!("shortcut-reminder window exists, resizing/repositioning and showing");
+        // Position before size: moving across monitors can change the scale
+        // factor, and a logical size has to be resolved against the new one.
+        if let Some(position) = anchor_position {
+            let _ = window.set_position(tauri::Position::Physical(position));
+        }
         let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize::new(
             window_width,
             window_height,
         )));
-        let _ = window.set_position(tauri::Position::Logical(tauri::LogicalPosition::new(x, y)));
         let _ = app_handle.emit_to(label, "shortcut-reminder-update", &shortcut_payload);
         let _ = window.show();
 
@@ -3093,7 +3078,6 @@ pub(crate) async fn show_shortcut_reminder_impl(
     )
     .title("")
     .inner_size(window_width, window_height)
-    .position(x, y)
     .visible_on_all_workspaces_gated(true)
     .always_on_top_gated(true)
     .decorations(false)
@@ -3113,6 +3097,12 @@ pub(crate) async fn show_shortcut_reminder_impl(
         })?;
 
     info!("shortcut-reminder window created");
+
+    // Set after build rather than via the builder, so a pinned display on a
+    // different scale factor lands on the pixel the anchor asked for.
+    if let Some(position) = anchor_position {
+        let _ = window.set_position(tauri::Position::Physical(position));
+    }
 
     // Convert to NSPanel on macOS for fullscreen support
     #[cfg(target_os = "macos")]

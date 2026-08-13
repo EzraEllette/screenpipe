@@ -22,6 +22,17 @@ pub fn is_reminder_visible() -> bool {
     NATIVE_REMINDER_VISIBLE.load(Ordering::SeqCst)
 }
 
+/// Observed state of the native live-meeting transcript card. `transcript_visible`
+/// is what AppKit reports, not what we intended to show.
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeetingOverlayPanelState {
+    pub transcript_visible: bool,
+    pub pinned: bool,
+    pub hovering: bool,
+    pub meeting_active: bool,
+}
+
 #[cfg(target_os = "macos")]
 mod ffi {
     use std::ffi::CString;
@@ -42,6 +53,14 @@ mod ffi {
             w: *mut f64,
             h: *mut f64,
         ) -> c_int;
+        pub fn shortcut_get_meeting_overlay_state(
+            transcript_visible: *mut c_int,
+            pinned: *mut c_int,
+            hovering: *mut c_int,
+            meeting_active: *mut c_int,
+        ) -> c_int;
+        pub fn shortcut_set_pill_hovering(hovering: c_int) -> c_int;
+        pub fn shortcut_toggle_meeting_pin() -> c_int;
         pub fn shortcut_set_action_callback(cb: Option<extern "C" fn(*const c_char)>);
     }
 
@@ -118,6 +137,37 @@ mod ffi {
         }
     }
 
+    /// Observed state of the live-meeting transcript card, or None when the
+    /// native panel is unavailable.
+    pub fn meeting_overlay_state() -> Option<super::MeetingOverlayPanelState> {
+        let (mut visible, mut pinned, mut hovering, mut active) = (0, 0, 0, 0);
+        let ok = unsafe {
+            shortcut_get_meeting_overlay_state(
+                &mut visible,
+                &mut pinned,
+                &mut hovering,
+                &mut active,
+            ) == 0
+        };
+        ok.then_some(super::MeetingOverlayPanelState {
+            transcript_visible: visible == 1,
+            pinned: pinned == 1,
+            hovering: hovering == 1,
+            meeting_active: active == 1,
+        })
+    }
+
+    /// Test seam: drive the chip's hover entry point directly, because AppKit
+    /// will not deliver a synthetic hover to a nonactivating panel.
+    pub fn set_pill_hovering(hovering: bool) -> bool {
+        unsafe { shortcut_set_pill_hovering(if hovering { 1 } else { 0 }) == 0 }
+    }
+
+    /// Test seam: the same toggle the card's pin button invokes.
+    pub fn toggle_meeting_pin() -> bool {
+        unsafe { shortcut_toggle_meeting_pin() == 0 }
+    }
+
     pub fn set_action_callback(cb: extern "C" fn(*const c_char)) {
         unsafe {
             shortcut_set_action_callback(Some(cb));
@@ -146,6 +196,15 @@ mod ffi {
         None
     }
     pub fn set_health_state(_state: &str) -> bool {
+        false
+    }
+    pub fn meeting_overlay_state() -> Option<super::MeetingOverlayPanelState> {
+        None
+    }
+    pub fn set_pill_hovering(_hovering: bool) -> bool {
+        false
+    }
+    pub fn toggle_meeting_pin() -> bool {
         false
     }
     pub fn set_action_callback(_cb: extern "C" fn(*const std::os::raw::c_char)) {}

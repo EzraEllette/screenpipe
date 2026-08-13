@@ -17,8 +17,25 @@ import {
  */
 export const CARD_ASK_FLAG = "card-ask-timing";
 
+/**
+ * Remote kill switch, deliberately separate from the arm flag.
+ *
+ * The arm is sticky in localStorage so a flag refresh cannot reassign someone
+ * mid-funnel. That stickiness also means turning the arm flag off does NOT
+ * stop already-enrolled installs, which is how the experiment kept running for
+ * ~21 hours after being disabled on 2026-08-10.
+ *
+ * This switch is read live on every decision and never persisted, so flipping
+ * it off in PostHog stops every ask everywhere within one flag refresh,
+ * regardless of what arm an install has stored. It fails closed: only an
+ * explicit `true` enables the feature, so a PostHog outage or a deleted flag
+ * silences the ask rather than releasing it.
+ */
+export const CARD_ASK_ENABLED_FLAG = "card-ask-enabled";
+
 export const CARD_ASK_ARMS = [
   "control",
+  "at_onboarding",
   "at_login",
   "at_first_value",
   "at_limit",
@@ -28,15 +45,28 @@ export type CardAskArm = (typeof CARD_ASK_ARMS)[number];
 
 /** The moment that fired the ask. One arm may own more than one trigger. */
 export type CardAskTrigger =
+  | "onboarding"
   | "login"
   | "first_value"
+  | "mid_session"
   | "limit"
   | "grant_expiry";
+
+export const CARD_ASK_TRIGGERS: readonly CardAskTrigger[] = [
+  "onboarding",
+  "login",
+  "first_value",
+  "mid_session",
+  "limit",
+  "grant_expiry",
+];
 
 /** Local storage key holding the sticky arm assignment. */
 export const CARD_ASK_ARM_STORAGE_KEY = "screenpipe_card_ask_arm";
 /** Local storage key holding triggers already shown, so we never repeat one. */
 export const CARD_ASK_SHOWN_STORAGE_KEY = "screenpipe_card_ask_shown";
+/** Local storage key marking that this install already logged its enrollment. */
+export const CARD_ASK_ENROLLED_STORAGE_KEY = "screenpipe_card_ask_enrolled";
 
 /**
  * Narrow an unknown PostHog variant to a known arm.
@@ -54,20 +84,69 @@ export function parseCardAskArm(flag: unknown): CardAskArm | null {
     : null;
 }
 
-/** Which triggers an arm listens to. Control listens to nothing. */
-export function triggersForArm(arm: CardAskArm): readonly CardAskTrigger[] {
-  switch (arm) {
-    case "at_login":
-      return ["login", "grant_expiry"];
-    case "at_first_value":
-      return ["first_value", "grant_expiry"];
-    case "at_limit":
-      return ["limit", "grant_expiry"];
-    case "control":
-      // Control stays silent even at expiry. It is the counterfactual: what
-      // conversion looks like when we never ask.
-      return [];
+/**
+ * Is the whole feature switched on?
+ *
+ * Fails closed on anything that is not a literal `true`, including the
+ * `undefined` PostHog returns while flags resolve. Combined with the fact that
+ * this value is never persisted, that makes the switch authoritative: there is
+ * no cached state that can keep the ask alive after it is turned off.
+ */
+export function isCardAskEnabled(flag: unknown): boolean {
+  return flag === true;
+}
+
+/**
+ * Default placements per arm, used when the flag carries no payload.
+ *
+ * `at_onboarding` exists so the onboarding card capture is one *placement of
+ * the experiment* rather than an always-on surface running underneath it. Any
+ * arm may own several placements; control owns none.
+ */
+const DEFAULT_ARM_TRIGGERS: Record<CardAskArm, readonly CardAskTrigger[]> = {
+  at_onboarding: ["onboarding", "grant_expiry"],
+  at_login: ["login", "grant_expiry"],
+  at_first_value: ["first_value", "grant_expiry"],
+  at_limit: ["limit", "grant_expiry"],
+  // Control stays silent even at expiry. It is the counterfactual: what
+  // conversion looks like when we never ask. Nothing else in the app may ask
+  // either, or this stops being a counterfactual — see `useCardAskPlacement`.
+  control: [],
+};
+
+/**
+ * Remote placement overrides, read from the flag's per-variant payload.
+ *
+ * Shape: `{"triggers": ["mid_session", "limit"]}`. This is what makes
+ * placement configurable without a release: moving an arm's ask from login to
+ * a mid-session modal is a PostHog edit, not a version bump. Unknown trigger
+ * names are dropped rather than throwing, so a typo in the dashboard degrades
+ * to fewer placements instead of a broken client.
+ *
+ * Returns `null` when the payload is absent or unusable, which means "fall
+ * back to the compiled default" rather than "no placements".
+ */
+export function parseTriggerOverride(
+  payload: unknown,
+): readonly CardAskTrigger[] | null {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return null;
   }
+  const raw = (payload as { triggers?: unknown }).triggers;
+  if (!Array.isArray(raw)) return null;
+  const valid = raw.filter((t): t is CardAskTrigger =>
+    CARD_ASK_TRIGGERS.includes(t as CardAskTrigger),
+  );
+  // An explicitly empty list is meaningful: it silences an arm remotely.
+  return valid;
+}
+
+/** Which triggers an arm listens to, after any remote override. */
+export function triggersForArm(
+  arm: CardAskArm,
+  override?: readonly CardAskTrigger[] | null,
+): readonly CardAskTrigger[] {
+  return override ?? DEFAULT_ARM_TRIGGERS[arm];
 }
 
 /** Sources that mean someone else is paying, or there is nothing to sell. */
@@ -217,10 +296,18 @@ export type CardAskDecisionInput = {
   trigger: CardAskTrigger;
   eligible: boolean;
   alreadyShownTriggers: readonly CardAskTrigger[];
+  /** Live remote kill switch. Not sticky, so it always wins. */
+  enabled: boolean;
+  /** Remote placement override for this arm, if the payload supplied one. */
+  triggerOverride?: readonly CardAskTrigger[] | null;
 };
 
 /**
  * Pure decision: show the card ask for this trigger?
+ *
+ * This is the ONLY function permitted to answer that question. Any surface
+ * that asks for a card outside it silently contaminates the control arm, which
+ * is exactly what the onboarding slide did before it was routed through here.
  *
  * Every guard is explicit so the test suite can pin each reason separately.
  */
@@ -229,10 +316,13 @@ export function shouldShowCardAsk({
   trigger,
   eligible,
   alreadyShownTriggers,
+  enabled,
+  triggerOverride = null,
 }: CardAskDecisionInput): boolean {
+  if (!enabled) return false; // remote kill switch beats a sticky arm
   if (arm === null) return false; // flag unresolved — never guess
   if (!eligible) return false;
-  if (!triggersForArm(arm).includes(trigger)) return false;
+  if (!triggersForArm(arm, triggerOverride).includes(trigger)) return false;
   if (alreadyShownTriggers.includes(trigger)) return false;
   return true;
 }
@@ -264,14 +354,8 @@ export function parseShownTriggers(raw: string | null): CardAskTrigger[] {
   try {
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
-    const valid: CardAskTrigger[] = [
-      "login",
-      "first_value",
-      "limit",
-      "grant_expiry",
-    ];
     return parsed.filter((v): v is CardAskTrigger =>
-      valid.includes(v as CardAskTrigger),
+      CARD_ASK_TRIGGERS.includes(v as CardAskTrigger),
     );
   } catch {
     return [];

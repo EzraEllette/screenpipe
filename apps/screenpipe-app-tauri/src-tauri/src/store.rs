@@ -966,6 +966,11 @@ pub struct SettingsStore {
     /// Where the user dragged the overlay: one of top/bottom x left/center/right.
     #[serde(rename = "shortcutOverlayAnchor", default = "default_overlay_anchor")]
     pub shortcut_overlay_anchor: String,
+    /// Display the overlay was pinned to, as a stable per-display UUID. Empty
+    /// until the user drags it, and ignored when that display is not attached,
+    /// so the pill stays put instead of following the cursor between monitors.
+    #[serde(rename = "shortcutOverlayDisplay", default)]
+    pub shortcut_overlay_display: String,
     /// Unique device ID for AI usage tracking (generated on first launch)
     #[serde(rename = "deviceId", default = "generate_device_id")]
     pub device_id: String,
@@ -1559,6 +1564,7 @@ Rules:
             lock_vault_shortcut: "Super+Shift+L".to_string(),
             shortcut_overlay_size: "small".to_string(),
             shortcut_overlay_anchor: default_overlay_anchor(),
+            shortcut_overlay_display: String::new(),
             show_shortcut_overlay: true,
             allow_hiding_shortcut_overlay: false,
             device_id: uuid::Uuid::new_v4().to_string(),

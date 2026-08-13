@@ -61,10 +61,10 @@ describe("UsagePopover", () => {
     mocks.query.usage.hosted_ai.allowances = originalAllowances;
   });
 
-  it("opens on hover and shows every Cloudflare window", async () => {
+  it("opens on click and shows every Cloudflare window", async () => {
     render(<UsagePopover />);
 
-    fireEvent.pointerEnter(screen.getByRole("button", { name: "AI usage, 62% used" }));
+    fireEvent.click(screen.getByRole("button", { name: "AI usage, 62% used" }));
 
     expect(await screen.findByText("Frontier models")).toBeTruthy();
     expect(screen.getByText("Weekly AI allowance")).toBeTruthy();
@@ -74,7 +74,7 @@ describe("UsagePopover", () => {
 
   it("names the plan in the header and keeps it lowercase", async () => {
     render(<UsagePopover />);
-    fireEvent.pointerEnter(screen.getByRole("button", { name: "AI usage, 62% used" }));
+    fireEvent.click(screen.getByRole("button", { name: "AI usage, 62% used" }));
 
     const header = await screen.findByRole("button", {
       name: /plan usage limits · Business/i,
@@ -89,7 +89,7 @@ describe("UsagePopover", () => {
 
   it("puts each allowance's reset and percent on the row itself", async () => {
     render(<UsagePopover />);
-    fireEvent.pointerEnter(screen.getByRole("button", { name: "AI usage, 62% used" }));
+    fireEvent.click(screen.getByRole("button", { name: "AI usage, 62% used" }));
 
     const rows = await screen.findAllByTestId("usage-limit-row");
     expect(rows).toHaveLength(2);
@@ -103,7 +103,7 @@ describe("UsagePopover", () => {
 
   it("opens the full usage settings page from the header", async () => {
     render(<UsagePopover />);
-    fireEvent.pointerEnter(screen.getByRole("button", { name: "AI usage, 62% used" }));
+    fireEvent.click(screen.getByRole("button", { name: "AI usage, 62% used" }));
     fireEvent.click(
       await screen.findByRole("button", { name: /plan usage limits · Business/i }),
     );
@@ -114,22 +114,26 @@ describe("UsagePopover", () => {
     mocks.query.usage.hosted_ai.allowances = null as never;
     render(<UsagePopover />);
 
-    fireEvent.pointerEnter(screen.getByRole("button", { name: "AI usage unavailable" }));
+    fireEvent.click(screen.getByRole("button", { name: "AI usage unavailable" }));
 
     expect(await screen.findByText("usage data is unavailable. try refreshing.")).toBeTruthy();
     expect(document.body.textContent).not.toContain("$");
   });
 
-  it("closes after the pointer leaves the trigger and content", async () => {
+  // Hovering the chip on the way to send must not open anything: the panel is
+  // read deliberately, so only a click may summon or dismiss it.
+  it("ignores hover and toggles on click", async () => {
     render(<UsagePopover />);
     const trigger = screen.getByRole("button", { name: "AI usage, 62% used" });
 
     fireEvent.pointerEnter(trigger);
-    const content = await screen.findByTestId("usage-popover-content");
-    fireEvent.pointerLeave(trigger);
-    fireEvent.pointerEnter(content);
-    fireEvent.pointerLeave(content);
+    fireEvent.mouseOver(trigger);
+    expect(screen.queryByTestId("usage-popover-content")).toBeNull();
 
+    fireEvent.click(trigger);
+    expect(await screen.findByTestId("usage-popover-content")).toBeTruthy();
+
+    fireEvent.click(trigger);
     await waitFor(() => {
       expect(screen.queryByTestId("usage-popover-content")).toBeNull();
     });

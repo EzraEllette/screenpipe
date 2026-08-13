@@ -6,9 +6,9 @@ and layer declared in the manifest, weighted by confidence and criticality.
 
 - Manifest: `e2e/coverage-map.json`
 - Specs directory: `e2e/specs`
-- Mapped specs: 109
-- Declared test blocks: 314
-- Weighted coverage points: 246.5
+- Mapped specs: 112
+- Declared test blocks: 318
+- Weighted coverage points: 250.0
 
 Confidence weights: strong=1.0, partial=0.7, conditional=0.4, smoke=0.3.
 Criticality weights: high=1.0, medium=0.7, low=0.4.
@@ -19,9 +19,9 @@ can execute more runtime cases than this number shows.
 
 | Platform | Specs | Declared tests | Weighted points | Layers | Features | Critical score |
 | --- | --- | --- | --- | --- | --- | --- |
-| windows | 85 | 274 | 224.6 | 15 | 90 | 92% |
-| macos | 105 | 277 | 217.3 | 17 | 92 | 90% |
-| linux | 74 | 231 | 193.2 | 14 | 85 | 88% |
+| windows | 86 | 276 | 226.6 | 15 | 90 | 92% |
+| macos | 108 | 281 | 220.8 | 17 | 93 | 90% |
+| linux | 75 | 233 | 195.2 | 14 | 85 | 88% |
 
 ## Runtime Results
 
@@ -37,18 +37,18 @@ pass/fail/skip counts.
 | auth | - | 1 specs / 1 tests / 1.0 pts | - |
 | billing | 4 specs / 6 tests / 5.7 pts | 4 specs / 6 tests / 5.7 pts | 4 specs / 6 tests / 5.7 pts |
 | capture-ocr | 2 specs / 16 tests / 6.4 pts | 8 specs / 12 tests / 4.8 pts | 1 specs / 3 tests / 1.2 pts |
-| chat-ai | 25 specs / 50 tests / 36.9 pts | 35 specs / 70 tests / 49.5 pts | 24 specs / 49 tests / 36.4 pts |
+| chat-ai | 25 specs / 50 tests / 36.9 pts | 36 specs / 71 tests / 50.5 pts | 24 specs / 49 tests / 36.4 pts |
 | entitlement | - | 1 specs / 1 tests / 1.0 pts | - |
-| local-api | 24 specs / 113 tests / 94.0 pts | 29 specs / 98 tests / 82.0 pts | 19 specs / 81 tests / 72.2 pts |
+| local-api | 24 specs / 113 tests / 94.0 pts | 31 specs / 100 tests / 83.5 pts | 19 specs / 81 tests / 72.2 pts |
 | notifications | 4 specs / 25 tests / 16.3 pts | 3 specs / 5 tests / 3.4 pts | 2 specs / 4 tests / 3.1 pts |
-| onboarding | 7 specs / 31 tests / 28.0 pts | 9 specs / 33 tests / 29.4 pts | 7 specs / 31 tests / 28.0 pts |
-| os-integration | 7 specs / 29 tests / 24.8 pts | 13 specs / 25 tests / 14.8 pts | 2 specs / 12 tests / 8.7 pts |
+| onboarding | 8 specs / 33 tests / 30.0 pts | 10 specs / 35 tests / 31.4 pts | 8 specs / 33 tests / 30.0 pts |
+| os-integration | 7 specs / 29 tests / 24.8 pts | 14 specs / 26 tests / 15.3 pts | 2 specs / 12 tests / 8.7 pts |
 | performance | 2 specs / 44 tests / 44.0 pts | 4 specs / 34 tests / 30.5 pts | 1 specs / 29 tests / 29.0 pts |
-| pipes | 6 specs / 19 tests / 19.0 pts | 7 specs / 24 tests / 24.0 pts | 6 specs / 19 tests / 19.0 pts |
-| real-ui-e2e | 59 specs / 176 tests / 146.0 pts | 69 specs / 176 tests / 146.1 pts | 54 specs / 151 tests / 131.2 pts |
+| pipes | 6 specs / 19 tests / 19.0 pts | 8 specs / 25 tests / 25.0 pts | 6 specs / 19 tests / 19.0 pts |
+| real-ui-e2e | 60 specs / 178 tests / 148.0 pts | 71 specs / 179 tests / 148.6 pts | 55 specs / 153 tests / 133.2 pts |
 | settings | 14 specs / 38 tests / 35.0 pts | 16 specs / 33 tests / 28.7 pts | 13 specs / 30 tests / 27.0 pts |
 | storage-privacy | 9 specs / 40 tests / 31.3 pts | 9 specs / 26 tests / 25.1 pts | 6 specs / 19 tests / 18.1 pts |
-| tauri-command | 17 specs / 47 tests / 36.4 pts | 22 specs / 53 tests / 40.3 pts | 16 specs / 46 tests / 35.4 pts |
+| tauri-command | 18 specs / 49 tests / 38.4 pts | 25 specs / 57 tests / 43.8 pts | 17 specs / 48 tests / 37.4 pts |
 | window-lifecycle | 18 specs / 63 tests / 53.0 pts | 18 specs / 44 tests / 31.4 pts | 13 specs / 39 tests / 29.9 pts |
 
 ## Critical Feature Matrix
@@ -71,8 +71,8 @@ pass/fail/skip counts.
 | Audio device health | audio-device | covered (strong; windows-system-integration, windows-core-recording) | weak (conditional; capture-restart-device-recovery, meetings-only-audio-lifecycle) | gap |
 | Meetings-only audio device ownership | audio-device, local-api, real-ui-e2e | weak (conditional; meetings-only-audio-lifecycle) | weak (conditional; meetings-only-audio-lifecycle) | - |
 | Window lifecycle, focus, and dedupe | window-lifecycle | covered (strong; windows-system-integration, window-lifecycle) | covered (strong; window-lifecycle, viewer-deeplink) | covered (strong; window-lifecycle, viewer-deeplink) |
-| Meeting note creation and editing | real-ui-e2e | covered (strong; windows-user-journey, meeting-note-bottom-click) | covered (strong; meeting-note-bottom-click, meeting-workspace-tabs) | covered (strong; meeting-note-bottom-click, meeting-workspace-tabs) |
-| Pipes discover, install, and play | pipes | covered (strong; pipes, brain-overview) | covered (strong; pipes, pipe-continuous-chat) | covered (strong; pipes, brain-overview) |
+| Meeting note creation and editing | real-ui-e2e | covered (strong; windows-user-journey, meeting-note-bottom-click) | covered (strong; meeting-note-bottom-click, meeting-restart-live-transcription) | covered (strong; meeting-note-bottom-click, meeting-restart-live-transcription) |
+| Pipes discover, install, and play | pipes | covered (strong; pipes, brain-overview) | covered (strong; pipes, brain-overview) | covered (strong; pipes, brain-overview) |
 | Chat window, composer, and streaming state | chat-ai | covered (strong; acp-backend, chat-sidebar-groups) | covered (strong; acp-backend, chat-sidebar-groups) | covered (strong; acp-backend, chat-sidebar-groups) |
 | Tray/search window behavior | window-lifecycle | covered (strong; window-lifecycle, tray-search) | covered (strong; window-lifecycle, tray-search) | covered (strong; window-lifecycle, tray-search) |
 | Native tray recording status refresh | os-integration | covered (strong; tray-recording-status) | - | - |
@@ -90,7 +90,7 @@ pass/fail/skip counts.
 
 ## Execution Integrity
 
-- Specs that claim coverage but contain zero executable test blocks: zzz-browser-state-chat-switch.spec.ts, zz-owned-browser-background-nav.spec.ts, zzz-owned-browser-headless.spec.ts. They assert nothing and no longer count toward any critical feature.
+- Specs that claim coverage but contain zero executable test blocks: zz-owned-browser-background-nav.spec.ts, zzz-browser-state-chat-switch.spec.ts, zzz-owned-browser-headless.spec.ts. They assert nothing and no longer count toward any critical feature.
 - Declared coverage below is NOT reconciled against execution: no runtime results
   were supplied. Specs can self-skip on hosted runners (no display, vision off,
   recording disabled) and still read as covered. Run `e2e:coverage:runtime` (or pass
@@ -149,6 +149,7 @@ pass/fail/skip counts.
 | first-run-ai-summary.spec.ts | macos | onboarding, chat-ai, real-ui-e2e, tauri-command | onboarding, first-run-learning, chat | high | strong | real-user-flow | 1 | Opt-in hosted-AI lane for the post-setup summary: the real app starts its own Pi session through the Rust command and the production Worker under Miniflare, and the forwarded provider request is asserted to carry the screen and audio excerpts plus the browser URL, not just app names. Guards the regression where the summary was AI-written but built from containers only, so it read templated. The seeded chat must hold the model's text and never the deterministic opener. |
 | first-run-guide.spec.ts | windows, macos, linux | onboarding, chat-ai, real-ui-e2e | onboarding, chat, first-run-guide | high | strong | real-user-flow | 3 | Replayed first-run guide verifies the composer remains focused and clickable above its scrim, fails open when stacking defeats the lift, and remembers decline across reloads. |
 | first-run-learning-window.spec.ts | windows, macos, linux | onboarding, real-ui-e2e | onboarding, first-run-learning | high | strong | real-user-flow | 8 | Post-setup learning window on Home under the authenticated seed: opens from a real complete_onboarding with nothing seeded (guards the cross-window webview localStorage handoff), live countdown, settles to the real engine-reported reason when nothing was captured, stays dismissed across a reload, offers a ready summary and clears after use, and never renders in idle or done. |
+| first-run-reset-learning-window.spec.ts | windows, macos, linux | onboarding, real-ui-e2e, tauri-command | onboarding, first-run-learning, settings-persistence | high | strong | real-user-flow | 2 | Reset Onboarding must revive the first-run banner in EVERY webview. resetLearningWindow only clears the partition it runs in; Settings shares the home webview while the banner also renders in the separate chat window, so a spent seed claim survived there and the banner never returned. Drives two live webviews because a jsdom test shares one storage object and cannot see a webview boundary at all. |
 | focus-server.spec.ts | windows, macos, linux | local-api, window-lifecycle, tauri-command | window-lifecycle, focus-server, deeplink | medium | partial | api | 2 | Focus server opens windows and forwards deeplink args. |
 | hd-recording-pipeline.spec.ts | macos | capture-ocr, local-api, performance | capture-ocr, hd-recording, timeline | high | conditional | api | 1 | Opt-in macOS HD capture and OCR indexing. |
 | help-discord-link.spec.ts | windows, macos, linux | real-ui-e2e | help | low | smoke | real-user-flow | 2 | Help section Discord invite link. |
@@ -161,6 +162,7 @@ pass/fail/skip counts.
 | main-window.spec.ts | windows, macos, linux | window-lifecycle, tauri-command | window-lifecycle, main-window | medium | partial | command | 2 | Main window show/hide dedupe. |
 | meeting-apps-picker.spec.ts | windows, macos, linux | settings, real-ui-e2e | settings-recording, meeting-detector-ignored-apps | medium | strong | real-user-flow | 3 | Per-app meeting-detection ignore picker: open, toggle, count badge, persistence across reopen (#3882 / #3847). |
 | meeting-note-bottom-click.spec.ts | windows, macos, linux | real-ui-e2e, local-api | meeting-notes | high | strong | real-user-flow | 3 | Seeds and opens a long meeting note, checks editor shell click focus behavior, then clicks the bottom editor line. |
+| meeting-overlay-pin.spec.ts | macos | real-ui-e2e, local-api, tauri-command, os-integration | meeting-notes, meeting-overlay-stream, shortcut-overlay | medium | partial | real-user-flow | 1 | Pins the native macOS live-transcript card against a real started meeting: it opens on hover, stays visible after the pointer leaves, and the authoritative stop edge hides it and clears the pin, asserted on the AppKit panel's observed visibility. Hover and the pin toggle are driven through the controller entry points the tracking area and pin button use, because AppKit delivers no synthetic hover to a nonactivating panel. The Windows/Linux reminder webview renders the sign-in gate under E2E seeds, so that surface is covered by component tests instead. |
 | meeting-overlay-stream.spec.ts | windows, macos, linux | local-api, tauri-command | meeting-notes, meeting-overlay-stream | high | strong | mixed | 1 | Starts a real isolated meeting, verifies bounded snapshot plus deterministic delta/final transcript frames, and proves the stream clears on the authoritative stop edge. |
 | meeting-restart-live-transcription.spec.ts | windows, macos, linux | real-ui-e2e, local-api | meeting-notes | high | strong | command | 1 | Opens an auto-detected meeting, runs the full stop_screenpipe/spawn_screenpipe restart the health overlay's RESTART button uses, and asserts the meeting is still open afterwards so live transcription has something to reattach to. |
 | meeting-summary-recovery.spec.ts | windows, macos, linux | real-ui-e2e, local-api | meeting-notes, meeting-summary-recovery | high | strong | real-user-flow | 1 | Seeds an ended meeting through the isolated API and verifies persistent saved-audio retranscription, its replacement warning, and completed-summary rerun without launching hosted AI. |
@@ -176,6 +178,7 @@ pass/fail/skip counts.
 | permission-recovery.spec.ts | macos | os-integration, real-ui-e2e, window-lifecycle | permission-recovery, window-lifecycle | high | conditional | real-user-flow | 2 | macOS-only recovery window for missing TCC permissions. |
 | pi-extensions.spec.ts | windows, macos, linux | real-ui-e2e, settings | connections, pi-extensions, agent-extensions | medium | strong | real-user-flow | 1 | Opens Home -> Connections, opens Pi extensions, verifies catalog and warning copy, filters package search, and captures a screenshot. Read-only smoke: does not install packages. |
 | pipe-continuous-chat.spec.ts | macos | pipes, chat-ai, real-ui-e2e, local-api, storage-privacy | pipes, chat | high | strong | real-user-flow | 5 | Five native desktop journeys cover failed-save rollback and retry, stable one-chat continuity across real Pipe runs, a human follow-up carried into the next scheduled run, explicit pause/resume behavior with a read-only old chat, reset rejection during an active human reply, and a confirmed clean run without prior scheduled or human context. |
+| pipe-local-ai-gateway.spec.ts | macos | pipes, chat-ai, local-api, tauri-command | pipes | high | strong | command | 1 | Opt-in full-stack hosted Pipe coverage records the real Pi request entering the production Worker bundle and verifies the Pipe workload marker plus nonblank session affinity for history-off runs and stable affinity across history-on runs. |
 | pipes-mcp-connections.spec.ts | windows, macos, linux | pipes, real-ui-e2e, local-api | pipes, connections | high | strong | real-user-flow | 3 | Seeds a custom MCP server, installs a local pipe, selects the MCP server from the pipe connection picker, and verifies the mcp:<id> allowlist persists. |
 | pipes.spec.ts | windows, macos, linux | pipes, real-ui-e2e, local-api | pipes | high | strong | real-user-flow | 8 | Pipes discover, install failure, connection modal, install, list, play, and stop. |
 | privacy-api-auth-enforcement.spec.ts | windows, macos, linux | settings, local-api, storage-privacy | settings-privacy-api-auth, local-api-auth, restart-flow | high | conditional | mixed | 1 | Opt-in restart smoke toggles API auth and verifies backend behavior. |

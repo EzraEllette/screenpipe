@@ -91,6 +91,22 @@ describe("onboarding card capture", () => {
     );
   });
 
+  // The step used to hard-code a 520px iframe inside a 460px box, which forced
+  // the onboarding window wider and taller than every other slide and still cut
+  // off the free-plan link. It now fills whatever the shared window leaves.
+  it("fills the available height instead of forcing a fixed iframe size", async () => {
+    render(<PlanSelectionStep handleNextSlide={vi.fn()} />);
+
+    const root = screen.getByTestId("onboarding-card-capture");
+    expect(root.className).toContain("flex-1");
+    expect(root.className).not.toMatch(/max-w-/);
+
+    const frame = await screen.findByTestId("onboarding-card-frame");
+    expect(frame.className).toContain("h-full");
+    expect(frame.className).not.toMatch(/h-\[\d+px\]/);
+    expect(frame.parentElement?.className).toContain("flex-1");
+  });
+
   it("recreates embedded checkout with monthly billing when switched", async () => {
     render(<PlanSelectionStep handleNextSlide={vi.fn()} />);
     await waitFor(() => expect(mocks.fetch).toHaveBeenCalledOnce());
