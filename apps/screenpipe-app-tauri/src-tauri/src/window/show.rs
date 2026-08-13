@@ -32,6 +32,7 @@ use super::util::screen_aware_size;
 use tauri::Emitter;
 #[cfg(target_os = "macos")]
 use super::GatedPanelPlacement;
+use super::GatedWindowPlacement;
 #[cfg(target_os = "macos")]
 use tauri_nspanel::ManagerExt;
 #[cfg(target_os = "macos")]
@@ -580,12 +581,12 @@ impl ShowRewindWindow {
                             let ns_win = ns_win as id;
                             unsafe {
                                 begin_search_focus_session();
-                                let _: () = msg_send![ns_win, setLevel: 1002_i64];
+                                crate::window::ns::set_level_gated(ns_win, 1002_i64);
                                 let current: i32 = msg_send![ns_win, styleMask];
                                 let _: () = msg_send![ns_win, setStyleMask: current | 128];
                                 let _: () = msg_send![ns_win, setBecomesKeyOnlyIfNeeded: true];
                                 let _: () = msg_send![ns_win, orderFront: std::ptr::null::<objc::runtime::Object>()];
-                                let _: () = msg_send![ns_win, makeKeyWindow];
+                                crate::window::ns::make_key_if_allowed(ns_win);
                                 make_nswindow_webview_first_responder(ns_win);
                             }
                         }
@@ -644,11 +645,15 @@ impl ShowRewindWindow {
                                 let behavior: u64 =
                                     msg_send![ns_win as cocoa_id, collectionBehavior];
                                 let move_to_active: u64 = 1 << 1;
-                                let _: () = msg_send![ns_win as cocoa_id, setCollectionBehavior: behavior | move_to_active];
+                                crate::window::ns::set_collection_behavior_gated(
+                                    ns_win as cocoa_id,
+                                    behavior | move_to_active,
+                                );
 
                                 // Bring window to front and make it key
-                                let _: () =
-                                    msg_send![ns_win as cocoa_id, makeKeyAndOrderFront: cocoa_nil];
+                                crate::window::ns::make_key_and_order_front_if_allowed(
+                                    ns_win as cocoa_id,
+                                );
 
                                 // Set WKWebView as first responder so keyboard input works.
                                 // Without this, re-showing an existing Settings window may
@@ -781,7 +786,7 @@ impl ShowRewindWindow {
                             .min_inner_size(800.0, 600.0)
                             .decorations(true)
                             .visible(false)
-                            .focused(false)
+                            .focused_gated(false)
                             .transparent(false);
                         super::finalize_webview_window(builder.build()?)
                     };
@@ -804,7 +809,7 @@ impl ShowRewindWindow {
                             .decorations(true)
                             .skip_taskbar(true)
                             .visible(false)
-                            .focused(false)
+                            .focused_gated(false)
                             .transparent(false)
                             .on_page_load(move |win, payload| {
                                 if matches!(
@@ -1085,10 +1090,10 @@ impl ShowRewindWindow {
                             "/overlay",
                             main_label_for_mode("fullscreen"),
                         )
-                        .always_on_top(true)
+                        .always_on_top_gated(true)
                         .decorations(false)
                         .skip_taskbar(true)
-                        .focused(false)
+                        .focused_gated(false)
                         .transparent(true)
                         .visible(false)
                         .hidden_title(true)
@@ -1141,13 +1146,13 @@ impl ShowRewindWindow {
                             main_label_for_mode("fullscreen"),
                         )
                         .title("screenpipe")
-                        .visible_on_all_workspaces(true)
-                        .always_on_top(true)
+                        .visible_on_all_workspaces_gated(true)
+                        .always_on_top_gated(true)
                         .decorations(false)
                         .resizable(false)
                         .maximizable(false)
                         .minimizable(false)
-                        .focused(false)
+                        .focused_gated(false)
                         .transparent(true)
                         .visible(false)
                         .skip_taskbar(true)
@@ -1200,7 +1205,7 @@ impl ShowRewindWindow {
                         .min_inner_size(800.0, 600.0)
                         .decorations(true)
                         .visible(false)
-                        .focused(false)
+                        .focused_gated(false)
                         .transparent(false)
                         .on_page_load(move |win, payload| {
                             if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
@@ -1435,7 +1440,7 @@ impl ShowRewindWindow {
                     None => "/home".to_string(),
                 };
 
-                let builder = self.window_builder(app, &url).focused(true);
+                let builder = self.window_builder(app, &url).focused_gated(true);
                 #[cfg(target_os = "macos")]
                 let builder = {
                     use tauri::window::Color;
@@ -1548,12 +1553,12 @@ impl ShowRewindWindow {
                 let clamped_min = (min.0.min(width), min.1.min(height));
                 let builder = self
                     .window_builder(app, "/onboarding")
-                    .visible_on_all_workspaces(true)
+                    .visible_on_all_workspaces_gated(true)
                     .min_inner_size(clamped_min.0, clamped_min.1)
                     .inner_size(width, height)
                     .minimizable(false)
                     .maximizable(false)
-                    .focused(true);
+                    .focused_gated(true);
                 let window = super::finalize_webview_window(builder.build()?);
 
                 window
@@ -1572,9 +1577,9 @@ impl ShowRewindWindow {
                         .window_builder(app, "/chat")
                         .inner_size(650.0, 800.0)
                         .min_inner_size(500.0, 600.0)
-                        .focused(false)
+                        .focused_gated(false)
                         .visible(false)
-                        .always_on_top(chat_always_on_top)
+                        .always_on_top_gated(chat_always_on_top)
                         .hidden_title(true);
                     let window = super::finalize_webview_window(builder.build()?);
 
@@ -1649,8 +1654,8 @@ impl ShowRewindWindow {
                         .window_builder(app, "/chat")
                         .inner_size(650.0, 800.0)
                         .min_inner_size(500.0, 600.0)
-                        .focused(true)
-                        .always_on_top(chat_always_on_top);
+                        .focused_gated(true)
+                        .always_on_top_gated(chat_always_on_top);
                     super::finalize_webview_window(builder.build()?)
                 };
 
@@ -1662,8 +1667,8 @@ impl ShowRewindWindow {
                     .inner_size(420.0, 420.0)
                     .min_inner_size(400.0, 350.0)
                     .resizable(false)
-                    .focused(true)
-                    .always_on_top(true)
+                    .focused_gated(true)
+                    .always_on_top_gated(true)
                     .center();
                 #[cfg(target_os = "macos")]
                 let builder = builder.hidden_title(true);
@@ -1750,12 +1755,12 @@ impl ShowRewindWindow {
         .shadow(true)
         .decorations(false)
         .transparent(true)
-        .always_on_top(true)
-        .visible_on_all_workspaces(true)
+        .always_on_top_gated(true)
+        .visible_on_all_workspaces_gated(true)
         .inner_size(bar_w, bar_h)
         .min_inner_size(SEARCH_BAR_MIN_W, 56.0)
         .position(x, y)
-        .focused(focus)
+        .focused_gated(focus)
         .resizable(true);
 
         let window = super::finalize_webview_window(builder.build()?);
@@ -1782,7 +1787,7 @@ impl ShowRewindWindow {
                         object_setClass(ns_win, nspanel_class);
 
                         // Level 1002 — above fullscreen (CGShieldingWindowLevel+2)
-                        let _: () = msg_send![ns_win, setLevel: 1002_i64];
+                        crate::window::ns::set_level_gated(ns_win, 1002_i64);
 
                         // NSNonactivatingPanelMask (128) — appear over fullscreen
                         // without triggering a Space switch
@@ -1790,7 +1795,7 @@ impl ShowRewindWindow {
                         let _: () = msg_send![ns_win, setStyleMask: current | 128];
 
                         // CanJoinAllSpaces (1) + FullScreenAuxiliary (256)
-                        let _: () = msg_send![ns_win, setCollectionBehavior: 257_u64];
+                        crate::window::ns::set_collection_behavior_gated(ns_win, 257_u64);
 
                         let _: () = msg_send![ns_win, setHidesOnDeactivate: false];
                         let _: () = msg_send![ns_win, setBecomesKeyOnlyIfNeeded: true];
@@ -1800,7 +1805,7 @@ impl ShowRewindWindow {
                         if focus {
                             begin_search_focus_session();
                             let _: () = msg_send![ns_win, orderFront: nil];
-                            let _: () = msg_send![ns_win, makeKeyWindow];
+                            crate::window::ns::make_key_if_allowed(ns_win);
                             make_nswindow_webview_first_responder(ns_win);
                         }
                     }

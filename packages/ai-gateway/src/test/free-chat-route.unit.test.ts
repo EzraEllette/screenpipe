@@ -16,9 +16,9 @@ mock.module('@clerk/backend', () => ({
 
 const {
 	handleRequest,
-	shouldEnableArgusBackgroundFallback,
-	shouldEnableArgusSafetyRefusalFallback,
 	shouldEnableGpt56HistoryCache,
+	shouldEnableBackgroundFallback,
+	shouldEnableSafetyRefusalFallback,
 } = await import('../index');
 const { resolveLatencyClass } = await import('../utils/latency');
 
@@ -297,7 +297,7 @@ describe('/v1/chat/completions free-plan route policy', () => {
 		expect(await response.text()).not.toContain('authentication_required');
 	});
 
-	it('keeps the paid background Argus rescue enabled when the flex-tier kill switch is off', () => {
+	it('keeps the paid background rescue lane enabled when the flex-tier kill switch is off', () => {
 		const backgroundRequest = request({
 			'x-screenpipe-latency': 'background',
 		});
@@ -312,13 +312,13 @@ describe('/v1/chat/completions free-plan route policy', () => {
 			model: 'auto',
 			messages: [{ role: 'user', content: 'hello' }],
 		}, flexDisabledEnv)).toBe('interactive');
-		expect(shouldEnableArgusBackgroundFallback(backgroundRequest, {
+		expect(shouldEnableBackgroundFallback(backgroundRequest, {
 			isValid: true,
 			tier: 'subscribed',
 			accountPlan: 'basic',
 			deviceId: 'pipe-device',
 		})).toBe(true);
-		expect(shouldEnableArgusSafetyRefusalFallback(backgroundRequest, {
+		expect(shouldEnableSafetyRefusalFallback(backgroundRequest, {
 			isValid: true,
 			tier: 'subscribed',
 			accountPlan: 'basic',
@@ -329,7 +329,7 @@ describe('/v1/chat/completions free-plan route policy', () => {
 			'x-screenpipe-latency': 'background',
 			'x-screenpipe-workload': 'pipe',
 		});
-		expect(shouldEnableArgusSafetyRefusalFallback(pipeRequest, {
+		expect(shouldEnableSafetyRefusalFallback(pipeRequest, {
 			isValid: true,
 			tier: 'subscribed',
 			accountPlan: 'basic',

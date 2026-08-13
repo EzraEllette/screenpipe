@@ -48,10 +48,15 @@ export function MeetingWorkspaceTabs({
   value,
   onValueChange,
   summaryState,
+  trailing,
 }: {
   value: MeetingWorkspaceTab;
   onValueChange: (value: MeetingWorkspaceTab) => void;
   summaryState?: "working" | "ready" | "attention" | null;
+  // Rendered on the same rule as the tabs but outside the tablist, so a
+  // note-wide action stays reachable from every tab without becoming a
+  // fourth pseudo-tab for arrow-key navigation.
+  trailing?: React.ReactNode;
 }) {
   const tabRefs = React.useRef<Array<HTMLButtonElement | null>>([]);
 
@@ -62,11 +67,14 @@ export function MeetingWorkspaceTabs({
     tabRefs.current[normalized]?.focus();
   };
 
-  return (
+  const tablist = (
     <div
       role="tablist"
       aria-label="meeting workspace"
-      className="flex min-w-0 items-stretch overflow-x-auto border-b border-border [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+      className={cn(
+        "flex min-w-0 items-stretch overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden",
+        !trailing && "border-b border-border",
+      )}
     >
       {MEETING_TABS.map((tab, index) => {
         const selected = value === tab.value;
@@ -120,6 +128,15 @@ export function MeetingWorkspaceTabs({
           </button>
         );
       })}
+    </div>
+  );
+
+  if (!trailing) return tablist;
+
+  return (
+    <div className="flex min-w-0 items-stretch border-b border-border">
+      {tablist}
+      <div className="ml-auto flex shrink-0 items-stretch">{trailing}</div>
     </div>
   );
 }

@@ -21,6 +21,56 @@ export function createMockHealth(scenario: BrowserDevScenario = "ready") {
   };
 }
 
+/**
+ * Synthetic app roster for the search `@` namespace. Invented names on purpose:
+ * the harness has to be able to demo and screenshot entity search without
+ * anyone's real capture history standing in as the fixture.
+ */
+const MOCK_APP_ROSTER = [
+  { name: "Signal", count: 1204, days_ago: 0 },
+  { name: "Slack", count: 8431, days_ago: 0 },
+  { name: "Cursor", count: 6220, days_ago: 1 },
+  { name: "Linear", count: 990, days_ago: 2 },
+  { name: "Design Signals", count: 240, days_ago: 96 },
+];
+
+function mockAppRoster() {
+  return MOCK_APP_ROSTER.map((app) => ({
+    name: app.name,
+    count: app.count,
+    last_seen: new Date(Date.now() - app.days_ago * 86_400_000).toISOString(),
+  }));
+}
+
+/** Frames for a keyword-free `app_name=` browse. */
+function mockAppFrames(appName: string, limit: number, offset: number) {
+  const roster = MOCK_APP_ROSTER.find((app) => app.name === appName);
+  if (!roster) return [];
+  const total = Math.min(roster.count, 72);
+  return Array.from({ length: Math.max(0, Math.min(limit, total - offset)) }, (_, i) => {
+    const index = offset + i;
+    return {
+      type: "OCR",
+      content: {
+        frame_id: 90_000 + index,
+        text: `${appName} window capture ${index + 1}`,
+        timestamp: new Date(Date.now() - index * 1_800_000).toISOString(),
+        file_path: "",
+        offset_index: index,
+        app_name: appName,
+        window_name: `${appName} — mock window`,
+        tags: [],
+        frame: null,
+        frame_name: null,
+        browser_url: null,
+        focused: true,
+        device_name: "browser dev",
+        text_source: "accessibility",
+      },
+    };
+  });
+}
+
 export function mockLocalApiResponse(
   url: URL,
   init: RequestInit | undefined,
@@ -44,7 +94,14 @@ export function mockLocalApiResponse(
   }
   if (url.pathname === "/audio/device/status") return Response.json([]);
   if (url.pathname === "/vision/device/status") return Response.json([]);
-  if (url.pathname === "/raw_sql") return Response.json([]);
+  if (url.pathname === "/raw_sql") {
+    // The only raw_sql the search window issues is the app roster.
+    const body = typeof init?.body === "string" ? init.body : "";
+    if (scenario !== "empty" && body.includes("GROUP BY app_name")) {
+      return Response.json(mockAppRoster());
+    }
+    return Response.json([]);
+  }
   if (url.pathname === "/tags/autocomplete") return Response.json([]);
   if (url.pathname === "/meetings/status") {
     return Response.json({ active: false, manualActive: false });
@@ -57,9 +114,20 @@ export function mockLocalApiResponse(
   if (url.pathname === "/pipes/activity") {
     return Response.json({ data: [], has_more: false, next_before_id: null });
   }
-  if (url.pathname === "/pipes" || url.pathname === "/search") {
+  if (url.pathname === "/search") {
+    const appName = url.searchParams.get("app_name");
+    if (scenario !== "empty" && appName) {
+      const limit = Number(url.searchParams.get("limit")) || 36;
+      const offset = Number(url.searchParams.get("offset")) || 0;
+      const data = mockAppFrames(appName, limit, offset);
+      return Response.json({
+        data,
+        pagination: { limit, offset, total: data.length },
+      });
+    }
     return Response.json(emptyPage);
   }
+  if (url.pathname === "/pipes") return Response.json(emptyPage);
   if (method === "DELETE") return Response.json({ success: true });
   if (method !== "GET") return Response.json({ success: true });
   return Response.json(scenario === "empty" ? emptyPage : { data: [] });

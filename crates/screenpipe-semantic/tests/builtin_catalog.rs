@@ -174,6 +174,39 @@ fn web_variants_match_their_url_without_native_identity() {
 }
 
 #[test]
+fn windows_desktop_executables_select_a_parser() {
+    // Executable names taken from live Windows captures on this machine. A
+    // missing alias means the app matches no parser at all, which is how the
+    // default Windows mail client (`olk.exe`, the "new Outlook") and store
+    // apps hosted behind ApplicationFrameHost went unparsed.
+    let registry = builtin_parser_registry().expect("built-in manifests must compile");
+    for executable in [
+        "olk.exe",
+        "OUTLOOK.EXE",
+        "ms-teams.exe",
+        "Notepad.exe",
+        "WINWORD.EXE",
+        "ToDo.exe",
+        "WindowsTerminal.exe",
+        "ChatGPT.exe",
+        "claude.exe",
+    ] {
+        let app = AppIdentity {
+            platform: Platform::Windows,
+            app_id: None,
+            executable: Some(executable.into()),
+            display_name: executable.into(),
+            version: None,
+            browser_url: None,
+        };
+        assert!(
+            registry.capture_plan(&app).is_some(),
+            "{executable} matched no parser identity"
+        );
+    }
+}
+
+#[test]
 fn identity_alone_never_emits_semantics() {
     let registry = builtin_parser_registry().expect("built-in manifests must compile");
     let mut builder = SemanticTreeBuilder::new(TreeBudget::default());

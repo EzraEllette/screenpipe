@@ -288,7 +288,10 @@ pub static BUILTIN_APP_PROFILES: &[BuiltinAppProfile] = &[
         "Outlook",
         &[M, D],
         &["com.microsoft.Outlook"],
-        &["Microsoft Outlook", "OUTLOOK.EXE", "outlook"],
+        // `olk.exe` is the "new Outlook" for Windows; classic Outlook ships as
+        // `OUTLOOK.EXE`. Without the newer executable a Windows install of the
+        // default mail client matched no parser at all.
+        &["Microsoft Outlook", "OUTLOOK.EXE", "olk.exe", "outlook"],
         &[
             r"^https?://outlook\.office\.com/",
             r"^https?://outlook\.live\.com/",
