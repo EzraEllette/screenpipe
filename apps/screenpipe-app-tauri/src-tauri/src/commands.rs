@@ -3449,6 +3449,24 @@ pub async fn show_notification_panel(
         return Ok(());
     }
 
+    // Repeat gate — see `gate::repeat_suppressed_now`. Critical alerts are
+    // exempt there, so a recording-stopped notice still re-fires. This sits
+    // above every render branch below: the overlay paths return once they draw,
+    // so gating after them would let a repeat surface on the pill anyway.
+    let notification_title =
+        crate::notifications::gate::title_from_payload(&payload).unwrap_or_default();
+    if crate::notifications::gate::repeat_suppressed_now(
+        notification_type.as_deref(),
+        notification_pipe.as_deref(),
+        &notification_title,
+    ) {
+        info!(
+            "show_notification_panel: suppressed (repeat within cooldown, type={:?})",
+            notification_type
+        );
+        return Ok(());
+    }
+
     // The pill speaks up for its own alerts wherever it is native. Windows has
     // no native standalone panel, so only the overlay branch applies and
     // anything the pill refuses falls through to the webview panel below.
