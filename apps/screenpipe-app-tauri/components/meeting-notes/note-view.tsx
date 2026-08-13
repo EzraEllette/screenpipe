@@ -119,7 +119,11 @@ import { listenTyped, TAURI_EVENTS } from "@/lib/events/tauri-events";
 import { mountAgentEventBus, registerObserver } from "@/lib/events/bus";
 import { parsePipeSessionId } from "@/lib/events/types";
 import { writeBrowserLogNow } from "@/lib/logging/browser-log";
-import { copyMeetingToClipboard } from "./copy-meeting";
+import { copyMeetingToClipboard, copyMeetingTranscript } from "./copy-meeting";
+import {
+  MeetingShareMenu,
+  type MeetingShareAction,
+} from "./meeting-share-menu";
 import { copyMeetingSummary, emailMeetingSummary } from "./share-summary";
 import {
   resolveTranscriptOpen,
@@ -230,8 +234,11 @@ export function NoteView({
   const [retranscribing, setRetranscribing] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [copying, setCopying] = useState(false);
-  const [copied, setCopied] = useState(false);
-  const [summaryCopied, setSummaryCopied] = useState(false);
+  // One control shares the meeting, so one piece of state remembers which of
+  // its actions last landed on the clipboard.
+  const [copiedAction, setCopiedAction] = useState<MeetingShareAction | null>(
+    null,
+  );
   const [resumingCapture, setResumingCapture] = useState(false);
   const [savingBeforeStop, setSavingBeforeStop] = useState(false);
   const [autoSummaryEnabled, setAutoSummaryEnabled] = useState<boolean | null>(
@@ -1134,6 +1141,14 @@ export function NoteView({
     note: note || null,
   });
 
+  const confirmCopied = (action: MeetingShareAction) => {
+    setCopiedAction(action);
+    window.setTimeout(
+      () => setCopiedAction((current) => (current === action ? null : current)),
+      2000,
+    );
+  };
+
   const handleCopy = async () => {
     if (copying) return;
     setCopying(true);
@@ -1144,13 +1159,35 @@ export function NoteView({
       // happen without re-rendering ReplayStrip).
       const ctx = await copyMeetingToClipboard(fresh);
       setMeetingCtx(ctx);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 2000);
+      confirmCopied("meeting");
       toast({ title: "copied to clipboard" });
     } catch (err) {
       console.error("failed to copy meeting", err);
       toast({
         title: "couldn't copy",
+        description: String(err),
+        variant: "destructive",
+      });
+    } finally {
+      setCopying(false);
+    }
+  };
+
+  const handleCopyTranscript = async () => {
+    if (copying) return;
+    setCopying(true);
+    try {
+      const copiedTranscript = await copyMeetingTranscript(currentMeeting());
+      if (!copiedTranscript) {
+        toast({ title: "nothing transcribed yet" });
+        return;
+      }
+      confirmCopied("transcript");
+      toast({ title: "transcript copied" });
+    } catch (err) {
+      console.error("failed to copy transcript", err);
+      toast({
+        title: "couldn't copy transcript",
         description: String(err),
         variant: "destructive",
       });
@@ -1172,8 +1209,7 @@ export function NoteView({
         toast({ title: "no summary to copy yet" });
         return;
       }
-      setSummaryCopied(true);
-      window.setTimeout(() => setSummaryCopied(false), 2000);
+      confirmCopied("summary");
       toast({ title: "summary copied", description: "paste it anywhere" });
     } catch (err) {
       console.error("failed to copy meeting summary", err);
@@ -1434,6 +1470,10 @@ export function NoteView({
       ? "finalizing"
       : "writing"
     : null;
+  // Share only what is finished and on disk. A half-streamed summary would put
+  // a truncated one in someone's inbox.
+  const canShareSummary =
+    Boolean(extractMeetingSummary(note)) && !summaryWorking;
   const summaryTabState = summaryWorking
     ? "working"
     : summaryLifecycle.kind === "completed"
@@ -1530,32 +1570,24 @@ export function NoteView({
               );
             }}
             summaryState={summaryTabState}
-            // Copying the note is what people do after reading it, so the
-            // action lives on the tab rule where it is always visible and
-            // applies to the whole meeting rather than the active tab. It was
-            // previously hidden until the title row was hovered, which made it
-            // undiscoverable and collided with the shortcut overlay.
+            // Sharing is what people do after reading, so the action lives on
+            // the tab rule where it is always visible and applies to the whole
+            // meeting rather than the active tab. Every destination hangs off
+            // this one control: a second copy icon in the transcript header and
+            // a third inside the summary tab used to compete with it, and the
+            // reachable one was always the transcript dump.
             trailing={
-              <button
-                type="button"
-                onClick={handleCopy}
-                disabled={copying}
-                data-testid="meeting-copy-button"
-                title="copy meeting + transcript to clipboard"
-                aria-label="copy meeting and transcript"
-                className="flex h-11 shrink-0 items-center gap-2 border-l border-border px-4 font-mono text-[11px] uppercase tracking-[0.12em] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:z-10 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-foreground disabled:text-muted-foreground/50 disabled:hover:bg-transparent"
-              >
-                {copying ? (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                ) : copied ? (
-                  <Check className="h-3.5 w-3.5" />
-                ) : (
-                  <Copy className="h-3.5 w-3.5" />
-                )}
-                <span className="hidden sm:inline">
-                  {copied ? "copied" : "copy"}
-                </span>
-              </button>
+              <MeetingShareMenu
+                canShareSummary={canShareSummary}
+                busy={copying}
+                copiedAction={copiedAction}
+                onShare={(action) => {
+                  if (action === "summary") void handleCopySummary();
+                  else if (action === "email") void handleEmailSummary();
+                  else if (action === "transcript") void handleCopyTranscript();
+                  else void handleCopy();
+                }}
+              />
             }
           />
         </div>
@@ -1650,9 +1682,6 @@ export function NoteView({
             canGenerate={
               canSummarizeMeeting && !summaryWorking && !retranscribing
             }
-            onCopySummary={() => void handleCopySummary()}
-            onEmailSummary={() => void handleEmailSummary()}
-            summaryCopied={summaryCopied}
           />
         )}
       </main>
