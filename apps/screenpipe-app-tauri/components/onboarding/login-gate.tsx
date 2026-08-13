@@ -10,6 +10,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import posthog from "posthog-js";
 import { isDevBillingBypassEnabled } from "@/lib/app-entitlement";
 import { ArrowRight } from "lucide-react";
+import { LOCALITY_DETAIL } from "./trust-disclosure";
 
 const FAILURE_COPY: Record<string, string> = {
   cancelled: "sign in was cancelled in your browser.",
@@ -482,7 +483,11 @@ const OnboardingLogin: React.FC<OnboardingLoginProps> = ({
                 where their recordings live. Scoped to STORAGE, not
                 transmission, because paid users are auto-switched to cloud
                 transcription (applyProCloudAudioDefaults in use-settings) so
-                any "nothing ever leaves" claim would be false for them. */}
+                any "nothing ever leaves" claim would be false for them.
+                The pause half rides on the same line rather than a second
+                stacked note: three muted lines under the CTA read as noise,
+                and the off switch matters most to the same users who only
+                ever see this slide. */}
             <motion.p
               data-testid="login-locality"
               className="font-mono text-[10px] text-muted-foreground/40 mt-1.5 tracking-wide"
@@ -490,7 +495,7 @@ const OnboardingLogin: React.FC<OnboardingLoginProps> = ({
               animate={{ opacity: 1 }}
               transition={{ duration: 0.5, delay: 1.15 }}
             >
-              your recordings are stored on this computer
+              {LOCALITY_DETAIL} · pause anytime
             </motion.p>
           </>
         )}

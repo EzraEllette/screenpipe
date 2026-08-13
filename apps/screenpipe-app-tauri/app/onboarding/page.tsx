@@ -33,7 +33,11 @@ const SLIDE_WINDOW_SIZES: Record<SlideKey, { width: number; height: number }> =
   {
     login: { width: 500, height: 480 },
     acquisition: { width: 500, height: 560 },
-    permissions: { width: 500, height: 560 },
+    // Taller than the other 560 slides: the wheel now sits under the data dir
+    // chip and above the pause note, and at 560 the note was clipped by the
+    // window edge (caught by the trust-affordance E2E screenshot, which is why
+    // that spec asserts the note is inside the viewport).
+    permissions: { width: 500, height: 660 },
     timeline: { width: 500, height: 680 },
     engine: { width: 500, height: 620 },
     plan: { width: 760, height: 720 },
