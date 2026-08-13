@@ -812,6 +812,7 @@
         "src/transcription/whisper/detect_language.rs",
         "src/utils/audio/convert.rs",
         "src/utils/audio/resample.rs",
+        "src/utils/ffmpeg.rs",
         "tests/accuracy_test.rs",
         "tests/batch_deferral_test.rs",
         "tests/core_tests.rs"
@@ -834,7 +835,7 @@
       "criticality": "high",
       "confidence": "partial",
       "kind": "mixed",
-      "notes": "Batch deferral, cleanup, language detection, result normalization, and real recording/transcription tests. Hardware/model-heavy tests are ignored by default."
+      "notes": "Batch deferral, cleanup, language detection, result normalization, and real recording/transcription tests. Hardware/model-heavy tests are ignored by default. Also covers ffmpeg encode child reaping on error paths."
     },
     {
       "id": "audio-device-stream-health",
