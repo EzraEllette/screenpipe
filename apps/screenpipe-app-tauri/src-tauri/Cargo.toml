@@ -50,6 +50,11 @@ tauri-plugin-updater = "=2.10.0"
 semver = "1"
 # staged-update signature re-verification (same crate/version the updater plugin uses)
 minisign-verify = "0.2"
+# staged-update pre-extraction at download time — the exit path must be two
+# renames, not a 400 MB gunzip in the dying process (same crates/versions the
+# updater plugin already pulls in)
+flate2 = "1"
+tar = "0.4"
 tauri-plugin-dialog = "=2.6.0"
 tauri-plugin-os = "=2.3.2"
 tauri-plugin-process = "=2.3.1"
