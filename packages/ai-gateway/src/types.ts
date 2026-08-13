@@ -4,7 +4,7 @@
 import type Anthropic from '@anthropic-ai/sdk';
 
 export interface Message {
-	role: 'system' | 'user' | 'assistant' | 'tool';
+	role: 'system' | 'developer' | 'user' | 'assistant' | 'tool';
 	content: string | ContentPart[];
 	name?: string;
 	tool_calls?: ToolCall[];
@@ -86,6 +86,12 @@ export interface RequestBody {
 	tool_choice?: string | { type: 'function'; function: { name: string } };
 	response_format?: ResponseFormat;
 	/**
+	 * Gateway-internal prompt-cache eligibility. The Worker overwrites this
+	 * from its validated session-affinity header and rollout mode; client input
+	 * is never authoritative, and providers never forward this field upstream.
+	 */
+	gpt56HistoryCacheEligible?: boolean;
+	/**
 	 * Gateway-internal latency tier for the Vertex Gemini lane. Set by the
 	 * router from the request's latency class (see resolveLatencyClass in
 	 * index.ts), NEVER sent by clients and NEVER forwarded upstream — providers
@@ -140,6 +146,8 @@ export interface GeminiResponse {
 
 export interface Env {
 	AI: Ai;
+	/** GPT-5.6 prompt caching: `system` (default/kill switch) or `history`. */
+	GPT56_HISTORY_CACHE_MODE?: string;
 	/** Hosted chat rollout switch. Any value other than `cloudflare` is legacy. */
 	HOSTED_CHAT_GATEWAY_MODE?: string;
 	/** Same-account Cloudflare AI Gateway used by the Workers AI binding. */

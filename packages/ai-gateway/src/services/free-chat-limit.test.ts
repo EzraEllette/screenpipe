@@ -20,6 +20,7 @@ import {
 	applyFreeChatRequestLimits,
 	getFreeChatCostReservationMicroUsd,
 	getFreeChatDailyBudgetMicroUsd,
+	hasHistoryCacheSessionAffinity,
 	loadFreeChatCostControls,
 	prepareFreeChatTurn,
 	releaseFreeChatLease,
@@ -230,6 +231,20 @@ const serviceAuth: AuthResult = {
 	deviceId: 'cloud-runner',
 	service: true,
 };
+
+describe('history cache session affinity', () => {
+	it('accepts normal bounded chat and Pipe session affinity values', () => {
+		expect(hasHistoryCacheSessionAffinity(requestFor('chat-session-1'))).toBe(true);
+		expect(hasHistoryCacheSessionAffinity(requestFor(` ${'p'.repeat(512)} `))).toBe(true);
+	});
+
+	it('rejects missing, blank, oversized, and internal title sessions', () => {
+		expect(hasHistoryCacheSessionAffinity(requestFor())).toBe(false);
+		expect(hasHistoryCacheSessionAffinity(requestFor(undefined, { 'x-session-affinity': '  ' }))).toBe(false);
+		expect(hasHistoryCacheSessionAffinity(requestFor('x'.repeat(513)))).toBe(false);
+		expect(hasHistoryCacheSessionAffinity(requestFor('__title:chat-session-1'))).toBe(false);
+	});
+});
 
 function metered(userId: string, turnKey: string): Extract<FreeChatPreflight, { mode: 'metered' }> {
 	return { mode: 'metered', userId, turnKey };
