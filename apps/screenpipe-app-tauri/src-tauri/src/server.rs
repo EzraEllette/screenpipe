@@ -386,6 +386,15 @@ pub async fn run_server(app_handle: tauri::AppHandle, port: u16) {
         .route("/window-size", axum::routing::post(set_window_size))
         .route("/focus", axum::routing::post(handle_focus));
 
+    // E2E driver for the packaged updater test (e2e/mock-updates). Native
+    // tray menus can't be driven by WebDriver, so the packaged test reads the
+    // menu-item state and fires the exact production click path over
+    // localhost instead. Compiled out of every shipped build.
+    #[cfg(feature = "e2e")]
+    let app = app
+        .route("/e2e/updates/state", axum::routing::get(e2e_updates_state))
+        .route("/e2e/updates/click", axum::routing::post(e2e_updates_click));
+
     let app = with_control_server_boundary(app)
         .layer(
             TraceLayer::new_for_http()
@@ -652,6 +661,46 @@ async fn list_installed_apps_handler(State(_): State<ServerState>) -> impl IntoR
         *guard = Some((Instant::now(), apps.clone()));
     }
     Json(apps)
+}
+
+/// Content-free updater state for the packaged e2e test: what the tray menu
+/// item says, whether a staged update exists, and where boot stands. No
+/// versions of anything private, no paths, no tokens.
+#[cfg(feature = "e2e")]
+async fn e2e_updates_state(State(state): State<ServerState>) -> impl IntoResponse {
+    use tauri::Manager;
+
+    let manager = state
+        .app_handle
+        .try_state::<std::sync::Arc<crate::updates::UpdatesManager>>();
+    let (menu_text, menu_enabled, update_installed) = match manager.as_ref() {
+        Some(m) => {
+            let (text, enabled) = m.menu_item_snapshot().unwrap_or_default();
+            (text, enabled, m.has_update_installed().await)
+        }
+        None => (String::new(), false, false),
+    };
+    let staged = crate::staged_update::staged_snapshot();
+    Json(serde_json::json!({
+        "menu_text": menu_text,
+        "menu_enabled": menu_enabled,
+        "update_installed": update_installed,
+        "boot_phase": crate::health::get_boot_phase_snapshot().phase,
+        "restart_started": crate::updates::update_restart_started(),
+        "staged_version": staged.as_ref().map(|(v, _)| v.clone()),
+        "staged_pre_extracted": staged.as_ref().map(|(_, e)| *e).unwrap_or(false),
+        "app_version": state.app_handle.package_info().version.to_string(),
+    }))
+}
+
+/// Fire the exact production tray-click path ("Restart to update" /
+/// "Check for updates"). Returns immediately; on the install path the
+/// process exits a few seconds later, exactly like a real click.
+#[cfg(feature = "e2e")]
+async fn e2e_updates_click(State(state): State<ServerState>) -> impl IntoResponse {
+    let app = state.app_handle.clone();
+    tauri::async_runtime::spawn(crate::updates::trigger_update_now(app));
+    Json(serde_json::json!({ "accepted": true }))
 }
 
 async fn set_window_size(

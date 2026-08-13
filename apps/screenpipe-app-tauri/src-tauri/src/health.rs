@@ -154,6 +154,16 @@ pub enum BootReadiness {
     /// Phase is `error`. Process is in a stuck state; restart won't help and
     /// callers should fail fast rather than waiting.
     Errored,
+    /// Phase is `idle`: the engine was never started (signed-out install,
+    /// entitlement gate, deliberate stop) or a prior engine fully wound
+    /// down. Nothing is initializing, so the #3622 ORT teardown race cannot
+    /// happen — a process restart is safe. Kept distinct from `Ready`
+    /// because engine-dependent callers (capture start after a permission
+    /// grant) must still treat it as "engine unavailable". Before this
+    /// variant existed, `idle` fell into `Pending`, so a signed-out install
+    /// could never pass the update restart gate: the tray's "Restart to
+    /// update" silently no-oped forever (2026-08-11 MacBook Air report).
+    Idle,
 }
 
 fn read_boot_phase() -> String {
@@ -171,19 +181,25 @@ pub fn boot_readiness() -> BootReadiness {
     match read_boot_phase().as_str() {
         "ready" => BootReadiness::Ready,
         "error" => BootReadiness::Errored,
+        "idle" => BootReadiness::Idle,
         _ => BootReadiness::Pending,
     }
 }
 
-/// Block until boot reaches a terminal state (`Ready` or `Errored`) or `timeout`
-/// elapses, then return the final readiness. Callers decide what to do with
-/// `Errored` and timed-out `Pending`.
+/// Block until boot reaches a settled state (`Ready`, `Errored`, or `Idle`)
+/// or `timeout` elapses, then return the final readiness. Callers decide what
+/// to do with `Errored`, `Idle`, and timed-out `Pending`.
+///
+/// `Idle` is settled, not pending: nothing is booting, and nothing will
+/// change without an external trigger (sign-in, manual start), so waiting on
+/// it would always run out the full timeout for no reason.
 pub async fn wait_for_boot_ready(timeout: Duration) -> BootReadiness {
     let deadline = Instant::now() + timeout;
     loop {
         match boot_readiness() {
             BootReadiness::Ready => return BootReadiness::Ready,
             BootReadiness::Errored => return BootReadiness::Errored,
+            BootReadiness::Idle => return BootReadiness::Idle,
             BootReadiness::Pending => {
                 if Instant::now() >= deadline {
                     return BootReadiness::Pending;
@@ -676,9 +692,7 @@ fn overlay_failure_detail(
         (false, false, false) if status == RecordingStatus::Error => {
             "recording engine could not start"
         }
-        (false, false, false) if status == RecordingStatus::Stopped => {
-            "recording engine stopped"
-        }
+        (false, false, false) if status == RecordingStatus::Stopped => "recording engine stopped",
         _ => "recording stopped unexpectedly",
     }
 }
@@ -2878,8 +2892,8 @@ mod tests {
                     && !recently_woke
                     && (status == RecordingStatus::Error
                         || (status == RecordingStatus::Stopped && ever_connected));
-                let expected_broken = simulated_break
-                    || (!failure_suppressed && (engine_down || confirmed_failure));
+                let expected_broken =
+                    simulated_break || (!failure_suppressed && (engine_down || confirmed_failure));
                 let expected = OverlayTickDecision {
                     broken: expected_broken,
                     healthy: !intentionally_paused

@@ -438,69 +438,158 @@ enum OverlayHorizontal {
     case trailing
 }
 
-/// Discrete places the pill can be pinned to. A floating control that lands
-/// wherever the pointer let go looks dropped; landing on a corner or an edge
-/// centre looks placed.
+/// Discrete places the pill can be pinned to: the centre of each screen edge.
+///
+/// Corners were tried and dropped. Six targets over one screen meant two of
+/// them were always a near-tie, so a drop had to be aimed rather than thrown,
+/// and a corner puts the pill where menu bar extras and desktop icons already
+/// live. Four edge centres are unambiguous at a glance and each one is the
+/// obvious "park it out of the way on this side".
 enum OverlayAnchor: String, CaseIterable {
-    case topLeft = "top-left"
     case topCenter = "top-center"
-    case topRight = "top-right"
-    case bottomLeft = "bottom-left"
+    case rightCenter = "right-center"
     case bottomCenter = "bottom-center"
-    case bottomRight = "bottom-right"
+    case leftCenter = "left-center"
 
-    /// Top anchors keep the pill at the panel top so the disclosure, dock menu
-    /// and notification all have room to open downward, and vice versa.
+    /// Whether the pill sits at the top of its panel, so the disclosure, dock
+    /// menu and notification all open downward. The side anchors are vertically
+    /// centred and have room either way, so they open downward too.
     var pillAtPanelTop: Bool {
+        self != .bottomCenter
+    }
+
+    /// Which side of the panel the pill hugs. Side anchors pin to their edge so
+    /// the dock expands inward; top and bottom stay centred.
+    var horizontal: OverlayHorizontal {
         switch self {
-        case .topLeft, .topCenter, .topRight: return true
-        case .bottomLeft, .bottomCenter, .bottomRight: return false
+        case .leftCenter: return .leading
+        case .rightCenter: return .trailing
+        case .topCenter, .bottomCenter: return .center
         }
     }
 
-    var horizontal: OverlayHorizontal {
-        switch self {
-        case .topLeft, .bottomLeft: return .leading
-        case .topCenter, .bottomCenter: return .center
-        case .topRight, .bottomRight: return .trailing
+    /// Whether the pill is centred on the vertical axis rather than pinned to
+    /// the top or bottom edge.
+    var pillAtVerticalCentre: Bool {
+        self == .leftCenter || self == .rightCenter
+    }
+
+    /// Anchors that existed before the edge-centre set. Kept so a stored corner
+    /// resolves instead of silently falling back to the default; the vertical
+    /// half is what people notice, so a corner keeps its top or bottom.
+    static func fromStored(_ raw: String) -> OverlayAnchor? {
+        if let exact = OverlayAnchor(rawValue: raw) { return exact }
+        switch raw {
+        case "top-left", "top-right": return .topCenter
+        case "bottom-left", "bottom-right": return .bottomCenter
+        default: return nil
         }
     }
 }
 
-/// Gap between the pinned pill and the screen edge.
-let kAnchorMargin: CGFloat = 4
+/// Gap between the pinned pill and the screen edge, at 1x. Scaled with the
+/// overlay so a large pill sits proportionally off the edge instead of hugging
+/// it while everything drawn around it grows.
+let kBaseAnchorMargin: CGFloat = 4
+
+func anchorMargin(scale: CGFloat) -> CGFloat {
+    kBaseAnchorMargin * scale
+}
+
+/// Drag stage appearance.
+let kDragStageDim: CGFloat = 0.30
+// Idle pads have to be legible on their own, since they are the whole point of the
+// stage. Measured over the 30% backdrop these land ~11 levels above it, and the
+// active pad another ~16 above that.
+let kDragPadFill: CGFloat = 0.14
+let kDragPadBorder: CGFloat = 0.45
+let kDragPadFillActive: CGFloat = 0.34
+let kDragPadBorderActive: CGFloat = 0.95
+let kDragPadActiveScale: CGFloat = 1.08
+let kDragPadHighlightDur: CFTimeInterval = 0.15
+let kDragStageFadeDur: Double = 0.12
+/// Inset of a landing pad beyond the resting pill footprint, at 1x.
+let kBaseDragPadInset: CGFloat = 5
+/// Release settle. Decelerates hard then eases the last few points in, which
+/// reads as the pill being caught by the anchor rather than slid to it.
+let kSnapDur: Double = 0.28
+let kSnapCurve: (Float, Float, Float, Float) = (0.2, 0.9, 0.3, 1.0)
 
 /// Where the resting pill should sit on screen for a given anchor.
 func anchorPillCenter(
     _ anchor: OverlayAnchor,
     in visible: NSRect,
-    pillSize: NSSize
+    pillSize: NSSize,
+    scale: CGFloat
 ) -> NSPoint {
     let halfW = pillSize.width / 2
     let halfH = pillSize.height / 2
+    let margin = anchorMargin(scale: scale)
     let x: CGFloat
     switch anchor.horizontal {
-    case .leading: x = visible.minX + kAnchorMargin + halfW
+    case .leading: x = visible.minX + margin + halfW
     case .center: x = visible.midX
-    case .trailing: x = visible.maxX - kAnchorMargin - halfW
+    case .trailing: x = visible.maxX - margin - halfW
     }
-    let y = anchor.pillAtPanelTop
-        ? visible.maxY - kAnchorMargin - halfH
-        : visible.minY + kAnchorMargin + halfH
+    let y: CGFloat
+    if anchor.pillAtVerticalCentre {
+        y = visible.midY
+    } else if anchor.pillAtPanelTop {
+        y = visible.maxY - margin - halfH
+    } else {
+        y = visible.minY + margin + halfH
+    }
     return NSPoint(x: x, y: y)
 }
 
-/// Anchor whose resting spot is closest to where the pill was dropped. Ties go
-/// to the current anchor so a stray nudge never re-pins the pill.
+/// Footprint of the landing pad drawn for `anchor` on the drag stage. Padded
+/// out from the resting pill so it reads as a target rather than a second pill,
+/// and clamped inside the visible frame so a corner pad is never half off the
+/// edge at 2x.
+func dragPadRect(
+    for anchor: OverlayAnchor,
+    in visible: NSRect,
+    pillSize: NSSize,
+    scale: CGFloat
+) -> NSRect {
+    let center = anchorPillCenter(anchor, in: visible, pillSize: pillSize, scale: scale)
+    let inset = kBaseDragPadInset * scale
+    let rect = NSRect(
+        x: center.x - pillSize.width / 2 - inset,
+        y: center.y - pillSize.height / 2 - inset,
+        width: pillSize.width + inset * 2,
+        height: pillSize.height + inset * 2
+    )
+    let x = min(max(rect.minX, visible.minX), visible.maxX - rect.width)
+    let y = min(max(rect.minY, visible.minY), visible.maxY - rect.height)
+    return NSRect(x: x, y: y, width: rect.width, height: rect.height)
+}
+
+/// Edge the pill was dropped nearest to. Ties go to the current anchor so a
+/// stray nudge never re-pins the pill.
+///
+/// Distance is measured to the edge, not to the anchor point. Measuring to the
+/// point makes the side targets nearly unreachable on a wide screen: on
+/// 1920x1050 the centre of the desktop is 513pt from the top and bottom
+/// anchors but 945pt from the side ones, so "drop it on the left" only works
+/// within a sliver hugging the left edge. Edge distance splits the screen on
+/// the diagonals instead, which is what docking to an edge should mean.
 func nearestAnchor(
     to pillCenter: NSPoint,
     in visible: NSRect,
     pillSize: NSSize,
+    scale: CGFloat,
     current: OverlayAnchor
 ) -> OverlayAnchor {
     func distance(_ anchor: OverlayAnchor) -> CGFloat {
-        let target = anchorPillCenter(anchor, in: visible, pillSize: pillSize)
-        return hypot(target.x - pillCenter.x, target.y - pillCenter.y)
+        // Absolute, so a drop past an edge still reads as nearest to it rather
+        // than going negative and beating every other edge.
+        switch anchor {
+        case .topCenter: return abs(visible.maxY - pillCenter.y)
+        case .bottomCenter: return abs(pillCenter.y - visible.minY)
+        case .leftCenter: return abs(pillCenter.x - visible.minX)
+        case .rightCenter: return abs(visible.maxX - pillCenter.x)
+        }
     }
     var best = current
     var bestDistance = distance(current)
@@ -1243,8 +1332,16 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
     /// Where the pill is pinned. Rust supplies the persisted value on show and
     /// stores whatever the user drags it to.
     private var overlayAnchor: OverlayAnchor = .topCenter
-    private var snapHintPanel: NSPanel?
-    private var snapHintAnchor: OverlayAnchor?
+    /// Display the pill was last pinned to. The pill returns here when that
+    /// display is still attached, so a second monitor does not steal it just
+    /// because the cursor happens to be there.
+    private var overlayDisplay: String?
+    private var dragStagePanel: NSPanel?
+    private var dragStageView: DragStageView?
+    private var dragStageScreen: NSScreen?
+    #if OVERLAY_PREVIEW
+    private var previewStageLocked = false
+    #endif
     private var isDraggingPill = false
     private var notificationPanel: NSPanel?
     private var notificationHostingView: NSHostingView<AnyView>?
@@ -1254,6 +1351,26 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
     /// Notification currently shown from the pill. Held here rather than on
     /// `metrics` so showing one does not re-render the pill itself.
     private var activeNotification: OverlayNotification?
+
+    override init() {
+        super.init()
+        // Without this a visible pill keeps the coordinates of a display that
+        // was just unplugged or resized until something else happens to
+        // reposition it.
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(screenParametersChanged),
+            name: NSApplication.didChangeScreenParametersNotification,
+            object: nil
+        )
+    }
+
+    @objc private func screenParametersChanged() {
+        DispatchQueue.main.async { [self] in
+            guard isVisible, !isDraggingPill else { return }
+            positionPanel()
+        }
+    }
 
     private var healthToolTip: String? {
         guard metrics.healthState == "failure" else { return nil }
@@ -1277,7 +1394,7 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
             }
             if panel == nil || prevScale != gOverlayScale {
                 dismissOverlayNotification()
-                hideSnapHint()
+                hideDragStage()
                 isDraggingPill = false
                 panel?.orderOut(nil)
                 disclosurePanel?.orderOut(nil)
@@ -1291,7 +1408,9 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
                 transcriptTrackingView = nil
                 // Every child panel is sized from gOverlayScale at creation, so
                 // they have to be rebuilt too when the scale changes.
-                snapHintPanel = nil
+                dragStagePanel = nil
+                dragStageView = nil
+                dragStageScreen = nil
                 notificationPanel = nil
                 notificationHostingView = nil
                 notificationTrackingView = nil
@@ -1323,7 +1442,7 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
             metrics.hoveredControl = nil
             isDraggingPill = false
             dismissOverlayNotification()
-            hideSnapHint()
+            hideDragStage()
             // Hiding the overlay retires the pin too, so re-showing it later
             // does not resurrect a card the user has not asked for again.
             metrics.meetingPinned = false
@@ -1541,6 +1660,22 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
     }
 
 #if OVERLAY_PREVIEW
+    /// Hold the drag stage up without a pointer so its layout can be inspected.
+    /// `performDrag` owns the run loop during a real drag, which makes the stage
+    /// awkward to screenshot.
+    func setPreviewDragStage(highlight: OverlayAnchor?) {
+        DispatchQueue.main.async { [self] in
+            previewStageLocked = true
+            isDraggingPill = true
+            metrics.isHovering = false
+            metrics.forceExpanded = false
+            metrics.hoveredControl = nil
+            disclosurePanel?.orderOut(nil)
+            showDragStage()
+            dragStageView?.setHighlighted(highlight ?? overlayAnchor)
+        }
+    }
+
     func setPreviewExpanded(_ expanded: Bool) {
         DispatchQueue.main.async { [self] in
             metrics.isHovering = expanded
@@ -1640,8 +1775,12 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
         if let s = dict["chat"] { chatShortcut = prettifyShortcut(s) }
         if let s = dict["search"] { searchShortcut = prettifyShortcut(s) }
         if let s = dict["shortcutOverlaySize"] { setOverlayScale(s) }
-        if let s = dict["shortcutOverlayAnchor"], let anchor = OverlayAnchor(rawValue: s) {
+        if let s = dict["shortcutOverlayAnchor"], let anchor = OverlayAnchor.fromStored(s) {
             overlayAnchor = anchor
+        }
+        // Empty means "no display pinned yet", so fall back to the cursor.
+        if let s = dict["shortcutOverlayDisplay"] {
+            overlayDisplay = s.isEmpty ? nil : s
         }
         if let s = dict["metrics_ws_url"] { metricsWsUrl = s }
         if let s = dict["events_ws_url"] { eventsWsUrl = s }
@@ -2010,6 +2149,24 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
         return NSScreen.screens.first { NSMouseInRect(mouseLocation, $0.frame, false) }
     }
 
+    /// Stable per-display key. Survives reboots and cable swaps, unlike the
+    /// display's index in `NSScreen.screens`.
+    private func displayIdentifier(for screen: NSScreen) -> String? {
+        guard let number = screen.deviceDescription[
+            NSDeviceDescriptionKey("NSScreenNumber")
+        ] as? NSNumber else { return nil }
+        let displayID = CGDirectDisplayID(number.uint32Value)
+        guard let uuid = CGDisplayCreateUUIDFromDisplayID(displayID)?
+            .takeRetainedValue() else { return nil }
+        return CFUUIDCreateString(nil, uuid) as String
+    }
+
+    /// The display the pill was pinned to, when it is still attached.
+    private func pinnedScreen() -> NSScreen? {
+        guard let wanted = overlayDisplay else { return nil }
+        return NSScreen.screens.first { displayIdentifier(for: $0) == wanted }
+    }
+
     /// Screen a dropped pill belongs to. Falls back to the panel's screen so a
     /// drop into a gap between displays still lands somewhere real.
     private func screenContaining(_ point: NSPoint) -> NSScreen? {
@@ -2026,7 +2183,9 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
         let panelW = kBaseExpandedW * gOverlayScale
         let panelH = kBaseExpandedH * gOverlayScale
         let pill = collapsedPillSize()
-        let center = anchorPillCenter(anchor, in: visible, pillSize: pill)
+        let center = anchorPillCenter(
+            anchor, in: visible, pillSize: pill, scale: gOverlayScale
+        )
 
         let x: CGFloat
         switch anchor.horizontal {
@@ -2056,7 +2215,15 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
 
     private func positionPanel(animated: Bool = false, on targetScreen: NSScreen? = nil) {
         guard let panel = panel else { return }
-        guard let screen = targetScreen ?? screenUnderCursor() ?? panel.screen ?? NSScreen.main
+        // Precedence matters. The pinned display beats the cursor, so working on
+        // a second monitor does not drag the pill along; a panel already on
+        // screen beats the cursor too, so an incidental reposition (a health
+        // state flip, say) can never teleport a visible pill to another display.
+        guard let screen = targetScreen
+            ?? pinnedScreen()
+            ?? (panel.isVisible ? panel.screen : nil)
+            ?? screenUnderCursor()
+            ?? NSScreen.main
         else { return }
 
         // The anchor is the single source of truth for both the panel origin
@@ -2067,8 +2234,10 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
 
         if animated {
             NSAnimationContext.runAnimationGroup { context in
-                context.duration = kAnimDur
-                context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                context.duration = kSnapDur
+                context.timingFunction = CAMediaTimingFunction(
+                    controlPoints: kSnapCurve.0, kSnapCurve.1, kSnapCurve.2, kSnapCurve.3
+                )
                 panel.animator().setFrameOrigin(origin)
             }
         } else {
@@ -2092,22 +2261,33 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
         metrics.forceExpanded = false
         metrics.hoveredControl = nil
         disclosurePanel?.orderOut(nil)
-        updateSnapHint()
+        showDragStage()
+        updateDragStage()
     }
 
     /// Snap to the nearest anchor, persist it, and let the panel settle there.
     private func endPillDrag() {
+        #if OVERLAY_PREVIEW
+        // `--drag-stage` holds the stage open for inspection; a stray pointer
+        // must not tear it down mid-screenshot.
+        if previewStageLocked { return }
+        #endif
         isDraggingPill = false
-        hideSnapHint()
+        hideDragStage()
         guard let (landed, screen) = droppedAnchor() else { return }
 
-        let changed = landed != overlayAnchor
+        let display = displayIdentifier(for: screen)
+        let changed = landed != overlayAnchor || display != overlayDisplay
         overlayAnchor = landed
+        overlayDisplay = display
         // Re-place on the screen the pill was dropped on, which is not always
         // the one under the cursor at release.
         positionPanel(animated: true, on: screen)
         if changed {
             sendAction("set_overlay_anchor:\(landed.rawValue)")
+            if let display = display {
+                sendAction("set_overlay_display:\(display)")
+            }
         }
     }
 
@@ -2119,77 +2299,105 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
             to: center,
             in: screen.visibleFrame,
             pillSize: collapsedPillSize(),
+            scale: gOverlayScale,
             current: overlayAnchor
         )
         return (landed, screen)
     }
 
-    private func snapHintTarget() -> (OverlayAnchor, NSRect)? {
-        guard let (candidate, screen) = droppedAnchor() else { return nil }
-        let pill = collapsedPillSize()
-        let target = anchorPillCenter(candidate, in: screen.visibleFrame, pillSize: pill)
-        // Pad the hint so it reads as a landing pad rather than a second pill.
-        let pad: CGFloat = 5 * gOverlayScale
-        let rect = NSRect(
-            x: target.x - pill.width / 2 - pad,
-            y: target.y - pill.height / 2 - pad,
-            width: pill.width + pad * 2,
-            height: pill.height + pad * 2
+    // MARK: Drag stage
+
+    private func showDragStage() {
+        guard let panel = panel else { return }
+        let screen = screenContaining(currentPillCenter() ?? panel.frame.origin)
+            ?? panel.screen
+            ?? NSScreen.main
+        guard let screen = screen else { return }
+
+        let stage = ensureDragStagePanel()
+        stage.setFrame(screen.frame, display: false)
+        dragStageView?.frame = NSRect(origin: .zero, size: screen.frame.size)
+        dragStageView?.layoutPads(
+            visible: screen.visibleFrame,
+            stageOrigin: screen.frame.origin,
+            pillSize: collapsedPillSize(),
+            scale: gOverlayScale
         )
-        return (candidate, rect)
+        dragStageScreen = screen
+
+        stage.alphaValue = 0
+        // Regardless, not orderFront: the overlay is used while another app is
+        // frontmost, and a plain orderFront does nothing from the background.
+        stage.orderFrontRegardless()
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = kDragStageFadeDur
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            stage.animator().alphaValue = 1
+        }
     }
 
-    private func updateSnapHint() {
-        guard isDraggingPill, let (candidate, rect) = snapHintTarget() else {
-            hideSnapHint()
+    /// Follow the pill while it is held: re-lay the pads if it crossed onto a
+    /// different display, and highlight whichever pad it would land on.
+    private func updateDragStage() {
+        guard isDraggingPill, let (candidate, screen) = droppedAnchor() else {
+            dragStageView?.setHighlighted(nil)
             return
         }
-        let hint = ensureSnapHintPanel()
-        hint.setFrame(rect, display: false)
-        if snapHintAnchor != candidate {
-            snapHintAnchor = candidate
+        if screen != dragStageScreen {
+            dragStagePanel?.setFrame(screen.frame, display: false)
+            dragStageView?.frame = NSRect(origin: .zero, size: screen.frame.size)
+            dragStageView?.layoutPads(
+                visible: screen.visibleFrame,
+                stageOrigin: screen.frame.origin,
+                pillSize: collapsedPillSize(),
+                scale: gOverlayScale
+            )
+            dragStageScreen = screen
         }
-        if !hint.isVisible {
-            hint.orderFront(nil)
+        dragStageView?.setHighlighted(candidate)
+    }
+
+    private func hideDragStage() {
+        dragStageScreen = nil
+        guard let stage = dragStagePanel, stage.isVisible else { return }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = kDragStageFadeDur
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            stage.animator().alphaValue = 0
+        } completionHandler: { [weak stage] in
+            stage?.orderOut(nil)
+            stage?.alphaValue = 1
         }
     }
 
-    private func hideSnapHint() {
-        snapHintAnchor = nil
-        snapHintPanel?.orderOut(nil)
-    }
-
-    private func ensureSnapHintPanel() -> NSPanel {
-        if let existing = snapHintPanel { return existing }
-        let hint = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 40, height: 30),
+    private func ensureDragStagePanel() -> NSPanel {
+        if let existing = dragStagePanel { return existing }
+        let stage = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 100, height: 100),
             styleMask: [.nonactivatingPanel, .borderless],
             backing: .buffered,
             defer: false
         )
-        hint.isFloatingPanel = true
-        hint.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.floatingWindow)) + 1)
-        hint.collectionBehavior = [.canJoinAllSpaces, .ignoresCycle, .fullScreenAuxiliary]
-        hint.isOpaque = false
-        hint.backgroundColor = .clear
-        hint.hasShadow = false
-        hint.hidesOnDeactivate = false
-        hint.isReleasedWhenClosed = false
-        hint.sharingType = .readOnly
-        hint.ignoresMouseEvents = true
+        stage.isFloatingPanel = true
+        // One level under the pill so the thing being dragged stays on top of
+        // the targets it is being dragged between.
+        stage.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.floatingWindow)) + 1)
+        stage.collectionBehavior = [.canJoinAllSpaces, .ignoresCycle, .fullScreenAuxiliary]
+        stage.isOpaque = false
+        stage.backgroundColor = .clear
+        stage.hasShadow = false
+        stage.hidesOnDeactivate = false
+        stage.isReleasedWhenClosed = false
+        stage.sharingType = .readOnly
+        // Never take the drag away from the pill.
+        stage.ignoresMouseEvents = true
 
-        let content = NSView(frame: hint.contentView?.bounds ?? .zero)
-        content.wantsLayer = true
-        content.autoresizingMask = [.width, .height]
-        if let layer = content.layer {
-            layer.cornerRadius = kBaseCollapsedCornerRadius * gOverlayScale
-            layer.borderWidth = 1
-            layer.borderColor = NSColor.white.withAlphaComponent(0.55).cgColor
-            layer.backgroundColor = NSColor.white.withAlphaComponent(0.10).cgColor
-        }
-        hint.contentView = content
-        snapHintPanel = hint
-        return hint
+        let view = DragStageView(frame: NSRect(x: 0, y: 0, width: 100, height: 100))
+        view.autoresizingMask = [.width, .height]
+        stage.contentView = view
+        dragStagePanel = stage
+        dragStageView = view
+        return stage
     }
 
     private func updateContent() {
@@ -2368,11 +2576,12 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
         case .center: preferredX = pill.midX - width / 2
         case .trailing: preferredX = pill.maxX - width
         }
-        let x = min(max(preferredX, visible.minX + kAnchorMargin), visible.maxX - width - kAnchorMargin)
+        let margin = anchorMargin(scale: gOverlayScale)
+        let x = min(max(preferredX, visible.minX + margin), visible.maxX - width - margin)
         let preferredY = metrics.disclosureDown
-            ? panel.frame.minY - height - kAnchorMargin
-            : panel.frame.maxY + kAnchorMargin
-        let y = min(max(preferredY, visible.minY + kAnchorMargin), visible.maxY - height - kAnchorMargin)
+            ? panel.frame.minY - height - margin
+            : panel.frame.maxY + margin
+        let y = min(max(preferredY, visible.minY + margin), visible.maxY - height - margin)
         toast.setFrameOrigin(NSPoint(x: x, y: y))
     }
 
@@ -2440,7 +2649,7 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
         // performDrag runs its own tracking loop, so this is the only signal
         // that the pill moved while the user is still holding it.
         if isDraggingPill {
-            updateSnapHint()
+            updateDragStage()
         }
         // A pinned card outlives the drag, so it has to follow the chip instead
         // of being left behind at the old anchor.
@@ -2515,6 +2724,120 @@ private class ReminderTrackingView: NSView {
             onHoverChanged?(hovering)
         }
         onPointerMoved?(hovering ? point : nil)
+    }
+}
+
+// MARK: - Drag stage
+// Shown only while the pill is being dragged: a full-screen click-through
+// panel that dims the desktop and paints every anchor the pill can land on,
+// highlighting the one it would snap to right now.
+//
+// Without it the six anchors are invisible. The snap is a plain nearest-point
+// partition of the whole screen, so a drop into open space looks like the pill
+// flew somewhere arbitrary. Drawing the targets makes the same snap read as a
+// choice the user made.
+
+// Not private: `shortcut_reminder_render.swift` draws it offscreen so PR and
+// docs visuals come from the real view rather than a redrawn mockup.
+@available(macOS 13.0, *)
+final class DragStageView: NSView {
+    private let backdropLayer = CALayer()
+    private var padLayers: [OverlayAnchor: CALayer] = [:]
+    private var padRects: [OverlayAnchor: NSRect] = [:]
+    private var highlighted: OverlayAnchor?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.addSublayer(backdropLayer)
+        backdropLayer.backgroundColor = NSColor.black
+            .withAlphaComponent(kDragStageDim).cgColor
+        for anchor in OverlayAnchor.allCases {
+            let pad = CALayer()
+            pad.borderWidth = 1
+            pad.backgroundColor = NSColor.white
+                .withAlphaComponent(kDragPadFill).cgColor
+            pad.borderColor = NSColor.white
+                .withAlphaComponent(kDragPadBorder).cgColor
+            layer?.addSublayer(pad)
+            padLayers[anchor] = pad
+        }
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("DragStageView is created in code only")
+    }
+
+    override var isFlipped: Bool { false }
+
+    /// Lay the pads out over `visible`, a rect in screen coordinates, for a
+    /// stage whose own origin is `stageOrigin`. Plain geometry rather than an
+    /// NSScreen so this can also be driven offscreen by the render tool.
+    func layoutPads(
+        visible: NSRect,
+        stageOrigin: NSPoint,
+        pillSize: NSSize,
+        scale: CGFloat
+    ) {
+        let origin = stageOrigin
+        backdropLayer.frame = bounds
+        padRects.removeAll(keepingCapacity: true)
+        for anchor in OverlayAnchor.allCases {
+            let screenRect = dragPadRect(
+                for: anchor,
+                in: visible,
+                pillSize: pillSize,
+                scale: scale
+            )
+            let local = NSRect(
+                x: screenRect.minX - origin.x,
+                y: screenRect.minY - origin.y,
+                width: screenRect.width,
+                height: screenRect.height
+            )
+            padRects[anchor] = local
+            guard let pad = padLayers[anchor] else { continue }
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            pad.frame = local
+            pad.cornerRadius = kBaseCollapsedCornerRadius * scale + 2
+            CATransaction.commit()
+        }
+        applyHighlight(animated: false)
+    }
+
+    /// Highlight the anchor the pill would land on. Animated so moving between
+    /// two pads reads as the target changing rather than as a redraw.
+    func setHighlighted(_ anchor: OverlayAnchor?) {
+        guard highlighted != anchor else { return }
+        highlighted = anchor
+        applyHighlight(animated: true)
+    }
+
+    private func applyHighlight(animated: Bool) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(!animated)
+        CATransaction.setAnimationDuration(kDragPadHighlightDur)
+        for (anchor, pad) in padLayers {
+            let isTarget = anchor == highlighted
+            pad.backgroundColor = NSColor.white
+                .withAlphaComponent(isTarget ? kDragPadFillActive : kDragPadFill)
+                .cgColor
+            pad.borderColor = NSColor.white
+                .withAlphaComponent(isTarget ? kDragPadBorderActive : kDragPadBorder)
+                .cgColor
+            // Scale about the pad's own centre; the frame stays authoritative
+            // so layoutPads can keep writing plain rects.
+            if let rect = padRects[anchor] {
+                pad.anchorPoint = CGPoint(x: 0.5, y: 0.5)
+                pad.position = CGPoint(x: rect.midX, y: rect.midY)
+                pad.bounds = CGRect(origin: .zero, size: rect.size)
+            }
+            let s = isTarget ? kDragPadActiveScale : 1.0
+            pad.transform = CATransform3DMakeScale(s, s, 1)
+        }
+        CATransaction.commit()
     }
 }
 

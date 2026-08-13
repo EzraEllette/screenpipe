@@ -212,8 +212,12 @@ export default function PlanSelectionStep({
   };
 
   return (
+    // Grows into whatever the shared onboarding window leaves after the heading
+    // and interval toggle, so the checkout box never overflows the window the
+    // way the old fixed 520px iframe did. max-w-2xl was dead: the onboarding
+    // page wraps every slide in max-w-lg.
     <div
-      className="mx-auto w-full max-w-2xl"
+      className="mx-auto flex min-h-0 w-full flex-1 flex-col"
       data-testid="onboarding-card-capture"
     >
       <div className="mb-4 text-center">
@@ -239,7 +243,7 @@ export default function PlanSelectionStep({
         </button>
       </div>
 
-      <div className="relative min-h-[460px] border bg-white">
+      <div className="relative min-h-[360px] flex-1 border bg-white">
         {busy && (
           <div className="absolute inset-0 flex items-center justify-center font-mono text-[11px] text-muted-foreground">
             loading secure payment form
@@ -251,7 +255,10 @@ export default function PlanSelectionStep({
             src={frameUrl}
             title="secure Stripe payment form"
             allow="payment"
-            className="h-[520px] w-full border-0"
+            // Fills the box exactly. A percentage height would not resolve
+            // against a flex-grown parent for a replaced element, leaving the
+            // iframe at its 150px intrinsic default.
+            className="absolute inset-0 h-full w-full border-0"
             data-testid="onboarding-card-frame"
           />
         )}

@@ -20,6 +20,7 @@ import {
   markLearningDone,
   markLearningEmpty,
   markLearningReady,
+  markLearningWriting,
   normalizeEmptyReason,
   readLearningWindow,
   resetLearningWindow,
@@ -526,5 +527,39 @@ describe("classifyEmptyReason", () => {
     ).toBe("unknown");
     expect(classifyEmptyReason(null)).toBe("unknown");
     expect(classifyEmptyReason(undefined)).toBe("unknown");
+  });
+});
+
+describe("writing phase", () => {
+  it("resumes a persisted writing phase as ready when the chat was seeded", () => {
+    // The process died after seedFirstRunSummaryChat but before markReady.
+    // The summary exists, so send the user to it rather than to an empty state.
+    beginLearningWindow(new Date().toISOString());
+    markLearningWriting();
+    const current = readLearningWindow();
+    localStorage.setItem(
+      "screenpipe.first-run.learning-window.v1",
+      JSON.stringify({ ...current, phase: "writing", chatId: "chat-42" }),
+    );
+    const resumed = readLearningWindow();
+    expect(resumed.phase).toBe("ready");
+    expect(resumed.chatId).toBe("chat-42");
+  });
+
+  it("settles a persisted writing phase with no chat instead of restoring a spinner", () => {
+    // The model call died with the process and the seed claim is already
+    // spent, so nothing will resume the work. Restoring `writing` would show a
+    // spinner that can never finish.
+    beginLearningWindow(new Date().toISOString());
+    markLearningWriting();
+    expect(readLearningWindow().phase).toBe("empty");
+  });
+
+  it("marks writing without disturbing the anchor", () => {
+    const anchor = new Date().toISOString();
+    beginLearningWindow(anchor);
+    const writing = markLearningWriting();
+    expect(writing.phase).toBe("writing");
+    expect(writing.startedAt).toBe(anchor);
   });
 });

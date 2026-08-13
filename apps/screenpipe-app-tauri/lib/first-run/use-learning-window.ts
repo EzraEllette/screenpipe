@@ -5,12 +5,14 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import posthog from "posthog-js";
 
 import { commands } from "@/lib/utils/tauri";
 import {
   LEARNING_POLL_INTERVAL_MS,
   LEARNING_WINDOW_CEILING_MS,
+  LEARNING_WINDOW_RESET_EVENT,
   beginLearningWindow,
   buildLearningSummary,
   canResolveYet,
@@ -23,7 +25,9 @@ import {
   markLearningDone,
   markLearningEmpty,
   markLearningReady,
+  markLearningWriting,
   releaseLearningSeed,
+  resetLearningWindow,
   readLearningWindow,
   type FirstRunCapturedApp,
   type FirstRunLearningState,
@@ -111,6 +115,7 @@ export function useLearningWindow(
       cancelled = true;
     };
   }, [state.phase]);
+
   const [capturedApps, setCapturedApps] = useState<FirstRunCapturedApp[]>([]);
   const [remainingMs, setRemainingMs] = useState(() =>
     learningWindowRemainingMs(readLearningWindow().startedAt),
@@ -119,7 +124,38 @@ export function useLearningWindow(
   // lives in claimLearningSeed(); this only avoids a redundant round trip.
   const seedingRef = useRef(false);
 
+  // Drop this webview's copy when any webview resets onboarding.
+  //
+  // `resetLearningWindow` in Settings clears only the `home` partition. The
+  // banner also renders in the separate `chat` webview, whose copy kept its
+  // terminal phase and spent seed claim — and the opening effect above returns
+  // immediately unless the phase is `idle`, so that banner never came back no
+  // matter how many times setup was replayed.
+  useEffect(() => {
+    const unlisten = listen(LEARNING_WINDOW_RESET_EVENT, () => {
+      resetLearningWindow();
+      seedingRef.current = false;
+      setCapturedApps([]);
+      // Back to `idle`, which re-arms the opening effect above. It will only
+      // actually open once setup writes a fresh `completedAt`.
+      setState(readLearningWindow());
+    });
+    return () => {
+      void unlisten.then((off) => off()).catch(() => {});
+    };
+  }, []);
+
   const isLearning = state.phase === "learning";
+  /**
+   * Both phases the resolve effect must stay mounted for.
+   *
+   * `learning` flips to `writing` from inside `resolve`, so keying the effect
+   * on `isLearning` alone would tear it down mid-flight: cleanup sets
+   * `cancelled`, aborts the in-flight detail fetch, and the summary bails and
+   * hands the seed claim back. Keeping both phases truthy means the transition
+   * changes no dependency and the running resolve is left alone.
+   */
+  const isResolving = isLearning || state.phase === "writing";
   const startedAt = state.startedAt;
 
   // Countdown to the ceiling. Purely cosmetic — the window resolves on
@@ -134,12 +170,16 @@ export function useLearningWindow(
 
   // Poll captured activity, resolve when there is enough to say something true.
   useEffect(() => {
-    if (!isLearning || !startedAt) return;
+    if (!isResolving || !startedAt) return;
 
     let cancelled = false;
     const controller = new AbortController();
 
     const resolve = async () => {
+      // Already producing the summary. The interval keeps firing through
+      // `writing` so the effect is not torn down under the in-flight call, but
+      // there is nothing left to poll for.
+      if (seedingRef.current) return;
       const activity = await fetchRecentActivity(startedAt, {
         signal: controller.signal,
       });
@@ -158,6 +198,12 @@ export function useLearningWindow(
       if (aiRef.current.aiSettingsLoaded === false) return;
       if (seedingRef.current || !claimLearningSeed()) return;
       seedingRef.current = true;
+      // Leave `learning` the moment the evidence gate is satisfied, before the
+      // model call below. Everything after this point is producing the summary,
+      // not waiting for something to summarize, and the countdown must stop:
+      // the model can outlive the ceiling, and a spinner beside `0:00` reads as
+      // a hang rather than as work in progress.
+      setState(markLearningWriting());
 
       // Re-fetch with detail now that we are committing to a summary.
       const detailed =
@@ -256,7 +302,7 @@ export function useLearningWindow(
       controller.abort();
       clearInterval(timer);
     };
-  }, [isLearning, startedAt]);
+  }, [isResolving, startedAt]);
 
   // Ceiling: settle honestly if evidence never arrived.
   useEffect(() => {
