@@ -764,6 +764,10 @@ pub async fn extract_frame_from_video(
     }
 
     let ffmpeg_path = find_ffmpeg_path().expect("failed to find ffmpeg path");
+    let is_snapshot_compaction = Path::new(file_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with("compact_"));
 
     // Get video FPS and duration - if this fails, the video is likely corrupted
     let (source_fps, video_duration) =
@@ -828,23 +832,37 @@ pub async fn extract_frame_from_video(
     let frame_filename = format!("frame_{}_{}.jpg", offset_index, Uuid::new_v4());
     let output_path = frames_dir.join(&frame_filename);
 
-    debug!(
-        "extracting frame from {} at offset {} and fps {} to {}",
-        file_path,
-        offset_str,
-        source_fps,
-        output_path.display()
-    );
-
     let mut command = ffmpeg_cmd_async(ffmpeg_path);
-    command
-        .args([
+    if is_snapshot_compaction {
+        // Compacted snapshot chunks can report a nominal r_frame_rate unrelated
+        // to their decoded frame ordinals. Select the stored ordinal exactly.
+        let select_filter = format!("select=eq(n\\,{offset_index}),scale=iw:ih,format=yuvj420p");
+        debug!(
+            "extracting decoded frame {} from compacted video {} to {}",
+            offset_index,
+            file_path,
+            output_path.display()
+        );
+        command.args(["-i", file_path, "-vf", &select_filter, "-vsync", "0"]);
+    } else {
+        debug!(
+            "extracting frame from {} at offset {} and fps {} to {}",
+            file_path,
+            offset_str,
+            source_fps,
+            output_path.display()
+        );
+        command.args([
             "-ss",
             &offset_str,
             "-i",
             file_path,
             "-vf",
-            "scale=iw:ih,format=yuvj420p", // Add format conversion
+            "scale=iw:ih,format=yuvj420p",
+        ]);
+    }
+    command
+        .args([
             "-vframes",
             "1",
             "-c:v",
