@@ -91,7 +91,7 @@ import {
 } from './services/cloudflare-ai-gateway';
 import { getCloudflareHostedChatUsage } from './services/cloudflare-ai-gateway-usage';
 import {
-	resolveArgusBackgroundFallbackBody,
+	resolveBackgroundFallbackBody,
 } from './services/background-limit-fallback';
 // import { handleTTSWebSocketUpgrade } from './handlers/voice-ws';
 
@@ -102,18 +102,18 @@ export { RateLimiter };
  * The header identifies workload intent; resolveLatencyClass only controls
  * whether the primary provider may use flex capacity.
  */
-export function shouldEnableArgusBackgroundFallback(
+export function shouldEnableBackgroundFallback(
 	request: Request,
 	authResult: AuthResult,
 ): boolean {
 	return isBackgroundRequest(request) && hasPaidHostedAiPlan(authResult);
 }
 
-export function shouldEnableArgusSafetyRefusalFallback(
+export function shouldEnableSafetyRefusalFallback(
 	request: Request,
 	authResult: AuthResult,
 ): boolean {
-	return shouldEnableArgusBackgroundFallback(request, authResult)
+	return shouldEnableBackgroundFallback(request, authResult)
 		&& request.headers.get('x-screenpipe-workload')?.toLowerCase() === 'pipe';
 }
 
@@ -613,7 +613,7 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 			}
 
 			const cloudflareGateway = isHostedChatGatewayEnabled(env);
-			let legacyArgusFallback = false;
+			let legacyRescueFallback = false;
 			// Legacy mode retains the paid weighted-query admission gate. In
 			// Cloudflare mode the provider-cost spend rules are authoritative for
 			// this endpoint; Free's separate two-message lease remains above.
@@ -633,15 +633,15 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 					status: 429,
 					code: creditsExhausted ? 'credits_exhausted' : 'daily_limit_exceeded',
 				};
-				const argusFallbackBody = resolveArgusBackgroundFallbackBody({
+				const rescueFallbackBody = resolveBackgroundFallbackBody({
 					enabled: isBackgroundRequest(request) && hasPaidHostedAiPlan(authResult),
 					error: allowanceError,
 					body,
 					env,
 				});
-				if (argusFallbackBody) {
-					legacyArgusFallback = true;
-					body = argusFallbackBody;
+				if (rescueFallbackBody) {
+					legacyRescueFallback = true;
+					body = rescueFallbackBody;
 				} else return addCorsHeaders(createErrorResponse(429, JSON.stringify({
 					...buildDailyUsageLimitError(
 						usage,
@@ -684,7 +684,7 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 				? await buildHostedChatGatewayContext(authResult, body.model, latency)
 				: undefined;
 			let dailyCostReservation: DailyCostHold | null = null;
-			if (!cloudflareGateway && !legacyArgusFallback) {
+			if (!cloudflareGateway && !legacyRescueFallback) {
 				const costReservation = await reserveDailyCostCap(
 					env,
 					authResult.deviceId,
@@ -721,21 +721,21 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 						status: costReservation.response.status,
 					});
 					const allowanceError = { status: costReservation.response.status, code: rejectionReason };
-					const argusFallbackBody = resolveArgusBackgroundFallbackBody({
+					const rescueFallbackBody = resolveBackgroundFallbackBody({
 						enabled: isBackgroundRequest(request) && hasPaidHostedAiPlan(authResult),
 						error: allowanceError,
 						body,
 						env,
 					});
-					if (argusFallbackBody) {
-						legacyArgusFallback = true;
-						body = argusFallbackBody;
+					if (rescueFallbackBody) {
+						legacyRescueFallback = true;
+						body = rescueFallbackBody;
 					} else {
 						if (freeChatLease) await releaseFreeChatLease(env, freeChatLease);
 						return costReservation.response;
 					}
 				}
-				if (costReservation.allowed && !legacyArgusFallback) {
+				if (costReservation.allowed && !legacyRescueFallback) {
 					dailyCostReservation = costReservation.reservation;
 				}
 			}
@@ -778,8 +778,8 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 						freePreview: freeChat.mode === 'metered',
 						efficientOnly: getHostedAiPlan(authResult.accountPlan) !== 'business',
 						gatewayContext,
-						argusBackgroundFallback: shouldEnableArgusBackgroundFallback(request, authResult),
-						argusSafetyRefusalFallback: shouldEnableArgusSafetyRefusalFallback(request, authResult),
+						backgroundFallback: shouldEnableBackgroundFallback(request, authResult),
+						safetyRefusalFallback: shouldEnableSafetyRefusalFallback(request, authResult),
 					},
 				);
 				if (response.status === 429 && body.stream) {
