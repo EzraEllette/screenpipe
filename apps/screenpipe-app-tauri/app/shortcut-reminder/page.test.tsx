@@ -177,6 +177,91 @@ describe("recording health hover detail", () => {
     );
   });
 
+  // #6126: the pill read as a total product failure whatever broke, so routine
+  // audio churn and a wedged capture backend looked identical to the user.
+  it("names audio when only audio failed", async () => {
+    mocks.getRecordingHealthState.mockResolvedValue(
+      "failure|audio capture is not updating|audio",
+    );
+
+    render(<ShortcutReminderPage />);
+
+    expect(await screen.findByText("audio needs help")).toBeVisible();
+    expect(screen.queryByText("recording needs help")).toBeNull();
+    // The reason stays available where it always was.
+    expect(
+      screen.getByRole("button", {
+        name: "Audio needs help: audio capture is not updating. Restart recording",
+      }),
+    ).toHaveAttribute("title", "audio capture is not updating");
+  });
+
+  it("names screen capture when only vision failed", async () => {
+    mocks.getRecordingHealthState.mockResolvedValue(
+      "failure|screen capture is not updating|screen",
+    );
+
+    render(<ShortcutReminderPage />);
+
+    expect(await screen.findByText("screen capture needs help")).toBeVisible();
+    expect(screen.queryByText("recording needs help")).toBeNull();
+  });
+
+  it("stays generic when both subsystems failed or the cause is unknown", async () => {
+    for (const payload of [
+      // Both broken: the engine sends no subsystem, so the pill must not pick one.
+      "failure|audio and screen capture are not updating",
+      "failure|multiple recording errors detected",
+      "failure|recording data cannot be saved",
+      // Bare state, and an engine predating the subsystem field.
+      "failure",
+      "failure|recording stopped unexpectedly",
+    ]) {
+      cleanup();
+      mocks.getRecordingHealthState.mockResolvedValue(payload);
+
+      render(<ShortcutReminderPage />);
+
+      expect(await screen.findByText("recording needs help")).toBeVisible();
+      expect(screen.queryByText("audio needs help")).toBeNull();
+      expect(screen.queryByText("screen capture needs help")).toBeNull();
+    }
+  });
+
+  it("names the subsystem from a live pushed event, not just the mount pull", async () => {
+    mocks.getRecordingHealthState.mockResolvedValue("normal");
+    let pushHealth: ((event: { payload: string }) => void) | undefined;
+    mocks.listen.mockImplementation(async (event: string, handler: unknown) => {
+      if (event === "recording-health-state") {
+        pushHealth = handler as (event: { payload: string }) => void;
+      }
+      return vi.fn();
+    });
+
+    render(<ShortcutReminderPage />);
+    await waitFor(() => expect(pushHealth).toBeDefined());
+
+    act(() => {
+      pushHealth!({ payload: "failure|audio capture is not updating|audio" });
+    });
+
+    expect(await screen.findByText("audio needs help")).toBeVisible();
+  });
+
+  // #5553 fixed overflow in this pill; "screen capture needs help" is the
+  // longest label it can now show, so it has to stay inside the same budget.
+  it("keeps the longest label on one truncating line", async () => {
+    mocks.getRecordingHealthState.mockResolvedValue(
+      "failure|screen capture is not updating|screen",
+    );
+
+    render(<ShortcutReminderPage />);
+
+    const label = await screen.findByText("screen capture needs help");
+    expect(label.className).toContain("whitespace-nowrap");
+    expect(label.className).toContain("truncate");
+  });
+
   it("shows a live meeting dot and reveals transcript plus explicit stop on hover", async () => {
     mocks.getRecordingHealthState.mockResolvedValue("normal");
     mocks.meetingOverlayState.active = true;

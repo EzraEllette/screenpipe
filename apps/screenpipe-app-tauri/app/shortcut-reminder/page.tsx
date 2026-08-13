@@ -70,6 +70,9 @@ export default function ShortcutReminderPage() {
   const { isMac, isLoading } = usePlatform();
   const [healthState, setHealthState] = useState<RecordingHealthState>("normal");
   const [healthDetail, setHealthDetail] = useState("");
+  // "audio" | "screen" | "" — empty when the cause spans subsystems or could
+  // not be attributed, which keeps the pill on its generic wording (#6126).
+  const [healthSubsystem, setHealthSubsystem] = useState("");
   const [overlayShortcut, setOverlayShortcut] = useState<string | null>(null);
   const [chatShortcut, setChatShortcut] = useState<string | null>(null);
   const [searchShortcut, setSearchShortcut] = useState<string | null>(null);
@@ -235,12 +238,14 @@ export default function ShortcutReminderPage() {
   // current via the event.
   useEffect(() => {
     let mounted = true;
-    // Payload is "state" or "state|detail" (a failure reason, or the boot
-    // phase label while fixing).
+    // Payload is "state", "state|detail", or "state|detail|subsystem" —
+    // detail is a failure reason (or the boot phase label while fixing), and
+    // subsystem names what failed when the engine could attribute it to one.
     const apply = (payload: string) => {
-      const [state, detail = ""] = payload.split("|", 2);
+      const [state, detail = "", subsystem = ""] = payload.split("|");
       setHealthState(state as RecordingHealthState);
       setHealthDetail(detail);
+      setHealthSubsystem(subsystem);
     };
     commands
       .getRecordingHealthState()
@@ -419,6 +424,19 @@ export default function ShortcutReminderPage() {
   const smIconPx = 10 * overlayScale;
   const dotPx = Math.max(5 * overlayScale, 5);
   const failureReason = healthDetail || "recording stopped unexpectedly";
+  // Name the subsystem the engine identified. Anything else — both failed, a
+  // persistence error, an unattributable stop — keeps the generic wording.
+  // Must stay in sync with `healthHeadline` in
+  // src-tauri/swift/shortcut_reminder.swift; both read the same payload field.
+  const failureHeadline =
+    healthSubsystem === "audio"
+      ? "audio needs help"
+      : healthSubsystem === "screen"
+        ? "screen capture needs help"
+        : "recording needs help";
+  // The pill is lowercase by design; the accessible name is a sentence.
+  const failureHeadlineSentence =
+    failureHeadline.charAt(0).toUpperCase() + failureHeadline.slice(1);
   const latestTranscript = meetingOverlay.items.at(-1);
   const latestSpeaker = latestTranscript
     ? latestTranscript.speakerName ||
@@ -462,7 +480,7 @@ export default function ShortcutReminderPage() {
             className="flex items-center justify-center flex-1 min-h-0 hover:bg-white/10 transition-colors cursor-pointer"
             style={{ gap: `${gap * 2}px`, padding: `${padY}px ${padX}px`, WebkitAppRegion: 'no-drag' } as React.CSSProperties}
             title={failureReason}
-            aria-label={`Recording needs help: ${failureReason}. Restart recording`}
+            aria-label={`${failureHeadlineSentence}: ${failureReason}. Restart recording`}
           >
             <div
               className="rounded-full bg-red-500 animate-pulse shrink-0"
@@ -472,7 +490,7 @@ export default function ShortcutReminderPage() {
               className="font-mono text-white/90 whitespace-nowrap truncate"
               style={{ fontSize: `${fontPx}px` }}
             >
-              recording needs help
+              {failureHeadline}
             </span>
           </button>
           <div className="bg-white/15" style={{ height: "1px" }} />
