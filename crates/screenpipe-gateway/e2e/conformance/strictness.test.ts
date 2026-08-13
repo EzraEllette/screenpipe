@@ -61,6 +61,7 @@ const goodDeviceList = () => ({
     {
       device_id: "dev-alice",
       label: "alice-mbp",
+      member_email: "alice@conformance.test",
       platform: "macos",
       app_version: "2.5.136",
       last_seen: "2026-07-22T09:08:00+00:00",
@@ -69,6 +70,7 @@ const goodDeviceList = () => ({
     {
       device_id: "dev-bob",
       label: "bob-thinkpad",
+      member_email: null,
       platform: null,
       app_version: null,
       last_seen: "2026-07-22T10:08:00Z",
@@ -291,6 +293,12 @@ describe("the nullable fields ARE allowed to be null (accepted divergences)", ()
     expect(componentValidator("DeviceList")(body)).toBe(true);
   });
 
+  it("Device.member_email — null when no verified identity source exists (DEV-MEMBER-EMAIL)", () => {
+    const body: any = goodDeviceList();
+    body.devices[0].member_email = null;
+    expect(componentValidator("DeviceList")(body)).toBe(true);
+  });
+
   it("FileEntry.size / last_modified — nullable on the gateway (FILES-NULLABILITY)", () => {
     const body: any = goodFileList();
     body.files[0].size = null;
@@ -300,6 +308,12 @@ describe("the nullable fields ARE allowed to be null (accepted divergences)", ()
 });
 
 describe("removing a required field is REJECTED", () => {
+  it("Device.member_email", () => {
+    const body: any = goodDeviceList();
+    delete body.devices[0].member_email;
+    expect(componentValidator("DeviceList")(body)).toBe(false);
+  });
+
   it.each([
     ["DeviceList", ["count", "devices"]],
     [

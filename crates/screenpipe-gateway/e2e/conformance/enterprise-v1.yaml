@@ -80,6 +80,18 @@ x-divergences:
       Neither field is in the wire format, so the gateway has no source for
       them. Typed `[string, "null"]` on both rather than omitted, so a consumer
       writes one branch instead of two.
+  DEV-MEMBER-EMAIL:
+    id: DEV-MEMBER-EMAIL
+    operations: ["GET /devices"]
+    fields: ["devices[].member_email"]
+    hosted: >-
+      enterprise_devices.member_email from the latest device heartbeat: the
+      verified account email when member-authenticated, otherwise null.
+    gateway: always null
+    rationale: >-
+      The customer-run gateway reads telemetry batches from object storage and
+      has no account-identity channel. Keeping the field required and nullable
+      gives consumers one stable response shape without inventing identity.
   SEARCH-ALGORITHM:
     id: SEARCH-ALGORITHM
     operations: ["GET /search"]
@@ -180,7 +192,8 @@ paths:
       operationId: listDevices
       summary: List the devices enrolled under the bearer's organization
       x-scope: read:devices
-      x-divergence: [DEV-LIVENESS, DEV-PLATFORM, TIMESTAMP-SERIALIZATION]
+      x-divergence:
+        [DEV-LIVENESS, DEV-PLATFORM, DEV-MEMBER-EMAIL, TIMESTAMP-SERIALIZATION]
       parameters:
         - $ref: "#/components/parameters/Pagination"
         - $ref: "#/components/parameters/Limit"
@@ -745,11 +758,25 @@ components:
       type: object
       additionalProperties: false
       required:
-        [device_id, label, platform, app_version, last_seen, enrolled_at]
+        [
+          device_id,
+          label,
+          member_email,
+          platform,
+          app_version,
+          last_seen,
+          enrolled_at,
+        ]
       properties:
         device_id: { type: string }
         label:
           { type: string, description: Hostname when known, else the device id }
+        member_email:
+          type: [string, "null"]
+          format: email
+          description: >-
+            Verified account email carried by the latest member-authenticated
+            heartbeat; always null on the gateway (DEV-MEMBER-EMAIL).
         platform:
           {
             type: [string, "null"],

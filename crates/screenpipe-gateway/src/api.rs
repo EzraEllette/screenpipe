@@ -1203,6 +1203,7 @@ async fn devices(
                 "devices": rows.into_iter().map(|(device_id, label, enrolled_at, last_seen)| json!({
                     "device_id": device_id,
                     "label": label,
+                    "member_email": null,
                     "platform": null,
                     "app_version": null,
                     "last_seen": last_seen,
@@ -2443,6 +2444,7 @@ mod tests {
         let devices = body["devices"].as_array().unwrap();
         assert_eq!(devices[0]["device_id"], "dev-b");
         assert_eq!(devices[0]["label"], "bob-mbp");
+        assert!(devices[0]["member_email"].is_null());
         assert!(devices[0]["platform"].is_null());
         assert!(devices[0].get("last_seen").is_some());
         assert!(body.get("next_cursor").is_none());

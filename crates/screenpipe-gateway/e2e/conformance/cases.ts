@@ -106,6 +106,32 @@ export const cases: Case[] = [
     },
   },
   {
+    id: "devices: member email is hosted identity and nullable on the gateway",
+    path: "/api/enterprise/v1/devices",
+    expectStatus: 200,
+    expectHosted: {
+      why: "DEV-MEMBER-EMAIL",
+      assert: (b) => {
+        const alice = b.devices.find((d: any) => d.device_id === "dev-alice");
+        if (alice.member_email !== "alice@conformance.test") {
+          throw new Error(`member_email=${alice.member_email}`);
+        }
+      },
+    },
+    expectGateway: {
+      why: "DEV-MEMBER-EMAIL",
+      assert: (b) => {
+        for (const d of b.devices) {
+          if (d.member_email !== null) {
+            throw new Error(
+              `gateway must report null member_email, got ${JSON.stringify(d)}`,
+            );
+          }
+        }
+      },
+    },
+  },
+  {
     id: "devices: limit=1 returns a continuation cursor",
     path: "/api/enterprise/v1/devices",
     query: { pagination: "keyset", limit: "1" },
