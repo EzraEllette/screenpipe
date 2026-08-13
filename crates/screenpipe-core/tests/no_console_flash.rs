@@ -217,3 +217,91 @@ fn console_programs_are_never_spawned_without_create_no_window() {
         offenders.join("\n  ")
     );
 }
+
+/// True when the function declared on this line hands a `Command` back to its
+/// caller.
+fn is_command_factory(line: &str) -> bool {
+    if !is_fn_signature(line) {
+        return false;
+    }
+    let t = line.trim_end().trim_end_matches('{').trim_end();
+    t.ends_with("-> Command")
+        || t.ends_with("-> std::process::Command")
+        || t.ends_with("-> tokio::process::Command")
+}
+
+/// A factory's callers cannot see whether the flag was set, so the factory has
+/// to set it.
+///
+/// The literal-program-name scan above cannot catch this shape: the program is
+/// a variable (`bun`, a resolved path) and the spawn happens somewhere else
+/// entirely. That is how the screenpipe-mcp prewarm shipped a terminal on every
+/// Windows launch — `bun_command` returned an unguarded `Command`, the install
+/// path happened to run it through a helper that added the flag, and the
+/// prewarm spawned it directly and then waited two minutes with a console
+/// sitting on the user's desktop.
+#[test]
+fn command_factories_guard_every_command_they_hand_out() {
+    let Some(root) = repo_root() else {
+        return;
+    };
+
+    let mut files = Vec::new();
+    collect_rs(&root.join("crates"), &mut files);
+    collect_rs(
+        &root.join("apps/screenpipe-app-tauri/src-tauri/src"),
+        &mut files,
+    );
+
+    let mut offenders = Vec::new();
+    for file in &files {
+        let Ok(text) = fs::read_to_string(file) else {
+            continue;
+        };
+        let lines: Vec<&str> = text.lines().collect();
+        let mut in_test_mod = false;
+        for (i, line) in lines.iter().enumerate() {
+            if line.contains("#[cfg(test)]") {
+                in_test_mod = true;
+            }
+            if in_test_mod || !is_command_factory(line) {
+                continue;
+            }
+            let (_, end) = enclosing_fn_range(&lines, i + 1);
+            for j in (i + 1)..end {
+                if !lines[j].contains("Command::new(") {
+                    continue;
+                }
+                if is_non_windows_branch(&lines, i, j) {
+                    continue;
+                }
+                // Same per-spawn region as above: a guarded sibling must not
+                // vouch for an unguarded one.
+                let region_end = ((j + 1)..end)
+                    .find(|&k| {
+                        lines[k].contains("Command::new") || lines[k].contains("no_window_command")
+                    })
+                    .unwrap_or(end)
+                    .min(j + 25);
+                let region = lines[j..region_end.max(j + 1)].join("\n");
+                if GUARDS.iter().any(|guard| region.contains(guard)) {
+                    continue;
+                }
+                offenders.push(format!(
+                    "{}:{} hands out an unguarded Command — `{}`",
+                    file.strip_prefix(&root).unwrap_or(file).display(),
+                    j + 1,
+                    line.trim()
+                ));
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "a Command factory must guard what it returns — its callers cannot \
+         tell that it did not. Build it with \
+         `screenpipe_core::no_window_command`/`no_window_command_async`:\n  {}",
+        offenders.join("\n  ")
+    );
+}
