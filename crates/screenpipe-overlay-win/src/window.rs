@@ -203,6 +203,11 @@ struct Ctx {
     /// changes. The cursor only decides the monitor while the user is dragging.
     work_area: RECT,
     press_origin: Option<(f32, f32)>,
+    /// The press landed on the pill stack, so travel past `DRAG_THRESHOLD`
+    /// becomes a drag even when it began on a dock button — the macOS
+    /// `DraggableHostingView` contract. Kept out of `OverlayState` because no
+    /// caller and no painter needs it.
+    press_can_drag: bool,
     dragging: bool,
     drag_offset: (i32, i32),
     animating: bool,
@@ -267,6 +272,7 @@ fn run_message_loop(
             // appears; after this the pill stays on its own monitor.
             work_area: monitor_work_area_at_cursor(),
             press_origin: None,
+            press_can_drag: false,
             dragging: false,
             drag_offset: (0, 0),
             animating: false,
@@ -721,11 +727,15 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
 
                 if let Some((ox, oy)) = ctx.press_origin {
                     if !ctx.dragging
-                        && ctx.state.pressed_control == Some(Control::Pill)
+                        && ctx.press_can_drag
                         && ((x - ox).powi(2) + (y - oy).powi(2)).sqrt() > DRAG_THRESHOLD
                     {
                         ctx.dragging = true;
                         ctx.state.dragging = true;
+                        // The press will not become a click any more; release
+                        // the button visual so it does not ride along lit.
+                        ctx.state.pressed_control = None;
+                        repaint(hwnd);
                     }
                     if ctx.dragging {
                         let scale = dpi_scale(hwnd);
@@ -788,6 +798,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 let (x, y) = mouse_dip(hwnd, lparam);
                 if let Some(ctx) = ctx_of(hwnd) {
                     ctx.press_origin = Some((x, y));
+                    ctx.press_can_drag = ctx.layout.press_can_drag(x, y);
                     ctx.state.pressed_control = ctx.layout.hit_test(x, y);
                     SetCapture(hwnd);
                     repaint(hwnd);
@@ -832,6 +843,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                         }
                     }
                     ctx.press_origin = None;
+                    ctx.press_can_drag = false;
                     ctx.state.pressed_control = None;
                 }
                 arm_dismiss_timer(hwnd);

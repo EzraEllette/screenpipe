@@ -121,6 +121,20 @@ impl Layout {
         }
     }
 
+    /// True when a press here may become a pill drag once the pointer travels
+    /// past the threshold. The whole pill stack drags — chip, dock, health
+    /// banner, disclosure — even when the press lands on a button: travel
+    /// cancels the click and moves the pill instead, exactly the
+    /// `DraggableHostingView` contract on macOS. Attachments (transcript,
+    /// notification) are separate panels there and do not drag the pill, so
+    /// they do not here either.
+    pub fn press_can_drag(&self, px: f32, py: f32) -> bool {
+        [Some(self.primary), self.disclosure]
+            .into_iter()
+            .flatten()
+            .any(|r| r.inset(-2.0, -2.0).contains(px, py))
+    }
+
     /// True when the point is over any painted surface — what decides whether
     /// the window keeps the pointer or lets it fall through to the desktop.
     pub fn is_opaque_at(&self, px: f32, py: f32) -> bool {
@@ -581,6 +595,55 @@ mod tests {
         let t = l.transcript.expect("transcript block");
         assert!(t.bottom() <= l.primary.y, "transcript sits above the pill");
         assert_eq!(l.window.w, BASE_TRANSCRIPT_W + SHADOW_PAD * 2.0);
+    }
+
+    #[test]
+    fn every_face_of_the_pill_stack_can_start_a_drag() {
+        // Resting chip.
+        let l = compute(&OverlayState::default());
+        let p = l.primary;
+        assert!(l.press_can_drag(p.x + p.w / 2.0, p.y + p.h / 2.0));
+
+        // Hovered, the dock tiles the primary with buttons — a press on a
+        // button must still be draggable, or the pill cannot be dragged at all:
+        // hovering is a precondition for pressing.
+        let l = compute(&hovered());
+        for (control, r) in &l.dock_cells {
+            assert!(
+                l.press_can_drag(r.x + r.w / 2.0, r.y + r.h / 2.0),
+                "press on {control:?} must be drag-eligible"
+            );
+        }
+        let d = l.disclosure.expect("hovered pill shows the disclosure");
+        assert!(l.press_can_drag(d.x + d.w / 2.0, d.y + d.h / 2.0));
+
+        // The health banner replaces the pill and drags like it.
+        let l = compute(&OverlayState {
+            health: Health::Failure,
+            ..Default::default()
+        });
+        let p = l.primary;
+        assert!(l.press_can_drag(p.x + p.w / 2.0, p.y + p.h / 2.0));
+    }
+
+    #[test]
+    fn attachments_do_not_drag_the_pill() {
+        let mut s = hovered();
+        s.notification = parse(r#"{"id":"m","title":"meeting started"}"#).ok();
+        s.meeting_active = true;
+        s.transcript_pinned = true;
+        s.transcript = vec![TranscriptItem {
+            speaker: "louis".into(),
+            text: "hello".into(),
+            device_type: "input".into(),
+        }];
+        let l = compute(&s);
+        let n = l.notification.expect("notification block");
+        assert!(!l.press_can_drag(n.x + n.w / 2.0, n.y + n.h / 2.0));
+        let t = l.transcript.expect("transcript block");
+        assert!(!l.press_can_drag(t.x + t.w / 2.0, t.y + t.h / 2.0));
+        // The shadow ring is not a grab handle either.
+        assert!(!l.press_can_drag(0.5, 0.5));
     }
 
     #[test]
