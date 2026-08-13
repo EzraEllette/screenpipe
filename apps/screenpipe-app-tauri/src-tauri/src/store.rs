@@ -2336,7 +2336,10 @@ pub fn show_fatal_startup_alert(title: &str, message: &str) {
         );
         Command::new("osascript").arg("-e").arg(script).spawn()
     } else if cfg!(target_os = "windows") {
-        Command::new("powershell")
+        // `-WindowStyle Hidden` hides PowerShell's *own* window, not the
+        // console Windows allocates for a console child of a GUI process — the
+        // alert would otherwise arrive with a black terminal beside it.
+        screenpipe_core::no_window_command("powershell")
             .args([
                 "-NoProfile",
                 "-WindowStyle",
