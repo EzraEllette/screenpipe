@@ -199,6 +199,51 @@ fn shortcut_reminder_visible(app_handle: tauri::AppHandle) -> bool {
         .unwrap_or(false)
 }
 
+/// E2E helper: open an auto-detected meeting the way the audio-process
+/// watcher would.
+///
+/// `POST /meetings/start` hardcodes `detection_source = "manual"`, and manual
+/// meetings are exactly the ones a recording restart does *not* strand: the
+/// audio-process watcher never owns them, so its shutdown hook leaves them
+/// open, and `close_orphaned_meetings` spares them for 12h. Reproducing the
+/// stranded-live-transcription bug therefore needs a genuine auto meeting —
+/// which normally only the detector creates, and the detector needs a real
+/// meeting app plus audio no CI runner has.
+#[command]
+async fn open_auto_meeting(
+    state: State<'_, RecordingState>,
+    app_name: String,
+    title: Option<String>,
+) -> Result<i64, String> {
+    let server_guard = state.server.lock().await;
+    let server = server_guard
+        .as_ref()
+        .ok_or_else(|| "server not running".to_string())?;
+    server
+        .db
+        .insert_meeting(&app_name, "audio_process", title.as_deref(), None)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// E2E helper: report the currently open meeting, if any.
+///
+/// Mirrors the "is a meeting still in progress?" question the streaming
+/// coordinator asks (`meeting_end IS NULL`), so a spec can assert a restart
+/// did not silently close the meeting out from under live transcription.
+#[command]
+async fn active_meeting_id(state: State<'_, RecordingState>) -> Result<Option<i64>, String> {
+    let server_guard = state.server.lock().await;
+    let Some(server) = server_guard.as_ref() else {
+        return Ok(None);
+    };
+    server
+        .db
+        .get_most_recent_active_meeting_id()
+        .await
+        .map_err(|error| error.to_string())
+}
+
 /// E2E helper: publish the production live-transcript event shape without
 /// depending on microphone hardware or an external transcription provider.
 #[command]
@@ -639,6 +684,8 @@ pub(super) fn plugin() -> TauriPlugin<Wry> {
             set_tray_recording_status,
             installed_tray_recording_status,
             shortcut_reminder_visible,
+            open_auto_meeting,
+            active_meeting_id,
             emit_meeting_overlay_transcript,
             emit_agent_stream,
             emit_settled_agent_follow_up,

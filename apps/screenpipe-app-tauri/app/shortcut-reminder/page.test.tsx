@@ -191,29 +191,22 @@ describe("recording health hover detail", () => {
     expect(meetingDot.className).toContain("pointer-events-none");
   });
 
-  it("offers bounded snoozes from the gear without restoring the inbox", async () => {
+  it("cannot be hidden from the gear — it opens Display settings instead", async () => {
     mocks.getRecordingHealthState.mockResolvedValue("normal");
-    mocks.storeGet.mockResolvedValue({ showShortcutOverlay: true });
+    mocks.storeGet.mockResolvedValue({});
 
     render(<ShortcutReminderPage />);
 
     fireEvent.mouseEnter(await screen.findByTestId("shortcut-reminder-root"));
     fireEvent.click(await screen.findByTitle("Overlay settings"));
-    expect(screen.getByTitle("Hide for today")).toBeVisible();
-    expect(screen.getByTitle("Hide for a week")).toBeVisible();
-    expect(screen.getByTitle("Open overlay settings")).toBeVisible();
-    expect(screen.queryByTitle("notifications")).toBeNull();
 
-    fireEvent.click(screen.getByTitle("Hide for a week"));
-    await waitFor(() => expect(mocks.storeSet).toHaveBeenCalledTimes(1));
-    expect(mocks.storeSet).toHaveBeenCalledWith(
-      "settings",
-      expect.objectContaining({
-        showShortcutOverlay: true,
-        shortcutOverlaySnoozedUntil: expect.any(Number),
-      }),
-    );
-    expect(mocks.hideShortcutReminder).toHaveBeenCalledTimes(1);
+    // The gear never hides the pill. Even when `overlay-hiding-control` grants
+    // the capability back, the switch lives in Display settings, not here.
+    expect(screen.queryByTitle("Hide for today")).toBeNull();
+    expect(screen.queryByTitle("Hide for a week")).toBeNull();
+    expect(mocks.hideShortcutReminder).not.toHaveBeenCalled();
+    expect(mocks.storeSet).not.toHaveBeenCalled();
+    expect(mocks.showWindow).toHaveBeenCalledWith({ Home: { page: "display" } });
   });
 
   it("keeps recording health ahead of the meeting preview", async () => {

@@ -951,17 +951,21 @@ pub struct SettingsStore {
     pub search_shortcut: String,
     #[serde(rename = "lockVaultShortcut", default)]
     pub lock_vault_shortcut: String,
-    #[serde(rename = "showShortcutOverlay", default = "default_true")]
-    pub show_shortcut_overlay: bool,
-    /// Unix timestamp until which the user asked to hide the shortcut overlay.
-    #[serde(rename = "shortcutOverlaySnoozedUntil", default)]
-    pub shortcut_overlay_snoozed_until: Option<i64>,
-    /// Version marker for the bounded re-show of the smaller overlay design.
-    #[serde(rename = "shortcutOverlayMinimalReshowVersion", default)]
-    pub shortcut_overlay_minimal_reshow_version: u32,
     /// Overlay size: "small" (default), "medium" (1.5x), "large" (2x)
     #[serde(rename = "shortcutOverlaySize", default = "default_overlay_size")]
     pub shortcut_overlay_size: String,
+    /// The user's choice, honored only while `allow_hiding_shortcut_overlay`
+    /// is on. The overlay ships unhideable, so this is inert by default.
+    #[serde(rename = "showShortcutOverlay", default = "default_true")]
+    pub show_shortcut_overlay: bool,
+    /// Remote-controlled capability (`overlay-hiding-control`), written by the
+    /// desktop remote-control registry. False ships; flipping the flag on gives
+    /// the Display toggle back without a release.
+    #[serde(rename = "allowHidingShortcutOverlay", default)]
+    pub allow_hiding_shortcut_overlay: bool,
+    /// Where the user dragged the overlay: one of top/bottom x left/center/right.
+    #[serde(rename = "shortcutOverlayAnchor", default = "default_overlay_anchor")]
+    pub shortcut_overlay_anchor: String,
     /// Unique device ID for AI usage tracking (generated on first launch)
     #[serde(rename = "deviceId", default = "generate_device_id")]
     pub device_id: String,
@@ -1060,6 +1064,10 @@ fn default_true() -> bool {
 
 fn default_overlay_size() -> String {
     "small".to_string()
+}
+
+fn default_overlay_anchor() -> String {
+    "top-center".to_string()
 }
 
 fn default_ui_theme() -> String {
@@ -1549,10 +1557,10 @@ Rules:
             lock_vault_shortcut: "Ctrl+Shift+L".to_string(),
             #[cfg(not(target_os = "windows"))]
             lock_vault_shortcut: "Super+Shift+L".to_string(),
-            show_shortcut_overlay: true,
-            shortcut_overlay_snoozed_until: None,
-            shortcut_overlay_minimal_reshow_version: 0,
             shortcut_overlay_size: "small".to_string(),
+            shortcut_overlay_anchor: default_overlay_anchor(),
+            show_shortcut_overlay: true,
+            allow_hiding_shortcut_overlay: false,
             device_id: uuid::Uuid::new_v4().to_string(),
             auto_update: true,
             auto_update_pipes: true,
@@ -2034,6 +2042,33 @@ fn restore_headed_mode_for_consumer(
     true
 }
 
+const WINDOWS_TIMELINE_WINDOW_MODE_MIGRATION: &str =
+    "windowsTimelineWindowModeMigrationV1";
+
+/// Move existing Windows installs off the legacy borderless fullscreen overlay.
+///
+/// The marker makes this a one-time migration: after the first upgraded launch,
+/// users can explicitly switch back to fullscreen without being overridden again.
+fn migrate_windows_timeline_to_window_mode(settings: &mut SettingsStore) -> bool {
+    if settings
+        .extra
+        .get(WINDOWS_TIMELINE_WINDOW_MODE_MIGRATION)
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return false;
+    }
+
+    if settings.overlay_mode == "fullscreen" {
+        settings.overlay_mode = "window".to_string();
+    }
+    settings.extra.insert(
+        WINDOWS_TIMELINE_WINDOW_MODE_MIGRATION.to_string(),
+        Value::Bool(true),
+    );
+    true
+}
+
 pub fn init_store(app: &AppHandle) -> Result<SettingsStore, String> {
     println!("Initializing settings store");
 
@@ -2051,14 +2086,14 @@ pub fn init_store(app: &AppHandle) -> Result<SettingsStore, String> {
         .unwrap_or(false);
 
     let is_new_store;
-    let (mut store, mut should_save) = match SettingsStore::get(app) {
+    let (mut store, mut should_save, can_run_settings_migrations) = match SettingsStore::get(app) {
         Ok(Some(store)) => {
             is_new_store = false;
-            (store, should_persist_restart_notification_migration)
+            (store, should_persist_restart_notification_migration, true)
         }
         Ok(None) => {
             is_new_store = true;
-            (SettingsStore::default(), true) // New store, save defaults
+            (SettingsStore::default(), true, true) // New store, save defaults
         }
         Err(e) => {
             is_new_store = false;
@@ -2070,7 +2105,7 @@ pub fn init_store(app: &AppHandle) -> Result<SettingsStore, String> {
                 "Failed to deserialize settings, using defaults (store not overwritten): {}",
                 e
             );
-            (SettingsStore::default(), false)
+            (SettingsStore::default(), false, false)
         }
     };
 
@@ -2150,6 +2185,16 @@ pub fn init_store(app: &AppHandle) -> Result<SettingsStore, String> {
     if restore_headed_mode_for_consumer(&mut store, cfg!(feature = "enterprise-build")) {
         tracing::info!(
             "settings migration: restored headed UI and scheduled pipe runs for consumer install"
+        );
+        should_save = true;
+    }
+
+    if cfg!(target_os = "windows")
+        && can_run_settings_migrations
+        && migrate_windows_timeline_to_window_mode(&mut store)
+    {
+        tracing::info!(
+            "settings migration: selected window mode for the Windows timeline overlay"
         );
         should_save = true;
     }
@@ -2336,7 +2381,10 @@ pub fn show_fatal_startup_alert(title: &str, message: &str) {
         );
         Command::new("osascript").arg("-e").arg(script).spawn()
     } else if cfg!(target_os = "windows") {
-        Command::new("powershell")
+        // `-WindowStyle Hidden` hides PowerShell's *own* window, not the
+        // console Windows allocates for a console child of a GUI process — the
+        // alert would otherwise arrive with a black terminal beside it.
+        screenpipe_core::no_window_command("powershell")
             .args([
                 "-NoProfile",
                 "-WindowStyle",
@@ -2430,17 +2478,29 @@ mod tests {
     }
 
     #[test]
-    fn shortcut_overlay_snooze_and_reshow_state_default_cleanly() {
-        let defaults = SettingsStore::default();
-        assert_eq!(defaults.shortcut_overlay_snoozed_until, None);
-        assert_eq!(defaults.shortcut_overlay_minimal_reshow_version, 0);
+    fn shortcut_overlay_anchor_defaults_to_top_center() {
+        assert_eq!(SettingsStore::default().shortcut_overlay_anchor, "top-center");
 
+        // Settings written before the pill could be pinned have no anchor key.
         let missing: SettingsStore = serde_json::from_value(json!({
             "aiPresets": []
         }))
         .unwrap();
-        assert_eq!(missing.shortcut_overlay_snoozed_until, None);
-        assert_eq!(missing.shortcut_overlay_minimal_reshow_version, 0);
+        assert_eq!(missing.shortcut_overlay_anchor, "top-center");
+    }
+
+    /// Stored dismissals from before the overlay became permanent must not
+    /// resurrect: the keys are gone, and an old file carrying them still loads.
+    #[test]
+    fn retired_overlay_dismissal_keys_are_ignored() {
+        let legacy: SettingsStore = serde_json::from_value(json!({
+            "aiPresets": [],
+            "showShortcutOverlay": false,
+            "shortcutOverlaySnoozedUntil": 4_102_444_800_i64,
+            "shortcutOverlayMinimalReshowVersion": 1,
+        }))
+        .unwrap();
+        assert_eq!(legacy.shortcut_overlay_anchor, "top-center");
     }
 
     #[test]
@@ -2545,6 +2605,40 @@ mod tests {
         assert!(!restore_headed_mode_for_consumer(&mut enterprise, true));
         assert!(enterprise.headless);
         assert!(enterprise.headless_record_only);
+    }
+
+    #[test]
+    fn windows_timeline_migration_moves_legacy_fullscreen_to_window_once() {
+        let mut settings = SettingsStore {
+            overlay_mode: "fullscreen".to_string(),
+            ..Default::default()
+        };
+
+        assert!(migrate_windows_timeline_to_window_mode(&mut settings));
+        assert_eq!(settings.overlay_mode, "window");
+        assert_eq!(
+            settings.extra.get(WINDOWS_TIMELINE_WINDOW_MODE_MIGRATION),
+            Some(&Value::Bool(true))
+        );
+
+        settings.overlay_mode = "fullscreen".to_string();
+        assert!(!migrate_windows_timeline_to_window_mode(&mut settings));
+        assert_eq!(settings.overlay_mode, "fullscreen");
+    }
+
+    #[test]
+    fn windows_timeline_migration_marks_existing_window_mode_complete() {
+        let mut settings = SettingsStore {
+            overlay_mode: "window".to_string(),
+            ..Default::default()
+        };
+
+        assert!(migrate_windows_timeline_to_window_mode(&mut settings));
+        assert_eq!(settings.overlay_mode, "window");
+        assert_eq!(
+            settings.extra.get(WINDOWS_TIMELINE_WINDOW_MODE_MIGRATION),
+            Some(&Value::Bool(true))
+        );
     }
 
     #[test]

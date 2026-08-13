@@ -13,100 +13,44 @@ use tracing::{error, info, warn};
 /// Global app handle stored so native action callbacks can emit events.
 static GLOBAL_APP_HANDLE: std::sync::OnceLock<tauri::AppHandle> = std::sync::OnceLock::new();
 
-const SHORTCUT_OVERLAY_DAY_SNOOZE_SECONDS: i64 = 24 * 60 * 60;
-const SHORTCUT_OVERLAY_WEEK_SNOOZE_SECONDS: i64 = 7 * SHORTCUT_OVERLAY_DAY_SNOOZE_SECONDS;
+/// Anchors the overlay accepts, mirroring `OverlayAnchor` in
+/// `swift/shortcut_reminder.swift`. Anything else is ignored rather than
+/// persisted, so a bad payload can never strand the pill off screen.
+pub(crate) const SHORTCUT_OVERLAY_ANCHORS: [&str; 6] = [
+    "top-left",
+    "top-center",
+    "top-right",
+    "bottom-left",
+    "bottom-center",
+    "bottom-right",
+];
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ShortcutOverlayDismissScope {
-    Today,
-    Week,
-    Persistent,
+pub(crate) fn parse_overlay_anchor(action: &str) -> Option<&str> {
+    let anchor = action.strip_prefix("set_overlay_anchor:")?;
+    SHORTCUT_OVERLAY_ANCHORS
+        .into_iter()
+        .find(|candidate| *candidate == anchor)
 }
 
-impl ShortcutOverlayDismissScope {
-    fn analytics_value(self) -> &'static str {
-        match self {
-            Self::Today => "today",
-            Self::Week => "week",
-            Self::Persistent => "persistent",
-        }
-    }
-
-    fn snooze_seconds(self) -> Option<i64> {
-        match self {
-            Self::Today => Some(SHORTCUT_OVERLAY_DAY_SNOOZE_SECONDS),
-            Self::Week => Some(SHORTCUT_OVERLAY_WEEK_SNOOZE_SECONDS),
-            Self::Persistent => None,
-        }
-    }
-}
-
-fn apply_shortcut_overlay_dismissal(
-    store: &mut SettingsStore,
-    scope: ShortcutOverlayDismissScope,
-    now_unix: i64,
-) {
-    if let Some(duration) = scope.snooze_seconds() {
-        store.show_shortcut_overlay = true;
-        store.shortcut_overlay_snoozed_until = Some(now_unix.saturating_add(duration));
-    } else {
-        store.show_shortcut_overlay = false;
-        store.shortcut_overlay_snoozed_until = None;
-    }
-}
-
-fn persist_shortcut_overlay_dismissal(
-    app: &tauri::AppHandle,
-    scope: ShortcutOverlayDismissScope,
-) -> bool {
+fn persist_shortcut_overlay_anchor(app: &tauri::AppHandle, anchor: &str) -> bool {
     match SettingsStore::get(app) {
         Ok(Some(mut store)) => {
-            apply_shortcut_overlay_dismissal(&mut store, scope, chrono::Utc::now().timestamp());
+            if store.shortcut_overlay_anchor == anchor {
+                return true;
+            }
+            store.shortcut_overlay_anchor = anchor.to_string();
             match store.save(app) {
                 Ok(()) => true,
                 Err(error) => {
-                    warn!("failed to persist shortcut overlay dismissal: {}", error);
+                    warn!("failed to persist shortcut overlay anchor: {}", error);
                     false
                 }
             }
         }
         Ok(None) => false,
         Err(error) => {
-            warn!("failed to read settings for overlay dismissal: {}", error);
+            warn!("failed to read settings for overlay anchor: {}", error);
             false
-        }
-    }
-}
-
-fn handle_shortcut_overlay_dismissal(
-    app: &tauri::AppHandle,
-    scope: ShortcutOverlayDismissScope,
-    open_display_settings: bool,
-) {
-    let persist_succeeded = persist_shortcut_overlay_dismissal(app, scope);
-    track_native_overlay_event(
-        app,
-        "shortcut_reminder_dismissed",
-        serde_json::json!({
-            "dismiss_scope": scope.analytics_value(),
-            "snooze_hours": scope.snooze_seconds().map(|seconds| seconds / 3_600),
-            "persist_succeeded": persist_succeeded,
-        }),
-    );
-    native_shortcut_reminder::hide();
-
-    if open_display_settings {
-        let app_for_show = app.clone();
-        if let Err(error) = app.run_on_main_thread(move || {
-            if let Err(error) = (ShowRewindWindow::Home {
-                page: Some("display".to_string()),
-            })
-            .show(&app_for_show)
-            {
-                warn!("failed to open Display settings after overlay turn-off: {error}");
-            }
-        }) {
-            warn!("failed to schedule Display settings after overlay turn-off: {error}");
         }
     }
 }
@@ -173,12 +117,6 @@ pub(crate) fn track_native_overlay_event(
     }
 }
 
-fn settings_menu_engagement_properties(action: &str) -> Option<serde_json::Value> {
-    let payload = action.strip_prefix("settings_menu_engaged:")?;
-    let properties: serde_json::Value = serde_json::from_str(payload).ok()?;
-    properties.is_object().then_some(properties)
-}
-
 fn native_notif_action_callback_inner(json_ptr: *const std::os::raw::c_char) {
     if json_ptr.is_null() {
         return;
@@ -186,6 +124,13 @@ fn native_notif_action_callback_inner(json_ptr: *const std::os::raw::c_char) {
     let json = unsafe { std::ffi::CStr::from_ptr(json_ptr) }
         .to_string_lossy()
         .to_string();
+    dispatch_notification_action(json);
+}
+
+/// Run one notification action. Shared by the standalone notification panel and
+/// by notifications the shortcut overlay renders itself, so a meeting alert
+/// behaves identically whichever surface showed it.
+pub(crate) fn dispatch_notification_action(json: String) {
     info!("native notification action: {}", json);
 
     let Some(app) = GLOBAL_APP_HANDLE.get() else {
@@ -761,15 +706,26 @@ fn native_shortcut_action_callback_inner(action_ptr: *const std::os::raw::c_char
         .to_string();
     info!("native shortcut action: {}", action);
 
+    // Notifications the pill rendered itself run the same dispatch as the
+    // standalone panel, on the same thread the panel callback uses.
+    if let Some(payload) = action.strip_prefix("notification_action:") {
+        dispatch_notification_action(payload.to_string());
+        return;
+    }
+
     if let Some(app) = GLOBAL_APP_HANDLE.get() {
         let app_clone = app.clone();
         std::thread::spawn(move || {
             let app_for_show = app_clone.clone();
-            if let Some(properties) = settings_menu_engagement_properties(&action) {
+            if let Some(anchor) = parse_overlay_anchor(&action) {
+                let persisted = persist_shortcut_overlay_anchor(&app_clone, anchor);
                 track_native_overlay_event(
                     &app_clone,
-                    "shortcut_reminder_settings_menu_engaged",
-                    properties,
+                    "shortcut_reminder_anchor_changed",
+                    serde_json::json!({
+                        "anchor": anchor,
+                        "persist_succeeded": persisted,
+                    }),
                 );
                 return;
             }
@@ -842,27 +798,6 @@ fn native_shortcut_action_callback_inner(action_ptr: *const std::os::raw::c_char
                             warn!("failed to open overlay settings: {error}");
                         }
                     });
-                }
-                "dismiss_today" => {
-                    handle_shortcut_overlay_dismissal(
-                        &app_clone,
-                        ShortcutOverlayDismissScope::Today,
-                        false,
-                    );
-                }
-                "dismiss_week" => {
-                    handle_shortcut_overlay_dismissal(
-                        &app_clone,
-                        ShortcutOverlayDismissScope::Week,
-                        false,
-                    );
-                }
-                "dismiss_persistent" => {
-                    handle_shortcut_overlay_dismissal(
-                        &app_clone,
-                        ShortcutOverlayDismissScope::Persistent,
-                        true,
-                    );
                 }
                 "restart_recording" => {
                     // Recording-health overlay: restart the engine in place.
@@ -945,55 +880,29 @@ fn native_shortcut_action_callback_inner(action_ptr: *const std::os::raw::c_char
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_shortcut_overlay_dismissal, native_overlay_meeting_note_id, notification_copy_value,
-        notification_source_url, parse_meeting_deeplink, settings_menu_engagement_properties,
-        ShortcutOverlayDismissScope, SHORTCUT_OVERLAY_DAY_SNOOZE_SECONDS,
-        SHORTCUT_OVERLAY_WEEK_SNOOZE_SECONDS,
+        native_overlay_meeting_note_id, notification_copy_value, notification_source_url,
+        parse_meeting_deeplink, parse_overlay_anchor, SHORTCUT_OVERLAY_ANCHORS,
     };
-    use crate::store::SettingsStore;
     use serde_json::json;
 
     #[test]
-    fn temporary_overlay_dismissals_keep_the_feature_enabled() {
-        for (scope, expected_until) in [
-            (
-                ShortcutOverlayDismissScope::Today,
-                100 + SHORTCUT_OVERLAY_DAY_SNOOZE_SECONDS,
-            ),
-            (
-                ShortcutOverlayDismissScope::Week,
-                100 + SHORTCUT_OVERLAY_WEEK_SNOOZE_SECONDS,
-            ),
-        ] {
-            let mut store = SettingsStore::default();
-            store.show_shortcut_overlay = false;
-            apply_shortcut_overlay_dismissal(&mut store, scope, 100);
-            assert!(store.show_shortcut_overlay);
-            assert_eq!(store.shortcut_overlay_snoozed_until, Some(expected_until));
+    fn accepts_every_anchor_the_overlay_can_report() {
+        for anchor in SHORTCUT_OVERLAY_ANCHORS {
+            assert_eq!(
+                parse_overlay_anchor(&format!("set_overlay_anchor:{anchor}")),
+                Some(anchor),
+            );
         }
     }
 
     #[test]
-    fn permanent_overlay_dismissal_clears_any_snooze() {
-        let mut store = SettingsStore::default();
-        store.shortcut_overlay_snoozed_until = Some(1_000);
-        apply_shortcut_overlay_dismissal(&mut store, ShortcutOverlayDismissScope::Persistent, 100);
-        assert!(!store.show_shortcut_overlay);
-        assert_eq!(store.shortcut_overlay_snoozed_until, None);
-    }
-
-    #[test]
-    fn parses_settings_menu_engagement_summary() {
-        let action = concat!(
-            "settings_menu_engaged:",
-            r#"{"hovered_items":["today","week"],"revisit_count":1,"longest_hover_ms":1400}"#
-        );
-        let properties = settings_menu_engagement_properties(action).expect("valid summary");
-        assert_eq!(properties["hovered_items"], json!(["today", "week"]));
-        assert_eq!(properties["revisit_count"], 1);
-        assert_eq!(properties["longest_hover_ms"], 1400);
-        assert!(settings_menu_engagement_properties("settings_menu_engaged:[]").is_none());
-        assert!(settings_menu_engagement_properties("settings_menu_opened").is_none());
+    fn rejects_anchors_that_would_strand_the_pill() {
+        // An unknown or malformed anchor must not be persisted — the pill would
+        // come back somewhere the positioning code cannot reason about.
+        assert_eq!(parse_overlay_anchor("set_overlay_anchor:middle"), None);
+        assert_eq!(parse_overlay_anchor("set_overlay_anchor:"), None);
+        assert_eq!(parse_overlay_anchor("set_overlay_anchor:top-left "), None);
+        assert_eq!(parse_overlay_anchor("open_timeline"), None);
     }
 
     #[test]

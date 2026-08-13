@@ -58,6 +58,17 @@ vi.mock("@/lib/upgrade-flow", () => ({
   openBusinessUpgradeSurface: mocks.openBusinessUpgradeSurface,
 }));
 
+function expectPhosphorPrimary(button: HTMLElement) {
+  expect(button).toHaveClass(
+    "border-[#4A6B00]",
+    "bg-[#C7FF3E]",
+    "text-black",
+    "hover:border-black",
+    "hover:bg-black",
+    "hover:text-[#C7FF3E]",
+  );
+}
+
 describe("UpgradeQuotaBanner", () => {
   beforeEach(() => {
     mocks.usageState = {
@@ -106,7 +117,9 @@ describe("UpgradeQuotaBanner", () => {
     mocks.gateState = true;
     render(<UpgradeQuotaBanner />);
 
-    fireEvent.click(screen.getByRole("button", { name: "View Business" }));
+    const upgrade = screen.getByRole("button", { name: "View Business" });
+    expectPhosphorPrimary(upgrade);
+    fireEvent.click(upgrade);
     await waitFor(() =>
       expect(mocks.openBusinessUpgradeSurface).toHaveBeenCalledWith(
         "ai-quota-banner",
@@ -302,9 +315,11 @@ describe("UpgradeQuotaBanner", () => {
 
       expect(mocks.seenEligibility).toBe(true);
       expect(screen.getByTestId("hosted-ai-allowance-banner")).toBeTruthy();
-      fireEvent.click(
-        screen.getByRole("button", { name: `Upgrade to ${planLabel}` }),
-      );
+      const polledUpgrade = screen.getByRole("button", {
+        name: `Upgrade to ${planLabel}`,
+      });
+      expectPhosphorPrimary(polledUpgrade);
+      fireEvent.click(polledUpgrade);
       await waitFor(() =>
         expect(mocks.openExternalUrl).toHaveBeenCalledWith(upgradeUrl),
       );
@@ -319,9 +334,11 @@ describe("UpgradeQuotaBanner", () => {
       };
 
       render(<UpgradeQuotaBanner />);
-      fireEvent.click(
-        screen.getByRole("button", { name: `Upgrade to ${planLabel}` }),
-      );
+      const immediateUpgrade = screen.getByRole("button", {
+        name: `Upgrade to ${planLabel}`,
+      });
+      expectPhosphorPrimary(immediateUpgrade);
+      fireEvent.click(immediateUpgrade);
       await waitFor(() =>
         expect(mocks.openExternalUrl).toHaveBeenCalledWith(upgradeUrl),
       );

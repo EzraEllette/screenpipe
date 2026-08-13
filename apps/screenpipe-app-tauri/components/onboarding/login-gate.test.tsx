@@ -98,6 +98,25 @@ describe("onboarding login gate", () => {
     expect(locality.textContent ?? "").not.toMatch(/\bmac\b/i);
   });
 
+  // Same reach argument as the locality line: permissions is mac-only, so
+  // without this the off switch is invisible to Windows and Linux until after
+  // they have already granted screen and mic.
+  it("tells every platform that recording can be paused", () => {
+    mocks.settings = { user: {} };
+    render(<OnboardingLogin handleNextSlide={vi.fn()} />);
+    // One line, not a second stacked note: three muted lines under the CTA
+    // read as noise. The locality assertion above covers the same element.
+    const locality = screen.getByTestId("login-locality");
+    expect(locality).toHaveTextContent("pause anytime");
+    // Device-neutral, and no keystroke: the pause shortcut is user-editable
+    // and can be disabled outright, so a printed chord would go stale on the
+    // user's own machine.
+    expect(locality.textContent ?? "").not.toMatch(
+      /\bmac\b|menu bar|system tray/i,
+    );
+    expect(locality.textContent ?? "").not.toMatch(/⌘|ctrl|alt|super/i);
+  });
+
   it("advances once when signed in AND entitled", async () => {
     mocks.settings = { user: { token: "t1", email: "maribel@bungalow.com" } };
     mocks.hasAppEntitlement.mockReturnValue(true);

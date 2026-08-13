@@ -46,7 +46,7 @@ import {
 	type UserGoalCategory,
 } from "@/lib/live-views/onboarding-activation";
 import {
-	LOCAL_DESKTOP_REMOTE_POLICY,
+	cloneLocalDesktopRemotePolicy,
 	NEW_INSTALL_REMOTE_CONTROL_PREFERENCES,
 	normalizeDesktopRemotePolicySnapshot,
 	normalizeDesktopRemotePreferences,
@@ -755,34 +755,9 @@ let DEFAULT_SETTINGS: Settings = {
 			remoteControlPreferences: {
 				...NEW_INSTALL_REMOTE_CONTROL_PREFERENCES,
 			},
-			remoteControlPolicy: {
-				schemaVersion: 1,
-				boolean: {
-					semanticContext: {
-						...LOCAL_DESKTOP_REMOTE_POLICY.boolean.semanticContext,
-					},
-					coreAudioSystemAudio: {
-						...LOCAL_DESKTOP_REMOTE_POLICY.boolean.coreAudioSystemAudio,
-					},
-					smartRecording: {
-						...LOCAL_DESKTOP_REMOTE_POLICY.boolean.smartRecording,
-					},
-					filterMusic: {
-						...LOCAL_DESKTOP_REMOTE_POLICY.boolean.filterMusic,
-					},
-					prioritizeInputLatency: {
-						...LOCAL_DESKTOP_REMOTE_POLICY.boolean.prioritizeInputLatency,
-					},
-					sidebarCustomization: {
-						...LOCAL_DESKTOP_REMOTE_POLICY.boolean.sidebarCustomization,
-					},
-				},
-				aecMode: { ...LOCAL_DESKTOP_REMOTE_POLICY.aecMode },
-				autoUpdate: { ...LOCAL_DESKTOP_REMOTE_POLICY.autoUpdate },
-			},
+			remoteControlPolicy: cloneLocalDesktopRemotePolicy(),
 			semanticContextMode: "memory",
 			useAllMonitors: true,
-			showShortcutOverlay: true,
 			chatHistory: {
 				conversations: [],
 				activeConversationId: null,
@@ -801,6 +776,8 @@ let DEFAULT_SETTINGS: Settings = {
 			filterMusic: true,
 			prioritizeInputLatency: false,
 			enableSidebarCustomization: false,
+			allowHidingShortcutOverlay: false,
+			showShortcutOverlay: true,
 			sidebarNavLayout: { ...DEFAULT_SIDEBAR_NAV_LAYOUT },
 			ignoreIncognitoWindows: true,
 			enhancedIncognitoDetection: false,
