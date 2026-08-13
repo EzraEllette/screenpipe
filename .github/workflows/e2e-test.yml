@@ -293,7 +293,12 @@ jobs:
   linux-e2e-test:
     name: Linux E2E Tests
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    # 90 was set when the suite was ~70 specs; it is 112 now, and the job has
+    # been cancelled at exactly 90m on every run since 2026-08-07 — which
+    # truncates the suite and hides whatever the unreached specs would say.
+    # Windows and macOS already sit at 120. Measured on b4b22f011: setup+Build
+    # ~9m, then 90 of 112 specs in the remaining ~80m.
+    timeout-minutes: 120
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
       # WebKit2GTK + xvfb workarounds. Without these, WebKit2GTK 4.1
