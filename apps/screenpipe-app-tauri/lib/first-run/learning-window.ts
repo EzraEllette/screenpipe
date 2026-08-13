@@ -67,6 +67,12 @@ export type FirstRunEmptyReason =
   | "no_frames_captured"
   | "below_frame_floor"
   | "single_app_below_floor"
+  // The window outlived its ceiling while nothing was mounted to settle it:
+  // the app was closed, or the banner's subtree went away mid-wait. Distinct
+  // from `unknown`, which means "we looked and could not tell". Here nobody
+  // ever looked, and folding the two together hid the largest first-run
+  // failure there is.
+  | "expired_unreported"
   | "unknown";
 
 export type FirstRunCapturedApp = {
@@ -83,6 +89,13 @@ export type FirstRunLearningState = {
   seededAt: string | null;
   chatId: string | null;
   emptyReason: FirstRunEmptyReason | null;
+  /**
+   * Set when a window is settled by rehydration rather than by the ceiling
+   * effect, which is the one settle path that emits nothing. The hook clears
+   * it after reporting, so the event fires exactly once no matter how many
+   * times the banner remounts.
+   */
+  pendingEmptyReport: boolean;
   /** Live-only, never persisted: rehydrating these would show stale apps. */
   capturedApps: FirstRunCapturedApp[];
 };
@@ -165,6 +178,7 @@ const EMPTY_STATE: FirstRunLearningState = {
   seededAt: null,
   chatId: null,
   emptyReason: null,
+  pendingEmptyReport: false,
   capturedApps: [],
 };
 
@@ -542,6 +556,12 @@ function normalize(value: unknown): FirstRunLearningState {
   // A window that outlived its ceiling cannot resume as "learning" — the user
   // closed the app mid-wait and reopening it to a countdown that already
   // expired would be a lie. Settle it instead.
+  //
+  // This is the only settle path with no telemetry of its own: the ceiling
+  // effect in `use-learning-window` emits `first_run_learning_empty`, but it
+  // never runs here because it is gated on `phase === "learning"` and this
+  // function has already moved past it. Flag the settle so the hook reports it
+  // once on mount, otherwise the most common first-run outcome is silent.
   if (phase === "learning") {
     if (!startedAt) return { ...EMPTY_STATE };
     if (Date.now() - Date.parse(startedAt) > LEARNING_WINDOW_CEILING_MS) {
@@ -549,7 +569,8 @@ function normalize(value: unknown): FirstRunLearningState {
         ...EMPTY_STATE,
         phase: "empty",
         startedAt,
-        emptyReason: "unknown",
+        emptyReason: "expired_unreported",
+        pendingEmptyReport: true,
       };
     }
   }
@@ -568,6 +589,7 @@ function normalize(value: unknown): FirstRunLearningState {
         seededAt: typeof state.seededAt === "string" ? state.seededAt : null,
         chatId: state.chatId,
         emptyReason: null,
+        pendingEmptyReport: false,
         capturedApps: [],
       };
     }
@@ -576,6 +598,7 @@ function normalize(value: unknown): FirstRunLearningState {
       phase: "empty",
       startedAt,
       emptyReason: "unknown",
+      pendingEmptyReport: true,
     };
   }
 
@@ -585,6 +608,7 @@ function normalize(value: unknown): FirstRunLearningState {
     seededAt: typeof state.seededAt === "string" ? state.seededAt : null,
     chatId: typeof state.chatId === "string" ? state.chatId : null,
     emptyReason: state.emptyReason ?? null,
+    pendingEmptyReport: state.pendingEmptyReport === true,
     // Always live; see the type comment.
     capturedApps: [],
   };
@@ -672,7 +696,20 @@ export function markLearningEmpty(
     phase: "empty",
     emptyReason: reason,
     chatId: null,
+    // The caller emits `first_run_learning_empty` itself, so there is nothing
+    // left for the mount-time reporter to pick up.
+    pendingEmptyReport: false,
   });
+}
+
+/**
+ * Mark the rehydration-settled window as reported. Idempotent, and safe to
+ * call from every mount: the flag is already false once the first one wins.
+ */
+export function clearPendingEmptyReport(): FirstRunLearningState {
+  const current = readLearningWindow();
+  if (!current.pendingEmptyReport) return current;
+  return writeLearningWindow({ ...current, pendingEmptyReport: false });
 }
 
 export function markLearningDone(): FirstRunLearningState {
