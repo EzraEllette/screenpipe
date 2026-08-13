@@ -444,7 +444,7 @@ fn push_state(app: &tauri::AppHandle, state: OverlayHealthState, detail: Option<
         Some(d) if !d.is_empty() => format!("{}|{}", state.as_str(), d),
         _ => state.as_str().to_string(),
     };
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
         crate::native_shortcut_reminder::set_health_state(&payload);
     }
@@ -561,7 +561,7 @@ pub async fn on_tick(
 
 /// True when either overlay surface is currently on screen.
 fn overlay_visible(app: &tauri::AppHandle) -> bool {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
         if crate::native_shortcut_reminder::is_reminder_visible() {
             return true;

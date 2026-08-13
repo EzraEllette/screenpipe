@@ -239,6 +239,9 @@ pbkdf2 = "0.12.2"
 sha1 = "0.10"
 
 [target.'cfg(target_os = "windows")'.dependencies]
+# The native win32 overlay pill. Replaces the WebView2 shortcut-reminder window
+# on windows; linux keeps the webview one.
+screenpipe-overlay-win = { path = "../../../crates/screenpipe-overlay-win" }
 winreg = "0.52.0"
 lazy_static = "1.5.0"
 image = "0.25.5"
