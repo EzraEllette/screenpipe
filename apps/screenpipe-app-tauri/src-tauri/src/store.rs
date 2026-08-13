@@ -1647,6 +1647,7 @@ impl SettingsStore {
             if let Some(presets) = obj.get_mut("aiPresets") {
                 if let Some(arr) = presets.as_array_mut() {
                     for preset in arr.iter_mut() {
+                        Self::repair_orphaned_acp_preset(preset);
                         if let Some(provider) = preset.get("provider").and_then(|p| p.as_str()) {
                             if !known_providers.contains(&provider) {
                                 tracing::warn!(
@@ -1666,6 +1667,59 @@ impl SettingsStore {
             }
         }
         val
+    }
+
+    /// Give a coding-agent preset its `acp` provider back.
+    ///
+    /// The unknown-provider fallback above rewrites `provider` in place and
+    /// leaves everything else alone. Any build predating ACP (`acp` reached
+    /// this allow-list on 2026-08-07) therefore turned a working coding-agent
+    /// preset into `provider: "custom"` with no URL, permanently — the agent id
+    /// survived in `model`, so the desktop then asked the cloud gateway for a
+    /// model literally named "codex-acp" and showed the 403 as "upgrade to
+    /// Screenpipe Business". One downgrade, or one older build opening the
+    /// store, was enough.
+    ///
+    /// The signature is deliberately narrow: an agent config, a model that is
+    /// still exactly that agent's id, and no URL. Switching a preset away from
+    /// a coding agent in the editor always rewrites `model` (cloud → "auto",
+    /// chatgpt → "gpt-5.6-terra") or sets a URL (ollama, custom), so a
+    /// deliberate choice can never match this and get flipped back.
+    fn repair_orphaned_acp_preset(preset: &mut Value) {
+        let Some(obj) = preset.as_object_mut() else {
+            return;
+        };
+        if obj.get("provider").and_then(|p| p.as_str()) == Some("acp") {
+            return;
+        }
+        let agent_id = obj
+            .get("acpAgent")
+            .and_then(|agent| agent.get("id"))
+            .and_then(|id| id.as_str())
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned);
+        let Some(agent_id) = agent_id else {
+            return;
+        };
+        if obj.get("model").and_then(|m| m.as_str()).map(str::trim) != Some(agent_id.as_str()) {
+            return;
+        }
+        let url_is_empty = obj
+            .get("url")
+            .map(|url| url.as_str().map(str::trim).unwrap_or("").is_empty())
+            .unwrap_or(true);
+        if !url_is_empty {
+            return;
+        }
+        tracing::warn!(
+            "restoring 'acp' provider for coding-agent preset '{}' (was '{}')",
+            agent_id,
+            obj.get("provider")
+                .and_then(|p| p.as_str())
+                .unwrap_or("none")
+        );
+        obj.insert("provider".to_string(), Value::String("acp".to_string()));
     }
 
     pub fn get(app: &AppHandle) -> Result<Option<Self>, String> {
@@ -3704,6 +3758,66 @@ mod tests {
         let preset = &sanitized_acp["aiPresets"][0];
         assert_eq!(preset["provider"].as_str(), Some("acp"));
         assert_eq!(preset["acpAgent"]["id"].as_str(), Some("codex-acp"));
+    }
+
+    /// The exact shape an ACP-unaware build leaves behind: provider rewritten
+    /// to "custom", no URL, agent id still sitting in `model`. Without the
+    /// repair the desktop asks the cloud gateway for a model named "codex-acp"
+    /// and shows the 403 as "upgrade to Screenpipe Business".
+    #[test]
+    fn orphaned_acp_preset_gets_its_provider_back() {
+        let downgraded = json!({
+            "aiPresets": [{
+                "id": "codex",
+                "provider": "custom",
+                "url": "",
+                "model": "codex-acp",
+                "acpAgent": {"id": "codex-acp"}
+            }]
+        });
+
+        let repaired = SettingsStore::sanitize_legacy_fields(downgraded);
+        let preset = &repaired["aiPresets"][0];
+        assert_eq!(preset["provider"].as_str(), Some("acp"));
+        assert_eq!(preset["acpAgent"]["id"].as_str(), Some("codex-acp"));
+        assert_eq!(preset["model"].as_str(), Some("codex-acp"));
+    }
+
+    /// A preset the user deliberately moved off a coding agent keeps a stale
+    /// `acpAgent` (the editor never clears it) but always gets a new model or a
+    /// URL. Neither may be dragged back onto the ACP backend.
+    #[test]
+    fn deliberate_non_acp_presets_are_left_alone() {
+        let intentional = json!({
+            "aiPresets": [
+                {
+                    // switched to cloud: editor rewrote the model
+                    "provider": "screenpipe-cloud",
+                    "url": "",
+                    "model": "auto",
+                    "acpAgent": {"id": "codex-acp"}
+                },
+                {
+                    // switched to ollama: editor set a URL, model kept
+                    "provider": "native-ollama",
+                    "url": "http://localhost:11434/v1",
+                    "model": "codex-acp",
+                    "acpAgent": {"id": "codex-acp"}
+                },
+                {
+                    // never an ACP preset at all
+                    "provider": "custom",
+                    "url": "",
+                    "model": "my-model"
+                }
+            ]
+        });
+
+        let sanitized = SettingsStore::sanitize_legacy_fields(intentional);
+        let presets = sanitized["aiPresets"].as_array().unwrap();
+        assert_eq!(presets[0]["provider"].as_str(), Some("screenpipe-cloud"));
+        assert_eq!(presets[1]["provider"].as_str(), Some("native-ollama"));
+        assert_eq!(presets[2]["provider"].as_str(), Some("custom"));
     }
 
     #[test]

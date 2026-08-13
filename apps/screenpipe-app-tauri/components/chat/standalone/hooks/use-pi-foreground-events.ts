@@ -19,6 +19,7 @@ import {
   buildHostedBusyFinalMessage,
   buildHostedBusyMessage,
   buildHostedBusyRetryMessage,
+  buildModelNotAllowedMessage,
   buildRateLimitMessage,
   classifyQuotaError,
   parseRateLimitWaitSeconds,
@@ -625,7 +626,7 @@ export function usePiForegroundEvents({
             if (piMessageIdRef.current) {
               const msgId = piMessageIdRef.current;
               setMessages((prev) =>
-                prev.map((m) => m.id === msgId ? { ...m, content: "This model requires an upgrade to Screenpipe Business. Switch to Auto to keep going." } : m)
+                prev.map((m) => m.id === msgId ? { ...m, content: buildModelNotAllowedMessage(errorStr) } : m)
               );
             }
           } else {
@@ -684,7 +685,7 @@ export function usePiForegroundEvents({
               }
             } else if (fullError.includes("model_not_allowed")) {
               setMessages((prev) =>
-                prev.map((m) => m.id === msgId ? { ...m, content: "This model requires an upgrade to Screenpipe Business. Switch to Auto to keep going." } : m)
+                prev.map((m) => m.id === msgId ? { ...m, content: buildModelNotAllowedMessage(fullError) } : m)
               );
             } else {
               const providerError = buildProviderErrorPresentation(fullError, presetWithAgentName());
@@ -1007,7 +1008,7 @@ export function usePiForegroundEvents({
               } else if (quotaErrorType === "rate") {
                 content = buildRateLimitMessage(errStr);
               } else if (errStr.includes("model_not_allowed")) {
-                content = "This model requires an upgrade to Screenpipe Business. Switch to Auto to keep going.";
+                content = buildModelNotAllowedMessage(errStr);
               } else {
                 content = buildProviderErrorPresentation(errStr, getActivePreset())?.message || errStr;
               }
@@ -1222,7 +1223,7 @@ export function usePiForegroundEvents({
               }
             } else if (errorStr.includes("model_not_allowed")) {
               setMessages((prev) =>
-                prev.map((m) => m.id === msgId ? { ...m, content: "This model requires an upgrade to Screenpipe Business. Switch to Auto to keep going." } : m)
+                prev.map((m) => m.id === msgId ? { ...m, content: buildModelNotAllowedMessage(errorStr) } : m)
               );
             } else {
               const providerError = buildProviderErrorPresentation(errorStr, presetWithAgentName());

@@ -7,8 +7,8 @@ and layer declared in the manifest, weighted by confidence and criticality.
 - Manifest: `e2e/coverage-map.json`
 - Specs directory: `e2e/specs`
 - Mapped specs: 112
-- Declared test blocks: 318
-- Weighted coverage points: 250.0
+- Declared test blocks: 319
+- Weighted coverage points: 250.7
 
 Confidence weights: strong=1.0, partial=0.7, conditional=0.4, smoke=0.3.
 Criticality weights: high=1.0, medium=0.7, low=0.4.
@@ -19,9 +19,9 @@ can execute more runtime cases than this number shows.
 
 | Platform | Specs | Declared tests | Weighted points | Layers | Features | Critical score |
 | --- | --- | --- | --- | --- | --- | --- |
-| windows | 86 | 276 | 226.6 | 15 | 90 | 92% |
-| macos | 108 | 281 | 220.8 | 17 | 93 | 90% |
-| linux | 75 | 233 | 195.2 | 14 | 85 | 88% |
+| windows | 86 | 277 | 227.3 | 15 | 90 | 92% |
+| macos | 108 | 282 | 221.5 | 17 | 93 | 90% |
+| linux | 75 | 234 | 195.9 | 14 | 85 | 88% |
 
 ## Runtime Results
 
@@ -37,18 +37,18 @@ pass/fail/skip counts.
 | auth | - | 1 specs / 1 tests / 1.0 pts | - |
 | billing | 4 specs / 6 tests / 5.7 pts | 4 specs / 6 tests / 5.7 pts | 4 specs / 6 tests / 5.7 pts |
 | capture-ocr | 2 specs / 16 tests / 6.4 pts | 8 specs / 12 tests / 4.8 pts | 1 specs / 3 tests / 1.2 pts |
-| chat-ai | 25 specs / 50 tests / 36.9 pts | 36 specs / 71 tests / 50.5 pts | 24 specs / 49 tests / 36.4 pts |
+| chat-ai | 25 specs / 51 tests / 37.6 pts | 36 specs / 72 tests / 51.2 pts | 24 specs / 50 tests / 37.1 pts |
 | entitlement | - | 1 specs / 1 tests / 1.0 pts | - |
 | local-api | 24 specs / 113 tests / 94.0 pts | 31 specs / 100 tests / 83.5 pts | 19 specs / 81 tests / 72.2 pts |
 | notifications | 4 specs / 25 tests / 16.3 pts | 3 specs / 5 tests / 3.4 pts | 2 specs / 4 tests / 3.1 pts |
 | onboarding | 8 specs / 33 tests / 30.0 pts | 10 specs / 35 tests / 31.4 pts | 8 specs / 33 tests / 30.0 pts |
-| os-integration | 7 specs / 29 tests / 24.8 pts | 14 specs / 26 tests / 15.3 pts | 2 specs / 12 tests / 8.7 pts |
+| os-integration | 7 specs / 30 tests / 25.5 pts | 14 specs / 27 tests / 16.0 pts | 2 specs / 13 tests / 9.4 pts |
 | performance | 2 specs / 44 tests / 44.0 pts | 4 specs / 34 tests / 30.5 pts | 1 specs / 29 tests / 29.0 pts |
 | pipes | 6 specs / 19 tests / 19.0 pts | 8 specs / 25 tests / 25.0 pts | 6 specs / 19 tests / 19.0 pts |
 | real-ui-e2e | 60 specs / 178 tests / 148.0 pts | 71 specs / 179 tests / 148.6 pts | 55 specs / 153 tests / 133.2 pts |
 | settings | 14 specs / 38 tests / 35.0 pts | 16 specs / 33 tests / 28.7 pts | 13 specs / 30 tests / 27.0 pts |
 | storage-privacy | 9 specs / 40 tests / 31.3 pts | 9 specs / 26 tests / 25.1 pts | 6 specs / 19 tests / 18.1 pts |
-| tauri-command | 18 specs / 49 tests / 38.4 pts | 25 specs / 57 tests / 43.8 pts | 17 specs / 48 tests / 37.4 pts |
+| tauri-command | 18 specs / 50 tests / 39.1 pts | 25 specs / 58 tests / 44.5 pts | 17 specs / 49 tests / 38.1 pts |
 | window-lifecycle | 18 specs / 63 tests / 53.0 pts | 18 specs / 44 tests / 31.4 pts | 13 specs / 39 tests / 29.9 pts |
 
 ## Critical Feature Matrix
@@ -100,7 +100,7 @@ pass/fail/skip counts.
 
 | Spec | Platforms | Layers | Features | Criticality | Confidence | UX | Tests | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| acp-backend.spec.ts | windows, macos, linux | chat-ai, tauri-command, os-integration | chat, acp-backend, agent-streaming, agent-permissions, agent-cancellation, agent-terminal, mcp-registration, process-supervision | high | partial | mixed | 11 | Official Rust ACP SDK runtime and inline UI E2E with a deterministic stdio agent: initialization, session close, streaming, background permissions, cancellation, localized auth/cancel, malformed stdout, exact adapter/descendant reaping, terminal lifecycle/output draining, and a real authenticated local API MCP health call. Curated third-party adapters remain manual smoke coverage. |
+| acp-backend.spec.ts | windows, macos, linux | chat-ai, tauri-command, os-integration | chat, acp-backend, agent-streaming, agent-permissions, agent-cancellation, agent-terminal, mcp-registration, process-supervision | high | partial | mixed | 12 | Official Rust ACP SDK runtime and inline UI E2E with a deterministic stdio agent: initialization, session close, streaming, background permissions, cancellation, localized auth/cancel, malformed stdout, exact adapter/descendant reaping, terminal lifecycle/output draining, and a real authenticated local API MCP health call. Curated third-party adapters remain manual smoke coverage. |
 | acp-onboarding-ux.spec.ts | windows, macos, linux | chat-ai, real-ui-e2e, tauri-command | chat, acp-backend, acp-onboarding, acp-auth | high | partial | real-user-flow | 2 | Selecting an ACP agent connects it with nothing sent (sign-in surfaces before the first send, not after a cold install), and the settings picker states who owns sign-in/models/API keys next to the agent list. |
 | api-key-cold-spawn.spec.ts | windows, macos, linux | local-api, tauri-command | local-api-auth, app-launch | medium | partial | command | 3 | Cold-spawn local API config regression coverage. |
 | api-search-stress.spec.ts | windows, macos, linux | local-api, performance | local-api-auth, local-api-search, health, audio-device-health, local-api-load | high | strong | api | 29 | Broad readonly API, auth, search, and load coverage. |

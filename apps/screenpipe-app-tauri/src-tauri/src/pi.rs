@@ -2333,6 +2333,34 @@ fn kill_orphan_pi_processes(managed_alive: bool) {
 /// 200ms is enough to detect immediate-exit crashes without delaying first chat.
 const PI_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(200);
 
+/// What a caller sees when an `acp` preset reaches a raw-Pi spawn path.
+pub(crate) const ACP_PRESET_WITHOUT_BACKEND: &str =
+    "This coding-agent preset is missing its agent configuration. Re-select the agent in Settings → AI presets.";
+
+/// Map a preset provider onto Pi's internal registry name.
+///
+/// An `acp` preset has no Pi provider at all: its model calls belong to the
+/// coding agent, not to a Pi provider. Reaching this mapping with `acp` means
+/// the ACP backend was dropped between the preset and the spawn, and the
+/// catch-all used to answer that with "screenpipe" — which sent the *agent id*
+/// ("codex-acp") to the cloud gateway as a model name. The gateway rejected it
+/// as `model_not_allowed`, and the desktop rendered that as "upgrade to
+/// Screenpipe Business": a billing dead end for what is really a broken preset,
+/// on an account that already had the plan. Fail loudly instead of silently
+/// spending someone's hosted allowance on a model id that cannot exist.
+fn pi_registry_provider(provider: &str, url: &str) -> Result<&'static str, String> {
+    Ok(match provider {
+        "openai" => "openai-byok",
+        "openai-chatgpt" => "openai-chatgpt",
+        "native-ollama" => "ollama",
+        "anthropic" => "anthropic-byok",
+        // "custom" requires a valid URL; fall back to screenpipe cloud if missing
+        "custom" if !url.is_empty() => "custom",
+        "acp" => return Err(ACP_PRESET_WITHOUT_BACKEND.to_string()),
+        "screenpipe-cloud" | "pi" | _ => "screenpipe",
+    })
+}
+
 /// Resolve a model name for the screenpipe provider.
 ///
 /// The gateway (api.screenpipe.com) is the source of truth for model validation
@@ -2555,16 +2583,11 @@ pub async fn pi_start_inner(
 
     // Determine which Pi provider and model to use
     let (pi_provider, pi_model) = match &provider_config {
+        // An ACP session's model calls belong to the adapter, so there is no Pi
+        // provider to resolve — these values are only used for logging below.
+        Some(config) if use_acp => ("acp".to_string(), config.model.clone()),
         Some(config) => {
-            let provider_name = match config.provider.as_str() {
-                "openai" => "openai-byok",
-                "openai-chatgpt" => "openai-chatgpt",
-                "native-ollama" => "ollama",
-                "anthropic" => "anthropic-byok",
-                // "custom" requires a valid URL; fall back to screenpipe cloud if missing
-                "custom" if !config.url.is_empty() => "custom",
-                "screenpipe-cloud" | "pi" | _ => "screenpipe",
-            };
+            let provider_name = pi_registry_provider(&config.provider, &config.url)?;
             let model = resolve_pi_model(&config.model, provider_name);
             (provider_name.to_string(), model)
         }
@@ -4198,17 +4221,10 @@ pub async fn pi_set_model(
 ) -> Result<(), String> {
     let sid = session_id.unwrap_or_else(|| "chat".to_string());
 
-    // Map frontend provider name → Pi's internal registry name. Must stay in
-    // sync with the mapping in `pi_start_inner` (line ~1045) — a mismatch
-    // means Pi can't find the model and returns "Model not found".
-    let pi_provider = match provider_config.provider.as_str() {
-        "openai" => "openai-byok",
-        "openai-chatgpt" => "openai-chatgpt",
-        "native-ollama" => "ollama",
-        "anthropic" => "anthropic-byok",
-        "custom" if !provider_config.url.is_empty() => "custom",
-        "screenpipe-cloud" | "pi" | _ => "screenpipe",
-    };
+    // Map frontend provider name → Pi's internal registry name. Shared with
+    // `pi_start_inner` so the two can't drift — a mismatch means Pi can't find
+    // the model and returns "Model not found".
+    let pi_provider = pi_registry_provider(&provider_config.provider, &provider_config.url)?;
     let pi_model = resolve_pi_model(&provider_config.model, pi_provider);
 
     let queue = {
@@ -6804,7 +6820,8 @@ error: InstallFailed extracting tarball"#;
     // -- build_models_json tests --
 
     use super::{
-        build_models_json, build_models_json_with_api_url, resolve_pi_model, PiProviderConfig,
+        build_models_json, build_models_json_with_api_url, pi_registry_provider, resolve_pi_model,
+        PiProviderConfig, ACP_PRESET_WITHOUT_BACKEND,
     };
 
     fn make_provider_config(provider: &str, model: &str) -> PiProviderConfig {
@@ -6863,6 +6880,42 @@ error: InstallFailed extracting tarball"#;
         assert_eq!(
             config["providers"]["screenpipe"]["baseUrl"],
             "http://127.0.0.1:8787/v1"
+        );
+    }
+
+    /// An `acp` preset that lost its backend must never be answered with the
+    /// cloud provider. That silent fallback sent the *agent id* to the gateway
+    /// as a model name, and the 403 surfaced as "upgrade to Screenpipe
+    /// Business" on accounts that already had the plan.
+    #[test]
+    fn acp_provider_never_falls_back_to_the_cloud() {
+        let error =
+            pi_registry_provider("acp", "").expect_err("acp must not resolve to a provider");
+        assert_eq!(error, ACP_PRESET_WITHOUT_BACKEND);
+        assert!(pi_registry_provider("acp", "https://example.com/v1").is_err());
+    }
+
+    #[test]
+    fn known_providers_still_map_as_before() {
+        assert_eq!(pi_registry_provider("openai", "").unwrap(), "openai-byok");
+        assert_eq!(
+            pi_registry_provider("openai-chatgpt", "").unwrap(),
+            "openai-chatgpt"
+        );
+        assert_eq!(pi_registry_provider("native-ollama", "").unwrap(), "ollama");
+        assert_eq!(
+            pi_registry_provider("anthropic", "").unwrap(),
+            "anthropic-byok"
+        );
+        assert_eq!(
+            pi_registry_provider("custom", "http://localhost:11434/v1").unwrap(),
+            "custom"
+        );
+        // custom without a URL keeps its long-standing cloud fallback
+        assert_eq!(pi_registry_provider("custom", "").unwrap(), "screenpipe");
+        assert_eq!(
+            pi_registry_provider("screenpipe-cloud", "").unwrap(),
+            "screenpipe"
         );
     }
 

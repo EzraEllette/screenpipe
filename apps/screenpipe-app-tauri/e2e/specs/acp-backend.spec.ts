@@ -56,6 +56,7 @@ let mcpSession = "";
 let terminalSession = "";
 let subagentSession = "";
 let resumeSession = "";
+let orphanedPresetSession = "";
 let treeMarkerPrefix = "";
 let treeMarkerToken = "";
 
@@ -71,6 +72,7 @@ function resetRunIdentifiers(): void {
   terminalSession = randomUUID();
   subagentSession = randomUUID();
   resumeSession = randomUUID();
+  orphanedPresetSession = randomUUID();
   treeMarkerPrefix = path.join(os.tmpdir(), `screenpipe-acp-process-${treeSession}`);
   treeMarkerToken = randomUUID();
 }
@@ -936,6 +938,36 @@ describe("ACP backend", function () {
     );
 
     const info = await invokeOrThrow<{ running: boolean }>("pi_info", { sessionId: exitSession });
+    expect(info.running).toBe(false);
+  });
+
+  it("refuses a coding-agent preset that lost its ACP backend instead of charging the cloud", async () => {
+    // The exact shape an ACP-unaware build leaves behind: the preset still
+    // names its agent in `model`, but `backend`/`acpAgent` are gone, so this
+    // lands on the raw-Pi spawn path. That path used to answer an unmapped
+    // provider with "screenpipe", which sent the agent id to the gateway as a
+    // model name; the resulting 403 was rendered as "upgrade to Screenpipe
+    // Business" on accounts that already held the plan.
+    const startupError = await invokeOrThrow<string>("plugin:e2e|capture_pi_start_error", {
+      sessionId: orphanedPresetSession,
+      projectDir: path.join(os.tmpdir(), `screenpipe-acp-e2e-${orphanedPresetSession}`),
+      providerConfig: {
+        provider: "acp",
+        url: "",
+        model: "codex-acp",
+        apiKey: null,
+        maxTokens: 4096,
+        systemPrompt: null,
+      },
+    });
+    expect(startupError).toContain("Re-select the agent in Settings");
+    expect(startupError.toLowerCase()).not.toContain("upgrade");
+
+    // Nothing may be left running: the old behaviour spawned a real Pi child
+    // pointed at the cloud gateway.
+    const info = await invokeOrThrow<{ running: boolean }>("pi_info", {
+      sessionId: orphanedPresetSession,
+    });
     expect(info.running).toBe(false);
   });
 
