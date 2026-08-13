@@ -135,20 +135,48 @@ fn store_json_has_presets(data: &[u8]) -> bool {
 /// crash can never destroy both the live file and its backup at once.
 pub(crate) fn durable_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    // The temp name must be unique per call. It used to be a fixed
+    // `<path>.durable.tmp`, which two concurrent writers to the same target
+    // shared: B's create truncated A's in-flight temp, and whichever renamed
+    // second got ENOENT because the first rename had already consumed it.
+    //
+    // Observed in production on 2026-08-13, six times in 22s, when
+    // set_overlay_anchor and set_overlay_display saved 103µs apart: the
+    // store.bin write and *both* last-good snapshots failed together, so the
+    // settings-wipe recovery chain was down exactly while writes contended.
+    // The same interleaving could also rename a half-written temp over the
+    // target — the torn file this helper exists to prevent.
+    //
+    // pid + counter is unique across every live writer. A hard crash mid-write
+    // still leaks at most one temp, the same as before; earlier temps are
+    // already consumed by their renames.
+    static SEQ: AtomicU64 = AtomicU64::new(0);
     let mut tmp = path.as_os_str().to_os_string();
-    tmp.push(".durable.tmp");
+    tmp.push(format!(
+        ".durable.{}.{}.tmp",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
     let tmp = std::path::PathBuf::from(tmp);
 
     {
-        let mut f = std::fs::File::create(&tmp)?;
+        // Truncate rather than create_new: the unique name already excludes
+        // every live writer, and a leftover from a dead process that reused
+        // this pid should be reclaimed, not turned into a hard write failure.
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            // store.bin and its snapshots hold API keys — owner-only from
+            // creation, so there is no window where the temp is world-readable.
+            opts.mode(0o600);
+        }
+        let mut f = opts.open(&tmp)?;
         f.write_all(bytes)?;
         f.sync_all()?; // contents + metadata to stable storage before the rename
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        // store.bin and its snapshots hold API keys — keep them owner-only.
-        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
     }
     if let Err(e) = std::fs::rename(&tmp, path) {
         let _ = std::fs::remove_file(&tmp);
@@ -3108,6 +3136,77 @@ mod tests {
         assert!(!store_json_has_presets(&invalid_json));
     }
 
+    /// Any `<name>.durable.<pid>.<seq>.tmp` still sitting in `dir`.
+    fn lingering_durable_temps(dir: &std::path::Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".durable.") && n.ends_with(".tmp"))
+            .collect()
+    }
+
+    /// Regression: concurrent writers to the same target used to share a fixed
+    /// `<path>.durable.tmp`. One truncated the other's in-flight temp and the
+    /// loser's rename failed with ENOENT — six times in production on
+    /// 2026-08-13, taking the store write and both last-good snapshots down
+    /// together. Against the fixed-name version this fails on nearly every run.
+    #[test]
+    fn durable_write_survives_concurrent_writers_to_same_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("store.bin");
+
+        // Distinct, long, byte-uniform payloads: any interleaving of two
+        // writers is trivially detectable, and the size widens the race window.
+        let payloads: Vec<Vec<u8>> = (0..8u8)
+            .map(|i| vec![b'a' + i; 256 * 1024])
+            .collect();
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(payloads.len()));
+        let handles: Vec<_> = payloads
+            .iter()
+            .cloned()
+            .map(|payload| {
+                let p = p.clone();
+                let barrier = std::sync::Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    durable_write(&p, &payload)
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join()
+                .expect("writer thread panicked")
+                .expect("concurrent durable_write must not fail");
+        }
+
+        // Whoever won the rename race, the published file must be exactly one
+        // writer's bytes — never a mix, never truncated.
+        let got = std::fs::read(&p).unwrap();
+        assert!(
+            payloads.contains(&got),
+            "published file is torn: {} bytes, first={:?} last={:?}",
+            got.len(),
+            got.first(),
+            got.last()
+        );
+
+        let leftovers = lingering_durable_temps(tmp.path());
+        assert!(
+            leftovers.is_empty(),
+            "no durable temp may linger after concurrent writes: {leftovers:?}"
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "store file must stay owner-only under a race");
+        }
+    }
+
     #[test]
     fn durable_write_writes_full_content_atomically() {
         let tmp = tempfile::tempdir().unwrap();
@@ -3123,11 +3222,9 @@ mod tests {
         );
 
         // The atomic temp must be gone — never left as a torn sibling.
-        let mut tmp_path = p.clone().into_os_string();
-        tmp_path.push(".durable.tmp");
         assert!(
-            !std::path::Path::new(&tmp_path).exists(),
-            "durable .tmp must not linger after a successful write"
+            lingering_durable_temps(tmp.path()).is_empty(),
+            "durable temp must not linger after a successful write"
         );
 
         #[cfg(unix)]
