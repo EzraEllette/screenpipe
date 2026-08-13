@@ -230,9 +230,151 @@ pub fn suppressed_now(
     suppressed(&guard, notification_type, pipe_name, now_ms, now_min)
 }
 
+// ---------------------------------------------------------------------------
+// Repeat suppression
+// ---------------------------------------------------------------------------
+//
+// The reduced states above answer "is the user available?". They do not answer
+// "have we already said this?". A condition-driven producer re-evaluates on a
+// timer, so the *same* alert can re-fire every tick for as long as the
+// condition holds. Today each producer hand-rolls its own latch (a
+// `notified_*` bool that only resets on restart), which means every new
+// producer re-implements it, and none of them coordinate.
+//
+// So: one ledger of when each distinct alert last surfaced, consulted at the
+// same choke point as the reduced states.
+//
+// Keyed on `(type, pipe, title)`, not on type alone. Our type vocabulary is
+// coarse — `pipe`, `system`, `meeting` — so a type-only cooldown would let one
+// chatty pipe mute every other pipe's alerts. The triple is the narrowest
+// identity that still collapses a genuine repeat.
+
+/// How long an identical alert stays muted after it surfaces.
+///
+/// Deliberately short. This is a de-duplicator for repeated *identical*
+/// alerts, not a quota — it should erase tick-storms and be invisible
+/// otherwise.
+pub const DEFAULT_REPEAT_COOLDOWN_MS: i64 = 90_000;
+
+/// Per-type overrides, for types whose producers are condition-driven and
+/// whose conditions persist for minutes at a time.
+const REPEAT_COOLDOWNS_MS: &[(&str, i64)] = &[("system", 600_000), ("meeting", 300_000)];
+
+/// Most entries we keep. Bounds memory when a pipe emits unique titles
+/// forever; the ledger is a cache, and evicting only costs one extra alert.
+const MAX_LEDGER_ENTRIES: usize = 256;
+
+pub fn repeat_cooldown_ms(notification_type: Option<&str>) -> i64 {
+    notification_type
+        .and_then(|t| {
+            REPEAT_COOLDOWNS_MS
+                .iter()
+                .find(|(name, _)| *name == t)
+                .map(|(_, ms)| *ms)
+        })
+        .unwrap_or(DEFAULT_REPEAT_COOLDOWN_MS)
+}
+
+/// Identity of an alert for repeat purposes. `\u{1}` can't appear in a JSON
+/// string value, so the parts can't run together to forge a collision.
+pub fn repeat_key(notification_type: Option<&str>, pipe_name: Option<&str>, title: &str) -> String {
+    format!(
+        "{}\u{1}{}\u{1}{}",
+        notification_type.unwrap_or(""),
+        pipe_name.unwrap_or(""),
+        title
+    )
+}
+
+/// Pure decision: was this alert shown too recently?
+///
+/// A backwards clock (NTP correction, DST, manual change) leaves a future
+/// timestamp in the ledger. Treat that as "not suppressed" rather than
+/// muting the alert until wall-clock catches up — failing open is the only
+/// safe direction for a notification gate.
+pub fn repeat_suppressed(last_shown_ms: Option<i64>, now_ms: i64, cooldown_ms: i64) -> bool {
+    match last_shown_ms {
+        Some(prev) => now_ms >= prev && now_ms.saturating_sub(prev) < cooldown_ms,
+        None => false,
+    }
+}
+
+/// Check-and-record against a ledger. Separated from the global so it is
+/// testable with an injected clock. Returns `true` when the alert should be
+/// dropped; on `false` the alert is recorded as shown now.
+fn check_and_record(
+    ledger: &mut std::collections::HashMap<String, i64>,
+    key: String,
+    now_ms: i64,
+    cooldown_ms: i64,
+) -> bool {
+    if repeat_suppressed(ledger.get(&key).copied(), now_ms, cooldown_ms) {
+        return true;
+    }
+    if ledger.len() >= MAX_LEDGER_ENTRIES && !ledger.contains_key(&key) {
+        // Drop everything already past its longest possible cooldown first;
+        // only if that frees nothing do we evict the single oldest entry.
+        let longest = REPEAT_COOLDOWNS_MS
+            .iter()
+            .map(|(_, ms)| *ms)
+            .chain(std::iter::once(DEFAULT_REPEAT_COOLDOWN_MS))
+            .max()
+            .unwrap_or(DEFAULT_REPEAT_COOLDOWN_MS);
+        ledger.retain(|_, shown| now_ms < *shown || now_ms.saturating_sub(*shown) < longest);
+        if ledger.len() >= MAX_LEDGER_ENTRIES {
+            if let Some(oldest) = ledger
+                .iter()
+                .min_by_key(|(_, shown)| **shown)
+                .map(|(k, _)| k.clone())
+            {
+                ledger.remove(&oldest);
+            }
+        }
+    }
+    ledger.insert(key, now_ms);
+    false
+}
+
+fn ledger() -> &'static std::sync::Mutex<std::collections::HashMap<String, i64>> {
+    static LEDGER: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, i64>>> =
+        std::sync::OnceLock::new();
+    LEDGER.get_or_init(Default::default)
+}
+
+/// Check-and-record for a live notification — what the choke point calls
+/// after [`suppressed_now`] has already cleared the reduced states.
+///
+/// Critical types are exempt and are never recorded: a recording-stopped
+/// alert that re-fires is re-stating an unresolved failure, and muting the
+/// second one would be the exact failure mode this gate exists to prevent.
+pub fn repeat_suppressed_now(
+    notification_type: Option<&str>,
+    pipe_name: Option<&str>,
+    title: &str,
+) -> bool {
+    if matches!(notification_type, Some(t) if is_critical_type(t)) {
+        return false;
+    }
+    // Nothing to key on — an untitled alert can't be told apart from the next
+    // one, so capping it would collapse unrelated alerts together.
+    if title.trim().is_empty() {
+        return false;
+    }
+    let key = repeat_key(notification_type, pipe_name, title);
+    let cooldown = repeat_cooldown_ms(notification_type);
+    let now_ms = chrono::Local::now().timestamp_millis();
+    let mut guard = ledger().lock().unwrap_or_else(|e| e.into_inner());
+    check_and_record(&mut guard, key, now_ms, cooldown)
+}
+
 /// Extract the `type` field from a notification panel payload JSON string.
 pub fn notification_type_from_payload(payload: &str) -> Option<String> {
     json_field(payload, "type")
+}
+
+/// Extract the `title` field from a notification panel payload JSON string.
+pub fn title_from_payload(payload: &str) -> Option<String> {
+    json_field(payload, "title")
 }
 
 /// Extract the `pipe_name` field from a notification panel payload JSON string.
@@ -540,5 +682,134 @@ mod tests {
             false,
             Some(DISK_PRESSURE_NOTIFICATION_TYPE)
         ));
+    }
+
+    // ---- repeat suppression ----------------------------------------------
+
+    fn empty_ledger() -> std::collections::HashMap<String, i64> {
+        std::collections::HashMap::new()
+    }
+
+    #[test]
+    fn first_alert_is_never_a_repeat() {
+        assert!(!repeat_suppressed(None, 1_000, 90_000));
+    }
+
+    #[test]
+    fn identical_alert_inside_cooldown_is_dropped_then_allowed_after() {
+        assert!(repeat_suppressed(Some(1_000), 1_000 + 89_999, 90_000));
+        assert!(!repeat_suppressed(Some(1_000), 1_000 + 90_000, 90_000));
+    }
+
+    /// A backwards clock must fail open. Muting until wall-clock catches up
+    /// could hide alerts for hours after a DST or NTP correction.
+    #[test]
+    fn backwards_clock_does_not_mute() {
+        assert!(!repeat_suppressed(Some(10_000_000), 1_000, 90_000));
+    }
+
+    #[test]
+    fn cooldown_is_per_type_with_a_default() {
+        assert_eq!(repeat_cooldown_ms(Some("system")), 600_000);
+        assert_eq!(repeat_cooldown_ms(Some("meeting")), 300_000);
+        assert_eq!(repeat_cooldown_ms(Some("pipe")), DEFAULT_REPEAT_COOLDOWN_MS);
+        assert_eq!(repeat_cooldown_ms(None), DEFAULT_REPEAT_COOLDOWN_MS);
+    }
+
+    /// The reason the key is a triple: our types are coarse, so two pipes
+    /// posting the same title must not silence each other.
+    #[test]
+    fn key_separates_pipes_types_and_titles() {
+        let a = repeat_key(Some("pipe"), Some("alpha"), "run finished");
+        let b = repeat_key(Some("pipe"), Some("beta"), "run finished");
+        let c = repeat_key(Some("system"), Some("alpha"), "run finished");
+        let d = repeat_key(Some("pipe"), Some("alpha"), "run failed");
+        assert_ne!(a, b);
+        assert_ne!(a, c);
+        assert_ne!(a, d);
+        assert_eq!(a, repeat_key(Some("pipe"), Some("alpha"), "run finished"));
+    }
+
+    /// Field values can't run together to forge a collision.
+    #[test]
+    fn key_parts_cannot_be_confused() {
+        assert_ne!(
+            repeat_key(Some("pipe"), Some("a"), "b"),
+            repeat_key(Some("pipe"), Some("ab"), "")
+        );
+    }
+
+    #[test]
+    fn ledger_drops_the_echo_and_reopens_after_the_cooldown() {
+        let mut ledger = empty_ledger();
+        let key = repeat_key(Some("system"), None, "disk filling up");
+        assert!(!check_and_record(&mut ledger, key.clone(), 0, 600_000));
+        assert!(check_and_record(&mut ledger, key.clone(), 60_000, 600_000));
+        assert!(check_and_record(&mut ledger, key.clone(), 599_999, 600_000));
+        assert!(!check_and_record(&mut ledger, key, 600_000, 600_000));
+    }
+
+    /// The window is measured from the last *delivered* alert, so a storm of
+    /// suppressed echoes can't ratchet it forward indefinitely.
+    #[test]
+    fn suppressed_echoes_do_not_extend_the_window() {
+        let mut ledger = empty_ledger();
+        let key = repeat_key(Some("pipe"), Some("p"), "t");
+        assert!(!check_and_record(&mut ledger, key.clone(), 0, 90_000));
+        for t in (10_000..90_000).step_by(10_000) {
+            assert!(check_and_record(&mut ledger, key.clone(), t, 90_000));
+        }
+        assert!(
+            !check_and_record(&mut ledger, key, 90_000, 90_000),
+            "window must still open exactly one cooldown after the delivery"
+        );
+    }
+
+    #[test]
+    fn ledger_stays_bounded_and_keeps_serving_new_keys() {
+        let mut ledger = empty_ledger();
+        for i in 0..(MAX_LEDGER_ENTRIES * 2) {
+            let key = repeat_key(Some("pipe"), Some("p"), &format!("title {i}"));
+            assert!(
+                !check_and_record(&mut ledger, key, i as i64, DEFAULT_REPEAT_COOLDOWN_MS),
+                "a never-seen alert must always be delivered"
+            );
+        }
+        assert!(
+            ledger.len() <= MAX_LEDGER_ENTRIES,
+            "ledger grew to {} entries",
+            ledger.len()
+        );
+    }
+
+    /// Critical alerts restate an unresolved failure. Muting the second one
+    /// is the exact failure mode this whole module exists to prevent.
+    #[test]
+    fn critical_types_are_never_repeat_suppressed() {
+        for t in CRITICAL_TYPES {
+            assert!(!repeat_suppressed_now(Some(t), None, "recording stopped"));
+            assert!(
+                !repeat_suppressed_now(Some(t), None, "recording stopped"),
+                "{t} must survive an immediate re-fire"
+            );
+        }
+    }
+
+    /// An untitled alert has no identity, so capping it would collapse
+    /// unrelated alerts into one.
+    #[test]
+    fn untitled_alerts_are_not_capped() {
+        assert!(!repeat_suppressed_now(Some("pipe"), Some("p"), ""));
+        assert!(!repeat_suppressed_now(Some("pipe"), Some("p"), "   "));
+    }
+
+    #[test]
+    fn title_is_read_from_payload() {
+        assert_eq!(
+            title_from_payload(r#"{"type":"pipe","title":"run finished"}"#).as_deref(),
+            Some("run finished")
+        );
+        assert_eq!(title_from_payload(r#"{"type":"pipe"}"#), None);
+        assert_eq!(title_from_payload("not json"), None);
     }
 }

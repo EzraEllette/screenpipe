@@ -6,6 +6,49 @@ import Foundation
 import AppKit
 import SwiftUI
 
+// MARK: - Non-intrusive e2e placement
+//
+// A local `--features e2e` run drives this overlay on the developer's own
+// desktop. Every panel below is built to sit over whatever is frontmost:
+// floating level, `canJoinAllSpaces`, and `orderFrontRegardless()` together put
+// it on top of another app *without ever taking focus*. That is exactly right
+// for the product and exactly wrong for a test run, and it is why suppressing
+// activation on the Rust side never stopped the suite covering the screen.
+//
+// Rust owns the switch (`window_activation_allowed`) and exports it through the
+// process environment, since these panels are AppKit windows this crate never
+// sees. Read with `getenv` rather than a cached `ProcessInfo` snapshot: a spec
+// can opt real placement back in mid-run, so the flag has to be read live.
+private var nonIntrusiveE2E: Bool {
+    guard let raw = getenv("SCREENPIPE_E2E_NON_INTRUSIVE") else { return false }
+    return String(cString: raw) == "1"
+}
+
+/// Below `NSNormalWindowLevel`, where a panel cannot be composited over any app
+/// window whatever orders it front afterwards.
+private func gatedLevel(_ level: NSWindow.Level) -> NSWindow.Level {
+    nonIntrusiveE2E ? NSWindow.Level(rawValue: -1) : level
+}
+
+/// Drop the bits that carry a panel onto whichever Space the developer is on.
+private func gatedBehavior(
+    _ behavior: NSWindow.CollectionBehavior
+) -> NSWindow.CollectionBehavior {
+    guard nonIntrusiveE2E else { return behavior }
+    return behavior.subtracting([.canJoinAllSpaces, .moveToActiveSpace, .fullScreenAuxiliary])
+}
+
+/// `orderFrontRegardless()` is the call that puts a panel over the frontmost app
+/// from the background. Under a non-intrusive run it becomes its opposite.
+private func gatedOrderFront(_ window: NSWindow?) {
+    guard let window else { return }
+    if nonIntrusiveE2E {
+        window.orderBack(nil)
+    } else {
+        window.orderFrontRegardless()
+    }
+}
+
 // MARK: - Callback for actions (dismiss, open window, toggle meeting)
 public typealias ShortcutActionCallback = @convention(c) (UnsafePointer<CChar>) -> Void
 private var gShortcutCallback: ShortcutActionCallback?
@@ -394,7 +437,10 @@ private let kBaseDisclosureGap: CGFloat = 4
 private let kBaseTranscriptW: CGFloat = 320
 private let kBaseTranscriptH: CGFloat = 142
 private let kBaseNotificationW: CGFloat = 340
-private let kBaseNotificationH: CGFloat = 44
+/// Title + body measure ~23pt and the action buttons are 22pt, so this leaves a
+/// ~5pt gutter instead of the ~10pt of dead air a 44pt row used to have. Keeps
+/// the toast in the same density family as the 30pt dock it hangs off.
+private let kBaseNotificationH: CGFloat = 34
 private let kRestingOpacity: Double = 0.50
 private let kAnimDur: Double = 0.2
 private let kDockControls = ["search", "chat", "timeline", "audio", "settings"]
@@ -1418,7 +1464,7 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
             }
             updateContent()
             positionPanel()
-            panel?.orderFrontRegardless()
+            gatedOrderFront(panel)
             AnimationTick.shared.setVisible(
                 true,
                 hasActiveSignal: false
@@ -1798,8 +1844,8 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
             defer: false
         )
         p.isFloatingPanel = true
-        p.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.floatingWindow)) + 2)
-        p.collectionBehavior = [.canJoinAllSpaces, .ignoresCycle, .fullScreenAuxiliary]
+        p.level = gatedLevel(NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.floatingWindow)) + 2))
+        p.collectionBehavior = gatedBehavior([.canJoinAllSpaces, .ignoresCycle, .fullScreenAuxiliary])
         p.isOpaque = false
         p.backgroundColor = .clear
         p.hasShadow = false
@@ -1850,6 +1896,7 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
             hoverHideWorkItem = nil
             metrics.isHovering = true
             refreshTranscriptPanelVisibility()
+            positionNotificationPanelIfVisible()
         } else {
             metrics.hoveredControl = nil
             disclosurePanel?.orderOut(nil)
@@ -1915,8 +1962,8 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
                 defer: false
             )
             disclosure.isFloatingPanel = true
-            disclosure.level = NSWindow.Level(rawValue: panel.level.rawValue + 1)
-            disclosure.collectionBehavior = [.canJoinAllSpaces, .ignoresCycle, .fullScreenAuxiliary]
+            disclosure.level = gatedLevel(NSWindow.Level(rawValue: panel.level.rawValue + 1))
+            disclosure.collectionBehavior = gatedBehavior([.canJoinAllSpaces, .ignoresCycle, .fullScreenAuxiliary])
             disclosure.isOpaque = false
             disclosure.backgroundColor = .clear
             disclosure.hasShadow = false
@@ -1930,7 +1977,7 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
         disclosure.contentView = hosting
         disclosure.setContentSize(size)
         positionDisclosurePanel(index: index)
-        disclosure.orderFrontRegardless()
+        gatedOrderFront(disclosure)
     }
 
     private func positionDisclosurePanel(index: Int? = nil) {
@@ -1958,6 +2005,7 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
             hoverHideWorkItem = nil
             metrics.isHovering = true
             refreshTranscriptPanelVisibility()
+            positionNotificationPanelIfVisible()
         } else {
             scheduleHoverExit()
         }
@@ -1976,6 +2024,7 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
             self.disclosurePanel?.orderOut(nil)
             // A pinned card is the one thing hover exit must not take away.
             self.refreshTranscriptPanelVisibility()
+            self.positionNotificationPanelIfVisible()
         }
         hoverHideWorkItem = work
         // Bridge between the chip and the card. The corridor is continuous now,
@@ -2031,7 +2080,7 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
         }
         updateTranscriptContent()
         positionTranscriptPanel()
-        transcriptPanel?.orderFrontRegardless()
+        gatedOrderFront(transcriptPanel)
     }
 
     private func createTranscriptPanel() {
@@ -2044,8 +2093,8 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
             defer: false
         )
         preview.isFloatingPanel = true
-        preview.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.floatingWindow)) + 2)
-        preview.collectionBehavior = [.canJoinAllSpaces, .ignoresCycle, .fullScreenAuxiliary]
+        preview.level = gatedLevel(NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.floatingWindow)) + 2))
+        preview.collectionBehavior = gatedBehavior([.canJoinAllSpaces, .ignoresCycle, .fullScreenAuxiliary])
         preview.isOpaque = false
         preview.backgroundColor = .clear
         preview.hasShadow = false
@@ -2328,7 +2377,7 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
         stage.alphaValue = 0
         // Regardless, not orderFront: the overlay is used while another app is
         // frontmost, and a plain orderFront does nothing from the background.
-        stage.orderFrontRegardless()
+        gatedOrderFront(stage)
         NSAnimationContext.runAnimationGroup { context in
             context.duration = kDragStageFadeDur
             context.timingFunction = CAMediaTimingFunction(name: .easeOut)
@@ -2381,8 +2430,8 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
         stage.isFloatingPanel = true
         // One level under the pill so the thing being dragged stays on top of
         // the targets it is being dragged between.
-        stage.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.floatingWindow)) + 1)
-        stage.collectionBehavior = [.canJoinAllSpaces, .ignoresCycle, .fullScreenAuxiliary]
+        stage.level = gatedLevel(NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.floatingWindow)) + 1))
+        stage.collectionBehavior = gatedBehavior([.canJoinAllSpaces, .ignoresCycle, .fullScreenAuxiliary])
         stage.isOpaque = false
         stage.backgroundColor = .clear
         stage.hasShadow = false
@@ -2510,8 +2559,8 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
             defer: false
         )
         toast.isFloatingPanel = true
-        toast.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.floatingWindow)) + 2)
-        toast.collectionBehavior = [.canJoinAllSpaces, .ignoresCycle, .fullScreenAuxiliary]
+        toast.level = gatedLevel(NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.floatingWindow)) + 2))
+        toast.collectionBehavior = gatedBehavior([.canJoinAllSpaces, .ignoresCycle, .fullScreenAuxiliary])
         toast.isOpaque = false
         toast.backgroundColor = .clear
         toast.hasShadow = false
@@ -2555,6 +2604,13 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
         }
     }
 
+    /// The toast hangs off the bar, so it has to move when the bar changes size
+    /// between the resting chip and the hovered dock.
+    private func positionNotificationPanelIfVisible() {
+        guard notificationPanel?.isVisible == true else { return }
+        positionNotificationPanel()
+    }
+
     /// Sit the notification against the pill on the side the disclosure opens,
     /// aligned to the pill's edge so it visibly belongs to it.
     private func positionNotificationPanel() {
@@ -2562,9 +2618,14 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
         let visible = panel.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? panel.frame
         let width = toast.frame.width
         let height = toast.frame.height
+        // Anchor to the *visible* bar, not the window. The window stays at the
+        // expanded size while the resting chip is only 16pt of it, so anchoring
+        // Y to the window edge left a ~46pt hole between the chip and the toast
+        // even though X was already measured off the chip. Same rect the
+        // transcript card uses, so the two attachments hang the same way.
         let pill = overlayHoverRect(
             in: panel.frame,
-            expanded: false,
+            expanded: metrics.isHovering || metrics.forceExpanded,
             disclosureDown: metrics.disclosureDown,
             horizontal: metrics.horizontal,
             scale: gOverlayScale
@@ -2579,8 +2640,8 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
         let margin = anchorMargin(scale: gOverlayScale)
         let x = min(max(preferredX, visible.minX + margin), visible.maxX - width - margin)
         let preferredY = metrics.disclosureDown
-            ? panel.frame.minY - height - margin
-            : panel.frame.maxY + margin
+            ? pill.minY - height - margin
+            : pill.maxY + margin
         let y = min(max(preferredY, visible.minY + margin), visible.maxY - height - margin)
         toast.setFrameOrigin(NSPoint(x: x, y: y))
     }
@@ -2591,7 +2652,7 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
         let destination = toast.frame
         guard let pill = panelFrameIfVisible() else {
             toast.alphaValue = 1
-            toast.orderFrontRegardless()
+            gatedOrderFront(toast)
             return
         }
         let start = NSRect(
@@ -2602,7 +2663,7 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
         )
         toast.setFrame(start, display: false)
         toast.alphaValue = 0
-        toast.orderFrontRegardless()
+        gatedOrderFront(toast)
         NSAnimationContext.runAnimationGroup { context in
             context.duration = kAnimDur
             context.timingFunction = CAMediaTimingFunction(name: .easeOut)

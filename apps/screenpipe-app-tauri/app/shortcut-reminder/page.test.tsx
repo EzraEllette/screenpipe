@@ -67,6 +67,13 @@ vi.mock("@tauri-apps/api/window", () => ({
       ...mocks.windowOuterSize,
       toLogical: () => mocks.windowOuterSize,
     })),
+    // `resizeOverlay` measures the *inner* size. Leaving it off the mock made
+    // every resize in these tests throw into the catch, so the whole resize
+    // path was exercised by nothing.
+    innerSize: vi.fn(async () => ({
+      ...mocks.windowOuterSize,
+      toLogical: () => mocks.windowOuterSize,
+    })),
     scaleFactor: vi.fn().mockResolvedValue(1),
     setSize: mocks.setSize,
     setPosition: mocks.setPosition,
@@ -304,6 +311,44 @@ describe("recording health hover detail", () => {
 
     expect(screen.queryByTestId("shortcut-reminder-meeting-preview")).toBeNull();
     expect(screen.getByTestId("shortcut-reminder-root")).toBeVisible();
+  });
+
+  it("shows the working chord on hover even when settings never stored one", async () => {
+    mocks.getRecordingHealthState.mockResolvedValue("normal");
+    // A settings object from before these keys existed. The chords are still
+    // registered by Rust, so the label has to name them.
+    mocks.storeGet.mockResolvedValue({ disabledShortcuts: [] });
+
+    render(<ShortcutReminderPage />);
+
+    fireEvent.mouseEnter(await screen.findByTestId("shortcut-reminder-root"));
+    fireEvent.mouseEnter(screen.getByTitle("Open timeline"));
+
+    expect(
+      await screen.findByText(formatShortcut("Super+Ctrl+S", true), {
+        exact: false,
+      }),
+    ).toBeVisible();
+  });
+
+  it("leaves no black bar under the dock when no control is hovered", async () => {
+    mocks.getRecordingHealthState.mockResolvedValue("normal");
+    mocks.storeGet.mockResolvedValue({});
+
+    render(<ShortcutReminderPage />);
+
+    const root = await screen.findByTestId("shortcut-reminder-root");
+    fireEvent.mouseEnter(root);
+
+    // The label row keeps its height so the dock cannot shift, but it must not
+    // paint until there is something to say — the native panel leaves this area
+    // clear.
+    const labelRow = root.lastElementChild as HTMLElement;
+    expect(labelRow.style.background).toBe("transparent");
+    expect(labelRow.style.border).toContain("transparent");
+
+    fireEvent.mouseEnter(screen.getByTitle("Open search"));
+    expect(labelRow.style.background).not.toBe("transparent");
   });
 
   it("keeps recording health ahead of the meeting preview", async () => {

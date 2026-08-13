@@ -42,6 +42,9 @@ pub(crate) fn parse_overlay_display(action: &str) -> Option<&str> {
     looks_like_uuid.then_some(display)
 }
 
+/// The standalone native notification panel exists only on macOS; windows
+/// routes pill notifications through the shortcut action callback instead.
+#[cfg(target_os = "macos")]
 pub(super) fn install_notification_action_callback(app_handle: &tauri::AppHandle) {
     let _ = GLOBAL_APP_HANDLE.set(app_handle.clone());
     native_notification::set_action_callback(native_notif_action_callback);
@@ -78,6 +81,7 @@ fn notification_source_url(action: &serde_json::Value) -> Option<String> {
 /// `panic_cannot_unwind` (extern "C" can't unwind through ObjC frames). Catch
 /// any panic and log it instead — losing one notification click is much better
 /// than killing the user's session.
+#[cfg(target_os = "macos")]
 extern "C" fn native_notif_action_callback(json_ptr: *const std::os::raw::c_char) {
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         native_notif_action_callback_inner(json_ptr);
@@ -104,6 +108,7 @@ pub(crate) fn track_native_overlay_event(
     }
 }
 
+#[cfg(target_os = "macos")]
 fn native_notif_action_callback_inner(json_ptr: *const std::os::raw::c_char) {
     if json_ptr.is_null() {
         return;
