@@ -73,11 +73,21 @@ export type FirstRunLearningState = {
 const STORAGE_KEY = "screenpipe.first-run.learning-window.v1";
 
 /**
- * Hard ceiling on the wait. Chosen from measurement, not from taste: at 2
- * minutes a warm install had a single app and 2 frames, which is not enough to
- * write a truthful sentence about someone's work.
+ * Hard ceiling on the wait.
+ *
+ * Was 5 minutes, chosen when the evidence gate counted frames and nothing
+ * else. That made the ceiling load-bearing: frames accrue at roughly six a
+ * minute on a normal desktop, so clearing a ten frame floor took most of the
+ * five minutes and the window ran to the ceiling in the common case rather
+ * than the rare one. With `hasEnoughEvidence` now resolving on observed apps,
+ * which accessibility reports immediately and without pixels, the wait is
+ * decided by evidence again and the ceiling goes back to being a backstop.
+ *
+ * Two minutes is the longest a first-run screen may sit before it reads as
+ * broken, and anything the window has not seen by then it is not going to see
+ * by minute five either.
  */
-export const LEARNING_WINDOW_CEILING_MS = 5 * 60 * 1_000;
+export const LEARNING_WINDOW_CEILING_MS = 2 * 60 * 1_000;
 
 /**
  * How long after setup a first summary may still be offered.
@@ -108,6 +118,18 @@ export const MIN_MULTI_APP_FRAMES = 6;
 export const MIN_EVIDENCE_APPS = 2;
 
 /**
+ * Observed working time before several apps count as a summary.
+ *
+ * Replaces the frame floor that used to sit beside the app count. Frames are a
+ * pixel-path artifact and vanish as a signal when screenshots are off; active
+ * minutes come from capture timestamps, so accessibility alone populates them.
+ * One minute is the smallest span the summary can describe without the copy
+ * collapsing to "for under a minute", which is what made the thin window read
+ * as broken.
+ */
+export const MIN_EVIDENCE_ACTIVE_MINUTES = 1;
+
+/**
  * Floor on how early the window may resolve.
  *
  * Independent of the evidence gate: a burst of frames in the first seconds can
@@ -115,7 +137,7 @@ export const MIN_EVIDENCE_APPS = 2;
  * minute", which makes the whole moment look trivial. Waiting a little buys a
  * summary worth reading.
  */
-export const MIN_LEARNING_MS = 90 * 1_000;
+export const MIN_LEARNING_MS = 60 * 1_000;
 
 /** Apps shown in the live readout. More than this reads as noise. */
 export const MAX_TRACKED_APPS = 5;
@@ -256,10 +278,35 @@ export function hasEnoughEvidence(activity: ActivitySnapshot): boolean {
   if (activity.data_status !== "ok") return false;
   const frames = Number(activity.total_frames ?? 0);
   const appCount = capturedAppsFrom(activity, 0).length;
+  const audioSegments = Number(activity.audio_summary?.segment_count ?? 0);
+  const activeMinutes = Number(activity.total_active_minutes ?? 0);
+
+  // Several apps over real observed time, with no frame floor beside it.
+  //
+  // The frame count was standing in for two different questions: "did we watch
+  // them long enough" and "was there more than one thing going on". Only the
+  // second needs the app list, and the first is answered directly by active
+  // minutes. Keeping frames in the clause broke the case this window exists to
+  // serve: with screenshots off there are no pixels, frames accrue at roughly
+  // six a minute and carry nothing extra, so `frames >= 6 && apps >= 2` could
+  // sit unmet for the whole ceiling while accessibility had already reported
+  // two apps and a minute of work.
+  //
+  // The active-minutes floor is what keeps the old regression out. Two apps
+  // with one frame each and no elapsed activity is the shape that once
+  // resolved into "I watched Google Chrome and Claude … 2 screens indexed";
+  // it has no observed time, so it still does not resolve here.
+  if (appCount >= MIN_EVIDENCE_APPS && activeMinutes >= MIN_EVIDENCE_ACTIVE_MINUTES) {
+    return true;
+  }
+
+  // One app, but enough captures to show it was sustained rather than a single
+  // redraw as the window opened.
   if (frames >= MIN_EVIDENCE_FRAMES) return true;
-  // Moving between apps says more per frame than sitting in one, so a couple
-  // of apps lowers the bar — but never below a real capture floor.
-  return frames >= MIN_MULTI_APP_FRAMES && appCount >= MIN_EVIDENCE_APPS;
+
+  // One app plus captured speech. Audio is independent of the screen, so it is
+  // real evidence on a machine recording a call with screenshots turned off.
+  return appCount >= 1 && audioSegments > 0;
 }
 
 export type LearningWindowOpening =
