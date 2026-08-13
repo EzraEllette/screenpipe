@@ -3305,8 +3305,21 @@ pub async fn show_notification_inbox(app_handle: tauri::AppHandle) -> Result<(),
     let label = "notification-inbox";
     let window_width = 340.0_f64;
     let window_height = 420.0_f64;
-    // Sit just below the shortcut overlay pill (y=12, ~26 logical tall).
-    let y = 46.0_f64;
+    // Hug the shortcut overlay pill instead of guessing at its height. The pill
+    // sits at y=12 and is 16 logical tall *times the overlay scale*; the flat 46
+    // this replaced assumed a ~26pt pill, so it floated ~18pt below a small pill
+    // and collided with a large one. 6pt of air matches the native panel.
+    let overlay_scale = match crate::store::SettingsStore::get(&app_handle)
+        .unwrap_or_default()
+        .unwrap_or_default()
+        .shortcut_overlay_size
+        .as_str()
+    {
+        "large" => 2.0_f64,
+        "medium" => 1.5,
+        _ => 1.0,
+    };
+    let y = 12.0 + 16.0 * overlay_scale + 6.0;
 
     // Top-center of the screen the overlay lives on: screen under the mouse
     // on macOS (matches the pill), primary monitor elsewhere.
