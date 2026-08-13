@@ -6,6 +6,49 @@ import Foundation
 import AppKit
 import SwiftUI
 
+// MARK: - Non-intrusive e2e placement
+//
+// A local `--features e2e` run drives this overlay on the developer's own
+// desktop. Every panel below is built to sit over whatever is frontmost:
+// floating level, `canJoinAllSpaces`, and `orderFrontRegardless()` together put
+// it on top of another app *without ever taking focus*. That is exactly right
+// for the product and exactly wrong for a test run, and it is why suppressing
+// activation on the Rust side never stopped the suite covering the screen.
+//
+// Rust owns the switch (`window_activation_allowed`) and exports it through the
+// process environment, since these panels are AppKit windows this crate never
+// sees. Read with `getenv` rather than a cached `ProcessInfo` snapshot: a spec
+// can opt real placement back in mid-run, so the flag has to be read live.
+private var nonIntrusiveE2E: Bool {
+    guard let raw = getenv("SCREENPIPE_E2E_NON_INTRUSIVE") else { return false }
+    return String(cString: raw) == "1"
+}
+
+/// Below `NSNormalWindowLevel`, where a panel cannot be composited over any app
+/// window whatever orders it front afterwards.
+private func gatedLevel(_ level: NSWindow.Level) -> NSWindow.Level {
+    nonIntrusiveE2E ? NSWindow.Level(rawValue: -1) : level
+}
+
+/// Drop the bits that carry a panel onto whichever Space the developer is on.
+private func gatedBehavior(
+    _ behavior: NSWindow.CollectionBehavior
+) -> NSWindow.CollectionBehavior {
+    guard nonIntrusiveE2E else { return behavior }
+    return behavior.subtracting([.canJoinAllSpaces, .moveToActiveSpace, .fullScreenAuxiliary])
+}
+
+/// `orderFrontRegardless()` is the call that puts a panel over the frontmost app
+/// from the background. Under a non-intrusive run it becomes its opposite.
+private func gatedOrderFront(_ window: NSWindow?) {
+    guard let window else { return }
+    if nonIntrusiveE2E {
+        window.orderBack(nil)
+    } else {
+        window.orderFrontRegardless()
+    }
+}
+
 // MARK: - Callback for actions (dismiss, open window, toggle meeting)
 public typealias ShortcutActionCallback = @convention(c) (UnsafePointer<CChar>) -> Void
 private var gShortcutCallback: ShortcutActionCallback?
@@ -1418,7 +1461,7 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
             }
             updateContent()
             positionPanel()
-            panel?.orderFrontRegardless()
+            gatedOrderFront(panel)
             AnimationTick.shared.setVisible(
                 true,
                 hasActiveSignal: false
@@ -1798,8 +1841,8 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
             defer: false
         )
         p.isFloatingPanel = true
-        p.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.floatingWindow)) + 2)
-        p.collectionBehavior = [.canJoinAllSpaces, .ignoresCycle, .fullScreenAuxiliary]
+        p.level = gatedLevel(NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.floatingWindow)) + 2))
+        p.collectionBehavior = gatedBehavior([.canJoinAllSpaces, .ignoresCycle, .fullScreenAuxiliary])
         p.isOpaque = false
         p.backgroundColor = .clear
         p.hasShadow = false
@@ -1915,8 +1958,8 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
                 defer: false
             )
             disclosure.isFloatingPanel = true
-            disclosure.level = NSWindow.Level(rawValue: panel.level.rawValue + 1)
-            disclosure.collectionBehavior = [.canJoinAllSpaces, .ignoresCycle, .fullScreenAuxiliary]
+            disclosure.level = gatedLevel(NSWindow.Level(rawValue: panel.level.rawValue + 1))
+            disclosure.collectionBehavior = gatedBehavior([.canJoinAllSpaces, .ignoresCycle, .fullScreenAuxiliary])
             disclosure.isOpaque = false
             disclosure.backgroundColor = .clear
             disclosure.hasShadow = false
@@ -1930,7 +1973,7 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
         disclosure.contentView = hosting
         disclosure.setContentSize(size)
         positionDisclosurePanel(index: index)
-        disclosure.orderFrontRegardless()
+        gatedOrderFront(disclosure)
     }
 
     private func positionDisclosurePanel(index: Int? = nil) {
@@ -2031,7 +2074,7 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
         }
         updateTranscriptContent()
         positionTranscriptPanel()
-        transcriptPanel?.orderFrontRegardless()
+        gatedOrderFront(transcriptPanel)
     }
 
     private func createTranscriptPanel() {
@@ -2044,8 +2087,8 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
             defer: false
         )
         preview.isFloatingPanel = true
-        preview.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.floatingWindow)) + 2)
-        preview.collectionBehavior = [.canJoinAllSpaces, .ignoresCycle, .fullScreenAuxiliary]
+        preview.level = gatedLevel(NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.floatingWindow)) + 2))
+        preview.collectionBehavior = gatedBehavior([.canJoinAllSpaces, .ignoresCycle, .fullScreenAuxiliary])
         preview.isOpaque = false
         preview.backgroundColor = .clear
         preview.hasShadow = false
@@ -2328,7 +2371,7 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
         stage.alphaValue = 0
         // Regardless, not orderFront: the overlay is used while another app is
         // frontmost, and a plain orderFront does nothing from the background.
-        stage.orderFrontRegardless()
+        gatedOrderFront(stage)
         NSAnimationContext.runAnimationGroup { context in
             context.duration = kDragStageFadeDur
             context.timingFunction = CAMediaTimingFunction(name: .easeOut)
@@ -2381,8 +2424,8 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
         stage.isFloatingPanel = true
         // One level under the pill so the thing being dragged stays on top of
         // the targets it is being dragged between.
-        stage.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.floatingWindow)) + 1)
-        stage.collectionBehavior = [.canJoinAllSpaces, .ignoresCycle, .fullScreenAuxiliary]
+        stage.level = gatedLevel(NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.floatingWindow)) + 1))
+        stage.collectionBehavior = gatedBehavior([.canJoinAllSpaces, .ignoresCycle, .fullScreenAuxiliary])
         stage.isOpaque = false
         stage.backgroundColor = .clear
         stage.hasShadow = false
@@ -2510,8 +2553,8 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
             defer: false
         )
         toast.isFloatingPanel = true
-        toast.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.floatingWindow)) + 2)
-        toast.collectionBehavior = [.canJoinAllSpaces, .ignoresCycle, .fullScreenAuxiliary]
+        toast.level = gatedLevel(NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.floatingWindow)) + 2))
+        toast.collectionBehavior = gatedBehavior([.canJoinAllSpaces, .ignoresCycle, .fullScreenAuxiliary])
         toast.isOpaque = false
         toast.backgroundColor = .clear
         toast.hasShadow = false
@@ -2591,7 +2634,7 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
         let destination = toast.frame
         guard let pill = panelFrameIfVisible() else {
             toast.alphaValue = 1
-            toast.orderFrontRegardless()
+            gatedOrderFront(toast)
             return
         }
         let start = NSRect(
@@ -2602,7 +2645,7 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
         )
         toast.setFrame(start, display: false)
         toast.alphaValue = 0
-        toast.orderFrontRegardless()
+        gatedOrderFront(toast)
         NSAnimationContext.runAnimationGroup { context in
             context.duration = kAnimDur
             context.timingFunction = CAMediaTimingFunction(name: .easeOut)
