@@ -386,6 +386,7 @@ pub async fn restart_for_update(
 
 /// True once any surface committed to an update restart. Diagnostics only
 /// (e2e driver / tray state) — the authoritative guard is the swap above.
+#[cfg_attr(not(feature = "e2e"), allow(dead_code))]
 pub fn update_restart_started() -> bool {
     UPDATE_RESTART_STARTED.load(Ordering::SeqCst)
 }
@@ -1443,6 +1444,7 @@ impl UpdatesManager {
 
     /// Content-free snapshot of the update menu item for diagnostics and the
     /// e2e driver: (label, enabled).
+    #[cfg_attr(not(feature = "e2e"), allow(dead_code))]
     pub fn menu_item_snapshot(&self) -> Option<(String, bool)> {
         let item = self.update_menu_item.as_ref()?;
         let text = item.text().ok()?;

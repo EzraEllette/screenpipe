@@ -70,13 +70,17 @@ mod ffi {
             w: *mut f64,
             h: *mut f64,
         ) -> c_int;
+        // Reached only through the e2e command surface below.
+        #[cfg_attr(not(feature = "e2e"), allow(dead_code))]
         pub fn shortcut_get_meeting_overlay_state(
             transcript_visible: *mut c_int,
             pinned: *mut c_int,
             hovering: *mut c_int,
             meeting_active: *mut c_int,
         ) -> c_int;
+        #[cfg_attr(not(feature = "e2e"), allow(dead_code))]
         pub fn shortcut_set_pill_hovering(hovering: c_int) -> c_int;
+        #[cfg_attr(not(feature = "e2e"), allow(dead_code))]
         pub fn shortcut_toggle_meeting_pin() -> c_int;
         pub fn shortcut_set_action_callback(cb: Option<extern "C" fn(*const c_char)>);
     }
@@ -156,6 +160,7 @@ mod ffi {
 
     /// Observed state of the live-meeting transcript card, or None when the
     /// native panel is unavailable.
+    #[cfg_attr(not(feature = "e2e"), allow(dead_code))]
     pub fn meeting_overlay_state() -> Option<super::MeetingOverlayPanelState> {
         let (mut visible, mut pinned, mut hovering, mut active) = (0, 0, 0, 0);
         let ok = unsafe {
@@ -176,11 +181,13 @@ mod ffi {
 
     /// Test seam: drive the chip's hover entry point directly, because AppKit
     /// will not deliver a synthetic hover to a nonactivating panel.
+    #[cfg_attr(not(feature = "e2e"), allow(dead_code))]
     pub fn set_pill_hovering(hovering: bool) -> bool {
         unsafe { shortcut_set_pill_hovering(if hovering { 1 } else { 0 }) == 0 }
     }
 
     /// Test seam: the same toggle the card's pin button invokes.
+    #[cfg_attr(not(feature = "e2e"), allow(dead_code))]
     pub fn toggle_meeting_pin() -> bool {
         unsafe { shortcut_toggle_meeting_pin() == 0 }
     }
