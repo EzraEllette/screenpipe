@@ -3385,12 +3385,63 @@ pub(crate) fn notification_belongs_to_overlay(notification_type: Option<&str>) -
     matches!(notification_type, Some("meeting"))
 }
 
+/// What actually happened to an alert we tried to surface.
+///
+/// `show_notification_panel` returned `Ok(())` whether it drew the panel or
+/// dropped the alert at a gate, so `/notify` logged "panel shown" for
+/// notifications the user never saw. Callers that report an outcome need to be
+/// able to tell those apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NotificationDelivery {
+    /// Drawn by the shortcut overlay pill, which owns its own alert types.
+    ShownOnOverlay,
+    /// Drawn by the standalone panel (native SwiftUI, or the webview fallback).
+    ShownOnPanel,
+    /// Dropped: master-off, snooze, or quiet hours.
+    SuppressedReduced,
+    /// Dropped: identical alert already surfaced inside its cooldown.
+    SuppressedRepeat,
+}
+
+impl NotificationDelivery {
+    pub(crate) fn was_shown(self) -> bool {
+        matches!(self, Self::ShownOnOverlay | Self::ShownOnPanel)
+    }
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::ShownOnOverlay => "shown_on_overlay",
+            Self::ShownOnPanel => "shown_on_panel",
+            Self::SuppressedReduced => "suppressed_reduced_state",
+            Self::SuppressedRepeat => "suppressed_repeat",
+        }
+    }
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn show_notification_panel(
     app_handle: tauri::AppHandle,
     payload: String,
 ) -> Result<(), String> {
+    deliver_notification_panel(app_handle, payload, true)
+        .await
+        .map(|_| ())
+}
+
+/// Render an alert, returning what actually happened to it.
+///
+/// `apply_repeat_gate` exists because the repeat gate is check-and-record, so
+/// running it twice for one alert makes the second call collide with the
+/// record the first call just wrote. `/notify` already gates before it
+/// persists, so it passes `false` and stays the single recorder for that path;
+/// the direct callers (capture-stall, audio device/health) come straight here
+/// and pass `true`.
+pub(crate) async fn deliver_notification_panel(
+    app_handle: tauri::AppHandle,
+    payload: String,
+    apply_repeat_gate: bool,
+) -> Result<NotificationDelivery, String> {
     use tauri::{Emitter, WebviewWindowBuilder};
 
     let label = "notification-panel";
@@ -3413,7 +3464,7 @@ pub async fn show_notification_panel(
             "show_notification_panel: suppressed (master/snooze/quiet, type={:?})",
             notification_type
         );
-        return Ok(());
+        return Ok(NotificationDelivery::SuppressedReduced);
     }
 
     // Repeat gate — see `gate::repeat_suppressed_now`. Critical alerts are
@@ -3424,17 +3475,19 @@ pub async fn show_notification_panel(
         crate::notifications::gate::title_from_payload(&payload).unwrap_or_default();
     let notification_body =
         crate::notifications::gate::body_from_payload(&payload).unwrap_or_default();
-    if crate::notifications::gate::repeat_suppressed_now(
-        notification_type.as_deref(),
-        notification_pipe.as_deref(),
-        &notification_title,
-        &notification_body,
-    ) {
+    if apply_repeat_gate
+        && crate::notifications::gate::repeat_suppressed_now(
+            notification_type.as_deref(),
+            notification_pipe.as_deref(),
+            &notification_title,
+            &notification_body,
+        )
+    {
         info!(
             "show_notification_panel: suppressed (repeat within cooldown, type={:?})",
             notification_type
         );
-        return Ok(());
+        return Ok(NotificationDelivery::SuppressedRepeat);
     }
 
     // The pill speaks up for its own alerts wherever it is native. Windows has
@@ -3448,7 +3501,7 @@ pub async fn show_notification_panel(
         {
             info!("meeting notification rendered from the shortcut overlay");
             let _ = app_handle.emit("native-notification-shown", &payload);
-            return Ok(());
+            return Ok(NotificationDelivery::ShownOnOverlay);
         }
     }
 
@@ -3467,7 +3520,7 @@ pub async fn show_notification_panel(
         {
             info!("meeting notification rendered from the shortcut overlay");
             let _ = app_handle.emit("native-notification-shown", &payload);
-            return Ok(());
+            return Ok(NotificationDelivery::ShownOnOverlay);
         }
 
         if native_notification::is_available() {
@@ -3476,7 +3529,7 @@ pub async fn show_notification_panel(
                 // Emit event so the main window can save notification history + PostHog analytics
                 // (the webview panel page does this in JS, but we bypass it with native)
                 let _ = app_handle.emit("native-notification-shown", &payload);
-                return Ok(());
+                return Ok(NotificationDelivery::ShownOnPanel);
             }
             warn!("Native notification panel failed, falling back to webview");
         }
@@ -3588,7 +3641,7 @@ pub async fn show_notification_panel(
             });
         }
 
-        return Ok(());
+        return Ok(NotificationDelivery::ShownOnPanel);
     }
 
     info!("Creating new notification-panel window");
@@ -3705,7 +3758,7 @@ pub async fn show_notification_panel(
         });
     }
 
-    Ok(())
+    Ok(NotificationDelivery::ShownOnPanel)
 }
 
 #[tauri::command]

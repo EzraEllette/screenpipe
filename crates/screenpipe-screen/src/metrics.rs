@@ -95,6 +95,71 @@ pub enum CaptureLoopStage {
     HotCachePush = 12,
 }
 
+/// Whether the capture loop is currently taking screenshots, and if not, why.
+///
+/// The loop derives this from `config.disable_screenshots || profile
+/// .screenshot_disabled`, and neither input was visible outside the loop's own
+/// stack. `/health` therefore could not tell "screenpipe turned pixels off on
+/// purpose" apart from "the OS is refusing to hand us frames", and told every
+/// user to go check Screen Recording permission. Publishing the effective
+/// state here lets health name the real cause.
+///
+/// Discriminants are stable: they are stored in an [`AtomicU8`], so only
+/// append new variants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ScreenshotCaptureState {
+    /// Screenshots are being taken.
+    Enabled = 0,
+    /// `--disable-screenshots` / the `disableScreenshots` setting. The
+    /// accessibility walk continues, so text capture is unaffected.
+    DisabledByConfig = 1,
+    /// The active power profile turned pixels off (low battery / OS low-power).
+    /// Restores itself when the machine leaves that profile.
+    DisabledByPowerProfile = 2,
+}
+
+impl ScreenshotCaptureState {
+    /// Resolve the effective state from the two inputs the capture loop uses.
+    /// Config wins when both apply: it is the one the user set deliberately
+    /// and the one that stays true after the battery recovers.
+    pub fn resolve(disabled_by_config: bool, disabled_by_power_profile: bool) -> Self {
+        if disabled_by_config {
+            Self::DisabledByConfig
+        } else if disabled_by_power_profile {
+            Self::DisabledByPowerProfile
+        } else {
+            Self::Enabled
+        }
+    }
+
+    /// Stable wire name. Kept exhaustive so a new variant cannot silently
+    /// report as "enabled".
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Enabled => "enabled",
+            Self::DisabledByConfig => "disabled_by_config",
+            Self::DisabledByPowerProfile => "disabled_by_power_profile",
+        }
+    }
+
+    /// True when pixel capture is off for any reason.
+    pub fn is_disabled(self) -> bool {
+        !matches!(self, Self::Enabled)
+    }
+
+    fn from_u8(value: u8) -> Self {
+        match value {
+            1 => Self::DisabledByConfig,
+            2 => Self::DisabledByPowerProfile,
+            // Unknown discriminants mean a newer writer than this reader.
+            // Treating that as "enabled" keeps health from inventing an
+            // intentional-disable excuse for a state it cannot name.
+            _ => Self::Enabled,
+        }
+    }
+}
+
 impl CaptureLoopStage {
     /// Human-readable name for logs. Kept exhaustive so a new variant cannot
     /// silently log as "unknown".
@@ -231,6 +296,11 @@ pub struct PipelineMetrics {
     pub loop_stage: AtomicU8,
     /// Unix timestamp (secs) at which `loop_stage` was last set.
     pub loop_stage_entered_ts: AtomicU64,
+    /// Effective [`ScreenshotCaptureState`] discriminant, published by the
+    /// capture loop whenever it re-derives `screenshot_disabled`. Lets
+    /// `/health` distinguish an intentional pixel-capture pause from a real
+    /// capture failure instead of blaming OS permission for both.
+    pub screenshot_capture_state: AtomicU8,
     /// Total number of capture operations attempted, regardless of outcome.
     /// Pair with `frames_captured` (successful persists) to detect silent loss between
     /// attempt and write — `attempts - captured - dedup_skips` over a window that should
@@ -287,6 +357,7 @@ impl PipelineMetrics {
             capture_loop_heartbeats: AtomicU64::new(0),
             loop_stage: AtomicU8::new(CaptureLoopStage::Unknown as u8),
             loop_stage_entered_ts: AtomicU64::new(0),
+            screenshot_capture_state: AtomicU8::new(ScreenshotCaptureState::Enabled as u8),
             capture_attempts: AtomicU64::new(0),
             dedup_skips: AtomicU64::new(0),
             frames_corrupt_black: AtomicU64::new(0),
@@ -345,6 +416,19 @@ impl PipelineMetrics {
             CaptureLoopStage::from_u8(self.loop_stage.load(Ordering::Relaxed)),
             self.loop_stage_entered_ts.load(Ordering::Relaxed),
         )
+    }
+
+    /// Publish whether the capture loop is taking screenshots, and if not why.
+    /// Called by the loop every time it re-derives `screenshot_disabled`, so
+    /// `/health` always sees the state the loop is actually running under.
+    pub fn record_screenshot_capture_state(&self, state: ScreenshotCaptureState) {
+        self.screenshot_capture_state
+            .store(state as u8, Ordering::Relaxed);
+    }
+
+    /// Effective screenshot-capture state last published by the capture loop.
+    pub fn screenshot_capture_state(&self) -> ScreenshotCaptureState {
+        ScreenshotCaptureState::from_u8(self.screenshot_capture_state.load(Ordering::Relaxed))
     }
 
     /// Record that a frame was skipped by similarity check.
@@ -729,6 +813,59 @@ pub struct MetricsSnapshot {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    /// #5808: the capture loop's effective screenshot state has to survive the
+    /// trip to /health, or health falls back to blaming OS permission.
+    #[test]
+    fn screenshot_capture_state_round_trips_through_the_atomic() {
+        let metrics = PipelineMetrics::new();
+        assert_eq!(
+            metrics.screenshot_capture_state(),
+            ScreenshotCaptureState::Enabled,
+            "a loop that never published must not look intentionally disabled",
+        );
+
+        for state in [
+            ScreenshotCaptureState::DisabledByConfig,
+            ScreenshotCaptureState::DisabledByPowerProfile,
+            ScreenshotCaptureState::Enabled,
+        ] {
+            metrics.record_screenshot_capture_state(state);
+            assert_eq!(metrics.screenshot_capture_state(), state);
+            assert_eq!(
+                state.is_disabled(),
+                state != ScreenshotCaptureState::Enabled
+            );
+        }
+    }
+
+    /// A newer writer may store a discriminant this reader does not know.
+    /// Reading it as "enabled" keeps health from inventing an
+    /// intentional-disable excuse for a state it cannot name.
+    #[test]
+    fn an_unknown_screenshot_state_reads_as_enabled() {
+        let metrics = PipelineMetrics::new();
+        metrics
+            .screenshot_capture_state
+            .store(200, Ordering::Relaxed);
+        assert_eq!(
+            metrics.screenshot_capture_state(),
+            ScreenshotCaptureState::Enabled,
+        );
+    }
+
+    #[test]
+    fn screenshot_state_names_are_stable_and_distinct() {
+        assert_eq!(ScreenshotCaptureState::Enabled.as_str(), "enabled");
+        assert_eq!(
+            ScreenshotCaptureState::DisabledByConfig.as_str(),
+            "disabled_by_config"
+        );
+        assert_eq!(
+            ScreenshotCaptureState::DisabledByPowerProfile.as_str(),
+            "disabled_by_power_profile"
+        );
+    }
 
     #[test]
     fn loop_heartbeat_advances_without_a_capture_attempt() {

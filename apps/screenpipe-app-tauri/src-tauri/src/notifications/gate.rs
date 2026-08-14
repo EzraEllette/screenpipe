@@ -366,19 +366,62 @@ pub fn repeat_suppressed_now(
     title: &str,
     body: &str,
 ) -> bool {
-    if matches!(notification_type, Some(t) if is_critical_type(t)) {
+    let Some((key, cooldown)) = repeat_identity(notification_type, pipe_name, title, body) else {
         return false;
-    }
-    // Nothing to key on — an untitled alert can't be told apart from the next
-    // one, so capping it would collapse unrelated alerts together.
-    if title.trim().is_empty() {
-        return false;
-    }
-    let key = repeat_key(notification_type, pipe_name, title, body);
-    let cooldown = repeat_cooldown_ms(notification_type);
+    };
     let now_ms = chrono::Local::now().timestamp_millis();
     let mut guard = ledger().lock().unwrap_or_else(|e| e.into_inner());
     check_and_record(&mut guard, key, now_ms, cooldown)
+}
+
+/// Read the ledger *without* recording.
+///
+/// `/notify` looks first so a suppressed alert never writes history, then hands
+/// the payload to `show_notification_panel` — the choke point every other
+/// producer also reaches. When both *recorded*, the second look always found
+/// what the first had written milliseconds earlier and dropped the alert. Every
+/// high-priority alert arriving over http died that way, while direct callers
+/// were untouched, which is what made it look intermittent rather than total.
+///
+/// So the early look only reads. The choke point owns the write, and an alert
+/// is recorded exactly once no matter which door it came through.
+pub fn repeat_suppressed_peek(
+    notification_type: Option<&str>,
+    pipe_name: Option<&str>,
+    title: &str,
+    body: &str,
+) -> bool {
+    let Some((key, cooldown)) = repeat_identity(notification_type, pipe_name, title, body) else {
+        return false;
+    };
+    let now_ms = chrono::Local::now().timestamp_millis();
+    let guard = ledger().lock().unwrap_or_else(|e| e.into_inner());
+    repeat_suppressed(guard.get(&key).copied(), now_ms, cooldown)
+}
+
+/// The ledger key and cooldown for an alert, or `None` when it is not subject
+/// to repeat suppression at all.
+///
+/// Critical types are exempt and are never recorded: a recording-stopped alert
+/// that re-fires is re-stating an unresolved failure, and muting the second one
+/// would be the exact failure mode this gate exists to prevent. An untitled
+/// alert has no identity, so capping it would collapse unrelated alerts.
+fn repeat_identity(
+    notification_type: Option<&str>,
+    pipe_name: Option<&str>,
+    title: &str,
+    body: &str,
+) -> Option<(String, i64)> {
+    if matches!(notification_type, Some(t) if is_critical_type(t)) {
+        return None;
+    }
+    if title.trim().is_empty() {
+        return None;
+    }
+    Some((
+        repeat_key(notification_type, pipe_name, title, body),
+        repeat_cooldown_ms(notification_type),
+    ))
 }
 
 /// Extract the `type` field from a notification panel payload JSON string.
@@ -861,12 +904,78 @@ mod tests {
         }
     }
 
+    /// One alert passes two gates on its way out: `/notify` looks first so a
+    /// repeat never writes history, then hands off to the choke point every
+    /// producer shares. Only the choke point may record — when both did, the
+    /// second look found the first look's own entry, milliseconds old, and
+    /// dropped the alert. Every high-priority alert sent over http died that
+    /// way; the meeting toast lost its "open note" button to it.
+    #[test]
+    fn looking_twice_at_one_alert_still_delivers_it() {
+        let mut ledger = empty_ledger();
+        let cooldown = repeat_cooldown_ms(Some("meeting"));
+        let key = repeat_key(
+            Some("meeting"),
+            None,
+            "meeting detected",
+            "screenpipe is saving this meeting for transcription: Google Meet",
+        );
+
+        // `/notify` peeks: nothing recorded yet, so it passes it along.
+        assert!(!repeat_suppressed(ledger.get(&key).copied(), 0, cooldown));
+        assert!(
+            ledger.is_empty(),
+            "the peek must not write — that write is what ate the alert"
+        );
+
+        // The choke point records and delivers.
+        assert!(!check_and_record(&mut ledger, key.clone(), 2, cooldown));
+
+        // A real repeat is still stopped at the door, before it writes history.
+        assert!(repeat_suppressed(
+            ledger.get(&key).copied(),
+            60_000,
+            cooldown
+        ));
+    }
+
     /// An untitled alert has no identity, so capping it would collapse
     /// unrelated alerts into one.
     #[test]
     fn untitled_alerts_are_not_capped() {
         assert!(!repeat_suppressed_now(Some("pipe"), Some("p"), "", ""));
         assert!(!repeat_suppressed_now(Some("pipe"), Some("p"), "   ", ""));
+    }
+
+    /// The gate checks *and* records, so asking it twice about one alert makes
+    /// the second question collide with the answer the first one wrote.
+    ///
+    /// `/notify` gated before persisting and then handed the alert to
+    /// `show_notification_panel`, which gated again — so every high-priority
+    /// notification that came through the route was dropped microseconds after
+    /// being cleared, and the route still logged it as shown. Only the direct
+    /// callers, which pass through once, kept working.
+    ///
+    /// The fix is one recorder per alert, not a longer cooldown: this asserts
+    /// the double-ask really does suppress, so the single-ask contract in
+    /// `deliver_notification_panel(.., apply_repeat_gate: false)` stays load-bearing.
+    #[test]
+    fn asking_the_same_gate_twice_suppresses_a_first_time_alert() {
+        let mut ledger = empty_ledger();
+        let key = repeat_key(Some("meeting"), None, "meeting detected", "with alice");
+        let cooldown = repeat_cooldown_ms(Some("meeting"));
+
+        // The route clears it and records the delivery.
+        assert!(
+            !check_and_record(&mut ledger, key.clone(), 1_000, cooldown),
+            "a first-time alert must pass the gate"
+        );
+        // The delivery path asks about the very same alert a moment later.
+        assert!(
+            check_and_record(&mut ledger, key, 1_001, cooldown),
+            "asking twice suppresses the alert the caller just cleared — \
+             exactly one caller may run the gate per alert"
+        );
     }
 
     #[test]

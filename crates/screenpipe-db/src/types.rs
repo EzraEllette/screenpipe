@@ -169,6 +169,8 @@ pub struct OCRResultRaw {
     /// or `"ocr"` (fallback for terminals, canvas-rendered apps, weak a11y).
     /// `None` for legacy rows captured before text_source was tracked.
     pub text_source: Option<String>,
+    /// Why the underlying frame was captured. `None` for legacy rows.
+    pub capture_trigger: Option<String>,
 }
 
 #[derive(OaSchema, Debug, Serialize, Deserialize)]
@@ -191,6 +193,8 @@ pub struct OCRResult {
     /// `"ocr"` (fallback). `None` for legacy rows. Despite the field name
     /// `ocr_text`, the content is accessibility-derived for most captures.
     pub text_source: Option<String>,
+    /// Why the underlying frame was captured. `None` for legacy rows.
+    pub capture_trigger: Option<String>,
 }
 
 /// Content type for search queries.
@@ -521,6 +525,8 @@ pub struct UiContent {
     pub offset_index: i64,
     pub frame_name: Option<String>,
     pub browser_url: Option<String>,
+    /// Why the underlying frame was captured. `None` for legacy rows.
+    pub capture_trigger: Option<String>,
 }
 
 #[derive(OaSchema, Debug, Clone)]

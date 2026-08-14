@@ -140,6 +140,9 @@ pub struct OCRContent {
     /// historically called OCR but most captures are accessibility-derived
     /// — read this field to know which path produced the text.
     pub text_source: Option<String>,
+    /// Why this frame was captured, such as `click`, `typing_pause`, `idle`,
+    /// or `visual_change`. `None` for legacy rows.
+    pub event_source: Option<String>,
 }
 
 #[derive(OaSchema, Serialize, Deserialize, Debug, Clone)]
@@ -184,6 +187,8 @@ pub struct UiContent {
     pub offset_index: i64,
     pub frame_name: Option<String>,
     pub browser_url: Option<String>,
+    /// Why this frame was captured. `None` for legacy rows.
+    pub event_source: Option<String>,
 }
 
 /// User input event content (clicks, keystrokes, clipboard, etc.)

@@ -867,6 +867,20 @@ fn record_loop_stage(
     monitor.record_loop_stage(stage);
 }
 
+/// Publish whether this loop is taking screenshots, and if not why, so
+/// `/health` can tell an intentional pixel pause apart from a capture failure
+/// (#5808). Both inputs are process-global (a config flag and the active power
+/// profile), so every monitor's loop writes the same value and last-writer-wins
+/// on the aggregate is correct.
+fn record_screenshot_capture_state(
+    aggregate: &screenpipe_screen::PipelineMetrics,
+    monitor: &screenpipe_screen::PipelineMetrics,
+    state: screenpipe_screen::ScreenshotCaptureState,
+) {
+    aggregate.record_screenshot_capture_state(state);
+    monitor.record_screenshot_capture_state(state);
+}
+
 fn record_persisted_capture(
     aggregate: &screenpipe_screen::PipelineMetrics,
     monitor: &screenpipe_screen::PipelineMetrics,
@@ -926,6 +940,13 @@ pub(crate) async fn event_driven_capture_loop(
 
     let screenshots_disabled_by_config = config.disable_screenshots;
     let mut screenshot_disabled = screenshots_disabled_by_config;
+    // Publish the effective state so /health can name an intentional pixel
+    // pause instead of blaming Screen Recording permission for it (#5808).
+    record_screenshot_capture_state(
+        &vision_metrics,
+        &monitor_liveness,
+        screenpipe_screen::ScreenshotCaptureState::resolve(screenshots_disabled_by_config, false),
+    );
     let mut visual_check_enabled = config.visual_check_interval_ms > 0 && !screenshot_disabled;
     let mut visual_check_interval = Duration::from_millis(config.visual_check_interval_ms);
     let mut visual_change_threshold = config.visual_change_threshold;
@@ -1466,6 +1487,14 @@ pub(crate) async fn event_driven_capture_loop(
                 visual_check_interval = Duration::from_millis(profile.visual_check_interval_ms);
                 visual_change_threshold = profile.visual_change_threshold;
                 screenshot_disabled = screenshots_disabled_by_config || profile.screenshot_disabled;
+                record_screenshot_capture_state(
+                    &vision_metrics,
+                    &monitor_liveness,
+                    screenpipe_screen::ScreenshotCaptureState::resolve(
+                        screenshots_disabled_by_config,
+                        profile.screenshot_disabled,
+                    ),
+                );
                 visual_check_enabled = profile.visual_check_interval_ms > 0 && !screenshot_disabled;
                 if visual_check_enabled && frame_comparer.is_none() {
                     frame_comparer =
@@ -2283,7 +2312,7 @@ fn resolve_capture_metadata_with_policy(
     Option<String>,
     Option<String>,
 ) {
-    let (mut app_name, mut window_name, browser_url, document_path) = match tree_snapshot {
+    let (mut app_name, mut window_name, mut browser_url, mut document_path) = match tree_snapshot {
         Some(snap) => (
             Some(snap.app_name.clone()),
             Some(snap.window_name.clone()),
@@ -2320,9 +2349,15 @@ fn resolve_capture_metadata_with_policy(
         } if !trigger_app_name.is_empty() => {
             if app_name.as_deref() != Some(trigger_app_name.as_str()) {
                 debug!(
-                    "focused app mismatch on app_switch: trigger='{}', tree={:?}; using trigger value",
+                    "focused app mismatch on app_switch: trigger='{}', tree={:?}; using trigger value and dropping stale window context",
                     trigger_app_name, app_name
                 );
+                // App-switch events typically do not carry the new window
+                // title. Keeping the previous tree's title, URL, or document
+                // path would create a metadata pair that never existed.
+                window_name = None;
+                browser_url = None;
+                document_path = None;
             }
             app_name = Some(trigger_app_name.clone());
         }
@@ -3916,6 +3951,45 @@ mod tests {
             Some("Google Chrome"),
             None,
         ));
+    }
+
+    #[test]
+    fn resolve_capture_metadata_drops_stale_window_context_on_app_switch() {
+        let snapshot = screenpipe_a11y::tree::TreeSnapshot {
+            app_name: "TextEdit".into(),
+            app_id: Some("com.apple.TextEdit".into()),
+            executable: None,
+            app_version: None,
+            window_name: "M1_B.txt".into(),
+            text_content: "visible text".into(),
+            nodes: Vec::new(),
+            semantic_nodes: Vec::new(),
+            browser_url: Some("https://stale.example".into()),
+            document_path: Some("/tmp/M1_B.txt".into()),
+            timestamp: Utc::now(),
+            node_count: 0,
+            walk_duration: Duration::from_millis(1),
+            content_hash: 0,
+            simhash: 0,
+            truncated: false,
+            truncation_reason: screenpipe_a11y::tree::TruncationReason::None,
+            max_depth_reached: 0,
+            window_bounds: None,
+        };
+
+        let (app_name, window_name, browser_url, document_path) = resolve_capture_metadata(
+            Some(&snapshot),
+            &CaptureTrigger::AppSwitch {
+                app_name: "Finder".into(),
+                target: None,
+            },
+            None,
+        );
+
+        assert_eq!(app_name.as_deref(), Some("Finder"));
+        assert_eq!(window_name, None);
+        assert_eq!(browser_url, None);
+        assert_eq!(document_path, None);
     }
 
     #[test]
