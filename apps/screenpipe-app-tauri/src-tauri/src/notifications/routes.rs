@@ -198,7 +198,10 @@ pub async fn send_notification(
     // echo here rather than expecting every producer to latch for itself. The
     // body is part of the identity because for some producers it carries the
     // only thing that tells two distinct alerts apart — see the gate's notes.
-    if super::gate::repeat_suppressed_now(
+    // A peek, not a check-and-record: `show_notification_panel` below is the
+    // choke point that records. Recording here too made that second look find
+    // this one's own entry and drop every high-priority alert sent over http.
+    if super::gate::repeat_suppressed_peek(
         Some(resolved_type.as_str()),
         source.pipe_name.as_deref(),
         &payload.title,
