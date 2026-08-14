@@ -10,6 +10,7 @@ name: Rust CI
 
 on:
   push:
+    branches: [main]
     paths:
       - '**.rs'
       - '**/Cargo.toml'

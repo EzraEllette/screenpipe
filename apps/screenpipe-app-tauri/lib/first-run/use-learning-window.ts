@@ -19,7 +19,6 @@ import {
   capturedAppsFrom,
   claimLearningSeed,
   classifyEmptyReason,
-  clearPendingEmptyReport,
   hasEnoughEvidence,
   learningWindowOpening,
   learningWindowRemainingMs,
@@ -340,20 +339,38 @@ export function useLearningWindow(
   // event at all, so the outcome was indistinguishable from "user never
   // finished setup" in PostHog.
   const pendingEmptyReport = state.pendingEmptyReport;
+  const pendingStartedAt = state.startedAt;
   useEffect(() => {
     if (!pendingEmptyReport) return;
-    posthog.capture("first_run_learning_empty", {
-      reason: state.emptyReason ?? "expired_unreported",
-      // No live engine call here: the window is long settled and a status read
-      // now would describe the present, not the window it is reporting on.
-      data_status: "not_checked",
-      frame_count: 0,
-      // Separates this from the ceiling-effect emit above, which happens with
-      // the banner mounted and a fresh activity read behind it.
-      settled_by: "rehydrate",
-    });
-    setState(clearPendingEmptyReport());
-  }, [pendingEmptyReport, state.emptyReason]);
+    let cancelled = false;
+
+    void (async () => {
+      // Ask the engine the same question the ceiling effect would have, so the
+      // user sees a reason they can act on rather than the `unknown` shrug
+      // rehydration parked there. Reporting a real reason is the whole point
+      // of this state; a rehydrated window must not be a second-class one.
+      const activity = pendingStartedAt
+        ? await fetchRecentActivity(pendingStartedAt)
+        : null;
+      if (cancelled) return;
+      const reason = classifyEmptyReason(activity);
+
+      posthog.capture("first_run_learning_empty", {
+        reason,
+        data_status: activity?.data_status ?? "none",
+        frame_count: Number(activity?.total_frames ?? 0),
+        // Separates this from the ceiling-effect emit above, which happens
+        // with the banner mounted and the window still live.
+        settled_by: "rehydrate",
+      });
+      // Also clears pendingEmptyReport, so a remount cannot double count.
+      setState(markLearningEmpty(reason));
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [pendingEmptyReport, pendingStartedAt]);
 
   const dismiss = useCallback(
     (options: { opened?: boolean } = {}) => {

@@ -15,6 +15,7 @@ import {
   type FirstRunEmptyReason,
 } from "@/lib/first-run/learning-window";
 import { appIconUrl } from "@/lib/first-run/recent-activity";
+import { useAgentHandoff } from "@/lib/first-run/use-agent-handoff";
 import {
   useLearningWindow,
   type LearningWindowOptions,
@@ -39,8 +40,6 @@ const EMPTY_COPY: Record<FirstRunEmptyReason, string> = {
     "Only a few screens were captured — not enough to say anything true about your work yet. Keep working and this fills in.",
   single_app_below_floor:
     "Everything captured came from a single app, which is too thin to summarize. This fills in as you move between apps.",
-  expired_unreported:
-    "The first-run summary timed out while Screenpipe was closed. Nothing is lost — it keeps reading in the background as you work.",
   unknown:
     "Nothing was captured in that window. Screenpipe keeps reading in the background as you work.",
 };
@@ -79,6 +78,8 @@ function CapturedAppIcon({ app }: { app: FirstRunCapturedApp }) {
 export function FirstRunLearningBanner(props: LearningWindowOptions = {}) {
   const { phase, capturedApps, remainingMs, chatId, emptyReason, dismiss } =
     useLearningWindow(props);
+  const { target: handoffTarget, hint: handoffHint, askAgent } =
+    useAgentHandoff(phase === "ready");
 
   if (
     phase !== "learning" &&
@@ -197,6 +198,24 @@ export function FirstRunLearningBanner(props: LearningWindowOptions = {}) {
             >
               Open the summary
             </Button>
+            {/* Setup already wired this agent over MCP, so it can answer from
+                real captured context. Offered second, never instead: the
+                summary is guaranteed to exist, the handoff depends on another
+                app being where we think it is. */}
+            {handoffTarget && (
+              <Button
+                size="sm"
+                variant="ghost"
+                className="h-7 text-[11px]"
+                data-testid="first-run-ask-agent"
+                data-agent={handoffTarget.id}
+                onClick={askAgent}
+              >
+                {handoffTarget.deeplink
+                  ? `Ask ${handoffTarget.label}`
+                  : `Copy for ${handoffTarget.label}`}
+              </Button>
+            )}
             <Button
               size="sm"
               variant="ghost"
@@ -206,6 +225,15 @@ export function FirstRunLearningBanner(props: LearningWindowOptions = {}) {
               Later
             </Button>
           </div>
+          {handoffHint && (
+            <p
+              className="text-[11px] leading-relaxed text-muted-foreground"
+              data-testid="first-run-ask-agent-hint"
+              role="status"
+            >
+              {handoffHint}
+            </p>
+          )}
         </div>
       )}
 

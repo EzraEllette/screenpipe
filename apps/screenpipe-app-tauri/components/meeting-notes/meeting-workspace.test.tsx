@@ -108,8 +108,42 @@ describe("meeting workspace tabs", () => {
     expect(screen.getByRole("tab", { name: "summary" })).toHaveFocus();
   });
 
-  // Whichever branch renders, the tabs sit on exactly one bottom rule.
-  it("keeps a single bottom rule with and without a trailing action", () => {
+  // A dot on a tab is a request for attention. Work in flight and failures
+  // qualify; a summary that finished normally does not, and it used to stay
+  // lit on every summarized meeting forever.
+  it("only marks the summary tab while work is in flight or has failed", () => {
+    const { rerender } = render(
+      <MeetingWorkspaceTabs
+        value="notes"
+        onValueChange={vi.fn()}
+        summaryState="working"
+      />,
+    );
+    expect(screen.getByLabelText("summary working")).toBeVisible();
+
+    rerender(
+      <MeetingWorkspaceTabs
+        value="notes"
+        onValueChange={vi.fn()}
+        summaryState="attention"
+      />,
+    );
+    expect(screen.getByLabelText("summary attention")).toBeVisible();
+
+    rerender(
+      <MeetingWorkspaceTabs
+        value="notes"
+        onValueChange={vi.fn()}
+        summaryState={null}
+      />,
+    );
+    expect(screen.queryByLabelText(/^summary /)).toBeNull();
+  });
+
+  // Standalone, the tabs draw their own rule. With a trailing action they are
+  // the last row of the meeting header, which already draws a full-bleed rule,
+  // so drawing one here too produced a visibly doubled line.
+  it("draws its own bottom rule only when it is not in the meeting header", () => {
     const { container: plain } = render(
       <MeetingWorkspaceTabs value="notes" onValueChange={vi.fn()} />,
     );
@@ -122,7 +156,7 @@ describe("meeting workspace tabs", () => {
         trailing={<button type="button">copy</button>}
       />,
     );
-    expect(withTrailing.querySelectorAll(".border-b")).toHaveLength(1);
+    expect(withTrailing.querySelectorAll(".border-b")).toHaveLength(0);
   });
 });
 

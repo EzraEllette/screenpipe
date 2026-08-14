@@ -5,6 +5,7 @@ name: Frontend Tests
 
 on:
   push:
+    branches: [main]
     paths:
       - 'apps/screenpipe-app-tauri/**/*.ts'
       - 'apps/screenpipe-app-tauri/**/*.tsx'
