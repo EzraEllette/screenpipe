@@ -471,6 +471,11 @@ struct HealthCheckResponse {
     last_ui_timestamp: Option<String>,
     #[serde(default)]
     frame_status: Option<String>,
+    /// Why vision is in `frame_status`. Absent on engines predating the
+    /// reason field, which is why every consumer below treats `None` as "no
+    /// information" and falls back to the old `frame_status` behavior.
+    #[serde(default)]
+    vision_reason: Option<String>,
     /// Capture-loop stage the engine last entered, and its age. Explains a
     /// `frame_status == "stale"` instead of leaving the incident with only a
     /// frozen clock. Absent on engines predating the stage marker.
@@ -577,20 +582,43 @@ fn capture_failure_signals(
     );
     let unrecovered_vision_failure = vision_progress.observe(health.pipeline.as_ref());
 
+    // An intentional pixel pause must never raise a capture-failure incident:
+    // it produces no frames by design and would otherwise alarm forever.
+    let vision_paused = vision_intentionally_paused(health);
+
     CaptureFailureSignals {
         audio,
-        vision: vision_status_failed
-            || (health.vision_db_write_stalled && unrecovered_vision_failure),
+        vision: !vision_paused
+            && (vision_status_failed
+                || (health.vision_db_write_stalled && unrecovered_vision_failure)),
         persistence: health.write_queue_degraded
             && (health.write_queue_consecutive_fatal >= WRITE_QUEUE_FAILURE_THRESHOLD
                 || health.write_queue_consecutive_contention >= WRITE_QUEUE_FAILURE_THRESHOLD),
     }
 }
 
+/// Vision is off because screenpipe turned it off, not because anything
+/// failed. The engine reports the distinction in `vision_reason` (#5808);
+/// engines predating that field report `None`, which keeps the old behavior.
+///
+/// Load-bearing for the notification path: with `disableScreenshots` set, no
+/// pixel frame ever lands, so `frame_status` sits at `stale` forever. Without
+/// this check that steady, intended state raises a capture-failure incident
+/// and tells the user to go fix a permission that is already granted.
+fn vision_intentionally_paused(health: &HealthCheckResponse) -> bool {
+    matches!(
+        health.vision_reason.as_deref(),
+        Some("disabled_by_setting")
+            | Some("no_displays_expected")
+            | Some("screenshots_disabled_by_config")
+            | Some("screenshots_disabled_by_power_profile")
+    )
+}
+
 /// Bare `frame_status == "stale"` — no unique frame AND no capture attempt for
 /// 60s. Debounced separately from hard failures; see `crate::stale_tier`.
 fn vision_frame_flow_stale(health: &HealthCheckResponse) -> bool {
-    health.frame_status.as_deref() == Some("stale")
+    health.frame_status.as_deref() == Some("stale") && !vision_intentionally_paused(health)
 }
 
 /// Recovery requires positive proof that both enabled raw-capture paths are
@@ -2095,6 +2123,7 @@ mod tests {
             last_audio_timestamp: None,
             last_ui_timestamp: None,
             frame_status: None,
+            vision_reason: None,
             loop_stage: None,
             loop_stage_age_secs: None,
             audio_status: None,
@@ -2122,6 +2151,7 @@ mod tests {
             last_audio_timestamp: None,
             last_ui_timestamp: None,
             frame_status: None,
+            vision_reason: None,
             loop_stage: None,
             loop_stage_age_secs: None,
             audio_status: None,
@@ -2414,6 +2444,73 @@ mod tests {
     }
 
     // ==================== recording-overlay signal tests ====================
+
+    /// #5808: with `disableScreenshots` set, no pixel frame ever lands, so
+    /// `frame_status` sits at `stale` forever. That steady, intended state
+    /// used to raise a capture-failure incident and point the user at a
+    /// permission that was already granted.
+    #[test]
+    fn an_intentional_pixel_pause_never_raises_a_capture_failure() {
+        for reason in [
+            "screenshots_disabled_by_config",
+            "screenshots_disabled_by_power_profile",
+            "disabled_by_setting",
+            "no_displays_expected",
+        ] {
+            let mut health = healthy_health();
+            health.frame_status = Some("stale".to_string());
+            health.vision_reason = Some(reason.to_string());
+            health.audio_status = Some("ok".to_string());
+
+            assert!(
+                !vision_frame_flow_stale(&health),
+                "{reason} must not enter the stale-tier notification path",
+            );
+            assert!(
+                !capture_failure_signals(&health, &mut VisionProgressTracker::default()).vision,
+                "{reason} must not be reported as a vision failure",
+            );
+        }
+    }
+
+    /// The pause must not mask a genuine fault either — including the case
+    /// where the engine has separately proven the writer is stuck.
+    #[test]
+    fn a_real_vision_fault_still_reports_while_reasons_are_present() {
+        let mut health = healthy_health();
+        health.frame_status = Some("stale".to_string());
+        health.vision_reason = Some("capture_stalled".to_string());
+        health.audio_status = Some("ok".to_string());
+        assert!(vision_frame_flow_stale(&health));
+
+        health.frame_status = Some("not_started".to_string());
+        assert!(capture_failure_signals(&health, &mut VisionProgressTracker::default()).vision);
+
+        let mut health = healthy_health();
+        health.frame_status = Some("stale".to_string());
+        health.vision_reason = Some("permission_denied".to_string());
+        health.audio_status = Some("ok".to_string());
+        assert!(vision_frame_flow_stale(&health));
+    }
+
+    /// Engines predating `vision_reason` send `None`; behavior must not change
+    /// for them, or upgrading the desktop app ahead of the engine would
+    /// silence real stalls.
+    #[test]
+    fn a_missing_vision_reason_keeps_the_previous_behavior() {
+        let mut health = healthy_health();
+        health.frame_status = Some("stale".to_string());
+        health.vision_reason = None;
+        health.audio_status = Some("ok".to_string());
+        assert!(vision_frame_flow_stale(&health));
+
+        health.frame_status = Some("not_started".to_string());
+        assert!(capture_failure_signals(&health, &mut VisionProgressTracker::default()).vision);
+
+        // An unrecognized future reason is also treated as no information.
+        health.vision_reason = Some("some_future_reason".to_string());
+        assert!(capture_failure_signals(&health, &mut VisionProgressTracker::default()).vision);
+    }
 
     #[test]
     fn transcription_backlog_is_not_a_recording_failure() {
