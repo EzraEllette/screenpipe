@@ -271,11 +271,17 @@ describe("useKeywordSearchStore search scheduling", () => {
 		).toEqual([566]);
 	});
 
-	it("keeps accessibility candidates instead of re-verifying them with screenshot OCR", async () => {
-		// Accessibility is the primary capture source and dominates real result
-		// sets. Gating it on a screenshot-OCR second opinion deleted correct results
-		// and competed with the recorder for the single shared capture OCR permit.
-		const candidates = Array.from({ length: 5 }, (_, index) => ({
+	it("filters only accessibility candidates without re-verifying screenshot OCR", async () => {
+		// The API still returns every source. The desktop UI filters accessibility
+		// locally while retaining OCR, hybrid, and legacy rows.
+		const sources: SearchMatch["text_source"][] = [
+			"accessibility",
+			"ocr",
+			"hybrid",
+			null,
+			"accessibility",
+		];
+		const candidates = sources.map((text_source, index) => ({
 			frame_id: index + 1,
 			timestamp: "2026-07-30T03:27:38.299898Z",
 			text_positions: [{
@@ -288,7 +294,7 @@ describe("useKeywordSearchStore search scheduling", () => {
 			confidence: 1,
 			text: "quarterly retention review",
 			url: "",
-			text_source: "accessibility" as const,
+			text_source,
 		}));
 		const requestedUrls: string[] = [];
 		vi.mocked(localFetch).mockImplementation((input) => {
@@ -305,19 +311,22 @@ describe("useKeywordSearchStore search scheduling", () => {
 
 		await useKeywordSearchStore.getState().searchKeywords("retention");
 
+		const state = useKeywordSearchStore.getState();
+		expect(state.searchResults.map((result) => result.frame_id)).toEqual([
+			2, 3, 4,
+		]);
 		expect(
-			useKeywordSearchStore
-				.getState()
-				.searchResults.map((result) => result.frame_id),
-		).toEqual([1, 2, 3, 4, 5]);
+			state.searchGroups.map((group) => group.representative.frame_id),
+		).toEqual([2, 3, 4]);
+		expect(state.lastCandidatePageSize).toBe(5);
 		expect(
 			requestedUrls.some((url) => url.includes("/text?persist=false")),
 		).toBe(false);
 	});
 
-	it("keeps a result whose match spans a larger element than any single position", async () => {
-		// Accessibility bounds are element-level: one box can cover a whole block of
-		// text. A coarse highlight is acceptable; deleting the row is not.
+	it("omits a semantic accessibility result with a coarse element box", async () => {
+		// Accessibility bounds are element-level: one box can cover a whole block
+		// or icon. The API result stays intact; this store is only the UI boundary.
 		const position = {
 			text: "a long accessibility block with the term buried inside it",
 			confidence: 1,
@@ -346,9 +355,7 @@ describe("useKeywordSearchStore search scheduling", () => {
 
 		await useKeywordSearchStore.getState().searchKeywords("unrelatedtoken");
 
-		const results = useKeywordSearchStore.getState().searchResults;
-		expect(results.map((result) => result.frame_id)).toEqual([99]);
-		expect(results[0].text_positions).toEqual([position]);
+		expect(useKeywordSearchStore.getState().searchResults).toEqual([]);
 	});
 });
 

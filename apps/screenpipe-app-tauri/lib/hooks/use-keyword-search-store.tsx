@@ -25,10 +25,10 @@ export interface SearchMatch {
 	confidence: number;
 	text: string;
 	url: string;
-	// "accessibility" (OS-native tree, primary) or "ocr" (fallback for
-	// terminals/canvas/weak a11y). Null for legacy rows captured before
-	// the field was tracked.
-	text_source?: "accessibility" | "ocr" | null;
+	// "accessibility" (OS-native tree, primary), "ocr" (fallback for
+	// terminals/canvas/weak a11y), or "hybrid" (thin tree supplemented by
+	// OCR). Null for legacy rows captured before the field was tracked.
+	text_source?: "accessibility" | "ocr" | "hybrid" | null;
 }
 
 export interface SearchMatchGroup {
@@ -157,30 +157,27 @@ export function visibleMatchingPositions(
 /**
  * Narrow each result's highlight to the positions that match the query.
  *
- * A backend match is authoritative. Accessibility is the primary capture
- * source, so a result is never dropped for failing a secondary check against a
- * fallback source. Screenshot OCR is deliberately not consulted here: it ran on
- * the single capture-shared permit, competed with the recorder, and silently
- * deleted correct results whose text was captured from the accessibility tree
- * but was not legible as pixels.
- *
- * When no individual position matches, the token sits inside a larger element
- * whose bounds cover the whole block. The result is kept with its original
- * positions and highlights coarsely rather than disappearing.
+ * The API remains authoritative and continues to return accessibility matches,
+ * but the desktop search UI temporarily omits them. AX labels can describe icon
+ * buttons or whole containers without rendering those words in the screenshot,
+ * and their element bounds are not trustworthy pixel highlights. Screenshot OCR
+ * is not run here because it shares the recorder's single OCR permit. Since
+ * text_source is frame-level, this is a temporary UI cutoff rather than exact
+ * per-query match provenance.
  */
 export function narrowSearchMatchHighlights(
 	results: SearchMatch[],
 	query: string,
 ): SearchMatch[] {
-	return results.map((result) => {
-		const matchingPositions = visibleMatchingPositions(
-			result.text_positions,
-			query,
-		);
-		return matchingPositions.length > 0
-			? { ...result, text_positions: matchingPositions }
-			: result;
-	});
+	return results
+		.filter((result) => result.text_source !== "accessibility")
+		.map((result) => {
+			const matchingPositions = visibleMatchingPositions(
+				result.text_positions,
+				query,
+			);
+			return { ...result, text_positions: matchingPositions };
+		});
 }
 
 export const useKeywordSearchStore = create<KeywordSearchState>((set, get) => ({
@@ -396,13 +393,13 @@ export const useKeywordSearchStore = create<KeywordSearchState>((set, get) => ({
 
 			const rawGroups: SearchMatchGroup[] = await response.json();
 			loadUiEventsAfterKeyword();
-			const pageGroups = rawGroups.map((group) => ({
-				...group,
-				representative: narrowSearchMatchHighlights(
+			const pageGroups: SearchMatchGroup[] = rawGroups.flatMap((group) => {
+				const [representative] = narrowSearchMatchHighlights(
 					[group.representative],
 					query,
-				)[0],
-			}));
+				);
+				return representative ? [{ ...group, representative }] : [];
+			});
 
 			if (get().activeRequestId === requestId) {
 				const { unavailableFrameIds } = get();
