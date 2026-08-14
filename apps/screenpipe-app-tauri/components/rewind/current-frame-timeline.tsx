@@ -402,6 +402,7 @@ export const CurrentFrameTimeline: FC<CurrentFrameTimelineProps> = ({
 
 	const { nativeLiveTextActive } = useLiveText({
 		debouncedFrame,
+		isFrameReady: !isLoading && !hasError,
 		renderedImageInfo,
 		isSnapshotFrame,
 		isSearchModalOpen,
