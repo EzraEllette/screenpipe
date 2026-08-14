@@ -47,6 +47,7 @@ export const NON_SK_ENT_TOKEN: string = tokensFile.non_sk_ent_token;
 export const DEVICE_ROWS: Array<{
   device_id: string;
   hostname: string;
+  member_email: string | null;
   platform: string;
   app_version: string;
   last_seen_at: string;
