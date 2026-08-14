@@ -35,6 +35,7 @@
 
 pub mod actions;
 pub mod anim;
+pub mod drag_stage;
 pub mod layout;
 pub mod notification;
 pub mod state;

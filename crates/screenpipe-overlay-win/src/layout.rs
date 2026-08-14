@@ -262,11 +262,9 @@ pub fn compute(state: &OverlayState) -> Layout {
     let mut placed: Vec<(Block, Rect)> = Vec::new();
     for (block, w, h) in order {
         let x = match state.anchor {
-            Anchor::TopLeft | Anchor::MiddleLeft | Anchor::BottomLeft => SHADOW_PAD,
-            Anchor::TopRight | Anchor::MiddleRight | Anchor::BottomRight => {
-                SHADOW_PAD + content_w - w
-            }
-            _ => SHADOW_PAD + (content_w - w) / 2.0,
+            Anchor::LeftCenter => SHADOW_PAD,
+            Anchor::RightCenter => SHADOW_PAD + content_w - w,
+            Anchor::TopCenter | Anchor::BottomCenter => SHADOW_PAD + (content_w - w) / 2.0,
         };
         placed.push((block, Rect::new(x, y, w, h)));
         y += h + gap;
@@ -495,12 +493,12 @@ mod tests {
         let mut s = hovered();
         s.notification = parse(r#"{"id":"m","title":"meeting started"}"#).ok();
 
-        s.anchor = Anchor::BottomLeft;
+        s.anchor = Anchor::LeftCenter;
         let l = compute(&s);
         assert_eq!(l.primary.x, SHADOW_PAD);
         assert_eq!(l.notification.unwrap().x, SHADOW_PAD);
 
-        s.anchor = Anchor::BottomRight;
+        s.anchor = Anchor::RightCenter;
         let l = compute(&s);
         assert_eq!(l.primary.right(), l.window.w - SHADOW_PAD);
         assert_eq!(l.notification.unwrap().right(), l.window.w - SHADOW_PAD);
@@ -571,7 +569,7 @@ mod tests {
         // pointer already is. This asserts the displacement so the guard in
         // `is_notification_at` cannot be dropped as redundant.
         let mut s = OverlayState {
-            anchor: Anchor::BottomRight,
+            anchor: Anchor::BottomCenter,
             meeting_active: true,
             transcript: vec![TranscriptItem {
                 speaker: "louis".into(),
@@ -699,7 +697,7 @@ mod tests {
     #[test]
     fn transcript_stacks_above_the_dock_when_pinned_at_the_bottom() {
         let s = OverlayState {
-            anchor: Anchor::BottomRight,
+            anchor: Anchor::BottomCenter,
             meeting_active: true,
             transcript_pinned: true,
             transcript: vec![TranscriptItem {

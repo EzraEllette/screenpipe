@@ -13,6 +13,7 @@
 import type { MutableRefObject } from "react";
 import {
   BASE_COLLAPSED_CORNER_RADIUS,
+  BASE_DRAG_PAD_BORDER_WIDTH,
   DRAG_PAD_ACTIVE_SCALE,
   DRAG_PAD_BORDER,
   DRAG_PAD_BORDER_ACTIVE,
@@ -31,7 +32,6 @@ type DragStageProps = {
 };
 
 export function DragStage({ stage, overlayScale, ghostRef }: DragStageProps) {
-  const padRadius = BASE_COLLAPSED_CORNER_RADIUS * overlayScale + 2;
   const pillRadius = BASE_COLLAPSED_CORNER_RADIUS * overlayScale;
 
   return (
@@ -62,13 +62,20 @@ export function DragStage({ stage, overlayScale, ghostRef }: DragStageProps) {
               top: rect.y,
               width: rect.width,
               height: rect.height,
-              borderRadius: `${padRadius}px`,
-              border: `1px solid rgba(255, 255, 255, ${
+              // The rect from `dragPadRect` is the whole target, ring included,
+              // the way a CALayer border is drawn inside its bounds. Without
+              // this the ring would grow the circle past the geometry the snap
+              // was computed from.
+              boxSizing: "border-box",
+              // A circle, so the four targets read as places to drop into
+              // rather than as four copies of the pill being dragged.
+              borderRadius: "50%",
+              border: `${BASE_DRAG_PAD_BORDER_WIDTH * overlayScale}px solid rgba(255, 255, 255, ${
                 isTarget ? DRAG_PAD_BORDER_ACTIVE : DRAG_PAD_BORDER
               })`,
-              background: `rgba(255, 255, 255, ${
-                isTarget ? DRAG_PAD_FILL_ACTIVE : DRAG_PAD_FILL
-              })`,
+              background: isTarget
+                ? `rgba(255, 255, 255, ${DRAG_PAD_FILL_ACTIVE})`
+                : `rgba(0, 0, 0, ${DRAG_PAD_FILL})`,
               // Scale about the pad's own centre so the frame stays the
               // authoritative rect and the highlight is purely visual.
               transform: `scale(${isTarget ? DRAG_PAD_ACTIVE_SCALE : 1})`,

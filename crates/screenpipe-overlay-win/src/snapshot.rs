@@ -13,11 +13,11 @@
 use windows::core::{Interface, Result, GUID, PCWSTR};
 use windows::Win32::Foundation::GENERIC_WRITE;
 use windows::Win32::Graphics::Direct2D::Common::D2D_SIZE_U;
-use windows::Win32::Graphics::Direct2D::Common::{D2D1_COLOR_F, D2D_RECT_F};
+use windows::Win32::Graphics::Direct2D::Common::{D2D1_COLOR_F, D2D_POINT_2F, D2D_RECT_F};
 use windows::Win32::Graphics::Direct2D::{
-    ID2D1RenderTarget, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_BITMAP_PROPERTIES,
+    ID2D1RenderTarget, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_BITMAP_PROPERTIES, D2D1_ELLIPSE,
     D2D1_FEATURE_LEVEL_DEFAULT, D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_DEFAULT,
-    D2D1_RENDER_TARGET_USAGE_NONE,
+    D2D1_RENDER_TARGET_USAGE_NONE, D2D1_ROUNDED_RECT,
 };
 use windows::Win32::Graphics::Gdi::{
     BitBlt, CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC, ReleaseDC,
@@ -31,9 +31,10 @@ use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
 use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
 
 use crate::anim::Equalizer;
+use crate::drag_stage;
 use crate::layout;
 use crate::render::{premultiplied_bgra, Renderer};
-use crate::state::OverlayState;
+use crate::state::{Anchor, OverlayState};
 
 /// What sits behind the overlay in a snapshot.
 pub enum Backdrop {
@@ -171,6 +172,144 @@ unsafe fn encode_png(
     frame.WriteSource(source, &rect)?;
     frame.Commit()?;
     encoder.Commit()
+}
+
+/// Render the drag stage — the dim and the four landing targets — over a
+/// desktop-sized canvas, with the held pill drawn where the cursor would be.
+///
+/// The stage only exists while a button is held, and screenshotting it on a real
+/// machine means covering the user's screen, so this draws it offscreen instead.
+/// Same geometry the live window uses: `drag_stage::targets`, so the picture
+/// cannot claim a layout the code would not produce.
+pub fn write_stage_png(
+    renderer: &Renderer,
+    size: (u32, u32),
+    scale: f32,
+    pill_at: (f32, f32),
+    backdrop: &Backdrop,
+    desktop: Option<&DesktopShot>,
+    path: &str,
+) -> Result<(u32, u32)> {
+    let (w, h) = size;
+    let area = layout::Rect::new(0.0, 0.0, w as f32 / scale, h as f32 / scale);
+    let pill = (
+        layout::BASE_COLLAPSED_W * scale,
+        layout::BASE_COLLAPSED_H * scale,
+    );
+    // The same call the window makes on every pointer move.
+    let active = Anchor::nearest(pill_at.0 / area.w, pill_at.1 / area.h);
+
+    unsafe {
+        let wic: IWICImagingFactory =
+            CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)?;
+        let target =
+            wic.CreateBitmap(w, h, &GUID_WICPixelFormat32bppPBGRA, WICBitmapCacheOnLoad)?;
+        let props = D2D1_RENDER_TARGET_PROPERTIES {
+            r#type: D2D1_RENDER_TARGET_TYPE_DEFAULT,
+            pixelFormat: premultiplied_bgra(),
+            dpiX: 96.0,
+            dpiY: 96.0,
+            usage: D2D1_RENDER_TARGET_USAGE_NONE,
+            minLevel: D2D1_FEATURE_LEVEL_DEFAULT,
+        };
+        let rt: ID2D1RenderTarget = renderer
+            .factory
+            .CreateWicBitmapRenderTarget(&target, &props)?;
+        renderer.invalidate_device();
+
+        rt.BeginDraw();
+        match backdrop {
+            Backdrop::Transparent => rt.Clear(Some(&solid(0.0, 0.0, 0.0, 0.0))),
+            Backdrop::Solid([r, g, b]) => rt.Clear(Some(&solid(*r, *g, *b, 1.0))),
+            Backdrop::Desktop => {
+                rt.Clear(Some(&solid(0.11, 0.12, 0.14, 1.0)));
+                if let Some(shot) = desktop {
+                    let (cw, ch, bytes) = shot.crop(0, 0, w.min(shot.width), h.min(shot.height));
+                    let bmp = rt.CreateBitmap(
+                        D2D_SIZE_U {
+                            width: cw,
+                            height: ch,
+                        },
+                        Some(bytes.as_ptr() as *const _),
+                        cw * 4,
+                        &D2D1_BITMAP_PROPERTIES {
+                            pixelFormat: premultiplied_bgra(),
+                            dpiX: 96.0,
+                            dpiY: 96.0,
+                        },
+                    )?;
+                    rt.DrawBitmap(
+                        &bmp,
+                        Some(&D2D_RECT_F {
+                            left: 0.0,
+                            top: 0.0,
+                            right: w as f32,
+                            bottom: h as f32,
+                        }),
+                        1.0,
+                        D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+                        None,
+                    );
+                }
+            }
+        }
+
+        rt.Clear(Some(&solid(0.0, 0.0, 0.0, drag_stage::STAGE_DIM)));
+        for t in drag_stage::targets(area, pill, 6.0, scale, Some(active)) {
+            let grow = if t.active {
+                drag_stage::TARGET_ACTIVE_SCALE
+            } else {
+                1.0
+            };
+            let radius = t.rect.w / 2.0 * grow;
+            let ellipse = D2D1_ELLIPSE {
+                point: D2D_POINT_2F {
+                    x: t.rect.x + t.rect.w / 2.0,
+                    y: t.rect.y + t.rect.h / 2.0,
+                },
+                radiusX: radius,
+                radiusY: radius,
+            };
+            let (v, fill, border) = if t.active {
+                (
+                    1.0,
+                    drag_stage::TARGET_FILL_ACTIVE,
+                    drag_stage::TARGET_BORDER_ACTIVE,
+                )
+            } else {
+                (0.0, drag_stage::TARGET_FILL, drag_stage::TARGET_BORDER)
+            };
+            let b = rt.CreateSolidColorBrush(&solid(v, v, v, fill), None)?;
+            rt.FillEllipse(&ellipse, &b);
+            let b = rt.CreateSolidColorBrush(&solid(1.0, 1.0, 1.0, border), None)?;
+            rt.DrawEllipse(&ellipse, &b, drag_stage::BASE_TARGET_BORDER * scale, None);
+        }
+
+        // The pill under the cursor, so the shot shows what is being moved.
+        let held = D2D_RECT_F {
+            left: pill_at.0 - pill.0 / 2.0,
+            top: pill_at.1 - pill.1 / 2.0,
+            right: pill_at.0 + pill.0 / 2.0,
+            bottom: pill_at.1 + pill.1 / 2.0,
+        };
+        let b = rt.CreateSolidColorBrush(&solid(0.0, 0.0, 0.0, 0.88), None)?;
+        rt.FillRoundedRectangle(
+            &D2D1_ROUNDED_RECT {
+                rect: held,
+                radiusX: layout::BASE_CORNER * scale,
+                radiusY: layout::BASE_CORNER * scale,
+            },
+            &b,
+        );
+
+        rt.EndDraw(None, None)?;
+        encode_png(&wic, &target.cast()?, w, h, path)?;
+    }
+    Ok((w, h))
+}
+
+fn solid(r: f32, g: f32, b: f32, a: f32) -> D2D1_COLOR_F {
+    D2D1_COLOR_F { r, g, b, a }
 }
 
 /// Render one overlay state to a PNG. `pad` adds breathing room around the
