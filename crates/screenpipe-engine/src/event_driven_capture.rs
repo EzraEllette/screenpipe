@@ -4577,6 +4577,24 @@ mod tests {
     }
 
     #[test]
+    fn reduce_drained_scroll_stop_survives_a_capped_burst_batch() {
+        // The recorder caps a burst at SCROLL_BURST_MAX_CORR_IDS (512) and
+        // ships the survivors in one message. That whole batch must reduce
+        // to a single ScrollStop with every id intact, otherwise the cap
+        // would just move the loss from the tracker into the reducer.
+        let ids: Vec<crate::frame_linker::CorrelationId> = (1..=512).collect();
+        let drained = [CaptureTriggerMsg::with_correlations(
+            CaptureTrigger::ScrollStop,
+            ids.clone(),
+        )];
+
+        let (trigger, corrs) = reduce_drained_triggers(drained, false, false);
+
+        assert_eq!(trigger, Some(CaptureTrigger::ScrollStop));
+        assert_eq!(corrs, ids);
+    }
+
+    #[test]
     fn reduce_drained_keeps_checkpoint_over_trailing_click() {
         let drained = vec![
             CaptureTriggerMsg::with_correlation(CaptureTrigger::Clipboard, 1),
