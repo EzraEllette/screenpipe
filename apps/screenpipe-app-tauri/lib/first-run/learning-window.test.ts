@@ -589,15 +589,22 @@ describe("a window that expired while nothing was mounted", () => {
     seedExpiredLearning();
     const state = readLearningWindow();
     expect(state.phase).toBe("empty");
-    expect(state.emptyReason).toBe("expired_unreported");
+    // Still `unknown` on purpose: the hook re-derives the real engine reason
+    // from the pending flag, so rehydration must not invent a user-visible
+    // state of its own.
+    expect(state.emptyReason).toBe("unknown");
     expect(state.pendingEmptyReport).toBe(true);
   });
 
-  it("distinguishes 'nobody looked' from 'we looked and could not tell'", () => {
-    // `unknown` means the engine was asked and had no answer. Folding an
-    // unreported expiry into it makes the two indistinguishable downstream.
+  it("flags the settle rather than inventing a new user-visible reason", () => {
+    // A rehydrated window must reach the same copy a ceiling-settled one does.
+    // An "expired while closed" state replaced an actionable engine reason
+    // with a shrug and broke the existing first-run E2E, which asserts the
+    // copy names something the user can act on.
     seedExpiredLearning();
-    expect(readLearningWindow().emptyReason).not.toBe("unknown");
+    const state = readLearningWindow();
+    expect(state.pendingEmptyReport).toBe(true);
+    expect(state.emptyReason).toBe("unknown");
   });
 
   it("clears the flag exactly once and is safe to call on every mount", () => {

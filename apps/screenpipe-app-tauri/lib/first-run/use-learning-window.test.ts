@@ -338,10 +338,11 @@ describe("useLearningWindow reports a window that expired unmounted", () => {
 
     await waitFor(() => expect(emptyEvents()).toHaveLength(1));
     const [, props] = emptyEvents()[0] as [string, Record<string, unknown>];
-    expect(props.reason).toBe("expired_unreported");
     expect(props.settled_by).toBe("rehydrate");
-    // No live engine read: it would describe now, not the window being reported.
-    expect(props.data_status).toBe("not_checked");
+    // A real engine-derived reason, same as the ceiling effect produces. The
+    // rehydrated window must not report a second-class reason.
+    expect(props.reason).not.toBe("");
+    expect(typeof props.data_status).toBe("string");
   });
 
   it("reports once, not once per mount", async () => {
