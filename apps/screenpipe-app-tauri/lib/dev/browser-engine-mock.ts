@@ -103,10 +103,20 @@ export function mockLocalApiResponse(
     return Response.json([]);
   }
   if (url.pathname === "/tags/autocomplete") return Response.json([]);
+  // Receipts reads `windows` straight off this body without validating it, so
+  // the harness has to return the real shape rather than an empty object.
+  if (url.pathname === "/activity-summary") {
+    return Response.json({ windows: [], total_active_seconds: 0 });
+  }
   if (url.pathname === "/meetings/status") {
     return Response.json({ active: false, manualActive: false });
   }
-  if (url.pathname === "/meetings") return Response.json([]);
+  // One finished, synthetic meeting so the meeting note surface can be opened
+  // and screenshotted in `bun run dev:web` without pointing the harness at a
+  // real database. Content is invented; do not make it look like real capture.
+  if (url.pathname === "/meetings") {
+    return Response.json(scenario === "empty" ? [] : [mockMeeting()]);
+  }
   if (url.pathname === "/memories") return Response.json(emptyPage);
   if (url.pathname === "/artifacts") {
     return Response.json({ ...emptyPage, sources: [] });
@@ -131,6 +141,33 @@ export function mockLocalApiResponse(
   if (method === "DELETE") return Response.json({ success: true });
   if (method !== "GET") return Response.json({ success: true });
   return Response.json(scenario === "empty" ? emptyPage : { data: [] });
+}
+
+// Invented content only. This exists so the meeting note surface renders in
+// the browser harness; it must never be mistaken for captured data.
+function mockMeeting() {
+  const start = new Date(Date.now() - 75 * 60 * 1000);
+  const end = new Date(start.getTime() + 21 * 60 * 1000);
+  return {
+    id: 1,
+    meeting_start: start.toISOString(),
+    meeting_end: end.toISOString(),
+    meeting_app: "google meet",
+    title: "sample meeting",
+    attendees: JSON.stringify(["sample person", "another person"]),
+    note: [
+      "first note line from the sample meeting",
+      "",
+      "second note line, long enough to show the reading measure the note",
+      "editor uses for body text",
+      "",
+      "## Summary",
+      "",
+      "A sample summary so the summary tab has something to render.",
+    ].join("\n"),
+    detection_source: "auto",
+    created_at: start.toISOString(),
+  };
 }
 
 function isLocalEngineUrl(url: URL, apiPort: number): boolean {

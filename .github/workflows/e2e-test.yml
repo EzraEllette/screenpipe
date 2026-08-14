@@ -15,7 +15,12 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+    types: [opened, synchronize, reopened, labeled]
   workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && github.sha || github.ref }}
@@ -24,8 +29,38 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
+  changes:
+    name: Route PR E2E
+    runs-on: ubuntu-latest
+    outputs:
+      desktop: ${{ steps.filter.outputs.desktop }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Detect desktop runtime changes
+        id: filter
+        if: github.event_name == 'pull_request'
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            desktop:
+              - 'apps/screenpipe-app-tauri/**'
+              - 'crates/**'
+              - 'packages/cli/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - '.cargo/**'
+              - '.github/actions/**'
+              - '.github/scripts/**'
+              - '.github/workflows/e2e-test.yml'
+
   windows-e2e-test:
-    name: Windows E2E Tests
+    name: Windows E2E Tests (run)
+    needs: changes
+    if: >-
+      github.event_name != 'pull_request' ||
+      needs.changes.outputs.desktop == 'true' ||
+      contains(github.event.pull_request.labels.*.name, 'full-ci')
     runs-on: windows-2022
     continue-on-error: true
     timeout-minutes: 120
@@ -291,7 +326,12 @@ jobs:
         path: ./apps/screenpipe-app-tauri/.e2e
 
   linux-e2e-test:
-    name: Linux E2E Tests
+    name: Linux E2E Tests (run)
+    needs: changes
+    if: >-
+      github.event_name != 'pull_request' ||
+      needs.changes.outputs.desktop == 'true' ||
+      contains(github.event.pull_request.labels.*.name, 'full-ci')
     runs-on: ubuntu-latest
     # 90 was set when the suite was ~70 specs; it is 112 now, and the job has
     # been cancelled at exactly 90m on every run since 2026-08-07 — which
@@ -631,7 +671,12 @@ jobs:
         path: ./apps/screenpipe-app-tauri/.e2e
 
   linux-wayland-e2e-test:
-    name: Linux Wayland E2E Tests
+    name: Linux Wayland E2E Tests (run)
+    needs: changes
+    if: >-
+      github.event_name != 'pull_request' ||
+      needs.changes.outputs.desktop == 'true' ||
+      contains(github.event.pull_request.labels.*.name, 'full-ci')
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
@@ -777,7 +822,12 @@ jobs:
         if-no-files-found: ignore
 
   macos-e2e-test:
-    name: macOS E2E Tests
+    name: macOS E2E Tests (run)
+    needs: changes
+    if: >-
+      github.event_name != 'pull_request' ||
+      needs.changes.outputs.desktop == 'true' ||
+      contains(github.event.pull_request.labels.*.name, 'full-ci')
     # Keep this pinned off macos-latest until GitHub's latest image has a
     # complete clang runtime again. macos-14 is too old for permission-flow's
     # Swift 6 package, while the current latest image advertises an Xcode 26.5
@@ -922,3 +972,63 @@ jobs:
         name: macos-screenpipe-data
         include-hidden-files: true
         path: ./apps/screenpipe-app-tauri/.e2e
+
+  windows-e2e-gate:
+    name: Windows E2E Tests
+    needs: [changes, windows-e2e-test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify routed check
+        env:
+          ROUTER_RESULT: ${{ needs.changes.result }}
+          SHOULD_RUN: ${{ github.event_name != 'pull_request' || needs.changes.outputs.desktop == 'true' || contains(github.event.pull_request.labels.*.name, 'full-ci') }}
+          CHECK_RESULT: ${{ needs.windows-e2e-test.result }}
+        run: |
+          test "$ROUTER_RESULT" = success
+          if [ "$SHOULD_RUN" = true ]; then test "$CHECK_RESULT" = success; fi
+
+  linux-e2e-gate:
+    name: Linux E2E Tests
+    needs: [changes, linux-e2e-test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify routed check
+        env:
+          ROUTER_RESULT: ${{ needs.changes.result }}
+          SHOULD_RUN: ${{ github.event_name != 'pull_request' || needs.changes.outputs.desktop == 'true' || contains(github.event.pull_request.labels.*.name, 'full-ci') }}
+          CHECK_RESULT: ${{ needs.linux-e2e-test.result }}
+        run: |
+          test "$ROUTER_RESULT" = success
+          if [ "$SHOULD_RUN" = true ]; then test "$CHECK_RESULT" = success; fi
+
+  linux-wayland-e2e-gate:
+    name: Linux Wayland E2E Tests
+    needs: [changes, linux-wayland-e2e-test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify routed check
+        env:
+          ROUTER_RESULT: ${{ needs.changes.result }}
+          SHOULD_RUN: ${{ github.event_name != 'pull_request' || needs.changes.outputs.desktop == 'true' || contains(github.event.pull_request.labels.*.name, 'full-ci') }}
+          CHECK_RESULT: ${{ needs.linux-wayland-e2e-test.result }}
+        run: |
+          test "$ROUTER_RESULT" = success
+          if [ "$SHOULD_RUN" = true ]; then test "$CHECK_RESULT" = success; fi
+
+  macos-e2e-gate:
+    name: macOS E2E Tests
+    needs: [changes, macos-e2e-test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify routed check
+        env:
+          ROUTER_RESULT: ${{ needs.changes.result }}
+          SHOULD_RUN: ${{ github.event_name != 'pull_request' || needs.changes.outputs.desktop == 'true' || contains(github.event.pull_request.labels.*.name, 'full-ci') }}
+          CHECK_RESULT: ${{ needs.macos-e2e-test.result }}
+        run: |
+          test "$ROUTER_RESULT" = success
+          if [ "$SHOULD_RUN" = true ]; then test "$CHECK_RESULT" = success; fi

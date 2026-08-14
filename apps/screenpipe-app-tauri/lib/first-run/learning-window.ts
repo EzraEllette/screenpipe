@@ -67,12 +67,6 @@ export type FirstRunEmptyReason =
   | "no_frames_captured"
   | "below_frame_floor"
   | "single_app_below_floor"
-  // The window outlived its ceiling while nothing was mounted to settle it:
-  // the app was closed, or the banner's subtree went away mid-wait. Distinct
-  // from `unknown`, which means "we looked and could not tell". Here nobody
-  // ever looked, and folding the two together hid the largest first-run
-  // failure there is.
-  | "expired_unreported"
   | "unknown";
 
 export type FirstRunCapturedApp = {
@@ -569,7 +563,12 @@ function normalize(value: unknown): FirstRunLearningState {
         ...EMPTY_STATE,
         phase: "empty",
         startedAt,
-        emptyReason: "expired_unreported",
+        // Deliberately still `unknown`, not a new reason. The hook re-derives
+        // the real engine reason from `pendingEmptyReport` below, exactly as
+        // the ceiling effect would have. Inventing a user-visible "timed out
+        // while closed" state here replaced an actionable reason with a
+        // shrug, which is the opposite of why these reasons exist.
+        emptyReason: "unknown",
         pendingEmptyReport: true,
       };
     }
@@ -598,7 +597,12 @@ function normalize(value: unknown): FirstRunLearningState {
       phase: "empty",
       startedAt,
       emptyReason: "unknown",
-      pendingEmptyReport: true,
+      // NOT flagged for reporting, unlike the expired-learning path above. A
+      // `writing` window that lost its process may still have an in-flight
+      // resolve that is about to seed a chat; re-deriving and rewriting state
+      // from here races it and can clear the chat id out from under a summary
+      // that actually landed.
+      pendingEmptyReport: false,
     };
   }
 

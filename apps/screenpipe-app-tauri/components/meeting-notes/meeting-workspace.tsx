@@ -27,6 +27,12 @@ export const MEETING_READING_COLUMN_CLASS = "w-full";
 export const MEETING_QUIET_CONTROL_CLASS =
   "rounded-none border-0 bg-transparent text-muted-foreground transition-colors hover:bg-transparent hover:text-foreground focus-visible:text-foreground";
 
+// Actions that sit on the tab rule share the tabs' own geometry so the row
+// reads as one band instead of a strip of floating boxes. Shared with the note
+// view now that the meeting actions live here rather than in a footer.
+export const MEETING_RULE_ACTION_CLASS =
+  "flex h-11 shrink-0 items-center gap-2 border-l border-border font-mono text-[11px] uppercase tracking-[0.12em] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:z-10 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-foreground disabled:text-muted-foreground/50 disabled:hover:bg-transparent";
+
 const MEETING_TABS: ReadonlyArray<{
   value: MeetingWorkspaceTab;
   label: string;
@@ -44,7 +50,9 @@ export function MeetingWorkspaceTabs({
 }: {
   value: MeetingWorkspaceTab;
   onValueChange: (value: MeetingWorkspaceTab) => void;
-  summaryState?: "working" | "ready" | "attention" | null;
+  // Only states that want something from the reader get a dot. "finished
+  // normally" is not one of them.
+  summaryState?: "working" | "attention" | null;
   // Rendered on the same rule as the tabs but outside the tablist, so a
   // note-wide action stays reachable from every tab without becoming a
   // fourth pseudo-tab for arrow-key navigation.
@@ -111,8 +119,8 @@ export function MeetingWorkspaceTabs({
                 aria-label={`summary ${state}`}
                 className={cn(
                   "h-1.5 w-1.5 shrink-0",
-                  state === "working" && "animate-pulse bg-current",
-                  state === "ready" && "bg-current",
+                  state === "working" &&
+                    "animate-pulse bg-current motion-reduce:animate-none",
                   state === "attention" && "bg-amber-500",
                 )}
               />
@@ -125,8 +133,11 @@ export function MeetingWorkspaceTabs({
 
   if (!trailing) return tablist;
 
+  // No border here: this row is the last thing in the meeting header, which
+  // already draws a full-bleed rule underneath it. Both together read as a
+  // doubled line, one inset and one not.
   return (
-    <div className="flex min-w-0 items-stretch border-b border-border">
+    <div className="flex min-w-0 items-stretch">
       {tablist}
       <div className="ml-auto flex shrink-0 items-stretch">{trailing}</div>
     </div>
