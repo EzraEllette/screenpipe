@@ -119,17 +119,24 @@ pub fn ffmpeg_cmd(path: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
     }
 }
 
-/// Create a `tokio::process::Command` for ffmpeg with `CREATE_NO_WINDOW` on Windows.
+/// Create a `tokio::process::Command` for ffmpeg with cancellation-safe defaults.
+///
+/// `kill_on_drop` is required because most callers use `Command::output`. If the
+/// future running that command is cancelled (request disconnect, timeout, or
+/// shutdown), Tokio otherwise detaches the child and leaves FFmpeg running.
 pub fn ffmpeg_cmd_async(path: impl AsRef<std::ffi::OsStr>) -> tokio::process::Command {
     #[cfg(not(windows))]
     {
-        tokio::process::Command::new(path)
+        let mut cmd = tokio::process::Command::new(path);
+        cmd.kill_on_drop(true);
+        cmd
     }
 
     #[cfg(windows)]
     {
         let mut cmd = tokio::process::Command::new(path);
         cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        cmd.kill_on_drop(true);
         cmd
     }
 }
