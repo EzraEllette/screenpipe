@@ -301,23 +301,23 @@ pub enum CaptureTrigger {
     Manual,
 }
 
-/// A trigger plus the `correlation_id` of the originating `ui_events` row,
-/// if any. The recorder assigns the correlation id when forwarding events
-/// that warrant a capture; the capture loop accumulates them across
-/// debounced triggers and reports the full set back through the frame
-/// linker once the resulting frame lands. Internally-generated triggers
-/// (Idle, VisualChange, Manual) leave `correlation_id` as `None`.
+/// A trigger plus the correlation IDs of its originating `ui_events` rows.
+/// Most recorder events carry one ID; a settled scroll burst carries every
+/// row ID atomically so a bounded broadcast channel cannot lose part of the
+/// burst. The capture loop accumulates IDs across debounced triggers and
+/// reports the full set back through the frame linker once the resulting
+/// frame lands. Internally-generated triggers carry an empty vector.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CaptureTriggerMsg {
     pub trigger: CaptureTrigger,
-    pub correlation_id: Option<crate::frame_linker::CorrelationId>,
+    pub correlation_ids: Vec<crate::frame_linker::CorrelationId>,
 }
 
 impl CaptureTriggerMsg {
     pub fn new(trigger: CaptureTrigger) -> Self {
         Self {
             trigger,
-            correlation_id: None,
+            correlation_ids: Vec::new(),
         }
     }
     pub fn with_correlation(
@@ -326,7 +326,17 @@ impl CaptureTriggerMsg {
     ) -> Self {
         Self {
             trigger,
-            correlation_id: Some(id),
+            correlation_ids: vec![id],
+        }
+    }
+
+    pub fn with_correlations(
+        trigger: CaptureTrigger,
+        correlation_ids: Vec<crate::frame_linker::CorrelationId>,
+    ) -> Self {
+        Self {
+            trigger,
+            correlation_ids,
         }
     }
 }
@@ -360,11 +370,7 @@ fn drain_pending_corr_ids(
     let mut out = Vec::new();
     loop {
         match trigger_rx.try_recv() {
-            Ok(msg) => {
-                if let Some(corr) = msg.correlation_id {
-                    out.push(corr);
-                }
-            }
+            Ok(msg) => out.extend(msg.correlation_ids),
             Err(broadcast::error::TryRecvError::Empty)
             | Err(broadcast::error::TryRecvError::Closed) => break,
             Err(broadcast::error::TryRecvError::Lagged(_)) => {
@@ -402,9 +408,7 @@ where
     let mut trigger: Option<CaptureTrigger> = None;
     let mut correlation_ids = Vec::new();
     for msg in msgs {
-        if let Some(corr) = msg.correlation_id {
-            correlation_ids.push(corr);
-        }
+        correlation_ids.extend(msg.correlation_ids);
         let candidate_priority = trigger_reduce_priority(&msg.trigger);
         let current_priority = trigger.as_ref().map(trigger_reduce_priority).unwrap_or(0);
         if trigger.is_none() || candidate_priority >= current_priority {
@@ -678,8 +682,9 @@ pub type TriggerReceiver = broadcast::Receiver<CaptureTriggerMsg>;
 
 /// Broadcast buffer for capture triggers. Sized to absorb a typing
 /// burst (Arc/Claude routinely emit 100+ Text/Click events in <200ms)
-/// while one monitor is mid-screenshot (250-800ms blocking). At 32B per
-/// `CaptureTriggerMsg` this is ~128KB total. Smaller buffers cause
+/// while one monitor is mid-screenshot (250-800ms blocking). The buffer
+/// remains modest for ordinary one-ID messages, while batched scroll IDs stay
+/// atomic within one slot. Smaller buffers cause
 /// `broadcast::error::RecvError::Lagged`, which drops correlation_ids
 /// permanently — the `ui_events` rows then stay `frame_id = NULL`.
 pub const TRIGGER_CHANNEL_BUFFER: usize = 4096;
@@ -4542,9 +4547,9 @@ mod tests {
         let m1 = rx1.try_recv().unwrap();
         let m2 = rx2.try_recv().unwrap();
         assert!(matches!(m1.trigger, CaptureTrigger::Click { x: 10, y: 20 }));
-        assert_eq!(m1.correlation_id, Some(42));
+        assert_eq!(m1.correlation_ids, vec![42]);
         assert!(matches!(m2.trigger, CaptureTrigger::Click { x: 10, y: 20 }));
-        assert_eq!(m2.correlation_id, Some(42));
+        assert_eq!(m2.correlation_ids, vec![42]);
     }
 
     #[test]
@@ -4571,6 +4576,37 @@ mod tests {
         assert!(matches!(trigger, Some(CaptureTrigger::WindowFocus { .. })));
         // All three corr ids accumulate.
         assert_eq!(corrs, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn reduce_drained_scroll_stop_message_collects_all_corr_ids() {
+        let drained = [CaptureTriggerMsg::with_correlations(
+            CaptureTrigger::ScrollStop,
+            vec![1, 2, 3],
+        )];
+
+        let (trigger, corrs) = reduce_drained_triggers(drained, false, false);
+
+        assert_eq!(trigger, Some(CaptureTrigger::ScrollStop));
+        assert_eq!(corrs, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn reduce_drained_scroll_stop_survives_a_capped_burst_batch() {
+        // The recorder caps a burst at SCROLL_BURST_MAX_CORR_IDS (512) and
+        // ships the survivors in one message. That whole batch must reduce
+        // to a single ScrollStop with every id intact, otherwise the cap
+        // would just move the loss from the tracker into the reducer.
+        let ids: Vec<crate::frame_linker::CorrelationId> = (1..=512).collect();
+        let drained = [CaptureTriggerMsg::with_correlations(
+            CaptureTrigger::ScrollStop,
+            ids.clone(),
+        )];
+
+        let (trigger, corrs) = reduce_drained_triggers(drained, false, false);
+
+        assert_eq!(trigger, Some(CaptureTrigger::ScrollStop));
+        assert_eq!(corrs, ids);
     }
 
     #[test]
