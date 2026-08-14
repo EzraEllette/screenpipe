@@ -13,6 +13,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
+import { MEETING_RULE_ACTION_CLASS } from "./meeting-workspace";
 
 /**
  * One share control for the whole meeting.
@@ -43,9 +44,8 @@ export type MeetingShareAction =
 
 // Matches the tab buttons on the same rule: same height, same rhythm, same
 // separator. The control has to read as part of the rule, not as a chip
-// floating on it.
-const RULE_ACTION_CLASS =
-  "flex h-11 shrink-0 items-center gap-2 border-l border-border font-mono text-[11px] uppercase tracking-[0.12em] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:z-10 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-foreground disabled:text-muted-foreground/50 disabled:hover:bg-transparent";
+// floating on it. Now shared with the meeting actions that moved onto this rule.
+const RULE_ACTION_CLASS = MEETING_RULE_ACTION_CLASS;
 
 const ACTION_LABEL: Record<MeetingShareAction, string> = {
   summary: "copy summary",
@@ -78,8 +78,6 @@ export function MeetingShareMenu({
   onShare: (action: MeetingShareAction) => void;
 }) {
   const primary: MeetingShareAction = canShareSummary ? "summary" : "meeting";
-  // Short enough to sit on the rule next to three tabs at narrow widths.
-  const primaryLabel = canShareSummary ? "share" : "copy";
   const secondary: MeetingShareAction[] = canShareSummary
     ? ["email", "transcript", "meeting"]
     : ["transcript"];
@@ -107,9 +105,11 @@ export function MeetingShareMenu({
         ) : (
           <PrimaryIcon className="h-3.5 w-3.5" />
         )}
-        <span className="hidden sm:inline">
-          {confirmed ? "copied" : primaryLabel}
-        </span>
+        {/* Icon only at rest. Fewer than 1 in 10 people who open a meeting use
+            any share action, so a text label here competed with the tabs for
+            attention it had not earned. The word comes back to confirm the
+            copy, which is the moment it actually carries information. */}
+        {confirmed && <span className="hidden sm:inline">copied</span>}
       </button>
 
       <DropdownMenu>

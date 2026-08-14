@@ -44,14 +44,32 @@ describe("meeting share control", () => {
       <MeetingShareMenu canShareSummary={false} onShare={onShare} />,
     );
 
-    // The label names the scope, so the primary click never silently changes
-    // meaning between states.
+    // The accessible name still names the scope, so the primary click never
+    // silently changes meaning between states. The control is icon-only at
+    // rest: fewer than 1 in 10 people who open a meeting use any share action,
+    // so a visible word here competed with the tabs beside it.
     const primary = screen.getByRole("button", {
       name: "copy meeting + transcript",
     });
-    expect(primary).toHaveTextContent("copy");
+    expect(primary).toHaveTextContent("");
     fireEvent.click(primary);
     expect(onShare).toHaveBeenCalledWith("meeting");
+  });
+
+  // The word comes back only to confirm the copy, which is the one moment it
+  // carries information the icon does not.
+  it("names the action only while confirming it", () => {
+    render(
+      <MeetingShareMenu
+        canShareSummary={false}
+        copiedAction="meeting"
+        onShare={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByRole("button", { name: "copy meeting + transcript" }),
+    ).toHaveTextContent("copied");
   });
 
   it("offers the remaining destinations behind the caret", async () => {
