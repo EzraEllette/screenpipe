@@ -2283,7 +2283,7 @@ fn resolve_capture_metadata_with_policy(
     Option<String>,
     Option<String>,
 ) {
-    let (mut app_name, mut window_name, browser_url, document_path) = match tree_snapshot {
+    let (mut app_name, mut window_name, mut browser_url, mut document_path) = match tree_snapshot {
         Some(snap) => (
             Some(snap.app_name.clone()),
             Some(snap.window_name.clone()),
@@ -2320,9 +2320,15 @@ fn resolve_capture_metadata_with_policy(
         } if !trigger_app_name.is_empty() => {
             if app_name.as_deref() != Some(trigger_app_name.as_str()) {
                 debug!(
-                    "focused app mismatch on app_switch: trigger='{}', tree={:?}; using trigger value",
+                    "focused app mismatch on app_switch: trigger='{}', tree={:?}; using trigger value and dropping stale window context",
                     trigger_app_name, app_name
                 );
+                // App-switch events typically do not carry the new window
+                // title. Keeping the previous tree's title, URL, or document
+                // path would create a metadata pair that never existed.
+                window_name = None;
+                browser_url = None;
+                document_path = None;
             }
             app_name = Some(trigger_app_name.clone());
         }
@@ -3916,6 +3922,45 @@ mod tests {
             Some("Google Chrome"),
             None,
         ));
+    }
+
+    #[test]
+    fn resolve_capture_metadata_drops_stale_window_context_on_app_switch() {
+        let snapshot = screenpipe_a11y::tree::TreeSnapshot {
+            app_name: "TextEdit".into(),
+            app_id: Some("com.apple.TextEdit".into()),
+            executable: None,
+            app_version: None,
+            window_name: "M1_B.txt".into(),
+            text_content: "visible text".into(),
+            nodes: Vec::new(),
+            semantic_nodes: Vec::new(),
+            browser_url: Some("https://stale.example".into()),
+            document_path: Some("/tmp/M1_B.txt".into()),
+            timestamp: Utc::now(),
+            node_count: 0,
+            walk_duration: Duration::from_millis(1),
+            content_hash: 0,
+            simhash: 0,
+            truncated: false,
+            truncation_reason: screenpipe_a11y::tree::TruncationReason::None,
+            max_depth_reached: 0,
+            window_bounds: None,
+        };
+
+        let (app_name, window_name, browser_url, document_path) = resolve_capture_metadata(
+            Some(&snapshot),
+            &CaptureTrigger::AppSwitch {
+                app_name: "Finder".into(),
+                target: None,
+            },
+            None,
+        );
+
+        assert_eq!(app_name.as_deref(), Some("Finder"));
+        assert_eq!(window_name, None);
+        assert_eq!(browser_url, None);
+        assert_eq!(document_path, None);
     }
 
     #[test]
