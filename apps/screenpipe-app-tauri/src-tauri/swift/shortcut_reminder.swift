@@ -74,17 +74,21 @@ public func shortcutSetMeetingStopResult(_ succeeded: Int32) {
 
 /// Recording-health state pushed from the Rust health loop (issue #5127):
 /// "normal" | "failure" | "fixing" | "recovered", optionally "state|detail"
-/// where detail is a concise failure reason or a boot-phase label while fixing.
+/// or "state|detail|subsystem" where detail is a concise failure reason (or a
+/// boot-phase label while fixing) and subsystem is "audio" or "screen" when
+/// the engine could attribute the failure to one (#6126).
 /// Swift only renders it — all detection/debounce/recovery logic lives in Rust.
 @_cdecl("shortcut_set_health_state")
 public func shortcutSetHealthState(_ statePtr: UnsafePointer<CChar>?) -> Int32 {
     guard let statePtr = statePtr else { return -1 }
     let payload = String(cString: statePtr)
-    let parts = payload.split(separator: "|", maxSplits: 1).map(String.init)
+    let parts = payload.split(separator: "|", maxSplits: 2).map(String.init)
     let state = parts.first ?? "normal"
     let detail = parts.count > 1 ? parts[1] : ""
+    let subsystem = parts.count > 2 ? parts[2] : ""
     if #available(macOS 13.0, *) {
-        ShortcutReminderController.shared.setHealthState(state, detail: detail)
+        ShortcutReminderController.shared.setHealthState(
+            state, detail: detail, subsystem: subsystem)
         return 0
     }
     return -2
@@ -110,6 +114,20 @@ final class OverlayMetrics: ObservableObject {
     @Published var healthState: String = "normal"
     /// Concise failure reason, or boot-phase label while fixing.
     @Published var healthDetail: String = ""
+    /// "audio" | "screen" | "" — which subsystem failed, when the engine could
+    /// attribute it to one. Empty keeps the pill's generic wording (#6126).
+    @Published var healthSubsystem: String = ""
+
+    /// Collapsed failure-pill label. Must stay in sync with the webview's
+    /// `failureHeadline` in app/shortcut-reminder/page.tsx — both render the
+    /// same `healthSubsystem` from the same payload.
+    var healthHeadline: String {
+        switch healthSubsystem {
+        case "audio": return "audio needs help"
+        case "screen": return "screen capture needs help"
+        default: return "recording needs help"
+        }
+    }
     /// True when the cursor is inside the panel area — drives expand/collapse
     /// since SwiftUI's .onHover tracking areas use .activeInActiveApp which
     /// does not fire when the app is not frontmost (the overlay stays visible
@@ -834,7 +852,9 @@ struct ShortcutReminderView: View {
                     // fits the fixed 200pt panel — the panel frame is never
                     // resized (setFrame on this nonactivating panel breaks
                     // its mouse routing; observed as a dead-click pill).
-                    Text(isExpanded ? "needs help" : "recording needs help")
+                    // Collapsed names the failing subsystem (#6126); expanded
+                    // stays generic because the action row owns that width.
+                    Text(isExpanded ? "needs help" : metrics.healthHeadline)
                         .font(Brand.swiftUIMonoFont(size: 8 * scale, weight: .regular))
                         .foregroundColor(.white.opacity(0.85))
                         .padding(.trailing, isExpanded ? s(8) : s(2))
@@ -1787,10 +1807,13 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
     /// frame is deliberately NOT resized — all health content is sized to fit
     /// the fixed expanded panel, because setFrame on this nonactivating panel
     /// breaks its mouse routing (dead-click pill).
-    func setHealthState(_ state: String, detail: String = "") {
+    func setHealthState(_ state: String, detail: String = "", subsystem: String = "") {
         DispatchQueue.main.async { [self] in
             if self.metrics.healthDetail != detail {
                 self.metrics.healthDetail = detail
+            }
+            if self.metrics.healthSubsystem != subsystem {
+                self.metrics.healthSubsystem = subsystem
             }
             if self.metrics.healthState != state {
                 let normalityChanged = (self.metrics.healthState == "normal") != (state == "normal")

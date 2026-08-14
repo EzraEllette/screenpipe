@@ -222,6 +222,8 @@ struct Ctx {
     /// The last anchor the app pushed, so a re-push of the same value can be
     /// told apart from the app actually asking the pill to move.
     pushed_anchor: Option<Anchor>,
+    /// Same, for the transcript card's pin.
+    pushed_pinned: Option<bool>,
     dragging: bool,
     drag_offset: (i32, i32),
     animating: bool,
@@ -295,6 +297,7 @@ fn run_message_loop(
             press_can_drag: false,
             toast_hovered: false,
             pushed_anchor: None,
+            pushed_pinned: None,
             dragging: false,
             drag_offset: (0, 0),
             animating: false,
@@ -662,12 +665,23 @@ fn resolve_anchor(
     window: Anchor,
     dragging: bool,
 ) -> (Anchor, Option<Anchor>) {
-    let app_moved_it = pushed != Some(incoming);
-    let applied = if app_moved_it && !dragging {
-        incoming
-    } else {
-        window
-    };
+    let (applied, pushed) = resolve_owned(pushed, incoming, window);
+    // Nothing relocates the pill while it is under the pointer, not even a
+    // genuine change: the drop decides where it lands.
+    (if dragging { window } else { applied }, pushed)
+}
+
+/// The value to apply for something the *window* owns but the app also sends
+/// back in every state push.
+///
+/// The app's copy is only as fresh as the last round-trip through its store, so
+/// a value the user just changed here — where the pill sits, whether the card
+/// is pinned — arrives back stale a few milliseconds later and would undo
+/// itself. An echo of what the app last sent is therefore ignored in favour of
+/// what the window has; only a value the app actually *changed* wins.
+fn resolve_owned<T: PartialEq + Copy>(pushed: Option<T>, incoming: T, window: T) -> (T, Option<T>) {
+    let app_changed_it = pushed != Some(incoming);
+    let applied = if app_changed_it { incoming } else { window };
     (applied, Some(incoming))
 }
 
@@ -696,6 +710,17 @@ fn drain_commands(hwnd: HWND) -> (bool, bool) {
                     resolve_anchor(ctx.pushed_anchor, s.anchor, ctx.state.anchor, ctx.dragging);
                 s.anchor = anchor;
                 ctx.pushed_anchor = pushed;
+                // The pin is the same story as the anchor: the pill toggles it
+                // itself and never reports it, so the app's copy is always the
+                // one from before the click. Taking it at face value unpinned
+                // the card again within a frame.
+                let (pinned, pushed) = resolve_owned(
+                    ctx.pushed_pinned,
+                    s.transcript_pinned,
+                    ctx.state.transcript_pinned,
+                );
+                s.transcript_pinned = pinned;
+                ctx.pushed_pinned = pushed;
                 // The caller does not own the notification either — it arrives
                 // through show_notification and leaves on its own schedule.
                 s.notification = ctx.state.notification.clone();
@@ -1054,6 +1079,30 @@ mod tests {
         // And once the app has caught up, echoing the dragged value is a no-op.
         let (anchor, _) = resolve_anchor(pushed, Anchor::TopLeft, Anchor::TopLeft, false);
         assert_eq!(anchor, Anchor::TopLeft);
+    }
+
+    /// The pin lives only in the window — clicking it reports nothing to the
+    /// app — so the app's copy is always the value from before the click, and
+    /// it re-sends that copy many times a second. Taking it at face value
+    /// unpinned the card again within a frame of pinning it.
+    #[test]
+    fn pinning_the_card_survives_the_apps_stale_state_pushes() {
+        // Startup: nothing pinned, app and window agree.
+        let (pinned, pushed) = resolve_owned(None, false, false);
+        assert!(!pinned);
+
+        // The user clicks the pin. The window owns `true` now; the app still
+        // believes `false` and keeps saying so.
+        let (pinned, pushed) = resolve_owned(pushed, false, true);
+        assert!(pinned, "an echo of the pre-click value must not unpin it");
+        let (pinned, pushed) = resolve_owned(pushed, false, true);
+        assert!(pinned, "and it must not unpin on the next push either");
+
+        // The meeting ends: the app genuinely clears the pin, and that wins.
+        let (pinned, pushed) = resolve_owned(pushed, true, true);
+        assert!(pinned, "app catching up to true is a no-op");
+        let (pinned, _) = resolve_owned(pushed, false, true);
+        assert!(!pinned, "a real change from the app clears the pin");
     }
 
     /// A push landing mid-drag must never teleport the pill out from under the

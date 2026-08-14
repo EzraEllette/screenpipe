@@ -769,35 +769,34 @@ fn persist_enterprise_device_config_inner(
     replaces_license_key: Option<&str>,
 ) -> Result<(), String> {
     let dir = screenpipe_core::paths::default_screenpipe_data_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| format!("failed to create dir: {}", e))?;
-
     let path = dir.join("enterprise.json");
-    let mut json = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-        .unwrap_or_else(|| serde_json::json!({}));
-    if let Some(key) = license_key {
-        json["license_key"] = serde_json::Value::String(key.to_string());
-    }
-    if let Some(url) = ingest_url {
-        json["ingest_url"] = serde_json::Value::String(url.to_string());
-    }
-    if let Some(replaced) = replaces_license_key {
-        let mut recovery = serde_json::json!({
-            "replaces_license_key_sha256": enterprise_license_key_sha256(replaced),
-            "license_key": license_key.expect("recovery includes a replacement key"),
-        });
-        if let Some(url) = ingest_url {
-            recovery["ingest_url"] = serde_json::Value::String(url.to_string());
+    crate::enterprise_config_file::update(&path, |json| {
+        if let Some(key) = license_key {
+            json.insert(
+                "license_key".to_string(),
+                serde_json::Value::String(key.to_string()),
+            );
         }
-        json["credential_recovery"] = recovery;
-    } else if license_key.is_some() {
-        json.as_object_mut()
-            .expect("enterprise device config is a JSON object")
-            .remove("credential_recovery");
-    }
-    std::fs::write(&path, serde_json::to_string_pretty(&json).unwrap())
-        .map_err(|e| format!("failed to write {}: {}", path.display(), e))?;
+        if let Some(url) = ingest_url {
+            json.insert(
+                "ingest_url".to_string(),
+                serde_json::Value::String(url.to_string()),
+            );
+        }
+        if let Some(replaced) = replaces_license_key {
+            let mut recovery = serde_json::json!({
+                "replaces_license_key_sha256": enterprise_license_key_sha256(replaced),
+                "license_key": license_key.expect("recovery includes a replacement key"),
+            });
+            if let Some(url) = ingest_url {
+                recovery["ingest_url"] = serde_json::Value::String(url.to_string());
+            }
+            json.insert("credential_recovery".to_string(), recovery);
+        } else if license_key.is_some() {
+            json.remove("credential_recovery");
+        }
+        Ok(())
+    })?;
 
     info!("enterprise: device config saved to {}", path.display());
     Ok(())
@@ -855,50 +854,19 @@ pub fn save_enterprise_license_key(license_key: String) -> Result<(), String> {
 /// machines we skip writing a `false` when there's nothing to clear.
 fn persist_enterprise_hide_app(hidden: bool) {
     let path = screenpipe_core::paths::default_screenpipe_data_dir().join("enterprise.json");
-
-    let mut json = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-        .unwrap_or_else(|| serde_json::json!({}));
-
-    let currently_set = json
-        .get("hide_app")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    if hidden == currently_set {
-        return; // already in sync — nothing to write
-    }
-    if !hidden && !path.exists() {
-        return; // never create a file just to record "not hidden"
-    }
-
-    if let Some(dir) = path.parent() {
-        if let Err(e) = std::fs::create_dir_all(dir) {
-            warn!(
-                "enterprise: could not create dir for enterprise.json: {}",
-                e
-            );
-            return;
+    match crate::enterprise_config_file::update(&path, |json| {
+        if hidden || json.contains_key("hide_app") {
+            json.insert("hide_app".to_string(), serde_json::Value::Bool(hidden));
         }
-    }
-    json["hide_app"] = serde_json::Value::Bool(hidden);
-    match serde_json::to_string_pretty(&json) {
-        Ok(body) => {
-            if let Err(e) = std::fs::write(&path, body) {
-                warn!(
-                    "enterprise: failed to persist hide_app to {}: {}",
-                    path.display(),
-                    e
-                );
-            } else {
-                info!(
-                    "enterprise: persisted hide_app={} to {}",
-                    hidden,
-                    path.display()
-                );
-            }
-        }
-        Err(e) => warn!("enterprise: failed to serialize enterprise.json: {}", e),
+        Ok(())
+    }) {
+        Ok(true) => info!(
+            "enterprise: persisted hide_app={} to {}",
+            hidden,
+            path.display()
+        ),
+        Ok(false) => {}
+        Err(error) => warn!("enterprise: failed to persist hide_app: {error}"),
     }
 }
 
@@ -1075,46 +1043,45 @@ pub fn save_enterprise_team_config(
     gateway_url: Option<String>,
 ) -> Result<(), String> {
     let dir = screenpipe_core::paths::default_screenpipe_data_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| format!("failed to create dir: {}", e))?;
-
     let path = dir.join("enterprise.json");
-    let mut json = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-        .unwrap_or_else(|| serde_json::json!({}));
-
-    if let Some(v) = is_admin {
-        json["is_admin"] = serde_json::Value::Bool(v);
-    }
-    if let Some(v) = license_active {
-        json["license_active"] = serde_json::Value::Bool(v);
-    }
     let token_set = team_api_token.is_some();
-    if let Some(t) = team_api_token {
-        json["team_api_token"] = if t.is_empty() {
-            serde_json::Value::Null
-        } else {
-            serde_json::Value::String(t)
-        };
-    }
-    // The org's team-API base (a gateway org's `gateway_url`). Every client
-    // reads this key; the 5-minute policy poll re-asserts it, so a changed
-    // gateway URL propagates without user action. Only http(s) values are
-    // written — a junk value would silently redirect all three readers.
     let url_set = gateway_url.is_some();
-    if let Some(u) = gateway_url {
-        let u = u.trim();
-        if u.is_empty() {
-            json["gateway_url"] = serde_json::Value::Null;
-        } else if u.starts_with("http://") || u.starts_with("https://") {
-            json["gateway_url"] = serde_json::Value::String(u.trim_end_matches('/').to_string());
-        } else {
-            warn!("enterprise: ignoring non-http gateway_url: {}", u);
+    crate::enterprise_config_file::update(&path, |json| {
+        if let Some(v) = is_admin {
+            json.insert("is_admin".to_string(), serde_json::Value::Bool(v));
         }
-    }
-
-    std::fs::write(&path, serde_json::to_string_pretty(&json).unwrap())
-        .map_err(|e| format!("failed to write {}: {}", path.display(), e))?;
+        if let Some(v) = license_active {
+            json.insert("license_active".to_string(), serde_json::Value::Bool(v));
+        }
+        if let Some(t) = team_api_token.as_ref() {
+            json.insert(
+                "team_api_token".to_string(),
+                if t.is_empty() {
+                    serde_json::Value::Null
+                } else {
+                    serde_json::Value::String(t.clone())
+                },
+            );
+        }
+        // The org's team-API base (a gateway org's `gateway_url`). Every client
+        // reads this key; the 5-minute policy poll re-asserts it, so a changed
+        // gateway URL propagates without user action. Only http(s) values are
+        // written — a junk value would silently redirect all three readers.
+        if let Some(u) = gateway_url.as_deref() {
+            let u = u.trim();
+            if u.is_empty() {
+                json.insert("gateway_url".to_string(), serde_json::Value::Null);
+            } else if u.starts_with("http://") || u.starts_with("https://") {
+                json.insert(
+                    "gateway_url".to_string(),
+                    serde_json::Value::String(u.trim_end_matches('/').to_string()),
+                );
+            } else {
+                warn!("enterprise: ignoring non-http gateway_url: {}", u);
+            }
+        }
+        Ok(())
+    })?;
 
     info!(
         "enterprise: team config saved to {} (is_admin set: {}, license_active set: {}, token set: {}, url set: {})",
@@ -3418,12 +3385,63 @@ pub(crate) fn notification_belongs_to_overlay(notification_type: Option<&str>) -
     matches!(notification_type, Some("meeting"))
 }
 
+/// What actually happened to an alert we tried to surface.
+///
+/// `show_notification_panel` returned `Ok(())` whether it drew the panel or
+/// dropped the alert at a gate, so `/notify` logged "panel shown" for
+/// notifications the user never saw. Callers that report an outcome need to be
+/// able to tell those apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NotificationDelivery {
+    /// Drawn by the shortcut overlay pill, which owns its own alert types.
+    ShownOnOverlay,
+    /// Drawn by the standalone panel (native SwiftUI, or the webview fallback).
+    ShownOnPanel,
+    /// Dropped: master-off, snooze, or quiet hours.
+    SuppressedReduced,
+    /// Dropped: identical alert already surfaced inside its cooldown.
+    SuppressedRepeat,
+}
+
+impl NotificationDelivery {
+    pub(crate) fn was_shown(self) -> bool {
+        matches!(self, Self::ShownOnOverlay | Self::ShownOnPanel)
+    }
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::ShownOnOverlay => "shown_on_overlay",
+            Self::ShownOnPanel => "shown_on_panel",
+            Self::SuppressedReduced => "suppressed_reduced_state",
+            Self::SuppressedRepeat => "suppressed_repeat",
+        }
+    }
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn show_notification_panel(
     app_handle: tauri::AppHandle,
     payload: String,
 ) -> Result<(), String> {
+    deliver_notification_panel(app_handle, payload, true)
+        .await
+        .map(|_| ())
+}
+
+/// Render an alert, returning what actually happened to it.
+///
+/// `apply_repeat_gate` exists because the repeat gate is check-and-record, so
+/// running it twice for one alert makes the second call collide with the
+/// record the first call just wrote. `/notify` already gates before it
+/// persists, so it passes `false` and stays the single recorder for that path;
+/// the direct callers (capture-stall, audio device/health) come straight here
+/// and pass `true`.
+pub(crate) async fn deliver_notification_panel(
+    app_handle: tauri::AppHandle,
+    payload: String,
+    apply_repeat_gate: bool,
+) -> Result<NotificationDelivery, String> {
     use tauri::{Emitter, WebviewWindowBuilder};
 
     let label = "notification-panel";
@@ -3446,7 +3464,7 @@ pub async fn show_notification_panel(
             "show_notification_panel: suppressed (master/snooze/quiet, type={:?})",
             notification_type
         );
-        return Ok(());
+        return Ok(NotificationDelivery::SuppressedReduced);
     }
 
     // Repeat gate — see `gate::repeat_suppressed_now`. Critical alerts are
@@ -3457,17 +3475,19 @@ pub async fn show_notification_panel(
         crate::notifications::gate::title_from_payload(&payload).unwrap_or_default();
     let notification_body =
         crate::notifications::gate::body_from_payload(&payload).unwrap_or_default();
-    if crate::notifications::gate::repeat_suppressed_now(
-        notification_type.as_deref(),
-        notification_pipe.as_deref(),
-        &notification_title,
-        &notification_body,
-    ) {
+    if apply_repeat_gate
+        && crate::notifications::gate::repeat_suppressed_now(
+            notification_type.as_deref(),
+            notification_pipe.as_deref(),
+            &notification_title,
+            &notification_body,
+        )
+    {
         info!(
             "show_notification_panel: suppressed (repeat within cooldown, type={:?})",
             notification_type
         );
-        return Ok(());
+        return Ok(NotificationDelivery::SuppressedRepeat);
     }
 
     // The pill speaks up for its own alerts wherever it is native. Windows has
@@ -3481,7 +3501,7 @@ pub async fn show_notification_panel(
         {
             info!("meeting notification rendered from the shortcut overlay");
             let _ = app_handle.emit("native-notification-shown", &payload);
-            return Ok(());
+            return Ok(NotificationDelivery::ShownOnOverlay);
         }
     }
 
@@ -3500,7 +3520,7 @@ pub async fn show_notification_panel(
         {
             info!("meeting notification rendered from the shortcut overlay");
             let _ = app_handle.emit("native-notification-shown", &payload);
-            return Ok(());
+            return Ok(NotificationDelivery::ShownOnOverlay);
         }
 
         if native_notification::is_available() {
@@ -3509,7 +3529,7 @@ pub async fn show_notification_panel(
                 // Emit event so the main window can save notification history + PostHog analytics
                 // (the webview panel page does this in JS, but we bypass it with native)
                 let _ = app_handle.emit("native-notification-shown", &payload);
-                return Ok(());
+                return Ok(NotificationDelivery::ShownOnPanel);
             }
             warn!("Native notification panel failed, falling back to webview");
         }
@@ -3621,7 +3641,7 @@ pub async fn show_notification_panel(
             });
         }
 
-        return Ok(());
+        return Ok(NotificationDelivery::ShownOnPanel);
     }
 
     info!("Creating new notification-panel window");
@@ -3738,7 +3758,7 @@ pub async fn show_notification_panel(
         });
     }
 
-    Ok(())
+    Ok(NotificationDelivery::ShownOnPanel)
 }
 
 #[tauri::command]
@@ -4418,12 +4438,21 @@ fn dir_size(path: &std::path::Path) -> u64 {
 #[specta::specta]
 pub fn set_autostart(app_handle: tauri::AppHandle, enabled: bool) -> Result<(), String> {
     use tauri_plugin_autostart::ManagerExt as AutostartManagerExt;
-    let manager = app_handle.autolaunch();
-    if enabled {
-        manager.enable().map_err(|e| e.to_string())?;
-    } else {
-        manager.disable().map_err(|e| e.to_string())?;
+
+    #[cfg(all(feature = "enterprise-build", target_os = "macos"))]
+    crate::enterprise_autostart::set_macos_employee_autostart(&app_handle, enabled)?;
+
+    #[cfg(not(all(feature = "enterprise-build", target_os = "macos")))]
+    {
+        let manager = app_handle.autolaunch();
+        if enabled {
+            manager.enable().map_err(|e| e.to_string())?;
+        } else {
+            manager.disable().map_err(|e| e.to_string())?;
+        }
     }
+
+    let manager = app_handle.autolaunch();
     info!(
         "autostart {}: is_enabled={}",
         if enabled { "enabled" } else { "disabled" },

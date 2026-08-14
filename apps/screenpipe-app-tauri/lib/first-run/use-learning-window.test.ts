@@ -307,3 +307,62 @@ describe("useLearningWindow cross-webview reset", () => {
     expect(readLearningWindow().phase).toBe("idle");
   });
 });
+
+describe("useLearningWindow reports a window that expired unmounted", () => {
+  const seedExpiredLearning = () => {
+    window.localStorage.setItem(
+      "screenpipe.first-run.learning-window.v1",
+      JSON.stringify({
+        phase: "learning",
+        startedAt: new Date(
+          Date.now() - LEARNING_WINDOW_CEILING_MS - 60_000,
+        ).toISOString(),
+        seededAt: null,
+        chatId: null,
+        emptyReason: null,
+      }),
+    );
+  };
+
+  const emptyEvents = () =>
+    capture.mock.calls.filter(([name]) => name === "first_run_learning_empty");
+
+  it("emits first_run_learning_empty on mount, tagged as a rehydrate settle", async () => {
+    // Before this, a window that expired while the banner was unmounted — the
+    // common case, because sending one chat message used to unmount it —
+    // produced no event at all.
+    seedExpiredLearning();
+    getOnboardingStatus.mockResolvedValue(okStatus(completedAgo(60_000)));
+
+    renderHook(() => useLearningWindow());
+
+    await waitFor(() => expect(emptyEvents()).toHaveLength(1));
+    const [, props] = emptyEvents()[0] as [string, Record<string, unknown>];
+    expect(props.reason).toBe("expired_unreported");
+    expect(props.settled_by).toBe("rehydrate");
+    // No live engine read: it would describe now, not the window being reported.
+    expect(props.data_status).toBe("not_checked");
+  });
+
+  it("reports once, not once per mount", async () => {
+    seedExpiredLearning();
+    getOnboardingStatus.mockResolvedValue(okStatus(completedAgo(60_000)));
+
+    const first = renderHook(() => useLearningWindow());
+    await waitFor(() => expect(emptyEvents()).toHaveLength(1));
+    first.unmount();
+
+    renderHook(() => useLearningWindow());
+    // Remounting must not double-count: the flag is cleared durably, not in
+    // component state.
+    await waitFor(() => expect(readLearningWindow().pendingEmptyReport).toBe(false));
+    expect(emptyEvents()).toHaveLength(1);
+  });
+
+  it("stays quiet for a window that never expired", async () => {
+    getOnboardingStatus.mockResolvedValue(okStatus(completedAgo(60_000)));
+    renderHook(() => useLearningWindow());
+    await waitFor(() => expect(readLearningWindow().phase).not.toBe("idle"));
+    expect(emptyEvents()).toHaveLength(0);
+  });
+});

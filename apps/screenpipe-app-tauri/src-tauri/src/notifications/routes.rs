@@ -198,7 +198,10 @@ pub async fn send_notification(
     // echo here rather than expecting every producer to latch for itself. The
     // body is part of the identity because for some producers it carries the
     // only thing that tells two distinct alerts apart — see the gate's notes.
-    if super::gate::repeat_suppressed_now(
+    // A peek, not a check-and-record: `show_notification_panel` below is the
+    // choke point that records. Recording here too made that second look find
+    // this one's own entry and drop every high-priority alert sent over http.
+    if super::gate::repeat_suppressed_peek(
         Some(resolved_type.as_str()),
         source.pipe_name.as_deref(),
         &payload.title,
@@ -336,16 +339,32 @@ pub async fn send_notification(
         tokio::spawn(async move {
             match tokio::time::timeout(
                 std::time::Duration::from_secs(5),
-                crate::commands::show_notification_panel(app, panel_json),
+                // `false`: the repeat gate already ran above, and it records as
+                // well as checks — running it again here would collide with the
+                // record this same alert just wrote and drop every notification.
+                crate::commands::deliver_notification_panel(app, panel_json, false),
             )
             .await
             {
-                Ok(Ok(())) => {
-                    info!(
-                        id = %delivery_id,
-                        notification_type = %delivery_type,
-                        "High-priority notification panel shown"
-                    );
+                Ok(Ok(delivery)) => {
+                    // Report what happened, not that we asked. The delivery path
+                    // still drops alerts at the reduced-state gate, so a blanket
+                    // "shown" here hid real suppressions in the logs.
+                    if delivery.was_shown() {
+                        info!(
+                            id = %delivery_id,
+                            notification_type = %delivery_type,
+                            outcome = %delivery.as_str(),
+                            "High-priority notification shown"
+                        );
+                    } else {
+                        info!(
+                            id = %delivery_id,
+                            notification_type = %delivery_type,
+                            outcome = %delivery.as_str(),
+                            "High-priority notification suppressed before display"
+                        );
+                    }
                 }
                 Ok(Err(e)) => {
                     error!(

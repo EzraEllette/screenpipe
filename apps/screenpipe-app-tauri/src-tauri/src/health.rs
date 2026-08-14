@@ -697,6 +697,27 @@ fn overlay_failure_detail(
     }
 }
 
+/// Which subsystem the overlay pill should name, derived from the reason
+/// [`overlay_failure_detail`] already produced.
+///
+/// The pill said "recording needs help" for everything, so routine Bluetooth
+/// audio churn read as a total product failure while screen capture was
+/// writing a frame every second (#6126). The engine already knew which
+/// subsystem failed; only the visible label threw it away.
+///
+/// Returns `""` whenever the cause is more than one subsystem or cannot be
+/// attributed — the pill then keeps its generic wording rather than guessing.
+pub(crate) fn overlay_failure_subsystem(detail: &str) -> &'static str {
+    match detail {
+        "audio capture is not updating" => "audio",
+        "screen capture is not updating" => "screen",
+        // "audio and screen capture are not updating", "multiple recording
+        // errors detected", persistence, engine start/stop, simulated breaks,
+        // and anything unrecognized stay generic on purpose.
+        _ => "",
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn overlay_tick_decision(
     status: RecordingStatus,
@@ -2838,6 +2859,94 @@ mod tests {
             assert!(expected.len() <= 49, "tooltip detail must stay brief");
             assert!(!expected.contains('/'), "tooltip must never expose a path");
         }
+    }
+
+    /// #6126: the pill said "recording needs help" for everything, so routine
+    /// audio churn read as a total product failure while screen capture was
+    /// writing a frame every second.
+    #[test]
+    fn overlay_names_a_single_failing_subsystem_and_never_guesses() {
+        assert_eq!(
+            overlay_failure_subsystem("audio capture is not updating"),
+            "audio",
+        );
+        assert_eq!(
+            overlay_failure_subsystem("screen capture is not updating"),
+            "screen",
+        );
+
+        // Anything spanning subsystems, or that the engine could not attribute,
+        // must stay generic rather than pick a side.
+        for generic in [
+            "audio and screen capture are not updating",
+            "multiple recording errors detected",
+            "recording data cannot be saved",
+            "recording engine could not start",
+            "recording engine stopped",
+            "recording stopped unexpectedly",
+            "recording did not restart",
+            "simulated recording failure",
+            "",
+        ] {
+            assert_eq!(
+                overlay_failure_subsystem(generic),
+                "",
+                "{generic:?} must keep the generic pill wording",
+            );
+        }
+    }
+
+    /// Every reason the engine can produce has to route through the mapping
+    /// above, so a new detail string cannot silently land in the wrong bucket.
+    #[test]
+    fn every_producible_failure_detail_maps_to_a_known_subsystem() {
+        let mut saw_audio = false;
+        let mut saw_screen = false;
+
+        for audio in [false, true] {
+            for vision in [false, true] {
+                for persistence in [false, true] {
+                    for simulated in [false, true] {
+                        for status in [
+                            RecordingStatus::Recording,
+                            RecordingStatus::Error,
+                            RecordingStatus::Stopped,
+                            RecordingStatus::Starting,
+                        ] {
+                            let detail = overlay_failure_detail(
+                                status,
+                                CaptureFailureSignals {
+                                    audio,
+                                    vision,
+                                    persistence,
+                                },
+                                simulated,
+                            );
+                            let subsystem = overlay_failure_subsystem(detail);
+                            assert!(
+                                matches!(subsystem, "" | "audio" | "screen"),
+                                "{detail:?} produced unknown subsystem {subsystem:?}",
+                            );
+                            // Only a lone audio or lone vision failure may be
+                            // attributed, and only when nothing else failed.
+                            if subsystem == "audio" {
+                                saw_audio = true;
+                                assert!(audio && !vision && !persistence && !simulated);
+                            }
+                            if subsystem == "screen" {
+                                saw_screen = true;
+                                assert!(vision && !audio && !persistence && !simulated);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        assert!(
+            saw_audio && saw_screen,
+            "both attributions must be reachable"
+        );
     }
 
     #[test]

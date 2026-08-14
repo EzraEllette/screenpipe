@@ -14,6 +14,7 @@ import {
   buildLearningSummary,
   capturedAppsFrom,
   claimLearningSeed,
+  clearPendingEmptyReport,
   formatCountdown,
   hasEnoughEvidence,
   learningWindowRemainingMs,
@@ -561,5 +562,61 @@ describe("writing phase", () => {
     const writing = markLearningWriting();
     expect(writing.phase).toBe("writing");
     expect(writing.startedAt).toBe(anchor);
+  });
+});
+
+describe("a window that expired while nothing was mounted", () => {
+  const seedExpiredLearning = () => {
+    window.localStorage.setItem(
+      "screenpipe.first-run.learning-window.v1",
+      JSON.stringify({
+        phase: "learning",
+        startedAt: new Date(
+          Date.now() - LEARNING_WINDOW_CEILING_MS - 60_000,
+        ).toISOString(),
+        seededAt: null,
+        chatId: null,
+        emptyReason: null,
+      }),
+    );
+  };
+
+  it("flags itself for reporting instead of settling silently", () => {
+    // The regression: this settle path emits nothing of its own, because the
+    // ceiling effect is gated on `phase === "learning"` and normalize has
+    // already left it. Without the flag the most common first-run outcome is
+    // invisible in analytics.
+    seedExpiredLearning();
+    const state = readLearningWindow();
+    expect(state.phase).toBe("empty");
+    expect(state.emptyReason).toBe("expired_unreported");
+    expect(state.pendingEmptyReport).toBe(true);
+  });
+
+  it("distinguishes 'nobody looked' from 'we looked and could not tell'", () => {
+    // `unknown` means the engine was asked and had no answer. Folding an
+    // unreported expiry into it makes the two indistinguishable downstream.
+    seedExpiredLearning();
+    expect(readLearningWindow().emptyReason).not.toBe("unknown");
+  });
+
+  it("clears the flag exactly once and is safe to call on every mount", () => {
+    seedExpiredLearning();
+    expect(readLearningWindow().pendingEmptyReport).toBe(true);
+    expect(clearPendingEmptyReport().pendingEmptyReport).toBe(false);
+    expect(clearPendingEmptyReport().pendingEmptyReport).toBe(false);
+    expect(readLearningWindow().pendingEmptyReport).toBe(false);
+  });
+
+  it("leaves a live window alone", () => {
+    beginLearningWindow();
+    const state = readLearningWindow();
+    expect(state.phase).toBe("learning");
+    expect(state.pendingEmptyReport).toBe(false);
+  });
+
+  it("does not flag a settle the ceiling effect already reported", () => {
+    beginLearningWindow();
+    expect(markLearningEmpty("no_frames_captured").pendingEmptyReport).toBe(false);
   });
 });

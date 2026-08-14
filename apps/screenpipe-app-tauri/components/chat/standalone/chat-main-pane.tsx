@@ -250,10 +250,20 @@ export function ChatMainPane({
                 </div>
               )}
             {/* Post-setup learning window. Renders only while the window is
-                open, so it is inert for everyone else. It sits on the empty
-                chat because that is where setup now lands and where the
-                summary chat appears once the window resolves. */}
-            {messages.length === 0 && !activePipeExecution && (
+                open, so it is inert for everyone else. It sits on the chat
+                because that is where setup lands and where the summary chat
+                appears once the window resolves.
+
+                Deliberately NOT gated on `messages.length === 0`. The window
+                owns a ceiling timer, and unmounting the banner kills it: the
+                user sends one message, this subtree goes away mid-wait, and
+                the window never settles — no summary, and no
+                `first_run_learning_resolved`/`_empty` either, so the failure
+                is invisible. Typing is the behaviour we want, so it must not
+                destroy the first-run summary. Measured 2026-08: 69% of users
+                who completed setup produced no learning event at all while
+                staying in the app a median of 9.4 hours. */}
+            {!activePipeExecution && (
               <div className="mx-auto w-full max-w-3xl px-4 pb-4">
                 <FirstRunLearningBanner
                   aiPreset={firstRunAiPreset}

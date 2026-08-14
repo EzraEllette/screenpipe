@@ -2283,7 +2283,7 @@ fn resolve_capture_metadata_with_policy(
     Option<String>,
     Option<String>,
 ) {
-    let (mut app_name, mut window_name, browser_url, document_path) = match tree_snapshot {
+    let (mut app_name, mut window_name, mut browser_url, mut document_path) = match tree_snapshot {
         Some(snap) => (
             Some(snap.app_name.clone()),
             Some(snap.window_name.clone()),
@@ -2320,9 +2320,15 @@ fn resolve_capture_metadata_with_policy(
         } if !trigger_app_name.is_empty() => {
             if app_name.as_deref() != Some(trigger_app_name.as_str()) {
                 debug!(
-                    "focused app mismatch on app_switch: trigger='{}', tree={:?}; using trigger value",
+                    "focused app mismatch on app_switch: trigger='{}', tree={:?}; using trigger value and dropping stale window context",
                     trigger_app_name, app_name
                 );
+                // App-switch events typically do not carry the new window
+                // title. Keeping the previous tree's title, URL, or document
+                // path would create a metadata pair that never existed.
+                window_name = None;
+                browser_url = None;
+                document_path = None;
             }
             app_name = Some(trigger_app_name.clone());
         }
@@ -2342,6 +2348,30 @@ fn resolve_capture_metadata_with_policy(
     }
 
     (app_name, window_name, browser_url, document_path)
+}
+
+/// Final privacy gate for captures that reached metadata resolution without a
+/// conclusive tree-walk skip. Keep this decision in one place so every value
+/// that can reach `paired_capture` is covered by the same policy. Built-in
+/// incognito matching is limited to the focus-owning monitor; manual patterns
+/// preserve their existing all-monitor behavior.
+fn resolved_window_matches_privacy_filters(
+    ignore_incognito_windows: bool,
+    resolved_window_hosts_focus: bool,
+    ignored_patterns: &[WindowPattern],
+    app_name: Option<&str>,
+    window_name: Option<&str>,
+) -> bool {
+    if resolved_window_hosts_focus
+        && ignore_incognito_windows
+        && window_name.is_some_and(screenpipe_a11y::incognito::is_title_private)
+    {
+        return true;
+    }
+
+    let app_name = app_name.unwrap_or_default().to_lowercase();
+    let window_name = window_name.unwrap_or_default().to_lowercase();
+    window_pattern::matches_any(ignored_patterns, &app_name, &window_name)
 }
 
 /// Rate-limit OCR-heavy apps. Two groups:
@@ -3065,30 +3095,33 @@ async fn do_capture(
         });
     }
 
-    // Final ignored-window gate: check resolved metadata (app + window) against
-    // ignored patterns. This catches edge cases where the tree walk succeeded but
-    // didn't return Skipped (e.g. the trigger carried the app name, not the tree).
-    // Uses full `window_pattern` semantics, so scoped `App::Title` patterns fire
-    // here even though earlier app-only gates intentionally skipped them. Reuses
-    // the patterns parsed above.
-    {
+    // Final privacy gate: apply title-based incognito detection and ignored-window
+    // patterns to resolved metadata. This catches edge cases where the tree walk
+    // returned no verdict while focus ownership remained confirmed (for example,
+    // a WindowFocus trigger still supplied the window title). Uses full
+    // `window_pattern` semantics, so scoped `App::Title` patterns still fire here.
+    if resolved_window_matches_privacy_filters(
+        params.tree_walker_config.ignore_incognito_windows,
+        monitor_hosts_focus,
+        &params.ignored_patterns,
+        app_name_owned.as_deref(),
+        window_name_owned.as_deref(),
+    ) {
         let check_app = app_name_owned.as_deref().unwrap_or_default().to_lowercase();
         let check_win = window_name_owned
             .as_deref()
             .unwrap_or_default()
             .to_lowercase();
-        if window_pattern::matches_any(&params.ignored_patterns, &check_app, &check_win) {
-            debug!(
-                "skipping capture: resolved app='{}' / window='{}' matches ignored pattern on monitor {}",
-                check_app, check_win, params.monitor_id
-            );
-            return Ok(CaptureOutput {
-                result: None,
-                image,
-                elements_deduped: false,
-                corrupt: None,
-            });
-        }
+        debug!(
+            "skipping capture: resolved app='{}' / window='{}' matches privacy filter on monitor {}",
+            check_app, check_win, params.monitor_id
+        );
+        return Ok(CaptureOutput {
+            result: None,
+            image,
+            elements_deduped: false,
+            corrupt: None,
+        });
     }
 
     // DRM content detection: check if the focused app/URL is a streaming service.
@@ -3816,6 +3849,118 @@ mod tests {
 
         assert_eq!(app_name.as_deref(), Some("Telegram"));
         assert_eq!(window_name.as_deref(), Some("Fresh Title"));
+    }
+
+    #[test]
+    fn incognito_setting_filters_resolved_title_when_tree_walk_is_unavailable() {
+        let trigger = CaptureTrigger::WindowFocus {
+            window_name: "Private search - Google Chrome (Incognito)".into(),
+            target: None,
+        };
+        let (app_name, window_name, _, _) = resolve_capture_metadata(None, &trigger, None);
+
+        assert!(
+            resolved_window_matches_privacy_filters(
+                true,
+                true,
+                &[],
+                app_name.as_deref(),
+                window_name.as_deref(),
+            ),
+            "ignoreIncognitoWindows must still reject an Incognito title when the AX tree walk is unavailable"
+        );
+    }
+
+    #[test]
+    fn resolved_incognito_fallback_respects_toggle_and_preserves_other_filters() {
+        let normal_title = "Private API docs - Google Chrome";
+        let private_title = "Private search - Google Chrome (Incognito)";
+
+        assert!(!resolved_window_matches_privacy_filters(
+            true,
+            true,
+            &[],
+            Some("Google Chrome"),
+            Some(normal_title),
+        ));
+        assert!(!resolved_window_matches_privacy_filters(
+            false,
+            true,
+            &[],
+            Some("Google Chrome"),
+            Some(private_title),
+        ));
+
+        let manual_patterns = WindowPattern::parse_list(&["Private API docs".to_string()]);
+        assert!(resolved_window_matches_privacy_filters(
+            false,
+            false,
+            &manual_patterns,
+            Some("Google Chrome"),
+            Some(normal_title),
+        ));
+        assert!(!resolved_window_matches_privacy_filters(
+            true,
+            false,
+            &[],
+            Some("Google Chrome"),
+            Some(private_title),
+        ));
+        assert!(!resolved_window_matches_privacy_filters(
+            true,
+            true,
+            &[],
+            Some("Google Chrome"),
+            None,
+        ));
+
+        let app_patterns = WindowPattern::parse_list(&["Google Chrome".to_string()]);
+        assert!(resolved_window_matches_privacy_filters(
+            true,
+            false,
+            &app_patterns,
+            Some("Google Chrome"),
+            None,
+        ));
+    }
+
+    #[test]
+    fn resolve_capture_metadata_drops_stale_window_context_on_app_switch() {
+        let snapshot = screenpipe_a11y::tree::TreeSnapshot {
+            app_name: "TextEdit".into(),
+            app_id: Some("com.apple.TextEdit".into()),
+            executable: None,
+            app_version: None,
+            window_name: "M1_B.txt".into(),
+            text_content: "visible text".into(),
+            nodes: Vec::new(),
+            semantic_nodes: Vec::new(),
+            browser_url: Some("https://stale.example".into()),
+            document_path: Some("/tmp/M1_B.txt".into()),
+            timestamp: Utc::now(),
+            node_count: 0,
+            walk_duration: Duration::from_millis(1),
+            content_hash: 0,
+            simhash: 0,
+            truncated: false,
+            truncation_reason: screenpipe_a11y::tree::TruncationReason::None,
+            max_depth_reached: 0,
+            window_bounds: None,
+        };
+
+        let (app_name, window_name, browser_url, document_path) = resolve_capture_metadata(
+            Some(&snapshot),
+            &CaptureTrigger::AppSwitch {
+                app_name: "Finder".into(),
+                target: None,
+            },
+            None,
+        );
+
+        assert_eq!(app_name.as_deref(), Some("Finder"));
+        assert_eq!(window_name, None);
+        assert_eq!(browser_url, None);
+        assert_eq!(document_path, None);
     }
 
     #[test]

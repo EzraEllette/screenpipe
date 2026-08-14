@@ -69,8 +69,38 @@ jobs:
         # openssl is preinstalled on the windows-2022 runner and already on PATH
         # (e2e-test.yml mints the same Scream cert with no choco openssl). Installing
         # it via choco breaks when slproweb.com 404s the latest OpenSSL installer.
-        choco install ffmpeg
+        if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
+          # Pin and download the self-contained nupkg directly. Chocolatey's
+          # package-index endpoint intermittently reports "package not found"
+          # even while packages.chocolatey.org continues serving this artifact.
+          $version = "9.0.1"
+          $package = Join-Path $env:RUNNER_TEMP "ffmpeg.$version.nupkg"
+          $url = "https://packages.chocolatey.org/ffmpeg.$version.nupkg"
+          $expectedSha256 = "157c12d0609be46f17c8abf7444e6306150db8fe8ad3e62cd24d60ad0a98d770"
+          $downloaded = $false
+          foreach ($attempt in 1..5) {
+            try {
+              Invoke-WebRequest -Uri $url -OutFile $package -UseBasicParsing -TimeoutSec 120
+              $actualSha256 = (Get-FileHash $package -Algorithm SHA256).Hash.ToLowerInvariant()
+              if ($actualSha256 -ne $expectedSha256) {
+                throw "FFmpeg package checksum mismatch: $actualSha256"
+              }
+              $downloaded = $true
+              break
+            } catch {
+              if ($attempt -ge 5) { throw }
+              $delay = [math]::Min(30, [math]::Pow(2, $attempt))
+              Write-Warning "FFmpeg download attempt $attempt failed: $($_.Exception.Message); retrying in $delay seconds"
+              Start-Sleep -Seconds $delay
+            }
+          }
+          if (-not $downloaded) { throw "failed to download FFmpeg after 5 attempts" }
+
+          choco install ffmpeg --version $version --source $env:RUNNER_TEMP -y --no-progress
+          if ($LASTEXITCODE -ne 0) { throw "failed to install the pinned FFmpeg package" }
+        }
         echo "C:\ProgramData\chocolatey\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+        ffmpeg -version
 
     - name: Install Scream on Windows
       shell: pwsh

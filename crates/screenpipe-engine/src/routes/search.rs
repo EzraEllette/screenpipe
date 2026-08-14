@@ -623,6 +623,7 @@ pub fn search_result_to_content_item(
             focused: ocr.focused,
             device_name: ocr.device_name.clone(),
             text_source: ocr.text_source.clone(),
+            event_source: ocr.capture_trigger.clone(),
         }),
         SearchResult::Audio(audio) => {
             let transcription = truncate(audio.transcription.clone());
@@ -660,6 +661,7 @@ pub fn search_result_to_content_item(
             offset_index: ui.offset_index,
             frame_name: ui.frame_name.clone(),
             browser_url: ui.browser_url.clone(),
+            event_source: ui.capture_trigger.clone(),
         }),
         SearchResult::Input(input) => ContentItem::Input(InputContent {
             id: input.id,
@@ -1693,6 +1695,7 @@ mod tests {
             focused: None,
             device_name: "test-device".to_string(),
             text_source: Some("ocr".to_string()),
+            event_source: None,
         }
     }
 
@@ -1708,6 +1711,7 @@ mod tests {
             offset_index: 0,
             frame_name: None,
             browser_url: None,
+            event_source: None,
         }
     }
 
@@ -1822,6 +1826,7 @@ mod tests {
                 focused: Some(true),
                 device_name: "test-device".to_string(),
                 text_source: Some("ocr".to_string()),
+                capture_trigger: Some("typing_pause".to_string()),
             })
         };
 
@@ -1830,12 +1835,35 @@ mod tests {
             None,
         );
         let lightweight_projection = search_result_to_content_item(&make_result(""), None);
+        let full_json = serde_json::to_value(full_projection).unwrap();
+        let lightweight_json = serde_json::to_value(lightweight_projection).unwrap();
 
         assert_eq!(
-            serde_json::to_value(full_projection).unwrap(),
-            serde_json::to_value(lightweight_projection).unwrap(),
+            full_json, lightweight_json,
             "the HTTP search shape must not expose OCR bounding-box JSON"
         );
+        assert_eq!(full_json["content"]["event_source"], "typing_pause");
+    }
+
+    #[test]
+    fn accessibility_event_source_is_observable_in_search_response() {
+        let result = SearchResult::UI(screenpipe_db::UiContent {
+            id: 42,
+            text: "visible text".to_string(),
+            timestamp: Utc::now(),
+            app_name: "test".to_string(),
+            window_name: "test window".to_string(),
+            initial_traversal_at: None,
+            file_path: "frame.jpg".to_string(),
+            offset_index: 0,
+            frame_name: Some("display-1".to_string()),
+            browser_url: None,
+            capture_trigger: Some("visual_change".to_string()),
+        });
+
+        let json = serde_json::to_value(search_result_to_content_item(&result, None)).unwrap();
+
+        assert_eq!(json["content"]["event_source"], "visual_change");
     }
 
     #[test]
