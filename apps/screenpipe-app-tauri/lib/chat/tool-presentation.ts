@@ -439,10 +439,16 @@ export function summarizeToolResult(result: string | undefined, family: string):
   return "JSON response returned";
 }
 
+// Adapters stamp their own name onto messages they relay from the underlying
+// agent (codex-acp: "[codex-acp forwarded startup error] …"). Which adapter
+// relayed a message is plumbing; the sentence after it is the part the user
+// has to act on, so the tag only pushes it off the first line.
+const ADAPTER_RELAY_TAG_RE = /^\[[a-z0-9_-]+ forwarded [a-z ]+\]\s*/i;
+
 export function formatToolResult(result: string | undefined): string | undefined {
   if (!result) return undefined;
   const json = parseToolResultJson(result);
-  if (!json) return result;
+  if (!json) return result.replace(ADAPTER_RELAY_TAG_RE, "");
   return JSON.stringify(json, null, 2);
 }
 
@@ -679,6 +685,17 @@ function bareMcpName(toolName: string): string {
   return toolName.replace(MCP_PREFIX_RE, "");
 }
 
+// codex-acp reports an MCP server that could not start as a failed tool call
+// named `mcp__<server>__startup`. It emits one per server on every turn, so a
+// user with several unauthenticated servers gets a stack of them.
+const MCP_STARTUP_RE = /^mcp__([a-z0-9_.-]+)__startup$/i;
+
+/** The server name behind an `mcp__<server>__startup` diagnostic, if that's what
+ *  this is. Never a real tool the agent chose to call. */
+export function mcpStartupServerName(toolName: string): string | null {
+  return toolName.match(MCP_STARTUP_RE)?.[1] ?? null;
+}
+
 /**
  * If `toolName` is a screenpipe MCP tool, synthesize the equivalent local curl
  * command from its rawInput args, so the existing curl classifier and endpoint
@@ -786,6 +803,21 @@ export function presentToolActivity(toolCall: PresentableToolCall): ToolActivity
           ? `${type} subagent`
           : "subagent";
     return activity(title, title);
+  }
+
+  // An MCP server that failed to start is a setup problem, not a step the agent
+  // took. Naming the server is the whole point: `mcp__<server>__startup` strips
+  // down to a bare "Startup", so several failing servers rendered as a stack of
+  // identical anonymous rows and the one fact worth reading was only visible
+  // after expanding one of them.
+  const mcpStartupServer = mcpStartupServerName(rawName);
+  if (mcpStartupServer) {
+    return activity(
+      `Starting the ${mcpStartupServer} MCP server`,
+      toolCall.isError
+        ? `${mcpStartupServer} MCP server failed to start`
+        : `Started the ${mcpStartupServer} MCP server`,
+    );
   }
 
   // screenpipe MCP tools mirror the local REST endpoints — reuse the curl path.

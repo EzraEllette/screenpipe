@@ -139,3 +139,57 @@ describe("UsagePopover", () => {
     });
   });
 });
+
+describe("UsagePopover trigger ring", () => {
+  const originalAllowances = mocks.query.usage.hosted_ai.allowances;
+
+  afterEach(() => {
+    mocks.query.usage.hosted_ai.allowances = originalAllowances;
+  });
+
+  // The composer has one icon slot to spare, so the arc carries the glance and
+  // the exact number lives in the panel, the tooltip and the accessible name.
+  it("draws the tightest allowance as an arc and still names the number", () => {
+    render(<UsagePopover />);
+
+    const trigger = screen.getByTestId("usage-popover-trigger");
+    expect(trigger.getAttribute("aria-label")).toBe("AI usage, 62% used");
+    expect(trigger.getAttribute("title")).toBe("AI usage: 62% used");
+
+    const ring = screen.getByTestId("usage-ring");
+    const arc = ring.querySelectorAll("circle")[1];
+    const circumference = 2 * Math.PI * 7;
+    expect(Number(arc.getAttribute("stroke-dasharray"))).toBeCloseTo(circumference, 5);
+    // 62% used leaves 38% of the circle undrawn.
+    expect(Number(arc.getAttribute("stroke-dashoffset"))).toBeCloseTo(
+      circumference * 0.38,
+      5,
+    );
+  });
+
+  it("reddens as the tightest allowance runs out", () => {
+    const stateFor = (used: number) => {
+      mocks.query.usage.hosted_ai.allowances = [
+        { ...originalAllowances[0], used_percent: used, remaining_percent: 100 - used },
+      ];
+      const view = render(<UsagePopover />);
+      const state = screen.getByTestId("usage-ring").getAttribute("data-usage-state");
+      view.unmount();
+      return state;
+    };
+
+    expect(stateFor(30)).toBe("ok");
+    expect(stateFor(85)).toBe("approaching");
+    expect(stateFor(100)).toBe("reached");
+  });
+
+  it("cannot overdraw the arc on a stale over-100 reading", () => {
+    mocks.query.usage.hosted_ai.allowances = [
+      { ...originalAllowances[0], used_percent: 140, remaining_percent: 0 },
+    ];
+    render(<UsagePopover />);
+
+    const arc = screen.getByTestId("usage-ring").querySelectorAll("circle")[1];
+    expect(Number(arc.getAttribute("stroke-dashoffset"))).toBe(0);
+  });
+});

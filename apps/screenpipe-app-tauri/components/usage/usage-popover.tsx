@@ -13,6 +13,7 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { UsageLimitsPanel } from "@/components/usage/usage-limits-panel";
+import { UsageRing } from "@/components/usage/usage-meter";
 import { quotaPlanLabel } from "@/lib/chat/quota-errors";
 import {
   formatUsagePercent,
@@ -50,23 +51,27 @@ export function UsagePopover() {
         <Button
           type="button"
           variant="ghost"
-          size="sm"
+          size="icon"
           className={cn(
-            "h-8 gap-1.5 px-2 text-xs hover:bg-muted/50 hover:text-foreground",
-            // The chip only earns full contrast once the tightest allowance is
+            "h-7 w-7 hover:bg-muted/50 hover:text-foreground",
+            // The ring only earns full contrast once the tightest allowance is
             // actually worth acting on; otherwise it stays background noise.
             state === "ok"
               ? "text-muted-foreground"
-              : "text-foreground font-medium",
+              : "text-foreground",
           )}
+          // The arc is the glance; the exact number belongs to the panel it
+          // opens, and to anyone who hovers or uses a screen reader.
+          title={percent ? `AI usage: ${percent} used` : "AI usage unavailable"}
           aria-label={percent ? `AI usage, ${percent} used` : "AI usage unavailable"}
           data-testid="usage-popover-trigger"
           data-state-usage={state}
         >
-          <Activity className="h-3.5 w-3.5" aria-hidden />
-          <span className="hidden font-mono tabular-nums sm:inline">
-            {percent ?? "—"}
-          </span>
+          {tightest ? (
+            <UsageRing percent={tightest.used_percent} state={state} />
+          ) : (
+            <Activity className="h-3.5 w-3.5" aria-hidden />
+          )}
         </Button>
       </PopoverTrigger>
       <PopoverContent
