@@ -177,6 +177,18 @@ describe("recording health hover detail", () => {
     );
   });
 
+  it("shows recovery confirmation instead of a broken or restart state", async () => {
+    mocks.getRecordingHealthState.mockResolvedValue(
+      "recovering|screen capture is not updating|screen",
+    );
+
+    render(<ShortcutReminderPage />);
+
+    expect(await screen.findByText("checking recovery...")).toBeVisible();
+    expect(screen.queryByText("screen capture needs help")).toBeNull();
+    expect(screen.queryByRole("button", { name: /restart/i })).toBeNull();
+  });
+
   // #6126: the pill read as a total product failure whatever broke, so routine
   // audio churn and a wedged capture backend looked identical to the user.
   it("names audio when only audio failed", async () => {

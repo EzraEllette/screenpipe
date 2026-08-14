@@ -200,7 +200,7 @@ fn primary_size(state: &OverlayState, s: f32) -> (f32, f32) {
             } * s,
             BASE_HEALTH_H * s,
         ),
-        Health::Fixing => (HEALTH_FIXING_W * s, BASE_HEALTH_H * s),
+        Health::Recovering | Health::Fixing => (HEALTH_FIXING_W * s, BASE_HEALTH_H * s),
         Health::Recovered => (HEALTH_RECOVERED_W * s, BASE_HEALTH_H * s),
         Health::Normal => {
             if expanded {

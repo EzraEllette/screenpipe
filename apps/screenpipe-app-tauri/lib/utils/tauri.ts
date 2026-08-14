@@ -714,10 +714,11 @@ async getPendingUpdate() : Promise<Result<PendingUpdateSnapshot | null, null>> {
 }
 },
 /**
- * Current recording-health overlay state: "normal" | "failure" | "fixing" |
- * "recovered", optionally suffixed "|<detail>" (a concise failure reason or
- * boot-phase label while fixing). The shortcut-reminder webview pulls this on
- * mount, then stays current via the "recording-health-state" event.
+ * Current recording-health overlay state: "normal" | "failure" |
+ * "recovering" | "fixing" | "recovered", optionally suffixed "|<detail>" (a
+ * concise failure reason or boot-phase label while fixing). The
+ * shortcut-reminder webview pulls this on mount, then stays current via the
+ * "recording-health-state" event.
  */
 async getRecordingHealthState() : Promise<string> {
     return await TAURI_INVOKE("get_recording_health_state");
