@@ -134,6 +134,7 @@ import {
   debounce,
   FieldValidationResult,
 } from "@/lib/utils/validation";
+import { parseOpenAiModelList } from "@/lib/utils/ai-model-list";
 import {
   DEFAULT_ENTERPRISE_AI_PRESET_POLICY,
   filterPresetsForEnterprisePolicy,
@@ -941,13 +942,10 @@ const AISection = ({
             modelCount = ollamaModels.length;
             setModels(ollamaModels);
           } else {
-            const apiModels = (data.data || [])
-              .map((m: any) => ({
-              id: m.id,
-              name: m.id,
-              provider: settingsPreset?.provider || "custom",
-              }))
-              .filter((m: any, idx: number, arr: any[]) => arr.findIndex((x: any) => x.id === m.id) === idx);
+            const apiModels = parseOpenAiModelList(data, {
+              provider: settingsPreset?.provider,
+              url: settingsPreset?.url,
+            });
             modelCount = apiModels.length;
             setModels(apiModels);
           }
@@ -1120,12 +1118,10 @@ const AISection = ({
             }
             const customData = await customResponse.json();
             setModels(
-              (customData.data || []).map((model: AIModel) => ({
-                ...model,
-                id: model.id,
-                name: model.id,
+              parseOpenAiModelList(customData, {
                 provider: "custom",
-              }))
+                url: settingsPreset?.url,
+              })
             );
           } catch (error) {
             console.error(

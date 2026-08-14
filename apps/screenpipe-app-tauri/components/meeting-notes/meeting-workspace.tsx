@@ -4,15 +4,7 @@
 "use client";
 
 import React from "react";
-import { Check, Copy, Mail } from "lucide-react";
 import { MemoizedReactMarkdown } from "@/components/markdown";
-import { Button } from "@/components/ui/button";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
 
 export type MeetingWorkspaceTab = "notes" | "transcript" | "summary";
@@ -48,10 +40,15 @@ export function MeetingWorkspaceTabs({
   value,
   onValueChange,
   summaryState,
+  trailing,
 }: {
   value: MeetingWorkspaceTab;
   onValueChange: (value: MeetingWorkspaceTab) => void;
   summaryState?: "working" | "ready" | "attention" | null;
+  // Rendered on the same rule as the tabs but outside the tablist, so a
+  // note-wide action stays reachable from every tab without becoming a
+  // fourth pseudo-tab for arrow-key navigation.
+  trailing?: React.ReactNode;
 }) {
   const tabRefs = React.useRef<Array<HTMLButtonElement | null>>([]);
 
@@ -62,11 +59,14 @@ export function MeetingWorkspaceTabs({
     tabRefs.current[normalized]?.focus();
   };
 
-  return (
+  const tablist = (
     <div
       role="tablist"
       aria-label="meeting workspace"
-      className="flex min-w-0 items-stretch overflow-x-auto border-b border-border [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+      className={cn(
+        "flex min-w-0 items-stretch overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden",
+        !trailing && "border-b border-border",
+      )}
     >
       {MEETING_TABS.map((tab, index) => {
         const selected = value === tab.value;
@@ -122,6 +122,15 @@ export function MeetingWorkspaceTabs({
       })}
     </div>
   );
+
+  if (!trailing) return tablist;
+
+  return (
+    <div className="flex min-w-0 items-stretch border-b border-border">
+      {tablist}
+      <div className="ml-auto flex shrink-0 items-stretch">{trailing}</div>
+    </div>
+  );
 }
 
 export function extractMeetingSummary(markdown: string): string | null {
@@ -135,16 +144,6 @@ export function extractMeetingSummary(markdown: string): string | null {
   return body || null;
 }
 
-// The summary header is where a share has to live: it is the first thing on
-// screen the moment the agent finishes. One trigger, destinations one level
-// down. Two peer buttons would have made three same-weight controls in this
-// header, against the rule the footer cluster already follows — primary stays
-// visible, everything occasional lives one level down. Granola and Notion both
-// land in the same place: a single share surface that fans out to destinations,
-// never a row of per-destination buttons.
-const MEETING_SHARE_BUTTON_CLASS =
-  "flex h-9 shrink-0 items-center gap-1.5 border border-border bg-background px-3 font-mono text-[10px] uppercase tracking-[0.12em] text-muted-foreground transition-colors hover:border-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-foreground disabled:opacity-40";
-
 export function MeetingSummarySurface({
   note,
   state,
@@ -152,9 +151,6 @@ export function MeetingSummarySurface({
   streamedSummary,
   onGenerate,
   canGenerate,
-  onCopySummary,
-  onEmailSummary,
-  summaryCopied,
 }: {
   note: string;
   state: "idle" | "working" | "ready" | "attention";
@@ -162,16 +158,10 @@ export function MeetingSummarySurface({
   streamedSummary?: string;
   onGenerate: () => void;
   canGenerate: boolean;
-  onCopySummary?: () => void;
-  onEmailSummary?: () => void;
-  summaryCopied?: boolean;
 }) {
   const savedSummary = extractMeetingSummary(note);
   const isStreaming = state === "working" && Boolean(streamedSummary?.trim());
   const summary = isStreaming ? streamedSummary! : savedSummary;
-  // Share only what is finished and on disk. A half-streamed draft would put a
-  // truncated summary in someone's inbox.
-  const canShare = Boolean(savedSummary) && state !== "working";
 
   return (
     <section
@@ -192,43 +182,9 @@ export function MeetingSummarySurface({
             </p>
           </div>
           <div className="flex shrink-0 items-center gap-2">
-            {canShare && (onCopySummary || onEmailSummary) && (
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    aria-label="share summary"
-                    title="share the summary, without the transcript"
-                    className={MEETING_SHARE_BUTTON_CLASS}
-                  >
-                    {summaryCopied ? (
-                      <>
-                        <Check className="h-3 w-3" />
-                        copied
-                      </>
-                    ) : (
-                      "share"
-                    )}
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end" className="w-56">
-                  {onCopySummary && (
-                    <DropdownMenuItem onSelect={() => onCopySummary()}>
-                      <Copy className="mr-2 h-3.5 w-3.5" />
-                      copy summary
-                    </DropdownMenuItem>
-                  )}
-                  {onEmailSummary && (
-                    <DropdownMenuItem onSelect={() => onEmailSummary()}>
-                      <Mail className="mr-2 h-3.5 w-3.5" />
-                      email summary
-                    </DropdownMenuItem>
-                  )}
-                </DropdownMenuContent>
-              </DropdownMenu>
-            )}
+            {/* Sharing the summary is the meeting-wide share control's job, on
+                the tab rule above. This header keeps only the action that is
+                unique to the summary tab: producing one. */}
             {(state === "idle" ||
               state === "attention" ||
               state === "ready") && (

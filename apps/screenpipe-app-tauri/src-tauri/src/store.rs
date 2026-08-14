@@ -135,20 +135,48 @@ fn store_json_has_presets(data: &[u8]) -> bool {
 /// crash can never destroy both the live file and its backup at once.
 pub(crate) fn durable_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    // The temp name must be unique per call. It used to be a fixed
+    // `<path>.durable.tmp`, which two concurrent writers to the same target
+    // shared: B's create truncated A's in-flight temp, and whichever renamed
+    // second got ENOENT because the first rename had already consumed it.
+    //
+    // Observed in production on 2026-08-13, six times in 22s, when
+    // set_overlay_anchor and set_overlay_display saved 103µs apart: the
+    // store.bin write and *both* last-good snapshots failed together, so the
+    // settings-wipe recovery chain was down exactly while writes contended.
+    // The same interleaving could also rename a half-written temp over the
+    // target — the torn file this helper exists to prevent.
+    //
+    // pid + counter is unique across every live writer. A hard crash mid-write
+    // still leaks at most one temp, the same as before; earlier temps are
+    // already consumed by their renames.
+    static SEQ: AtomicU64 = AtomicU64::new(0);
     let mut tmp = path.as_os_str().to_os_string();
-    tmp.push(".durable.tmp");
+    tmp.push(format!(
+        ".durable.{}.{}.tmp",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
     let tmp = std::path::PathBuf::from(tmp);
 
     {
-        let mut f = std::fs::File::create(&tmp)?;
+        // Truncate rather than create_new: the unique name already excludes
+        // every live writer, and a leftover from a dead process that reused
+        // this pid should be reclaimed, not turned into a hard write failure.
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            // store.bin and its snapshots hold API keys — owner-only from
+            // creation, so there is no window where the temp is world-readable.
+            opts.mode(0o600);
+        }
+        let mut f = opts.open(&tmp)?;
         f.write_all(bytes)?;
         f.sync_all()?; // contents + metadata to stable storage before the rename
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        // store.bin and its snapshots hold API keys — keep them owner-only.
-        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
     }
     if let Err(e) = std::fs::rename(&tmp, path) {
         let _ = std::fs::remove_file(&tmp);
@@ -951,11 +979,26 @@ pub struct SettingsStore {
     pub search_shortcut: String,
     #[serde(rename = "lockVaultShortcut", default)]
     pub lock_vault_shortcut: String,
-    #[serde(rename = "showShortcutOverlay", default = "default_true")]
-    pub show_shortcut_overlay: bool,
     /// Overlay size: "small" (default), "medium" (1.5x), "large" (2x)
     #[serde(rename = "shortcutOverlaySize", default = "default_overlay_size")]
     pub shortcut_overlay_size: String,
+    /// The user's choice, honored only while `allow_hiding_shortcut_overlay`
+    /// is on. The overlay ships unhideable, so this is inert by default.
+    #[serde(rename = "showShortcutOverlay", default = "default_true")]
+    pub show_shortcut_overlay: bool,
+    /// Remote-controlled capability (`overlay-hiding-control`), written by the
+    /// desktop remote-control registry. False ships; flipping the flag on gives
+    /// the Display toggle back without a release.
+    #[serde(rename = "allowHidingShortcutOverlay", default)]
+    pub allow_hiding_shortcut_overlay: bool,
+    /// Where the user dragged the overlay: one of top/bottom x left/center/right.
+    #[serde(rename = "shortcutOverlayAnchor", default = "default_overlay_anchor")]
+    pub shortcut_overlay_anchor: String,
+    /// Display the overlay was pinned to, as a stable per-display UUID. Empty
+    /// until the user drags it, and ignored when that display is not attached,
+    /// so the pill stays put instead of following the cursor between monitors.
+    #[serde(rename = "shortcutOverlayDisplay", default)]
+    pub shortcut_overlay_display: String,
     /// Unique device ID for AI usage tracking (generated on first launch)
     #[serde(rename = "deviceId", default = "generate_device_id")]
     pub device_id: String,
@@ -1054,6 +1097,10 @@ fn default_true() -> bool {
 
 fn default_overlay_size() -> String {
     "small".to_string()
+}
+
+fn default_overlay_anchor() -> String {
+    "top-center".to_string()
 }
 
 fn default_ui_theme() -> String {
@@ -1543,8 +1590,11 @@ Rules:
             lock_vault_shortcut: "Ctrl+Shift+L".to_string(),
             #[cfg(not(target_os = "windows"))]
             lock_vault_shortcut: "Super+Shift+L".to_string(),
-            show_shortcut_overlay: true,
             shortcut_overlay_size: "small".to_string(),
+            shortcut_overlay_anchor: default_overlay_anchor(),
+            shortcut_overlay_display: String::new(),
+            show_shortcut_overlay: true,
+            allow_hiding_shortcut_overlay: false,
             device_id: uuid::Uuid::new_v4().to_string(),
             auto_update: true,
             auto_update_pipes: true,
@@ -1625,6 +1675,7 @@ impl SettingsStore {
             if let Some(presets) = obj.get_mut("aiPresets") {
                 if let Some(arr) = presets.as_array_mut() {
                     for preset in arr.iter_mut() {
+                        Self::repair_orphaned_acp_preset(preset);
                         if let Some(provider) = preset.get("provider").and_then(|p| p.as_str()) {
                             if !known_providers.contains(&provider) {
                                 tracing::warn!(
@@ -1644,6 +1695,59 @@ impl SettingsStore {
             }
         }
         val
+    }
+
+    /// Give a coding-agent preset its `acp` provider back.
+    ///
+    /// The unknown-provider fallback above rewrites `provider` in place and
+    /// leaves everything else alone. Any build predating ACP (`acp` reached
+    /// this allow-list on 2026-08-07) therefore turned a working coding-agent
+    /// preset into `provider: "custom"` with no URL, permanently — the agent id
+    /// survived in `model`, so the desktop then asked the cloud gateway for a
+    /// model literally named "codex-acp" and showed the 403 as "upgrade to
+    /// Screenpipe Business". One downgrade, or one older build opening the
+    /// store, was enough.
+    ///
+    /// The signature is deliberately narrow: an agent config, a model that is
+    /// still exactly that agent's id, and no URL. Switching a preset away from
+    /// a coding agent in the editor always rewrites `model` (cloud → "auto",
+    /// chatgpt → "gpt-5.6-terra") or sets a URL (ollama, custom), so a
+    /// deliberate choice can never match this and get flipped back.
+    fn repair_orphaned_acp_preset(preset: &mut Value) {
+        let Some(obj) = preset.as_object_mut() else {
+            return;
+        };
+        if obj.get("provider").and_then(|p| p.as_str()) == Some("acp") {
+            return;
+        }
+        let agent_id = obj
+            .get("acpAgent")
+            .and_then(|agent| agent.get("id"))
+            .and_then(|id| id.as_str())
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned);
+        let Some(agent_id) = agent_id else {
+            return;
+        };
+        if obj.get("model").and_then(|m| m.as_str()).map(str::trim) != Some(agent_id.as_str()) {
+            return;
+        }
+        let url_is_empty = obj
+            .get("url")
+            .map(|url| url.as_str().map(str::trim).unwrap_or("").is_empty())
+            .unwrap_or(true);
+        if !url_is_empty {
+            return;
+        }
+        tracing::warn!(
+            "restoring 'acp' provider for coding-agent preset '{}' (was '{}')",
+            agent_id,
+            obj.get("provider")
+                .and_then(|p| p.as_str())
+                .unwrap_or("none")
+        );
+        obj.insert("provider".to_string(), Value::String("acp".to_string()));
     }
 
     pub fn get(app: &AppHandle) -> Result<Option<Self>, String> {
@@ -2026,6 +2130,33 @@ fn restore_headed_mode_for_consumer(
     true
 }
 
+const WINDOWS_TIMELINE_WINDOW_MODE_MIGRATION: &str =
+    "windowsTimelineWindowModeMigrationV1";
+
+/// Move existing Windows installs off the legacy borderless fullscreen overlay.
+///
+/// The marker makes this a one-time migration: after the first upgraded launch,
+/// users can explicitly switch back to fullscreen without being overridden again.
+fn migrate_windows_timeline_to_window_mode(settings: &mut SettingsStore) -> bool {
+    if settings
+        .extra
+        .get(WINDOWS_TIMELINE_WINDOW_MODE_MIGRATION)
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return false;
+    }
+
+    if settings.overlay_mode == "fullscreen" {
+        settings.overlay_mode = "window".to_string();
+    }
+    settings.extra.insert(
+        WINDOWS_TIMELINE_WINDOW_MODE_MIGRATION.to_string(),
+        Value::Bool(true),
+    );
+    true
+}
+
 pub fn init_store(app: &AppHandle) -> Result<SettingsStore, String> {
     println!("Initializing settings store");
 
@@ -2043,14 +2174,14 @@ pub fn init_store(app: &AppHandle) -> Result<SettingsStore, String> {
         .unwrap_or(false);
 
     let is_new_store;
-    let (mut store, mut should_save) = match SettingsStore::get(app) {
+    let (mut store, mut should_save, can_run_settings_migrations) = match SettingsStore::get(app) {
         Ok(Some(store)) => {
             is_new_store = false;
-            (store, should_persist_restart_notification_migration)
+            (store, should_persist_restart_notification_migration, true)
         }
         Ok(None) => {
             is_new_store = true;
-            (SettingsStore::default(), true) // New store, save defaults
+            (SettingsStore::default(), true, true) // New store, save defaults
         }
         Err(e) => {
             is_new_store = false;
@@ -2062,7 +2193,7 @@ pub fn init_store(app: &AppHandle) -> Result<SettingsStore, String> {
                 "Failed to deserialize settings, using defaults (store not overwritten): {}",
                 e
             );
-            (SettingsStore::default(), false)
+            (SettingsStore::default(), false, false)
         }
     };
 
@@ -2142,6 +2273,16 @@ pub fn init_store(app: &AppHandle) -> Result<SettingsStore, String> {
     if restore_headed_mode_for_consumer(&mut store, cfg!(feature = "enterprise-build")) {
         tracing::info!(
             "settings migration: restored headed UI and scheduled pipe runs for consumer install"
+        );
+        should_save = true;
+    }
+
+    if cfg!(target_os = "windows")
+        && can_run_settings_migrations
+        && migrate_windows_timeline_to_window_mode(&mut store)
+    {
+        tracing::info!(
+            "settings migration: selected window mode for the Windows timeline overlay"
         );
         should_save = true;
     }
@@ -2328,7 +2469,10 @@ pub fn show_fatal_startup_alert(title: &str, message: &str) {
         );
         Command::new("osascript").arg("-e").arg(script).spawn()
     } else if cfg!(target_os = "windows") {
-        Command::new("powershell")
+        // `-WindowStyle Hidden` hides PowerShell's *own* window, not the
+        // console Windows allocates for a console child of a GUI process — the
+        // alert would otherwise arrive with a black terminal beside it.
+        screenpipe_core::no_window_command("powershell")
             .args([
                 "-NoProfile",
                 "-WindowStyle",
@@ -2419,6 +2563,32 @@ mod tests {
     #[test]
     fn auto_update_defaults_to_enabled() {
         assert!(SettingsStore::default().auto_update);
+    }
+
+    #[test]
+    fn shortcut_overlay_anchor_defaults_to_top_center() {
+        assert_eq!(SettingsStore::default().shortcut_overlay_anchor, "top-center");
+
+        // Settings written before the pill could be pinned have no anchor key.
+        let missing: SettingsStore = serde_json::from_value(json!({
+            "aiPresets": []
+        }))
+        .unwrap();
+        assert_eq!(missing.shortcut_overlay_anchor, "top-center");
+    }
+
+    /// Stored dismissals from before the overlay became permanent must not
+    /// resurrect: the keys are gone, and an old file carrying them still loads.
+    #[test]
+    fn retired_overlay_dismissal_keys_are_ignored() {
+        let legacy: SettingsStore = serde_json::from_value(json!({
+            "aiPresets": [],
+            "showShortcutOverlay": false,
+            "shortcutOverlaySnoozedUntil": 4_102_444_800_i64,
+            "shortcutOverlayMinimalReshowVersion": 1,
+        }))
+        .unwrap();
+        assert_eq!(legacy.shortcut_overlay_anchor, "top-center");
     }
 
     #[test]
@@ -2523,6 +2693,40 @@ mod tests {
         assert!(!restore_headed_mode_for_consumer(&mut enterprise, true));
         assert!(enterprise.headless);
         assert!(enterprise.headless_record_only);
+    }
+
+    #[test]
+    fn windows_timeline_migration_moves_legacy_fullscreen_to_window_once() {
+        let mut settings = SettingsStore {
+            overlay_mode: "fullscreen".to_string(),
+            ..Default::default()
+        };
+
+        assert!(migrate_windows_timeline_to_window_mode(&mut settings));
+        assert_eq!(settings.overlay_mode, "window");
+        assert_eq!(
+            settings.extra.get(WINDOWS_TIMELINE_WINDOW_MODE_MIGRATION),
+            Some(&Value::Bool(true))
+        );
+
+        settings.overlay_mode = "fullscreen".to_string();
+        assert!(!migrate_windows_timeline_to_window_mode(&mut settings));
+        assert_eq!(settings.overlay_mode, "fullscreen");
+    }
+
+    #[test]
+    fn windows_timeline_migration_marks_existing_window_mode_complete() {
+        let mut settings = SettingsStore {
+            overlay_mode: "window".to_string(),
+            ..Default::default()
+        };
+
+        assert!(migrate_windows_timeline_to_window_mode(&mut settings));
+        assert_eq!(settings.overlay_mode, "window");
+        assert_eq!(
+            settings.extra.get(WINDOWS_TIMELINE_WINDOW_MODE_MIGRATION),
+            Some(&Value::Bool(true))
+        );
     }
 
     #[test]
@@ -2932,6 +3136,77 @@ mod tests {
         assert!(!store_json_has_presets(&invalid_json));
     }
 
+    /// Any `<name>.durable.<pid>.<seq>.tmp` still sitting in `dir`.
+    fn lingering_durable_temps(dir: &std::path::Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".durable.") && n.ends_with(".tmp"))
+            .collect()
+    }
+
+    /// Regression: concurrent writers to the same target used to share a fixed
+    /// `<path>.durable.tmp`. One truncated the other's in-flight temp and the
+    /// loser's rename failed with ENOENT — six times in production on
+    /// 2026-08-13, taking the store write and both last-good snapshots down
+    /// together. Against the fixed-name version this fails on nearly every run.
+    #[test]
+    fn durable_write_survives_concurrent_writers_to_same_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("store.bin");
+
+        // Distinct, long, byte-uniform payloads: any interleaving of two
+        // writers is trivially detectable, and the size widens the race window.
+        let payloads: Vec<Vec<u8>> = (0..8u8)
+            .map(|i| vec![b'a' + i; 256 * 1024])
+            .collect();
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(payloads.len()));
+        let handles: Vec<_> = payloads
+            .iter()
+            .cloned()
+            .map(|payload| {
+                let p = p.clone();
+                let barrier = std::sync::Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    durable_write(&p, &payload)
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join()
+                .expect("writer thread panicked")
+                .expect("concurrent durable_write must not fail");
+        }
+
+        // Whoever won the rename race, the published file must be exactly one
+        // writer's bytes — never a mix, never truncated.
+        let got = std::fs::read(&p).unwrap();
+        assert!(
+            payloads.contains(&got),
+            "published file is torn: {} bytes, first={:?} last={:?}",
+            got.len(),
+            got.first(),
+            got.last()
+        );
+
+        let leftovers = lingering_durable_temps(tmp.path());
+        assert!(
+            leftovers.is_empty(),
+            "no durable temp may linger after concurrent writes: {leftovers:?}"
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "store file must stay owner-only under a race");
+        }
+    }
+
     #[test]
     fn durable_write_writes_full_content_atomically() {
         let tmp = tempfile::tempdir().unwrap();
@@ -2947,11 +3222,9 @@ mod tests {
         );
 
         // The atomic temp must be gone — never left as a torn sibling.
-        let mut tmp_path = p.clone().into_os_string();
-        tmp_path.push(".durable.tmp");
         assert!(
-            !std::path::Path::new(&tmp_path).exists(),
-            "durable .tmp must not linger after a successful write"
+            lingering_durable_temps(tmp.path()).is_empty(),
+            "durable temp must not linger after a successful write"
         );
 
         #[cfg(unix)]
@@ -3582,6 +3855,66 @@ mod tests {
         let preset = &sanitized_acp["aiPresets"][0];
         assert_eq!(preset["provider"].as_str(), Some("acp"));
         assert_eq!(preset["acpAgent"]["id"].as_str(), Some("codex-acp"));
+    }
+
+    /// The exact shape an ACP-unaware build leaves behind: provider rewritten
+    /// to "custom", no URL, agent id still sitting in `model`. Without the
+    /// repair the desktop asks the cloud gateway for a model named "codex-acp"
+    /// and shows the 403 as "upgrade to Screenpipe Business".
+    #[test]
+    fn orphaned_acp_preset_gets_its_provider_back() {
+        let downgraded = json!({
+            "aiPresets": [{
+                "id": "codex",
+                "provider": "custom",
+                "url": "",
+                "model": "codex-acp",
+                "acpAgent": {"id": "codex-acp"}
+            }]
+        });
+
+        let repaired = SettingsStore::sanitize_legacy_fields(downgraded);
+        let preset = &repaired["aiPresets"][0];
+        assert_eq!(preset["provider"].as_str(), Some("acp"));
+        assert_eq!(preset["acpAgent"]["id"].as_str(), Some("codex-acp"));
+        assert_eq!(preset["model"].as_str(), Some("codex-acp"));
+    }
+
+    /// A preset the user deliberately moved off a coding agent keeps a stale
+    /// `acpAgent` (the editor never clears it) but always gets a new model or a
+    /// URL. Neither may be dragged back onto the ACP backend.
+    #[test]
+    fn deliberate_non_acp_presets_are_left_alone() {
+        let intentional = json!({
+            "aiPresets": [
+                {
+                    // switched to cloud: editor rewrote the model
+                    "provider": "screenpipe-cloud",
+                    "url": "",
+                    "model": "auto",
+                    "acpAgent": {"id": "codex-acp"}
+                },
+                {
+                    // switched to ollama: editor set a URL, model kept
+                    "provider": "native-ollama",
+                    "url": "http://localhost:11434/v1",
+                    "model": "codex-acp",
+                    "acpAgent": {"id": "codex-acp"}
+                },
+                {
+                    // never an ACP preset at all
+                    "provider": "custom",
+                    "url": "",
+                    "model": "my-model"
+                }
+            ]
+        });
+
+        let sanitized = SettingsStore::sanitize_legacy_fields(intentional);
+        let presets = sanitized["aiPresets"].as_array().unwrap();
+        assert_eq!(presets[0]["provider"].as_str(), Some("screenpipe-cloud"));
+        assert_eq!(presets[1]["provider"].as_str(), Some("native-ollama"));
+        assert_eq!(presets[2]["provider"].as_str(), Some("custom"));
     }
 
     #[test]

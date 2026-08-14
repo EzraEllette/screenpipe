@@ -17,10 +17,16 @@ import { resetCardAskTriggerBus } from "@/lib/card-ask/trigger-bus";
  */
 
 let flagVariant: string | undefined = "at_login";
+// The kill switch is read live on every decision, so it has to be mocked or
+// every ask is (correctly) suppressed.
+let flagEnabled: boolean | undefined = true;
+let flagPayload: unknown = undefined;
 let settingsState: { settings: any; isSettingsLoaded: boolean };
 
 vi.mock("posthog-js/react", () => ({
   useFeatureFlagVariantKey: () => flagVariant,
+  useFeatureFlagEnabled: () => flagEnabled,
+  useFeatureFlagPayload: () => flagPayload,
 }));
 
 vi.mock("@/lib/hooks/use-settings", () => ({

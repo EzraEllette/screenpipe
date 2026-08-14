@@ -522,6 +522,7 @@ commits: `eea0c865`, `fe9060db`, `c99c3967`, `aeaa446b`, `5a219688`, `caae1ebc`,
 - [ ] **Windows Defender** — app not blocked by default security.
 - [ ] **Windows default mode** — On Windows, the app should default to window mode on first launch.
 - [ ] **Windows taskbar icon** — The app should display a taskbar icon on Windows.
+- [ ] **Enterprise enforced auto-start enrollment** — In an installed Windows enterprise build, set `lockedSettings.autoStartEnabled = "true"`, disable Screenpipe in Task Manager Startup apps, and verify both the HKCU `Run` command (including `--autostart`) and `StartupApproved\Run` return to enabled within two seconds. Sign out/in and confirm Screenpipe starts in the background. Remove the policy, disable startup again, wait at least two reconciliation intervals, and verify it remains disabled.
 - [ ] **Windows login window resets stale OAuth navigation** — Click login, choose GitHub or Google, leave the provider flow open, then click login in Screenpipe again. The existing "sign in to screenpipe" window must return to the Screenpipe login page instead of showing the stale provider page or a blank document.
 - [ ] **Windows audio transcription accuracy** — On Windows, verify improved audio transcription accuracy due to native Silero VAD frame size and lower speech threshold.
 - [ ] **Windows multi-line pipe prompts** — Multi-line pipe prompts should be preserved on Windows.
@@ -849,6 +850,9 @@ run section 4 completely.
 ### before merging AI changes
 run section 10.
 
+### before merging updater / tray-update changes
+run section 32, and run `bun run test:e2e:packaged-updater:macos` (macOS).
+
 ## known limitations (not bugs)
 
 - tray icon on notched MacBooks can end up behind the notch if menu bar is crowded. Cmd+drag to reposition. dock menu is the fallback.
@@ -962,3 +966,15 @@ commits: `c6a73b17e`, `945b687ec`
 - [ ] **Persistent background chats** — Verify that chats continue to stream in the background even when navigating away from the chat view. (`0060ae9e5`, `ec5e80992`)
 - [ ] **Inline history in overlay** — Verify that inline history is restored in the overlay window. (`15b419ec7`)
 - [ ] **Notification URL actions** — Open a URL action from a native macOS notification when the overlay is not mounted. (`7fdcd2054`)
+
+### 32. Updates (tray "Restart to update")
+
+commits: 2026-08-11 tray-update-ux
+
+- [ ] **Tray restart while signed out** — On a signed-out / entitlement-gated install (engine never starts, boot phase `idle`), stage an update and click the tray "Restart to update". It MUST proceed and relaunch — before this fix the click silently no-oped forever (MacBook Air report).
+- [ ] **Tray click feedback** — Clicking "Restart to update" immediately changes the menu item to "Installing update…"; a deferred/failed restart shows a native notification instead of doing nothing.
+- [ ] **Fast install (no blackout)** — The exit-path install uses the pre-extracted rename path (log: `installed via pre-extracted fast path`). Old→new blackout is a few seconds, not 10–40s.
+- [ ] **Failed-install detection** — If an update quits but doesn't apply, the next boot shows "Update didn't apply — click to retry" (marker in `~/.screenpipe/update-attempt.json`, consumed once).
+- [ ] **No-update click safety** — Clicking the menu item with nothing staged runs a check and must NOT restart the app.
+
+Automated: `bun run test:e2e:packaged-updater:macos` drives all of the above against two real signed release-local builds (macOS only). Rust unit coverage: `cargo test --features e2e staged_update:: updates::tests` (pre-extract fast path, rollback, fallback, idle gate, marker classification).

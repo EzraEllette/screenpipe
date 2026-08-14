@@ -38,7 +38,7 @@ fn build_livetext_bridge() {
     }
 
     let has_vk = has_visionkit_sdk();
-    println!("cargo:warning=VisionKit SDK check: {}", has_vk);
+    eprintln!("VisionKit SDK check: {}", has_vk);
     if !has_vk {
         println!("cargo:warning=VisionKit.framework not found in SDK, building Live Text stub");
         build_livetext_stub(&out_dir, &lib_path);
@@ -374,6 +374,11 @@ const E2E_COMMANDS: &[&str] = &[
     "set_tray_recording_status",
     "installed_tray_recording_status",
     "shortcut_reminder_visible",
+    "open_auto_meeting",
+    "active_meeting_id",
+    "native_meeting_overlay_state",
+    "native_shortcut_set_hovering",
+    "native_toggle_meeting_pin",
     "emit_meeting_overlay_transcript",
     "emit_agent_stream",
     "emit_settled_agent_follow_up",
@@ -391,6 +396,7 @@ const E2E_COMMANDS: &[&str] = &[
     "seed_flags",
     "capture_pi_start_error",
     "set_onboarding_completed_ago",
+    "e2e_set_activation_allowed",
 ];
 
 fn validate_e2e_command_inventory() {
@@ -726,7 +732,6 @@ int shortcut_hide(void) { return -2; }
 int shortcut_is_available(void) { return 0; }
 void shortcut_set_meeting_active(int active) { (void)active; }
 void shortcut_set_meeting_stop_result(int succeeded) { (void)succeeded; }
-void shortcut_set_inbox_unread(int count) { (void)count; }
 int shortcut_set_health_state(const char* state) { (void)state; return -2; }
 int shortcut_get_frame(double* x, double* y, double* w, double* h) {
     (void)x; (void)y; (void)w; (void)h; return -2;
@@ -798,7 +803,7 @@ fn stage_mlx_metallib() {
         // Download mlx.metallib (pre-compiled MLX Metal shaders) for parakeet-mlx.
         // MLX needs this file next to the binary at runtime. The release
         // workflow exposes the target-suffixed externalBin copy to Tauri.
-        println!("cargo:warning=mlx-metallib: downloading from GitHub releases...");
+        eprintln!("mlx-metallib: downloading from GitHub releases...");
         let url =
             "https://github.com/screenpipe/screenpipe/releases/download/mlx-metallib-v0.2.0/mlx.metallib";
         let status = std::process::Command::new("curl")
@@ -807,10 +812,7 @@ fn stage_mlx_metallib() {
         match status {
             Ok(s) if s.success() => {
                 let size = std::fs::metadata(&metallib).map(|m| m.len()).unwrap_or(0);
-                println!(
-                    "cargo:warning=mlx-metallib: downloaded ({} MB)",
-                    size / 1_000_000
-                );
+                eprintln!("mlx-metallib: downloaded ({} MB)", size / 1_000_000);
             }
             _ => println!(
                 "cargo:warning=mlx-metallib: download failed — parakeet-mlx will crash at runtime"
@@ -818,10 +820,7 @@ fn stage_mlx_metallib() {
         }
     } else {
         let size = std::fs::metadata(&metallib).map(|m| m.len()).unwrap_or(0);
-        println!(
-            "cargo:warning=mlx-metallib: already present ({} MB)",
-            size / 1_000_000
-        );
+        eprintln!("mlx-metallib: already present ({} MB)", size / 1_000_000);
     }
 
     sign_macos_sidecar_if_needed(&metallib);
@@ -848,8 +847,8 @@ fn stage_libonnxruntime_dylib() {
                     if let Err(e) = std::fs::copy(&src, &dylib) {
                         println!("cargo:warning=libonnxruntime: ORT_DYLIB_PATH copy failed: {e}");
                     } else {
-                        println!(
-                            "cargo:warning=libonnxruntime: copied from ORT_DYLIB_PATH ({})",
+                        eprintln!(
+                            "libonnxruntime: copied from ORT_DYLIB_PATH ({})",
                             src.display()
                         );
                     }
@@ -861,14 +860,9 @@ fn stage_libonnxruntime_dylib() {
             !dylib.exists() || std::fs::metadata(&dylib).map(|m| m.len()).unwrap_or(0) < min_size;
 
         if still_needs_fetch {
-            println!(
-                "cargo:warning=libonnxruntime: downloading x86_64 dylib from Homebrew bottle..."
-            );
+            eprintln!("libonnxruntime: downloading x86_64 dylib from Homebrew bottle...");
             match download_homebrew_onnxruntime_dylib(&dylib) {
-                Ok(size) => println!(
-                    "cargo:warning=libonnxruntime: downloaded ({} MB)",
-                    size / 1_000_000
-                ),
+                Ok(size) => eprintln!("libonnxruntime: downloaded ({} MB)", size / 1_000_000),
                 Err(e) => {
                     let msg = format!("libonnxruntime dylib fetch failed: {e}");
                     if is_release {
@@ -923,8 +917,8 @@ fn sign_macos_sidecar_if_needed(path: &std::path::Path) {
 
     match status {
         Ok(status) if status.success() => {
-            println!(
-                "cargo:warning=macos-sidecar-sign: signed {}",
+            eprintln!(
+                "macos-sidecar-sign: signed {}",
                 path.file_name()
                     .and_then(|n| n.to_str())
                     .unwrap_or("sidecar")

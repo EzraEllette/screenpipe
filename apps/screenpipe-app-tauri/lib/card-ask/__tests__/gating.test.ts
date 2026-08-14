@@ -6,11 +6,14 @@ import { describe, expect, it } from "vitest";
 import type { AppUser } from "@/lib/app-entitlement";
 import {
   CARD_ASK_ARMS,
+  CARD_ASK_TRIGGERS,
   GRANT_EXPIRY_WINDOW_MS,
   isCardAskEligible,
+  isCardAskEnabled,
   isExpiringCardlessGrant,
   parseCardAskArm,
   parseShownTriggers,
+  parseTriggerOverride,
   resolveStickyArm,
   shouldShowCardAsk,
   triggersForArm,
@@ -111,6 +114,7 @@ describe("shouldShowCardAsk", () => {
         arm: "at_first_value",
         trigger: "first_value",
         eligible,
+        enabled: true,
         alreadyShownTriggers: [],
       }),
     ).toBe(true);
@@ -124,6 +128,7 @@ describe("shouldShowCardAsk", () => {
         arm: null,
         trigger: "login",
         eligible,
+        enabled: true,
         alreadyShownTriggers: [],
       }),
     ).toBe(false);
@@ -137,7 +142,8 @@ describe("shouldShowCardAsk", () => {
           arm: "control",
           trigger,
           eligible,
-          alreadyShownTriggers: [],
+          enabled: true,
+        alreadyShownTriggers: [],
         }),
       ).toBe(false);
     }
@@ -149,6 +155,7 @@ describe("shouldShowCardAsk", () => {
         arm: "at_login",
         trigger: "limit",
         eligible,
+        enabled: true,
         alreadyShownTriggers: [],
       }),
     ).toBe(false);
@@ -160,6 +167,7 @@ describe("shouldShowCardAsk", () => {
         arm: "at_login",
         trigger: "login",
         eligible: false,
+        enabled: true,
         alreadyShownTriggers: [],
       }),
     ).toBe(false);
@@ -171,6 +179,7 @@ describe("shouldShowCardAsk", () => {
         arm: "at_limit",
         trigger: "limit",
         eligible,
+        enabled: true,
         alreadyShownTriggers: ["limit"],
       }),
     ).toBe(false);
@@ -182,9 +191,135 @@ describe("shouldShowCardAsk", () => {
         arm: "at_first_value",
         trigger: "first_value",
         eligible,
+        enabled: true,
         alreadyShownTriggers: ["login"],
       }),
     ).toBe(true);
+  });
+
+  // The kill switch is the whole point of the remote control: an install with
+  // a sticky arm must go silent the moment the flag flips, with no release and
+  // no cache to clear.
+  it.each(CARD_ASK_ARMS)("shows nothing for %s when disabled", (arm) => {
+    for (const trigger of CARD_ASK_TRIGGERS) {
+      expect(
+        shouldShowCardAsk({
+          arm,
+          trigger,
+          eligible,
+          enabled: false,
+          alreadyShownTriggers: [],
+        }),
+      ).toBe(false);
+    }
+  });
+
+  it("fails closed when the kill switch has not resolved yet", () => {
+    // PostHog returns undefined while flags load. Treating that as "on" would
+    // flash the ask on every cold start before the switch arrives.
+    expect(isCardAskEnabled(undefined)).toBe(false);
+    expect(isCardAskEnabled(null)).toBe(false);
+    expect(isCardAskEnabled("true")).toBe(false);
+    expect(isCardAskEnabled(1)).toBe(false);
+    expect(isCardAskEnabled(true)).toBe(true);
+  });
+
+  // Regression for the contamination measured on 2026-08-12: the onboarding
+  // slide ran outside the experiment, so 19% of control was asked anyway and
+  // control stopped being a no-ask counterfactual.
+  it("never shows the onboarding placement to control", () => {
+    expect(
+      shouldShowCardAsk({
+        arm: "control",
+        trigger: "onboarding",
+        eligible,
+        enabled: true,
+        alreadyShownTriggers: [],
+      }),
+    ).toBe(false);
+  });
+
+  it("shows the onboarding placement only to the arm that owns it", () => {
+    expect(
+      shouldShowCardAsk({
+        arm: "at_onboarding",
+        trigger: "onboarding",
+        eligible,
+        enabled: true,
+        alreadyShownTriggers: [],
+      }),
+    ).toBe(true);
+    for (const arm of ["at_login", "at_first_value", "at_limit"] as const) {
+      expect(
+        shouldShowCardAsk({
+          arm,
+          trigger: "onboarding",
+          eligible,
+          enabled: true,
+          alreadyShownTriggers: [],
+        }),
+      ).toBe(false);
+    }
+  });
+
+  it("honours a remote placement override", () => {
+    // Moving an arm's ask to a mid-session modal must be a PostHog edit, not a
+    // release.
+    expect(
+      shouldShowCardAsk({
+        arm: "at_login",
+        trigger: "mid_session",
+        eligible,
+        enabled: true,
+        triggerOverride: ["mid_session"],
+        alreadyShownTriggers: [],
+      }),
+    ).toBe(true);
+    expect(
+      shouldShowCardAsk({
+        arm: "at_login",
+        trigger: "login",
+        eligible,
+        enabled: true,
+        triggerOverride: ["mid_session"],
+        alreadyShownTriggers: [],
+      }),
+    ).toBe(false);
+  });
+
+  it("lets an empty override silence a single arm remotely", () => {
+    expect(
+      shouldShowCardAsk({
+        arm: "at_limit",
+        trigger: "limit",
+        eligible,
+        enabled: true,
+        triggerOverride: [],
+        alreadyShownTriggers: [],
+      }),
+    ).toBe(false);
+  });
+});
+
+describe("parseTriggerOverride", () => {
+  it("returns null when there is no usable payload, meaning use defaults", () => {
+    expect(parseTriggerOverride(undefined)).toBeNull();
+    expect(parseTriggerOverride(null)).toBeNull();
+    expect(parseTriggerOverride("mid_session")).toBeNull();
+    expect(parseTriggerOverride(["mid_session"])).toBeNull();
+    expect(parseTriggerOverride({})).toBeNull();
+  });
+
+  it("keeps known triggers and drops dashboard typos", () => {
+    expect(
+      parseTriggerOverride({ triggers: ["mid_session", "nope", "limit"] }),
+    ).toEqual(["mid_session", "limit"]);
+  });
+
+  it("distinguishes an explicit empty list from an absent payload", () => {
+    // [] silences the arm; null falls back to the compiled default.
+    expect(parseTriggerOverride({ triggers: [] })).toEqual([]);
+    expect(parseTriggerOverride({})).toBeNull();
   });
 });
 

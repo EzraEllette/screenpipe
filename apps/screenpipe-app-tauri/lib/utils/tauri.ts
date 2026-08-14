@@ -2271,8 +2271,8 @@ async setEnhancedAiSuggestions(enabled: boolean, token: string) : Promise<Result
 /**
  * Called by the frontend after fetching the enterprise policy.
  */
-async setEnterprisePolicy(hiddenSections: string[]) : Promise<void> {
-    await TAURI_INVOKE("set_enterprise_policy", { hiddenSections });
+async setEnterprisePolicy(hiddenSections: string[], enforceAutoStart: boolean) : Promise<void> {
+    await TAURI_INVOKE("set_enterprise_policy", { hiddenSections, enforceAutoStart });
 },
 async setKeepAwake(enabled: boolean) : Promise<Result<null, string>> {
     try {
@@ -2293,6 +2293,18 @@ async setNativeTheme(theme: string) : Promise<Result<null, string>> {
 async setOnboardingStep(step: string) : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("set_onboarding_step", { step }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Pin the webview overlay after a drag. The native macOS panel persists the
+ * same two values over the FFI action channel, which the webview cannot use.
+ */
+async setShortcutOverlayAnchor(anchor: string, display: string | null) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_shortcut_overlay_anchor", { anchor, display }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -3694,11 +3706,32 @@ listenOnLan?: boolean }) &
  * that the Rust struct doesn't know about. Without this, `save()` would
  * serialize only known fields and silently wipe frontend-only data.
  */
-({ [key in string]: null | boolean | number | string | JsonValue[] | { [key in string]: JsonValue } }) & { aiPresets: AIPreset[]; isLoading: boolean; devMode: boolean; ocrEngine: string; dataDir: string; embeddedLLM: EmbeddedLLM; autoStartEnabled: boolean; platform: string; disabledShortcuts: string[]; user: User; showScreenpipeShortcut: string; startRecordingShortcut: string; stopRecordingShortcut: string; startAudioShortcut: string; stopAudioShortcut: string; showChatShortcut: string; searchShortcut: string; lockVaultShortcut?: string; showShortcutOverlay?: boolean;
+({ [key in string]: null | boolean | number | string | JsonValue[] | { [key in string]: JsonValue } }) & { aiPresets: AIPreset[]; isLoading: boolean; devMode: boolean; ocrEngine: string; dataDir: string; embeddedLLM: EmbeddedLLM; autoStartEnabled: boolean; platform: string; disabledShortcuts: string[]; user: User; showScreenpipeShortcut: string; startRecordingShortcut: string; stopRecordingShortcut: string; startAudioShortcut: string; stopAudioShortcut: string; showChatShortcut: string; searchShortcut: string; lockVaultShortcut?: string;
 /**
  * Overlay size: "small" (default), "medium" (1.5x), "large" (2x)
  */
 shortcutOverlaySize?: string;
+/**
+ * The user's choice, honored only while `allow_hiding_shortcut_overlay`
+ * is on. The overlay ships unhideable, so this is inert by default.
+ */
+showShortcutOverlay?: boolean;
+/**
+ * Remote-controlled capability (`overlay-hiding-control`), written by the
+ * desktop remote-control registry. False ships; flipping the flag on gives
+ * the Display toggle back without a release.
+ */
+allowHidingShortcutOverlay?: boolean;
+/**
+ * Where the user dragged the overlay: one of top/bottom x left/center/right.
+ */
+shortcutOverlayAnchor?: string;
+/**
+ * Display the overlay was pinned to, as a stable per-display UUID. Empty
+ * until the user drags it, and ignored when that display is not attached,
+ * so the pill stays put instead of following the cursor between monitors.
+ */
+shortcutOverlayDisplay?: string;
 /**
  * Unique device ID for AI usage tracking (generated on first launch)
  */
