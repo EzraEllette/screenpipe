@@ -25,7 +25,6 @@ import {
   Languages,
   Loader2,
   Mic2,
-  MoreHorizontal,
   Play,
   RefreshCw,
   Send,
@@ -123,6 +122,7 @@ import { writeBrowserLogNow } from "@/lib/logging/browser-log";
 import { copyMeetingToClipboard, copyMeetingTranscript } from "./copy-meeting";
 import {
   MeetingShareMenu,
+  type MeetingMenuGroup,
   type MeetingShareAction,
 } from "./meeting-share-menu";
 import { copyMeetingSummary, emailMeetingSummary } from "./share-summary";
@@ -1546,158 +1546,116 @@ export function NoteView({
         ? "attention"
         : "idle";
 
-  // Meeting actions sit on the tab rule beside share. They used to require a
-  // footer that stayed on screen for every finished meeting just to hold them.
-  const meetingActions = (
-    <TooltipProvider delayDuration={200}>
-                {!isLive && (
-                  <MeetingControlTooltip label={summaryActionLabel}>
-                    {/* The summary tab owns the prominent generate/retry
-                        button next to the output it produces. This one is the
-                        shortcut from the other tabs, so it takes the same
-                        recessive treatment as the rest of the cluster. */}
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={handleSummaryAction}
-                      disabled={
-                        summaryWorking || retranscribing || !canSummarizeMeeting
-                      }
-                      aria-label={summaryActionLabel}
-                      className={cn(
-                        MEETING_RULE_ACTION_CLASS,
-                        // shadcn Button draws a full border; the rule only wants
-                        // the left separator the tabs and share button use.
-                        "border-y-0 border-r-0 px-3",
-                      )}
-                    >
-                      {summaryWorking ? (
-                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                      ) : summaryLifecycle.kind === "completed" ? (
-                        <RefreshCw className="h-3.5 w-3.5" />
-                      ) : summaryLifecycle.kind === "failed" ? (
-                        <RefreshCw className="h-3.5 w-3.5" />
-                      ) : (
-                        <Sparkles className="h-3.5 w-3.5" />
-                      )}
-                    </Button>
-                  </MeetingControlTooltip>
-                )}
-                {/* Everything past summarize is occasional or destructive, so
-                    it lives one level down instead of adding more identical
-                    squares next to the primary action. */}
-                {!isLive && (
-                  <AlertDialog
-                    open={confirmingAction !== null}
-                    onOpenChange={(open) => {
-                      if (!open) setConfirmingAction(null);
-                    }}
-                  >
-                    <DropdownMenu>
-                      <MeetingControlTooltip label="more meeting actions">
-                        <DropdownMenuTrigger asChild>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            aria-label="more meeting actions"
-                            className={cn(
-                        MEETING_RULE_ACTION_CLASS,
-                        // shadcn Button draws a full border; the rule only wants
-                        // the left separator the tabs and share button use.
-                        "border-y-0 border-r-0 px-3",
-                      )}
-                          >
-                            <MoreHorizontal className="h-3.5 w-3.5" />
-                          </Button>
-                        </DropdownMenuTrigger>
-                      </MeetingControlTooltip>
-                      <DropdownMenuContent align="end" className="w-56">
-                        <DropdownMenuItem
-                          disabled={resuming}
-                          onSelect={() => void onResume()}
-                        >
-                          {resuming ? (
-                            <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />
-                          ) : (
-                            <Play className="mr-2 h-3.5 w-3.5" />
-                          )}
-                          {resuming ? "resuming meeting" : "resume meeting"}
-                        </DropdownMenuItem>
-                        <DropdownMenuItem
-                          disabled={retranscribing || summaryWorking}
-                          onSelect={() => setConfirmingAction("retranscribe")}
-                        >
-                          {retranscribing ? (
-                            <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />
-                          ) : (
-                            <AudioLines className="mr-2 h-3.5 w-3.5" />
-                          )}
-                          retranscribe saved audio
-                        </DropdownMenuItem>
-                        <DropdownMenuItem
-                          disabled={exporting}
-                          onSelect={() => void handleExport()}
-                        >
-                          {exporting ? (
-                            <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />
-                          ) : (
-                            <Download className="mr-2 h-3.5 w-3.5" />
-                          )}
-                          export to mp4
-                        </DropdownMenuItem>
-                        <DropdownMenuSeparator />
-                        <DropdownMenuItem
-                          onSelect={() => setConfirmingAction("delete")}
-                        >
-                          <Trash2 className="mr-2 h-3.5 w-3.5" />
-                          delete meeting
-                        </DropdownMenuItem>
-                      </DropdownMenuContent>
-                    </DropdownMenu>
-                    {confirmingAction === "retranscribe" ? (
-                      <AlertDialogContent>
-                        <AlertDialogHeader>
-                          <AlertDialogTitle>
-                            retranscribe meeting
-                          </AlertDialogTitle>
-                          <AlertDialogDescription>
-                            rebuild the transcript from saved audio. this
-                            replaces the current transcript and refreshes the
-                            summary when automatic summary is on.
-                          </AlertDialogDescription>
-                        </AlertDialogHeader>
-                        <AlertDialogFooter>
-                          <AlertDialogCancel>cancel</AlertDialogCancel>
-                          <AlertDialogAction
-                            onClick={() => void handleRetranscribe()}
-                          >
-                            retranscribe
-                          </AlertDialogAction>
-                        </AlertDialogFooter>
-                      </AlertDialogContent>
-                    ) : confirmingAction === "delete" ? (
-                      <AlertDialogContent>
-                        <AlertDialogHeader>
-                          <AlertDialogTitle>delete meeting</AlertDialogTitle>
-                          <AlertDialogDescription>
-                            your notes and transcript will be permanently
-                            deleted.
-                          </AlertDialogDescription>
-                        </AlertDialogHeader>
-                        <AlertDialogFooter>
-                          <AlertDialogCancel>cancel</AlertDialogCancel>
-                          <AlertDialogAction
-                            variant="destructive"
-                            onClick={() => void handleDelete()}
-                          >
-                            delete
-                          </AlertDialogAction>
-                        </AlertDialogFooter>
-                      </AlertDialogContent>
-                    ) : null}
-                  </AlertDialog>
-                )}
-    </TooltipProvider>
+  // Every meeting action hangs off the single `⋯` menu on the tab rule.
+  //
+  // These were a summarize button plus a second dropdown sitting immediately
+  // to the right of the share caret. Two bare menus side by side is the same
+  // discoverability failure as the three copy buttons this rule already fixed:
+  // neither trigger says what it holds, so finding anything meant opening both.
+  // One menu with labelled groups means "it is in the menu" is a complete
+  // instruction. Summarize loses its square here but keeps the prominent
+  // button inside the summary tab, next to the output it produces.
+  const meetingMenuGroups: MeetingMenuGroup[] = isLive
+    ? []
+    : [
+        {
+          label: "summary",
+          items: [
+            {
+              key: "summarize",
+              label: summaryActionLabel,
+              icon: summaryWorking
+                ? Loader2
+                : summaryLifecycle.kind === "completed" ||
+                    summaryLifecycle.kind === "failed"
+                  ? RefreshCw
+                  : Sparkles,
+              onSelect: () => handleSummaryAction(),
+              disabled:
+                summaryWorking || retranscribing || !canSummarizeMeeting,
+            },
+          ],
+        },
+        {
+          label: "meeting",
+          items: [
+            {
+              key: "resume",
+              label: resuming ? "resuming meeting" : "resume meeting",
+              icon: resuming ? Loader2 : Play,
+              onSelect: () => void onResume(),
+              disabled: resuming,
+            },
+            {
+              key: "retranscribe",
+              label: "retranscribe saved audio",
+              icon: retranscribing ? Loader2 : AudioLines,
+              onSelect: () => setConfirmingAction("retranscribe"),
+              disabled: retranscribing || summaryWorking,
+            },
+            {
+              key: "export",
+              label: "export to mp4",
+              icon: exporting ? Loader2 : Download,
+              onSelect: () => void handleExport(),
+              disabled: exporting,
+            },
+            {
+              key: "delete",
+              label: "delete meeting",
+              icon: Trash2,
+              onSelect: () => setConfirmingAction("delete"),
+              destructive: true,
+            },
+          ],
+        },
+      ];
+
+  // The confirmations are controlled by `confirmingAction`, so they no longer
+  // need to wrap the trigger that opens them.
+  const meetingConfirmations = (
+    <AlertDialog
+      open={confirmingAction !== null}
+      onOpenChange={(open) => {
+        if (!open) setConfirmingAction(null);
+      }}
+    >
+      {confirmingAction === "retranscribe" ? (
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>retranscribe meeting</AlertDialogTitle>
+            <AlertDialogDescription>
+              rebuild the transcript from saved audio. this replaces the current
+              transcript and refreshes the summary when automatic summary is on.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={() => void handleRetranscribe()}>
+              retranscribe
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      ) : confirmingAction === "delete" ? (
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>delete meeting</AlertDialogTitle>
+            <AlertDialogDescription>
+              your notes and transcript will be permanently deleted.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>cancel</AlertDialogCancel>
+            <AlertDialogAction
+              variant="destructive"
+              onClick={() => void handleDelete()}
+            >
+              delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      ) : null}
+    </AlertDialog>
   );
 
   return (
@@ -1707,6 +1665,7 @@ export function NoteView({
         onOpenChange={setShareOpen}
         artifact={shareArtifact}
       />
+      {meetingConfirmations}
       {isDraggingImage && (
         <div className="pointer-events-none absolute inset-0 z-50 flex items-center justify-center bg-background/60">
           <div className="border border-foreground bg-foreground px-12 py-10 text-background">
@@ -1792,31 +1751,45 @@ export function NoteView({
               );
             }}
             summaryState={summaryTabState}
-            // Sharing is what people do after reading, so the action lives on
-            // the tab rule where it is always visible and applies to the whole
-            // meeting rather than the active tab. Every destination hangs off
-            // this one control: a second copy icon in the transcript header and
-            // a third inside the summary tab used to compete with it, and the
-            // reachable one was always the transcript dump.
+            // Sharing is what people do after reading, so the actions live on
+            // the tab rule where they are always visible and apply to the whole
+            // meeting rather than the active tab. Three controls: copy, send,
+            // and one menu holding everything else — destinations and meeting
+            // lifecycle both, which is what let the second dropdown go away.
             trailing={
-              <>
-                <MeetingShareMenu
-                  canShareSummary={canShareSummary}
-                  canSend={shareArtifact.sections.length > 0}
-                  sendLabel={sendLabel}
-                  busy={copying}
-                  copiedAction={copiedAction}
-                  onShare={(action) => {
-                    if (action === "summary") void handleCopySummary();
-                    else if (action === "email") void handleEmailSummary();
-                    else if (action === "transcript")
-                      void handleCopyTranscript();
-                    else if (action === "send") setShareOpen(true);
-                    else void handleCopy();
-                  }}
-                />
-                {meetingActions}
-              </>
+              <MeetingShareMenu
+                canShareSummary={canShareSummary}
+                canSend={shareArtifact.sections.length > 0}
+                sendLabel={sendLabel}
+                busy={copying}
+                copiedAction={copiedAction}
+                moreGroups={meetingMenuGroups}
+                // This control had no telemetry, so "does anyone share a
+                // meeting" was unanswerable — while the equivalent Live View
+                // dialog measured 2 users in 30 days. Menu opens are tracked
+                // separately from actions so intent and completion can be told
+                // apart: someone who opens the menu and closes it went looking
+                // and did not find what they wanted.
+                onMenuOpenChange={(open) => {
+                  if (!open) return;
+                  posthog.capture("meeting_share_menu_opened", {
+                    has_summary: canShareSummary,
+                    can_send: shareArtifact.sections.length > 0,
+                  });
+                }}
+                onShare={(action) => {
+                  posthog.capture("meeting_share_action", {
+                    action,
+                    from_rule: action === "summary" || action === "send",
+                    has_summary: canShareSummary,
+                  });
+                  if (action === "summary") void handleCopySummary();
+                  else if (action === "email") void handleEmailSummary();
+                  else if (action === "transcript") void handleCopyTranscript();
+                  else if (action === "send") setShareOpen(true);
+                  else void handleCopy();
+                }}
+              />
             }
           />
         </div>

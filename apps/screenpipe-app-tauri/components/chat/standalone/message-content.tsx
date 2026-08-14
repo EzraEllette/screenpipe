@@ -10,6 +10,10 @@ import { Check, Calendar, ChevronDown, ChevronRight, ChevronUp, KeyRound, Loader
 import { SourceCitationFooter } from "@/components/chat/source-citation-footer";
 import { MarkdownBlock } from "@/components/chat/markdown-block";
 import { AskUserToolCard, isAskUserToolCall } from "@/components/chat/standalone/ask-user-tool-card";
+import {
+  AttachedContextCard,
+  parseAttachedContext,
+} from "@/components/chat/standalone/attached-context";
 import { getFaviconUrl } from "@/components/rewind/timeline/favicon-utils";
 import { IntegrationIcon } from "@/components/settings/connections-section";
 import { useFeedbackStore } from "@/lib/stores/feedback-store";
@@ -1680,6 +1684,22 @@ export function MessageContent({
       ))}
     </div>
   ) : null;
+
+  // A user message whose content opens with an attached-context envelope
+  // renders as a card plus the prompt, never as the raw payload. Checked
+  // before displayContent because the producer that writes these bubbles does
+  // not set one — see attached-context.tsx.
+  if (isUser && !message.displayContent) {
+    const attached = parseAttachedContext(message.content);
+    if (attached) {
+      return (
+        <div className="space-y-2">
+          {attachmentsRow}
+          <AttachedContextCard context={attached} />
+        </div>
+      );
+    }
+  }
 
   // User messages with a display label — checked before contentBlocks so
   // pipe messages with both fields render the collapsible label, not raw

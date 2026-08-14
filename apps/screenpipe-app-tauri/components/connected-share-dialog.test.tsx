@@ -77,16 +77,26 @@ describe("ConnectedShareDialog", () => {
     });
   });
 
+  // Destinations moved from seven always-visible tiles into one grouped menu,
+  // so choosing one is now: open the row, pick.
+  const openDestinations = async () => {
+    fireEvent.keyDown(
+      await screen.findByTestId("connected-share-destination"),
+      { key: "Enter" },
+    );
+  };
+
   it("waits for explicit approval, then shows a provider receipt", async () => {
     render(
       <ConnectedShareDialog open onOpenChange={vi.fn()} artifact={artifact} />,
     );
 
+    await openDestinations();
     fireEvent.click(
       await screen.findByTestId("connected-share-destination-slack"),
     );
     const send = await screen.findByRole("button", {
-      name: "send to my Slack messages",
+      name: "send to Slack",
     });
     expect(
       mocks.localFetch.mock.calls.some(
@@ -157,11 +167,12 @@ describe("ConnectedShareDialog", () => {
       <ConnectedShareDialog open onOpenChange={vi.fn()} artifact={artifact} />,
     );
 
+    await openDestinations();
     fireEvent.click(
       await screen.findByTestId("connected-share-destination-linear"),
     );
     const create = await screen.findByRole("button", {
-      name: "create issue in ENG",
+      name: "create Linear issue",
     });
     const proxyCallsBeforeConfirmation = mocks.localFetch.mock.calls.filter(
       ([path, init]) =>
@@ -210,16 +221,18 @@ describe("ConnectedShareDialog", () => {
     );
 
     expect(
-      await screen.findByText(
-        /Opening this screen does not run AI or send anything/,
-      ),
+      await screen.findByText(/Nothing runs or sends until you press send/),
     ).toBeInTheDocument();
+
+    // Connecting an app is setup, so it sits at the bottom of the destination
+    // menu rather than in a card between the destinations.
+    await openDestinations();
     expect(
-      screen.getByTestId("connected-share-connect-slack"),
-    ).toHaveTextContent("send directly · no AI");
+      await screen.findByTestId("connected-share-connect-slack"),
+    ).toHaveTextContent("connect Slack");
     expect(
       screen.getByTestId("connected-share-connect-linear"),
-    ).toHaveTextContent("review with Chat");
+    ).toHaveTextContent("connect Linear");
 
     fireEvent.click(screen.getByTestId("connected-share-connect-notion"));
 
@@ -252,6 +265,7 @@ describe("ConnectedShareDialog", () => {
       />,
     );
 
+    await openDestinations();
     const notion = await screen.findByTestId(
       "connected-share-destination-chat-notion",
     );
@@ -332,6 +346,7 @@ describe("ConnectedShareDialog", () => {
       <ConnectedShareDialog open onOpenChange={vi.fn()} artifact={artifact} />,
     );
 
+    await openDestinations();
     fireEvent.click(
       await screen.findByTestId("connected-share-destination-slack"),
     );
@@ -339,7 +354,7 @@ describe("ConnectedShareDialog", () => {
       await screen.findByTestId("connected-share-slack-channels-error"),
     ).toHaveTextContent("You can still send to your own Slack messages");
     fireEvent.click(
-      screen.getByRole("button", { name: "send to my Slack messages" }),
+      screen.getByRole("button", { name: "send to Slack" }),
     );
     await screen.findByText("sent to Slack");
   });
@@ -365,12 +380,13 @@ describe("ConnectedShareDialog", () => {
       <ConnectedShareDialog open onOpenChange={vi.fn()} artifact={artifact} />,
     );
 
+    await openDestinations();
     fireEvent.click(
       await screen.findByTestId("connected-share-destination-slack"),
     );
     fireEvent.click(
       await screen.findByRole("button", {
-        name: "send to my Slack messages",
+        name: "send to Slack",
       }),
     );
 
@@ -381,7 +397,133 @@ describe("ConnectedShareDialog", () => {
       screen.queryByTestId("connected-share-receipt"),
     ).not.toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "send to my Slack messages" }),
+      screen.getByRole("button", { name: "send to Slack" }),
     ).toBeEnabled();
+  });
+
+  // The dialog used to open on ten stacked regions and ask five questions
+  // before it would let you send, none of them defaulted. These pin the shape
+  // that replaced it: state the settled answers, ask nothing, stay openable.
+  describe("hierarchy", () => {
+    const multiBlock: ConnectedShareArtifact = {
+      ...artifact,
+      sections: [
+        { id: "a", title: "Total Tracked Time", body: "331.9 minutes" },
+        { id: "b", title: "Time by Category", body: "browsing 197.8" },
+        { id: "c", title: "Detailed Time Log", body: "06:45–15:02" },
+      ],
+    };
+
+    it("opens with contents and message settled rather than expanded", async () => {
+      mocks.localFetch.mockResolvedValue(
+        jsonResponse({ data: [{ id: "slack", connected: true }] }),
+      );
+
+      render(
+        <ConnectedShareDialog
+          open
+          onOpenChange={vi.fn()}
+          artifact={multiBlock}
+        />,
+      );
+
+      // Both rows report their answer without being opened.
+      const contents = await screen.findByTestId(
+        "connected-share-contents-toggle",
+      );
+      expect(contents).toHaveTextContent("all 3 blocks");
+      expect(contents).toHaveAttribute("aria-expanded", "false");
+      expect(
+        screen.getByTestId("connected-share-preview-toggle"),
+      ).toHaveAttribute("aria-expanded", "false");
+
+      // And the two controls they hide are genuinely not mounted.
+      expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+      expect(
+        screen.queryByLabelText(/edits here apply only to Slack/),
+      ).not.toBeInTheDocument();
+    });
+
+    it("keeps the exact payload one click away", async () => {
+      mocks.localFetch.mockResolvedValue(
+        jsonResponse({ data: [{ id: "slack", connected: true }] }),
+      );
+
+      render(
+        <ConnectedShareDialog
+          open
+          onOpenChange={vi.fn()}
+          artifact={multiBlock}
+        />,
+      );
+
+      fireEvent.click(
+        await screen.findByTestId("connected-share-preview-toggle"),
+      );
+      expect(screen.getByLabelText(/edits here apply only to Slack/)).toBeVisible();
+
+      fireEvent.click(await screen.findByTestId("connected-share-contents-toggle"));
+      expect(screen.getAllByRole("checkbox")).toHaveLength(3);
+    });
+
+    // A disclosure may hide a settled answer. It must never hide the reason the
+    // send button is disabled.
+    it("shows a blocking problem outside the collapsed rows", async () => {
+      mocks.localFetch.mockResolvedValue(
+        jsonResponse({ data: [{ id: "slack", connected: true }] }),
+      );
+
+      render(
+        <ConnectedShareDialog
+          open
+          onOpenChange={vi.fn()}
+          artifact={multiBlock}
+        />,
+      );
+
+      fireEvent.click(
+        await screen.findByTestId("connected-share-contents-toggle"),
+      );
+      for (const box of screen.getAllByRole("checkbox")) {
+        fireEvent.click(box);
+      }
+      // Collapse again — the complaint must survive the row closing over it.
+      fireEvent.click(screen.getByTestId("connected-share-contents-toggle"));
+
+      expect(
+        screen.getByText(/Choose at least one block to share/),
+      ).toBeVisible();
+      expect(
+        screen.getByRole("button", { name: "send to Slack" }),
+      ).toBeDisabled();
+    });
+
+    it("states the destination instead of asking for it", async () => {
+      mocks.localFetch.mockResolvedValue(
+        jsonResponse({ data: [{ id: "slack", connected: true }] }),
+      );
+
+      render(
+        <ConnectedShareDialog
+          open
+          onOpenChange={vi.fn()}
+          artifact={multiBlock}
+        />,
+      );
+
+      // One control carries the whole choice, and it is already answered.
+      const row = await screen.findByTestId("connected-share-destination");
+      expect(row).toHaveTextContent("Slack");
+      expect(row).toHaveTextContent("my messages");
+
+      // Nothing is a peer of it until it is opened.
+      expect(
+        screen.queryByTestId("connected-share-destination-copy"),
+      ).not.toBeInTheDocument();
+      await openDestinations();
+      expect(
+        await screen.findByTestId("connected-share-destination-copy"),
+      ).toBeVisible();
+    });
   });
 });

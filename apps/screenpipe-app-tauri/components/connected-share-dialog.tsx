@@ -13,10 +13,12 @@ import React, {
 import {
   AlertCircle,
   Check,
+  ChevronDown,
+  ChevronUp,
   Copy,
   ExternalLink,
   Loader2,
-  MessageSquareText,
+  Plus,
   RefreshCw,
   Send,
   Sparkles,
@@ -33,6 +35,14 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import {
   Select,
@@ -113,6 +123,12 @@ function slackChannelErrorMessage(error: string): string {
   return `${error} You can still send to your own Slack messages.`;
 }
 
+const CONNECTION_NAME: Record<"slack" | "linear" | "notion", string> = {
+  slack: "Slack",
+  linear: "Linear",
+  notion: "Notion",
+};
+
 function SlackMark() {
   return (
     <svg viewBox="0 0 24 24" className="h-4 w-4" aria-hidden="true">
@@ -133,6 +149,66 @@ function SlackMark() {
         d="M15.69 18.96a2.18 2.18 0 012.18 2.18 2.18 2.18 0 01-2.18 2.18 2.18 2.18 0 01-2.18-2.18v-2.18h2.18zm0-1.09a2.18 2.18 0 01-2.18-2.18 2.18 2.18 0 012.18-2.18h5.45a2.18 2.18 0 012.18 2.18 2.18 2.18 0 01-2.18 2.18h-5.45z"
       />
     </svg>
+  );
+}
+
+/**
+ * A settled decision, stated in one line, openable when it is wrong.
+ *
+ * Both things this dialog used to interrogate — which Blocks, and whether the
+ * rendered text is right — already have correct answers when it opens: all of
+ * them, and yes. Expanded they cost ~340px and pushed the terminal button to
+ * the tenth region of a scrolling modal, which is what made an ordinary send
+ * feel like filing a form. Collapsed they still state what will happen, which
+ * is the part "review before you send" actually depends on.
+ *
+ * Module-level on purpose: declared inside the dialog it would be a new
+ * component type every render, remounting the textarea and dropping focus on
+ * each keystroke.
+ */
+function SummaryRow({
+  label,
+  value,
+  action,
+  open,
+  onToggle,
+  testId,
+  children,
+}: {
+  label: string;
+  value: string;
+  action: string;
+  open: boolean;
+  onToggle: () => void;
+  testId: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="border-b border-border/60 last:border-b-0">
+      <button
+        type="button"
+        onClick={onToggle}
+        aria-expanded={open}
+        data-testid={testId}
+        className="flex w-full items-center justify-between gap-3 py-2.5 text-left"
+      >
+        <span className="shrink-0 text-xs">{label}</span>
+        <span className="flex min-w-0 items-center gap-2">
+          <span className="truncate text-[11px] text-muted-foreground">
+            {value}
+          </span>
+          <span className="flex shrink-0 items-center gap-0.5 text-[11px]">
+            {action}
+            {open ? (
+              <ChevronUp className="h-3 w-3" />
+            ) : (
+              <ChevronDown className="h-3 w-3" />
+            )}
+          </span>
+        </span>
+      </button>
+      {open && <div className="pb-3">{children}</div>}
+    </div>
   );
 }
 
@@ -169,6 +245,8 @@ export function ConnectedShareDialog({
   const [slackChannelsError, setSlackChannelsError] = useState<string | null>(
     null,
   );
+  const [contentsOpen, setContentsOpen] = useState(false);
+  const [previewOpen, setPreviewOpen] = useState(false);
   const [slackRefresh, setSlackRefresh] = useState(0);
   const [slackTarget, setSlackTarget] = useState(SELF_SLACK_TARGET);
   const [linearTeams, setLinearTeams] = useState<LinearTeam[]>([]);
@@ -624,30 +702,118 @@ export function ConnectedShareDialog({
   ].filter((id): id is "slack" | "linear" | "notion" => id !== null);
   const noConnectedShareApps = missingConnectionIds.length === 3;
 
+  const LinearMark = () => (
+    // eslint-disable-next-line @next/next/no-img-element
+    <img src="/images/linear.svg" alt="" className="h-4 w-4" />
+  );
+  const NotionMark = () => (
+    // eslint-disable-next-line @next/next/no-img-element
+    <img src="/images/notion.svg" alt="" className="h-4 w-4 dark:invert" />
+  );
+
+  /**
+   * Destinations, grouped by the only distinction that changes what happens.
+   *
+   * `direct` writes to the app; `with Chat` opens an editable prompt and runs
+   * nothing yet. That difference used to be a 10px grey badge above a row of
+   * lookalike tiles. As menu headings it is structure — you cannot pick one
+   * without reading which kind it is.
+   */
+  const directOptions: Array<{
+    value: Destination;
+    name: string;
+    icon: React.ReactNode;
+  }> = [
+    ...(availability.direct.slack
+      ? [{ value: "slack" as Destination, name: "Slack", icon: <SlackMark /> }]
+      : []),
+    ...(availability.direct.linear
+      ? [
+          {
+            value: "linear" as Destination,
+            name: "Linear",
+            icon: <LinearMark />,
+          },
+        ]
+      : []),
+    {
+      value: "copy" as Destination,
+      name: "Clipboard",
+      icon: <Copy className="h-4 w-4" />,
+    },
+  ];
+  const chatOptions: Array<{
+    value: Destination;
+    name: string;
+    icon: React.ReactNode;
+  }> = [
+    ...(availability.chat.linear
+      ? [
+          {
+            value: "chat-linear" as Destination,
+            name: "Linear",
+            icon: <LinearMark />,
+          },
+        ]
+      : []),
+    ...(availability.chat.notion
+      ? [
+          {
+            value: "chat-notion" as Destination,
+            name: "Notion",
+            icon: <NotionMark />,
+          },
+        ]
+      : []),
+  ];
+
+  const currentOption =
+    [...directOptions, ...chatOptions].find(
+      (option) => option.value === destination,
+    ) ?? directOptions[directOptions.length - 1];
+  const currentIsChat = destination.startsWith("chat-");
+  // The second line of the destination row: which channel, team, or nothing.
+  const currentTarget =
+    destination === "slack"
+      ? (slackChannels.find((item) => item.id === slackTarget)?.name
+          ? `#${slackChannels.find((item) => item.id === slackTarget)?.name}`
+          : "my messages")
+      : destination === "linear"
+        ? (linearTeams.find((item) => item.id === linearTeamId)?.name ??
+          "choose a team")
+        : currentIsChat
+          ? "prepare a prompt in Chat"
+          : "this machine";
+
+  const submitLabel =
+    destination === "copy"
+      ? "copy snapshot"
+      : destination === "slack"
+        ? "send to Slack"
+        : destination === "linear"
+          ? "create Linear issue"
+          : destination === "chat-linear"
+            ? "prepare Linear in Chat"
+            : "prepare Notion in Chat";
+
+  const contentsSummary = `${
+    selectedSectionIds.length === artifact.sections.length
+      ? `all ${artifact.sections.length} blocks`
+      : `${selectedSectionIds.length} of ${artifact.sections.length} blocks`
+  } · ${outgoingMessage.length.toLocaleString()} characters`;
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
-        className="max-h-[calc(100vh-2rem)] max-w-2xl gap-5 overflow-y-auto rounded-none [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-muted-foreground/40 hover:[&::-webkit-scrollbar-thumb]:bg-muted-foreground/60"
+        className="max-h-[calc(100vh-2rem)] max-w-lg gap-4 overflow-y-auto rounded-none [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-muted-foreground/40 hover:[&::-webkit-scrollbar-thumb]:bg-muted-foreground/60"
         data-testid="connected-share-dialog"
       >
         <DialogHeader>
-          <DialogTitle>send a snapshot</DialogTitle>
+          <DialogTitle>send snapshot</DialogTitle>
           <DialogDescription>
-            Choose exactly where this frozen copy goes and review every word.
+            A frozen copy of “{artifact.title}”.
           </DialogDescription>
         </DialogHeader>
-
-        <div
-          className="flex items-start gap-2 border border-border bg-muted/30 px-3 py-2 text-xs"
-          data-testid="connected-share-safety"
-        >
-          <MessageSquareText className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-          <p>
-            <span className="font-medium">Review first.</span> Opening this
-            screen does not run AI or send anything. Only the final button below
-            performs the named action.
-          </p>
-        </div>
 
         {connectionsLoading && (
           <p
@@ -688,189 +854,127 @@ export function ConnectedShareDialog({
           </div>
         )}
 
+        {/* One decision, stated. The dialog used to open on seven lookalike
+            tiles across three headed groups — two of which were *setup*, not
+            destinations — and asked you to pick before it would show you
+            anything else. The destination is remembered, so the common case is
+            already answered and this row reports it rather than asking. */}
         {connectionsChecked && !connectionsLoading && !connectionsError && (
-          <div className="space-y-3">
-            <div className="space-y-1.5">
-              <div className="flex items-center justify-between">
-                <p className="text-xs font-medium">direct</p>
-                <span className="text-[10px] text-muted-foreground">no AI</span>
-              </div>
-              <div
-                className="grid gap-2 sm:grid-cols-3"
-                aria-label="direct destination"
-              >
-                {availability.direct.slack && (
-                  <button
-                    type="button"
-                    data-testid="connected-share-destination-slack"
-                    className={`flex items-center gap-2 border px-3 py-2 text-left text-sm ${destination === "slack" ? "border-foreground bg-muted" : "border-border"}`}
-                    onClick={() => selectDestination("slack")}
-                  >
-                    <SlackMark /> Slack
-                  </button>
-                )}
-                {availability.direct.linear && (
-                  <button
-                    type="button"
-                    data-testid="connected-share-destination-linear"
-                    className={`flex items-center gap-2 border px-3 py-2 text-left text-sm ${destination === "linear" ? "border-foreground bg-muted" : "border-border"}`}
-                    onClick={() => selectDestination("linear")}
-                  >
-                    <img src="/images/linear.svg" alt="" className="h-4 w-4" />
-                    Linear
-                  </button>
-                )}
+          <div className="space-y-2">
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
                 <button
                   type="button"
-                  data-testid="connected-share-destination-copy"
-                  className={`flex items-center gap-2 border px-3 py-2 text-left text-sm ${destination === "copy" ? "border-foreground bg-muted" : "border-border"}`}
-                  onClick={() => selectDestination("copy")}
+                  data-testid="connected-share-destination"
+                  className="flex w-full items-center justify-between gap-3 border border-foreground px-3 py-2.5 text-left"
                 >
-                  <Copy className="h-4 w-4" /> clipboard
-                </button>
-              </div>
-            </div>
-
-            {(availability.chat.linear || availability.chat.notion) && (
-              <div
-                className="space-y-1.5"
-                data-testid="connected-share-chat-destinations"
-              >
-                <div className="flex items-center justify-between">
-                  <p className="flex items-center gap-1 text-xs font-medium">
-                    <Sparkles className="h-3 w-3" /> with Chat
-                  </p>
-                  <span className="text-[10px] text-muted-foreground">
-                    AI-assisted
+                  <span className="flex min-w-0 items-center gap-2">
+                    {currentOption?.icon}
+                    <span className="shrink-0 text-sm">
+                      {currentOption?.name}
+                    </span>
+                    <span className="shrink-0 text-muted-foreground">·</span>
+                    <span className="truncate text-xs text-muted-foreground">
+                      {currentTarget}
+                    </span>
                   </span>
-                </div>
-                <div className="grid gap-2 sm:grid-cols-2">
-                  {availability.chat.linear && (
-                    <button
-                      type="button"
-                      data-testid="connected-share-destination-chat-linear"
-                      className={`flex items-center justify-between border px-3 py-2 text-left text-sm ${destination === "chat-linear" ? "border-foreground bg-muted" : "border-border"}`}
-                      onClick={() => selectDestination("chat-linear")}
-                    >
-                      <span className="flex items-center gap-2">
-                        <img
-                          src="/images/linear.svg"
-                          alt=""
-                          className="h-4 w-4"
-                        />
-                        Linear
-                      </span>
-                      <span className="text-[10px] text-muted-foreground">
-                        prepare prompt
-                      </span>
-                    </button>
-                  )}
-                  {availability.chat.notion && (
-                    <button
-                      type="button"
-                      data-testid="connected-share-destination-chat-notion"
-                      className={`flex items-center justify-between border px-3 py-2 text-left text-sm ${destination === "chat-notion" ? "border-foreground bg-muted" : "border-border"}`}
-                      onClick={() => selectDestination("chat-notion")}
-                    >
-                      <span className="flex items-center gap-2">
-                        <img
-                          src="/images/notion.svg"
-                          alt=""
-                          className="h-4 w-4 dark:invert"
-                        />
-                        Notion
-                      </span>
-                      <span className="text-[10px] text-muted-foreground">
-                        prepare prompt
-                      </span>
-                    </button>
-                  )}
-                </div>
-                <p className="text-[11px] text-muted-foreground">
-                  “Prepare” opens an editable Chat prompt. AI still does not run
-                  until you submit it, and Chat must ask before creating
-                  anything.
-                </p>
-              </div>
+                  <span className="flex shrink-0 items-center gap-1 text-[11px] text-muted-foreground">
+                    change
+                    <ChevronDown className="h-3 w-3" />
+                  </span>
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" className="w-72">
+                {directOptions.length > 0 && (
+                  <>
+                    <DropdownMenuLabel className="font-mono text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
+                      direct — no AI
+                    </DropdownMenuLabel>
+                    {directOptions.map((option) => (
+                      <DropdownMenuItem
+                        key={option.value}
+                        data-testid={`connected-share-destination-${option.value}`}
+                        onSelect={() => selectDestination(option.value)}
+                        className="gap-2 text-xs"
+                      >
+                        {option.icon}
+                        {option.name}
+                        {destination === option.value && (
+                          <Check className="ml-auto h-3.5 w-3.5" />
+                        )}
+                      </DropdownMenuItem>
+                    ))}
+                  </>
+                )}
+                {chatOptions.length > 0 && (
+                  <>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuLabel className="font-mono text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
+                      review with Chat — AI-assisted
+                    </DropdownMenuLabel>
+                    {chatOptions.map((option) => (
+                      <DropdownMenuItem
+                        key={option.value}
+                        data-testid={`connected-share-destination-${option.value}`}
+                        onSelect={() => selectDestination(option.value)}
+                        className="gap-2 text-xs"
+                      >
+                        {option.icon}
+                        {option.name}
+                        {destination === option.value && (
+                          <Check className="ml-auto h-3.5 w-3.5" />
+                        )}
+                      </DropdownMenuItem>
+                    ))}
+                  </>
+                )}
+                {/* Connecting an app is setup, not sending. It used to be a
+                    bordered card wedged between the destination groups, which
+                    put a task you do once in the path of a task you do weekly.
+                    One row, below a rule, at the bottom. */}
+                {missingConnectionIds.length > 0 && (
+                  <>
+                    <DropdownMenuSeparator />
+                    {missingConnectionIds.map((id) => (
+                      <DropdownMenuItem
+                        key={id}
+                        data-testid={`connected-share-connect-${id}`}
+                        onSelect={() => openConnection(id)}
+                        className="gap-2 text-xs text-muted-foreground"
+                      >
+                        <Plus className="h-3.5 w-3.5" />
+                        connect {CONNECTION_NAME[id]}
+                      </DropdownMenuItem>
+                    ))}
+                  </>
+                )}
+              </DropdownMenuContent>
+            </DropdownMenu>
+
+            {noConnectedShareApps && (
+              <p
+                className="text-[11px] text-muted-foreground"
+                data-testid="connected-share-empty"
+              >
+                Nothing is connected for sharing yet. Clipboard works now, or
+                connect an app for the next snapshot.
+              </p>
+            )}
+            {currentIsChat && (
+              <p className="text-[11px] text-muted-foreground">
+                Opens an editable Chat prompt. AI still does not run until you
+                submit it, and Chat must ask before creating anything.
+              </p>
             )}
           </div>
         )}
 
-        {connectionsChecked &&
-          !connectionsLoading &&
-          !connectionsError &&
-          missingConnectionIds.length > 0 && (
-            <div
-              className="space-y-3 border border-border p-3"
-              data-testid="connected-share-empty"
-            >
-              <div>
-                <p className="text-xs font-medium">add a sharing destination</p>
-                <p className="mt-0.5 text-[11px] text-muted-foreground">
-                  {noConnectedShareApps
-                    ? "Nothing is connected for sharing yet. Clipboard works now, or connect an app for the next snapshot."
-                    : "Connect another app for future snapshots. Your connected destinations stay available above."}
-                </p>
-              </div>
-              <div className="grid gap-2 sm:grid-cols-3">
-                {[
-                  {
-                    id: "slack" as const,
-                    name: "Slack",
-                    icon: <SlackMark />,
-                    detail: "send directly · no AI",
-                  },
-                  {
-                    id: "linear" as const,
-                    name: "Linear",
-                    icon: (
-                      <img
-                        src="/images/linear.svg"
-                        alt=""
-                        className="h-4 w-4"
-                      />
-                    ),
-                    detail: "review with Chat",
-                  },
-                  {
-                    id: "notion" as const,
-                    name: "Notion",
-                    icon: (
-                      <img
-                        src="/images/notion.svg"
-                        alt=""
-                        className="h-4 w-4 dark:invert"
-                      />
-                    ),
-                    detail: "review with Chat",
-                  },
-                ]
-                  .filter((item) => missingConnectionIds.includes(item.id))
-                  .map((item) => (
-                    <button
-                      key={item.id}
-                      type="button"
-                      data-testid={`connected-share-connect-${item.id}`}
-                      className="border border-border p-2 text-left hover:bg-muted"
-                      onClick={() => openConnection(item.id)}
-                    >
-                      <span className="flex items-center gap-2 text-xs font-medium">
-                        {item.icon} {item.name}
-                      </span>
-                      <span className="mt-1 block text-[10px] text-muted-foreground">
-                        {item.detail}
-                      </span>
-                      <span className="mt-2 block text-[10px] underline">
-                        connect
-                      </span>
-                    </button>
-                  ))}
-              </div>
-            </div>
-          )}
-
+        {/* Slack's workspace and channel move inside the same bordered list as
+            contents and message. They were a second block repeating the word
+            "destination" directly under a row that already said Slack · my
+            messages, which read as two different questions about one thing. */}
         {destination === "slack" && (
-          <div className="grid gap-3 sm:grid-cols-2">
+          <div className="grid gap-3 border-y border-border/60 py-3 sm:grid-cols-2">
             {slackInstances.length > 1 && (
               <div className="space-y-1.5">
                 <label className="text-xs text-muted-foreground">
@@ -901,9 +1005,7 @@ export function ConnectedShareDialog({
               </div>
             )}
             <div className="space-y-1.5">
-              <label className="text-xs text-muted-foreground">
-                destination
-              </label>
+              <label className="text-xs text-muted-foreground">channel</label>
               <Select
                 value={slackTarget}
                 onValueChange={(value) => {
@@ -1014,32 +1116,88 @@ export function ConnectedShareDialog({
           </div>
         )}
 
-        {artifact.sections.length > 1 && (
-          <div className="space-y-2">
-            <div className="flex items-center justify-between gap-3">
-              <p className="text-xs font-medium">include blocks</p>
-              <span className="text-[10px] tabular-nums text-muted-foreground">
-                {selectedSectionIds.length} / {artifact.sections.length}
-              </span>
-            </div>
-            <div className="grid gap-2 sm:grid-cols-2">
-              {artifact.sections.map((section) => (
+        {/* Contents and message are one bordered list of two settled rows.
+            The checkbox grid opens at 6/6 — its default is already right — and
+            the grid and the rendered text described the same bytes twice, in
+            two places, both permanently expanded. */}
+        <div className="border-y border-border/60">
+          {artifact.sections.length > 1 && (
+            <SummaryRow
+              label="contents"
+              value={contentsSummary}
+              action="edit"
+              open={contentsOpen}
+              onToggle={() => setContentsOpen((value) => !value)}
+              testId="connected-share-contents-toggle"
+            >
+              <div className="grid gap-2 sm:grid-cols-2">
+                {artifact.sections.map((section) => (
+                  <label
+                    key={section.id}
+                    className="flex items-center gap-2 text-xs"
+                  >
+                    <Checkbox
+                      checked={selectedSectionIds.includes(section.id)}
+                      onCheckedChange={(checked) =>
+                        setSectionChecked(section.id, checked === true)
+                      }
+                    />
+                    <span className="truncate">{section.title}</span>
+                  </label>
+                ))}
+              </div>
+            </SummaryRow>
+          )}
+
+          <SummaryRow
+            label="message"
+            value={
+              destination.startsWith("chat-")
+                ? "what Chat will review"
+                : destination === "slack"
+                  ? "Slack-formatted"
+                  : "plain text"
+            }
+            action="preview"
+            open={previewOpen}
+            onToggle={() => setPreviewOpen((value) => !value)}
+            testId="connected-share-preview-toggle"
+          >
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between gap-3">
                 <label
-                  key={section.id}
-                  className="flex items-center gap-2 text-xs"
+                  htmlFor="connected-share-preview"
+                  className="text-[11px] text-muted-foreground"
                 >
-                  <Checkbox
-                    checked={selectedSectionIds.includes(section.id)}
-                    onCheckedChange={(checked) =>
-                      setSectionChecked(section.id, checked === true)
-                    }
-                  />
-                  <span className="truncate">{section.title}</span>
+                  {destination === "slack"
+                    ? "edits here apply only to Slack"
+                    : "edit before sending"}
                 </label>
-              ))}
+                <span
+                  className={`text-[10px] tabular-nums ${outgoingMessage.length > 39_000 ? "text-destructive" : "text-muted-foreground"}`}
+                >
+                  {outgoingMessage.length.toLocaleString()} / 39,000
+                </span>
+              </div>
+              <Textarea
+                id="connected-share-preview"
+                value={outgoingMessage}
+                maxLength={39_000}
+                onChange={(event) => {
+                  if (destination === "slack") {
+                    setSlackMessage(event.target.value);
+                  } else {
+                    setMessage(event.target.value);
+                    setSlackMessage(renderSlackMessage(event.target.value));
+                  }
+                  setReceipt(null);
+                  setActionError(null);
+                }}
+                className="min-h-48 rounded-none border-border font-mono text-xs focus-visible:border-foreground focus-visible:ring-0 focus-visible:ring-offset-0 [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-muted-foreground/40 hover:[&::-webkit-scrollbar-thumb]:bg-muted-foreground/60"
+              />
             </div>
-          </div>
-        )}
+          </SummaryRow>
+        </div>
 
         {artifact.sections.length === 0 && (
           <div className="border border-border px-3 py-2 text-xs" role="status">
@@ -1048,61 +1206,30 @@ export function ConnectedShareDialog({
           </div>
         )}
 
-        <div className="space-y-1.5">
-          <div className="flex items-center justify-between gap-3">
-            <label
-              htmlFor="connected-share-preview"
-              className="text-xs font-medium"
-            >
-              {destination.startsWith("chat-")
-                ? "snapshot Chat will review"
-                : destination === "slack"
-                  ? "what Slack will receive"
-                  : "what will be sent"}
-            </label>
-            <span
-              className={`text-[10px] tabular-nums ${outgoingMessage.length > 39_000 ? "text-destructive" : "text-muted-foreground"}`}
-            >
-              {outgoingMessage.length.toLocaleString()} / 39,000
-            </span>
-          </div>
-          <Textarea
-            id="connected-share-preview"
-            value={outgoingMessage}
-            maxLength={39_000}
-            onChange={(event) => {
-              if (destination === "slack") {
-                setSlackMessage(event.target.value);
-              } else {
-                setMessage(event.target.value);
-                setSlackMessage(renderSlackMessage(event.target.value));
-              }
-              setReceipt(null);
-              setActionError(null);
-            }}
-            className="min-h-56 rounded-none border-border font-mono text-xs focus-visible:border-foreground focus-visible:ring-0 focus-visible:ring-offset-0 [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-muted-foreground/40 hover:[&::-webkit-scrollbar-thumb]:bg-muted-foreground/60"
-          />
-          {destination === "slack" && (
-            <p className="text-[11px] text-muted-foreground">
-              This is the exact Slack-formatted message. Edits here apply only
-              to Slack.
-            </p>
-          )}
-          {selectedSectionIds.length === 0 && artifact.sections.length > 0 && (
-            <p className="text-[11px] text-destructive" role="alert">
-              Choose at least one block to share.
-            </p>
-          )}
-          {outgoingMessage.length > 39_000 && (
-            <p className="text-[11px] text-destructive" role="alert">
-              This snapshot is too long. Remove some text or blocks before
-              sharing.
-            </p>
-          )}
-          <p className="text-[11px] leading-relaxed text-muted-foreground">
-            {artifact.privacyNote}
+        {/* Blocking problems stay outside the collapsed rows. A reason the
+            button is disabled must never itself be behind a disclosure. */}
+        {selectedSectionIds.length === 0 && artifact.sections.length > 0 && (
+          <p className="text-[11px] text-destructive" role="alert">
+            Choose at least one block to share.
           </p>
-        </div>
+        )}
+        {outgoingMessage.length > 39_000 && (
+          <p className="text-[11px] text-destructive" role="alert">
+            This snapshot is too long. Remove some text or blocks before
+            sharing.
+          </p>
+        )}
+
+        {/* What the old banner said, minus the reassurance. "Nothing has run"
+            was a whole bordered region at the top explaining that a dialog is
+            not a send — necessary when the dialog looked like a form, noise
+            once it is one line and a button. */}
+        <p
+          className="text-[11px] leading-relaxed text-muted-foreground"
+          data-testid="connected-share-safety"
+        >
+          {artifact.privacyNote} Nothing runs or sends until you press send.
+        </p>
 
         {actionError && (
           <div
@@ -1170,7 +1297,12 @@ export function ConnectedShareDialog({
             ) : (
               <Send className="mr-1.5 h-3.5 w-3.5" />
             )}
-            {destinationLabel(destination)}
+            {/* Still names the app, because this is the click with a
+                consequence and it must never be ambiguous. But not the channel
+                too — "send to my Slack messages" was carrying the whole
+                destination because nothing above it did. The row does now, so
+                the button can shrink to the app and stop shouting. */}
+            {submitLabel}
           </Button>
         </DialogFooter>
       </DialogContent>

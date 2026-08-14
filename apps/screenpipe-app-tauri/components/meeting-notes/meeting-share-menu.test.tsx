@@ -4,9 +4,10 @@
 
 import React from "react";
 import { fireEvent, render, screen } from "@testing-library/react";
+import { Play, Trash2 } from "lucide-react";
 import { describe, expect, it, vi } from "vitest";
 
-import { MeetingShareMenu } from "./meeting-share-menu";
+import { MeetingShareMenu, type MeetingMenuGroup } from "./meeting-share-menu";
 
 // The meeting view carried three copy affordances: the tab-rule `copy`
 // (meeting + transcript), an unlabelled copy icon in the transcript header
@@ -14,20 +15,60 @@ import { MeetingShareMenu } from "./meeting-share-menu";
 // for whichever was visible, which was the transcript dump — the one thing
 // nobody wants to paste into an email.
 //
-// One control now owns every destination. These tests pin the two properties
-// that make that safe: the primary click is named on the button, and a partial
-// summary can never be the primary click.
+// Consolidating those left a new problem: a bare caret and a bare `⋯` sitting
+// next to each other, neither saying what it held. These tests pin the shape
+// that replaced both — copy, send, and exactly one menu — plus the properties
+// that make it safe: the primary click is named, a partial summary can never
+// be the primary click, and sending is always named before it is clicked.
 describe("meeting share control", () => {
-  it("keeps one control on the rule, destinations one level down", () => {
+  const meetingGroups: MeetingMenuGroup[] = [
+    {
+      label: "meeting",
+      items: [
+        { key: "resume", label: "resume meeting", icon: Play, onSelect: vi.fn() },
+        {
+          key: "delete",
+          label: "delete meeting",
+          icon: Trash2,
+          onSelect: vi.fn(),
+          destructive: true,
+        },
+      ],
+    },
+  ];
+
+  const openMenu = () =>
+    fireEvent.keyDown(
+      screen.getByRole("button", { name: "more meeting actions" }),
+      { key: "Enter" },
+    );
+
+  it("keeps at most three controls on the rule", () => {
+    render(
+      <MeetingShareMenu
+        canShareSummary
+        canSend
+        moreGroups={meetingGroups}
+        onShare={vi.fn()}
+      />,
+    );
+
+    // copy, send, more — and nothing else, however many actions exist below.
+    expect(screen.getAllByRole("button")).toHaveLength(3);
+    expect(screen.getByRole("button", { name: "copy summary" })).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: "send to an app…" }),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: "more meeting actions" }),
+    ).toBeVisible();
+  });
+
+  it("drops to two controls when there is nothing to send", () => {
     render(<MeetingShareMenu canShareSummary onShare={vi.fn()} />);
 
     expect(screen.getAllByRole("button")).toHaveLength(2);
-    expect(screen.getByRole("button", { name: "copy summary" })).toBeVisible();
-    expect(
-      screen.getByRole("button", { name: "more share options" }),
-    ).toBeVisible();
-    expect(screen.queryByText("email summary")).not.toBeInTheDocument();
-    expect(screen.queryByText("copy transcript")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("meeting-send-button")).not.toBeInTheDocument();
   });
 
   it("makes the formatted summary the one-click action once there is one", () => {
@@ -40,9 +81,7 @@ describe("meeting share control", () => {
 
   it("falls back to the full dump when no summary exists yet", () => {
     const onShare = vi.fn();
-    render(
-      <MeetingShareMenu canShareSummary={false} onShare={onShare} />,
-    );
+    render(<MeetingShareMenu canShareSummary={false} onShare={onShare} />);
 
     // The accessible name still names the scope, so the primary click never
     // silently changes meaning between states. The control is icon-only at
@@ -58,7 +97,7 @@ describe("meeting share control", () => {
 
   // The word comes back only to confirm the copy, which is the one moment it
   // carries information the icon does not.
-  it("names the action only while confirming it", () => {
+  it("names the copy action only while confirming it", () => {
     render(
       <MeetingShareMenu
         canShareSummary={false}
@@ -72,15 +111,62 @@ describe("meeting share control", () => {
     ).toHaveTextContent("copied");
   });
 
-  it("offers the remaining destinations behind the caret", async () => {
+  // Sending has a consequence outside the app, so unlike `copy` it says what
+  // it does before you click it. It was previously invisible behind a caret
+  // while Live View put the same action in its header.
+  it("puts share on the rule, visible but icon-only", () => {
+    const onShare = vi.fn();
+    render(<MeetingShareMenu canShareSummary canSend onShare={onShare} />);
+
+    const send = screen.getByTestId("meeting-send-button");
+    // Visible fixes the discoverability bug; unlabelled keeps the rule's
+    // scarcest slot off an action measured at 2 users in 30 days.
+    expect(send).toHaveTextContent("");
+    expect(send).toHaveAccessibleName("send to an app…");
+    fireEvent.click(send);
+    expect(onShare).toHaveBeenCalledWith("send");
+  });
+
+  // The control shipped with no telemetry, so nobody could answer whether
+  // meetings get shared at all. Opening the menu is tracked apart from acting
+  // on it: open-then-close is someone who went looking and did not find it.
+  it("reports menu opens so intent can be told apart from completion", async () => {
+    const onMenuOpenChange = vi.fn();
+    render(
+      <MeetingShareMenu
+        canShareSummary
+        onMenuOpenChange={onMenuOpenChange}
+        onShare={vi.fn()}
+      />,
+    );
+
+    openMenu();
+    await screen.findByRole("menuitem", { name: /copy transcript/ });
+    expect(onMenuOpenChange).toHaveBeenCalledWith(true);
+  });
+
+  // Recognising "send to Slack" beats reading "send" and then discovering
+  // which app it meant.
+  it("names the app it will send to once there is a remembered one", () => {
+    render(
+      <MeetingShareMenu
+        canShareSummary
+        canSend
+        sendLabel="send to Slack…"
+        onShare={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByRole("button", { name: "send to Slack…" }),
+    ).toBeVisible();
+  });
+
+  it("offers the remaining destinations behind the one menu", async () => {
     const onShare = vi.fn();
     render(<MeetingShareMenu canShareSummary onShare={onShare} />);
 
-    // Keyboard open, which also pins the trigger as reachable without a mouse.
-    fireEvent.keyDown(
-      screen.getByRole("button", { name: "more share options" }),
-      { key: "Enter" },
-    );
+    openMenu();
 
     const email = await screen.findByRole("menuitem", {
       name: /email summary/,
@@ -89,11 +175,17 @@ describe("meeting share control", () => {
       await screen.findByRole("menuitem", { name: /copy transcript/ }),
     ).toBeVisible();
     expect(
-      await screen.findByRole("menuitem", { name: /copy meeting \+ transcript/ }),
+      await screen.findByRole("menuitem", {
+        name: /copy meeting \+ transcript/,
+      }),
     ).toBeVisible();
-    // The primary action is not repeated inside its own menu.
+    // The primary action is not repeated inside its own menu, and neither is
+    // send now that it has its own button.
     expect(
       screen.queryByRole("menuitem", { name: /^copy summary/ }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("menuitem", { name: /send/ }),
     ).not.toBeInTheDocument();
 
     fireEvent.click(email);
@@ -103,10 +195,7 @@ describe("meeting share control", () => {
   it("does not offer summary destinations mid-stream", async () => {
     render(<MeetingShareMenu canShareSummary={false} onShare={vi.fn()} />);
 
-    fireEvent.keyDown(
-      screen.getByRole("button", { name: "more share options" }),
-      { key: "Enter" },
-    );
+    openMenu();
 
     expect(
       await screen.findByRole("menuitem", { name: /copy transcript/ }),
@@ -116,9 +205,95 @@ describe("meeting share control", () => {
     ).not.toBeInTheDocument();
   });
 
+  // The second dropdown that used to sit beside the caret now arrives here as
+  // a labelled group. Labels are what let one menu hold both share
+  // destinations and meeting lifecycle without becoming a flat list of nine.
+  it("folds meeting actions into the same menu under their own heading", async () => {
+    const onSelect = vi.fn();
+    render(
+      <MeetingShareMenu
+        canShareSummary
+        moreGroups={[
+          {
+            label: "meeting",
+            items: [
+              { key: "resume", label: "resume meeting", icon: Play, onSelect },
+            ],
+          },
+        ]}
+        onShare={vi.fn()}
+      />,
+    );
+
+    openMenu();
+
+    // Both worlds are reachable from the single trigger.
+    expect(
+      await screen.findByRole("menuitem", { name: /copy transcript/ }),
+    ).toBeVisible();
+    const resume = await screen.findByRole("menuitem", {
+      name: /resume meeting/,
+    });
+    expect(screen.getByText("copy")).toBeVisible();
+    expect(screen.getByText("meeting")).toBeVisible();
+
+    fireEvent.click(resume);
+    expect(onSelect).toHaveBeenCalled();
+  });
+
+  it("keeps a destructive action out of the group it would be misclicked in", async () => {
+    render(
+      <MeetingShareMenu
+        canShareSummary
+        moreGroups={meetingGroups}
+        onShare={vi.fn()}
+      />,
+    );
+
+    openMenu();
+
+    const items = await screen.findAllByRole("menuitem");
+    // Delete is last, after its own separator, so it never sits directly under
+    // the pointer's resting place on an adjacent action.
+    expect(items[items.length - 1]).toHaveTextContent("delete meeting");
+  });
+
+  it("disables a menu entry the meeting cannot currently run", async () => {
+    render(
+      <MeetingShareMenu
+        canShareSummary
+        moreGroups={[
+          {
+            label: "summary",
+            items: [
+              {
+                key: "summarize",
+                label: "summarizing meeting",
+                icon: Play,
+                onSelect: vi.fn(),
+                disabled: true,
+              },
+            ],
+          },
+        ]}
+        onShare={vi.fn()}
+      />,
+    );
+
+    openMenu();
+
+    expect(
+      await screen.findByRole("menuitem", { name: /summarizing meeting/ }),
+    ).toHaveAttribute("aria-disabled", "true");
+  });
+
   it("confirms on the trigger only for the action that landed", () => {
     const { rerender } = render(
-      <MeetingShareMenu canShareSummary copiedAction="summary" onShare={vi.fn()} />,
+      <MeetingShareMenu
+        canShareSummary
+        copiedAction="summary"
+        onShare={vi.fn()}
+      />,
     );
     expect(
       screen.getByRole("button", { name: "copy summary" }),
@@ -138,67 +313,10 @@ describe("meeting share control", () => {
     ).not.toHaveTextContent("copied");
   });
 
-  // Sending to a connected app is a destination, not a fifth button on the
-  // rule. It stays behind the caret and only appears when there is something
-  // worth sending, so an empty meeting cannot offer a destination picker.
-  it("offers sending only when there is something to send", async () => {
-    const onShare = vi.fn();
-    const openCaret = () =>
-      fireEvent.keyDown(
-        screen.getByRole("button", { name: "more share options" }),
-        { key: "Enter" },
-      );
-
-    const withoutSend = render(
-      <MeetingShareMenu canShareSummary onShare={onShare} />,
-    );
-    openCaret();
-    // The rest of the menu is there, so this is absence of the entry rather
-    // than a menu that simply never opened.
-    expect(
-      await screen.findByRole("menuitem", { name: /email summary/ }),
-    ).toBeVisible();
-    expect(
-      screen.queryByRole("menuitem", { name: /send to an app/ }),
-    ).not.toBeInTheDocument();
-    withoutSend.unmount();
-
-    render(<MeetingShareMenu canShareSummary canSend onShare={onShare} />);
-    openCaret();
-    const send = await screen.findByRole("menuitem", {
-      name: /send to an app/,
-    });
-
-    fireEvent.click(send);
-    expect(onShare).toHaveBeenCalledWith("send");
-  });
-
-  // Recognising "send to Slack" beats reading "send to an app" and then
-  // discovering which one it meant.
-  it("names the app it will send to once there is a remembered one", async () => {
+  it("locks every control while a copy is in flight", () => {
     render(
-      <MeetingShareMenu
-        canShareSummary
-        canSend
-        sendLabel="send to Slack…"
-        onShare={vi.fn()}
-      />,
+      <MeetingShareMenu canShareSummary canSend busy onShare={vi.fn()} />,
     );
-    fireEvent.keyDown(
-      screen.getByRole("button", { name: "more share options" }),
-      { key: "Enter" },
-    );
-
-    expect(
-      await screen.findByRole("menuitem", { name: /send to Slack/ }),
-    ).toBeVisible();
-    expect(
-      screen.queryByRole("menuitem", { name: /send to an app/ }),
-    ).not.toBeInTheDocument();
-  });
-
-  it("locks the control while a copy is in flight", () => {
-    render(<MeetingShareMenu canShareSummary busy onShare={vi.fn()} />);
 
     for (const button of screen.getAllByRole("button")) {
       expect(button).toBeDisabled();

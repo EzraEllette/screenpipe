@@ -419,19 +419,22 @@ describe("connected snapshot sharing", function () {
     });
     await meetingRow.click();
     await waitForTestId("note-editor", 20_000);
-    // Sending lives inside the one meeting share control rather than on its
-    // own button: the standalone toolbar this spec used to click was removed
-    // when the three competing copy affordances were consolidated.
+    // Sending is a named button on the meeting rule, beside copy. It spent one
+    // release behind the share caret, which put the same artifact's send action
+    // in the header on Live View and two clicks deep on meetings.
     const openShareMenu = async () => {
-      const caret = await $(`[aria-label="more share options"]`);
-      await caret.waitForClickable({ timeout: t(10_000) });
-      await caret.click();
-      const sendItem = await $(`//*[contains(text(), "send to an app")]`);
-      await sendItem.waitForDisplayed({ timeout: t(10_000) });
-      return sendItem;
+      const send = await $(`[data-testid="meeting-send-button"]`);
+      await send.waitForClickable({ timeout: t(10_000) });
+      return send;
+    };
+    // Destinations live in one grouped menu on the dialog's first row.
+    const openDestinationMenu = async () => {
+      const row = await waitForTestId("connected-share-destination", 10_000);
+      await row.click();
+      await browser.pause(t(250));
     };
 
-    const shareCaret = await $(`[aria-label="more share options"]`);
+    const shareCaret = await $(`[aria-label="more meeting actions"]`);
     await shareCaret.waitForExist({ timeout: t(10_000) });
     expect(
       existsSync(await saveScreenshot("connected-share-meeting-entry")),
@@ -446,10 +449,11 @@ describe("connected snapshot sharing", function () {
       () => document.body?.innerText ?? "",
     )) as string;
     expect(disconnectedText).toContain(
-      "Opening this screen does not run AI or send anything",
+      "Nothing runs or sends until you press send",
     );
-    expect(disconnectedText).toContain("add a sharing destination");
-    expect(disconnectedText).toContain("send directly · no AI");
+    expect(disconnectedText).toContain(
+      "Nothing is connected for sharing yet",
+    );
     expect(await shareWrites()).toHaveLength(0);
     expect(
       existsSync(await saveScreenshot("connected-share-meeting-disconnected")),
@@ -464,22 +468,24 @@ describe("connected snapshot sharing", function () {
     await installShareFixture("connected", true);
     await (await openShareMenu()).click();
     await waitForTestId("connected-share-dialog", 10_000);
-    await waitForTestId("connected-share-destination-slack", 10_000);
-    await waitForTestId("connected-share-chat-destinations", 10_000);
     await waitForSettledShareDialog();
+    await openDestinationMenu();
+    await waitForTestId("connected-share-destination-slack", 10_000);
+    await waitForTestId("connected-share-destination-chat-notion", 10_000);
     const connectedText = (await browser.execute(
       () => document.body?.innerText ?? "",
     )) as string;
-    expect(connectedText).toContain("direct");
-    expect(connectedText).toContain("with Chat");
-    expect(connectedText).toContain("AI-assisted");
+    // The one distinction that changes what happens is a menu heading now,
+    // not a 10px badge above lookalike tiles.
+    expect(connectedText).toContain("direct — no AI");
+    expect(connectedText).toContain("review with Chat — AI-assisted");
     expect(await shareWrites()).toHaveLength(0);
     expect(
       existsSync(await saveScreenshot("connected-share-meeting-connected")),
     ).toBe(true);
 
-    // The dialog always opens on "copy" — no destination is preselected, so
-    // opening the review can never send anything. Pick Slack explicitly.
+    // Opening the review can never send anything, whatever destination the row
+    // reports. Pick Slack explicitly from the open menu.
     const slackDestination = await waitForTestId(
       "connected-share-destination-slack",
       10_000,
@@ -493,7 +499,9 @@ describe("connected snapshot sharing", function () {
         timeoutMsg: "Slack destination did not become the confirm action",
       },
     );
-    expect(await confirmSlack.getText()).toContain("send to my Slack messages");
+    // The row above states the channel, so the button names the app and stops
+    // there instead of restating the whole destination in caps.
+    expect(await confirmSlack.getText()).toContain("send to Slack");
     await confirmSlack.click();
     await waitForTestId("connected-share-receipt", 10_000);
     await waitForSettledShareDialog();
@@ -540,6 +548,12 @@ describe("connected snapshot sharing", function () {
     const sendView = await waitForTestId("overview-send", 10_000);
     await sendView.click();
     await waitForTestId("connected-share-dialog", 10_000);
+    const openLiveViewDestinations = await waitForTestId(
+      "connected-share-destination",
+      10_000,
+    );
+    await openLiveViewDestinations.click();
+    await browser.pause(t(250));
     const notion = await waitForTestId(
       "connected-share-destination-chat-notion",
       10_000,
@@ -549,14 +563,24 @@ describe("connected snapshot sharing", function () {
     const liveViewText = (await browser.execute(
       () => document.body?.innerText ?? "",
     )) as string;
-    expect(liveViewText).toContain("Wins");
-    expect(liveViewText).toContain("Next actions");
-    expect(liveViewText).toContain("snapshot Chat will review");
+    // Contents reports the settled answer instead of the grid; the Block
+    // titles are still one click away, asserted below once it is open.
+    expect(liveViewText).toMatch(/all \d+ blocks/);
+    expect(liveViewText).toContain("what Chat will review");
     expect(await shareWrites()).toHaveLength(1);
     expect(
       existsSync(await saveScreenshot("connected-share-live-view-notion")),
     ).toBe(true);
 
+    // Both rows open on demand: the grid and the payload are one click each.
+    (await waitForTestId("connected-share-contents-toggle", 10_000)).click();
+    (await waitForTestId("connected-share-preview-toggle", 10_000)).click();
+    await browser.pause(t(250));
+    const expandedText = (await browser.execute(
+      () => document.body?.innerText ?? "",
+    )) as string;
+    expect(expandedText).toContain("Wins");
+    expect(expandedText).toContain("Next actions");
     await browser.execute(() => {
       const dialog = document.querySelector(
         '[data-testid="connected-share-dialog"]',

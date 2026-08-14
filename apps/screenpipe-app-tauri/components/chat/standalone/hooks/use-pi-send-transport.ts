@@ -641,7 +641,13 @@ export function usePiSendTransport(options: PiSendTransportOptions) {
       // Clear prefill context banner (was only cleared in non-Pi path)
       if (prefillContext) {
         // Prepend context to the user message so Pi sees it
-        const contextLabel = prefillSource === "timeline" ? "timeline selection" : "search";
+        // A reviewed snapshot is not a search hit, and calling it one told both
+        // the model and the reader the wrong thing about where it came from.
+        const contextLabel = prefillSource?.startsWith("connected-share-")
+          ? "reviewed Screenpipe snapshot"
+          : prefillSource === "timeline"
+            ? "timeline selection"
+            : "search";
         userMessage = `[Context from ${contextLabel}: ${prefillContext}]\n\n${userMessage}`;
         setPrefillContext(null);
       }
