@@ -181,7 +181,6 @@ export async function getHostedChatGatewayConnection(
 
 	const defaultHeaders: Record<string, string | null> = {
 		'cf-aig-metadata': JSON.stringify(context),
-		'cf-aig-skip-cache': 'true',
 		'cf-aig-collect-log-payload': 'false',
 		'cf-aig-max-attempts': '1',
 		'cf-aig-byok-alias': 'default',
