@@ -39,6 +39,8 @@ const EMPTY_COPY: Record<FirstRunEmptyReason, string> = {
     "Only a few screens were captured — not enough to say anything true about your work yet. Keep working and this fills in.",
   single_app_below_floor:
     "Everything captured came from a single app, which is too thin to summarize. This fills in as you move between apps.",
+  expired_unreported:
+    "The first-run summary timed out while Screenpipe was closed. Nothing is lost — it keeps reading in the background as you work.",
   unknown:
     "Nothing was captured in that window. Screenpipe keeps reading in the background as you work.",
 };

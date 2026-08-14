@@ -7,7 +7,7 @@ import { render, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useLiveText } from "../use-live-text";
 
-const { commandsMock } = vi.hoisted(() => ({
+const { commandsMock, nativeFocusListeners, tauriWindowMock } = vi.hoisted(() => ({
 	commandsMock: {
 		livetextIsAvailable: vi.fn(async () => ({ status: "ok", data: true })),
 		livetextInit: vi.fn(async () => ({ status: "ok", data: null })),
@@ -18,9 +18,19 @@ const { commandsMock } = vi.hoisted(() => ({
 		livetextHide: vi.fn(async () => ({ status: "ok", data: null })),
 		livetextSetGuardRect: vi.fn(async () => ({ status: "ok", data: null })),
 	},
+	nativeFocusListeners: [] as Array<(event: { payload: boolean }) => void>,
+	tauriWindowMock: {
+		onFocusChanged: vi.fn(async (listener: (event: { payload: boolean }) => void) => {
+			nativeFocusListeners.push(listener);
+			return vi.fn();
+		}),
+	},
 }));
 
 vi.mock("@/lib/utils/tauri", () => ({ commands: commandsMock }));
+vi.mock("@tauri-apps/api/window", () => ({
+	getCurrentWindow: () => tauriWindowMock,
+}));
 vi.mock("@/lib/api", () => ({
 	getApiBaseUrl: () => "http://localhost:3030",
 	appendAuthToken: (url: string) => url,
@@ -59,6 +69,7 @@ async function renderActive(opts: Opts) {
 describe("useLiveText search highlights", () => {
 	beforeEach(() => {
 		vi.clearAllMocks();
+		nativeFocusListeners.length = 0;
 	});
 
 	it("scopes the highlight request to the frame the search matched", async () => {
@@ -127,6 +138,34 @@ describe("useLiveText search highlights", () => {
 	});
 });
 
+describe("useLiveText focus handling", () => {
+	beforeEach(() => {
+		vi.clearAllMocks();
+		nativeFocusListeners.length = 0;
+	});
+
+	it("keeps VisionKit visible when selection blurs only the webview", async () => {
+		await renderActive(baseOpts({}));
+		await waitFor(() => expect(tauriWindowMock.onFocusChanged).toHaveBeenCalled());
+		commandsMock.livetextHide.mockClear();
+
+		window.dispatchEvent(new Event("blur"));
+		await Promise.resolve();
+
+		expect(commandsMock.livetextHide).not.toHaveBeenCalled();
+	});
+
+	it("hides VisionKit when the native window actually loses focus", async () => {
+		await renderActive(baseOpts({}));
+		await waitFor(() => expect(nativeFocusListeners.length).toBeGreaterThan(0));
+		commandsMock.livetextHide.mockClear();
+
+		nativeFocusListeners.at(-1)?.({ payload: false });
+
+		await waitFor(() => expect(commandsMock.livetextHide).toHaveBeenCalledTimes(1));
+	});
+});
+
 const frameAt = (frameId: string) => ({
 	filePath: "/f.png",
 	offsetIndex: 0,
@@ -137,6 +176,7 @@ const frameAt = (frameId: string) => ({
 describe("useLiveText analyze failures", () => {
 	beforeEach(() => {
 		vi.clearAllMocks();
+		nativeFocusListeners.length = 0;
 		vi.useRealTimers();
 		commandsMock.livetextIsAvailable.mockResolvedValue({ status: "ok", data: true });
 		commandsMock.livetextAnalyze.mockResolvedValue({ status: "ok", data: "" });

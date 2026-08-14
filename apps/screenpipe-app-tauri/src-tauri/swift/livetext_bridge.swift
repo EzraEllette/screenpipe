@@ -413,6 +413,11 @@ public func ltInit(_ window: UnsafePointer<CChar>?, _ windowPtr: UInt64) -> Int3
             // Focus stealing is managed by mainThreadPreservingFocus() and by
             // hiding the overlay when the search modal is open.
             overlay.preferredInteractionTypes = [.textSelection]
+            // Text is directly selectable without Apple's supplementary
+            // Live Text button. Keep its highlight mode off so the image is
+            // never dimmed behind recognized text.
+            overlay.setSupplementaryInterfaceHidden(true, animated: false)
+            overlay.selectableItemsHighlighted = false
             overlay.isHidden = true
             overlay.frame = NSRect.zero
             overlay.autoresizingMask = [] // we manage position manually
@@ -597,6 +602,8 @@ public func ltUpdatePosition(
                 if let analysis = pending {
                     overlay.analysis = analysis
                     overlay.preferredInteractionTypes = [.textSelection]
+                    overlay.setSupplementaryInterfaceHidden(true, animated: false)
+                    overlay.selectableItemsHighlighted = false
                     overlay.isHidden = false
                     if #available(macOS 14.0, *) {
                         if terms.isEmpty {

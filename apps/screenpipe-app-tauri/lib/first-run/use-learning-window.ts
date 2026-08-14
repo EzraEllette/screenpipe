@@ -19,6 +19,7 @@ import {
   capturedAppsFrom,
   claimLearningSeed,
   classifyEmptyReason,
+  clearPendingEmptyReport,
   hasEnoughEvidence,
   learningWindowOpening,
   learningWindowRemainingMs,
@@ -331,6 +332,28 @@ export function useLearningWindow(
     const timer = setTimeout(() => void settle(), remaining);
     return () => clearTimeout(timer);
   }, [isLearning, startedAt]);
+
+  // Report a window that rehydration settled. That path is the one settle with
+  // no telemetry: the ceiling effect above is gated on `learning`, and
+  // `normalize` has already left that phase by the time anything mounts. Until
+  // this existed, a window that expired while nothing was mounted produced no
+  // event at all, so the outcome was indistinguishable from "user never
+  // finished setup" in PostHog.
+  const pendingEmptyReport = state.pendingEmptyReport;
+  useEffect(() => {
+    if (!pendingEmptyReport) return;
+    posthog.capture("first_run_learning_empty", {
+      reason: state.emptyReason ?? "expired_unreported",
+      // No live engine call here: the window is long settled and a status read
+      // now would describe the present, not the window it is reporting on.
+      data_status: "not_checked",
+      frame_count: 0,
+      // Separates this from the ceiling-effect emit above, which happens with
+      // the banner mounted and a fresh activity read behind it.
+      settled_by: "rehydrate",
+    });
+    setState(clearPendingEmptyReport());
+  }, [pendingEmptyReport, state.emptyReason]);
 
   const dismiss = useCallback(
     (options: { opened?: boolean } = {}) => {
