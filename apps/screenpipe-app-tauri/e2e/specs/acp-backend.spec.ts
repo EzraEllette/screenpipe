@@ -684,7 +684,22 @@ describe("ACP backend", function () {
       .filter((event) => event.type === "message_update")
       .map((event) => event.assistantMessageEvent?.delta ?? "")
       .join("\n");
-    expect(streamedText).toContain("Plan");
+    // The plan arrives structurally, not as a flattened blob on the thinking
+    // channel. It used to be joined into "Plan\n✓ …/→ …" and pushed through
+    // message_update, so every redelivery stacked another collapsed copy.
+    const planUpdates = events.filter((event) => event.type === "plan_update");
+    expect(planUpdates.length).toBeGreaterThanOrEqual(2);
+    expect(planUpdates[0].entries).toEqual([
+      { content: "Inspect the request", status: "completed", priority: "high" },
+      { content: "Run the deterministic tool", status: "in_progress", priority: "medium" },
+    ]);
+    // The second delivery advances a step — the desktop replaces the block
+    // rather than appending a second one (see lib/chat/acp-plan.ts).
+    expect(planUpdates[planUpdates.length - 1].entries).toEqual([
+      { content: "Inspect the request", status: "completed", priority: "high" },
+      { content: "Run the deterministic tool", status: "completed", priority: "medium" },
+    ]);
+    expect(streamedText).not.toContain("Plan\n");
     expect(streamedText).toContain("First streamed chunk");
     expect(streamedText).toContain("Permission accepted; turn complete");
 

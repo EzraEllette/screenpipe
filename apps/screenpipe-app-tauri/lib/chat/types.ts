@@ -94,6 +94,16 @@ export type ContentBlock =
   | { type: "text"; text: string }
   | { type: "tool"; toolCall: ToolCall }
   | { type: "thinking"; text: string; isThinking: boolean; durationMs?: number }
+  // ACP agent plan. Replaced in place on every update — ACP resends the whole
+  // plan each time it changes, so at most one of these exists per message.
+  | {
+      type: "plan";
+      entries: Array<{
+        content: string;
+        status: "pending" | "in_progress" | "completed";
+        priority?: string;
+      }>;
+    }
   | {
       type: "agent_action";
       actionKind: "permission" | "auth";
