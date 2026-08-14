@@ -869,6 +869,37 @@ mod tests {
         assert!(!repeat_suppressed_now(Some("pipe"), Some("p"), "   ", ""));
     }
 
+    /// The gate checks *and* records, so asking it twice about one alert makes
+    /// the second question collide with the answer the first one wrote.
+    ///
+    /// `/notify` gated before persisting and then handed the alert to
+    /// `show_notification_panel`, which gated again — so every high-priority
+    /// notification that came through the route was dropped microseconds after
+    /// being cleared, and the route still logged it as shown. Only the direct
+    /// callers, which pass through once, kept working.
+    ///
+    /// The fix is one recorder per alert, not a longer cooldown: this asserts
+    /// the double-ask really does suppress, so the single-ask contract in
+    /// `deliver_notification_panel(.., apply_repeat_gate: false)` stays load-bearing.
+    #[test]
+    fn asking_the_same_gate_twice_suppresses_a_first_time_alert() {
+        let mut ledger = empty_ledger();
+        let key = repeat_key(Some("meeting"), None, "meeting detected", "with alice");
+        let cooldown = repeat_cooldown_ms(Some("meeting"));
+
+        // The route clears it and records the delivery.
+        assert!(
+            !check_and_record(&mut ledger, key.clone(), 1_000, cooldown),
+            "a first-time alert must pass the gate"
+        );
+        // The delivery path asks about the very same alert a moment later.
+        assert!(
+            check_and_record(&mut ledger, key, 1_001, cooldown),
+            "asking twice suppresses the alert the caller just cleared — \
+             exactly one caller may run the gate per alert"
+        );
+    }
+
     #[test]
     fn title_is_read_from_payload() {
         assert_eq!(
