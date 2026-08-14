@@ -395,7 +395,7 @@ mod macos {
         is_login_item_open_event, macos_status_from_raw, macos_status_is_registered,
         EnrollmentStatus, LAUNCHED_AS_LOGIN_ITEM_KEY,
     };
-    use cocoa::base::{id, nil, BOOL};
+    use cocoa::base::{id, nil, BOOL, NO};
     use cocoa::foundation::NSAutoreleasePool;
     use objc::runtime::Class;
     use objc::{msg_send, sel, sel_impl};
@@ -420,6 +420,12 @@ mod macos {
         }
     });
 
+    /// `BOOL` is `bool` on aarch64 but `i8` on x86_64, so `!value` only compiles
+    /// on Apple Silicon. Compare against `NO` to read the same on both arches.
+    fn is_true(value: BOOL) -> bool {
+        value != NO
+    }
+
     fn ensure_framework_loaded() -> Result<(), String> {
         SERVICE_MANAGEMENT_HANDLE
             .as_ref()
@@ -433,7 +439,7 @@ mod macos {
             .ok_or_else(|| "SMAppService class is unavailable".to_string())?;
 
         let responds: BOOL = msg_send![class, respondsToSelector: sel!(mainAppService)];
-        if !responds {
+        if !is_true(responds) {
             return Err("SMAppService.mainAppService is unavailable".to_string());
         }
         let service: id = msg_send![class, mainAppService];
@@ -442,7 +448,7 @@ mod macos {
         }
 
         let responds: BOOL = msg_send![service, respondsToSelector: sel!(status)];
-        if !responds {
+        if !is_true(responds) {
             return Err("SMAppService.mainApp.status is unavailable".to_string());
         }
         Ok(service)
@@ -454,7 +460,7 @@ mod macos {
         name: &str,
     ) -> Result<(), String> {
         let responds: BOOL = msg_send![object, respondsToSelector: selector];
-        if responds {
+        if is_true(responds) {
             Ok(())
         } else {
             Err(format!("SMAppService.mainApp.{name} is unavailable"))
@@ -470,7 +476,7 @@ mod macos {
             return "no NSError was provided".to_string();
         }
         let responds: BOOL = msg_send![error, respondsToSelector: sel!(localizedDescription)];
-        if !responds {
+        if !is_true(responds) {
             return "NSError.localizedDescription is unavailable".to_string();
         }
         let description: id = msg_send![error, localizedDescription];
@@ -478,7 +484,7 @@ mod macos {
             return "NSError.localizedDescription returned nil".to_string();
         }
         let responds: BOOL = msg_send![description, respondsToSelector: sel!(UTF8String)];
-        if !responds {
+        if !is_true(responds) {
             return "NSError description UTF8String is unavailable".to_string();
         }
         let utf8: *const std::os::raw::c_char = msg_send![description, UTF8String];
@@ -512,7 +518,7 @@ mod macos {
                 )?;
                 let mut error: id = nil;
                 let registered: BOOL = msg_send![service, registerAndReturnError: &mut error];
-                if !registered {
+                if !is_true(registered) {
                     return Err(format!(
                         "SMAppService.mainApp registration failed: {}",
                         error_description(error)
@@ -549,7 +555,7 @@ mod macos {
                 let mut error: id = nil;
                 let unregistered: BOOL = msg_send![service, unregisterAndReturnError: &mut error];
                 let raw = status_raw(service);
-                if !unregistered && macos_status_is_registered(raw)? {
+                if !is_true(unregistered) && macos_status_is_registered(raw)? {
                     return Err(format!(
                         "SMAppService.mainApp unregistration failed: {}",
                         error_description(error)
@@ -575,7 +581,7 @@ mod macos {
                     .ok_or_else(|| "NSAppleEventManager class is unavailable".to_string())?;
                 let responds: BOOL =
                     msg_send![class, respondsToSelector: sel!(sharedAppleEventManager)];
-                if !responds {
+                if !is_true(responds) {
                     return Err(
                         "NSAppleEventManager.sharedAppleEventManager is unavailable".to_string()
                     );
@@ -589,7 +595,7 @@ mod macos {
                 }
                 let responds: BOOL =
                     msg_send![manager, respondsToSelector: sel!(currentAppleEvent)];
-                if !responds {
+                if !is_true(responds) {
                     return Err("NSAppleEventManager.currentAppleEvent is unavailable".to_string());
                 }
 
@@ -607,7 +613,7 @@ mod macos {
                     ),
                 ] {
                     let responds: BOOL = msg_send![event, respondsToSelector: selector];
-                    if !responds {
+                    if !is_true(responds) {
                         return Err(format!("NSAppleEventDescriptor.{name} is unavailable"));
                     }
                 }
