@@ -6,9 +6,9 @@ and layer declared in the manifest, weighted by confidence and criticality.
 
 - Manifest: `e2e/coverage-map.json`
 - Specs directory: `e2e/specs`
-- Mapped specs: 113
-- Declared test blocks: 325
-- Weighted coverage points: 254.9
+- Mapped specs: 114
+- Declared test blocks: 329
+- Weighted coverage points: 257.7
 
 Confidence weights: strong=1.0, partial=0.7, conditional=0.4, smoke=0.3.
 Criticality weights: high=1.0, medium=0.7, low=0.4.
@@ -19,9 +19,9 @@ can execute more runtime cases than this number shows.
 
 | Platform | Specs | Declared tests | Weighted points | Layers | Features | Critical score |
 | --- | --- | --- | --- | --- | --- | --- |
-| windows | 87 | 283 | 231.5 | 15 | 92 | 92% |
-| macos | 109 | 288 | 225.7 | 17 | 95 | 90% |
-| linux | 76 | 240 | 200.1 | 14 | 87 | 88% |
+| windows | 88 | 287 | 234.3 | 15 | 92 | 92% |
+| macos | 110 | 292 | 228.5 | 17 | 95 | 90% |
+| linux | 77 | 244 | 202.9 | 14 | 87 | 88% |
 
 ## Runtime Results
 
@@ -41,11 +41,11 @@ pass/fail/skip counts.
 | entitlement | - | 1 specs / 1 tests / 1.0 pts | - |
 | local-api | 24 specs / 113 tests / 94.0 pts | 31 specs / 100 tests / 83.5 pts | 19 specs / 81 tests / 72.2 pts |
 | notifications | 4 specs / 25 tests / 16.3 pts | 3 specs / 5 tests / 3.4 pts | 2 specs / 4 tests / 3.1 pts |
-| onboarding | 8 specs / 33 tests / 30.0 pts | 10 specs / 35 tests / 31.4 pts | 8 specs / 33 tests / 30.0 pts |
+| onboarding | 9 specs / 37 tests / 32.8 pts | 11 specs / 39 tests / 34.2 pts | 9 specs / 37 tests / 32.8 pts |
 | os-integration | 7 specs / 30 tests / 25.5 pts | 14 specs / 27 tests / 16.0 pts | 2 specs / 13 tests / 9.4 pts |
 | performance | 2 specs / 44 tests / 44.0 pts | 4 specs / 34 tests / 30.5 pts | 1 specs / 29 tests / 29.0 pts |
 | pipes | 6 specs / 19 tests / 19.0 pts | 8 specs / 25 tests / 25.0 pts | 6 specs / 19 tests / 19.0 pts |
-| real-ui-e2e | 61 specs / 184 tests / 152.2 pts | 72 specs / 185 tests / 152.8 pts | 56 specs / 159 tests / 137.4 pts |
+| real-ui-e2e | 62 specs / 188 tests / 155.0 pts | 73 specs / 189 tests / 155.6 pts | 57 specs / 163 tests / 140.2 pts |
 | settings | 14 specs / 38 tests / 35.0 pts | 16 specs / 33 tests / 28.7 pts | 13 specs / 30 tests / 27.0 pts |
 | storage-privacy | 9 specs / 40 tests / 31.3 pts | 9 specs / 26 tests / 25.1 pts | 6 specs / 19 tests / 18.1 pts |
 | tauri-command | 18 specs / 50 tests / 39.1 pts | 25 specs / 58 tests / 44.5 pts | 17 specs / 49 tests / 38.1 pts |
@@ -147,6 +147,7 @@ pass/fail/skip counts.
 | chat-window.spec.ts | windows, macos, linux | chat-ai, window-lifecycle, real-ui-e2e | chat, window-lifecycle | high | strong | real-user-flow | 1 | Opens Chat and focuses the composer for typing. |
 | chat-within-session-context-loss.spec.ts | macos | chat-ai | chat, chat-context | medium | conditional | synthetic | 5 | macOS-only within-chat context retention regression. |
 | db-hard-fault-fail-closed.spec.ts | windows, macos, linux | local-api, tauri-command, real-ui-e2e | database-hard-fault-containment, app-launch | high | strong | mixed | 1 | Opt-in packaged-desktop regression: causes real SQLITE_CORRUPT in the isolated E2E database, then proves the engine API and database owners stop while the desktop stays alive and does not respawn across the watchdog window. |
+| first-run-agent-handoff.spec.ts | windows, macos, linux | onboarding, real-ui-e2e | onboarding, first-run-learning, mcp-registration | high | partial | real-user-flow | 4 | Agent handoff beside the first-run summary: the summary stays primary and clickable whether or not an agent is offered, an offered target is never nameless or unclickable, the filesystem probe cannot break the ready banner or the summary click-through, and the paste instruction appears only after the handoff runs. Waits for the async probe before concluding absence. Does not assert WHICH agent: detectAiTools resolves the real home in the webview (SCREENPIPE_E2E_AI_TOOLS_HOME is Rust-only), so selection is host-dependent and is covered in lib/first-run/agent-handoff.test.ts and use-agent-handoff.test.ts. |
 | first-run-ai-summary.spec.ts | macos | onboarding, chat-ai, real-ui-e2e, tauri-command | onboarding, first-run-learning, chat | high | strong | real-user-flow | 1 | Opt-in hosted-AI lane for the post-setup summary: the real app starts its own Pi session through the Rust command and the production Worker under Miniflare, and the forwarded provider request is asserted to carry the screen and audio excerpts plus the browser URL, not just app names. Guards the regression where the summary was AI-written but built from containers only, so it read templated. The seeded chat must hold the model's text and never the deterministic opener. |
 | first-run-guide.spec.ts | windows, macos, linux | onboarding, chat-ai, real-ui-e2e | onboarding, chat, first-run-guide | high | strong | real-user-flow | 3 | Replayed first-run guide verifies the composer remains focused and clickable above its scrim, fails open when stacking defeats the lift, and remembers decline across reloads. |
 | first-run-learning-window.spec.ts | windows, macos, linux | onboarding, real-ui-e2e | onboarding, first-run-learning | high | strong | real-user-flow | 8 | Post-setup learning window on Home under the authenticated seed: opens from a real complete_onboarding with nothing seeded (guards the cross-window webview localStorage handoff), live countdown, settles to the real engine-reported reason when nothing was captured, stays dismissed across a reload, offers a ready summary and clears after use, and never renders in idle or done. |

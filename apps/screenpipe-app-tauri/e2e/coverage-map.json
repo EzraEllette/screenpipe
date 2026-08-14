@@ -946,7 +946,7 @@
       "criticality": "medium",
       "confidence": "partial",
       "ux": "synthetic",
-      "notes": "QUARANTINED (#4610): cross-window prefill duplicate regression. The autoSend persist precondition is racy in CI \u2014 times out with 0 conversations (not the duplicate=2 it guards) ~100% Linux + ~33% macOS. Re-enable once it seeds the persisted conversation deterministically."
+      "notes": "QUARANTINED (#4610): cross-window prefill duplicate regression. The autoSend persist precondition is racy in CI — times out with 0 conversations (not the duplicate=2 it guards) ~100% Linux + ~33% macOS. Re-enable once it seeds the persisted conversation deterministically."
     },
     {
       "spec": "chat-queue-burst-pending.spec.ts",
@@ -1136,7 +1136,7 @@
       "criticality": "high",
       "confidence": "partial",
       "ux": "synthetic",
-      "notes": "A turn that ends while the panel does not own the session on the agent-event bus must still release the composer dispatch guards and must not duplicate the user message; regression for the stuck 'analyzing\u2026' chat whose later messages all piled into QUEUED."
+      "notes": "A turn that ends while the panel does not own the session on the agent-event bus must still release the composer dispatch guards and must not duplicate the user message; regression for the stuck 'analyzing…' chat whose later messages all piled into QUEUED."
     },
     {
       "spec": "chat-subagent-async-completion.spec.ts",
@@ -1259,6 +1259,28 @@
       "confidence": "strong",
       "ux": "mixed",
       "notes": "Opt-in packaged-desktop regression: causes real SQLITE_CORRUPT in the isolated E2E database, then proves the engine API and database owners stop while the desktop stays alive and does not respawn across the watchdog window."
+    },
+    {
+      "spec": "first-run-agent-handoff.spec.ts",
+      "platforms": [
+        "windows",
+        "macos",
+        "linux"
+      ],
+      "layers": [
+        "onboarding",
+        "real-ui-e2e"
+      ],
+      "features": [
+        "onboarding",
+        "first-run-learning",
+        "mcp-registration"
+      ],
+      "criticality": "high",
+      "confidence": "partial",
+      "ux": "real-user-flow",
+      "tests": 4,
+      "notes": "Agent handoff beside the first-run summary: the summary stays primary and clickable whether or not an agent is offered, an offered target is never nameless or unclickable, the filesystem probe cannot break the ready banner or the summary click-through, and the paste instruction appears only after the handoff runs. Waits for the async probe before concluding absence. Does not assert WHICH agent: detectAiTools resolves the real home in the webview (SCREENPIPE_E2E_AI_TOOLS_HOME is Rust-only), so selection is host-dependent and is covered in lib/first-run/agent-handoff.test.ts and use-agent-handoff.test.ts."
     },
     {
       "spec": "first-run-ai-summary.spec.ts",
