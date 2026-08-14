@@ -24,8 +24,9 @@ use std::sync::{Arc, Mutex};
 
 use windows::core::Result;
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
+use windows::Win32::Graphics::Direct2D::Common::{D2D1_COLOR_F, D2D_POINT_2F};
 use windows::Win32::Graphics::Direct2D::{
-    ID2D1DCRenderTarget, ID2D1RenderTarget, D2D1_FEATURE_LEVEL_DEFAULT,
+    ID2D1DCRenderTarget, ID2D1RenderTarget, D2D1_ELLIPSE, D2D1_FEATURE_LEVEL_DEFAULT,
     D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_DEFAULT,
     D2D1_RENDER_TARGET_USAGE_GDI_COMPATIBLE,
 };
@@ -46,14 +47,15 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowLongPtrW, GetWindowRect, KillTimer, LoadCursorW, PostMessageW, PostQuitMessage,
     RegisterClassExW, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage,
     UpdateLayeredWindow, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, HWND_TOPMOST, IDC_ARROW, MSG,
-    SWP_NOACTIVATE, SWP_NOSIZE, SW_HIDE, SW_SHOWNOACTIVATE, ULW_ALPHA, WINDOWPOS, WM_APP,
-    WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
-    WM_SETTINGCHANGE, WM_TIMER, WM_WINDOWPOSCHANGING, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_HIDE, SW_SHOWNOACTIVATE, ULW_ALPHA, WINDOWPOS,
+    WM_APP, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MOUSEMOVE, WM_SETTINGCHANGE, WM_TIMER, WM_WINDOWPOSCHANGING, WNDCLASSEXW, WS_EX_LAYERED,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
 use crate::actions::{action_for, anchor_action};
 use crate::anim::Equalizer;
+use crate::drag_stage;
 use crate::layout::{self, Layout, SHADOW_PAD};
 use crate::notification::{self, Notification, Refusal};
 use crate::render::{premultiplied_bgra, Renderer};
@@ -79,6 +81,11 @@ const ANIM_MS: u32 = 83; // ~12 Hz, same cadence as the macOS meter.
 const HOVER_POLL_MS: u32 = 90;
 /// Pointer travel before a press on the pill becomes a drag rather than a click.
 const DRAG_THRESHOLD: f32 = 4.0;
+
+/// Gap in DIP between the pinned pill and the edge of the work area. Shared
+/// with the drag stage so a landing target is drawn exactly where the pill it
+/// stands for will come to rest.
+const PILL_MARGIN: f32 = 6.0;
 
 /// What the overlay reports back to the app: the same action strings the macOS
 /// panel sends, so the rust side needs no per-platform mapping.
@@ -227,6 +234,9 @@ struct Ctx {
     dragging: bool,
     drag_offset: (i32, i32),
     animating: bool,
+    /// The dimmed sheet and its landing targets. Built the first time the pill
+    /// is dragged and kept for the process' life, hidden between drags.
+    stage: Option<Stage>,
 }
 
 struct Dib {
@@ -301,6 +311,7 @@ fn run_message_loop(
             dragging: false,
             drag_offset: (0, 0),
             animating: false,
+            stage: None,
         });
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(ctx) as isize);
         *hwnd_out.lock().unwrap() = hwnd.0 as isize;
@@ -382,7 +393,7 @@ fn origin_for(hwnd: HWND, ctx: &Ctx, anchor: Anchor) -> (i32, i32) {
     let win_h = (ctx.layout.window.h * scale).ceil() as i32;
     let wa_w = (wa.right - wa.left).max(1);
     let wa_h = (wa.bottom - wa.top).max(1);
-    let margin = (6.0 * scale) as i32;
+    let margin = (PILL_MARGIN * scale) as i32;
     let pad = (SHADOW_PAD * scale) as i32;
     let (fx, fy) = anchor.fractions();
 
@@ -527,6 +538,312 @@ fn repaint(hwnd: HWND) {
             Some(&blend),
             ULW_ALPHA,
         );
+    }
+}
+
+// MARK: - Drag stage
+//
+// The dimmed sheet with the four landing targets, shown only while the pill is
+// held. A window of its own rather than a bigger pill window: the pill's size
+// *is* its layout and its hit area, so growing it to cover the screen would
+// change what the desktop can be clicked through to. macOS keeps a second
+// `NSPanel` for the same reason.
+
+/// Everything the stage owns. Its HWND is deliberately not given a `Ctx`, so
+/// the shared window procedure short-circuits on every message it receives.
+struct Stage {
+    hwnd: HWND,
+    dib: Option<Dib>,
+    rt: Option<ID2D1DCRenderTarget>,
+    /// What is currently painted, so a pointer move that changes neither the
+    /// monitor nor the target does not redraw a full-screen surface.
+    painted: Option<(RECT, Option<Anchor>)>,
+}
+
+/// The stage never handles anything: it is click-through, it owns no state, and
+/// it is painted imperatively by the pill's own message handling.
+extern "system" fn stage_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+}
+
+/// Register the stage's window class once. Separate from the pill's class so
+/// the pill's `WM_WINDOWPOSCHANGING` rule — always reassert topmost — does not
+/// apply here: the stage has to stay *under* the thing being dragged over it.
+fn stage_class() -> windows::core::PCWSTR {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    let class = windows::core::w!("screenpipe_overlay_drag_stage");
+    ONCE.call_once(|| unsafe {
+        let Ok(instance) = GetModuleHandleW(None) else {
+            return;
+        };
+        let wc = WNDCLASSEXW {
+            cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+            style: CS_HREDRAW | CS_VREDRAW,
+            lpfnWndProc: Some(stage_wndproc),
+            hInstance: instance.into(),
+            hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
+            lpszClassName: class,
+            ..Default::default()
+        };
+        RegisterClassExW(&wc);
+    });
+    class
+}
+
+/// Bring the stage up over `work_area` and paint it. Called once, when a press
+/// becomes a drag.
+fn show_stage(pill: HWND, ctx: &mut Ctx) {
+    unsafe {
+        if ctx.stage.is_none() {
+            let Ok(instance) = GetModuleHandleW(None) else {
+                return;
+            };
+            // WS_EX_TRANSPARENT is the one that matters: the stage sits under
+            // the pointer for the whole gesture and must never take the drag
+            // away from the pill. WS_EX_NOACTIVATE keeps the user's app
+            // frontmost, which is the overlay's normal condition.
+            let hwnd = CreateWindowExW(
+                WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+                stage_class(),
+                windows::core::w!("screenpipe overlay drag stage"),
+                WS_POPUP,
+                0,
+                0,
+                10,
+                10,
+                None,
+                None,
+                instance,
+                None,
+            );
+            match hwnd {
+                Ok(hwnd) => {
+                    ctx.stage = Some(Stage {
+                        hwnd,
+                        dib: None,
+                        rt: None,
+                        painted: None,
+                    })
+                }
+                Err(e) => {
+                    // A stage that will not open is a worse drag, not a broken
+                    // one: the pill still moves and still snaps.
+                    tracing::warn!("overlay drag stage window: {e:?}");
+                    return;
+                }
+            }
+        }
+        update_stage(pill, ctx);
+        let Some(stage) = ctx.stage.as_ref() else {
+            return;
+        };
+        let _ = ShowWindow(stage.hwnd, SW_SHOWNOACTIVATE);
+        // Directly beneath the pill, so the thing being dragged stays on top of
+        // the targets it is being dragged between.
+        let _ = SetWindowPos(
+            stage.hwnd,
+            pill,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOACTIVATE | SWP_NOSIZE | SWP_NOMOVE,
+        );
+    }
+}
+
+/// Re-lay and repaint the stage if the pill crossed onto another monitor or the
+/// target it would land on changed. A no-op otherwise, which is most moves.
+fn update_stage(pill: HWND, ctx: &mut Ctx) {
+    let work = ctx.work_area;
+    let target = ctx.state.drag_target;
+    let Some(stage) = ctx.stage.as_mut() else {
+        return;
+    };
+    let same = stage
+        .painted
+        .map(|(w, t)| rects_equal(w, work) && t == target)
+        .unwrap_or(false);
+    if same {
+        return;
+    }
+    let scale = dpi_scale(pill);
+    unsafe {
+        let _ = SetWindowPos(
+            stage.hwnd,
+            pill,
+            work.left,
+            work.top,
+            (work.right - work.left).max(1),
+            (work.bottom - work.top).max(1),
+            SWP_NOACTIVATE,
+        );
+    }
+    paint_stage(stage, &ctx.renderer, work, target, scale);
+    stage.painted = Some((work, target));
+}
+
+fn hide_stage(ctx: &mut Ctx) {
+    let Some(stage) = ctx.stage.as_mut() else {
+        return;
+    };
+    unsafe {
+        let _ = ShowWindow(stage.hwnd, SW_HIDE);
+    }
+    // Forget what was painted so the next drag lays the targets out against
+    // whatever monitor the pill is on by then.
+    stage.painted = None;
+}
+
+fn rects_equal(a: RECT, b: RECT) -> bool {
+    a.left == b.left && a.top == b.top && a.right == b.right && a.bottom == b.bottom
+}
+
+fn paint_stage(
+    stage: &mut Stage,
+    renderer: &Renderer,
+    work: RECT,
+    target: Option<Anchor>,
+    scale: f32,
+) {
+    unsafe {
+        let w = (work.right - work.left).max(1);
+        let h = (work.bottom - work.top).max(1);
+
+        let stale = stage
+            .dib
+            .as_ref()
+            .map(|d| d.width != w || d.height != h)
+            .unwrap_or(true);
+        if stale {
+            if let Some(dib) = stage.dib.take() {
+                SelectObject(dib.dc, dib.previous);
+                let _ = DeleteObject(dib.bitmap);
+                let _ = DeleteDC(dib.dc);
+            }
+            let Some(dib) = create_dib(w, h) else { return };
+            stage.dib = Some(dib);
+            stage.rt = None;
+        }
+        let Some(dib) = stage.dib.as_ref() else {
+            return;
+        };
+        let mem = dib.dc;
+
+        if stage.rt.is_none() {
+            let props = D2D1_RENDER_TARGET_PROPERTIES {
+                r#type: D2D1_RENDER_TARGET_TYPE_DEFAULT,
+                pixelFormat: premultiplied_bgra(),
+                dpiX: 96.0 * scale,
+                dpiY: 96.0 * scale,
+                usage: D2D1_RENDER_TARGET_USAGE_GDI_COMPATIBLE,
+                minLevel: D2D1_FEATURE_LEVEL_DEFAULT,
+            };
+            match renderer.factory.CreateDCRenderTarget(&props) {
+                Ok(rt) => stage.rt = Some(rt),
+                Err(e) => {
+                    tracing::error!("overlay drag stage render target: {e:?}");
+                    return;
+                }
+            }
+        }
+        let rt = stage.rt.clone().expect("stage render target");
+        let bind = RECT {
+            left: 0,
+            top: 0,
+            right: w,
+            bottom: h,
+        };
+        if rt.BindDC(mem, &bind).is_err() {
+            stage.rt = None;
+            return;
+        }
+
+        let rt: ID2D1RenderTarget = rt.clone().into();
+        rt.BeginDraw();
+        // The whole sheet is the dim; there is nothing else behind it.
+        rt.Clear(Some(&rgba(0.0, drag_stage::STAGE_DIM)));
+
+        // Targets are laid out in the work area's own DIP space, so shift them
+        // to the stage's origin.
+        let area = layout::Rect::new(0.0, 0.0, w as f32 / scale, h as f32 / scale);
+        let pill = (
+            layout::BASE_COLLAPSED_W * scale,
+            layout::BASE_COLLAPSED_H * scale,
+        );
+        for t in drag_stage::targets(area, pill, PILL_MARGIN, scale, target) {
+            let grow = if t.active {
+                drag_stage::TARGET_ACTIVE_SCALE
+            } else {
+                1.0
+            };
+            let radius = t.rect.w / 2.0 * grow;
+            let ellipse = D2D1_ELLIPSE {
+                point: D2D_POINT_2F {
+                    x: t.rect.x + t.rect.w / 2.0,
+                    y: t.rect.y + t.rect.h / 2.0,
+                },
+                radiusX: radius,
+                radiusY: radius,
+            };
+            let (fill_white, fill_a, border_a) = if t.active {
+                (
+                    1.0,
+                    drag_stage::TARGET_FILL_ACTIVE,
+                    drag_stage::TARGET_BORDER_ACTIVE,
+                )
+            } else {
+                (0.0, drag_stage::TARGET_FILL, drag_stage::TARGET_BORDER)
+            };
+            if let Ok(brush) = rt.CreateSolidColorBrush(&rgba(fill_white, fill_a), None) {
+                rt.FillEllipse(&ellipse, &brush);
+            }
+            if let Ok(brush) = rt.CreateSolidColorBrush(&rgba(1.0, border_a), None) {
+                rt.DrawEllipse(
+                    &ellipse,
+                    &brush,
+                    drag_stage::BASE_TARGET_BORDER * scale,
+                    None,
+                );
+            }
+        }
+        if let Err(e) = rt.EndDraw(None, None) {
+            tracing::error!("overlay drag stage EndDraw: {e:?}");
+            stage.rt = None;
+            return;
+        }
+
+        let size = SIZE { cx: w, cy: h };
+        let src = POINT { x: 0, y: 0 };
+        let blend = BLENDFUNCTION {
+            BlendOp: AC_SRC_OVER as u8,
+            BlendFlags: 0,
+            SourceConstantAlpha: 255,
+            AlphaFormat: AC_SRC_ALPHA as u8,
+        };
+        let _ = UpdateLayeredWindow(
+            stage.hwnd,
+            None,
+            None,
+            Some(&size),
+            mem,
+            Some(&src),
+            COLORREF(0),
+            Some(&blend),
+            ULW_ALPHA,
+        );
+    }
+}
+
+/// Grey level `v` at alpha `a`, premultiplied the way the layered surface wants
+/// it. D2D takes straight alpha and premultiplies on write, so this only has to
+/// name the colour.
+fn rgba(v: f32, a: f32) -> D2D1_COLOR_F {
+    D2D1_COLOR_F {
+        r: v,
+        g: v,
+        b: v,
+        a,
     }
 }
 
@@ -847,6 +1164,13 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                         // The press will not become a click any more; release
                         // the button visual so it does not ride along lit.
                         ctx.state.pressed_control = None;
+                        // Seed the target before the sheet opens, so the first
+                        // frame already lights the edge the pill is nearest.
+                        let mut pt = POINT::default();
+                        let _ = GetCursorPos(&mut pt);
+                        ctx.work_area = monitor_work_area_at_cursor();
+                        ctx.state.drag_target = Some(drop_target(ctx, pt));
+                        show_stage(hwnd, ctx);
                         repaint(hwnd);
                     }
                     if ctx.dragging {
@@ -871,6 +1195,10 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                             ctx.state.drag_target = Some(target);
                             repaint(hwnd);
                         }
+                        // Follows the pill onto another monitor and relights the
+                        // target; a no-op when neither changed, which is most
+                        // moves.
+                        update_stage(hwnd, ctx);
                         return LRESULT(0);
                     }
                 }
@@ -945,6 +1273,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                         ctx.dragging = false;
                         ctx.state.dragging = false;
                         ctx.state.drag_target = None;
+                        hide_stage(ctx);
                         action = Some(anchor_action(ctx.state.anchor));
                     } else if let Some(pressed) = ctx.state.pressed_control {
                         // Only fire when the release lands on the same control
@@ -1037,6 +1366,16 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
                     let mut ctx = Box::from_raw(p);
                     release_dib(&mut ctx);
+                    // The stage outlives individual drags, so it is only torn
+                    // down with the pill. Its DIB is a full-screen bitmap.
+                    if let Some(mut stage) = ctx.stage.take() {
+                        if let Some(dib) = stage.dib.take() {
+                            SelectObject(dib.dc, dib.previous);
+                            let _ = DeleteObject(dib.bitmap);
+                            let _ = DeleteDC(dib.dc);
+                        }
+                        let _ = DestroyWindow(stage.hwnd);
+                    }
                 }
                 PostQuitMessage(0);
                 LRESULT(0)
@@ -1058,27 +1397,27 @@ mod tests {
     fn a_dragged_pill_survives_the_apps_stale_state_pushes() {
         // Startup: the app pushes the persisted anchor and the pill takes it.
         let (anchor, pushed) =
-            resolve_anchor(None, Anchor::BottomRight, Anchor::BottomCenter, false);
-        assert_eq!(anchor, Anchor::BottomRight, "first push places the pill");
+            resolve_anchor(None, Anchor::RightCenter, Anchor::BottomCenter, false);
+        assert_eq!(anchor, Anchor::RightCenter, "first push places the pill");
 
         // The user drags it across the screen; the window now owns MiddleLeft.
-        let dragged = Anchor::MiddleLeft;
+        let dragged = Anchor::LeftCenter;
 
         // The metrics feed pushes again, still carrying the pre-drag anchor.
-        let (anchor, pushed) = resolve_anchor(pushed, Anchor::BottomRight, dragged, false);
+        let (anchor, pushed) = resolve_anchor(pushed, Anchor::RightCenter, dragged, false);
         assert_eq!(anchor, dragged, "an echo must not drag the pill home");
 
         // ...and keeps pushing, many times a second.
-        let (anchor, pushed) = resolve_anchor(pushed, Anchor::BottomRight, dragged, false);
+        let (anchor, pushed) = resolve_anchor(pushed, Anchor::RightCenter, dragged, false);
         assert_eq!(anchor, dragged);
 
         // Settings genuinely move it: a *changed* anchor is obeyed.
-        let (anchor, pushed) = resolve_anchor(pushed, Anchor::TopLeft, dragged, false);
-        assert_eq!(anchor, Anchor::TopLeft);
+        let (anchor, pushed) = resolve_anchor(pushed, Anchor::TopCenter, dragged, false);
+        assert_eq!(anchor, Anchor::TopCenter);
 
         // And once the app has caught up, echoing the dragged value is a no-op.
-        let (anchor, _) = resolve_anchor(pushed, Anchor::TopLeft, Anchor::TopLeft, false);
-        assert_eq!(anchor, Anchor::TopLeft);
+        let (anchor, _) = resolve_anchor(pushed, Anchor::TopCenter, Anchor::TopCenter, false);
+        assert_eq!(anchor, Anchor::TopCenter);
     }
 
     /// The pin lives only in the window — clicking it reports nothing to the
@@ -1110,11 +1449,11 @@ mod tests {
     #[test]
     fn nothing_moves_the_pill_while_it_is_being_dragged() {
         let (anchor, _) = resolve_anchor(
-            Some(Anchor::BottomRight),
-            Anchor::TopLeft,
-            Anchor::MiddleRight,
+            Some(Anchor::RightCenter),
+            Anchor::TopCenter,
+            Anchor::RightCenter,
             true,
         );
-        assert_eq!(anchor, Anchor::MiddleRight);
+        assert_eq!(anchor, Anchor::RightCenter);
     }
 }

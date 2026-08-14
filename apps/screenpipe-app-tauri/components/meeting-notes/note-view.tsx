@@ -28,6 +28,7 @@ import {
   MoreHorizontal,
   Play,
   RefreshCw,
+  Send,
   Sparkles,
   Square,
   Trash2,
@@ -125,6 +126,12 @@ import {
   type MeetingShareAction,
 } from "./meeting-share-menu";
 import { copyMeetingSummary, emailMeetingSummary } from "./share-summary";
+import { ConnectedShareDialog } from "@/components/connected-share-dialog";
+import { createMeetingShareArtifact } from "@/lib/connected-share";
+import {
+  readRememberedShare,
+  rememberedSendLabel,
+} from "@/lib/connected-share-preference";
 import {
   resolveTranscriptOpen,
   type TranscriptOpenIntent,
@@ -242,6 +249,13 @@ export function NoteView({
   const [copiedAction, setCopiedAction] = useState<MeetingShareAction | null>(
     null,
   );
+  const [shareOpen, setShareOpen] = useState(false);
+  // Read once per open rather than on every render: the menu only needs to
+  // name the app, and the dialog re-reads the full preference when it mounts.
+  const sendLabel = useMemo(
+    () => rememberedSendLabel(readRememberedShare("meeting")),
+    [shareOpen],
+  );
   const [resumingCapture, setResumingCapture] = useState(false);
   const [savingBeforeStop, setSavingBeforeStop] = useState(false);
   const [autoSummaryEnabled, setAutoSummaryEnabled] = useState<boolean | null>(
@@ -294,6 +308,16 @@ export function NoteView({
   const [isDraggingImage, setIsDraggingImage] = useState(false);
   const canSummarizeMeeting =
     !isLive && !stopping && !savingBeforeStop && Boolean(meeting.meeting_end);
+  const shareArtifact = useMemo(
+    () =>
+      createMeetingShareArtifact({
+        ...meeting,
+        title: title || null,
+        attendees: attendees || null,
+        note: note || null,
+      }),
+    [attendees, meeting, note, title],
+  );
   const summaryPipeSlug = settings.meetingSummaryPipeSlug || "meeting-summary";
   const summaryWorking =
     summarizing ||
@@ -1678,6 +1702,11 @@ export function NoteView({
 
   return (
     <div ref={rootRef} className="relative flex h-full flex-col bg-background">
+      <ConnectedShareDialog
+        open={shareOpen}
+        onOpenChange={setShareOpen}
+        artifact={shareArtifact}
+      />
       {isDraggingImage && (
         <div className="pointer-events-none absolute inset-0 z-50 flex items-center justify-center bg-background/60">
           <div className="border border-foreground bg-foreground px-12 py-10 text-background">
@@ -1773,6 +1802,8 @@ export function NoteView({
               <>
                 <MeetingShareMenu
                   canShareSummary={canShareSummary}
+                  canSend={shareArtifact.sections.length > 0}
+                  sendLabel={sendLabel}
                   busy={copying}
                   copiedAction={copiedAction}
                   onShare={(action) => {
@@ -1780,6 +1811,7 @@ export function NoteView({
                     else if (action === "email") void handleEmailSummary();
                     else if (action === "transcript")
                       void handleCopyTranscript();
+                    else if (action === "send") setShareOpen(true);
                     else void handleCopy();
                   }}
                 />

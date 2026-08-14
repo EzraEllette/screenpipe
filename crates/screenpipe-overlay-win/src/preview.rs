@@ -15,7 +15,9 @@ use std::time::Duration;
 use crate::anim::Equalizer;
 use crate::notification;
 use crate::render::Renderer;
-use crate::snapshot::{capture_desktop, write_bgra_png, write_png, Backdrop, DesktopShot};
+use crate::snapshot::{
+    capture_desktop, write_bgra_png, write_png, write_stage_png, Backdrop, DesktopShot,
+};
 use crate::state::{Anchor, Control, Health, OverlaySize, OverlayState, TranscriptItem};
 use crate::window::Overlay;
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
@@ -187,9 +189,9 @@ pub fn flows() -> Vec<(&'static str, OverlayState)> {
     ));
 
     out.push((
-        "11-anchor-top-right",
+        "11-anchor-right-center",
         OverlayState {
-            anchor: Anchor::TopRight,
+            anchor: Anchor::RightCenter,
             hovering: true,
             ..base()
         },
@@ -242,6 +244,37 @@ fn shots(dir: &str) -> windows::core::Result<()> {
         )?;
         println!("{path} {w}x{h}");
     }
+
+    // The drag stage is not an `OverlayState` the pill can be rendered from —
+    // it is a desktop-sized sheet — so it gets its own pass. One shot per edge,
+    // because the whole point of the stage is which target lights up.
+    let backdrop = if desktop.is_some() {
+        Backdrop::Desktop
+    } else {
+        Backdrop::Solid([0.11, 0.12, 0.14])
+    };
+    let (sw, sh) = desktop
+        .as_ref()
+        .map(|d| (d.width, d.height))
+        .unwrap_or((1920, 1080));
+    for (name, at) in [
+        ("13-drag-stage-top", (0.5, 0.18)),
+        ("14-drag-stage-right", (0.86, 0.5)),
+        ("15-drag-stage-bottom", (0.5, 0.82)),
+        ("16-drag-stage-left", (0.14, 0.5)),
+    ] {
+        let path = format!("{dir}/{name}.png");
+        let (w, h) = write_stage_png(
+            &renderer,
+            (sw, sh),
+            1.0,
+            (sw as f32 * at.0, sh as f32 * at.1),
+            &backdrop,
+            desktop.as_ref(),
+            &path,
+        )?;
+        println!("{path} {w}x{h}");
+    }
     Ok(())
 }
 
@@ -288,17 +321,15 @@ fn live_shots(dir: &str) -> windows::core::Result<()> {
 /// Anchor names accepted on the command line, matching the kebab-case the
 /// settings store and `overlay-anchor.ts` already use.
 fn parse_anchor(s: &str) -> Option<Anchor> {
-    Some(match s {
-        "top-left" => Anchor::TopLeft,
-        "top-center" | "top" => Anchor::TopCenter,
-        "top-right" => Anchor::TopRight,
-        "middle-left" | "left" => Anchor::MiddleLeft,
-        "middle-right" | "right" => Anchor::MiddleRight,
-        "bottom-left" => Anchor::BottomLeft,
-        "bottom-center" | "bottom" => Anchor::BottomCenter,
-        "bottom-right" => Anchor::BottomRight,
-        _ => return None,
-    })
+    match s {
+        "top" => Some(Anchor::TopCenter),
+        "bottom" => Some(Anchor::BottomCenter),
+        "left" => Some(Anchor::LeftCenter),
+        "right" => Some(Anchor::RightCenter),
+        // Everything else, retired corner spellings included, goes through the
+        // same resolver the settings store uses.
+        other => Anchor::from_stored(other),
+    }
 }
 
 /// The started-meeting toast, minus its auto-dismiss so it stays up long enough
@@ -420,7 +451,7 @@ pub fn run() -> windows::core::Result<()> {
         }
         _ => {
             eprintln!(
-                "usage: overlay-preview shots [dir]\n       overlay-preview live-shots [dir]\n       overlay-preview live [anchor] [--no-cycle] [--toast]\n\nanchors: top-left top-center top-right middle-left middle-right\n         bottom-left bottom-center bottom-right"
+                "usage: overlay-preview shots [dir]\n       overlay-preview live-shots [dir]\n       overlay-preview live [anchor] [--no-cycle] [--toast]\n\nanchors: top-center right-center bottom-center left-center"
             );
             Ok(())
         }

@@ -20,6 +20,7 @@ import {
   CheckCircle2,
   Loader2,
   RefreshCw,
+  Send,
   Undo2,
   X,
 } from "lucide-react";
@@ -47,6 +48,7 @@ import { LiveViewDashboardSwitcher } from "@/components/settings/live-view-dashb
 import { LiveViewLayoutEditor } from "@/components/settings/live-view-layout-editor";
 import { LiveViewOnboardingActivation } from "@/components/settings/live-view-onboarding-activation";
 import { LiveViewOnboardingGuide } from "@/components/settings/live-view-onboarding-guide";
+import { ConnectedShareDialog } from "@/components/connected-share-dialog";
 import {
   getTemplatePipeReadiness,
   LiveViewTemplateGallery,
@@ -67,6 +69,7 @@ import { useHealthCheck } from "@/lib/hooks/use-health-check";
 import { usePlatform } from "@/lib/hooks/use-platform";
 import { useToast } from "@/components/ui/use-toast";
 import { localFetch } from "@/lib/api";
+import { createLiveViewShareArtifact } from "@/lib/connected-share";
 import { showChatWithPrefill } from "@/lib/chat-utils";
 import {
   buildLiveViewItemHandoff,
@@ -551,6 +554,7 @@ export function BrainOverview({
   const [pipeSchedules, setPipeSchedules] = useState<PipeScheduleSnapshot[]>([]);
   const [templateGalleryOpen, setTemplateGalleryOpen] = useState(false);
   const [createDashboardOpen, setCreateDashboardOpen] = useState(false);
+  const [shareOpen, setShareOpen] = useState(false);
   const [undoView, setUndoView] = useState<ViewDefinition | null>(null);
   const [undoRevision, setUndoRevision] = useState<number | null>(null);
   const [previewDestination, setPreviewDestination] =
@@ -593,6 +597,10 @@ export function BrainOverview({
   const canvasSaveErrorsRef = useRef(new Map<string, string>());
   const pendingCanvasSavesRef = useRef(
     new Map<string, BrainViewCanvasDocument>(),
+  );
+  const shareArtifact = useMemo(
+    () => (view ? createLiveViewShareArtifact(view) : null),
+    [view],
   );
   const canvasSavePumpRef = useRef<Promise<void> | null>(null);
   const refreshOnboardingActivation = useCallback(
@@ -2950,6 +2958,13 @@ export function BrainOverview({
   const onboardingColdStart = showOnboardingActivation && !onboardingHasResult;
   return (
     <div className="relative flex min-h-0 flex-1 overflow-hidden">
+      {shareArtifact && (
+        <ConnectedShareDialog
+          open={shareOpen}
+          onOpenChange={setShareOpen}
+          artifact={shareArtifact}
+        />
+      )}
       <div
         data-testid="brain-overview-scroll"
         className="flex h-full min-h-0 w-full flex-col overflow-hidden pr-2"
@@ -3060,6 +3075,18 @@ export function BrainOverview({
                     refreshIsActive ? "animate-spin" : ""
                   }`}
                 />
+              </Button>
+            )}
+            {!onboardingColdStart && slots.some((slot) => slot.value) && (
+              <Button
+                data-testid="overview-send"
+                variant="outline"
+                size="sm"
+                className="h-9 flex-1 rounded-none px-3 sm:flex-none"
+                disabled={dashboardBusy}
+                onClick={() => setShareOpen(true)}
+              >
+                <Send className="mr-1.5 h-3.5 w-3.5" /> send
               </Button>
             )}
           </div>

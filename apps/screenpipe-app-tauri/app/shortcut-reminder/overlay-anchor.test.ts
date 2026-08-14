@@ -10,7 +10,7 @@ import {
   anchorPillCenter,
   anchorPillOrigin,
   BASE_ANCHOR_MARGIN,
-  BASE_DRAG_PAD_INSET,
+  BASE_DRAG_PAD_DIAMETER,
   boundingRect,
   dragPadRect,
   isOverlayAnchor,
@@ -199,20 +199,29 @@ describe("nearest anchor", () => {
   });
 });
 
-describe("landing pads", () => {
-  it("inflates the resting pill by the scaled inset", () => {
-    const pad = dragPadRect("top-center", WORK_AREA, PILL, 1);
-    expect(pad.width).toBe(PILL.width + BASE_DRAG_PAD_INSET * 2);
-    expect(pad.height).toBe(PILL.height + BASE_DRAG_PAD_INSET * 2);
-
-    const scaled = dragPadRect("top-center", WORK_AREA, { width: 44, height: 32 }, 2);
-    expect(scaled.width).toBe(44 + BASE_DRAG_PAD_INSET * 2 * 2);
-    expect(scaled.height).toBe(32 + BASE_DRAG_PAD_INSET * 2 * 2);
+describe("landing targets", () => {
+  it("is a square bounding box, so the drawn target is a circle", () => {
+    for (const scale of [1, 1.5, 2]) {
+      const pad = dragPadRect("top-center", WORK_AREA, PILL, scale);
+      expect(pad.width).toBe(BASE_DRAG_PAD_DIAMETER * scale);
+      expect(pad.height).toBe(pad.width);
+    }
   });
 
-  it("clamps every pad inside the work area", () => {
-    // At 1x the inset (5) exceeds the margin (4), so an unclamped pad would
-    // hang one pixel off whichever edge its anchor hugs.
+  it("is wide enough to swallow the pill it stands for", () => {
+    // The held pill is dropped into the circle, so the circle has to clear the
+    // pill's diagonal — not just its width — or the pill spills out of the
+    // target at the moment it lands.
+    for (const scale of [1, 1.5, 2]) {
+      const pill = { width: PILL.width * scale, height: PILL.height * scale };
+      const diagonal = Math.hypot(pill.width, pill.height);
+      expect(BASE_DRAG_PAD_DIAMETER * scale).toBeGreaterThan(diagonal);
+    }
+  });
+
+  it("clamps every target inside the work area", () => {
+    // The circle is wider than the gap the pill rests in, so an unclamped
+    // target would always hang off whichever edge its anchor hugs.
     for (const anchor of OVERLAY_ANCHORS) {
       const pad = dragPadRect(anchor, WORK_AREA, PILL, 1);
       expect(pad.x).toBeGreaterThanOrEqual(WORK_AREA.x);
@@ -230,12 +239,15 @@ describe("landing pads", () => {
     expect(dragPadRect("left-center", offset, PILL, 1).x).toBe(1920);
   });
 
-  it("clamps each pad flush to its own edge at every overlay scale", () => {
-    // The inset (5) is always wider than the margin (4) and both scale
-    // together, so a pad always wants to overhang the edge its anchor hugs and
-    // always ends up flush against it. Losing the clamp would put a pad half
-    // off the edge at 2x.
-    expect(BASE_DRAG_PAD_INSET).toBeGreaterThan(BASE_ANCHOR_MARGIN);
+  it("clamps each target flush to its own edge at every overlay scale", () => {
+    // Half the circle (20) always reaches past the margin plus half the pill
+    // (4 + 8 vertically, 4 + 11 horizontally), and all of it scales together,
+    // so a target always wants to overhang the edge its anchor hugs and always
+    // ends up flush against it. Losing the clamp would put one half off the
+    // edge at 2x.
+    expect(BASE_DRAG_PAD_DIAMETER / 2).toBeGreaterThan(
+      BASE_ANCHOR_MARGIN + PILL.width / 2,
+    );
     for (const scale of [1, 1.5, 2]) {
       const pill = { width: 22 * scale, height: 16 * scale };
       expect(dragPadRect("top-center", WORK_AREA, pill, scale).y).toBe(0);
@@ -247,9 +259,9 @@ describe("landing pads", () => {
     }
   });
 
-  it("keeps a side pad centred on the axis it is not clamped on", () => {
+  it("keeps a side target centred on the axis it is not clamped on", () => {
     // Only the hugged edge is clamped. The other axis has room to spare, so the
-    // pad has to stay centred on the resting pill rather than drift.
+    // target has to stay centred on the resting pill rather than drift.
     const pad = dragPadRect("right-center", WORK_AREA, PILL, 1);
     expect(pad.y + pad.height / 2).toBe(
       anchorPillCenter("right-center", WORK_AREA, PILL, 1).y,

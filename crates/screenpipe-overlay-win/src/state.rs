@@ -13,65 +13,89 @@ use serde::{Deserialize, Serialize};
 
 use crate::notification::Notification;
 
-/// Which edge-centre the pill is pinned to. Same nine-value vocabulary as
-/// `app/shortcut-reminder/overlay-anchor.ts`, so a pin made in the webview
-/// overlay is understood by the native one and vice versa.
+/// Which edge-centre the pill is pinned to. The same four-value vocabulary as
+/// `app/shortcut-reminder/overlay-anchor.ts` and `commands/overlay_anchor.rs`,
+/// so a pin made here round-trips through the settings store and means the same
+/// thing to the macOS panel and the webview overlay.
+///
+/// This used to carry nine values, corners included, and emitted them as
+/// `middle-left` / `top-right` / … . The store only ever accepted the four
+/// `*-center` names: it folds `top-left` and `top-right` into `top-center`, and
+/// it rejects `middle-left` and `middle-right` outright. So on windows a pill
+/// dragged to the left or right edge reported an anchor nobody understood and
+/// came back somewhere else on the next launch, and a corner silently became an
+/// edge centre. Four values, one vocabulary, and the drag stage can draw the
+/// same four targets everywhere.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum Anchor {
-    TopLeft,
-    TopCenter,
-    TopRight,
-    MiddleLeft,
-    MiddleRight,
-    BottomLeft,
     #[default]
+    TopCenter,
+    RightCenter,
     BottomCenter,
-    BottomRight,
+    LeftCenter,
 }
 
 impl Anchor {
-    pub const ALL: [Anchor; 8] = [
-        Anchor::TopLeft,
+    pub const ALL: [Anchor; 4] = [
         Anchor::TopCenter,
-        Anchor::TopRight,
-        Anchor::MiddleLeft,
-        Anchor::MiddleRight,
-        Anchor::BottomLeft,
+        Anchor::RightCenter,
         Anchor::BottomCenter,
-        Anchor::BottomRight,
+        Anchor::LeftCenter,
     ];
+
+    /// Resolve a stored anchor name, folding the retired corner and `middle-*`
+    /// spellings the way the settings store does. The vertical half is what
+    /// people notice, so a corner keeps its top or bottom.
+    pub fn from_stored(value: &str) -> Option<Anchor> {
+        match value {
+            "top-center" => Some(Anchor::TopCenter),
+            "right-center" | "middle-right" => Some(Anchor::RightCenter),
+            "bottom-center" => Some(Anchor::BottomCenter),
+            "left-center" | "middle-left" => Some(Anchor::LeftCenter),
+            "top-left" | "top-right" => Some(Anchor::TopCenter),
+            "bottom-left" | "bottom-right" => Some(Anchor::BottomCenter),
+            _ => None,
+        }
+    }
 
     /// Fraction of the work area, 0..1, where this anchor's pill centre sits.
     pub fn fractions(self) -> (f32, f32) {
-        let x = match self {
-            Anchor::TopLeft | Anchor::MiddleLeft | Anchor::BottomLeft => 0.0,
-            Anchor::TopCenter | Anchor::BottomCenter => 0.5,
-            Anchor::TopRight | Anchor::MiddleRight | Anchor::BottomRight => 1.0,
-        };
-        let y = match self {
-            Anchor::TopLeft | Anchor::TopCenter | Anchor::TopRight => 0.0,
-            Anchor::MiddleLeft | Anchor::MiddleRight => 0.5,
-            Anchor::BottomLeft | Anchor::BottomCenter | Anchor::BottomRight => 1.0,
-        };
-        (x, y)
+        match self {
+            Anchor::TopCenter => (0.5, 0.0),
+            Anchor::RightCenter => (1.0, 0.5),
+            Anchor::BottomCenter => (0.5, 1.0),
+            Anchor::LeftCenter => (0.0, 0.5),
+        }
     }
 
-    /// Docks and disclosures grow away from the screen edge the pill hugs.
+    /// Docks and disclosures grow away from the screen edge the pill hugs. The
+    /// side anchors are vertically centred and have room either way, so they
+    /// open downward too.
     pub fn opens_downward(self) -> bool {
-        matches!(self, Anchor::TopLeft | Anchor::TopCenter | Anchor::TopRight)
+        !matches!(self, Anchor::BottomCenter)
     }
 
     /// The nearest anchor to a point expressed as work-area fractions.
+    ///
+    /// Distance is to the *edge*, not to the anchor point, matching
+    /// `nearestAnchor` in `overlay-anchor.ts`. Measuring to the point makes the
+    /// side targets nearly unreachable on a wide screen: the centre of a
+    /// 1920x1050 desktop is much closer to the top and bottom anchors than to
+    /// the side ones. Edge distance splits the screen on its diagonals, which is
+    /// what docking to an edge should mean.
     pub fn nearest(fx: f32, fy: f32) -> Anchor {
-        let mut best = Anchor::BottomCenter;
+        let mut best = Anchor::TopCenter;
         let mut best_d = f32::MAX;
         for a in Anchor::ALL {
-            let (ax, ay) = a.fractions();
-            // Vertical mistakes are more disruptive than horizontal ones (a pill
-            // that jumps across the screen top-to-bottom reads as a bug), so the
-            // vertical axis is weighted heavier when picking the drop target.
-            let d = (ax - fx).powi(2) + 1.6 * (ay - fy).powi(2);
+            // Absolute, so a drop past an edge still reads as nearest to it
+            // rather than going negative and beating every other edge.
+            let d = match a {
+                Anchor::TopCenter => fy.abs(),
+                Anchor::BottomCenter => (1.0 - fy).abs(),
+                Anchor::LeftCenter => fx.abs(),
+                Anchor::RightCenter => (1.0 - fx).abs(),
+            };
             if d < best_d {
                 best_d = d;
                 best = a;
@@ -217,25 +241,72 @@ mod tests {
     use super::*;
 
     #[test]
-    fn nearest_anchor_snaps_to_the_corner_you_dragged_to() {
-        assert_eq!(Anchor::nearest(0.02, 0.98), Anchor::BottomLeft);
+    fn nearest_anchor_snaps_to_the_edge_you_dragged_to() {
         assert_eq!(Anchor::nearest(0.5, 0.02), Anchor::TopCenter);
-        assert_eq!(Anchor::nearest(0.97, 0.5), Anchor::MiddleRight);
+        assert_eq!(Anchor::nearest(0.5, 0.98), Anchor::BottomCenter);
+        assert_eq!(Anchor::nearest(0.02, 0.5), Anchor::LeftCenter);
+        assert_eq!(Anchor::nearest(0.97, 0.5), Anchor::RightCenter);
     }
 
     #[test]
-    fn vertical_axis_wins_ties_so_the_pill_never_jumps_screens() {
-        // Dead centre horizontally, slightly below the middle: the pill should
-        // stay on the bottom half rather than snapping up.
-        assert_eq!(Anchor::nearest(0.5, 0.6), Anchor::BottomCenter);
+    fn a_drop_near_a_corner_takes_the_edge_it_is_closest_to() {
+        // Distance is to the edge, so the corner region splits on the diagonal
+        // rather than being unreachable. 0.02 from the top beats 0.10 from the
+        // left even though both are "top left".
+        assert_eq!(Anchor::nearest(0.10, 0.02), Anchor::TopCenter);
+        assert_eq!(Anchor::nearest(0.02, 0.10), Anchor::LeftCenter);
+    }
+
+    #[test]
+    fn a_drop_past_an_edge_still_reads_as_nearest_to_it() {
+        // The pointer can leave the work area; a negative fraction must not
+        // beat every other edge by going most-negative.
+        assert_eq!(Anchor::nearest(0.5, -0.2), Anchor::TopCenter);
+        assert_eq!(Anchor::nearest(1.3, 0.5), Anchor::RightCenter);
     }
 
     #[test]
     fn anchors_round_trip_through_json_kebab_case() {
-        let json = serde_json::to_string(&Anchor::BottomRight).unwrap();
-        assert_eq!(json, "\"bottom-right\"");
+        let json = serde_json::to_string(&Anchor::BottomCenter).unwrap();
+        assert_eq!(json, "\"bottom-center\"");
         let back: Anchor = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, Anchor::BottomRight);
+        assert_eq!(back, Anchor::BottomCenter);
+    }
+
+    #[test]
+    fn stored_corner_and_middle_names_still_resolve() {
+        // Anything already written to `shortcutOverlayAnchor` by an older build
+        // has to land somewhere real instead of silently reverting to default.
+        assert_eq!(Anchor::from_stored("middle-left"), Some(Anchor::LeftCenter));
+        assert_eq!(
+            Anchor::from_stored("middle-right"),
+            Some(Anchor::RightCenter)
+        );
+        assert_eq!(Anchor::from_stored("top-right"), Some(Anchor::TopCenter));
+        assert_eq!(
+            Anchor::from_stored("bottom-left"),
+            Some(Anchor::BottomCenter)
+        );
+        assert_eq!(Anchor::from_stored("nonsense"), None);
+    }
+
+    #[test]
+    fn every_anchor_reports_the_name_the_settings_store_accepts() {
+        // The store folds corners and rejects `middle-*`, so anything this
+        // emits must already be one of the four canonical names or the pin is
+        // dropped on the next launch.
+        for a in Anchor::ALL {
+            let slug = crate::actions::anchor_slug(a);
+            assert_eq!(
+                Anchor::from_stored(slug),
+                Some(a),
+                "{slug} does not round-trip"
+            );
+            assert!(
+                slug.ends_with("-center"),
+                "{slug} is not a name the store keeps"
+            );
+        }
     }
 
     #[test]

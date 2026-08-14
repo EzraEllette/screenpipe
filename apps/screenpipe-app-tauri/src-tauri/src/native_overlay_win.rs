@@ -123,13 +123,14 @@ pub fn show(json: Option<&str>) -> bool {
             "medium" => OverlaySize::Medium,
             _ => OverlaySize::Small,
         };
-        if let Some(anchor) = serde_json::from_value::<Anchor>(
-            payload
-                .get("shortcutOverlayAnchor")
-                .cloned()
-                .unwrap_or(serde_json::Value::Null),
-        )
-        .ok()
+        // Through `from_stored`, not serde: the store can still hold a corner
+        // or a `middle-*` name written by an older build, and plain
+        // deserialisation would reject those and silently leave the pill at the
+        // default instead of at the edge the user pinned it to.
+        if let Some(anchor) = payload
+            .get("shortcutOverlayAnchor")
+            .and_then(|v| v.as_str())
+            .and_then(Anchor::from_stored)
         {
             s.anchor = anchor;
         }
