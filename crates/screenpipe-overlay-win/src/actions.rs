@@ -71,14 +71,10 @@ pub fn anchor_action(anchor: Anchor) -> String {
 
 pub fn anchor_slug(anchor: Anchor) -> &'static str {
     match anchor {
-        Anchor::TopLeft => "top-left",
         Anchor::TopCenter => "top-center",
-        Anchor::TopRight => "top-right",
-        Anchor::MiddleLeft => "middle-left",
-        Anchor::MiddleRight => "middle-right",
-        Anchor::BottomLeft => "bottom-left",
+        Anchor::RightCenter => "right-center",
         Anchor::BottomCenter => "bottom-center",
-        Anchor::BottomRight => "bottom-right",
+        Anchor::LeftCenter => "left-center",
     }
 }
 
@@ -171,12 +167,12 @@ mod tests {
     #[test]
     fn anchor_reports_kebab_case_for_the_settings_store() {
         assert_eq!(
-            anchor_action(Anchor::BottomRight),
-            "set_overlay_anchor:bottom-right"
+            anchor_action(Anchor::BottomCenter),
+            "set_overlay_anchor:bottom-center"
         );
         assert_eq!(
-            anchor_action(Anchor::MiddleLeft),
-            "set_overlay_anchor:middle-left"
+            anchor_action(Anchor::LeftCenter),
+            "set_overlay_anchor:left-center"
         );
         // Must match the json the anchor itself serialises to, or a pin made on
         // windows would not restore.

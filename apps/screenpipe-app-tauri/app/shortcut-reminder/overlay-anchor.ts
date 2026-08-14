@@ -52,17 +52,26 @@ export type Size = { width: number; height: number };
 
 /** Gap between the pinned pill and the work-area edge, at 1x. */
 export const BASE_ANCHOR_MARGIN = 4;
-/** Inset of a landing pad beyond the resting pill footprint, at 1x. */
-export const BASE_DRAG_PAD_INSET = 5;
-/** Corner radius of the resting pill at 1x, shared with the pads. */
+/** Diameter of a landing target at 1x. A circle rather than a second pill: the
+ *  four of them read as one set of places to drop into, where four pill
+ *  outlines read as four copies of the thing being dragged. 40 clears the
+ *  27.2pt diagonal of the 22x16 collapsed pill with room to spare, so the held
+ *  pill sits inside the target it is about to land on. */
+export const BASE_DRAG_PAD_DIAMETER = 40;
+/** Corner radius of the resting pill at 1x. */
 export const BASE_COLLAPSED_CORNER_RADIUS = 4;
 
-/** Drag stage appearance, matched to the native `DragStageView`. */
+/** Drag stage appearance, matched to the native `DragStageView`. An idle target
+ *  is a dark disc under a light ring, not a wash of white: the dim is 30%
+ *  black, so over a bright window it only reaches light grey and a white fill
+ *  would disappear into it. The target under the pill fills in white, so the
+ *  drop reads as committed rather than as one of four equal options. */
 export const DRAG_STAGE_DIM = 0.3;
-export const DRAG_PAD_FILL = 0.14;
-export const DRAG_PAD_BORDER = 0.45;
-export const DRAG_PAD_FILL_ACTIVE = 0.34;
-export const DRAG_PAD_BORDER_ACTIVE = 0.95;
+export const DRAG_PAD_FILL = 0.4; // black
+export const DRAG_PAD_BORDER = 0.65; // white
+export const DRAG_PAD_FILL_ACTIVE = 0.92; // white
+export const DRAG_PAD_BORDER_ACTIVE = 1; // white
+export const BASE_DRAG_PAD_BORDER_WIDTH = 1.5;
 export const DRAG_PAD_ACTIVE_SCALE = 1.08;
 export const DRAG_PAD_HIGHLIGHT_MS = 150;
 export const DRAG_STAGE_FADE_MS = 120;
@@ -140,9 +149,11 @@ export function anchorPillOrigin(
   return { x: center.x - pill.width / 2, y: center.y - pill.height / 2 };
 }
 
-/** Footprint of the landing pad drawn for `anchor`. Padded out from the resting
- *  pill so it reads as a target rather than a second pill, and clamped inside
- *  the work area so a corner pad is never half off the edge at 2x. */
+/** Bounding square of the circular landing target drawn for `anchor`, centred
+ *  on where the pill would come to rest and clamped inside the work area so a
+ *  target is never half off the edge at 2x. The clamp is why this returns a
+ *  rect rather than a centre and a radius: near an edge the drawn circle is
+ *  nudged inward and stops being concentric with the resting pill. */
 export function dragPadRect(
   anchor: OverlayAnchor,
   area: Rect,
@@ -150,16 +161,14 @@ export function dragPadRect(
   scale: number,
 ): Rect {
   const center = anchorPillCenter(anchor, area, pill, scale);
-  const inset = BASE_DRAG_PAD_INSET * scale;
-  const width = pill.width + inset * 2;
-  const height = pill.height + inset * 2;
-  const rawX = center.x - pill.width / 2 - inset;
-  const rawY = center.y - pill.height / 2 - inset;
+  const size = BASE_DRAG_PAD_DIAMETER * scale;
+  const rawX = center.x - size / 2;
+  const rawY = center.y - size / 2;
   return {
-    x: Math.min(Math.max(rawX, area.x), area.x + area.width - width),
-    y: Math.min(Math.max(rawY, area.y), area.y + area.height - height),
-    width,
-    height,
+    x: Math.min(Math.max(rawX, area.x), area.x + area.width - size),
+    y: Math.min(Math.max(rawY, area.y), area.y + area.height - size),
+    width: size,
+    height: size,
   };
 }
 

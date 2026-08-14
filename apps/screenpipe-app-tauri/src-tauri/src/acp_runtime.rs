@@ -1280,27 +1280,26 @@ impl RuntimeState {
                 }
             }
             "plan" => {
+                // ACP resends the WHOLE plan on every change, so this must
+                // replace the previous one rather than append. It used to emit
+                // a fresh thinking_start/delta/end triple per update, which
+                // stacked one collapsed "Plan" blob per revision — a five-step
+                // plan touched five times left five of them in the transcript.
+                // Forward the entries structurally instead and let the desktop
+                // keep exactly one live plan block per turn.
+                //
+                // Closing an open thought first also matches every other arm;
+                // the old code was the only one that could emit thinking_start
+                // while a thought was already open.
+                self.close_thought_locked(&mut turn);
                 self.ensure_turn_locked(&mut turn);
-                let plan = update
-                    .get("entries")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|entry| {
-                        let content = entry.get("content")?.as_str()?;
-                        let prefix = match entry.get("status").and_then(Value::as_str) {
-                            Some("completed") => "✓",
-                            Some("in_progress") => "→",
-                            _ => "○",
-                        };
-                        Some(format!("{prefix} {content}"))
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                if !plan.is_empty() {
-                    self.output.send(json!({ "type": "message_update", "assistantMessageEvent": { "type": "thinking_start" } }));
-                    self.output.send(json!({ "type": "message_update", "assistantMessageEvent": { "type": "thinking_delta", "delta": format!("Plan\n{plan}") } }));
-                    self.output.send(json!({ "type": "message_update", "assistantMessageEvent": { "type": "thinking_end" } }));
+                let entries = plan_entries(&update);
+                // An empty plan is a real signal (the agent cleared it), but
+                // there is nothing to show and emitting it would leave an empty
+                // card, so drop it rather than render a blank block.
+                if !entries.is_empty() {
+                    self.output
+                        .send(json!({ "type": "plan_update", "entries": entries }));
                 }
             }
             "tool_call" => {
@@ -1720,6 +1719,40 @@ fn meta_tool_name(update: &Value) -> Option<&str> {
 
 // The ACP tool-call `kind` category, forwarded so the desktop can label native
 // agent tools by kind when their title isn't a recognized tool name.
+/// Structured entries for an ACP `plan` update.
+///
+/// ACP redelivers the whole plan whenever any step changes, so the desktop
+/// replaces its single plan block with this list rather than appending. Kept
+/// pure so the mapping is testable without a live agent connection.
+///
+/// Entries with no usable content are dropped, and an unknown or absent status
+/// becomes `pending` — the ACP default, and the safest thing to show for a step
+/// that has not started.
+fn plan_entries(update: &Value) -> Vec<Value> {
+    update
+        .get("entries")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            let content = entry.get("content")?.as_str()?.trim();
+            if content.is_empty() {
+                return None;
+            }
+            let status = match entry.get("status").and_then(Value::as_str) {
+                Some("completed") => "completed",
+                Some("in_progress") => "in_progress",
+                _ => "pending",
+            };
+            let mut mapped = json!({ "content": content, "status": status });
+            if let Some(priority) = entry.get("priority").and_then(Value::as_str) {
+                mapped["priority"] = json!(priority);
+            }
+            Some(mapped)
+        })
+        .collect()
+}
+
 fn tool_kind(update: &Value) -> Option<String> {
     update
         .get("kind")
@@ -4449,6 +4482,56 @@ mod tests {
         );
         assert_eq!(tool_call_id(&json!({ "toolCallId": "\n\t" })), None);
         assert_eq!(tool_call_id(&json!({})), None);
+    }
+
+    #[test]
+    fn plan_entries_are_forwarded_structurally_not_flattened_to_text() {
+        // Regression: the plan used to be joined into a "✓/→/○" string and
+        // pushed through the thinking channel, so every redelivery stacked
+        // another collapsed copy in the transcript.
+        let entries = plan_entries(&json!({
+            "entries": [
+                { "content": "read the file", "status": "completed" },
+                { "content": "edit it", "status": "in_progress", "priority": "high" },
+                { "content": "verify", "status": "pending" },
+            ]
+        }));
+        assert_eq!(
+            entries,
+            vec![
+                json!({ "content": "read the file", "status": "completed" }),
+                json!({ "content": "edit it", "status": "in_progress", "priority": "high" }),
+                json!({ "content": "verify", "status": "pending" }),
+            ]
+        );
+    }
+
+    #[test]
+    fn plan_entries_default_unknown_status_to_pending_and_drop_empty_content() {
+        let entries = plan_entries(&json!({
+            "entries": [
+                { "content": "no status" },
+                { "content": "weird", "status": "banana" },
+                { "content": "   " },
+                { "status": "completed" },
+                { "content": "  trimmed  ", "status": "completed" },
+            ]
+        }));
+        assert_eq!(
+            entries,
+            vec![
+                json!({ "content": "no status", "status": "pending" }),
+                json!({ "content": "weird", "status": "pending" }),
+                json!({ "content": "trimmed", "status": "completed" }),
+            ]
+        );
+    }
+
+    #[test]
+    fn plan_entries_are_empty_when_the_update_carries_none() {
+        assert!(plan_entries(&json!({})).is_empty());
+        assert!(plan_entries(&json!({ "entries": [] })).is_empty());
+        assert!(plan_entries(&json!({ "entries": "nope" })).is_empty());
     }
 
     #[test]

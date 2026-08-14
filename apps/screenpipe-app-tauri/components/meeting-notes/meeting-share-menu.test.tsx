@@ -138,6 +138,65 @@ describe("meeting share control", () => {
     ).not.toHaveTextContent("copied");
   });
 
+  // Sending to a connected app is a destination, not a fifth button on the
+  // rule. It stays behind the caret and only appears when there is something
+  // worth sending, so an empty meeting cannot offer a destination picker.
+  it("offers sending only when there is something to send", async () => {
+    const onShare = vi.fn();
+    const openCaret = () =>
+      fireEvent.keyDown(
+        screen.getByRole("button", { name: "more share options" }),
+        { key: "Enter" },
+      );
+
+    const withoutSend = render(
+      <MeetingShareMenu canShareSummary onShare={onShare} />,
+    );
+    openCaret();
+    // The rest of the menu is there, so this is absence of the entry rather
+    // than a menu that simply never opened.
+    expect(
+      await screen.findByRole("menuitem", { name: /email summary/ }),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole("menuitem", { name: /send to an app/ }),
+    ).not.toBeInTheDocument();
+    withoutSend.unmount();
+
+    render(<MeetingShareMenu canShareSummary canSend onShare={onShare} />);
+    openCaret();
+    const send = await screen.findByRole("menuitem", {
+      name: /send to an app/,
+    });
+
+    fireEvent.click(send);
+    expect(onShare).toHaveBeenCalledWith("send");
+  });
+
+  // Recognising "send to Slack" beats reading "send to an app" and then
+  // discovering which one it meant.
+  it("names the app it will send to once there is a remembered one", async () => {
+    render(
+      <MeetingShareMenu
+        canShareSummary
+        canSend
+        sendLabel="send to Slack…"
+        onShare={vi.fn()}
+      />,
+    );
+    fireEvent.keyDown(
+      screen.getByRole("button", { name: "more share options" }),
+      { key: "Enter" },
+    );
+
+    expect(
+      await screen.findByRole("menuitem", { name: /send to Slack/ }),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole("menuitem", { name: /send to an app/ }),
+    ).not.toBeInTheDocument();
+  });
+
   it("locks the control while a copy is in flight", () => {
     render(<MeetingShareMenu canShareSummary busy onShare={vi.fn()} />);
 

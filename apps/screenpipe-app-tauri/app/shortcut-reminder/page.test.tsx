@@ -621,6 +621,32 @@ describe("drag to pin", () => {
     expect(screen.getByTestId("shortcut-reminder-drag-ghost")).toBeTruthy();
   });
 
+  it("draws the targets as circles over a dimmed desktop", async () => {
+    await grabPill();
+    await dragTo(600, 400);
+
+    // The dim is the thing that says "the desktop is not what you are aiming
+    // at right now". It shipped invisible on macOS once already.
+    const backdrop = screen
+      .getByTestId("shortcut-reminder-drag-stage")
+      .querySelector("div");
+    expect(backdrop?.getAttribute("style")).toContain("rgba(0, 0, 0, 0.3)");
+
+    for (const pad of screen.getAllByTestId("shortcut-reminder-drag-pad")) {
+      const style = pad.getAttribute("style") ?? "";
+      // A square box with a 50% radius is a circle; a pill-shaped pad is what
+      // this replaced.
+      expect(style).toContain("border-radius: 50%");
+      expect(pad.style.width).toBe(pad.style.height);
+      // Dark disc, light ring — legible over a dimmed bright window, which a
+      // white-on-white fill was not.
+      const active = pad.getAttribute("data-active") === "true";
+      expect(style).toContain(
+        active ? "background: rgba(255, 255, 255, 0.92)" : "background: rgba(0, 0, 0, 0.4)",
+      );
+    }
+  });
+
   it("highlights the pad the pill would land on", async () => {
     await grabPill();
     await dragTo(600, 400);

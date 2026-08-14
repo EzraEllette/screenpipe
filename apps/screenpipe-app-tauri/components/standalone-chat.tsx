@@ -869,6 +869,10 @@ export function StandaloneChat({
     pendingDocs,
     clearConnectionChip,
     refreshConnectionState,
+    prefillSource,
+    setPrefillContext,
+    setPrefillFrameId,
+    setPrefillSource,
   });
 
   // Chat conversations — stored as individual JSON files in ~/.screenpipe/chats/

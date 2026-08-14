@@ -1497,6 +1497,25 @@
       "notes": "Installs the generic Commitments and Accounting Live View kits, shows Done, Later, and Not right without hover, persists snooze, correction, resolve, dismiss, and reopen decisions through the local API, verifies receipts survive reload, and captures real product screenshots."
     },
     {
+      "spec": "live-view-pinch-zoom.spec.ts",
+      "platforms": [
+        "macos",
+        "linux"
+      ],
+      "layers": [
+        "real-ui-e2e",
+        "tauri-command"
+      ],
+      "features": [
+        "brain-overview",
+        "live-view-canvas-pinch-zoom"
+      ],
+      "criticality": "medium",
+      "confidence": "strong",
+      "ux": "real-user-flow",
+      "notes": "Drives the Live View canvas with the same native-magnify payload the macOS magnification gesture recognizer emits. Asserts the recognizer takes ownership so WebKit's duplicate ctrl+wheel stops zooming while plain scroll still pans, that an app-wide pinch is ignored by an unfocused canvas, and that canvas zoom stays anchored, clamped at 25%, and persisted through load_brain_view_canvas. The focused per-frame zoom arithmetic is asserted in the component tests because WKWebView under WebDriver does not reliably receive OS-level focus."
+    },
+    {
       "spec": "macos-ui-performance.spec.ts",
       "platforms": [
         "macos"
@@ -2473,6 +2492,28 @@
       "confidence": "strong",
       "ux": "real-user-flow",
       "notes": "Windows-first real UX journey across search, timeline, separate screen/audio settings, meetings, notifications, storage, and privacy."
+    },
+    {
+      "spec": "connected-share.spec.ts",
+      "platforms": [
+        "windows",
+        "macos",
+        "linux"
+      ],
+      "layers": [
+        "real-ui-e2e",
+        "local-api"
+      ],
+      "features": [
+        "meeting-notes",
+        "brain-overview",
+        "live-views",
+        "connections"
+      ],
+      "criticality": "high",
+      "confidence": "strong",
+      "ux": "real-user-flow",
+      "notes": "Exercises the Send snapshot dialog from meeting notes and Live Views across disconnected setup, connected direct-send, receipt, and Chat-draft destinations, with mocked connection APIs and screenshot coverage."
     },
     {
       "spec": "zz-account-basic-upgrade-billing.spec.ts",

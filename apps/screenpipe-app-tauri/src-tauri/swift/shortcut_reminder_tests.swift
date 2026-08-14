@@ -128,8 +128,10 @@ private func testMarginScales() {
     expectClose(top.y, visible.maxY - 8 - 16, "scaled top y")
 }
 
-/// Every pad has to stay inside the visible frame. At 2x the inset grows to
-/// 10pt against an 8pt margin, so an unclamped corner pad would overhang.
+/// Every landing target has to stay inside the visible frame, stay square so
+/// it draws as a circle, and stay wide enough to swallow the pill dropped into
+/// it. Half the 40pt circle always reaches past the margin plus half the pill,
+/// so an unclamped target would overhang the edge its anchor hugs at any scale.
 private func testPadStaysOnScreen() {
     for scale in [CGFloat(1), 1.5, 2] {
         let collapsedScale = 1 + (scale - 1) * 0.2
@@ -155,9 +157,19 @@ private func testPadStaysOnScreen() {
                 r.maxY <= visible.maxY + 0.001,
                 "\(anchor.rawValue) @\(scale)x overhangs top: \(r.maxY)"
             )
+            expectClose(
+                r.width,
+                kBaseDragPadDiameter * scale,
+                "\(anchor.rawValue) @\(scale)x target diameter"
+            )
+            expectClose(
+                r.height,
+                r.width,
+                "\(anchor.rawValue) @\(scale)x target is not square"
+            )
             expect(
-                r.width > size.width && r.height > size.height,
-                "\(anchor.rawValue) @\(scale)x pad is not larger than the pill"
+                r.width > hypot(size.width, size.height),
+                "\(anchor.rawValue) @\(scale)x target does not clear the pill's diagonal"
             )
         }
     }

@@ -562,18 +562,28 @@ func anchorMargin(scale: CGFloat) -> CGFloat {
 
 /// Drag stage appearance.
 let kDragStageDim: CGFloat = 0.30
-// Idle pads have to be legible on their own, since they are the whole point of the
-// stage. Measured over the 30% backdrop these land ~11 levels above it, and the
-// active pad another ~16 above that.
-let kDragPadFill: CGFloat = 0.14
-let kDragPadBorder: CGFloat = 0.45
-let kDragPadFillActive: CGFloat = 0.34
-let kDragPadBorderActive: CGFloat = 0.95
+// An idle target is a dark disc under a light ring, not a wash of white. The
+// dim is 30% black, so over a dark desktop it stays near black but over a
+// bright window — a browser, a document, most of the day — it only reaches
+// light grey, and the white-on-white fill this used to draw was invisible
+// exactly where the stage is needed most. Dark fill carries the light case,
+// the ring carries the dark one.
+let kDragPadFill: CGFloat = 0.40         // black
+let kDragPadBorder: CGFloat = 0.65       // white
+// The target under the pill fills in, so the drop reads as committed rather
+// than as one of four equal options.
+let kDragPadFillActive: CGFloat = 0.92   // white
+let kDragPadBorderActive: CGFloat = 1.0  // white
+let kBaseDragPadBorderWidth: CGFloat = 1.5
 let kDragPadActiveScale: CGFloat = 1.08
 let kDragPadHighlightDur: CFTimeInterval = 0.15
 let kDragStageFadeDur: Double = 0.12
-/// Inset of a landing pad beyond the resting pill footprint, at 1x.
-let kBaseDragPadInset: CGFloat = 5
+/// Diameter of a landing target at 1x. A circle rather than a second pill: the
+/// four of them read as one set of places to drop into, where four pill
+/// outlines read as four copies of the thing being dragged. 40 clears the
+/// 27.2pt diagonal of the 22x16 collapsed pill with room to spare, so the held
+/// pill sits inside the target it is about to land on.
+let kBaseDragPadDiameter: CGFloat = 40
 /// Release settle. Decelerates hard then eases the last few points in, which
 /// reads as the pill being caught by the anchor rather than slid to it.
 let kSnapDur: Double = 0.28
@@ -606,10 +616,11 @@ func anchorPillCenter(
     return NSPoint(x: x, y: y)
 }
 
-/// Footprint of the landing pad drawn for `anchor` on the drag stage. Padded
-/// out from the resting pill so it reads as a target rather than a second pill,
-/// and clamped inside the visible frame so a corner pad is never half off the
-/// edge at 2x.
+/// Bounding square of the circular landing target drawn for `anchor` on the
+/// drag stage, centred on where the pill would come to rest and clamped inside
+/// the visible frame so a target is never half off the edge at 2x. The clamp is
+/// why this returns a rect rather than a centre and a radius: near an edge the
+/// drawn circle is nudged inward and stops being concentric with the pill.
 func dragPadRect(
     for anchor: OverlayAnchor,
     in visible: NSRect,
@@ -617,16 +628,10 @@ func dragPadRect(
     scale: CGFloat
 ) -> NSRect {
     let center = anchorPillCenter(anchor, in: visible, pillSize: pillSize, scale: scale)
-    let inset = kBaseDragPadInset * scale
-    let rect = NSRect(
-        x: center.x - pillSize.width / 2 - inset,
-        y: center.y - pillSize.height / 2 - inset,
-        width: pillSize.width + inset * 2,
-        height: pillSize.height + inset * 2
-    )
-    let x = min(max(rect.minX, visible.minX), visible.maxX - rect.width)
-    let y = min(max(rect.minY, visible.minY), visible.maxY - rect.height)
-    return NSRect(x: x, y: y, width: rect.width, height: rect.height)
+    let size = kBaseDragPadDiameter * scale
+    let x = min(max(center.x - size / 2, visible.minX), visible.maxX - size)
+    let y = min(max(center.y - size / 2, visible.minY), visible.maxY - size)
+    return NSRect(x: x, y: y, width: size, height: size)
 }
 
 /// Edge the pill was dropped nearest to. Ties go to the current anchor so a
@@ -2838,8 +2843,7 @@ final class DragStageView: NSView {
             .withAlphaComponent(kDragStageDim).cgColor
         for anchor in OverlayAnchor.allCases {
             let pad = CALayer()
-            pad.borderWidth = 1
-            pad.backgroundColor = NSColor.white
+            pad.backgroundColor = NSColor.black
                 .withAlphaComponent(kDragPadFill).cgColor
             pad.borderColor = NSColor.white
                 .withAlphaComponent(kDragPadBorder).cgColor
@@ -2885,7 +2889,9 @@ final class DragStageView: NSView {
             CATransaction.begin()
             CATransaction.setDisableActions(true)
             pad.frame = local
-            pad.cornerRadius = kBaseCollapsedCornerRadius * scale + 2
+            // The rect is square, so half its width is a circle.
+            pad.cornerRadius = local.width / 2
+            pad.borderWidth = kBaseDragPadBorderWidth * scale
             CATransaction.commit()
         }
         applyHighlight(animated: false)
@@ -2905,7 +2911,7 @@ final class DragStageView: NSView {
         CATransaction.setAnimationDuration(kDragPadHighlightDur)
         for (anchor, pad) in padLayers {
             let isTarget = anchor == highlighted
-            pad.backgroundColor = NSColor.white
+            pad.backgroundColor = (isTarget ? NSColor.white : NSColor.black)
                 .withAlphaComponent(isTarget ? kDragPadFillActive : kDragPadFill)
                 .cgColor
             pad.borderColor = NSColor.white
@@ -2929,10 +2935,24 @@ final class DragStageView: NSView {
 // NSHostingView swallows mouseDown so isMovableByWindowBackground can't work.
 // Let super.mouseDown run first so SwiftUI gets the press while the mouse is
 // still down (required for Button gesture recognizers). Then install a local
-// event monitor: if the mouse moves past 4px before mouseUp, collapse the
-// pill and hand off to performDrag (swallowing the event so the button never
-// sees mouseUp and its action never fires). If mouseUp arrives first, let it
-// through — SwiftUI completes the tap normally.
+// event monitor: if the mouse moves past 4px before mouseUp, collapse the pill
+// and move the panel ourselves for the rest of the gesture (swallowing the
+// events so the button never sees mouseUp and its action never fires). If
+// mouseUp arrives first, let it through — SwiftUI completes the tap normally.
+//
+// This used to call `window.performDrag(with:)` and trust it to own the gesture
+// until the mouse came up. It does not, for this window: `performDrag` returns
+// almost immediately — measured at 3-7ms — whenever the app is not the active
+// one, and a background app is the overlay's whole reason to exist. The monitor
+// then treated every later `.leftMouseDragged` as a fresh threshold crossing,
+// so one drag across the screen ran twelve begin/end cycles: twelve
+// `beginPillDrag` calls that showed the stage, twelve `endPillDrag` calls that
+// faded it straight back out, snapped the panel to the nearest anchor and
+// persisted it. The dim and the landing targets were on screen for a few
+// milliseconds at a time and the pill lurched between anchors instead of
+// following the cursor, which is what "drag to pin does nothing on macOS"
+// actually was. Owning the loop makes it one begin, N moves, one end — the same
+// shape as the win32 pill (SetCapture + SetWindowPos) and the webview one.
 
 @available(macOS 13.0, *)
 private class DraggableHostingView<Content: View>: NSHostingView<Content> {
@@ -2943,9 +2963,14 @@ private class DraggableHostingView<Content: View>: NSHostingView<Content> {
 
     private var dragMonitor: Any?
     private var dragStartLocation: NSPoint = .zero
-    /// Set when a drag fires — the next mouseUp must be swallowed so
-    /// SwiftUI's button doesn't see it and fire its action.
-    private var swallowNextMouseUp = false
+    /// True between the threshold crossing and mouseUp. Doubles as the flag
+    /// that the closing mouseUp must be swallowed, so SwiftUI's button does not
+    /// see it and fire its action.
+    private var isDragging = false
+    /// Cursor position within the panel at the moment the drag started, in
+    /// screen coordinates. Held constant so the pill keeps the same spot under
+    /// the cursor for the whole gesture.
+    private var grabOffset = CGVector(dx: 0, dy: 0)
 
     deinit {
         if let m = dragMonitor {
@@ -2965,7 +2990,7 @@ private class DraggableHostingView<Content: View>: NSHostingView<Content> {
             dragMonitor = nil
         }
 
-        swallowNextMouseUp = false
+        isDragging = false
         dragStartLocation = event.locationInWindow
         let dragThreshold: CGFloat = 4.0
 
@@ -2977,26 +3002,36 @@ private class DraggableHostingView<Content: View>: NSHostingView<Content> {
                     NSEvent.removeMonitor(m)
                     self.dragMonitor = nil
                 }
-                if self.swallowNextMouseUp {
-                    // Drag just ended — swallow so SwiftUI's button
-                    // doesn't see mouseUp and fire its action.
-                    self.swallowNextMouseUp = false
+                if self.isDragging {
+                    // Drag just ended — swallow so SwiftUI's button doesn't see
+                    // mouseUp and fire its action.
+                    self.isDragging = false
+                    self.onDragEnded?()
                     return nil
                 }
                 // Normal click — let the event reach SwiftUI.
                 return event
             case .leftMouseDragged:
+                if self.isDragging {
+                    self.moveWindow(under: NSEvent.mouseLocation)
+                    return nil
+                }
                 let dx = event.locationInWindow.x - self.dragStartLocation.x
                 let dy = event.locationInWindow.y - self.dragStartLocation.y
                 if hypot(dx, dy) > dragThreshold {
-                    // Drag — collapse pill, move window.
+                    // Drag — collapse pill, then move the window ourselves for
+                    // the rest of the gesture. The window that received
+                    // mouseDown keeps receiving mouse events until mouseUp even
+                    // once the cursor leaves it, so the monitor sees the whole
+                    // drag without any capture of our own.
+                    self.isDragging = true
+                    let mouse = NSEvent.mouseLocation
+                    self.grabOffset = CGVector(
+                        dx: mouse.x - window.frame.minX,
+                        dy: mouse.y - window.frame.minY
+                    )
                     self.onDragStarted?()
-                    // performDrag runs its own tracking loop and returns
-                    // after the user releases the mouse. The monitor stays
-                    // alive to catch and swallow the final mouseUp.
-                    self.swallowNextMouseUp = true
-                    window.performDrag(with: event)
-                    self.onDragEnded?()
+                    self.moveWindow(under: mouse)
                     return nil
                 }
                 return event
@@ -3004,6 +3039,15 @@ private class DraggableHostingView<Content: View>: NSHostingView<Content> {
                 return event
             }
         }
+    }
+
+    /// Keep the grabbed point of the panel pinned under the cursor. Screen
+    /// coordinates throughout, so crossing onto another display just works.
+    private func moveWindow(under mouse: NSPoint) {
+        guard let window = window else { return }
+        window.setFrameOrigin(
+            NSPoint(x: mouse.x - grabOffset.dx, y: mouse.y - grabOffset.dy)
+        )
     }
 }
 

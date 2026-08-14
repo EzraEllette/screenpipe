@@ -37,6 +37,7 @@ import { chatTelemetryContextForResponse } from "@/lib/chat/response-feedback";
 import { optimisticAssistantForUserEcho } from "@/lib/chat/cross-window-transcript-sync";
 import { qualifiedValue } from "@/lib/analytics/qualified-value";
 import { acpAdapterInfo } from "@/lib/utils/preset-appearance";
+import { normalizePlanEntries, upsertPlanBlock } from "@/lib/chat/acp-plan";
 import { useAcpBootState } from "@/lib/stores/acp-boot-state";
 import { toast } from "@/components/ui/use-toast";
 import { registerPiLogListener } from "@/components/chat/standalone/hooks/pi-log-listener";
@@ -424,6 +425,30 @@ export function usePiForegroundEvents({
 
             scheduleStreamingMessageRender();
 
+          } else if (evt.type === "plan_update") {
+            // ACP resends the whole plan on every change. Replace the single
+            // plan block instead of appending — appending is what stacked one
+            // collapsed copy per revision.
+            if (!ensureAssistantPlaceholder()) return;
+            const entries = normalizePlanEntries((evt as { entries?: unknown }).entries);
+            const next = upsertPlanBlock(piContentBlocksRef.current, entries);
+            if (next === piContentBlocksRef.current) return;
+            piContentBlocksRef.current = next;
+            if (piMessageIdRef.current) {
+              const msgId = piMessageIdRef.current;
+              const contentBlocks = [...next];
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === msgId
+                    ? {
+                        ...m,
+                        content: m.content === "Processing..." ? "" : m.content,
+                        contentBlocks,
+                      }
+                    : m,
+                ),
+              );
+            }
           } else if (evt.type === "thinking_start") {
             if (!ensureAssistantPlaceholder()) return;
             piThinkingStartRef.current = Date.now();

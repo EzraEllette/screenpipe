@@ -40,6 +40,7 @@ import {
   sourceCitationsFromMessage,
 } from "@/lib/source-citations";
 import { renderChartFence } from "@/components/chat/charts/chat-chart";
+import { PlanBlock } from "@/components/chat/standalone/plan-block";
 
 const MermaidDiagram = React.lazy(() =>
   import("@/components/rewind/mermaid-diagram").then((mod) => ({
@@ -828,6 +829,7 @@ type GroupedBlock =
   | { type: "connection-action"; block: Extract<ContentBlock, { type: "connection_action" }>; key: number }
   | { type: "agent-action"; block: Extract<ContentBlock, { type: "agent_action" }>; key: number }
   | { type: "tool-group"; toolCalls: ToolCall[]; key: number }
+  | { type: "plan"; block: Extract<ContentBlock, { type: "plan" }>; key: number }
   | { type: "work-group"; toolCalls: ToolCall[]; durationMs: number; key: number };
 
 function groupContentBlocks(blocks: ContentBlock[]): GroupedBlock[] {
@@ -851,6 +853,8 @@ function groupContentBlocks(blocks: ContentBlock[]): GroupedBlock[] {
         result.push({ type: "connection-action", block, key: result.length });
       } else if (block.type === "agent_action") {
         result.push({ type: "agent-action", block, key: result.length });
+      } else if (block.type === "plan" && block.entries.length > 0) {
+        result.push({ type: "plan", block, key: result.length });
       }
     }
   }
@@ -956,7 +960,15 @@ function mergeWorkAndIntermediateText(groups: GroupedBlock[]): GroupedBlock[] {
     } else if (g.type === "tool-group") {
       firstKey ??= g.key;
       allToolCalls.push(...g.toolCalls);
-    } else if (g.type === "connection-action" || g.type === "agent-action") {
+    } else if (
+      g.type === "connection-action" ||
+      g.type === "agent-action" ||
+      // The plan is not narration — it is the agent's stated intent for the
+      // work being summarized, and the common ACP turn is "make a plan, then
+      // use tools". Dropping it here would hide the plan on exactly the turns
+      // that have one.
+      g.type === "plan"
+    ) {
       finalBlocks.push(g);
     }
     // text and thinking blocks before the boundary are dropped
@@ -1754,6 +1766,9 @@ export function MessageContent({
             // Thinking blocks are always hidden — guard until
             // collapseHiddenWorkGroups absorbs them fully.
             return null;
+          }
+          if (group.type === "plan") {
+            return <PlanBlock key={`plan-${group.key}`} entries={group.block.entries} />;
           }
           if (group.type === "connection-action") {
             const liveConnection = connectionItems.find((connection) => connection.id === group.block.connectionId);
