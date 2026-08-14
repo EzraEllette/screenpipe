@@ -112,6 +112,178 @@ async fn ensure_regular_media_file(file_path: &str) -> Result<std::fs::Metadata>
     Ok(metadata)
 }
 
+/// How to reach decoded frame ordinal `offset_index` inside a media file.
+///
+/// `offset_index` is always a zero-based decode ordinal, but the two kinds of
+/// file we store it against need different FFmpeg invocations:
+///
+/// * Recorder chunks are constant-frame-rate by construction (see the module
+///   docs on `hd_recorder`), so ordinal `n` sits at `n / fps` and an input seek
+///   reaches it after decoding at most one GOP.
+/// * Compacted snapshot chunks carry a nominal frame rate unrelated to their
+///   stored ordinals, so only FFmpeg's decoded-frame counter `n` is meaningful.
+///   That costs a full decode of everything before the target frame, so it is
+///   the fallback, not the default.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum FrameLocator {
+    /// `-ss <seconds>` placed *before* `-i`: seeks to the preceding keyframe and
+    /// decodes forward, so the cost is bounded by the GOP length.
+    Seek { seconds: f64 },
+    /// `select=eq(n,index)`: decodes every frame from the start of the file.
+    DecodeOrdinal { index: i64 },
+}
+
+impl FrameLocator {
+    /// The `-ss` value to place before `-i`, when seeking applies.
+    ///
+    /// Six decimals matter: at three decimals the rounding error is comparable
+    /// to a frame period on high frame rates, which is what makes an exact
+    /// `n / fps` seek land on the wrong frame.
+    pub(crate) fn input_seek_arg(&self) -> Option<String> {
+        match self {
+            FrameLocator::Seek { seconds } => Some(format!("{seconds:.6}")),
+            FrameLocator::DecodeOrdinal { .. } => None,
+        }
+    }
+
+    /// Prefix `rest` with a `select` clause when the ordinal must be counted.
+    pub(crate) fn video_filter(&self, rest: &str) -> String {
+        match self {
+            FrameLocator::Seek { .. } => rest.to_string(),
+            FrameLocator::DecodeOrdinal { index } => {
+                format!("select=eq(n\\,{index}),{rest}")
+            }
+        }
+    }
+}
+
+fn is_compacted_snapshot(file_path: &str) -> bool {
+    Path::new(file_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with("compact_"))
+}
+
+/// Aim half a frame period *before* the target frame's presentation time.
+///
+/// `-ss` before `-i` emits the first frame at or after the seek point. Aiming
+/// straight at `pts(n)` leaves no margin, so any upward rounding returns frame
+/// `n + 1`; that is reproducible on fractional rates such as 30000/1001. Half a
+/// frame early keeps half a frame of slack on both sides.
+fn seek_seconds_for_ordinal(index: i64, fps: f64) -> f64 {
+    (((index as f64) - 0.5) / fps).max(0.0)
+}
+
+/// Clamp a past-the-end request onto the last frame the file actually stores.
+///
+/// A chunk truncated by a crash still has rows pointing past its final frame.
+/// Serving the closest real frame keeps those timeline entries usable; letting
+/// the request run off the end returns no image at all.
+/// Round rather than floor: for a CFR file `duration * fps` is the exact frame
+/// count in exact arithmetic, but in floating point it lands just under it (a
+/// 60-frame 30000/1001 clip computes 59.99999999999999). Flooring that drops a
+/// frame and clamps a perfectly valid request for the final frame down to its
+/// predecessor, which is a wrong image rather than a missing one.
+fn clamp_to_last_frame(index: i64, fps: f64, duration: f64) -> i64 {
+    if !duration.is_finite() || duration <= 0.0 {
+        return index;
+    }
+    let total_frames = (duration * fps).round();
+    if total_frames < 1.0 {
+        return 0;
+    }
+    let last_frame = (total_frames as i64).saturating_sub(1);
+    index.min(last_frame)
+}
+
+/// Decide how to locate `offset_index`, given probed `(fps, duration)` if any.
+///
+/// Passing `None` for `metadata` is the safe answer whenever the probe failed:
+/// counting decoded frames is slower but never depends on a frame rate we could
+/// not read.
+pub(crate) fn plan_frame_locator(
+    file_path: &str,
+    offset_index: i64,
+    metadata: Option<(f64, f64)>,
+) -> FrameLocator {
+    let index = offset_index.max(0);
+    if is_compacted_snapshot(file_path) {
+        return FrameLocator::DecodeOrdinal { index };
+    }
+    let Some((fps, duration)) = metadata else {
+        return FrameLocator::DecodeOrdinal { index };
+    };
+    if !fps.is_finite() || fps <= 0.0 {
+        return FrameLocator::DecodeOrdinal { index };
+    }
+    let index = clamp_to_last_frame(index, fps, duration);
+    FrameLocator::Seek {
+        seconds: seek_seconds_for_ordinal(index, fps),
+    }
+}
+
+/// True when the error is FFmpeg/ffprobe itself being absent, not a bad file.
+///
+/// `Command::output` surfaces a spawn failure as an io error, which is a very
+/// different operator action from a corrupt recording, so the two must not be
+/// reported the same way.
+fn is_missing_binary_error(error: &anyhow::Error) -> bool {
+    if let Some(io_error) = error.downcast_ref::<std::io::Error>() {
+        return io_error.kind() == std::io::ErrorKind::NotFound;
+    }
+    let text = error.to_string().to_lowercase();
+    text.contains("no such file") || text.contains("os error 2")
+}
+
+/// Probe `(fps, duration)`, tolerating every failure.
+///
+/// Used where a slow-but-correct extraction beats an error: without metadata
+/// the caller falls back to counting decoded frames, which still returns the
+/// right image.
+async fn probe_frame_metadata_or_unknown(
+    ffmpeg_path: &Path,
+    file_path: &str,
+) -> Option<(f64, f64)> {
+    match get_video_fps_and_duration(ffmpeg_path, file_path).await {
+        Ok(metadata) => Some(metadata),
+        Err(error) => {
+            warn!(
+                "could not read video metadata for {}, falling back to decoded-ordinal selection: {}",
+                file_path, error
+            );
+            None
+        }
+    }
+}
+
+/// Probe `(fps, duration)` and classify the failure modes the HTTP layer maps
+/// to distinct statuses.
+///
+/// A missing ffprobe binary is an operator problem with a specific remedy, so
+/// it is reported rather than silently absorbed; `/frames/:id` turns it into an
+/// actionable message. Returns `Ok(None)` when the probe failed in a way that
+/// still leaves frame extraction worth attempting; the caller should then fall
+/// back to counting decoded frames and, if extraction also fails, report the
+/// file as corrupt.
+async fn probe_frame_metadata(ffmpeg_path: &Path, file_path: &str) -> Result<Option<(f64, f64)>> {
+    match get_video_fps_and_duration(ffmpeg_path, file_path).await {
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(error) if is_missing_binary_error(&error) => Err(anyhow::anyhow!(
+            "FFPROBE_NOT_FOUND: cannot extract frame from {} - ffprobe binary not found. \
+             Ensure ffprobe is installed alongside ffmpeg. Error: {}",
+            file_path,
+            error
+        )),
+        Err(error) => {
+            warn!(
+                "could not read video metadata for {}, falling back to decoded-ordinal selection: {}",
+                file_path, error
+            );
+            Ok(None)
+        }
+    }
+}
+
 pub async fn extract_frame(file_path: &str, offset_index: i64) -> Result<String> {
     ensure_regular_media_file(file_path).await?;
     if offset_index < 0 {
@@ -123,11 +295,10 @@ pub async fn extract_frame(file_path: &str, offset_index: i64) -> Result<String>
     let ffmpeg_path =
         find_ffmpeg_path().ok_or_else(|| anyhow::anyhow!("failed to find ffmpeg path"))?;
 
-    // Frames may be stored either as video chunks (seek by offset) or as
-    // individual still images. `offset_index` is a zero-based decode ordinal,
-    // not milliseconds or a presentation timestamp, so video selection must be
-    // based on FFmpeg's decoded-frame counter (`n`). This is also correct for
-    // variable-frame-rate media.
+    // Frames may be stored either as video chunks or as individual still
+    // images. `offset_index` is a zero-based decode ordinal, not milliseconds
+    // and not a presentation timestamp; a still image has exactly one frame, so
+    // no selection applies to it at all.
     let is_image = std::path::Path::new(file_path)
         .extension()
         .and_then(|e| e.to_str())
@@ -138,14 +309,27 @@ pub async fn extract_frame(file_path: &str, offset_index: i64) -> Result<String>
             )
         })
         .unwrap_or(false);
-    debug!("extracting frame {} from {}", offset_index, file_path);
 
-    let mut command = ffmpeg_cmd_async(ffmpeg_path);
-    command.args(["-i", file_path]);
-    let filter = if is_image {
-        "scale=iw*0.75:ih*0.75".to_string()
+    let locator = if is_image {
+        None
     } else {
-        format!("select=eq(n\\,{offset_index}),scale=iw*0.75:ih*0.75")
+        let metadata = probe_frame_metadata_or_unknown(&ffmpeg_path, file_path).await;
+        Some(plan_frame_locator(file_path, offset_index, metadata))
+    };
+    debug!(
+        "extracting frame {} from {} via {:?}",
+        offset_index, file_path, locator
+    );
+
+    let mut command = ffmpeg_cmd_async(&ffmpeg_path);
+    if let Some(seek) = locator.as_ref().and_then(FrameLocator::input_seek_arg) {
+        command.args(["-ss", &seek]);
+    }
+    command.args(["-i", file_path]);
+    let scale = "scale=iw*0.75:ih*0.75";
+    let filter = match locator.as_ref() {
+        Some(locator) => locator.video_filter(scale),
+        None => scale.to_string(),
     };
     command
         .args([
@@ -265,13 +449,17 @@ pub async fn merge_videos(
     // Normalize every decoded stream before concat. Decoding alone does not
     // make dimensions, sample aspect ratios, pixel formats, time bases, or
     // audio layouts compatible with FFmpeg's concat filter.
-    let canvas_width = inputs[0].1.width.max(2) & !1;
-    let canvas_height = inputs[0].1.height.max(2) & !1;
-    let include_audio = inputs.iter().any(|(_, layout)| layout.has_audio);
+    //
+    // Size the canvas to the largest input rather than the first one: taking
+    // the first would downscale every other clip whenever the merge happens to
+    // start with a small one, throwing away detail that cannot be recovered.
+    // Smaller clips are letterboxed into the canvas by the pad below.
     let layouts = inputs
         .iter()
         .map(|(_, layout)| layout.clone())
         .collect::<Vec<_>>();
+    let (canvas_width, canvas_height) = canvas_for(&layouts);
+    let include_audio = layouts.iter().any(|layout| layout.has_audio);
     let filter = build_concat_filter(&layouts, canvas_width, canvas_height, include_audio);
 
     let mut cmd = ffmpeg_cmd_async(ffmpeg_path);
@@ -351,6 +539,15 @@ struct MediaLayout {
     has_audio: bool,
 }
 
+/// Even-sized canvas large enough to hold every input without downscaling.
+///
+/// H.264/HEVC chroma subsampling needs even dimensions, hence the `& !1`.
+fn canvas_for(layouts: &[MediaLayout]) -> (u32, u32) {
+    let width = layouts.iter().map(|l| l.width).max().unwrap_or(2).max(2) & !1;
+    let height = layouts.iter().map(|l| l.height).max().unwrap_or(2).max(2) & !1;
+    (width, height)
+}
+
 async fn probe_media_layout(ffprobe_path: &Path, video_path: &str) -> Result<MediaLayout> {
     let mut cmd = ffmpeg_cmd_async(ffprobe_path);
     cmd.args([
@@ -359,7 +556,7 @@ async fn probe_media_layout(ffprobe_path: &Path, video_path: &str) -> Result<Med
         "-print_format",
         "json",
         "-show_entries",
-        "stream=codec_type,width,height:format=duration",
+        "stream=codec_type,width,height,duration:format=duration",
         video_path,
     ]);
     let output = cmd.output().await?;
@@ -390,11 +587,19 @@ async fn probe_media_layout(ffprobe_path: &Path, video_path: &str) -> Result<Med
         .and_then(|value| u32::try_from(value).ok())
         .filter(|value| *value > 0)
         .ok_or_else(|| anyhow::anyhow!("video height is missing"))?;
-    let duration = value
-        .pointer("/format/duration")
-        .and_then(serde_json::Value::as_str)
-        .and_then(|value| value.parse::<f64>().ok())
-        .filter(|value| value.is_finite() && *value > 0.0)
+    // Prefer the video stream's own duration. The generated silence for a
+    // video-only input is trimmed to this length, and the container duration
+    // can exceed the video stream (trailing metadata, a longer sibling track),
+    // which would insert silence past the last frame and drift every later
+    // clip's audio out of sync.
+    let parse_duration = |value: Option<&serde_json::Value>| {
+        value
+            .and_then(serde_json::Value::as_str)
+            .and_then(|value| value.parse::<f64>().ok())
+            .filter(|value| value.is_finite() && *value > 0.0)
+    };
+    let duration = parse_duration(video.get("duration"))
+        .or_else(|| parse_duration(value.pointer("/format/duration")))
         .ok_or_else(|| anyhow::anyhow!("video duration is missing"))?;
     let has_audio = streams
         .iter()
@@ -562,7 +767,9 @@ pub async fn extract_frames_from_video(
 
 pub async fn get_video_fps(ffmpeg_path: &std::path::Path, video_path: &str) -> Result<f64> {
     let (fps, _) = get_video_fps_and_duration(ffmpeg_path, video_path).await?;
-    Ok(fps)
+    // Callers that only want a rough rate keep the historical 1fps default;
+    // callers that must not guess check `is_finite` themselves.
+    Ok(if fps.is_finite() { fps } else { 1.0 })
 }
 
 /// Get video FPS and duration with caching.
@@ -668,7 +875,10 @@ async fn get_video_fps_and_duration_uncached(
                         .and_then(parse_frame_rate)
                 })
         })
-        .unwrap_or(1.0);
+        // NaN means "ffprobe answered but no usable frame rate" — distinct from
+        // a real 1fps recording. Seeking by a guessed rate lands on the wrong
+        // frame, so this must stay distinguishable from a genuine value.
+        .unwrap_or(f64::NAN);
 
     let duration = parsed
         .get("format")
@@ -919,6 +1129,13 @@ pub async fn extract_frame_from_video(
     let ffmpeg_path =
         find_ffmpeg_path().ok_or_else(|| anyhow::anyhow!("failed to find ffmpeg path"))?;
 
+    // A file whose metadata will not parse is still worth one extraction
+    // attempt, but if that attempt also fails the file is unreadable rather
+    // than merely awkward — the route maps that to 410 instead of 500.
+    let metadata = probe_frame_metadata(&ffmpeg_path, file_path).await?;
+    let metadata_unreadable = metadata.is_none();
+    let locator = plan_frame_locator(file_path, offset_index, metadata);
+
     // Create a temporary directory for frames if it doesn't exist
     let frames_dir = PathBuf::from("/tmp/screenpipe_frames");
     tokio::fs::create_dir_all(&frames_dir).await?;
@@ -928,14 +1145,18 @@ pub async fn extract_frame_from_video(
     let output_path = frames_dir.join(&frame_filename);
 
     debug!(
-        "extracting frame ordinal {} from {} to {}",
+        "extracting frame ordinal {} from {} to {} via {:?}",
         offset_index,
         file_path,
-        output_path.display()
+        output_path.display(),
+        locator
     );
 
     let mut command = ffmpeg_cmd_async(ffmpeg_path);
-    let filter = format!("select=eq(n\\,{offset_index}),scale=iw:ih,format=yuvj420p");
+    if let Some(seek) = locator.input_seek_arg() {
+        command.args(["-ss", &seek]);
+    }
+    let filter = locator.video_filter("scale=iw:ih,format=yuvj420p");
     command
         .args([
             "-i",
@@ -973,10 +1194,23 @@ pub async fn extract_frame_from_video(
     if !output.status.success() {
         let error_message = String::from_utf8_lossy(&output.stderr);
         info!("ffmpeg error: {}", error_message);
+        if metadata_unreadable {
+            return Err(anyhow::anyhow!(
+                "VIDEO_CORRUPTED: cannot read metadata from {} and frame extraction failed: {}",
+                file_path,
+                error_message
+            ));
+        }
         return Err(anyhow::anyhow!("ffmpeg process failed: {}", error_message));
     }
 
     if !output_path.exists() {
+        if metadata_unreadable {
+            return Err(anyhow::anyhow!(
+                "VIDEO_CORRUPTED: cannot read metadata from {} and no frame was produced",
+                file_path
+            ));
+        }
         return Err(anyhow::anyhow!("failed to extract frame: file not created"));
     }
 
@@ -1049,6 +1283,149 @@ mod tests {
         assert!(filter.contains("concat=n=2:v=1:a=1[outv][outa]"));
     }
 
+    #[test]
+    fn merge_canvas_never_downscales_to_the_first_input() {
+        // A short 720p intro followed by 1080p footage must not force the whole
+        // merge down to 720p just because it happens to be first.
+        let layouts = vec![
+            MediaLayout {
+                width: 1280,
+                height: 720,
+                duration: 2.0,
+                has_audio: false,
+            },
+            MediaLayout {
+                width: 1920,
+                height: 1080,
+                duration: 3.0,
+                has_audio: false,
+            },
+        ];
+        assert_eq!(canvas_for(&layouts), (1920, 1080));
+    }
+
+    #[test]
+    fn merge_canvas_dimensions_stay_even_for_chroma_subsampling() {
+        let layouts = vec![MediaLayout {
+            width: 1919,
+            height: 1081,
+            duration: 1.0,
+            has_audio: false,
+        }];
+        assert_eq!(canvas_for(&layouts), (1918, 1080));
+    }
+
+    #[test]
+    fn recorder_chunks_seek_instead_of_decoding_every_preceding_frame() {
+        // Recorder chunks are CFR, so ordinal 1700 is reachable by seeking.
+        // Selecting it by decoded ordinal instead would decode 1700 frames of
+        // 1080p for a single timeline thumbnail.
+        let locator = plan_frame_locator(
+            "monitor_1_2026-08-13_10-00-00.mp4",
+            1700,
+            Some((30.0, 60.0)),
+        );
+
+        match locator {
+            FrameLocator::Seek { seconds } => {
+                // Half a frame before pts(1700) = 1700/30.
+                assert!((seconds - (1699.5 / 30.0)).abs() < 1e-9, "got {seconds}");
+            }
+            other => panic!("expected an input seek for a CFR chunk, got {other:?}"),
+        }
+        assert!(locator.input_seek_arg().is_some());
+        assert_eq!(locator.video_filter("scale=iw:ih"), "scale=iw:ih");
+    }
+
+    #[test]
+    fn compacted_snapshot_chunks_still_select_by_decoded_ordinal() {
+        // Their nominal frame rate is unrelated to the stored ordinals, so a
+        // time seek would land on an arbitrary frame.
+        let locator = plan_frame_locator("compact_2026-08-13_10-00-00.mp4", 7, Some((1.0, 600.0)));
+
+        assert_eq!(locator, FrameLocator::DecodeOrdinal { index: 7 });
+        assert!(locator.input_seek_arg().is_none());
+        assert_eq!(
+            locator.video_filter("scale=iw:ih"),
+            "select=eq(n\\,7),scale=iw:ih"
+        );
+    }
+
+    #[test]
+    fn unreadable_metadata_falls_back_to_decoded_ordinal() {
+        // Without a trustworthy fps there is no valid seek target; counting
+        // decoded frames is slow but cannot silently pick the wrong frame.
+        assert_eq!(
+            plan_frame_locator("monitor_1.mp4", 12, None),
+            FrameLocator::DecodeOrdinal { index: 12 }
+        );
+        assert_eq!(
+            plan_frame_locator("monitor_1.mp4", 12, Some((0.0, 60.0))),
+            FrameLocator::DecodeOrdinal { index: 12 }
+        );
+        assert_eq!(
+            plan_frame_locator("monitor_1.mp4", 12, Some((f64::NAN, 60.0))),
+            FrameLocator::DecodeOrdinal { index: 12 }
+        );
+    }
+
+    #[test]
+    fn offsets_past_the_end_clamp_to_the_last_stored_frame() {
+        // A chunk truncated by a crash still has rows pointing past its final
+        // frame. Those must resolve to the last real frame, not to no image.
+        // 60s at 30fps stores frames 0..=1799.
+        assert_eq!(clamp_to_last_frame(5_000, 30.0, 60.0), 1799);
+        assert_eq!(clamp_to_last_frame(1_799, 30.0, 60.0), 1799);
+        assert_eq!(clamp_to_last_frame(10, 30.0, 60.0), 10);
+        // Degenerate durations must not clamp to a negative ordinal.
+        assert_eq!(clamp_to_last_frame(10, 30.0, 0.001), 0);
+        // Floating point puts `duration * fps` just under the true frame count
+        // on fractional rates (2.002 * 30000/1001 == 59.99999999999999), so the
+        // final frame must not be clamped away.
+        let ntsc = 30000.0 / 1001.0;
+        assert_eq!(clamp_to_last_frame(59, ntsc, 2.002), 59);
+        assert_eq!(clamp_to_last_frame(60, ntsc, 2.002), 59);
+        // An unknown duration leaves the request untouched.
+        assert_eq!(clamp_to_last_frame(10, 30.0, f64::MAX), 10);
+
+        match plan_frame_locator("monitor_1.mp4", 5_000, Some((30.0, 60.0))) {
+            FrameLocator::Seek { seconds } => {
+                assert!((seconds - (1798.5 / 30.0)).abs() < 1e-9, "got {seconds}");
+            }
+            other => panic!("expected a clamped seek, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn frame_zero_never_seeks_before_the_start_of_the_file() {
+        match plan_frame_locator("monitor_1.mp4", 0, Some((30.0, 60.0))) {
+            FrameLocator::Seek { seconds } => assert_eq!(seconds, 0.0),
+            other => panic!("expected a seek, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn seek_arg_keeps_enough_precision_for_high_frame_rates() {
+        // Three decimals is not enough: at 30000/1001 the rounding error is a
+        // meaningful fraction of a frame period, which is how an exact
+        // `n / fps` seek ends up on the following frame.
+        let locator = plan_frame_locator("monitor_1.mp4", 47, Some((30000.0 / 1001.0, 60.0)));
+        let arg = locator.input_seek_arg().expect("CFR chunk seeks");
+        assert_eq!(arg.split('.').next_back().map(str::len), Some(6));
+    }
+
+    #[test]
+    fn missing_binary_errors_are_told_apart_from_bad_media() {
+        let missing = anyhow::Error::new(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "No such file or directory (os error 2)",
+        ));
+        assert!(is_missing_binary_error(&missing));
+
+        let corrupt = anyhow::anyhow!("ffprobe failed: moov atom not found");
+        assert!(!is_missing_binary_error(&corrupt));
+    }
+
     #[tokio::test]
     async fn frame_extractors_reject_directories_before_spawning_ffmpeg() {
         let directory = tempfile::tempdir().unwrap();
@@ -1091,12 +1468,16 @@ pub async fn extract_high_quality_frame(
     );
     let output_path = output_dir.join(frame_filename);
 
+    let metadata = probe_frame_metadata_or_unknown(&ffmpeg_path, file_path).await;
+    let locator = plan_frame_locator(file_path, offset_index, metadata);
+
     let mut command = ffmpeg_cmd_async(&ffmpeg_path);
-    let filter = format!("select=eq(n\\,{offset_index}),scale=3840:2160:flags=lanczos");
+    command.args(["-y", "-loglevel", "error"]);
+    if let Some(seek) = locator.input_seek_arg() {
+        command.args(["-ss", &seek]);
+    }
+    let filter = locator.video_filter("scale=3840:2160:flags=lanczos");
     command.args([
-        "-y",
-        "-loglevel",
-        "error",
         "-i",
         file_path,
         "-vframes",

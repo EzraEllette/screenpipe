@@ -806,9 +806,26 @@ async fn extract_frame(
 
     debug!("extracted {} frames from video", all_frames.len());
 
-    for ((offset, grouped_tasks), frame_data) in
-        tasks_by_offset.into_iter().zip(all_frames.into_iter())
-    {
+    let frame_by_offset = match pair_frames_with_offsets(&frame_positions, all_frames) {
+        Some(paired) => paired,
+        None => {
+            error!(
+                "ffmpeg returned a different number of frames than requested for {}; \
+                 re-extracting individually to keep frames matched to their ordinals",
+                video_file_path
+            );
+            extract_frames_individually(&ffmpeg, &video_file_path, &frame_positions).await
+        }
+    };
+
+    for (offset, grouped_tasks) in tasks_by_offset {
+        let Some(frame_data) = frame_by_offset.get(&offset) else {
+            debug!(
+                "no frame available for ordinal {} in {}, skipping",
+                offset, video_file_path
+            );
+            continue;
+        };
         for (chunk, device_data) in grouped_tasks {
             let cache_key = format!("{}||{}", chunk.timestamp, device_data.device_name);
             debug!("processing frame ordinal {} with key {}", offset, cache_key);
@@ -883,6 +900,85 @@ async fn extract_frame(
 
     debug!("processed {} frames from video file", processed);
     Ok(processed)
+}
+
+/// Pair each requested ordinal with the frame FFmpeg produced for it.
+///
+/// FFmpeg emits selected frames in ascending decode order and the zero-padded
+/// output pattern sorts the same way, so the Nth file belongs to the Nth
+/// requested ordinal — but that only holds when FFmpeg produced exactly one
+/// frame per request. A truncated or partially decodable chunk returns fewer
+/// files, and positional pairing would then attach an image to an ordinal it
+/// does not belong to, silently serving the wrong screenshot for a frame id.
+///
+/// Returns `None` when the counts disagree; there is no way to recover the
+/// mapping from a short batch, so the caller must re-extract rather than guess.
+fn pair_frames_with_offsets(
+    offsets: &[i64],
+    frames: Vec<Vec<u8>>,
+) -> Option<BTreeMap<i64, Vec<u8>>> {
+    if frames.len() != offsets.len() {
+        return None;
+    }
+    Some(offsets.iter().copied().zip(frames).collect())
+}
+
+/// Extract each ordinal with its own FFmpeg run, so the returned bytes cannot be
+/// attributed to the wrong frame.
+///
+/// This is the recovery path for a batch that came back short. It is slower by
+/// one process per frame, which is the right trade against serving a
+/// mismatched screenshot. Ordinals that yield nothing are simply absent from
+/// the map and their tasks are skipped.
+async fn extract_frames_individually(
+    ffmpeg: &PathBuf,
+    video_file_path: &str,
+    offsets: &[i64],
+) -> BTreeMap<i64, Vec<u8>> {
+    let mut frames = BTreeMap::new();
+    for &offset in offsets {
+        let mut cmd = screenpipe_core::ffmpeg_cmd_async(ffmpeg);
+        cmd.args([
+            "-i",
+            video_file_path,
+            "-vf",
+            &format!("select=eq(n\\,{offset}),format=yuv420p,scale=iw*0.8:ih*0.8"),
+            "-vsync",
+            "0",
+            "-frames:v",
+            "1",
+            "-f",
+            "image2pipe",
+            "-c:v",
+            "mjpeg",
+            "-q:v",
+            "12",
+            "-",
+        ]);
+
+        #[cfg(windows)]
+        {
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+
+        match cmd.output().await {
+            Ok(output) if output.status.success() && !output.stdout.is_empty() => {
+                frames.insert(offset, output.stdout);
+            }
+            Ok(output) => debug!(
+                "no frame for ordinal {} in {}: {}",
+                offset,
+                video_file_path,
+                String::from_utf8_lossy(&output.stderr)
+            ),
+            Err(e) => debug!(
+                "failed to extract ordinal {} from {}: {}",
+                offset, video_file_path, e
+            ),
+        }
+    }
+    frames
 }
 
 async fn is_video_file_complete(ffmpeg_path: &PathBuf, file_path: &str) -> Result<bool> {
@@ -1064,4 +1160,58 @@ impl OrderedFrameStreamer {
 
 fn is_older_than_24h(timestamp: &DateTime<Utc>) -> bool {
     Utc::now() - *timestamp > Duration::hours(24)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn frame(marker: u8) -> Vec<u8> {
+        vec![marker; 4]
+    }
+
+    #[test]
+    fn complete_batches_pair_each_ordinal_with_its_own_frame() {
+        let offsets = [0i64, 30, 60];
+        let paired = pair_frames_with_offsets(&offsets, vec![frame(0), frame(30), frame(60)])
+            .expect("counts match, so the batch is usable");
+
+        assert_eq!(paired.get(&0), Some(&frame(0)));
+        assert_eq!(paired.get(&30), Some(&frame(30)));
+        assert_eq!(paired.get(&60), Some(&frame(60)));
+    }
+
+    #[test]
+    fn short_batches_are_rejected_instead_of_mispairing_frames() {
+        // FFmpeg decoded only the first two of three requested ordinals, which
+        // is what a truncated chunk looks like. Zipping would hand ordinal 30
+        // the image belonging to ordinal 60 and drop ordinal 60 entirely, so
+        // the frame served for one frame id would be a different moment.
+        let offsets = [0i64, 30, 60];
+        let short = vec![frame(0), frame(30)];
+
+        assert!(
+            pair_frames_with_offsets(&offsets, short).is_none(),
+            "a short batch must not be paired positionally"
+        );
+    }
+
+    #[test]
+    fn over_long_batches_are_rejected_too() {
+        // More frames than requested means the select filter matched something
+        // unexpected; the mapping is equally unknowable in that direction.
+        let offsets = [0i64, 30];
+        let extra = vec![frame(0), frame(30), frame(60)];
+
+        assert!(pair_frames_with_offsets(&offsets, extra).is_none());
+    }
+
+    #[test]
+    fn duplicate_offsets_never_reach_pairing() {
+        // Ordinals arrive as BTreeMap keys, so they are unique and ascending.
+        // Pairing relies on that: it is what makes "Nth file == Nth ordinal"
+        // line up with FFmpeg's ascending decode order.
+        let offsets = [0i64, 30, 60];
+        assert!(offsets.windows(2).all(|w| w[0] < w[1]));
+    }
 }
