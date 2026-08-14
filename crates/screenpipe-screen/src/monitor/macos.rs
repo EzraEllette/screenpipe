@@ -206,7 +206,17 @@ where
     T: Send + 'static,
     F: FnOnce() -> Result<T> + Send + 'static,
 {
-    let _serial_guard = serializer.lock().await;
+    // Bounding only the holder leaves the wait unbounded, so a queued caller
+    // inherits the sum of every holder ahead of it. See the same repair and
+    // reasoning in `run_bounded_sck_enumeration`; this is the capture-path twin
+    // and sits directly under the capture loop's own bounded await.
+    // See tests::capture_wait_stays_bounded_when_callers_queue.
+    let Ok(_serial_guard) = tokio::time::timeout(timeout, serializer.lock()).await else {
+        let secs = timeout.as_secs();
+        return Err(anyhow::anyhow!(
+            "{name}: capture busy; serializer held {secs}s, refusing to queue"
+        ));
+    };
     let permit = workers.try_acquire_owned().map_err(|e| match e {
         tokio::sync::TryAcquireError::NoPermits => anyhow::anyhow!(
             "{name}: capture retry budget exhausted; Apple callbacks remain blocked"
@@ -468,11 +478,25 @@ where
 {
     // Healthy enumeration stays single-file. After a timeout this guard is
     // released, allowing one genuinely fresh SCK request to recover capture.
-    // The holder is itself bounded by `timeout` below, so waiting here cannot
-    // inherit the unbounded Apple callback. Avoid racing two equal 15-second
-    // timeouts, which could reject the queued recovery attempt at the instant
-    // the first holder releases this guard.
-    let _serial_guard = serializer.lock().await;
+    //
+    // Bounding only the holder is not enough. Each holder is capped at
+    // `timeout`, but an unbounded wait here lets a queued caller inherit the
+    // sum of every holder ahead of it: with callbacks that are slow yet do
+    // return, permits recycle, nobody fast-fails, and the Nth caller waits
+    // N * timeout. That is the #3939 shape — a 250ms-bounded await in the
+    // capture loop reported frozen for 73-299s, which is 5-20 holders deep at
+    // the 15s production timeout. Cap the wait so a caller never blocks for
+    // more than roughly twice the timeout it asked for.
+    // See tests::enumeration_wait_stays_bounded_when_callers_queue.
+    let _serial_guard = match tokio::time::timeout(timeout, serializer.lock()).await {
+        Ok(guard) => guard,
+        Err(_) => {
+            return Err(MonitorListError::Other(format!(
+                "ScreenCaptureKit monitor enumeration busy: another caller held the serializer for {}s; serving the caller's fallback instead of queueing",
+                timeout.as_secs()
+            )))
+        }
+    };
 
     // A timed-out spawn_blocking task cannot be cancelled because the Apple
     // callback is outside Rust's control. Two permits bound the damage while
@@ -1340,6 +1364,149 @@ mod tests {
             run_bounded_sck_enumeration(&serializer, workers, Duration::from_secs(1), || Ok(4u8))
                 .await;
         assert!(matches!(recovered, Ok(4)));
+    }
+
+    /// Production #3939 freezes report 73-299s frozen in a 250ms-bounded await.
+    /// `run_bounded_sck_enumeration` bounds the *holder* at `timeout`, but the
+    /// wait for `serializer` is unbounded, so queued callers inherit the sum of
+    /// every holder ahead of them. With callbacks that are slow but do return,
+    /// permits recycle, nobody fast-fails, and the queue grows without limit.
+    ///
+    /// A caller must never wait for more than a small multiple of the timeout
+    /// it asked for, however many callers are queued.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn enumeration_wait_stays_bounded_when_callers_queue() {
+        const TIMEOUT: Duration = Duration::from_millis(100);
+        // Longer than TIMEOUT so every holder times out, but finite so the
+        // permit recycles and later callers never hit the retry budget.
+        const CALLBACK: Duration = Duration::from_millis(160);
+        const CALLERS: usize = 6;
+
+        let serializer: &'static tokio::sync::Mutex<()> =
+            Box::leak(Box::new(tokio::sync::Mutex::new(())));
+        let workers = Arc::new(tokio::sync::Semaphore::new(2));
+
+        let started = Instant::now();
+        let mut handles = Vec::new();
+        for _ in 0..CALLERS {
+            let workers = workers.clone();
+            handles.push(tokio::spawn(async move {
+                let _ = run_bounded_sck_enumeration(serializer, workers, TIMEOUT, move || {
+                    std::thread::sleep(CALLBACK);
+                    Ok(1u8)
+                })
+                .await;
+                started.elapsed()
+            }));
+        }
+
+        let mut worst = Duration::ZERO;
+        for handle in handles {
+            worst = worst.max(handle.await.expect("caller task panicked"));
+        }
+
+        // Two permits let two holders overlap, so ~2x TIMEOUT is the honest
+        // ceiling for a bounded design. Allow 3x for scheduling slack.
+        let ceiling = TIMEOUT * 3;
+        assert!(
+            worst <= ceiling,
+            "queued caller waited {worst:?} for a {TIMEOUT:?} bounded call \
+             ({CALLERS} callers, ceiling {ceiling:?}) — the serializer wait is unbounded, \
+             so waiters inherit every holder ahead of them"
+        );
+    }
+
+    /// The capture-path twin of the enumeration queue defect. This serializer
+    /// sits under the capture loop's own bounded await, so an unbounded wait
+    /// here is what lets a 250ms-bounded loop stage report minutes frozen.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn capture_wait_stays_bounded_when_callers_queue() {
+        const TIMEOUT: Duration = Duration::from_millis(100);
+        const CALLBACK: Duration = Duration::from_millis(160);
+        const CALLERS: usize = 6;
+
+        let serializer: &'static tokio::sync::Mutex<()> =
+            Box::leak(Box::new(tokio::sync::Mutex::new(())));
+        let workers = Arc::new(tokio::sync::Semaphore::new(2));
+
+        let started = Instant::now();
+        let mut handles = Vec::new();
+        for _ in 0..CALLERS {
+            let workers = workers.clone();
+            handles.push(tokio::spawn(async move {
+                let _ = run_bounded_macos_capture(
+                    "test-capture",
+                    serializer,
+                    workers,
+                    TIMEOUT,
+                    move || {
+                        std::thread::sleep(CALLBACK);
+                        Ok(1u8)
+                    },
+                )
+                .await;
+                started.elapsed()
+            }));
+        }
+
+        let mut worst = Duration::ZERO;
+        for handle in handles {
+            worst = worst.max(handle.await.expect("caller task panicked"));
+        }
+
+        let ceiling = TIMEOUT * 3;
+        assert!(
+            worst <= ceiling,
+            "queued capture caller waited {worst:?} for a {TIMEOUT:?} bounded call \
+             ({CALLERS} callers, ceiling {ceiling:?})"
+        );
+    }
+
+    /// The other regime, for contrast: when callbacks never return, both
+    /// permits stay pinned and later callers fast-fail on the retry budget
+    /// instead of queueing. This caps the wait at ~2x timeout, which means a
+    /// permanent wedge alone cannot explain a multi-minute production freeze.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn enumeration_fast_fails_once_both_permits_are_pinned() {
+        const TIMEOUT: Duration = Duration::from_millis(100);
+        const CALLERS: usize = 6;
+
+        let serializer: &'static tokio::sync::Mutex<()> =
+            Box::leak(Box::new(tokio::sync::Mutex::new(())));
+        let workers = Arc::new(tokio::sync::Semaphore::new(2));
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let release_rx = Arc::new(std::sync::Mutex::new(release_rx));
+
+        let started = Instant::now();
+        let mut handles = Vec::new();
+        for _ in 0..CALLERS {
+            let workers = workers.clone();
+            let release_rx = release_rx.clone();
+            handles.push(tokio::spawn(async move {
+                let _ = run_bounded_sck_enumeration(serializer, workers, TIMEOUT, move || {
+                    // Park until the test releases us; models an Apple callback
+                    // that never comes back.
+                    let _ = release_rx.lock().expect("release lock").recv();
+                    Ok(1u8)
+                })
+                .await;
+                started.elapsed()
+            }));
+        }
+
+        let mut worst = Duration::ZERO;
+        for handle in handles {
+            worst = worst.max(handle.await.expect("caller task panicked"));
+        }
+        for _ in 0..CALLERS {
+            let _ = release_tx.send(());
+        }
+
+        assert!(
+            worst <= TIMEOUT * 4,
+            "with both permits pinned every later caller should fast-fail, \
+             but the worst wait was {worst:?}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
