@@ -108,6 +108,9 @@ export function SummaryCards({
 }: SummaryCardsProps) {
   const [showAll, setShowAll] = useState(false);
   const [showBuilder, setShowBuilder] = useState(false);
+  // Progressive disclosure (DESIGN.md core value): the quick-action shelf is
+  // opt-in so a new chat presents one obvious action, not eight.
+  const [showMore, setShowMore] = useState(false);
   const [editingTemplate, setEditingTemplate] = useState<CustomTemplate | null>(null);
   // Curated home grid — kept deliberately small to reduce cognitive load.
   // Order matters. Definitions come from the app bundle (FALLBACK_TEMPLATES)
@@ -186,7 +189,7 @@ export function SummaryCards({
         <button
           data-testid={`summary-card-${featured[0].name}`}
           onClick={() => handleCardClick(featured[0])}
-          className="group w-full max-w-lg mb-1.5 text-left px-4 py-3.5 border border-border/40 bg-amber-500/[0.06] dark:bg-amber-400/[0.08] hover:!bg-foreground hover:text-background hover:border-foreground transition-all duration-150 cursor-pointer"
+          className="group relative w-full max-w-lg mb-1.5 text-left px-4 py-3.5 border border-border/40 border-l-2 border-l-phosphor-strong hover:!bg-foreground hover:text-background hover:border-foreground hover:border-l-phosphor transition-all duration-150 cursor-pointer"
         >
           <div className="flex items-center gap-3">
             <HomeCardIcon
@@ -239,7 +242,7 @@ export function SummaryCards({
           column's edges (brick fill) instead of leaving a ragged right edge. */}
       <div className="w-full max-w-lg mb-4 flex flex-wrap items-center gap-1">
         {/* Template-backed chips (Time Breakdown, Missed To-Dos) */}
-        {featured.slice(2).map((pipe) => (
+        {showMore && featured.slice(2).map((pipe) => (
           <button
             key={pipe.name}
             data-testid={`summary-card-${pipe.name}`}
@@ -250,7 +253,7 @@ export function SummaryCards({
           </button>
         ))}
         {/* Quick summary chips */}
-        {[
+        {showMore && [
           { label: "Meeting Prep", prompt: "Summarize context I'll need for upcoming meetings" },
           { label: "Blockers", prompt: "What problems, errors, or blockers did I encounter?" },
         ].map((qt) => (
@@ -273,6 +276,19 @@ export function SummaryCards({
             {qt.label}
           </button>
         ))}
+        {!showMore && (
+          <button
+            type="button"
+            data-testid="summary-cards-more"
+            onClick={() => {
+              posthog.capture("home_card_clicked", { kind: "more_disclosure" });
+              setShowMore(true);
+            }}
+            className="grow px-2 py-0.5 text-[11px] font-mono tracking-wide bg-muted/20 hover:bg-foreground hover:text-background border border-border/30 hover:border-foreground text-muted-foreground/70 transition-all duration-150 cursor-pointer"
+          >
+            more
+          </button>
+        )}
         {/* User's saved templates — chips slightly fainter than built-ins with
             a pin glyph marking them as user-owned. Full text and management
             (edit/delete) live in the edit dialog. */}

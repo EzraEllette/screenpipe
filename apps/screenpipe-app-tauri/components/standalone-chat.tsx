@@ -1120,6 +1120,7 @@ export function StandaloneChat({
     flushPendingSteerBatch,
     handleStop,
     openConnectionSetup,
+    pendingSend,
     sendMessage,
     steerMessage,
     steerQueuedPrompt,
@@ -1983,6 +1984,7 @@ export function StandaloneChat({
         className={className}
         conversationId={conversationId}
         messages={messages}
+        pendingUserText={pendingSend?.text ?? null}
         sidebarCollapsed={sidebarCollapsed}
         isMac={isMac}
         isFullscreen={isFullscreen}
@@ -2067,6 +2069,7 @@ export function StandaloneChat({
         onChatContextMenu={handleChatContextMenu}
         messages={messages}
         isPreparingPrefill={isPreparingPrefill}
+        pendingSend={pendingSend}
         activePipeExecution={activePipeExecution}
         continuousPipeChat={continuousPipeChat}
         isLoading={isLoading}

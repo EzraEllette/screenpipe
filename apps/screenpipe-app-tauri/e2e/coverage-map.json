@@ -834,6 +834,25 @@
       "notes": "Opt-in full-stack hosted-AI path: the E2E app and real Pi route through the Rust-validated loopback URL into the production Worker bundle under Miniflare, with migrated local D1 and network-closed fake provider egress, then the streamed answer reaches the real chat UI."
     },
     {
+      "spec": "chat-new-chat-first-message-ux.spec.ts",
+      "platforms": [
+        "macos"
+      ],
+      "layers": [
+        "chat-ai",
+        "real-ui-e2e"
+      ],
+      "features": [
+        "chat",
+        "chat-first-message-ux",
+        "chat-turn-status"
+      ],
+      "criticality": "medium",
+      "confidence": "partial",
+      "ux": "real-user-flow",
+      "notes": "Real + new chat through the first assistant token over a cold Pi start: pins that the message and cleared composer land in the send frame, that only one status element is ever mounted, and that the pane never snaps alignment. Opt-in (SCREENPIPE_E2E_LOCAL_AI_GATEWAY)."
+    },
+    {
       "spec": "chat-new-session-stale-save.spec.ts",
       "platforms": [
         "windows",

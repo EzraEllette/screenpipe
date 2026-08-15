@@ -4,7 +4,7 @@
 "use client";
 
 import * as React from "react";
-import { ChevronDown, Loader2, Settings, Workflow } from "lucide-react";
+import { ChevronDown, Settings, Workflow } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { SummaryCards } from "@/components/chat/summary-cards";
 import { FirstRunLearningBanner } from "@/components/first-run/learning-banner";
@@ -66,6 +66,11 @@ interface ChatMainPaneProps {
     "summaryCardsProps"
   >;
   messageListProps: ChatMessageListProps;
+  /**
+   * A dispatched send whose durable row has not landed yet. Rendered as the
+   * user's bubble so the transcript is never empty during the preflight.
+   */
+  pendingSend?: { text: string; displayLabel?: string } | null;
   isUserScrolledUp: boolean;
   scrollToBottom: () => void;
 }
@@ -101,6 +106,7 @@ export function ChatMainPane({
   summaryCardsProps,
   homeStarterProps,
   messageListProps,
+  pendingSend,
   isUserScrolledUp,
   scrollToBottom,
   firstRunAiPreset,
@@ -126,6 +132,7 @@ export function ChatMainPane({
         <div
           ref={scrollContainerRef}
           data-testid="chat-message-scroll"
+          role="log"
           className="h-full overflow-y-auto overflow-x-hidden"
           onScroll={onMessagesScroll}
           onContextMenu={onChatContextMenu}
@@ -133,7 +140,8 @@ export function ChatMainPane({
           <div className={cn(
             CHAT_RAIL_CLASS,
             "px-5 sm:px-6 py-4 space-y-4",
-            messages.length === 0 && !isPreparingPrefill && !activePipeExecution
+            messages.length === 0 && !pendingSend && !isLoading && !isStreaming
+              && !isPreparingPrefill && !activePipeExecution
               && "min-h-full flex flex-col items-center justify-center"
           )}>
             {continuousPipeChat && (
@@ -181,27 +189,6 @@ export function ChatMainPane({
                 executionId={activePipeExecution.executionId}
               />
             )}
-            {messages.length === 0 &&
-              !isPreparingPrefill &&
-              !activePipeExecution &&
-              (isLoading || isStreaming) && (
-                <div
-                  data-testid="chat-empty-active-turn"
-                  role="status"
-                  aria-live="polite"
-                  className="flex max-w-sm flex-col items-center gap-3 py-12 text-center"
-                >
-                  <div className="rounded-full border border-border/60 bg-muted/50 p-3">
-                    <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
-                  </div>
-                  <div className="space-y-1">
-                    <h3 className="font-medium">Working on your message</h3>
-                    <p className="text-sm text-muted-foreground">
-                      Your message is saved. Starting the AI can take a moment.
-                    </p>
-                  </div>
-                </div>
-              )}
             {messages.length === 0 &&
               !isPreparingPrefill &&
               !activePipeExecution &&
@@ -273,6 +260,7 @@ export function ChatMainPane({
               </div>
             )}
             {messages.length === 0 &&
+              !pendingSend &&
               !isPreparingPrefill &&
               !activePipeExecution &&
               !isLoading &&
@@ -284,6 +272,23 @@ export function ChatMainPane({
                   {...homeStarterProps}
                 />
               )}
+            {/* The message the user just sent, shown from the send frame until
+                the durable row replaces it. Same geometry as a real user row so
+                nothing moves when the swap happens. */}
+            {pendingSend && (
+              <div
+                data-testid="chat-pending-user-message"
+                className="relative flex min-w-0 justify-end"
+              >
+                <div className="group/message flex min-w-0 max-w-[82%] flex-col items-end">
+                  <div className="relative max-w-full overflow-hidden rounded-xl bg-muted/60 px-4 py-3 text-sm text-foreground">
+                    <p className="whitespace-pre-wrap break-words">
+                      {pendingSend.displayLabel ?? pendingSend.text}
+                    </p>
+                  </div>
+                </div>
+              </div>
+            )}
             {/* A conversation switch is a hard visual boundary. Remounting the
                 list prevents AnimatePresence from carrying an outgoing chat's
                 exit nodes into the new chat's empty state. */}

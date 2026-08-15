@@ -18,6 +18,17 @@ describe("SummaryCards", () => {
     vi.clearAllMocks();
   });
 
+/**
+ * The built-in extras beyond the two featured cards now sit behind a `more`
+ * disclosure, so an empty chat opens with one obvious action instead of eight.
+ * These assertions are about ordering and dispatch, which are unchanged — they
+ * just have to open the shelf first, the way a user would.
+ */
+function revealBuiltInShelf(): void {
+  const more = screen.queryByTestId("summary-cards-more");
+  if (more) fireEvent.click(more);
+}
+
   it("prioritizes cards from the saved onboarding goal", () => {
     render(
       <SummaryCards
@@ -29,6 +40,8 @@ describe("SummaryCards", () => {
         userGoalCategory="work_patterns"
       />,
     );
+
+    revealBuiltInShelf();
 
     const cards = screen.getAllByTestId(/^summary-card-/);
     expect(cards.slice(0, 4).map((card) => card.dataset.testid)).toEqual([
@@ -63,6 +76,8 @@ describe("SummaryCards", () => {
       <SummaryCards {...props} userGoalCategory="meeting_follow_through" />,
     );
 
+    revealBuiltInShelf();
+
     const cards = screen.getAllByTestId(/^summary-card-/);
     expect(cards.slice(0, 4).map((card) => card.dataset.testid)).toEqual([
       "summary-card-missed-todos",
@@ -70,6 +85,53 @@ describe("SummaryCards", () => {
       "summary-card-automate-my-work",
       "summary-card-time-breakdown",
     ]);
+  });
+
+  it("opens with one obvious action and keeps the built-in extras behind more", () => {
+    render(
+      <SummaryCards
+        onSendMessage={vi.fn()}
+        customTemplates={[]}
+        onSaveCustomTemplate={vi.fn()}
+        onUpdateCustomTemplate={vi.fn()}
+        onDeleteCustomTemplate={vi.fn()}
+        userGoalCategory="work_memory"
+      />,
+    );
+
+    // Only the hero and its one alternative. Eight simultaneous targets on an
+    // empty chat is the clutter this disclosure exists to remove.
+    expect(screen.getAllByTestId(/^summary-card-/)).toHaveLength(2);
+    expect(screen.queryByText("Meeting Prep")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("summary-cards-more"));
+
+    expect(screen.getAllByTestId(/^summary-card-/).length).toBeGreaterThan(2);
+    expect(screen.getByText("Meeting Prep")).toBeInTheDocument();
+    expect(screen.queryByTestId("summary-cards-more")).not.toBeInTheDocument();
+  });
+
+  it("never hides the user's own saved templates behind the disclosure", () => {
+    render(
+      <SummaryCards
+        onSendMessage={vi.fn()}
+        customTemplates={[
+          {
+            id: "tpl-1",
+            title: "Client recap",
+            prompt: "recap my client work",
+            timeRange: "today",
+          } as never,
+        ]}
+        onSaveCustomTemplate={vi.fn()}
+        onUpdateCustomTemplate={vi.fn()}
+        onDeleteCustomTemplate={vi.fn()}
+      />,
+    );
+
+    // Progressive disclosure hides our defaults, never the user's own work.
+    expect(screen.getByText("Client recap")).toBeInTheDocument();
+    expect(screen.getByText("+ custom")).toBeInTheDocument();
   });
 
   it("dispatches every built-in home card once with its visible label", () => {
@@ -83,6 +145,8 @@ describe("SummaryCards", () => {
         onDeleteCustomTemplate={vi.fn()}
       />,
     );
+
+    revealBuiltInShelf();
 
     const cards = [
       ["automate-my-work", "⚡ Automate My Work"],
