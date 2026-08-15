@@ -2185,15 +2185,58 @@ pub fn init_store(app: &AppHandle) -> Result<SettingsStore, String> {
         }
         Err(e) => {
             is_new_store = false;
-            // Fallback to defaults when deserialization fails (e.g., corrupted store)
-            // DON'T save - preserve original store in case it can be manually recovered
-            // This prevents crashes from invalid values like negative integers in u32 fields
-            // Non-fatal — logged as warn (not error) so Sentry doesn't pick it up.
-            warn!(
-                "Failed to deserialize settings, using defaults (store not overwritten): {}",
+            // Falling straight through to defaults here disabled the product.
+            //
+            // Defaults carry no account and no plan, so `local_plan_policy()`
+            // reads `Unknown`, the consumer recording gate refuses with
+            // `account_required`, and the engine never starts — `boot_phase`
+            // stays `idle` while onboarding waits on a readiness signal that
+            // cannot arrive. And because the bad file was deliberately left in
+            // place, it repeated on every launch: 178 Windows users on 2.6.21
+            // relaunched 6.5 times each and never once reached a started engine.
+            //
+            // L2 already restores a snapshot when store.bin *parses* but is
+            // degraded. A torn file — exactly what `durable_write`'s old shared
+            // temp path could produce by renaming a half-written temp over the
+            // target — does not parse, so it never reached that path. Run the
+            // same recovery here before surrendering to defaults.
+            //
+            // Logged at error, not warn. The previous level was chosen so
+            // "Sentry doesn't pick it up", which is backwards for a failure that
+            // silently turns recording off and self-perpetuates; it is why this
+            // ran unnoticed for 25 hours with no alert.
+            tracing::error!(
+                "settings failed to deserialize, attempting snapshot recovery: {}",
                 e
             );
-            (SettingsStore::default(), false, false)
+
+            let recovered = get_base_dir(app, None)
+                .ok()
+                .map(|base_dir| base_dir.join("store.bin"))
+                .filter(|store_path| {
+                    restore_snapshot_over(store_path, "store.bin failed to deserialize")
+                })
+                .and_then(|_| SettingsStore::get(app).ok().flatten());
+
+            match recovered {
+                Some(store) => {
+                    tracing::warn!(
+                        "settings recovered from a healthy snapshot after a deserialize failure"
+                    );
+                    (store, should_persist_restart_notification_migration, true)
+                }
+                None => {
+                    // Still don't overwrite: the file stays for forensics and a
+                    // later manual recovery. But say plainly what the user is
+                    // about to experience instead of logging it as routine.
+                    tracing::error!(
+                        "settings deserialize failure with no healthy snapshot — starting from \
+                         defaults; recording stays gated until an account refresh restores a \
+                         verified plan"
+                    );
+                    (SettingsStore::default(), false, false)
+                }
+            }
         }
     };
 
@@ -2834,6 +2877,49 @@ mod tests {
         }));
 
         assert!(!store.has_current_app_entitlement());
+    }
+
+    /// An unreadable store must not read as "signed out".
+    ///
+    /// `SettingsStore::get` substitutes `SettingsStore::default()` when the read
+    /// fails. A defaulted store carries no account and no plan, so
+    /// `local_plan_policy()` is `Unknown`, and the consumer recording gate
+    /// (`recording_access_policy(.., has_verified_local_plan = false, ..)`,
+    /// already asserted false in recording.rs) refuses to start the engine with
+    /// `account_required`. The engine then never starts, `boot_phase` stays
+    /// `idle`, and onboarding waits on a readiness signal that cannot arrive.
+    ///
+    /// That is a lockout caused by an unreadable file rather than by the user's
+    /// actual entitlement, and it is durable: 178 Windows users on 2.6.21
+    /// relaunched 6.5 times each and never once reached a started engine.
+    /// Conflating the two states is the defect; this pins the conflation.
+    #[test]
+    fn unreadable_store_defaults_to_unknown_and_locks_the_engine_out() {
+        // What a failed read hands the gate.
+        assert_eq!(
+            SettingsStore::default().local_plan_policy(),
+            LocalPlanPolicy::Unknown,
+            "a defaulted store must be Unknown — this is what gates the engine off"
+        );
+
+        // Same code, same build, only the store contents differ: a signed-in
+        // free account is allowed to record. So the lockout is entirely a
+        // function of whether the store survived, not of entitlement.
+        let mut signed_in = SettingsStore::default();
+        signed_in.user.id = Some("user_free".to_string());
+        signed_in.user.subscription_plan = Some("none".to_string());
+        signed_in.user.entitlement = Some(json!({
+            "active": true,
+            "plan": "none",
+            "source": "free",
+            "checked_at": chrono::Utc::now().to_rfc3339(),
+            "features": { "app": true, "cloud": false }
+        }));
+        assert_eq!(
+            signed_in.local_plan_policy(),
+            LocalPlanPolicy::VerifiedFree,
+            "an intact signed-in free store must clear the gate"
+        );
     }
 
     #[test]
