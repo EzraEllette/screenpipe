@@ -27,6 +27,7 @@ const mocks = vi.hoisted(() => ({
     user: null as null | {
       cloud_subscribed?: boolean;
       has_payment_method?: boolean;
+      entitlement_source?: string;
       // Plan selection needs a token to do anything: without one it can neither
       // load checkout nor start the cardless trial, so page.tsx keeps the slide
       // out of visibleOrder. Seed it wherever a signed-in user is intended.
@@ -34,11 +35,6 @@ const mocks = vi.hoisted(() => ({
     },
   },
   isSettingsLoaded: true,
-  // The onboarding card capture is a placement of the card-ask experiment, so
-  // the arm decides whether the flow walks into it. Default to active so the
-  // pre-existing slide-order assertions keep testing slide order rather than
-  // silently re-testing the experiment gate.
-  cardAskPlacement: { active: true, arm: "at_onboarding" as string | null },
 }));
 
 const onboardingData = { currentStep: "login", isCompleted: false };
@@ -132,15 +128,12 @@ vi.mock("@/lib/utils/tauri", () => ({
 }));
 vi.mock("posthog-js", () => ({ default: { capture: mocks.capture } }));
 
-vi.mock("@/lib/hooks/use-card-ask", () => ({
-  useCardAskPlacement: () => mocks.cardAskPlacement,
-}));
-
 import OnboardingPage from "./page";
 
 describe("enterprise onboarding authentication", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    window.history.replaceState({}, "", "/onboarding");
     mocks.enterprisePolicy = {
       isManagedDeployment: true,
       isManagedDeploymentResolved: true,
@@ -155,7 +148,6 @@ describe("enterprise onboarding authentication", () => {
     mocks.settings.deviceTier = "low";
     mocks.settings.user = null;
     mocks.isSettingsLoaded = true;
-    mocks.cardAskPlacement = { active: true, arm: "at_onboarding" };
   });
 
   it("offers regular sign-in and Enterprise Key on the login step", () => {
@@ -192,6 +184,24 @@ describe("enterprise onboarding authentication", () => {
       funnel_version: "onboarding_ui_v2",
       step: "started",
     });
+  });
+
+  it("restores the plan controller after hosted checkout returns", async () => {
+    window.history.replaceState({}, "", "/onboarding?checkout=complete");
+    mocks.enterprisePolicy.isManagedDeployment = false;
+    mocks.settings.user = {
+      token: "token-1",
+      cloud_subscribed: true,
+      has_payment_method: true,
+    };
+    onboardingData.currentStep = "engine";
+
+    render(<OnboardingPage />);
+
+    expect(screen.getByText("plan selection")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(mocks.setOnboardingStep).toHaveBeenCalledWith("plan"),
+    );
   });
 
   it("leaves login completion analytics to the login gate", async () => {
@@ -258,7 +268,11 @@ describe("enterprise onboarding authentication", () => {
   // on the payment slide. One size, applied once, for the whole flow.
   it("sizes the window once instead of resizing per slide", async () => {
     mocks.enterprisePolicy.isManagedDeployment = false;
-    mocks.settings.user = { has_payment_method: false, token: "tok" };
+    mocks.settings.user = {
+      has_payment_method: false,
+      entitlement_source: "none",
+      token: "tok",
+    };
     onboardingData.currentStep = "engine";
 
     render(<OnboardingPage />);
@@ -288,9 +302,13 @@ describe("enterprise onboarding authentication", () => {
     expect(screen.queryByText("connect apps")).not.toBeInTheDocument();
   });
 
-  it("shows plan selection last for signed-in consumer onboarding", async () => {
+  it("shows plan selection last for a new free consumer account", async () => {
     mocks.enterprisePolicy.isManagedDeployment = false;
-    mocks.settings.user = { has_payment_method: false, token: "tok" };
+    mocks.settings.user = {
+      has_payment_method: false,
+      entitlement_source: "none",
+      token: "tok",
+    };
     onboardingData.currentStep = "engine";
 
     render(<OnboardingPage />);
@@ -338,11 +356,12 @@ describe("enterprise onboarding authentication", () => {
     expect(screen.queryByText("plan selection")).not.toBeInTheDocument();
   });
 
-  it("collects payment during a cardless trial", async () => {
+  it("does not collect payment from an existing cardless trial", async () => {
     mocks.enterprisePolicy.isManagedDeployment = false;
     mocks.settings.user = {
       cloud_subscribed: true,
       has_payment_method: false,
+      entitlement_source: "manual",
       token: "tok",
     };
     onboardingData.currentStep = "engine";
@@ -350,53 +369,21 @@ describe("enterprise onboarding authentication", () => {
     render(<OnboardingPage />);
     fireEvent.click(await screen.findByRole("button", { name: "finish engine" }));
 
-    expect(await screen.findByText("plan selection")).toBeInTheDocument();
-    expect(mocks.completeOnboarding).not.toHaveBeenCalled();
-  });
-
-  // Regression for the contamination measured on 2026-08-12. The slide used to
-  // run outside the experiment, so ~19% of the control arm was asked for a card
-  // anyway and control stopped being a no-ask counterfactual.
-  it("finishes setup without asking when the arm does not own the placement", async () => {
-    mocks.enterprisePolicy.isManagedDeployment = false;
-    mocks.settings.user = {
-      cloud_subscribed: true,
-      has_payment_method: false,
-      token: "tok",
-    };
-    mocks.cardAskPlacement = { active: false, arm: "control" };
-    onboardingData.currentStep = "engine";
-
-    render(<OnboardingPage />);
-    fireEvent.click(await screen.findByRole("button", { name: "finish engine" }));
-
-    await waitFor(() => expect(mocks.completeOnboarding).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(mocks.completeOnboarding).toHaveBeenCalledWith({
+        method: "setup_finished",
+      }),
+    );
     expect(screen.queryByText("plan selection")).not.toBeInTheDocument();
   });
 
-  // The kill switch has to reach this surface too, otherwise "turn it off"
-  // still leaves every new install being asked during setup.
-  it("finishes setup without asking when the kill switch is off", async () => {
+  it("marks checkout as required while keeping funnel keys stable", async () => {
     mocks.enterprisePolicy.isManagedDeployment = false;
     mocks.settings.user = {
-      cloud_subscribed: true,
       has_payment_method: false,
+      entitlement_source: "none",
       token: "tok",
     };
-    mocks.cardAskPlacement = { active: false, arm: "at_onboarding" };
-    onboardingData.currentStep = "engine";
-
-    render(<OnboardingPage />);
-    fireEvent.click(await screen.findByRole("button", { name: "finish engine" }));
-
-    await waitFor(() => expect(mocks.completeOnboarding).toHaveBeenCalled());
-    expect(screen.queryByText("plan selection")).not.toBeInTheDocument();
-  });
-
-  it("stamps the arm on funnel steps so the cliff is measurable", async () => {
-    mocks.enterprisePolicy.isManagedDeployment = false;
-    mocks.settings.user = { has_payment_method: false, token: "tok" };
-    mocks.cardAskPlacement = { active: false, arm: "control" };
     onboardingData.currentStep = "engine";
 
     render(<OnboardingPage />);
@@ -406,8 +393,8 @@ describe("enterprise onboarding authentication", () => {
       expect(mocks.capture).toHaveBeenCalledWith(
         "onboarding_step_reached",
         expect.objectContaining({
-          card_ask_arm: "control",
-          card_ask_placement_active: false,
+          card_ask_arm: "required",
+          card_ask_placement_active: true,
         }),
       ),
     );
