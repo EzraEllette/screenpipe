@@ -8,6 +8,7 @@ import React, {
   useEffect,
   useLayoutEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import {
@@ -65,6 +66,7 @@ import {
   preferredShareDestination,
   readRememberedShare,
   writeRememberedShare,
+  type RememberedShare,
 } from "@/lib/connected-share-preference";
 import { showChatWithPrefill } from "@/lib/chat-utils";
 
@@ -266,6 +268,50 @@ export function ConnectedShareDialog({
   const [linearTeamId, setLinearTeamId] = useState("");
   const [linearTitle, setLinearTitle] = useState(artifact.title);
 
+  /**
+   * The remembered destination, held until the list that owns it has loaded.
+   *
+   * Recall has to survive the two fetches that follow it. Both the Slack
+   * channel list and the Linear team list reset their own selection when they
+   * resolve — correctly, because switching workspace must not keep a channel
+   * from the previous one — and that reset used to land *after* the remembered
+   * target was restored, throwing it away before the user ever saw it. Only the
+   * destination app survived, so the weekly standup still had to re-pick its
+   * channel every time.
+   *
+   * Parking it in a ref lets each list claim its own value exactly once, after
+   * it can check the value still exists. A later switch by the user finds the
+   * recall already spent and resets as before.
+   */
+  const pendingRecallRef = useRef<RememberedShare | null>(null);
+
+  /**
+   * Claim the remembered target for a destination, once.
+   *
+   * Gated on the destination matching because `target` holds a Slack channel or
+   * a Linear team depending on where the last send went; a channel id must not
+   * be offered to the team list. Consumed even when it turns out to be stale so
+   * a failed match is not retried on the next reload.
+   */
+  const claimRecalledTarget = useCallback(
+    (forDestination: Destination): string | null => {
+      const pending = pendingRecallRef.current;
+      if (!pending?.target || pending.destination !== forDestination) {
+        return null;
+      }
+      pendingRecallRef.current = { ...pending, target: undefined };
+      return pending.target;
+    },
+    [],
+  );
+
+  const claimRecalledInstance = useCallback((): string | null => {
+    const pending = pendingRecallRef.current;
+    if (!pending?.instance) return null;
+    pendingRecallRef.current = { ...pending, instance: undefined };
+    return pending.instance;
+  }, []);
+
   const resetPreview = useCallback(
     (ids: string[]) => {
       const rendered = renderConnectedShareArtifact(artifact, ids);
@@ -284,6 +330,7 @@ export function ConnectedShareDialog({
 
   useEffect(() => {
     if (!open) return;
+    pendingRecallRef.current = null;
     resetPreview(allSectionIds);
     setLinearTitle(artifact.title);
     // Stays null until the connection check says what is actually reachable.
@@ -350,10 +397,21 @@ export function ConnectedShareDialog({
           ...(ready.chat.linear ? ["chat-linear"] : []),
           ...(ready.chat.notion ? ["chat-notion"] : []),
         ];
-        setDestination(
-          preferredShareDestination(remembered, connected) as Destination | null,
-        );
-        if (remembered?.target) setSlackTarget(remembered.target);
+        const nextDestination = preferredShareDestination(
+          remembered,
+          connected,
+        ) as Destination | null;
+        setDestination(nextDestination);
+        // Park the rest of the recall for the channel and team lists to claim
+        // once they can confirm the remembered value still exists. Dropped when
+        // the destination is gone, so a revoked Slack connection cannot leave a
+        // channel selected under a destination the user has to re-pick anyway.
+        pendingRecallRef.current =
+          remembered && nextDestination === remembered.destination
+            ? remembered
+            : null;
+        // The workspace is safe to apply now: it decides which channel list is
+        // fetched, so waiting would fetch the wrong workspace and refetch.
         if (remembered?.instance) setSlackInstance(remembered.instance);
       })
       .catch((error) => {
@@ -401,20 +459,36 @@ export function ConnectedShareDialog({
           }));
         if (cancelled) return;
         setSlackInstances(instances);
-        setSlackInstance(instances[0]?.instance ?? DEFAULT_SLACK_INSTANCE);
+        // Keep the remembered workspace when it is still connected; a stale one
+        // falls back to the first rather than selecting nothing.
+        const recalled = claimRecalledInstance();
+        const stillConnected =
+          recalled !== null &&
+          instances.some(
+            (entry) => (entry.instance ?? DEFAULT_SLACK_INSTANCE) === recalled,
+          );
+        setSlackInstance(
+          stillConnected
+            ? recalled
+            : (instances[0]?.instance ?? DEFAULT_SLACK_INSTANCE),
+        );
       })
       .catch(() => undefined);
     return () => {
       cancelled = true;
     };
-  }, [availability.direct.slack, open]);
+  }, [availability.direct.slack, claimRecalledInstance, open]);
 
   useEffect(() => {
     if (!open || !availability.direct.slack || destination !== "slack") return;
     let cancelled = false;
     setSlackChannelsLoading(true);
     setSlackChannelsError(null);
-    setSlackTarget(SELF_SLACK_TARGET);
+    // Clear the selection while the list reloads, so a channel from the
+    // workspace being switched away from cannot stay selected. Held back when a
+    // recall is still pending: that one is applied below, once it can be
+    // checked against the channels that actually came back.
+    if (!pendingRecallRef.current?.target) setSlackTarget(SELF_SLACK_TARGET);
     const instanceQuery =
       slackInstance !== DEFAULT_SLACK_INSTANCE
         ? `&instance=${encodeURIComponent(slackInstance)}`
@@ -442,11 +516,27 @@ export function ConnectedShareDialog({
           })) as SlackChannel[];
       })
       .then((channels) => {
-        if (!cancelled) setSlackChannels(channels);
+        if (cancelled) return;
+        setSlackChannels(channels);
+        // A remembered channel is only restored once the list proves it is
+        // still there. A deleted or now-inaccessible channel falls back to the
+        // private self-send rather than sitting selected and failing on send.
+        const recalled = claimRecalledTarget("slack");
+        if (recalled) {
+          setSlackTarget(
+            channels.some((channel) => channel.id === recalled)
+              ? recalled
+              : SELF_SLACK_TARGET,
+          );
+        }
       })
       .catch((error) => {
         if (cancelled) return;
         setSlackChannels([]);
+        // The recall cannot be checked against a list that failed to load, so
+        // spend it and fall back rather than leaving a channel selected that
+        // may no longer exist.
+        if (claimRecalledTarget("slack")) setSlackTarget(SELF_SLACK_TARGET);
         setSlackChannelsError(
           error instanceof Error
             ? error.message
@@ -461,6 +551,7 @@ export function ConnectedShareDialog({
     };
   }, [
     availability.direct.slack,
+    claimRecalledTarget,
     destination,
     open,
     slackInstance,
@@ -490,7 +581,12 @@ export function ConnectedShareDialog({
       .then((teams) => {
         if (cancelled) return;
         setLinearTeams(teams);
-        setLinearTeamId(teams[0]?.id ?? "");
+        // Same rule as the Slack channel: the remembered team is used only if
+        // it is still in the list this account can see.
+        const recalled = claimRecalledTarget("linear");
+        const stillVisible =
+          recalled !== null && teams.some((team) => team.id === recalled);
+        setLinearTeamId(stillVisible ? recalled : (teams[0]?.id ?? ""));
       })
       .catch((error) => {
         if (cancelled) return;
@@ -508,7 +604,13 @@ export function ConnectedShareDialog({
     return () => {
       cancelled = true;
     };
-  }, [availability.direct.linear, destination, linearRefresh, open]);
+  }, [
+    availability.direct.linear,
+    claimRecalledTarget,
+    destination,
+    linearRefresh,
+    open,
+  ]);
 
   const setSectionChecked = (id: string, checked: boolean) => {
     const next = checked
