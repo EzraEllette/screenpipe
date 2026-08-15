@@ -192,6 +192,34 @@ describe("meeting share control", () => {
     expect(onShare).toHaveBeenCalledWith("email");
   });
 
+  // `email summary` shipped inside the group headed `copy`, where it was the
+  // only row that wrote nothing to the clipboard — it opens a mailto: draft.
+  // The heading named a verb while the grouping followed the payload, so the
+  // one row that behaved differently was the one the label mispromised.
+  it("keeps the mail draft out of the group headed copy", async () => {
+    render(<MeetingShareMenu canShareSummary onShare={vi.fn()} />);
+
+    openMenu();
+
+    await screen.findByRole("menuitem", { name: /email summary/ });
+
+    // Both headings exist, so the mail draft has somewhere honest to live.
+    expect(screen.getByText("copy")).toBeVisible();
+    expect(screen.getByText("send")).toBeVisible();
+
+    // The clipboard rows come first, and the mail draft sorts after them —
+    // under `send`, not inside `copy`.
+    const labels = screen
+      .getAllByRole("menuitem")
+      .map((item) => item.textContent ?? "");
+    const lastClipboardIndex = labels.findLastIndex((label) =>
+      /^copy /.test(label),
+    );
+    const emailIndex = labels.findIndex((label) => /email summary/.test(label));
+    expect(lastClipboardIndex).toBeGreaterThanOrEqual(0);
+    expect(emailIndex).toBeGreaterThan(lastClipboardIndex);
+  });
+
   it("does not offer summary destinations mid-stream", async () => {
     render(<MeetingShareMenu canShareSummary={false} onShare={vi.fn()} />);
 

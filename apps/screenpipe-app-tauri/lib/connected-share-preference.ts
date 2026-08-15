@@ -90,12 +90,18 @@ export function writeRememberedShare(
  *
  * What you used last, if it is still connected. Otherwise the only connected
  * destination when there is exactly one — picking from a list of one asks a
- * question with a single answer. Otherwise `copy`.
+ * question with a single answer. Otherwise nothing.
  *
  * Auto-select deliberately does not apply once a remembered destination has
  * gone missing. Someone who sends to Slack every week, whose Slack connection
  * then drops, should not find the dialog quietly pointed at Linear with a
  * confirm button under their cursor. A vanished destination means ask again.
+ *
+ * The fallback used to be `copy`, which made "we could not work out where this
+ * should go" indistinguishable from "send this to your clipboard" — and made
+ * the clipboard the resting state of a dialog whose button says send. There is
+ * no local destination now, so the honest answer is `null` and the dialog says
+ * so instead of quietly aiming somewhere.
  */
 const DESTINATION_APP: Record<string, string> = {
   slack: "Slack",
@@ -121,14 +127,11 @@ export function rememberedSendLabel(
 export function preferredShareDestination(
   remembered: RememberedShare | null,
   connected: readonly string[],
-  fallback = "copy",
-): string {
+): string | null {
   if (remembered) {
     return connected.includes(remembered.destination)
       ? remembered.destination
-      : fallback;
+      : null;
   }
-  const sendable = connected.filter((entry) => entry !== fallback);
-  if (sendable.length === 1) return sendable[0];
-  return fallback;
+  return connected.length === 1 ? connected[0] : null;
 }
