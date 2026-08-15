@@ -252,6 +252,76 @@ private func testTieBreaksToCurrent() {
     }
 }
 
+/// The transcript card and a notification are separate panels at the same
+/// window level, both hanging off the same pill edge. Stacking is the only
+/// thing keeping the toast off the card's header row — and the alert that
+/// brought this up ("live transcript not flowing") only ever fires while a
+/// meeting is running, so the card is up by definition.
+private func testAttachmentStacking() {
+    let card = NSSize(width: 320, height: 142)
+    let toast = NSSize(width: 340, height: 34)
+    let margin = anchorMargin(scale: 1)
+
+    for disclosureDown in [true, false] {
+        // Pill at the top edge opens downward, and vice versa.
+        let pill = disclosureDown
+            ? NSRect(x: 949, y: visible.maxY - 4 - 16, width: 22, height: 16)
+            : NSRect(x: 949, y: visible.minY + 4, width: 22, height: 16)
+        let side = disclosureDown ? "down" : "up"
+
+        let cardY = overlayAttachmentY(
+            pill: pill, height: card.height, gap: 0, stacked: 0,
+            disclosureDown: disclosureDown, visible: visible, edgeInset: 4
+        )
+        // Butted against the bar: a gap here is a hole in the hover corridor.
+        expectClose(
+            disclosureDown ? cardY + card.height : cardY,
+            disclosureDown ? pill.minY : pill.maxY,
+            "card butts the pill (\(side))"
+        )
+
+        let toastY = overlayAttachmentY(
+            pill: pill, height: toast.height, gap: margin, stacked: card.height,
+            disclosureDown: disclosureDown, visible: visible, edgeInset: margin
+        )
+        let cardRect = NSRect(x: 949, y: cardY, width: card.width, height: card.height)
+        let toastRect = NSRect(x: 949, y: toastY, width: toast.width, height: toast.height)
+        expect(
+            !cardRect.intersects(toastRect),
+            "toast overlaps the transcript card (\(side)): \(toastRect) vs \(cardRect)"
+        )
+        // Past the card, not merely clear of it: the two read as one stack.
+        expectClose(
+            disclosureDown ? cardRect.minY - toastRect.maxY : toastRect.minY - cardRect.maxY,
+            margin,
+            "toast sits one margin past the card (\(side))"
+        )
+
+        // With no card up, the toast keeps hanging straight off the pill.
+        let aloneY = overlayAttachmentY(
+            pill: pill, height: toast.height, gap: margin, stacked: 0,
+            disclosureDown: disclosureDown, visible: visible, edgeInset: margin
+        )
+        expectClose(
+            disclosureDown ? pill.minY - (aloneY + toast.height) : aloneY - pill.maxY,
+            margin,
+            "lone toast hangs off the pill (\(side))"
+        )
+    }
+}
+
+/// Stacking must not push an attachment off the display; the clamp wins.
+private func testAttachmentStaysOnScreen() {
+    let tall: CGFloat = 900
+    let pill = NSRect(x: 949, y: visible.maxY - 4 - 16, width: 22, height: 16)
+    let y = overlayAttachmentY(
+        pill: pill, height: tall, gap: 4, stacked: 600,
+        disclosureDown: true, visible: visible, edgeInset: 4
+    )
+    expect(y >= visible.minY + 4, "stacked attachment ran off the bottom: \(y)")
+    expect(y + tall <= visible.maxY - 4, "stacked attachment ran off the top: \(y)")
+}
+
 /// Anchor raw values are a wire contract with Rust
 /// (`SHORTCUT_OVERLAY_ANCHORS` in `commands/native_actions.rs`). Renaming one
 /// silently stops persistence, so pin them here too.
@@ -271,6 +341,8 @@ struct ShortcutReminderTests {
         testLegacyCornersMigrate()
         testNearestAnchor()
         testTieBreaksToCurrent()
+        testAttachmentStacking()
+        testAttachmentStaysOnScreen()
         testWireContract()
 
         if failures.isEmpty {

@@ -23,7 +23,8 @@ struct ShortcutReminderPreview {
 
         let arguments = Array(CommandLine.arguments.dropFirst())
         if arguments.contains("--help") || arguments.contains("-h") {
-            print("usage: preview-shortcut-overlay.sh [--once] [--expanded] [--meeting] [--notification]")
+            print("usage: preview-shortcut-overlay.sh [--once] [--expanded] [--meeting]")
+            print("       [--pinned-meeting] [--notification]")
             print("       [--size small|medium|large]")
             print("       [--anchor top-center|right-center|bottom-center|left-center]")
             print("       [--drag-stage [--highlight <anchor>]]")
@@ -60,7 +61,9 @@ struct ShortcutReminderPreview {
         payloadJSON.withCString { pointer in
             _ = shortcutShow(pointer)
         }
-        if arguments.contains("--meeting") {
+        if arguments.contains("--pinned-meeting") {
+            ShortcutReminderController.shared.setPreviewPinnedMeeting()
+        } else if arguments.contains("--meeting") {
             ShortcutReminderController.shared.setPreviewMeeting()
         } else if arguments.contains("--expanded") {
             ShortcutReminderController.shared.setPreviewExpanded(true)
