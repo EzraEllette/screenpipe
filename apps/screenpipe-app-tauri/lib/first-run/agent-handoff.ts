@@ -82,6 +82,21 @@ const HANDOFF_TARGETS: AgentHandoffTarget[] = [
 ];
 
 /**
+ * Every connected target, in preference order.
+ *
+ * The user picks; we only decide the order. Someone with both Claude and Codex
+ * wired has a real preference we cannot read from disk, and silently choosing
+ * for them sends the answer to the wrong app — which looks like the handoff is
+ * broken rather than aimed elsewhere.
+ */
+export function pickHandoffTargets(
+  connected: readonly ConnectAllToolId[],
+): AgentHandoffTarget[] {
+  const available = new Set(connected);
+  return HANDOFF_TARGETS.filter((target) => available.has(target.id));
+}
+
+/**
  * First connected target in preference order, or null when the user has no
  * connected agent — in which case the caller must fall back to the in-app
  * summary rather than advertising an app that is not there.
@@ -89,8 +104,7 @@ const HANDOFF_TARGETS: AgentHandoffTarget[] = [
 export function pickHandoffTarget(
   connected: readonly ConnectAllToolId[],
 ): AgentHandoffTarget | null {
-  const available = new Set(connected);
-  return HANDOFF_TARGETS.find((target) => available.has(target.id)) ?? null;
+  return pickHandoffTargets(connected)[0] ?? null;
 }
 
 /** Exposed for tests and for callers that need the whole preference order. */

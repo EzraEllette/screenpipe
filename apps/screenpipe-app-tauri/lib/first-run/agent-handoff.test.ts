@@ -8,7 +8,29 @@ import {
   HANDOFF_PROMPT,
   handoffTargets,
   pickHandoffTarget,
+  pickHandoffTargets,
 } from "./agent-handoff";
+
+describe("pickHandoffTargets", () => {
+  it("returns every connected agent, in preference order", () => {
+    // Order is ours, choice is the user's. Returning only the first hid Codex
+    // from anyone who also had Claude installed.
+    expect(pickHandoffTargets(["codex", "cursor", "claude"]).map((t) => t.id)).toEqual(
+      ["claude", "cursor", "codex"],
+    );
+  });
+
+  it("drops unsupported tools instead of offering a dead button", () => {
+    expect(pickHandoffTargets(["hermes", "windsurf", "codex"]).map((t) => t.id)).toEqual(
+      ["codex"],
+    );
+  });
+
+  it("returns nothing when no connected agent is supported", () => {
+    expect(pickHandoffTargets([])).toEqual([]);
+    expect(pickHandoffTargets(["hermes"])).toEqual([]);
+  });
+});
 
 describe("pickHandoffTarget", () => {
   it("returns null with no connected agent, so the caller falls back", () => {

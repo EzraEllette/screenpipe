@@ -13,11 +13,11 @@ const mocks = vi.hoisted(() => ({
   view: {} as LearningWindowView,
   emit: vi.fn().mockResolvedValue(undefined),
   handoff: {
-    target: null,
+    targets: [],
     hint: null,
     askAgent: vi.fn().mockResolvedValue(undefined),
   } as {
-    target: { id: string; label: string; deeplink?: string; hint: string } | null;
+    targets: { id: string; label: string; deeplink?: string; hint: string }[];
     hint: string | null;
     askAgent: ReturnType<typeof vi.fn>;
   },
@@ -52,7 +52,7 @@ beforeEach(() => {
   // Default: no connected agent. Every handoff assertion opts in explicitly so
   // the fallback path is what the other tests exercise.
   mocks.handoff = {
-    target: null,
+    targets: [],
     hint: null,
     askAgent: vi.fn().mockResolvedValue(undefined),
   };
@@ -136,6 +136,18 @@ describe("first-run learning banner", () => {
   });
 });
 
+const CLAUDE = {
+  id: "claude",
+  label: "Claude",
+  deeplink: "claude://claude",
+  hint: "Claude opens with the question copied. Paste it to run.",
+};
+const CODEX = {
+  id: "codex",
+  label: "Codex",
+  hint: "Question copied. Paste it into your Codex terminal session.",
+};
+
 describe("agent handoff on the ready summary", () => {
   beforeEach(() => {
     mocks.view = view({ phase: "ready", chatId: "first-run-handoff" });
@@ -150,12 +162,7 @@ describe("agent handoff on the ready summary", () => {
   });
 
   it("offers to open a deeplinkable agent alongside the summary", () => {
-    mocks.handoff.target = {
-      id: "claude",
-      label: "Claude",
-      deeplink: "claude://claude",
-      hint: "Claude opens with the question copied. Paste it to run.",
-    };
+    mocks.handoff.targets = [CLAUDE];
     render(<FirstRunLearningBanner />);
 
     const ask = screen.getByTestId("first-run-ask-agent");
@@ -166,11 +173,7 @@ describe("agent handoff on the ready summary", () => {
   });
 
   it("says copy, not ask, for an agent it cannot bring forward", () => {
-    mocks.handoff.target = {
-      id: "codex",
-      label: "Codex",
-      hint: "Question copied. Paste it into your Codex terminal session.",
-    };
+    mocks.handoff.targets = [CODEX];
     render(<FirstRunLearningBanner />);
     expect(screen.getByTestId("first-run-ask-agent")).toHaveTextContent(
       "Copy for Codex",
@@ -178,24 +181,38 @@ describe("agent handoff on the ready summary", () => {
   });
 
   it("runs the handoff on click", () => {
-    mocks.handoff.target = {
-      id: "claude",
-      label: "Claude",
-      deeplink: "claude://claude",
-      hint: "paste it",
-    };
+    mocks.handoff.targets = [CLAUDE];
     render(<FirstRunLearningBanner />);
     fireEvent.click(screen.getByTestId("first-run-ask-agent"));
-    expect(mocks.handoff.askAgent).toHaveBeenCalledTimes(1);
+    expect(mocks.handoff.askAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "claude" }),
+    );
+  });
+
+  it("fans out every connected agent, and sends to the one clicked", () => {
+    // Two connected agents is the case the old single-target button got
+    // wrong: it silently picked Claude and gave Codex users no way to choose.
+    mocks.handoff.targets = [CLAUDE, CODEX];
+    render(<FirstRunLearningBanner />);
+
+    expect(screen.getByTestId("first-run-ask-agent-picker")).toBeInTheDocument();
+    const asks = screen.getAllByTestId("first-run-ask-agent");
+    expect(asks.map((el) => el.getAttribute("data-agent"))).toEqual([
+      "claude",
+      "codex",
+    ]);
+    // Logos carry no text, so the accessible name is the only affordance a
+    // screen reader or keyboard user gets.
+    expect(asks[1]).toHaveAccessibleName("Copy for Codex");
+
+    fireEvent.click(asks[1]);
+    expect(mocks.handoff.askAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "codex" }),
+    );
   });
 
   it("shows the paste instruction only once there is one", () => {
-    mocks.handoff.target = {
-      id: "claude",
-      label: "Claude",
-      deeplink: "claude://claude",
-      hint: "paste it",
-    };
+    mocks.handoff.targets = [CLAUDE];
     const { rerender } = render(<FirstRunLearningBanner />);
     expect(
       screen.queryByTestId("first-run-ask-agent-hint"),

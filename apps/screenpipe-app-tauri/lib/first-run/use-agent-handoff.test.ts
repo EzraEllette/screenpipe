@@ -62,13 +62,13 @@ describe("useAgentHandoff — resolving a target", () => {
     // The probe touches the filesystem several times; an inert banner must
     // not pay for it on every mount.
     await waitFor(() => expect(detectAiTools).not.toHaveBeenCalled());
-    expect(result.current.target).toBeNull();
+    expect(result.current.targets).toEqual([]);
   });
 
   it("offers Claude when it is detected and actually wired over MCP", async () => {
     detectAiTools.mockResolvedValue(["claude"]);
     const { result } = renderHook(() => useAgentHandoff(true));
-    await waitFor(() => expect(result.current.target?.id).toBe("claude"));
+    await waitFor(() => expect(result.current.targets[0]?.id).toBe("claude"));
   });
 
   it("refuses a detected-but-unconnected agent", async () => {
@@ -78,7 +78,7 @@ describe("useAgentHandoff — resolving a target", () => {
     getInstalledMcpVersion.mockResolvedValue(null);
     const { result } = renderHook(() => useAgentHandoff(true));
     await waitFor(() => expect(detectAiTools).toHaveBeenCalled());
-    expect(result.current.target).toBeNull();
+    expect(result.current.targets).toEqual([]);
   });
 
   it("refuses an agent with MCP but no skills installed", async () => {
@@ -86,7 +86,40 @@ describe("useAgentHandoff — resolving a target", () => {
     areExternalAgentSkillsInstalled.mockResolvedValue(false);
     const { result } = renderHook(() => useAgentHandoff(true));
     await waitFor(() => expect(areExternalAgentSkillsInstalled).toHaveBeenCalled());
-    expect(result.current.target).toBeNull();
+    expect(result.current.targets).toEqual([]);
+  });
+
+  it("offers every connected agent, in preference order", async () => {
+    // Both wired is the case that used to lose information: the hook picked
+    // Claude and Codex never reached the UI at all.
+    detectAiTools.mockResolvedValue(["codex", "claude"]);
+    isCodexMcpInstalled.mockResolvedValue(true);
+    const { result } = renderHook(() => useAgentHandoff(true));
+    await waitFor(() => expect(result.current.targets).toHaveLength(2));
+    expect(result.current.targets.map((t) => t.id)).toEqual(["claude", "codex"]);
+  });
+
+  it("reports the offer so the click has a denominator", async () => {
+    detectAiTools.mockResolvedValue(["claude"]);
+    const { result } = renderHook(() => useAgentHandoff(true));
+    await waitFor(() => expect(result.current.targets).toHaveLength(1));
+
+    const shown = capture.mock.calls.filter(
+      (c) => c[0] === "first_run_agent_handoff_shown",
+    );
+    expect(shown).toHaveLength(1);
+    expect(shown[0]?.[1]).toMatchObject({ agents: ["claude"], agent_count: 1 });
+  });
+
+  it("stays silent when there is nothing to offer", async () => {
+    // An impression for an offer that never rendered would inflate the
+    // denominator and make the handoff look ignored rather than absent.
+    detectAiTools.mockResolvedValue([]);
+    renderHook(() => useAgentHandoff(true));
+    await waitFor(() => expect(detectAiTools).toHaveBeenCalled());
+    expect(
+      capture.mock.calls.filter((c) => c[0] === "first_run_agent_handoff_shown"),
+    ).toHaveLength(0);
   });
 
   it("falls back to the in-app summary when the probe throws", async () => {
@@ -94,7 +127,7 @@ describe("useAgentHandoff — resolving a target", () => {
     const { result } = renderHook(() => useAgentHandoff(true));
     await waitFor(() => expect(detectAiTools).toHaveBeenCalled());
     // A broken probe must never break the banner.
-    expect(result.current.target).toBeNull();
+    expect(result.current.targets).toEqual([]);
   });
 });
 
@@ -102,10 +135,10 @@ describe("useAgentHandoff — performing the handoff", () => {
   it("copies the question and opens the app", async () => {
     detectAiTools.mockResolvedValue(["claude"]);
     const { result } = renderHook(() => useAgentHandoff(true));
-    await waitFor(() => expect(result.current.target?.id).toBe("claude"));
+    await waitFor(() => expect(result.current.targets[0]?.id).toBe("claude"));
 
     await act(async () => {
-      await result.current.askAgent();
+      await result.current.askAgent(result.current.targets[0]);
     });
 
     expect(copyTextToClipboard).toHaveBeenCalledWith(HANDOFF_PROMPT);
@@ -124,10 +157,10 @@ describe("useAgentHandoff — performing the handoff", () => {
     detectAiTools.mockResolvedValue(["claude"]);
     copyTextToClipboard.mockRejectedValue(new Error("no clipboard access"));
     const { result } = renderHook(() => useAgentHandoff(true));
-    await waitFor(() => expect(result.current.target?.id).toBe("claude"));
+    await waitFor(() => expect(result.current.targets[0]?.id).toBe("claude"));
 
     await act(async () => {
-      await result.current.askAgent();
+      await result.current.askAgent(result.current.targets[0]);
     });
 
     expect(openUrl).not.toHaveBeenCalled();
@@ -140,10 +173,10 @@ describe("useAgentHandoff — performing the handoff", () => {
     detectAiTools.mockResolvedValue(["claude"]);
     openUrl.mockRejectedValue(new Error("no handler"));
     const { result } = renderHook(() => useAgentHandoff(true));
-    await waitFor(() => expect(result.current.target?.id).toBe("claude"));
+    await waitFor(() => expect(result.current.targets[0]?.id).toBe("claude"));
 
     await act(async () => {
-      await result.current.askAgent();
+      await result.current.askAgent(result.current.targets[0]);
     });
 
     // The question is already copied, so this is a downgrade, not a failure.
@@ -157,10 +190,10 @@ describe("useAgentHandoff — performing the handoff", () => {
     isCodexMcpInstalled.mockResolvedValue(true);
     getInstalledMcpVersion.mockResolvedValue(null);
     const { result } = renderHook(() => useAgentHandoff(true));
-    await waitFor(() => expect(result.current.target?.id).toBe("codex"));
+    await waitFor(() => expect(result.current.targets[0]?.id).toBe("codex"));
 
     await act(async () => {
-      await result.current.askAgent();
+      await result.current.askAgent(result.current.targets[0]);
     });
 
     expect(copyTextToClipboard).toHaveBeenCalledWith(HANDOFF_PROMPT);
@@ -173,7 +206,7 @@ describe("useAgentHandoff — performing the handoff", () => {
     await waitFor(() => expect(detectAiTools).toHaveBeenCalled());
 
     await act(async () => {
-      await result.current.askAgent();
+      await result.current.askAgent(result.current.targets[0]);
     });
 
     expect(copyTextToClipboard).not.toHaveBeenCalled();
@@ -183,10 +216,10 @@ describe("useAgentHandoff — performing the handoff", () => {
   it("sends no prompt text to analytics", async () => {
     detectAiTools.mockResolvedValue(["claude"]);
     const { result } = renderHook(() => useAgentHandoff(true));
-    await waitFor(() => expect(result.current.target?.id).toBe("claude"));
+    await waitFor(() => expect(result.current.targets[0]?.id).toBe("claude"));
 
     await act(async () => {
-      await result.current.askAgent();
+      await result.current.askAgent(result.current.targets[0]);
     });
 
     const payload = JSON.stringify(capture.mock.calls);
