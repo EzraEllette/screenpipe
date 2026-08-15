@@ -5108,6 +5108,20 @@ mod tests {
 
     #[tokio::test]
     async fn test_ensure_pi_config_adds_ollama_provider() {
+        // Redirect to a temp dir. Without this the test both reads and WRITES
+        // the developer's real `~/.screenpipe/pi-chat/.pi/models.json`, so it
+        // mutates live config on every `cargo test -p screenpipe-core` and then
+        // fails for anyone who already has an ollama model configured (the
+        // `models.len() == 1` assertion below sees their models, not ours).
+        // This is the only test in the module that touches the pi config dir,
+        // so overriding the process env here cannot disturb its neighbours.
+        let temp = tempfile::tempdir().expect("tempdir");
+        // Drop the migration marker in first: `pi_config_dir` seeds any
+        // unmarked dir from the global `~/.pi/agent`, which would copy the
+        // developer's own ollama models straight back in.
+        std::fs::write(temp.path().join(PI_MIGRATION_MARKER), "").expect("seed marker");
+        std::env::set_var("SCREENPIPE_PI_AGENT_DIR", temp.path());
+
         // Call ensure_pi_config with ollama provider info
         PiExecutor::ensure_pi_config(
             None,
@@ -5139,6 +5153,8 @@ mod tests {
         let models = ollama.get("models").unwrap().as_array().unwrap();
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].get("id").unwrap().as_str().unwrap(), "qwen3:8b");
+
+        std::env::remove_var("SCREENPIPE_PI_AGENT_DIR");
     }
 
     /// Regression: the engine used to capture the cloud user token once at

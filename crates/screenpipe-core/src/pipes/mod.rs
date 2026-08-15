@@ -2946,7 +2946,7 @@ impl PipeManager {
                         if path
                             .file_name()
                             .and_then(|n| n.to_str())
-                            .map_or(false, |n| n.starts_with('.'))
+                            .is_some_and(|n| n.starts_with('.'))
                         {
                             continue;
                         }
@@ -2954,7 +2954,7 @@ impl PipeManager {
                         if !path
                             .extension()
                             .and_then(|e| e.to_str())
-                            .map_or(false, is_user_facing_artifact_ext)
+                            .is_some_and(is_user_facing_artifact_ext)
                         {
                             continue;
                         }
@@ -7598,7 +7598,7 @@ fn should_run_config(cfg: &ScheduleConfig, last_run: DateTime<Utc>) -> bool {
     }
     match next_fire(cfg, search_from) {
         // Don't fire a slot past the effective end (e.g. beyond the Nth run).
-        Some(next) => now >= next && end.map_or(true, |e| next <= e),
+        Some(next) => now >= next && end.is_none_or(|e| next <= e),
         None => false,
     }
 }

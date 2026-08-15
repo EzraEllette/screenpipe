@@ -1779,7 +1779,7 @@ fn find_labeled_descendant_at(
         // app costs at most ~0.1s per read instead of the ~6s macOS default
         // (tree-walker pattern, tree/macos.rs).
         let _ = child.set_messaging_timeout_secs(0.1);
-        let Some(b) = get_element_bounds(&child) else {
+        let Some(b) = get_element_bounds(child) else {
             continue;
         };
         // only descend into elements that actually contain the cursor
@@ -1787,10 +1787,10 @@ fn find_labeled_descendant_at(
             continue;
         }
         // prefer the deepest (most specific) labeled match
-        if let Some(found) = find_labeled_descendant_at(&child, x, y, depth - 1, budget) {
+        if let Some(found) = find_labeled_descendant_at(child, x, y, depth - 1, budget) {
             return Some(found);
         }
-        if let (Some(role), Some(name)) = (role_string(&child), element_label(&child)) {
+        if let (Some(role), Some(name)) = (role_string(child), element_label(child)) {
             let area = b.width * b.height;
             let better = best
                 .as_ref()

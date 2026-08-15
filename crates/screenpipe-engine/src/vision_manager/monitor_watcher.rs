@@ -1404,6 +1404,10 @@ mod tests {
     /// change the watchdog waited 240s, so every wedge showed the user a pill
     /// ~100s before anything acted on it.
     #[test]
+    // Deliberate constant assertion: this is the regression guard. If someone
+    // raises the attended window past the desktop's alert threshold the wedge
+    // becomes user-visible before recovery acts, which is the bug this targets.
+    #[allow(clippy::assertions_on_constants)]
     fn attended_gone_silent_recovers_before_the_desktop_alert() {
         const DESKTOP_ALERT_SECS: u64 = 150;
         assert!(
@@ -1489,6 +1493,9 @@ mod tests {
 
     /// Guard the ordering the shortened window depends on.
     #[test]
+    // Deliberate constant assertion, same reason as above: it pins the ordering
+    // between the two windows so a future tuning pass cannot silently invert it.
+    #[allow(clippy::assertions_on_constants)]
     fn attended_window_stays_below_the_idle_window() {
         assert!(
             SILENT_DB_STALE_SECS_ATTENDED < SILENT_DB_STALE_SECS,

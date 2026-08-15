@@ -703,8 +703,7 @@ pub async fn paired_capture(
     // detector boxed but that holds no readable text must stay marked or
     // it would re-OCR forever.
     if ocr_gate_escalated && !ocr_engine_failed {
-        if let (Some(gate), Some((cache_text, cache_json))) =
-            (ocr_gate.as_deref_mut(), ocr_cache_payload.as_ref())
+        if let (Some(gate), Some((cache_text, cache_json))) = (ocr_gate, ocr_cache_payload.as_ref())
         {
             gate.ocr_indexed(
                 &app_name.unwrap_or("unknown").to_lowercase(),

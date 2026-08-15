@@ -290,8 +290,7 @@ impl DatabaseManager {
         const BATCH: usize = 500;
         let mut tx = self.begin_immediate_with_retry().await?;
         for group in chunk_ids.chunks(BATCH) {
-            let placeholders: String = std::iter::repeat("?")
-                .take(group.len())
+            let placeholders: String = std::iter::repeat_n("?", group.len())
                 .collect::<Vec<_>>()
                 .join(",");
             let del_transcriptions = format!(
