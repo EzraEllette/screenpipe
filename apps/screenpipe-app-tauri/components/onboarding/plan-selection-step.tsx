@@ -23,6 +23,10 @@ const CARDLESS_TRIAL_URL = screenpipeWebUrl(
   "https://screenpipe.com",
 );
 
+const DEFAULT_CHECKOUT_HEIGHT = 520;
+const MIN_CHECKOUT_HEIGHT = 360;
+const MAX_CHECKOUT_HEIGHT = 1_800;
+
 type BillingInterval = "year" | "month";
 
 export default function PlanSelectionStep({
@@ -34,6 +38,7 @@ export default function PlanSelectionStep({
   const user = settings.user as AppUser | null | undefined;
   const [interval, setInterval] = useState<BillingInterval>("year");
   const [frameUrl, setFrameUrl] = useState<string | null>(null);
+  const [frameHeight, setFrameHeight] = useState(DEFAULT_CHECKOUT_HEIGHT);
   const [busy, setBusy] = useState(true);
   const [completing, setCompleting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -62,6 +67,7 @@ export default function PlanSelectionStep({
     const controller = new AbortController();
     setBusy(true);
     setFrameUrl(null);
+    setFrameHeight(DEFAULT_CHECKOUT_HEIGHT);
     setError(null);
     setCompleting(false);
     posthog.capture("onboarding_card_checkout_started", { interval });
@@ -137,11 +143,24 @@ export default function PlanSelectionStep({
     const onMessage = (event: MessageEvent) => {
       if (
         event.origin !== embeddedOrigin ||
-        event.source !== iframeRef.current?.contentWindow ||
-        event.data?.type !== "screenpipe:checkout-complete"
+        event.source !== iframeRef.current?.contentWindow
       ) {
         return;
       }
+
+      if (event.data?.type === "screenpipe:checkout-resize") {
+        const reportedHeight = Number(event.data.height);
+        if (!Number.isFinite(reportedHeight)) return;
+        setFrameHeight(
+          Math.min(
+            MAX_CHECKOUT_HEIGHT,
+            Math.max(MIN_CHECKOUT_HEIGHT, Math.ceil(reportedHeight)),
+          ),
+        );
+        return;
+      }
+
+      if (event.data?.type !== "screenpipe:checkout-complete") return;
       setCompleting(true);
       posthog.capture("onboarding_card_checkout_completed", { interval });
       if (userToken) void loadUserRef.current(userToken, true);
@@ -212,12 +231,11 @@ export default function PlanSelectionStep({
   };
 
   return (
-    // Grows into whatever the shared onboarding window leaves after the heading
-    // and interval toggle, so the checkout box never overflows the window the
-    // way the old fixed 520px iframe did. max-w-2xl was dead: the onboarding
-    // page wraps every slide in max-w-lg.
+    // The HTTPS wrapper reports Stripe's real rendered height. The iframe grows
+    // to that height and the shared onboarding region becomes the only scroll
+    // surface, instead of trapping the full checkout inside a ~421px scroller.
     <div
-      className="mx-auto flex min-h-0 w-full flex-1 flex-col"
+      className="mx-auto w-full"
       data-testid="onboarding-card-capture"
     >
       <div className="mb-4 text-center">
@@ -243,7 +261,7 @@ export default function PlanSelectionStep({
         </button>
       </div>
 
-      <div className="relative min-h-[360px] flex-1 border bg-white">
+      <div className="relative min-h-[360px] border bg-white">
         {busy && (
           <div className="absolute inset-0 flex items-center justify-center font-mono text-[11px] text-muted-foreground">
             loading secure payment form
@@ -255,10 +273,8 @@ export default function PlanSelectionStep({
             src={frameUrl}
             title="secure Stripe payment form"
             allow="payment"
-            // Fills the box exactly. A percentage height would not resolve
-            // against a flex-grown parent for a replaced element, leaving the
-            // iframe at its 150px intrinsic default.
-            className="absolute inset-0 h-full w-full border-0"
+            className="block w-full border-0"
+            style={{ height: `${frameHeight}px` }}
             data-testid="onboarding-card-frame"
           />
         )}

@@ -91,20 +91,42 @@ describe("onboarding card capture", () => {
     );
   });
 
-  // The step used to hard-code a 520px iframe inside a 460px box, which forced
-  // the onboarding window wider and taller than every other slide and still cut
-  // off the free-plan link. It now fills whatever the shared window leaves.
-  it("fills the available height instead of forcing a fixed iframe size", async () => {
+  it("grows the checkout to its reported height and keeps one page scroller", async () => {
     render(<PlanSelectionStep handleNextSlide={vi.fn()} />);
 
     const root = screen.getByTestId("onboarding-card-capture");
-    expect(root.className).toContain("flex-1");
     expect(root.className).not.toMatch(/max-w-/);
 
     const frame = await screen.findByTestId("onboarding-card-frame");
-    expect(frame.className).toContain("h-full");
-    expect(frame.className).not.toMatch(/h-\[\d+px\]/);
-    expect(frame.parentElement?.className).toContain("flex-1");
+    expect(frame).toHaveStyle({ height: "520px" });
+    expect(frame.className).not.toContain("absolute");
+    expect(frame.parentElement?.className).not.toContain("flex-1");
+
+    act(() => {
+      window.dispatchEvent(
+        new MessageEvent("message", {
+          origin: "https://untrusted.test",
+          source: (frame as HTMLIFrameElement).contentWindow,
+          data: { type: "screenpipe:checkout-resize", height: 700 },
+        }),
+      );
+    });
+    expect(frame).toHaveStyle({ height: "520px" });
+
+    act(() => {
+      window.dispatchEvent(
+        new MessageEvent("message", {
+          origin: "https://example.test",
+          source: (frame as HTMLIFrameElement).contentWindow,
+          data: {
+            type: "screenpipe:checkout-resize",
+            height: 911.2,
+          },
+        }),
+      );
+    });
+
+    expect(frame).toHaveStyle({ height: "912px" });
   });
 
   it("recreates embedded checkout with monthly billing when switched", async () => {
