@@ -33,6 +33,11 @@ import {
 import { discoverTeamApiBase, discoverTeamToken } from "./team-config";
 import { PKG_VERSION } from "./version";
 import { formatForElementPurpose } from "./element-format";
+import {
+  localContextDayStarts,
+  normalizeTime,
+  normalizeTimeFields,
+} from "./time-normalization";
 
 initMcpTelemetry({ transport: "stdio" });
 
@@ -404,11 +409,11 @@ const TOOLS: Tool[] = [
         offset: { type: "integer", description: "Pagination offset. Use when results say 'use offset=N for more'.", default: 0 },
         start_time: {
           type: "string",
-          description: "Accepted: ISO 8601 ('2024-01-15T10:00:00Z'), 'Nh ago' / 'Nd ago' / 'Nw ago', 'now', 'yesterday', 'today', or bare 'YYYY-MM-DD'. Always provide to avoid scanning entire history.",
+          description: "Accepted: ISO 8601 ('2024-01-15T10:00:00Z'), relative time, or local calendar ('today', 'yesterday', 'tomorrow', 'YYYY-MM-DD'). Always provide to avoid scanning entire history.",
         },
         end_time: {
           type: "string",
-          description: "ISO 8601 UTC or relative (e.g. 'now'). Defaults to now.",
+          description: "ISO 8601, relative time, or local calendar ('today', 'yesterday', 'tomorrow', 'YYYY-MM-DD'). Defaults to now.",
         },
         app_name: { type: "string", description: "Filter by app name (e.g. 'Google Chrome', 'Slack', 'zoom.us'). Case-sensitive." },
         window_name: { type: "string", description: "Filter by window title substring" },
@@ -454,8 +459,8 @@ const TOOLS: Tool[] = [
     inputSchema: {
       type: "object",
       properties: {
-        start_time: { type: "string", description: "ISO 8601 UTC or relative (e.g. '1d ago'). Omit when searching by q — it filters all history." },
-        end_time: { type: "string", description: "ISO 8601 UTC or relative" },
+        start_time: { type: "string", description: "ISO 8601, relative time, or local calendar ('today', 'yesterday', 'tomorrow', 'YYYY-MM-DD'). Omit when searching by q — it filters all history." },
+        end_time: { type: "string", description: "ISO 8601, relative time, or local calendar ('today', 'yesterday', 'tomorrow', 'YYYY-MM-DD')" },
         q: { type: "string", description: "Case-insensitive substring filter on title, attendees (names/emails), and note. Searches all history." },
         limit: { type: "integer", description: "Max results (default 20)", default: 20 },
         offset: { type: "integer", description: "Pagination offset", default: 0 },
@@ -473,8 +478,8 @@ const TOOLS: Tool[] = [
     inputSchema: {
       type: "object",
       properties: {
-        start_time: { type: "string", description: "ISO 8601 UTC or relative (e.g. '3h ago')" },
-        end_time: { type: "string", description: "ISO 8601 UTC or relative (e.g. 'now')" },
+        start_time: { type: "string", description: "ISO 8601, relative (e.g. '3h ago'), or local calendar ('today', 'yesterday', 'tomorrow', 'YYYY-MM-DD')" },
+        end_time: { type: "string", description: "ISO 8601, relative (e.g. 'now'), or local calendar ('today', 'yesterday', 'tomorrow', 'YYYY-MM-DD')" },
         app_name: { type: "string", description: "Optional app name filter to focus on one app" },
       },
       required: ["start_time", "end_time"],
@@ -498,8 +503,8 @@ const TOOLS: Tool[] = [
           description: "Element source. 'accessibility' is preferred (OS-native tree). 'ocr' for apps without a11y.",
         },
         role: { type: "string", description: "Element role filter (e.g. 'AXButton', 'AXLink', 'AXTextField')" },
-        start_time: { type: "string", description: "ISO 8601 UTC or relative" },
-        end_time: { type: "string", description: "ISO 8601 UTC or relative" },
+        start_time: { type: "string", description: "ISO 8601, relative time, or local calendar ('today', 'yesterday', 'tomorrow', 'YYYY-MM-DD')" },
+        end_time: { type: "string", description: "ISO 8601, relative time, or local calendar ('today', 'yesterday', 'tomorrow', 'YYYY-MM-DD')" },
         app_name: { type: "string", description: "Filter by app name" },
         purpose: {
           type: "string",
@@ -537,8 +542,8 @@ const TOOLS: Tool[] = [
     inputSchema: {
       type: "object",
       properties: {
-        start_time: { type: "string", description: 'ISO 8601 UTC or relative (e.g. "5m ago", "now")' },
-        end_time: { type: "string", description: 'ISO 8601 UTC or relative (e.g. "5m ago", "now")' },
+        start_time: { type: "string", description: "ISO 8601, relative time, or local calendar ('today', 'yesterday', 'tomorrow', 'YYYY-MM-DD')" },
+        end_time: { type: "string", description: "ISO 8601, relative time, or local calendar ('today', 'yesterday', 'tomorrow', 'YYYY-MM-DD')" },
         output_path: {
           type: "string",
           description:
@@ -823,8 +828,8 @@ const TOOLS: Tool[] = [
       type: "object",
       properties: {
         q: { type: "string", description: "Keyword query (FTS5 syntax: quoted phrases, AND/OR, prefix*)" },
-        start_time: { type: "string", description: "ISO 8601 UTC, 'Nh ago' / 'Nd ago' / 'Nw ago', 'now', 'yesterday', 'today', or 'YYYY-MM-DD'" },
-        end_time: { type: "string", description: "Same formats as start_time" },
+        start_time: { type: "string", description: "ISO 8601, relative time, or local calendar ('today', 'yesterday', 'tomorrow', 'YYYY-MM-DD')" },
+        end_time: { type: "string", description: "ISO 8601, relative time, or local calendar ('today', 'yesterday', 'tomorrow', 'YYYY-MM-DD')" },
         app_name: { type: "string", description: "Filter by exact app name (case-sensitive, e.g. 'Google Chrome')" },
         limit: { type: "integer", description: "Max results (default 20)", default: 20 },
         offset: { type: "integer", description: "Pagination offset", default: 0 },
@@ -1080,6 +1085,7 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
   if (uri === "screenpipe://context") {
     const now = new Date();
     const ms = now.getTime();
+    const dayStarts = localContextDayStarts(now);
     return {
       contents: [
         {
@@ -1099,8 +1105,7 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
                 now: now.toISOString(),
                 one_hour_ago: new Date(ms - 60 * 60 * 1000).toISOString(),
                 three_hours_ago: new Date(ms - 3 * 60 * 60 * 1000).toISOString(),
-                today_start: `${now.toISOString().split("T")[0]}T00:00:00Z`,
-                yesterday_start: `${new Date(ms - 24 * 60 * 60 * 1000).toISOString().split("T")[0]}T00:00:00Z`,
+                ...dayStarts,
                 one_week_ago: new Date(ms - 7 * 24 * 60 * 60 * 1000).toISOString(),
               },
             },
@@ -1317,42 +1322,6 @@ const qualifiedValue = createMcpQualifiedValueReporter((payload) =>
       server.getClientVersion()?.name,
     ),
 );
-
-// Server's deserialize_flexible_datetime accepts ISO 8601 + "Nh ago" / "Nd ago"
-// / "Nw ago" / "now". Models also try "yesterday", "today", and bare dates
-// ("2026-05-17") — normalize those here so the request doesn't 400.
-function normalizeTime(input: string | undefined): string | undefined {
-  if (!input) return input;
-  const s = input.trim();
-  if (!s) return input;
-  const lower = s.toLowerCase();
-  if (lower === "yesterday") return "1d ago";
-  if (lower === "today") {
-    return `${new Date().toISOString().split("T")[0]}T00:00:00Z`;
-  }
-  if (lower === "tomorrow") {
-    const t = new Date();
-    t.setUTCDate(t.getUTCDate() + 1);
-    return `${t.toISOString().split("T")[0]}T00:00:00Z`;
-  }
-  // Bare YYYY-MM-DD → start of day UTC
-  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return `${s}T00:00:00Z`;
-  return s;
-}
-
-// Apply normalizeTime to start_time/end_time fields in an args object.
-// Returns a new object — does not mutate the input.
-function normalizeTimeFields(
-  args: Record<string, unknown>,
-): Record<string, unknown> {
-  const out = { ...args };
-  for (const k of ["start_time", "end_time"] as const) {
-    if (typeof out[k] === "string") {
-      out[k] = normalizeTime(out[k] as string);
-    }
-  }
-  return out;
-}
 
 // Zone label for a timestamp's HH:MM slice. The server serializes timestamps in
 // its LOCAL timezone (e.g. "...T09:03:44+05:30"), so the HH:MM is already local —
@@ -1879,8 +1848,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "export-video": {
-        const startTime = normalizeTime(args.start_time as string);
-        const endTime = normalizeTime(args.end_time as string);
+        const now = new Date();
+        const startTime = normalizeTime(args.start_time as string, now);
+        const endTime = normalizeTime(args.end_time as string, now);
 
         if (!startTime || !endTime) {
           return {
