@@ -6,6 +6,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import posthog from "posthog-js";
+import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { useSettings } from "@/lib/hooks/use-settings";
 import { screenpipeWebUrl } from "@/lib/web-url";
 import type { AppUser } from "@/lib/app-entitlement";
@@ -14,8 +15,8 @@ const CHECKOUT_URL = screenpipeWebUrl(
   "/api/subscription/checkout",
   "https://screenpipe.com",
 );
-const EMBEDDED_CHECKOUT_URL = screenpipeWebUrl(
-  "/embedded-checkout",
+const HOSTED_CHECKOUT_URL = screenpipeWebUrl(
+  "/onboarding/checkout",
   "https://screenpipe.com",
 );
 const CARDLESS_TRIAL_URL = screenpipeWebUrl(
@@ -23,11 +24,51 @@ const CARDLESS_TRIAL_URL = screenpipeWebUrl(
   "https://screenpipe.com",
 );
 
-const DEFAULT_CHECKOUT_HEIGHT = 520;
-const MIN_CHECKOUT_HEIGHT = 360;
-const MAX_CHECKOUT_HEIGHT = 1_800;
+const CHECKOUT_WINDOW_LABEL = "onboarding-checkout";
+const CHECKOUT_POLL_INTERVAL_MS = 3_000;
+const CHECKOUT_COMPLETE_TITLE = "screenpipe checkout complete";
 
 type BillingInterval = "year" | "month";
+
+function createCheckoutWindow(url: string): WebviewWindow {
+  const checkoutWindow = new WebviewWindow(CHECKOUT_WINDOW_LABEL, {
+    url,
+    title: "secure checkout — screenpipe",
+    width: 500,
+    height: 680,
+    minWidth: 450,
+    minHeight: 500,
+    center: true,
+    preventOverflow: true,
+    resizable: true,
+    maximizable: false,
+    focus: true,
+    parent: "onboarding",
+  });
+  void checkoutWindow.onCloseRequested((event) => {
+    event.preventDefault();
+    // The app's shared close handler keeps ordinary windows warm by hiding
+    // them. Checkout is disposable, so destroy it after the close callback
+    // returns; otherwise its label remains occupied and it cannot be reopened.
+    setTimeout(() => void checkoutWindow.destroy().catch(() => {}), 0);
+  });
+  return checkoutWindow;
+}
+
+function waitForCheckoutWindow(checkoutWindow: WebviewWindow): Promise<void> {
+  return new Promise((resolve, reject) => {
+    void checkoutWindow.once("tauri://created", () => resolve());
+    void checkoutWindow.once<string>("tauri://error", (event) => {
+      reject(
+        new Error(
+          typeof event.payload === "string"
+            ? event.payload
+            : "secure checkout could not be opened",
+        ),
+      );
+    });
+  });
+}
 
 export default function PlanSelectionStep({
   handleNextSlide,
@@ -37,19 +78,22 @@ export default function PlanSelectionStep({
   const { settings, loadUser } = useSettings();
   const user = settings.user as AppUser | null | undefined;
   const [interval, setInterval] = useState<BillingInterval>("year");
-  const [frameUrl, setFrameUrl] = useState<string | null>(null);
-  const [frameHeight, setFrameHeight] = useState(DEFAULT_CHECKOUT_HEIGHT);
+  const [checkoutUrl, setCheckoutUrl] = useState<string | null>(null);
+  const [checkoutAttempt, setCheckoutAttempt] = useState(0);
+  const [checkoutOpen, setCheckoutOpen] = useState(false);
   const [busy, setBusy] = useState(true);
-  const [completing, setCompleting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showFree, setShowFree] = useState(false);
   const [startingCardlessTrial, setStartingCardlessTrial] = useState(false);
-  const iframeRef = useRef<HTMLIFrameElement>(null);
   const requestRef = useRef(0);
   const advancedRef = useRef(false);
   const loadUserRef = useRef(loadUser);
+  const checkoutWindowRef = useRef<WebviewWindow | null>(null);
+  const completionVerifiedRef = useRef(false);
+  const intervalRef = useRef(interval);
   const userToken = user?.token;
   loadUserRef.current = loadUser;
+  intervalRef.current = interval;
 
   useEffect(() => {
     const timer = setTimeout(() => setShowFree(true), 6_000);
@@ -66,108 +110,146 @@ export default function PlanSelectionStep({
     const requestId = ++requestRef.current;
     const controller = new AbortController();
     setBusy(true);
-    setFrameUrl(null);
-    setFrameHeight(DEFAULT_CHECKOUT_HEIGHT);
+    setCheckoutUrl(null);
+    setCheckoutOpen(false);
     setError(null);
-    setCompleting(false);
+    completionVerifiedRef.current = false;
     posthog.capture("onboarding_card_checkout_started", { interval });
 
-    void fetch(CHECKOUT_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      signal: controller.signal,
-      body: JSON.stringify({
-        plan: "pro",
-        interval,
-        token: userToken,
-        origin: "desktop-onboarding-card-capture",
-        ui_mode: "embedded",
-        source_tracking_id: "desktop-onboarding-business-v2",
-        product_tier: "business",
-        internal_plan: "pro",
-        billing_interval: interval,
-        seats: 1,
-        cta_location: "desktop_onboarding_card_capture",
-        cta_action: "start_trial",
-        destination_type: "stripe_embedded_checkout",
-        business_trial_mode: "new",
-      }),
-    })
-      .then(async (response) => {
+    void (async () => {
+      try {
+        const response = await fetch(CHECKOUT_URL, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          signal: controller.signal,
+          body: JSON.stringify({
+            plan: "pro",
+            interval,
+            token: userToken,
+            origin: "desktop-onboarding-card-capture",
+            ui_mode: "custom",
+            source_tracking_id: "desktop-onboarding-business-v2",
+            product_tier: "business",
+            internal_plan: "pro",
+            billing_interval: interval,
+            seats: 1,
+            cta_location: "desktop_onboarding_card_capture",
+            cta_action: "start_trial",
+            destination_type: "stripe_payment_element",
+            business_trial_mode: "new",
+          }),
+        });
         const data = await response.json().catch(() => ({}));
-        if (!response.ok || !data.clientSecret) {
+        if (!response.ok || data.type !== "custom" || !data.clientSecret) {
           throw new Error(data.error || `checkout failed (${response.status})`);
         }
-        if (requestId !== requestRef.current) return;
-        setFrameUrl(
-          `${EMBEDDED_CHECKOUT_URL}#client_secret=${encodeURIComponent(data.clientSecret)}`,
-        );
-        posthog.capture("onboarding_card_checkout_loaded", { interval });
-      })
-      .catch((checkoutError) => {
+        if (controller.signal.aborted || requestId !== requestRef.current) return;
+
+        const url = `${HOSTED_CHECKOUT_URL}#client_secret=${encodeURIComponent(
+          data.clientSecret,
+        )}`;
+        setCheckoutUrl(url);
+      } catch (checkoutError) {
         if (controller.signal.aborted || requestId !== requestRef.current) return;
         setError(
           checkoutError instanceof Error
             ? checkoutError.message
-            : "secure checkout could not be loaded",
+            : "secure checkout could not be created",
         );
-      })
-      .finally(() => {
-        if (requestId === requestRef.current) setBusy(false);
-      });
+        setBusy(false);
+      }
+    })();
 
     return () => controller.abort();
   }, [interval, userToken]);
 
   useEffect(() => {
-    if (!frameUrl || !userToken) return;
+    if (!checkoutUrl) return;
+    let cancelled = false;
+    let checkoutWindow: WebviewWindow | null = null;
+    setBusy(true);
+    setCheckoutOpen(false);
+
+    void (async () => {
+      try {
+        const existingWindow = await WebviewWindow.getByLabel(
+          CHECKOUT_WINDOW_LABEL,
+        ).catch(() => null);
+        if (existingWindow) await existingWindow.destroy().catch(() => {});
+        if (cancelled) return;
+
+        checkoutWindow = createCheckoutWindow(checkoutUrl);
+        checkoutWindowRef.current = checkoutWindow;
+        void checkoutWindow.once("tauri://destroyed", () => {
+          if (checkoutWindowRef.current !== checkoutWindow) return;
+          checkoutWindowRef.current = null;
+          if (cancelled) return;
+          setCheckoutOpen(false);
+          posthog.capture("onboarding_card_checkout_closed", {
+            interval: intervalRef.current,
+          });
+        });
+        await waitForCheckoutWindow(checkoutWindow);
+        if (cancelled) return;
+
+        setCheckoutOpen(true);
+        posthog.capture("onboarding_card_checkout_loaded", {
+          interval: intervalRef.current,
+          destination_type: "stripe_payment_element",
+        });
+      } catch (checkoutError) {
+        if (cancelled) return;
+        setError(
+          checkoutError instanceof Error
+            ? checkoutError.message
+            : "secure checkout could not be opened",
+        );
+      } finally {
+        if (!cancelled) setBusy(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      if (checkoutWindowRef.current === checkoutWindow) {
+        checkoutWindowRef.current = null;
+      }
+      if (checkoutWindow) void checkoutWindow.destroy().catch(() => {});
+    };
+  }, [checkoutAttempt, checkoutUrl]);
+
+  useEffect(() => {
+    if (!checkoutOpen || !userToken) return;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
-    let attempts = 0;
     const poll = async () => {
-      attempts += 1;
+      let checkoutComplete = false;
       try {
-        await loadUserRef.current(userToken, true);
+        const checkoutTitle = await checkoutWindowRef.current?.title();
+        checkoutComplete = checkoutTitle === CHECKOUT_COMPLETE_TITLE;
       } catch {}
-      if (!cancelled && attempts < 40) timer = setTimeout(poll, 3_000);
+      try {
+        if (checkoutComplete && !completionVerifiedRef.current) {
+          completionVerifiedRef.current = true;
+          // The hosted checkout has confirmed success. Run Stripe recovery
+          // once, then fall back to the cheap account read while its webhook
+          // finishes. Neither response advances unless the server returns the
+          // authoritative has_payment_method flag.
+          await loadUserRef.current(userToken, true);
+        } else {
+          await loadUserRef.current(userToken);
+        }
+      } catch {}
+      if (!cancelled) timer = setTimeout(poll, CHECKOUT_POLL_INTERVAL_MS);
     };
-    timer = setTimeout(poll, 2_000);
+    timer = setTimeout(poll, CHECKOUT_POLL_INTERVAL_MS);
     return () => {
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, [frameUrl, userToken]);
-
-  useEffect(() => {
-    const embeddedOrigin = new URL(EMBEDDED_CHECKOUT_URL).origin;
-    const onMessage = (event: MessageEvent) => {
-      if (
-        event.origin !== embeddedOrigin ||
-        event.source !== iframeRef.current?.contentWindow
-      ) {
-        return;
-      }
-
-      if (event.data?.type === "screenpipe:checkout-resize") {
-        const reportedHeight = Number(event.data.height);
-        if (!Number.isFinite(reportedHeight)) return;
-        setFrameHeight(
-          Math.min(
-            MAX_CHECKOUT_HEIGHT,
-            Math.max(MIN_CHECKOUT_HEIGHT, Math.ceil(reportedHeight)),
-          ),
-        );
-        return;
-      }
-
-      if (event.data?.type !== "screenpipe:checkout-complete") return;
-      setCompleting(true);
-      posthog.capture("onboarding_card_checkout_completed", { interval });
-      if (userToken) void loadUserRef.current(userToken, true);
-    };
-    window.addEventListener("message", onMessage);
-    return () => window.removeEventListener("message", onMessage);
-  }, [interval, userToken]);
+  }, [checkoutOpen, userToken]);
 
   useEffect(() => {
     if (
@@ -177,11 +259,43 @@ export default function PlanSelectionStep({
       return;
     }
     advancedRef.current = true;
+    const checkoutWindow = checkoutWindowRef.current;
+    checkoutWindowRef.current = null;
+    setCheckoutOpen(false);
+    if (checkoutWindow) void checkoutWindow.destroy().catch(() => {});
+    posthog.capture("onboarding_card_checkout_completed", { interval });
     posthog.capture("onboarding_plan_activated", {
       plan: user.subscription_plan || "unknown",
     });
     void handleNextSlide();
-  }, [handleNextSlide, user?.has_payment_method, user?.subscription_plan]);
+  }, [
+    handleNextSlide,
+    interval,
+    user?.has_payment_method,
+    user?.subscription_plan,
+  ]);
+
+  const reopenCheckout = () => {
+    if (!checkoutUrl || busy) return;
+    setBusy(true);
+    setError(null);
+    setCheckoutAttempt((attempt) => attempt + 1);
+  };
+
+  const focusCheckout = async () => {
+    const checkoutWindow = checkoutWindowRef.current;
+    if (!checkoutWindow) {
+      reopenCheckout();
+      return;
+    }
+    try {
+      await checkoutWindow.show();
+      await checkoutWindow.setFocus();
+    } catch {
+      setCheckoutOpen(false);
+      setError("secure checkout could not be focused");
+    }
+  };
 
   const continueWithoutCard = async () => {
     if (startingCardlessTrial) return;
@@ -231,11 +345,8 @@ export default function PlanSelectionStep({
   };
 
   return (
-    // The HTTPS wrapper reports Stripe's real rendered height. The iframe grows
-    // to that height and the shared onboarding region becomes the only scroll
-    // surface, instead of trapping the full checkout inside a ~421px scroller.
     <div
-      className="mx-auto w-full"
+      className="mx-auto w-full max-w-sm"
       data-testid="onboarding-card-capture"
     >
       <div className="mb-4 text-center">
@@ -261,32 +372,58 @@ export default function PlanSelectionStep({
         </button>
       </div>
 
-      <div className="relative min-h-[360px] border bg-white">
+      <div className="flex min-h-[190px] flex-col items-center justify-center border p-6 text-center">
         {busy && (
-          <div className="absolute inset-0 flex items-center justify-center font-mono text-[11px] text-muted-foreground">
-            loading secure payment form
-          </div>
+          <p className="font-mono text-[11px] text-muted-foreground">
+            opening secure checkout
+          </p>
         )}
-        {frameUrl && !completing && (
-          <iframe
-            ref={iframeRef}
-            src={frameUrl}
-            title="secure Stripe payment form"
-            allow="payment"
-            className="block w-full border-0"
-            style={{ height: `${frameHeight}px` }}
-            data-testid="onboarding-card-frame"
-          />
+        {!busy && checkoutOpen && (
+          <>
+            <p className="text-sm">secure checkout is open</p>
+            <p className="mt-2 font-mono text-[10px] leading-relaxed text-muted-foreground">
+              add your payment method there. setup continues automatically
+              after your account is updated.
+            </p>
+            <button
+              type="button"
+              onClick={() => void focusCheckout()}
+              className="mt-5 border px-4 py-2 font-mono text-[10px] uppercase tracking-widest transition-colors hover:bg-foreground hover:text-background"
+            >
+              return to checkout
+            </button>
+          </>
         )}
-        {completing && (
-          <div className="absolute inset-0 flex items-center justify-center font-mono text-[11px] text-muted-foreground">
-            activating your subscription
-          </div>
+        {!busy && !checkoutOpen && checkoutUrl && !error && (
+          <>
+            <p className="text-sm">checkout closed</p>
+            <p className="mt-2 font-mono text-[10px] text-muted-foreground">
+              no payment was recorded. reopen it when you are ready.
+            </p>
+            <button
+              type="button"
+              onClick={() => void reopenCheckout()}
+              className="mt-5 border px-4 py-2 font-mono text-[10px] uppercase tracking-widest transition-colors hover:bg-foreground hover:text-background"
+            >
+              reopen checkout
+            </button>
+          </>
         )}
-        {error && (
-          <div className="absolute inset-0 flex items-center justify-center p-8 text-center font-mono text-[11px] text-destructive">
-            {error}
-          </div>
+        {!busy && error && (
+          <>
+            <p className="font-mono text-[11px] text-destructive">
+              {error}
+            </p>
+            {checkoutUrl && (
+              <button
+                type="button"
+                onClick={() => void reopenCheckout()}
+                className="mt-5 border px-4 py-2 font-mono text-[10px] uppercase tracking-widest transition-colors hover:bg-foreground hover:text-background"
+              >
+                try again
+              </button>
+            )}
+          </>
         )}
       </div>
 
