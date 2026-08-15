@@ -203,14 +203,26 @@ export function useCardAskPlacement(
     [settings?.user, isSettingsLoaded],
   );
 
-  const active = shouldShowCardAsk({
-    arm,
-    trigger,
-    eligible,
-    enabled,
-    triggerOverride,
-    alreadyShownTriggers: [],
-  });
+  // A forced billing-gate run exists to exercise the billing surface. Without
+  // this narrow override, the normal PostHog control/unresolved paths can
+  // finish onboarding from Engine without ever mounting Checkout, which makes
+  // a local preview smoke test look like a product-flow regression.
+  const forceOnboardingPlacement =
+    trigger === "onboarding" &&
+    process.env.NEXT_PUBLIC_SCREENPIPE_FORCE_BILLING_GATE === "true";
+  const active = forceOnboardingPlacement
+    ? eligible
+    : shouldShowCardAsk({
+        arm,
+        trigger,
+        eligible,
+        enabled,
+        triggerOverride,
+        alreadyShownTriggers: [],
+      });
 
-  return { active, arm };
+  return {
+    active,
+    arm: forceOnboardingPlacement ? "at_onboarding" : arm,
+  };
 }

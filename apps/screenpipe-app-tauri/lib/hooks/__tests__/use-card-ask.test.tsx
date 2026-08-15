@@ -33,7 +33,10 @@ vi.mock("@/lib/hooks/use-settings", () => ({
   useSettings: () => settingsState,
 }));
 
-import { useCardAsk } from "@/lib/hooks/use-card-ask";
+import {
+  useCardAsk,
+  useCardAskPlacement,
+} from "@/lib/hooks/use-card-ask";
 
 // jsdom in this repo does not expose a usable localStorage; every hook test
 // installs its own in-memory mock (see use-is-enterprise-build.test.tsx).
@@ -52,6 +55,7 @@ const localStorageMock = {
 };
 
 function reset() {
+  delete process.env.NEXT_PUBLIC_SCREENPIPE_FORCE_BILLING_GATE;
   localStorageValues.clear();
   Object.defineProperty(window, "localStorage", {
     configurable: true,
@@ -59,6 +63,8 @@ function reset() {
   });
   resetCardAskTriggerBus();
   flagVariant = "at_first_value";
+  flagEnabled = true;
+  flagPayload = undefined;
   settingsState = {
     settings: { user: { id: "u1", email: "a@b.com" } },
     isSettingsLoaded: true,
@@ -175,5 +181,56 @@ describe("useCardAsk", () => {
     unmount();
     expect(() => emitCardAskTrigger("first_value")).not.toThrow();
     expect(result.current.activeTrigger).toBeNull();
+  });
+});
+
+describe("useCardAskPlacement", () => {
+  it("forces the onboarding placement during a billing-gate preview run", () => {
+    process.env.NEXT_PUBLIC_SCREENPIPE_FORCE_BILLING_GATE = "true";
+    flagVariant = "control";
+    flagEnabled = false;
+    settingsState = {
+      settings: {
+        user: {
+          id: "u1",
+          email: "a@b.com",
+          has_payment_method: false,
+        },
+      },
+      isSettingsLoaded: true,
+    };
+
+    const { result } = renderHook(() => useCardAskPlacement("onboarding"));
+
+    expect(result.current).toEqual({
+      active: true,
+      arm: "at_onboarding",
+    });
+  });
+
+  it("does not force another placement or an ineligible account", () => {
+    process.env.NEXT_PUBLIC_SCREENPIPE_FORCE_BILLING_GATE = "true";
+    flagVariant = "control";
+    flagEnabled = false;
+
+    const otherPlacement = renderHook(() =>
+      useCardAskPlacement("first_value"),
+    );
+    expect(otherPlacement.result.current.active).toBe(false);
+
+    settingsState = {
+      settings: {
+        user: {
+          id: "u1",
+          email: "a@b.com",
+          has_payment_method: true,
+        },
+      },
+      isSettingsLoaded: true,
+    };
+    const paidAccount = renderHook(() =>
+      useCardAskPlacement("onboarding"),
+    );
+    expect(paidAccount.result.current.active).toBe(false);
   });
 });
