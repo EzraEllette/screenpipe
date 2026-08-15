@@ -20,9 +20,15 @@ icon: "newspaper"
 - **Context window meter in the usage popover** — the AI usage popover now shows a dedicated context window row above your plan limits, with the full fraction (for example, `667.4k / 1.0M (67%)`) so you can see at a glance how much room is left in the current conversation before compaction kicks in. Meters are now colour-coded — blue while you have headroom, amber from 80%, red when you're at the limit — and share a single component with your plan allowance rows so the two can't drift out of sync. Colour is additive: the percentage, reset phrase, and screen-reader label each carry the same state on their own. See [connections](/connections).
 - **Meetings now shows up in the Home sidebar by default** — the Meetings row is visible in the Home sidebar out of the box instead of only appearing as the compact toolbar icon next to search. You can still swap between the labelled sidebar row and the toolbar icon from Settings → Display. Existing users with a saved sidebar layout keep whatever they had. See [meeting intelligence](/meeting-intelligence).
 
+### updates
+
+- **Compact chat composer chrome** — the row of controls under the chat composer is shorter and less busy. Every control now sits at a uniform height, the composer takes about 20 pixels less vertical space, and the settings trigger drops the sliders glyph so the model name has more room before it truncates. See [chat](/chatgpt).
+- **Usage chip is now a ring** — the chat usage indicator collapses to a single arc that fills as you approach your plan limit. The ring uses the same blue → amber → red states as the plan meters in the usage popover it opens, so glance and detail always agree, and the exact percentage stays available in the tooltip, the accessible name, and the popover itself. See [connections](/connections).
+
 ### bug fixes
 
 - **Live meeting dot no longer shifts on hover** — the red meeting dot on the collapsed overlay pill now stays anchored in place when you move the cursor over it. Previously, expanding the pill relocated the dot enough that the cursor could land on a shortcut cell and the transcript card would flicker instead of opening. Hovering the pill now reliably opens the transcript card it points to. See [meeting intelligence](/meeting-intelligence).
+- **Failed MCP servers name themselves in chat** — when an MCP server can't start, the chat now shows the server name in the failure row instead of a bare "Startup" label, and leads with the actionable error message. You can tell at a glance which server is broken without expanding each row. See [MCP server](/mcp-server).
 
 ## week of august 9, 2026
 
