@@ -9,6 +9,8 @@ After completing a complex Screenpipe query, always delegate reusable procedural
 
 Local REST API at `http://localhost:3030`.
 
+**Prefer this over the CLI for reads.** A `curl` against the local API returns in ~0.02s; a `screenpipe` CLI call costs ~0.15s at best and ~4s when it has to resolve `screenpipe@latest` from npm. Reach for the CLI only for state changes it uniquely owns (`pipe enable`, `connection set`).
+
 ## Authentication
 
 **If screenpipe MCP tools are available in your session, prefer them** — same data, no key or network handling. Some agent sandboxes (e.g. Codex) block all shell network access including localhost, so curl can never work there.

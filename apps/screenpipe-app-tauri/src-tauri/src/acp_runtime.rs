@@ -225,6 +225,33 @@ impl RuntimeConfig {
         let mut env = parse_json_env::<HashMap<String, String>>("SCREENPIPE_ACP_ENV_JSON")?
             .unwrap_or_default();
         env.retain(|name, _| !is_process_guard_env(name) && !is_forbidden_acp_env(name));
+
+        // ACP agents are pointed at the seeded `.pi/skills/*/SKILL.md` guides
+        // (see `build_first_turn_context`), and the always-on `screenpipe-cli`
+        // skill invokes `${SCREENPIPE_CLI:-bun x screenpipe@latest}`. Without
+        // this the adapter takes the ~4s npm fallback on every CLI call, where
+        // pi already gets the ~0.15s resolved binary via
+        // `apply_pi_isolation_env` — which ACP deliberately does not use,
+        // since that also carries pi-specific isolation vars.
+        //
+        // Inserted after the retain above so it cannot be spoofed by an
+        // inbound `SCREENPIPE_ACP_ENV_JSON` entry, and inherited from here by
+        // the adapter's own terminals (ACP never calls `env_clear`, and
+        // `SCREENPIPE_CLI` is not on the `RUNTIME_ONLY_ENV` scrub list).
+        let data_dir = screenpipe_core::paths::default_screenpipe_data_dir();
+        if let Some(cli) = screenpipe_core::agents::cli_runtime::resolved_cli_binary(&data_dir) {
+            env.insert(
+                screenpipe_core::agents::cli_runtime::CLI_ENV_VAR.to_string(),
+                cli.to_string_lossy().to_string(),
+            );
+        }
+        // An ACP-only user never runs a pipe, so nothing else would ever
+        // publish a launcher for them. Best-effort, single-flighted, and off
+        // the critical path.
+        screenpipe_core::agents::cli_runtime::maybe_refresh_in_background(
+            &data_dir,
+            Path::new(&bun_path),
+        );
         let configured_command = env_nonempty("SCREENPIPE_ACP_COMMAND");
         let (command, args) = if let Some(command) = configured_command {
             (command, configured_args)

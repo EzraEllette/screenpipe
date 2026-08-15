@@ -2418,6 +2418,24 @@ pub fn apply_pi_isolation_env(apply: &mut dyn FnMut(&str, &str)) {
     // We pin the pi version ourselves (ensure_installed); don't let the
     // subprocess phone pi.dev for update checks on every run.
     apply("PI_SKIP_VERSION_CHECK", "1");
+    // Same reasoning one layer out: the bundled skills tell agents to run the
+    // screenpipe CLI, and `bun x screenpipe@latest` spends ~1.5s resolving the
+    // registry on every single call. Hand them an already-resolved native
+    // binary when one is published; the skills fall back to `bun x` when this
+    // is unset, so an unpublished launcher is slow, never broken.
+    // `default_screenpipe_data_dir` is the one authority for this path on every
+    // platform — including Windows, where `%LOCALAPPDATA%\screenpipe` holds
+    // bundled tooling (git-portable, bun) but *not* the data dir.
+    let dir = crate::paths::default_screenpipe_data_dir();
+    if let Some(cli) = super::cli_runtime::resolved_cli_binary(&dir) {
+        apply(super::cli_runtime::CLI_ENV_VAR, &cli.to_string_lossy());
+    }
+    // Due-or-missing launcher: resolve out of band so the *next* run is fast.
+    // Single-flighted and best-effort — this never blocks the spawn it is
+    // attached to, and a failure just leaves the `bun x` fallback in place.
+    if let Some(bun) = find_bun_executable() {
+        super::cli_runtime::maybe_refresh_in_background(&dir, std::path::Path::new(&bun));
+    }
 }
 
 /// Marker file recording that the one-time seed from `~/.pi/agent` ran.
