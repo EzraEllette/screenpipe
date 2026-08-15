@@ -2332,11 +2332,25 @@ pub fn init_store(app: &AppHandle) -> Result<SettingsStore, String> {
 
     if should_save {
         if let Err(e) = store.save(app) {
-            // Non-fatal — logged as warn (not error) so Sentry doesn't pick it up.
-            // Common cause on Windows: antivirus / Controlled Folder Access / OneDrive
-            // blocks the first write; we retry on subsequent saves so the user isn't
-            // actually stuck. Not worth paging Louis about.
-            warn!("Failed to save initial settings store (non-fatal): {}", e);
+            // "We retry on subsequent saves so the user isn't actually stuck" is
+            // only true when the block is transient. The documented Windows
+            // causes — antivirus, Controlled Folder Access, OneDrive — are
+            // usually *persistent*, and every later save fails the same way.
+            // That includes the save that persists the account's verified plan,
+            // and without a persisted plan `local_plan_policy()` reads Unknown,
+            // the recording gate refuses with `account_required`, and the engine
+            // never starts. So this is not "not worth paging about": it is one
+            // of the two ways recording silently turns itself off on Windows.
+            //
+            // Reported at error. The old level was chosen so Sentry would skip
+            // it, which is exactly why the Windows onboarding collapse ran 25
+            // hours with no alert.
+            tracing::error!(
+                "failed to save settings store — if this persists (antivirus, Controlled \
+                 Folder Access, OneDrive), the account plan cannot be stored and recording \
+                 stays gated: {}",
+                e
+            );
         }
     }
     Ok(store)
@@ -2349,11 +2363,14 @@ pub fn init_onboarding_store(app: &AppHandle) -> Result<OnboardingStore, String>
         Ok(Some(onboarding)) => (onboarding, false),
         Ok(None) => (OnboardingStore::default(), true),
         Err(e) => {
-            // Fallback to defaults when deserialization fails
-            // DON'T save - preserve original store
-            // Non-fatal — logged as warn (not error) so Sentry doesn't pick it up.
-            warn!(
-                "Failed to deserialize onboarding, using defaults (store not overwritten): {}",
+            // Defaults mean "onboarding not completed", so an unreadable store
+            // silently replays setup for someone who already finished it — and
+            // setup now ends at a mandatory card ask. Still not saved, so the
+            // original file survives for recovery, but this is a user-visible
+            // reset rather than a routine miss and must be reported as one.
+            tracing::error!(
+                "failed to deserialize onboarding store, falling back to defaults \
+                 (file preserved) — setup will replay for this install: {}",
                 e
             );
             (OnboardingStore::default(), false)
@@ -2362,9 +2379,14 @@ pub fn init_onboarding_store(app: &AppHandle) -> Result<OnboardingStore, String>
 
     if should_save {
         if let Err(e) = onboarding.save(app) {
-            // Non-fatal — logged as warn (not error) so Sentry doesn't pick it up.
-            // See matching comment in init_settings_store.
-            warn!("Failed to save initial onboarding store (non-fatal): {}", e);
+            // Same persistence failure as the settings store above: if the write
+            // is blocked rather than merely late, onboarding completion never
+            // lands and setup replays on every launch.
+            tracing::error!(
+                "failed to save onboarding store — if this persists, setup completion \
+                 cannot be recorded and will replay on the next launch: {}",
+                e
+            );
         }
     }
     Ok(onboarding)
@@ -2919,6 +2941,99 @@ mod tests {
             signed_in.local_plan_policy(),
             LocalPlanPolicy::VerifiedFree,
             "an intact signed-in free store must clear the gate"
+        );
+    }
+
+    /// Regression for the Windows 2.6.20+ onboarding outage: a torn `store.bin`
+    /// must be recovered, not converted into a permanent recording lockout.
+    ///
+    /// `durable_write`'s then-shared temp path could rename a half-written temp
+    /// over `store.bin` (ff5ca0ac5 records it happening six times in 22s on
+    /// 2026-08-13, taking out the file and *both* last-good snapshots). The torn
+    /// file does not parse, so L2 — which only fires when the file parses but is
+    /// degraded — never saw it, and `init_settings_store` substituted
+    /// `SettingsStore::default()`. Defaults carry no plan, so
+    /// `local_plan_policy()` read `Unknown`, the consumer recording gate refused
+    /// with `account_required`, the engine never started, `boot_phase` stayed
+    /// `idle`, and onboarding waited on a readiness signal that could not
+    /// arrive. The bad file was preserved rather than repaired, so it recurred
+    /// on every launch: 178 users, 6.5 launches each, zero successes.
+    ///
+    /// Pins the whole contract rather than one branch: the snapshot is
+    /// restored, the recovered store deserializes to a **non-Unknown** plan
+    /// policy (which is what actually reopens the gate), and the torn bytes
+    /// survive on disk for forensics.
+    #[test]
+    fn torn_store_is_recovered_and_clears_the_recording_gate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_path = tmp.path().join("store.bin");
+
+        // Build the snapshot by serializing a store we have *asserted* opens the
+        // gate, so this fixture cannot drift from the real field names.
+        let mut good = SettingsStore::default();
+        good.user.id = Some("user_free".to_string());
+        good.user.subscription_plan = Some("none".to_string());
+        good.user.entitlement = Some(json!({
+            "active": true,
+            "plan": "none",
+            "source": "free",
+            "checked_at": chrono::Utc::now().to_rfc3339(),
+            "features": { "app": true, "cloud": false }
+        }));
+        assert_eq!(
+            good.local_plan_policy(),
+            LocalPlanPolicy::VerifiedFree,
+            "fixture must be a store that clears the gate, or the test proves nothing"
+        );
+
+        let mut settings_json = serde_json::to_value(&good).unwrap();
+        // read_healthy_snapshot requires presets, else it refuses the snapshot
+        // as degraded and there is nothing to restore from.
+        settings_json["aiPresets"] = json!([{ "id": "default" }]);
+        std::fs::write(
+            store_path.with_extension(LAST_GOOD_SUFFIX),
+            serde_json::to_vec(&json!({ "settings": settings_json })).unwrap(),
+        )
+        .unwrap();
+
+        // A half-written temp renamed over the target.
+        let torn = br#"{"settings":{"aiPresets":[{"id":"def"#;
+        std::fs::write(&store_path, torn).unwrap();
+        assert!(
+            serde_json::from_slice::<Value>(torn).is_err(),
+            "the fixture must actually be unparseable, or this is not the bug"
+        );
+
+        assert!(
+            restore_snapshot_over(&store_path, "test: torn store.bin"),
+            "a torn store.bin with a healthy snapshot must be restored"
+        );
+
+        // The recovered store must reopen the recording gate. This is the
+        // assertion that matters: bytes on disk are not the contract, a
+        // non-Unknown plan policy is.
+        let on_disk: Value = serde_json::from_slice(&std::fs::read(&store_path).unwrap())
+            .expect("restored store.bin must parse");
+        let recovered: SettingsStore =
+            serde_json::from_value(on_disk["settings"].clone()).expect("restored settings deserialize");
+        assert_ne!(
+            recovered.local_plan_policy(),
+            LocalPlanPolicy::Unknown,
+            "recovery that leaves the plan Unknown still locks recording off"
+        );
+        assert_eq!(recovered.local_plan_policy(), LocalPlanPolicy::VerifiedFree);
+
+        // The torn bytes must survive for forensics.
+        let preserved = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|entry| {
+                entry.file_name().to_string_lossy().contains("pre-restore")
+                    && std::fs::read(entry.path()).map(|b| b == torn).unwrap_or(false)
+            });
+        assert!(
+            preserved,
+            "the torn store must be kept as a pre-restore copy, not silently discarded"
         );
     }
 
