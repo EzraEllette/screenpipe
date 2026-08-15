@@ -673,6 +673,91 @@ func nearestAnchor(
     return best
 }
 
+/// Y origin for a panel hanging off the pill on the side the disclosure opens.
+///
+/// `stacked` is the height already claimed on that side by attachments nearer
+/// the pill. Without it every attachment measures from the same pill edge, so
+/// the transcript card and a notification both land in the same place and the
+/// toast covers the card's header row — which is precisely the case that
+/// matters, since "live transcript not flowing" only fires while a meeting is
+/// running and the card is up.
+func overlayAttachmentY(
+    pill: NSRect,
+    height: CGFloat,
+    gap: CGFloat,
+    stacked: CGFloat,
+    disclosureDown: Bool,
+    visible: NSRect,
+    edgeInset: CGFloat
+) -> CGFloat {
+    let preferred = disclosureDown
+        ? pill.minY - stacked - gap - height
+        : pill.maxY + stacked + gap
+    return min(
+        max(preferred, visible.minY + edgeInset),
+        visible.maxY - height - edgeInset
+    )
+}
+
+/// How much of the chip has to stay on a display while it is being dragged.
+/// The collapsed pill is 16pt tall, so this keeps a whole one in view: enough
+/// to see what you are holding and to grab it again.
+let kMinDraggedPillVisible: CGFloat = 20
+
+/// Shortest distance from a point to a rect, 0 when inside.
+private func distanceSquared(from point: NSPoint, to rect: NSRect) -> CGFloat {
+    let dx = max(rect.minX - point.x, 0, point.x - rect.maxX)
+    let dy = max(rect.minY - point.y, 0, point.y - rect.maxY)
+    return dx * dx + dy * dy
+}
+
+/// Panel origin for a drag in progress, pulled back so the chip cannot leave
+/// the desktop.
+///
+/// Without this the panel origin just tracks the cursor, and a drag off the
+/// left edge parks the pill in negative space. That is survivable while the
+/// drop still snaps — the snap puts it back — but it is the reason a *missed*
+/// drop made the pill vanish rather than merely sit somewhere odd. Clamping
+/// means even a drag that ends badly leaves something on screen to grab.
+///
+/// The clamp is per display, not against the bounding box of all of them: two
+/// screens of different heights leave dead space in that box which belongs to
+/// no display, and a pill clamped into it is just as gone. When the chip
+/// centre leaves every screen it is pulled into the nearest one.
+func clampedDragOrigin(
+    panelOrigin: NSPoint,
+    pillCentreOffset: CGVector,
+    screens: [NSRect],
+    minVisible: CGFloat = kMinDraggedPillVisible
+) -> NSPoint {
+    guard !screens.isEmpty else { return panelOrigin }
+    let centre = NSPoint(
+        x: panelOrigin.x + pillCentreOffset.dx,
+        y: panelOrigin.y + pillCentreOffset.dy
+    )
+    // On a display already: leave the drag alone, so normal dragging is
+    // untouched and only the escape is corrected.
+    if screens.contains(where: { NSMouseInRect(centre, $0, false) }) {
+        return panelOrigin
+    }
+    guard let target = screens.min(by: {
+        distanceSquared(from: centre, to: $0) < distanceSquared(from: centre, to: $1)
+    }) else { return panelOrigin }
+
+    // Never inset past the middle of a small display, which would push the
+    // centre back out the far side.
+    let insetX = min(minVisible, target.width / 2)
+    let insetY = min(minVisible, target.height / 2)
+    let clamped = NSPoint(
+        x: min(max(centre.x, target.minX + insetX), target.maxX - insetX),
+        y: min(max(centre.y, target.minY + insetY), target.maxY - insetY)
+    )
+    return NSPoint(
+        x: clamped.x - pillCentreOffset.dx,
+        y: clamped.y - pillCentreOffset.dy
+    )
+}
+
 func overlayHoverRect(
     in bounds: NSRect,
     expanded: Bool,
@@ -1423,8 +1508,21 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
     private var dragStageScreen: NSScreen?
     #if OVERLAY_PREVIEW
     private var previewStageLocked = false
+    private var previewTranscriptTimer: Timer?
     #endif
     private var isDraggingPill = false
+    /// Offset from the panel origin to the pinned transcript card, frozen for
+    /// the length of a drag. Holding it constant moves the card rigidly with
+    /// the pill instead of recomputing an anchor and re-clamping it against the
+    /// screen on every mouse move, which is what made the card wobble behind
+    /// the chip rather than travel with it.
+    private var draggedTranscriptOffset: CGVector?
+    /// Same, for a toast that happens to be up when the drag starts.
+    private var draggedNotificationOffset: CGVector?
+    /// True for the length of the release animation. The attachments are
+    /// animated to their own destinations in the same group, so the per-move
+    /// chase in `windowDidMove` has to stay out of the way until it lands.
+    private var isSettlingPanel = false
     private var notificationPanel: NSPanel?
     private var notificationHostingView: NSHostingView<AnyView>?
     private var notificationTrackingView: ReminderTrackingView?
@@ -1792,6 +1890,72 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
             panel?.orderOut(nil)
         }
     }
+
+    /// Pill and pinned card on screen together, which `setPreviewMeeting`
+    /// deliberately is not: it hides the pill so a screenshot picks the card.
+    /// This is the state the drag glue and the attachment stack are about — the
+    /// pill is the thing being dragged, and a notification arriving here is a
+    /// meeting alert landing while the meeting it is about is still running.
+    func setPreviewPinnedMeeting() {
+        DispatchQueue.main.async { [self] in
+            disconnectMeetingEventsWebSocket()
+            metrics.meetingActive = true
+            metrics.activeMeetingId = 42
+            metrics.meetingApp = "zoom"
+            metrics.meetingTranscriptItems = [
+                "so the overlay follows the pill now",
+                "right, and the toast stacks past the card",
+                "that was the part that overlapped",
+                "shipping it today",
+            ].enumerated().map { index, text in
+                MeetingOverlayTranscriptItem(
+                    meetingId: 42,
+                    itemId: "preview-\(index)",
+                    deviceName: index.isMultiple(of: 2) ? "system audio" : "macbook microphone",
+                    deviceType: index.isMultiple(of: 2) ? "output" : "input",
+                    speakerName: index.isMultiple(of: 2) ? "speaker 1" : "you",
+                    text: text,
+                    capturedAt: "2026-08-14T18:0\(index):00Z",
+                    isFinal: true
+                )
+            }
+            metrics.meetingPinned = true
+            refreshTranscriptPanelVisibility()
+            startPreviewTranscriptFeed()
+        }
+    }
+
+    /// A meeting that is actually live keeps pushing transcript deltas, and
+    /// each one lands in `refreshTranscriptPanelVisibility` — including while
+    /// the pill is being dragged. Reproducing that here is the whole point:
+    /// without a feed the preview is a still life and the drag looks fine.
+    private func startPreviewTranscriptFeed() {
+        previewTranscriptTimer?.invalidate()
+        var line = 0
+        previewTranscriptTimer = Timer.scheduledTimer(
+            withTimeInterval: 0.7, repeats: true
+        ) { [weak self] _ in
+            guard let self = self else { return }
+            line += 1
+            self.metrics.meetingTranscriptItems.append(
+                MeetingOverlayTranscriptItem(
+                    meetingId: 42,
+                    itemId: "preview-live-\(line)",
+                    deviceName: line.isMultiple(of: 2) ? "system audio" : "macbook microphone",
+                    deviceType: line.isMultiple(of: 2) ? "output" : "input",
+                    speakerName: line.isMultiple(of: 2) ? "speaker 1" : "you",
+                    text: "live line \(line) arriving while you drag",
+                    capturedAt: "2026-08-14T18:00:00Z",
+                    isFinal: true
+                )
+            )
+            if self.metrics.meetingTranscriptItems.count > 50 {
+                self.metrics.meetingTranscriptItems.removeFirst()
+            }
+            // Same call the websocket makes for every delta.
+            self.refreshTranscriptPanelVisibility()
+        }
+    }
 #endif
 
     private func openMeetingNote() {
@@ -1889,7 +2053,15 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
         p.backgroundColor = .clear
         p.hasShadow = false
         p.hidesOnDeactivate = false
-        p.isMovableByWindowBackground = true
+        // Off, deliberately. AppKit's own background drag is a second mover
+        // that knows nothing about the drag stage: no threshold, no landing
+        // targets, and no snap or persist on release. Whenever it won the
+        // gesture the pill simply stayed where it was let go — "it does not pin
+        // to a location, I can drag it anywhere" — and a drag past a screen
+        // edge left it stranded off the desktop with the stored anchor
+        // untouched, so it came back only on the next launch. `DraggableHosting-
+        // View` is the one mover now, and it always ends in `endPillDrag`.
+        p.isMovableByWindowBackground = false
         p.acceptsMouseMovedEvents = true
         p.isReleasedWhenClosed = false
         p.sharingType = .readOnly
@@ -1930,6 +2102,11 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
 
     private func setPillHovering(_ hovering: Bool) {
         pillHovering = hovering
+        // A drag walks the pill under a cursor that is holding still relative
+        // to it, and AppKit reports that as a stream of enter/exit. Acting on
+        // it re-expands the dock and re-opens a disclosure tooltip on top of
+        // the card being dragged. Record the state, act on it at the drop.
+        guard !isDraggingPill else { return }
         if hovering {
             hoverHideWorkItem?.cancel()
             hoverHideWorkItem = nil
@@ -1944,6 +2121,10 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
     }
 
     private func updateHoveredControl(at point: NSPoint?) {
+        guard !isDraggingPill else {
+            metrics.hoveredControl = nil
+            return
+        }
         guard metrics.isHovering, let point = point else {
             metrics.hoveredControl = nil
             return
@@ -2039,6 +2220,9 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
 
     private func setTranscriptHovering(_ hovering: Bool) {
         transcriptHovering = hovering
+        // Same as the pill: the card is travelling with the cursor, so its own
+        // enter/exit during a drag says nothing about intent.
+        guard !isDraggingPill else { return }
         if hovering {
             hoverHideWorkItem?.cancel()
             hoverHideWorkItem = nil
@@ -2112,14 +2296,25 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
             && (hovering || metrics.meetingPinned)
         guard shouldShow else {
             transcriptPanel?.orderOut(nil)
+            draggedTranscriptOffset = nil
+            // The toast measured itself past a card that just left.
+            positionNotificationPanelIfVisible()
             return
         }
+        // A live meeting pushes a transcript delta every few seconds, and each
+        // one lands here. Mid-drag that meant re-rendering the card and
+        // re-clamping it against a pill that is still moving, which is what
+        // made dragging a pinned meeting stutter. The card is already glued to
+        // the pill for the length of the gesture; leave it alone and let the
+        // drop apply whatever arrived meanwhile.
+        if isDraggingPill { return }
         if transcriptPanel == nil {
             createTranscriptPanel()
         }
         updateTranscriptContent()
         positionTranscriptPanel()
         gatedOrderFront(transcriptPanel)
+        positionNotificationPanelIfVisible()
     }
 
     private func createTranscriptPanel() {
@@ -2175,31 +2370,80 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
         }
     }
 
-    private func positionTranscriptPanel() {
-        guard let panel = panel, let transcriptPanel = transcriptPanel else { return }
-        let visible = panel.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? panel.frame
-        let width = transcriptPanel.frame.width
-        let height = transcriptPanel.frame.height
-        // Anchor to the *visible* bar, not the window. The window stays at the
-        // expanded size while the resting chip is only 16pt of it, so anchoring
-        // to the window edge left a ~46pt hole between the chip and the card.
-        // This is the same rect the hover tracking uses, so the two stay in sync.
-        let anchor = overlayHoverRect(
-            in: panel.frame,
+    /// Rect of the visible bar the attachments hang off, for a given panel
+    /// frame. Anchoring to the *visible* bar rather than the window matters:
+    /// the window stays at the expanded size while the resting chip is only
+    /// 16pt of it, so anchoring to the window edge leaves a ~46pt hole. This is
+    /// the same rect the hover tracking uses, so the two stay in sync.
+    private func attachmentAnchorRect(in panelFrame: NSRect) -> NSRect {
+        overlayHoverRect(
+            in: panelFrame,
             expanded: metrics.isHovering || metrics.forceExpanded,
             disclosureDown: metrics.disclosureDown,
             horizontal: metrics.horizontal,
             scale: gOverlayScale
         )
+    }
+
+    /// Height the transcript card claims on the disclosure side, or 0 when it
+    /// is not on screen. Anything stacked past the card offsets by this.
+    private func transcriptStackHeight() -> CGFloat {
+        guard let card = transcriptPanel, card.isVisible else { return 0 }
+        return card.frame.height
+    }
+
+    /// Where the card belongs for a given panel frame. Split out from the
+    /// setter so the release animation can aim at the destination instead of
+    /// chasing the pill one `windowDidMove` at a time.
+    private func transcriptOrigin(forPanelFrame panelFrame: NSRect, visible: NSRect) -> NSPoint? {
+        guard let transcriptPanel = transcriptPanel else { return nil }
+        let width = transcriptPanel.frame.width
+        let height = transcriptPanel.frame.height
+        let anchor = attachmentAnchorRect(in: panelFrame)
         let centeredX = anchor.midX - width / 2
         let x = min(max(centeredX, visible.minX + 4), visible.maxX - width - 4)
         // Butt the card against the bar: dead space here is a gap in the hover
         // corridor, and the pointer crossing it reads as leaving both surfaces.
-        let preferredY = metrics.disclosureDown
-            ? anchor.minY - height
-            : anchor.maxY
-        let y = min(max(preferredY, visible.minY + 4), visible.maxY - height - 4)
-        transcriptPanel.setFrameOrigin(NSPoint(x: x, y: y))
+        let y = overlayAttachmentY(
+            pill: anchor,
+            height: height,
+            gap: 0,
+            stacked: 0,
+            disclosureDown: metrics.disclosureDown,
+            visible: visible,
+            edgeInset: 4
+        )
+        return NSPoint(x: x, y: y)
+    }
+
+    private func positionTranscriptPanel() {
+        guard let panel = panel, let transcriptPanel = transcriptPanel else { return }
+        let visible = visibleFrame(for: panel)
+        guard let origin = transcriptOrigin(forPanelFrame: panel.frame, visible: visible) else {
+            return
+        }
+        transcriptPanel.setFrameOrigin(origin)
+        reglueIfDragging(transcriptPanel, into: &draggedTranscriptOffset)
+    }
+
+    /// Re-freeze an attachment's drag offset after something placed it by
+    /// geometry mid-gesture — a toast arriving, a hover exit landing. Without
+    /// this the panel keeps the position it was just given while the pill walks
+    /// away from it, and the glue only picks it up if it was already visible
+    /// when the drag started.
+    private func reglueIfDragging(_ attachment: NSPanel, into offset: inout CGVector?) {
+        guard isDraggingPill, let panel = panel, attachment.isVisible else { return }
+        offset = CGVector(
+            dx: attachment.frame.minX - panel.frame.minX,
+            dy: attachment.frame.minY - panel.frame.minY
+        )
+    }
+
+    private func visibleFrame(for panel: NSPanel, on screen: NSScreen? = nil) -> NSRect {
+        screen?.visibleFrame
+            ?? panel.screen?.visibleFrame
+            ?? NSScreen.main?.visibleFrame
+            ?? panel.frame
     }
 
     /// Disclosure direction follows the pinned anchor rather than the live
@@ -2321,17 +2565,40 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
         let origin = anchoredPanelOrigin(for: overlayAnchor, on: screen)
 
         if animated {
+            // Attachments travel in the same group, aimed at where they belong
+            // once the pill has landed. Letting them chase the animated frame
+            // through `windowDidMove` instead makes a pinned card lag the chip
+            // for the length of the settle and arrive a beat late.
+            let settled = NSRect(origin: origin, size: panel.frame.size)
+            let visible = visibleFrame(for: panel, on: screen)
+            let cardDestination = transcriptPanel?.isVisible == true
+                ? transcriptOrigin(forPanelFrame: settled, visible: visible)
+                : nil
+            let toastDestination = notificationPanel?.isVisible == true
+                ? notificationOrigin(forPanelFrame: settled, visible: visible)
+                : nil
+
+            isSettlingPanel = true
             NSAnimationContext.runAnimationGroup { context in
                 context.duration = kSnapDur
                 context.timingFunction = CAMediaTimingFunction(
                     controlPoints: kSnapCurve.0, kSnapCurve.1, kSnapCurve.2, kSnapCurve.3
                 )
                 panel.animator().setFrameOrigin(origin)
+                if let cardDestination = cardDestination {
+                    transcriptPanel?.animator().setFrameOrigin(cardDestination)
+                }
+                if let toastDestination = toastDestination {
+                    notificationPanel?.animator().setFrameOrigin(toastDestination)
+                }
+            } completionHandler: { [weak self] in
+                self?.isSettlingPanel = false
             }
-        } else {
-            panel.setFrameOrigin(origin)
+            positionDisclosurePanel()
+            return
         }
 
+        panel.setFrameOrigin(origin)
         positionDisclosurePanel()
         if transcriptPanel?.isVisible == true {
             positionTranscriptPanel()
@@ -2349,8 +2616,33 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
         metrics.forceExpanded = false
         metrics.hoveredControl = nil
         disclosurePanel?.orderOut(nil)
+        glueAttachmentsToDrag()
         showDragStage()
         updateDragStage()
+    }
+
+    /// Settle the attachments against the collapsed chip once, then freeze
+    /// their offsets so the rest of the gesture is pure translation.
+    private func glueAttachmentsToDrag() {
+        guard let panel = panel else { return }
+        // The pill just collapsed from the 30pt dock to the 16pt chip, so the
+        // attachments belong a few points closer before anything is frozen.
+        if transcriptPanel?.isVisible == true {
+            positionTranscriptPanel()
+        }
+        if notificationPanel?.isVisible == true {
+            positionNotificationPanel()
+        }
+        let origin = panel.frame.origin
+        func frozenOffset(_ attachment: NSPanel?) -> CGVector? {
+            guard let attachment = attachment, attachment.isVisible else { return nil }
+            return CGVector(
+                dx: attachment.frame.minX - origin.x,
+                dy: attachment.frame.minY - origin.y
+            )
+        }
+        draggedTranscriptOffset = frozenOffset(transcriptPanel)
+        draggedNotificationOffset = frozenOffset(notificationPanel)
     }
 
     /// Snap to the nearest anchor, persist it, and let the panel settle there.
@@ -2361,8 +2653,19 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
         if previewStageLocked { return }
         #endif
         isDraggingPill = false
+        draggedTranscriptOffset = nil
+        draggedNotificationOffset = nil
         hideDragStage()
-        guard let (landed, screen) = droppedAnchor() else { return }
+        // Apply whatever the meeting pushed while the card was glued, before
+        // the settle so the animation aims at the card's real destination.
+        refreshTranscriptPanelVisibility()
+        guard let (landed, screen) = droppedAnchor() else {
+            // No screen could be resolved at all — every display went away
+            // mid-drag, say. Re-apply the stored anchor so the pill is put back
+            // somewhere real rather than left where the gesture dropped it.
+            positionPanel(animated: false)
+            return
+        }
 
         let display = displayIdentifier(for: screen)
         let changed = landed != overlayAnchor || display != overlayDisplay
@@ -2380,6 +2683,12 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
     }
 
     /// Anchor the pill would land on right now, with the screen it belongs to.
+    ///
+    /// Nothing here may return nil for a pill that is merely in a strange
+    /// place: an early return would leave the panel exactly where the drag
+    /// abandoned it, which is the failure this whole path exists to prevent.
+    /// `screenContaining` falls back through the panel's screen to the main
+    /// one, so a drop into a gap between displays still resolves.
     private func droppedAnchor() -> (OverlayAnchor, NSScreen)? {
         guard let center = currentPillCenter(),
               let screen = screenContaining(center) else { return nil }
@@ -2505,17 +2814,38 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
             hosting.rootView = AnyView(view)
         } else {
             let hosting = DraggableHostingView(rootView: AnyView(view))
+            hosting.pillCentreOffset = { [weak self] in
+                guard let self = self, let panel = self.panel else {
+                    return CGVector(dx: 0, dy: 0)
+                }
+                let rect = overlayHoverRect(
+                    in: panel.frame,
+                    expanded: false,
+                    disclosureDown: self.metrics.disclosureDown,
+                    horizontal: self.metrics.horizontal,
+                    scale: gOverlayScale
+                )
+                return CGVector(
+                    dx: rect.midX - panel.frame.minX,
+                    dy: rect.midY - panel.frame.minY
+                )
+            }
             hosting.onDragStarted = { [weak self] in
-                self?.pillHovering = false
-                self?.transcriptHovering = false
-                self?.transcriptPanel?.orderOut(nil)
-                self?.beginPillDrag()
+                guard let self = self else { return }
+                self.pillHovering = false
+                self.transcriptHovering = false
+                // A pinned card is part of what is being dragged, so it travels
+                // with the pill. Only the card that hover opened goes away with
+                // the hover, along with the rest of the hover UI.
+                if !self.metrics.meetingPinned {
+                    self.transcriptPanel?.orderOut(nil)
+                }
+                self.beginPillDrag()
             }
             hosting.onDragEnded = { [weak self] in
+                // `endPillDrag` restores the card against the pill's new home
+                // and rides it in on the settle.
                 self?.endPillDrag()
-                // Dragging collapses hover UI, but a pinned card is meant to stay:
-                // bring it back against the pill's new home.
-                self?.refreshTranscriptPanelVisibility()
             }
             hosting.frame = contentView.bounds
             hosting.autoresizingMask = [.width, .height]
@@ -2650,25 +2980,17 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
         positionNotificationPanel()
     }
 
-    /// Sit the notification against the pill on the side the disclosure opens,
-    /// aligned to the pill's edge so it visibly belongs to it.
-    private func positionNotificationPanel() {
-        guard let panel = panel, let toast = notificationPanel else { return }
-        let visible = panel.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? panel.frame
+    /// Where the toast belongs for a given panel frame. Same rect the
+    /// transcript card hangs off, offset past the card when one is on screen so
+    /// the two attachments stack outward from the pill instead of landing on
+    /// each other. The win32 pill gets this for free by laying every block out
+    /// in one window, edge-outward; here they are separate panels at the same
+    /// level, so the offset has to be explicit.
+    private func notificationOrigin(forPanelFrame panelFrame: NSRect, visible: NSRect) -> NSPoint? {
+        guard let toast = notificationPanel else { return nil }
         let width = toast.frame.width
         let height = toast.frame.height
-        // Anchor to the *visible* bar, not the window. The window stays at the
-        // expanded size while the resting chip is only 16pt of it, so anchoring
-        // Y to the window edge left a ~46pt hole between the chip and the toast
-        // even though X was already measured off the chip. Same rect the
-        // transcript card uses, so the two attachments hang the same way.
-        let pill = overlayHoverRect(
-            in: panel.frame,
-            expanded: metrics.isHovering || metrics.forceExpanded,
-            disclosureDown: metrics.disclosureDown,
-            horizontal: metrics.horizontal,
-            scale: gOverlayScale
-        )
+        let pill = attachmentAnchorRect(in: panelFrame)
 
         let preferredX: CGFloat
         switch metrics.horizontal {
@@ -2678,11 +3000,28 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
         }
         let margin = anchorMargin(scale: gOverlayScale)
         let x = min(max(preferredX, visible.minX + margin), visible.maxX - width - margin)
-        let preferredY = metrics.disclosureDown
-            ? pill.minY - height - margin
-            : pill.maxY + margin
-        let y = min(max(preferredY, visible.minY + margin), visible.maxY - height - margin)
-        toast.setFrameOrigin(NSPoint(x: x, y: y))
+        let y = overlayAttachmentY(
+            pill: pill,
+            height: height,
+            gap: margin,
+            stacked: transcriptStackHeight(),
+            disclosureDown: metrics.disclosureDown,
+            visible: visible,
+            edgeInset: margin
+        )
+        return NSPoint(x: x, y: y)
+    }
+
+    /// Sit the notification against the pill on the side the disclosure opens,
+    /// aligned to the pill's edge so it visibly belongs to it.
+    private func positionNotificationPanel() {
+        guard let panel = panel, let toast = notificationPanel else { return }
+        guard let origin = notificationOrigin(
+            forPanelFrame: panel.frame,
+            visible: visibleFrame(for: panel)
+        ) else { return }
+        toast.setFrameOrigin(origin)
+        reglueIfDragging(toast, into: &draggedNotificationOffset)
     }
 
     /// Grow out of the pill instead of appearing on top of it.
@@ -2741,20 +3080,48 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
     }
 
     func windowDidMove(_ notification: Notification) {
+        // The settle animates the panel and every attachment together, to
+        // destinations already computed from where the pill is landing. Chasing
+        // the animated frame from here would fight it frame by frame.
+        guard !isSettlingPanel else { return }
+
+        // The drag loop runs its own tracking, so this is the only signal that
+        // the pill moved while the user is still holding it. Attachments ride
+        // along on a frozen offset: rigid, and no geometry recomputed per move.
+        // The pinned anchor cannot change mid-drag, so nothing else here has
+        // anything to do until the drop.
+        if isDraggingPill {
+            moveDraggedAttachments()
+            updateDragStage()
+            return
+        }
+
         updateDisclosureDirection()
         positionDisclosurePanel()
+
         if notificationPanel?.isVisible == true {
             positionNotificationPanel()
-        }
-        // performDrag runs its own tracking loop, so this is the only signal
-        // that the pill moved while the user is still holding it.
-        if isDraggingPill {
-            updateDragStage()
         }
         // A pinned card outlives the drag, so it has to follow the chip instead
         // of being left behind at the old anchor.
         if transcriptPanel?.isVisible == true {
             positionTranscriptPanel()
+        }
+    }
+
+    /// Keep the attachments glued to the pill for the length of a drag.
+    private func moveDraggedAttachments() {
+        guard let panel = panel else { return }
+        let origin = panel.frame.origin
+        if let offset = draggedTranscriptOffset, let card = transcriptPanel, card.isVisible {
+            card.setFrameOrigin(
+                NSPoint(x: origin.x + offset.dx, y: origin.y + offset.dy)
+            )
+        }
+        if let offset = draggedNotificationOffset, let toast = notificationPanel, toast.isVisible {
+            toast.setFrameOrigin(
+                NSPoint(x: origin.x + offset.dx, y: origin.y + offset.dy)
+            )
         }
     }
 }
@@ -2971,8 +3338,19 @@ private class DraggableHostingView<Content: View>: NSHostingView<Content> {
     var onDragStarted: (() -> Void)?
     /// Called once the user releases, so the controller can snap and persist.
     var onDragEnded: (() -> Void)?
+    /// Centre of the visible chip relative to the panel origin. Supplied by the
+    /// controller because only it knows the current metrics; used to clamp the
+    /// chip rather than the whole panel, most of which is empty space for the
+    /// expanded dock.
+    var pillCentreOffset: (() -> CGVector)?
 
     private var dragMonitor: Any?
+    /// Global twin of `dragMonitor`. A local monitor only sees events routed to
+    /// this app, and the overlay's whole job is to be used while another app is
+    /// frontmost — release the button over that app and the closing mouseUp can
+    /// land there instead. Without this the drag never ended: no snap, no
+    /// persist, and the pill sat wherever it was abandoned.
+    private var globalDragMonitor: Any?
     private var dragStartLocation: NSPoint = .zero
     /// True between the threshold crossing and mouseUp. Doubles as the flag
     /// that the closing mouseUp must be swallowed, so SwiftUI's button does not
@@ -2984,9 +3362,28 @@ private class DraggableHostingView<Content: View>: NSHostingView<Content> {
     private var grabOffset = CGVector(dx: 0, dy: 0)
 
     deinit {
+        removeDragMonitors()
+    }
+
+    private func removeDragMonitors() {
         if let m = dragMonitor {
             NSEvent.removeMonitor(m)
+            dragMonitor = nil
         }
+        if let m = globalDragMonitor {
+            NSEvent.removeMonitor(m)
+            globalDragMonitor = nil
+        }
+    }
+
+    /// End the gesture exactly once, whichever monitor noticed the release
+    /// first. Both are always torn down here, so a drag can never leave a
+    /// monitor armed for the next press to trip over.
+    private func finishDrag() {
+        removeDragMonitors()
+        guard isDragging else { return }
+        isDragging = false
+        onDragEnded?()
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -2996,28 +3393,38 @@ private class DraggableHostingView<Content: View>: NSHostingView<Content> {
 
         guard let window = window else { return }
 
-        if let m = dragMonitor {
-            NSEvent.removeMonitor(m)
-            dragMonitor = nil
-        }
+        removeDragMonitors()
 
         isDragging = false
         dragStartLocation = event.locationInWindow
         let dragThreshold: CGFloat = 4.0
 
+        // Sees the release when it happens over another app. Global monitors
+        // cannot consume the event, which is fine: the click it would leak to
+        // SwiftUI belongs to whatever is under the cursor, not to us.
+        globalDragMonitor = NSEvent.addGlobalMonitorForEvents(
+            matching: [.leftMouseDragged, .leftMouseUp]
+        ) { [weak self] event in
+            guard let self = self else { return }
+            switch event.type {
+            case .leftMouseUp:
+                self.finishDrag()
+            case .leftMouseDragged where self.isDragging:
+                self.moveWindow(under: NSEvent.mouseLocation)
+            default:
+                break
+            }
+        }
+
         dragMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDragged, .leftMouseUp]) { [weak self] event in
             guard let self = self else { return event }
             switch event.type {
             case .leftMouseUp:
-                if let m = self.dragMonitor {
-                    NSEvent.removeMonitor(m)
-                    self.dragMonitor = nil
-                }
-                if self.isDragging {
+                let wasDragging = self.isDragging
+                self.finishDrag()
+                if wasDragging {
                     // Drag just ended — swallow so SwiftUI's button doesn't see
                     // mouseUp and fire its action.
-                    self.isDragging = false
-                    self.onDragEnded?()
                     return nil
                 }
                 // Normal click — let the event reach SwiftUI.
@@ -3052,12 +3459,22 @@ private class DraggableHostingView<Content: View>: NSHostingView<Content> {
         }
     }
 
-    /// Keep the grabbed point of the panel pinned under the cursor. Screen
-    /// coordinates throughout, so crossing onto another display just works.
+    /// Keep the grabbed point of the panel pinned under the cursor, but never
+    /// let the chip itself leave the desktop. Screen coordinates throughout, so
+    /// crossing onto another display just works.
     private func moveWindow(under mouse: NSPoint) {
         guard let window = window else { return }
+        let raw = NSPoint(x: mouse.x - grabOffset.dx, y: mouse.y - grabOffset.dy)
+        let offset = pillCentreOffset?() ?? CGVector(
+            dx: window.frame.width / 2,
+            dy: window.frame.height / 2
+        )
         window.setFrameOrigin(
-            NSPoint(x: mouse.x - grabOffset.dx, y: mouse.y - grabOffset.dy)
+            clampedDragOrigin(
+                panelOrigin: raw,
+                pillCentreOffset: offset,
+                screens: NSScreen.screens.map { $0.frame }
+            )
         )
     }
 }

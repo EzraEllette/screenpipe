@@ -1485,7 +1485,7 @@ fn whatsapp_without_call_signal_blocked_by_gate() {
     );
 
     // Simulate what build_candidates does: check call_evidence with no call signals.
-    let call_evidence = vec![CallSignalEvidence {
+    let call_evidence = [CallSignalEvidence {
         platform: "whatsapp".to_string(),
         is_in_call: false,
         matched_signals: vec![],
@@ -1525,7 +1525,7 @@ fn whatsapp_with_call_signal_passes_gate() {
         ResolvedMeetingCandidate::Native { ref platform, .. } if platform == "WhatsApp"
     ));
 
-    let call_evidence = vec![CallSignalEvidence {
+    let call_evidence = [CallSignalEvidence {
         platform: "whatsapp".to_string(),
         is_in_call: true,
         matched_signals: vec!["AutomationIdContains(Calling_Window)".to_string()],

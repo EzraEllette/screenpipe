@@ -874,9 +874,9 @@ async fn load_snippets(
         .filter(|key_text| {
             let text = key_text.text.trim();
             text.len() >= 20
-                && !query_text_lower
+                && query_text_lower
                     .as_ref()
-                    .is_some_and(|q| !text.to_lowercase().contains(q))
+                    .is_none_or(|q| text.to_lowercase().contains(q))
         })
         .collect();
 

@@ -5,6 +5,13 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 #![allow(deprecated)] // cocoa/objc crate deprecations — will migrate to objc2 later
 #![allow(unused_imports)]
+// `cargo test`/`--all-targets` compiles this binary with the test harness in
+// place of `main`, so everything reachable only from `main` looks unreachable
+// and rustc emits ~21 bogus `never used` warnings (enterprise_autostart, the
+// policy enforcement entrypoints). They are live in the real binary; deleting
+// them breaks the app. Suppress dead_code under cfg(test) only, so the real
+// build still reports genuine dead code.
+#![cfg_attr(test, allow(dead_code))]
 // analytics.rs builds a ~70-field json! health blob; the default recursion limit
 // (128) overflows while expanding the macro. Raise it for the whole crate.
 #![recursion_limit = "256"]

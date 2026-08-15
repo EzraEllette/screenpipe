@@ -252,6 +252,76 @@ private func testTieBreaksToCurrent() {
     }
 }
 
+/// The transcript card and a notification are separate panels at the same
+/// window level, both hanging off the same pill edge. Stacking is the only
+/// thing keeping the toast off the card's header row — and the alert that
+/// brought this up ("live transcript not flowing") only ever fires while a
+/// meeting is running, so the card is up by definition.
+private func testAttachmentStacking() {
+    let card = NSSize(width: 320, height: 142)
+    let toast = NSSize(width: 340, height: 34)
+    let margin = anchorMargin(scale: 1)
+
+    for disclosureDown in [true, false] {
+        // Pill at the top edge opens downward, and vice versa.
+        let pill = disclosureDown
+            ? NSRect(x: 949, y: visible.maxY - 4 - 16, width: 22, height: 16)
+            : NSRect(x: 949, y: visible.minY + 4, width: 22, height: 16)
+        let side = disclosureDown ? "down" : "up"
+
+        let cardY = overlayAttachmentY(
+            pill: pill, height: card.height, gap: 0, stacked: 0,
+            disclosureDown: disclosureDown, visible: visible, edgeInset: 4
+        )
+        // Butted against the bar: a gap here is a hole in the hover corridor.
+        expectClose(
+            disclosureDown ? cardY + card.height : cardY,
+            disclosureDown ? pill.minY : pill.maxY,
+            "card butts the pill (\(side))"
+        )
+
+        let toastY = overlayAttachmentY(
+            pill: pill, height: toast.height, gap: margin, stacked: card.height,
+            disclosureDown: disclosureDown, visible: visible, edgeInset: margin
+        )
+        let cardRect = NSRect(x: 949, y: cardY, width: card.width, height: card.height)
+        let toastRect = NSRect(x: 949, y: toastY, width: toast.width, height: toast.height)
+        expect(
+            !cardRect.intersects(toastRect),
+            "toast overlaps the transcript card (\(side)): \(toastRect) vs \(cardRect)"
+        )
+        // Past the card, not merely clear of it: the two read as one stack.
+        expectClose(
+            disclosureDown ? cardRect.minY - toastRect.maxY : toastRect.minY - cardRect.maxY,
+            margin,
+            "toast sits one margin past the card (\(side))"
+        )
+
+        // With no card up, the toast keeps hanging straight off the pill.
+        let aloneY = overlayAttachmentY(
+            pill: pill, height: toast.height, gap: margin, stacked: 0,
+            disclosureDown: disclosureDown, visible: visible, edgeInset: margin
+        )
+        expectClose(
+            disclosureDown ? pill.minY - (aloneY + toast.height) : aloneY - pill.maxY,
+            margin,
+            "lone toast hangs off the pill (\(side))"
+        )
+    }
+}
+
+/// Stacking must not push an attachment off the display; the clamp wins.
+private func testAttachmentStaysOnScreen() {
+    let tall: CGFloat = 900
+    let pill = NSRect(x: 949, y: visible.maxY - 4 - 16, width: 22, height: 16)
+    let y = overlayAttachmentY(
+        pill: pill, height: tall, gap: 4, stacked: 600,
+        disclosureDown: true, visible: visible, edgeInset: 4
+    )
+    expect(y >= visible.minY + 4, "stacked attachment ran off the bottom: \(y)")
+    expect(y + tall <= visible.maxY - 4, "stacked attachment ran off the top: \(y)")
+}
+
 /// Anchor raw values are a wire contract with Rust
 /// (`SHORTCUT_OVERLAY_ANCHORS` in `commands/native_actions.rs`). Renaming one
 /// silently stops persistence, so pin them here too.
@@ -259,6 +329,116 @@ private func testWireContract() {
     let expected = ["top-center", "right-center", "bottom-center", "left-center"]
     let actual = OverlayAnchor.allCases.map(\.rawValue)
     expect(actual == expected, "anchor raw values drifted: \(actual)")
+}
+
+/// A drag inside a display must be left exactly alone. The clamp is a fence at
+/// the edge of the desktop, not a magnet, so ordinary dragging still tracks the
+/// cursor pixel for pixel.
+private func testClampLeavesOnScreenDragsAlone() {
+    let screens = [NSRect(x: 0, y: 0, width: 1920, height: 1080)]
+    let offset = CGVector(dx: 100, dy: 20)
+    for origin in [
+        NSPoint(x: 0, y: 0),
+        NSPoint(x: 400, y: 300),
+        NSPoint(x: 1500, y: 900),
+    ] {
+        let clamped = clampedDragOrigin(
+            panelOrigin: origin, pillCentreOffset: offset, screens: screens
+        )
+        expect(clamped == origin, "clamp moved an on-screen drag at \(origin) to \(clamped)")
+    }
+}
+
+/// The reported bug: drag left, let go, the pill is gone. The clamp is what
+/// guarantees something stays grabbable even when the drop misbehaves.
+private func testClampKeepsPillOnDesktop() {
+    let screens = [NSRect(x: 0, y: 0, width: 1920, height: 1080)]
+    let offset = CGVector(dx: 100, dy: 20)
+
+    let farLeft = clampedDragOrigin(
+        panelOrigin: NSPoint(x: -4000, y: 500),
+        pillCentreOffset: offset,
+        screens: screens
+    )
+    expectClose(farLeft.x + offset.dx, kMinDraggedPillVisible, "chip centre pulled to left edge")
+    expectClose(farLeft.y + offset.dy, 520, "clamp left the vertical position alone")
+
+    // Every other direction, including diagonally past a corner.
+    let cases: [(NSPoint, String)] = [
+        (NSPoint(x: 9000, y: 500), "right"),
+        (NSPoint(x: 400, y: -3000), "below"),
+        (NSPoint(x: 400, y: 9000), "above"),
+        (NSPoint(x: -9000, y: 9000), "past the top-left corner"),
+    ]
+    for (origin, label) in cases {
+        let clamped = clampedDragOrigin(
+            panelOrigin: origin, pillCentreOffset: offset, screens: screens
+        )
+        let centre = NSPoint(x: clamped.x + offset.dx, y: clamped.y + offset.dy)
+        expect(
+            NSMouseInRect(centre, screens[0], false),
+            "chip dragged \(label) ended off the desktop at \(centre)"
+        )
+    }
+}
+
+/// With two displays the chip is pulled into the nearer one, and dead space in
+/// the bounding box of both is never a valid resting place: clamping to that
+/// box would leave the pill in a region no display can draw.
+private func testClampPicksNearestDisplay() {
+    // Side by side, second one shorter, so y in 720..<1080 beyond x=1920 is
+    // inside the bounding box but on no display.
+    let screens = [
+        NSRect(x: 0, y: 0, width: 1920, height: 1080),
+        NSRect(x: 1920, y: 0, width: 1280, height: 720),
+    ]
+    let offset = CGVector(dx: 10, dy: 10)
+
+    let intoSecond = clampedDragOrigin(
+        panelOrigin: NSPoint(x: 4000, y: 300),
+        pillCentreOffset: offset,
+        screens: screens
+    )
+    let secondCentre = NSPoint(x: intoSecond.x + offset.dx, y: intoSecond.y + offset.dy)
+    expect(
+        NSMouseInRect(secondCentre, screens[1], false),
+        "chip past the right edge should land on the second display, got \(secondCentre)"
+    )
+
+    let deadSpace = clampedDragOrigin(
+        panelOrigin: NSPoint(x: 2400, y: 900),
+        pillCentreOffset: offset,
+        screens: screens
+    )
+    let deadCentre = NSPoint(x: deadSpace.x + offset.dx, y: deadSpace.y + offset.dy)
+    expect(
+        screens.contains { NSMouseInRect(deadCentre, $0, false) },
+        "chip in the gap above the shorter display stayed off every screen at \(deadCentre)"
+    )
+}
+
+/// A display smaller than twice the inset must not have the chip pushed out the
+/// opposite side by the inset itself.
+private func testClampSurvivesTinyDisplay() {
+    let tiny = [NSRect(x: 0, y: 0, width: 24, height: 24)]
+    let offset = CGVector(dx: 5, dy: 5)
+    let clamped = clampedDragOrigin(
+        panelOrigin: NSPoint(x: -500, y: -500), pillCentreOffset: offset, screens: tiny
+    )
+    let centre = NSPoint(x: clamped.x + offset.dx, y: clamped.y + offset.dy)
+    expect(
+        NSMouseInRect(centre, tiny[0], false),
+        "chip left a display smaller than the inset, at \(centre)"
+    )
+}
+
+/// No displays at all (all asleep mid-drag) must not crash or teleport.
+private func testClampWithoutDisplaysIsIdentity() {
+    let origin = NSPoint(x: 123, y: 456)
+    let clamped = clampedDragOrigin(
+        panelOrigin: origin, pillCentreOffset: CGVector(dx: 1, dy: 2), screens: []
+    )
+    expect(clamped == origin, "clamp with no displays should be identity, got \(clamped)")
 }
 
 @main
@@ -271,7 +451,14 @@ struct ShortcutReminderTests {
         testLegacyCornersMigrate()
         testNearestAnchor()
         testTieBreaksToCurrent()
+        testAttachmentStacking()
+        testAttachmentStaysOnScreen()
         testWireContract()
+        testClampLeavesOnScreenDragsAlone()
+        testClampKeepsPillOnDesktop()
+        testClampPicksNearestDisplay()
+        testClampSurvivesTinyDisplay()
+        testClampWithoutDisplaysIsIdentity()
 
         if failures.isEmpty {
             print("shortcut overlay geometry: \(checks) checks passed")

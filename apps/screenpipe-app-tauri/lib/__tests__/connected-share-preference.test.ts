@@ -97,27 +97,32 @@ describe("remembered share destination", () => {
 describe("preferred destination", () => {
   it("reopens on the destination you last used", () => {
     expect(
-      preferredShareDestination({ destination: "slack" }, ["copy", "slack"]),
+      preferredShareDestination({ destination: "slack" }, ["slack", "linear"]),
     ).toBe("slack");
   });
 
   // Disconnecting an app must not strand the dialog on a destination that can
-  // no longer send.
-  it("falls back when the remembered app is no longer connected", () => {
+  // no longer send. It used to land on `copy`, which meant a dropped Slack
+  // connection silently turned a send into a clipboard write.
+  it("asks again when the remembered app is no longer connected", () => {
     expect(
-      preferredShareDestination({ destination: "slack" }, ["copy", "linear"]),
-    ).toBe("copy");
+      preferredShareDestination({ destination: "slack" }, ["linear"]),
+    ).toBeNull();
   });
 
   // Picking from a list of one is a question with a single answer.
   it("skips the picker when exactly one app is connected", () => {
-    expect(preferredShareDestination(null, ["copy", "slack"])).toBe("slack");
+    expect(preferredShareDestination(null, ["slack"])).toBe("slack");
   });
 
-  it("asks when there is a real choice, and when there is none", () => {
-    expect(preferredShareDestination(null, ["copy", "slack", "linear"])).toBe(
-      "copy",
-    );
-    expect(preferredShareDestination(null, ["copy"])).toBe("copy");
+  it("asks when there is a real choice", () => {
+    expect(preferredShareDestination(null, ["slack", "linear"])).toBeNull();
+  });
+
+  // Nothing connected is not a destination. The dialog has to say so rather
+  // than resolve to a local write nobody asked for.
+  it("has no destination when nothing is connected", () => {
+    expect(preferredShareDestination(null, [])).toBeNull();
+    expect(preferredShareDestination({ destination: "slack" }, [])).toBeNull();
   });
 });

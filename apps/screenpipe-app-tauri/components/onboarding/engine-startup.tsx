@@ -34,6 +34,13 @@ type StartupState = "starting" | "running" | "stuck";
 
 const TAKING_LONGER_MS = 8000;
 const STUCK_TIMEOUT_MS = 15000;
+// spawn_screenpipe has no internal deadline: when it is asked to spawn an engine
+// that is already running it can neither resolve nor reject, and that await was
+// the only thing standing between the user and the rest of setup. A hang here
+// used to be completely silent — the stuck timer re-arms on every boot-phase
+// update, so nothing ever fired. Bounded so the health poll and the stuck timer
+// stay in charge of the outcome.
+const SPAWN_TIMEOUT_MS = 20000;
 
 // Boot phases emitted by the Rust backend — see src-tauri/src/health.rs.
 // We use these to show actionable copy during long migrations (Mike Cloke
@@ -68,14 +75,42 @@ type EngineHealthPayload = {
 // progress, so HTTP success cannot be used as an engine-liveness check here.
 // Validate the response shape instead so an unrelated service on the port does
 // not let onboarding advance.
+// Onboarding needs to know the engine is *up*, not that capture is warm.
+//
+// Requiring the health payload's shape meant any response that was not that
+// payload read as "not ready" forever. The important such response is a 401:
+// the local API's auth is on by default, and if the key is not in hand yet the
+// engine answers its own port with an error body. `frame_status` and
+// `audio_status` are non-Option `String` in HealthCheckResponse, so they are
+// never the thing missing — a rejected 200 is not the failure mode, a non-health
+// body is. 2.6.20+ on Windows sat on this screen at 11% pass while 210 of those
+// users were emitting live engine telemetry the whole time.
+//
+// A response object at all proves something is listening: localFetch throws on
+// connection refused and never reaches here. We still require either the health
+// payload or an auth rejection, so an unrelated process on the port cannot be
+// mistaken for the engine — that case stays with the port-conflict boot phase.
 async function isEngineHealthResponse(response: Response): Promise<boolean> {
+  if (response.status === 401 || response.status === 403) return true;
   try {
     const data = (await response.json()) as EngineHealthPayload;
-    return (
+    const conforms =
       typeof data.audio_status === "string" &&
-      typeof data.frame_status === "string"
-    );
+      typeof data.frame_status === "string";
+    // The whole failure was a body we never looked at. Report the shape (keys
+    // only, no values) so a future mismatch names itself instead of costing
+    // another week of silence.
+    if (!conforms) {
+      posthog.capture("onboarding_engine_health_unrecognized", {
+        http_status: response.status,
+        keys: Object.keys(data ?? {}).slice(0, 20).join(","),
+      });
+    }
+    return conforms;
   } catch {
+    posthog.capture("onboarding_engine_health_unparseable", {
+      http_status: response.status,
+    });
     return false;
   }
 }
@@ -165,7 +200,31 @@ export default function EngineStartup({ handleNextSlide }: EngineStartupProps) {
           return;
         }
 
-        const result = await commands.spawnScreenpipe(null);
+        const SPAWN_TIMED_OUT = Symbol("spawn-timed-out");
+        let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+        const result = await Promise.race([
+          commands.spawnScreenpipe(null),
+          new Promise<typeof SPAWN_TIMED_OUT>((resolve) => {
+            timeoutHandle = setTimeout(
+              () => resolve(SPAWN_TIMED_OUT),
+              SPAWN_TIMEOUT_MS,
+            );
+          }),
+        ]);
+        clearTimeout(timeoutHandle);
+
+        // Not an error: the engine is very often already up (its own telemetry
+        // proves it), and the health poll is the path that notices. Report it so
+        // this stops being invisible, then let the poll or the stuck timer own
+        // the outcome rather than forcing either one here.
+        if (result === SPAWN_TIMED_OUT) {
+          posthog.capture("onboarding_engine_spawn_timeout", {
+            time_spent_ms: Date.now() - mountTimeRef.current,
+            timeout_ms: SPAWN_TIMEOUT_MS,
+          });
+          return;
+        }
+
         if (result.status === "error") {
           throw new Error(result.error);
         }

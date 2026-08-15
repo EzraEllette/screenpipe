@@ -2862,7 +2862,7 @@ fn windows_title_sweep_ignores_meet_end_and_landing_pages() {
         // Post-call "You left the meeting" page and the landing page.
         "Meet - Google Chrome",
         "Meet - Google Chrome — Personal",
-        "Meet and Microsoft​Edge",
+        "Meet and Microsoft\u{200B}Edge",
         // Ordinary pages that merely start with the anchor.
         "Meet the Team | Acme - Google Chrome",
         "Meet Kevin - YouTube - Google Chrome",
@@ -2887,7 +2887,7 @@ fn windows_title_sweep_still_matches_real_meet_windows() {
     for title in &[
         "Meet - abc-defg-hij - Google Chrome",
         "Meet – abc-defg-hij",
-        "Meet - abc-defg-hij and 3 more pages - Personal - Microsoft​ Edge",
+        "Meet - abc-defg-hij and 3 more pages - Personal - Microsoft\u{200B} Edge",
     ] {
         assert_eq!(
             windows_browser_title_match(title, meet),

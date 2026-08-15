@@ -219,9 +219,9 @@ pub(crate) async fn handle_no_apps_path(
         // activity, else the continuously-written silent tap chunks would
         // keep an ended call alive forever here too.
         let recent_output_chunk = db.has_recent_output_audio(30).await.unwrap_or(false);
-        let recent_voice_activity = detector.as_ref().map_or(true, |d| {
-            d.audio_active_within(AUDIO_GATE_WINDOW.as_millis() as u64)
-        });
+        let recent_voice_activity = detector
+            .as_ref()
+            .is_none_or(|d| d.audio_active_within(AUDIO_GATE_WINDOW.as_millis() as u64));
         let calendar_active = has_active_calendar_event(calendar_events, Utc::now());
         audio_or_calendar_keepalive(recent_output_chunk, recent_voice_activity, calendar_active)
     } else {

@@ -121,15 +121,33 @@ describe("onboarding card capture", () => {
     });
   });
 
-  it("reveals the cardless trial path after six seconds and activates it", async () => {
-    vi.useFakeTimers();
+  // The cardless escape used to appear on a 6s timer and took 33% of this
+  // slide. There is no longer any standing way past the card.
+  it("never offers a cardless path while checkout is healthy", async () => {
+    render(<PlanSelectionStep handleNextSlide={vi.fn()} />);
+    await waitFor(() => expect(mocks.fetch).toHaveBeenCalledOnce());
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(screen.queryByTestId("onboarding-plan-free")).not.toBeInTheDocument();
+    expect(
+      screen.getByTestId("onboarding-plan-reassurance").textContent,
+    ).toMatch(/nothing is charged until your trial ends/i);
+  });
+
+  // Still the last slide: if our own checkout cannot load, a hard gate would
+  // strand the user in setup with no app behind it.
+  it("offers a way out only when checkout fails, and activates the trial", async () => {
+    mocks.fetch.mockImplementation(async (input: RequestInfo | URL) =>
+      String(input).endsWith("/api/subscription/onboarding-trial")
+        ? { ok: true, json: async () => ({ activated: true }) }
+        : { ok: false, status: 500, json: async () => ({ error: "boom" }) },
+    );
     const next = vi.fn();
     render(<PlanSelectionStep handleNextSlide={next} />);
 
-    expect(screen.queryByTestId("onboarding-plan-free")).not.toBeInTheDocument();
-    act(() => vi.advanceTimersByTime(5_999));
-    expect(screen.queryByTestId("onboarding-plan-free")).not.toBeInTheDocument();
-    act(() => vi.advanceTimersByTime(1));
+    await waitFor(() =>
+      expect(screen.getByTestId("onboarding-plan-free")).toBeInTheDocument(),
+    );
     await act(async () => {
       fireEvent.click(screen.getByTestId("onboarding-plan-free"));
     });
@@ -142,6 +160,5 @@ describe("onboarding card capture", () => {
         body: JSON.stringify({ token: "token-1" }),
       }),
     );
-    vi.useRealTimers();
   });
 });

@@ -614,7 +614,7 @@ fn layout_in(target: &str, h: &Path) -> Result<AgentLayout> {
         "claude-desktop" => AgentLayout {
             name: "Claude Desktop",
             skills_dir: None, // desktop app is MCP-only
-            mcp_path: claude_desktop_config(&h)?,
+            mcp_path: claude_desktop_config(h)?,
             mcp_format: McpFormat::Json,
         },
         "codex" => AgentLayout {
@@ -1441,7 +1441,7 @@ mod tests {
             .filter(|n| n.contains(".screenpipe-backup-"))
             .count();
         assert!(
-            backups >= 1 && backups <= MAX_CONFIG_BACKUPS,
+            (1..=MAX_CONFIG_BACKUPS).contains(&backups),
             "backups = {backups}"
         );
         assert!(

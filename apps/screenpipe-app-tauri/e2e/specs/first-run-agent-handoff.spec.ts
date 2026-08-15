@@ -81,7 +81,11 @@ const readHandoff = async (): Promise<{ agent: string; label: string } | null> =
     if (!el) return null;
     return {
       agent: el.getAttribute("data-agent") ?? "",
-      label: (el.textContent ?? "").trim(),
+      // With two or more connected agents the offer fans out into icon-only
+      // buttons, so the name lives in aria-label. Reading textContent alone
+      // reported an unnamed target on exactly the hosts that had the most
+      // agents wired.
+      label: (el.textContent ?? "").trim() || (el.getAttribute("aria-label") ?? "").trim(),
     };
   }, ASK_AGENT)) as { agent: string; label: string } | null;
 
