@@ -49,6 +49,13 @@ const SPAWN_TIMEOUT_MS = 20000;
 // and used the app from Home instead (95% reached Home, 69% sent a chat).
 // Progress still buys time. It no longer buys forever.
 export const MAX_ENGINE_WAIT_MS = 120000;
+// How long the health poll must fail continuously before it is worth reporting.
+// The server binds only after the audio manager is built, so every poll before
+// that fails by construction — the first real firing of the unreachable event
+// was a `TimeoutError` at 2.0s from a Windows user who reached `engine_started`
+// at 9s and finished setup. Past this mark a normal bind has had time to happen,
+// so continued failure is a finding rather than a startup in progress.
+export const HEALTH_UNREACHABLE_REPORT_AFTER_MS = 12000;
 
 // Boot phases emitted by the Rust backend — see src-tauri/src/health.rs.
 // We use these to show actionable copy during long migrations (Mike Cloke
@@ -161,9 +168,30 @@ export default function EngineStartup({ handleNextSlide }: EngineStartupProps) {
   // Once per mount: the health poll used to swallow its own failure, which is
   // how a 95%-to-11% collapse produced no telemetry at all.
   const hasReportedPollFailureRef = useRef(false);
+  // When the health poll started failing, and how many times in a row. A poll
+  // issued before the server binds always fails, so the duration is what
+  // separates "still starting" from "never coming up".
+  const pollFailingSinceRef = useRef<number | null>(null);
+  const consecutivePollFailuresRef = useRef(0);
+  // Stamped on the unreachable report; triage otherwise has to join another
+  // event to learn which build produced it.
+  const appVersionRef = useRef<string | null>(null);
   // Read by the unmount beacon so it can tell "left while still waiting" apart
   // from "left after the engine came up".
   const stateRef = useRef<StartupState>("starting");
+
+  useEffect(() => {
+    // Promise.resolve so a non-promise return cannot throw inside a passive
+    // effect — a version stamp must never be able to break this screen.
+    Promise.resolve()
+      .then(() => getVersion())
+      .then((v) => {
+        appVersionRef.current = typeof v === "string" ? v : null;
+      })
+      .catch(() => {
+        appVersionRef.current = null;
+      });
+  }, []);
 
   // The preceding permissions screen checks macOS TCC directly before it
   // persists the `engine` step. Engine startup only needs to prove that the
@@ -318,18 +346,30 @@ export default function EngineStartup({ handleNextSlide }: EngineStartupProps) {
           markEngineReady();
         }
       } catch (pollError) {
-        // Swallowing this was the whole reason the failure was invisible. The
-        // engine is demonstrably alive for most users who never leave this
-        // screen — 88% of them emit `resource_usage`, 95% reach Home and 69%
-        // send a chat message — so "not ready yet" was wrong: /health is
-        // unreachable from this webview while the server answers fine.
+        // Swallowing this was the whole reason the failure was invisible: the
+        // health poll could fail forever and emit nothing.
         //
-        // Reported once per mount, reason only. Repeating it every 500ms would
-        // bury the signal it exists to provide.
-        if (!hasReportedPollFailureRef.current) {
+        // But the first miss is not a failure. The server binds after the audio
+        // manager is built — 4.6-8.8s on an M4 Max — so a poll issued before
+        // that has nothing to connect to, and the very first real firing of
+        // this event was exactly that: `TimeoutError` at 2.0s on Windows, from
+        // a user who then reached `engine_started` at 9s and completed setup.
+        // Reporting that would make this event fire for healthy users and tell
+        // us nothing. Wait until the failures have persisted past the point
+        // where a normal bind would have happened, then report once.
+        pollFailingSinceRef.current ??= Date.now();
+        consecutivePollFailuresRef.current += 1;
+        const unreachableForMs = Date.now() - pollFailingSinceRef.current;
+
+        if (
+          !hasReportedPollFailureRef.current &&
+          unreachableForMs >= HEALTH_UNREACHABLE_REPORT_AFTER_MS
+        ) {
           hasReportedPollFailureRef.current = true;
           posthog.capture("onboarding_engine_health_unreachable", {
             time_spent_ms: Date.now() - mountTimeRef.current,
+            unreachable_for_ms: unreachableForMs,
+            consecutive_failures: consecutivePollFailuresRef.current,
             reason:
               pollError instanceof Error
                 ? pollError.name || "error"
@@ -338,6 +378,8 @@ export default function EngineStartup({ handleNextSlide }: EngineStartupProps) {
               pollError instanceof Error
                 ? pollError.message.slice(0, 120)
                 : String(pollError ?? "unknown").slice(0, 120),
+            // Triage needed this and had to join another event to get it.
+            app_version: appVersionRef.current ?? "unknown",
           });
         }
       }

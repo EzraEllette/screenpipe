@@ -39,7 +39,9 @@ vi.mock("@tauri-apps/api/path", () => ({
   join: vi.fn(async (...parts: string[]) => parts.join("/")),
 }));
 vi.mock("@tauri-apps/plugin-fs", () => ({ readTextFile: vi.fn() }));
-vi.mock("@tauri-apps/api/app", () => ({ getVersion: vi.fn() }));
+vi.mock("@tauri-apps/api/app", () => ({
+  getVersion: vi.fn(async () => "2.6.29"),
+}));
 vi.mock("@tauri-apps/plugin-os", () => ({
   platform: vi.fn(() => "macos"),
   version: vi.fn(() => "15.0"),
@@ -58,6 +60,7 @@ vi.mock("./particle-stream", () => ({
 }));
 
 import EngineStartup, {
+  HEALTH_UNREACHABLE_REPORT_AFTER_MS,
   MAX_ENGINE_WAIT_MS,
   STUCK_TIMEOUT_MS,
 } from "./engine-startup";
@@ -260,6 +263,89 @@ describe("onboarding engine startup", () => {
       // Stuck is a real screen with a retry and a log-submission path. The bug
       // was that the user never got any screen at all.
       expect(mocks.handleNextSlide).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // The server binds after the audio manager is built, so the first health poll
+  // fails by construction. The very first real firing of this event in
+  // production was a TimeoutError at 2.0s from a Windows user who then reached
+  // engine_started at 9s and finished setup — reporting that would fire for
+  // healthy users and mean nothing.
+  it("stays quiet when the health poll recovers during a normal bind", async () => {
+    vi.useFakeTimers();
+    try {
+      let listening = false;
+      mocks.spawnScreenpipe.mockImplementation(() => new Promise(() => {}));
+      mocks.localFetch.mockImplementation(async () => {
+        if (!listening) throw new Error("signal timed out");
+        return new Response(
+          JSON.stringify({
+            status: "healthy",
+            status_code: 200,
+            frame_status: "ok",
+            audio_status: "ok",
+          }),
+          { status: 200 },
+        );
+      });
+
+      render(<EngineStartup handleNextSlide={mocks.handleNextSlide} />);
+
+      // Fails for a while, the way a pre-bind poll does, then the server binds
+      // well inside the reporting threshold.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(4000);
+      });
+      listening = true;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2000);
+      });
+
+      expect(mocks.capture).not.toHaveBeenCalledWith(
+        "onboarding_engine_health_unreachable",
+        expect.anything(),
+      );
+      expect(mocks.capture).toHaveBeenCalledWith(
+        "onboarding_engine_started",
+        expect.any(Object),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reports the health poll only once it has failed past the threshold", async () => {
+    vi.useFakeTimers();
+    try {
+      mocks.spawnScreenpipe.mockImplementation(() => new Promise(() => {}));
+      mocks.localFetch.mockRejectedValue(new Error("signal timed out"));
+
+      render(<EngineStartup handleNextSlide={mocks.handleNextSlide} />);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(HEALTH_UNREACHABLE_REPORT_AFTER_MS / 2);
+      });
+      expect(mocks.capture).not.toHaveBeenCalledWith(
+        "onboarding_engine_health_unreachable",
+        expect.anything(),
+      );
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(HEALTH_UNREACHABLE_REPORT_AFTER_MS);
+      });
+
+      const calls = mocks.capture.mock.calls.filter(
+        ([name]) => name === "onboarding_engine_health_unreachable",
+      );
+      expect(calls).toHaveLength(1);
+      const [, props] = calls[0];
+      expect(props.reason).toBe("Error");
+      expect(props.unreachable_for_ms).toBeGreaterThanOrEqual(
+        HEALTH_UNREACHABLE_REPORT_AFTER_MS,
+      );
+      expect(props.consecutive_failures).toBeGreaterThan(1);
     } finally {
       vi.useRealTimers();
     }
