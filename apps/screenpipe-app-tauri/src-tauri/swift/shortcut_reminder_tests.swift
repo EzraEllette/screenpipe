@@ -331,6 +331,116 @@ private func testWireContract() {
     expect(actual == expected, "anchor raw values drifted: \(actual)")
 }
 
+/// A drag inside a display must be left exactly alone. The clamp is a fence at
+/// the edge of the desktop, not a magnet, so ordinary dragging still tracks the
+/// cursor pixel for pixel.
+private func testClampLeavesOnScreenDragsAlone() {
+    let screens = [NSRect(x: 0, y: 0, width: 1920, height: 1080)]
+    let offset = CGVector(dx: 100, dy: 20)
+    for origin in [
+        NSPoint(x: 0, y: 0),
+        NSPoint(x: 400, y: 300),
+        NSPoint(x: 1500, y: 900),
+    ] {
+        let clamped = clampedDragOrigin(
+            panelOrigin: origin, pillCentreOffset: offset, screens: screens
+        )
+        expect(clamped == origin, "clamp moved an on-screen drag at \(origin) to \(clamped)")
+    }
+}
+
+/// The reported bug: drag left, let go, the pill is gone. The clamp is what
+/// guarantees something stays grabbable even when the drop misbehaves.
+private func testClampKeepsPillOnDesktop() {
+    let screens = [NSRect(x: 0, y: 0, width: 1920, height: 1080)]
+    let offset = CGVector(dx: 100, dy: 20)
+
+    let farLeft = clampedDragOrigin(
+        panelOrigin: NSPoint(x: -4000, y: 500),
+        pillCentreOffset: offset,
+        screens: screens
+    )
+    expectClose(farLeft.x + offset.dx, kMinDraggedPillVisible, "chip centre pulled to left edge")
+    expectClose(farLeft.y + offset.dy, 520, "clamp left the vertical position alone")
+
+    // Every other direction, including diagonally past a corner.
+    let cases: [(NSPoint, String)] = [
+        (NSPoint(x: 9000, y: 500), "right"),
+        (NSPoint(x: 400, y: -3000), "below"),
+        (NSPoint(x: 400, y: 9000), "above"),
+        (NSPoint(x: -9000, y: 9000), "past the top-left corner"),
+    ]
+    for (origin, label) in cases {
+        let clamped = clampedDragOrigin(
+            panelOrigin: origin, pillCentreOffset: offset, screens: screens
+        )
+        let centre = NSPoint(x: clamped.x + offset.dx, y: clamped.y + offset.dy)
+        expect(
+            NSMouseInRect(centre, screens[0], false),
+            "chip dragged \(label) ended off the desktop at \(centre)"
+        )
+    }
+}
+
+/// With two displays the chip is pulled into the nearer one, and dead space in
+/// the bounding box of both is never a valid resting place: clamping to that
+/// box would leave the pill in a region no display can draw.
+private func testClampPicksNearestDisplay() {
+    // Side by side, second one shorter, so y in 720..<1080 beyond x=1920 is
+    // inside the bounding box but on no display.
+    let screens = [
+        NSRect(x: 0, y: 0, width: 1920, height: 1080),
+        NSRect(x: 1920, y: 0, width: 1280, height: 720),
+    ]
+    let offset = CGVector(dx: 10, dy: 10)
+
+    let intoSecond = clampedDragOrigin(
+        panelOrigin: NSPoint(x: 4000, y: 300),
+        pillCentreOffset: offset,
+        screens: screens
+    )
+    let secondCentre = NSPoint(x: intoSecond.x + offset.dx, y: intoSecond.y + offset.dy)
+    expect(
+        NSMouseInRect(secondCentre, screens[1], false),
+        "chip past the right edge should land on the second display, got \(secondCentre)"
+    )
+
+    let deadSpace = clampedDragOrigin(
+        panelOrigin: NSPoint(x: 2400, y: 900),
+        pillCentreOffset: offset,
+        screens: screens
+    )
+    let deadCentre = NSPoint(x: deadSpace.x + offset.dx, y: deadSpace.y + offset.dy)
+    expect(
+        screens.contains { NSMouseInRect(deadCentre, $0, false) },
+        "chip in the gap above the shorter display stayed off every screen at \(deadCentre)"
+    )
+}
+
+/// A display smaller than twice the inset must not have the chip pushed out the
+/// opposite side by the inset itself.
+private func testClampSurvivesTinyDisplay() {
+    let tiny = [NSRect(x: 0, y: 0, width: 24, height: 24)]
+    let offset = CGVector(dx: 5, dy: 5)
+    let clamped = clampedDragOrigin(
+        panelOrigin: NSPoint(x: -500, y: -500), pillCentreOffset: offset, screens: tiny
+    )
+    let centre = NSPoint(x: clamped.x + offset.dx, y: clamped.y + offset.dy)
+    expect(
+        NSMouseInRect(centre, tiny[0], false),
+        "chip left a display smaller than the inset, at \(centre)"
+    )
+}
+
+/// No displays at all (all asleep mid-drag) must not crash or teleport.
+private func testClampWithoutDisplaysIsIdentity() {
+    let origin = NSPoint(x: 123, y: 456)
+    let clamped = clampedDragOrigin(
+        panelOrigin: origin, pillCentreOffset: CGVector(dx: 1, dy: 2), screens: []
+    )
+    expect(clamped == origin, "clamp with no displays should be identity, got \(clamped)")
+}
+
 @main
 struct ShortcutReminderTests {
     static func main() {
@@ -344,6 +454,11 @@ struct ShortcutReminderTests {
         testAttachmentStacking()
         testAttachmentStaysOnScreen()
         testWireContract()
+        testClampLeavesOnScreenDragsAlone()
+        testClampKeepsPillOnDesktop()
+        testClampPicksNearestDisplay()
+        testClampSurvivesTinyDisplay()
+        testClampWithoutDisplaysIsIdentity()
 
         if failures.isEmpty {
             print("shortcut overlay geometry: \(checks) checks passed")

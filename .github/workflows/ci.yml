@@ -467,6 +467,7 @@ jobs:
       - name: Run PII removal tests
         run: cargo test -p screenpipe-core pii_removal
 
+
       # A crash here is a real data race in livetext_bridge.swift; the test
       # skips itself when VisionKit is unavailable on the runner.
       - name: Run Live Text bridge race stress test

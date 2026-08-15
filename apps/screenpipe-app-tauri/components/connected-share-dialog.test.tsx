@@ -303,7 +303,10 @@ describe("ConnectedShareDialog", () => {
     ).toBe(false);
   });
 
-  it("keeps clipboard available and recovers when connection discovery fails", async () => {
+  // A failed check used to resolve to the clipboard, so the dialog quietly
+  // offered a local write under a button that says send. It now says it could
+  // not check and offers retry, and nothing is sendable until it succeeds.
+  it("stays unsendable and recovers when connection discovery fails", async () => {
     mocks.localFetch
       .mockRejectedValueOnce(new Error("local service unavailable"))
       .mockResolvedValueOnce(jsonResponse({ data: [] }));
@@ -315,13 +318,77 @@ describe("ConnectedShareDialog", () => {
     const error = await screen.findByTestId(
       "connected-share-connections-error",
     );
-    expect(error).toHaveTextContent("Clipboard still works");
-    expect(screen.getByRole("button", { name: "copy snapshot" })).toBeEnabled();
+    expect(error).toHaveTextContent("local service unavailable");
+    expect(
+      screen.queryByRole("button", { name: /copy snapshot/i }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByTestId("connected-share-confirm")).toBeDisabled();
 
     fireEvent.click(screen.getByRole("button", { name: "retry" }));
     await screen.findByTestId("connected-share-empty");
     expect(
       screen.queryByTestId("connected-share-connections-error"),
+    ).not.toBeInTheDocument();
+    // Still nothing connected, so still nothing to send to.
+    expect(screen.getByTestId("connected-share-confirm")).toBeDisabled();
+    expect(screen.getByTestId("connected-share-confirm")).toHaveTextContent(
+      "connect an app to send",
+    );
+  });
+
+  // `no destination` has two causes and they need opposite instructions.
+  // Telling someone to connect an app while two connected apps sit in the menu
+  // below is worse than saying nothing.
+  it("asks which app rather than which to connect when several are ready", async () => {
+    mocks.localFetch.mockImplementation(async (path: string) => {
+      if (path === "/connections") {
+        return jsonResponse({
+          data: [
+            { id: "slack", connected: true },
+            { id: "notion", connected: true },
+          ],
+        });
+      }
+      if (path === "/connections/slack/instances") {
+        return jsonResponse({ instances: [] });
+      }
+      if (path.startsWith("/connections/slack/conversations")) {
+        return jsonResponse({ channels: [] });
+      }
+      throw new Error(`unexpected request: ${path}`);
+    });
+
+    render(
+      <ConnectedShareDialog open onOpenChange={vi.fn()} artifact={artifact} />,
+    );
+
+    const row = await screen.findByTestId("connected-share-destination");
+    expect(row).toHaveTextContent("choose where this goes");
+    expect(row).not.toHaveTextContent("connect an app to send");
+
+    const confirm = screen.getByTestId("connected-share-confirm");
+    expect(confirm).toBeDisabled();
+    expect(confirm).toHaveTextContent("choose a destination");
+  });
+
+  // The clipboard had a destination row of its own, which made the send dialog
+  // a fourth way to copy — in a third serialization — behind a glyph that
+  // promises the snapshot leaves the machine.
+  it("offers no local destination", async () => {
+    render(
+      <ConnectedShareDialog open onOpenChange={vi.fn()} artifact={artifact} />,
+    );
+
+    await openDestinations();
+    await screen.findByTestId("connected-share-destination-slack");
+    expect(
+      screen.queryByTestId("connected-share-destination-copy"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("menuitem", { name: /clipboard/i }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /copy snapshot/i }),
     ).not.toBeInTheDocument();
   });
 
@@ -518,11 +585,11 @@ describe("ConnectedShareDialog", () => {
 
       // Nothing is a peer of it until it is opened.
       expect(
-        screen.queryByTestId("connected-share-destination-copy"),
+        screen.queryByTestId("connected-share-destination-slack"),
       ).not.toBeInTheDocument();
       await openDestinations();
       expect(
-        await screen.findByTestId("connected-share-destination-copy"),
+        await screen.findByTestId("connected-share-destination-slack"),
       ).toBeVisible();
     });
   });

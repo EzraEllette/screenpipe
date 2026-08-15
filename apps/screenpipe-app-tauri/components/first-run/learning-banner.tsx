@@ -15,6 +15,7 @@ import {
   type FirstRunEmptyReason,
 } from "@/lib/first-run/learning-window";
 import { appIconUrl } from "@/lib/first-run/recent-activity";
+import { AgentHandoffPicker } from "@/components/first-run/agent-handoff-picker";
 import { useAgentHandoff } from "@/lib/first-run/use-agent-handoff";
 import {
   useLearningWindow,
@@ -78,7 +79,7 @@ function CapturedAppIcon({ app }: { app: FirstRunCapturedApp }) {
 export function FirstRunLearningBanner(props: LearningWindowOptions = {}) {
   const { phase, capturedApps, remainingMs, chatId, emptyReason, dismiss } =
     useLearningWindow(props);
-  const { target: handoffTarget, hint: handoffHint, askAgent } =
+  const { targets: handoffTargets, hint: handoffHint, askAgent } =
     useAgentHandoff(phase === "ready");
 
   if (
@@ -198,24 +199,14 @@ export function FirstRunLearningBanner(props: LearningWindowOptions = {}) {
             >
               Open the summary
             </Button>
-            {/* Setup already wired this agent over MCP, so it can answer from
-                real captured context. Offered second, never instead: the
+            {/* Setup already wired these agents over MCP, so they can answer
+                from real captured context. Offered second, never instead: the
                 summary is guaranteed to exist, the handoff depends on another
                 app being where we think it is. */}
-            {handoffTarget && (
-              <Button
-                size="sm"
-                variant="ghost"
-                className="h-7 text-[11px]"
-                data-testid="first-run-ask-agent"
-                data-agent={handoffTarget.id}
-                onClick={askAgent}
-              >
-                {handoffTarget.deeplink
-                  ? `Ask ${handoffTarget.label}`
-                  : `Copy for ${handoffTarget.label}`}
-              </Button>
-            )}
+            <AgentHandoffPicker
+              targets={handoffTargets}
+              onPick={(target) => void askAgent(target)}
+            />
             <Button
               size="sm"
               variant="ghost"

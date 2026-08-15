@@ -151,6 +151,58 @@ describe("onboarding engine startup", () => {
     expect(initialNextSlide).not.toHaveBeenCalled();
   });
 
+  // The 2.6.20+ Windows regression: the local API's auth is on by default, so
+  // before the key is in hand /health answers with an error body instead of the
+  // health payload. That read as "engine not ready" forever while the engine was
+  // running and emitting telemetry, and setup stalled at 11% pass on Windows.
+  it("treats an auth rejection from the local api as proof the engine is up", async () => {
+    mocks.localFetch.mockImplementation(async () =>
+      new Response(JSON.stringify({ error: "unauthorized" }), { status: 401 }),
+    );
+
+    render(<EngineStartup handleNextSlide={mocks.handleNextSlide} />);
+
+    await waitFor(() =>
+      expect(mocks.localFetch).toHaveBeenCalledWith("/health", expect.any(Object)),
+    );
+    // Already listening, so there is nothing to spawn — and spawning an engine
+    // that is already up is exactly the call that used to hang.
+    expect(mocks.spawnScreenpipe).not.toHaveBeenCalled();
+    await waitFor(
+      () => expect(mocks.handleNextSlide).toHaveBeenCalledTimes(1),
+      { timeout: 2000 },
+    );
+  });
+
+  // spawn_screenpipe can neither resolve nor reject when the engine is already
+  // running. The health poll has to be able to finish setup without it.
+  it("still finishes setup when the startup command never settles", async () => {
+    let healthy = false;
+    mocks.spawnScreenpipe.mockImplementation(() => new Promise(() => {}));
+    mocks.localFetch.mockImplementation(async () => {
+      if (!healthy) throw new Error("engine not listening yet");
+      return new Response(
+        JSON.stringify({
+          status: "healthy",
+          status_code: 200,
+          frame_status: "ok",
+          audio_status: "ok",
+        }),
+        { status: 200 },
+      );
+    });
+
+    render(<EngineStartup handleNextSlide={mocks.handleNextSlide} />);
+    await waitFor(() => expect(mocks.spawnScreenpipe).toHaveBeenCalledWith(null));
+    expect(mocks.handleNextSlide).not.toHaveBeenCalled();
+
+    healthy = true;
+    await waitFor(
+      () => expect(mocks.handleNextSlide).toHaveBeenCalledTimes(1),
+      { timeout: 3000 },
+    );
+  });
+
   it("does not advance when the startup command reports an error", async () => {
     mocks.localFetch.mockRejectedValue(new Error("engine not listening yet"));
     mocks.spawnScreenpipe.mockResolvedValue({

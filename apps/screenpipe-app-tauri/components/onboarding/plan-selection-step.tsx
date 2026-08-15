@@ -37,7 +37,6 @@ export default function PlanSelectionStep({
   const [busy, setBusy] = useState(true);
   const [completing, setCompleting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [showFree, setShowFree] = useState(false);
   const [startingCardlessTrial, setStartingCardlessTrial] = useState(false);
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const requestRef = useRef(0);
@@ -45,11 +44,6 @@ export default function PlanSelectionStep({
   const loadUserRef = useRef(loadUser);
   const userToken = user?.token;
   loadUserRef.current = loadUser;
-
-  useEffect(() => {
-    const timer = setTimeout(() => setShowFree(true), 6_000);
-    return () => clearTimeout(timer);
-  }, []);
 
   useEffect(() => {
     if (!userToken) {
@@ -274,17 +268,32 @@ export default function PlanSelectionStep({
         )}
       </div>
 
-      {showFree && (
+      {/* The old standing "continue with limited free plan" link took 33% of
+          this slide (156 of 479 people over Aug 11-13) straight past the card,
+          and a cardless grant converts at ~0.2%. The card is now the only way
+          forward, so the reassurance that used to be implied by that link has
+          to be stated here instead: the reason people hesitate at a card field
+          is fear of being locked in, not the price. */}
+      <p
+        className="mx-auto mt-4 max-w-sm text-center font-mono text-[10px] leading-relaxed text-muted-foreground"
+        data-testid="onboarding-plan-reassurance"
+      >
+        nothing is charged until your trial ends. cancel in one click, or switch
+        to the free plan or a cheaper one whenever you want, from settings.
+      </p>
+
+      {/* Error-state only, never a standing choice. This is the last slide, so
+          if our own checkout cannot load there has to be a way out or the user
+          is stranded in setup with no app behind it. */}
+      {error && (
         <button
           type="button"
           onClick={() => void continueWithoutCard()}
           disabled={startingCardlessTrial}
-          className="mx-auto mt-4 block font-mono text-[10px] text-muted-foreground/40 underline decoration-muted-foreground/20 underline-offset-4 transition-opacity hover:text-muted-foreground focus:text-muted-foreground"
+          className="mx-auto mt-3 block font-mono text-[10px] text-muted-foreground underline decoration-muted-foreground/40 underline-offset-4"
           data-testid="onboarding-plan-free"
         >
-          {startingCardlessTrial
-            ? "starting trial"
-            : "continue with limited free plan"}
+          {startingCardlessTrial ? "continuing" : "continue without a card"}
         </button>
       )}
     </div>

@@ -155,25 +155,32 @@ export function MeetingShareMenu({
 }) {
   const primary: MeetingShareAction = canShareSummary ? "summary" : "meeting";
   // `send` graduated to its own button, so it is no longer listed here.
-  const secondary: MeetingShareAction[] = canShareSummary
-    ? ["email", "transcript", "meeting"]
+  const clipboardActions: MeetingShareAction[] = canShareSummary
+    ? ["transcript", "meeting"]
     : ["transcript"];
+  // `email` opens a mailto: draft. It shipped inside the group headed `copy`,
+  // where it was the only row that wrote nothing to the clipboard — the group
+  // was organised by payload (the summary) while its label named a verb. It
+  // gets its own heading rather than a rename, because the distinction that
+  // matters when scanning is where the text ends up.
+  const mailActions: MeetingShareAction[] = canShareSummary ? ["email"] : [];
 
   const confirmed = copiedAction === primary;
   const PrimaryIcon = confirmed ? Check : ACTION_ICON[primary];
 
-  // The leftover copy destinations become an ordinary labelled group, so the
-  // menu has one shape and the renderer below has no special cases.
+  const toItems = (actions: MeetingShareAction[]) =>
+    actions.map((action) => ({
+      key: action,
+      label: ACTION_LABEL[action],
+      icon: ACTION_ICON[action],
+      onSelect: () => onShare(action),
+    }));
+
+  // The leftover copy destinations become ordinary labelled groups, so the menu
+  // has one shape and the renderer below has no special cases.
   const groups: MeetingMenuGroup[] = [
-    {
-      label: "copy",
-      items: secondary.map((action) => ({
-        key: action,
-        label: ACTION_LABEL[action],
-        icon: ACTION_ICON[action],
-        onSelect: () => onShare(action),
-      })),
-    },
+    { label: "copy", items: toItems(clipboardActions) },
+    { label: "send", items: toItems(mailActions) },
     ...moreGroups,
   ].filter((group) => group.items.length > 0);
 

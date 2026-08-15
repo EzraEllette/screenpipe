@@ -17,7 +17,7 @@ import {
 import {
   HANDOFF_PROMPT,
   handoffTargets,
-  pickHandoffTarget,
+  pickHandoffTargets,
   type AgentHandoffTarget,
 } from "@/lib/first-run/agent-handoff";
 import { commands } from "@/lib/utils/tauri";
@@ -55,11 +55,14 @@ async function isHandoffReady(id: ConnectAllToolId): Promise<boolean> {
 }
 
 export type AgentHandoffView = {
-  /** Null until resolved, and whenever no connected agent is available. */
-  target: AgentHandoffTarget | null;
+  /**
+   * Every connected agent, in preference order. Empty until resolved, and
+   * whenever the user has none.
+   */
+  targets: AgentHandoffTarget[];
   /** Shown only after a click, so the banner stays quiet until it is useful. */
   hint: string | null;
-  askAgent: () => Promise<void>;
+  askAgent: (target: AgentHandoffTarget) => Promise<void>;
 };
 
 /**
@@ -71,7 +74,7 @@ export type AgentHandoffView = {
  * can act on the answer.
  */
 export function useAgentHandoff(enabled: boolean): AgentHandoffView {
-  const [target, setTarget] = useState<AgentHandoffTarget | null>(null);
+  const [targets, setTargets] = useState<AgentHandoffTarget[]>([]);
   const [hint, setHint] = useState<string | null>(null);
 
   useEffect(() => {
@@ -82,7 +85,7 @@ export function useAgentHandoff(enabled: boolean): AgentHandoffView {
       try {
         const detected = await detectAiTools();
         // Probe only what was detected, and only ids the handoff knows about,
-        // in preference order so the first connected one wins.
+        // in preference order so the offer is ordered the same way every time.
         const candidates = handoffTargets()
           .map((t) => t.id)
           .filter((id) => detected.includes(id));
@@ -91,11 +94,21 @@ export function useAgentHandoff(enabled: boolean): AgentHandoffView {
           if (await isHandoffReady(id)) connected.push(id);
         }
         if (cancelled) return;
-        setTarget(pickHandoffTarget(connected));
+        const resolved = pickHandoffTargets(connected);
+        setTargets(resolved);
+        if (resolved.length > 0) {
+          // The impression. Without it `handoff_clicked` has no denominator:
+          // a quiet week is indistinguishable from "we never offered", and
+          // those have opposite fixes.
+          posthog.capture("first_run_agent_handoff_shown", {
+            agents: resolved.map((t) => t.id),
+            agent_count: resolved.length,
+          });
+        }
       } catch {
         // A failed probe means no handoff, never a broken banner. The summary
         // is still there and is still the primary action.
-        if (!cancelled) setTarget(null);
+        if (!cancelled) setTargets([]);
       }
     })();
 
@@ -104,7 +117,7 @@ export function useAgentHandoff(enabled: boolean): AgentHandoffView {
     };
   }, [enabled]);
 
-  const askAgent = useCallback(async () => {
+  const askAgent = useCallback(async (target: AgentHandoffTarget) => {
     if (!target) return;
 
     // Copy first. If the clipboard write fails there is nothing to paste, so
@@ -151,7 +164,7 @@ export function useAgentHandoff(enabled: boolean): AgentHandoffView {
       opened,
       copy_only: !target.deeplink,
     });
-  }, [target]);
+  }, []);
 
-  return { target, hint, askAgent };
+  return { targets, hint, askAgent };
 }

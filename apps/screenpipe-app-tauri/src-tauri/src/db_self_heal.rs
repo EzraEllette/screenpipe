@@ -5,15 +5,19 @@
 //! Launch-time self-heal for transient SQLite hard faults.
 //!
 //! A `SQLITE_IOERR_SHORT_READ` (extended code 522) under heavy concurrent load
-//! desyncs the WAL index in memory. Every pool is torn down and the database is
-//! durably quarantined, which is correct while the faulted process is still
-//! running: its `-shm` mapping cannot be trusted.
+//! desyncs the WAL index against the WAL it describes. Every pool is torn down
+//! and the database is durably quarantined, which is correct while the faulted
+//! process is still running: its live view of `-shm` cannot be trusted. (That
+//! index is file-backed even under `unix-excl` — see the VFS note in
+//! `screenpipe-db`'s `db/setup.rs`.)
 //!
-//! The quarantine is *cross-launch*, though, and that part over-fires. A fresh
-//! process has a fresh WAL index, so the poisoning is gone before the first
-//! read. Three separate incidents (2026-07-02, 2026-08-05, 2026-08-11) all ended
-//! the same way: `PRAGMA quick_check` returned `ok` on the quarantined file, and
-//! the "recovery" rebuilt a database that was never damaged. In the meantime
+//! The quarantine is *cross-launch*, though, and that part over-fires. Once
+//! every handle is gone the index no longer outlives the fault: the first
+//! connection in a fresh process rebuilds it from the WAL, so the desync is
+//! gone before the first read. Three separate incidents (2026-07-02,
+//! 2026-08-05, 2026-08-11) all ended the same way: `PRAGMA quick_check`
+//! returned `ok` on the quarantined file, and the "recovery" rebuilt a
+//! database that was never damaged. In the meantime
 //! recording stayed off — hours, in the 2026-08-11 case, because nothing resumes
 //! until a human notices the tray and runs a repair.
 //!

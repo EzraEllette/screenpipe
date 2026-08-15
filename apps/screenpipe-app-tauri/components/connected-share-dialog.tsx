@@ -15,7 +15,6 @@ import {
   Check,
   ChevronDown,
   ChevronUp,
-  Copy,
   ExternalLink,
   Loader2,
   Plus,
@@ -68,9 +67,20 @@ import {
   writeRememberedShare,
 } from "@/lib/connected-share-preference";
 import { showChatWithPrefill } from "@/lib/chat-utils";
-import { commands } from "@/lib/utils/tauri";
 
-type Destination = "slack" | "linear" | "copy" | "chat-linear" | "chat-notion";
+/**
+ * Where a reviewed snapshot can go.
+ *
+ * `copy` used to live here and it was the default: the state initialised to it,
+ * every open reset to it, and a failed connection check fell back to it. So the
+ * send button's default happy path was a clipboard write, and its primary
+ * action read `copy snapshot` — the same verb as the copy button two slots to
+ * its left on the same rule. The clipboard already had a dedicated control with
+ * three labelled payloads; this was a fourth, in a third serialization, behind
+ * a glyph that promises a destination. Destinations are now only things this
+ * dialog can send to, and `null` means nothing is connected yet.
+ */
+type Destination = "slack" | "linear" | "chat-linear" | "chat-notion";
 
 type SlackInstance = {
   instance: string | null;
@@ -229,7 +239,7 @@ export function ConnectedShareDialog({
   const [selectedSectionIds, setSelectedSectionIds] = useState<string[]>([]);
   const [message, setMessage] = useState("");
   const [slackMessage, setSlackMessage] = useState("");
-  const [destination, setDestination] = useState<Destination>("copy");
+  const [destination, setDestination] = useState<Destination | null>(null);
   const [availability, setAvailability] = useState(EMPTY_AVAILABILITY);
   const [connectionsLoading, setConnectionsLoading] = useState(true);
   const [connectionsChecked, setConnectionsChecked] = useState(false);
@@ -276,7 +286,9 @@ export function ConnectedShareDialog({
     if (!open) return;
     resetPreview(allSectionIds);
     setLinearTitle(artifact.title);
-    setDestination("copy");
+    // Stays null until the connection check says what is actually reachable.
+    // There is no longer a local destination to fall back to.
+    setDestination(null);
     setConnectionsError(null);
     setReceipt(null);
     setActionError(null);
@@ -333,14 +345,13 @@ export function ConnectedShareDialog({
         // recalled; the explicit final send still stands in front of the write.
         const remembered = readRememberedShare(artifact.surface);
         const connected: string[] = [
-          "copy",
           ...(ready.direct.slack ? ["slack"] : []),
           ...(ready.direct.linear ? ["linear"] : []),
           ...(ready.chat.linear ? ["chat-linear"] : []),
           ...(ready.chat.notion ? ["chat-notion"] : []),
         ];
         setDestination(
-          preferredShareDestination(remembered, connected) as Destination,
+          preferredShareDestination(remembered, connected) as Destination | null,
         );
         if (remembered?.target) setSlackTarget(remembered.target);
         if (remembered?.instance) setSlackInstance(remembered.instance);
@@ -348,7 +359,10 @@ export function ConnectedShareDialog({
       .catch((error) => {
         if (cancelled) return;
         setAvailability(EMPTY_AVAILABILITY);
-        setDestination("copy");
+        // A failed check used to silently become a clipboard write. Now it
+        // surfaces the error and offers retry instead of quietly doing
+        // something the user did not pick.
+        setDestination(null);
         setConnectionsError(
           didTimeout
             ? "Connection check timed out."
@@ -542,20 +556,6 @@ export function ConnectedShareDialog({
     );
   };
 
-  const copy = async () => {
-    await commands.copyTextToClipboard(message);
-    setReceipt({
-      title: "copied",
-      detail: "The reviewed snapshot is on your clipboard.",
-    });
-    posthog.capture("connected_share_completed", {
-      surface: artifact.surface,
-      destination: "copy",
-      section_count: selectedSectionIds.length,
-    });
-    toast({ title: "copied snapshot" });
-  };
-
   const sendToSlack = async () => {
     const channel = slackChannels.find((item) => item.id === slackTarget);
     const response = await localFetch("/connections/slack/send", {
@@ -636,7 +636,7 @@ export function ConnectedShareDialog({
   };
 
   const submit = async () => {
-    if (!outgoingMessage.trim() || sending) return;
+    if (!destination || !outgoingMessage.trim() || sending) return;
     setSending(true);
     setReceipt(null);
     setActionError(null);
@@ -646,7 +646,6 @@ export function ConnectedShareDialog({
       section_count: selectedSectionIds.length,
     });
     try {
-      if (destination === "copy") await copy();
       if (destination === "slack") await sendToSlack();
       if (destination === "linear") await sendToLinear();
       if (destination === "chat-linear") await prepareInChat("linear");
@@ -689,6 +688,7 @@ export function ConnectedShareDialog({
   };
 
   const canSubmit =
+    destination !== null &&
     outgoingMessage.trim().length > 0 &&
     outgoingMessage.length <= 39_000 &&
     selectedSectionIds.length > 0 &&
@@ -736,11 +736,6 @@ export function ConnectedShareDialog({
           },
         ]
       : []),
-    {
-      value: "copy" as Destination,
-      name: "Clipboard",
-      icon: <Copy className="h-4 w-4" />,
-    },
   ];
   const chatOptions: Array<{
     value: Destination;
@@ -767,11 +762,16 @@ export function ConnectedShareDialog({
       : []),
   ];
 
-  const currentOption =
-    [...directOptions, ...chatOptions].find(
-      (option) => option.value === destination,
-    ) ?? directOptions[directOptions.length - 1];
-  const currentIsChat = destination.startsWith("chat-");
+  const currentOption = [...directOptions, ...chatOptions].find(
+    (option) => option.value === destination,
+  );
+  const currentIsChat = destination?.startsWith("chat-") ?? false;
+  // "Nothing is connected" and "more than one thing is connected and you have
+  // not said which" are both `destination === null`, but they need opposite
+  // instructions. Telling someone to connect an app while Slack and Notion sit
+  // in the open menu below is the kind of wrong that erodes trust in the rest
+  // of the dialog.
+  const hasAnyDestination = directOptions.length + chatOptions.length > 0;
   // The second line of the destination row: which channel, team, or nothing.
   const currentTarget =
     destination === "slack"
@@ -783,18 +783,24 @@ export function ConnectedShareDialog({
           "choose a team")
         : currentIsChat
           ? "prepare a prompt in Chat"
-          : "this machine";
+          : hasAnyDestination
+            ? "choose where this goes"
+            : "connect an app to send";
 
+  // Every label is a send verb now. `copy snapshot` was the odd one out and it
+  // collided with the copy button on the same rule.
   const submitLabel =
-    destination === "copy"
-      ? "copy snapshot"
-      : destination === "slack"
-        ? "send to Slack"
-        : destination === "linear"
-          ? "create Linear issue"
-          : destination === "chat-linear"
-            ? "prepare Linear in Chat"
-            : "prepare Notion in Chat";
+    destination === "slack"
+      ? "send to Slack"
+      : destination === "linear"
+        ? "create Linear issue"
+        : destination === "chat-linear"
+          ? "prepare Linear in Chat"
+          : destination === "chat-notion"
+            ? "prepare Notion in Chat"
+            : hasAnyDestination
+              ? "choose a destination"
+              : "connect an app to send";
 
   const contentsSummary = `${
     selectedSectionIds.length === artifact.sections.length
@@ -838,7 +844,7 @@ export function ConnectedShareDialog({
                   connected apps could not be checked
                 </p>
                 <p className="mt-0.5 text-muted-foreground">
-                  {connectionsError} Clipboard still works.
+                  {connectionsError} Retry, or use copy on the rule above.
                 </p>
               </div>
             </div>
@@ -871,7 +877,7 @@ export function ConnectedShareDialog({
                   <span className="flex min-w-0 items-center gap-2">
                     {currentOption?.icon}
                     <span className="shrink-0 text-sm">
-                      {currentOption?.name}
+                      {currentOption?.name ?? "no destination"}
                     </span>
                     <span className="shrink-0 text-muted-foreground">·</span>
                     <span className="truncate text-xs text-muted-foreground">
@@ -956,8 +962,9 @@ export function ConnectedShareDialog({
                 className="text-[11px] text-muted-foreground"
                 data-testid="connected-share-empty"
               >
-                Nothing is connected for sharing yet. Clipboard works now, or
-                connect an app for the next snapshot.
+                Nothing is connected for sharing yet. Connect an app to send
+                this snapshot, or use copy on the rule above to put it on your
+                clipboard.
               </p>
             )}
             {currentIsChat && (
@@ -1152,7 +1159,7 @@ export function ConnectedShareDialog({
           <SummaryRow
             label="message"
             value={
-              destination.startsWith("chat-")
+              currentIsChat
                 ? "what Chat will review"
                 : destination === "slack"
                   ? "Slack-formatted"
@@ -1292,7 +1299,7 @@ export function ConnectedShareDialog({
           >
             {sending ? (
               <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
-            ) : destination.startsWith("chat-") ? (
+            ) : currentIsChat ? (
               <Sparkles className="mr-1.5 h-3.5 w-3.5" />
             ) : (
               <Send className="mr-1.5 h-3.5 w-3.5" />

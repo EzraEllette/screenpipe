@@ -1583,8 +1583,15 @@ pub async fn get_disk_usage(
         _ => screenpipe_core::paths::default_screenpipe_data_dir(),
     };
 
-    match crate::disk_usage::disk_usage(&screenpipe_dir_path, force_refresh.unwrap_or(false)).await
-    {
+    // An explicit refresh must re-read the disk; a normal load is happy with a
+    // cached value under an hour old.
+    let freshness = if force_refresh.unwrap_or(false) {
+        crate::disk_usage::Freshness::Force
+    } else {
+        crate::disk_usage::Freshness::UseCache
+    };
+
+    match crate::disk_usage::disk_usage(&screenpipe_dir_path, freshness).await {
         Ok(Some(disk_usage)) => match serde_json::to_value(&disk_usage) {
             Ok(json_value) => Ok(json_value),
             Err(e) => {

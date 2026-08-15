@@ -698,6 +698,65 @@ func overlayAttachmentY(
     )
 }
 
+/// How much of the chip has to stay on a display while it is being dragged.
+/// The collapsed pill is 16pt tall, so this keeps a whole one in view: enough
+/// to see what you are holding and to grab it again.
+let kMinDraggedPillVisible: CGFloat = 20
+
+/// Shortest distance from a point to a rect, 0 when inside.
+private func distanceSquared(from point: NSPoint, to rect: NSRect) -> CGFloat {
+    let dx = max(rect.minX - point.x, 0, point.x - rect.maxX)
+    let dy = max(rect.minY - point.y, 0, point.y - rect.maxY)
+    return dx * dx + dy * dy
+}
+
+/// Panel origin for a drag in progress, pulled back so the chip cannot leave
+/// the desktop.
+///
+/// Without this the panel origin just tracks the cursor, and a drag off the
+/// left edge parks the pill in negative space. That is survivable while the
+/// drop still snaps — the snap puts it back — but it is the reason a *missed*
+/// drop made the pill vanish rather than merely sit somewhere odd. Clamping
+/// means even a drag that ends badly leaves something on screen to grab.
+///
+/// The clamp is per display, not against the bounding box of all of them: two
+/// screens of different heights leave dead space in that box which belongs to
+/// no display, and a pill clamped into it is just as gone. When the chip
+/// centre leaves every screen it is pulled into the nearest one.
+func clampedDragOrigin(
+    panelOrigin: NSPoint,
+    pillCentreOffset: CGVector,
+    screens: [NSRect],
+    minVisible: CGFloat = kMinDraggedPillVisible
+) -> NSPoint {
+    guard !screens.isEmpty else { return panelOrigin }
+    let centre = NSPoint(
+        x: panelOrigin.x + pillCentreOffset.dx,
+        y: panelOrigin.y + pillCentreOffset.dy
+    )
+    // On a display already: leave the drag alone, so normal dragging is
+    // untouched and only the escape is corrected.
+    if screens.contains(where: { NSMouseInRect(centre, $0, false) }) {
+        return panelOrigin
+    }
+    guard let target = screens.min(by: {
+        distanceSquared(from: centre, to: $0) < distanceSquared(from: centre, to: $1)
+    }) else { return panelOrigin }
+
+    // Never inset past the middle of a small display, which would push the
+    // centre back out the far side.
+    let insetX = min(minVisible, target.width / 2)
+    let insetY = min(minVisible, target.height / 2)
+    let clamped = NSPoint(
+        x: min(max(centre.x, target.minX + insetX), target.maxX - insetX),
+        y: min(max(centre.y, target.minY + insetY), target.maxY - insetY)
+    )
+    return NSPoint(
+        x: clamped.x - pillCentreOffset.dx,
+        y: clamped.y - pillCentreOffset.dy
+    )
+}
+
 func overlayHoverRect(
     in bounds: NSRect,
     expanded: Bool,
@@ -1983,7 +2042,15 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
         p.backgroundColor = .clear
         p.hasShadow = false
         p.hidesOnDeactivate = false
-        p.isMovableByWindowBackground = true
+        // Off, deliberately. AppKit's own background drag is a second mover
+        // that knows nothing about the drag stage: no threshold, no landing
+        // targets, and no snap or persist on release. Whenever it won the
+        // gesture the pill simply stayed where it was let go — "it does not pin
+        // to a location, I can drag it anywhere" — and a drag past a screen
+        // edge left it stranded off the desktop with the stored anchor
+        // untouched, so it came back only on the next launch. `DraggableHosting-
+        // View` is the one mover now, and it always ends in `endPillDrag`.
+        p.isMovableByWindowBackground = false
         p.acceptsMouseMovedEvents = true
         p.isReleasedWhenClosed = false
         p.sharingType = .readOnly
@@ -2581,7 +2648,13 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
         // Apply whatever the meeting pushed while the card was glued, before
         // the settle so the animation aims at the card's real destination.
         refreshTranscriptPanelVisibility()
-        guard let (landed, screen) = droppedAnchor() else { return }
+        guard let (landed, screen) = droppedAnchor() else {
+            // No screen could be resolved at all — every display went away
+            // mid-drag, say. Re-apply the stored anchor so the pill is put back
+            // somewhere real rather than left where the gesture dropped it.
+            positionPanel(animated: false)
+            return
+        }
 
         let display = displayIdentifier(for: screen)
         let changed = landed != overlayAnchor || display != overlayDisplay
@@ -2599,6 +2672,12 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
     }
 
     /// Anchor the pill would land on right now, with the screen it belongs to.
+    ///
+    /// Nothing here may return nil for a pill that is merely in a strange
+    /// place: an early return would leave the panel exactly where the drag
+    /// abandoned it, which is the failure this whole path exists to prevent.
+    /// `screenContaining` falls back through the panel's screen to the main
+    /// one, so a drop into a gap between displays still resolves.
     private func droppedAnchor() -> (OverlayAnchor, NSScreen)? {
         guard let center = currentPillCenter(),
               let screen = screenContaining(center) else { return nil }
@@ -2724,6 +2803,22 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
             hosting.rootView = AnyView(view)
         } else {
             let hosting = DraggableHostingView(rootView: AnyView(view))
+            hosting.pillCentreOffset = { [weak self] in
+                guard let self = self, let panel = self.panel else {
+                    return CGVector(dx: 0, dy: 0)
+                }
+                let rect = overlayHoverRect(
+                    in: panel.frame,
+                    expanded: false,
+                    disclosureDown: self.metrics.disclosureDown,
+                    horizontal: self.metrics.horizontal,
+                    scale: gOverlayScale
+                )
+                return CGVector(
+                    dx: rect.midX - panel.frame.minX,
+                    dy: rect.midY - panel.frame.minY
+                )
+            }
             hosting.onDragStarted = { [weak self] in
                 guard let self = self else { return }
                 self.pillHovering = false
@@ -3232,8 +3327,19 @@ private class DraggableHostingView<Content: View>: NSHostingView<Content> {
     var onDragStarted: (() -> Void)?
     /// Called once the user releases, so the controller can snap and persist.
     var onDragEnded: (() -> Void)?
+    /// Centre of the visible chip relative to the panel origin. Supplied by the
+    /// controller because only it knows the current metrics; used to clamp the
+    /// chip rather than the whole panel, most of which is empty space for the
+    /// expanded dock.
+    var pillCentreOffset: (() -> CGVector)?
 
     private var dragMonitor: Any?
+    /// Global twin of `dragMonitor`. A local monitor only sees events routed to
+    /// this app, and the overlay's whole job is to be used while another app is
+    /// frontmost — release the button over that app and the closing mouseUp can
+    /// land there instead. Without this the drag never ended: no snap, no
+    /// persist, and the pill sat wherever it was abandoned.
+    private var globalDragMonitor: Any?
     private var dragStartLocation: NSPoint = .zero
     /// True between the threshold crossing and mouseUp. Doubles as the flag
     /// that the closing mouseUp must be swallowed, so SwiftUI's button does not
@@ -3245,9 +3351,28 @@ private class DraggableHostingView<Content: View>: NSHostingView<Content> {
     private var grabOffset = CGVector(dx: 0, dy: 0)
 
     deinit {
+        removeDragMonitors()
+    }
+
+    private func removeDragMonitors() {
         if let m = dragMonitor {
             NSEvent.removeMonitor(m)
+            dragMonitor = nil
         }
+        if let m = globalDragMonitor {
+            NSEvent.removeMonitor(m)
+            globalDragMonitor = nil
+        }
+    }
+
+    /// End the gesture exactly once, whichever monitor noticed the release
+    /// first. Both are always torn down here, so a drag can never leave a
+    /// monitor armed for the next press to trip over.
+    private func finishDrag() {
+        removeDragMonitors()
+        guard isDragging else { return }
+        isDragging = false
+        onDragEnded?()
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -3257,28 +3382,38 @@ private class DraggableHostingView<Content: View>: NSHostingView<Content> {
 
         guard let window = window else { return }
 
-        if let m = dragMonitor {
-            NSEvent.removeMonitor(m)
-            dragMonitor = nil
-        }
+        removeDragMonitors()
 
         isDragging = false
         dragStartLocation = event.locationInWindow
         let dragThreshold: CGFloat = 4.0
 
+        // Sees the release when it happens over another app. Global monitors
+        // cannot consume the event, which is fine: the click it would leak to
+        // SwiftUI belongs to whatever is under the cursor, not to us.
+        globalDragMonitor = NSEvent.addGlobalMonitorForEvents(
+            matching: [.leftMouseDragged, .leftMouseUp]
+        ) { [weak self] event in
+            guard let self = self else { return }
+            switch event.type {
+            case .leftMouseUp:
+                self.finishDrag()
+            case .leftMouseDragged where self.isDragging:
+                self.moveWindow(under: NSEvent.mouseLocation)
+            default:
+                break
+            }
+        }
+
         dragMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDragged, .leftMouseUp]) { [weak self] event in
             guard let self = self else { return event }
             switch event.type {
             case .leftMouseUp:
-                if let m = self.dragMonitor {
-                    NSEvent.removeMonitor(m)
-                    self.dragMonitor = nil
-                }
-                if self.isDragging {
+                let wasDragging = self.isDragging
+                self.finishDrag()
+                if wasDragging {
                     // Drag just ended — swallow so SwiftUI's button doesn't see
                     // mouseUp and fire its action.
-                    self.isDragging = false
-                    self.onDragEnded?()
                     return nil
                 }
                 // Normal click — let the event reach SwiftUI.
@@ -3313,12 +3448,22 @@ private class DraggableHostingView<Content: View>: NSHostingView<Content> {
         }
     }
 
-    /// Keep the grabbed point of the panel pinned under the cursor. Screen
-    /// coordinates throughout, so crossing onto another display just works.
+    /// Keep the grabbed point of the panel pinned under the cursor, but never
+    /// let the chip itself leave the desktop. Screen coordinates throughout, so
+    /// crossing onto another display just works.
     private func moveWindow(under mouse: NSPoint) {
         guard let window = window else { return }
+        let raw = NSPoint(x: mouse.x - grabOffset.dx, y: mouse.y - grabOffset.dy)
+        let offset = pillCentreOffset?() ?? CGVector(
+            dx: window.frame.width / 2,
+            dy: window.frame.height / 2
+        )
         window.setFrameOrigin(
-            NSPoint(x: mouse.x - grabOffset.dx, y: mouse.y - grabOffset.dy)
+            clampedDragOrigin(
+                panelOrigin: raw,
+                pillCentreOffset: offset,
+                screens: NSScreen.screens.map { $0.frame }
+            )
         )
     }
 }
