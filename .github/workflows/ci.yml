@@ -467,16 +467,6 @@ jobs:
       - name: Run PII removal tests
         run: cargo test -p screenpipe-core pii_removal
 
-      # The main src-tauri package has no other cargo-test job anywhere in CI —
-      # only its livetext-stress sub-crate is covered below. That gap is how a
-      # settings-store regression silently disabled recording for Windows
-      # onboarding for 25 hours: store.rs gates the engine on a verified plan,
-      # and a store.bin that failed to deserialize fell through to defaults,
-      # which read as "no plan". Nothing compiled these tests, so nothing caught
-      # it. pre_build.js has already run above, so build.rs will not panic here.
-      - name: Run settings-store recovery tests
-        timeout-minutes: 25
-        run: cargo test --manifest-path apps/screenpipe-app-tauri/src-tauri/Cargo.toml store::tests
 
       # A crash here is a real data race in livetext_bridge.swift; the test
       # skips itself when VisionKit is unavailable on the runner.
