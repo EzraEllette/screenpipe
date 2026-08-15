@@ -28,6 +28,19 @@ function blockProgress(block: ContentBlock): number {
       return 1 + (block.description?.length ?? 0);
     case "agent_action":
       return 1 + block.title.length + (block.message?.length ?? 0);
+    case "plan":
+      // A plan is replaced wholesale rather than appended to, so length alone
+      // can't rank two copies: the same plan with a step advanced is the newer
+      // one at identical text length. Weight completed steps so a further-along
+      // plan wins the cross-window "richer copy" comparison.
+      return (
+        1 +
+        block.entries.reduce(
+          (total, entry) =>
+            total + entry.content.length + (entry.status === "completed" ? 1 : 0),
+          0,
+        )
+      );
   }
 }
 

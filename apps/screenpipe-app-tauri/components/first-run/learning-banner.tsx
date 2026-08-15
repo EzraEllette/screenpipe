@@ -15,6 +15,7 @@ import {
   type FirstRunEmptyReason,
 } from "@/lib/first-run/learning-window";
 import { appIconUrl } from "@/lib/first-run/recent-activity";
+import { useAgentHandoff } from "@/lib/first-run/use-agent-handoff";
 import {
   useLearningWindow,
   type LearningWindowOptions,
@@ -33,6 +34,12 @@ const EMPTY_COPY: Record<FirstRunEmptyReason, string> = {
     "Recording is on but nothing was captured yet. This usually means the screen did not change much.",
   empty_but_recording:
     "Recording is on and still warming up. Nothing has been indexed yet.",
+  no_frames_captured:
+    "Recording is on but no screens were captured in that window. If this keeps happening, check Screen Recording permission.",
+  below_frame_floor:
+    "Only a few screens were captured — not enough to say anything true about your work yet. Keep working and this fills in.",
+  single_app_below_floor:
+    "Everything captured came from a single app, which is too thin to summarize. This fills in as you move between apps.",
   unknown:
     "Nothing was captured in that window. Screenpipe keeps reading in the background as you work.",
 };
@@ -71,8 +78,15 @@ function CapturedAppIcon({ app }: { app: FirstRunCapturedApp }) {
 export function FirstRunLearningBanner(props: LearningWindowOptions = {}) {
   const { phase, capturedApps, remainingMs, chatId, emptyReason, dismiss } =
     useLearningWindow(props);
+  const { target: handoffTarget, hint: handoffHint, askAgent } =
+    useAgentHandoff(phase === "ready");
 
-  if (phase !== "learning" && phase !== "ready" && phase !== "empty") {
+  if (
+    phase !== "learning" &&
+    phase !== "writing" &&
+    phase !== "ready" &&
+    phase !== "empty"
+  ) {
     return null;
   }
 
@@ -133,6 +147,38 @@ export function FirstRunLearningBanner(props: LearningWindowOptions = {}) {
         </div>
       )}
 
+      {phase === "writing" && (
+        <div className="flex flex-col gap-2">
+          <div className="flex items-center gap-3">
+            <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-muted-foreground" />
+            <p className="text-xs font-medium text-foreground">
+              Writing your summary
+            </p>
+          </div>
+          {/* No countdown. The clock measured how long we would keep waiting
+              for something to summarize, and that question is already
+              answered; the model can take tens of seconds and outlast the
+              ceiling, so a timer here would tick to 0:00 and then keep
+              spinning. */}
+          <p className="text-[11px] leading-relaxed text-muted-foreground">
+            Screenpipe saw enough. Putting the summary together now — this
+            takes a few seconds.
+          </p>
+          {capturedApps.length > 0 && (
+            <div className="flex items-center gap-2 pt-0.5">
+              <span className="shrink-0 text-[11px] text-muted-foreground">
+                Reading from
+              </span>
+              <span className="flex items-center gap-1">
+                {capturedApps.map((app) => (
+                  <CapturedAppIcon key={app.name} app={app} />
+                ))}
+              </span>
+            </div>
+          )}
+        </div>
+      )}
+
       {phase === "ready" && (
         <div className="flex flex-col gap-2">
           <p className="text-xs font-medium text-foreground">
@@ -152,6 +198,24 @@ export function FirstRunLearningBanner(props: LearningWindowOptions = {}) {
             >
               Open the summary
             </Button>
+            {/* Setup already wired this agent over MCP, so it can answer from
+                real captured context. Offered second, never instead: the
+                summary is guaranteed to exist, the handoff depends on another
+                app being where we think it is. */}
+            {handoffTarget && (
+              <Button
+                size="sm"
+                variant="ghost"
+                className="h-7 text-[11px]"
+                data-testid="first-run-ask-agent"
+                data-agent={handoffTarget.id}
+                onClick={askAgent}
+              >
+                {handoffTarget.deeplink
+                  ? `Ask ${handoffTarget.label}`
+                  : `Copy for ${handoffTarget.label}`}
+              </Button>
+            )}
             <Button
               size="sm"
               variant="ghost"
@@ -161,6 +225,15 @@ export function FirstRunLearningBanner(props: LearningWindowOptions = {}) {
               Later
             </Button>
           </div>
+          {handoffHint && (
+            <p
+              className="text-[11px] leading-relaxed text-muted-foreground"
+              data-testid="first-run-ask-agent-hint"
+              role="status"
+            >
+              {handoffHint}
+            </p>
+          )}
         </div>
       )}
 

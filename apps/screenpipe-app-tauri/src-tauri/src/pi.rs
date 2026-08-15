@@ -55,6 +55,8 @@ const TITLE_SESSION_PREFIX: &str = "__title:";
 const REQUIRED_PI_EXTENSION_PACKAGE: &str = "npm:pi-subagents";
 const CONVERSATION_HISTORY_OPEN: &str = "<conversation_history>";
 const CONVERSATION_HISTORY_CLOSE: &str = "</conversation_history>";
+const PI_INSTALL_ARGS: [&str; 2] = ["install", "--ignore-scripts"];
+const NPM_INSTALL_ARGS: [&str; 4] = ["install", "--ignore-scripts", "--no-audit", "--no-fund"];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PiConversationSyncState {
@@ -246,7 +248,11 @@ fn truncate_stderr(stderr: &str) -> String {
 #[cfg(windows)]
 fn build_command_for_path(path: &str) -> Command {
     if path.ends_with(".cmd") || path.ends_with(".bat") {
-        let mut cmd = Command::new("cmd.exe");
+        // No-window here rather than relying on the caller: both of today's
+        // callers do set the flag, but only after ~2500 lines of indirection,
+        // and a third caller that forgets would flash a terminal. Setting it
+        // twice is harmless.
+        let mut cmd = screenpipe_core::no_window_command("cmd.exe");
         cmd.args(["/C", path]);
         cmd
     } else if path.ends_with(".exe") {
@@ -261,17 +267,19 @@ fn build_command_for_path(path: &str) -> Command {
                 cmd.arg(js);
                 return cmd;
             }
-            // Not a bun shim or resolution failed — run .exe directly
-            Command::new(path)
+            // Not a bun shim or resolution failed — run .exe directly. Still a
+            // console program, so it gets the same treatment as the bun path
+            // above rather than being the one branch that flashes.
+            screenpipe_core::no_window_command(path)
         } else {
-            Command::new(path)
+            screenpipe_core::no_window_command(path)
         }
     } else if let Some(bun) = find_bun_executable() {
         let mut cmd = bun_command(&bun);
         cmd.arg(path);
         cmd
     } else {
-        Command::new(path)
+        screenpipe_core::no_window_command(path)
     }
 }
 
@@ -284,7 +292,9 @@ fn build_command_for_path(path: &str) -> Command {
         cmd.arg(path);
         cmd
     } else {
-        Command::new(path)
+        // A no-op off Windows, kept in the same shape as the windows arm so
+        // both read as "every command this factory returns is guarded".
+        screenpipe_core::no_window_command(path)
     }
 }
 
@@ -1190,6 +1200,16 @@ fn local_pi_install_integrity_error(install_dir: &Path) -> Option<String> {
     if !cli_js.exists() {
         return Some(format!("missing Pi entrypoint at {}", cli_js.display()));
     }
+    let agent_session_runtime = pi_dir
+        .join("dist")
+        .join("core")
+        .join("agent-session-runtime.js");
+    if !agent_session_runtime.is_file() {
+        return Some(format!(
+            "missing Pi runtime artifact at {}",
+            agent_session_runtime.display()
+        ));
+    }
 
     if !is_local_pi_version_current(install_dir) {
         return Some(format!("Pi package version is not {}", PI_PACKAGE));
@@ -1216,17 +1236,19 @@ fn clear_pi_install_artifacts(install_dir: &Path) {
     let _ = std::fs::remove_file(install_dir.join("package-lock.json"));
 }
 
-fn apply_no_window(_cmd: &mut Command) {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-        _cmd.creation_flags(CREATE_NO_WINDOW);
-    }
+/// Local alias so the many call sites below stay unchanged while there is only
+/// one implementation of the flag, in `screenpipe_core::no_window`.
+fn apply_no_window(cmd: &mut Command) {
+    screenpipe_core::apply_no_window(cmd);
 }
 
 fn bun_command(bun: &str) -> Command {
-    let mut cmd = Command::new(bun);
+    // No-window at construction, not left to `run_command_output`: bun is a
+    // console program and not every caller runs it through that helper. The
+    // screenpipe-mcp prewarm spawns this directly at every launch and waits up
+    // to two minutes for it, so the missing flag was a terminal sitting on the
+    // user's desktop for the whole startup.
+    let mut cmd = screenpipe_core::no_window_command(bun);
     // Single source of truth in screenpipe-core: on Linux, bun subprocesses
     // must not inherit the app's LD_LIBRARY_PATH, or bundled runtimes like
     // AppImage can make bun crash before it prints diagnostics.
@@ -1262,23 +1284,33 @@ fn format_install_failure(tool: &str, output: &Output) -> String {
 
 fn should_retry_install_with_npm(stderr: &str) -> bool {
     let lower = stderr.to_lowercase();
-    let eperm_failure = lower.contains("eperm")
-        && (lower.contains("ntsetinformationfile")
-            || lower.contains("cache dir")
-            || lower.contains("extracting tarball")
-            || lower.contains("moving"));
+    let locked_file_context = lower.contains("ntsetinformationfile")
+        || lower.contains("cache dir")
+        || lower.contains("extracting tarball")
+        || lower.contains("moving")
+        || lower.contains("copying files from cache");
+    // EPERM and EBUSY are the same class of Windows failure: another handle
+    // (Defender, Search indexer, a previous bun) holds a file bun is copying
+    // out of its cache. Only EPERM was matched before, so an EBUSY install
+    // failed hard and left node_modules half-populated.
+    let locked_file_failure =
+        (lower.contains("eperm") || lower.contains("ebusy")) && locked_file_context;
     let crash_failure = lower.contains("segmentation fault")
         || lower.contains("bun has crashed")
         || lower.contains("panic")
         || lower.contains("avx support");
-    eperm_failure || crash_failure
+    locked_file_failure || crash_failure
 }
 
 fn npm_install_command(install_dir: &Path) -> Command {
     #[cfg(windows)]
     {
-        let mut cmd = Command::new("cmd.exe");
-        cmd.args(["/C", "npm", "install", "--no-audit", "--no-fund"])
+        // Guarded at construction, not left to `run_command_output`: an npm
+        // fallback install can run for minutes, so a missed flag here is a
+        // terminal sitting on the user's desktop, not a blink.
+        let mut cmd = screenpipe_core::no_window_command("cmd.exe");
+        cmd.args(["/C", "npm"])
+            .args(NPM_INSTALL_ARGS)
             .current_dir(install_dir);
         cmd
     }
@@ -1286,8 +1318,7 @@ fn npm_install_command(install_dir: &Path) -> Command {
     #[cfg(not(windows))]
     {
         let mut cmd = Command::new("npm");
-        cmd.args(["install", "--no-audit", "--no-fund"])
-            .current_dir(install_dir);
+        cmd.args(NPM_INSTALL_ARGS).current_dir(install_dir);
         cmd
     }
 }
@@ -1310,10 +1341,31 @@ fn verify_pi_package_install(install_dir: &Path) -> Result<(), String> {
 /// permanent until node_modules is cleared. Never ask the user to delete
 /// directories: retry once with node_modules+lockfiles cleared, then once
 /// more with the bun cache wiped too, before reporting failure.
+/// Whether a failed install left a tree that only clearing node_modules can fix.
+///
+/// A verification failure says so explicitly. But a Windows file-lock abort
+/// (EPERM/EBUSY, typically Defender or the Search indexer holding a file bun is
+/// copying out of its cache) fails the install *before* verification runs, and
+/// leaves node_modules half-populated. The next `bun install` then trusts
+/// bun.lock ("no changes") and never re-copies the missing files, so Pi fails at
+/// runtime with `Cannot find package '<dep>'` until node_modules is cleared.
+/// Both cases need the same self-heal, so treat them the same.
+fn install_failure_is_self_healable(install_dir: &Path, error: &str) -> bool {
+    if error.contains("dependency verification failed") {
+        return true;
+    }
+    let lower = error.to_lowercase();
+    let locked_file_failure = lower.contains("eperm")
+        || lower.contains("ebusy")
+        || lower.contains("enotempty")
+        || lower.contains("copying files from cache");
+    locked_file_failure && local_pi_install_integrity_error(install_dir).is_some()
+}
+
 fn run_pi_package_install(install_dir: &Path, bun: &str) -> Result<(), String> {
     let first = run_pi_package_install_once(install_dir, bun);
     let Err(e) = first else { return Ok(()) };
-    if !e.contains("dependency verification failed") {
+    if !install_failure_is_self_healable(install_dir, &e) {
         return Err(e);
     }
 
@@ -1328,7 +1380,7 @@ fn run_pi_package_install(install_dir: &Path, bun: &str) -> Result<(), String> {
         info!("Pi install self-heal succeeded after clearing node_modules");
         return Ok(());
     };
-    if !e.contains("dependency verification failed") {
+    if !install_failure_is_self_healable(install_dir, &e) {
         return Err(e);
     }
 
@@ -1356,8 +1408,9 @@ fn run_pi_package_install_once(install_dir: &Path, bun: &str) -> Result<(), Stri
     // from the log alone; a bun that can't even execute (e.g. SIGILL on an
     // unsupported CPU) shows up right here as the version probe failing.
     info!(
-        "Running Pi dependency install: {} install (cwd: {}, bun version: {})",
+        "Running Pi dependency install: {} {} (cwd: {}, bun version: {})",
         bun,
+        PI_INSTALL_ARGS.join(" "),
         install_dir.display(),
         screenpipe_core::agents::pi::bun_version_string(bun),
     );
@@ -1366,7 +1419,10 @@ fn run_pi_package_install_once(install_dir: &Path, bun: &str) -> Result<(), Stri
     bun_cmd
         .current_dir(install_dir)
         .env("BUN_INSTALL_CACHE_DIR", &cache_dir)
-        .args(["install"]);
+        // CREATE_NO_WINDOW only applies to this Bun process. Lifecycle scripts
+        // can launch fresh console processes, so disable them for ScreenPipe's
+        // app-managed dependency set as well.
+        .args(PI_INSTALL_ARGS);
 
     match run_command_output(bun_cmd) {
         Ok(output) if output.status.success() => verify_pi_package_install(install_dir),
@@ -2286,6 +2342,34 @@ fn kill_orphan_pi_processes(managed_alive: bool) {
 /// 200ms is enough to detect immediate-exit crashes without delaying first chat.
 const PI_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(200);
 
+/// What a caller sees when an `acp` preset reaches a raw-Pi spawn path.
+pub(crate) const ACP_PRESET_WITHOUT_BACKEND: &str =
+    "This coding-agent preset is missing its agent configuration. Re-select the agent in Settings → AI presets.";
+
+/// Map a preset provider onto Pi's internal registry name.
+///
+/// An `acp` preset has no Pi provider at all: its model calls belong to the
+/// coding agent, not to a Pi provider. Reaching this mapping with `acp` means
+/// the ACP backend was dropped between the preset and the spawn, and the
+/// catch-all used to answer that with "screenpipe" — which sent the *agent id*
+/// ("codex-acp") to the cloud gateway as a model name. The gateway rejected it
+/// as `model_not_allowed`, and the desktop rendered that as "upgrade to
+/// Screenpipe Business": a billing dead end for what is really a broken preset,
+/// on an account that already had the plan. Fail loudly instead of silently
+/// spending someone's hosted allowance on a model id that cannot exist.
+fn pi_registry_provider(provider: &str, url: &str) -> Result<&'static str, String> {
+    Ok(match provider {
+        "openai" => "openai-byok",
+        "openai-chatgpt" => "openai-chatgpt",
+        "native-ollama" => "ollama",
+        "anthropic" => "anthropic-byok",
+        // "custom" requires a valid URL; fall back to screenpipe cloud if missing
+        "custom" if !url.is_empty() => "custom",
+        "acp" => return Err(ACP_PRESET_WITHOUT_BACKEND.to_string()),
+        "screenpipe-cloud" | "pi" | _ => "screenpipe",
+    })
+}
+
 /// Resolve a model name for the screenpipe provider.
 ///
 /// The gateway (api.screenpipe.com) is the source of truth for model validation
@@ -2508,16 +2592,11 @@ pub async fn pi_start_inner(
 
     // Determine which Pi provider and model to use
     let (pi_provider, pi_model) = match &provider_config {
+        // An ACP session's model calls belong to the adapter, so there is no Pi
+        // provider to resolve — these values are only used for logging below.
+        Some(config) if use_acp => ("acp".to_string(), config.model.clone()),
         Some(config) => {
-            let provider_name = match config.provider.as_str() {
-                "openai" => "openai-byok",
-                "openai-chatgpt" => "openai-chatgpt",
-                "native-ollama" => "ollama",
-                "anthropic" => "anthropic-byok",
-                // "custom" requires a valid URL; fall back to screenpipe cloud if missing
-                "custom" if !config.url.is_empty() => "custom",
-                "screenpipe-cloud" | "pi" | _ => "screenpipe",
-            };
+            let provider_name = pi_registry_provider(&config.provider, &config.url)?;
             let model = resolve_pi_model(&config.model, provider_name);
             (provider_name.to_string(), model)
         }
@@ -4189,17 +4268,10 @@ pub async fn pi_set_model(
 ) -> Result<(), String> {
     let sid = session_id.unwrap_or_else(|| "chat".to_string());
 
-    // Map frontend provider name → Pi's internal registry name. Must stay in
-    // sync with the mapping in `pi_start_inner` (line ~1045) — a mismatch
-    // means Pi can't find the model and returns "Model not found".
-    let pi_provider = match provider_config.provider.as_str() {
-        "openai" => "openai-byok",
-        "openai-chatgpt" => "openai-chatgpt",
-        "native-ollama" => "ollama",
-        "anthropic" => "anthropic-byok",
-        "custom" if !provider_config.url.is_empty() => "custom",
-        "screenpipe-cloud" | "pi" | _ => "screenpipe",
-    };
+    // Map frontend provider name → Pi's internal registry name. Shared with
+    // `pi_start_inner` so the two can't drift — a mismatch means Pi can't find
+    // the model and returns "Model not found".
+    let pi_provider = pi_registry_provider(&provider_config.provider, &provider_config.url)?;
     let pi_model = resolve_pi_model(&provider_config.model, pi_provider);
 
     let queue = {
@@ -5438,6 +5510,12 @@ mod tests {
         "<conversation_history>\nuser: hello\nassistant: hi\n</conversation_history>\n\nwhat next?";
 
     #[test]
+    fn managed_pi_installs_disable_dependency_lifecycle_scripts() {
+        assert!(super::PI_INSTALL_ARGS.contains(&"--ignore-scripts"));
+        assert!(super::NPM_INSTALL_ARGS.contains(&"--ignore-scripts"));
+    }
+
+    #[test]
     fn prepares_prompt_for_pi_conversation_state() {
         use super::PiConversationSyncState::{NeedsRecovery, Synced};
 
@@ -6061,8 +6139,13 @@ printf '%s\n' '{"type":"agent_end"}'
             super::PI_PACKAGE.rsplit('@').next().unwrap_or(""),
         );
         let dist = pi_dir.join("dist");
-        std::fs::create_dir_all(&dist).expect("create dist");
+        std::fs::create_dir_all(dist.join("core")).expect("create dist");
         std::fs::write(dist.join("cli.js"), "console.log('pi')").expect("write cli");
+        std::fs::write(
+            dist.join("core").join("agent-session-runtime.js"),
+            "export class AgentSessionRuntime {}",
+        )
+        .expect("write agent session runtime");
     }
 
     /// Regression guard for the empty "Pi background install failed: " log
@@ -6186,6 +6269,44 @@ printf '%s\n' '{"type":"agent_end"}'
     }
 
     #[test]
+    fn local_pi_integrity_detects_missing_agent_session_runtime() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let install_dir = dir.path();
+        let pi_dir = super::pi_package_dir(install_dir);
+        write_pi_package(install_dir);
+        write_package_json(
+            &super::node_module_package_dir(install_dir, "@earendil-works/pi-ai"),
+            "@earendil-works/pi-ai",
+            super::PI_AI_PACKAGE.rsplit('@').next().unwrap_or(""),
+        );
+        write_package_json(
+            &super::node_module_package_dir(install_dir, "@anthropic-ai/sdk"),
+            "@anthropic-ai/sdk",
+            "0.91.1",
+        );
+        write_package_json(
+            &super::node_module_package_dir(install_dir, "cross-spawn"),
+            "cross-spawn",
+            "7.0.6",
+        );
+        std::fs::remove_file(
+            pi_dir
+                .join("dist")
+                .join("core")
+                .join("agent-session-runtime.js"),
+        )
+        .expect("remove agent session runtime");
+
+        let error = super::local_pi_install_integrity_error(install_dir)
+            .expect("missing agent session runtime should make install unhealthy");
+        assert!(
+            error.contains("agent-session-runtime.js"),
+            "unexpected integrity error: {}",
+            error
+        );
+    }
+
+    #[test]
     fn local_pi_integrity_accepts_nested_transitive_dependency() {
         let dir = tempfile::tempdir().expect("tempdir");
         let install_dir = dir.path();
@@ -6219,6 +6340,41 @@ error: InstallFailed extracting tarball"#;
         assert!(super::should_retry_install_with_npm(stderr));
         assert!(!super::should_retry_install_with_npm(
             "error: package not found @earendil-works/nope"
+        ));
+    }
+
+    /// The exact stderr from the Windows E2E runner. EBUSY was not matched, so
+    /// the install failed hard with no npm fallback and no self-heal.
+    #[test]
+    fn detects_bun_windows_ebusy_cache_copy_failures() {
+        let stderr =
+            "EBUSY: failed copying files from cache to destination for package @aws-sdk/nested-clients";
+
+        assert!(super::should_retry_install_with_npm(stderr));
+    }
+
+    #[test]
+    fn self_heals_a_failed_install_that_left_a_broken_dependency_tree() {
+        let temp = tempfile::tempdir().unwrap();
+        let install_dir = temp.path();
+
+        // A verification failure is self-healable regardless of tree state.
+        assert!(super::install_failure_is_self_healable(
+            install_dir,
+            "Pi install completed but dependency verification failed: missing Pi entrypoint"
+        ));
+
+        // An EBUSY abort fails before verification runs, but leaves the tree
+        // unusable — same corruption, so it must take the same self-heal path.
+        assert!(super::install_failure_is_self_healable(
+            install_dir,
+            "bun install failed (exit code 1). output: EBUSY: failed copying files from cache to destination for package @aws-sdk/nested-clients"
+        ));
+
+        // A genuine resolution failure must NOT burn three install attempts.
+        assert!(!super::install_failure_is_self_healable(
+            install_dir,
+            "bun install failed (exit code 1). output: error: package not found @earendil-works/nope"
         ));
     }
 
@@ -6711,7 +6867,8 @@ error: InstallFailed extracting tarball"#;
     // -- build_models_json tests --
 
     use super::{
-        build_models_json, build_models_json_with_api_url, resolve_pi_model, PiProviderConfig,
+        build_models_json, build_models_json_with_api_url, pi_registry_provider, resolve_pi_model,
+        PiProviderConfig, ACP_PRESET_WITHOUT_BACKEND,
     };
 
     fn make_provider_config(provider: &str, model: &str) -> PiProviderConfig {
@@ -6770,6 +6927,42 @@ error: InstallFailed extracting tarball"#;
         assert_eq!(
             config["providers"]["screenpipe"]["baseUrl"],
             "http://127.0.0.1:8787/v1"
+        );
+    }
+
+    /// An `acp` preset that lost its backend must never be answered with the
+    /// cloud provider. That silent fallback sent the *agent id* to the gateway
+    /// as a model name, and the 403 surfaced as "upgrade to Screenpipe
+    /// Business" on accounts that already had the plan.
+    #[test]
+    fn acp_provider_never_falls_back_to_the_cloud() {
+        let error =
+            pi_registry_provider("acp", "").expect_err("acp must not resolve to a provider");
+        assert_eq!(error, ACP_PRESET_WITHOUT_BACKEND);
+        assert!(pi_registry_provider("acp", "https://example.com/v1").is_err());
+    }
+
+    #[test]
+    fn known_providers_still_map_as_before() {
+        assert_eq!(pi_registry_provider("openai", "").unwrap(), "openai-byok");
+        assert_eq!(
+            pi_registry_provider("openai-chatgpt", "").unwrap(),
+            "openai-chatgpt"
+        );
+        assert_eq!(pi_registry_provider("native-ollama", "").unwrap(), "ollama");
+        assert_eq!(
+            pi_registry_provider("anthropic", "").unwrap(),
+            "anthropic-byok"
+        );
+        assert_eq!(
+            pi_registry_provider("custom", "http://localhost:11434/v1").unwrap(),
+            "custom"
+        );
+        // custom without a URL keeps its long-standing cloud fallback
+        assert_eq!(pi_registry_provider("custom", "").unwrap(), "screenpipe");
+        assert_eq!(
+            pi_registry_provider("screenpipe-cloud", "").unwrap(),
+            "screenpipe"
         );
     }
 

@@ -2066,7 +2066,7 @@ fn walk_element(elem: &ax::UiElement, depth: usize, state: &mut WalkState) {
                 window_pattern::matches_any(&state.ignored_patterns, app_lc, &lower)
             };
             // title comes from the batch; url is not batched (read individually).
-            if attrs.title.as_deref().is_some_and(|t| matches(t))
+            if attrs.title.as_deref().is_some_and(&matches)
                 || get_string_attr(elem, ax::attr::url()).is_some_and(|u| matches(&u))
             {
                 state.hit_ignored_extension = true;

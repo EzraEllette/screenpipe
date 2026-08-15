@@ -12,7 +12,10 @@ import {
   setFirstRunGuidePending,
   setFirstRunGuideReplayAfterOnboarding,
 } from "@/lib/first-run-guide";
-import { resetLearningWindow } from "@/lib/first-run/learning-window";
+import {
+  LEARNING_WINDOW_RESET_EVENT,
+  resetLearningWindow,
+} from "@/lib/first-run/learning-window";
 import type { OnboardingLiveViewFlowProperties } from "@/lib/analytics/onboarding-funnel";
 
 export type OnboardingCompletionContext = {
@@ -102,24 +105,33 @@ export const useOnboarding = create<OnboardingState>((set, get) => ({
           },
           isLoading: false,
         }));
-        posthog.capture("onboarding_completed", {
-          completion_method: context.method,
-          pipe_count: context.pipeCount,
-          customized: context.customized,
-          ...(context.dashboardBlockCount !== undefined
-            ? { dashboard_block_count: context.dashboardBlockCount }
-            : {}),
-          ...(context.goalCategory
-            ? { goal_category: context.goalCategory }
-            : {}),
-          ...(context.live_view_flow_variant
-            ? {
-                live_view_flow_variant: context.live_view_flow_variant,
-                existing_live_view_count_bucket:
-                  context.existing_live_view_count_bucket,
-              }
-            : {}),
-        });
+        // Sent instantly, not batched. Setup runs in its own webview and this
+        // fires immediately before that webview is navigated away and torn
+        // down, so a queued event never gets flushed: `engine_completed` (a
+        // tick earlier, same handler) landed while `onboarding_completed` was
+        // lost for essentially every user.
+        posthog.capture(
+          "onboarding_completed",
+          {
+            completion_method: context.method,
+            pipe_count: context.pipeCount,
+            customized: context.customized,
+            ...(context.dashboardBlockCount !== undefined
+              ? { dashboard_block_count: context.dashboardBlockCount }
+              : {}),
+            ...(context.goalCategory
+              ? { goal_category: context.goalCategory }
+              : {}),
+            ...(context.live_view_flow_variant
+              ? {
+                  live_view_flow_variant: context.live_view_flow_variant,
+                  existing_live_view_count_bucket:
+                    context.existing_live_view_count_bucket,
+                }
+              : {}),
+          },
+          { send_instantly: true },
+        );
         // Setup no longer builds a dashboard, so Brain would open on an empty
         // container. Land on Home instead: it always has something to render,
         // it is where the learning window runs, and it is where the summary
@@ -144,6 +156,14 @@ export const useOnboarding = create<OnboardingState>((set, get) => ({
       }
     } catch (error) {
       setFirstRunGuidePending(firstRunGuideWasPending);
+      // A completion that never persists also means `completedAt` is never
+      // written, so the first-run window can never open. That used to leave no
+      // trace at all beyond a console line in a webview nobody is watching.
+      posthog.capture(
+        "onboarding_completion_failed",
+        { completion_method: context.method },
+        { send_instantly: true },
+      );
       console.error("Error completing onboarding:", error);
       set({
         error:
@@ -167,7 +187,16 @@ export const useOnboarding = create<OnboardingState>((set, get) => ({
         setFirstRunGuideReplayAfterOnboarding(false);
         // Clear any half-finished window so a replayed setup opens a fresh one
         // instead of resuming a countdown against the previous run's cutoff.
+        //
+        // The local call only clears THIS webview. Settings runs in `home`,
+        // but the banner also renders in the separate `chat` webview, and
+        // partitions do not share localStorage — so without the broadcast that
+        // copy keeps its spent seed claim and terminal phase, and its banner
+        // never returns however many times setup is replayed.
         resetLearningWindow();
+        await emit(LEARNING_WINDOW_RESET_EVENT).catch(() => {
+          // A webview that missed the broadcast still clears on next launch.
+        });
         // Update local state
         set((state) => ({
           onboardingData: {

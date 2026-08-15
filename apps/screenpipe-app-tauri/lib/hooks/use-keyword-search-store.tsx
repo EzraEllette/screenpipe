@@ -276,6 +276,7 @@ export const useKeywordSearchStore = create<KeywordSearchState>((set, get) => ({
 		}
 
 		const { searchResults: searchResultsBeforeRequest } = get();
+		const { searchGroups: searchGroupsBeforeRequest } = get();
 
 		const searchRequest: SearchRequest = {
 			query,
@@ -296,7 +297,7 @@ export const useKeywordSearchStore = create<KeywordSearchState>((set, get) => ({
 				offset: (options.offset ?? 0).toString(),
 				include_context: (options.include_context ?? false).toString(),
 				fuzzy_match: (options.fuzzy_match ?? fuzzy_default).toString(),
-				group: "false",
+				group: "true",
 			});
 
 			if (options.app_names) {
@@ -393,9 +394,15 @@ export const useKeywordSearchStore = create<KeywordSearchState>((set, get) => ({
 				throw new Error("Search request failed");
 			}
 
-			const rawResults: SearchMatch[] = await response.json();
+			const rawGroups: SearchMatchGroup[] = await response.json();
 			loadUiEventsAfterKeyword();
-				const results = narrowSearchMatchHighlights(rawResults, query);
+			const pageGroups = rawGroups.map((group) => ({
+				...group,
+				representative: narrowSearchMatchHighlights(
+					[group.representative],
+					query,
+				)[0],
+			}));
 
 			if (get().activeRequestId === requestId) {
 				const { unavailableFrameIds } = get();
@@ -407,19 +414,22 @@ export const useKeywordSearchStore = create<KeywordSearchState>((set, get) => ({
 				const existingFrameIds = new Set(
 					baseResults.map((result) => result.frame_id),
 				);
-				const finalPageResults = results.filter(
-					(result) =>
-						!existingFrameIds.has(result.frame_id) &&
-						!unavailableFrameIds.has(result.frame_id),
+				const finalPageGroups = pageGroups.filter(
+					(group) =>
+						!existingFrameIds.has(group.representative.frame_id) &&
+						!unavailableFrameIds.has(group.representative.frame_id),
+				);
+				const finalPageResults = finalPageGroups.map(
+					(group) => group.representative,
 				);
 				const finalResults = [...baseResults, ...finalPageResults];
-				const finalGroups: SearchMatchGroup[] = finalResults.map((match) => ({
-					representative: match,
-					group_size: 1,
-					start_time: match.timestamp,
-					end_time: match.timestamp,
-					frame_ids: [match.frame_id],
-				}));
+				const baseGroups = isInitialSearch
+					? []
+					: searchGroupsBeforeRequest.filter(
+							(group) =>
+								!unavailableFrameIds.has(group.representative.frame_id),
+						);
+				const finalGroups = [...baseGroups, ...finalPageGroups];
 				if (isInitialSearch) {
 					posthog.capture("search_ui_keyword_completed", {
 						...analyticsProperties,
@@ -442,7 +452,7 @@ export const useKeywordSearchStore = create<KeywordSearchState>((set, get) => ({
 									),
 					searchQuery: query,
 					isSearching: false,
-					lastCandidatePageSize: rawResults.length,
+					lastCandidatePageSize: rawGroups.length,
 					lastRequest: searchRequest,
 					currentAbortController: null,
 				});

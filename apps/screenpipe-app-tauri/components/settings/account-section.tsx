@@ -13,7 +13,7 @@ export const searchIndex: SettingsField[] = [
   { label: "Sign in to Screenpipe", keywords: ["login", "log in", "sign in"] },
   { label: "Logout", keywords: ["signout", "sign out", "log out"] },
   { label: "Screenpipe Business", keywords: ["subscription", "billing", "plan", "pro", "business", "max", "ultra", "upgrade", "manage"] },
-  { label: "scheduled sync across devices", keywords: ["scheduled sync", "pipe sync", "sync"] },
+  { label: "sync scheduled tasks across devices", keywords: ["scheduled sync", "pipe sync", "sync"] },
   { label: "memories sync across devices", keywords: ["memories sync", "sync", "facts"] },
   { label: "connection sync across devices", keywords: ["connection sync", "sync", "slack", "notion"] },
 ];
@@ -30,7 +30,6 @@ import { toast } from "@/components/ui/use-toast";
 import { commands } from "@/lib/utils/tauri";
 import { openExternalUrl } from "@/lib/open-external-url";
 import {
-  getBusinessCapacityUpgrade,
   planDisplayName,
   isSignedInCloudSubscriber,
   type AppUser,
@@ -64,6 +63,7 @@ import {
 import {
   AccountPlanOptions,
   accountPlanForEntitlement,
+  type PlanPurchase,
 } from "./account-plan-options";
 
 const ACCOUNT_URL = screenpipeWebUrl("/account", "https://screenpipe.com");
@@ -155,21 +155,30 @@ export function AccountSection() {
   const hasExistingSubscription =
     hasExistingStripeSubscriptionPlan(subscriptionPlan) &&
     !hasExpiringProfilePlan;
-  const capacityUpgrade =
-    process.env.NEXT_PUBLIC_BUSINESS_POWER_PLANS_ENABLED === "true"
-      ? getBusinessCapacityUpgrade(subscriptionPlan)
-      : null;
-
-  const openCapacityUpgrade = async () => {
-    if (!capacityUpgrade) return;
+  /** Capacity levels change an existing subscription, so they are proration on
+   *  the web billing page rather than a new in-app checkout. */
+  const openCapacityBilling = async (
+    targetPlan: Extract<PlanPurchase, { kind: "billing" }>["targetPlan"],
+  ) => {
     const billingUrl = new URL(BILLING_URL);
-    billingUrl.searchParams.set("target_plan", capacityUpgrade.targetPlan);
+    billingUrl.searchParams.set("target_plan", targetPlan);
     billingUrl.searchParams.set("interval", "month");
     posthog.capture("desktop_business_capacity_upgrade_opened", {
       current_plan: subscriptionPlan,
-      target_plan: capacityUpgrade.targetPlan,
+      target_plan: targetPlan,
     });
     await openExternalUrl(billingUrl.toString());
+  };
+
+  const selectPlan = (purchase: PlanPurchase) => {
+    if (purchase.kind === "billing") {
+      void openCapacityBilling(purchase.targetPlan);
+      return;
+    }
+    void handleCheckout({
+      ...defaultUpgradeSelection("account-plan-options"),
+      plan: purchase.plan,
+    });
   };
 
   useEffect(() => {
@@ -322,7 +331,7 @@ export function AccountSection() {
         offer_version: selection.offerVersion,
         pricing_experiment_variant: selection.experimentVariant,
       });
-      await commands.openLoginWindow(null);
+      await commands.openLoginWindow(null, null);
       return;
     }
 
@@ -501,7 +510,7 @@ export function AccountSection() {
             <Button
               variant="outline"
               size="sm"
-              onClick={() => commands.openLoginWindow(null)}
+              onClick={() => commands.openLoginWindow(null, null)}
             >
               login <ExternalLinkIcon className="w-3.5 h-3.5 ml-1.5" />
             </Button>
@@ -552,45 +561,15 @@ export function AccountSection() {
               entitlementPlan={subscriptionPlan}
               fallbackTo={hasExpiringProfilePlan ? "free" : undefined}
               busy={checkoutBusy}
-              onChoose={(plan) =>
-                handleCheckout({
-                  ...defaultUpgradeSelection("account-plan-options"),
-                  plan,
-                })
-              }
+              onSelect={selectPlan}
             />
           </div>
-
-          {capacityUpgrade && (
-            <div
-              className="mt-4 flex items-center justify-between gap-4 rounded-lg border border-border/60 bg-muted/20 px-3.5 py-3"
-              data-testid="account-capacity-upgrade"
-            >
-              <div className="min-w-0">
-                <p className="text-sm font-medium">need more AI capacity?</p>
-                <p className="text-xs text-muted-foreground">
-                  {capacityUpgrade.name} adds higher query and request-rate
-                  limits for ${capacityUpgrade.monthlyPrice}/month.
-                </p>
-              </div>
-              <Button
-                variant="outline"
-                size="sm"
-                className="shrink-0"
-                data-testid="account-capacity-upgrade-button"
-                onClick={openCapacityUpgrade}
-              >
-                view {capacityUpgrade.name.replace("Business ", "")}
-                <ExternalLinkIcon className="ml-1.5 h-3.5 w-3.5" />
-              </Button>
-            </div>
-          )}
 
           {/* Pipe sync */}
           <div className="mt-4 pt-4 border-t border-border/50">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-sm font-medium">scheduled sync across devices</p>
+                <p className="text-sm font-medium">sync scheduled tasks across devices</p>
                 <p className="text-xs text-muted-foreground">
                   sync your scheduled tasks & configs to all devices linked to your account
                 </p>
@@ -603,7 +582,7 @@ export function AccountSection() {
                     onCheckedChange={async (checked) => {
                       await updateSettings({ pipeSyncEnabled: checked });
                       toast({
-                        title: checked ? "scheduled sync enabled" : "scheduled sync disabled",
+                        title: checked ? "scheduled task sync enabled" : "scheduled task sync disabled",
                         description: checked
                           ? "scheduled tasks will sync across your devices"
                           : "scheduled tasks will no longer sync",
@@ -808,7 +787,7 @@ export function AccountSection() {
             <Button
               className="w-full max-w-xs bg-foreground text-background hover:bg-background hover:text-foreground transition-colors duration-150"
               size="lg"
-              onClick={() => commands.openLoginWindow(null)}
+              onClick={() => commands.openLoginWindow(null, null)}
             >
               Log in
               <ExternalLinkIcon className="w-4 h-4 ml-2" />
@@ -830,7 +809,7 @@ export function AccountSection() {
           <Card className="p-4 opacity-75">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-sm font-medium">scheduled sync across devices</p>
+                <p className="text-sm font-medium">sync scheduled tasks across devices</p>
                 <p className="text-xs text-muted-foreground">
                   sync your scheduled tasks & configs to all devices linked to your account
                 </p>
@@ -874,12 +853,7 @@ export function AccountSection() {
                   entitlementPlan={subscriptionPlan}
                   fallbackTo={hasExpiringProfilePlan ? "free" : undefined}
                   busy={checkoutBusy}
-                  onChoose={(plan) =>
-                    handleCheckout({
-                      ...defaultUpgradeSelection("account-plan-options"),
-                      plan,
-                    })
-                  }
+                  onSelect={selectPlan}
                 />
               </div>
             </Card>
@@ -901,12 +875,7 @@ export function AccountSection() {
                 <AccountPlanOptions
                   current="free"
                   busy={checkoutBusy}
-                  onChoose={(plan) =>
-                    handleCheckout({
-                      ...defaultUpgradeSelection("account-plan-options"),
-                      plan,
-                    })
-                  }
+                  onSelect={selectPlan}
                 />
               </div>
             </Card>
@@ -927,7 +896,7 @@ export function AccountSection() {
           <Card className="p-4 opacity-75">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-sm font-medium">scheduled sync across devices</p>
+                <p className="text-sm font-medium">sync scheduled tasks across devices</p>
                 <p className="text-xs text-muted-foreground">
                   sync your scheduled tasks & configs to all devices linked to your account
                 </p>

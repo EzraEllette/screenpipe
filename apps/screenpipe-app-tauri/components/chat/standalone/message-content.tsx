@@ -10,6 +10,10 @@ import { Check, Calendar, ChevronDown, ChevronRight, ChevronUp, KeyRound, Loader
 import { SourceCitationFooter } from "@/components/chat/source-citation-footer";
 import { MarkdownBlock } from "@/components/chat/markdown-block";
 import { AskUserToolCard, isAskUserToolCall } from "@/components/chat/standalone/ask-user-tool-card";
+import {
+  AttachedContextCard,
+  parseAttachedContext,
+} from "@/components/chat/standalone/attached-context";
 import { getFaviconUrl } from "@/components/rewind/timeline/favicon-utils";
 import { IntegrationIcon } from "@/components/settings/connections-section";
 import { useFeedbackStore } from "@/lib/stores/feedback-store";
@@ -39,6 +43,8 @@ import {
 import {
   sourceCitationsFromMessage,
 } from "@/lib/source-citations";
+import { renderChartFence } from "@/components/chat/charts/chat-chart";
+import { PlanBlock } from "@/components/chat/standalone/plan-block";
 
 const MermaidDiagram = React.lazy(() =>
   import("@/components/rewind/mermaid-diagram").then((mod) => ({
@@ -827,6 +833,7 @@ type GroupedBlock =
   | { type: "connection-action"; block: Extract<ContentBlock, { type: "connection_action" }>; key: number }
   | { type: "agent-action"; block: Extract<ContentBlock, { type: "agent_action" }>; key: number }
   | { type: "tool-group"; toolCalls: ToolCall[]; key: number }
+  | { type: "plan"; block: Extract<ContentBlock, { type: "plan" }>; key: number }
   | { type: "work-group"; toolCalls: ToolCall[]; durationMs: number; key: number };
 
 function groupContentBlocks(blocks: ContentBlock[]): GroupedBlock[] {
@@ -850,6 +857,8 @@ function groupContentBlocks(blocks: ContentBlock[]): GroupedBlock[] {
         result.push({ type: "connection-action", block, key: result.length });
       } else if (block.type === "agent_action") {
         result.push({ type: "agent-action", block, key: result.length });
+      } else if (block.type === "plan" && block.entries.length > 0) {
+        result.push({ type: "plan", block, key: result.length });
       }
     }
   }
@@ -955,7 +964,15 @@ function mergeWorkAndIntermediateText(groups: GroupedBlock[]): GroupedBlock[] {
     } else if (g.type === "tool-group") {
       firstKey ??= g.key;
       allToolCalls.push(...g.toolCalls);
-    } else if (g.type === "connection-action" || g.type === "agent-action") {
+    } else if (
+      g.type === "connection-action" ||
+      g.type === "agent-action" ||
+      // The plan is not narration — it is the agent's stated intent for the
+      // work being summarized, and the common ACP turn is "make a plan, then
+      // use tools". Dropping it here would hide the plan on exactly the turns
+      // that have one.
+      g.type === "plan"
+    ) {
       finalBlocks.push(g);
     }
     // text and thinking blocks before the boundary are dropped
@@ -1668,6 +1685,22 @@ export function MessageContent({
     </div>
   ) : null;
 
+  // A user message whose content opens with an attached-context envelope
+  // renders as a card plus the prompt, never as the raw payload. Checked
+  // before displayContent because the producer that writes these bubbles does
+  // not set one — see attached-context.tsx.
+  if (isUser && !message.displayContent) {
+    const attached = parseAttachedContext(message.content);
+    if (attached) {
+      return (
+        <div className="space-y-2">
+          {attachmentsRow}
+          <AttachedContextCard context={attached} />
+        </div>
+      );
+    }
+  }
+
   // User messages with a display label — checked before contentBlocks so
   // pipe messages with both fields render the collapsible label, not raw
   // prompt text. Also handles connection chip messages and doc-attached
@@ -1744,7 +1777,7 @@ export function MessageContent({
                   if (language === "app-stats") {
                     return <AppStatsBlock content={content} />;
                   }
-                  return null;
+                  return renderChartFence(language, content);
                 }}
               />
             );
@@ -1753,6 +1786,9 @@ export function MessageContent({
             // Thinking blocks are always hidden — guard until
             // collapseHiddenWorkGroups absorbs them fully.
             return null;
+          }
+          if (group.type === "plan") {
+            return <PlanBlock key={`plan-${group.key}`} entries={group.block.entries} />;
           }
           if (group.type === "connection-action") {
             const liveConnection = connectionItems.find((connection) => connection.id === group.block.connectionId);
@@ -1863,7 +1899,7 @@ export function MessageContent({
             if (language === "app-stats") {
               return <AppStatsBlock content={content} />;
             }
-            return null;
+            return renderChartFence(language, content);
           }}
         />
       ) : null}

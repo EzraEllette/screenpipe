@@ -10,6 +10,7 @@
 //! parses configs, runs the scheduler, and delegates execution to an
 //! [`AgentExecutor`].
 
+mod builtin_migrations;
 pub mod connection_triggers;
 pub mod connections;
 pub mod favorites;
@@ -23,6 +24,7 @@ use crate::agents::{
     pi::{pi_event_protocol_error, pi_package_enabled, PiExecutor},
     AgentExecutor, ExecutionHandle, SharedPid, STOP_REQUESTED_PID,
 };
+use crate::pipes::builtin_migrations::migrate_builtin_pipe_text;
 use crate::pipes::connections::parse_mcp_connection_id;
 use crate::pipes::mcp_access::McpSessionAccessRegistry;
 use anyhow::{anyhow, Result};
@@ -2944,7 +2946,7 @@ impl PipeManager {
                         if path
                             .file_name()
                             .and_then(|n| n.to_str())
-                            .map_or(false, |n| n.starts_with('.'))
+                            .is_some_and(|n| n.starts_with('.'))
                         {
                             continue;
                         }
@@ -2952,7 +2954,7 @@ impl PipeManager {
                         if !path
                             .extension()
                             .and_then(|e| e.to_str())
-                            .map_or(false, is_user_facing_artifact_ext)
+                            .is_some_and(is_user_facing_artifact_ext)
                         {
                             continue;
                         }
@@ -6611,116 +6613,6 @@ pub fn parse_frontmatter(content: &str) -> Result<(PipeConfig, String)> {
     Ok((config, body))
 }
 
-/// Surgically repair known-broken fragments in an already-installed builtin
-/// `pipe.md` without clobbering the user's other edits. `install_builtin_pipes`
-/// only writes when the file is absent, so a stale local copy never picks up a
-/// bundled fix on its own. Rather than overwrite the whole file (which would
-/// throw away user customization), we replace just the specific broken fragment.
-///
-/// Returns the rewritten content only when a migration actually applied, so the
-/// caller can skip the disk write otherwise. Idempotent: running it on
-/// already-fixed content is a no-op.
-fn migrate_builtin_pipe_text(name: &str, original: &str) -> Option<String> {
-    if name == "automate-my-work" {
-        let replacement = BUNDLED_BUILTIN_PIPES
-            .iter()
-            .find_map(|(builtin_name, content)| (*builtin_name == name).then_some(*content))?;
-        return replace_prompt_body_when_hash_matches(
-            original,
-            replacement,
-            AUTOMATE_MY_WORK_LEGACY_PROMPT_HASHES,
-        );
-    }
-
-    // (old, new) fragment swaps per builtin pipe.
-    let replacements: &[(&str, &str)] = match name {
-        // the meeting-summary pipe shipped instructions to PATCH
-        // /meetings/:id, but the server only registers PUT (see
-        // screenpipe-engine server.rs) — so every save 404'd. fix already
-        // installed local copies. PR #4247.
-        "meeting-summary" => &[
-            (
-                "-X PATCH \"http://localhost:3030/meetings/",
-                "-X PUT \"http://localhost:3030/meetings/",
-            ),
-            // the pipe picked "the most recent meeting", which is the wrong one
-            // whenever two meetings end close together. the scheduler now names
-            // the meeting in .trigger-context.json — point installed copies at
-            // it, since install_builtin_pipes never overwrites them. #5481.
-            (
-                "step 1 — find the meeting that just ended:",
-                concat!(
-                    "step 1 — find the meeting that just ended. when the scheduler woke you for an event ",
-                    "it wrote `./.trigger-context.json` in this pipe's folder; read it first and use the ",
-                    "meeting id it names:\n",
-                    "\n",
-                    "  cat ./.trigger-context.json   # {\"event\": \"meeting_ended\", \"key\": \"<MEETING_ID>\", ...}\n",
-                    "\n",
-                    "  curl -s -H \"Authorization: Bearer $SCREENPIPE_LOCAL_API_KEY\" \\\n",
-                    "    \"http://localhost:3030/meetings/<MEETING_ID>\"\n",
-                    "\n",
-                    "only if that file is missing (a manual run) fall back to the most recent row:",
-                ),
-            ),
-            (
-                "the most recent row is the one that just ended. capture its",
-                "either way, capture the meeting's",
-            ),
-            // A maintainer-only synchronization note was accidentally shipped
-            // inside the runtime prompt. Agents interpreted it as work to do
-            // and recursively searched the user's home or ~/.screenpipe for
-            // app source, pegging a CPU core after meetings. Replace it in
-            // already-installed copies with an explicit bounded-work rule.
-            (
-                "keep the wording of this prompt in sync with `buildMeetingSummarizeInstructions` in `apps/screenpipe-app-tauri/lib/utils/meeting-context.ts` (used by the in-app \"summarize with AI\" button) — the two surfaces should produce the same behavior.",
-                "the instructions below are complete. screenpipe API search is required: use the meeting id and exact meeting time window with the named local HTTP endpoints below. do not inspect app source or recursively search the filesystem; never run recursive `find` or `grep` over the user's home or `~/.screenpipe`.",
-            ),
-            // Clarify the first bounded-work migration: the pipe must search
-            // Screenpipe through the meeting-scoped API. Only recursive
-            // filesystem/source discovery is prohibited.
-            (
-                "the instructions below are complete. do not inspect app source or search outside this pipe folder. never run recursive `find` or `grep` over the user's home or `~/.screenpipe`; use only the named local files and bounded HTTP endpoints below.",
-                "the instructions below are complete. screenpipe API search is required: use the meeting id and exact meeting time window with the named local HTTP endpoints below. do not inspect app source or recursively search the filesystem; never run recursive `find` or `grep` over the user's home or `~/.screenpipe`.",
-            ),
-        ],
-        _ => return None,
-    };
-
-    let mut updated = original.to_string();
-    for (old, new) in replacements {
-        updated = updated.replace(old, new);
-    }
-
-    (updated != original).then_some(updated)
-}
-
-/// Replace only the instruction body of a known built-in prompt version.
-/// Frontmatter and the self-improving memory section stay untouched. Any user
-/// edit inside the instruction body changes the hash and opts out of migration.
-fn replace_prompt_body_when_hash_matches(
-    original: &str,
-    replacement: &str,
-    legacy_hashes: &[&str],
-) -> Option<String> {
-    let original_prompt_start = original.find("<role>")?;
-    let replacement_prompt_start = replacement.find("<role>")?;
-    let original_prompt = &original[original_prompt_start..];
-    let original_hash = simple_hash(original_prompt);
-    if !legacy_hashes.contains(&original_hash.as_str()) {
-        return None;
-    }
-
-    let prefix = original[..original_prompt_start].replace(
-        "description: \"Find genuinely new, low-risk automations tailored to your workflow\"",
-        "description: \"Find one repeated workflow and propose a testable automation\"",
-    );
-    Some(format!(
-        "{}{}",
-        prefix,
-        &replacement[replacement_prompt_start..]
-    ))
-}
-
 /// Atomic file write: write to a temp file in the same directory, then rename.
 /// On Unix, rename is atomic. On Windows, this avoids the partial-write window
 /// where a concurrent reader (e.g. the scheduler) sees a truncated file.
@@ -7706,7 +7598,7 @@ fn should_run_config(cfg: &ScheduleConfig, last_run: DateTime<Utc>) -> bool {
     }
     match next_fire(cfg, search_from) {
         // Don't fire a slot past the effective end (e.g. beyond the Nth run).
-        Some(next) => now >= next && end.map_or(true, |e| next <= e),
+        Some(next) => now >= next && end.is_none_or(|e| next <= e),
         None => false,
     }
 }
@@ -8731,147 +8623,6 @@ mod tests {
         assert!(logs_dir
             .join("archive/2026-01/20260101_000000.json")
             .exists());
-    }
-
-    #[test]
-    fn migrate_builtin_pipe_fixes_stale_patch_verb() {
-        // a stale local meeting-summary copy with the old PATCH verb gets
-        // surgically rewritten to PUT, leaving surrounding text untouched.
-        let stale = "do stuff\n  curl -s -X PATCH \"http://localhost:3030/meetings/<MEETING_ID>\" \\\n    -d '{}'\nmore stuff";
-        let fixed = migrate_builtin_pipe_text("meeting-summary", stale)
-            .expect("stale PATCH content should migrate");
-        assert!(fixed.contains("-X PUT \"http://localhost:3030/meetings/"));
-        assert!(!fixed.contains("-X PATCH"));
-        assert!(fixed.starts_with("do stuff"));
-        assert!(fixed.ends_with("more stuff"));
-
-        // idempotent: already-PUT content is a no-op (no rewrite, no churn).
-        assert!(migrate_builtin_pipe_text("meeting-summary", &fixed).is_none());
-
-        // other builtins and unrelated content are left alone.
-        assert!(migrate_builtin_pipe_text("day-recap", stale).is_none());
-        assert!(migrate_builtin_pipe_text("meeting-summary", "no api calls here").is_none());
-    }
-
-    /// #5481: installed copies still say "pick the most recent meeting", which is
-    /// wrong when two meetings end together. They must be pointed at the trigger
-    /// file, since install_builtin_pipes never overwrites an existing pipe.md.
-    #[test]
-    fn migrate_builtin_pipe_points_meeting_summary_at_trigger_context() {
-        let stale = concat!(
-            "read the screenpipe skill first.\n",
-            "\n",
-            "step 1 — find the meeting that just ended:\n",
-            "\n",
-            "  curl -s \"http://localhost:3030/meetings?limit=1\"\n",
-            "\n",
-            "the most recent row is the one that just ended. capture its `id` and `note`.\n",
-            "\n",
-            "step 2 — summarize it.",
-        );
-
-        let fixed = migrate_builtin_pipe_text("meeting-summary", stale)
-            .expect("stale most-recent-meeting content should migrate");
-        assert!(fixed.contains(".trigger-context.json"));
-        assert!(fixed.contains("/meetings/<MEETING_ID>"));
-        assert!(!fixed.contains("the most recent row is the one that just ended"));
-
-        // the manual-run fallback and the surrounding steps survive.
-        assert!(fixed.contains("http://localhost:3030/meetings?limit=1"));
-        assert!(fixed.starts_with("read the screenpipe skill first."));
-        assert!(fixed.ends_with("step 2 — summarize it."));
-
-        // idempotent: running it again is a no-op.
-        assert!(migrate_builtin_pipe_text("meeting-summary", &fixed).is_none());
-    }
-
-    #[test]
-    fn migrate_builtin_pipe_removes_source_search_instruction() {
-        let stale = concat!(
-            "a meeting just ended.\n\n",
-            "keep the wording of this prompt in sync with `buildMeetingSummarizeInstructions` in ",
-            "`apps/screenpipe-app-tauri/lib/utils/meeting-context.ts` (used by the in-app ",
-            "\"summarize with AI\" button) — the two surfaces should produce the same behavior.\n\n",
-            "read the screenpipe skill first.\n",
-        );
-
-        let fixed = migrate_builtin_pipe_text("meeting-summary", stale)
-            .expect("source-search instruction should migrate");
-        assert!(!fixed.contains("buildMeetingSummarizeInstructions"));
-        assert!(fixed.contains("screenpipe API search is required"));
-        assert!(fixed.contains("never run recursive `find` or `grep`"));
-        assert!(fixed.ends_with("read the screenpipe skill first.\n"));
-        assert!(migrate_builtin_pipe_text("meeting-summary", &fixed).is_none());
-    }
-
-    /// The shipped prompt must already be in its migrated form, or every fresh
-    /// install would be rewritten on the next startup.
-    #[test]
-    fn bundled_meeting_summary_needs_no_migration() {
-        let bundled = BUNDLED_BUILTIN_PIPES
-            .iter()
-            .find_map(|(name, content)| (*name == "meeting-summary").then_some(*content))
-            .expect("meeting-summary is bundled");
-        assert!(migrate_builtin_pipe_text("meeting-summary", bundled).is_none());
-        let (config, body) = parse_frontmatter(bundled).expect("bundled prompt should parse");
-        assert_eq!(config.timeout, Some(600));
-        assert!(!body.contains("buildMeetingSummarizeInstructions"));
-        assert!(body.contains("screenpipe API search is required"));
-        assert!(body.contains("never run recursive `find` or `grep`"));
-    }
-
-    #[test]
-    fn migrate_builtin_pipe_replaces_only_a_known_prompt_body() {
-        let stale = concat!(
-            "---\nschedule: manual\n",
-            "description: \"Find genuinely new, low-risk automations tailored to your workflow\"\n",
-            "---\n\n# memory\n- user lesson\n\n",
-            "<role>\nlegacy automation instructions\n</role>\n",
-        );
-        let replacement = concat!(
-            "---\nschedule: manual\n---\n\n",
-            "<role>\nnew evidence-first instructions\n</role>\n",
-        );
-        let prompt_start = stale.find("<role>").unwrap();
-        let legacy_hash = simple_hash(&stale[prompt_start..]);
-
-        let fixed =
-            replace_prompt_body_when_hash_matches(stale, replacement, &[legacy_hash.as_str()])
-                .expect("known legacy prompt should migrate");
-
-        assert!(fixed.contains("# memory\n- user lesson"));
-        assert!(fixed.contains(
-            "description: \"Find one repeated workflow and propose a testable automation\""
-        ));
-        assert!(fixed.contains("new evidence-first instructions"));
-        assert!(!fixed.contains("legacy automation instructions"));
-        assert!(replace_prompt_body_when_hash_matches(
-            &fixed,
-            replacement,
-            &[legacy_hash.as_str()],
-        )
-        .is_none());
-
-        let customized = stale.replace(
-            "legacy automation instructions",
-            "legacy automation instructions with my customization",
-        );
-        assert!(replace_prompt_body_when_hash_matches(
-            &customized,
-            replacement,
-            &[legacy_hash.as_str()],
-        )
-        .is_none());
-    }
-
-    #[test]
-    fn current_automate_my_work_builtin_does_not_migrate_again() {
-        let current = BUNDLED_BUILTIN_PIPES
-            .iter()
-            .find_map(|(name, content)| (*name == "automate-my-work").then_some(*content))
-            .unwrap();
-
-        assert!(migrate_builtin_pipe_text("automate-my-work", current).is_none());
     }
 
     #[test]

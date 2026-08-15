@@ -1659,19 +1659,11 @@ fn handle_menu_event(app_handle: &AppHandle, event: tauri::menu::MenuEvent) {
                     });
                 } else {
                     // For production builds, run the authenticated update flow.
-                    tauri::async_runtime::spawn(async move {
-                        let state = app.state::<std::sync::Arc<crate::updates::UpdatesManager>>();
-                        if state.has_update_installed().await {
-                            // apply via the same backend path as the banner instead
-                            // of round-tripping through the frontend.
-                            if let Err(e) = crate::updates::restart_for_update(app.clone(), None).await
-                            {
-                                tracing::error!("tray menu: restart for update failed: {}", e);
-                            }
-                        } else if let Err(e) = state.check_for_updates(true, true).await {
-                            tracing::error!("tray menu: check for updates failed: {}", e);
-                        }
-                    });
+                    // The whole flow — including surfacing deferred/failed
+                    // outcomes, which the old inline handler silently
+                    // discarded — lives in updates::trigger_update_now so the
+                    // packaged e2e driver exercises the identical path.
+                    tauri::async_runtime::spawn(crate::updates::trigger_update_now(app));
                 }
             });
         }
@@ -1718,8 +1710,7 @@ fn handle_menu_event(app_handle: &AppHandle, event: tauri::menu::MenuEvent) {
                 if let Some(win) = app.get_webview_window("onboarding") {
                     let _ = win.close();
                 }
-                // Show the main window
-                show_main_window(app.clone());
+                let _ = post_skip_onboarding_window().show(&app);
             });
         }
         "onboarding" => {
@@ -1939,9 +1930,27 @@ fn to_accelerator(shortcut: &str) -> String {
         .replace("CommandOrControl", "CmdOrCtrl")
 }
 
+/// Where "Skip onboarding" lands. Setup ends at Home, exactly like finishing
+/// onboarding normally (`commands::complete_onboarding`). `ShowRewindWindow::Main`
+/// renders `/overlay`, the timeline, which is the wrong destination for a fresh
+/// install because nothing has been captured yet.
+fn post_skip_onboarding_window() -> ShowRewindWindow {
+    ShowRewindWindow::Home {
+        page: Some("home".to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn skip_onboarding_lands_on_home_not_the_timeline() {
+        match post_skip_onboarding_window() {
+            ShowRewindWindow::Home { page } => assert_eq!(page.as_deref(), Some("home")),
+            other => panic!("skip onboarding must land on Home, got {other:?}"),
+        }
+    }
 
     #[test]
     fn recording_status_text_distinguishes_meetings_only_audio_states() {

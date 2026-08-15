@@ -6,6 +6,8 @@ import { waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	queryHighlightTokens,
+	type SearchMatch,
+	type SearchMatchGroup,
 	useKeywordSearchStore,
 	visibleMatchingPositions,
 } from "../use-keyword-search-store";
@@ -40,6 +42,16 @@ function jsonResponse(body: unknown) {
 		status: 200,
 		headers: { "Content-Type": "application/json" },
 	});
+}
+
+function grouped(matches: SearchMatch[]): SearchMatchGroup[] {
+	return matches.map((representative) => ({
+		representative,
+		group_size: 1,
+		start_time: representative.timestamp,
+		end_time: representative.timestamp,
+		frame_ids: [representative.frame_id],
+	}));
 }
 
 describe("useKeywordSearchStore search scheduling", () => {
@@ -82,11 +94,12 @@ describe("useKeywordSearchStore search scheduling", () => {
 		expect(calls).toHaveLength(1);
 		expect(calls[0]).toContain("/search/keyword?");
 		expect(calls[0]).toContain("query=screenpipe");
+		expect(calls[0]).toContain("group=true");
 		expect(useKeywordSearchStore.getState().isSearching).toBe(true);
 		expect(useKeywordSearchStore.getState().isSearchingUiEvents).toBe(false);
 
 		keywordResponse.resolve(
-			jsonResponse([
+			jsonResponse(grouped([
 				{
 					frame_id: 1,
 					timestamp: "2026-06-19T00:00:00.000Z",
@@ -102,7 +115,7 @@ describe("useKeywordSearchStore search scheduling", () => {
 					url: "",
 					text_source: "ocr",
 				},
-			]),
+			])),
 		);
 
 		await searchPromise;
@@ -180,7 +193,7 @@ describe("useKeywordSearchStore search scheduling", () => {
 		const newSearch = useKeywordSearchStore.getState().searchKeywords("new-query");
 		expect(oldSignal?.aborted).toBe(true);
 
-		newResponse.resolve(jsonResponse([{
+		newResponse.resolve(jsonResponse(grouped([{
 			frame_id: 2,
 			timestamp: "2026-07-13T01:00:00.000Z",
 			text_positions: [{
@@ -194,10 +207,10 @@ describe("useKeywordSearchStore search scheduling", () => {
 			text: "new result",
 			url: "",
 			text_source: "ocr",
-		}]));
+		}])));
 		await newSearch;
 
-		oldResponse.resolve(jsonResponse([{
+		oldResponse.resolve(jsonResponse(grouped([{
 			frame_id: 1,
 			timestamp: "2026-07-13T00:00:00.000Z",
 			text_positions: [{
@@ -211,7 +224,7 @@ describe("useKeywordSearchStore search scheduling", () => {
 			text: "old result",
 			url: "",
 			text_source: "ocr",
-		}]));
+		}])));
 		await oldSearch;
 
 		expect(useKeywordSearchStore.getState().searchQuery).toBe("new-query");
@@ -222,7 +235,7 @@ describe("useKeywordSearchStore search scheduling", () => {
 		vi.mocked(localFetch).mockImplementation((input) => {
 			const url = String(input);
 			if (url.startsWith("/search/keyword?")) {
-				return Promise.resolve(jsonResponse([{
+				return Promise.resolve(jsonResponse(grouped([{
 					frame_id: 566,
 					timestamp: "2026-07-30T03:27:38.299898Z",
 					text_positions: [{
@@ -241,7 +254,7 @@ describe("useKeywordSearchStore search scheduling", () => {
 					text: "Deterministic",
 					url: "",
 					text_source: "ocr",
-				}]));
+				}])));
 			}
 			if (url.startsWith("/search?")) {
 				return Promise.resolve(jsonResponse({ data: [] }));
@@ -282,7 +295,7 @@ describe("useKeywordSearchStore search scheduling", () => {
 			const url = String(input);
 			requestedUrls.push(url);
 			if (url.startsWith("/search/keyword?")) {
-				return Promise.resolve(jsonResponse(candidates));
+				return Promise.resolve(jsonResponse(grouped(candidates)));
 			}
 			if (url.startsWith("/search?")) {
 				return Promise.resolve(jsonResponse({ data: [] }));
@@ -313,7 +326,7 @@ describe("useKeywordSearchStore search scheduling", () => {
 		vi.mocked(localFetch).mockImplementation((input) => {
 			const url = String(input);
 			if (url.startsWith("/search/keyword?")) {
-				return Promise.resolve(jsonResponse([{
+				return Promise.resolve(jsonResponse(grouped([{
 					frame_id: 99,
 					timestamp: "2026-07-30T03:27:38.299898Z",
 					text_positions: [position],
@@ -323,7 +336,7 @@ describe("useKeywordSearchStore search scheduling", () => {
 					text: position.text,
 					url: "",
 					text_source: "accessibility" as const,
-				}]));
+				}])));
 			}
 			if (url.startsWith("/search?")) {
 				return Promise.resolve(jsonResponse({ data: [] }));

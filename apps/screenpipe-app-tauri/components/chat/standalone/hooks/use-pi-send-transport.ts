@@ -38,6 +38,19 @@ type LivePiSessionCheck =
   // Callers must not hard-abort a send on an indeterminate result.
   | { running: false; error: string; indeterminate: boolean };
 
+export function hasAuthoritativeActivePiTurn({
+  isStreaming,
+  assistantMessageId,
+}: {
+  // `isLoading` is intentionally accepted but ignored: send preflight uses it
+  // for immediate UI feedback before any backend turn exists.
+  isLoading: boolean;
+  isStreaming: boolean;
+  assistantMessageId: string | null;
+}): boolean {
+  return isStreaming || assistantMessageId !== null;
+}
+
 export async function awaitPendingPiPresetSwitch(
   promiseRef: { current: Promise<void> | null },
 ): Promise<void> {
@@ -197,7 +210,11 @@ export function usePiSendTransport(options: PiSendTransportOptions) {
   }
 
   async function interruptActivePiTurn() {
-    const hasActiveTurn = isLoading || isStreaming || !!piMessageIdRef.current;
+    const hasActiveTurn = hasAuthoritativeActivePiTurn({
+      isLoading,
+      isStreaming,
+      assistantMessageId: piMessageIdRef.current,
+    });
     if (!hasActiveTurn) return;
 
     let aborted = false;
@@ -637,7 +654,13 @@ export function usePiSendTransport(options: PiSendTransportOptions) {
       // Clear prefill context banner (was only cleared in non-Pi path)
       if (prefillContext) {
         // Prepend context to the user message so Pi sees it
-        const contextLabel = prefillSource === "timeline" ? "timeline selection" : "search";
+        // A reviewed snapshot is not a search hit, and calling it one told both
+        // the model and the reader the wrong thing about where it came from.
+        const contextLabel = prefillSource?.startsWith("connected-share-")
+          ? "reviewed Screenpipe snapshot"
+          : prefillSource === "timeline"
+            ? "timeline selection"
+            : "search";
         userMessage = `[Context from ${contextLabel}: ${prefillContext}]\n\n${userMessage}`;
         setPrefillContext(null);
       }

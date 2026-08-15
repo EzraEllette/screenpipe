@@ -4,7 +4,7 @@
 "use client";
 
 import { useState } from "react";
-import { Loader2, SlidersHorizontal } from "lucide-react";
+import { Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import { Switch } from "@/components/ui/switch";
 import {
@@ -177,7 +177,6 @@ export function AcpConfigSelector({
 
   return (
     <ComposerSettingsPopover
-      icon={SlidersHorizontal}
       label={triggerLabel}
       title={`Agent configuration${triggerLabel === "config" ? "" : `: ${triggerLabel}`}`}
       ariaLabel="Agent configuration"

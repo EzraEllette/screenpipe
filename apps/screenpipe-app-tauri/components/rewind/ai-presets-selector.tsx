@@ -88,6 +88,11 @@ import {
   filterPresetsForEnterprisePolicy,
   isEnterpriseManagedPreset,
 } from "@/lib/enterprise-ai-preset-policy";
+import {
+  applyResolvedModelLimits,
+  ollamaContextWindowFromShow,
+  resolveModelLimits,
+} from "@/lib/model-metadata";
 
 // Helper to detect UUID-like strings and format preset names nicely
 const formatPresetName = (name: string): string => {
@@ -142,6 +147,10 @@ interface OpenAIModel {
   id: string;
   created?: number;
   owned_by?: string;
+  context_window?: number;
+  max_output_tokens?: number;
+  max_input_tokens?: number;
+  max_tokens?: number;
 }
 
 export const DEFAULT_PROMPT = `Rules:
@@ -252,6 +261,7 @@ export function AIProviderConfig({
     model: defaultPreset?.model || "",
     acpAgent: defaultPreset?.acpAgent,
     maxContextChars: defaultPreset?.maxContextChars || 512000,
+    maxTokens: defaultPreset?.maxTokens ?? 4096,
     prompt: defaultPreset?.prompt || DEFAULT_PROMPT,
     id: defaultPreset?.id || "",
     defaultPreset: defaultPreset?.defaultPreset || false,
@@ -550,6 +560,51 @@ export function AIProviderConfig({
       })();
     }
   }, [selectedProvider, formData.apiKey, formData.url, connectionFieldErrors.url]);
+
+  useEffect(() => {
+    if (selectedProvider !== "native-ollama" || !formData.model) return;
+    let cancelled = false;
+    const ollamaBaseUrl = (formData.url || "http://localhost:11434/v1")
+      .replace(/\/v1\/?$/, "")
+      .replace(/\/$/, "");
+    void tauriFetchWithDeadline(`${ollamaBaseUrl}/api/show`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: formData.model }),
+    }).then(async (response) => {
+      if (!response.ok || cancelled) return;
+      const contextWindow = ollamaContextWindowFromShow(await response.json());
+      if (!contextWindow || cancelled) return;
+      setOpenAIModels((current) => current.some((model) => model.id === formData.model)
+        ? current.map((model) => model.id === formData.model
+          ? { ...model, context_window: contextWindow }
+          : model)
+        : [...current, { id: formData.model!, context_window: contextWindow }]);
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [selectedProvider, formData.model, formData.url]);
+
+  const selectedModelMetadata = useMemo(
+    () => selectedProvider === "screenpipe-cloud"
+      ? piModels.find((candidate) => candidate.id === formData.model)
+      : openaiModels.find((candidate) => candidate.id === formData.model),
+    [selectedProvider, piModels, openaiModels, formData.model],
+  );
+  const resolvedModelLimits = useMemo(
+    () => resolveModelLimits(formData.provider, formData.model, selectedModelMetadata),
+    [formData.provider, formData.model, selectedModelMetadata],
+  );
+
+  useEffect(() => {
+    if (!resolvedModelLimits) return;
+    setFormData((current) => {
+      const resolved = applyResolvedModelLimits(current, selectedModelMetadata);
+      return resolved.maxContextChars === current.maxContextChars &&
+        resolved.maxTokens === current.maxTokens
+        ? current
+        : resolved as AIPreset;
+    });
+  }, [resolvedModelLimits, selectedModelMetadata]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1014,7 +1069,7 @@ export function AIProviderConfig({
                       {m.name}{m.free ? " (free)" : ""}
                       {locked && <span className="text-[9px] font-medium text-muted-foreground border rounded px-1">business</span>}
                       {!locked && costLabel && <span className="text-[9px] font-medium text-muted-foreground">{costLabel}</span>}
-                      {m.recommended_for?.includes('pipes') && <span className="text-[9px] text-muted-foreground bg-muted rounded px-1">pipes</span>}
+                      {m.recommended_for?.includes('pipes') && <span className="text-[9px] text-muted-foreground bg-muted rounded px-1">tasks</span>}
                       {m.health?.status === 'down' && <span className="text-[9px] text-red-400 ml-1">overloaded</span>}
                     </span>
                   </SelectItem>
@@ -1091,43 +1146,52 @@ export function AIProviderConfig({
 
         {showAdvanced && (
           <div className="space-y-1.5">
-            {selectedProvider !== "screenpipe-cloud" && (
-              <>
-                <div className="space-y-1">
-                  <Label htmlFor="maxContextTokens" className="text-xs">model context tokens</Label>
-                  <Input
-                    id="maxContextTokens"
-                    type="number"
-                    min={32768}
-                    max={500000}
-                    step={1024}
-                    value={Math.ceil((formData.maxContextChars || 512000) / 4)}
-                    onChange={(e) => {
-                      const tokens = parseInt(e.target.value) || 128000;
-                      setFormData({ ...formData, maxContextChars: tokens * 4 });
-                    }}
-                    className="h-6 text-[10px]"
-                  />
-                  <p className="text-[10px] text-muted-foreground">
-                    match your provider&apos;s context window (for example, Ollama num_ctx); Screenpipe agents need at least 32,768
-                  </p>
-                </div>
-                <div className="space-y-1">
-                  <Label htmlFor="maxTokens" className="text-xs">max output tokens</Label>
-                  <Input
-                    id="maxTokens"
-                    type="number"
-                    min={256}
-                    max={128000}
-                    step={256}
-                    value={(formData as any).maxTokens ?? 4096}
-                    onChange={(e) =>
-                      setFormData({ ...formData, maxTokens: parseInt(e.target.value) || 4096 } as any)
-                    }
-                    className="h-6 text-[10px]"
-                  />
-                </div>
-              </>
+            {resolvedModelLimits && (
+              <p className="text-[10px] text-muted-foreground">
+                known model limits are configured automatically
+              </p>
+            )}
+            {selectedProvider !== "screenpipe-cloud" &&
+              selectedProvider !== "acp" &&
+              !resolvedModelLimits?.contextWindow && (
+              <div className="space-y-1">
+                <Label htmlFor="maxContextTokens" className="text-xs">model context tokens</Label>
+                <Input
+                  id="maxContextTokens"
+                  type="number"
+                  min={32768}
+                  max={2000000}
+                  step={1024}
+                  value={Math.ceil((formData.maxContextChars || 512000) / 4)}
+                  onChange={(e) => {
+                    const tokens = parseInt(e.target.value) || 128000;
+                    setFormData({ ...formData, maxContextChars: tokens * 4 });
+                  }}
+                  className="h-6 text-[10px]"
+                />
+                <p className="text-[10px] text-muted-foreground">
+                  use this only when the endpoint does not publish a context window; Screenpipe agents need at least 32,768
+                </p>
+              </div>
+            )}
+            {selectedProvider !== "screenpipe-cloud" &&
+              selectedProvider !== "acp" &&
+              !resolvedModelLimits?.maxOutputTokens && (
+              <div className="space-y-1">
+                <Label htmlFor="maxTokens" className="text-xs">max output tokens</Label>
+                <Input
+                  id="maxTokens"
+                  type="number"
+                  min={256}
+                  max={128000}
+                  step={256}
+                  value={formData.maxTokens ?? 4096}
+                  onChange={(e) =>
+                    setFormData({ ...formData, maxTokens: parseInt(e.target.value) || 4096 })
+                  }
+                  className="h-6 text-[10px]"
+                />
+              </div>
             )}
             <div className="space-y-1">
               <Label htmlFor="prompt" className="text-xs">prompt</Label>
@@ -1228,8 +1292,8 @@ export const AIPresetDialog = ({
       acpAgent: providerData.provider === "acp" ? providerData.acpAgent : undefined,
     };
 
-    // Screenpipe Cloud: max output is defined per model in the gateway catalog (see screenpipe_cloud_models in Rust).
-    // Do not persist or override maxTokens from this dialog — avoids defaulting to 4096 and matches Settings.
+    // Screenpipe Cloud gets its output budget from the gateway catalog. Direct
+    // providers retain the resolved value or the user's unknown-model fallback.
     if (providerData.provider !== "screenpipe-cloud") {
       (newPreset as any).maxTokens = (providerData as any).maxTokens ?? 4096;
     }

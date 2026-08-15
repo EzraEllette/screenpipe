@@ -4,7 +4,7 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
-import { LockedSetting } from "@/components/enterprise-locked-setting";
+import { LockedSetting, ManagedSwitch } from "@/components/enterprise-locked-setting";
 import { useSettings } from "@/lib/hooks/use-settings";
 import { Switch } from "@/components/ui/switch";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -39,7 +39,7 @@ export const searchIndex: SettingsField[] = [
   { label: "Auto-start", keywords: ["autostart", "launch", "startup"] },
   { label: "Auto-update", keywords: ["updates"] },
   { label: "Check for updates", keywords: ["version"] },
-  { label: "Auto-Update Scheduled" },
+  { label: "Auto-update scheduled tasks", keywords: ["pipes", "store", "tasks"] },
   { label: "Reset Onboarding", keywords: ["setup"] },
   { label: "Your goal", keywords: ["onboarding", "purpose", "personalization"] },
 ];
@@ -248,7 +248,8 @@ export default function GeneralSettings() {
                   <p className="text-xs text-muted-foreground">Start in the background when you log in</p>
                 </div>
               </div>
-              <Switch
+              <ManagedSwitch
+                settingKey="autoStartEnabled"
                 id="auto-start-toggle"
                 checked={settings?.autoStartEnabled ?? false}
                 onCheckedChange={handleAutoStartChange}
@@ -349,8 +350,8 @@ export default function GeneralSettings() {
               <div className="flex items-center space-x-2.5">
                 <RefreshCw className="h-4 w-4 text-muted-foreground shrink-0" />
                 <div>
-                  <h3 className="text-sm font-medium text-foreground">Auto-Update Scheduled</h3>
-                  <p className="text-xs text-muted-foreground">Update Store tasks you haven&apos;t modified</p>
+                  <h3 className="text-sm font-medium text-foreground">Auto-update scheduled tasks</h3>
+                  <p className="text-xs text-muted-foreground">Keep tasks you installed from the Store up to date, unless you&apos;ve edited them</p>
                 </div>
               </div>
               <Switch

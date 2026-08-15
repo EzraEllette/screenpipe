@@ -436,3 +436,70 @@ describe("presentToolActivity — ACP tool calls", () => {
     );
   });
 });
+
+describe("MCP server startup diagnostics", () => {
+  // codex-acp reports each MCP server that could not start as a failed tool
+  // call named `mcp__<server>__startup`. Stripping the prefix left a bare
+  // "Startup", so a user with several unauthenticated servers saw a stack of
+  // identical anonymous rows and had to expand one to learn which server.
+  it("names the server instead of collapsing to an anonymous 'Startup'", () => {
+    expect(
+      presentToolActivity({
+        toolName: "mcp__Notion__startup",
+        args: {},
+        isError: true,
+      }).completedLabel,
+    ).toBe("Notion MCP server failed to start");
+  });
+
+  it("keeps two failing servers distinguishable", () => {
+    const labelFor = (server: string) =>
+      presentToolActivity({
+        toolName: `mcp__${server}__startup`,
+        args: {},
+        isError: true,
+      }).completedLabel;
+    expect(labelFor("Notion")).not.toBe(labelFor("figma"));
+  });
+
+  it("does not call a server that started fine a failure", () => {
+    expect(
+      presentToolActivity({ toolName: "mcp__linear__startup", args: {} }).completedLabel,
+    ).toBe("Started the linear MCP server");
+  });
+
+  it("labels the in-flight state as startup, not generic work", () => {
+    expect(
+      presentToolActivity({ toolName: "mcp__dropboxmcp__startup", args: {} }).runningLabel,
+    ).toBe("Starting the dropboxmcp MCP server");
+  });
+
+  // Only the exact `__startup` suffix is a diagnostic; a real MCP tool that
+  // merely mentions startup stays on the humanized path.
+  it("leaves a real MCP tool alone", () => {
+    expect(
+      presentToolActivity({ toolName: "mcp__acme__startup-check", args: {} }).completedLabel,
+    ).toBe("Startup check");
+  });
+});
+
+describe("adapter relay tags in tool results", () => {
+  // codex-acp prefixes messages it relays from codex with its own name. The
+  // actionable sentence is what the user needs; the tag only delays it.
+  it("drops the adapter's relay tag and keeps the actionable message", () => {
+    expect(
+      formatToolResult(
+        "[codex-acp forwarded startup error] MCP server `Notion` failed to start: " +
+          "The Notion MCP server is not logged in. Run `codex mcp login Notion`.",
+      ),
+    ).toBe(
+      "MCP server `Notion` failed to start: The Notion MCP server is not logged in. " +
+        "Run `codex mcp login Notion`.",
+    );
+  });
+
+  it("leaves an ordinary result untouched", () => {
+    expect(formatToolResult("[warn] disk almost full")).toBe("[warn] disk almost full");
+    expect(formatToolResult("plain output")).toBe("plain output");
+  });
+});

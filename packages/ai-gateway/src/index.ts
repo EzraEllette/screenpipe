@@ -26,11 +26,11 @@ import { handleTinfoilAttestation, handleTinfoilProxy, parseTinfoilUsageMetrics 
 import {
 	getCostAccumulatorOrThrow,
 	getDailyUserCost,
-	getTranscriptionDailyCostOrThrow,
 	getNonStreamSettlementCost,
 	getStreamSettlementCost,
 	getSpendSummary,
 	inferProvider,
+	isFrontierModel,
 	logCost,
 	monthlyCostKey,
 	trialCostKey,
@@ -39,9 +39,14 @@ import {
 	type CostReservationShape,
 } from './services/cost-tracker';
 import {
-	getTranscriptionDailyCostCap,
 	resolveHostedAiTextCostLimits,
 } from './services/hosted-ai-cost-controls';
+import {
+	DEEPGRAM_FILE_COST_PER_HOUR,
+	readTranscribedSeconds,
+	transcriptionCostIdentity,
+	transcriptionGateResponse,
+} from './services/transcription-budget';
 import { trackResponseUsage } from './utils/stream-usage-tracker';
 import { pruneRuntimeState } from './services/runtime-state-maintenance';
 import { resolveLatencyClass, isBackgroundRequest } from './utils/latency';
@@ -60,6 +65,7 @@ import {
 import {
 	FREE_CHAT_MAX_REQUEST_BYTES,
 	applyFreeChatRequestLimits,
+	hasHistoryCacheSessionAffinity,
 	prepareFreeChatTurn,
 	releaseFreeChatLease,
 	reserveFreeChatRequest,
@@ -90,7 +96,7 @@ import {
 } from './services/cloudflare-ai-gateway';
 import { getCloudflareHostedChatUsage } from './services/cloudflare-ai-gateway-usage';
 import {
-	resolveArgusBackgroundFallbackBody,
+	resolveBackgroundFallbackBody,
 } from './services/background-limit-fallback';
 // import { handleTTSWebSocketUpgrade } from './handlers/voice-ws';
 
@@ -101,19 +107,29 @@ export { RateLimiter };
  * The header identifies workload intent; resolveLatencyClass only controls
  * whether the primary provider may use flex capacity.
  */
-export function shouldEnableArgusBackgroundFallback(
+export function shouldEnableBackgroundFallback(
 	request: Request,
 	authResult: AuthResult,
 ): boolean {
 	return isBackgroundRequest(request) && hasPaidHostedAiPlan(authResult);
 }
 
-export function shouldEnableArgusSafetyRefusalFallback(
+export function shouldEnableSafetyRefusalFallback(
 	request: Request,
 	authResult: AuthResult,
 ): boolean {
-	return shouldEnableArgusBackgroundFallback(request, authResult)
+	return shouldEnableBackgroundFallback(request, authResult)
 		&& request.headers.get('x-screenpipe-workload')?.toLowerCase() === 'pipe';
+}
+
+/**
+ * History caching is a server-authoritative rollout. Only normal Pi sessions
+ * with a bounded affinity header are eligible; raw affinity never leaves this
+ * request boundary.
+ */
+export function shouldEnableGpt56HistoryCache(request: Request, env: Env): boolean {
+	return String(env.GPT56_HISTORY_CACHE_MODE ?? 'system').trim().toLowerCase() === 'history'
+		&& hasHistoryCacheSessionAffinity(request);
 }
 
 type BoundedJsonRead =
@@ -354,6 +370,7 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 				usageTier,
 				cloudflareManaged ? undefined : authResult.userId,
 				usageAccountPlan,
+				{ readLegacyDailyCounter: !cloudflareManaged },
 			);
 			if (cloudflareManaged) {
 				let cloudflareContext: HostedChatGatewayContext | null = null;
@@ -373,6 +390,9 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 				}
 				const allowanceExhausted = cloudflareUsage?.allowances
 					.some((allowance) => allowance.remaining_percent <= 0) ?? null;
+				const totalAllowanceExhausted = cloudflareUsage?.allowances
+					.some((allowance) =>
+						allowance.lane === 'combined' && allowance.remaining_percent <= 0) ?? null;
 				const capacityUpgrade = getHostedAiCapacityUpgrade(usageAccountPlan);
 				const upgradeEligible = capacityUpgrade !== null;
 				const enriched = {
@@ -381,7 +401,7 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 					// legacy query counters remain in the compatibility envelope, but
 					// cannot be presented as a live provider-cost meter.
 					upsell_banner: allowanceExhausted === true && upgradeEligible,
-					cost_limit_reached: allowanceExhausted,
+					cost_limit_reached: totalAllowanceExhausted,
 					upgrade_eligible: upgradeEligible,
 					hosted_ai: {
 						// Use the exact plan sent to Cloudflare. Max and Ultra have
@@ -395,6 +415,8 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 						usage_as_of: cloudflareUsage?.usage_as_of ?? null,
 						allowances: cloudflareUsage?.allowances ?? null,
 						model_access: [...getHostedAiAllowedModels(usageAccountPlan)],
+						frontier_models: getHostedAiAllowedModels(usageAccountPlan)
+							.filter((model) => isFrontierModel(model)),
 						required_plan: capacityUpgrade?.requiredPlan ?? null,
 						upgrade_url: capacityUpgrade?.upgradeUrl ?? null,
 						can_buy_credits: false,
@@ -422,7 +444,7 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 				console.error('usage cost control configuration unavailable', error);
 				return addCorsHeaders(createErrorResponse(503, JSON.stringify({
 					error: 'cost_control_unavailable',
-					message: 'Hosted AI usage controls are temporarily unavailable. Try again shortly.',
+					message: 'AI usage controls are temporarily unavailable. Try again shortly.',
 				})));
 			}
 			let monthlyCost: number | null = null;
@@ -457,6 +479,8 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 						? null
 						: Math.max(0, includedCredits - usedCredits),
 					model_access: [...getHostedAiAllowedModels(usageAccountPlan)],
+					frontier_models: getHostedAiAllowedModels(usageAccountPlan)
+						.filter((model) => isFrontierModel(model)),
 					required_plan: capacityUpgrade?.requiredPlan ?? null,
 					upgrade_url: capacityUpgrade?.upgradeUrl ?? null,
 					// Legacy query credits do not raise the provider-cost ceiling yet.
@@ -502,7 +526,7 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 				return freeChatErrorResponse({
 					status: 401,
 					code: 'authentication_required',
-					message: 'Sign in to use screenpipe hosted AI.',
+					message: 'Sign in to use screenpipe AI.',
 				});
 			}
 			if (!hasPaidHostedAiPlan(authResult) && authResult.accountPlan !== 'free') {
@@ -523,7 +547,7 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 							return freeChatErrorResponse({
 								status: 413,
 								code: 'free_chat_request_too_large',
-								message: `Free hosted chat requests are limited to ${FREE_CHAT_MAX_REQUEST_BYTES} bytes.`,
+								message: `Free AI chat requests are limited to ${FREE_CHAT_MAX_REQUEST_BYTES} bytes.`,
 							});
 						}
 						throw new Error('invalid JSON');
@@ -565,6 +589,9 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 				return freeChatErrorResponse(freeChat.error);
 			}
 			applyFreeChatRequestLimits(body, freeChat);
+			// Always overwrite any client-supplied value. Only the Worker rollout
+			// mode and Pi's validated affinity header may enable history breakpoints.
+			body.gpt56HistoryCacheEligible = shouldEnableGpt56HistoryCache(request, env);
 
 			// Gate the model for this tier. Background/automation traffic (pipes,
 			// daily summaries) must never hard-fail — a scheduled pipe pinned to a
@@ -604,7 +631,7 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 			}
 
 			const cloudflareGateway = isHostedChatGatewayEnabled(env);
-			let legacyArgusFallback = false;
+			let legacyRescueFallback = false;
 			// Legacy mode retains the paid weighted-query admission gate. In
 			// Cloudflare mode the provider-cost spend rules are authoritative for
 			// this endpoint; Free's separate two-message lease remains above.
@@ -624,15 +651,15 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 					status: 429,
 					code: creditsExhausted ? 'credits_exhausted' : 'daily_limit_exceeded',
 				};
-				const argusFallbackBody = resolveArgusBackgroundFallbackBody({
+				const rescueFallbackBody = resolveBackgroundFallbackBody({
 					enabled: isBackgroundRequest(request) && hasPaidHostedAiPlan(authResult),
 					error: allowanceError,
 					body,
 					env,
 				});
-				if (argusFallbackBody) {
-					legacyArgusFallback = true;
-					body = argusFallbackBody;
+				if (rescueFallbackBody) {
+					legacyRescueFallback = true;
+					body = rescueFallbackBody;
 				} else return addCorsHeaders(createErrorResponse(429, JSON.stringify({
 					...buildDailyUsageLimitError(
 						usage,
@@ -649,7 +676,7 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 						},
 						subscribe: {
 							url: 'https://screenpi.pe/onboarding',
-							benefit: 'Frontier Claude and GPT models, higher hosted AI limits, and encrypted sync',
+							benefit: 'Frontier Claude and GPT models, higher AI limits, and encrypted sync',
 							price: '$29/mo',
 						},
 					},
@@ -675,7 +702,7 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 				? await buildHostedChatGatewayContext(authResult, body.model, latency)
 				: undefined;
 			let dailyCostReservation: DailyCostHold | null = null;
-			if (!cloudflareGateway && !legacyArgusFallback) {
+			if (!cloudflareGateway && !legacyRescueFallback) {
 				const costReservation = await reserveDailyCostCap(
 					env,
 					authResult.deviceId,
@@ -712,21 +739,21 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 						status: costReservation.response.status,
 					});
 					const allowanceError = { status: costReservation.response.status, code: rejectionReason };
-					const argusFallbackBody = resolveArgusBackgroundFallbackBody({
+					const rescueFallbackBody = resolveBackgroundFallbackBody({
 						enabled: isBackgroundRequest(request) && hasPaidHostedAiPlan(authResult),
 						error: allowanceError,
 						body,
 						env,
 					});
-					if (argusFallbackBody) {
-						legacyArgusFallback = true;
-						body = argusFallbackBody;
+					if (rescueFallbackBody) {
+						legacyRescueFallback = true;
+						body = rescueFallbackBody;
 					} else {
 						if (freeChatLease) await releaseFreeChatLease(env, freeChatLease);
 						return costReservation.response;
 					}
 				}
-				if (costReservation.allowed && !legacyArgusFallback) {
+				if (costReservation.allowed && !legacyRescueFallback) {
 					dailyCostReservation = costReservation.reservation;
 				}
 			}
@@ -769,8 +796,8 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 						freePreview: freeChat.mode === 'metered',
 						efficientOnly: getHostedAiPlan(authResult.accountPlan) !== 'business',
 						gatewayContext,
-						argusBackgroundFallback: shouldEnableArgusBackgroundFallback(request, authResult),
-						argusSafetyRefusalFallback: shouldEnableArgusSafetyRefusalFallback(request, authResult),
+						backgroundFallback: shouldEnableBackgroundFallback(request, authResult),
+						safetyRefusalFallback: shouldEnableSafetyRefusalFallback(request, authResult),
 					},
 				);
 				if (response.status === 429 && body.stream) {
@@ -990,44 +1017,31 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 		}
 
 		if (path === '/v1/listen' && request.method === 'POST') {
-			let dailyCost: number;
-			let maxCost: number;
-			try {
-				dailyCost = await getTranscriptionDailyCostOrThrow(env, authResult.deviceId);
-				maxCost = getTranscriptionDailyCostCap(authResult.accountPlan, env);
-			} catch (error) {
-				console.error('transcription cost control unavailable', error);
-				return addCorsHeaders(createErrorResponse(503, JSON.stringify({
-					error: 'cost_control_unavailable',
-					message: 'Hosted transcription controls are temporarily unavailable. Local transcription still works.',
-				})));
-			}
-			if (dailyCost >= maxCost) {
-				return addCorsHeaders(createErrorResponse(429, JSON.stringify({
-					error: 'daily_cost_limit_exceeded',
-					message: "You've reached today's hosted transcription allowance. Audio will be transcribed locally until tomorrow.",
-				})));
-			}
+			const costIdentity = transcriptionCostIdentity(request, authResult);
+			const gate = await transcriptionGateResponse(env, request, authResult, costIdentity);
+			if (gate) return gate;
 
-			// Estimate cost from audio size: ~30s chunks at $0.26/hr = $0.0022/chunk
-			// More precise: estimate duration from Content-Length (MP3 at 64kbps = 8KB/s)
+			// Content-Length is a fallback, not the bill. It is absent on chunked
+			// uploads (which previously billed a flat 30s no matter how long the
+			// audio was) and it describes compressed bytes, not duration. Deepgram
+			// reports the real duration in metadata, so prefer that below.
 			const contentLength = parseInt(request.headers.get('content-length') || '0');
-			const estimatedSeconds = contentLength > 0 ? contentLength / 8000 : 30;
-			const estimatedCost = (estimatedSeconds / 3600) * 0.26;
+			const fallbackSeconds = contentLength > 0 ? contentLength / 8000 : 30;
 
 			const response = await handleFileTranscription(request, env, ctx, authResult.deviceId);
 
 			// Log cost after successful transcription
 			if (response.ok) {
+				const billedSeconds = await readTranscribedSeconds(response, fallbackSeconds);
 				ctx.waitUntil(logCost(env, {
-					device_id: authResult.deviceId,
+					device_id: costIdentity,
 					user_id: authResult.userId,
 					tier: authResult.tier,
 					provider: 'deepgram',
 					model: 'nova-3',
-					input_tokens: Math.round(estimatedSeconds),
+					input_tokens: Math.round(billedSeconds),
 					output_tokens: null,
-					estimated_cost_usd: estimatedCost,
+					estimated_cost_usd: (billedSeconds / 3600) * DEEPGRAM_FILE_COST_PER_HOUR,
 					endpoint: '/v1/listen',
 					stream: false,
 					budgeted: false,
@@ -1039,25 +1053,10 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 		}
 
 		if (path === '/v1/realtime' && request.method === 'GET') {
-			try {
-				const [dailyCost, maxCost] = await Promise.all([
-					getTranscriptionDailyCostOrThrow(env, authResult.deviceId),
-					Promise.resolve(getTranscriptionDailyCostCap(authResult.accountPlan, env)),
-				]);
-				if (dailyCost >= maxCost) {
-					return addCorsHeaders(createErrorResponse(429, JSON.stringify({
-						error: 'daily_cost_limit_exceeded',
-						message: "You've reached today's hosted transcription allowance. Use local transcription or try again tomorrow.",
-					})));
-				}
-			} catch (error) {
-				console.error('realtime transcription cost control unavailable', error);
-				return addCorsHeaders(createErrorResponse(503, JSON.stringify({
-					error: 'cost_control_unavailable',
-					message: 'Hosted transcription controls are temporarily unavailable. Local transcription still works.',
-				})));
-			}
-			return await handleRealtimeTranscriptionUpgrade(request, env, ctx, authResult);
+			const costIdentity = transcriptionCostIdentity(request, authResult);
+			const gate = await transcriptionGateResponse(env, request, authResult, costIdentity);
+			if (gate) return gate;
+			return await handleRealtimeTranscriptionUpgrade(request, env, ctx, authResult, costIdentity);
 		}
 
 		if (path === '/v1/models' && request.method === 'GET') {
@@ -1092,7 +1091,34 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 		}
 
 		if (path === '/v1/voice/transcribe' && request.method === 'POST') {
-			return await handleVoiceTranscription(request, env);
+			// This route reached Deepgram with no cap check and no cost log, so its
+			// spend was both unbounded and invisible in the cost tables. It shares
+			// the transcription budget with /v1/listen.
+			const costIdentity = transcriptionCostIdentity(request, authResult);
+			const gate = await transcriptionGateResponse(env, request, authResult, costIdentity);
+			if (gate) return gate;
+
+			const contentLength = parseInt(request.headers.get('content-length') || '0');
+			const fallbackSeconds = contentLength > 0 ? contentLength / 8000 : 30;
+			const response = await handleVoiceTranscription(request, env);
+			if (response.ok) {
+				const billedSeconds = await readTranscribedSeconds(response, fallbackSeconds);
+				ctx.waitUntil(logCost(env, {
+					device_id: costIdentity,
+					user_id: authResult.userId,
+					tier: authResult.tier,
+					provider: 'deepgram',
+					model: 'nova-3',
+					input_tokens: Math.round(billedSeconds),
+					output_tokens: null,
+					estimated_cost_usd: (billedSeconds / 3600) * DEEPGRAM_FILE_COST_PER_HOUR,
+					endpoint: '/v1/voice/transcribe',
+					stream: false,
+					budgeted: false,
+					transcription_budgeted: true,
+				}));
+			}
+			return response;
 		}
 
 		if (path === '/v1/voice/query' && request.method === 'POST') {
