@@ -186,23 +186,37 @@ impl AnalyticsManager {
             },
         });
 
-        // Add disk usage information (use cache, don't force refresh for analytics)
-        let disk_usage_result =
-            crate::disk_usage::disk_usage(&self.screenpipe_dir_path, false).await;
+        // Disk usage is attached opportunistically, never computed here.
+        //
+        // Walking the data dir is O(files) and reaches tens of seconds on large
+        // installs. Analytics events fire far more often than the one-hour cache
+        // TTL, so letting them trigger the walk meant every expired cache kicked
+        // off a full traversal — 61 walks in one 13-hour session, ~26% of the
+        // app's total CPU. The fields are a nice-to-have; a stale or absent
+        // number is strictly better than burning a core to freshen it.
+        let disk_usage_result = crate::disk_usage::disk_usage(
+            &self.screenpipe_dir_path,
+            crate::disk_usage::Freshness::CachedOnly,
+        )
+        .await;
 
-        if let Ok(Some(disk_usage)) = disk_usage_result {
-            if let Some(payload_props) = payload["properties"].as_object_mut() {
-                let disk_data = json!({
-                    "disk_total_data_size": disk_usage.total_data_size,
-                    "disk_total_cache_size": disk_usage.total_cache_size,
-                    "disk_available_space": disk_usage.available_space,
-                    "disk_media_videos_size": disk_usage.media.videos_size,
-                    "disk_media_audios_size": disk_usage.media.audios_size,
-                });
-                payload_props.extend(disk_data.as_object().unwrap().clone());
+        match disk_usage_result {
+            Ok(Some(disk_usage)) => {
+                if let Some(payload_props) = payload["properties"].as_object_mut() {
+                    let disk_data = json!({
+                        "disk_total_data_size": disk_usage.total_data_size,
+                        "disk_total_cache_size": disk_usage.total_cache_size,
+                        "disk_available_space": disk_usage.available_space,
+                        "disk_media_videos_size": disk_usage.media.videos_size,
+                        "disk_media_audios_size": disk_usage.media.audios_size,
+                    });
+                    payload_props.extend(disk_data.as_object().unwrap().clone());
+                }
             }
-        } else {
-            warn!("failed to get disk usage: {:?}", disk_usage_result);
+            // No cache yet (fresh install, or the UI has not asked once). Send
+            // the event without the disk fields rather than blocking on a walk.
+            Ok(None) => {}
+            Err(e) => warn!("failed to read cached disk usage: {:?}", e),
         }
 
         // Inject UTM attribution as $set_once (only sets on first event per person)
