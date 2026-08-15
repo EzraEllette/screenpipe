@@ -60,6 +60,59 @@ mod tests {
         RecoveredEnterpriseDeviceConfig,
     };
 
+    /// `get_local_api_config` must never await the server mutex.
+    ///
+    /// `ServerCore::start()` holds that mutex across database migration, the
+    /// audio manager build, and the port bind. Every `localFetch` in the webview
+    /// reaches this command through `ensureInitialized()`, so awaiting the lock
+    /// put all local API traffic behind startup. Onboarding's health check could
+    /// not begin — its `AbortSignal.timeout` never applied because no fetch had
+    /// started — while the 15s stuck timer fired against a still-active boot
+    /// phase and never re-armed. 426 users in six days left setup having emitted
+    /// no outcome at all: not started, not failed, not stuck.
+    ///
+    /// Guarded at the source because the failure is invisible at runtime: the
+    /// command still returns the right value, just far too late.
+    #[test]
+    fn get_local_api_config_never_awaits_the_startup_lock() {
+        // Needles are assembled at runtime so they never appear verbatim in this
+        // file. Spelled out, each one matches its own source line — which sits
+        // above the definition — and the guard silently inspects itself.
+        let fn_needle = concat!("pub async fn ", "get_local_api_config");
+        let blocking = concat!("server.lock()", ".await");
+        let non_blocking = concat!("server.", "try_lock()");
+
+        let source = include_str!("commands.rs");
+        let start = source
+            .find(fn_needle)
+            .expect("command renamed — repoint this guard at it");
+        let body = &source[start..];
+        let end = body.find("\n}\n").expect("unterminated function body");
+        let body = &body[..end];
+
+        assert!(
+            !body.contains(blocking),
+            "get_local_api_config awaits the server startup mutex again — this \
+             stalls every webview localFetch behind ServerCore::start()"
+        );
+        assert!(
+            body.contains(non_blocking),
+            "expected a non-blocking try_lock, with the resolved-key fallback \
+             covering a contended lock"
+        );
+    }
+
+    /// The fallback is what makes the non-blocking read safe: a contended lock
+    /// degrades to the resolved key the spawning server adopts verbatim, not to
+    /// the `key: null` that originally forced the blocking `await`.
+    #[test]
+    fn contended_lock_falls_back_to_a_usable_key_not_null() {
+        let config = fallback_local_api_config(Some("sp-abc123".to_string()), 3030);
+        assert_eq!(config["key"], "sp-abc123");
+        assert_eq!(config["auth_enabled"], true);
+        assert_eq!(config["port"], 3030);
+    }
+
     /// The overlay ships unhideable. A stored `showShortcutOverlay: false` —
     /// whether left over from before this shipped or set while the remote
     /// capability was on — must stay inert until the flag grants it back.
@@ -378,16 +431,29 @@ pub fn get_low_disk_guard_config() -> LowDiskGuardConfig {
 pub async fn get_local_api_config(app_handle: tauri::AppHandle) -> serde_json::Value {
     use crate::recording::RecordingState;
     if let Some(state) = app_handle.try_state::<RecordingState>() {
-        // Must await the lock: `try_lock` often failed while server_core held the mutex
-        // during startup, returning key:null to the webview. JS then cached "no API key" and
-        // opened WebSockets without ?token= → endless 403 / abnormal close (1006).
-        let guard = state.server.lock().await;
-        if let Some(ref core) = *guard {
-            return serde_json::json!({
-                "key": core.local_api_key,
-                "port": core.port,
-                "auth_enabled": core.local_api_key.is_some(),
-            });
+        // Never await this lock. `ServerCore::start()` holds it for the whole of
+        // startup — database migration, audio manager build, port bind — and every
+        // `localFetch` in the webview sits behind `ensureInitialized()`, which calls
+        // this command. Awaiting it meant the first local API call could not even
+        // begin until startup finished, so onboarding's health check never ran, its
+        // `AbortSignal.timeout` never applied (no fetch had started), and its 15s
+        // stuck timer fired first against a still-active boot phase and never
+        // re-armed. 426 users in six days left setup having emitted no outcome at
+        // all — not started, not failed, not stuck.
+        //
+        // The reason the original code awaited — `try_lock` returning key:null and
+        // the webview latching "no API key" into token-less WebSockets — no longer
+        // applies: the fallback below returns the *resolved* key, which the
+        // spawning server adopts verbatim, so a contended lock now degrades to the
+        // same key rather than to null.
+        if let Ok(guard) = state.server.try_lock() {
+            if let Some(ref core) = *guard {
+                return serde_json::json!({
+                    "key": core.local_api_key,
+                    "port": core.port,
+                    "auth_enabled": core.local_api_key.is_some(),
+                });
+            }
         }
     }
     // *guard is None — server hasn't been constructed yet (early-mount race
