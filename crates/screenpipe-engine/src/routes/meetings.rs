@@ -1132,9 +1132,10 @@ pub(crate) async fn stop_meeting_handler(
 
 /// Export request: pass `meeting_id` to export a meeting (its window is resolved
 /// from the DB), or `start`/`end` for an arbitrary wall-clock range (`end` defaults
-/// to now). `start`/`end` accept ISO 8601 or relative (`"2h ago"`, `"now"`). Same
-/// `meeting_id` XOR `start`/`end` contract as the `screenpipe export` CLI and the
-/// in-app `export_recording` Tauri command.
+/// to now). `start`/`end` accept ISO 8601, relative (`"2h ago"`, `"now"`), or
+/// machine-local calendar boundaries (`"today"`, `"yesterday"`, `YYYY-MM-DD`).
+/// Same `meeting_id` XOR `start`/`end` contract as the `screenpipe export` CLI
+/// and the in-app `export_recording` Tauri command.
 #[derive(OaSchema, Deserialize, Debug)]
 pub struct ExportRequest {
     #[serde(default)]

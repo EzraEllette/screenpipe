@@ -86,8 +86,8 @@ wc -c /tmp/sp.json && head -c 2000 /tmp/sp.json
 | `content_type` | No | `all` (default), `accessibility`, `audio`, `input`, `ocr`, `memory`, `parsed`. Use `parsed` for compact app-specific messages, emails, tasks, documents, and code review. Parsed capture is experimental, may be empty when disabled/unsupported, and is not included in `all`. Screen text is primarily the accessibility tree; OCR is the fallback for apps without it (videos, games, remote desktops). |
 | `limit` | No | Default 20. Must be 1-20 — never pass a larger value; page with `offset` instead. |
 | `offset` | No | Pagination. Default 0. |
-| `start_time` | **Yes** | ISO 8601 or relative (`16h ago`, `2d ago`, `30m ago`). |
-| `end_time` | No | Defaults to now (`now`, `1h ago`). |
+| `start_time` | **Yes** | ISO 8601, relative (`16h ago`, `2d ago`, `30m ago`), or local calendar literal (`today`, `yesterday`, `YYYY-MM-DD`). |
+| `end_time` | No | Same forms as `start_time`; defaults to `now`. |
 | `app_name` | No | Substring, e.g. "Google Chrome", "Slack". |
 | `window_name` | No | Window title substring. |
 | `frame_id` | No | With `content_type=parsed`, return parsed data attached to one frame. |
@@ -100,7 +100,9 @@ wc -c /tmp/sp.json && head -c 2000 /tmp/sp.json
 | `format` | No | `json` (default), `csv`, `tsv`/`table`. CSV is lossless; TSV collapses newlines. |
 | `fields` | No | Column allowlist of dotted paths, e.g. `type,content.app_name,content.text`. |
 
-**Critical rules:** always include `start_time` (unbounded queries timeout) · always pass `fields=` with only the columns you need · always keep `limit` between 1 and 20 · always write the response to a file with `-o` and read it with `head`, never straight to stdout · "recent" = 30 min, "today" = since midnight, "yesterday" = yesterday's range · if `/search` is empty, fall back to `/activity-summary` and check `data_status` before saying "no data" · on timeout, narrow the range.
+**Calendar ranges are local:** `today`, `yesterday`, and bare `YYYY-MM-DD` dates mean the user's LOCAL calendar days in their timezone, not UTC days or rolling 24-hour ranges. Pass calendar literals directly to the API (`start_time=today&end_time=now`, `start_time=yesterday&end_time=today`). Never calculate midnight with `date -u` or append `T00:00:00Z`.
+
+**Other critical rules:** always include `start_time` (unbounded queries timeout) · "recent" = 30 min · if `/search` is empty, fall back to `/activity-summary` and check `data_status` before saying "no data" · on timeout, narrow the range. · always pass `fields=` with only the columns you need · always keep `limit` between 1 and 20 · always write the response to a file with `-o` and read it with `head`, never straight to stdout · "recent" = 30 min, "today" = since midnight, "yesterday" = yesterday's range · if `/search` is empty, fall back to `/activity-summary` and check `data_status` before saying "no data" · on timeout, narrow the range.
 
 Single `content_type` means uniform rows, so add `format=csv` too:
 

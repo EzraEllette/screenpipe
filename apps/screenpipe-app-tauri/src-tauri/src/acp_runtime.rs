@@ -47,7 +47,7 @@ pub(crate) const CLOUD_API_KEY_ENV: &str = "SCREENPIPE_API_KEY";
 /// why these tools sometimes never registered and the agent fell back to raw
 /// SQL. `pi::prewarm_screenpipe_mcp` seeds the cache at install. Bump alongside
 /// packages/screenpipe-mcp.
-pub(crate) const SCREENPIPE_MCP_PKG: &str = "screenpipe-mcp@0.19.1";
+pub(crate) const SCREENPIPE_MCP_PKG: &str = "screenpipe-mcp@0.19.2";
 
 /// Environment carried into the runtime process by `pi.rs` that belongs to the
 /// runtime alone and must never be inherited by any child it spawns — neither
@@ -271,7 +271,7 @@ impl RuntimeConfig {
 const SCREENPIPE_TOOLS_HINT: &str = "\
 You are running inside screenpipe. Prefer its MCP tools over shell/curl (this is your usage guide). Tool names below are written with hyphens; some agents expose the same tools with underscores (activity_summary, search_content) or a query_recordings tool for read-only SQL — use whatever your own tool list shows, and never fall back to curl or /raw_sql just because a name here doesn't match exactly:
 - the `screenpipe` server searches and summarizes the user's screen, audio, and UI history.
-  - `activity-summary` for broad questions (\"what was I doing?\", \"which apps?\", \"how long on X?\"): it pre-summarizes apps, windows, and transcripts and owns the time math — pass natural-language times (\"today\", \"2h ago\") and never sum minutes yourself.
+  - `activity-summary` for broad questions (\"what was I doing?\", \"which apps?\", \"how long on X?\"): it pre-summarizes apps, windows, and transcripts and owns the time math — pass natural-language times (\"today\", \"2h ago\"); \"today\" is the user's local calendar day starting at local midnight, not UTC midnight or a rolling 24 hours. Never sum minutes yourself.
   - `search-content` for specific lookups; filter by content_type, app_name, window_name, and a time range.
   - `update-memory` (and search with content_type=memory) to persist and recall facts across sessions.
 - `list_connections` shows the user's connected apps; `screenpipe_connect_app` connects one and waits for the user when a task needs it.
@@ -3790,6 +3790,18 @@ mod tests {
     }
 
     #[test]
+    fn screenpipe_mcp_pin_matches_workspace_package_version() {
+        let package: Value = serde_json::from_str(include_str!(
+            "../../../../packages/screenpipe-mcp/package.json"
+        ))
+        .expect("parse screenpipe-mcp package.json");
+        let version = package["version"]
+            .as_str()
+            .expect("screenpipe-mcp package version");
+        assert_eq!(SCREENPIPE_MCP_PKG, format!("screenpipe-mcp@{version}"));
+    }
+
+    #[test]
     fn agents_resolve_from_the_catalog() {
         // npx agents run via the bundled bun with a pinned package from the
         // static catalog (version lives in agents.json, not hardcoded here).
@@ -4133,6 +4145,10 @@ mod tests {
         let none = build_first_turn_context(None);
         assert!(none.contains("screenpipe_connect_app"));
         assert!(none.contains("save_artifact"));
+        assert!(
+            none.contains("today\" is the user's local calendar day starting at local midnight")
+        );
+        assert!(none.contains("not UTC midnight or a rolling 24 hours"));
 
         // With a user prompt, the hint is prepended and the prompt preserved.
         let combined = build_first_turn_context(Some("Be terse.".to_string()));
