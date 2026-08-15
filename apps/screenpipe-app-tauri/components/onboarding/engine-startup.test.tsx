@@ -373,6 +373,50 @@ describe("onboarding engine startup", () => {
     );
   });
 
+  // Observed in production on 2.6.29: a macOS user skipped Screen Recording,
+  // the engine correctly refused with kind=permission, they clicked skip on the
+  // stuck screen, reached the plan step, loaded the card checkout and landed on
+  // Home. Healthy. The beacon still called it abandonment, and left alone every
+  // permission-skipper would pollute the one number that tells us whether users
+  // are stranded.
+  it("does not call a deliberate skip abandonment", async () => {
+    mocks.localFetch.mockRejectedValue(new Error("Load failed"));
+    mocks.spawnScreenpipe.mockResolvedValue({
+      status: "error",
+      error: "Screen recording permission required. Please grant permission.",
+    });
+
+    const { unmount, getByTestId } = render(
+      <EngineStartup handleNextSlide={mocks.handleNextSlide} />,
+    );
+
+    // The spawn error flips straight to the stuck screen, which owns the skip.
+    await waitFor(() =>
+      expect(mocks.capture).toHaveBeenCalledWith(
+        "onboarding_engine_spawn_failed",
+        expect.objectContaining({ error_kind: "permission" }),
+      ),
+    );
+
+    await act(async () => {
+      getByTestId("onboarding-startup-skip").click();
+    });
+    await waitFor(() =>
+      expect(mocks.capture).toHaveBeenCalledWith(
+        "onboarding_startup_skipped",
+        expect.any(Object),
+      ),
+    );
+
+    unmount();
+
+    expect(mocks.capture).not.toHaveBeenCalledWith(
+      "onboarding_engine_abandoned",
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
   it("stays quiet on unmount once the engine is up", async () => {
     mocks.localFetch.mockImplementation(async () =>
       new Response(

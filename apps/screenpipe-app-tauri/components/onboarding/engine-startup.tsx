@@ -176,6 +176,11 @@ export default function EngineStartup({ handleNextSlide }: EngineStartupProps) {
   // Stamped on the unreachable report; triage otherwise has to join another
   // event to learn which build produced it.
   const appVersionRef = useRef<string | null>(null);
+  // Set when the user chooses to move on from the stuck screen. A permission
+  // skip is a healthy outcome — the engine names the real reason, the user
+  // continues, reaches the plan step and lands on Home — and counting it as
+  // abandonment would bury the signal the beacon exists to carry.
+  const leftDeliberatelyRef = useRef(false);
   // Read by the unmount beacon so it can tell "left while still waiting" apart
   // from "left after the engine came up".
   const stateRef = useRef<StartupState>("starting");
@@ -215,7 +220,7 @@ export default function EngineStartup({ handleNextSlide }: EngineStartupProps) {
   // the hole: leaving without reaching "running" is itself the finding.
   useEffect(
     () => () => {
-      if (stateRef.current === "running") return;
+      if (stateRef.current === "running" || leftDeliberatelyRef.current) return;
       posthog.capture(
         "onboarding_engine_abandoned",
         {
@@ -544,6 +549,9 @@ export default function EngineStartup({ handleNextSlide }: EngineStartupProps) {
   }, [state, bootPhase?.phase, stuckCheckTick]);
 
   const handleSkip = async () => {
+    // Leaving by choice is not abandonment. `handleContinueWithoutRecording`
+    // routes through here too, so this covers both explicit exits.
+    leftDeliberatelyRef.current = true;
     posthog.capture("onboarding_startup_skipped", {
       serverStarted,
       audioReady,
@@ -901,6 +909,7 @@ export default function EngineStartup({ handleNextSlide }: EngineStartupProps) {
               )}
               <button
                 onClick={handleSkip}
+                data-testid="onboarding-startup-skip"
                 className="font-mono text-xs text-muted-foreground hover:text-foreground transition-colors underline underline-offset-4"
               >
                 continue without recording →
