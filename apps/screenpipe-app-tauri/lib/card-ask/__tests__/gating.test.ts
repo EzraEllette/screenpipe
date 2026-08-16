@@ -522,9 +522,16 @@ describe("isExpiringCardlessGrant", () => {
     }
   });
 
-  it("uses a two-day window by default", () => {
-    expect(GRANT_EXPIRY_WINDOW_MS).toBe(2 * DAY);
-    expect(isExpiringCardlessGrant(grant(2 * DAY - 1000), NOW)).toBe(true);
-    expect(isExpiringCardlessGrant(grant(2 * DAY + 1000), NOW)).toBe(false);
+  // Four days covers the back half of a seven-day grant. Two days required the
+  // user to launch on one of two specific days, which is why ~150 eligible
+  // people a day produced 52 asks in total over 2026-08-12..16.
+  it("uses a four-day window by default", () => {
+    expect(GRANT_EXPIRY_WINDOW_MS).toBe(4 * DAY);
+    expect(isExpiringCardlessGrant(grant(4 * DAY - 1000), NOW)).toBe(true);
+    expect(isExpiringCardlessGrant(grant(4 * DAY + 1000), NOW)).toBe(false);
+  });
+
+  it("stays silent for a grant that is still early in its term", () => {
+    expect(isExpiringCardlessGrant(grant(6 * DAY), NOW)).toBe(false);
   });
 });

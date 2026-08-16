@@ -244,8 +244,20 @@ export function isExpiringCardlessGrant(
   return expiresAt - nowMs <= windowMs;
 }
 
-/** How close to grant expiry the expiry ask becomes eligible. */
-export const GRANT_EXPIRY_WINDOW_MS = 2 * 24 * 60 * 60 * 1000;
+/**
+ * How close to grant expiry the expiry ask becomes eligible.
+ *
+ * Four days, not two. The grant runs seven days, so this opens the ask for
+ * roughly its back half — late enough that the user has lived with Business
+ * features and has something to lose, early enough to survive the gap between
+ * launches. A two-day window silently required the user to open the app on one
+ * of two specific days: measured over 2026-08-12..16, ~150 people/day held a
+ * grant inside that window and 52 people *total* were ever asked.
+ *
+ * The ask is still shown at most once per install, so widening the window
+ * changes who is reachable, never how often anyone is interrupted.
+ */
+export const GRANT_EXPIRY_WINDOW_MS = 4 * 24 * 60 * 60 * 1000;
 
 /**
  * Loose paid-plan detection for suppression only.

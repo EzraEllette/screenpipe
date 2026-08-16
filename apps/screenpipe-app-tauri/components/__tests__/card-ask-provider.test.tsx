@@ -157,3 +157,67 @@ describe("CardAskProvider login trigger", () => {
     expect(modal()).toBeNull();
   });
 });
+
+/**
+ * The expiry ask in a process that outlives the window it is looking for.
+ *
+ * screenpipe keeps Home alive for days, so an effect that samples `Date.now()`
+ * once at mount evaluates the expiry test roughly once per process. Without a
+ * tick, a user whose Home mounted while the grant was still far out is never
+ * asked, regardless of how wide the eligibility window is.
+ */
+describe("CardAskProvider grant expiry trigger", () => {
+  const DAY = 24 * 60 * 60 * 1000;
+
+  function grantExpiringIn(ms: number) {
+    return {
+      ...cardlessUser,
+      entitlement_source: "manual",
+      plan_expires_at: new Date(Date.now() + ms).toISOString(),
+    };
+  }
+
+  beforeEach(() => {
+    flagVariant = "at_onboarding";
+    localStorageValues.set(CARD_ASK_ARM_STORAGE_KEY, "at_onboarding");
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("asks a grant holder inside the four-day window", () => {
+    settingsState = {
+      settings: { user: grantExpiringIn(3 * DAY) },
+      isSettingsLoaded: true,
+    };
+    render(<CardAskProvider />);
+    expect(modal()).not.toBeNull();
+  });
+
+  it("stays silent while the grant is still far out", () => {
+    settingsState = {
+      settings: { user: grantExpiringIn(6 * DAY) },
+      isSettingsLoaded: true,
+    };
+    render(<CardAskProvider />);
+    expect(modal()).toBeNull();
+  });
+
+  it("asks once the grant enters the window during a long-running session", () => {
+    vi.useFakeTimers();
+    // Mounted three days before the window opens, which is the ordinary case
+    // for an app that is launched once and left running.
+    settingsState = {
+      settings: { user: grantExpiringIn(7 * DAY) },
+      isSettingsLoaded: true,
+    };
+    const { rerender } = render(<CardAskProvider />);
+    expect(modal()).toBeNull();
+
+    // Same mount, same account object: only wall-clock time has moved.
+    vi.advanceTimersByTime(4 * DAY);
+    rerender(<CardAskProvider />);
+    expect(modal()).not.toBeNull();
+  });
+});

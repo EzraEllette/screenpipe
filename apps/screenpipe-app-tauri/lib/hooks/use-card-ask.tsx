@@ -80,6 +80,8 @@ export function useCardAsk(): CardAskState {
     null,
   );
   const shownRef = useRef<CardAskTrigger[]>([]);
+  /** Triggers that have fired this session, shown or not, for late retry. */
+  const pendingRef = useRef<CardAskTrigger[]>([]);
   const [hydrated, setHydrated] = useState(false);
 
   // Load persisted state once.
@@ -127,10 +129,12 @@ export function useCardAsk(): CardAskState {
     );
   }, []);
 
-  // Subscribe to trigger sites.
-  useEffect(() => {
-    if (!hydrated) return;
-    return onCardAskTrigger((trigger) => {
+  // Attempt to show one trigger against the current decision inputs.
+  //
+  // Identity changes whenever any input to the decision changes, which is what
+  // lets the retry effect below re-run as late-arriving state lands.
+  const attemptShow = useCallback(
+    (trigger: CardAskTrigger) => {
       setActiveTrigger((current) => {
         // Never stack a second modal over a visible one.
         if (current !== null) return current;
@@ -146,8 +150,44 @@ export function useCardAsk(): CardAskState {
         markShown(trigger);
         return trigger;
       });
+    },
+    [arm, eligible, enabled, triggerOverride, markShown],
+  );
+
+  // Subscribe to trigger sites, and remember every trigger that fires.
+  //
+  // The bus is fire-and-forget with no replay, and a trigger site emits as soon
+  // as *its own* preconditions are met — `grant_expiry` fires on `arm` plus a
+  // loaded account. But the decision also depends on two PostHog flags
+  // (`enabled`, and the payload behind `triggerOverride`) that resolve over the
+  // network, and `enabled` fails closed while unresolved. On most launches the
+  // sticky arm comes back from localStorage before those flags land, so the
+  // emission was evaluated against `enabled === false` and dropped forever.
+  //
+  // Measured 2026-08-12..16: only 52 people were ever shown the expiry ask
+  // while ~150/day held a grant expiring inside the window, and the same app
+  // version produced both outcomes — the signature of a race, not a gate.
+  // Recording the trigger here makes the drop recoverable.
+  useEffect(() => {
+    if (!hydrated) return;
+    return onCardAskTrigger((trigger) => {
+      if (!pendingRef.current.includes(trigger)) {
+        pendingRef.current = [...pendingRef.current, trigger];
+      }
+      attemptShow(trigger);
     });
-  }, [hydrated, arm, eligible, enabled, triggerOverride, markShown]);
+  }, [hydrated, attemptShow]);
+
+  // Re-evaluate anything that arrived before its decision inputs were ready.
+  //
+  // Retrying is safe: `markShown` is idempotent and `shouldShowCardAsk` refuses
+  // an already-shown trigger, so a pending entry that has been displayed once
+  // becomes a no-op rather than a repeat ask.
+  useEffect(() => {
+    if (!hydrated) return;
+    if (pendingRef.current.length === 0) return;
+    for (const trigger of pendingRef.current) attemptShow(trigger);
+  }, [hydrated, attemptShow]);
 
   const isFirstAsk = shownRef.current.length <= 1;
 
