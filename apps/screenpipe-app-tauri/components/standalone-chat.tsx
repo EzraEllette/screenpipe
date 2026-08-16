@@ -692,6 +692,13 @@ export function StandaloneChat({
       ? state.sessions[conversationId]?.messages
       : undefined,
   );
+  const pipeRunArtifactSource = useChatStore((state) => {
+    if (!conversationId) return null;
+    const context = state.sessions[conversationId]?.pipeContext;
+    return context
+      ? `pipe:${context.pipeName}:${context.executionId}`
+      : null;
+  });
   const messages = (pipeWatchMessages ?? localMessages) as Message[];
 
   const {
@@ -701,7 +708,7 @@ export function StandaloneChat({
   const { filePreview, openFilePreview, closeFilePreview } =
     useChatFilePreview(conversationId);
   const { inspectorOpen, setInspectorOpen, outputs: inspectorOutputs, sources: inspectorSources } =
-    useChatInspector(messages);
+    useChatInspector(messages, pipeRunArtifactSource);
   const [activeSideView, setActiveSideView] = useState<"inspector" | "side" | null>(null);
   const [browserHiddenBehindInspector, setBrowserHiddenBehindInspector] = useState(false);
   const [browserPanelState, setBrowserPanelState] = useState({

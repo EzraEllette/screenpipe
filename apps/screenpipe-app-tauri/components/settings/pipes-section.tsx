@@ -142,7 +142,7 @@ import {
 } from "@/components/ui/dialog";
 import { PostInstallConnectionsModal } from "@/components/post-install-connections-modal";
 import posthog from "posthog-js";
-import { MemoizedReactMarkdown } from "@/components/markdown";
+import { MarkdownBlock } from "@/components/chat/markdown-block";
 import { useDeviceMonitor } from "@/lib/hooks/use-device-monitor";
 import { Monitor, Wifi, WifiOff, ScanSearch, Lock } from "lucide-react";
 import { requestPipeStop } from "@/lib/pipe-stop";
@@ -3543,7 +3543,12 @@ export function PipesSection() {
                                 {exec.error_message && !pipeExecutionCompletedBeforeContinueError(exec) && <p className="text-xs text-muted-foreground">{exec.error_message}</p>}
                                 {pipeExecutionDisplayStatus(exec) === "completed" && exec.stdout && cleanPipeStdout(exec.stdout) && (
                                   <div>
-                                    <div className="text-xs text-muted-foreground max-h-96 overflow-y-auto scrollbar-hide"><MemoizedReactMarkdown className="prose prose-xs dark:prose-invert max-w-none break-words text-xs [&>*:first-child]:mt-0 [&>*:last-child]:mb-0 [&_h1]:text-sm [&_h2]:text-xs [&_h3]:text-xs [&_p]:text-xs [&_li]:text-xs [&_code]:text-[10px]">{cleanPipeStdout(exec.stdout)}</MemoizedReactMarkdown></div>
+                                    <div className="text-xs text-muted-foreground max-h-96 overflow-y-auto scrollbar-hide [&_.prose]:text-xs [&_.prose]:max-w-none [&_.prose_h1]:text-sm [&_.prose_h2]:text-xs [&_.prose_h3]:text-xs [&_.prose_p]:text-xs [&_.prose_li]:text-xs [&_.prose_code]:text-[10px]">
+                                      <MarkdownBlock
+                                        text={cleanPipeStdout(exec.stdout)}
+                                        isUser={false}
+                                      />
+                                    </div>
                                   </div>
                                 )}
                                 {pipeExecutionDisplayStatus(exec) === "failed" && exec.stderr && !exec.error_message && (
@@ -3604,7 +3609,12 @@ export function PipesSection() {
                                     >
                                       {copiedExecId === -(i + 1) ? <Check className="h-3 w-3 text-green-500" /> : <Copy className="h-3 w-3 text-muted-foreground" />}
                                     </button>
-                                    <div className="text-xs text-muted-foreground max-h-96 overflow-y-auto scrollbar-hide"><MemoizedReactMarkdown className="prose prose-xs dark:prose-invert max-w-none break-words text-xs [&>*:first-child]:mt-0 [&>*:last-child]:mb-0 [&_h1]:text-sm [&_h2]:text-xs [&_h3]:text-xs [&_p]:text-xs [&_li]:text-xs [&_code]:text-[10px]">{cleanPipeStdout(log.stdout)}</MemoizedReactMarkdown></div>
+                                    <div className="text-xs text-muted-foreground max-h-96 overflow-y-auto scrollbar-hide [&_.prose]:text-xs [&_.prose]:max-w-none [&_.prose_h1]:text-sm [&_.prose_h2]:text-xs [&_.prose_h3]:text-xs [&_.prose_p]:text-xs [&_.prose_li]:text-xs [&_.prose_code]:text-[10px]">
+                                      <MarkdownBlock
+                                        text={cleanPipeStdout(log.stdout)}
+                                        isUser={false}
+                                      />
+                                    </div>
                                   </div>
                                 )}
                                 {!log.success && log.stderr && (
