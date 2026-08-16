@@ -166,6 +166,11 @@ describe("onboarding permission wheel", () => {
     expect(
       screen.getByText("Three permissions turn on recording.")
     ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", {
+        name: /continue without all permissions/i,
+      })
+    ).toBeNull();
   });
 
   it("advances focus and refocuses the window when the poller detects a grant", async () => {

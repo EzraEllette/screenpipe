@@ -533,6 +533,9 @@ impl ShowRewindWindow {
                 if onboarding_store.is_completed {
                     return ShowRewindWindow::Home { page: None }.show(app);
                 }
+                window.show().ok();
+                crate::window::focus_window(&window);
+                return Ok(window);
             }
 
             if id.label() == RewindWindowId::Search.label() {

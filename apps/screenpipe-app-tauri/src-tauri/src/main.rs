@@ -2488,14 +2488,15 @@ async fn main() {
                         }
                     }
                     // Defer off the event stack so run handler stays panic-free.
-                    // Open the settings/app window (not the timeline overlay).
+                    // Showing Onboarding is the app-entry gate: it focuses setup
+                    // while incomplete and routes to Home once complete.
                     if crate::enterprise_policy::is_app_ui_hidden() || crate::headless::is_dormant()
                     {
                         return;
                     }
                     let app = app_handle.app_handle().clone();
                     let _ = app_handle.app_handle().run_on_main_thread(move || {
-                        let _ = ShowRewindWindow::Home { page: None }.show(&app);
+                        let _ = ShowRewindWindow::Onboarding.show(&app);
                     });
                 }
                 _ => {}
