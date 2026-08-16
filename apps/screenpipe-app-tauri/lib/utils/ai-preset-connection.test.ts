@@ -111,6 +111,16 @@ describe("testAiPresetConnection", () => {
       ),
     ).resolves.toMatchObject({ reply: "hi" });
 
+    expect(request).toHaveBeenCalledWith(
+      "https://api.anthropic.com/v1/messages",
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          "x-api-key": "k",
+          "anthropic-version": "2023-06-01",
+          "anthropic-dangerous-direct-browser-access": "true",
+        }),
+      }),
+    );
     expect(JSON.parse(request.mock.calls[0][1]!.body as string).stream).toBe(false);
   });
 

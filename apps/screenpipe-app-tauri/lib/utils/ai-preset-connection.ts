@@ -52,6 +52,7 @@ const headersForPreset = (
   if (preset.provider === "anthropic") {
     if (preset.apiKey) headers["x-api-key"] = preset.apiKey;
     headers["anthropic-version"] = "2023-06-01";
+    headers["anthropic-dangerous-direct-browser-access"] = "true";
   } else if (preset.apiKey) {
     headers.Authorization = `Bearer ${preset.apiKey}`;
   }
