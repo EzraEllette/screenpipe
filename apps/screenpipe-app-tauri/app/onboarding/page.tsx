@@ -202,10 +202,16 @@ export default function OnboardingPage() {
     () =>
       SLIDE_ORDER.filter(
         (s) =>
+          // Nobody on a managed deployment "heard about" screenpipe: their
+          // administrator pushed it. Asking anyway adds a step to an IT
+          // rollout and files those installs under a marketing channel they
+          // never came from, so the attribution this step exists to collect is
+          // worse for having been asked.
+          (s !== "acquisition" || !isManagedDeployment) &&
           (s !== "timeline" || timelineChoiceVisible) &&
           (s !== "plan" || shouldShowPlanSelection),
       ),
-    [shouldShowPlanSelection, timelineChoiceVisible],
+    [isManagedDeployment, shouldShowPlanSelection, timelineChoiceVisible],
   );
   // Read by the hydration-gated restore effect below. Assigned during render,
   // per the ref-mirror rule in CLAUDE.md.
@@ -270,10 +276,15 @@ export default function OnboardingPage() {
           // A saved step must not resume onto a slide that this device or its
           // managed policy is no longer eligible to see.
           const mappedSlide =
-            (mapped === "timeline" && !timelineChoiceVisibleRef.current) ||
-            (mapped === "plan" && !shouldShowPlanSelection)
-              ? "engine"
-              : mapped;
+            mapped === "acquisition" && isManagedDeployment
+              ? // A managed install saved mid-acquisition, from a build that
+                // still asked, resumes at the step that follows it rather than
+                // at the engine: permissions still have to be granted.
+                "permissions"
+              : (mapped === "timeline" && !timelineChoiceVisibleRef.current) ||
+                  (mapped === "plan" && !shouldShowPlanSelection)
+                ? "engine"
+                : mapped;
           setCurrentSlide(mappedSlide);
         }
       }

@@ -18,14 +18,14 @@ results and `cargo llvm-cov` data on top when judging release confidence.
 
 ### Tauri E2E
 
-- Mapped specs: 116
-- Declared test blocks: 333
-- Weighted coverage points: 260.8
+- Mapped specs: 117
+- Declared test blocks: 334
+- Weighted coverage points: 261.3
 
 | Platform | Specs | Declared tests | Weighted points | Layers | Features | Critical score |
 | --- | --- | --- | --- | --- | --- | --- |
 | windows | 89 | 288 | 235.3 | 15 | 93 | 92% |
-| macos | 112 | 296 | 231.6 | 17 | 97 | 90% |
+| macos | 113 | 297 | 232.1 | 17 | 99 | 90% |
 | linux | 79 | 248 | 206.0 | 14 | 89 | 88% |
 
 ### Core Engine

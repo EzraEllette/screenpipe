@@ -363,6 +363,35 @@ describe("enterprise onboarding authentication", () => {
     expect(screen.queryByText("plan selection")).not.toBeInTheDocument();
   });
 
+  // Regression: acquisition asks which marketing channel the user arrived from.
+  // A managed deployment has no such channel — an administrator pushed the
+  // install — so asking both lengthens an IT rollout and files those installs
+  // under a channel they never came from. It shipped unfiltered and stayed that
+  // way for over a week, because the only check that objected was a desktop E2E
+  // nobody could read through the other red jobs.
+  it("does not ask managed onboarding where it heard about screenpipe", async () => {
+    mocks.enterprisePolicy.isManagedAuthenticated = true;
+
+    render(<OnboardingPage />);
+
+    await waitFor(() =>
+      expect(mocks.setOnboardingStep).toHaveBeenCalledWith("permissions"),
+    );
+    expect(mocks.setOnboardingStep).not.toHaveBeenCalledWith("acquisition");
+  });
+
+  // A device that saved mid-acquisition on an older build still has to grant
+  // permissions, so it resumes there rather than skipping ahead to the engine.
+  it("resumes a managed install saved on acquisition at permissions", async () => {
+    onboardingData.currentStep = "acquisition";
+
+    render(<OnboardingPage />);
+
+    expect(
+      await screen.findByRole("button", { name: "finish permissions" }),
+    ).toBeInTheDocument();
+  });
+
   it("does not collect payment from an existing cardless trial", async () => {
     mocks.enterprisePolicy.isManagedDeployment = false;
     mocks.settings.user = {
@@ -444,6 +473,10 @@ describe("enterprise onboarding authentication", () => {
     },
   );
 
+  // The point of this one is that a verified credential advances at all. It
+  // asserted "acquisition" for as long as the managed flow asked which
+  // marketing channel the device came from, so the destination was wrong and
+  // the unit test agreed with it. Only the desktop E2E objected.
   it("advances after either enterprise credential is verified", async () => {
     mocks.enterprisePolicy.authenticationState = "authenticated";
     mocks.enterprisePolicy.isManagedAuthenticated = true;
@@ -451,7 +484,7 @@ describe("enterprise onboarding authentication", () => {
     render(<OnboardingPage />);
 
     await waitFor(() =>
-      expect(mocks.setOnboardingStep).toHaveBeenCalledWith("acquisition"),
+      expect(mocks.setOnboardingStep).toHaveBeenCalledWith("permissions"),
     );
   });
 
