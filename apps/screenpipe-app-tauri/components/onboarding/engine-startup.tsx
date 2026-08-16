@@ -48,7 +48,16 @@ const SPAWN_TIMEOUT_MS = 20000;
 // phase that stalls never re-arms the timer. They sat on a spinner, gave up,
 // and used the app from Home instead (95% reached Home, 69% sent a chat).
 // Progress still buys time. It no longer buys forever.
-export const MAX_ENGINE_WAIT_MS = 120000;
+//
+// 120s was a judgement call with no data behind it, and production promptly
+// found its edge: a macOS user who granted Screen Recording mid-setup — which
+// restarts the app — had `spawn_screenpipe` never settle (spawn_timeout at
+// 20.1s), then reached `engine_started` at 114.9s and went on to complete setup
+// and reach the plan step. A legitimate recovery finished 5.1s inside the
+// ceiling. A ceiling that close to observed-good behaviour reports healthy
+// engines as stuck, so it sits comfortably above the worst legitimate case we
+// have actually seen rather than just above the ones we imagined.
+export const MAX_ENGINE_WAIT_MS = 180000;
 // How long the health poll must fail continuously before it is worth reporting.
 // The server binds only after the audio manager is built, so every poll before
 // that fails by construction — the first real firing of the unreachable event

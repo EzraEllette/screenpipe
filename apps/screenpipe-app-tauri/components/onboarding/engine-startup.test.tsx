@@ -351,6 +351,57 @@ describe("onboarding engine startup", () => {
     }
   });
 
+  // The ceiling exists to end a stall, not to cut off a slow-but-working boot.
+  // Observed in production: a macOS permission grant restarted the app, spawn
+  // never settled, and the engine came up at 114.9s. That must still count as a
+  // success, not a stuck screen.
+  it("waits out a slow but genuine boot instead of calling it stuck", async () => {
+    vi.useFakeTimers();
+    try {
+      let listening = false;
+      mocks.spawnScreenpipe.mockImplementation(() => new Promise(() => {}));
+      mocks.localFetch.mockImplementation(async () => {
+        if (!listening) throw new Error("Load failed");
+        return new Response(
+          JSON.stringify({
+            status: "healthy",
+            status_code: 200,
+            frame_status: "ok",
+            audio_status: "ok",
+          }),
+          { status: 200 },
+        );
+      });
+
+      render(<EngineStartup handleNextSlide={mocks.handleNextSlide} />);
+
+      // Stepped so the boot-phase poll can deliver and React can re-render
+      // between stuck-timer checks — a single jump leaves bootPhase null, which
+      // is not what a genuinely booting engine looks like.
+      for (let elapsed = 0; elapsed < 114900; elapsed += 5000) {
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(5000);
+        });
+      }
+      expect(mocks.capture).not.toHaveBeenCalledWith(
+        "onboarding_engine_stuck",
+        expect.anything(),
+      );
+
+      listening = true;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1000);
+      });
+
+      expect(mocks.capture).toHaveBeenCalledWith(
+        "onboarding_engine_started",
+        expect.any(Object),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   // A user who gives up and closes the window used to be indistinguishable from
   // one who never opened it, which is why the collapse produced no telemetry.
   it("reports leaving the screen while the engine never came up", async () => {
