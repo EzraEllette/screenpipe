@@ -16,6 +16,7 @@ export const searchIndex: SettingsField[] = [
   { label: "sync scheduled tasks across devices", keywords: ["scheduled sync", "pipe sync", "sync"] },
   { label: "memories sync across devices", keywords: ["memories sync", "sync", "facts"] },
   { label: "connection sync across devices", keywords: ["connection sync", "sync", "slack", "notion"] },
+  { label: "restart remote sync", keywords: ["reset sync", "older key", "new device", "decryption"] },
 ];
 import { Button } from "@/components/ui/button";
 import { useSettings } from "@/lib/hooks/use-settings";
@@ -65,6 +66,10 @@ import {
   accountPlanForEntitlement,
   type PlanPurchase,
 } from "./account-plan-options";
+import {
+  isLegacySyncKeyMismatch,
+  SyncKeyRecovery,
+} from "./sync-key-recovery";
 
 const ACCOUNT_URL = screenpipeWebUrl("/account", "https://screenpipe.com");
 const BILLING_URL = screenpipeWebUrl("/account/billing", "https://screenpipe.com");
@@ -138,6 +143,7 @@ export function AccountSection() {
   const [pipeSyncing, setPipeSyncing] = useState(false);
   const [memoriesSyncing, setMemoriesSyncing] = useState(false);
   const [connectionsSyncing, setConnectionsSyncing] = useState(false);
+  const [showSyncKeyRecovery, setShowSyncKeyRecovery] = useState(false);
   const [checkoutBusy, setCheckoutBusy] = useState(false);
   const [upgradeSource, setUpgradeSource] = useState("app-account-section");
   const upgradeCardRef = useRef<HTMLDivElement>(null);
@@ -464,6 +470,17 @@ export function AccountSection() {
   // in src-tauri/src/tray.rs.
   const { isManagedDeployment } = useManagedPolicy();
 
+  const reportSyncFailure = (error: unknown) => {
+    if (isLegacySyncKeyMismatch(error)) {
+      setShowSyncKeyRecovery(true);
+    }
+    toast({
+      title: "sync failed",
+      description: syncErrorDescription(error),
+      variant: "destructive",
+    });
+  };
+
   return (
     <div className="space-y-6">
       {/* Header + login status */}
@@ -611,11 +628,7 @@ export function AccountSection() {
                         await syncFetchOrThrow("/sync/pipes/push", { method: "POST" });
                         toast({ title: "scheduled tasks synced" });
                       } catch (e) {
-                        toast({
-                          title: "sync failed",
-                          description: syncErrorDescription(e),
-                          variant: "destructive",
-                        });
+                        reportSyncFailure(e);
                       } finally {
                         setPipeSyncing(false);
                       }
@@ -676,11 +689,7 @@ export function AccountSection() {
                         await syncFetchOrThrow("/sync/memories/push", { method: "POST" });
                         toast({ title: "memories synced" });
                       } catch (e) {
-                        toast({
-                          title: "sync failed",
-                          description: syncErrorDescription(e),
-                          variant: "destructive",
-                        });
+                        reportSyncFailure(e);
                       } finally {
                         setMemoriesSyncing(false);
                       }
@@ -744,11 +753,7 @@ export function AccountSection() {
                         await syncFetchOrThrow("/sync/connections/push", { method: "POST" });
                         toast({ title: "connections synced" });
                       } catch (e) {
-                        toast({
-                          title: "sync failed",
-                          description: syncErrorDescription(e),
-                          variant: "destructive",
-                        });
+                        reportSyncFailure(e);
                       } finally {
                         setConnectionsSyncing(false);
                       }
@@ -762,6 +767,10 @@ export function AccountSection() {
             </div>
           </div>
           </Card>
+          <SyncKeyRecovery
+            visible={showSyncKeyRecovery}
+            onRecovered={() => setShowSyncKeyRecovery(false)}
+          />
           {hasExpiringProfilePlan && (
             <div ref={upgradeCardRef}>
               <BusinessUpgradeCard
