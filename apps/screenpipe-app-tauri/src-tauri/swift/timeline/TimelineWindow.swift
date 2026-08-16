@@ -167,8 +167,8 @@ struct TimelineKeyHandler {
             }
             return true
         case "l" where control && command:
-            if model.selection != nil {
-                TimelineActionBridge.shared.emit("ask_ai_selection")
+            if let action = model.askAISelectionAction() {
+                TimelineActionBridge.shared.emit(action)
                 return true
             }
             return false

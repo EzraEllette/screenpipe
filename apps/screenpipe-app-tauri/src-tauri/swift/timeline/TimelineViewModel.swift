@@ -725,6 +725,49 @@ final class TimelineViewModel: ObservableObject {
         selection = nil
     }
 
+    func askAISelectionAction() -> String? {
+        guard let selection else { return nil }
+        let selectedFrames = selection.indices.compactMap { index in
+            frames.indices.contains(index) ? frames[index] : nil
+        }
+
+        var apps: [String] = []
+        var seenApps = Set<String>()
+        for frame in selectedFrames {
+            for device in frame.devices {
+                let app = device.metadata.appName.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !app.isEmpty, seenApps.insert(app).inserted { apps.append(app) }
+            }
+        }
+
+        var screenTextSamples: [String] = []
+        var audioTranscriptions: [String] = []
+        for frame in selectedFrames.prefix(3) {
+            for device in frame.devices {
+                let text = device.metadata.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !text.isEmpty { screenTextSamples.append(String(text.prefix(200))) }
+                for audio in device.audio {
+                    let transcription = audio.transcription.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !transcription.isEmpty {
+                        audioTranscriptions.append(String(transcription.prefix(200)))
+                    }
+                }
+            }
+        }
+
+        let payload = TimelineAISelectionPayload(
+            start: TimelineTime.iso(selection.start),
+            end: TimelineTime.iso(selection.end),
+            apps: apps,
+            screenTextSamples: screenTextSamples,
+            audioTranscriptions: audioTranscriptions,
+            frameCount: selectedFrames.count
+        )
+        guard let data = try? JSONEncoder().encode(payload),
+              let json = String(data: data, encoding: .utf8) else { return nil }
+        return "ask_ai_selection:\(json)"
+    }
+
     // MARK: Playback
 
     func togglePlayback() {

@@ -1061,7 +1061,9 @@ struct TimelineTagToolbar: View {
                     .buttonStyle(TimelineControlStyle())
                 }
                 Button {
-                    TimelineActionBridge.shared.emit("ask_ai_selection")
+                    if let action = model.askAISelectionAction() {
+                        TimelineActionBridge.shared.emit(action)
+                    }
                 } label: {
                     HStack(spacing: 6) {
                         Image(systemName: "sparkles")

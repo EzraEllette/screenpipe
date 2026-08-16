@@ -96,6 +96,21 @@ mod ffi {
 
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimelineSelectionContext {
+    pub start: String,
+    pub end: String,
+    #[serde(default)]
+    pub apps: Vec<String>,
+    #[serde(default)]
+    pub screen_text_samples: Vec<String>,
+    #[serde(default)]
+    pub audio_transcriptions: Vec<String>,
+    #[serde(default)]
+    pub frame_count: usize,
+}
+
 /// What the Swift timeline asked the app to do. Parsed from the raw action
 /// string so callers match on a value rather than re-parsing text.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -107,7 +122,7 @@ pub enum TimelineAction {
     OpenRecordingSettings,
     CopyFrame { frame_id: String },
     CopyText,
-    AskAiSelection,
+    AskAiSelection { selection: TimelineSelectionContext },
     ApplyTag { tag: String },
     DeleteRange,
     Unknown { raw: String },
@@ -133,7 +148,14 @@ impl TimelineAction {
                 frame_id: id.to_string(),
             },
             ("copy_text", _) => Self::CopyText,
-            ("ask_ai_selection", _) => Self::AskAiSelection,
+            ("ask_ai_selection", Some(payload)) => {
+                match serde_json::from_str::<TimelineSelectionContext>(payload) {
+                    Ok(selection) => Self::AskAiSelection { selection },
+                    Err(_) => Self::Unknown {
+                        raw: raw.to_string(),
+                    },
+                }
+            }
             ("apply_tag", Some(tag)) => Self::ApplyTag {
                 tag: tag.to_string(),
             },
@@ -258,15 +280,26 @@ mod tests {
             TimelineAction::OpenRecordingSettings
         );
         assert_eq!(TimelineAction::parse("copy_text"), TimelineAction::CopyText);
-        assert_eq!(
-            TimelineAction::parse("ask_ai_selection"),
-            TimelineAction::AskAiSelection
-        );
         assert_eq!(TimelineAction::parse("delete_range"), TimelineAction::DeleteRange);
     }
 
     #[test]
     fn parses_actions_with_arguments() {
+        assert_eq!(
+            TimelineAction::parse(
+                r#"ask_ai_selection:{"start":"2026-08-16T22:00:00Z","end":"2026-08-16T22:05:00Z","apps":["Mail"],"screenTextSamples":["hello"],"audioTranscriptions":["world"],"frameCount":4}"#
+            ),
+            TimelineAction::AskAiSelection {
+                selection: TimelineSelectionContext {
+                    start: "2026-08-16T22:00:00Z".to_string(),
+                    end: "2026-08-16T22:05:00Z".to_string(),
+                    apps: vec!["Mail".to_string()],
+                    screen_text_samples: vec!["hello".to_string()],
+                    audio_transcriptions: vec!["world".to_string()],
+                    frame_count: 4,
+                }
+            }
+        );
         assert_eq!(
             TimelineAction::parse("open_daily_summary:2026-08-16"),
             TimelineAction::OpenDailySummary {
@@ -311,6 +344,12 @@ mod tests {
 
     #[test]
     fn an_argument_action_without_its_argument_is_unknown() {
+        assert_eq!(
+            TimelineAction::parse("ask_ai_selection"),
+            TimelineAction::Unknown {
+                raw: "ask_ai_selection".to_string()
+            }
+        );
         assert_eq!(
             TimelineAction::parse("open_daily_summary"),
             TimelineAction::Unknown {

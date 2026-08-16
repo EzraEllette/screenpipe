@@ -23,10 +23,56 @@
 import { useEffect, useRef, useState } from "react";
 import { emit, listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import posthog from "posthog-js";
 
 import { commands } from "@/lib/utils/tauri";
 import { getApiKey, getApiPort } from "@/lib/api";
 import { TimelineDailySummary } from "@/components/rewind/timeline/daily-summary";
+import { showChatWithPrefill } from "@/lib/chat-utils";
+
+export interface NativeTimelineSelectionContext {
+  start: string;
+  end: string;
+  apps: string[];
+  screenTextSamples: string[];
+  audioTranscriptions: string[];
+  frameCount: number;
+}
+
+export function buildNativeSelectionChatPrefill(
+  selection: NativeTimelineSelectionContext
+): { context: string; prompt: string } | null {
+  const start = new Date(selection.start);
+  const end = new Date(selection.end);
+  if (
+    !Number.isFinite(start.getTime()) ||
+    !Number.isFinite(end.getTime()) ||
+    end < start
+  ) {
+    return null;
+  }
+
+  const startLabel = start.toLocaleString();
+  const endLabel = end.toLocaleString();
+  const contextParts = [`Time range: ${startLabel} - ${endLabel}`];
+  const apps = selection.apps.filter(Boolean).slice(0, 50);
+  if (apps.length > 0) contextParts.push(`Apps: ${apps.join(", ")}`);
+
+  const screenText = selection.screenTextSamples.filter(Boolean).slice(0, 12);
+  if (screenText.length > 0) {
+    contextParts.push(`Screen text samples:\n${screenText.join("\n---\n")}`);
+  }
+
+  const audio = selection.audioTranscriptions.filter(Boolean).slice(0, 12);
+  if (audio.length > 0) {
+    contextParts.push(`Audio transcriptions:\n${audio.join("\n---\n")}`);
+  }
+
+  return {
+    context: contextParts.join("\n\n"),
+    prompt: `Based on my activity from ${startLabel} to ${endLabel}, `,
+  };
+}
 
 export function parseTimelineDay(day: string): Date | null {
   const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(day);
@@ -75,6 +121,27 @@ export function NativeTimelineBridge() {
           id: (request?.id ?? 0) + 1,
         }));
       }),
+      listen<NativeTimelineSelectionContext>(
+        "timeline-ask-ai-selection",
+        (event) => {
+          const prefill = buildNativeSelectionChatPrefill(event.payload);
+          if (!prefill) return;
+          void showChatWithPrefill({
+            ...prefill,
+            source: "timeline",
+          }).then(() => {
+            posthog.capture("timeline_selection_to_chat", {
+              selection_duration_ms:
+                new Date(event.payload.end).getTime() -
+                new Date(event.payload.start).getTime(),
+              frames_in_selection: event.payload.frameCount,
+              native_timeline: true,
+            });
+          }).catch((error) => {
+            console.error("failed to open chat for native timeline selection", error);
+          });
+        }
+      ),
     ];
     return () => {
       for (const subscription of subscriptions) {

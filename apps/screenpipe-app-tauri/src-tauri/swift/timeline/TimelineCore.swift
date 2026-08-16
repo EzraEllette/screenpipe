@@ -999,6 +999,18 @@ struct TimelineSelection: Equatable {
     }
 }
 
+/// Compact context handed to the webview when a native selection opens chat.
+/// Samples deliberately match the old React timeline's three-frame, 200-character
+/// bounds so selecting a long range cannot turn the FFI action into a data dump.
+struct TimelineAISelectionPayload: Codable, Equatable {
+    var start: String
+    var end: String
+    var apps: [String]
+    var screenTextSamples: [String]
+    var audioTranscriptions: [String]
+    var frameCount: Int
+}
+
 // MARK: - Meetings
 
 struct TimelineMeeting: Equatable, Identifiable {

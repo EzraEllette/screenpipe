@@ -362,6 +362,28 @@ private func testKeyboard() {
     expect(TimelineActionBridge.shared.drainEmitted().contains("open_search"), "slash opens search")
     expect(!model.filters.isActive, "slash resets filters")
 
+    // Ask AI carries the selected range and bounded context across the FFI
+    // bridge; a plain action name leaves the webview with nothing to ask about.
+    model.extendSelection(anchor: 5, to: 9)
+    _ = TimelineActionBridge.shared.drainEmitted()
+    expect(
+        handler.handle(TimelineKeyEvent(keyCode: 37, characters: "l", command: true, control: true)),
+        "ctrl+cmd+l with a selection is consumed"
+    )
+    let askActions = TimelineActionBridge.shared.drainEmitted()
+    let askPayload = askActions.first { $0.hasPrefix("ask_ai_selection:") }
+    expect(askPayload != nil, "ask AI emits structured selection context, got \(askActions)")
+    if let askPayload,
+       let data = askPayload.dropFirst("ask_ai_selection:".count).data(using: .utf8),
+       let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+        expectEqual(json["frameCount"] as? Int, 5, "ask AI selected frame count")
+        expect((json["apps"] as? [String])?.isEmpty == false, "ask AI includes selected apps")
+        expect((json["screenTextSamples"] as? [String])?.isEmpty == false,
+               "ask AI includes bounded screen text")
+    } else {
+        failures.append("ask AI selection payload is not valid JSON")
+    }
+
     // Copy shortcuts name the frame they act on.
     model.setIndex(0)
     _ = TimelineActionBridge.shared.drainEmitted()

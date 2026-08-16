@@ -209,8 +209,8 @@ fn native_timeline_action_callback_inner(action_ptr: *const std::os::raw::c_char
         TimelineAction::CopyText => {
             let _ = app.emit("timeline-copy-text", ());
         }
-        TimelineAction::AskAiSelection => {
-            let _ = app.emit("timeline-ask-ai-selection", ());
+        TimelineAction::AskAiSelection { selection } => {
+            let _ = app.emit("timeline-ask-ai-selection", selection);
         }
         TimelineAction::ApplyTag { tag } => {
             // Swift already wrote the tag optimistically; this is for anything
