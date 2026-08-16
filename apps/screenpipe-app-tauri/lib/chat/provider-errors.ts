@@ -364,6 +364,7 @@ export function buildProviderErrorPresentation(
   // regions, but Pi wraps it in raw SSE framing. Match the stable sentence and
   // return our own constant so transport details and any suffix stay inert.
   if (
+    isHostedScreenpipeProvider(preset?.provider) &&
     errorStr
       .toLowerCase()
       .includes("cloud ai models aren't available in your country or region")

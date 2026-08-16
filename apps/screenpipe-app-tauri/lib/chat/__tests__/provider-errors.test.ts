@@ -12,6 +12,8 @@ import {
   SafetyRefusalError,
 } from "../provider-errors";
 
+const regionalDenialRaw = `Error: 403 data: {"error":{"message":"Cloud AI models aren't available in your country or region (the provider rejected the request). Connect a local model like Ollama in Settings → AI to keep using chat.","type":"api_error","code":"403"}}\n\ndata: [DONE]`;
+
 describe("provider error copy", () => {
   it.each([
     "Provider finish_reason: content_filter",
@@ -53,22 +55,41 @@ describe("provider error copy", () => {
     expect(presentation?.message).not.toContain("account_not_in_good_standing");
   });
 
-  it("maps the gateway regional denial to friendly, non-retryable copy", () => {
-    const raw = `Error: 403 data: {"error":{"message":"Cloud AI models aren't available in your country or region (the provider rejected the request). Connect a local model like Ollama in Settings → AI to keep using chat.","type":"api_error","code":"403"}}\n\ndata: [DONE]`;
-    const presentation = buildProviderErrorPresentation(raw, {
-      provider: "screenpipe-cloud",
-      model: "auto",
-    });
+  it.each(["screenpipe-cloud", "pi"])(
+    "maps the gateway regional denial for hosted alias %s to friendly, non-retryable copy",
+    (provider) => {
+      const presentation = buildProviderErrorPresentation(regionalDenialRaw, {
+        provider,
+        model: "auto",
+      });
 
-    expect(presentation).toEqual({
-      kind: "provider",
-      message: "Cloud AI models aren't available in your country or region (the provider rejected the request). Connect a local model like Ollama in Settings → AI to keep using chat.",
-      retryable: false,
-    });
-    expect(presentation?.message).not.toContain("Error: 403");
-    expect(presentation?.message).not.toContain("data:");
-    expect(presentation?.message).not.toContain("[DONE]");
-  });
+      expect(presentation).toEqual({
+        kind: "provider",
+        message: "Cloud AI models aren't available in your country or region (the provider rejected the request). Connect a local model like Ollama in Settings → AI to keep using chat.",
+        retryable: false,
+      });
+      expect(presentation?.message).not.toContain("Error: 403");
+      expect(presentation?.message).not.toContain("data:");
+      expect(presentation?.message).not.toContain("[DONE]");
+    },
+  );
+
+  it.each([
+    ["custom", { provider: "custom", model: "auto" }],
+    ["acp", { provider: "acp", model: "auto" }],
+    ["anthropic", { provider: "anthropic", model: "auto" }],
+    ["missing", undefined],
+  ] as const)(
+    "does not let the regional-denial phrase hijack non-hosted preset %s",
+    (_label, preset) => {
+      const presentation = buildProviderErrorPresentation(regionalDenialRaw, preset);
+
+      expect(presentation?.message ?? "").not.toContain(
+        "Cloud AI models aren't available in your country or region",
+      );
+      expect(presentation === null || presentation.retryable).toBe(true);
+    },
+  );
 
   it("does not classify an ordinary provider error as a safety refusal", () => {
     expect(SafetyRefusalError.from("Connection error.")).toBeNull();
