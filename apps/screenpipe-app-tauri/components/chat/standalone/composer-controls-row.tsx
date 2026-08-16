@@ -12,6 +12,7 @@ import {
 } from "@/components/ui/popover";
 import { AIPresetsSelector } from "@/components/rewind/ai-presets-selector";
 import { AcpConfigSelector } from "@/components/chat/standalone/acp-config-selector";
+import { AcpPermissionSelector } from "@/components/chat/standalone/acp-permission-selector";
 import { ThinkingLevelSelector } from "@/components/thinking-level-selector";
 import { ComposerUtilityMenu } from "@/components/chat/standalone/composer-utility-menu";
 import { UsagePopover } from "@/components/usage/usage-popover";
@@ -122,6 +123,14 @@ export function ComposerControlsRow({
           />
         </PopoverContent>
       </Popover>
+      {isAcp && (
+        <AcpPermissionSelector
+          sessionId={modelControls.currentQueueSessionId}
+          agentId={acpAgentId}
+          activePreset={modelControls.activePreset}
+          onPersistDefault={modelControls.onAcpConfigDefault}
+        />
+      )}
       <ActiveFilterLabels filters={filters} />
       <AIPresetsSelector
         compact
@@ -154,6 +163,7 @@ export function ComposerControlsRow({
           activePreset={modelControls.activePreset}
           onPersistDefault={modelControls.onAcpConfigDefault}
           onReauthenticate={modelControls.onReauthenticate}
+          hideModeControl
         />
       ) : (
         <ThinkingLevelSelector
