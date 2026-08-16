@@ -25,7 +25,7 @@ env:
 
 jobs:
   changes:
-    name: Route PR checks
+    name: Route CI checks
     runs-on: ubuntu-latest
     outputs:
       rust: ${{ steps.filter.outputs.rust }}
@@ -34,11 +34,13 @@ jobs:
       coverage: ${{ steps.filter.outputs.coverage }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 20
       - name: Classify changed paths
         id: filter
-        if: github.event_name == 'pull_request'
-        uses: dorny/paths-filter@v3
+        uses: dorny/paths-filter@v4
         with:
+          base: ${{ github.event_name == 'push' && github.ref || '' }}
           filters: |
             rust:
               - '**/*.rs'
@@ -75,7 +77,6 @@ jobs:
     name: Clippy & Format (run)
     needs: changes
     if: >-
-      github.event_name != 'pull_request' ||
       needs.changes.outputs.rust == 'true' ||
       contains(github.event.pull_request.labels.*.name, 'full-ci')
     runs-on: ubuntu-latest
@@ -111,7 +112,6 @@ jobs:
     name: Dependency & Performance Checks (run)
     needs: changes
     if: >-
-      github.event_name != 'pull_request' ||
       needs.changes.outputs.rust == 'true' ||
       contains(github.event.pull_request.labels.*.name, 'full-ci')
     runs-on: ubuntu-latest
@@ -153,7 +153,6 @@ jobs:
     name: Cargo.lock freshness (run)
     needs: changes
     if: >-
-      github.event_name != 'pull_request' ||
       needs.changes.outputs.lockfiles == 'true' ||
       contains(github.event.pull_request.labels.*.name, 'full-ci')
     # Version bumps (release-app / release-cli) that only touch Cargo.toml leave
@@ -176,7 +175,6 @@ jobs:
     name: Knip (frontend dead code) (run)
     needs: changes
     if: >-
-      github.event_name != 'pull_request' ||
       needs.changes.outputs.frontend == 'true' ||
       contains(github.event.pull_request.labels.*.name, 'full-ci')
     runs-on: ubuntu-latest
@@ -197,7 +195,6 @@ jobs:
     name: Coverage dashboards current
     needs: changes
     if: >-
-      github.event_name != 'pull_request' ||
       needs.changes.outputs.coverage == 'true' ||
       contains(github.event.pull_request.labels.*.name, 'full-ci')
     runs-on: ubuntu-latest
@@ -231,7 +228,7 @@ jobs:
       - name: Verify routed check
         env:
           ROUTER_RESULT: ${{ needs.changes.result }}
-          SHOULD_RUN: ${{ github.event_name != 'pull_request' || needs.changes.outputs.rust == 'true' || contains(github.event.pull_request.labels.*.name, 'full-ci') }}
+          SHOULD_RUN: ${{ needs.changes.outputs.rust == 'true' || contains(github.event.pull_request.labels.*.name, 'full-ci') }}
           CHECK_RESULT: ${{ needs.lint.result }}
         run: |
           test "$ROUTER_RESULT" = success
@@ -246,7 +243,7 @@ jobs:
       - name: Verify routed check
         env:
           ROUTER_RESULT: ${{ needs.changes.result }}
-          SHOULD_RUN: ${{ github.event_name != 'pull_request' || needs.changes.outputs.rust == 'true' || contains(github.event.pull_request.labels.*.name, 'full-ci') }}
+          SHOULD_RUN: ${{ needs.changes.outputs.rust == 'true' || contains(github.event.pull_request.labels.*.name, 'full-ci') }}
           CHECK_RESULT: ${{ needs.optimize.result }}
         run: |
           test "$ROUTER_RESULT" = success
@@ -261,7 +258,7 @@ jobs:
       - name: Verify routed check
         env:
           ROUTER_RESULT: ${{ needs.changes.result }}
-          SHOULD_RUN: ${{ github.event_name != 'pull_request' || needs.changes.outputs.lockfiles == 'true' || contains(github.event.pull_request.labels.*.name, 'full-ci') }}
+          SHOULD_RUN: ${{ needs.changes.outputs.lockfiles == 'true' || contains(github.event.pull_request.labels.*.name, 'full-ci') }}
           CHECK_RESULT: ${{ needs.lockfiles.result }}
         run: |
           test "$ROUTER_RESULT" = success
@@ -276,7 +273,7 @@ jobs:
       - name: Verify routed check
         env:
           ROUTER_RESULT: ${{ needs.changes.result }}
-          SHOULD_RUN: ${{ github.event_name != 'pull_request' || needs.changes.outputs.frontend == 'true' || contains(github.event.pull_request.labels.*.name, 'full-ci') }}
+          SHOULD_RUN: ${{ needs.changes.outputs.frontend == 'true' || contains(github.event.pull_request.labels.*.name, 'full-ci') }}
           CHECK_RESULT: ${{ needs.knip.result }}
         run: |
           test "$ROUTER_RESULT" = success

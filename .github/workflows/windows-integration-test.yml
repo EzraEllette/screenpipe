@@ -10,6 +10,8 @@ on:
   pull_request:
     branches: [ main ]
     types: [opened, synchronize, reopened, labeled]
+  schedule:
+    - cron: "43 9 * * *"
   workflow_dispatch:
 
 permissions:
@@ -27,17 +29,20 @@ env:
 
 jobs:
   changes:
-    name: Route PR Windows CLI test
+    name: Route Windows CLI test
     runs-on: ubuntu-latest
     outputs:
       cli: ${{ steps.filter.outputs.cli }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 20
       - name: Detect CLI runtime changes
         id: filter
-        if: github.event_name == 'pull_request'
-        uses: dorny/paths-filter@v3
+        if: github.event_name == 'pull_request' || github.event_name == 'push'
+        uses: dorny/paths-filter@v4
         with:
+          base: ${{ github.event_name == 'push' && github.ref || '' }}
           filters: |
             cli:
               - 'crates/**'
@@ -53,7 +58,8 @@ jobs:
   test-windows:
     needs: changes
     if: >-
-      github.event_name != 'pull_request' ||
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'schedule' ||
       needs.changes.outputs.cli == 'true' ||
       contains(github.event.pull_request.labels.*.name, 'full-ci')
     runs-on: windows-2022
