@@ -340,8 +340,8 @@ describe("desktop remote control", () => {
     ).toEqual([]);
   });
 
-  it("ships the overlay unhideable and never seeds a local opt-in", () => {
-    // Shipped: the capability is off, so the Display toggle stays absent.
+  it("ships the rollout capability disabled and never seeds a local opt-in", () => {
+    // The user-facing visibility choice is independent of this legacy rollout.
     expect(
       resolveBooleanRemoteControlValue(
         "overlayHiding",
@@ -350,7 +350,7 @@ describe("desktop remote control", () => {
       ),
     ).toBe(false);
 
-    // Remote grant: the toggle comes back without a release.
+    // Managed installs can still grant the legacy capability remotely.
     expect(
       resolveBooleanRemoteControlValue("overlayHiding", null, {
         defaultEnabled: true,
@@ -358,8 +358,7 @@ describe("desktop remote control", () => {
       }),
     ).toBe(true);
 
-    // Nothing lets a user grant themselves the capability, so the preference
-    // must stay null forever — a seeded value would make the flag a no-op.
+    // The capability remains inherited rather than becoming sticky.
     expect(
       normalizeDesktopRemotePreferences({
         allowHidingShortcutOverlay: true,

@@ -13,6 +13,25 @@ use tracing::{error, info, warn};
 /// Global app handle stored so native action callbacks can emit events.
 static GLOBAL_APP_HANDLE: std::sync::OnceLock<tauri::AppHandle> = std::sync::OnceLock::new();
 
+fn handle_shortcut_overlay_hour_snooze(app: &tauri::AppHandle) {
+    let app = app.clone();
+    native_shortcut_reminder::hide();
+    tauri::async_runtime::spawn(async move {
+        let persist_succeeded = crate::commands::snooze_shortcut_reminder_for_hour(app.clone())
+            .await
+            .is_ok();
+        track_native_overlay_event(
+            &app,
+            "shortcut_reminder_dismissed",
+            serde_json::json!({
+                "dismiss_scope": "hour",
+                "snooze_hours": 1,
+                "persist_succeeded": persist_succeeded,
+            }),
+        );
+    });
+}
+
 // The anchor allowlist and both store writes live in `overlay_anchor`, which is
 // compiled everywhere: the native panel and the webview overlay have to agree
 // on what a valid anchor is, and only one of them is macOS-only.
@@ -796,6 +815,9 @@ fn native_shortcut_action_callback_inner(action_ptr: *const std::os::raw::c_char
                             warn!("failed to open overlay settings: {error}");
                         }
                     });
+                }
+                "dismiss_hour" => {
+                    handle_shortcut_overlay_hour_snooze(&app_clone);
                 }
                 "restart_recording" => {
                     // Recording-health overlay: restart the engine in place.

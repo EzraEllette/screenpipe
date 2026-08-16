@@ -1138,7 +1138,7 @@ struct ShortcutReminderView: View {
             Rectangle().fill(.white.opacity(0.28)).frame(width: 1).padding(.vertical, s(4))
 
             DockIconButton(icon: "gearshape", active: metrics.hoveredControl == "settings", scale: scale) {
-                onAction("open_overlay_settings")
+                onAction("show_settings_menu")
             }
         }
         .frame(width: kBaseExpandedW * scale, height: kBaseDockH * scale)
@@ -2795,7 +2795,11 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
             metrics: metrics,
             scale: gOverlayScale,
             onAction: { [weak self] action in
-                self?.sendAction(action)
+                if action == "show_settings_menu" {
+                    self?.showShortcutSettingsMenu()
+                } else {
+                    self?.sendAction(action)
+                }
             }
         )
         let contentView = panel.contentView!
@@ -3037,6 +3041,49 @@ class ShortcutReminderController: NSObject, NSWindowDelegate {
             toast.animator().setFrame(destination, display: true)
             toast.animator().alphaValue = 1
         }
+    }
+
+    /// Wispr-style native menu: one temporary escape beside the floating bar,
+    /// with the durable choice kept in Settings. Using AppKit's menu avoids a
+    /// second floating panel and inherits keyboard, screen-edge and VoiceOver
+    /// behavior from macOS.
+    private func showShortcutSettingsMenu() {
+        guard let contentView = panel?.contentView else { return }
+        let menu = NSMenu(title: "shortcut reminder")
+        menu.autoenablesItems = false
+
+        let snooze = NSMenuItem(
+            title: "Hide for 1 hour",
+            action: #selector(hideShortcutReminderForHour),
+            keyEquivalent: ""
+        )
+        snooze.target = self
+        snooze.isEnabled = true
+        menu.addItem(snooze)
+        menu.addItem(.separator())
+
+        let settings = NSMenuItem(
+            title: "Settings…",
+            action: #selector(openShortcutReminderSettings),
+            keyEquivalent: ""
+        )
+        settings.target = self
+        settings.isEnabled = true
+        menu.addItem(settings)
+
+        menu.popUp(
+            positioning: nil,
+            at: NSPoint(x: contentView.bounds.maxX - 4, y: contentView.bounds.minY + 4),
+            in: contentView
+        )
+    }
+
+    @objc private func hideShortcutReminderForHour() {
+        sendAction("dismiss_hour")
+    }
+
+    @objc private func openShortcutReminderSettings() {
+        sendAction("open_overlay_settings")
     }
 
     private func sendAction(_ action: String) {

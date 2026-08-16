@@ -783,6 +783,7 @@ let DEFAULT_SETTINGS: Settings = {
 			enableSidebarCustomization: false,
 			allowHidingShortcutOverlay: false,
 			showShortcutOverlay: true,
+			shortcutOverlaySnoozedUntil: null,
 			sidebarNavLayout: { ...DEFAULT_SIDEBAR_NAV_LAYOUT },
 			ignoreIncognitoWindows: true,
 			enhancedIncognitoDetection: false,

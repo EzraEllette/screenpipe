@@ -63,6 +63,7 @@ const DEFAULT_SHORTCUTS = {
 
 const COLLAPSED_SIZE = { width: 22, height: 16 };
 const EXPANDED_SIZE = { width: 160, height: 62 };
+const SETTINGS_MENU_SIZE = { width: 164, height: 96 };
 const INCIDENT_SIZE = { width: 160, height: 40 };
 const MEETING_SIZE = { width: 280, height: 80 };
 
@@ -85,6 +86,7 @@ export default function ShortcutReminderPage() {
   const [hoverMeetingId, setHoverMeetingId] = useState<number | null>(null);
   const [pinnedMeetingId, setPinnedMeetingId] = useState<number | null>(null);
   const [expanded, setExpanded] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [hoveredControl, setHoveredControl] = useState<string | null>(null);
   const [overlayScale, setOverlayScale] = useState(1);
   const [anchor, setAnchor] = useState<OverlayAnchor>(DEFAULT_OVERLAY_ANCHOR);
@@ -354,6 +356,8 @@ export default function ShortcutReminderPage() {
       resizeOverlay(INCIDENT_SIZE);
     } else if (meetingOverlay.active && meetingCardOpen) {
       resizeOverlay(MEETING_SIZE);
+    } else if (settingsOpen) {
+      resizeOverlay(SETTINGS_MENU_SIZE);
     } else if (expanded) {
       resizeOverlay(EXPANDED_SIZE);
     } else {
@@ -366,6 +370,7 @@ export default function ShortcutReminderPage() {
     meetingCardOpen,
     meetingOverlay.active,
     resizeOverlay,
+    settingsOpen,
   ]);
 
   const handleRestartRecording = useCallback(async (e: React.MouseEvent) => {
@@ -409,8 +414,27 @@ export default function ShortcutReminderPage() {
   const handleOpenSettings = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
+    setSettingsOpen(false);
     posthog.capture("shortcut_reminder_overlay_settings_clicked");
     void commands.showWindow({ Home: { page: "display" } });
+  }, []);
+
+  const handleHourSnooze = useCallback(async (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    // Close immediately so a slow encrypted-store write cannot close a menu
+    // the user reopened while the reminder is still animating away.
+    setSettingsOpen(false);
+    try {
+      const result = await commands.snoozeShortcutReminderForHour();
+      if (result.status === "error") throw new Error(result.error);
+      posthog.capture("shortcut_reminder_dismissed", {
+        dismiss_scope: "hour",
+        snooze_hours: 1,
+      });
+    } catch (error) {
+      console.error("Failed to snooze shortcut reminder:", error);
+    }
   }, []);
 
   // Size tokens are scaled inline instead of via CSS `transform: scale()` so
@@ -761,6 +785,7 @@ export default function ShortcutReminderPage() {
       }}
       onMouseLeave={() => {
         setExpanded(false);
+        setSettingsOpen(false);
         setHoveredControl(null);
       }}
     >
@@ -834,20 +859,55 @@ export default function ShortcutReminderPage() {
           onMouseEnter={() => setHoveredControl("settings")}
           onMouseDown={(e) => e.stopPropagation()}
           onPointerDown={(e) => e.stopPropagation()}
-          onClick={handleOpenSettings}
+          onClick={(e) => {
+            e.stopPropagation();
+            setSettingsOpen((open) => !open);
+          }}
         >
           <Settings style={{ width: `${12 * overlayScale}px`, height: `${12 * overlayScale}px` }} />
         </button>
       </div>
 
-      {/* The label row only exists while a control is hovered. The native panel
+      {settingsOpen ? (
+        <div
+          role="menu"
+          aria-label="Shortcut reminder options"
+          className="flex w-full min-h-0 flex-1 flex-col overflow-hidden border border-white/40 font-mono text-white/85"
+          style={{
+            marginTop: dockAbove ? `${4 * overlayScale}px` : 0,
+            marginBottom: dockAbove ? 0 : `${4 * overlayScale}px`,
+            background: "rgba(0, 0, 0, 0.96)",
+            borderRadius: `${4 * overlayScale}px`,
+            fontSize: `${fontPx}px`,
+          }}
+        >
+          <button
+            role="menuitem"
+            className="flex-1 px-2 text-left hover:bg-white/15"
+            title="Hide for 1 hour"
+            onClick={(e) => void handleHourSnooze(e)}
+          >
+            hide for 1 hour
+          </button>
+          <div className="mx-2 bg-white/20" style={{ height: "1px" }} />
+          <button
+            role="menuitem"
+            className="flex-1 px-2 text-left hover:bg-white/15"
+            title="Open overlay settings"
+            onClick={handleOpenSettings}
+          >
+            settings…
+          </button>
+        </div>
+      ) : (
+        /* The label row only exists while a control is hovered. The native panel
           keeps this area transparent (`Color.clear`) and floats the label under
           the hovered icon; painting it unconditionally left an empty black bar
           hanging under the dock whenever the pointer sat between icons. The
-          reserved height stays either way so the dock never shifts. */}
-      <div
-        className="flex w-full min-h-0 flex-1 items-center justify-center overflow-hidden font-mono text-white/75"
-        style={{
+          reserved height stays either way so the dock never shifts. */
+        <div
+          className="flex w-full min-h-0 flex-1 items-center justify-center overflow-hidden font-mono text-white/75"
+          style={{
           maxHeight: `${26 * overlayScale}px`,
           // The gap belongs between the two rows, and `column-reverse` does not
           // flip which physical side a margin lands on. Keeping it on `top`
@@ -859,15 +919,16 @@ export default function ShortcutReminderPage() {
           border: `1px solid ${disclosure ? "rgba(255, 255, 255, 0.25)" : "transparent"}`,
           borderRadius: `${4 * overlayScale}px`,
           fontSize: `${fontPx}px`,
-        }}
-      >
-        {disclosure ? (
-          <span className="truncate px-1">
-            {disclosure[0]}
-            {disclosure[1] ? `  ${disclosure[1]}` : ""}
-          </span>
-        ) : null}
-      </div>
+          }}
+        >
+          {disclosure ? (
+            <span className="truncate px-1">
+              {disclosure[0]}
+              {disclosure[1] ? `  ${disclosure[1]}` : ""}
+            </span>
+          ) : null}
+        </div>
+      )}
     </div>
   );
 }

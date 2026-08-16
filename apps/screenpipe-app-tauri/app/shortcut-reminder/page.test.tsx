@@ -20,6 +20,7 @@ const mocks = vi.hoisted(() => ({
   storeGet: vi.fn(),
   storeSet: vi.fn(),
   hideShortcutReminder: vi.fn(),
+  snoozeShortcutReminderForHour: vi.fn(),
   showWindow: vi.fn(),
   setSize: vi.fn(),
   setPosition: vi.fn(),
@@ -118,6 +119,7 @@ vi.mock("@/lib/utils/tauri", () => ({
     overlayRestartRecording: vi.fn(),
     overlayDismissIncident: vi.fn(),
     hideShortcutReminder: mocks.hideShortcutReminder,
+    snoozeShortcutReminderForHour: mocks.snoozeShortcutReminderForHour,
     showWindow: mocks.showWindow,
     setShortcutOverlayAnchor: mocks.setShortcutOverlayAnchor,
   },
@@ -155,6 +157,8 @@ describe("recording health hover detail", () => {
     mocks.stopMeeting.mockReset();
     mocks.storeSet.mockReset();
     mocks.hideShortcutReminder.mockReset();
+    mocks.snoozeShortcutReminderForHour.mockReset();
+    mocks.snoozeShortcutReminderForHour.mockResolvedValue({ status: "ok", data: null });
     mocks.showWindow.mockReset();
     mocks.setSize.mockReset();
     mocks.setPosition.mockReset();
@@ -306,7 +310,7 @@ describe("recording health hover detail", () => {
     expect(meetingDot.className).toContain("pointer-events-none");
   });
 
-  it("cannot be hidden from the gear — it opens Display settings instead", async () => {
+  it("offers Wispr-style one-hour hiding and a path to Display settings", async () => {
     mocks.getRecordingHealthState.mockResolvedValue("normal");
     mocks.storeGet.mockResolvedValue({});
 
@@ -315,12 +319,16 @@ describe("recording health hover detail", () => {
     fireEvent.mouseEnter(await screen.findByTestId("shortcut-reminder-root"));
     fireEvent.click(await screen.findByTitle("Overlay settings"));
 
-    // The gear never hides the pill. Even when `overlay-hiding-control` grants
-    // the capability back, the switch lives in Display settings, not here.
-    expect(screen.queryByTitle("Hide for today")).toBeNull();
-    expect(screen.queryByTitle("Hide for a week")).toBeNull();
-    expect(mocks.hideShortcutReminder).not.toHaveBeenCalled();
-    expect(mocks.storeSet).not.toHaveBeenCalled();
+    expect(screen.getByRole("menu", { name: "Shortcut reminder options" })).toBeVisible();
+    fireEvent.click(screen.getByTitle("Hide for 1 hour"));
+
+    await waitFor(() =>
+      expect(mocks.snoozeShortcutReminderForHour).toHaveBeenCalledTimes(1),
+    );
+
+    fireEvent.mouseEnter(screen.getByTestId("shortcut-reminder-root"));
+    fireEvent.click(screen.getByTitle("Overlay settings"));
+    fireEvent.click(screen.getByTitle("Open overlay settings"));
     expect(mocks.showWindow).toHaveBeenCalledWith({ Home: { page: "display" } });
   });
 

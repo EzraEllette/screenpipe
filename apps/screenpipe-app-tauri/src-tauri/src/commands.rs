@@ -56,8 +56,8 @@ mod tests {
         merge_enterprise_file_configs, persist_enterprise_device_config,
         persist_recovered_enterprise_device_config, read_enterprise_config_from_path,
         notification_belongs_to_overlay, recovery_anchor_license_key, save_enterprise_team_config,
-        scan_chat_entries_by_mtime, shortcut_overlay_hidden_by_choice, EnterpriseFileConfig,
-        RecoveredEnterpriseDeviceConfig,
+        scan_chat_entries_by_mtime, shortcut_overlay_hidden_by_choice,
+        should_resume_snoozed_overlay, EnterpriseFileConfig, RecoveredEnterpriseDeviceConfig,
     };
 
     /// `get_local_api_config` must never await the server mutex.
@@ -113,15 +113,20 @@ mod tests {
         assert_eq!(config["port"], 3030);
     }
 
-    /// The overlay ships unhideable. A stored `showShortcutOverlay: false` —
-    /// whether left over from before this shipped or set while the remote
-    /// capability was on — must stay inert until the flag grants it back.
     #[test]
-    fn a_stored_hide_choice_only_counts_once_remote_policy_allows_it() {
-        assert!(!shortcut_overlay_hidden_by_choice(false, false));
-        assert!(!shortcut_overlay_hidden_by_choice(false, true));
-        assert!(shortcut_overlay_hidden_by_choice(true, false));
-        assert!(!shortcut_overlay_hidden_by_choice(true, true));
+    fn saved_choice_and_active_snooze_hide_the_shortcut_overlay() {
+        assert!(shortcut_overlay_hidden_by_choice(false, None, 100));
+        assert!(shortcut_overlay_hidden_by_choice(true, Some(101), 100));
+        assert!(!shortcut_overlay_hidden_by_choice(true, Some(100), 100));
+        assert!(!shortcut_overlay_hidden_by_choice(true, None, 100));
+    }
+
+    #[test]
+    fn only_the_matching_expired_snooze_may_restore_the_overlay() {
+        assert!(should_resume_snoozed_overlay(true, Some(100), 100, 100));
+        assert!(!should_resume_snoozed_overlay(false, Some(100), 100, 100));
+        assert!(!should_resume_snoozed_overlay(true, Some(200), 100, 100));
+        assert!(!should_resume_snoozed_overlay(true, Some(100), 100, 99));
     }
 
     #[test]
@@ -2886,34 +2891,104 @@ fn shortcut_reminder_payload(
     map
 }
 
-/// Whether a stored "keep the overlay hidden" choice may be honored at all.
-/// The overlay is the app's only always-on surface — it carries recording
-/// health, live meeting state and meeting notifications — so it ships
-/// unhideable and a stale stored `false` stays inert. `overlay-hiding-control`
-/// (see `lib/desktop-remote-control.ts`) can grant the capability back
-/// remotely, at which point the user's own choice starts counting again.
+/// Whether the user's persistent choice or temporary snooze hides the normal
+/// shortcut reminder. Confirmed recording incidents bypass this predicate and
+/// use the same small surface only for recovery.
 pub(crate) fn shortcut_overlay_hidden_by_choice(
-    allow_hiding: bool,
     show_overlay: bool,
+    snoozed_until: Option<i64>,
+    now_unix: i64,
 ) -> bool {
-    allow_hiding && !show_overlay
+    !show_overlay || snoozed_until.is_some_and(|until| until > now_unix)
 }
 
-/// Suppression is otherwise a system decision (timeline off, headless), never
-/// a stored dismissal.
+const SHORTCUT_OVERLAY_HOUR_SNOOZE_SECONDS: i64 = 60 * 60;
+
+fn should_resume_snoozed_overlay(
+    show_overlay: bool,
+    stored_until: Option<i64>,
+    expected_until: i64,
+    now_unix: i64,
+) -> bool {
+    show_overlay && stored_until == Some(expected_until) && expected_until <= now_unix
+}
+
+fn schedule_shortcut_overlay_resume(app_handle: tauri::AppHandle, expected_until: i64) {
+    tauri::async_runtime::spawn(async move {
+        let delay_seconds = expected_until
+            .saturating_sub(chrono::Utc::now().timestamp())
+            .max(0) as u64;
+        tokio::time::sleep(std::time::Duration::from_secs(delay_seconds)).await;
+
+        let Ok(Some(mut store)) = crate::store::SettingsStore::get(&app_handle) else {
+            return;
+        };
+        let now_unix = chrono::Utc::now().timestamp();
+        if !should_resume_snoozed_overlay(
+            store.show_shortcut_overlay,
+            store.shortcut_overlay_snoozed_until,
+            expected_until,
+            now_unix,
+        ) {
+            return;
+        }
+
+        store.shortcut_overlay_snoozed_until = None;
+        if let Err(error) = store.save(&app_handle) {
+            warn!("failed to clear expired shortcut overlay snooze: {}", error);
+            return;
+        }
+        if let Err(error) = show_shortcut_reminder_impl(app_handle, true, true).await {
+            warn!("failed to restore shortcut overlay after snooze: {}", error);
+        }
+    });
+}
+
+/// Honor the saved preference on every startup. Expired snoozes are cleared so
+/// Settings and subsequent launches reflect the actual state.
 pub(crate) async fn maybe_show_shortcut_reminder_on_startup(
     app_handle: tauri::AppHandle,
 ) -> Result<(), String> {
-    let store = crate::store::SettingsStore::get(&app_handle)?.unwrap_or_default();
+    let mut store = crate::store::SettingsStore::get(&app_handle)?.unwrap_or_default();
+    let now_unix = chrono::Utc::now().timestamp();
     if shortcut_overlay_hidden_by_choice(
-        store.allow_hiding_shortcut_overlay,
         store.show_shortcut_overlay,
+        store.shortcut_overlay_snoozed_until,
+        now_unix,
     ) {
-        info!("shortcut overlay stays hidden: remote policy allows it and the user turned it off");
+        if store.show_shortcut_overlay {
+            if let Some(until) = store.shortcut_overlay_snoozed_until {
+                schedule_shortcut_overlay_resume(app_handle, until);
+            }
+        }
+        info!("shortcut overlay stays hidden: saved preference or one-hour snooze");
         return Ok(());
+    }
+    if store
+        .shortcut_overlay_snoozed_until
+        .is_some_and(|until| until <= now_unix)
+    {
+        store.shortcut_overlay_snoozed_until = None;
+        store.save(&app_handle)?;
     }
 
     show_shortcut_reminder_impl(app_handle, true, true).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn snooze_shortcut_reminder_for_hour(
+    app_handle: tauri::AppHandle,
+) -> Result<(), String> {
+    let mut store = crate::store::SettingsStore::get(&app_handle)?.unwrap_or_default();
+    let until = chrono::Utc::now()
+        .timestamp()
+        .saturating_add(SHORTCUT_OVERLAY_HOUR_SNOOZE_SECONDS);
+    store.show_shortcut_overlay = true;
+    store.shortcut_overlay_snoozed_until = Some(until);
+    store.save(&app_handle)?;
+    schedule_shortcut_overlay_resume(app_handle.clone(), until);
+    hide_shortcut_reminder(app_handle).await
 }
 
 #[tauri::command]
@@ -2922,6 +2997,22 @@ pub async fn show_shortcut_reminder(
     app_handle: tauri::AppHandle,
     _shortcut: String,
 ) -> Result<(), String> {
+    let mut store = crate::store::SettingsStore::get(&app_handle)?.unwrap_or_default();
+    let now_unix = chrono::Utc::now().timestamp();
+    if shortcut_overlay_hidden_by_choice(
+        store.show_shortcut_overlay,
+        store.shortcut_overlay_snoozed_until,
+        now_unix,
+    ) {
+        return Ok(());
+    }
+    if store
+        .shortcut_overlay_snoozed_until
+        .is_some_and(|until| until <= now_unix)
+    {
+        store.shortcut_overlay_snoozed_until = None;
+        store.save(&app_handle)?;
+    }
     show_shortcut_reminder_impl(app_handle, true, true).await
 }
 

@@ -982,13 +982,15 @@ pub struct SettingsStore {
     /// Overlay size: "small" (default), "medium" (1.5x), "large" (2x)
     #[serde(rename = "shortcutOverlaySize", default = "default_overlay_size")]
     pub shortcut_overlay_size: String,
-    /// The user's choice, honored only while `allow_hiding_shortcut_overlay`
-    /// is on. The overlay ships unhideable, so this is inert by default.
+    /// The user's persistent choice for the shortcut reminder. Recording-health
+    /// incidents may still reveal their own temporary recovery surface.
     #[serde(rename = "showShortcutOverlay", default = "default_true")]
     pub show_shortcut_overlay: bool,
-    /// Remote-controlled capability (`overlay-hiding-control`), written by the
-    /// desktop remote-control registry. False ships; flipping the flag on gives
-    /// the Display toggle back without a release.
+    /// Unix timestamp until which the user asked to hide the shortcut reminder.
+    #[serde(rename = "shortcutOverlaySnoozedUntil", default)]
+    pub shortcut_overlay_snoozed_until: Option<i64>,
+    /// Compatibility capability written by the desktop remote-control registry.
+    /// Consumer visibility is controlled by `show_shortcut_overlay` above.
     #[serde(rename = "allowHidingShortcutOverlay", default)]
     pub allow_hiding_shortcut_overlay: bool,
     /// Where the user dragged the overlay: one of top/bottom x left/center/right.
@@ -1594,6 +1596,7 @@ Rules:
             shortcut_overlay_anchor: default_overlay_anchor(),
             shortcut_overlay_display: String::new(),
             show_shortcut_overlay: true,
+            shortcut_overlay_snoozed_until: None,
             allow_hiding_shortcut_overlay: false,
             device_id: uuid::Uuid::new_v4().to_string(),
             auto_update: true,
@@ -2642,10 +2645,19 @@ mod tests {
         assert_eq!(missing.shortcut_overlay_anchor, "top-center");
     }
 
-    /// Stored dismissals from before the overlay became permanent must not
-    /// resurrect: the keys are gone, and an old file carrying them still loads.
     #[test]
-    fn retired_overlay_dismissal_keys_are_ignored() {
+    fn shortcut_overlay_preferences_survive_old_and_new_stores() {
+        let defaults = SettingsStore::default();
+        assert!(defaults.show_shortcut_overlay);
+        assert_eq!(defaults.shortcut_overlay_snoozed_until, None);
+
+        let missing: SettingsStore = serde_json::from_value(json!({
+            "aiPresets": []
+        }))
+        .unwrap();
+        assert!(missing.show_shortcut_overlay);
+        assert_eq!(missing.shortcut_overlay_snoozed_until, None);
+
         let legacy: SettingsStore = serde_json::from_value(json!({
             "aiPresets": [],
             "showShortcutOverlay": false,
@@ -2653,7 +2665,8 @@ mod tests {
             "shortcutOverlayMinimalReshowVersion": 1,
         }))
         .unwrap();
-        assert_eq!(legacy.shortcut_overlay_anchor, "top-center");
+        assert!(!legacy.show_shortcut_overlay);
+        assert_eq!(legacy.shortcut_overlay_snoozed_until, Some(4_102_444_800));
     }
 
     #[test]

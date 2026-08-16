@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
-use windows::core::Result;
+use windows::core::{w, Result};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
 use windows::Win32::Graphics::Direct2D::Common::{D2D1_COLOR_F, D2D_POINT_2F};
 use windows::Win32::Graphics::Direct2D::{
@@ -43,17 +43,22 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos, GetMessageW,
-    GetWindowLongPtrW, GetWindowRect, KillTimer, LoadCursorW, PostMessageW, PostQuitMessage,
-    RegisterClassExW, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage,
-    UpdateLayeredWindow, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, HWND_TOPMOST, IDC_ARROW, MSG,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_HIDE, SW_SHOWNOACTIVATE, ULW_ALPHA, WINDOWPOS,
-    WM_APP, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MOUSEMOVE, WM_SETTINGCHANGE, WM_TIMER, WM_WINDOWPOSCHANGING, WNDCLASSEXW, WS_EX_LAYERED,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
+    DispatchMessageW, GetCursorPos, GetMessageW, GetWindowLongPtrW, GetWindowRect, KillTimer,
+    LoadCursorW, PostMessageW, PostQuitMessage, RegisterClassExW, SetTimer, SetWindowLongPtrW,
+    SetWindowPos, ShowWindow, TrackPopupMenu, TranslateMessage, UpdateLayeredWindow, CS_HREDRAW,
+    CS_VREDRAW, GWLP_USERDATA, HWND_TOPMOST, IDC_ARROW, MF_SEPARATOR, MF_STRING, MSG,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_HIDE, SW_SHOWNOACTIVATE, TPM_RETURNCMD,
+    TPM_RIGHTALIGN, TPM_TOPALIGN, ULW_ALPHA, WINDOWPOS, WM_APP, WM_DESTROY, WM_DISPLAYCHANGE,
+    WM_DPICHANGED, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_SETTINGCHANGE, WM_TIMER,
+    WM_WINDOWPOSCHANGING, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
-use crate::actions::{action_for, anchor_action};
+use crate::actions::{
+    action_for, anchor_action, settings_menu_action, SETTINGS_MENU_HIDE_HOUR,
+    SETTINGS_MENU_OPEN_SETTINGS,
+};
 use crate::anim::Equalizer;
 use crate::drag_stage;
 use crate::layout::{self, Layout, SHADOW_PAD};
@@ -81,6 +86,45 @@ const ANIM_MS: u32 = 83; // ~12 Hz, same cadence as the macOS meter.
 const HOVER_POLL_MS: u32 = 90;
 /// Pointer travel before a press on the pill becomes a drag rather than a click.
 const DRAG_THRESHOLD: f32 = 4.0;
+
+/// Show the same two-choice native menu as the macOS overlay. Returning the
+/// selected app action keeps menu presentation inside the Win32 window while
+/// preserving the cross-platform callback contract.
+unsafe fn show_settings_menu(hwnd: HWND) -> Option<String> {
+    let menu = CreatePopupMenu().ok()?;
+    let result = (|| {
+        AppendMenuW(
+            menu,
+            MF_STRING,
+            SETTINGS_MENU_HIDE_HOUR,
+            w!("Hide for 1 hour"),
+        )
+        .ok()?;
+        AppendMenuW(menu, MF_SEPARATOR, 0, w!("")).ok()?;
+        AppendMenuW(
+            menu,
+            MF_STRING,
+            SETTINGS_MENU_OPEN_SETTINGS,
+            w!("Settings..."),
+        )
+        .ok()?;
+
+        let mut point = POINT::default();
+        GetCursorPos(&mut point).ok()?;
+        let command = TrackPopupMenu(
+            menu,
+            TPM_RETURNCMD | TPM_RIGHTALIGN | TPM_TOPALIGN,
+            point.x,
+            point.y,
+            0,
+            hwnd,
+            None,
+        );
+        settings_menu_action(command.0 as usize)
+    })();
+    let _ = DestroyMenu(menu);
+    result
+}
 
 /// Gap in DIP between the pinned pill and the edge of the work area. Shared
 /// with the drag stage so a landing target is drawn exactly where the pill it
@@ -1279,7 +1323,11 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                         // Only fire when the release lands on the same control
                         // the press did — dragging off a button cancels it.
                         if ctx.layout.hit_test(x, y) == Some(pressed) {
-                            action = action_for(&ctx.state, pressed);
+                            action = if pressed == Control::Settings {
+                                show_settings_menu(hwnd)
+                            } else {
+                                action_for(&ctx.state, pressed)
+                            };
                             // Pinning is the overlay's own state, so it is applied
                             // here rather than reported and echoed back.
                             if pressed == Control::TranscriptPin {

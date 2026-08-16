@@ -591,12 +591,23 @@ async fn reveal_overlay_if_hidden(app: &tauri::AppHandle) {
     if overlay_visible(app) {
         return;
     }
-    // The overlay can no longer be dismissed, so anything hiding it now is a
-    // system decision (timeline disabled, headless, or the startup show has not
-    // landed yet). Leave it up after recovery rather than re-hiding it: if the
-    // startup show was simply slow, hiding it again would fight that.
+    // Take responsibility for re-hiding only when this reveal overrides the
+    // user's persistent choice or active one-hour snooze. If startup is merely
+    // slow, the normal shortcut pill should stay once recovery finishes.
+    let now_unix = chrono::Utc::now().timestamp();
+    let user_wants_hidden = crate::store::SettingsStore::get(app)
+        .ok()
+        .flatten()
+        .map(|store| {
+            crate::commands::shortcut_overlay_hidden_by_choice(
+                store.show_shortcut_overlay,
+                store.shortcut_overlay_snoozed_until,
+                now_unix,
+            )
+        })
+        .unwrap_or(false);
     if let Ok(mut inner) = INNER.lock() {
-        inner.auto_revealed = false;
+        inner.auto_revealed = user_wants_hidden;
     }
     info!("overlay health: revealing hidden shortcut overlay for incident");
     // Skip the disable_timeline gate and the wait-for-server handshake — the
