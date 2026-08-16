@@ -1859,7 +1859,7 @@ impl PiExecutor {
         // BufReader::lines() which crashes on invalid UTF-8 bytes.
         // See: toggl-sync crash "stream did not contain valid UTF-8".
         let mut reader = tokio::io::BufReader::new(child_stdout);
-        let mut stdout_buf = String::new();
+        let mut stdout_buf = BoundedOutput::default();
         let mut llm_error: Option<String> = None;
         let mut line_bytes = Vec::new();
 
@@ -1905,8 +1905,7 @@ impl PiExecutor {
                 }
             }
 
-            stdout_buf.push_str(&line);
-            stdout_buf.push('\n');
+            stdout_buf.push_line(&line);
         }
 
         let status = child.wait().await?;
@@ -1938,7 +1937,7 @@ impl PiExecutor {
         };
 
         Ok(AgentOutput {
-            stdout: stdout_buf,
+            stdout: stdout_buf.into_string(),
             stderr,
             success,
             pid,
@@ -2826,6 +2825,67 @@ pub fn describe_exit_status_code(code: i32) -> String {
         }
     }
     format!("exit code {code}")
+}
+
+/// Head bytes kept verbatim by [`BoundedOutput`] — enough for the run's setup.
+const BOUNDED_OUTPUT_HEAD: usize = 64 * 1024;
+/// Trailing bytes kept by [`BoundedOutput`] — where the result or error lands.
+const BOUNDED_OUTPUT_TAIL: usize = 192 * 1024;
+
+/// A run's captured stdout, bounded in memory while keeping both ends.
+///
+/// The agent's stdout was accumulated into an unbounded `String` for the whole
+/// run, so a long agent turn with large tool results held all of it resident.
+/// Nothing parses this buffer — the JSON events are decoded per line as they
+/// arrive and this is only the stored record — so eliding the middle costs no
+/// behavior.
+///
+/// Both ends are kept deliberately: the head carries the run's setup and the
+/// tail carries the result or the error, which are the two things anyone
+/// reading a failed run actually needs.
+#[derive(Default)]
+pub struct BoundedOutput {
+    head: String,
+    tail: String,
+    dropped: usize,
+}
+
+impl BoundedOutput {
+    pub fn push_line(&mut self, line: &str) {
+        // `self.tail.is_empty()` closes the head for good once anything has
+        // spilled. Without it a short line still fits the head's leftover
+        // capacity after longer lines have already gone to the tail, and the
+        // record silently reorders itself.
+        if self.tail.is_empty() && self.head.len() + line.len() + 1 <= BOUNDED_OUTPUT_HEAD {
+            self.head.push_str(line);
+            self.head.push('\n');
+            return;
+        }
+        self.tail.push_str(line);
+        self.tail.push('\n');
+        // Trim whole lines off the front so the tail stays a run of complete
+        // lines rather than resuming mid-token.
+        while self.tail.len() > BOUNDED_OUTPUT_TAIL {
+            let Some(cut) = self.tail.find('\n').map(|i| i + 1) else {
+                break;
+            };
+            self.dropped += cut;
+            self.tail.drain(..cut);
+        }
+    }
+
+    pub fn into_string(self) -> String {
+        if self.tail.is_empty() {
+            return self.head;
+        }
+        if self.dropped == 0 {
+            return self.head + &self.tail;
+        }
+        format!(
+            "{}\n...[{} bytes elided to bound memory]...\n{}",
+            self.head, self.dropped, self.tail
+        )
+    }
 }
 
 /// Last `max` bytes of a captured process stream, lossy-decoded and
@@ -5313,6 +5373,72 @@ mod tests {
             "stdout diagnostics must survive: {}",
             msg
         );
+    }
+
+    /// A normal run must round-trip byte-for-byte — this replaced an unbounded
+    /// `String`, so anything short has to look exactly as it did before.
+    #[test]
+    fn short_output_is_unchanged() {
+        let mut out = BoundedOutput::default();
+        out.push_line("{\"type\":\"start\"}");
+        out.push_line("{\"type\":\"agent_end\"}");
+        assert_eq!(
+            out.into_string(),
+            "{\"type\":\"start\"}\n{\"type\":\"agent_end\"}\n"
+        );
+    }
+
+    /// A long agent turn is bounded, and both ends survive: the head carries
+    /// the setup, the tail carries the result or error. Losing the tail would
+    /// be worse than the memory it saves — that is where failures land.
+    #[test]
+    fn long_output_is_bounded_and_keeps_both_ends() {
+        let mut out = BoundedOutput::default();
+        out.push_line("FIRST_LINE_MARKER");
+        for i in 0..40_000 {
+            out.push_line(&format!(
+                "{{\"tool_result\":{},\"padding\":\"{}\"}}",
+                i,
+                "x".repeat(64)
+            ));
+        }
+        out.push_line("LAST_LINE_MARKER");
+
+        let s = out.into_string();
+        assert!(
+            s.starts_with("FIRST_LINE_MARKER\n"),
+            "head must survive so the run's setup is still readable"
+        );
+        assert!(
+            s.trim_end().ends_with("LAST_LINE_MARKER"),
+            "tail must survive — the result and any error land there"
+        );
+        assert!(
+            s.contains("bytes elided"),
+            "elision must be visible, not silent"
+        );
+        assert!(
+            s.len() <= BOUNDED_OUTPUT_HEAD + BOUNDED_OUTPUT_TAIL + 128,
+            "bounded output grew to {} bytes",
+            s.len()
+        );
+    }
+
+    /// The tail is trimmed by whole lines, so it never resumes mid-JSON.
+    #[test]
+    fn elided_tail_starts_on_a_line_boundary() {
+        let mut out = BoundedOutput::default();
+        for i in 0..40_000 {
+            out.push_line(&format!("{{\"n\":{},\"pad\":\"{}\"}}", i, "y".repeat(64)));
+        }
+        let s = out.into_string();
+        let tail = s.rsplit("]...\n").next().unwrap();
+        for line in tail.lines().take(5) {
+            assert!(
+                line.starts_with('{') && line.ends_with('}'),
+                "tail line resumed mid-record: {line}"
+            );
+        }
     }
 
     #[test]

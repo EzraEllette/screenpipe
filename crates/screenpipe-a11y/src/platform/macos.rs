@@ -54,6 +54,26 @@ fn record_input_monitoring_truth(granted: bool) {
 }
 
 // Keycodes for clipboard operations (macOS)
+/// Did `run_in_mode` come back without having waited at all?
+///
+/// `Finished` (no sources or timers left in this mode) and `Stopped`
+/// (`CFRunLoopStop`) both return immediately, so a caller that loops straight
+/// back in spins a core. `TimedOut` already waited out the slice, and
+/// `HandledSource` is the healthy busy path that must stay hot.
+fn ax_run_loop_returned_without_waiting(result: cf::RunLoopRunResult) -> bool {
+    matches!(
+        result,
+        cf::RunLoopRunResult::Finished | cf::RunLoopRunResult::Stopped
+    )
+}
+
+/// How long one AX run-loop slice waits when the mode is idle but healthy.
+const AX_RUN_LOOP_SLICE_SECS: f64 = 0.1;
+/// Yield for a full slice when `run_in_mode` returned without waiting at all.
+/// Matching the slice keeps a sourceless observer thread at roughly the same
+/// wake rate as a healthy idle one instead of at 100% of a core.
+const AX_RUN_LOOP_IDLE_BACKOFF: Duration = Duration::from_millis(100);
+
 const KEY_C: u16 = 8;
 const KEY_X: u16 = 7;
 const KEY_V: u16 = 9;
@@ -1613,7 +1633,27 @@ fn run_app_observer(
     };
 
     while !stop.load(Ordering::Acquire) {
-        cf::RunLoop::run_in_mode(run_loop_mode, 0.1, true);
+        let result = cf::RunLoop::run_in_mode(run_loop_mode, AX_RUN_LOOP_SLICE_SECS, true);
+
+        // `Finished` means this mode has no sources or timers left — the
+        // observed app exited, the observer was invalidated, or every
+        // `add_notification` above failed — and `Stopped` means someone called
+        // CFRunLoopStop. Both return *immediately* instead of waiting out the
+        // interval, so looping straight back into `run_in_mode` turns this
+        // thread into a spin at 100% of one core. Nothing re-adds a source
+        // unless `refresh_requested` fires, so it never recovers on its own.
+        //
+        // This is the shape behind the macOS pinned-core cohort: p98 CPU sits
+        // at ~112% (one saturated core) in every uptime bucket, and the pinned
+        // share climbs with uptime because a latched process never comes back
+        // — 99 users at a 55.8h median while their median peer sits near 8%.
+        //
+        // `HandledSource` must keep looping immediately; returning promptly
+        // after one source is the entire point of `return_after_source_handled`
+        // and is what keeps focus tracking responsive.
+        if ax_run_loop_returned_without_waiting(result) {
+            std::thread::sleep(AX_RUN_LOOP_IDLE_BACKOFF);
+        }
 
         if refresh_requested.swap(false, Ordering::SeqCst) {
             reattach_observer();
@@ -2754,6 +2794,49 @@ extern "C" fn activity_only_callback(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The AX observer thread loops on `run_in_mode`. Two of the four results
+    /// come back instantly: `Finished` when the mode has no sources or timers
+    /// left, and `Stopped` after `CFRunLoopStop`. Looping straight back in on
+    /// either pins the thread at 100% of one core, and nothing re-adds a source
+    /// unless a refresh is requested, so it never recovers — the shape behind
+    /// ~99 macOS users sitting at one saturated core with a 55.8h median
+    /// uptime while their median peer used ~8%.
+    #[test]
+    fn instant_run_loop_returns_back_off_and_waiting_ones_do_not() {
+        assert!(
+            ax_run_loop_returned_without_waiting(cf::RunLoopRunResult::Finished),
+            "no sources left returns immediately — looping on it is the spin"
+        );
+        assert!(
+            ax_run_loop_returned_without_waiting(cf::RunLoopRunResult::Stopped),
+            "CFRunLoopStop returns immediately too"
+        );
+
+        // These two must never back off. `TimedOut` already waited out the
+        // slice, and delaying `HandledSource` would add latency to every focus
+        // change — returning promptly after one source is the entire point of
+        // `return_after_source_handled`.
+        assert!(
+            !ax_run_loop_returned_without_waiting(cf::RunLoopRunResult::TimedOut),
+            "TimedOut already waited the full slice"
+        );
+        assert!(
+            !ax_run_loop_returned_without_waiting(cf::RunLoopRunResult::HandledSource),
+            "HandledSource is the healthy busy path and must stay hot"
+        );
+    }
+
+    /// A sourceless observer thread should wake at roughly the same rate as a
+    /// healthy idle one, not faster.
+    #[test]
+    fn idle_backoff_matches_one_healthy_slice() {
+        assert_eq!(
+            AX_RUN_LOOP_IDLE_BACKOFF.as_secs_f64(),
+            AX_RUN_LOOP_SLICE_SECS,
+            "backoff drifting from the slice changes the sourceless wake rate"
+        );
+    }
 
     #[test]
     fn test_permission_check() {
