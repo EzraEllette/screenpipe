@@ -19,8 +19,8 @@ use super::content_process::setup_content_process_handler;
 use super::first_responder::{make_nswindow_webview_first_responder, make_webview_first_responder};
 #[cfg(target_os = "macos")]
 use super::focus::{
-    begin_search_focus_session, finish_search_focus_session, restore_frontmost_app,
-    restore_frontmost_app_if_external_with_app,
+    appkit_focus_is_descendant_of, begin_search_focus_session, finish_search_focus_session,
+    restore_frontmost_app, restore_frontmost_app_if_external_with_app,
 };
 use super::panel::{main_label_for_mode, MAIN_CREATED_MODE};
 #[cfg(target_os = "macos")]
@@ -1300,6 +1300,15 @@ impl ShowRewindWindow {
                         #[cfg(not(target_os = "linux"))]
                         tauri::WindowEvent::Focused(is_focused) => {
                             if !is_focused {
+                                #[cfg(target_os = "macos")]
+                                if appkit_focus_is_descendant_of(&window_clone) {
+                                    info!(
+                                        "Main window focus moved to an attached child; keeping overlay visible"
+                                    );
+                                    focus_cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+                                    MAIN_PANEL_SHOWN.store(true, std::sync::atomic::Ordering::SeqCst);
+                                    return;
+                                }
                                 info!("Main window lost focus, scheduling hide (300ms debounce)");
                                 // Synchronous alpha=0 — panel stays in window list
                                 // but is invisible. No order_out (causes focus loops).
@@ -1320,11 +1329,63 @@ impl ShowRewindWindow {
                                 focus_cancel.store(false, std::sync::atomic::Ordering::SeqCst);
                                 let cancel = focus_cancel.clone();
                                 let app = app_clone.clone();
+                                #[cfg(target_os = "macos")]
+                                let window = window_clone.clone();
                                 std::thread::spawn(move || {
                                     std::thread::sleep(std::time::Duration::from_millis(300));
                                     if cancel.load(std::sync::atomic::Ordering::SeqCst) {
                                         info!("Focus-loss hide cancelled (panel regained focus)");
                                         return;
+                                    }
+                                    // AppKit can report the parent's focus loss before it
+                                    // updates `keyWindow`. Re-check on the main thread after
+                                    // the debounce so clicks into an attached native child do
+                                    // not dismiss the overlay.
+                                    #[cfg(target_os = "macos")]
+                                    {
+                                        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+                                        let app2 = app.clone();
+                                        let window2 = window.clone();
+                                        let lbl = {
+                                            let mode = MAIN_CREATED_MODE
+                                                .lock()
+                                                .unwrap_or_else(|e| e.into_inner())
+                                                .clone();
+                                            main_label_for_mode(&mode).to_string()
+                                        };
+                                        if app
+                                            .run_on_main_thread(move || {
+                                                let keep_visible =
+                                                    appkit_focus_is_descendant_of(&window2);
+                                                if keep_visible {
+                                                    if let Ok(panel) =
+                                                        app2.get_webview_panel(&lbl)
+                                                    {
+                                                        unsafe {
+                                                            use objc::{msg_send, sel, sel_impl};
+                                                            let _: () = msg_send![
+                                                                &*panel,
+                                                                setAlphaValue: 1.0f64
+                                                            ];
+                                                        }
+                                                    }
+                                                    MAIN_PANEL_SHOWN.store(
+                                                        true,
+                                                        std::sync::atomic::Ordering::SeqCst,
+                                                    );
+                                                }
+                                                let _ = sender.send(keep_visible);
+                                            })
+                                            .is_ok()
+                                            && receiver
+                                                .recv_timeout(std::time::Duration::from_secs(1))
+                                                .unwrap_or(false)
+                                        {
+                                            info!(
+                                                "Main window focus settled on an attached child; keeping overlay visible"
+                                            );
+                                            return;
+                                        }
                                     }
                                     info!("Main window hiding after debounce");
                                     // Dispatch all AppKit work to main thread — this

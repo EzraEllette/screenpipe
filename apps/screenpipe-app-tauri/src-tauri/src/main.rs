@@ -173,6 +173,7 @@ mod log_files;
 mod media_commands;
 mod native_notification;
 mod native_shortcut_reminder;
+mod native_timeline;
 #[cfg(target_os = "windows")]
 mod native_overlay_win;
 mod notifications;

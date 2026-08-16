@@ -22,6 +22,7 @@ import { UpdateBanner } from "@/components/update-banner";
 import { useManagedPolicy } from "@/lib/hooks/use-managed-policy";
 import { ModelDownloadTracker } from "@/components/model-download-tracker";
 import Timeline from "@/components/rewind/timeline";
+import { NativeTimeline } from "@/components/rewind/native-timeline";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { RefreshCw, AlertTriangle, WifiOff, Upload, Loader, Check, Calendar, X } from "lucide-react";
@@ -384,7 +385,7 @@ export default function OverlayPage() {
           <UpdateBanner />
           
           {showTimeline ? (
-            <div className="w-full scrollbar-hide bg-background relative">
+            <div className="w-full h-screen scrollbar-hide bg-background relative">
               {/* Subtle disconnected indicator - only show if we have data but no connection */}
               {hasAnyData && !isConnected && isServerDown && (
                 <div className="fixed top-10 right-4 z-50 flex items-center gap-2 px-3 py-1.5 bg-muted/90 backdrop-blur-sm rounded-full text-xs text-muted-foreground border">
@@ -403,7 +404,7 @@ export default function OverlayPage() {
                 </div>
               )}
               <TimelineErrorBoundary>
-                <Timeline />
+                <NativeTimeline fallback={<Timeline />} />
               </TimelineErrorBoundary>
             </div>
           ) : showServerError ? (

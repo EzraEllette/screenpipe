@@ -72,6 +72,157 @@ pub(super) fn install_notification_action_callback(app_handle: &tauri::AppHandle
 pub(super) fn install_shortcut_action_callback(app_handle: &tauri::AppHandle) {
     let _ = GLOBAL_APP_HANDLE.set(app_handle.clone());
     native_shortcut_reminder::set_action_callback(native_shortcut_action_callback);
+    // The native timeline shares the same trampoline lifetime, so install it
+    // here rather than adding a second startup hook that could drift.
+    crate::native_timeline::set_action_callback(native_timeline_action_callback);
+    install_native_timeline_placement(app_handle);
+}
+
+/// Lets the webview pin the native timeline over a slice of its own layout.
+///
+/// This rides on events rather than commands on purpose: the rect changes on
+/// every resize, and a command would mean a generated binding for a call whose
+/// only job is to forward four numbers. The webview is the only thing that
+/// knows where its content area is, so it has to be the one to say.
+fn install_native_timeline_placement(app_handle: &tauri::AppHandle) {
+    use tauri::{Emitter, Listener};
+
+    let attach_handle = app_handle.clone();
+    app_handle.listen("native-timeline-attach", move |event| {
+        let Ok(mut payload) = serde_json::from_str::<serde_json::Value>(event.payload()) else {
+            return;
+        };
+        payload["hostWindow"] = serde_json::json!(-1);
+        let pointer = host_window_pointer(&attach_handle, &payload);
+        if let Some(pointer) = pointer {
+            payload["hostPointer"] = serde_json::json!(pointer);
+        }
+        let ok = pointer.is_some() && crate::native_timeline::show_raw(&payload.to_string());
+        tracing::info!(
+            target: "native_timeline",
+            label = payload.get("windowLabel").and_then(|v| v.as_str()).unwrap_or("?"),
+            resolved_host = pointer.is_some(),
+            attached = ok,
+            "native timeline attach request"
+        );
+        // Tell the webview whether it actually got a window. Without this a
+        // failed attach is a transparent hole in the layout, which reads as a
+        // blank screen rather than as "fall back to the React timeline".
+        let label = payload
+            .get("windowLabel")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let _ = attach_handle.emit(
+            "native-timeline-attached",
+            serde_json::json!({ "windowLabel": label, "ok": ok }),
+        );
+    });
+
+    let detach_handle = app_handle.clone();
+    app_handle.listen("native-timeline-detach", move |event| {
+        let payload = serde_json::from_str::<serde_json::Value>(event.payload())
+            .unwrap_or_else(|_| serde_json::json!({}));
+        let mut out = serde_json::json!({});
+        if let Some(pointer) = host_window_pointer(&detach_handle, &payload) {
+            out["hostPointer"] = serde_json::json!(pointer);
+        }
+        crate::native_timeline::detach(&out.to_string());
+    });
+}
+
+/// The address of the `NSWindow` behind a Tauri window label.
+///
+/// Which window is asking matters once more than one of them shows a timeline,
+/// and "the main window" stops being an answer. The label comes from the
+/// webview, which is the only side that knows who it is; Tauri turns it into
+/// the AppKit handle that Swift can attach to.
+#[cfg(target_os = "macos")]
+fn host_window_pointer(app: &tauri::AppHandle, payload: &serde_json::Value) -> Option<isize> {
+    use tauri::Manager;
+
+    let label = payload.get("windowLabel")?.as_str()?;
+    let window = app.get_webview_window(label)?;
+    window.ns_window().ok().map(|ptr| ptr as isize)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn host_window_pointer(_app: &tauri::AppHandle, _payload: &serde_json::Value) -> Option<isize> {
+    None
+}
+
+/// Callback invoked from Swift when the native timeline asks the app to do
+/// something it deliberately cannot do itself: open another window, write to
+/// the clipboard, or delete a range.
+///
+/// A Rust panic crossing this Cocoa→Rust trampoline aborts the whole app, so
+/// everything is caught here.
+extern "C" fn native_timeline_action_callback(action_ptr: *const std::os::raw::c_char) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        native_timeline_action_callback_inner(action_ptr);
+    }));
+}
+
+fn native_timeline_action_callback_inner(action_ptr: *const std::os::raw::c_char) {
+    if action_ptr.is_null() {
+        return;
+    }
+    let raw = match unsafe { std::ffi::CStr::from_ptr(action_ptr) }.to_str() {
+        Ok(value) => value.to_string(),
+        Err(_) => return,
+    };
+    let Some(app) = GLOBAL_APP_HANDLE.get().cloned() else {
+        return;
+    };
+
+    use crate::native_timeline::TimelineAction;
+    use tauri::Emitter;
+
+    match TimelineAction::parse(&raw) {
+        TimelineAction::CloseWindow => {
+            crate::native_timeline::hide();
+            // The Swift close button and its attached-window blur both mean
+            // close the overlay, not merely remove the AppKit child and leave
+            // an empty webview host behind.
+            tauri::async_runtime::spawn(async move {
+                if let Err(error) = crate::commands::close_window(app, ShowRewindWindow::Main).await
+                {
+                    tracing::warn!(%error, "failed to close timeline overlay");
+                }
+            });
+        }
+        TimelineAction::OpenSearch => {
+            let _ = app.emit("timeline-open-search", ());
+        }
+        TimelineAction::OpenChat => {
+            let _ = app.emit("timeline-open-chat", ());
+        }
+        TimelineAction::OpenRecordingSettings => {
+            let _ = app.emit("timeline-open-recording-settings", ());
+        }
+        TimelineAction::CopyFrame { frame_id } => {
+            let _ = app.emit("timeline-copy-frame", frame_id);
+        }
+        TimelineAction::CopyText => {
+            let _ = app.emit("timeline-copy-text", ());
+        }
+        TimelineAction::AskAiSelection => {
+            let _ = app.emit("timeline-ask-ai-selection", ());
+        }
+        TimelineAction::ApplyTag { tag } => {
+            // Swift already wrote the tag optimistically; this is for anything
+            // in the app that wants to react (toasts, analytics).
+            let _ = app.emit("timeline-tag-applied", tag);
+        }
+        TimelineAction::DeleteRange => {
+            let _ = app.emit("timeline-delete-range", ());
+        }
+        TimelineAction::Unknown { raw } => {
+            // Forwarded rather than dropped so a newer Swift build is not
+            // silently ignored by an older Rust one.
+            let _ = app.emit("timeline-action", raw);
+        }
+    }
 }
 
 fn notification_copy_value(action: &serde_json::Value) -> Option<String> {
