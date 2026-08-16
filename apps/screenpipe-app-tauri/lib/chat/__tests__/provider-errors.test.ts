@@ -53,6 +53,23 @@ describe("provider error copy", () => {
     expect(presentation?.message).not.toContain("account_not_in_good_standing");
   });
 
+  it("maps the gateway regional denial to friendly, non-retryable copy", () => {
+    const raw = `Error: 403 data: {"error":{"message":"Cloud AI models aren't available in your country or region (the provider rejected the request). Connect a local model like Ollama in Settings → AI to keep using chat.","type":"api_error","code":"403"}}\n\ndata: [DONE]`;
+    const presentation = buildProviderErrorPresentation(raw, {
+      provider: "screenpipe-cloud",
+      model: "auto",
+    });
+
+    expect(presentation).toEqual({
+      kind: "provider",
+      message: "Cloud AI models aren't available in your country or region (the provider rejected the request). Connect a local model like Ollama in Settings → AI to keep using chat.",
+      retryable: false,
+    });
+    expect(presentation?.message).not.toContain("Error: 403");
+    expect(presentation?.message).not.toContain("data:");
+    expect(presentation?.message).not.toContain("[DONE]");
+  });
+
   it("does not classify an ordinary provider error as a safety refusal", () => {
     expect(SafetyRefusalError.from("Connection error.")).toBeNull();
     expect(

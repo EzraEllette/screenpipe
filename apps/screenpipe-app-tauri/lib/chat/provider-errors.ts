@@ -17,6 +17,8 @@ const MIN_AGENT_CONTEXT_TOKENS = 32_768;
 const tokenFormatter = new Intl.NumberFormat("en-US");
 const SAFETY_REFUSAL_MESSAGE =
   "The selected model declined this request because of its safety policy. This is not a screenpipe outage. Start a new chat and revise the request with clear authorized context, or ask for high-level guidance.";
+const CLOUD_REGIONAL_DENIAL_MESSAGE =
+  "Cloud AI models aren't available in your country or region (the provider rejected the request). Connect a local model like Ollama in Settings → AI to keep using chat.";
 
 export type ProviderErrorPresentation = {
   kind: "provider" | "safety_refusal";
@@ -356,6 +358,17 @@ export function buildProviderErrorPresentation(
   const standingMessage = buildAccountStandingMessage(errorStr);
   if (standingMessage) {
     return { kind: "provider", message: standingMessage, retryable: false };
+  }
+
+  // The hosted gateway already provides safe recovery copy for geo-blocked
+  // regions, but Pi wraps it in raw SSE framing. Match the stable sentence and
+  // return our own constant so transport details and any suffix stay inert.
+  if (
+    errorStr
+      .toLowerCase()
+      .includes("cloud ai models aren't available in your country or region")
+  ) {
+    return { kind: "provider", message: CLOUD_REGIONAL_DENIAL_MESSAGE, retryable: false };
   }
 
   // A coding agent's own service refusing the user, before the generic provider
