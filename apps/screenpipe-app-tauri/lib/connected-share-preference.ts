@@ -22,6 +22,16 @@ export type RememberedShare = {
   destination: string;
   /** Slack channel/user id, or Linear team id, depending on destination. */
   target?: string;
+  /**
+   * How that target reads to a person: `#product`, `my Slack messages`, `ENG`.
+   *
+   * Stored at send time rather than resolved on read, because resolving it
+   * means fetching the channel or team list, and the one place that most needs
+   * to name the destination — a button offering to send there again — would
+   * then have to make a network call before it could render its own label.
+   * The dialog already knows the name at the moment it sends.
+   */
+  targetLabel?: string;
   /** Slack instance id, when the workspace is not the default. */
   instance?: string;
 };
@@ -65,6 +75,8 @@ export function readRememberedShare(
     return {
       destination: value.destination,
       target: typeof value.target === "string" ? value.target : undefined,
+      targetLabel:
+        typeof value.targetLabel === "string" ? value.targetLabel : undefined,
       instance: typeof value.instance === "string" ? value.instance : undefined,
     };
   } catch {
@@ -122,6 +134,36 @@ export function rememberedSendLabel(
 ): string {
   const app = remembered ? DESTINATION_APP[remembered.destination] : undefined;
   return app ? `send to ${app}…` : "send to an app…";
+}
+
+/**
+ * The one-tap repeat of the last send, when it can be stated exactly.
+ *
+ * A button that sends the moment it is pressed has to name where, in full,
+ * before the press. "send to Slack" is not enough: the workspace has a dozen
+ * channels and the difference between the right one and a public one is the
+ * whole risk. So this returns nothing unless the exact target was recorded,
+ * which in practice means the send happened after `targetLabel` shipped.
+ *
+ * Only the two direct destinations qualify. `chat-*` hands off to the agent for
+ * review, so "one tap" there would be one tap to open a conversation, which the
+ * dialog already does and does not need a second control for.
+ *
+ * Availability is the caller's job: a remembered channel whose connection has
+ * since been revoked must not be offered, and only the caller knows that.
+ */
+export function rememberedOneTapSend(
+  remembered: RememberedShare | null,
+): { destination: "slack" | "linear"; target: string; label: string } | null {
+  if (!remembered?.target || !remembered.targetLabel) return null;
+  if (remembered.destination !== "slack" && remembered.destination !== "linear") {
+    return null;
+  }
+  return {
+    destination: remembered.destination,
+    target: remembered.target,
+    label: remembered.targetLabel,
+  };
 }
 
 export function preferredShareDestination(

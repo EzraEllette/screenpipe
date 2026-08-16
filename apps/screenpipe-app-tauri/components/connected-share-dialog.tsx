@@ -69,6 +69,13 @@ import {
   type RememberedShare,
 } from "@/lib/connected-share-preference";
 import { showChatWithPrefill } from "@/lib/chat-utils";
+import {
+  createLinearIssue,
+  responseError,
+  sendSlackSnapshot,
+  DEFAULT_SLACK_INSTANCE,
+  SELF_SLACK_TARGET,
+} from "@/lib/connected-share-send";
 
 /**
  * Where a reviewed snapshot can go.
@@ -107,26 +114,10 @@ type Receipt = {
   url?: string;
 };
 
-const SELF_SLACK_TARGET = "__self__";
-const DEFAULT_SLACK_INSTANCE = "__default__";
 const EMPTY_AVAILABILITY: ShareConnectionAvailability = {
   direct: { slack: false, linear: false },
   chat: { linear: false, notion: false },
 };
-
-function responseError(body: unknown, fallback: string): string {
-  if (typeof body !== "object" || body === null) return fallback;
-  const record = body as Record<string, unknown>;
-  if (typeof record.error === "string") return record.error;
-  if (typeof record.details === "string") return record.details;
-  const errors = Array.isArray(record.errors) ? record.errors : [];
-  const first = errors[0];
-  if (typeof first === "object" && first !== null) {
-    const message = (first as Record<string, unknown>).message;
-    if (typeof message === "string") return message;
-  }
-  return fallback;
-}
 
 function slackChannelErrorMessage(error: string): string {
   if (error.toLowerCase().includes("missing_scope")) {
@@ -633,6 +624,23 @@ export function ConnectedShareDialog({
     return "copy snapshot";
   };
 
+  /**
+   * The human name of whatever this send is about to land in.
+   *
+   * Only the two direct destinations get one: a `chat-*` handoff has no target
+   * until the agent picks one, so naming it here would be a guess.
+   */
+  const rememberedTargetLabel = (value: Destination): string | undefined => {
+    if (value === "slack") {
+      const channel = slackChannels.find((item) => item.id === slackTarget);
+      return channel ? `#${channel.name}` : "my Slack messages";
+    }
+    if (value === "linear") {
+      return linearTeams.find((item) => item.id === linearTeamId)?.key;
+    }
+    return undefined;
+  };
+
   const selectDestination = (next: Destination) => {
     setDestination(next);
     setReceipt(null);
@@ -660,58 +668,29 @@ export function ConnectedShareDialog({
 
   const sendToSlack = async () => {
     const channel = slackChannels.find((item) => item.id === slackTarget);
-    const response = await localFetch("/connections/slack/send", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        text: slackMessage,
-        ...(channel ? { channel: channel.id } : {}),
-        ...(slackInstance !== DEFAULT_SLACK_INSTANCE
-          ? { instance: slackInstance }
-          : {}),
-      }),
+    const result = await sendSlackSnapshot({
+      text: slackMessage,
+      target: slackTarget,
+      instance: slackInstance,
     });
-    const body = await response.json();
-    if (!response.ok || body?.ok === false) {
-      throw new Error(
-        responseError(body, "Slack couldn't send this snapshot."),
-      );
-    }
     setReceipt({
       title: "sent to Slack",
-      detail: `${body?.team || "Slack"} · ${channel ? `#${channel.name}` : "your messages"} · ${body?.ts || "delivered"}`,
+      detail: `${result.team || "Slack"} · ${channel ? `#${channel.name}` : "your messages"} · ${result.ts || "delivered"}`,
     });
   };
 
   const sendToLinear = async () => {
     const team = linearTeams.find((item) => item.id === linearTeamId);
     if (!team) throw new Error("Choose a Linear team first.");
-    const response = await localFetch("/connections/linear/proxy/graphql", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        query:
-          "mutation CreateSharedIssue($input: IssueCreateInput!) { issueCreate(input: $input) { success issue { id identifier url title } } }",
-        variables: {
-          input: {
-            teamId: team.id,
-            title: linearTitle.trim(),
-            description: message,
-          },
-        },
-      }),
+    const issue = await createLinearIssue({
+      teamId: team.id,
+      title: linearTitle.trim(),
+      description: message,
     });
-    const body = await response.json();
-    const result = body?.data?.issueCreate;
-    if (!response.ok || body?.errors || result?.success !== true) {
-      throw new Error(
-        responseError(body, "Linear couldn't create this issue."),
-      );
-    }
     setReceipt({
-      title: `created ${result.issue?.identifier || "Linear issue"}`,
-      detail: `${team.name} · ${result.issue?.title || linearTitle}`,
-      url: typeof result.issue?.url === "string" ? result.issue.url : undefined,
+      title: `created ${issue.identifier || "Linear issue"}`,
+      detail: `${team.name} · ${issue.title || linearTitle}`,
+      url: issue.url,
     });
   };
 
@@ -757,6 +736,10 @@ export function ConnectedShareDialog({
       writeRememberedShare(artifact.surface, {
         destination,
         target: destination === "slack" ? slackTarget : linearTeamId || undefined,
+        // Recorded here because this is the only place that has both the id and
+        // the name. A control offering to send here again can then say exactly
+        // where without a lookup.
+        targetLabel: rememberedTargetLabel(destination),
         instance: destination === "slack" ? slackInstance : undefined,
       });
       if (destination === "slack" || destination === "linear") {

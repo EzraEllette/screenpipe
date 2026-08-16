@@ -10,6 +10,7 @@ import {
   Loader2,
   Mail,
   MoreHorizontal,
+  Send,
   Share,
 } from "lucide-react";
 
@@ -69,7 +70,9 @@ export type MeetingShareAction =
   /** the everything dump: header, notes, transcript */
   | "meeting"
   /** open the review-first dialog that sends to a connected app */
-  | "send";
+  | "send"
+  /** send straight to the destination this meeting went to last */
+  | "resend";
 
 // Matches the tab buttons on the same rule: same height, same rhythm, same
 // separator. The control has to read as part of the rule, not as a chip
@@ -82,6 +85,7 @@ const ACTION_LABEL: Record<MeetingShareAction, string> = {
   transcript: "copy transcript",
   meeting: "copy meeting + transcript",
   send: "send to an app…",
+  resend: "send again",
 };
 
 const ACTION_ICON: Record<
@@ -93,6 +97,7 @@ const ACTION_ICON: Record<
   transcript: Copy,
   meeting: Copy,
   send: Share,
+  resend: Send,
 };
 
 /** One entry in the single overflow menu. */
@@ -122,6 +127,7 @@ export function MeetingShareMenu({
   canShareSummary,
   canSend = false,
   sendLabel,
+  resendLabel,
   busy = false,
   copiedAction = null,
   moreGroups = [],
@@ -140,6 +146,12 @@ export function MeetingShareMenu({
    * is faster than reading "send" and then discovering which app it meant.
    */
   sendLabel?: string;
+  /**
+   * The exact destination of the last send, e.g. `#product`. Present only when
+   * that destination is still reachable and can be named in full, which is what
+   * turns the rule's send slot from "open a chooser" into one tap.
+   */
+  resendLabel?: string;
   busy?: boolean;
   /** Which action last landed on the clipboard, for the transient check. */
   copiedAction?: MeetingShareAction | null;
@@ -178,9 +190,28 @@ export function MeetingShareMenu({
 
   // The leftover copy destinations become ordinary labelled groups, so the menu
   // has one shape and the renderer below has no special cases.
+  // Only offered when the last destination is still reachable and nameable.
+  const oneTap = canSend ? resendLabel : undefined;
+
+  // With one tap on the rule, the chooser is the exception rather than the
+  // default, so it moves under the caret. It must stay reachable: a standing
+  // destination is a convenience, not a lock-in, and "somewhere else" is the
+  // only escape from it.
+  const sendGroupActions: MeetingShareAction[] = [
+    ...mailActions,
+    ...(oneTap ? (["send"] as MeetingShareAction[]) : []),
+  ];
+
   const groups: MeetingMenuGroup[] = [
     { label: "copy", items: toItems(clipboardActions) },
-    { label: "send", items: toItems(mailActions) },
+    {
+      label: "send",
+      items: toItems(sendGroupActions).map((item) =>
+        item.key === "send"
+          ? { ...item, label: "send somewhere else…" }
+          : item,
+      ),
+    },
     ...moreGroups,
   ].filter((group) => group.items.length > 0);
 
@@ -217,7 +248,7 @@ export function MeetingShareMenu({
           would spend the rule's scarcest slot on unproven demand. The glyph is
           the macOS share sheet rather than a paper plane: this opens a
           destination chooser, it does not submit a message. */}
-      {canSend && (
+      {canSend && !oneTap && (
         <button
           type="button"
           onClick={() => onShare("send")}
@@ -228,6 +259,33 @@ export function MeetingShareMenu({
           className={cn(RULE_ACTION_CLASS, "px-4")}
         >
           <Share className="h-3.5 w-3.5" />
+        </button>
+      )}
+
+      {/* Once the destination is known there is nothing left to choose, so the
+          slot stops being a chooser and becomes the send itself. It carries a
+          word where the chooser was icon-only, because this one commits: the
+          label has to say where before the press, not after it. The paper plane
+          replaces the share sheet for the same reason — this submits.
+          Picking a different destination stays available under the caret. */}
+      {canSend && oneTap && (
+        <button
+          type="button"
+          onClick={() => onShare("resend")}
+          disabled={busy}
+          data-testid="meeting-resend-button"
+          aria-label={`send to ${oneTap}`}
+          title={`send this meeting to ${oneTap} now`}
+          className={cn(RULE_ACTION_CLASS, "gap-1.5 px-4")}
+        >
+          {busy ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <Send className="h-3.5 w-3.5" />
+          )}
+          <span className="hidden max-w-[12ch] truncate sm:inline">
+            {oneTap}
+          </span>
         </button>
       )}
 

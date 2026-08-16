@@ -132,6 +132,7 @@ import {
   readRememberedShare,
   rememberedSendLabel,
 } from "@/lib/connected-share-preference";
+import { useMeetingOneTapSend } from "./use-meeting-one-tap-send";
 import {
   resolveTranscriptOpen,
   type TranscriptOpenIntent,
@@ -318,6 +319,29 @@ export function NoteView({
       }),
     [attendees, meeting, note, title],
   );
+  const oneTapSend = useMeetingOneTapSend(shareArtifact);
+
+  /**
+   * The press is the confirmation, so the receipt has to be unmissable.
+   *
+   * Nothing was reviewed on the way out: the user pressed a button naming a
+   * destination and the message left. Saying exactly where it landed is what
+   * keeps that honest, and a failure has to be loud for the same reason —
+   * silence after a send reads as success.
+   */
+  const handleOneTapSend = useCallback(async () => {
+    const result = await oneTapSend.send();
+    if (result.ok) {
+      toast({ title: result.detail });
+      return;
+    }
+    toast({
+      title: "couldn't send",
+      description: result.error,
+      variant: "destructive",
+    });
+  }, [oneTapSend, toast]);
+
   const summaryPipeSlug = settings.meetingSummaryPipeSlug || "meeting-summary";
   const summaryWorking =
     summarizing ||
@@ -1777,16 +1801,21 @@ export function NoteView({
                     can_send: shareArtifact.sections.length > 0,
                   });
                 }}
+                resendLabel={oneTapSend.label ?? undefined}
                 onShare={(action) => {
                   posthog.capture("meeting_share_action", {
                     action,
-                    from_rule: action === "summary" || action === "send",
+                    from_rule:
+                      action === "summary" ||
+                      action === "send" ||
+                      action === "resend",
                     has_summary: canShareSummary,
                   });
                   if (action === "summary") void handleCopySummary();
                   else if (action === "email") void handleEmailSummary();
                   else if (action === "transcript") void handleCopyTranscript();
                   else if (action === "send") setShareOpen(true);
+                  else if (action === "resend") void handleOneTapSend();
                   else void handleCopy();
                 }}
               />
