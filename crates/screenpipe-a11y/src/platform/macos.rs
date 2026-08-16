@@ -33,6 +33,43 @@ use objc2_app_kit::NSPasteboard;
 /// and cause a SIGABRT in CFDictionarySetValue / __CFBasicHashRehash.
 static AX_QUERY_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
+/// Process-wide ceiling for any AX call that does not set its own timeout.
+///
+/// macOS defaults to roughly 6s per message. AX reads are synchronous IPC
+/// serviced on the *target app's* main thread, so an unbounded read against a
+/// busy app stalls that app's UI — including drag loops — for as long as we are
+/// willing to wait. Several focus-path reads (`focused_app`, `focused_window`,
+/// `focused_ui_element`, `element_at_pos`) run straight off AX notifications
+/// with no debounce and previously inherited that 6s default.
+///
+/// 1s is deliberately looser than the 0.1–0.2s per-element bounds the walker
+/// sets, so it only ever acts as a backstop: `AXUIElementSetMessagingTimeout`
+/// on a specific element still overrides it for that element.
+const AX_DEFAULT_TIMEOUT_SECS: f32 = 1.0;
+
+/// Apply [`AX_DEFAULT_TIMEOUT_SECS`] as this process's default AX timeout.
+///
+/// Passing the system-wide element to `AXUIElementSetMessagingTimeout` sets the
+/// default for every message the app sends, so this only needs to land once —
+/// hence the `Once`, which also keeps it off the hot notification path.
+pub(crate) fn ensure_global_ax_timeout() {
+    static INIT: std::sync::Once = std::sync::Once::new();
+    INIT.call_once(|| {
+        let sys = ax::UiElement::sys_wide();
+        match sys.set_messaging_timeout_secs(AX_DEFAULT_TIMEOUT_SECS) {
+            Ok(()) => debug!(
+                "AX default messaging timeout set to {}s (was the ~6s system default)",
+                AX_DEFAULT_TIMEOUT_SECS
+            ),
+            Err(e) => warn!(
+                "failed to set AX default messaging timeout: {:?} — unbounded AX reads \
+                 can stall the target app's main thread for ~6s",
+                e
+            ),
+        }
+    });
+}
+
 /// Process-wide ground truth for macOS Input Monitoring, learned from the ONE
 /// real CGEventTap we create in `run_event_tap` / `run_activity_only_tap`.
 ///
@@ -281,6 +318,9 @@ impl UiRecorder {
                 perms.input_monitoring
             );
         }
+
+        // Bound every AX read this process makes before any of them can run.
+        ensure_global_ax_timeout();
 
         let (tx, rx) = bounded::<UiEvent>(self.config.max_buffer_size);
         let stop = Arc::new(AtomicBool::new(false));
@@ -2084,6 +2124,13 @@ fn get_string_attr(elem: &ax::UiElement, attr: &ax::Attr) -> Option<String> {
 
 fn get_focused_window_title(pid: i32) -> Option<String> {
     let app = ax::UiElement::with_app_pid(pid);
+
+    // Runs on every AX focus notification with no debounce, so it is the most
+    // frequent unbounded read we make. Match the 0.1s the click/context paths
+    // already use rather than leaning on the 1s process default: a slow app
+    // should cost us a missing title, not a stalled observer thread.
+    let _ = app.set_messaging_timeout_secs(0.1);
+
     let focused = app.attr_value(ax::attr::focused_window()).ok()?;
 
     if focused.get_type_id() == ax::UiElement::type_id() {
