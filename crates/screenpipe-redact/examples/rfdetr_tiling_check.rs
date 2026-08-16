@@ -36,6 +36,7 @@ async fn main() -> anyhow::Result<()> {
             input_size: 0,
             conf_threshold: 0.50,
             tiled_inference: tiled,
+            extend_wrapped_secrets: true,
         };
         let redactor = RfdetrRedactor::load(cfg)?;
         let mode = if tiled { "tiled 2x2" } else { "whole-frame" };

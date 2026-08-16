@@ -150,6 +150,19 @@ pub struct RfdetrConfig {
     /// seams. A confidence floor on tile-only detections: it buys back the
     /// harness stray rise but drops real core recall to 68.8%.
     pub tiled_inference: bool,
+    /// Grow a detected `Secret` box over the wrapped continuation lines of the
+    /// same token.
+    ///
+    /// The detector emits one box per rendered line, so a credential that soft
+    /// wraps gets only its first line blacked while the rest stays legible —
+    /// and the pipeline reports success. See
+    /// [`crate::image::secret_continuation`] for the guards that stop this from
+    /// swallowing columns of same-shaped tokens (`sha256:` digests, PEM bodies,
+    /// lockfile hashes).
+    ///
+    /// Off only for measurement: the audit example runs a corpus both ways to
+    /// show the added area is confined to genuinely wrapped secrets.
+    pub extend_wrapped_secrets: bool,
 }
 
 impl Default for RfdetrConfig {
@@ -164,6 +177,7 @@ impl Default for RfdetrConfig {
             // applies a second floor.
             conf_threshold: 0.50,
             tiled_inference: true,
+            extend_wrapped_secrets: true,
         }
     }
 }
@@ -422,7 +436,8 @@ mod imp {
             // nothing, so 4× the compute would buy nothing.
             let big = orig_w >= self.input_size * 2 && orig_h >= self.input_size * 3 / 2;
             if !self.cfg.tiled_inference || !big {
-                return self.infer_window(&img, 0, 0, orig_w, orig_h);
+                let regions = self.infer_window(&img, 0, 0, orig_w, orig_h)?;
+                return Ok(self.extend_wrapped_secrets(&img, regions));
             }
 
             // UNION of the whole frame and 2×2 tiles — the tiles ADD to the
@@ -440,10 +455,56 @@ mod imp {
             // catches it.
             //
             let mut all: Vec<ImageRegion> = Vec::new();
-            for (x, y, w, h) in inference_windows(orig_w, orig_h) {
-                all.extend(self.infer_window(&img, x, y, w, h)?);
+            for (i, (x, y, w, h)) in inference_windows(orig_w, orig_h).into_iter().enumerate() {
+                let regions = self.infer_window(&img, x, y, w, h)?;
+                if i == 0 {
+                    // Guard C: only whole-frame secret detections are eligible
+                    // for continuation extension. Tiled inference emits ~8.5x
+                    // more secret boxes, and every model-reachable
+                    // over-redaction found while stress-testing this came
+                    // through a tile-only box. `inference_windows()[0]` is the
+                    // whole frame, so restricting it here is structural rather
+                    // than a flag someone can flip.
+                    all.extend(self.extend_wrapped_secrets(&img, regions));
+                } else {
+                    all.extend(regions);
+                }
             }
             Ok(suppress_overlaps(all))
+        }
+
+        /// Grow whole-frame `Secret` boxes over their wrapped continuation
+        /// lines.
+        ///
+        /// The detector emits one box per rendered line, so a credential that
+        /// soft-wraps gets only its first line redacted while the rest stays
+        /// legible — and the pipeline reports success. See
+        /// [`crate::image::secret_continuation`] for the guards that keep this
+        /// from over-redacting columns of same-shaped tokens.
+        fn extend_wrapped_secrets(
+            &self,
+            img: &image::RgbImage,
+            regions: Vec<ImageRegion>,
+        ) -> Vec<ImageRegion> {
+            if !self.cfg.extend_wrapped_secrets {
+                return regions;
+            }
+            let (out, stats) = crate::image::secret_continuation::extend_secret_boxes(
+                img,
+                &regions,
+                self.cfg.conf_threshold,
+                SpanLabel::Secret,
+            );
+            if stats.extended > 0 || stats.discarded_not_tail > 0 {
+                tracing::debug!(
+                    extended = stats.extended,
+                    discarded_not_tail = stats.discarded_not_tail,
+                    discarded_budget = stats.discarded_budget,
+                    added_pixels = stats.added_pixels,
+                    "secret continuation pass"
+                );
+            }
+            out
         }
 
         /// Run the model over one window of `img` and return regions in
@@ -794,6 +855,7 @@ mod tests {
             input_size: 0,
             conf_threshold: 0.3,
             tiled_inference: true,
+            extend_wrapped_secrets: true,
         };
         let res = RfdetrRedactor::load(cfg);
         assert!(matches!(res, Err(RedactError::Unavailable(_))));
@@ -850,6 +912,7 @@ mod tests {
                 input_size: 0,
                 conf_threshold: 0.3,
                 tiled_inference: true,
+                extend_wrapped_secrets: true,
             };
             // This must return Err, not panic.
             let res = RfdetrRedactor::load(cfg);
@@ -879,6 +942,7 @@ mod tests {
             input_size: 0,
             conf_threshold: 0.3,
             tiled_inference: true,
+            extend_wrapped_secrets: true,
         };
         // Wrong-checksum file → ensure_model_present tries to
         // download. Network may or may not be available in CI, so

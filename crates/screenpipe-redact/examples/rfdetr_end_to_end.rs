@@ -40,6 +40,7 @@ async fn main() -> anyhow::Result<()> {
         input_size: 0,
         conf_threshold: 0.50,
         tiled_inference: true,
+        extend_wrapped_secrets: true,
     })?;
 
     let regions = redactor.detect(&frame).await?;
