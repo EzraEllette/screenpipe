@@ -26,6 +26,24 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import { commands } from "@/lib/utils/tauri";
 import { getApiKey, getApiPort } from "@/lib/api";
+import { TimelineDailySummary } from "@/components/rewind/timeline/daily-summary";
+
+export function parseTimelineDay(day: string): Date | null {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(day);
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const date = Number(match[3]);
+  const parsed = new Date(year, month - 1, date, 12);
+  if (
+    parsed.getFullYear() !== year ||
+    parsed.getMonth() !== month - 1 ||
+    parsed.getDate() !== date
+  ) {
+    return null;
+  }
+  return parsed;
+}
 
 /**
  * Routes the actions the Swift window cannot perform on its own. Mount once,
@@ -36,6 +54,11 @@ import { getApiKey, getApiPort } from "@/lib/api";
  * silently does nothing.
  */
 export function NativeTimelineBridge() {
+  const [dailySummaryRequest, setDailySummaryRequest] = useState<{
+    date: Date;
+    id: number;
+  } | null>(null);
+
   useEffect(() => {
     const subscriptions = [
       listen("timeline-open-search", () => {
@@ -43,6 +66,14 @@ export function NativeTimelineBridge() {
       }),
       listen("timeline-open-chat", () => {
         void commands.showWindow("Chat");
+      }),
+      listen<string>("timeline-open-daily-summary", (event) => {
+        const date = parseTimelineDay(event.payload);
+        if (!date) return;
+        setDailySummaryRequest((request) => ({
+          date,
+          id: (request?.id ?? 0) + 1,
+        }));
       }),
     ];
     return () => {
@@ -52,7 +83,17 @@ export function NativeTimelineBridge() {
     };
   }, []);
 
-  return null;
+  if (!dailySummaryRequest) return null;
+
+  return (
+    <TimelineDailySummary
+      key={dailySummaryRequest.date.toISOString()}
+      currentDate={dailySummaryRequest.date}
+      embedded
+      hideTrigger
+      openRequest={dailySummaryRequest.id}
+    />
+  );
 }
 
 /**
@@ -132,7 +173,7 @@ export function NativeTimeline({ fallback }: { fallback: React.ReactNode }) {
     // would be behind it. Nothing in the DOM can stack above an AppKit window,
     // so the window has to get out of the way instead.
     const OVERLAY_SELECTOR =
-      '[role="dialog"], [role="alertdialog"], [data-radix-popper-content-wrapper]';
+      '[role="dialog"], [role="alertdialog"], [data-radix-popper-content-wrapper], [data-native-timeline-occluder="true"]';
     let occluded = false;
     let queued = 0;
 

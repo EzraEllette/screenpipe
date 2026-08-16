@@ -292,6 +292,18 @@ private func testControlBarButtonsRespond(window: NSWindow, model: TimelineViewM
     expect(actionable.count == buttons.count,
            "every button must expose a press action, \(buttons.count - actionable.count) did not")
 
+    if let dailySummary = buttons.first(where: { $0.label == "daily summary" }) {
+        _ = TimelineActionBridge.shared.drainEmitted()
+        press(dailySummary)
+        let actions = TimelineActionBridge.shared.drainEmitted()
+        expect(actions.contains { $0.range(
+            of: #"^open_daily_summary:\d{4}-\d{2}-\d{2}$"#,
+            options: .regularExpression
+        ) != nil }, "the daily summary control must send its selected local day, got \(actions)")
+    } else {
+        failures.append("the daily summary control is missing")
+    }
+
     if let captions = buttons.first(where: { $0.label == "hide captions" }) {
         model.showSubtitles = true
         press(captions)

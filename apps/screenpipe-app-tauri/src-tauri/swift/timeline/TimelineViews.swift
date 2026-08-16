@@ -398,6 +398,7 @@ struct TimelineControlBar: View {
     var body: some View {
         HStack(spacing: 8) {
             dateGroup
+            dailySummaryAction
             if model.hasAudioNearby { playbackGroup }
             searchAction
             if !embedded { chatAction }
@@ -486,6 +487,25 @@ struct TimelineControlBar: View {
         model.playbackSpeed == floor(model.playbackSpeed)
             ? String(Int(model.playbackSpeed))
             : String(model.playbackSpeed)
+    }
+
+    private var dailySummaryAction: some View {
+        Button {
+            let date = model.currentTimestamp ?? model.currentDate
+            TimelineActionBridge.shared.emit(
+                "open_daily_summary:\(TimelineDateNavigation.dayKey(date))"
+            )
+        } label: {
+            ZStack(alignment: .topTrailing) {
+                Image(systemName: "calendar")
+                Image(systemName: "sparkles")
+                    .font(.system(size: 7, weight: .bold))
+                    .offset(x: 4, y: -4)
+            }
+        }
+        .buttonStyle(TimelineControlStyle())
+        .accessibilityLabel("daily summary")
+        .help("Generate a summary for this day")
     }
 
     private var searchAction: some View {

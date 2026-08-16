@@ -129,9 +129,13 @@ export function presentGenerationError(
 export function TimelineDailySummary({
 	currentDate,
 	embedded = false,
+	hideTrigger = false,
+	openRequest,
 }: {
 	currentDate: Date;
 	embedded?: boolean;
+	hideTrigger?: boolean;
+	openRequest?: number;
 }) {
 	const { settings, updateSettings } = useSettings();
 	const [summary, setSummary] = useState("");
@@ -147,6 +151,7 @@ export function TimelineDailySummary({
 	const abortRef = useRef<AbortController | null>(null);
 	const triggerRef = useRef<HTMLButtonElement | null>(null);
 	const panelRef = useRef<HTMLElement | null>(null);
+	const handledOpenRequestRef = useRef<number | undefined>(undefined);
 	const dateId = format(currentDate, "yyyy-MM-dd");
 	const enhancedAI = settings?.enhancedAI ?? false;
 	const userToken = settings?.user?.token ?? "";
@@ -260,17 +265,20 @@ export function TimelineDailySummary({
 		[currentDate, dailySummaryPreset, dateId, userToken],
 	);
 
-	const handleTriggerClick = () => {
+	const handleTriggerClick = useCallback(() => {
+		const cachedSummary = summary || readCachedSummary(currentDate);
 		posthog.capture("timeline_daily_summary_clicked", {
 			selected_date: dateId,
 			enhanced_ai_enabled: enhancedAI,
-			has_cached_summary: Boolean(summary),
+			has_cached_summary: Boolean(cachedSummary),
 		});
 
 		// Cached summaries are local output. Keep them readable if the user later
 		// disables Enhanced AI or signs out; only a new generation needs consent
 		// and an authenticated model session.
-		if (summary) {
+		if (cachedSummary) {
+			setSummary(cachedSummary);
+			setStatus("complete");
 			setPanelOpen(true);
 			return;
 		}
@@ -290,7 +298,17 @@ export function TimelineDailySummary({
 		}
 
 		void generate();
-	};
+	}, [currentDate, dateId, enhancedAI, generate, isGenerating, summary, userToken]);
+
+	useEffect(() => {
+		if (
+			openRequest === undefined ||
+			handledOpenRequestRef.current === openRequest
+		)
+			return;
+		handledOpenRequestRef.current = openRequest;
+		handleTriggerClick();
+	}, [handleTriggerClick, openRequest]);
 
 	const handleEnableAndGenerate = async () => {
 		if (!userToken) {
@@ -384,45 +402,48 @@ export function TimelineDailySummary({
 
 	return (
 		<>
-			<TooltipProvider delayDuration={200}>
-				<Tooltip>
-					<TooltipTrigger asChild>
-						<button
-							ref={triggerRef}
-							type="button"
-							data-testid="timeline-daily-summary-trigger"
-							onClick={handleTriggerClick}
-							className={cn(
-								"group relative flex h-10 w-10 shrink-0 items-center justify-center border border-border bg-background text-foreground transition-colors duration-150 hover:bg-foreground hover:text-background",
-								panelOpen && "bg-foreground text-background",
-							)}
-							aria-label={tooltipText}
-							aria-expanded={panelOpen}
-						>
-							{isGenerating ? (
-								<Loader2 className="h-4 w-4 animate-spin" />
-							) : (
-								<span className="relative">
-									<CalendarDays className="h-4 w-4" />
-									<Sparkles className="absolute -right-1.5 -top-1.5 h-2.5 w-2.5 fill-current" />
-								</span>
-							)}
-							{summary && !isGenerating && (
-								<span className="absolute -right-1 -top-1 h-2.5 w-2.5 border-2 border-background bg-foreground" />
-							)}
-						</button>
-					</TooltipTrigger>
-					<TooltipContent side="bottom" className="font-mono text-xs">
-						{tooltipText}
-					</TooltipContent>
-				</Tooltip>
-			</TooltipProvider>
+			{!hideTrigger && (
+				<TooltipProvider delayDuration={200}>
+					<Tooltip>
+						<TooltipTrigger asChild>
+							<button
+								ref={triggerRef}
+								type="button"
+								data-testid="timeline-daily-summary-trigger"
+								onClick={handleTriggerClick}
+								className={cn(
+									"group relative flex h-10 w-10 shrink-0 items-center justify-center border border-border bg-background text-foreground transition-colors duration-150 hover:bg-foreground hover:text-background",
+									panelOpen && "bg-foreground text-background",
+								)}
+								aria-label={tooltipText}
+								aria-expanded={panelOpen}
+							>
+								{isGenerating ? (
+									<Loader2 className="h-4 w-4 animate-spin" />
+								) : (
+									<span className="relative">
+										<CalendarDays className="h-4 w-4" />
+										<Sparkles className="absolute -right-1.5 -top-1.5 h-2.5 w-2.5 fill-current" />
+									</span>
+								)}
+								{summary && !isGenerating && (
+									<span className="absolute -right-1 -top-1 h-2.5 w-2.5 border-2 border-background bg-foreground" />
+								)}
+							</button>
+						</TooltipTrigger>
+						<TooltipContent side="bottom" className="font-mono text-xs">
+							{tooltipText}
+						</TooltipContent>
+					</Tooltip>
+				</TooltipProvider>
+			)}
 
 			<AnimatePresence>
 				{panelOpen && (
 					<motion.aside
 						ref={panelRef}
 						data-testid="timeline-daily-summary-panel"
+						data-native-timeline-occluder="true"
 						className={cn(
 							"ai-panel fixed right-5 z-[150] flex max-h-[min(620px,calc(100vh-112px))] w-[min(420px,calc(100vw-32px))] flex-col overflow-hidden border border-border bg-background/95 text-foreground shadow-lg shadow-black/5 backdrop-blur-xl",
 							embedded

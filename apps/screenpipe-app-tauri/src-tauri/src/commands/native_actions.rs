@@ -194,6 +194,9 @@ fn native_timeline_action_callback_inner(action_ptr: *const std::os::raw::c_char
         TimelineAction::OpenSearch => {
             let _ = app.emit("timeline-open-search", ());
         }
+        TimelineAction::OpenDailySummary { date } => {
+            let _ = app.emit("timeline-open-daily-summary", date);
+        }
         TimelineAction::OpenChat => {
             let _ = app.emit("timeline-open-chat", ());
         }

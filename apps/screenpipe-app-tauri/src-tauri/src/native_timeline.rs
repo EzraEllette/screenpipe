@@ -102,6 +102,7 @@ use serde::{Deserialize, Serialize};
 pub enum TimelineAction {
     CloseWindow,
     OpenSearch,
+    OpenDailySummary { date: String },
     OpenChat,
     OpenRecordingSettings,
     CopyFrame { frame_id: String },
@@ -123,6 +124,9 @@ impl TimelineAction {
         match (name, argument) {
             ("close_window", _) => Self::CloseWindow,
             ("open_search", _) => Self::OpenSearch,
+            ("open_daily_summary", Some(date)) => Self::OpenDailySummary {
+                date: date.to_string(),
+            },
             ("open_chat", _) => Self::OpenChat,
             ("open_recording_settings", _) => Self::OpenRecordingSettings,
             ("copy_frame", Some(id)) => Self::CopyFrame {
@@ -264,6 +268,12 @@ mod tests {
     #[test]
     fn parses_actions_with_arguments() {
         assert_eq!(
+            TimelineAction::parse("open_daily_summary:2026-08-16"),
+            TimelineAction::OpenDailySummary {
+                date: "2026-08-16".to_string()
+            }
+        );
+        assert_eq!(
             TimelineAction::parse("copy_frame:12345"),
             TimelineAction::CopyFrame {
                 frame_id: "12345".to_string()
@@ -301,6 +311,12 @@ mod tests {
 
     #[test]
     fn an_argument_action_without_its_argument_is_unknown() {
+        assert_eq!(
+            TimelineAction::parse("open_daily_summary"),
+            TimelineAction::Unknown {
+                raw: "open_daily_summary".to_string()
+            }
+        );
         assert_eq!(
             TimelineAction::parse("copy_frame"),
             TimelineAction::Unknown {

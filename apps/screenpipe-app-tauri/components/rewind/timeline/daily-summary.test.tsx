@@ -198,6 +198,32 @@ describe("TimelineDailySummary", () => {
 		expect(trigger).not.toHaveTextContent("daily summary");
 	});
 
+	it("opens from the native timeline request without rendering a duplicate trigger", async () => {
+		const selectedDate = new Date(2026, 6, 25);
+		mocks.settings.user = null;
+		window.localStorage.setItem(
+			dailySummaryCacheKey(selectedDate),
+			GENERATED_SUMMARY,
+		);
+
+		render(
+			<TimelineDailySummary
+				currentDate={selectedDate}
+				embedded
+				hideTrigger
+				openRequest={1}
+			/>,
+		);
+
+		expect(
+			screen.queryByTestId("timeline-daily-summary-trigger"),
+		).not.toBeInTheDocument();
+		const panel = await screen.findByTestId("timeline-daily-summary-panel");
+		expect(panel).toHaveAttribute("data-native-timeline-occluder", "true");
+		expect(panel).toHaveTextContent("focused implementation session");
+		expect(mocks.runDailySummaryWithPi).not.toHaveBeenCalled();
+	});
+
 	it("keeps wheel navigation inside the summary and closes on outside click", async () => {
 		const selectedDate = new Date(2026, 6, 25);
 		mocks.settings.user = null;
