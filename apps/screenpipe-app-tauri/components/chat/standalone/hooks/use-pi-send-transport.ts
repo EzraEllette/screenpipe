@@ -41,14 +41,22 @@ type LivePiSessionCheck =
 export function hasAuthoritativeActivePiTurn({
   isStreaming,
   assistantMessageId,
+  backendBusy,
+  startedDuringPreflight,
 }: {
   // `isLoading` is intentionally accepted but ignored: send preflight uses it
   // for immediate UI feedback before any backend turn exists.
   isLoading: boolean;
   isStreaming: boolean;
   assistantMessageId: string | null;
+  backendBusy: boolean;
+  startedDuringPreflight: boolean;
 }): boolean {
-  return isStreaming || assistantMessageId !== null;
+  return (
+    !startedDuringPreflight &&
+    backendBusy &&
+    (isStreaming || assistantMessageId !== null)
+  );
 }
 
 export async function awaitPendingPiPresetSwitch(
@@ -211,11 +219,16 @@ export function usePiSendTransport(options: PiSendTransportOptions) {
     }
   }
 
-  async function interruptActivePiTurn() {
+  async function interruptActivePiTurn(
+    liveSession: LivePiSessionCheck,
+    startedDuringPreflight: boolean,
+  ) {
     const hasActiveTurn = hasAuthoritativeActivePiTurn({
       isLoading,
       isStreaming,
       assistantMessageId: piMessageIdRef.current,
+      backendBusy: liveSession.running && liveSession.info.busy,
+      startedDuringPreflight,
     });
     if (!hasActiveTurn) return;
 
@@ -301,6 +314,7 @@ export function usePiSendTransport(options: PiSendTransportOptions) {
     // not immediately started a second time, and a failed one cannot reuse the
     // stale provider.
     let liveSession: Awaited<ReturnType<typeof checkLivePiSession>>;
+    let startedDuringPreflight = false;
     try {
       liveSession = await checkLivePiSession(piSessionIdRef.current, setPiInfo);
     } catch (e) {
@@ -387,6 +401,7 @@ export function usePiSendTransport(options: PiSendTransportOptions) {
                 providerConfig,
               );
               if (result.status === "ok" && result.data.running) {
+                startedDuringPreflight = !liveSession.running && !liveSession.indeterminate;
                 setPiInfo(result.data);
                 piSessionSyncedRef.current = false;
                 piCrashCountRef.current = 0;
@@ -505,7 +520,7 @@ export function usePiSendTransport(options: PiSendTransportOptions) {
         return;
       }
 
-      await interruptActivePiTurn();
+      await interruptActivePiTurn(liveSession, startedDuringPreflight);
     } catch (e) {
       setIsLoading(false);
       throw e;

@@ -16,14 +16,41 @@ describe("Pi active-turn detection", () => {
       isLoading: true,
       isStreaming: false,
       assistantMessageId: null,
+      backendBusy: false,
+      startedDuringPreflight: false,
+    })).toBe(false);
+  });
+
+  it("does not abort from stale frontend state after starting an idle Pi session", () => {
+    expect(hasAuthoritativeActivePiTurn({
+      isLoading: false,
+      isStreaming: true,
+      assistantMessageId: "stale-assistant",
+      backendBusy: false,
+      startedDuringPreflight: true,
+    })).toBe(false);
+  });
+
+  it("does not mistake startup RPC activity for a turn after starting Pi", () => {
+    expect(hasAuthoritativeActivePiTurn({
+      isLoading: false,
+      isStreaming: true,
+      assistantMessageId: "stale-assistant",
+      backendBusy: true,
+      startedDuringPreflight: true,
     })).toBe(false);
   });
 
   it.each([
     { isStreaming: true, assistantMessageId: null },
     { isStreaming: false, assistantMessageId: "assistant-1" },
-  ])("preserves interruption for an authoritative active turn", (state) => {
-    expect(hasAuthoritativeActivePiTurn({ isLoading: false, ...state })).toBe(true);
+  ])("preserves interruption when the backend confirms active Pi work", (state) => {
+    expect(hasAuthoritativeActivePiTurn({
+      isLoading: false,
+      backendBusy: true,
+      startedDuringPreflight: false,
+      ...state,
+    })).toBe(true);
   });
 
   it("uses authoritative turn state in the interruption path", () => {
@@ -34,5 +61,7 @@ describe("Pi active-turn detection", () => {
     expect(start).toBeGreaterThan(-1);
     expect(end).toBeGreaterThan(start);
     expect(source.slice(start, end)).toContain("hasAuthoritativeActivePiTurn({");
+    expect(source.slice(start, end)).toContain("backendBusy:");
+    expect(source.slice(start, end)).toContain("startedDuringPreflight,");
   });
 });
