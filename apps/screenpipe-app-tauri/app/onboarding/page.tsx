@@ -15,20 +15,15 @@ import PlanSelectionStep from "@/components/onboarding/plan-selection-step";
 import { useOnboarding } from "@/lib/hooks/use-onboarding";
 import { useManagedPolicy } from "@/lib/hooks/use-managed-policy";
 import { useSettings } from "@/lib/hooks/use-settings";
-import { useCardAskPlacement } from "@/lib/hooks/use-card-ask";
 import { EnterpriseLicensePrompt } from "@/components/enterprise-license-prompt";
 import posthog from "posthog-js";
 import { commands } from "@/lib/utils/tauri";
 import { onboardingFunnel } from "@/lib/analytics/onboarding-funnel";
 import type { AppUser } from "@/lib/app-entitlement";
+import { readOnboardingCheckoutStatus } from "@/lib/onboarding-checkout-navigation";
 
 type SlideKey =
-  | "login"
-  | "acquisition"
-  | "permissions"
-  | "timeline"
-  | "engine"
-  | "plan";
+  "login" | "acquisition" | "permissions" | "timeline" | "engine" | "plan";
 
 // One size for the whole flow. Per-slide sizes made the window jump on every
 // step, worst on "plan", which widened to 760 even though the content column is
@@ -122,7 +117,14 @@ const applyOnboardingWindowSize = async () => {
 
 export default function OnboardingPage() {
   const { toast } = useToast();
-  const [currentSlide, setCurrentSlide] = useState<SlideKey>("login");
+  const [checkoutReturnStatus] = useState(() =>
+    typeof window === "undefined"
+      ? null
+      : readOnboardingCheckoutStatus(window.location.search),
+  );
+  const [currentSlide, setCurrentSlide] = useState<SlideKey>(() =>
+    checkoutReturnStatus ? "plan" : "login",
+  );
   const [isVisible, setIsVisible] = useState(true);
   const [isTransitioning, setIsTransitioning] = useState(false);
   const [permissionsProgress, setPermissionsProgress] = useState<{
@@ -170,20 +172,19 @@ export default function OnboardingPage() {
     settings.deviceTier === "high"
       ? settings.deviceTier
       : "unknown";
+  const needsOnboardingCheckout =
+    user?.has_payment_method !== true && user?.entitlement_source !== "manual";
   const shouldShowPlanSelection =
-    !isManagedDeployment && user?.has_payment_method !== true;
-  // The card ask is an experiment, not a default. This placement is owned by
-  // the `card-ask-timing` arms and killed instantly by `card-ask-enabled`.
-  //
-  // Before this gate the slide ran unconditionally, underneath the experiment
-  // it was supposed to be part of, so ~19% of the `control` arm was asked for a
-  // card anyway and control stopped being a no-ask counterfactual. Measured
-  // 2026-08-12 over 14 days: control 28/147, at_login 30/159,
-  // at_first_value 28/154, at_limit 32/158.
-  const cardAskPlacement = useCardAskPlacement("onboarding");
+    !isManagedDeployment &&
+    (checkoutReturnStatus !== null || needsOnboardingCheckout);
+  // New accounts no longer receive the old cardless profile grant, so they
+  // resolve entitlement_source as "none" and enter checkout. Accounts that
+  // already hold a preserved manual grant keep that access without being
+  // forced to add a card. The previous card-ask experiment must not suppress
+  // checkout for an eligible new account.
   // "plan" is the last slide, so auto-advancing onto it without a token traps
-  // the user in onboarding: PlanSelectionStep can neither load embedded
-  // checkout (it renders "sign in to continue") nor start the cardless trial,
+  // the user in onboarding: PlanSelectionStep cannot open hosted checkout
+  // (it renders "sign in to continue"),
   // and handleNextSlide stops calling completeOnboarding once a next slide
   // exists. Someone who skipped sign-in would sit on /onboarding forever.
   //
@@ -196,9 +197,7 @@ export default function OnboardingPage() {
   // slide from visibleOrder instead would satisfy the second and break the
   // first.
   const canAdvanceIntoPlanSelection =
-    shouldShowPlanSelection &&
-    Boolean(user?.token) &&
-    cardAskPlacement.active;
+    shouldShowPlanSelection && Boolean(user?.token);
   const visibleOrder = useMemo(
     () =>
       SLIDE_ORDER.filter(
@@ -223,6 +222,19 @@ export default function OnboardingPage() {
       const { loadOnboardingStatus } = useOnboarding.getState();
       await loadOnboardingStatus();
       const { onboardingData } = useOnboarding.getState();
+
+      // Hosted checkout temporarily replaces this webview's local document.
+      // Its explicit complete/cancel return always resumes the plan controller,
+      // even if a stale persisted step predates the outbound navigation.
+      if (checkoutReturnStatus && !isManagedDeployment) {
+        try {
+          await commands.setOnboardingStep("plan");
+        } catch {
+          // non-critical: the in-memory restore below is enough for this run
+        }
+        setCurrentSlide("plan");
+        return;
+      }
 
       if (onboardingData.currentStep && !onboardingData.isCompleted) {
         const step = onboardingData.currentStep as string;
@@ -268,6 +280,8 @@ export default function OnboardingPage() {
     };
     init();
   }, [
+    checkoutReturnStatus,
+    isManagedDeployment,
     isManagedDeploymentResolved,
     isSettingsLoaded,
     shouldShowPlanSelection,
@@ -343,11 +357,9 @@ export default function OnboardingPage() {
     posthog.capture("onboarding_step_reached", {
       step_name: `${currentSlide}_completed`,
       step_index: visibleOrder.indexOf(currentSlide) + 1,
-      // Stamped on every step so the funnel can be split by arm. Without this
-      // there is no way to answer "does asking for a card here cost us
-      // completions?", which is the whole point of running the experiment.
-      card_ask_arm: cardAskPlacement.arm ?? "unassigned",
-      card_ask_placement_active: cardAskPlacement.active,
+      // Keep the existing analytics keys stable across the release cutover.
+      card_ask_arm: "required",
+      card_ask_placement_active: true,
     });
 
     // Hidden enterprise deployments only need authentication + permissions.
@@ -422,8 +434,6 @@ export default function OnboardingPage() {
     }, 300);
   }, [
     canAdvanceIntoPlanSelection,
-    cardAskPlacement.arm,
-    cardAskPlacement.active,
     completeOnboarding,
     currentSlide,
     deviceTierForAnalytics,
