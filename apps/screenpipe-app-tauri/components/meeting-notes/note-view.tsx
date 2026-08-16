@@ -1831,27 +1831,6 @@ export function NoteView({
               transcriptOpen={transcriptOpen}
               onTranscriptToggle={() => setTranscriptOpen((open) => !open)}
             />
-
-            {/* `activity` is cast from an HTTP body, not validated, so a
-                payload missing `audio_summary` used to throw here and take the
-                whole note — text, transcript, controls — to the global error
-                boundary over a supporting strip. Degrade instead. */}
-            {meetingCtx?.activity && (
-              <div className="mt-10 select-text space-y-6">
-                {Array.isArray(
-                  meetingCtx.activity.audio_summary?.top_transcriptions,
-                ) && (
-                  <ReplayStrip
-                    meetingId={meeting.id}
-                    segments={
-                      meetingCtx.activity.audio_summary.top_transcriptions
-                    }
-                    timeRange={meetingCtx.activity.time_range}
-                  />
-                )}
-                <Receipts activity={meetingCtx.activity} />
-              </div>
-            )}
           </div>
         </section>
 
@@ -1883,6 +1862,32 @@ export function NoteView({
             onGenerate={handleSummaryAction}
             canGenerate={
               canSummarizeMeeting && !summaryWorking && !retranscribing
+            }
+            // Mounted with the tab rather than always: the strip pulls the
+            // meeting's transcript rows and frame samples, and opening a
+            // meeting to read notes or the transcript should not pay for
+            // evidence nobody asked to see.
+            activity={
+              // `activity` is cast from an HTTP body, not validated, so a
+              // payload missing `audio_summary` used to throw here and take
+              // the whole surface to the global error boundary over a
+              // supporting strip. Degrade instead.
+              meetingCtx?.activity ? (
+                <>
+                  {Array.isArray(
+                    meetingCtx.activity.audio_summary?.top_transcriptions,
+                  ) && (
+                    <ReplayStrip
+                      meetingId={meeting.id}
+                      segments={
+                        meetingCtx.activity.audio_summary.top_transcriptions
+                      }
+                      timeRange={meetingCtx.activity.time_range}
+                    />
+                  )}
+                  <Receipts activity={meetingCtx.activity} />
+                </>
+              ) : null
             }
           />
         )}

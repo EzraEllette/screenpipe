@@ -162,6 +162,7 @@ export function MeetingSummarySurface({
   streamedSummary,
   onGenerate,
   canGenerate,
+  activity,
 }: {
   note: string;
   state: "idle" | "working" | "ready" | "attention";
@@ -169,6 +170,11 @@ export function MeetingSummarySurface({
   streamedSummary?: string;
   onGenerate: () => void;
   canGenerate: boolean;
+  // Replay scrubber and the "related during this meeting" list. They are
+  // evidence for the summary — what was on screen and open while it was
+  // written — so they belong under it. Under the note editor they sat below a
+  // draft of unbounded length, which is a place nobody scrolls to.
+  activity?: React.ReactNode;
 }) {
   const savedSummary = extractMeetingSummary(note);
   const isStreaming = state === "working" && Boolean(streamedSummary?.trim());
@@ -274,6 +280,15 @@ export function MeetingSummarySurface({
             </div>
           )}
         </div>
+
+        {activity && (
+          <div
+            data-testid="meeting-summary-activity"
+            className="mt-10 select-text space-y-6"
+          >
+            {activity}
+          </div>
+        )}
       </div>
     </section>
   );

@@ -210,6 +210,51 @@ describe("meeting summary surface", () => {
     expect(onGenerate).toHaveBeenCalledOnce();
   });
 
+  // The replay scrubber and the "related during this meeting" list used to
+  // render under the note editor, below a draft of unbounded length. They are
+  // evidence for the summary, so they now hang off the summary tab — after the
+  // summary text, inside the same centered shell, and selectable.
+  it("renders meeting evidence after the summary, not before it", () => {
+    render(
+      <MeetingSummarySurface
+        note={"## Summary\nThe team agreed to ship."}
+        state="ready"
+        detail="saved locally"
+        onGenerate={vi.fn()}
+        canGenerate
+        activity={<div data-testid="evidence">replay the moment</div>}
+      />,
+    );
+
+    const activity = screen.getByTestId("meeting-summary-activity");
+    expect(screen.getByTestId("evidence")).toBeVisible();
+    expect(activity).toHaveClass("select-text");
+    expect(activity.closest(".max-w-3xl")).not.toBeNull();
+
+    // Order matters: the summary is the answer, the evidence supports it.
+    const column = screen.getByTestId("meeting-summary-reading-column");
+    expect(
+      column.compareDocumentPosition(activity) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it("leaves no evidence container behind when a meeting has none", () => {
+    render(
+      <MeetingSummarySurface
+        note={"## Summary\nThe team agreed to ship."}
+        state="ready"
+        detail="saved locally"
+        onGenerate={vi.fn()}
+        canGenerate
+      />,
+    );
+
+    expect(
+      screen.queryByTestId("meeting-summary-activity"),
+    ).not.toBeInTheDocument();
+  });
+
   it("offers a truthful empty state before a summary exists", () => {
     render(
       <MeetingSummarySurface
