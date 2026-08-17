@@ -1242,6 +1242,7 @@ export function PipesSection() {
 
   const apiBase = selectedDevice ? `http://${selectedDevice}` : getApiBaseUrl();
   const isRemote = !!selectedDevice;
+  const composioToken = isRemote ? undefined : settings.user?.token;
   currentApiBase.current = apiBase;
   const displayedPipes = pipesForApi(pipes, pipesApiBase, apiBase);
   const displayedLogs = pipesForApi(logs, logsApiBase, apiBase);
@@ -1412,10 +1413,14 @@ export function PipesSection() {
 
   const fetchConnections = useCallback(async () => {
     try {
-      const next = await fetchAvailablePipeConnections(apiBase, availableConnections);
+      const next = await fetchAvailablePipeConnections(
+        apiBase,
+        availableConnections,
+        composioToken
+      );
       setAvailableConnections(next);
     } catch { /* server may not be running */ }
-  }, [apiBase, availableConnections]);
+  }, [apiBase, availableConnections, composioToken]);
 
   const checkForUpdates = useCallback(async () => {
     try {
@@ -3352,7 +3357,11 @@ export function PipesSection() {
                             .map((p) => ({ name: p.config.name }))}
                           availableConnections={availableConnections}
                           refreshConnections={async () => {
-                            const next = await fetchAvailablePipeConnections(apiBase, availableConnections);
+                            const next = await fetchAvailablePipeConnections(
+                              apiBase,
+                              availableConnections,
+                              composioToken
+                            );
                             setAvailableConnections(next);
                             return next;
                           }}
@@ -4155,7 +4164,8 @@ export function PipesSection() {
               try {
                 latestConnections = await fetchAvailablePipeConnections(
                   apiBase,
-                  availableConnections
+                  availableConnections,
+                  composioToken
                 );
               } catch {
                 // Fall back to current in-memory state if fetch fails.
