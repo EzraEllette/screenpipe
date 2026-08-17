@@ -71,7 +71,7 @@ export function ChatInspectorPopover({
       <PopoverContent
         align="end"
         sideOffset={8}
-        className="w-[36rem] max-w-[calc(100vw-2rem)] rounded-2xl p-0 shadow-xl"
+        className="w-[22rem] max-w-[calc(100vw-2rem)] rounded-2xl p-0 shadow-xl"
         onInteractOutside={(event) => event.preventDefault()}
       >
         <ChatInspector
