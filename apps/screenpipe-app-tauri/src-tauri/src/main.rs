@@ -107,6 +107,7 @@ mod pi;
 mod pi_command_queue;
 mod power_awake;
 mod process_exit;
+mod provider_automations;
 mod recording;
 mod remote_support_logs;
 mod remote_sync_commands;
@@ -411,6 +412,7 @@ macro_rules! define_specta_builder {
             .typ::<enterprise_install_metadata::EnterpriseInstallMetadata>()
             .typ::<enterprise_host_identity::EnterpriseHostIdentity>()
             .typ::<chatgpt_oauth::ChatGptOAuthStatus>()
+            .typ::<provider_automations::ProviderAutomation>()
             .typ::<oauth::OAuthStatus>()
             .typ::<events::JobEvent>()
             .typ::<events::ExportEvent>()

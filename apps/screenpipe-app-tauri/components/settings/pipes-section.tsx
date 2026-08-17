@@ -53,6 +53,7 @@ import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { PipeTriggerPicker } from "./pipe-trigger-picker";
+import { ProviderAutomationsPanel } from "./provider-automations-panel";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import {
   Select,
@@ -1165,6 +1166,7 @@ export function PipesSection() {
     Record<string, "clearing" | "cleared" | "error">
   >({});
   const [refreshing, setRefreshing] = useState(false);
+  const [providerRefreshToken, setProviderRefreshToken] = useState(0);
   const debounceTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const pendingSaves = useRef<Record<string, string>>({});
   // Track in-flight config saves so runPipe can await them
@@ -2531,6 +2533,7 @@ export function PipesSection() {
           <Button variant="outline" size="icon" className={`h-8 w-8 ${refreshing ? "pointer-events-none opacity-70" : ""}`} onClick={async () => {
             if (refreshing) return;
             setRefreshing(true);
+            setProviderRefreshToken((value) => value + 1);
             await Promise.all([
               fetchPipes(),
               new Promise((r) => setTimeout(r, 2000)),
@@ -2554,6 +2557,13 @@ export function PipesSection() {
             </Button>
           )}
         </div>
+      )}
+
+      {pipeTypeFilter === "local" && !selectMode && (
+        <ProviderAutomationsPanel
+          searchQuery={searchQuery}
+          refreshToken={providerRefreshToken}
+        />
       )}
 
       {pipeTypeFilter === "cloud" ? (

@@ -986,6 +986,17 @@ async listImportedSkills() : Promise<Result<ImportedSkill[], string>> {
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * List schedules owned by native agent harnesses without mutating them.
+ */
+async listProviderAutomations() : Promise<Result<ProviderAutomation[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_provider_automations") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async livetextAnalyze(imagePath: string, frameId: string, x: number, y: number, w: number, h: number) : Promise<Result<string, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("livetext_analyze", { imagePath, frameId, x, y, w, h }) };
@@ -3117,6 +3128,23 @@ preview: string;
  * label in the UI ("queued 4s ago").
  */
 queuedAtMs: number }
+export type ProviderAutomation = {
+/**
+ * Stable registry key. It always includes the provider namespace.
+ */
+key: string; provider: string; nativeId: string; name: string;
+/**
+ * Provider-native schedule (RRULE for Codex, cron for Claude).
+ */
+schedule: string; scheduleLabel: string | null; status: string;
+/**
+ * `local`, `provider_durable`, or `session`.
+ */
+executionScope: string;
+/**
+ * Read-only until the provider exposes a supported lifecycle API.
+ */
+manageability: string; lifecycleNote: string; updatedAtMs: number | null }
 /**
  * A skill offered by the curated registry. Installing one downloads its folder
  * (the directory containing `SKILL.md`) from a public GitHub repo into the
