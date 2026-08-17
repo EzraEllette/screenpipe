@@ -4430,19 +4430,30 @@ pub struct AcpAgentInstallStatus {
     pub installed: bool,
     pub command: Option<String>,
     pub install_url: Option<String>,
+    pub can_install_automatically: bool,
 }
 
 #[tauri::command]
 #[specta::specta]
 pub fn pi_acp_agent_install_status(agent_id: String) -> AcpAgentInstallStatus {
-    let (requires_install, installed, command, install_url) =
+    let (requires_install, installed, command, install_url, can_install_automatically) =
         crate::acp_runtime::agent_install_status(&agent_id);
     AcpAgentInstallStatus {
         requires_install,
         installed,
         command,
         install_url,
+        can_install_automatically,
     }
+}
+
+/// Install a supported binary ACP agent after the user clicks Install, then
+/// return a fresh status so the UI only unblocks once the CLI is resolvable.
+#[tauri::command]
+#[specta::specta]
+pub async fn pi_acp_agent_install(agent_id: String) -> Result<AcpAgentInstallStatus, String> {
+    crate::acp_runtime::install_agent(&agent_id).await?;
+    Ok(pi_acp_agent_install_status(agent_id))
 }
 
 /// Whether launching this agent will trigger a first-run package install (a

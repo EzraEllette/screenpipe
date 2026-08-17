@@ -441,6 +441,17 @@ enum AgentLaunch {
     },
 }
 
+/// An explicit, user-triggered installer for a binary ACP agent.
+///
+/// Installers are compiled into the static catalog. The runtime still checks
+/// each URL against a narrow allowlist before downloading anything so a future
+/// catalog edit cannot accidentally turn this into an arbitrary script runner.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+enum AgentInstaller {
+    ShellScript { url: String },
+}
+
 /// How an agent can be pointed at Screenpipe Cloud instead of the user's own
 /// provider account, from the catalog (agents.json).
 ///
@@ -473,6 +484,10 @@ struct CatalogAgent {
     /// JSON key is `installUrl`.
     #[serde(default)]
     install_url: Option<String>,
+    /// Optional in-app installer. A missing installer keeps the external-link
+    /// flow for agents whose supported installation cannot run in this app.
+    #[serde(default)]
+    installer: Option<AgentInstaller>,
     /// Serve screenpipe's MCP tools over loopback http instead of client stdio,
     /// for agents that reject stdio MCP servers (Cursor, GitHub Copilot). JSON
     /// key is `httpMcp`.
@@ -591,18 +606,189 @@ fn agent_catalog() -> Vec<CatalogAgent> {
 /// Whether a binary agent's CLI is resolvable on PATH. npx agents (run via the
 /// bundled bun) always report installed; binary agents (OpenCode, Cursor, Kimi)
 /// require the user to install the CLI. Returns
-/// `(requires_install, installed, command, install_url)`.
-pub fn agent_install_status(id: &str) -> (bool, bool, Option<String>, Option<String>) {
+/// `(requires_install, installed, command, install_url, can_install_automatically)`.
+pub fn agent_install_status(id: &str) -> (bool, bool, Option<String>, Option<String>, bool) {
     let Some(agent) = agent_catalog().into_iter().find(|agent| agent.id == id) else {
-        return (false, true, None, None);
+        return (false, true, None, None, false);
     };
+    let can_install_automatically = agent.installer.is_some() && cfg!(unix);
     match agent.launch {
-        AgentLaunch::Npx { .. } => (false, true, None, agent.install_url),
+        AgentLaunch::Npx { .. } => (false, true, None, agent.install_url, false),
         AgentLaunch::Binary { command, .. } => {
             let installed = command_on_path(&command);
-            (true, installed, Some(command), agent.install_url)
+            (
+                true,
+                installed,
+                Some(command),
+                agent.install_url,
+                can_install_automatically,
+            )
         }
     }
+}
+
+const MAX_INSTALL_SCRIPT_BYTES: usize = 128 * 1024;
+
+/// Install a binary ACP agent after an explicit click in the desktop UI.
+///
+/// Only Cursor currently opts in. Native Windows retains the website flow:
+/// Cursor supports this shell installer on macOS/Linux (and Windows via WSL),
+/// while the desktop app itself runs outside WSL.
+pub async fn install_agent(id: &str) -> Result<(), String> {
+    let agent = agent_catalog()
+        .into_iter()
+        .find(|agent| agent.id == id)
+        .ok_or_else(|| "unknown ACP agent".to_string())?;
+    let command = match &agent.launch {
+        AgentLaunch::Binary { command, .. } => command.clone(),
+        AgentLaunch::Npx { .. } => {
+            return Err("this ACP agent does not require a separate install".to_string())
+        }
+    };
+    if command_on_path(&command) {
+        return Ok(());
+    }
+    let installer = agent
+        .installer
+        .ok_or_else(|| "automatic installation is not available for this ACP agent".to_string())?;
+
+    #[cfg(not(unix))]
+    {
+        let _ = installer;
+        return Err(
+            "automatic installation is not available on this platform; use the official installer"
+                .to_string(),
+        );
+    }
+
+    #[cfg(unix)]
+    {
+        match installer {
+            AgentInstaller::ShellScript { url } => run_shell_installer(&url).await?,
+        }
+        if command_on_path(&command) {
+            Ok(())
+        } else {
+            Err(format!(
+                "the installer finished, but the {command} command was not found"
+            ))
+        }
+    }
+}
+
+fn trusted_installer_url(url: &reqwest::Url) -> bool {
+    url.scheme() == "https"
+        && url.host_str() == Some("cursor.com")
+        && url.path() == "/install"
+        && url.query().is_none()
+        && url.fragment().is_none()
+}
+
+#[cfg(unix)]
+async fn run_shell_installer(url: &str) -> Result<(), String> {
+    let url =
+        reqwest::Url::parse(url).map_err(|error| format!("invalid installer URL: {error}"))?;
+    if !trusted_installer_url(&url) {
+        return Err("refusing an untrusted ACP installer URL".to_string());
+    }
+
+    let client = reqwest::Client::builder()
+        .user_agent("screenpipe-acp-installer")
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|error| format!("failed to prepare the installer download: {error}"))?;
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|error| format!("failed to download the official installer: {error}"))?;
+    if !trusted_installer_url(response.url()) {
+        return Err("the ACP installer redirected to an untrusted URL".to_string());
+    }
+    let mut response = response
+        .error_for_status()
+        .map_err(|error| format!("the official installer download failed: {error}"))?;
+    let content_length = response.content_length();
+    if content_length.is_some_and(|size| size > MAX_INSTALL_SCRIPT_BYTES as u64) {
+        return Err("the ACP installer script is unexpectedly large".to_string());
+    }
+    let mut script = Vec::with_capacity(content_length.unwrap_or(0) as usize);
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| format!("failed to read the official installer: {error}"))?
+    {
+        if script.len().saturating_add(chunk.len()) > MAX_INSTALL_SCRIPT_BYTES {
+            return Err("the ACP installer script is unexpectedly large".to_string());
+        }
+        script.extend_from_slice(&chunk);
+    }
+    if !script.starts_with(b"#!/usr/bin/env bash") {
+        return Err("the ACP installer response is not the expected shell script".to_string());
+    }
+
+    let home = std::env::var_os("HOME").ok_or("HOME is unavailable; cannot install Cursor")?;
+    let mut command = tokio::process::Command::new("/bin/bash");
+    command
+        .arg("-s")
+        .env_clear()
+        .env("HOME", home)
+        .env("NO_COLOR", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    for key in ["PATH", "SHELL", "TMPDIR", "LANG", "LC_ALL"] {
+        if let Some(value) = std::env::var_os(key) {
+            command.env(key, value);
+        }
+    }
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("failed to start the Cursor installer: {error}"))?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or("failed to open the Cursor installer input")?;
+    stdin
+        .write_all(&script)
+        .await
+        .map_err(|error| format!("failed to send the Cursor installer: {error}"))?;
+    drop(stdin);
+
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(180),
+        child.wait_with_output(),
+    )
+    .await
+    .map_err(|_| "the Cursor installer timed out".to_string())?
+    .map_err(|error| format!("failed while waiting for the Cursor installer: {error}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let detail = installer_error_detail(&output.stdout, &output.stderr);
+    if detail.is_empty() {
+        Err(format!(
+            "the Cursor installer exited with {}",
+            output.status
+        ))
+    } else {
+        Err(format!("the Cursor installer failed: {detail}"))
+    }
+}
+
+#[cfg(unix)]
+fn installer_error_detail(stdout: &[u8], stderr: &[u8]) -> String {
+    let stderr = String::from_utf8_lossy(stderr);
+    let stdout = String::from_utf8_lossy(stdout);
+    let detail = if stderr.trim().is_empty() {
+        stdout.trim()
+    } else {
+        stderr.trim()
+    };
+    let mut chars = detail.chars().rev().take(2_000).collect::<Vec<_>>();
+    chars.reverse();
+    chars.into_iter().collect()
 }
 
 /// bun's global package content-cache dir (`$BUN_INSTALL/install/cache`,
@@ -675,8 +861,37 @@ fn command_on_path(command: &str) -> bool {
         return true;
     }
     refresh_login_shell_path();
+    if path_has_command(command) {
+        return true;
+    }
+    make_local_bin_visible(command);
     path_has_command(command)
 }
+
+/// Cursor's official installer writes to `~/.local/bin` but intentionally does
+/// not edit shell startup files. Add that standard user bin directory to this
+/// process when it contains the requested CLI, so install works immediately
+/// and on the next app launch without mutating the user's dotfiles.
+#[cfg(not(windows))]
+fn make_local_bin_visible(command: &str) {
+    let Some(home) = std::env::var_os("HOME") else {
+        return;
+    };
+    let local_bin = PathBuf::from(home).join(".local/bin");
+    if !local_bin.join(command).is_file() {
+        return;
+    }
+    let mut paths = vec![local_bin];
+    if let Some(current) = std::env::var_os("PATH") {
+        paths.extend(std::env::split_paths(&current));
+    }
+    if let Ok(path) = std::env::join_paths(paths) {
+        std::env::set_var("PATH", path);
+    }
+}
+
+#[cfg(windows)]
+fn make_local_bin_visible(_command: &str) {}
 
 fn path_has_command(command: &str) -> bool {
     let direct = std::path::Path::new(command);
@@ -3917,21 +4132,46 @@ mod tests {
     #[test]
     fn install_status_only_gates_binary_agents() {
         // npx agents run via the bundled bun — never gated on a user install.
-        let (requires, installed, _, _) = agent_install_status("codex-acp");
+        let (requires, installed, _, _, can_install) = agent_install_status("codex-acp");
         assert!(!requires);
         assert!(installed);
+        assert!(!can_install);
 
         // Binary agents require the CLI on PATH (installed value is env-specific)
         // and surface their install URL (installUrl in agents.json).
-        let (requires, _, command, install_url) = agent_install_status("opencode");
+        let (requires, _, command, install_url, can_install) = agent_install_status("opencode");
         assert!(requires);
         assert_eq!(command.as_deref(), Some("opencode"));
         assert_eq!(install_url.as_deref(), Some("https://opencode.ai"));
+        assert!(!can_install);
+
+        // Cursor opts into the in-app installer on platforms that can execute
+        // its official bash installer. Native Windows keeps the website flow.
+        let (requires, _, command, _, can_install) = agent_install_status("cursor");
+        assert!(requires);
+        assert_eq!(command.as_deref(), Some("cursor-agent"));
+        assert_eq!(can_install, cfg!(unix));
 
         // Unknown ids don't gate.
-        let (requires, installed, _, _) = agent_install_status("not-a-real-agent");
+        let (requires, installed, _, _, can_install) = agent_install_status("not-a-real-agent");
         assert!(!requires);
         assert!(installed);
+        assert!(!can_install);
+    }
+
+    #[test]
+    fn automatic_installer_only_trusts_the_exact_cursor_endpoint() {
+        for url in [
+            "http://cursor.com/install",
+            "https://cursor.com.evil.example/install",
+            "https://cursor.com/other",
+            "https://cursor.com/install?next=evil",
+        ] {
+            assert!(!trusted_installer_url(&reqwest::Url::parse(url).unwrap()));
+        }
+        assert!(trusted_installer_url(
+            &reqwest::Url::parse("https://cursor.com/install").unwrap()
+        ));
     }
 
     #[test]

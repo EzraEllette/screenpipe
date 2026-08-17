@@ -1398,6 +1398,18 @@ async piAbortActive(sessionId: string | null) : Promise<Result<null, string>> {
 async piAcpAgentDownloadPending(agentId: string) : Promise<boolean> {
     return await TAURI_INVOKE("pi_acp_agent_download_pending", { agentId });
 },
+/**
+ * Install a supported binary ACP agent after the user clicks Install, then
+ * return a fresh status so the UI only unblocks once the CLI is resolvable.
+ */
+async piAcpAgentInstall(agentId: string) : Promise<Result<AcpAgentInstallStatus, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("pi_acp_agent_install", { agentId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async piAcpAgentInstallStatus(agentId: string) : Promise<AcpAgentInstallStatus> {
     return await TAURI_INVOKE("pi_acp_agent_install_status", { agentId });
 },
@@ -2778,7 +2790,7 @@ useScreenpipeCloud?: boolean | null }
  * via the bundled bun and are always available. The preset editor uses this to
  * gate saving and to show an install prompt instead of a cryptic spawn error.
  */
-export type AcpAgentInstallStatus = { requiresInstall: boolean; installed: boolean; command: string | null; installUrl: string | null }
+export type AcpAgentInstallStatus = { requiresInstall: boolean; installed: boolean; command: string | null; installUrl: string | null; canInstallAutomatically: boolean }
 export type AcpAgentPresetConfig = { id: string; command?: string | null; args?: string[];
 /**
  * Keys with empty values inherit from the desktop process environment.
