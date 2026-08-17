@@ -6819,7 +6819,7 @@ fn render_prompt_with_port(
     let header = format!(
         r#"Default run lookback: {start_time} to {end_time}
 Structured output targets may declare an authoritative time range that overrides this default for that target.
-Date: {date}
+Run date: {date}
 Timezone: {timezone} (UTC{tz_offset})
 Pipe name: {}
 "#,
@@ -10356,6 +10356,8 @@ mod tests {
         // User prompt contains a default lookback and the "Execute" instruction.
         assert!(prompt.contains("Default run lookback:"));
         assert!(prompt.contains("authoritative time range"));
+        assert!(prompt.contains("Run date:"));
+        assert!(!prompt.contains("\nDate:"));
         assert!(prompt.contains("Do the work described above now."));
         // Port / body go into system prompt, not user prompt
         let sys = render_pipe_system_prompt("body text", 3031, None, None, None, false);
