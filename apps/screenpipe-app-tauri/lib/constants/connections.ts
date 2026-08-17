@@ -152,6 +152,25 @@ export interface ConnectionSuggestionTile {
   description?: string;
 }
 
+const CONNECTION_SEARCH_ALIASES_BY_ID: Record<string, readonly string[]> = {
+  gmail: ["google", "google mail", "email", "mail"],
+};
+
+export function connectionMatchesSearch(
+  tile: ConnectionSuggestionTile,
+  query: string,
+): boolean {
+  const normalizedQuery = query.trim().toLowerCase();
+  if (!normalizedQuery) return true;
+
+  return [
+    tile.name,
+    tile.id,
+    tile.description ?? "",
+    ...(CONNECTION_SEARCH_ALIASES_BY_ID[tile.id] ?? []),
+  ].some((term) => term.toLowerCase().includes(normalizedQuery));
+}
+
 export const CONNECTION_HARDCODED_DESCRIPTIONS: Record<string, string> = {
   "claude": "Search your screen & audio from Claude Desktop via MCP",
   "cursor": "Give Cursor AI access to your screen history via MCP",

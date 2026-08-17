@@ -30,6 +30,7 @@ import {
   CONNECTION_CATEGORY_BY_ID,
   CONNECTION_HARDCODED_DESCRIPTIONS,
   compareConnectionTiles,
+  connectionMatchesSearch,
   getSuggestedConnectionsForDevice,
   normalizeConnectionCategory,
   type ConnectionSuggestionTile,
@@ -4049,7 +4050,7 @@ export function ConnectionsSection({
     }
     const q = search.toLowerCase().trim();
     if (q) {
-      tiles = tiles.filter(t => t.name.toLowerCase().includes(q));
+      tiles = tiles.filter((tile) => connectionMatchesSearch(tile, q));
     }
     return [...tiles].sort(compareConnectionTiles);
   }, [allTiles, categoryFilter, search]);
