@@ -39,6 +39,7 @@ use tracing_oslog::OsLogger;
 use updates::start_update_check;
 use window::ShowRewindWindow;
 
+mod acp_extensions;
 mod acp_runtime;
 mod analytics;
 mod auth_session;
@@ -423,6 +424,17 @@ macro_rules! define_specta_builder {
 
 #[tokio::main]
 async fn main() {
+    if acp_extensions::is_portable_mcp_mode() {
+        let exit_code = match acp_extensions::run_portable_mcp_mode() {
+            Ok(exit_code) => exit_code,
+            Err(error) => {
+                eprintln!("[acp-extension] {error}");
+                1
+            }
+        };
+        std::process::exit(exit_code);
+    }
+
     if acp_runtime::is_process_guard_mode() {
         let exit_code = match acp_runtime::run_process_guard() {
             Ok(exit_code) => exit_code,

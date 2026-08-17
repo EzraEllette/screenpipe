@@ -900,6 +900,32 @@ fn record_persisted_capture(
     monitor.record_db_write(duration);
 }
 
+/// Record the mutually exclusive live OCR cache outcomes carried by a
+/// successfully persisted capture result.
+fn record_ocr_result_metrics(
+    vision_metrics: &screenpipe_screen::PipelineMetrics,
+    result: &PairedCaptureResult,
+) {
+    debug_assert!(
+        !(result.ocr_cache_hit && result.ocr_duration_ms.is_some()),
+        "a capture cannot both reuse cached OCR and execute OCR"
+    );
+
+    if result.ocr_cache_hit {
+        vision_metrics.record_ocr_cache_hit();
+    }
+    match (result.ocr_duration_ms, result.ocr_was_empty) {
+        (Some(ocr_ms), true) => {
+            vision_metrics.record_ocr(Duration::from_millis(ocr_ms));
+            vision_metrics.record_ocr_empty();
+        }
+        (Some(ocr_ms), false) => {
+            vision_metrics.record_ocr(Duration::from_millis(ocr_ms));
+        }
+        (None, _) => {}
+    }
+}
+
 fn record_capture_skip(
     aggregate: &screenpipe_screen::PipelineMetrics,
     monitor: &screenpipe_screen::PipelineMetrics,
@@ -1134,13 +1160,7 @@ pub(crate) async fn event_driven_capture_loop(
                         &monitor_liveness,
                         Duration::from_millis(result.duration_ms),
                     );
-                    // OCR metrics: record once per OCR run (each run = cache miss).
-                    if let Some(ocr_ms) = result.ocr_duration_ms {
-                        vision_metrics.record_ocr(Duration::from_millis(ocr_ms), 0, 1);
-                        if result.ocr_was_empty {
-                            vision_metrics.record_ocr_empty();
-                        }
-                    }
+                    record_ocr_result_metrics(&vision_metrics, result);
                     if let Some(ref cache) = hot_frame_cache {
                         push_to_hot_cache(cache, result, &device_name, &CaptureTrigger::Manual)
                             .await;
@@ -1588,65 +1608,64 @@ pub(crate) async fn event_driven_capture_loop(
                 tokio::time::sleep(poll_interval).await;
             }
         } else {
-            // Block on `recv()` for the FIRST trigger so an idle channel
-            // doesn't burn CPU (matches the upstream "reduce idle
-            // wakeups" change). Once a message arrives, drain the rest
-            // via `try_recv` so that bursts of triggers coalesce into
-            // one capture, with every correlation_id reaching the
-            // linker. The reducer then collapses (kind, corr_ids) and
-            // filters out skipped kinds (Clipboard/KeyPress with their
-            // respective gates off).
+            // Drain without parking this long-lived capture task inside
+            // `broadcast::Receiver::recv()`. Production traces showed this
+            // task repeatedly failing to resume from that receiver wait even
+            // though its 250ms timeout had elapsed; the heartbeat then froze
+            // for minutes while the rest of the runtime stayed healthy.
+            //
+            // Preserve the same 250ms idle cadence and CPU cost with a plain
+            // timer sleep. Triggers remain buffered by the broadcast channel
+            // and are drained on wake, adding at most the same poll interval
+            // already budgeted for checkpoint promotion and idle capture.
+            // This removes the receiver-waker/cancellation path without adding
+            // a retry threshold, watchdog timer, or other recovery heuristic.
             let mut drained: Vec<CaptureTriggerMsg> = Vec::new();
             let mut lagged_force_manual = false;
             let mut closed_now = false;
 
+            // Preserve immediate handling for an already-buffered trigger.
+            // Sleep only when the channel is empty; anything arriving during
+            // that sleep remains buffered for the drain below.
             record_loop_stage(
                 &vision_metrics,
                 &monitor_liveness,
-                screenpipe_screen::CaptureLoopStage::TriggerWait,
+                screenpipe_screen::CaptureLoopStage::TriggerDrain,
             );
-            match tokio::time::timeout(poll_interval, trigger_rx.recv()).await {
-                Ok(Ok(msg)) => drained.push(msg),
-                Ok(Err(broadcast::error::RecvError::Lagged(n))) => {
+            match trigger_rx.try_recv() {
+                Ok(msg) => drained.push(msg),
+                Err(broadcast::error::TryRecvError::Empty) => {
+                    record_loop_stage(
+                        &vision_metrics,
+                        &monitor_liveness,
+                        screenpipe_screen::CaptureLoopStage::TriggerWait,
+                    );
+                    tokio::time::sleep(poll_interval).await;
+                }
+                Err(broadcast::error::TryRecvError::Lagged(n)) => {
                     debug!(
                         "trigger channel lagged by {} messages on monitor {}",
                         n, monitor_id
                     );
-                    // Missed broadcast msgs — their correlation_ids are
-                    // gone forever and those ui_events rows will stay
-                    // frame_id=NULL. Bump the lagged counter so the
-                    // periodic linker WARN shows this slice of loss.
                     report_triggers_dropped(
                         linker_tx.as_ref(),
                         Vec::new(),
                         crate::frame_linker::DropReason::Lagged,
                     );
-                    let _ = n;
-                    // Fall back to Manual below if nothing else wins.
                     lagged_force_manual = true;
                 }
-                Ok(Err(broadcast::error::RecvError::Closed)) => {
+                Err(broadcast::error::TryRecvError::Closed) => {
                     warn!(
                         "trigger channel closed for monitor {}, continuing with polling-only mode",
                         monitor_id
                     );
                     closed_now = true;
                 }
-                Err(_elapsed) => {
-                    // No trigger this poll_interval — fall through to
-                    // poll_activity below.
-                }
             }
 
-            // The bounded wait above returned, so anything past this point is
-            // synchronous gate work, not the timer. Re-marking here keeps the
-            // watchdog's "frozen in <stage>" message honest: `trigger-wait`
-            // now accuses only the 250ms-bounded await (a freeze there means
-            // the task was never resumed), while `trigger-drain` accuses the
-            // synchronous gates below (a freeze there means a lock is held by
-            // another thread). Previously both shared one marker, so a
-            // multi-minute #3939 freeze reported `trigger-wait` even though a
-            // 250ms timeout cannot account for it.
+            // Anything past this point is synchronous channel/gate work.
+            // Re-marking here keeps the watchdog's "frozen in <stage>"
+            // message honest.
             record_loop_stage(
                 &vision_metrics,
                 &monitor_liveness,
@@ -2008,15 +2027,7 @@ pub(crate) async fn event_driven_capture_loop(
                                 &monitor_liveness,
                                 Duration::from_millis(result.duration_ms),
                             );
-                            // OCR metrics: record once per OCR run. Each run is a
-                            // cache miss (no OCR result cache exists). `ocr_duration_ms`
-                            // is Some only when OCR actually ran for this frame.
-                            if let Some(ocr_ms) = result.ocr_duration_ms {
-                                vision_metrics.record_ocr(Duration::from_millis(ocr_ms), 0, 1);
-                                if result.ocr_was_empty {
-                                    vision_metrics.record_ocr_empty();
-                                }
-                            }
+                            record_ocr_result_metrics(&vision_metrics, result);
                             // OCR-gate telemetry (#5054/#5060): decision counters
                             // (skip / crop_ocr — the fast-path ratio) plus the
                             // per-capture detect+hash latency.
@@ -3606,6 +3617,48 @@ fn is_frame_corrupt(image: &image::DynamicImage) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ocr_metrics_result(
+        ocr_cache_hit: bool,
+        ocr_duration_ms: Option<u64>,
+        ocr_was_empty: bool,
+    ) -> PairedCaptureResult {
+        PairedCaptureResult {
+            frame_id: 1,
+            snapshot_path: String::new(),
+            accessibility_text: None,
+            text_source: None,
+            capture_trigger: "test".to_string(),
+            captured_at: Utc::now(),
+            duration_ms: 1,
+            ocr_duration_ms,
+            ocr_was_empty,
+            ocr_cache_hit,
+            ocr_gate_decision: None,
+            ocr_gate_detect_duration: None,
+            app_name: None,
+            window_name: None,
+            browser_url: None,
+            content_hash: None,
+        }
+    }
+
+    #[test]
+    fn capture_result_metrics_distinguish_hits_runs_and_noops() {
+        let metrics = screenpipe_screen::PipelineMetrics::new();
+
+        record_ocr_result_metrics(&metrics, &ocr_metrics_result(true, None, false));
+        record_ocr_result_metrics(&metrics, &ocr_metrics_result(false, Some(10), false));
+        record_ocr_result_metrics(&metrics, &ocr_metrics_result(false, Some(30), true));
+        record_ocr_result_metrics(&metrics, &ocr_metrics_result(false, None, false));
+
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.ocr_cache_hits, 1);
+        assert_eq!(snapshot.ocr_cache_misses, 2);
+        assert_eq!(snapshot.ocr_completed, 2);
+        assert_eq!(snapshot.ocr_empty, 1);
+        assert!((snapshot.avg_ocr_latency_ms - 20.0).abs() < 1e-6);
+    }
 
     #[test]
     fn capture_loop_silent_seed_requires_exact_token() {

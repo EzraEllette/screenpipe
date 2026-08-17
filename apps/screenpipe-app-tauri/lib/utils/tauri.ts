@@ -1239,9 +1239,9 @@ async openPipeWindow(port: number, title: string) : Promise<Result<null, string>
     else return { status: "error", error: e  as any };
 }
 },
-async openSearchWindow(query: string | null) : Promise<Result<null, string>> {
+async openSearchWindow(query: string | null, timelineOrigin: string | null) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("open_search_window", { query }) };
+    return { status: "ok", data: await TAURI_INVOKE("open_search_window", { query, timelineOrigin }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1397,6 +1397,18 @@ async piAbortActive(sessionId: string | null) : Promise<Result<null, string>> {
  */
 async piAcpAgentDownloadPending(agentId: string) : Promise<boolean> {
     return await TAURI_INVOKE("pi_acp_agent_download_pending", { agentId });
+},
+/**
+ * Install a supported binary ACP agent after the user clicks Install, then
+ * return a fresh status so the UI only unblocks once the CLI is resolvable.
+ */
+async piAcpAgentInstall(agentId: string) : Promise<Result<AcpAgentInstallStatus, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("pi_acp_agent_install", { agentId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
 },
 async piAcpAgentInstallStatus(agentId: string) : Promise<AcpAgentInstallStatus> {
     return await TAURI_INVOKE("pi_acp_agent_install_status", { agentId });
@@ -2142,13 +2154,15 @@ async scanDeviceSkills() : Promise<Result<DeviceSkill[], string>> {
 }
 },
 /**
- * Navigate from Search to a timestamp on the Main timeline.
- * Shows Main, emits the navigation event from the app handle (not a webview),
- * then closes the Search window.
+ * Navigate from Search to the timeline that opened it.
+ *
+ * Native Swift timelines are addressed by their host-window label. Searches
+ * opened elsewhere retain the legacy React event so non-macOS and older
+ * surfaces continue to work.
  */
-async searchNavigateToTimeline(timestamp: string, frameId: number | null, searchTerms: string[] | null, searchResultsJson: string | null, searchQuery: string | null) : Promise<Result<null, string>> {
+async searchNavigateToTimeline(timestamp: string, frameId: number | null, searchTerms: string[] | null, searchResultsJson: string | null, searchQuery: string | null, timelineOrigin: string | null) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("search_navigate_to_timeline", { timestamp, frameId, searchTerms, searchResultsJson, searchQuery }) };
+    return { status: "ok", data: await TAURI_INVOKE("search_navigate_to_timeline", { timestamp, frameId, searchTerms, searchResultsJson, searchQuery, timelineOrigin }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2778,7 +2792,7 @@ useScreenpipeCloud?: boolean | null }
  * via the bundled bun and are always available. The preset editor uses this to
  * gate saving and to show an install prompt instead of a cryptic spawn error.
  */
-export type AcpAgentInstallStatus = { requiresInstall: boolean; installed: boolean; command: string | null; installUrl: string | null }
+export type AcpAgentInstallStatus = { requiresInstall: boolean; installed: boolean; command: string | null; installUrl: string | null; canInstallAutomatically: boolean }
 export type AcpAgentPresetConfig = { id: string; command?: string | null; args?: string[];
 /**
  * Keys with empty values inherit from the desktop process environment.
@@ -3005,7 +3019,12 @@ downloaded: boolean;
 auth_required: boolean }
 export type PiBackend = "acp"
 export type PiCheckResult = { available: boolean; path: string | null }
-export type PiExtensionPackage = { source: string; scope: string; filtered: boolean; installed: boolean }
+export type PiExtensionPackage = { source: string; scope: string; filtered: boolean; installed: boolean;
+/**
+ * True only after Screenpipe validates the installed package's portable
+ * ACP MCP manifest and its entrypoint stays inside the package directory.
+ */
+acpCompatible: boolean }
 /**
  * Image content for Pi RPC protocol (pi-ai ImageContent format)
  */
