@@ -5,8 +5,13 @@
 
 import * as React from "react";
 import { open as openUrl } from "@tauri-apps/plugin-shell";
-import { FileText, PanelRightClose } from "lucide-react";
+import { FileText, Settings2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 import { Separator } from "@/components/ui/separator";
 import {
   Tooltip,
@@ -23,103 +28,125 @@ import {
   jumpToTimelineMoment,
   openSearchForQuery,
 } from "@/lib/timeline-navigation";
+import { cn } from "@/lib/utils";
 
 interface ChatInspectorProps {
   outputs: SourceCitation[];
   sources: SourceCitation[];
   onOpenFile: (path: string) => void;
-  onClose: () => void;
+}
+
+interface ChatInspectorPopoverProps extends ChatInspectorProps {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}
+
+export function ChatInspectorPopover({
+  open,
+  onOpenChange,
+  outputs,
+  sources,
+  onOpenFile,
+}: ChatInspectorPopoverProps) {
+  return (
+    <Popover open={open} onOpenChange={onOpenChange}>
+      <PopoverTrigger asChild>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          className={cn(
+            "h-7 w-7",
+            open && "bg-muted ring-2 ring-primary ring-offset-1 ring-offset-background",
+          )}
+          title="Toggle pinned summary"
+          aria-label="Toggle pinned summary"
+          aria-pressed={open}
+          onMouseDown={(event) => event.stopPropagation()}
+          onClick={(event) => event.stopPropagation()}
+        >
+          <Settings2 className="h-4 w-4" />
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent
+        align="end"
+        sideOffset={8}
+        className="w-[36rem] max-w-[calc(100vw-2rem)] rounded-2xl p-0 shadow-xl"
+        onInteractOutside={(event) => event.preventDefault()}
+      >
+        <ChatInspector
+          outputs={outputs}
+          sources={sources}
+          onOpenFile={onOpenFile}
+        />
+      </PopoverContent>
+    </Popover>
+  );
 }
 
 export function ChatInspector({
   outputs,
   sources,
   onOpenFile,
-  onClose,
 }: ChatInspectorProps) {
   return (
-    <aside
-      aria-label="Inspector"
-      className="flex h-full w-[min(20rem,38vw)] min-w-60 max-w-80 shrink-0 flex-col border-l border-border bg-background"
+    <div
+      role="region"
+      aria-label="Pinned summary"
+      className="max-h-[min(34rem,calc(100vh-5rem))] overflow-y-auto"
     >
-      <div className="flex h-10 shrink-0 items-center justify-between border-b border-border px-3">
-        <h2 className="text-xs font-medium lowercase tracking-wide">
-          inspector
-        </h2>
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon"
-          onClick={onClose}
-          className="h-7 w-7"
-          aria-label="Close inspector"
-          title="Close inspector"
-        >
-          <PanelRightClose className="h-4 w-4" />
-        </Button>
+      <div className="px-4 pb-2 pt-3">
+        <h2 className="text-sm font-medium">Outputs</h2>
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto">
-        <section aria-labelledby="inspector-outputs-heading" className="py-2">
-          <h3
-            id="inspector-outputs-heading"
-            className="px-3 py-1.5 text-[11px] font-medium uppercase tracking-wider text-muted-foreground"
-          >
-            Outputs
-          </h3>
-          {outputs.length === 0 ? (
-            <p className="px-3 py-2 text-[13px] text-muted-foreground">
-              No outputs yet
-            </p>
-          ) : (
-            <div className="px-1">
-              {outputs.map((output, i) => (
-                <Button
-                  key={`${output.id || "output"}:${i}`}
-                  type="button"
-                  variant="ghost"
-                  onClick={() => output.path && onOpenFile(output.path)}
-                  className="h-9 w-full justify-start gap-2 px-2 text-[13px] font-normal"
-                >
-                  <FileText className="h-4 w-4 shrink-0 text-muted-foreground" />
-                  <span className="truncate">
-                    {output.path?.split("/").pop() ?? output.title}
-                  </span>
-                </Button>
-              ))}
-            </div>
-          )}
-        </section>
+      {outputs.length === 0 ? (
+        <p className="px-4 pb-3 text-[13px] text-muted-foreground">
+          No outputs yet
+        </p>
+      ) : (
+        <div className="px-2 pb-2">
+          {outputs.map((output, i) => (
+            <Button
+              key={`${output.id || "output"}:${i}`}
+              type="button"
+              variant="ghost"
+              onClick={() => output.path && onOpenFile(output.path)}
+              className="h-9 w-full justify-start gap-2 px-2 text-[13px] font-normal"
+            >
+              <FileText className="h-4 w-4 shrink-0 text-muted-foreground" />
+              <span className="truncate">
+                {output.path?.split("/").pop() ?? output.title}
+              </span>
+            </Button>
+          ))}
+        </div>
+      )}
 
-        <Separator />
+      <Separator />
 
-        <section aria-labelledby="inspector-sources-heading" className="py-2">
-          <h3
-            id="inspector-sources-heading"
-            className="px-3 py-1.5 text-[11px] font-medium uppercase tracking-wider text-muted-foreground"
-          >
-            Sources
-          </h3>
-          {sources.length === 0 ? (
-            <p className="px-3 py-2 text-[13px] text-muted-foreground">
-              No sources yet
-            </p>
-          ) : (
-            <TooltipProvider delayDuration={200}>
-              <div className="flex flex-wrap gap-2.5 px-3 py-2">
-                {sources.map((source, i) => (
-                  <SourceIcon
-                    key={`${source.id || "source"}:${i}`}
-                    source={source}
-                    onOpenFile={onOpenFile}
-                  />
-                ))}
-              </div>
-            </TooltipProvider>
-          )}
-        </section>
+      <div className="px-4 pb-1 pt-3">
+        <h3 className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+          Sources
+        </h3>
       </div>
-    </aside>
+      {sources.length === 0 ? (
+        <p className="px-4 pb-3 text-[13px] text-muted-foreground">
+          No sources yet
+        </p>
+      ) : (
+        <TooltipProvider delayDuration={200}>
+          <div className="flex flex-wrap gap-2.5 px-4 pb-3 pt-1">
+            {sources.map((source, i) => (
+              <SourceIcon
+                key={`${source.id || "source"}:${i}`}
+                source={source}
+                onOpenFile={onOpenFile}
+              />
+            ))}
+          </div>
+        </TooltipProvider>
+      )}
+    </div>
   );
 }
 

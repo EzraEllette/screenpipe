@@ -34,7 +34,7 @@ import { useHardcodedTiles } from "@/lib/hooks/use-hardcoded-tiles";
 import { useIsFullscreen } from "@/lib/hooks/use-is-fullscreen";
 import { useChatFilePreview } from "@/lib/hooks/use-chat-file-preview";
 import { useChatInspector } from "@/lib/hooks/use-chat-inspector";
-import { ChatInspector } from "@/components/chat/chat-inspector";
+import { ChatInspectorPopover } from "@/components/chat/chat-inspector";
 import { useSqlAutocomplete, useTagAutocomplete } from "@/lib/hooks/use-sql-autocomplete";
 import { loadConversationFile } from "@/lib/chat-storage";
 import {
@@ -1954,27 +1954,6 @@ export function StandaloneChat({
         }}
         rightActions={
           <div className="relative z-10 flex items-center gap-1">
-            {inspectorHasContent ? (
-              <Button
-                variant="ghost"
-                size="icon"
-                onMouseDown={(e) => e.stopPropagation()}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  toggleInspector();
-                }}
-                className={cn("h-7 w-7", inspectorOpen && "bg-muted")}
-                title={inspectorOpen ? "Hide inspector" : "Show inspector"}
-                aria-label={inspectorOpen ? "Hide inspector" : "Show inspector"}
-                aria-pressed={inspectorOpen}
-              >
-                {inspectorOpen ? (
-                  <PanelRightClose size={14} />
-                ) : (
-                  <PanelRightOpen size={14} />
-                )}
-              </Button>
-            ) : null}
             {sidePanelHasContent ? (
               <Button
                 variant="ghost"
@@ -1984,14 +1963,13 @@ export function StandaloneChat({
                   e.stopPropagation();
                   toggleBrowserPanel();
                 }}
-                className={cn("h-7 w-7", sidePanelOpen && "bg-muted")}
-                title={
-                  filePreviewOpen
-                    ? "Hide preview"
-                    : browserPanelState.open
-                      ? "Hide browser"
-                      : "Show browser"
-                }
+                className={cn(
+                  "h-7 w-7",
+                  sidePanelOpen && "bg-muted ring-2 ring-primary ring-offset-1 ring-offset-background",
+                )}
+                title="Toggle side panel"
+                aria-label="Toggle side panel"
+                aria-pressed={sidePanelOpen}
               >
                 {sidePanelOpen ? (
                   <PanelRightClose size={14} />
@@ -2004,9 +1982,19 @@ export function StandaloneChat({
         }
       />
 
-      <div className="flex flex-1 min-h-0">
-      <div className="flex flex-1 min-w-0 min-h-0" data-browser-panel-host>
-      <div className="flex-1 flex flex-col min-w-0" data-firstrun-target="messages">
+      <div className="flex-1 flex min-h-0" data-browser-panel-host>
+      <div className="relative flex-1 flex flex-col min-w-0" data-firstrun-target="messages">
+      {inspectorHasContent ? (
+        <div className="absolute -top-8 right-2 z-30">
+          <ChatInspectorPopover
+            open={inspectorOpen}
+            onOpenChange={setInspectorOpen}
+            outputs={inspectorOutputs}
+            sources={inspectorSources}
+            onOpenFile={openFilePreview}
+          />
+        </div>
+      ) : null}
       <ChatMainPane
         firstRunAiPreset={firstRunAiPreset}
         firstRunUserToken={settings?.user?.token ?? null}
@@ -2238,16 +2226,6 @@ export function StandaloneChat({
         onPanelStateChange={handlePanelStateChange}
       />
       </div> {/* End of horizontal chat+browser split */}
-
-      {inspectorOpen ? (
-        <ChatInspector
-          outputs={inspectorOutputs}
-          sources={inspectorSources}
-          onOpenFile={openFilePreview}
-          onClose={() => setInspectorOpen(false)}
-        />
-      ) : null}
-      </div> {/* End of horizontal chat+side-panels split */}
 
 
       {scheduleDialogProps && (
