@@ -106,8 +106,10 @@ struct TimelineScrubberView: View {
             case .active(let point):
                 let index = layout.globalIndex(atX: point.x - offset)
                 model.hoveredIndex = index
+                model.hoveredScrubberX = point.x
             case .ended:
                 model.hoveredIndex = nil
+                model.hoveredScrubberX = nil
             }
         }
     }
