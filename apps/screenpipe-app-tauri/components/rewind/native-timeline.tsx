@@ -170,7 +170,15 @@ export function NativeTimelineBridge() {
  * non-macOS host, or a build whose Swift library was stubbed out — so the
  * section is never blank.
  */
-export function NativeTimeline({ fallback }: { fallback: React.ReactNode }) {
+export function NativeTimeline({
+  fallback,
+  transparentHost = false,
+  closeOnEscape = false,
+}: {
+  fallback: React.ReactNode;
+  transparentHost?: boolean;
+  closeOnEscape?: boolean;
+}) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const [available, setAvailable] = useState<boolean | null>(null);
   // Null while the first attach is in flight. A failed attach leaves a
@@ -226,6 +234,7 @@ export function NativeTimeline({ fallback }: { fallback: React.ReactNode }) {
         port: getApiPort(),
         apiKey: getApiKey(),
         embedded: true,
+        closeOnEscape,
         rect: {
           x: Math.round(box.left),
           y: Math.round(box.top),
@@ -278,7 +287,7 @@ export function NativeTimeline({ fallback }: { fallback: React.ReactNode }) {
       // whatever the user navigated to.
       void emit("native-timeline-detach", detachPayload);
     };
-  }, [available]);
+  }, [available, closeOnEscape]);
 
   // Never render nothing. Returning null while the availability check was in
   // flight left the overlay window white, and a check that never resolves left
@@ -286,7 +295,14 @@ export function NativeTimeline({ fallback }: { fallback: React.ReactNode }) {
   // the native one has actually taken over.
   if (available !== true || attached === false) return <>{fallback}</>;
 
-  // Black rather than transparent: the timeline's own canvas is black, so a
-  // frame where the native window has not painted yet does not flash white.
-  return <div ref={hostRef} className="h-full w-full bg-black" />;
+  // The in-app section uses black to match the native canvas while it attaches.
+  // The fullscreen overlay must stay transparent when the native child yields
+  // to a React panel such as Daily Summary, otherwise the entire desktop turns
+  // into an opaque black rectangle behind that panel.
+  return (
+    <div
+      ref={hostRef}
+      className={`h-full w-full ${transparentHost ? "bg-transparent" : "bg-black"}`}
+    />
+  );
 }

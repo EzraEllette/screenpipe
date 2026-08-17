@@ -401,6 +401,15 @@ private func testKeyboard() {
     _ = embedded.handle(TimelineKeyEvent(keyCode: TimelineKeyEvent.escape))
     expect(!TimelineActionBridge.shared.drainEmitted().contains("close_window"),
            "embedded escape does not close the window")
+
+    // The fullscreen overlay is hosted like an embedded timeline but owns the
+    // containing window, so its Escape contract is deliberately different.
+    let overlayModel = populatedModel()
+    let overlay = TimelineKeyHandler(model: overlayModel, embedded: true, closeOnEscape: true)
+    _ = TimelineActionBridge.shared.drainEmitted()
+    _ = overlay.handle(TimelineKeyEvent(keyCode: TimelineKeyEvent.escape))
+    expect(TimelineActionBridge.shared.drainEmitted().contains("close_window"),
+           "overlay escape asks to close its host window")
 }
 
 @MainActor
@@ -517,10 +526,45 @@ private func testDateNavigation() {
     model.jumpDay(-1)
     expect(!model.isAtToday, "previous day leaves today")
     expect(model.frames.isEmpty, "changing date clears the previous day's frames")
+    expect(model.isNavigating, "day navigation stays guarded while its batch is pending")
+
+    model.injectForTesting(frames: fixtureFrames(count: 4, base: model.currentDate))
+    expect(!model.isNavigating, "the requested day batch acknowledges navigation")
+
+    model.jumpDay(1)
+    expect(model.isAtToday, "next day works immediately after the previous day loads")
 
     model.jumpToNow()
     expect(Calendar.current.isDate(model.currentDate, inSameDayAs: today), "jump to now returns to today")
     expectEqual(model.currentIndex, 0, "jump to now returns to the live edge")
+}
+
+@MainActor
+private func testConnectionFailurePresentation() {
+    expect(
+        !TimelineViewModel.shouldSurfaceConnectionFailure(
+            state: .reconnecting(attempt: 1), hasFrames: false
+        ),
+        "the first reconnect stays in loading state instead of flashing an error"
+    )
+    expect(
+        TimelineViewModel.shouldSurfaceConnectionFailure(
+            state: .reconnecting(attempt: 2), hasFrames: false
+        ),
+        "repeated reconnect failures surface a useful error"
+    )
+    expect(
+        !TimelineViewModel.shouldSurfaceConnectionFailure(
+            state: .reconnecting(attempt: 2), hasFrames: true
+        ),
+        "a transport hiccup does not replace already-rendered frames"
+    )
+    expect(
+        TimelineViewModel.shouldSurfaceConnectionFailure(
+            state: .failed("terminal"), hasFrames: false
+        ),
+        "terminal failures surface immediately"
+    )
 }
 
 @MainActor
@@ -810,6 +854,7 @@ struct TimelineRenderTests {
                 ("selection and filters", testSelectionAndFilters),
                 ("live edge", testLiveEdgeFollowing),
                 ("date navigation", testDateNavigation),
+                ("connection failure presentation", testConnectionFailurePresentation),
                 ("playback", testPlayback),
                 ("search review", { testSearchReview(shots: shots) }),
                 ("tag toolbar", { testTagToolbarRenders(shots: shots) }),

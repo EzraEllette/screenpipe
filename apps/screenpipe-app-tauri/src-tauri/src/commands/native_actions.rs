@@ -175,10 +175,13 @@ fn native_timeline_action_callback_inner(action_ptr: *const std::os::raw::c_char
         return;
     };
 
-    use crate::native_timeline::TimelineAction;
+    use crate::native_timeline::{RoutedTimelineAction, TimelineAction};
     use tauri::Emitter;
 
-    match TimelineAction::parse(&raw) {
+    let routed = RoutedTimelineAction::parse(&raw);
+    let target = routed.window_label;
+
+    match routed.action {
         TimelineAction::CloseWindow => {
             crate::native_timeline::hide();
             // The Swift close button and its attached-window blur both mean
@@ -192,13 +195,13 @@ fn native_timeline_action_callback_inner(action_ptr: *const std::os::raw::c_char
             });
         }
         TimelineAction::OpenSearch => {
-            let _ = app.emit("timeline-open-search", ());
+            emit_timeline_event(&app, target.as_deref(), "timeline-open-search", ());
         }
         TimelineAction::OpenDailySummary { date } => {
-            let _ = app.emit("timeline-open-daily-summary", date);
+            emit_timeline_event(&app, target.as_deref(), "timeline-open-daily-summary", date);
         }
         TimelineAction::OpenChat => {
-            let _ = app.emit("timeline-open-chat", ());
+            emit_timeline_event(&app, target.as_deref(), "timeline-open-chat", ());
         }
         TimelineAction::OpenRecordingSettings => {
             let _ = app.emit("timeline-open-recording-settings", ());
@@ -210,7 +213,12 @@ fn native_timeline_action_callback_inner(action_ptr: *const std::os::raw::c_char
             let _ = app.emit("timeline-copy-text", ());
         }
         TimelineAction::AskAiSelection { selection } => {
-            let _ = app.emit("timeline-ask-ai-selection", selection);
+            emit_timeline_event(
+                &app,
+                target.as_deref(),
+                "timeline-ask-ai-selection",
+                selection,
+            );
         }
         TimelineAction::ApplyTag { tag } => {
             // Swift already wrote the tag optimistically; this is for anything
@@ -225,6 +233,21 @@ fn native_timeline_action_callback_inner(action_ptr: *const std::os::raw::c_char
             // silently ignored by an older Rust one.
             let _ = app.emit("timeline-action", raw);
         }
+    }
+}
+
+fn emit_timeline_event<T: serde::Serialize + Clone>(
+    app: &tauri::AppHandle,
+    window_label: Option<&str>,
+    event: &str,
+    payload: T,
+) {
+    if let Some(label) = window_label {
+        if let Err(error) = app.emit_to(label, event, payload.clone()) {
+            tracing::warn!(%error, %label, %event, "failed to route native timeline action");
+        }
+    } else if let Err(error) = app.emit(event, payload) {
+        tracing::warn!(%error, %event, "failed to broadcast native timeline action");
     }
 }
 

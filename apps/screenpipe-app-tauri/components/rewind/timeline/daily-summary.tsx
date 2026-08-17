@@ -54,6 +54,8 @@ import { cn } from "@/lib/utils";
 import { commands, type AIPreset } from "@/lib/utils/tauri";
 
 const SUMMARY_CACHE_PREFIX = "screenpipe:timeline-daily-summary:pi-v2:";
+export const TIMELINE_DISMISS_TOP_OVERLAY_EVENT =
+	"timeline-dismiss-top-overlay";
 
 type SummaryStatus = "idle" | "gathering" | "complete" | "error";
 
@@ -366,14 +368,34 @@ export function TimelineDailySummary({
 				return;
 			closePanel();
 		};
+		const handleEscape = (event: KeyboardEvent) => {
+			if (event.key !== "Escape") return;
+			event.preventDefault();
+			event.stopPropagation();
+			// Dismiss the summary first and leave the underlying native
+			// timeline/overlay open; a second Escape can close the host window.
+			closePanel();
+		};
+		const handleNativeEscape = () => closePanel();
 
 		document.addEventListener("pointerdown", handleOutsidePointerDown, true);
-		return () =>
+		document.addEventListener("keydown", handleEscape, true);
+		window.addEventListener(
+			TIMELINE_DISMISS_TOP_OVERLAY_EVENT,
+			handleNativeEscape,
+		);
+		return () => {
 			document.removeEventListener(
 				"pointerdown",
 				handleOutsidePointerDown,
 				true,
 			);
+			document.removeEventListener("keydown", handleEscape, true);
+			window.removeEventListener(
+				TIMELINE_DISMISS_TOP_OVERLAY_EVENT,
+				handleNativeEscape,
+			);
+		};
 	}, [closePanel, panelOpen]);
 
 	const copySummary = async () => {

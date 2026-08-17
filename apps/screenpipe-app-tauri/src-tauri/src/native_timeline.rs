@@ -128,6 +128,40 @@ pub enum TimelineAction {
     Unknown { raw: String },
 }
 
+/// Callback envelope used by attached timelines. The legacy callback was only
+/// an action string, which forced Rust to broadcast UI actions to every
+/// webview. Once both Home and the overlay host timelines, that opens the
+/// daily-summary panel in the wrong window. Standalone/older Swift builds can
+/// still send a plain string.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoutedTimelineAction {
+    pub action: TimelineAction,
+    pub window_label: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TimelineActionEnvelope {
+    action: String,
+    #[serde(default)]
+    window_label: Option<String>,
+}
+
+impl RoutedTimelineAction {
+    pub fn parse(raw: &str) -> Self {
+        match serde_json::from_str::<TimelineActionEnvelope>(raw) {
+            Ok(envelope) => Self {
+                action: TimelineAction::parse(&envelope.action),
+                window_label: envelope.window_label.filter(|label| !label.is_empty()),
+            },
+            Err(_) => Self {
+                action: TimelineAction::parse(raw),
+                window_label: None,
+            },
+        }
+    }
+}
+
 impl TimelineAction {
     /// Actions are `name` or `name:argument`; the argument may contain colons,
     /// so only the first one separates.
@@ -316,6 +350,28 @@ mod tests {
             TimelineAction::parse("apply_tag:deep work"),
             TimelineAction::ApplyTag {
                 tag: "deep work".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn parses_routed_actions_without_breaking_legacy_callbacks() {
+        assert_eq!(
+            RoutedTimelineAction::parse(
+                r#"{"action":"open_daily_summary:2026-08-16","windowLabel":"main"}"#
+            ),
+            RoutedTimelineAction {
+                action: TimelineAction::OpenDailySummary {
+                    date: "2026-08-16".to_string()
+                },
+                window_label: Some("main".to_string()),
+            }
+        );
+        assert_eq!(
+            RoutedTimelineAction::parse("open_search"),
+            RoutedTimelineAction {
+                action: TimelineAction::OpenSearch,
+                window_label: None,
             }
         );
     }

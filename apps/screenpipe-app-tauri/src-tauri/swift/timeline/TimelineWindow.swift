@@ -33,7 +33,20 @@ final class TimelineActionBridge {
     func emit(_ action: String) {
         emitted.append(action)
         guard let callback else { return }
-        action.withCString { callback($0) }
+        let windowLabel = MainActor.assumeIsolated {
+            TimelineWindowController.activeHostWindowLabel()
+        }
+        let callbackAction: String
+        if let windowLabel,
+           let data = try? JSONSerialization.data(
+               withJSONObject: ["action": action, "windowLabel": windowLabel]
+           ),
+           let routed = String(data: data, encoding: .utf8) {
+            callbackAction = routed
+        } else {
+            callbackAction = action
+        }
+        callbackAction.withCString { callback($0) }
     }
 
     func drainEmitted() -> [String] {
@@ -99,6 +112,7 @@ struct TimelineKeyEvent: Sendable, Equatable {
 struct TimelineKeyHandler {
     let model: TimelineViewModel
     var embedded: Bool
+    var closeOnEscape = false
 
     /// Returns true when the event was consumed.
     func handle(_ event: TimelineKeyEvent) -> Bool {
@@ -136,7 +150,7 @@ struct TimelineKeyHandler {
                 model.clearSelection()
             } else if model.filters.isActive {
                 model.resetFilters()
-            } else if !embedded {
+            } else if !embedded || closeOnEscape {
                 model.pause()
                 TimelineActionBridge.shared.emit("close_window")
             }
@@ -314,6 +328,14 @@ final class TimelineWindowController: NSObject, NSWindowDelegate {
         attachedControllers.removeValue(forKey: pointer)?.detach()
     }
 
+    /// Route native actions back to the webview that owns the key timeline.
+    /// More than one host can have an attached timeline, so broadcasting an
+    /// action opens panels in the wrong window (or both windows).
+    static func activeHostWindowLabel() -> String? {
+        guard let keyWindow = NSApp.keyWindow else { return nil }
+        return attachedControllers.values.first { $0.window === keyWindow }?.hostWindowLabel
+    }
+
     private var window: NSWindow?
     private var model: TimelineViewModel?
     private var keyMonitor: Any?
@@ -324,6 +346,9 @@ final class TimelineWindowController: NSObject, NSWindowDelegate {
     /// The host's `NSWindow` address, handed over by Rust. Unambiguous where
     /// "the main window" is not, once the app has two of them.
     private var hostPointer: Int?
+    /// Tauri label for the parent webview. Used only to route actions back to
+    /// the surface that produced them.
+    private var hostWindowLabel: String?
     /// The attached rect, in the parent's own (bottom-left) coordinates, so the
     /// child can be re-laid whenever the parent moves or resizes.
     private var attachedRect: NSRect?
@@ -383,7 +408,13 @@ final class TimelineWindowController: NSObject, NSWindowDelegate {
             return true
         }
 
-        makeWindow(config: config, embedded: embedded, frame: defaultFrame(), borderless: false)
+        makeWindow(
+            config: config,
+            embedded: embedded,
+            closeOnEscape: false,
+            frame: defaultFrame(),
+            borderless: false
+        )
         window?.makeKeyAndOrderFront(nil)
         return true
     }
@@ -391,7 +422,11 @@ final class TimelineWindowController: NSObject, NSWindowDelegate {
     /// Creates the window without showing it, so a caller that needs to place
     /// it first does not have to reveal it in the wrong spot.
     private func makeWindow(
-        config: TimelineAPIConfig, embedded: Bool, frame: NSRect, borderless: Bool
+        config: TimelineAPIConfig,
+        embedded: Bool,
+        closeOnEscape: Bool,
+        frame: NSRect,
+        borderless: Bool
     ) {
         let model = TimelineViewModel(config: config)
         self.model = model
@@ -427,7 +462,7 @@ final class TimelineWindowController: NSObject, NSWindowDelegate {
         window.delegate = self
         self.window = window
 
-        installKeyMonitor(model: model, embedded: embedded)
+        installKeyMonitor(model: model, embedded: embedded, closeOnEscape: closeOnEscape)
         installScrollMonitor(model: model)
     }
 
@@ -441,9 +476,15 @@ final class TimelineWindowController: NSObject, NSWindowDelegate {
     /// layout, not where the window will be next.
     @discardableResult
     func attach(
-        config: TimelineAPIConfig, hostWindowNumber: Int, rect: NSRect, hostPointer: Int? = nil
+        config: TimelineAPIConfig,
+        hostWindowNumber: Int,
+        rect: NSRect,
+        hostPointer: Int? = nil,
+        hostWindowLabel: String? = nil,
+        closeOnEscape: Bool = false
     ) -> Bool {
         self.hostPointer = hostPointer
+        self.hostWindowLabel = hostWindowLabel
         guard let host = resolveHost(hostWindowNumber) else { return false }
 
         // Build it at its final frame. Creating at the centred default and
@@ -451,9 +492,19 @@ final class TimelineWindowController: NSObject, NSWindowDelegate {
         // or two, in the wrong place, before it snapped into the layout.
         let target = attachedFrame(host: host, rect: rect)
         if window == nil {
-            makeWindow(config: config, embedded: true, frame: target, borderless: true)
+            makeWindow(
+                config: config,
+                embedded: true,
+                closeOnEscape: closeOnEscape,
+                frame: target,
+                borderless: true
+            )
         }
-        guard let window else { return false }
+        guard let window, let model else { return false }
+        // Placement events repeat on resize. Refreshing the handler is cheap
+        // and keeps an existing controller correct if its host mode changes.
+        installKeyMonitor(model: model, embedded: true, closeOnEscape: closeOnEscape)
+        installScrollMonitor(model: model)
 
         // Borderless: the parent already draws the chrome around this region.
         window.styleMask = [.borderless, .fullSizeContentView]
@@ -549,6 +600,7 @@ final class TimelineWindowController: NSObject, NSWindowDelegate {
         removeParentObservers()
         hostWindowNumber = nil
         hostPointer = nil
+        hostWindowLabel = nil
         attachedRect = nil
         guard let window else { return }
         window.parent?.removeChildWindow(window)
@@ -566,6 +618,8 @@ final class TimelineWindowController: NSObject, NSWindowDelegate {
     func close() {
         removeParentObservers()
         hostWindowNumber = nil
+        hostPointer = nil
+        hostWindowLabel = nil
         attachedRect = nil
         removeKeyMonitor()
         model?.stop()
@@ -581,9 +635,17 @@ final class TimelineWindowController: NSObject, NSWindowDelegate {
         window = nil
     }
 
-    private func installKeyMonitor(model: TimelineViewModel, embedded: Bool) {
+    private func installKeyMonitor(
+        model: TimelineViewModel,
+        embedded: Bool,
+        closeOnEscape: Bool = false
+    ) {
         removeKeyMonitor()
-        let handler = TimelineKeyHandler(model: model, embedded: embedded)
+        let handler = TimelineKeyHandler(
+            model: model,
+            embedded: embedded,
+            closeOnEscape: closeOnEscape
+        )
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self, self.window?.isKeyWindow == true else { return event }
             // Never steal keys from a text field; the tag input lives in this window.
@@ -661,15 +723,18 @@ public func timeline_show(_ json: UnsafePointer<CChar>?) -> Int32 {
 
     var config = TimelineAPIConfig.fromEnvironment()
     var embedded = false
+    var closeOnEscape = false
     if let json, let text = String(validatingUTF8: json), let data = text.data(using: .utf8),
        let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
         if let port = obj["port"] as? Int { config.port = port }
         if let host = obj["host"] as? String, !host.isEmpty { config.host = host }
         if let key = obj["apiKey"] as? String, !key.isEmpty { config.apiKey = key }
         if let value = obj["embedded"] as? Bool { embedded = value }
+        if let value = obj["closeOnEscape"] as? Bool { closeOnEscape = value }
         if let r = obj["rect"] as? [String: Any] {
             let host = (obj["hostWindow"] as? Int) ?? -1
             let pointer = obj["hostPointer"] as? Int
+            let label = obj["windowLabel"] as? String
             let rect = NSRect(
                 x: (r["x"] as? Double) ?? 0,
                 y: (r["y"] as? Double) ?? 0,
@@ -681,7 +746,12 @@ public func timeline_show(_ json: UnsafePointer<CChar>?) -> Int32 {
                 let controller = pointer.map { TimelineWindowController.controller(forHost: $0) }
                     ?? TimelineWindowController.shared
                 return controller.attach(
-                    config: cfg, hostWindowNumber: host, rect: rect, hostPointer: pointer
+                    config: cfg,
+                    hostWindowNumber: host,
+                    rect: rect,
+                    hostPointer: pointer,
+                    hostWindowLabel: label,
+                    closeOnEscape: closeOnEscape
                 ) ? 0 : -1
             }
             if Thread.isMainThread {

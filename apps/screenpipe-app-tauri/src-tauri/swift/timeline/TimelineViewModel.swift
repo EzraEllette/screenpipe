@@ -347,6 +347,10 @@ final class TimelineViewModel: ObservableObject {
         currentIndex = TimelineLiveEdge.shiftIndex(currentIndex, newFramesAtFront: result.newAtFront)
         meetings = TimelineMeetingDetection.detect(frames: frames)
         isLoading = false
+        // A completed day batch is the navigation acknowledgement. Without
+        // clearing this flag here, both day arrows stay disabled until the
+        // timeout even though the requested day is already on screen.
+        isNavigating = false
         connectionError = nil
 
         // Only reload pixels when the frame under the playhead actually changed.
@@ -887,6 +891,7 @@ final class TimelineViewModel: ObservableObject {
 extension TimelineViewModel: FrameStreamClientDelegate {
     nonisolated func frameStream(didReceive batch: [StreamTimeSeriesResponse]) {
         Task { @MainActor in
+            if !batch.isEmpty { self.connectionError = nil }
             self.pendingBatch.append(contentsOf: batch)
         }
     }
@@ -903,8 +908,6 @@ extension TimelineViewModel: FrameStreamClientDelegate {
             switch state {
             case .failed(let message):
                 self.connectionError = message
-            case .open:
-                self.connectionError = nil
             default:
                 break
             }
@@ -914,8 +917,31 @@ extension TimelineViewModel: FrameStreamClientDelegate {
     nonisolated func frameStream(didFail message: String) {
         Task { @MainActor in
             // A transport hiccup with frames already on screen is not worth a
-            // full-screen error; the client reconnects on its own.
-            if self.frames.isEmpty { self.connectionError = message }
+            // full-screen error; the client reconnects on its own. The first
+            // failed handshake is also expected while the local server wakes,
+            // so keep the loading state through that retry instead of flashing
+            // an error card for a connection that succeeds moments later.
+            if Self.shouldSurfaceConnectionFailure(
+                state: self.stream.state,
+                hasFrames: !self.frames.isEmpty
+            ) {
+                self.connectionError = message
+            }
+        }
+    }
+
+    static func shouldSurfaceConnectionFailure(
+        state: FrameStreamClient.State,
+        hasFrames: Bool
+    ) -> Bool {
+        guard !hasFrames else { return false }
+        switch state {
+        case .failed:
+            return true
+        case .reconnecting(let attempt):
+            return attempt >= 2
+        default:
+            return false
         }
     }
 }
