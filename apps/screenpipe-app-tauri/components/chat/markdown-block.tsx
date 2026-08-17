@@ -17,6 +17,7 @@ import {
 import { createCodeMarkdownComponents } from "@/components/markdown/code-block";
 import { timelineTimestampFromDeepLink } from "@/lib/timeline-deeplink";
 import { jumpToTimelineMoment } from "@/lib/timeline-navigation";
+import { routeNotificationDeeplink } from "@/lib/notifications/actions";
 import { commands } from "@/lib/utils/tauri";
 import { useTimelineStore } from "@/lib/hooks/use-timeline-store";
 import { cn } from "@/lib/utils";
@@ -93,6 +94,7 @@ export function MarkdownBlock({
           if (
             href?.startsWith("screenpipe://timeline") ||
             href?.startsWith("screenpipe://frame") ||
+            href?.startsWith("screenpipe://meeting") ||
             href?.startsWith("screenpipe://view")
           ) {
             const handleScreenpipeLinkClick = async (
@@ -118,6 +120,11 @@ export function MarkdownBlock({
                     await commands.showWindow("Main");
                     await emit("navigate-to-frame", frameId);
                   }
+                  return;
+                }
+
+                if (href.startsWith("screenpipe://meeting")) {
+                  await routeNotificationDeeplink(href);
                   return;
                 }
 

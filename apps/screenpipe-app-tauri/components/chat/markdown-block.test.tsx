@@ -11,6 +11,7 @@ const {
   openViewerWindowMock,
   setPendingNavigationMock,
   showWindowMock,
+  routeNotificationDeeplinkMock,
 } = vi.hoisted(() => ({
   emitMock: vi.fn(async () => undefined),
   openViewerWindowMock: vi.fn(async (_path: string) => ({
@@ -18,6 +19,7 @@ const {
   })),
   setPendingNavigationMock: vi.fn(),
   showWindowMock: vi.fn(async () => ({ status: "ok" as const })),
+  routeNotificationDeeplinkMock: vi.fn(async () => undefined),
 }));
 
 vi.mock("@/lib/utils/tauri", () => ({
@@ -37,6 +39,10 @@ vi.mock("@/lib/hooks/use-timeline-store", () => ({
       setPendingNavigation: setPendingNavigationMock,
     }),
   },
+}));
+
+vi.mock("@/lib/notifications/actions", () => ({
+  routeNotificationDeeplink: routeNotificationDeeplinkMock,
 }));
 
 describe("MarkdownBlock", () => {
@@ -88,4 +94,22 @@ describe("MarkdownBlock", () => {
       });
     },
   );
+
+  it("opens meeting evidence in the meeting record", async () => {
+    render(
+      <MarkdownBlock
+        text="[planning meeting](screenpipe://meeting/42)"
+        isUser={false}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("link", { name: "planning meeting" }));
+
+    await waitFor(() => {
+      expect(routeNotificationDeeplinkMock).toHaveBeenCalledWith(
+        "screenpipe://meeting/42",
+      );
+    });
+    expect(setPendingNavigationMock).not.toHaveBeenCalled();
+  });
 });
