@@ -428,6 +428,8 @@ function buildForkPrompt(pipeName: string): string {
 // parsePipeError moved to @/lib/pipe-errors (shared with the global pipe-advisory
 // watcher so both surface the same friendly message). Imported at the top.
 
+type PipeEffort = "low" | "medium" | "high";
+
 interface PipeConfig {
   name: string;
   schedule: string;
@@ -438,6 +440,7 @@ interface PipeConfig {
   agent: string;
   model: string;
   provider?: string;
+  effort?: PipeEffort;
   preset?: string | string[];
   enterprise_managed?: boolean;
   history?: boolean;
@@ -3624,7 +3627,7 @@ export function PipesSection() {
                       <div className="px-4 py-3">
                         <p className="text-sm font-medium">runtime</p>
                         <p className="mt-0.5 text-[11px] text-muted-foreground">
-                          control external notifications and execution limits.
+                          control reasoning, external notifications, and execution limits.
                         </p>
                       </div>
                       {/* Notification API permission */}
@@ -3639,6 +3642,54 @@ export function PipesSection() {
                           checked={!isNotificationsDenied(promptDrafts[pipe.config.name] ?? pipe.raw_content)}
                           onCheckedChange={(checked) => toggleNotifications(pipe.config.name, checked)}
                         />
+                      </div>
+
+                      {/* Reasoning effort */}
+                      <div className="grid gap-3 p-4 sm:grid-cols-[minmax(0,1fr)_11rem] sm:items-center">
+                        <div>
+                          <Label className="text-xs font-medium">reasoning effort</Label>
+                          <p className="mt-0.5 text-[11px] text-muted-foreground">
+                            low uses fewer reasoning tokens. raise it only for tasks that need deeper analysis; unsupported models may ignore it.
+                          </p>
+                        </div>
+                        <Select
+                          disabled={enterpriseManaged}
+                          value={pipe.config.effort ?? "low"}
+                          onValueChange={(value) => {
+                            const pipeName = pipe.config.name;
+                            const effort = value as PipeEffort;
+                            setPipes((prev) =>
+                              prev.map((p) =>
+                                p.config.name === pipeName
+                                  ? { ...p, config: { ...p.config, effort } }
+                                  : p
+                              )
+                            );
+                            const savePromise = fetch(`${apiBase}/pipes/${encodeURIComponent(pipeName)}/config`, {
+                              method: "POST",
+                              headers: { "Content-Type": "application/json" },
+                              body: JSON.stringify({ effort }),
+                            }).then(() => {
+                              delete pendingConfigSaves.current[pipeName];
+                              fetchPipes();
+                            }).catch(() => {
+                              delete pendingConfigSaves.current[pipeName];
+                            });
+                            pendingConfigSaves.current[pipeName] = savePromise;
+                          }}
+                        >
+                          <SelectTrigger
+                            className="h-8 w-full text-xs"
+                            data-testid={`pipe-effort-select-${pipe.config.name}`}
+                          >
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="low">low (recommended)</SelectItem>
+                            <SelectItem value="medium">medium</SelectItem>
+                            <SelectItem value="high">high</SelectItem>
+                          </SelectContent>
+                        </Select>
                       </div>
 
                       {/* Timeout */}

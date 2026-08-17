@@ -49,7 +49,11 @@ import {
 } from './services/transcription-budget';
 import { trackResponseUsage } from './utils/stream-usage-tracker';
 import { pruneRuntimeState } from './services/runtime-state-maintenance';
-import { resolveLatencyClass, isBackgroundRequest } from './utils/latency';
+import {
+	applyBackgroundReasoningDefault,
+	resolveLatencyClass,
+	isBackgroundRequest,
+} from './utils/latency';
 import {
 	reserveDailyCostCap,
 	withDailyCostSettlement,
@@ -566,6 +570,7 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 					message: 'Request body must be a JSON object.',
 				})));
 			}
+			body = applyBackgroundReasoningDefault(body, isBackgroundRequest(request));
 
 			// Reject requests with no usable model up-front — every downstream
 			// model.toLowerCase() (createProvider, isModelAllowed, cost tracking)
