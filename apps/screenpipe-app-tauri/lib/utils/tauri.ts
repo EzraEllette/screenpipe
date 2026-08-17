@@ -1239,9 +1239,9 @@ async openPipeWindow(port: number, title: string) : Promise<Result<null, string>
     else return { status: "error", error: e  as any };
 }
 },
-async openSearchWindow(query: string | null) : Promise<Result<null, string>> {
+async openSearchWindow(query: string | null, timelineOrigin: string | null) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("open_search_window", { query }) };
+    return { status: "ok", data: await TAURI_INVOKE("open_search_window", { query, timelineOrigin }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2154,13 +2154,15 @@ async scanDeviceSkills() : Promise<Result<DeviceSkill[], string>> {
 }
 },
 /**
- * Navigate from Search to a timestamp on the Main timeline.
- * Shows Main, emits the navigation event from the app handle (not a webview),
- * then closes the Search window.
+ * Navigate from Search to the timeline that opened it.
+ *
+ * Native Swift timelines are addressed by their host-window label. Searches
+ * opened elsewhere retain the legacy React event so non-macOS and older
+ * surfaces continue to work.
  */
-async searchNavigateToTimeline(timestamp: string, frameId: number | null, searchTerms: string[] | null, searchResultsJson: string | null, searchQuery: string | null) : Promise<Result<null, string>> {
+async searchNavigateToTimeline(timestamp: string, frameId: number | null, searchTerms: string[] | null, searchResultsJson: string | null, searchQuery: string | null, timelineOrigin: string | null) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("search_navigate_to_timeline", { timestamp, frameId, searchTerms, searchResultsJson, searchQuery }) };
+    return { status: "ok", data: await TAURI_INVOKE("search_navigate_to_timeline", { timestamp, frameId, searchTerms, searchResultsJson, searchQuery, timelineOrigin }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };

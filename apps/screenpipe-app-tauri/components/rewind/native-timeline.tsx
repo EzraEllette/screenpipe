@@ -125,7 +125,7 @@ export function NativeTimelineBridge() {
   useEffect(() => {
     const subscriptions = [
       listen("timeline-open-search", () => {
-        void commands.showWindow({ Search: { query: null } });
+        void commands.openSearchWindow(null, getCurrentWindow().label);
       }),
       listen("timeline-open-chat", () => {
         void commands.showWindow("Chat");

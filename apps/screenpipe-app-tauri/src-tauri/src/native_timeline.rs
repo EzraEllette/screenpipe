@@ -265,6 +265,65 @@ pub fn navigate_to_frame(frame_id: &str) -> bool {
     ffi::navigate(&serde_json::json!({ "frameId": frame_id }).to_string())
 }
 
+fn search_result_frame_ids(search_results_json: Option<&str>) -> Vec<String> {
+    let Some(raw) = search_results_json else {
+        return Vec::new();
+    };
+    let Ok(results) = serde_json::from_str::<Vec<serde_json::Value>>(raw) else {
+        return Vec::new();
+    };
+    results
+        .iter()
+        .filter_map(|result| {
+            let id = result.get("frame_id")?;
+            if let Some(number) = id.as_i64() {
+                Some(number.to_string())
+            } else {
+                id.as_str().map(ToOwned::to_owned)
+            }
+        })
+        .collect()
+}
+
+fn search_navigation_payload(
+    timestamp: &str,
+    frame_id: Option<i64>,
+    window_label: &str,
+    search_terms: Option<&[String]>,
+    search_results_json: Option<&str>,
+    search_query: Option<&str>,
+) -> String {
+    serde_json::json!({
+        "timestamp": timestamp,
+        "frameId": frame_id.map(|id| id.to_string()),
+        "windowLabel": window_label,
+        "searchTerms": search_terms.unwrap_or_default(),
+        "searchFrameIds": search_result_frame_ids(search_results_json),
+        "searchQuery": search_query,
+    })
+    .to_string()
+}
+
+/// Navigate the exact native timeline that launched Search and hydrate its
+/// search-review strip from the selectable result set.
+pub fn navigate_to_search_result(
+    timestamp: &str,
+    frame_id: Option<i64>,
+    window_label: &str,
+    search_terms: Option<&[String]>,
+    search_results_json: Option<&str>,
+    search_query: Option<&str>,
+) -> bool {
+    ffi::navigate(&search_navigation_payload(
+        timestamp,
+        frame_id,
+        window_label,
+        search_terms,
+        search_results_json,
+        search_query,
+    ))
+}
+
 pub fn set_action_callback(cb: extern "C" fn(*const std::os::raw::c_char)) {
     ffi::set_action_callback(cb)
 }
@@ -318,6 +377,26 @@ pub fn native_timeline_navigate(timestamp: Option<String>, frame_id: Option<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn search_navigation_targets_origin_and_exact_frame() {
+        let terms = vec!["swift".to_string(), "timeline".to_string()];
+        let payload = search_navigation_payload(
+            "2026-08-17T13:05:00Z",
+            Some(42),
+            "home",
+            Some(&terms),
+            Some(r#"[{"frame_id":41},{"frame_id":42}]"#),
+            Some("swift timeline"),
+        );
+        let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
+
+        assert_eq!(value["windowLabel"], "home");
+        assert_eq!(value["frameId"], "42");
+        assert_eq!(value["searchFrameIds"], serde_json::json!(["41", "42"]));
+        assert_eq!(value["searchTerms"], serde_json::json!(["swift", "timeline"]));
+        assert_eq!(value["searchQuery"], "swift timeline");
+    }
 
     #[test]
     fn parses_plain_actions() {
