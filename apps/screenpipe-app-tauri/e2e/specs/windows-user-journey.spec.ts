@@ -647,7 +647,7 @@ describe("Windows user journey", function () {
     expect(existsSync(shortcutsScreenshot)).toBe(true);
   });
 
-  it("keeps the shortcut reminder overlay on screen and drives its dock actions", async function () {
+  it("lets users control the shortcut reminder and drives its dock actions", async function () {
     if (!isWindows) this.skip();
 
     await openHomeWindow();
@@ -660,10 +660,8 @@ describe("Windows user journey", function () {
     await displayNav.waitForDisplayed({ timeout: t(15_000) });
     await displayNav.click();
 
-    // The overlay carries recording health, live meeting state and meeting
-    // alerts, so it ships unhideable and Display offers only a size. The
-    // `overlay-hiding-control` remote flag can restore the switch, but it is
-    // off by default and E2E never initializes PostHog.
+    // Like Wispr Flow, the persistent choice lives in Settings while the
+    // floating menu owns the temporary one-hour snooze.
     await waitForBodyText(
       (bodyText) =>
         bodyText.includes("theme, windows, and overlay appearance") &&
@@ -671,7 +669,7 @@ describe("Windows user journey", function () {
         bodyText.includes("overlay size"),
       "Display settings did not show the shortcut reminder controls",
     );
-    expect(await $("#shortcut-overlay").isExisting()).toBe(false);
+    expect(await $("#shortcut-overlay").isExisting()).toBe(true);
 
     try {
       await expectShortcutReminderVisible(true, t(20_000));
@@ -790,10 +788,12 @@ describe("Windows user journey", function () {
       await overlaySettingsButton.waitForDisplayed({ timeout: t(10_000) });
       await overlaySettingsButton.click();
 
-      // The gear opens Display settings; it must not offer to hide the pill,
-      // and the pill must still be on screen afterwards.
-      expect(await $('button[title="Hide for today"]').isExisting()).toBe(false);
-      expect(await $('button[title="Hide for a week"]').isExisting()).toBe(false);
+      // Match Wispr Flow's progressive disclosure: the floating bar offers a
+      // one-hour snooze and links to the persistent control in Display.
+      const hideForHourButton = await $('button[title="Hide for 1 hour"]');
+      await hideForHourButton.waitForDisplayed({ timeout: t(10_000) });
+      const persistentSettingsButton = await $('button[title="Open overlay settings"]');
+      await persistentSettingsButton.waitForDisplayed({ timeout: t(10_000) });
       await expectShortcutReminderVisible(true, t(20_000));
     } finally {
       if ((await browser.getWindowHandles()).includes("home")) {

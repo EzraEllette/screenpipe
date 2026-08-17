@@ -16,10 +16,45 @@ mock.module('@clerk/backend', () => ({
 
 const {
 	handleRequest,
-	shouldEnableArgusBackgroundFallback,
-	shouldEnableArgusSafetyRefusalFallback,
+	shouldEnableGpt56HistoryCache,
+	shouldEnableBackgroundFallback,
+	shouldEnableSafetyRefusalFallback,
 } = await import('../index');
 const { resolveLatencyClass } = await import('../utils/latency');
+
+describe('GPT-5.6 history cache rollout policy', () => {
+	function requestWithAffinity(affinity?: string): Request {
+		return new Request('https://gateway.test/v1/chat/completions', {
+			headers: affinity === undefined ? {} : { 'x-session-affinity': affinity },
+		});
+	}
+
+	it('requires history mode and a normal bounded Pi session', () => {
+		expect(shouldEnableGpt56HistoryCache(
+			requestWithAffinity('chat-session-1'),
+			{ GPT56_HISTORY_CACHE_MODE: 'history' } as Env,
+		)).toBe(true);
+		expect(shouldEnableGpt56HistoryCache(
+			requestWithAffinity('pipe-session-1'),
+			{ GPT56_HISTORY_CACHE_MODE: ' HISTORY ' } as Env,
+		)).toBe(true);
+	});
+
+	it('defaults to system-only and rejects invalid or title affinity values', () => {
+		for (const mode of [undefined, 'system', 'unknown']) {
+			expect(shouldEnableGpt56HistoryCache(
+				requestWithAffinity('chat-session-1'),
+				{ GPT56_HISTORY_CACHE_MODE: mode } as Env,
+			)).toBe(false);
+		}
+		for (const affinity of [undefined, ' ', 'x'.repeat(513), '__title:chat-session-1']) {
+			expect(shouldEnableGpt56HistoryCache(
+				requestWithAffinity(affinity),
+				{ GPT56_HISTORY_CACHE_MODE: 'history' } as Env,
+			)).toBe(false);
+		}
+	});
+});
 
 describe('/v1/chat/completions free-plan route policy', () => {
 	const originalFetch = globalThis.fetch;
@@ -262,7 +297,7 @@ describe('/v1/chat/completions free-plan route policy', () => {
 		expect(await response.text()).not.toContain('authentication_required');
 	});
 
-	it('keeps the paid background Argus rescue enabled when the flex-tier kill switch is off', () => {
+	it('keeps the paid background rescue lane enabled when the flex-tier kill switch is off', () => {
 		const backgroundRequest = request({
 			'x-screenpipe-latency': 'background',
 		});
@@ -277,13 +312,13 @@ describe('/v1/chat/completions free-plan route policy', () => {
 			model: 'auto',
 			messages: [{ role: 'user', content: 'hello' }],
 		}, flexDisabledEnv)).toBe('interactive');
-		expect(shouldEnableArgusBackgroundFallback(backgroundRequest, {
+		expect(shouldEnableBackgroundFallback(backgroundRequest, {
 			isValid: true,
 			tier: 'subscribed',
 			accountPlan: 'basic',
 			deviceId: 'pipe-device',
 		})).toBe(true);
-		expect(shouldEnableArgusSafetyRefusalFallback(backgroundRequest, {
+		expect(shouldEnableSafetyRefusalFallback(backgroundRequest, {
 			isValid: true,
 			tier: 'subscribed',
 			accountPlan: 'basic',
@@ -294,7 +329,7 @@ describe('/v1/chat/completions free-plan route policy', () => {
 			'x-screenpipe-latency': 'background',
 			'x-screenpipe-workload': 'pipe',
 		});
-		expect(shouldEnableArgusSafetyRefusalFallback(pipeRequest, {
+		expect(shouldEnableSafetyRefusalFallback(pipeRequest, {
 			isValid: true,
 			tier: 'subscribed',
 			accountPlan: 'basic',

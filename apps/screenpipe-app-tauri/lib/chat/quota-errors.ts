@@ -156,6 +156,42 @@ export function parseQuotaUpgradeAction(
   });
 }
 
+/**
+ * The rejected model id, read from the gateway's own prose (`Model "x" is not
+ * available…`) because the body carries no dedicated field for it. Bounded so a
+ * hostile or malformed body can't paste an essay into the chat transcript.
+ */
+function modelNotAllowedName(errorStr: string): string | null {
+  // Pi may hand this body over raw, escaped once, or escaped twice depending on
+  // how many JSON hops it took, so the quotes are matched with any amount of
+  // backslash in front of them rather than unescaping first.
+  return errorStr.match(/model\s+\\*"([^"\\]{1,64})\\*"/i)?.[1] ?? null;
+}
+
+/**
+ * Copy for a `model_not_allowed` rejection.
+ *
+ * This used to be one hardcoded "upgrade to Screenpipe Business" string, which
+ * is wrong for most of the cases that reach it. The gateway sends
+ * `required_plan: null` when no plan unlocks the model — a Business account
+ * asking for a model id that does not exist gets told to buy the plan it is
+ * already on. Only claim an upgrade when the gateway actually offers one.
+ */
+export function buildModelNotAllowedMessage(errorStr: string): string {
+  const upgrade = validateQuotaUpgradeAction({
+    requiredPlan: structuredString(errorStr, "required_plan"),
+    upgradeUrl: structuredString(errorStr, "upgrade_url"),
+  });
+  if (upgrade) {
+    const plan = QUOTA_PLAN_LABELS[upgrade.requiredPlan];
+    return `This model needs the ${plan} plan. Switch to Auto to keep going, or upgrade.`;
+  }
+  const named = modelNotAllowedName(errorStr)
+    ? `"${modelNotAllowedName(errorStr)}" isn't`
+    : "This model isn't";
+  return `${named} available on Screenpipe Cloud. Switch to Auto, or use your own provider key. If you picked a coding agent, re-select it in Settings → AI presets.`;
+}
+
 export function buildDailyLimitMessage(errorStr: string): string {
   try {
     const normalized = errorStr.toLowerCase();

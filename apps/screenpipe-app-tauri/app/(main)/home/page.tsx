@@ -66,6 +66,10 @@ import { mountPipeRunRecorder } from "@/lib/events/pipe-run-recorder";
 import { mountPipeWatchWriter } from "@/lib/events/pipe-watch-writer";
 import { RecordingStatus, type RecordingDevice } from "@/components/recording-status";
 import Timeline from "@/components/rewind/timeline";
+import {
+  NativeTimeline,
+  NativeTimelineBridge,
+} from "@/components/rewind/native-timeline";
 import { useQueryState } from "nuqs";
 import { listen } from "@tauri-apps/api/event";
 import { useSettings } from "@/lib/hooks/use-settings";
@@ -743,7 +747,7 @@ function HomeContent() {
     };
   }, []);
 
-  const toggleMeeting = useCallback(async (seed?: { title?: string; attendees?: string; resumeMeetingId?: number }) => {
+  const toggleMeeting = useCallback(async (seed?: { title?: string; attendees?: string; resumeMeetingId?: number; calendarEventId?: string }) => {
     setMeetingLoading(true);
     try {
       if (meetingState.active) {
@@ -801,6 +805,9 @@ function HomeContent() {
         if (seed?.resumeMeetingId) body.id = seed.resumeMeetingId;
         if (seed?.title) body.title = seed.title;
         if (seed?.attendees) body.attendees = seed.attendees;
+        // Claim the event so it cannot also name a later meeting.
+        if (seed?.calendarEventId)
+          body.calendar_event_id = seed.calendarEventId;
         const res = await localFetch("/meetings/start", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -932,7 +939,9 @@ function HomeContent() {
         // to chat (the redirect effect also resets activeSection to "home"). This
         // avoids a flash of the disabled placeholder on reload.
         if (settings.disableTimeline) return null;
-        return <Timeline embedded />;
+        // The native window replaces the React timeline where it can run; the
+        // webview one stays as the fallback for hosts without it.
+        return <NativeTimeline fallback={<Timeline embedded />} />;
       case "brain":
         return <BrainSection />;
       case "pipes":
@@ -988,10 +997,10 @@ function HomeContent() {
     // Each click allocates a new session id (empty rows are not reused — that
     // felt like opening an old recent).
     home: { label: "Chat", icon: <Plus className="h-3.5 w-3.5" /> },
-    brain: { label: "Brain", icon: <Brain className="h-3.5 w-3.5" /> },
     meetings: { label: "Meetings", icon: <CalendarClock className="h-3.5 w-3.5" /> },
-    pipes: { label: "Scheduled", icon: <TimerReset className="h-3.5 w-3.5" /> },
     timeline: { label: "Timeline", icon: <MonitorPlay className="h-3.5 w-3.5" /> },
+    brain: { label: "Brain", icon: <Brain className="h-3.5 w-3.5" /> },
+    pipes: { label: "Scheduled", icon: <TimerReset className="h-3.5 w-3.5" /> },
     connections: { label: "Connections", icon: <Plug className="h-3.5 w-3.5" /> },
   };
 
@@ -1107,6 +1116,9 @@ function HomeContent() {
           and global shortcuts already own. Each row prints its shortcut, so
           palette use teaches the direct key. Home window only: the settings
           page binds its own ⌘K for search focus while mounted. */}
+      {/* Routes actions the native timeline window cannot perform itself. */}
+      <NativeTimelineBridge />
+
       <CommandPalette
         deps={{
           openSearch: () => {

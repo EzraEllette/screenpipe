@@ -85,7 +85,7 @@ describe('Cloudflare hosted-chat metadata', () => {
 });
 
 describe('Cloudflare provider-native connection', () => {
-	it('uses the Workers binding, BYOK, metadata-only logs, and disables Gateway retries/cache', async () => {
+	it('uses the Workers binding, BYOK, metadata-only logs, and disables Gateway retries', async () => {
 		const calls: string[] = [];
 		const env = {
 			HOSTED_CHAT_GATEWAY_MODE: 'cloudflare',
@@ -109,7 +109,7 @@ describe('Cloudflare provider-native connection', () => {
 		expect(connection.defaultHeaders.Authorization).toBeNull();
 		expect(connection.defaultHeaders['cf-aig-byok-alias']).toBe('default');
 		expect(connection.defaultHeaders['cf-aig-authorization']).toBe('Bearer local-oauth-token');
-		expect(connection.defaultHeaders['cf-aig-skip-cache']).toBe('true');
+		expect(connection.defaultHeaders).not.toHaveProperty('cf-aig-skip-cache');
 		expect(connection.defaultHeaders['cf-aig-max-attempts']).toBe('1');
 		expect(connection.defaultHeaders['cf-aig-collect-log-payload']).toBe('false');
 		expect(JSON.parse(connection.defaultHeaders['cf-aig-metadata']!)).toEqual(context);

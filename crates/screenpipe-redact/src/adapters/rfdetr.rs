@@ -128,6 +128,41 @@ pub struct RfdetrConfig {
     /// — keep this one permissive (default 0.10) and tighten via the
     /// policy's `min_score`.
     pub conf_threshold: f32,
+    /// Additionally run inference on a 2×2 grid of overlapping tiles, on top
+    /// of the whole-frame pass, when the frame is much larger than
+    /// `input_size`.
+    ///
+    /// Squeezing a 1512×948 desktop into 512×512 shrinks a 14 px line of
+    /// text to ~8 px, below the scale the model was trained on. Tiling
+    /// presents each quadrant at native input size, putting real text back
+    /// in the trained regime. Measured on 522 captured frames carrying 44
+    /// unique real PII values, recall on email/phone/secret went 62.5% →
+    /// 81.2% (email 75→92%, secret 1/2→2/2) at no cost in precision: on the
+    /// held-out 240-frame set the detection count is unchanged (60 vs 59)
+    /// and pattern-clear false positives stay at zero, while the detections
+    /// that survive an OCR-and-judge audit nearly double (7 → 13 verified
+    /// true positives). Costs 5 forward passes instead of 1 (whole frame +
+    /// 4 tiles), 99 → 487 ms/frame at the 2-thread setting this adapter
+    /// pins. Gated on frame size and can be turned off.
+    ///
+    /// Two variants were measured and are worse. A 3×3 grid: core 75%, it
+    /// magnifies past the trained scale and splits long strings across more
+    /// seams. A confidence floor on tile-only detections: it buys back the
+    /// harness stray rise but drops real core recall to 68.8%.
+    pub tiled_inference: bool,
+    /// Grow a detected `Secret` box over the wrapped continuation lines of the
+    /// same token.
+    ///
+    /// The detector emits one box per rendered line, so a credential that soft
+    /// wraps gets only its first line blacked while the rest stays legible —
+    /// and the pipeline reports success. See
+    /// [`crate::image::secret_continuation`] for the guards that stop this from
+    /// swallowing columns of same-shaped tokens (`sha256:` digests, PEM bodies,
+    /// lockfile hashes).
+    ///
+    /// Off only for measurement: the audit example runs a corpus both ways to
+    /// show the added area is confined to genuinely wrapped secrets.
+    pub extend_wrapped_secrets: bool,
 }
 
 impl Default for RfdetrConfig {
@@ -141,6 +176,8 @@ impl Default for RfdetrConfig {
             // tighten further (e.g. 0.70 paranoid mode) — that just
             // applies a second floor.
             conf_threshold: 0.50,
+            tiled_inference: true,
+            extend_wrapped_secrets: true,
         }
     }
 }
@@ -288,13 +325,19 @@ mod imp {
                     // full-width pool burned ~4 cores in WorkerLoop while the
                     // redaction backlog drained (340% CPU regression after 3b9a1a105).
                     .with_intra_op_spinning(false)?
-                    // With CoreML the CPU pool only runs CoreML-rejected fallback
-                    // ops; 2 threads is plenty. CPU-only builds keep the full pool.
-                    .with_intra_threads(if cfg!(feature = "onnx-coreml") {
-                        2
-                    } else {
-                        num_cpus_physical()
-                    })?;
+                    // 2 threads on every CPU path. This graph parallelizes
+                    // badly: measured on 512px frames, whole-frame inference
+                    // costs 997 CPU-ms at the full physical pool but only
+                    // 365 CPU-ms at 2 threads — 2.7x less CPU — while wall
+                    // time only moves 135 -> 195 ms. This is a background
+                    // worker that already sleeps 20 ms between frames and
+                    // backs off on an adaptive CPU cooldown, so per-frame
+                    // latency is irrelevant and total CPU is what the user
+                    // actually pays for in heat and battery.
+                    //
+                    // (With CoreML the CPU pool only runs CoreML-rejected
+                    // fallback ops, where 2 was already the right number.)
+                    .with_intra_threads(2)?;
                 // Offload to the Apple Neural Engine (Mac) / NPU (Windows) instead of
                 // running CPU-only. CoreML MLProgram + ComputeUnits::All measured ~3.4x
                 // faster than the legacy default and keeps the work off the CPU/GPU.
@@ -387,8 +430,103 @@ mod imp {
                 .map_err(|e| RedactError::Runtime(format!("open {}: {e}", image_path.display())))?
                 .to_rgb8();
             let (orig_w, orig_h) = (img.width(), img.height());
+
+            // Tiling only pays when the frame is much larger than the model
+            // input. On a frame already near `input_size` the downscale loses
+            // nothing, so 4× the compute would buy nothing.
+            let big = orig_w >= self.input_size * 2 && orig_h >= self.input_size * 3 / 2;
+            if !self.cfg.tiled_inference || !big {
+                let regions = self.infer_window(&img, 0, 0, orig_w, orig_h)?;
+                return Ok(self.extend_wrapped_secrets(&img, regions));
+            }
+
+            // UNION of the whole frame and 2×2 tiles — the tiles ADD to the
+            // whole-frame pass, they do not replace it.
+            //
+            // This is load-bearing. The model has a narrow trained scale band.
+            // Real desktop frames sit BELOW it (a 14 px line lands at ~8 px
+            // once squeezed to 512), so tiling lifts them into band and recall
+            // rises. But content already inside the band gets magnified OUT of
+            // it by the same 1.8×, and recall collapses: measured on the
+            // planted harness, tiles alone score 56.1 % (person 25/109,
+            // address 43/107) against 95.7 % for the whole frame. Taking the
+            // union scores 96.7 % — better than either alone, because
+            // whichever pass presents a given string at the trained scale
+            // catches it.
+            //
+            let mut all: Vec<ImageRegion> = Vec::new();
+            for (i, (x, y, w, h)) in inference_windows(orig_w, orig_h).into_iter().enumerate() {
+                let regions = self.infer_window(&img, x, y, w, h)?;
+                if i == 0 {
+                    // Guard C: only whole-frame secret detections are eligible
+                    // for continuation extension. Tiled inference emits ~8.5x
+                    // more secret boxes, and every model-reachable
+                    // over-redaction found while stress-testing this came
+                    // through a tile-only box. `inference_windows()[0]` is the
+                    // whole frame, so restricting it here is structural rather
+                    // than a flag someone can flip.
+                    all.extend(self.extend_wrapped_secrets(&img, regions));
+                } else {
+                    all.extend(regions);
+                }
+            }
+            Ok(suppress_overlaps(all))
+        }
+
+        /// Grow whole-frame `Secret` boxes over their wrapped continuation
+        /// lines.
+        ///
+        /// The detector emits one box per rendered line, so a credential that
+        /// soft-wraps gets only its first line redacted while the rest stays
+        /// legible — and the pipeline reports success. See
+        /// [`crate::image::secret_continuation`] for the guards that keep this
+        /// from over-redacting columns of same-shaped tokens.
+        fn extend_wrapped_secrets(
+            &self,
+            img: &image::RgbImage,
+            regions: Vec<ImageRegion>,
+        ) -> Vec<ImageRegion> {
+            if !self.cfg.extend_wrapped_secrets {
+                return regions;
+            }
+            let (out, stats) = crate::image::secret_continuation::extend_secret_boxes(
+                img,
+                &regions,
+                self.cfg.conf_threshold,
+                SpanLabel::Secret,
+            );
+            if stats.extended > 0 || stats.discarded_not_tail > 0 {
+                tracing::debug!(
+                    extended = stats.extended,
+                    discarded_not_tail = stats.discarded_not_tail,
+                    discarded_budget = stats.discarded_budget,
+                    added_pixels = stats.added_pixels,
+                    "secret continuation pass"
+                );
+            }
+            out
+        }
+
+        /// Run the model over one window of `img` and return regions in
+        /// FULL-FRAME pixel coordinates. `ox`/`oy` is the window's origin.
+        fn infer_window(
+            &self,
+            img: &image::RgbImage,
+            ox: u32,
+            oy: u32,
+            win_w: u32,
+            win_h: u32,
+        ) -> Result<Vec<ImageRegion>, RedactError> {
+            let window;
+            let src: &image::RgbImage =
+                if ox == 0 && oy == 0 && win_w == img.width() && win_h == img.height() {
+                    img
+                } else {
+                    window = image::imageops::crop_imm(img, ox, oy, win_w, win_h).to_image();
+                    &window
+                };
             let resized = image::imageops::resize(
-                &img,
+                src,
                 self.input_size,
                 self.input_size,
                 image::imageops::FilterType::Triangle,
@@ -465,10 +603,12 @@ mod imp {
                 let cy = boxes[bo + 1];
                 let bw = boxes[bo + 2];
                 let bh = boxes[bo + 3];
-                let x1 = ((cx - bw / 2.0) * orig_w as f32).max(0.0);
-                let y1 = ((cy - bh / 2.0) * orig_h as f32).max(0.0);
-                let w_px = (bw * orig_w as f32).max(0.0);
-                let h_px = (bh * orig_h as f32).max(0.0);
+                // Model coords are normalized to the WINDOW; shift by the
+                // window origin to land in full-frame pixels.
+                let x1 = ((cx - bw / 2.0) * win_w as f32).max(0.0) + ox as f32;
+                let y1 = ((cy - bh / 2.0) * win_h as f32).max(0.0) + oy as f32;
+                let w_px = (bw * win_w as f32).max(0.0);
+                let h_px = (bh * win_h as f32).max(0.0);
                 if w_px <= 0.0 || h_px <= 0.0 {
                     continue;
                 }
@@ -479,6 +619,68 @@ mod imp {
                 });
             }
             Ok(out)
+        }
+    }
+
+    /// Windows to run the model over, as `(x, y, w, h)` in frame pixels.
+    ///
+    /// **The first entry is always the whole frame.** That is the invariant
+    /// this function exists to make testable, because getting it wrong is
+    /// silent and expensive: an earlier revision returned only the 4 tiles,
+    /// which reads as a harmless optimisation (fewer passes, and real-frame
+    /// recall is identical) but collapses the planted harness from 95.7 % to
+    /// 56.1 % — the model has a narrow trained scale band, and content already
+    /// inside it is magnified OUT of band by the tile zoom.
+    ///
+    /// Tiles are 2×2 with ~20 % overlap so a PII string on a seam is still
+    /// wholly inside at least one tile.
+    pub(super) fn inference_windows(w: u32, h: u32) -> Vec<(u32, u32, u32, u32)> {
+        let mut out = vec![(0, 0, w, h)];
+        let (tw, th) = (w / 2, h / 2);
+        let (ox, oy) = (tw / 5, th / 5);
+        for gy in 0..2u32 {
+            for gx in 0..2u32 {
+                let x0 = (gx * tw).saturating_sub(ox);
+                let y0 = (gy * th).saturating_sub(oy);
+                let x1 = ((gx + 1) * tw + ox).min(w);
+                let y1 = ((gy + 1) * th + oy).min(h);
+                if x1 > x0 && y1 > y0 {
+                    out.push((x0, y0, x1 - x0, y1 - y0));
+                }
+            }
+        }
+        out
+    }
+
+    /// Greedy IoU suppression across tiles.
+    ///
+    /// Tiles overlap by design, so the same string is often detected twice —
+    /// once per tile. Keep the highest-scoring box and drop anything that
+    /// overlaps it heavily. Redaction only needs the pixels covered once, and
+    /// duplicate regions would inflate the audit counts.
+    pub(super) fn suppress_overlaps(mut regions: Vec<ImageRegion>) -> Vec<ImageRegion> {
+        regions.sort_by(|a, b| b.score.total_cmp(&a.score));
+        let mut kept: Vec<ImageRegion> = Vec::with_capacity(regions.len());
+        for r in regions {
+            if !kept.iter().any(|k| iou(k.bbox, r.bbox) >= 0.55) {
+                kept.push(r);
+            }
+        }
+        kept
+    }
+
+    /// Intersection-over-union of two `[x, y, w, h]` boxes.
+    fn iou(a: [u32; 4], b: [u32; 4]) -> f32 {
+        let (ax2, ay2) = (a[0] + a[2], a[1] + a[3]);
+        let (bx2, by2) = (b[0] + b[2], b[1] + b[3]);
+        let ix = ax2.min(bx2).saturating_sub(a[0].max(b[0]));
+        let iy = ay2.min(by2).saturating_sub(a[1].max(b[1]));
+        let inter = (ix as u64) * (iy as u64);
+        let union = (a[2] as u64) * (a[3] as u64) + (b[2] as u64) * (b[3] as u64) - inter;
+        if union == 0 {
+            0.0
+        } else {
+            inter as f32 / union as f32
         }
     }
 
@@ -516,12 +718,6 @@ mod imp {
 
     fn rt_err<E: std::fmt::Display>(ctx: &'static str) -> impl FnOnce(E) -> RedactError {
         move |e| RedactError::Runtime(format!("{ctx}: {e}"))
-    }
-
-    fn num_cpus_physical() -> usize {
-        std::thread::available_parallelism()
-            .map(|n| (n.get() / 2).max(1))
-            .unwrap_or(2)
     }
 }
 
@@ -570,12 +766,96 @@ impl ImageRedactor for RfdetrRedactor {
 mod tests {
     use super::*;
 
+    /// Tiling must ADD to the whole-frame pass, never replace it.
+    ///
+    /// Dropping the whole-frame pass looks like a free optimisation — one
+    /// fewer forward pass, and real-frame recall does not move — but it
+    /// collapses the planted harness from 95.7 % to 56.1 %, because content
+    /// already at the trained scale is magnified out of band by the tile
+    /// zoom. This test is the guard for that regression.
+    #[cfg(feature = "onnx-cpu")]
+    #[test]
+    fn whole_frame_pass_is_never_dropped() {
+        for (w, h) in [(1512u32, 948u32), (1920, 1080), (2560, 1440), (1023, 767)] {
+            let wins = imp::inference_windows(w, h);
+            assert_eq!(wins.len(), 5, "{w}x{h}: expect whole frame + 4 tiles");
+            assert_eq!(
+                wins[0],
+                (0, 0, w, h),
+                "{w}x{h}: first window MUST be the whole frame"
+            );
+        }
+    }
+
+    /// The 2×2 grid must cover every pixel of the frame. A gap between
+    /// tiles would be a blind spot where PII is never even looked at,
+    /// which is a silent privacy failure rather than a visible bug.
+    #[cfg(feature = "onnx-cpu")]
+    #[test]
+    fn tiles_cover_the_whole_frame() {
+        for (w, h) in [(1512u32, 948u32), (1920, 1080), (2560, 1440), (1023, 767)] {
+            let tiles = &imp::inference_windows(w, h)[1..];
+            assert_eq!(tiles.len(), 4);
+            // Every pixel must fall inside at least one tile.
+            for (px, py) in [
+                (0u32, 0u32),
+                (w - 1, 0),
+                (0, h - 1),
+                (w - 1, h - 1),
+                (w / 2, h / 2),
+                (w / 2, 0),
+                (0, h / 2),
+            ] {
+                assert!(
+                    tiles
+                        .iter()
+                        .any(|&(x, y, tw, th)| px >= x && px < x + tw && py >= y && py < y + th),
+                    "{w}x{h}: pixel ({px},{py}) is covered by no tile — blind spot"
+                );
+            }
+            // And the tiles must overlap, so a string on a seam is whole
+            // inside at least one of them.
+            let (x0, _, w0, _) = tiles[0];
+            let (x1, ..) = tiles[1];
+            assert!(x1 < x0 + w0, "{w}x{h}: tiles do not overlap horizontally");
+        }
+    }
+
+    #[cfg(feature = "onnx-cpu")]
+    #[test]
+    fn overlapping_duplicates_are_suppressed() {
+        // Same string caught in two overlapping tiles, plus a distinct box.
+        let regions = vec![
+            ImageRegion {
+                bbox: [100, 100, 80, 12],
+                label: CLASSES[1],
+                score: 0.7,
+            },
+            ImageRegion {
+                bbox: [102, 100, 78, 12],
+                label: CLASSES[1],
+                score: 0.9,
+            },
+            ImageRegion {
+                bbox: [400, 300, 60, 12],
+                label: CLASSES[4],
+                score: 0.6,
+            },
+        ];
+        let kept = imp::suppress_overlaps(regions);
+        assert_eq!(kept.len(), 2, "near-identical boxes must collapse to one");
+        // The higher-scoring duplicate is the survivor.
+        assert!((kept[0].score - 0.9).abs() < f32::EPSILON);
+    }
+
     #[test]
     fn missing_model_path_is_unavailable() {
         let cfg = RfdetrConfig {
             model_path: PathBuf::from("/nonexistent/rfdetr.onnx"),
             input_size: 0,
             conf_threshold: 0.3,
+            tiled_inference: true,
+            extend_wrapped_secrets: true,
         };
         let res = RfdetrRedactor::load(cfg);
         assert!(matches!(res, Err(RedactError::Unavailable(_))));
@@ -631,6 +911,8 @@ mod tests {
                 model_path: p,
                 input_size: 0,
                 conf_threshold: 0.3,
+                tiled_inference: true,
+                extend_wrapped_secrets: true,
             };
             // This must return Err, not panic.
             let res = RfdetrRedactor::load(cfg);
@@ -659,6 +941,8 @@ mod tests {
             model_path: p.clone(),
             input_size: 0,
             conf_threshold: 0.3,
+            tiled_inference: true,
+            extend_wrapped_secrets: true,
         };
         // Wrong-checksum file → ensure_model_present tries to
         // download. Network may or may not be available in CI, so

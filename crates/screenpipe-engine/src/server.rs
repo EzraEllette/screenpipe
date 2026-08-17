@@ -970,6 +970,7 @@ impl SCServer {
             .get("/sync/status", sync_api::sync_status)
             .post("/sync/trigger", sync_api::sync_trigger)
             .post("/sync/lock", sync_api::sync_lock)
+            .post("/sync/reset-account", sync_api::sync_reset_account)
             .post("/sync/download", sync_api::sync_download)
             .post("/sync/pipes/push", sync_api::sync_pipes_push)
             .post("/sync/pipes/pull", sync_api::sync_pipes_pull)

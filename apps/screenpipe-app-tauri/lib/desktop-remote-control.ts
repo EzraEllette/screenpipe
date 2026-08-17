@@ -43,10 +43,8 @@ export const BOOLEAN_REMOTE_CONTROL_DEFINITIONS = {
     settingKey: "enableSidebarCustomization",
     shippedDefault: false,
   },
-  // Whether the user is allowed to hide the shortcut overlay at all. The
-  // overlay carries recording health, live meeting state and meeting alerts,
-  // so it ships unhideable; this is the remote escape hatch that gives the
-  // Display toggle back if that turns out to be too strict.
+  // Compatibility control retained for managed installs. The consumer UI's
+  // visibility choice is independent from this rollout capability.
   overlayHiding: {
     flagKey: "overlay-hiding-control",
     settingKey: "allowHidingShortcutOverlay",

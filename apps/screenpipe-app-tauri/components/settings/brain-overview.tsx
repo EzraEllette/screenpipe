@@ -20,6 +20,7 @@ import {
   CheckCircle2,
   Loader2,
   RefreshCw,
+  Send,
   Undo2,
   X,
 } from "lucide-react";
@@ -47,6 +48,7 @@ import { LiveViewDashboardSwitcher } from "@/components/settings/live-view-dashb
 import { LiveViewLayoutEditor } from "@/components/settings/live-view-layout-editor";
 import { LiveViewOnboardingActivation } from "@/components/settings/live-view-onboarding-activation";
 import { LiveViewOnboardingGuide } from "@/components/settings/live-view-onboarding-guide";
+import { ConnectedShareDialog } from "@/components/connected-share-dialog";
 import {
   getTemplatePipeReadiness,
   LiveViewTemplateGallery,
@@ -67,6 +69,7 @@ import { useHealthCheck } from "@/lib/hooks/use-health-check";
 import { usePlatform } from "@/lib/hooks/use-platform";
 import { useToast } from "@/components/ui/use-toast";
 import { localFetch } from "@/lib/api";
+import { createLiveViewShareArtifact } from "@/lib/connected-share";
 import { showChatWithPrefill } from "@/lib/chat-utils";
 import {
   buildLiveViewItemHandoff,
@@ -162,6 +165,8 @@ type DataRefreshState = {
   startedAt: number;
   startFailureCount: number;
   filled: number;
+  refreshableTotal: number;
+  unconfiguredCount: number;
   total: number;
   message?: string;
 };
@@ -290,13 +295,25 @@ function serializedSlots(slots: ViewSlot[]): BrainViewSlotInput[] {
 
 function DataRefreshBanner({ state }: { state: DataRefreshState }) {
   const active = state.status === "starting" || state.status === "running";
+  const configurationNote =
+    state.unconfiguredCount > 0
+      ? `${state.unconfiguredCount} section${
+          state.unconfiguredCount === 1 ? "" : "s"
+        } not configured`
+      : null;
+  const withConfigurationNote = (message: string) =>
+    configurationNote ? `${message} · ${configurationNote}` : message;
   const message =
     state.status === "starting"
-      ? `starting ${state.pipeNames.join(", ")}`
+      ? withConfigurationNote(`starting ${state.pipeNames.join(", ")}`)
       : state.status === "running"
         ? state.filled > 0
-          ? `${state.filled} of ${state.total} sections updated`
-          : `${state.pipeNames.join(", ")} ${state.pipeNames.length === 1 ? "is" : "are"} building your live data`
+          ? withConfigurationNote(
+              `${state.filled} of ${state.refreshableTotal} connected sections updated`,
+            )
+          : withConfigurationNote(
+              `${state.pipeNames.join(", ")} ${state.pipeNames.length === 1 ? "is" : "are"} building your live data`,
+            )
         : state.status === "complete"
           ? `${state.total} sections updated from source data`
           : state.message || "some sections could not be updated";
@@ -316,7 +333,7 @@ function DataRefreshBanner({ state }: { state: DataRefreshState }) {
       <span>{message}</span>
       {active && (
         <span className="ml-auto tabular-nums text-muted-foreground">
-          {state.filled}/{state.total}
+          {state.filled}/{state.refreshableTotal}
         </span>
       )}
     </div>
@@ -537,6 +554,7 @@ export function BrainOverview({
   const [pipeSchedules, setPipeSchedules] = useState<PipeScheduleSnapshot[]>([]);
   const [templateGalleryOpen, setTemplateGalleryOpen] = useState(false);
   const [createDashboardOpen, setCreateDashboardOpen] = useState(false);
+  const [shareOpen, setShareOpen] = useState(false);
   const [undoView, setUndoView] = useState<ViewDefinition | null>(null);
   const [undoRevision, setUndoRevision] = useState<number | null>(null);
   const [previewDestination, setPreviewDestination] =
@@ -579,6 +597,10 @@ export function BrainOverview({
   const canvasSaveErrorsRef = useRef(new Map<string, string>());
   const pendingCanvasSavesRef = useRef(
     new Map<string, BrainViewCanvasDocument>(),
+  );
+  const shareArtifact = useMemo(
+    () => (view ? createLiveViewShareArtifact(view) : null),
+    [view],
   );
   const canvasSavePumpRef = useRef<Promise<void> | null>(null);
   const refreshOnboardingActivation = useCallback(
@@ -1052,9 +1074,9 @@ export function BrainOverview({
       requestedSlots?: ViewSlot[],
       trigger: LiveViewRefreshTrigger = "manual",
     ) => {
-      const boundSlots = (requestedSlots ?? targetView.slots).filter(
-        (slot) => slot.binding,
-      );
+      const targetSlots = requestedSlots ?? targetView.slots;
+      const boundSlots = targetSlots.filter((slot) => slot.binding);
+      const unconfiguredCount = targetSlots.length - boundSlots.length;
       const pipeNames = Array.from(
         new Set(
           boundSlots
@@ -1065,7 +1087,9 @@ export function BrainOverview({
       const analyticsProperties = {
         ...liveViewAnalyticsProperties(targetView, views.length),
         trigger,
-        requested_block_count: boundSlots.length,
+        requested_block_count: targetSlots.length,
+        connected_block_count: boundSlots.length,
+        unconfigured_block_count: unconfiguredCount,
         requested_pipe_count: pipeNames.length,
         is_onboarding: Boolean(getOnboardingLiveViewActivation(targetView.id)),
       };
@@ -1092,7 +1116,9 @@ export function BrainOverview({
         startedAt,
         startFailureCount: 0,
         filled: 0,
-        total: boundSlots.length,
+        refreshableTotal: boundSlots.length,
+        unconfiguredCount,
+        total: targetSlots.length,
       });
 
       // Give every source feeding this dashboard a cadence before running it.
@@ -1369,7 +1395,15 @@ export function BrainOverview({
           if (!current || current.startedAt !== dataRefresh.startedAt) {
             return current;
           }
-          if (filled >= current.total) {
+          if (filled >= current.refreshableTotal) {
+            if (current.unconfiguredCount > 0) {
+              return {
+                ...current,
+                status: "partial",
+                filled,
+                message: `${filled} of ${current.total} sections updated · ${current.unconfiguredCount} not configured`,
+              };
+            }
             return { ...current, status: "complete", filled };
           }
           if (timedOut) {
@@ -1379,7 +1413,13 @@ export function BrainOverview({
               filled,
               message:
                 filled > 0
-                  ? `${filled} of ${current.total} sections updated. The scheduled tasks are still working on the rest.`
+                  ? `${filled} of ${current.refreshableTotal} connected sections updated. The scheduled tasks are still working on the rest.${
+                      current.unconfiguredCount > 0
+                        ? ` ${current.unconfiguredCount} section${
+                            current.unconfiguredCount === 1 ? " is" : "s are"
+                          } not configured.`
+                        : ""
+                    }`
                   : "The scheduled tasks are still working. This view will update when they publish data.",
             };
           }
@@ -1415,6 +1455,8 @@ export function BrainOverview({
       time_range: dataRefresh.timeRange,
       duration_ms: Math.max(0, Date.now() - dataRefresh.startedAt),
       requested_block_count: dataRefresh.total,
+      connected_block_count: dataRefresh.refreshableTotal,
+      unconfigured_block_count: dataRefresh.unconfiguredCount,
       requested_pipe_count: dataRefresh.pipeNames.length,
       refreshed_block_count: dataRefresh.filled,
       pipe_start_failure_count: dataRefresh.startFailureCount,
@@ -2893,6 +2935,7 @@ export function BrainOverview({
 
   if (!view) return null;
   const boundSlotCount = slots.filter((slot) => slot.binding).length;
+  const unconfiguredBlockCount = slots.length - boundSlotCount;
   const periodRanges = allowedLiveViewTimeRanges(view.periodPolicy);
   const freshness = summarizeLiveViewFreshness(slots);
   const latestUpdate = freshness.label;
@@ -2915,6 +2958,13 @@ export function BrainOverview({
   const onboardingColdStart = showOnboardingActivation && !onboardingHasResult;
   return (
     <div className="relative flex min-h-0 flex-1 overflow-hidden">
+      {shareArtifact && (
+        <ConnectedShareDialog
+          open={shareOpen}
+          onOpenChange={setShareOpen}
+          artifact={shareArtifact}
+        />
+      )}
       <div
         data-testid="brain-overview-scroll"
         className="flex h-full min-h-0 w-full flex-col overflow-hidden pr-2"
@@ -3027,6 +3077,18 @@ export function BrainOverview({
                 />
               </Button>
             )}
+            {!onboardingColdStart && slots.some((slot) => slot.value) && (
+              <Button
+                data-testid="overview-send"
+                variant="outline"
+                size="sm"
+                className="h-9 flex-1 rounded-none px-3 sm:flex-none"
+                disabled={dashboardBusy}
+                onClick={() => setShareOpen(true)}
+              >
+                <Send className="mr-1.5 h-3.5 w-3.5" /> send
+              </Button>
+            )}
           </div>
         </div>
         {latestUpdate && !onboardingColdStart && (
@@ -3044,6 +3106,16 @@ export function BrainOverview({
                 </span>
               </>
             )}
+          </p>
+        )}
+        {unconfiguredBlockCount > 0 && !onboardingColdStart && (
+          <p
+            data-testid="overview-unconfigured-blocks"
+            className="mb-3 shrink-0 text-[11px] text-muted-foreground"
+          >
+            {unconfiguredBlockCount} Block
+            {unconfiguredBlockCount === 1 ? " is" : "s are"} not connected to a
+            scheduled task
           </p>
         )}
         {canvasError && (

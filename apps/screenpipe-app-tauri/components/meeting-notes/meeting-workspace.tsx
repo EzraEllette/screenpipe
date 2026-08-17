@@ -4,15 +4,7 @@
 "use client";
 
 import React from "react";
-import { Check, Copy, Mail } from "lucide-react";
 import { MemoizedReactMarkdown } from "@/components/markdown";
-import { Button } from "@/components/ui/button";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
 
 export type MeetingWorkspaceTab = "notes" | "transcript" | "summary";
@@ -35,6 +27,12 @@ export const MEETING_READING_COLUMN_CLASS = "w-full";
 export const MEETING_QUIET_CONTROL_CLASS =
   "rounded-none border-0 bg-transparent text-muted-foreground transition-colors hover:bg-transparent hover:text-foreground focus-visible:text-foreground";
 
+// Actions that sit on the tab rule share the tabs' own geometry so the row
+// reads as one band instead of a strip of floating boxes. Shared with the note
+// view now that the meeting actions live here rather than in a footer.
+export const MEETING_RULE_ACTION_CLASS =
+  "flex h-11 shrink-0 items-center gap-2 border-l border-border font-mono text-[11px] uppercase tracking-[0.12em] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:z-10 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-foreground disabled:text-muted-foreground/50 disabled:hover:bg-transparent";
+
 const MEETING_TABS: ReadonlyArray<{
   value: MeetingWorkspaceTab;
   label: string;
@@ -52,7 +50,9 @@ export function MeetingWorkspaceTabs({
 }: {
   value: MeetingWorkspaceTab;
   onValueChange: (value: MeetingWorkspaceTab) => void;
-  summaryState?: "working" | "ready" | "attention" | null;
+  // Only states that want something from the reader get a dot. "finished
+  // normally" is not one of them.
+  summaryState?: "working" | "attention" | null;
   // Rendered on the same rule as the tabs but outside the tablist, so a
   // note-wide action stays reachable from every tab without becoming a
   // fourth pseudo-tab for arrow-key navigation.
@@ -119,8 +119,8 @@ export function MeetingWorkspaceTabs({
                 aria-label={`summary ${state}`}
                 className={cn(
                   "h-1.5 w-1.5 shrink-0",
-                  state === "working" && "animate-pulse bg-current",
-                  state === "ready" && "bg-current",
+                  state === "working" &&
+                    "animate-pulse bg-current motion-reduce:animate-none",
                   state === "attention" && "bg-amber-500",
                 )}
               />
@@ -133,8 +133,11 @@ export function MeetingWorkspaceTabs({
 
   if (!trailing) return tablist;
 
+  // No border here: this row is the last thing in the meeting header, which
+  // already draws a full-bleed rule underneath it. Both together read as a
+  // doubled line, one inset and one not.
   return (
-    <div className="flex min-w-0 items-stretch border-b border-border">
+    <div className="flex min-w-0 items-stretch">
       {tablist}
       <div className="ml-auto flex shrink-0 items-stretch">{trailing}</div>
     </div>
@@ -152,16 +155,6 @@ export function extractMeetingSummary(markdown: string): string | null {
   return body || null;
 }
 
-// The summary header is where a share has to live: it is the first thing on
-// screen the moment the agent finishes. One trigger, destinations one level
-// down. Two peer buttons would have made three same-weight controls in this
-// header, against the rule the footer cluster already follows — primary stays
-// visible, everything occasional lives one level down. Granola and Notion both
-// land in the same place: a single share surface that fans out to destinations,
-// never a row of per-destination buttons.
-const MEETING_SHARE_BUTTON_CLASS =
-  "flex h-9 shrink-0 items-center gap-1.5 border border-border bg-background px-3 font-mono text-[10px] uppercase tracking-[0.12em] text-muted-foreground transition-colors hover:border-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-foreground disabled:opacity-40";
-
 export function MeetingSummarySurface({
   note,
   state,
@@ -169,9 +162,7 @@ export function MeetingSummarySurface({
   streamedSummary,
   onGenerate,
   canGenerate,
-  onCopySummary,
-  onEmailSummary,
-  summaryCopied,
+  activity,
 }: {
   note: string;
   state: "idle" | "working" | "ready" | "attention";
@@ -179,16 +170,15 @@ export function MeetingSummarySurface({
   streamedSummary?: string;
   onGenerate: () => void;
   canGenerate: boolean;
-  onCopySummary?: () => void;
-  onEmailSummary?: () => void;
-  summaryCopied?: boolean;
+  // Replay scrubber and the "related during this meeting" list. They are
+  // evidence for the summary — what was on screen and open while it was
+  // written — so they belong under it. Under the note editor they sat below a
+  // draft of unbounded length, which is a place nobody scrolls to.
+  activity?: React.ReactNode;
 }) {
   const savedSummary = extractMeetingSummary(note);
   const isStreaming = state === "working" && Boolean(streamedSummary?.trim());
   const summary = isStreaming ? streamedSummary! : savedSummary;
-  // Share only what is finished and on disk. A half-streamed draft would put a
-  // truncated summary in someone's inbox.
-  const canShare = Boolean(savedSummary) && state !== "working";
 
   return (
     <section
@@ -209,43 +199,9 @@ export function MeetingSummarySurface({
             </p>
           </div>
           <div className="flex shrink-0 items-center gap-2">
-            {canShare && (onCopySummary || onEmailSummary) && (
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    aria-label="share summary"
-                    title="share the summary, without the transcript"
-                    className={MEETING_SHARE_BUTTON_CLASS}
-                  >
-                    {summaryCopied ? (
-                      <>
-                        <Check className="h-3 w-3" />
-                        copied
-                      </>
-                    ) : (
-                      "share"
-                    )}
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end" className="w-56">
-                  {onCopySummary && (
-                    <DropdownMenuItem onSelect={() => onCopySummary()}>
-                      <Copy className="mr-2 h-3.5 w-3.5" />
-                      copy summary
-                    </DropdownMenuItem>
-                  )}
-                  {onEmailSummary && (
-                    <DropdownMenuItem onSelect={() => onEmailSummary()}>
-                      <Mail className="mr-2 h-3.5 w-3.5" />
-                      email summary
-                    </DropdownMenuItem>
-                  )}
-                </DropdownMenuContent>
-              </DropdownMenu>
-            )}
+            {/* Sharing the summary is the meeting-wide share control's job, on
+                the tab rule above. This header keeps only the action that is
+                unique to the summary tab: producing one. */}
             {(state === "idle" ||
               state === "attention" ||
               state === "ready") && (
@@ -324,6 +280,15 @@ export function MeetingSummarySurface({
             </div>
           )}
         </div>
+
+        {activity && (
+          <div
+            data-testid="meeting-summary-activity"
+            className="mt-10 select-text space-y-6"
+          >
+            {activity}
+          </div>
+        )}
       </div>
     </section>
   );

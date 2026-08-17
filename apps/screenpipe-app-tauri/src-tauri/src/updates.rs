@@ -247,12 +247,27 @@ const BANNER_GATE_TIMEOUT_SECS: u64 = 60;
 /// (which passes `force=true`). In-memory only — a restart re-attempts once.
 const UPDATE_FAILURE_COOLDOWN: Duration = Duration::from_secs(6 * 60 * 60);
 
-/// Wait for boot to reach "ready" or "error", with timeout. Logs the
+/// Wait for boot to reach a settled state, with timeout. Logs the
 /// outcome with `label` so deferrals are searchable in support logs.
 pub async fn await_restart_gate(timeout: Duration, label: &str) -> RestartGate {
     let outcome = crate::health::wait_for_boot_ready(timeout).await;
     match outcome {
         crate::health::BootReadiness::Ready => RestartGate::Proceed,
+        // Idle = the engine was never started (signed-out install, entitlement
+        // gate) or already fully wound down. No audio/ORT init is in flight,
+        // so the #3622 race this gate exists for cannot happen — and blocking
+        // here stranded signed-out installs on old versions forever: the tray
+        // "Restart to update" click deferred every time (2026-08-11 MacBook
+        // Air report). Restart is safe AND is the only way such an install
+        // ever updates.
+        crate::health::BootReadiness::Idle => {
+            info!(
+                "{}: engine idle (never started) — nothing is initializing, proceeding \
+                 with restart",
+                label
+            );
+            RestartGate::Proceed
+        }
         crate::health::BootReadiness::Errored => {
             warn!(
                 "{}: boot phase is 'error' — restarting anyway; a relaunch is the \
@@ -326,6 +341,14 @@ pub async fn restart_for_update(
         return Ok("proceed".to_string());
     }
 
+    // Durable "we are about to apply vX" marker: the next boot compares it
+    // with the running version, so a swap that silently failed to apply is
+    // detected instead of the app just quietly staying old.
+    #[cfg(target_os = "macos")]
+    if let Some(to_version) = crate::staged_update::staged_version() {
+        record_update_attempt(&app, &to_version);
+    }
+
     info!("banner restart: gate passed, shutting down for update");
 
     // Non-fatal AND time-bounded: a wedged capture/audio teardown must not
@@ -359,6 +382,195 @@ pub async fn restart_for_update(
     );
 
     Ok("proceed".to_string())
+}
+
+/// True once any surface committed to an update restart. Diagnostics only
+/// (e2e driver / tray state) — the authoritative guard is the swap above.
+#[cfg_attr(not(feature = "e2e"), allow(dead_code))]
+pub fn update_restart_started() -> bool {
+    UPDATE_RESTART_STARTED.load(Ordering::SeqCst)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Update-attempt marker
+//
+// The install itself runs in the dying process (staged_update.rs), after the
+// last log reader is gone — if it fails, nothing today would ever say so: the
+// app just comes back on the old version and the menu claims it's fine. Both
+// Claude Desktop and the ChatGPT/Codex desktop write a durable marker before
+// quitting for an update and compare it against the running version on next
+// boot; we do the same. See classify_update_attempt for the outcomes.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+pub struct UpdateAttempt {
+    pub from_version: String,
+    pub to_version: String,
+    pub ts_epoch_secs: u64,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum UpdateAttemptOutcome {
+    /// Running version moved off `from_version` — the install applied.
+    Applied,
+    /// Still running `from_version` — the install did not apply.
+    Failed,
+    /// Marker doesn't match the running version at all (e.g. a manual
+    /// reinstall in between); nothing useful to conclude.
+    Unrelated,
+}
+
+/// Pure so it's unit-testable: what does a leftover marker mean given the
+/// version that actually booted?
+fn classify_update_attempt(attempt: &UpdateAttempt, current_version: &str) -> UpdateAttemptOutcome {
+    if attempt.from_version == current_version {
+        UpdateAttemptOutcome::Failed
+    } else if attempt.to_version == current_version {
+        UpdateAttemptOutcome::Applied
+    } else {
+        UpdateAttemptOutcome::Unrelated
+    }
+}
+
+const UPDATE_ATTEMPT_MARKER_FILE: &str = "update-attempt.json";
+
+fn update_attempt_marker_path(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
+    crate::config::get_base_dir(app, None)
+        .ok()
+        .map(|d| d.join(UPDATE_ATTEMPT_MARKER_FILE))
+}
+
+/// Best-effort: a marker failure must never block the update itself.
+fn record_update_attempt(app: &tauri::AppHandle, to_version: &str) {
+    let Some(path) = update_attempt_marker_path(app) else {
+        return;
+    };
+    let attempt = UpdateAttempt {
+        from_version: app.package_info().version.to_string(),
+        to_version: to_version.to_string(),
+        ts_epoch_secs: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+    };
+    match serde_json::to_vec(&attempt).map(|bytes| std::fs::write(&path, bytes)) {
+        Ok(Ok(())) => info!(
+            "update attempt recorded: {} → {}",
+            attempt.from_version, attempt.to_version
+        ),
+        Ok(Err(e)) => warn!("failed to write update-attempt marker: {}", e),
+        Err(e) => warn!("failed to serialize update-attempt marker: {}", e),
+    }
+}
+
+/// Read + delete the marker left by the previous process. Returns the failed
+/// attempt when the install demonstrably did not apply; logs the applied /
+/// unrelated cases.
+fn consume_update_attempt_marker(app: &tauri::AppHandle) -> Option<UpdateAttempt> {
+    let path = update_attempt_marker_path(app)?;
+    let raw = std::fs::read(&path).ok()?;
+    if let Err(e) = std::fs::remove_file(&path) {
+        warn!("failed to remove update-attempt marker: {}", e);
+    }
+    let attempt: UpdateAttempt = match serde_json::from_slice(&raw) {
+        Ok(a) => a,
+        Err(e) => {
+            warn!("malformed update-attempt marker, ignoring: {}", e);
+            return None;
+        }
+    };
+    let current = app.package_info().version.to_string();
+    match classify_update_attempt(&attempt, &current) {
+        UpdateAttemptOutcome::Applied => {
+            info!(
+                "previous update install applied: {} → {}",
+                attempt.from_version, attempt.to_version
+            );
+            None
+        }
+        UpdateAttemptOutcome::Failed => {
+            error!(
+                "previous update install did NOT apply: still on {} after attempting {} \
+                 (marker ts={})",
+                attempt.from_version, attempt.to_version, attempt.ts_epoch_secs
+            );
+            Some(attempt)
+        }
+        UpdateAttemptOutcome::Unrelated => {
+            info!(
+                "update-attempt marker ({} → {}) doesn't match running version {} — ignoring",
+                attempt.from_version, attempt.to_version, current
+            );
+            None
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tray update flow
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Fire-and-forget native notification; used where no webview toast can exist
+/// (tray-only interactions, possibly with zero windows open).
+fn notify_update_state(app: &tauri::AppHandle, title: &str, body: &str) {
+    let app = app.clone();
+    let title = title.to_string();
+    let body = body.to_string();
+    std::thread::spawn(move || {
+        if let Err(e) = app.notification().builder().title(title).body(body).show() {
+            warn!("failed to show update notification: {}", e);
+        }
+    });
+}
+
+/// The production tray-click flow behind the "Restart to update" / "Check
+/// for updates" menu item. Shared by the native tray handler (tray.rs) and
+/// the e2e driver route (server.rs, `e2e` feature) so the packaged update
+/// test exercises the exact code path the menu click runs.
+///
+/// Every outcome is surfaced. The pre-2026-08-11 handler discarded
+/// `Ok("pending")`, so a click while the gate deferred did nothing visible —
+/// no dialog, no notification, label unchanged — and users clicked again
+/// into the `UPDATE_RESTART_STARTED` guard, which also did nothing visible
+/// (2026-08-11 MacBook Air report).
+pub async fn trigger_update_now(app: tauri::AppHandle) {
+    let manager = app.state::<Arc<UpdatesManager>>().inner().clone();
+    if manager.has_update_installed().await {
+        // Immediate feedback in the menu itself: the install + relaunch can
+        // take a few seconds even on the rename fast path.
+        manager.set_menu_installing();
+        match restart_for_update(app.clone(), None).await {
+            Ok(outcome) if outcome == "proceed" => {
+                // Process exits shortly; "Installing update…" stays until the
+                // replacement app rebuilds the tray.
+            }
+            Ok(outcome) => {
+                warn!("tray update flow: restart deferred (outcome={})", outcome);
+                manager.set_menu_restart_ready();
+                notify_update_state(
+                    &app,
+                    "screenpipe is still starting up",
+                    "the update will install once startup finishes — try again in a moment.",
+                );
+            }
+            Err(e) => {
+                error!("tray update flow: restart for update failed: {}", e);
+                manager.set_menu_restart_ready();
+                notify_update_state(
+                    &app,
+                    "update couldn't restart",
+                    "screenpipe couldn't save settings before restarting. try again, or quit and reopen the app.",
+                );
+            }
+        }
+    } else if let Err(e) = manager.check_for_updates(true, true).await {
+        error!("tray menu: check for updates failed: {}", e);
+        notify_update_state(
+            &app,
+            "update check failed",
+            "couldn't reach the update server. check your connection and try again.",
+        );
+    }
 }
 
 /// Decide whether a detected update version is still inside the post-failure
@@ -577,11 +789,18 @@ impl UpdatesManager {
         #[cfg(windows)]
         sweep_moved_aside_binaries();
 
+        // Did the previous process quit to apply an update that never landed?
+        let failed_attempt = consume_update_attempt_marker(app);
+
         let update_menu_item = if is_enterprise_build(app) {
             None
         } else {
             let (menu_text, enabled) = if is_source_build(app) {
                 ("Auto-updates unavailable (source build)", true) // Enable to show info dialog
+            } else if failed_attempt.is_some() {
+                // Enabled: with nothing staged in this fresh process, a click
+                // routes to check_for_updates(force) and re-attempts.
+                ("Update didn't apply — click to retry", true)
             } else {
                 ("Screenpipe is up to date", false)
             };
@@ -933,12 +1152,28 @@ impl UpdatesManager {
                     // the running bundle into a temp dir, which breaks TCC
                     // attribution for the live process (ScreenCaptureKit -3801)
                     // until relaunch. Download + stage only; the install runs
-                    // on the exit path (see staged_update.rs).
+                    // on the exit path (see staged_update.rs). stage() now also
+                    // pre-extracts the ~160 MB archive (seconds of gunzip), so
+                    // it runs on the blocking pool, not an async worker.
                     #[cfg(target_os = "macos")]
                     let result = match update.download(on_chunk, || {}).await {
                         Ok(bytes) => {
-                            crate::staged_update::stage(&self.app, update.clone(), &bytes)
-                                .map_err(tauri_plugin_updater::Error::Io)
+                            let app = self.app.clone();
+                            let staged_update = update.clone();
+                            match tauri::async_runtime::spawn_blocking(move || {
+                                crate::staged_update::stage(&app, staged_update, &bytes)
+                            })
+                            .await
+                            {
+                                Ok(stage_result) => {
+                                    stage_result.map_err(tauri_plugin_updater::Error::Io)
+                                }
+                                Err(join_err) => {
+                                    Err(tauri_plugin_updater::Error::Io(std::io::Error::other(
+                                        format!("stage task panicked: {join_err}"),
+                                    )))
+                                }
+                            }
                         }
                         Err(e) => Err(e),
                     };
@@ -1132,6 +1367,8 @@ impl UpdatesManager {
                     return Result::Ok(true);
                 }
 
+                record_update_attempt(&self.app, &update.version);
+
                 let _ = self.app.emit(
                     "update-restarting",
                     serde_json::json!({
@@ -1185,6 +1422,34 @@ impl UpdatesManager {
 
     pub fn update_now_menu_item_ref(&self) -> Option<&MenuItem<Wry>> {
         self.update_menu_item.as_ref()
+    }
+
+    /// Menu feedback for a committed tray-click install: the click must be
+    /// visibly acknowledged even though the whole UI is about to go away.
+    pub fn set_menu_installing(&self) {
+        if let Some(item) = &self.update_menu_item {
+            let _ = item.set_text("Installing update…");
+            let _ = item.set_enabled(false);
+        }
+    }
+
+    /// Restore the actionable state after a deferred/failed restart so the
+    /// user can click again.
+    pub fn set_menu_restart_ready(&self) {
+        if let Some(item) = &self.update_menu_item {
+            let _ = item.set_text("Restart to update");
+            let _ = item.set_enabled(true);
+        }
+    }
+
+    /// Content-free snapshot of the update menu item for diagnostics and the
+    /// e2e driver: (label, enabled).
+    #[cfg_attr(not(feature = "e2e"), allow(dead_code))]
+    pub fn menu_item_snapshot(&self) -> Option<(String, bool)> {
+        let item = self.update_menu_item.as_ref()?;
+        let text = item.text().ok()?;
+        let enabled = item.is_enabled().unwrap_or(false);
+        Some((text, enabled))
     }
 
     pub async fn has_update_installed(&self) -> bool {
@@ -1693,6 +1958,48 @@ mod tests {
         let result = await_safe_restart(Some(1)).await;
         set_boot_phase("idle", None);
         assert_eq!(result, "pending");
+    }
+
+    #[tokio::test]
+    async fn await_safe_restart_proceeds_when_engine_idle() {
+        let _guard = BOOT_PHASE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        // Idle = the engine was never started (signed-out install /
+        // entitlement gate). Nothing is initializing, so the #3622 race
+        // cannot happen — and treating idle as pending permanently locked
+        // such installs out of updates (2026-08-11 MacBook Air report: tray
+        // "Restart to update" deferred forever).
+        set_boot_phase("idle", None);
+        let result = await_safe_restart(Some(1)).await;
+        assert_eq!(
+            result, "proceed",
+            "idle engine must not block the update restart gate"
+        );
+    }
+
+    #[test]
+    fn update_attempt_classification_matches_versions() {
+        let attempt = UpdateAttempt {
+            from_version: "2.6.6".into(),
+            to_version: "2.6.7".into(),
+            ts_epoch_secs: 0,
+        };
+        // Still on the version we tried to leave → the install didn't apply.
+        assert_eq!(
+            classify_update_attempt(&attempt, "2.6.6"),
+            UpdateAttemptOutcome::Failed
+        );
+        // Running the target version → applied.
+        assert_eq!(
+            classify_update_attempt(&attempt, "2.6.7"),
+            UpdateAttemptOutcome::Applied
+        );
+        // Running something else entirely (manual reinstall) → no conclusion.
+        assert_eq!(
+            classify_update_attempt(&attempt, "2.7.0"),
+            UpdateAttemptOutcome::Unrelated
+        );
     }
 
     #[test]

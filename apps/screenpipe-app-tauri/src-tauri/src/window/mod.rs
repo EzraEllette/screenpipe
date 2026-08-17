@@ -54,9 +54,27 @@ pub fn window_activation_allowed() -> bool {
             Ok("1") | Ok("true")
         );
         let on_ci = std::env::var("CI").is_ok_and(|v| !v.is_empty() && v != "0" && v != "false");
-        E2E_ACTIVATION_ALLOWED.store(opted_in || on_ci, Ordering::SeqCst);
+        let allowed = opted_in || on_ci;
+        E2E_ACTIVATION_ALLOWED.store(allowed, Ordering::SeqCst);
+        publish_non_intrusive_env(allowed);
     });
     E2E_ACTIVATION_ALLOWED.load(Ordering::SeqCst)
+}
+
+/// Carry the switch across the Rust/Swift boundary.
+///
+/// The macOS shortcut overlay is a set of AppKit panels owned by
+/// `swift/shortcut_reminder.swift`, which this crate never gets a handle to.
+/// They are the loudest thing in a suite run — floating level plus
+/// `orderFrontRegardless()` is designed to cover the frontmost app without
+/// taking focus, so gating activation here did nothing to them. The process
+/// environment is the one channel both sides already share.
+#[cfg(feature = "e2e")]
+fn publish_non_intrusive_env(activation_allowed: bool) {
+    std::env::set_var(
+        "SCREENPIPE_E2E_NON_INTRUSIVE",
+        if activation_allowed { "0" } else { "1" },
+    );
 }
 
 /// Let a spec re-enable real activation for the assertions that need it.
@@ -65,6 +83,9 @@ pub fn set_window_activation_allowed(allowed: bool) {
     // Run the env seed first so it cannot clobber this later.
     let _ = window_activation_allowed();
     E2E_ACTIVATION_ALLOWED.store(allowed, std::sync::atomic::Ordering::SeqCst);
+    // Keep Swift's view of the switch in step, so a spec that opts real
+    // activation back in also gets the real overlay placement.
+    publish_non_intrusive_env(allowed);
 }
 
 #[cfg(not(feature = "e2e"))]
@@ -104,10 +125,12 @@ pub(crate) trait GatedPanelPlacement {
 #[cfg(target_os = "macos")]
 impl GatedPanelPlacement for tauri_nspanel::raw_nspanel::RawNSPanel {
     fn set_level_gated(&self, level: i32) {
+        // Not `0`: a panel clamped to the normal level still orders to the front
+        // of that level and covers the developer's app. Below normal it cannot.
         self.set_level(if window_activation_allowed() {
             level
         } else {
-            0
+            NON_INTRUSIVE_WINDOW_LEVEL
         });
     }
 
@@ -155,6 +178,52 @@ pub(crate) fn activate_app_if_allowed() {
         let _: () = msg_send![ns_app, activateIgnoringOtherApps: true];
     }
 }
+
+/// One step below `NSNormalWindowLevel`, where every real app window lives.
+#[cfg(target_os = "macos")]
+pub(crate) const NON_INTRUSIVE_WINDOW_LEVEL: i32 = -1;
+
+/// Sink an e2e window below every real app window.
+///
+/// The gates above stop screenpipe *taking focus*, but focus is only half of
+/// what puts a window over the developer's work. A window that is merely shown
+/// still orders to the front of its own level, so it lands on top of whatever
+/// they are looking at while focus stays exactly where it was. Every gate here
+/// passed and the suite still covered the screen.
+///
+/// Level is the structural half of the rule. Below `NSNormalWindowLevel` a
+/// window cannot be composited above any app window, whatever calls
+/// `orderFront:` afterwards, so this holds without a race and without having to
+/// find every show path. The window is still created, still rendered, and still
+/// driven by WebDriver: it just lives underneath the developer's desktop.
+#[cfg(target_os = "macos")]
+pub(crate) fn sink_below_apps_if_non_intrusive(window: &tauri::WebviewWindow) {
+    if window_activation_allowed() {
+        return;
+    }
+    // AppKit window state is main-thread only, and `finalize_webview_window` runs
+    // on whichever thread created the window — often a tokio worker. Reaching
+    // `setLevel:` from there traps inside WindowManagement and takes the process
+    // with it, so hop to the main thread before touching the NSWindow.
+    let target = window.clone();
+    let _ = window.run_on_main_thread(move || {
+        use objc::{msg_send, sel, sel_impl};
+        use tauri_nspanel::cocoa::base::{id, nil};
+        let Ok(ns_window) = target.ns_window() else {
+            return;
+        };
+        unsafe {
+            let ns_window = ns_window as id;
+            let _: () = msg_send![ns_window, setLevel: NON_INTRUSIVE_WINDOW_LEVEL];
+            let _: () = msg_send![ns_window, orderBack: nil];
+        }
+    });
+}
+
+/// No-op off macOS: the non-intrusive rule exists for a developer's own desktop,
+/// and local suite runs there are macOS. CI is exempt on every platform.
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn sink_below_apps_if_non_intrusive(_window: &tauri::WebviewWindow) {}
 
 /// Give the foreground back the instant anything makes the app active.
 ///
@@ -229,7 +298,14 @@ pub(crate) mod ns {
     /// # Safety
     /// `ns_win` must be a live `NSWindow` and the caller must be on the main thread.
     pub(crate) unsafe fn set_level_gated(ns_win: id, level: i64) {
-        let level = if window_activation_allowed() { level } else { 0 };
+        // Not `0`: the normal level is where the developer's own app windows
+        // live, so a window clamped there still covers them the moment anything
+        // orders it front. Below normal it cannot.
+        let level = if window_activation_allowed() {
+            level
+        } else {
+            super::NON_INTRUSIVE_WINDOW_LEVEL as i64
+        };
         let _: () = msg_send![ns_win, setLevel: level];
     }
 
@@ -262,8 +338,10 @@ pub(crate) mod ns {
                 objc::runtime::Object,
             >()];
         } else {
-            let _: () =
-                msg_send![ns_win, orderFront: std::ptr::null::<objc::runtime::Object>()];
+            // `orderFront:` still lifts the window to the top of its level, which
+            // is the other half of covering the developer's screen even with the
+            // key-focus step skipped. Put it behind instead.
+            let _: () = msg_send![ns_win, orderBack: std::ptr::null::<objc::runtime::Object>()];
         }
     }
 }
@@ -305,6 +383,9 @@ pub fn finalize_webview_window(window: tauri::WebviewWindow) -> tauri::WebviewWi
     if let Err(error) = capture_protection::apply_to_new_window(&window) {
         tracing::warn!("{error}");
     }
+    // Every webview window in the app is built through here, so this is the one
+    // place a non-intrusive e2e run can be kept off the developer's screen.
+    sink_below_apps_if_non_intrusive(&window);
     window
 }
 

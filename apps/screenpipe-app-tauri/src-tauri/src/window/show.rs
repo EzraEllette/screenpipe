@@ -19,8 +19,8 @@ use super::content_process::setup_content_process_handler;
 use super::first_responder::{make_nswindow_webview_first_responder, make_webview_first_responder};
 #[cfg(target_os = "macos")]
 use super::focus::{
-    begin_search_focus_session, finish_search_focus_session, restore_frontmost_app,
-    restore_frontmost_app_if_external_with_app,
+    appkit_focus_is_descendant_of, begin_search_focus_session, finish_search_focus_session,
+    restore_frontmost_app, restore_frontmost_app_if_external_with_app,
 };
 use super::panel::{main_label_for_mode, MAIN_CREATED_MODE};
 #[cfg(target_os = "macos")]
@@ -459,6 +459,20 @@ impl ShowRewindWindow {
     }
 
     pub fn show(&self, app: &AppHandle) -> tauri::Result<WebviewWindow> {
+        self.show_with_search_origin(app, None)
+    }
+
+    /// Show a window while preserving which native timeline launched Search.
+    ///
+    /// Search is a pre-warmed, reused webview, so the origin must travel in
+    /// both the first-load URL and the in-place `search-reset` event. Keeping
+    /// this outside `ShowRewindWindow` avoids changing the public window enum
+    /// for an option that only has meaning during a timeline hand-off.
+    pub fn show_with_search_origin(
+        &self,
+        app: &AppHandle,
+        search_origin: Option<&str>,
+    ) -> tauri::Result<WebviewWindow> {
         let id = self.id();
         let onboarding_store = OnboardingStore::get(app)
             .unwrap_or_else(|_| None)
@@ -533,6 +547,9 @@ impl ShowRewindWindow {
                 if onboarding_store.is_completed {
                     return ShowRewindWindow::Home { page: None }.show(app);
                 }
+                window.show().ok();
+                crate::window::focus_window(&window);
+                return Ok(window);
             }
 
             if id.label() == RewindWindowId::Search.label() {
@@ -547,7 +564,10 @@ impl ShowRewindWindow {
                 // optional prefill query (empty string when none).
                 let _ = window.emit(
                     "search-reset",
-                    serde_json::json!({ "query": self.metadata() }),
+                    serde_json::json!({
+                        "query": self.metadata(),
+                        "originWindowLabel": search_origin,
+                    }),
                 );
 
                 // Reposition to center of primary monitor
@@ -1297,6 +1317,15 @@ impl ShowRewindWindow {
                         #[cfg(not(target_os = "linux"))]
                         tauri::WindowEvent::Focused(is_focused) => {
                             if !is_focused {
+                                #[cfg(target_os = "macos")]
+                                if appkit_focus_is_descendant_of(&window_clone) {
+                                    info!(
+                                        "Main window focus moved to an attached child; keeping overlay visible"
+                                    );
+                                    focus_cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+                                    MAIN_PANEL_SHOWN.store(true, std::sync::atomic::Ordering::SeqCst);
+                                    return;
+                                }
                                 info!("Main window lost focus, scheduling hide (300ms debounce)");
                                 // Synchronous alpha=0 — panel stays in window list
                                 // but is invisible. No order_out (causes focus loops).
@@ -1317,11 +1346,63 @@ impl ShowRewindWindow {
                                 focus_cancel.store(false, std::sync::atomic::Ordering::SeqCst);
                                 let cancel = focus_cancel.clone();
                                 let app = app_clone.clone();
+                                #[cfg(target_os = "macos")]
+                                let window = window_clone.clone();
                                 std::thread::spawn(move || {
                                     std::thread::sleep(std::time::Duration::from_millis(300));
                                     if cancel.load(std::sync::atomic::Ordering::SeqCst) {
                                         info!("Focus-loss hide cancelled (panel regained focus)");
                                         return;
+                                    }
+                                    // AppKit can report the parent's focus loss before it
+                                    // updates `keyWindow`. Re-check on the main thread after
+                                    // the debounce so clicks into an attached native child do
+                                    // not dismiss the overlay.
+                                    #[cfg(target_os = "macos")]
+                                    {
+                                        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+                                        let app2 = app.clone();
+                                        let window2 = window.clone();
+                                        let lbl = {
+                                            let mode = MAIN_CREATED_MODE
+                                                .lock()
+                                                .unwrap_or_else(|e| e.into_inner())
+                                                .clone();
+                                            main_label_for_mode(&mode).to_string()
+                                        };
+                                        if app
+                                            .run_on_main_thread(move || {
+                                                let keep_visible =
+                                                    appkit_focus_is_descendant_of(&window2);
+                                                if keep_visible {
+                                                    if let Ok(panel) =
+                                                        app2.get_webview_panel(&lbl)
+                                                    {
+                                                        unsafe {
+                                                            use objc::{msg_send, sel, sel_impl};
+                                                            let _: () = msg_send![
+                                                                &*panel,
+                                                                setAlphaValue: 1.0f64
+                                                            ];
+                                                        }
+                                                    }
+                                                    MAIN_PANEL_SHOWN.store(
+                                                        true,
+                                                        std::sync::atomic::Ordering::SeqCst,
+                                                    );
+                                                }
+                                                let _ = sender.send(keep_visible);
+                                            })
+                                            .is_ok()
+                                            && receiver
+                                                .recv_timeout(std::time::Duration::from_secs(1))
+                                                .unwrap_or(false)
+                                        {
+                                            info!(
+                                                "Main window focus settled on an attached child; keeping overlay visible"
+                                            );
+                                            return;
+                                        }
                                     }
                                     info!("Main window hiding after debounce");
                                     // Dispatch all AppKit work to main thread — this
@@ -1534,20 +1615,23 @@ impl ShowRewindWindow {
                 // Build the floating search bar and bring it to front (focus=true).
                 // The hidden pre-warm path (prewarm_search) reuses the same builder
                 // with focus=false so startup doesn't steal focus.
-                Self::create_search_window(app, query.as_deref(), true)?
+                Self::create_search_window(app, query.as_deref(), search_origin, true)?
             }
             ShowRewindWindow::Onboarding => {
                 if onboarding_store.is_completed {
                     return ShowRewindWindow::Home { page: None }.show(app);
                 }
 
-                // Clamp onboarding window size to primary monitor to prevent min > max panic
+                // One size for every onboarding slide (see ONBOARDING_WINDOW_SIZE in
+                // app/onboarding/page.tsx) so stepping through setup never resizes
+                // the window. Still clamped to the primary monitor to prevent a
+                // min > max panic on small displays; slides scroll when clamped.
                 let (width, height) = if let Ok(Some(monitor)) = app.primary_monitor() {
                     let logical: tauri::LogicalSize<f64> =
                         monitor.size().to_logical(monitor.scale_factor());
-                    (500.0_f64.min(logical.width), 560.0_f64.min(logical.height))
+                    (500.0_f64.min(logical.width), 680.0_f64.min(logical.height))
                 } else {
-                    (500.0, 560.0)
+                    (500.0, 680.0)
                 };
                 let min = self.id().min_size().unwrap_or((0.0, 0.0));
                 let clamped_min = (min.0.min(width), min.1.min(height));
@@ -1718,11 +1802,17 @@ impl ShowRewindWindow {
     fn create_search_window(
         app: &AppHandle,
         query: Option<&str>,
+        search_origin: Option<&str>,
         focus: bool,
     ) -> tauri::Result<WebviewWindow> {
         let mut url = "/search".to_string();
         if let Some(q) = query {
             url.push_str(q);
+        }
+        if let Some(origin) = search_origin {
+            url.push(if url.contains('?') { '&' } else { '?' });
+            url.push_str("timelineOrigin=");
+            url.push_str(origin);
         }
 
         // Compact, centered, no chrome. Start thin (just the input row); JS
@@ -1844,7 +1934,7 @@ impl ShowRewindWindow {
         // and search effects suspended until the first `search-reset` event.
         // A hidden WKWebView otherwise continues rendering and issuing IPC as
         // if the search panel were visible.
-        let window = Self::create_search_window(app, Some("?prewarm=1"), false)?;
+        let window = Self::create_search_window(app, Some("?prewarm=1"), None, false)?;
         #[cfg(target_os = "macos")]
         setup_content_process_handler(&window);
         #[cfg(not(target_os = "macos"))]

@@ -5,6 +5,13 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 #![allow(deprecated)] // cocoa/objc crate deprecations — will migrate to objc2 later
 #![allow(unused_imports)]
+// `cargo test`/`--all-targets` compiles this binary with the test harness in
+// place of `main`, so everything reachable only from `main` looks unreachable
+// and rustc emits ~21 bogus `never used` warnings (enterprise_autostart, the
+// policy enforcement entrypoints). They are live in the real binary; deleting
+// them breaks the app. Suppress dead_code under cfg(test) only, so the real
+// build still reports genuine dead code.
+#![cfg_attr(test, allow(dead_code))]
 // analytics.rs builds a ~70-field json! health blob; the default recursion limit
 // (128) overflows while expanding the macro. Raise it for the whole crate.
 #![recursion_limit = "256"]
@@ -32,6 +39,7 @@ use tracing_oslog::OsLogger;
 use updates::start_update_check;
 use window::ShowRewindWindow;
 
+mod acp_extensions;
 mod acp_runtime;
 mod analytics;
 mod auth_session;
@@ -58,6 +66,15 @@ mod disk_pressure_notifications;
 mod e2e;
 mod embedded_server;
 mod enterprise;
+#[cfg(any(
+    test,
+    all(
+        feature = "enterprise-build",
+        any(target_os = "macos", target_os = "windows")
+    )
+))]
+mod enterprise_autostart;
+mod enterprise_config_file;
 mod enterprise_host_identity;
 mod enterprise_install_metadata;
 mod enterprise_policy;
@@ -157,6 +174,9 @@ mod log_files;
 mod media_commands;
 mod native_notification;
 mod native_shortcut_reminder;
+mod native_timeline;
+#[cfg(target_os = "windows")]
+mod native_overlay_win;
 mod notifications;
 mod safe_icon;
 mod shortcuts;
@@ -241,10 +261,79 @@ fn should_prevent_window_close(label: &str) -> bool {
 /// Used to skip Home so login starts stay in the tray.
 const AUTOSTART_ARG: &str = "--autostart";
 
+#[cfg(any(test, all(feature = "enterprise-build", target_os = "macos")))]
+const MACOS_LOGIN_DUPLICATE_WINDOW: std::time::Duration = std::time::Duration::from_secs(30);
+
+#[cfg(any(test, all(feature = "enterprise-build", target_os = "macos")))]
+#[derive(Default)]
+struct PendingPlainLoginDuplicate {
+    expires_at: Option<std::time::Instant>,
+}
+
+#[cfg(any(test, all(feature = "enterprise-build", target_os = "macos")))]
+impl PendingPlainLoginDuplicate {
+    fn arm(&mut self, legacy_launch: bool, main_app_enabled: bool, now: std::time::Instant) {
+        self.expires_at =
+            (legacy_launch && main_app_enabled).then_some(now + MACOS_LOGIN_DUPLICATE_WINDOW);
+    }
+
+    fn consume_if_plain<S: AsRef<str>>(&mut self, args: &[S], now: std::time::Instant) -> bool {
+        let Some(expires_at) = self.expires_at else {
+            return false;
+        };
+        if now > expires_at {
+            self.expires_at = None;
+            return false;
+        }
+        if args.len() != 1 || args[0].as_ref().starts_with("screenpipe://") {
+            return false;
+        }
+        self.expires_at = None;
+        true
+    }
+}
+
+#[cfg(all(feature = "enterprise-build", target_os = "macos"))]
+static PENDING_MACOS_LOGIN_DUPLICATE: once_cell::sync::Lazy<
+    std::sync::Mutex<PendingPlainLoginDuplicate>,
+> = once_cell::sync::Lazy::new(|| std::sync::Mutex::new(PendingPlainLoginDuplicate::default()));
+
 /// True when this process was started by the OS login/autostart entry
 /// (LaunchAgent / Run registry), not a manual user launch.
 fn launched_from_autostart() -> bool {
-    args_contain_autostart(std::env::args())
+    let argument_launch = args_contain_autostart(std::env::args());
+    #[cfg(all(feature = "enterprise-build", target_os = "macos"))]
+    let login_item_event = match enterprise_autostart::launched_as_macos_login_item() {
+        Ok(detected) => detected,
+        Err(error) => {
+            warn!("autostart: could not inspect macOS launch event: {error}");
+            false
+        }
+    };
+    #[cfg(not(all(feature = "enterprise-build", target_os = "macos")))]
+    let login_item_event = false;
+
+    #[cfg(all(feature = "enterprise-build", target_os = "macos"))]
+    if argument_launch {
+        match enterprise_autostart::macos_main_app_is_enabled() {
+            Ok(main_app_enabled) => {
+                let mut pending = PENDING_MACOS_LOGIN_DUPLICATE
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                pending.arm(true, main_app_enabled, std::time::Instant::now());
+                if main_app_enabled {
+                    info!("autostart: armed one-shot main-app login duplicate suppression");
+                }
+            }
+            Err(error) => warn!("autostart: could not inspect main-app enrollment: {error}"),
+        }
+    }
+
+    let login_launch = classify_login_launch(argument_launch, login_item_event);
+    if login_item_event {
+        info!("autostart: macOS login-item launch event detected");
+    }
+    login_launch
 }
 
 fn args_contain_autostart<I, S>(args: I) -> bool
@@ -253,6 +342,29 @@ where
     S: AsRef<str>,
 {
     args.into_iter().any(|a| a.as_ref() == AUTOSTART_ARG)
+}
+
+/// Keep OS-startup handoffs in the background regardless of whether they
+/// arrive through tauri-plugin-single-instance or the early HTTP fallback.
+pub(crate) fn should_suppress_startup_handoff<S: AsRef<str>>(args: &[S]) -> bool {
+    if args_contain_autostart(args.iter()) {
+        return true;
+    }
+
+    #[cfg(all(feature = "enterprise-build", target_os = "macos"))]
+    {
+        return PENDING_MACOS_LOGIN_DUPLICATE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .consume_if_plain(args, std::time::Instant::now());
+    }
+
+    #[cfg(not(all(feature = "enterprise-build", target_os = "macos")))]
+    false
+}
+
+fn classify_login_launch(argument_launch: bool, login_item_event: bool) -> bool {
+    argument_launch || login_item_event
 }
 
 // check if the server is running
@@ -312,6 +424,17 @@ macro_rules! define_specta_builder {
 
 #[tokio::main]
 async fn main() {
+    if acp_extensions::is_portable_mcp_mode() {
+        let exit_code = match acp_extensions::run_portable_mcp_mode() {
+            Ok(exit_code) => exit_code,
+            Err(error) => {
+                eprintln!("[acp-extension] {error}");
+                1
+            }
+        };
+        std::process::exit(exit_code);
+    }
+
     if acp_runtime::is_process_guard_mode() {
         let exit_code = match acp_runtime::run_process_guard() {
             Ok(exit_code) => exit_code,
@@ -966,8 +1089,16 @@ async fn main() {
             // A second app launch is usually the Windows taskbar/dock entry point.
             // Open the Home app window here; `show_main_window` intentionally
             // opens the timeline overlay for the global shortcut/tray timeline.
-            if !crate::enterprise_policy::is_app_ui_hidden() {
+            // macOS can start both the main-app login item and the retained
+            // legacy LaunchAgent at once. The plugin's exact --autostart flag
+            // always stays background-only. If legacy won the primary race,
+            // consume one plain main-app handoff from the short guard armed
+            // during setup; normal subsequent launches retain Home behavior.
+            let login_duplicate = should_suppress_startup_handoff(&args_clone);
+            if !crate::enterprise_policy::is_app_ui_hidden() && !login_duplicate {
                 let _ = ShowRewindWindow::Home { page: None }.show(&app_for_closure);
+            } else if login_duplicate {
+                info!("autostart: ignored duplicate login LaunchAgent handoff");
             }
 
             // Forward deep-link URL from args
@@ -1008,7 +1139,12 @@ async fn main() {
         .manage(sync_scheduler)
         .invoke_handler(tauri_helper::tauri_collect_commands!())
         .setup(move |app| {
-            //deep link register_all
+            // Capture before setup does any other work: this callback runs
+            // synchronously inside applicationDidFinishLaunching, while the
+            // kAEOpenApplication event (including Apple's `lgit` login-item
+            // reason parameter) is still the current Apple event.
+            let from_autostart = launched_from_autostart();
+
             #[cfg(any(windows, target_os = "linux"))]
             {
                 use tauri_plugin_deep_link::DeepLinkExt;
@@ -1477,7 +1613,6 @@ async fn main() {
             }
 
             let app_ui_hidden = crate::enterprise_policy::is_app_ui_hidden();
-            let from_autostart = launched_from_autostart();
 
             // The old connection slide blocked onboarding on work that can be
             // done safely and idempotently by Rust. During first-run setup,
@@ -1504,12 +1639,13 @@ async fn main() {
                 app_ui_hidden || (store.headless && store.headless_record_only),
             );
             if from_autostart {
-                info!("launched from OS autostart (--autostart); starting in background");
+                info!("launched from OS startup enrollment; starting in background");
             }
 
             // Show onboarding/home unless managed background agent, or login
             // autostart (tray + server only; UI via tray/dock/shortcut).
-            // Incomplete onboarding still shows so setup can finish.
+            // Incomplete onboarding still shows so required enterprise access
+            // can finish; an authenticated login launch skips Home below.
             if app_ui_hidden {
                 info!("enterprise: hidden UI mode active, skipping startup app windows");
             } else if headless_startup {
@@ -1995,6 +2131,12 @@ async fn main() {
                 autostart_manager.is_enabled().unwrap_or(false)
             );
 
+            #[cfg(all(
+                feature = "enterprise-build",
+                any(target_os = "macos", target_os = "windows")
+            ))]
+            enterprise_autostart::spawn(&app_handle);
+
             // Use persistent analytics_id for PostHog (consistent across frontend and backend)
             let unique_id = store.recording.analytics_id.clone();
             let email = store.user.email.unwrap_or_default();
@@ -2347,15 +2489,27 @@ async fn main() {
 
                 #[cfg(target_os = "macos")]
                 tauri::RunEvent::Reopen { .. } => {
+                    #[cfg(feature = "enterprise-build")]
+                    match enterprise_autostart::launched_as_macos_login_item() {
+                        Ok(true) => {
+                            info!("autostart: ignored macOS login-item Reopen event");
+                            return;
+                        }
+                        Ok(false) => {}
+                        Err(error) => {
+                            warn!("autostart: could not inspect macOS Reopen event: {error}")
+                        }
+                    }
                     // Defer off the event stack so run handler stays panic-free.
-                    // Open the settings/app window (not the timeline overlay).
+                    // Showing Onboarding is the app-entry gate: it focuses setup
+                    // while incomplete and routes to Home once complete.
                     if crate::enterprise_policy::is_app_ui_hidden() || crate::headless::is_dormant()
                     {
                         return;
                     }
                     let app = app_handle.app_handle().clone();
                     let _ = app_handle.app_handle().run_on_main_thread(move || {
-                        let _ = ShowRewindWindow::Home { page: None }.show(&app);
+                        let _ = ShowRewindWindow::Onboarding.show(&app);
                     });
                 }
                 _ => {}
@@ -2369,12 +2523,19 @@ async fn main() {
 
 #[cfg(test)]
 mod autostart_arg_tests {
-    use super::{args_contain_autostart, AUTOSTART_ARG};
+    use super::{
+        args_contain_autostart, classify_login_launch, should_suppress_startup_handoff,
+        PendingPlainLoginDuplicate, AUTOSTART_ARG, MACOS_LOGIN_DUPLICATE_WINDOW,
+    };
 
     #[test]
     fn detects_autostart_flag() {
         assert!(args_contain_autostart(["screenpipe", AUTOSTART_ARG]));
         assert!(args_contain_autostart([AUTOSTART_ARG]));
+        assert!(should_suppress_startup_handoff(&[
+            "screenpipe",
+            AUTOSTART_ARG
+        ]));
     }
 
     #[test]
@@ -2385,6 +2546,43 @@ mod autostart_arg_tests {
             "--check-arc-automation"
         ]));
         assert!(!args_contain_autostart(["screenpipe", "--autostarted"]));
+        assert!(!should_suppress_startup_handoff(&["screenpipe"]));
+    }
+
+    #[test]
+    fn login_launch_accepts_cli_or_apple_event_signal() {
+        assert!(!classify_login_launch(false, false));
+        assert!(classify_login_launch(true, false));
+        assert!(classify_login_launch(false, true));
+        assert!(classify_login_launch(true, true));
+    }
+
+    #[test]
+    fn plain_login_duplicate_is_bounded_and_one_shot() {
+        let start = std::time::Instant::now();
+        let mut pending = PendingPlainLoginDuplicate::default();
+
+        pending.arm(true, true, start);
+        assert!(!pending.consume_if_plain(&["screenpipe", "--manual"], start));
+        assert!(!pending.consume_if_plain(&["screenpipe://open"], start));
+        assert!(pending.consume_if_plain(&["screenpipe"], start));
+        assert!(!pending.consume_if_plain(&["screenpipe"], start));
+
+        pending.arm(true, true, start);
+        assert!(!pending.consume_if_plain(
+            &["screenpipe"],
+            start + MACOS_LOGIN_DUPLICATE_WINDOW + std::time::Duration::from_millis(1)
+        ));
+    }
+
+    #[test]
+    fn plain_login_duplicate_arms_only_for_legacy_with_main_app_enabled() {
+        let start = std::time::Instant::now();
+        for (legacy_launch, main_app_enabled) in [(false, true), (true, false), (false, false)] {
+            let mut pending = PendingPlainLoginDuplicate::default();
+            pending.arm(legacy_launch, main_app_enabled, start);
+            assert!(!pending.consume_if_plain(&["screenpipe"], start));
+        }
     }
 }
 

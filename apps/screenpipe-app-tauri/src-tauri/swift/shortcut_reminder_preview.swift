@@ -23,8 +23,11 @@ struct ShortcutReminderPreview {
 
         let arguments = Array(CommandLine.arguments.dropFirst())
         if arguments.contains("--help") || arguments.contains("-h") {
-            print("usage: preview-shortcut-overlay.sh [--once] [--expanded] [--meeting] [--notification]")
-            print("       [--size small|medium|large] [--anchor top-left|top-center|...|bottom-right]")
+            print("usage: preview-shortcut-overlay.sh [--once] [--expanded] [--meeting]")
+            print("       [--pinned-meeting] [--notification]")
+            print("       [--size small|medium|large]")
+            print("       [--anchor top-center|right-center|bottom-center|left-center]")
+            print("       [--drag-stage [--highlight <anchor>]]")
             print("hover the resting icon to inspect the expanded native dock; drag it to re-pin it")
             print("press Ctrl-C to quit")
             return
@@ -58,10 +61,21 @@ struct ShortcutReminderPreview {
         payloadJSON.withCString { pointer in
             _ = shortcutShow(pointer)
         }
-        if arguments.contains("--meeting") {
+        if arguments.contains("--pinned-meeting") {
+            ShortcutReminderController.shared.setPreviewPinnedMeeting()
+        } else if arguments.contains("--meeting") {
             ShortcutReminderController.shared.setPreviewMeeting()
         } else if arguments.contains("--expanded") {
             ShortcutReminderController.shared.setPreviewExpanded(true)
+        }
+
+        if arguments.contains("--drag-stage") {
+            // Hold the stage open so it can be looked at. `--highlight` picks
+            // which landing pad reads as the one the pill would snap to.
+            let highlight = requestedHighlight(from: arguments)
+            DispatchQueue.main.async {
+                ShortcutReminderController.shared.setPreviewDragStage(highlight: highlight)
+            }
         }
 
         if arguments.contains("--notification") {
@@ -113,11 +127,17 @@ struct ShortcutReminderPreview {
     private static func requestedAnchor(from arguments: [String]) -> String {
         guard let anchorFlag = arguments.firstIndex(of: "--anchor"),
               arguments.indices.contains(anchorFlag + 1),
-              let anchor = OverlayAnchor(rawValue: arguments[anchorFlag + 1])
+              let anchor = OverlayAnchor.fromStored(arguments[anchorFlag + 1])
         else {
             return OverlayAnchor.topCenter.rawValue
         }
         return anchor.rawValue
+    }
+
+    private static func requestedHighlight(from arguments: [String]) -> OverlayAnchor? {
+        guard let flag = arguments.firstIndex(of: "--highlight"),
+              arguments.indices.contains(flag + 1) else { return nil }
+        return OverlayAnchor.fromStored(arguments[flag + 1])
     }
 
     private static func requestedSize(from arguments: [String]) -> String {

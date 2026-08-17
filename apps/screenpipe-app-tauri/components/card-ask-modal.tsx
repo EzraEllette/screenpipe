@@ -17,16 +17,38 @@ import type { CardAskArm, CardAskTrigger } from "@/lib/card-ask/gating";
 import { openExternalUrl } from "@/lib/open-external-url";
 import { screenpipeWebBase } from "@/lib/web-url";
 
+/**
+ * Kept for the analytics landing page only. The modal no longer sends anyone
+ * here: see the comment in `handleStart` for why that path converted ~0%.
+ */
 export const CARD_ASK_CHECKOUT_PATH = "/onboarding?trial=business&src=card_ask";
+
+/** Attribution origin for every session this modal mints. */
+export const CARD_ASK_CHECKOUT_ORIGIN = "desktop_card_ask";
 
 /** Copy is trigger-specific: the ask must reference what just happened. */
 const COPY: Record<
   CardAskTrigger,
   { title: string; body: string; cta: string }
 > = {
+  // The onboarding placement is rendered by PlanSelectionStep, not this modal.
+  // Copy still lives here so the map stays exhaustive over CardAskTrigger and
+  // a remote payload cannot route `onboarding` to the modal and find nothing.
+  onboarding: {
+    title: "Start your 7-day Business trial",
+    body: "Full access to AI, unlimited pipes, and cloud transcription. Cancel anytime before day 7 and you are not charged.",
+    cta: "Start trial",
+  },
   login: {
     title: "Start your 7-day Business trial",
     body: "Full access to AI, unlimited pipes, and cloud transcription. Cancel anytime before day 7 and you are not charged.",
+    cta: "Start trial",
+  },
+  // Mid-journey placement: the user is deep in a session and has seen the app
+  // work, so the ask leads with continuity rather than setup.
+  mid_session: {
+    title: "Keep Business features running",
+    body: "A 7-day Business trial keeps AI, pipes, and cloud transcription at full capacity while you work. Cancel anytime before day 7 and you are not charged.",
     cta: "Start trial",
   },
   first_value: {
@@ -53,6 +75,14 @@ type Props = {
   arm: CardAskArm | null;
   isFirstAsk: boolean;
   os: string;
+  /**
+   * Account token used to mint the Checkout Session server-side.
+   *
+   * Passed in rather than read from context so this stays a presentational
+   * component that can be rendered in isolation; the provider already holds
+   * the account.
+   */
+  token?: string;
   onDismiss: () => void;
   onConsume: () => void;
   /** Injected in tests. */
@@ -65,6 +95,7 @@ export function CardAskModal({
   arm,
   isFirstAsk,
   os,
+  token = "",
   onDismiss,
   onConsume,
   openUrl = openExternalUrl,
@@ -74,6 +105,7 @@ export function CardAskModal({
 }: Props) {
   const shownAtRef = useRef<number | null>(null);
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(false);
   const open = trigger !== null && arm !== null;
 
   // Which opening has already been reported. `isFirstAsk` is derived from a
@@ -117,25 +149,86 @@ export function CardAskModal({
     if (!trigger || !arm || busy) return;
     setBusy(true);
     cardAskEvents.clicked({ arm, trigger, os });
-    const url = `${checkoutBaseUrl}${CARD_ASK_CHECKOUT_PATH}&arm=${encodeURIComponent(
-      arm,
-    )}&trigger=${encodeURIComponent(trigger)}`;
+
+    // Ask the server to mint a Stripe Checkout Session against this account,
+    // then open Stripe's own page — the same shape Settings uses, which is the
+    // only card ask in the app that has ever produced subscriptions.
+    //
+    // The previous implementation opened `/onboarding?src=card_ask` in the
+    // system browser, which failed three ways at once and converted ~0%:
+    //   1. No Clerk session in an external browser, so the purchase could not
+    //      be pinned to this account.
+    //   2. That page's checkout omits the trial, so the user was asked to pay
+    //      in full immediately, directly contradicting this modal's promise
+    //      that nothing is charged yet.
+    //   3. In the control arm of a separate pricing experiment its Business
+    //      button is a *download* link, offering to reinstall the app the user
+    //      is standing in.
+    // A server-minted session is authenticated by the token, carries the trial,
+    // and needs no browser session because the customer is already bound to it.
     try {
-      await openUrl(url);
+      if (!token) throw new Error("signed_out");
+
+      const response = await fetch(
+        `${checkoutBaseUrl}/api/subscription/checkout`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            plan: "pro",
+            interval: "month",
+            token,
+            returnUrl: `${checkoutBaseUrl}/account`,
+            origin: CARD_ASK_CHECKOUT_ORIGIN,
+            // Turns the session into a trial. For someone already holding a
+            // cardless grant the server ends the Stripe trial exactly when
+            // that grant expires, so "nothing is charged until your trial
+            // ends" is literally what Stripe shows them.
+            business_trial_mode: "new",
+            source_tracking_id: "desktop-card-ask-v1",
+            product_tier: "business",
+            internal_plan: "pro",
+            billing_interval: "month",
+            seats: 1,
+            cta_location: `${CARD_ASK_CHECKOUT_ORIGIN}_${trigger}`,
+            cta_action: "start_trial",
+            destination_type: "stripe_checkout",
+            card_ask_src: "modal",
+            card_ask_arm: arm,
+            card_ask_trigger: trigger,
+          }),
+        },
+      );
+      const data = (await response.json().catch(() => ({}))) as {
+        url?: string;
+        error?: string;
+      };
+      if (!response.ok || !data.url) throw new Error("checkout_unavailable");
+
+      await openUrl(data.url);
       cardAskEvents.checkoutOpened({
         arm,
         trigger,
         os,
-        destinationType: "web_checkout",
+        destinationType: "stripe_checkout",
       });
       onConsume();
-    } catch {
+    } catch (error) {
       // Bounded classification only — never a raw error body.
-      cardAskEvents.checkoutFailed({ arm, trigger, os, reason: "open_failed" });
+      cardAskEvents.checkoutFailed({
+        arm,
+        trigger,
+        os,
+        reason:
+          error instanceof Error && error.message === "signed_out"
+            ? "signed_out"
+            : "checkout_unavailable",
+      });
+      setError(true);
     } finally {
       setBusy(false);
     }
-  }, [trigger, arm, os, busy, checkoutBaseUrl, openUrl, onConsume]);
+  }, [trigger, arm, os, busy, checkoutBaseUrl, openUrl, onConsume, token]);
 
   if (!open || !trigger) return null;
   const copy = COPY[trigger];
@@ -158,8 +251,21 @@ export function CardAskModal({
             disabled={busy}
             data-testid="card-ask-start"
           >
-            {busy ? "opening checkout" : copy.cta}
+            {busy ? "opening checkout" : error ? "try again" : copy.cta}
           </Button>
+          {/*
+            A failed mint has to say so. The button returning to its resting
+            label looks identical to never having been pressed, which reads as
+            a dead control and costs the sale twice.
+          */}
+          {error && (
+            <p
+              className="text-center text-[11px] text-muted-foreground"
+              data-testid="card-ask-error"
+            >
+              checkout could not be opened. check your connection and try again.
+            </p>
+          )}
           {/*
             Immediately clickable, always. A timed or disabled skip is a dark
             pattern and it targets day-0 activation, the one metric this

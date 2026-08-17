@@ -4,26 +4,26 @@
 
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import posthog from "posthog-js";
 import { useSettings } from "@/lib/hooks/use-settings";
 import { screenpipeWebUrl } from "@/lib/web-url";
+import {
+  readOnboardingCheckoutStatus,
+  submitHostedCheckoutStart,
+} from "@/lib/onboarding-checkout-navigation";
 import type { AppUser } from "@/lib/app-entitlement";
 
-const CHECKOUT_URL = screenpipeWebUrl(
-  "/api/subscription/checkout",
+const HOSTED_CHECKOUT_URL = screenpipeWebUrl(
+  "/onboarding/checkout",
   "https://screenpipe.com",
 );
-const EMBEDDED_CHECKOUT_URL = screenpipeWebUrl(
-  "/embedded-checkout",
-  "https://screenpipe.com",
-);
-const CARDLESS_TRIAL_URL = screenpipeWebUrl(
-  "/api/subscription/onboarding-trial",
-  "https://screenpipe.com",
-);
+const CHECKOUT_POLL_INTERVAL_MS = 3_000;
 
-type BillingInterval = "year" | "month";
+function checkoutStatus() {
+  if (typeof window === "undefined") return null;
+  return readOnboardingCheckoutStatus(window.location.search);
+}
 
 export default function PlanSelectionStep({
   handleNextSlide,
@@ -32,252 +32,215 @@ export default function PlanSelectionStep({
 }) {
   const { settings, loadUser } = useSettings();
   const user = settings.user as AppUser | null | undefined;
-  const [interval, setInterval] = useState<BillingInterval>("year");
-  const [frameUrl, setFrameUrl] = useState<string | null>(null);
-  const [busy, setBusy] = useState(true);
-  const [completing, setCompleting] = useState(false);
+  const [returnStatus] = useState(checkoutStatus);
+  const [busy, setBusy] = useState(returnStatus !== "cancelled");
   const [error, setError] = useState<string | null>(null);
-  const [showFree, setShowFree] = useState(false);
-  const [startingCardlessTrial, setStartingCardlessTrial] = useState(false);
-  const iframeRef = useRef<HTMLIFrameElement>(null);
-  const requestRef = useRef(0);
+  const [returnRecoveryFinished, setReturnRecoveryFinished] = useState(
+    returnStatus !== "complete",
+  );
+  const submissionStartedRef = useRef(false);
+  const recoveryStartedRef = useRef(false);
   const advancedRef = useRef(false);
   const loadUserRef = useRef(loadUser);
   const userToken = user?.token;
   loadUserRef.current = loadUser;
 
-  useEffect(() => {
-    const timer = setTimeout(() => setShowFree(true), 6_000);
-    return () => clearTimeout(timer);
-  }, []);
-
-  useEffect(() => {
+  const startCheckout = useCallback(() => {
+    if (submissionStartedRef.current) return;
     if (!userToken) {
       setBusy(false);
       setError("sign in to continue");
       return;
     }
 
-    const requestId = ++requestRef.current;
-    const controller = new AbortController();
+    submissionStartedRef.current = true;
     setBusy(true);
-    setFrameUrl(null);
     setError(null);
-    setCompleting(false);
-    posthog.capture("onboarding_card_checkout_started", { interval });
-
-    void fetch(CHECKOUT_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      signal: controller.signal,
-      body: JSON.stringify({
-        plan: "pro",
-        interval,
-        token: userToken,
-        origin: "desktop-onboarding-card-capture",
-        ui_mode: "embedded",
-        source_tracking_id: "desktop-onboarding-business-v2",
-        product_tier: "business",
-        internal_plan: "pro",
-        billing_interval: interval,
-        seats: 1,
-        cta_location: "desktop_onboarding_card_capture",
-        cta_action: "start_trial",
-        destination_type: "stripe_embedded_checkout",
-        business_trial_mode: "new",
-      }),
-    })
-      .then(async (response) => {
-        const data = await response.json().catch(() => ({}));
-        if (!response.ok || !data.clientSecret) {
-          throw new Error(data.error || `checkout failed (${response.status})`);
-        }
-        if (requestId !== requestRef.current) return;
-        setFrameUrl(
-          `${EMBEDDED_CHECKOUT_URL}#client_secret=${encodeURIComponent(data.clientSecret)}`,
-        );
-        posthog.capture("onboarding_card_checkout_loaded", { interval });
-      })
-      .catch((checkoutError) => {
-        if (controller.signal.aborted || requestId !== requestRef.current) return;
-        setError(
-          checkoutError instanceof Error
-            ? checkoutError.message
-            : "secure checkout could not be loaded",
-        );
-      })
-      .finally(() => {
-        if (requestId === requestRef.current) setBusy(false);
+    try {
+      posthog.capture("onboarding_card_checkout_started", {
+        destination_type: "hosted_stripe_payment_element",
       });
-
-    return () => controller.abort();
-  }, [interval, userToken]);
+      submitHostedCheckoutStart({
+        hostedCheckoutUrl: HOSTED_CHECKOUT_URL,
+        token: userToken,
+        currentHref: window.location.href,
+      });
+    } catch (checkoutError) {
+      submissionStartedRef.current = false;
+      setBusy(false);
+      setError(
+        checkoutError instanceof Error
+          ? checkoutError.message
+          : "secure checkout could not be opened",
+      );
+    }
+  }, [userToken]);
 
   useEffect(() => {
-    if (!frameUrl || !userToken) return;
+    if (returnStatus !== null) return;
+    startCheckout();
+  }, [returnStatus, startCheckout]);
+
+  useEffect(() => {
+    if (returnStatus !== "complete") return;
+    const cleanUrl = new URL(window.location.href);
+    cleanUrl.searchParams.delete("checkout");
+    cleanUrl.searchParams.delete("interval");
+    window.history.replaceState(window.history.state, "", cleanUrl.toString());
+  }, [returnStatus]);
+
+  useEffect(() => {
+    if (
+      returnStatus !== "complete" ||
+      !userToken ||
+      recoveryStartedRef.current
+    ) {
+      if (returnStatus === "complete" && !userToken) {
+        setBusy(false);
+        setError("sign in to confirm your payment");
+      }
+      return;
+    }
+
+    recoveryStartedRef.current = true;
+    setBusy(true);
+    setError(null);
+    void loadUserRef
+      .current(userToken, true)
+      .catch(() => {
+        // Stripe's webhook may still make the authoritative flag available to
+        // the cheap account poll below.
+      })
+      .finally(() => {
+        setReturnRecoveryFinished(true);
+        setBusy(false);
+      });
+  }, [returnStatus, userToken]);
+
+  useEffect(() => {
+    if (
+      returnStatus !== "complete" ||
+      !returnRecoveryFinished ||
+      !userToken ||
+      user?.has_payment_method === true
+    ) {
+      return;
+    }
+
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
-    let attempts = 0;
     const poll = async () => {
-      attempts += 1;
       try {
-        await loadUserRef.current(userToken, true);
+        await loadUserRef.current(userToken);
       } catch {}
-      if (!cancelled && attempts < 40) timer = setTimeout(poll, 3_000);
+      if (!cancelled) timer = setTimeout(poll, CHECKOUT_POLL_INTERVAL_MS);
     };
-    timer = setTimeout(poll, 2_000);
+    timer = setTimeout(poll, CHECKOUT_POLL_INTERVAL_MS);
     return () => {
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, [frameUrl, userToken]);
-
-  useEffect(() => {
-    const embeddedOrigin = new URL(EMBEDDED_CHECKOUT_URL).origin;
-    const onMessage = (event: MessageEvent) => {
-      if (
-        event.origin !== embeddedOrigin ||
-        event.source !== iframeRef.current?.contentWindow ||
-        event.data?.type !== "screenpipe:checkout-complete"
-      ) {
-        return;
-      }
-      setCompleting(true);
-      posthog.capture("onboarding_card_checkout_completed", { interval });
-      if (userToken) void loadUserRef.current(userToken, true);
-    };
-    window.addEventListener("message", onMessage);
-    return () => window.removeEventListener("message", onMessage);
-  }, [interval, userToken]);
+  }, [
+    returnRecoveryFinished,
+    returnStatus,
+    user?.has_payment_method,
+    userToken,
+  ]);
 
   useEffect(() => {
     if (
       user?.has_payment_method !== true ||
-      advancedRef.current
+      advancedRef.current ||
+      (returnStatus === "complete" && !returnRecoveryFinished)
     ) {
       return;
     }
     advancedRef.current = true;
+    posthog.capture("onboarding_card_checkout_completed");
     posthog.capture("onboarding_plan_activated", {
       plan: user.subscription_plan || "unknown",
     });
     void handleNextSlide();
-  }, [handleNextSlide, user?.has_payment_method, user?.subscription_plan]);
+  }, [
+    handleNextSlide,
+    returnRecoveryFinished,
+    returnStatus,
+    user?.has_payment_method,
+    user?.subscription_plan,
+  ]);
 
-  const continueWithoutCard = async () => {
-    if (startingCardlessTrial) return;
-    // This is the last slide, so a no-op here strands the user in onboarding.
-    // With no token there is no account to attach a cardless trial to (the
-    // sign-in guard above has already blocked checkout), so the only correct
-    // move is to let setup finish; the plan is still selectable from Settings.
-    // page.tsx keeps this slide out of visibleOrder without a token, so this
-    // only fires if the token clears while the slide is already mounted.
-    if (!userToken) {
-      advancedRef.current = true;
-      await handleNextSlide();
-      return;
-    }
-    setStartingCardlessTrial(true);
-    setError(null);
-    try {
-      const response = await fetch(CARDLESS_TRIAL_URL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ token: userToken }),
-      });
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(data.error || `trial activation failed (${response.status})`);
-      }
-      posthog.capture("onboarding_cardless_trial_started", {
-        activated: data.activated === true,
-      });
-      advancedRef.current = true;
-      try {
-        await loadUserRef.current(userToken, true);
-        await handleNextSlide();
-      } catch (advanceError) {
-        advancedRef.current = false;
-        throw advanceError;
-      }
-    } catch (activationError) {
-      setError(
-        activationError instanceof Error
-          ? activationError.message
-          : "could not start trial",
-      );
-    } finally {
-      setStartingCardlessTrial(false);
-    }
-  };
+  if (returnStatus === "complete") {
+    return (
+      <div
+        className="mx-auto w-full max-w-sm"
+        data-testid="onboarding-card-capture"
+      >
+        <div className="text-center">
+          <h2 className="text-xl font-semibold lowercase">
+            confirming your payment
+          </h2>
+          <p className="mt-2 font-mono text-[10px] leading-relaxed text-muted-foreground">
+            setup continues automatically when your account is ready.
+          </p>
+        </div>
+        <div className="mt-5 flex min-h-[150px] items-center justify-center border p-6 text-center">
+          {error ? (
+            <p className="font-mono text-[11px] text-destructive">{error}</p>
+          ) : (
+            <p className="font-mono text-[11px] text-muted-foreground">
+              {busy ? "checking secure checkout" : "waiting for confirmation"}
+            </p>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  if (returnStatus === "cancelled") {
+    return (
+      <div
+        className="mx-auto w-full max-w-sm text-center"
+        data-testid="onboarding-card-capture"
+      >
+        <h2 className="text-xl font-semibold lowercase">
+          checkout was not completed
+        </h2>
+        <p className="mt-2 font-mono text-[10px] leading-relaxed text-muted-foreground">
+          retry when you are ready to start your trial.
+        </p>
+        {error && (
+          <p className="mt-4 font-mono text-[11px] text-destructive">{error}</p>
+        )}
+        <button
+          type="button"
+          onClick={startCheckout}
+          disabled={busy}
+          className="mt-5 border bg-foreground px-4 py-2 font-mono text-[10px] uppercase tracking-widest text-background transition-opacity hover:opacity-80 disabled:opacity-50"
+        >
+          {busy ? "opening checkout" : "retry secure checkout"}
+        </button>
+      </div>
+    );
+  }
 
   return (
     <div
-      className="mx-auto w-full max-w-2xl"
+      className="mx-auto w-full max-w-sm text-center"
       data-testid="onboarding-card-capture"
     >
-      <div className="mb-4 text-center">
-        <h2 className="text-xl font-semibold lowercase">
-          add a payment method to keep screenpipe business
-        </h2>
-      </div>
-
-      <div className="mb-3 flex justify-center gap-1 font-mono text-[10px] uppercase tracking-widest">
+      <h2 className="text-xl font-semibold lowercase">
+        opening secure checkout
+      </h2>
+      <p className="mt-3 font-mono text-[11px] text-muted-foreground">
+        {error || "loading screenpipe.com"}
+      </p>
+      {error && (
         <button
           type="button"
-          onClick={() => setInterval("year")}
-          className={`border px-3 py-1.5 ${interval === "year" ? "bg-foreground text-background" : "text-muted-foreground"}`}
+          onClick={startCheckout}
+          className="mt-5 border px-4 py-2 font-mono text-[10px] uppercase tracking-widest transition-colors hover:bg-foreground hover:text-background"
         >
-          annual
-        </button>
-        <button
-          type="button"
-          onClick={() => setInterval("month")}
-          className={`border px-3 py-1.5 ${interval === "month" ? "bg-foreground text-background" : "text-muted-foreground"}`}
-        >
-          monthly
-        </button>
-      </div>
-
-      <div className="relative min-h-[460px] border bg-white">
-        {busy && (
-          <div className="absolute inset-0 flex items-center justify-center font-mono text-[11px] text-muted-foreground">
-            loading secure payment form
-          </div>
-        )}
-        {frameUrl && !completing && (
-          <iframe
-            ref={iframeRef}
-            src={frameUrl}
-            title="secure Stripe payment form"
-            allow="payment"
-            className="h-[520px] w-full border-0"
-            data-testid="onboarding-card-frame"
-          />
-        )}
-        {completing && (
-          <div className="absolute inset-0 flex items-center justify-center font-mono text-[11px] text-muted-foreground">
-            activating your subscription
-          </div>
-        )}
-        {error && (
-          <div className="absolute inset-0 flex items-center justify-center p-8 text-center font-mono text-[11px] text-destructive">
-            {error}
-          </div>
-        )}
-      </div>
-
-      {showFree && (
-        <button
-          type="button"
-          onClick={() => void continueWithoutCard()}
-          disabled={startingCardlessTrial}
-          className="mx-auto mt-4 block font-mono text-[10px] text-muted-foreground/40 underline decoration-muted-foreground/20 underline-offset-4 transition-opacity hover:text-muted-foreground focus:text-muted-foreground"
-          data-testid="onboarding-plan-free"
-        >
-          {startingCardlessTrial
-            ? "starting trial"
-            : "continue with limited free plan"}
+          try again
         </button>
       )}
     </div>

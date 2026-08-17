@@ -21,12 +21,12 @@ import {
 } from '../services/cloudflare-ai-gateway';
 import { classifyCloudflareSpendLimitRule } from '../services/cloudflare-ai-gateway-usage';
 import {
-  ARGUS_BACKGROUND_FALLBACK_MODEL,
+  BACKGROUND_FALLBACK_MODEL,
   SafetyRefusalError,
   isProviderQuotaOrBillingLimitError,
   isSafetyRefusalError,
-  resolveArgusBackgroundFallbackBody,
-  shouldUseArgusBackgroundFallback,
+  resolveBackgroundFallbackBody,
+  shouldUseBackgroundFallback,
 } from '../services/background-limit-fallback';
 import { getHostedAiCapacityUpgrade } from '../services/hosted-ai-policy';
 
@@ -441,7 +441,7 @@ async function tryModel(
  * exceptions are terminal account allowance gates and safety refusals: neither
  * is a model-health failure. Auto can recover from a frontier-only allowance
  * gate by skipping the remaining frontier attempts. Paid background safety
- * refusals use the dedicated Argus rescue lane below. A
+ * refusals use the dedicated rescue lane below. A
  * model-specific reject (e.g. gpt-5.4's stricter tool_call-id length limit, a
  * region block, or a model-not-enabled) routinely succeeds on the next entry
  * (glm-5/Gemini accept what OpenAI rejected). Before, a 400 broke the loop and
@@ -505,34 +505,36 @@ export async function runChain(
   return { error: lastError, lastModel, limitError };
 }
 
-export async function tryArgusBackgroundFallback(
+export async function tryBackgroundFallback(
   body: RequestBody,
   env: Env,
   enabled: boolean,
   error: unknown,
   attemptModel: typeof tryModel = tryModel,
 ): Promise<Response | null> {
-  const fallbackBody = resolveArgusBackgroundFallbackBody({ enabled, error, body, env });
+  const fallbackBody = resolveBackgroundFallbackBody({ enabled, error, body, env });
   if (!fallbackBody) return null;
   try {
+    // No gateway context: call the provider directly so the exhausted
+    // Cloudflare spend limit cannot reject the rescue attempt too.
     const response = await attemptModel(
-      ARGUS_BACKGROUND_FALLBACK_MODEL,
+      BACKGROUND_FALLBACK_MODEL,
       fallbackBody,
       env,
       'fallback',
       false,
       undefined,
     );
-    console.warn('background hosted AI request served by Argus', {
+    console.warn('background hosted AI request served by rescue model', {
       requestedModel: body.model,
-      fallbackModel: ARGUS_BACKGROUND_FALLBACK_MODEL,
+      fallbackModel: BACKGROUND_FALLBACK_MODEL,
       reason: isSafetyRefusalError(error) ? 'safety_refusal' : 'allowance_or_quota',
     });
-    const tagged = addModelHeader(response, ARGUS_BACKGROUND_FALLBACK_MODEL);
-    tagged.headers.set('x-screenpipe-background-fallback', 'argus');
+    const tagged = addModelHeader(response, BACKGROUND_FALLBACK_MODEL);
+    tagged.headers.set('x-screenpipe-background-fallback', BACKGROUND_FALLBACK_MODEL);
     return addCorsHeaders(tagged);
   } catch (fallbackError: any) {
-    console.error('background Argus fallback failed; preserving original response', {
+    console.error('background rescue fallback failed; preserving original response', {
       status: fallbackError?.status ?? 500,
       message: String(fallbackError?.message ?? 'unknown').slice(0, 160),
     });
@@ -652,16 +654,16 @@ async function probeStreamingSafetyRefusal(response: Response): Promise<SafetyRe
  * Safety refusals are terminal events inside an otherwise successful HTTP 200
  * stream. For paid background Pipes only, inspect the stream until its first
  * assistant output or terminal refusal. A refusal before any content/tool call
- * gets one text-only Argus attempt; interactive chat never enables this path.
+ * gets one rescue-model attempt; interactive chat never enables this path.
  */
-export async function tryArgusSafetyRefusalFallback(
+export async function trySafetyRefusalFallback(
   primaryResponse: Response,
   body: RequestBody,
   env: Env,
   enabled: boolean,
   attemptModel: typeof tryModel = tryModel,
 ): Promise<Response> {
-  if (!shouldUseArgusBackgroundFallback({
+  if (!shouldUseBackgroundFallback({
     enabled,
     error: new SafetyRefusalError(),
     body,
@@ -687,25 +689,25 @@ export async function tryArgusSafetyRefusalFallback(
     return primaryResponse;
   }
 
-  const argusResponse = await tryArgusBackgroundFallback(
+  const rescueResponse = await tryBackgroundFallback(
     body,
     env,
     enabled,
     new SafetyRefusalError(),
     attemptModel,
   );
-  if (!argusResponse) {
+  if (!rescueResponse) {
     void probe.body?.cancel().catch(() => {});
     return primaryResponse;
   }
 
   // The primary branch is no longer needed. Do not await cancellation: a
   // tee'd stream can keep its cancellation promise pending until both branches
-  // settle, while the Argus response is ready to return immediately.
+  // settle, while the rescue response is ready to return immediately.
   void primaryResponse.body?.cancel().catch(() => {});
   void probe.body?.cancel().catch(() => {});
-  argusResponse.headers.set('x-screenpipe-background-fallback-reason', 'safety_refusal');
-  return argusResponse;
+  rescueResponse.headers.set('x-screenpipe-background-fallback-reason', 'safety_refusal');
+  return rescueResponse;
 }
 
 /** User-friendly error message for a final cascade failure. */
@@ -847,8 +849,8 @@ export async function handleChatCompletions(
     freePreview?: boolean;
     efficientOnly?: boolean;
     gatewayContext?: HostedChatGatewayContext;
-    argusBackgroundFallback?: boolean;
-    argusSafetyRefusalFallback?: boolean;
+    backgroundFallback?: boolean;
+    safetyRefusalFallback?: boolean;
   } = {},
 ): Promise<Response> {
   // A request with no messages at all can never complete: OpenAI would
@@ -899,16 +901,16 @@ export async function handleChatCompletions(
 
   const finalizeProviderResponse = async (response: Response, model: string): Promise<Response> => {
     const primaryResponse = addCorsHeaders(addModelHeader(response, model));
-    return tryArgusSafetyRefusalFallback(
+    return trySafetyRefusalFallback(
       primaryResponse,
       body,
       env,
-      options.argusSafetyRefusalFallback === true,
+      options.safetyRefusalFallback === true,
     );
   };
-  const argusFallbackEnabledForError = (error: unknown): boolean => isSafetyRefusalError(error)
-    ? options.argusSafetyRefusalFallback === true
-    : options.argusBackgroundFallback === true;
+  const rescueFallbackEnabledForError = (error: unknown): boolean => isSafetyRefusalError(error)
+    ? options.safetyRefusalFallback === true
+    : options.backgroundFallback === true;
 
   // Flex (Vertex's 50%-off, cache-read-discounted Gemini lane) now applies to
   // interactive Gemini too, not just background — see isFlexEligible. tryModel
@@ -963,13 +965,13 @@ export async function handleChatCompletions(
       return resp;
     }
     const fallbackError = result.limitError ?? result.error;
-    const argusResponse = await tryArgusBackgroundFallback(
+    const rescueResponse = await tryBackgroundFallback(
       body,
       env,
-      argusFallbackEnabledForError(fallbackError),
+      rescueFallbackEnabledForError(fallbackError),
       fallbackError,
     );
-    if (argusResponse) return argusResponse;
+    if (rescueResponse) return rescueResponse;
     if (isHostedChatAllowanceError(result.error)) {
       return allowanceErrorResponse(body, result.error);
     }
@@ -991,13 +993,13 @@ export async function handleChatCompletions(
       return finalizeProviderResponse(result.response, result.model);
     }
     const fallbackError = result.limitError ?? result.error;
-    const argusResponse = await tryArgusBackgroundFallback(
+    const rescueResponse = await tryBackgroundFallback(
       body,
       env,
-      argusFallbackEnabledForError(fallbackError),
+      rescueFallbackEnabledForError(fallbackError),
       fallbackError,
     );
-    if (argusResponse) return argusResponse;
+    if (rescueResponse) return rescueResponse;
     if (isHostedChatAllowanceError(result.error)) {
       return allowanceErrorResponse(body, result.error);
     }
@@ -1016,13 +1018,13 @@ export async function handleChatCompletions(
     logModelOutcome(env, { model: body.model, outcome: 'ok' }).catch(() => {});
     return finalizeProviderResponse(response, body.model);
   } catch (error: any) {
-    const argusResponse = await tryArgusBackgroundFallback(
+    const rescueResponse = await tryBackgroundFallback(
       body,
       env,
-      argusFallbackEnabledForError(error),
+      rescueFallbackEnabledForError(error),
       error,
     );
-    if (argusResponse) return argusResponse;
+    if (rescueResponse) return rescueResponse;
     if (isHostedChatAllowanceError(error)) {
       return allowanceErrorResponse(body, error);
     }

@@ -223,13 +223,32 @@ impl FocusAwareController {
             .lock()
             .ok()
             .is_some_and(|time| time.elapsed() < STALE_FOCUS_CUTOFF);
-        focus_is_fresh
-            && self
+        if focus_is_fresh {
+            return self
                 .current_focus
                 .lock()
                 .ok()
                 .and_then(|focus| focus.clone())
-                .is_some_and(|focus| focus.matches(identity))
+                .is_some_and(|focus| focus.matches(identity));
+        }
+
+        // Events only flow when focus *changes*, so on a single-monitor setup
+        // (or any stretch where the cursor stays on one display) the stream
+        // goes quiet and `last_event_time` blows past the cutoff even though
+        // nothing is wrong. Treating quiet as "not focused" silently stripped
+        // the AX walk from every capture — frames kept flowing but with OCR
+        // text and empty app/window attribution. Pull the tracker's latest
+        // resolution instead: its own safety-net poll keeps `current()` fresh
+        // independent of event emission, so this is still a *confirmed*
+        // focus read, not a guess.
+        //
+        // When the tracker cannot resolve at all (Null tracker, cursor in a
+        // display gap, platform tracker wedged) this stays fail-closed —
+        // "unknown monitor → OCR + unknown identity" is the deliberate
+        // capture-source boundary from #6018.
+        self.tracker
+            .current()
+            .is_some_and(|current| current.matches(identity))
     }
 
     #[cfg(test)]
@@ -402,6 +421,34 @@ mod tests {
         FocusAwareController::new(tracker)
     }
 
+    /// Tracker whose `current()` answer is pinned by the test. Stands in for a
+    /// healthy platform tracker whose event stream has gone quiet because
+    /// focus stopped *changing* — the normal single-monitor condition.
+    struct StaticFocusTracker {
+        current: std::sync::Mutex<Option<MonitorIdentity>>,
+        tx: tokio::sync::broadcast::Sender<crate::focus_tracker::FocusEvent>,
+    }
+
+    impl StaticFocusTracker {
+        fn resolving(identity: MonitorIdentity) -> Self {
+            let (tx, _) = tokio::sync::broadcast::channel(16);
+            Self {
+                current: std::sync::Mutex::new(Some(identity)),
+                tx,
+            }
+        }
+    }
+
+    impl FocusTracker for StaticFocusTracker {
+        fn current(&self) -> Option<MonitorIdentity> {
+            self.current.lock().expect("static tracker mutex").clone()
+        }
+        fn subscribe(&self) -> tokio::sync::broadcast::Receiver<crate::focus_tracker::FocusEvent> {
+            self.tx.subscribe()
+        }
+        fn stop(&self) {}
+    }
+
     #[tokio::test]
     async fn initial_state_is_active_for_all_monitors() {
         let ctrl = make_ctrl();
@@ -492,6 +539,11 @@ mod tests {
         // Both monitors should now report Active (safe fallback).
         assert_eq!(ctrl.state(1), CaptureState::Active);
         assert_eq!(ctrl.state(2), CaptureState::Active);
+        // hosts_focus stays closed: the Null tracker cannot resolve a monitor,
+        // and unresolved focus means OCR + unknown identity (the #6018
+        // capture-source boundary). Contrast with
+        // hosts_focus_survives_quiet_event_stream_via_tracker_pull, where a
+        // healthy tracker still resolves the monitor and keeps its AX walk.
         assert!(!ctrl.hosts_focus(1));
         assert!(!ctrl.hosts_focus(2));
         // A fresh focus event should clear the stale latch and restore
@@ -499,6 +551,49 @@ mod tests {
         ctrl.set_focus_for_test(1);
         assert_eq!(ctrl.state(1), CaptureState::Active);
         assert_eq!(ctrl.state(2), CaptureState::Cold);
+    }
+
+    /// The incident this gate caused: one monitor, cursor parked on it, so
+    /// focus never *changes* and the tracker (correctly) emits nothing. After
+    /// 30 quiet seconds `last_event_time` is stale — but the tracker itself
+    /// still resolves the cursor's monitor every poll. hosts_focus must pull
+    /// that resolution instead of failing closed, or every capture loses its
+    /// tree walk: OCR text, empty app_name, empty window_name, forever.
+    #[tokio::test]
+    async fn hosts_focus_survives_quiet_event_stream_via_tracker_pull() {
+        let identity = MonitorIdentity::new(3, Some("Display_1920x1080_0,0".to_string()));
+        let tracker: Arc<dyn FocusTracker> =
+            Arc::new(StaticFocusTracker::resolving(identity.clone()));
+        let ctrl = FocusAwareController::new(tracker);
+
+        ctrl.set_focus_identity_for_test(identity.clone());
+        assert!(ctrl.hosts_focus_for_identity(&identity));
+
+        // 60 quiet seconds — no focus change, so no events. Not a fault.
+        ctrl.backdate_last_event_for_test(Instant::now() - Duration::from_secs(60));
+
+        assert!(
+            ctrl.hosts_focus_for_identity(&identity),
+            "a quiet event stream must not strip focus from the monitor the tracker still resolves"
+        );
+    }
+
+    /// Isolation survives the stale fallback: when the tracker resolves the
+    /// cursor onto monitor A, a stale-event query for monitor B stays false.
+    /// The fail-open tier only applies when nothing can resolve focus at all.
+    #[tokio::test]
+    async fn stale_fallback_still_isolates_the_unfocused_monitor() {
+        let focused = MonitorIdentity::new(1, Some("Dell_3840x2160_0,0".to_string()));
+        let other = MonitorIdentity::new(2, Some("LG_1920x1080_3840,0".to_string()));
+        let tracker: Arc<dyn FocusTracker> =
+            Arc::new(StaticFocusTracker::resolving(focused.clone()));
+        let ctrl = FocusAwareController::new(tracker);
+
+        ctrl.set_focus_identity_for_test(focused.clone());
+        ctrl.backdate_last_event_for_test(Instant::now() - Duration::from_secs(60));
+
+        assert!(ctrl.hosts_focus_for_identity(&focused));
+        assert!(!ctrl.hosts_focus_for_identity(&other));
     }
 
     #[tokio::test]

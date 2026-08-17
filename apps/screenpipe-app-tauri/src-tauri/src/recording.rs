@@ -845,7 +845,25 @@ pub async fn spawn_screenpipe(
     // a crashed/failed server back instead of treating it as a user stop.
     state.set_capture_intent(true);
 
-    let _lifecycle_guard = state.server_lifecycle.lock().await;
+    // Do not wait for the lifecycle lock. It is held across a full stop/start,
+    // so when the app is already bringing the server up — the ordinary case
+    // right after the macOS Screen Recording grant restarts us — this await
+    // parks for the whole boot. Onboarding calls this command on mount and its
+    // 20s guard was firing at 20.0-23.0s on every platform, with two users
+    // observed giving up: one closed the app at the timeout, one stayed 11
+    // minutes and never completed setup.
+    //
+    // A held lock means a startup or teardown is already running, and capture
+    // intent is set above, so the desired end state is already being reached.
+    // Report success and let the caller's health poll observe the engine come
+    // up — which is what already rescues most of these users, just without the
+    // dead wait first. If that in-flight startup fails, capture intent keeps
+    // the health watchdog retrying and the caller's own health timeout still
+    // surfaces it, so a real failure is not swallowed here.
+    let Ok(_lifecycle_guard) = state.server_lifecycle.try_lock() else {
+        info!("spawn_screenpipe: startup already in progress, not queueing behind it");
+        return Ok(());
+    };
     spawn_screenpipe_inner(&state, app).await
 }
 
@@ -1527,6 +1545,46 @@ async fn kill_process_on_port(port: u16) {
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod spawn_lifecycle_lock_tests {
+    /// `spawn_screenpipe` must not await `server_lifecycle`.
+    ///
+    /// That lock is held across a full stop/start, so awaiting it parks the
+    /// command for an entire boot. Onboarding calls it on mount, and its 20s
+    /// guard fired at 20.0-23.0s across Windows, macOS and Linux — most users
+    /// were rescued by the health poll, but one closed the app at the timeout
+    /// and another stayed eleven minutes without ever completing setup.
+    ///
+    /// Guarded at the source because the runtime symptom is indistinguishable
+    /// from a slow machine: the command eventually returns the right answer.
+    #[test]
+    fn spawn_screenpipe_does_not_await_the_lifecycle_lock() {
+        // Assembled so the needles never match their own source lines.
+        let fn_needle = concat!("pub async fn ", "spawn_screenpipe(");
+        let blocking = concat!("server_lifecycle.lock()", ".await");
+        let non_blocking = concat!("server_lifecycle.", "try_lock()");
+
+        let source = include_str!("recording.rs");
+        let start = source
+            .find(fn_needle)
+            .expect("spawn_screenpipe renamed — repoint this guard at it");
+        let body = &source[start..];
+        let end = body.find("\n}\n").expect("unterminated function body");
+        let body = &body[..end];
+
+        assert!(
+            !body.contains(blocking),
+            "spawn_screenpipe awaits server_lifecycle again — this parks the \
+             command behind an in-flight startup and strands onboarding"
+        );
+        assert!(
+            body.contains(non_blocking),
+            "expected a non-blocking try_lock so an in-progress startup is \
+             reported rather than queued behind"
+        );
     }
 }
 
