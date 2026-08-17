@@ -691,14 +691,14 @@ fn parse_discord(context: &ParseContext<'_>, tree: &SemanticTree) -> ParseOutcom
         .collect::<Vec<_>>();
     let Some(list) = content_lists.into_iter().find(|list| {
         tree.descendants(*list)
-            .any(|node| role_is(tree, node, "AXDocumentArticle"))
+            .any(|node| is_discord_message_article(tree, node))
     }) else {
         return parse_discord_heading_fallback(context, tree);
     };
     let mut messages = Vec::new();
     for article in tree
         .descendants(list)
-        .filter(|node| role_is(tree, *node, "AXDocumentArticle"))
+        .filter(|node| is_discord_message_article(tree, *node))
         .take(MAX_ITEMS - 1)
     {
         let (actor, evidence) = direction_actor(tree, article);
@@ -724,6 +724,11 @@ fn parse_discord(context: &ParseContext<'_>, tree: &SemanticTree) -> ParseOutcom
             messages,
         )
     }
+}
+
+fn is_discord_message_article(tree: &SemanticTree, node: NodeId) -> bool {
+    role_is(tree, node, "AXDocumentArticle")
+        || (role_is(tree, node, "AXGroup") && tree.subrole(node) == Some("AXDocument"))
 }
 
 fn parse_discord_heading_fallback(context: &ParseContext<'_>, tree: &SemanticTree) -> ParseOutcome {
