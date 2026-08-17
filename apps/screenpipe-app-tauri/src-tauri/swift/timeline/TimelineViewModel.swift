@@ -228,6 +228,7 @@ final class TimelineViewModel: ObservableObject {
     private var imageLoadToken = 0
     private var requestedDays = Set<String>()
     private var tagFetchInFlight = Set<String>()
+    private var navigationGeneration = 0
 
     /// Native actions must return to the webview that owns this model. Looking
     /// up the current key window is racy because the fullscreen overlay is a
@@ -747,10 +748,17 @@ final class TimelineViewModel: ObservableObject {
 
     func jumpDay(_ delta: Int) {
         let target = TimelineDateNavigation.jumpDay(from: currentDate, delta: delta)
-        changeDate(to: target)
+        // An older/empty day may never yield a frame batch, so its navigation
+        // guard must not trap the user there. Moving forward supersedes that
+        // pending request; moving further backward stays guarded to avoid a
+        // queue of overlapping historical requests.
+        changeDate(to: target, supersedePendingNavigation: delta > 0)
     }
 
     func jumpToNow() {
+        // Invalidate any pending historical navigation timeout so it cannot
+        // later clear loading state for this current-day request.
+        navigationGeneration += 1
         isNavigating = false
         currentDate = Date()
         currentIndex = 0
@@ -758,8 +766,10 @@ final class TimelineViewModel: ObservableObject {
         loadCurrentImage()
     }
 
-    func changeDate(to date: Date) {
-        guard !isNavigating else { return }
+    func changeDate(to date: Date, supersedePendingNavigation: Bool = false) {
+        guard !isNavigating || supersedePendingNavigation else { return }
+        navigationGeneration += 1
+        let generation = navigationGeneration
         isNavigating = true
         pause()
         resetFilters()
@@ -771,7 +781,7 @@ final class TimelineViewModel: ObservableObject {
         requestDay(date)
         // Never leave the spinner up forever if the day query stalls.
         DispatchQueue.main.asyncAfter(deadline: .now() + TimelineDateNavigation.navigationTimeout) { [weak self] in
-            guard let self else { return }
+            guard let self, self.navigationGeneration == generation else { return }
             self.isNavigating = false
             self.isLoading = false
         }

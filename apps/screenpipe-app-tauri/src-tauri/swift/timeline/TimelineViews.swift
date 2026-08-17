@@ -446,7 +446,9 @@ struct TimelineControlBar: View {
                 Image(systemName: "chevron.right")
             }
             .buttonStyle(TimelineControlStyle())
-            .disabled(model.isNavigating || model.isAtToday)
+            // Forward navigation is the escape hatch from a slow/empty older
+            // day, so it remains clickable while that request is pending.
+            .disabled(model.isAtToday)
             .help("Next day")
 
             Button { model.jumpToNow() } label: {

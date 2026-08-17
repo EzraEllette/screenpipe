@@ -547,11 +547,23 @@ private func testDateNavigation() {
     expect(model.frames.isEmpty, "changing date clears the previous day's frames")
     expect(model.isNavigating, "day navigation stays guarded while its batch is pending")
 
+    // A slow or empty older day has no batch to acknowledge the request. The
+    // forward arrow must still return to today instead of staying disabled for
+    // the navigation timeout.
+    model.jumpDay(1)
+    expect(model.isAtToday, "next day supersedes a pending previous-day request")
+    expect(model.isNavigating, "the replacement current-day request is now pending")
+
+    model.jumpDay(-1)
+    expect(model.isAtToday, "backward navigation stays guarded while the replacement is pending")
+
     model.injectForTesting(frames: fixtureFrames(count: 4, base: model.currentDate))
     expect(!model.isNavigating, "the requested day batch acknowledges navigation")
 
+    model.jumpDay(-1)
+    model.injectForTesting(frames: fixtureFrames(count: 4, base: model.currentDate))
     model.jumpDay(1)
-    expect(model.isAtToday, "next day works immediately after the previous day loads")
+    expect(model.isAtToday, "next day also works after the previous day loads")
 
     model.jumpToNow()
     expect(Calendar.current.isDate(model.currentDate, inSameDayAs: today), "jump to now returns to today")
