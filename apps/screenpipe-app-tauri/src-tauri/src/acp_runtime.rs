@@ -9,6 +9,7 @@
 //! hidden mode of the signed Screenpipe executable so no second sidecar or
 //! handwritten protocol implementation is shipped.
 
+use crate::acp_extensions::AcpExtensionMiddleware;
 use agent_client_protocol::schema::v1::{
     AuthCapabilities, AuthMethod, AuthenticateRequest, BooleanConfigOptionCapabilities,
     CancelNotification, ClientCapabilities,
@@ -175,6 +176,9 @@ struct RuntimeConfig {
     preferred_auth_method: Option<String>,
     system_context: Option<String>,
     session_defaults: SessionDefaults,
+    /// Provider-neutral capabilities contributed by installed Pi packages
+    /// which explicitly expose a portable MCP entrypoint.
+    extension_middleware: AcpExtensionMiddleware,
     /// The user's own registered MCP servers, resolved (with secret header
     /// values) by the desktop before launch and forwarded to the adapter in
     /// session/new alongside the screenpipe server.
@@ -280,6 +284,7 @@ impl RuntimeConfig {
                 "SCREENPIPE_ACP_SESSION_CONFIG_JSON",
             )?
             .unwrap_or_default(),
+            extension_middleware: AcpExtensionMiddleware::discover(),
             user_mcp_servers: parse_json_env::<Vec<UserMcpServer>>(
                 "SCREENPIPE_ACP_USER_MCP_JSON",
             )?
@@ -2427,6 +2432,40 @@ fn engine_api_url() -> Option<String> {
     })
 }
 
+/// Deliberately narrow environment for third-party portable extension
+/// processes. Provider credentials and the Screenpipe cloud JWT stay in the
+/// ACP runtime/agent; an installed extension receives only local Screenpipe
+/// access plus the process basics Bun needs on each platform.
+fn extension_mcp_env() -> Vec<(String, String)> {
+    let mut env = Vec::new();
+    for name in [
+        "HOME",
+        "USERPROFILE",
+        "PATH",
+        "SHELL",
+        "TMPDIR",
+        "TEMP",
+        "TMP",
+        "LANG",
+        "LC_ALL",
+    ] {
+        if let Ok(value) = std::env::var(name) {
+            env.push((name.to_string(), value));
+        }
+    }
+    env.push(("NO_COLOR".into(), "1".into()));
+    if let Some(url) = engine_api_url() {
+        env.push(("SCREENPIPE_API_URL".into(), url));
+    }
+    if let Some(key) = env_nonempty("SCREENPIPE_LOCAL_API_KEY") {
+        env.push(("SCREENPIPE_LOCAL_API_KEY".into(), key));
+    }
+    if let Some(chat_id) = env_nonempty("SCREENPIPE_CHAT_SESSION_ID") {
+        env.push(("SCREENPIPE_CHAT_SESSION_ID".into(), chat_id));
+    }
+    env
+}
+
 fn mcp_servers(config: &RuntimeConfig) -> Vec<McpServer> {
     let mut servers: Vec<McpServer> = Vec::new();
 
@@ -2473,6 +2512,20 @@ fn mcp_servers(config: &RuntimeConfig) -> Vec<McpServer> {
                     .args(vec![tools_server.to_string_lossy().into_owned()])
                     .env(tools_env),
             ));
+        }
+        // Installed Pi packages may opt into the portable ACP subset by
+        // declaring a Screenpipe MCP entrypoint. A native launcher clears the
+        // inherited environment before Bun imports package code, then exposes
+        // one stdio server per package; arbitrary Pi hooks remain native to Pi.
+        // pi-acp runs the same isolated Pi installation and loads the package
+        // natively, so mounting its portable surface again would duplicate
+        // tools. Every non-Pi ACP agent receives the middleware form.
+        if config.agent_id != "pi-acp" {
+            servers.extend(
+                config
+                    .extension_middleware
+                    .stdio_servers(&config.bun_path, &extension_mcp_env()),
+            );
         }
     }
     // Forward the user's own registered MCP servers so every harness sees
@@ -2601,6 +2654,18 @@ fn spawn_http_mcp_servers(config: &RuntimeConfig) -> Vec<std::process::Child> {
             }
             Err(error) => eprintln!("[acp-runtime] core http mcp server failed to start: {error}"),
         }
+    }
+
+    // Cursor and Copilot reject client stdio MCP declarations. Portable
+    // package entrypoints use the same manifest but switch transports through
+    // the documented SCREENPIPE_MCP_* environment contract.
+    for (child, name, url) in config.extension_middleware.spawn_http_servers(
+        &config.bun_path,
+        &extension_mcp_env(),
+        free_loopback_port,
+    ) {
+        children.push(child);
+        urls.push((name, url));
     }
 
     let _ = HTTP_MCP_URLS.set(urls);
@@ -4094,6 +4159,7 @@ mod tests {
             preferred_auth_method: None,
             system_context: None,
             session_defaults: SessionDefaults::default(),
+            extension_middleware: AcpExtensionMiddleware::default(),
             user_mcp_servers: Vec::new(),
             resume_session_id: None,
         }
@@ -4180,6 +4246,19 @@ mod tests {
         assert!(is_forbidden_acp_env("screenpipe_api_key"));
         assert!(!is_forbidden_acp_env("SCREENPIPE_LOCAL_API_KEY"));
         assert!(!is_forbidden_acp_env("ANTHROPIC_API_KEY"));
+    }
+
+    #[test]
+    fn portable_extensions_receive_only_local_screenpipe_access() {
+        let names = extension_mcp_env()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect::<std::collections::HashSet<_>>();
+
+        assert!(!names.contains("SCREENPIPE_API_KEY"));
+        assert!(!names.contains("OPENAI_API_KEY"));
+        assert!(!names.contains("ANTHROPIC_API_KEY"));
+        assert!(names.contains("NO_COLOR"));
     }
 
     #[test]
@@ -4472,6 +4551,46 @@ mod tests {
             .join(".screenpipe")
             .join("screenpipe-tools.mjs")
             .exists());
+    }
+
+    #[test]
+    fn portable_package_middleware_mounts_everywhere_except_native_pi() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let package = dir.path().join("npm/node_modules/portable-pi");
+        std::fs::create_dir_all(package.join("dist")).expect("package dir");
+        std::fs::write(package.join("dist/mcp.mjs"), "// MCP server").expect("entrypoint");
+        std::fs::write(
+            package.join("package.json"),
+            r#"{"screenpipe":{"acp":{"mcpServer":"./dist/mcp.mjs"}}}"#,
+        )
+        .expect("package manifest");
+        std::fs::write(
+            dir.path().join("settings.json"),
+            r#"{"packages":["npm:portable-pi"]}"#,
+        )
+        .expect("Pi settings");
+
+        let mut config = runtime_config("claude-acp");
+        config.project_dir = dir.path().join("project");
+        config.extension_middleware = AcpExtensionMiddleware::discover_in(dir.path());
+        let names = |config: &RuntimeConfig| {
+            mcp_servers(config)
+                .into_iter()
+                .filter_map(|server| match server {
+                    McpServer::Stdio(stdio) => Some(stdio.name),
+                    McpServer::Http(_) => None,
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+
+        assert!(names(&config)
+            .iter()
+            .any(|name| name == "pi-extension-portable-pi"));
+        config.agent_id = "pi-acp".into();
+        assert!(!names(&config)
+            .iter()
+            .any(|name| name == "pi-extension-portable-pi"));
     }
 
     #[test]

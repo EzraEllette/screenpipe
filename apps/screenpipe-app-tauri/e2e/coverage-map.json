@@ -1960,7 +1960,7 @@
       "criticality": "medium",
       "confidence": "strong",
       "ux": "real-user-flow",
-      "notes": "Opens Home -> Connections, opens Pi extensions, verifies catalog and warning copy, filters package search, and captures a screenshot. Read-only smoke: does not install packages."
+      "notes": "Opens Home -> Connections, opens Agent extensions, verifies provider-neutral built-ins and compatibility labels, filters the Pi package search, and captures a screenshot. Read-only smoke: does not install packages."
     },
     {
       "spec": "pipe-continuous-chat.spec.ts",

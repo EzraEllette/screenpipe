@@ -455,6 +455,9 @@ pub struct PiExtensionPackage {
     pub scope: String,
     pub filtered: bool,
     pub installed: bool,
+    /// True only after Screenpipe validates the installed package's portable
+    /// ACP MCP manifest and its entrypoint stays inside the package directory.
+    pub acp_compatible: bool,
 }
 
 /// RPC Response from Pi
@@ -4634,6 +4637,7 @@ fn pi_settings_packages(settings: &serde_json::Value) -> Vec<PiExtensionPackage>
 
             Some(PiExtensionPackage {
                 installed: pi_package_source_looks_installed(&source),
+                acp_compatible: crate::acp_extensions::package_source_is_portable(&source),
                 source,
                 scope: "user".to_string(),
                 filtered,
@@ -4673,7 +4677,7 @@ fn validate_pi_extension_package_source(source: &str) -> Result<String, String> 
     Err("Only npm: packages and GitHub package URLs can be installed from screenpipe".to_string())
 }
 
-fn npm_package_name_from_source(source: &str) -> Option<String> {
+pub(crate) fn npm_package_name_from_source(source: &str) -> Option<String> {
     let spec = source.strip_prefix("npm:")?.trim();
     if spec.is_empty() {
         return None;

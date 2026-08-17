@@ -3017,7 +3017,12 @@ downloaded: boolean;
 auth_required: boolean }
 export type PiBackend = "acp"
 export type PiCheckResult = { available: boolean; path: string | null }
-export type PiExtensionPackage = { source: string; scope: string; filtered: boolean; installed: boolean }
+export type PiExtensionPackage = { source: string; scope: string; filtered: boolean; installed: boolean;
+/**
+ * True only after Screenpipe validates the installed package's portable
+ * ACP MCP manifest and its entrypoint stays inside the package directory.
+ */
+acpCompatible: boolean }
 /**
  * Image content for Pi RPC protocol (pi-ai ImageContent format)
  */
