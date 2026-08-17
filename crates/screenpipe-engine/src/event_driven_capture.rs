@@ -1582,65 +1582,64 @@ pub(crate) async fn event_driven_capture_loop(
                 tokio::time::sleep(poll_interval).await;
             }
         } else {
-            // Block on `recv()` for the FIRST trigger so an idle channel
-            // doesn't burn CPU (matches the upstream "reduce idle
-            // wakeups" change). Once a message arrives, drain the rest
-            // via `try_recv` so that bursts of triggers coalesce into
-            // one capture, with every correlation_id reaching the
-            // linker. The reducer then collapses (kind, corr_ids) and
-            // filters out skipped kinds (Clipboard/KeyPress with their
-            // respective gates off).
+            // Drain without parking this long-lived capture task inside
+            // `broadcast::Receiver::recv()`. Production traces showed this
+            // task repeatedly failing to resume from that receiver wait even
+            // though its 250ms timeout had elapsed; the heartbeat then froze
+            // for minutes while the rest of the runtime stayed healthy.
+            //
+            // Preserve the same 250ms idle cadence and CPU cost with a plain
+            // timer sleep. Triggers remain buffered by the broadcast channel
+            // and are drained on wake, adding at most the same poll interval
+            // already budgeted for checkpoint promotion and idle capture.
+            // This removes the receiver-waker/cancellation path without adding
+            // a retry threshold, watchdog timer, or other recovery heuristic.
             let mut drained: Vec<CaptureTriggerMsg> = Vec::new();
             let mut lagged_force_manual = false;
             let mut closed_now = false;
 
+            // Preserve immediate handling for an already-buffered trigger.
+            // Sleep only when the channel is empty; anything arriving during
+            // that sleep remains buffered for the drain below.
             record_loop_stage(
                 &vision_metrics,
                 &monitor_liveness,
-                screenpipe_screen::CaptureLoopStage::TriggerWait,
+                screenpipe_screen::CaptureLoopStage::TriggerDrain,
             );
-            match tokio::time::timeout(poll_interval, trigger_rx.recv()).await {
-                Ok(Ok(msg)) => drained.push(msg),
-                Ok(Err(broadcast::error::RecvError::Lagged(n))) => {
+            match trigger_rx.try_recv() {
+                Ok(msg) => drained.push(msg),
+                Err(broadcast::error::TryRecvError::Empty) => {
+                    record_loop_stage(
+                        &vision_metrics,
+                        &monitor_liveness,
+                        screenpipe_screen::CaptureLoopStage::TriggerWait,
+                    );
+                    tokio::time::sleep(poll_interval).await;
+                }
+                Err(broadcast::error::TryRecvError::Lagged(n)) => {
                     debug!(
                         "trigger channel lagged by {} messages on monitor {}",
                         n, monitor_id
                     );
-                    // Missed broadcast msgs — their correlation_ids are
-                    // gone forever and those ui_events rows will stay
-                    // frame_id=NULL. Bump the lagged counter so the
-                    // periodic linker WARN shows this slice of loss.
                     report_triggers_dropped(
                         linker_tx.as_ref(),
                         Vec::new(),
                         crate::frame_linker::DropReason::Lagged,
                     );
-                    let _ = n;
-                    // Fall back to Manual below if nothing else wins.
                     lagged_force_manual = true;
                 }
-                Ok(Err(broadcast::error::RecvError::Closed)) => {
+                Err(broadcast::error::TryRecvError::Closed) => {
                     warn!(
                         "trigger channel closed for monitor {}, continuing with polling-only mode",
                         monitor_id
                     );
                     closed_now = true;
                 }
-                Err(_elapsed) => {
-                    // No trigger this poll_interval — fall through to
-                    // poll_activity below.
-                }
             }
 
-            // The bounded wait above returned, so anything past this point is
-            // synchronous gate work, not the timer. Re-marking here keeps the
-            // watchdog's "frozen in <stage>" message honest: `trigger-wait`
-            // now accuses only the 250ms-bounded await (a freeze there means
-            // the task was never resumed), while `trigger-drain` accuses the
-            // synchronous gates below (a freeze there means a lock is held by
-            // another thread). Previously both shared one marker, so a
-            // multi-minute #3939 freeze reported `trigger-wait` even though a
-            // 250ms timeout cannot account for it.
+            // Anything past this point is synchronous channel/gate work.
+            // Re-marking here keeps the watchdog's "frozen in <stage>"
+            // message honest.
             record_loop_stage(
                 &vision_metrics,
                 &monitor_liveness,
