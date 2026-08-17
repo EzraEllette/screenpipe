@@ -5,6 +5,7 @@
 use super::catalog::{
     contains_ascii_case_insensitive, manifest_for_family, profile_for, AppFamily, BuiltinAppProfile,
 };
+use super::persisted_web::{action_anchored_turns, parse_gmail as parse_persisted_gmail};
 use crate::{
     apply_message_identity, apply_message_time, is_message_time_label, AccessibilityAttribute,
     CapturedNodeFlags, IdentityQuality, MessageIdentityInput, MessageTimeContext, NodeId,
@@ -89,6 +90,8 @@ impl FamilyParser {
             priority,
         );
         if family == AppFamily::Conversation {
+            manifest.parser_version = "3".into();
+        } else if family == AppFamily::Mail {
             manifest.parser_version = "2".into();
         }
         Self { family, manifest }
@@ -167,6 +170,9 @@ fn parse_conversation(
     }
     if messages.is_empty() {
         messages = fluent_control_message_turns(tree);
+    }
+    if messages.is_empty() && profile.id == "discord" {
+        messages = action_anchored_turns(tree, &["Reply", "Add reaction"]);
     }
     if messages.is_empty() {
         return chromium_chat_list(profile, tree).unwrap_or_default();
@@ -312,7 +318,14 @@ fn parse_mail(profile: &BuiltinAppProfile, tree: &SemanticTree) -> Vec<SemanticI
         messages.push((node, sender.to_owned(), body));
     }
     if messages.is_empty() {
-        return parse_mail_list_rows(profile, tree);
+        let rows = parse_mail_list_rows(profile, tree);
+        if !rows.is_empty() {
+            return rows;
+        }
+        if profile.id == "gmail" {
+            return parse_persisted_gmail(profile, tree);
+        }
+        return Vec::new();
     }
 
     let mut conversation = SemanticItem::new(
