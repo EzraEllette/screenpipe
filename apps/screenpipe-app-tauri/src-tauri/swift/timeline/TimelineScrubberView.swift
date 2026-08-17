@@ -99,6 +99,7 @@ struct TimelineScrubberView: View {
             playhead(x: size.width / 2, height: size.height)
         }
         .contentShape(Rectangle())
+        .timelinePointerCursor()
         .gesture(dragGesture(layout: layout, size: size, offset: offset))
         .onContinuousHover { phase in
             switch phase {
@@ -268,6 +269,7 @@ struct TimelineScrubberView: View {
                 .onTapGesture {
                     model.activePopoverGroupIndex = model.activePopoverGroupIndex == index ? nil : index
                 }
+                .timelinePointerCursor()
             }
         }
     }

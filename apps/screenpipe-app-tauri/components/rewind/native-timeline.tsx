@@ -23,12 +23,14 @@
 import { useEffect, useRef, useState } from "react";
 import { emit, listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import posthog from "posthog-js";
 
 import { commands } from "@/lib/utils/tauri";
-import { getApiKey, getApiPort } from "@/lib/api";
+import { getApiKey, getApiPort, localFetch } from "@/lib/api";
 import { TimelineDailySummary } from "@/components/rewind/timeline/daily-summary";
 import { showChatWithPrefill } from "@/lib/chat-utils";
+import { toast } from "@/components/ui/use-toast";
 
 export interface NativeTimelineSelectionContext {
   start: string;
@@ -37,6 +39,21 @@ export interface NativeTimelineSelectionContext {
   screenTextSamples: string[];
   audioTranscriptions: string[];
   frameCount: number;
+}
+
+export interface NativeTimelineExportSelection {
+  start: string;
+  end: string;
+}
+
+export type NativeTimelineOcclusionMode = "above" | "underlay" | "detached";
+
+export function nativeTimelineOcclusionMode(
+  transparentHost: boolean,
+  occluded: boolean
+): NativeTimelineOcclusionMode {
+  if (!occluded) return "above";
+  return transparentHost ? "underlay" : "detached";
 }
 
 export function buildNativeSelectionChatPrefill(
@@ -142,6 +159,47 @@ export function NativeTimelineBridge() {
           });
         }
       ),
+      listen<NativeTimelineExportSelection>(
+        "timeline-export-video-selection",
+        (event) => {
+          const selection = event.payload;
+          toast({ title: "exporting selected timeline…" });
+          void localFetch("/export", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              start: selection.start,
+              end: selection.end,
+              include_audio: true,
+            }),
+          }).then(async (response) => {
+            if (!response.ok) {
+              const body = await response.json().catch(() => null);
+              throw new Error(body?.error || `export failed (${response.status})`);
+            }
+            const result = await response.json();
+            const outputPath = String(result.output_path || "");
+            if (outputPath) await revealItemInDir(outputPath);
+            toast({
+              title: "timeline video exported",
+              description: outputPath || "Saved in screenpipe exports.",
+            });
+            posthog.capture("timeline_selection_exported", {
+              selection_duration_ms:
+                new Date(selection.end).getTime() -
+                new Date(selection.start).getTime(),
+              native_timeline: true,
+            });
+          }).catch((error) => {
+            console.error("failed to export native timeline selection", error);
+            toast({
+              variant: "destructive",
+              title: "timeline export failed",
+              description: error instanceof Error ? error.message : "Try again.",
+            });
+          });
+        }
+      ),
     ];
     return () => {
       for (const subscription of subscriptions) {
@@ -224,7 +282,7 @@ export function NativeTimeline({
 
     // Rounded, because a fractional rect leaves a seam between the child
     // window and the webview underneath it.
-    const place = () => {
+    const place = (underlay = false) => {
       const box = host.getBoundingClientRect();
       if (box.width < 1 || box.height < 1) return;
       void emit("native-timeline-attach", {
@@ -235,6 +293,7 @@ export function NativeTimeline({
         apiKey: getApiKey(),
         embedded: true,
         closeOnEscape,
+        underlay,
         rect: {
           x: Math.round(box.left),
           y: Math.round(box.top),
@@ -244,10 +303,10 @@ export function NativeTimeline({
       });
     };
 
-    // A child window sits above the webview by construction, so anything the
-    // app draws over the timeline — the command palette, a dialog, a dropdown —
-    // would be behind it. Nothing in the DOM can stack above an AppKit window,
-    // so the window has to get out of the way instead.
+    // A child window normally sits above the webview, so DOM overlays would be
+    // behind it. The fullscreen host is transparent: while one of its panels
+    // is open, place the native child below that host so both remain visible.
+    // Opaque embedded hosts still detach because an underlay would be hidden.
     const OVERLAY_SELECTOR =
       '[role="dialog"], [role="alertdialog"], [data-radix-popper-content-wrapper], [data-native-timeline-occluder="true"]';
     let occluded = false;
@@ -258,11 +317,15 @@ export function NativeTimeline({
       const nowOccluded = document.querySelector(OVERLAY_SELECTOR) !== null;
       if (nowOccluded !== occluded) {
         occluded = nowOccluded;
-        if (occluded) void emit("native-timeline-detach", detachPayload);
+        const mode = nativeTimelineOcclusionMode(transparentHost, occluded);
+        if (mode === "underlay") place(true);
+        else if (mode === "detached") void emit("native-timeline-detach", detachPayload);
         else place();
         return;
       }
-      if (!occluded) place();
+      const mode = nativeTimelineOcclusionMode(transparentHost, occluded);
+      if (mode === "above") place();
+      else if (mode === "underlay") place(true);
     };
 
     const schedule = () => {
@@ -287,7 +350,7 @@ export function NativeTimeline({
       // whatever the user navigated to.
       void emit("native-timeline-detach", detachPayload);
     };
-  }, [available, closeOnEscape]);
+  }, [available, closeOnEscape, transparentHost]);
 
   // Never render nothing. Returning null while the availability check was in
   // flight left the overlay window white, and a check that never resolves left

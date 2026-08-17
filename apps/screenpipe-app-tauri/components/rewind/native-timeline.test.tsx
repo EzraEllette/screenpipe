@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildNativeSelectionChatPrefill,
+  nativeTimelineOcclusionMode,
   parseTimelineDay,
 } from "./native-timeline";
 
@@ -56,5 +57,11 @@ describe("native timeline bridge payloads", () => {
         end: "2026-08-16T22:00:00.000Z",
       })
     ).toBeNull();
+  });
+
+  it("keeps DOM panels above a transparent overlay without hiding the timeline", () => {
+    expect(nativeTimelineOcclusionMode(true, true)).toBe("underlay");
+    expect(nativeTimelineOcclusionMode(false, true)).toBe("detached");
+    expect(nativeTimelineOcclusionMode(true, false)).toBe("above");
   });
 });

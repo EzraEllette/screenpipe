@@ -224,9 +224,21 @@ final class TimelineViewModel: ObservableObject {
     private var playbackStart: Date?
     private var playbackWallStart: Date?
     private let audioPlayer = TimelineAudioPlayer()
+    private var actionWindowLabel: String?
     private var imageLoadToken = 0
     private var requestedDays = Set<String>()
     private var tagFetchInFlight = Set<String>()
+
+    /// Native actions must return to the webview that owns this model. Looking
+    /// up the current key window is racy because the fullscreen overlay is a
+    /// non-activating panel and Home can remain key behind it.
+    func setActionWindowLabel(_ label: String?) {
+        actionWindowLabel = label
+    }
+
+    func emitAction(_ action: String) {
+        TimelineActionBridge.shared.emit(action, windowLabel: actionWindowLabel)
+    }
 
     // The scrubber redraws on every scrub tick and every smooth-zoom frame.
     // Recomputing per-frame facets and app groups there is O(frames) with a
@@ -366,20 +378,32 @@ final class TimelineViewModel: ObservableObject {
     /// Tags are fetched for the visible window only; a day of frames is far too
     /// many ids to ask for at once.
     func fetchTagsForViewport() {
-        let ids = visibleFrames
+        fetchTags(frameIds: visibleFrames
             .compactMap { $0.devices.first?.frameId }
-            .filter { !$0.isEmpty && tagsByFrameId[$0] == nil && !tagFetchInFlight.contains($0) }
+        )
+    }
+
+    private func fetchTags(frameIds: [String]) {
+        var seen = Set<String>()
+        let ids = frameIds.filter {
+            !$0.isEmpty
+                && seen.insert($0).inserted
+                && tagsByFrameId[$0] == nil
+                && !tagFetchInFlight.contains($0)
+        }
         guard !ids.isEmpty else { return }
-        let batch = Array(ids.prefix(400))
-        batch.forEach { tagFetchInFlight.insert($0) }
-        Task { [rest] in
-            let fetched = (try? await rest.tags(frameIds: batch)) ?? [:]
-            await MainActor.run {
-                for id in batch {
-                    // Record the empty case too, so an untagged frame is not
-                    // re-requested on every scroll tick.
-                    self.tagsByFrameId[id] = fetched[id] ?? []
-                    self.tagFetchInFlight.remove(id)
+        for offset in stride(from: 0, to: ids.count, by: 400) {
+            let batch = Array(ids[offset..<min(offset + 400, ids.count)])
+            batch.forEach { tagFetchInFlight.insert($0) }
+            Task { [rest] in
+                let fetched = (try? await rest.tags(frameIds: batch)) ?? [:]
+                await MainActor.run {
+                    for id in batch {
+                        // Record the empty case too, so an untagged frame is not
+                        // re-requested on every scroll tick.
+                        self.tagsByFrameId[id] = fetched[id] ?? []
+                        self.tagFetchInFlight.remove(id)
+                    }
                 }
             }
         }
@@ -397,6 +421,25 @@ final class TimelineViewModel: ObservableObject {
             for tag in tags(for: frame) { counts[tag, default: 0] += 1 }
         }
         return counts.sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }.map(\.key)
+    }
+
+    var selectionTags: [String] {
+        guard let selection else { return [] }
+        var tags = Set<String>()
+        for index in selection.indices where frames.indices.contains(index) {
+            for tag in self.tags(for: frames[index]) { tags.insert(tag) }
+        }
+        return tags.sorted()
+    }
+
+    func tagState(_ tag: String, in selection: TimelineSelection) -> TimelineSelectionTagState {
+        let selected = selection.indices.filter { frames.indices.contains($0) }
+        guard !selected.isEmpty else { return .none }
+        let matches = selected.reduce(into: 0) { count, index in
+            if tags(for: frames[index]).contains(tag) { count += 1 }
+        }
+        if matches == 0 { return .none }
+        return matches == selected.count ? .all : .some
     }
 
     /// Apply or remove a tag across the current selection, optimistically.
@@ -547,7 +590,7 @@ final class TimelineViewModel: ObservableObject {
     }
 
     var hasAudioNearby: Bool {
-        TimelineAudio.hasAudioNearby(frames: frames, currentIndex: currentIndex)
+        !nearbyAudioSegments.isEmpty
     }
 
     /// Distinct facet values inside the current viewport, which is what the
@@ -589,6 +632,28 @@ final class TimelineViewModel: ObservableObject {
             }
         }
         return TimelineSubtitles.lines(candidates: candidates, currentTime: now)
+    }
+
+    func reassignSpeaker(_ line: SubtitleLine, to rawName: String) async throws {
+        let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return }
+        let response = try await rest.reassignSpeaker(audioChunkId: line.audioChunkId, name: name)
+        var updated = frames
+        for frameIndex in updated.indices {
+            for deviceIndex in updated[frameIndex].devices.indices {
+                for audioIndex in updated[frameIndex].devices[deviceIndex].audio.indices {
+                    let audio = updated[frameIndex].devices[deviceIndex].audio[audioIndex]
+                    let sameVoice = response.renamedWholeSpeaker
+                        && line.speakerId != nil
+                        && audio.speakerId == line.speakerId
+                    guard sameVoice || audio.audioChunkId == line.audioChunkId else { continue }
+                    updated[frameIndex].devices[deviceIndex].audio[audioIndex].speakerId = response.newSpeakerId
+                    updated[frameIndex].devices[deviceIndex].audio[audioIndex].speakerName = response.newSpeakerName
+                }
+            }
+        }
+        frames = updated
+        meetings = TimelineMeetingDetection.detect(frames: frames)
     }
 
     // MARK: Playhead
@@ -719,10 +784,20 @@ final class TimelineViewModel: ObservableObject {
 
     func beginSelection(at index: Int) {
         selection = TimelineSelection.make(anchor: index, hovered: index, frames: frames)
+        fetchTagsForSelection()
     }
 
     func extendSelection(anchor: Int, to index: Int) {
         selection = TimelineSelection.make(anchor: anchor, hovered: index, frames: frames)
+        fetchTagsForSelection()
+    }
+
+    private func fetchTagsForSelection() {
+        guard let selection else { return }
+        fetchTags(frameIds: selection.indices.compactMap { index in
+            guard frames.indices.contains(index) else { return nil }
+            return frames[index].devices.first?.frameId
+        })
     }
 
     func clearSelection() {
@@ -772,6 +847,17 @@ final class TimelineViewModel: ObservableObject {
         return "ask_ai_selection:\(json)"
     }
 
+    func exportVideoSelectionAction() -> String? {
+        guard let selection else { return nil }
+        let payload = TimelineExportSelectionPayload(
+            start: TimelineTime.iso(selection.start),
+            end: TimelineTime.iso(selection.end)
+        )
+        guard let data = try? JSONEncoder().encode(payload),
+              let json = String(data: data, encoding: .utf8) else { return nil }
+        return "export_video_selection:\(json)"
+    }
+
     // MARK: Playback
 
     func togglePlayback() {
@@ -779,10 +865,15 @@ final class TimelineViewModel: ObservableObject {
     }
 
     func play() {
-        guard hasAudioNearby, let start = currentTimestamp else { return }
+        let segments = nearbyAudioSegments
+        guard !segments.isEmpty, let start = currentTimestamp else { return }
         isPlaying = true
         playbackStart = start
         playbackWallStart = Date()
+        // Sync before the first 30 Hz timer tick. Apart from feeling immediate,
+        // this lets AVFoundation replace a zero stream duration with the real
+        // file duration before the playhead advances.
+        audioPlayer.sync(clock: start, segments: segments, isPlaying: true)
         playbackTimer?.invalidate()
         let timer = Timer(timeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.tickPlayback() }

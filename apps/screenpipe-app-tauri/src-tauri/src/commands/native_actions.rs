@@ -220,6 +220,14 @@ fn native_timeline_action_callback_inner(action_ptr: *const std::os::raw::c_char
                 selection,
             );
         }
+        TimelineAction::ExportVideoSelection { selection } => {
+            emit_timeline_event(
+                &app,
+                target.as_deref(),
+                "timeline-export-video-selection",
+                selection,
+            );
+        }
         TimelineAction::ApplyTag { tag } => {
             // Swift already wrote the tag optimistically; this is for anything
             // in the app that wants to react (toasts, analytics).
