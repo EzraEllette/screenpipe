@@ -201,6 +201,7 @@ final class TimelineViewModel: ObservableObject {
     @Published var showSubtitles = true
     @Published var activePopoverGroupIndex: Int?
     @Published var hoveredIndex: Int?
+    @Published var hoveredScrubberX: CGFloat?
 
     // Playback
     @Published private(set) var isPlaying = false
