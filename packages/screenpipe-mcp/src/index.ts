@@ -1302,6 +1302,7 @@ async function fetchAPI(
       headers: {
         "Content-Type": "application/json",
         ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+        "x-screenpipe-client": "mcp",
         ...options.headers,
       },
     });
