@@ -272,9 +272,10 @@ impl RuntimeConfig {
             project_dir,
             bun_path,
             preferred_auth_method: env_nonempty("SCREENPIPE_ACP_AUTH_METHOD"),
-            system_context: Some(build_first_turn_context(env_nonempty(
-                "SCREENPIPE_ACP_SYSTEM_PROMPT",
-            ))),
+            system_context: Some(build_first_turn_context(
+                load_screenpipe_agents_context(&data_dir),
+                env_nonempty("SCREENPIPE_ACP_SYSTEM_PROMPT"),
+            )),
             session_defaults: parse_json_env::<SessionDefaults>(
                 "SCREENPIPE_ACP_SESSION_CONFIG_JSON",
             )?
@@ -308,14 +309,81 @@ You are running inside screenpipe. Prefer its MCP tools over shell/curl (this is
 - screenpipe seeds task guides in `.pi/skills/*/SKILL.md` under your working directory. Before starting a task, list that folder and read the SKILL.md that matches the request; it names the exact tools and steps to use.
 Do not curl localhost for these; call the tools.";
 
-/// Combine the always-on tools hint with the user's configured system prompt
-/// (if any) into the first-turn context. Kept as one string so it is delivered
-/// exactly once, on the first prompt of the session.
-fn build_first_turn_context(user_prompt: Option<String>) -> String {
-    match user_prompt {
-        Some(prompt) => format!("{SCREENPIPE_TOOLS_HINT}\n\n{prompt}"),
-        None => SCREENPIPE_TOOLS_HINT.to_string(),
+/// Match Codex's default maximum for project instructions. A local user can
+/// still keep detailed, on-demand workflows in `<data_dir>/skills`; this file
+/// is for the durable instructions every session needs.
+const SCREENPIPE_AGENTS_MAX_BYTES: u64 = 32 * 1024;
+
+/// Load the screenpipe-global instructions used by every ACP-backed agent.
+///
+/// Native Pi already walks from a chat or Pipe cwd up through its parents and
+/// discovers `<data_dir>/AGENTS.md` itself. ACP adapters do not share one
+/// instruction-file convention: Claude looks for `CLAUDE.md`, while Codex can
+/// stop at the ACP cwd when it has no repository root. Injecting the data-dir
+/// file through ACP makes the screenpipe contract deterministic without
+/// copying it into every chat/Pipe directory.
+///
+/// `AGENTS.override.md` follows Codex/Pi precedence and is useful for a
+/// temporary replacement. Empty files fall through to the next candidate.
+fn load_screenpipe_agents_context(data_dir: &Path) -> Option<String> {
+    for filename in ["AGENTS.override.md", "AGENTS.md"] {
+        let path = data_dir.join(filename);
+        let file = match std::fs::File::open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                eprintln!("screenpipe ACP could not read {}: {error}", path.display());
+                continue;
+            }
+        };
+
+        let mut bytes = Vec::new();
+        if let Err(error) = file
+            .take(SCREENPIPE_AGENTS_MAX_BYTES + 1)
+            .read_to_end(&mut bytes)
+        {
+            eprintln!("screenpipe ACP could not read {}: {error}", path.display());
+            continue;
+        }
+
+        let truncated = bytes.len() as u64 > SCREENPIPE_AGENTS_MAX_BYTES;
+        bytes.truncate(SCREENPIPE_AGENTS_MAX_BYTES as usize);
+        let content = String::from_utf8_lossy(&bytes).trim().to_string();
+        if content.is_empty() {
+            continue;
+        }
+
+        let truncation_note = if truncated {
+            "\n\n[screenpipe truncated this instructions file at 32 KiB]"
+        } else {
+            ""
+        };
+        return Some(format!(
+            "# screenpipe user instructions\n\nLoaded from `{}`. These durable instructions apply to this session.\n\n{}{truncation_note}",
+            path.display(),
+            content
+        ));
     }
+
+    None
+}
+
+/// Combine the always-on tools hint, screenpipe-global AGENTS.md, and the
+/// user's configured system prompt into one first-turn context. It is
+/// delivered exactly once, on the first prompt of the ACP session.
+fn build_first_turn_context(
+    agents_context: Option<String>,
+    user_prompt: Option<String>,
+) -> String {
+    [
+        Some(SCREENPIPE_TOOLS_HINT.to_string()),
+        agents_context,
+        user_prompt,
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join("\n\n")
 }
 
 fn env_nonempty(name: &str) -> Option<String> {
@@ -4169,18 +4237,69 @@ mod tests {
     #[test]
     fn first_turn_context_always_includes_the_tools_hint() {
         // With no user system prompt, the first-turn context is just the hint.
-        let none = build_first_turn_context(None);
+        let none = build_first_turn_context(None, None);
         assert!(none.contains("screenpipe_connect_app"));
         assert!(none.contains("save_artifact"));
+        assert!(none.contains(".pi/skills/*/SKILL.md"));
         assert!(
             none.contains("today\" is the user's local calendar day starting at local midnight")
         );
         assert!(none.contains("not UTC midnight or a rolling 24 hours"));
 
-        // With a user prompt, the hint is prepended and the prompt preserved.
-        let combined = build_first_turn_context(Some("Be terse.".to_string()));
+        // Durable instructions sit after the built-in tool contract, while an
+        // explicit preset prompt remains last.
+        let combined = build_first_turn_context(
+            Some("# screenpipe user instructions\n\nUse the weekly-report skill.".to_string()),
+            Some("Be terse.".to_string()),
+        );
         assert!(combined.contains("sp_web_search"));
+        assert!(combined.contains("Use the weekly-report skill."));
+        assert!(
+            combined.find("sp_web_search")
+                < combined.find("Use the weekly-report skill.")
+        );
         assert!(combined.trim_end().ends_with("Be terse."));
+    }
+
+    #[test]
+    fn screenpipe_agents_file_is_loaded_with_override_precedence() {
+        let data_dir = tempfile::tempdir().expect("data dir");
+        std::fs::write(data_dir.path().join("AGENTS.md"), "Use normal guidance.\n")
+            .expect("write AGENTS.md");
+
+        let normal = load_screenpipe_agents_context(data_dir.path()).expect("normal guidance");
+        assert!(normal.contains("AGENTS.md"));
+        assert!(normal.contains("Use normal guidance."));
+
+        std::fs::write(
+            data_dir.path().join("AGENTS.override.md"),
+            "Use temporary guidance.\n",
+        )
+        .expect("write override");
+        let overridden =
+            load_screenpipe_agents_context(data_dir.path()).expect("override guidance");
+        assert!(overridden.contains("AGENTS.override.md"));
+        assert!(overridden.contains("Use temporary guidance."));
+        assert!(!overridden.contains("Use normal guidance."));
+
+        // An empty temporary override must not hide the durable file.
+        std::fs::write(data_dir.path().join("AGENTS.override.md"), "\n")
+            .expect("empty override");
+        let fallback = load_screenpipe_agents_context(data_dir.path()).expect("fallback guidance");
+        assert!(fallback.contains("AGENTS.md"));
+        assert!(fallback.contains("Use normal guidance."));
+    }
+
+    #[test]
+    fn screenpipe_agents_file_is_optional_and_bounded() {
+        let data_dir = tempfile::tempdir().expect("data dir");
+        assert!(load_screenpipe_agents_context(data_dir.path()).is_none());
+
+        let oversized = "x".repeat(SCREENPIPE_AGENTS_MAX_BYTES as usize + 512);
+        std::fs::write(data_dir.path().join("AGENTS.md"), oversized).expect("write AGENTS.md");
+        let context = load_screenpipe_agents_context(data_dir.path()).expect("bounded guidance");
+        assert!(context.contains("truncated this instructions file at 32 KiB"));
+        assert!(!context.contains(&"x".repeat(SCREENPIPE_AGENTS_MAX_BYTES as usize + 1)));
     }
 
     #[test]
