@@ -897,6 +897,32 @@ fn record_persisted_capture(
     monitor.record_db_write(duration);
 }
 
+/// Record the mutually exclusive live OCR cache outcomes carried by a
+/// successfully persisted capture result.
+fn record_ocr_result_metrics(
+    vision_metrics: &screenpipe_screen::PipelineMetrics,
+    result: &PairedCaptureResult,
+) {
+    debug_assert!(
+        !(result.ocr_cache_hit && result.ocr_duration_ms.is_some()),
+        "a capture cannot both reuse cached OCR and execute OCR"
+    );
+
+    if result.ocr_cache_hit {
+        vision_metrics.record_ocr_cache_hit();
+    }
+    match (result.ocr_duration_ms, result.ocr_was_empty) {
+        (Some(ocr_ms), true) => {
+            vision_metrics.record_ocr(Duration::from_millis(ocr_ms));
+            vision_metrics.record_ocr_empty();
+        }
+        (Some(ocr_ms), false) => {
+            vision_metrics.record_ocr(Duration::from_millis(ocr_ms));
+        }
+        (None, _) => {}
+    }
+}
+
 fn record_capture_skip(
     aggregate: &screenpipe_screen::PipelineMetrics,
     monitor: &screenpipe_screen::PipelineMetrics,
@@ -1128,13 +1154,7 @@ pub(crate) async fn event_driven_capture_loop(
                         &monitor_liveness,
                         Duration::from_millis(result.duration_ms),
                     );
-                    // OCR metrics: record once per OCR run (each run = cache miss).
-                    if let Some(ocr_ms) = result.ocr_duration_ms {
-                        vision_metrics.record_ocr(Duration::from_millis(ocr_ms), 0, 1);
-                        if result.ocr_was_empty {
-                            vision_metrics.record_ocr_empty();
-                        }
-                    }
+                    record_ocr_result_metrics(&vision_metrics, result);
                     if let Some(ref cache) = hot_frame_cache {
                         push_to_hot_cache(cache, result, &device_name, &CaptureTrigger::Manual)
                             .await;
@@ -2001,15 +2021,7 @@ pub(crate) async fn event_driven_capture_loop(
                                 &monitor_liveness,
                                 Duration::from_millis(result.duration_ms),
                             );
-                            // OCR metrics: record once per OCR run. Each run is a
-                            // cache miss (no OCR result cache exists). `ocr_duration_ms`
-                            // is Some only when OCR actually ran for this frame.
-                            if let Some(ocr_ms) = result.ocr_duration_ms {
-                                vision_metrics.record_ocr(Duration::from_millis(ocr_ms), 0, 1);
-                                if result.ocr_was_empty {
-                                    vision_metrics.record_ocr_empty();
-                                }
-                            }
+                            record_ocr_result_metrics(&vision_metrics, result);
                             // OCR-gate telemetry (#5054/#5060): decision counters
                             // (skip / crop_ocr — the fast-path ratio) plus the
                             // per-capture detect+hash latency.
@@ -3599,6 +3611,48 @@ fn is_frame_corrupt(image: &image::DynamicImage) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ocr_metrics_result(
+        ocr_cache_hit: bool,
+        ocr_duration_ms: Option<u64>,
+        ocr_was_empty: bool,
+    ) -> PairedCaptureResult {
+        PairedCaptureResult {
+            frame_id: 1,
+            snapshot_path: String::new(),
+            accessibility_text: None,
+            text_source: None,
+            capture_trigger: "test".to_string(),
+            captured_at: Utc::now(),
+            duration_ms: 1,
+            ocr_duration_ms,
+            ocr_was_empty,
+            ocr_cache_hit,
+            ocr_gate_decision: None,
+            ocr_gate_detect_duration: None,
+            app_name: None,
+            window_name: None,
+            browser_url: None,
+            content_hash: None,
+        }
+    }
+
+    #[test]
+    fn capture_result_metrics_distinguish_hits_runs_and_noops() {
+        let metrics = screenpipe_screen::PipelineMetrics::new();
+
+        record_ocr_result_metrics(&metrics, &ocr_metrics_result(true, None, false));
+        record_ocr_result_metrics(&metrics, &ocr_metrics_result(false, Some(10), false));
+        record_ocr_result_metrics(&metrics, &ocr_metrics_result(false, Some(30), true));
+        record_ocr_result_metrics(&metrics, &ocr_metrics_result(false, None, false));
+
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.ocr_cache_hits, 1);
+        assert_eq!(snapshot.ocr_cache_misses, 2);
+        assert_eq!(snapshot.ocr_completed, 2);
+        assert_eq!(snapshot.ocr_empty, 1);
+        assert!((snapshot.avg_ocr_latency_ms - 20.0).abs() < 1e-6);
+    }
 
     #[test]
     fn capture_loop_silent_seed_requires_exact_token() {
