@@ -1127,6 +1127,31 @@ private func testFrameAccessors() {
     expect(!TimelineFrames.hasAudio(emptyAudio), "a blank transcription is not audio")
 }
 
+// MARK: - Hover preview placement
+
+private func testHoverPreviewPlacement() {
+    expectClose(
+        TimelineHoverLayout.previewLeadingX(cursorX: 500, containerWidth: 1_000),
+        364,
+        "preview centres above the pointer"
+    )
+    expectClose(
+        TimelineHoverLayout.previewLeadingX(cursorX: 10, containerWidth: 1_000),
+        8,
+        "preview clamps to the left edge"
+    )
+    expectClose(
+        TimelineHoverLayout.previewLeadingX(cursorX: 990, containerWidth: 1_000),
+        720,
+        "preview clamps to the right edge"
+    )
+    expectClose(
+        TimelineHoverLayout.previewLeadingX(cursorX: 120, containerWidth: 240),
+        0,
+        "preview avoids a negative origin in a narrow host"
+    )
+}
+
 // MARK: - Runner
 
 private let allTests: [(String, () -> Void)] = [
@@ -1162,6 +1187,7 @@ private let allTests: [(String, () -> Void)] = [
     ("search review", testSearchReview),
     ("date navigation", testDateNavigation),
     ("frame accessors", testFrameAccessors),
+    ("hover preview placement", testHoverPreviewPlacement),
 ]
 
 @main

@@ -466,6 +466,30 @@ enum TimelineHoverMetadata {
     }
 }
 
+enum TimelineHoverLayout {
+    static let previewWidth: CGFloat = 272
+    static let edgeInset: CGFloat = 8
+
+    /// Keep the preview centred over the pointer while clamping its card to
+    /// the timeline edges. On a window narrower than the card, the honest best
+    /// placement is the left edge rather than a negative origin.
+    static func previewLeadingX(
+        cursorX: CGFloat,
+        containerWidth: CGFloat,
+        width: CGFloat = previewWidth,
+        inset: CGFloat = edgeInset
+    ) -> CGFloat {
+        let containerWidth = max(0, containerWidth)
+        let width = max(0, width)
+        let inset = max(0, inset)
+        guard containerWidth >= width + inset * 2 else { return 0 }
+        return min(
+            max(cursorX - width / 2, inset),
+            containerWidth - width - inset
+        )
+    }
+}
+
 enum TimelineGrouping {
     /// Bidirectional carry-forward of `browser_url`, so a browser run keeps its
     /// site through frames where the URL was not captured. Returns one entry per
