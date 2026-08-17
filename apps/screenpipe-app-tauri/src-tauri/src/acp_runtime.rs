@@ -1413,23 +1413,76 @@ unsafe extern "system" {
 
 struct RuntimeState {
     output: ParentOutput,
+    agent_id: String,
     project_dir: PathBuf,
     turn: Mutex<TurnState>,
     ui_waiters: Mutex<HashMap<String, oneshot::Sender<Option<String>>>>,
     terminals: Mutex<HashMap<String, Arc<TerminalRecord>>>,
     system_context: Mutex<Option<String>>,
+    provider_session_id: Mutex<Option<String>>,
 }
 
 impl RuntimeState {
     fn new(output: ParentOutput, config: &RuntimeConfig) -> Self {
         Self {
             output,
+            agent_id: config.agent_id.clone(),
             project_dir: config.project_dir.clone(),
             turn: Mutex::new(TurnState::default()),
             ui_waiters: Mutex::new(HashMap::new()),
             terminals: Mutex::new(HashMap::new()),
             system_context: Mutex::new(config.system_context.clone()),
+            provider_session_id: Mutex::new(None),
         }
+    }
+
+    /// Keep provider-owned schedules attached to exactly one live ACP session.
+    /// Reclaiming a resumed session preserves its projection; replacing the
+    /// session drops session-only tasks immediately.
+    fn replace_provider_session(&self, session_id: &str) {
+        let Ok(mut current) = self.provider_session_id.lock() else {
+            return;
+        };
+        if current.as_deref() == Some(session_id) {
+            crate::provider_automations::begin_provider_session(
+                &self.agent_id,
+                session_id,
+                &self.project_dir,
+            );
+            return;
+        }
+        if let Some(previous) = current.take() {
+            crate::provider_automations::end_provider_session(&self.agent_id, &previous);
+        }
+        crate::provider_automations::begin_provider_session(
+            &self.agent_id,
+            session_id,
+            &self.project_dir,
+        );
+        *current = Some(session_id.to_owned());
+    }
+
+    fn observe_provider_schedule(&self, update: &Value) {
+        let name = tool_name(update);
+        if !matches!(name.as_str(), "CronCreate" | "CronDelete" | "CronList") {
+            return;
+        }
+        let session_id = self
+            .provider_session_id
+            .lock()
+            .ok()
+            .and_then(|session| session.clone());
+        let Some(session_id) = session_id else {
+            return;
+        };
+        crate::provider_automations::observe_provider_schedule_tool(
+            &self.agent_id,
+            &session_id,
+            &name,
+            &tool_args(update),
+            &tool_result_text(update),
+            update.get("status").and_then(Value::as_str) == Some("failed"),
+        );
     }
 
     fn ensure_turn_locked(&self, turn: &mut TurnState) {
@@ -1643,6 +1696,7 @@ impl RuntimeState {
                 }
                 self.output.send(start);
                 if update_status_finished(&update) {
+                    self.observe_provider_schedule(&update);
                     finish_tool(&self.output, &id, &update);
                     turn.active_tools.remove(&id);
                 }
@@ -1681,6 +1735,7 @@ impl RuntimeState {
                     self.output.send(start);
                 }
                 if update_status_finished(&merged) {
+                    self.observe_provider_schedule(&merged);
                     finish_tool(&self.output, &id, &merged);
                     turn.active_tools.remove(&id);
                 } else if let Some(progress) = tool_progress(&update) {
@@ -1832,6 +1887,16 @@ impl RuntimeState {
     /// Remove and return a terminal by id (release drops it from the map).
     fn take_terminal(&self, id: &str) -> Option<Arc<TerminalRecord>> {
         self.terminals.lock().ok().and_then(|mut map| map.remove(id))
+    }
+}
+
+impl Drop for RuntimeState {
+    fn drop(&mut self) {
+        if let Ok(session) = self.provider_session_id.get_mut() {
+            if let Some(session_id) = session.take() {
+                crate::provider_automations::end_provider_session(&self.agent_id, &session_id);
+            }
+        }
     }
 }
 
@@ -2095,14 +2160,18 @@ fn update_status_finished(update: &Value) -> bool {
     )
 }
 
-fn finish_tool(output: &ParentOutput, id: &str, update: &Value) {
-    let is_error = update.get("status").and_then(Value::as_str) == Some("failed");
-    let mut result = update
+fn tool_result_text(update: &Value) -> String {
+    update
         .get("content")
         .filter(|value| value.as_array().is_some_and(|items| !items.is_empty()))
         .or_else(|| update.get("rawOutput"))
         .and_then(|value| content_text(Some(value)))
-        .unwrap_or_default();
+        .unwrap_or_default()
+}
+
+fn finish_tool(output: &ParentOutput, id: &str, update: &Value) {
+    let is_error = update.get("status").and_then(Value::as_str) == Some("failed");
+    let mut result = tool_result_text(update);
     if result.trim().is_empty() {
         // Some adapters report completion with neither content nor rawOutput; a
         // minimal summary reads better than an empty result card.
@@ -3500,6 +3569,7 @@ async fn run_protocol(
             );
             let (mut session, resumed) =
                 open_or_resume_session(&connection, &state, &init, &config).await?;
+            state.replace_provider_session(&session.session_id.to_string());
             // The agent is up (any first-run download finished) — clear the
             // "downloading" hint before announcing readiness.
             state.output.send(json!({
@@ -3624,6 +3694,7 @@ async fn run_protocol(
                                     match create_session_with_auth(&connection, &state, &init, &config).await {
                                         Ok(new_session) => {
                                             session = new_session;
+                                            state.replace_provider_session(&session.session_id.to_string());
                                             state.reset_system_context(config.system_context.clone());
                                             apply_session_defaults(&connection, &config, &mut session).await;
                                             send_session_config(&state.output, &config.agent_id, &session);
@@ -4754,6 +4825,7 @@ mod tests {
     fn test_state(output: &ParentOutput) -> RuntimeState {
         RuntimeState {
             output: output.clone(),
+            agent_id: "test-agent".to_owned(),
             project_dir: PathBuf::from("/tmp"),
             turn: Mutex::new(TurnState {
                 prompt_in_flight: true,
@@ -4762,6 +4834,7 @@ mod tests {
             ui_waiters: Mutex::new(HashMap::new()),
             terminals: Mutex::new(HashMap::new()),
             system_context: Mutex::new(None),
+            provider_session_id: Mutex::new(None),
         }
     }
 
