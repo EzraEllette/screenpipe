@@ -51,8 +51,8 @@ before considering them complete.
 
 ## dev builds are isolated from your installed app
 
-`bun tauri dev` / `bun run dev:tauri` / `cargo run` do **not** touch the
-production install. Every debug build redirects itself at startup
+`bun run dev:tauri` and `bun run build:tauri:dev` do **not** touch the
+production install. Every development build redirects itself at startup
 (`src-tauri/src/dev_isolation.rs`):
 
 | | production | dev |

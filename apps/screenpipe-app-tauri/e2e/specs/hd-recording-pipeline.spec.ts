@@ -33,8 +33,8 @@
  * (vision off / headless), so it never fails the default CI lane.
  *
  * Build + run from apps/screenpipe-app-tauri:
- *   NEXT_PUBLIC_SCREENPIPE_E2E=true bun tauri build --no-sign --debug \
- *     --no-bundle -- --features e2e
+ *   NEXT_PUBLIC_SCREENPIPE_E2E=true bun tauri build --no-bundle \
+ *     -- --profile debug-dev --features e2e
  *   bun run test:e2e:hd:macos
  *   # which is: SCREENPIPE_E2E_SEED=onboarding bun run wdio run e2e/wdio.conf.ts \
  *   #             --spec e2e/specs/hd-recording-pipeline.spec.ts

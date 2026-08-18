@@ -92,28 +92,13 @@ Collect the minimum for the task in front of you.
 
 ## Part 4 — Make macOS stop dropping your permissions
 
-Read this even though it's fiddly, because it saves you from a confusing failure. Stay calm here; this is the step people misdiagnose.
+Normal development uses `bun run dev:tauri` or `bun run build:tauri:dev` and
+does not package or sign an app. Do not add signing flags to those commands.
 
-screenpipe needs Screen Recording, Microphone, and Accessibility permissions. macOS ties those to an app's code signature. A normal dev build gets a fresh signature every rebuild, so macOS treats each rebuild as a new app and drops your permissions. Your code is fine, but capture "returns nothing," and you lose an afternoon to a bug that isn't there.
-
-The fix: sign dev builds with one stable identity. If you don't have an Apple Developer cert, make a free self-signed one:
-
-1. In Keychain Access → Certificate Assistant → Create a Certificate, name it `screenpipe dev`, Identity Type **Self-Signed Root**, Certificate Type **Code Signing**. Confirm it exists:
-   ```bash
-   security find-identity -v -p codesigning
-   # you should see your "screenpipe dev" identity in the list
-   ```
-2. Build and sign with it. Same flow as `scripts/build_macos.sh`, your cert:
-   ```bash
-   cd apps/screenpipe-app-tauri
-   bun tauri build --no-sign --features metal
-   APP="src-tauri/target/release/bundle/macos/screenpipe - Development.app"
-   xattr -cr "$APP"
-   codesign --force --deep --sign "screenpipe dev" "$APP"
-   ```
-3. Grant the three permissions once. The signature is now stable, so future rebuilds keep them.
-
-You only need this for desktop-app work. If you're on the engine via the command line, skip it. But remember it: the day capture "stops working" after a rebuild, this is why.
+Only when a test specifically needs Screen Recording, Microphone, or
+Accessibility permission to persist across rebuilt `.app` bundles, use
+`apps/screenpipe-app-tauri/scripts/build_macos.sh`. The canonical commands and
+the separate TCC-specific path are documented in `docs/macos-dev-builds.md`.
 
 ---
 
