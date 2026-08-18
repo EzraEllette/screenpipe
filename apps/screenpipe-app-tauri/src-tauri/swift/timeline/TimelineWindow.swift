@@ -653,6 +653,7 @@ final class TimelineWindowController: NSObject, NSWindowDelegate {
     @discardableResult
     func show(config: TimelineAPIConfig = .fromEnvironment(), embedded: Bool = false) -> Bool {
         if let window {
+            model?.updateAPIConfig(config)
             window.makeKeyAndOrderFront(nil)
             return true
         }
@@ -767,6 +768,8 @@ final class TimelineWindowController: NSObject, NSWindowDelegate {
                 frame: target,
                 borderless: true
             )
+        } else {
+            model?.updateAPIConfig(config)
         }
         guard let window, let model else { return false }
         model.setActionWindowLabel(hostWindowLabel)

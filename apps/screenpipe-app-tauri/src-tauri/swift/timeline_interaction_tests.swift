@@ -756,6 +756,92 @@ private func testNavigationTargetsAttachedController() {
     pump(0.2)
 }
 
+/// The webview can mount before `get_local_api_config` resolves. Its first
+/// placement then carries port 3030 and a later resize carries the actual
+/// isolated/custom port. Reusing the child must update the live model instead
+/// of leaving its original socket stuck on the stale endpoint.
+@MainActor
+private func testAttachedControllerRebindsChangedAPIConfig() {
+    // First reproduce the exact 3030 -> isolated-port transition without
+    // starting either socket. This proves the model accepts the correction,
+    // rather than silently retaining the construction-time endpoint.
+    let staleConfig = TimelineAPIConfig(host: "127.0.0.1", port: 3030, apiKey: "stale")
+    let isolatedConfig = TimelineAPIConfig(host: "127.0.0.1", port: 3130, apiKey: "corrected")
+    let coldModel = TimelineViewModel(config: staleConfig)
+    coldModel.setErrorForTesting("Could not connect to the server")
+    expect(coldModel.updateAPIConfig(isolatedConfig),
+           "the cold model must accept a corrected isolated port")
+    expectEqual(coldModel.config, isolatedConfig, "corrected cold-model API config")
+    expect(coldModel.connectionError == nil,
+           "the corrected cold model must discard its stale connection error")
+
+    let host = NSWindow(
+        contentRect: NSRect(x: 170, y: 170, width: 760, height: 540),
+        styleMask: [.titled], backing: .buffered, defer: false
+    )
+    host.makeKeyAndOrderFront(nil)
+    let pointer = Int(bitPattern: Unmanaged.passUnretained(host).toOpaque())
+    let controller = TimelineWindowController.controller(forHost: pointer)
+    let rect = NSRect(x: 0, y: 0, width: 760, height: 540)
+
+    // The attached half stays offline so this regression never contacts the
+    // user's running production or development API during the test.
+    let initial = TimelineAPIConfig(host: "127.0.0.1", port: 0, apiKey: "stale")
+    expect(controller.attach(
+        config: initial,
+        hostWindowNumber: host.windowNumber,
+        rect: rect,
+        hostPointer: pointer,
+        hostWindowLabel: "stale-port-host"
+    ), "the stale-port fixture must attach")
+    guard let model = controller.currentModel else {
+        failures.append("the stale-port fixture has no model")
+        TimelineWindowController.releaseController(forHost: pointer)
+        host.close()
+        return
+    }
+    model.injectForTesting(frames: fixtureFrames(count: 4))
+    model.setErrorForTesting("Could not connect to the server")
+
+    let target = Date().addingTimeInterval(-120)
+    model.navigateToSearchResult(
+        timestamp: target,
+        frameId: "990001",
+        query: "stale port",
+        results: [TimelineSearchResult(
+            frameId: "990001",
+            timestamp: target,
+            textPositions: []
+        )],
+        terms: ["stale", "port"],
+        navigationId: "stale-port-click"
+    )
+
+    let corrected = TimelineAPIConfig(host: "127.0.0.1", port: 0, apiKey: "corrected")
+    expect(controller.attach(
+        config: corrected,
+        hostWindowNumber: host.windowNumber,
+        rect: rect,
+        hostPointer: pointer,
+        hostWindowLabel: "stale-port-host"
+    ), "the corrected placement must reattach")
+    pump(0.1)
+
+    expect(controller.currentModel === model,
+           "API correction must keep the model rendered by the existing SwiftUI tree")
+    expectEqual(model.config, corrected, "corrected native API config")
+    expect(model.connectionError == nil,
+           "a stale connection error must clear when the native transport is rebound")
+    expect(model.frames.isEmpty,
+           "frames from the stale API instance must not leak into the corrected endpoint")
+    expectEqual(model.searchReview?.query, "stale port",
+                "API correction must retain the active Search review")
+
+    TimelineWindowController.releaseController(forHost: pointer)
+    host.close()
+    pump(0.2)
+}
+
 /// Keyboard has to work through the real window, not just the handler.
 @MainActor
 private func testKeyboardThroughWindow(window: NSWindow, model: TimelineViewModel) {
@@ -1015,6 +1101,8 @@ private func runTests() {
         ("icons", testIcons),
         ("icon chip renders", { testIconChipRenders(shots: shots) }),
         ("deep links target attached host", testNavigationTargetsAttachedController),
+        ("attached controller rebinds changed API config",
+         testAttachedControllerRebindsChangedAPIConfig),
         ("external navigation hides stale frames", { testExternalNavigationLoading(model: model) }),
         ("Activity return chrome", { testActivityReturnChrome() }),
         // Last: it re-parents and re-styles the shared window.

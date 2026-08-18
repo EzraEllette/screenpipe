@@ -214,10 +214,10 @@ final class TimelineViewModel: ObservableObject {
     @Published var playbackSpeed: Double = 1
     @Published private(set) var mutedDevices: Set<String> = []
 
-    let config: TimelineAPIConfig
-    private let rest: TimelineRESTClient
-    private let stream: FrameStreamClient
-    private let images: FrameImageLoader
+    private(set) var config: TimelineAPIConfig
+    private var rest: TimelineRESTClient
+    private var stream: FrameStreamClient
+    private var images: FrameImageLoader
 
     /// Exposed so the hover preview can fetch thumbnails through the same
     /// cache and failed-chunk memory the canvas uses.
@@ -243,6 +243,8 @@ final class TimelineViewModel: ObservableObject {
     private var pendingSearchNavigation: (frameId: String?, timestamp: Date)?
     private var externalNavigationGeneration = 0
     private var externalNavigationHasSelectedTarget = false
+    private var isStarted = false
+    private var apiGeneration = 0
 
     /// Native actions must return to the webview that owns this model. Looking
     /// up the current key window is racy because the fullscreen overlay is a
@@ -283,6 +285,8 @@ final class TimelineViewModel: ObservableObject {
     // MARK: Lifecycle
 
     func start() {
+        guard !isStarted else { return }
+        isStarted = true
         // Offline means no socket, no polling and no request — otherwise the
         // transport's failure would mask the state under test.
         guard !config.isOffline else {
@@ -301,6 +305,7 @@ final class TimelineViewModel: ObservableObject {
     }
 
     func stop() {
+        isStarted = false
         stream.disconnect()
         audioPlayer.releaseAll()
         flushTimer?.invalidate()
@@ -311,6 +316,65 @@ final class TimelineViewModel: ObservableObject {
         healthTimer = nil
         zoomTimer = nil
         playbackTimer = nil
+    }
+
+    /// Rebind an already-mounted native timeline to the API configuration the
+    /// webview has just resolved. Placement repeats as the host resizes, so a
+    /// child created during startup can first receive the default port and
+    /// later receive the real isolated/custom port. Keeping the original
+    /// transport made that correction a no-op and left a permanent connection
+    /// error over an otherwise healthy app.
+    @discardableResult
+    func updateAPIConfig(_ updated: TimelineAPIConfig) -> Bool {
+        guard updated != config else { return false }
+
+        let searchToResume = pendingSearchNavigation ?? searchReview?.activeResult.map {
+            (frameId: Optional($0.frameId), timestamp: $0.timestamp)
+        }
+        let shouldRestart = isStarted
+        stop()
+        apiGeneration &+= 1
+        config = updated
+        rest = TimelineRESTClient(config: updated)
+        stream = FrameStreamClient(config: updated)
+        stream.delegate = self
+        images = FrameImageLoader(rest: rest)
+
+        // Never mix frames, tags, health, or decoded pixels from two local API
+        // instances. Search-review intent is deliberately retained so a click
+        // made during the startup race still resolves on the corrected server.
+        pendingBatch = []
+        frames = []
+        health = nil
+        meetings = []
+        earliestRecording = nil
+        daysWithData = []
+        tagsByFrameId = [:]
+        requestedDays = []
+        tagFetchInFlight = []
+        currentIndex = 0
+        currentImage = nil
+        currentImageFrameId = nil
+        pendingSearchNavigation = searchToResume
+        preferredFrameId = searchToResume?.frameId
+        imageLoadToken &+= 1
+        isLoadingImage = false
+        imageUnavailable = false
+        connectionError = nil
+        isLoading = true
+        isNavigating = false
+        isPlaying = false
+        playbackStart = nil
+        playbackWallStart = nil
+        lastAdjacentLoad = .distantPast
+
+        if shouldRestart {
+            start()
+            if let pendingSearchNavigation {
+                requestSearchWindow(around: pendingSearchNavigation.timestamp)
+            }
+        }
+        return true
     }
 
     private func startFlushTimer() {
@@ -361,17 +425,25 @@ final class TimelineViewModel: ObservableObject {
     }
 
     private func refreshHealth() {
-        Task { [weak self] in
+        let generation = apiGeneration
+        let rest = self.rest
+        Task { [weak self, rest] in
             guard let self else { return }
-            let value = try? await self.rest.health()
-            await MainActor.run { self.health = value }
+            let value = try? await rest.health()
+            await MainActor.run {
+                guard generation == self.apiGeneration else { return }
+                self.health = value
+            }
         }
     }
 
     private func loadCalendarBounds() async {
+        let generation = apiGeneration
+        let rest = self.rest
         let earliest = try? await rest.earliestRecordingDate()
         let days = try? await rest.daysWithData()
         await MainActor.run {
+            guard generation == self.apiGeneration else { return }
             self.earliestRecording = earliest ?? self.earliestRecording
             if let days { self.daysWithData = days }
         }
@@ -447,9 +519,11 @@ final class TimelineViewModel: ObservableObject {
         for offset in stride(from: 0, to: ids.count, by: 400) {
             let batch = Array(ids[offset..<min(offset + 400, ids.count)])
             batch.forEach { tagFetchInFlight.insert($0) }
+            let generation = apiGeneration
             Task { [rest] in
                 let fetched = (try? await rest.tags(frameIds: batch)) ?? [:]
                 await MainActor.run {
+                    guard generation == self.apiGeneration else { return }
                     for id in batch {
                         // Record the empty case too, so an untagged frame is not
                         // re-requested on every scroll tick.

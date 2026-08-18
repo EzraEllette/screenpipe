@@ -15,7 +15,7 @@ import Foundation
 
 // MARK: - Configuration
 
-struct TimelineAPIConfig {
+struct TimelineAPIConfig: Equatable {
     var host: String
     var port: Int
     var apiKey: String?
