@@ -776,7 +776,8 @@ export function ActivityLedger({
       });
     return () => {
       cancelled = true;
-      historyAbortRef.current?.abort();
+      // History generation must outlive this page so its result is persisted
+      // even when the user navigates elsewhere while Pi is still working.
     };
   }, [preset, range]);
 

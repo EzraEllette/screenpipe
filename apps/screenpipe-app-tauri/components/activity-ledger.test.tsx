@@ -591,6 +591,32 @@ describe("ActivityLedger", () => {
     expect(mocks.runDailySummaryWithPi).not.toHaveBeenCalled();
   });
 
+  it("finishes and persists history generation after leaving the page", async () => {
+    let resolveHistory!: (value: string) => void;
+    mocks.runDailySummaryWithPi.mockImplementation(
+      () =>
+        new Promise<string>((resolve) => {
+          resolveHistory = resolve;
+        }),
+    );
+
+    const view = render(<ActivityLedger />);
+
+    await waitFor(() =>
+      expect(mocks.runDailySummaryWithPi).toHaveBeenCalledOnce(),
+    );
+    const generationSignal = mocks.runDailySummaryWithPi.mock.calls[0][0]
+      .signal as AbortSignal;
+
+    view.unmount();
+
+    expect(generationSignal.aborted).toBe(false);
+    resolveHistory(HISTORY_RESPONSE);
+    await waitFor(() =>
+      expect(mocks.reconcilePersistedActivityHistory).toHaveBeenCalled(),
+    );
+  });
+
   it("keeps rows concise while exposing artifact icons and skill creation", async () => {
     render(<ActivityLedger />);
 
