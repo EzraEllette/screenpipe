@@ -43,6 +43,7 @@ import {
   type ActivityReviewMeeting,
 } from "@/lib/activity-review-prompt";
 import {
+  ACTIVITY_HISTORY_RECONCILE_OVERLAP_MS,
   loadPersistedActivityHistory,
   mergeActivityHistoryCoverage,
   mergeActivityHistoryDocuments,
@@ -96,6 +97,7 @@ type ActivityArtifact = ActivityHistoryEvidence & {
 };
 
 const MAX_VISIBLE_ARTIFACTS = 6;
+const ACTIVITY_HISTORY_REFRESH_INTERVAL_MS = 10 * 60_000;
 const ACTIVITY_RANGE_STORAGE_KEY = "screenpipe:activity-history:range";
 const ACTIVITY_CUSTOM_START_STORAGE_KEY =
   "screenpipe:activity-history:custom-start";
@@ -260,6 +262,22 @@ export function minimumHistoryEntryCount(
   }
   const activeDays = Math.max(1, Math.ceil(wallHours / 24));
   return Math.min(activeDays * 18, Math.max(1, Math.ceil(activeMinutes / 60)));
+}
+
+export function canAddRecentActivity(
+  range: TimeRange,
+  coverage: ActivityHistoryCoverage[],
+): boolean {
+  const pending = nextActivityHistoryRange(range, coverage);
+  if (!pending) return false;
+  const overlap =
+    pending.start.getTime() > range.start.getTime()
+      ? ACTIVITY_HISTORY_RECONCILE_OVERLAP_MS
+      : 0;
+  return (
+    pending.end.getTime() - pending.start.getTime() - overlap >
+    ACTIVITY_HISTORY_REFRESH_INTERVAL_MS
+  );
 }
 
 function formatEntryTime(entry: ActivityHistoryEntry): string {
@@ -571,6 +589,7 @@ export function ActivityLedger({
   );
   const initialNow = useMemo(() => new Date(), []);
   const anchor = initialNow;
+  const [currentTimeMs, setCurrentTimeMs] = useState(initialNow.getTime());
   const [preset, setPreset] = useState<RangePreset>(readStoredRangePreset);
   const initialPresetRef = useRef(preset);
   const [customStart, setCustomStart] = useState(() =>
@@ -640,6 +659,27 @@ export function ActivityLedger({
     () => (range ? nextActivityHistoryRange(range, historyCoverage) : null),
     [historyCoverage, range],
   );
+  const recentRange = useMemo(
+    () =>
+      rangeForPreset(
+        preset,
+        new Date(currentTimeMs),
+        customStart,
+        customEnd,
+      ),
+    [currentTimeMs, customEnd, customStart, preset],
+  );
+  const recentActivityAvailable = Boolean(
+    recentRange && canAddRecentActivity(recentRange, historyCoverage),
+  );
+
+  useEffect(() => {
+    const interval = window.setInterval(
+      () => setCurrentTimeMs(Date.now()),
+      30_000,
+    );
+    return () => window.clearInterval(interval);
+  }, []);
 
   useEffect(() => {
     posthog.capture("activity_viewed", { range: initialPresetRef.current });
@@ -804,6 +844,7 @@ export function ActivityLedger({
   const generateHistory = useCallback(async (
     generationRange: TimeRange,
     source: GenerationSource,
+    viewRange: TimeRange = range!,
   ) => {
     if (!range || historyLoadingRef.current) return;
     posthog.capture("activity_generation_started", {
@@ -850,7 +891,7 @@ export function ActivityLedger({
           ACTIVITY_REVIEW_PROMPT_VERSION,
           generationRange,
           { entries: [] },
-          range,
+          viewRange,
         );
         setHistory(
           persisted.entries.length > 0 ? { entries: persisted.entries } : null,
@@ -930,7 +971,7 @@ export function ActivityLedger({
           ACTIVITY_REVIEW_PROMPT_VERSION,
           generationRange,
           next,
-          range,
+          viewRange,
         );
       } catch {
         persisted = {
@@ -981,6 +1022,47 @@ export function ActivityLedger({
     history,
     historyCoverage,
   ]);
+
+  const addRecentActivity = useCallback(() => {
+    const clickedRange = rangeForPreset(
+      preset,
+      new Date(),
+      customStart,
+      customEnd,
+    );
+    const clickedHistoryRange = clickedRange
+      ? nextActivityHistoryRange(clickedRange, historyCoverage)
+      : null;
+    if (
+      !clickedRange ||
+      !clickedHistoryRange ||
+      !canAddRecentActivity(clickedRange, historyCoverage) ||
+      loading ||
+      historyLoading ||
+      !cacheReady ||
+      invalidRange
+    ) {
+      return;
+    }
+    void generateHistory(clickedHistoryRange, "refresh", clickedRange);
+  }, [
+    cacheReady,
+    customEnd,
+    customStart,
+    generateHistory,
+    historyCoverage,
+    historyLoading,
+    invalidRange,
+    loading,
+    preset,
+  ]);
+
+  const recentActivityDisabled =
+    loading ||
+    historyLoading ||
+    !cacheReady ||
+    invalidRange ||
+    !recentActivityAvailable;
 
   const makeSkill = (entry: ActivityHistoryEntry) => {
     posthog.capture("activity_skill_clicked");
@@ -1109,12 +1191,8 @@ Re-query Screenpipe only inside the cited time range and use the cited frames an
               <Button
                 variant="ghost"
                 size="icon"
-                onClick={() => {
-                  if (range) void generateHistory(range, "refresh");
-                }}
-                disabled={
-                  loading || historyLoading || !cacheReady || invalidRange
-                }
+                onClick={addRecentActivity}
+                disabled={recentActivityDisabled}
                 aria-label="Refresh history"
               >
                 <RefreshCw
@@ -1264,6 +1342,29 @@ Re-query Screenpipe only inside the cited time range and use the cited frames an
                   ))}
                 </div>
               ))}
+              <div className="flex flex-col items-center border-t border-border py-10 text-center">
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="h-10 rounded-none px-5 uppercase tracking-wide"
+                  onClick={addRecentActivity}
+                  disabled={recentActivityDisabled}
+                >
+                  <RefreshCw
+                    className={cn(
+                      "mr-2 h-3.5 w-3.5",
+                      historyLoading && "animate-spin",
+                    )}
+                    aria-hidden="true"
+                  />
+                  Add recent activities
+                </Button>
+                <p className="mt-2 text-xs text-muted-foreground">
+                  {recentActivityAvailable
+                    ? "Include work recorded since your last update."
+                    : "More activity can be added every 10 minutes."}
+                </p>
+              </div>
             </section>
           ) : loading && !summary ? (
             <div className="flex h-48 items-center justify-center gap-2 text-sm text-muted-foreground">
