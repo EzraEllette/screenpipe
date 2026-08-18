@@ -184,7 +184,10 @@ struct TimelineFrameCanvas: View {
                 // size out of SwiftUI's ideal-size negotiation. The screenshot
                 // scales into the timeline viewport instead of leaving the
                 // 1920x1080 root clipped inside a narrower embedded pane.
-                TimelineFrameImageView(image: image)
+                TimelineFrameImageView(
+                    image: image,
+                    searchHighlights: model.activeSearchHighlightPositions
+                )
             } else if model.imageUnavailable {
                 TimelineImageUnavailableCard(model: model)
             } else {
@@ -204,11 +207,12 @@ struct TimelineFrameCanvas: View {
 /// named view makes the native-resolution regression directly render-testable.
 struct TimelineFrameImageView: View {
     let image: NSImage
+    var searchHighlights: [TimelineSearchTextPosition] = []
 
     var body: some View {
         GeometryReader { viewport in
-            TimelineLiveTextImage(image: image)
-                .frame(width: viewport.size.width, height: viewport.size.height)
+            TimelineLiveTextImage(image: image, searchHighlights: searchHighlights)
+            .frame(width: viewport.size.width, height: viewport.size.height)
         }
         .clipped()
     }

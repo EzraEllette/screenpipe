@@ -224,6 +224,10 @@ final class TimelineViewModel: ObservableObject {
     var imageLoader: FrameImageLoader { images }
 
     private var pendingBatch: [StreamTimeSeriesResponse] = []
+    /// Rust retries one handoff while an attached child is mounting. Treat
+    /// those retries as delivery attempts, not fresh user clicks, or they reset
+    /// a quick arrow/strip interaction back to the original result.
+    private var lastSearchNavigationId: String?
     private var flushTimer: Timer?
     private var healthTimer: Timer?
     private var zoomTimer: Timer?
@@ -1078,18 +1082,19 @@ final class TimelineViewModel: ObservableObject {
 
     func enterSearchReview(
         query: String,
-        frameIds: [String],
+        results: [TimelineSearchResult],
         terms: [String],
         activeFrameId: String? = nil
     ) {
-        let activeIndex = activeFrameId.flatMap { frameIds.firstIndex(of: $0) } ?? 0
+        let activeIndex = activeFrameId.flatMap {
+            frameId in results.firstIndex { $0.frameId == frameId }
+        } ?? 0
         searchReview = TimelineSearchReview(
             query: query,
-            frameIds: frameIds,
+            results: results,
             activeIndex: activeIndex,
             terms: terms
         )
-        jumpToSearchResult(activeIndex)
     }
 
     /// Search may target a frame that belongs to another day or is not in the
@@ -1099,17 +1104,38 @@ final class TimelineViewModel: ObservableObject {
         timestamp: Date,
         frameId: String?,
         query: String?,
-        frameIds: [String],
-        terms: [String]
+        results: [TimelineSearchResult],
+        terms: [String],
+        navigationId: String?
     ) {
-        if let query, !query.isEmpty, !frameIds.isEmpty {
+        if let navigationId, navigationId == lastSearchNavigationId { return }
+        lastSearchNavigationId = navigationId
+
+        if let query, !query.isEmpty, !results.isEmpty {
             enterSearchReview(
                 query: query,
-                frameIds: frameIds,
+                results: results,
                 terms: terms,
                 activeFrameId: frameId
             )
         }
+
+        let selectedResult = frameId.flatMap { selectedFrameId in
+            results.first { $0.frameId == selectedFrameId }
+        } ?? TimelineSearchResult(
+            frameId: frameId ?? "",
+            timestamp: timestamp,
+            textPositions: []
+        )
+        navigateToSearchResult(selectedResult, fallbackFrameId: frameId)
+    }
+
+    private func navigateToSearchResult(
+        _ result: TimelineSearchResult,
+        fallbackFrameId: String? = nil
+    ) {
+        let frameId = result.frameId.isEmpty ? fallbackFrameId : result.frameId
+        let timestamp = result.timestamp
 
         if let frameId,
            let index = TimelineNavigation.index(ofFrameId: frameId, in: frames) {
@@ -1149,14 +1175,11 @@ final class TimelineViewModel: ObservableObject {
     }
 
     func jumpToSearchResult(_ index: Int) {
-        guard let review = searchReview, review.frameIds.indices.contains(index) else { return }
+        guard let review = searchReview, review.results.indices.contains(index) else { return }
         var updated = review
         updated.activeIndex = index
         searchReview = updated
-        let frameId = review.frameIds[index]
-        if let frameIndex = TimelineNavigation.index(ofFrameId: frameId, in: frames) {
-            selectSearchFrame(frameId, at: frameIndex)
-        }
+        navigateToSearchResult(review.results[index])
     }
 
     private func selectSearchFrame(_ frameId: String, at index: Int) {
@@ -1173,6 +1196,12 @@ final class TimelineViewModel: ObservableObject {
     func exitSearchReview() {
         searchReview = nil
         pendingSearchNavigation = nil
+    }
+
+    var activeSearchHighlightPositions: [TimelineSearchTextPosition] {
+        guard let result = searchReview?.activeResult,
+              result.frameId == displayFrameId else { return [] }
+        return result.textPositions.filter { $0.bounds.isVisible }
     }
 
     // MARK: Test seam

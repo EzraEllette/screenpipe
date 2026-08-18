@@ -145,6 +145,14 @@ private func stats(_ rep: NSBitmapImageRep) -> RenderStats {
     )
 }
 
+private func firstSubview<T: NSView>(of type: T.Type, in root: NSView) -> T? {
+    if let match = root as? T { return match }
+    for child in root.subviews {
+        if let match = firstSubview(of: type, in: child) { return match }
+    }
+    return nil
+}
+
 @MainActor
 private func write(_ rep: NSBitmapImageRep, to directory: String, name: String) {
     guard let data = rep.representation(using: .png, properties: [:]) else { return }
@@ -248,6 +256,42 @@ private func testFrameImageFitsEmbeddedViewport() {
     expect((right?.greenComponent ?? 0) > 0.7,
            "the embedded viewport must keep the capture's right edge visible")
 
+    let highlight = TimelineSearchTextPosition(
+        text: "invoice",
+        confidence: 0.99,
+        bounds: TimelineSearchTextBounds(left: 0.45, top: 0.45, width: 0.1, height: 0.1)
+    )
+    let highlightedHost = NSHostingView(
+        rootView: TimelineFrameImageView(image: image, searchHighlights: [highlight])
+    )
+    highlightedHost.frame = CGRect(x: 0, y: 0, width: 320, height: 240)
+    highlightedHost.layoutSubtreeIfNeeded()
+    RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+    highlightedHost.layoutSubtreeIfNeeded()
+    if let liveText = firstSubview(of: TimelineLiveTextContainer.self, in: highlightedHost) {
+        expectEqual(liveText.displayedSearchHighlights, [highlight],
+                    "the Live Text surface receives the active highlight")
+        expectEqual(liveText.searchHighlightView.positions, [highlight],
+                    "the topmost AppKit highlight receives the verified geometry")
+        expect(liveText.searchHighlightView.superview === liveText,
+               "the search highlight is mounted in the Live Text hierarchy")
+        liveText.searchHighlightView.needsDisplay = true
+        liveText.searchHighlightView.displayIfNeeded()
+        if let markRep = liveText.searchHighlightView.bitmapImageRepForCachingDisplay(
+            in: liveText.searchHighlightView.bounds
+        ) {
+            liveText.searchHighlightView.cacheDisplay(
+                in: liveText.searchHighlightView.bounds, to: markRep
+            )
+            let mark = markRep.colorAt(x: markRep.pixelsWide / 2, y: markRep.pixelsHigh / 2)
+            expect((mark?.redComponent ?? 0) > 0.15 && (mark?.greenComponent ?? 0) > 0.15,
+                   "the topmost AppKit search overlay paints yellow pixels")
+        } else {
+            failures.append("the AppKit search overlay could not be inspected")
+        }
+    } else {
+        failures.append("the highlighted Live Text surface did not mount")
+    }
     let container = TimelineLiveTextContainer(frame: CGRect(x: 0, y: 0, width: 866, height: 850))
     container.imageView.image = image
     container.layoutSubtreeIfNeeded()
@@ -630,7 +674,14 @@ private func testPlayback() {
 private func testSearchReview(shots: String) {
     let model = populatedModel()
     let ids = (0..<5).map { String(500_000 + $0 * 7) }
-    model.enterSearchReview(query: "invoice", frameIds: ids, terms: ["invoice"])
+    let results = ids.enumerated().map { index, frameId in
+        TimelineSearchResult(
+            frameId: frameId,
+            timestamp: TimelineFrames.date(of: model.frames[index * 7]) ?? Date(),
+            textPositions: []
+        )
+    }
+    model.enterSearchReview(query: "invoice", results: results, terms: ["invoice"])
     expect(model.searchReview != nil, "search review is entered")
     expectEqual(model.searchReview?.count, 5, "review holds every result")
     expectEqual(model.currentIndex, 0, "review starts on the newest match")

@@ -14,6 +14,7 @@
 // segment for the same app are the same colour.
 
 import Foundation
+import CoreGraphics
 
 // MARK: - JS number semantics
 
@@ -1406,14 +1407,73 @@ enum TimelineSelectionTagState: Equatable {
 
 // MARK: - Search review
 
+struct TimelineSearchTextBounds: Equatable {
+    var left: Double
+    var top: Double
+    var width: Double
+    var height: Double
+
+    var isVisible: Bool {
+        left >= 0 && top >= 0 && width > 0 && height > 0
+            && left + width <= 1.001 && top + height <= 1.001
+    }
+}
+
+struct TimelineSearchTextPosition: Equatable {
+    var text: String
+    var confidence: Double
+    var bounds: TimelineSearchTextBounds
+}
+
+/// Everything required to revisit one Search hit. Frame id alone works only
+/// while that hit happens to be in the currently loaded day; arrows and strip
+/// clicks need the timestamp as well so they can request another day/window.
+struct TimelineSearchResult: Equatable {
+    var frameId: String
+    var timestamp: Date
+    var textPositions: [TimelineSearchTextPosition]
+}
+
+enum TimelineSearchHighlightLayout {
+    /// Search bounds are normalized to the source screenshot and originate at
+    /// its top-left. Project them into the same aspect-fit rectangle used by
+    /// Live Text so the yellow mark stays on the selected words after resize.
+    static func rect(
+        for bounds: TimelineSearchTextBounds,
+        imageSize: CGSize,
+        viewport: CGRect
+    ) -> CGRect {
+        guard bounds.isVisible, imageSize.width > 0, imageSize.height > 0,
+              viewport.width > 0, viewport.height > 0 else { return .zero }
+        let scale = min(viewport.width / imageSize.width, viewport.height / imageSize.height)
+        let fittedSize = CGSize(width: imageSize.width * scale, height: imageSize.height * scale)
+        let fitted = CGRect(
+            x: viewport.midX - fittedSize.width / 2,
+            y: viewport.midY - fittedSize.height / 2,
+            width: fittedSize.width,
+            height: fittedSize.height
+        )
+        return CGRect(
+            x: fitted.minX + CGFloat(bounds.left) * fitted.width,
+            y: fitted.minY + CGFloat(bounds.top) * fitted.height,
+            width: CGFloat(bounds.width) * fitted.width,
+            height: CGFloat(bounds.height) * fitted.height
+        )
+    }
+}
+
 /// The bottom pill's model while reviewing search results.
 struct TimelineSearchReview: Equatable {
     var query: String
-    var frameIds: [String]
+    var results: [TimelineSearchResult]
     var activeIndex: Int
     var terms: [String]
 
-    var count: Int { frameIds.count }
+    var frameIds: [String] { results.map(\.frameId) }
+    var activeResult: TimelineSearchResult? {
+        results.indices.contains(activeIndex) ? results[activeIndex] : nil
+    }
+    var count: Int { results.count }
     var isFirst: Bool { activeIndex <= 0 }
     var isLast: Bool { activeIndex >= count - 1 }
 

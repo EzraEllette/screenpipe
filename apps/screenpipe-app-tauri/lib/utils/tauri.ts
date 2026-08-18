@@ -2167,9 +2167,9 @@ async scanDeviceSkills() : Promise<Result<DeviceSkill[], string>> {
 /**
  * Navigate from Search to the timeline that opened it.
  *
- * Native Swift timelines are addressed by their host-window label. Searches
- * opened elsewhere retain the legacy React event so non-macOS and older
- * surfaces continue to work.
+ * Native Swift timelines are addressed by their host-window label. Global
+ * Search defaults to the overlay's `main` label on macOS; non-macOS surfaces
+ * retain the legacy React event.
  */
 async searchNavigateToTimeline(timestamp: string, frameId: number | null, searchTerms: string[] | null, searchResultsJson: string | null, searchQuery: string | null, timelineOrigin: string | null) : Promise<Result<null, string>> {
     try {

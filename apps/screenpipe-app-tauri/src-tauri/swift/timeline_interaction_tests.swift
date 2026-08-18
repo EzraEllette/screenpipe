@@ -790,12 +790,25 @@ private func testSearchNavigationWaitsForExactFrame(model: TimelineViewModel) {
     clickedDevice.frameId = "900002"
     targetFrames[2].devices.append(clickedDevice)
 
+    let highlight = TimelineSearchTextPosition(
+        text: "exact",
+        confidence: 0.99,
+        bounds: TimelineSearchTextBounds(left: 0.2, top: 0.3, width: 0.15, height: 0.05)
+    )
+    let results = targetFrames.enumerated().map { index, frame in
+        TimelineSearchResult(
+            frameId: index == 2 ? "900002" : String(900_000 + index),
+            timestamp: TimelineFrames.date(of: frame) ?? targetDate,
+            textPositions: index == 2 ? [highlight] : []
+        )
+    }
     model.navigateToSearchResult(
         timestamp: targetDate.addingTimeInterval(-60),
         frameId: "900002",
         query: "exact frame",
-        frameIds: ["900000", "900001", "900002", "900003"],
-        terms: ["exact", "frame"]
+        results: results,
+        terms: ["exact", "frame"],
+        navigationId: "search-click-1"
     )
     expect(model.frames.isEmpty, "a result on another day must request that day")
 
@@ -807,6 +820,41 @@ private func testSearchNavigationWaitsForExactFrame(model: TimelineViewModel) {
     expectEqual(model.displayFrameId, "900002", "search renders the clicked monitor frame")
     expectEqual(model.displayDeviceIndex, 1, "search renders the clicked device within the row")
     expectEqual(model.searchReview?.activeIndex, 2, "search review starts on the clicked result")
+    expectEqual(model.activeSearchHighlightPositions, [highlight],
+                "the clicked frame exposes its verified yellow highlight")
+
+    model.stepSearchResult(1)
+    expectEqual(model.searchReview?.activeIndex, 3, "the older arrow advances the result")
+    expectEqual(model.displayFrameId, "900003", "the older arrow selects its exact frame")
+
+    // Rust retries while a restored host attaches. The repeated hand-off must
+    // not undo a user's arrow or strip click after the first delivery.
+    model.navigateToSearchResult(
+        timestamp: targetDate.addingTimeInterval(-60),
+        frameId: "900002",
+        query: "exact frame",
+        results: results,
+        terms: ["exact", "frame"],
+        navigationId: "search-click-1"
+    )
+    expectEqual(model.searchReview?.activeIndex, 3, "a retry does not reset the chosen result")
+    expectEqual(model.displayFrameId, "900003", "a retry does not reset the chosen frame")
+
+    let handler = TimelineKeyHandler(model: model, embedded: false, closeOnEscape: true)
+    _ = handler.handle(TimelineKeyEvent(keyCode: TimelineKeyEvent.escape))
+    expect(model.searchReview == nil, "Escape dismisses the search review before the overlay")
+    expect(!TimelineActionBridge.shared.drainEmitted().contains("close_window"),
+           "dismissing search review does not close the overlay")
+
+    model.navigateToSearchResult(
+        timestamp: targetDate.addingTimeInterval(-60),
+        frameId: "900002",
+        query: "exact frame",
+        results: results,
+        terms: ["exact", "frame"],
+        navigationId: "search-click-1"
+    )
+    expect(model.searchReview == nil, "a delayed retry cannot reopen dismissed search review")
 }
 
 /// Home and the overlay keep independent attached controllers. A routed Search
@@ -829,6 +877,11 @@ private func testSearchNavigationTargetsHostLabel() {
         hostWindowLabel: "home"
     )
     expect(attached, "the labelled timeline fixture must attach")
+    expectEqual(
+        TimelineWindowController.hostWindowLabel(containing: host),
+        "home",
+        "embedded Search actions retain Home when the Tauri parent is key"
+    )
     expect(
         TimelineWindowController.model(forWindowLabel: "home") === controller.currentModel,
         "Search must resolve the model owned by its Home host"
@@ -855,13 +908,26 @@ private func testSearchClickQueuedUntilHostAttaches() {
     for index in targetFrames.indices {
         targetFrames[index].devices[0].frameId = String(910_000 + index)
     }
+    let searchResults: [[String: Any]] = targetFrames.enumerated().map { index, frame in
+        [
+            "frameId": String(910_000 + index),
+            "timestamp": frame.timestamp,
+            "textPositions": index == 2 ? [[
+                "text": "queued",
+                "confidence": 0.98,
+                "bounds": ["left": 0.25, "top": 0.4, "width": 0.2, "height": 0.05]
+            ]] : []
+        ]
+    }
     let payload: [String: Any] = [
         "timestamp": ISO8601DateFormatter().string(from: targetDate),
         "frameId": "910002",
         "windowLabel": label,
         "searchQuery": "queued exact frame",
         "searchFrameIds": ["910000", "910001", "910002", "910003"],
-        "searchTerms": ["queued", "exact", "frame"]
+        "searchResults": searchResults,
+        "searchTerms": ["queued", "exact", "frame"],
+        "navigationId": "queued-click-1"
     ]
     let data = try! JSONSerialization.data(withJSONObject: payload)
     let json = String(data: data, encoding: .utf8)!
@@ -902,6 +968,8 @@ private func testSearchClickQueuedUntilHostAttaches() {
         "910002",
         "queued Search click reaches its exact native frame after attach"
     )
+    expectEqual(model.activeSearchHighlightPositions.count, 1,
+                "queued Search JSON retains its verified highlight geometry")
 
     TimelineWindowController.releaseController(forHost: pointer)
     host.close()
