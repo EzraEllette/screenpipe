@@ -1340,6 +1340,13 @@ enum TimelineAudio {
     static let preloadBehind: TimeInterval = 5
     static let maxCachedSegments = 20
 
+    private static let utcCalendar: Calendar = {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.locale = Locale(identifier: "en_US_POSIX")
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        return calendar
+    }()
+
     static func nextSpeed(after current: Double) -> Double {
         guard let i = speeds.firstIndex(of: current) else { return speeds[0] }
         return speeds[(i + 1) % speeds.count]
@@ -1364,16 +1371,39 @@ enum TimelineAudio {
     /// Recording start parsed from `..._YYYY-MM-DD_HH-MM-SS.ext`, read as UTC.
     static func recordingStart(fromFilename path: String) -> Date? {
         let name = (path as NSString).lastPathComponent
-        let pattern = #"_(\d{4}-\d{2}-\d{2})_(\d{2})-(\d{2})-(\d{2})\.\w+$"#
-        guard let regex = try? NSRegularExpression(pattern: pattern),
-              let match = regex.firstMatch(in: name, range: NSRange(name.startIndex..., in: name)),
-              match.numberOfRanges == 5 else { return nil }
-        func part(_ i: Int) -> String {
-            guard let r = Range(match.range(at: i), in: name) else { return "" }
-            return String(name[r])
+        let stem = (name as NSString).deletingPathExtension
+        let stemBytes = Array(stem.utf8)
+        guard stemBytes.count >= 20, stemBytes[stemBytes.count - 20] == 95 else { return nil }
+        let bytes = Array(stemBytes.suffix(19))
+        guard
+              bytes[4] == 45, bytes[7] == 45, bytes[10] == 95,
+              bytes[13] == 45, bytes[16] == 45 else { return nil }
+
+        func number(_ range: Range<Int>) -> Int? {
+            var value = 0
+            for index in range {
+                let byte = bytes[index]
+                guard byte >= 48, byte <= 57 else { return nil }
+                value = value * 10 + Int(byte - 48)
+            }
+            return value
         }
-        let stamp = "\(part(1))T\(part(2)):\(part(3)):\(part(4))Z"
-        return TimelineTime.parse(stamp)
+
+        guard let year = number(0..<4),
+              let month = number(5..<7),
+              let day = number(8..<10),
+              let hour = number(11..<13),
+              let minute = number(14..<16),
+              let second = number(17..<19) else { return nil }
+        return utcCalendar.date(from: DateComponents(
+            timeZone: TimeZone(secondsFromGMT: 0),
+            year: year,
+            month: month,
+            day: day,
+            hour: hour,
+            minute: minute,
+            second: second
+        ))
     }
 
     /// Master clock: `start + elapsedWall * speed`.

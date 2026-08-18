@@ -752,8 +752,37 @@ private func testNavigationTargetsAttachedController() {
     expectEqual(model.currentIndex, 12, "embedded timeline deep link index")
 
     TimelineWindowController.releaseController(forHost: hostKey)
+    expect(!model.isRunningForTesting,
+           "releasing an attached Timeline must stop its socket and timers")
     host.close()
     pump(0.2)
+}
+
+@MainActor
+private func testIdleAndHiddenLifecycle(model: TimelineViewModel) {
+    expect(model.isRunningForTesting, "a visible Timeline must be running")
+    expect(!model.hasActiveZoomTimerForTesting,
+           "an idle Timeline must not keep a 60 Hz zoom timer alive")
+
+    model.zoom.zoomIn()
+    expect(model.hasActiveZoomTimerForTesting,
+           "changing the zoom target starts display-cadence animation")
+    pump(1.5)
+    expect(!model.hasActiveZoomTimerForTesting,
+           "the zoom timer stops after reaching its target")
+
+    TimelineWindowController.shared.hide()
+    pump(0.1)
+    expect(!model.isRunningForTesting,
+           "hiding the Timeline must stop its socket, polling and timers")
+
+    _ = TimelineWindowController.shared.show(
+        config: TimelineAPIConfig(host: "127.0.0.1", port: 0, apiKey: nil),
+        embedded: false
+    )
+    pump(0.1)
+    expect(model.isRunningForTesting,
+           "showing a hidden Timeline must resume exactly one lifecycle")
 }
 
 /// The webview can mount before `get_local_api_config` resolves. Its first
@@ -1086,6 +1115,7 @@ private func runTests() {
     }
 
     let groups: [(String, () -> Void)] = [
+        ("idle and hidden lifecycle", { testIdleAndHiddenLifecycle(model: model) }),
         ("no overlay swallows hit tests", { testNoOverlaySwallowsHitTests(window: window) }),
         ("control bar buttons respond",
          { testControlBarButtonsRespond(window: window, model: model) }),

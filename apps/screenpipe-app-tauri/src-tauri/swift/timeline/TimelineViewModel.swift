@@ -57,6 +57,7 @@ actor FrameImageLoader {
     }
 
     func image(for frame: StreamTimeSeriesResponse, deviceIndex: Int = 0) async -> NSImage? {
+        guard !Task.isCancelled else { return nil }
         guard frame.devices.indices.contains(deviceIndex) else { return nil }
         let device = frame.devices[deviceIndex]
         let key = "\(device.frameId)@\(frame.timestamp)"
@@ -66,15 +67,15 @@ actor FrameImageLoader {
         switch FrameImageSource.resolve(for: frame, deviceIndex: deviceIndex) {
         case .snapshot(let url):
             image = NSImage(contentsOf: url)
-            if image == nil, !device.frameId.isEmpty {
+            if image == nil, !Task.isCancelled, !device.frameId.isEmpty {
                 image = await httpImage(frameId: device.frameId)
             }
         case .videoChunk(let url, let offset, let fps):
-            if !isChunkFailed(url.path) {
+            if !Task.isCancelled, !isChunkFailed(url.path) {
                 image = await videoFrame(url: url, offsetIndex: offset, fps: fps)
-                if image == nil { markChunkFailed(url.path) }
+                if image == nil, !Task.isCancelled { markChunkFailed(url.path) }
             }
-            if image == nil, !device.frameId.isEmpty {
+            if image == nil, !Task.isCancelled, !device.frameId.isEmpty {
                 image = await httpImage(frameId: device.frameId)
             }
         case .http(let frameId):
@@ -83,6 +84,7 @@ actor FrameImageLoader {
             image = nil
         }
 
+        guard !Task.isCancelled else { return nil }
         if let image { store(image, for: key) }
         return image
     }
@@ -114,8 +116,14 @@ actor FrameImageLoader {
         generator.requestedTimeToleranceBefore = .zero
         generator.requestedTimeToleranceAfter = .zero
         let time = CMTime(seconds: max(0, target), preferredTimescale: 600)
-        guard let cgImage = try? await generator.image(at: time).image else { return nil }
-        return NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+        return await withTaskCancellationHandler {
+            guard !Task.isCancelled,
+                  let cgImage = try? await generator.image(at: time).image,
+                  !Task.isCancelled else { return nil }
+            return NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+        } onCancel: {
+            generator.cancelAllCGImageGeneration()
+        }
     }
 
     /// Trust the server's fps when the implied seek lands inside the clip;
@@ -194,7 +202,11 @@ final class TimelineViewModel: ObservableObject {
     @Published private(set) var imageUnavailable = false
 
     // Chrome
-    @Published var zoom = TimelineZoomState()
+    @Published var zoom = TimelineZoomState() {
+        didSet {
+            if isStarted, zoom.zoom != zoom.target { startZoomTimerIfNeeded() }
+        }
+    }
     @Published var filters = TimelineFilters()
     @Published var selection: TimelineSelection?
     @Published var searchReview: TimelineSearchReview?
@@ -237,6 +249,7 @@ final class TimelineViewModel: ObservableObject {
     private let audioPlayer = TimelineAudioPlayer()
     private var actionWindowLabel: String?
     private var imageLoadToken = 0
+    private var imageLoadTask: Task<Void, Never>?
     private var requestedDays = Set<String>()
     private var tagFetchInFlight = Set<String>()
     private var navigationGeneration = 0
@@ -245,6 +258,8 @@ final class TimelineViewModel: ObservableObject {
     private var externalNavigationHasSelectedTarget = false
     private var isStarted = false
     private var apiGeneration = 0
+    private var cachedNearbyAudioKey = ""
+    private var cachedNearbyAudio = TimelineNearbyAudioSnapshot()
 
     /// Native actions must return to the webview that owns this model. Looking
     /// up the current key window is racy because the fullscreen overlay is a
@@ -290,12 +305,12 @@ final class TimelineViewModel: ObservableObject {
         // Offline means no socket, no polling and no request — otherwise the
         // transport's failure would mask the state under test.
         guard !config.isOffline else {
-            startZoomTimer()
+            if zoom.zoom != zoom.target { startZoomTimerIfNeeded() }
             return
         }
         stream.connect()
         startFlushTimer()
-        startZoomTimer()
+        if zoom.zoom != zoom.target { startZoomTimerIfNeeded() }
         refreshHealth()
         healthTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refreshHealth() }
@@ -312,10 +327,14 @@ final class TimelineViewModel: ObservableObject {
         healthTimer?.invalidate()
         zoomTimer?.invalidate()
         playbackTimer?.invalidate()
+        imageLoadTask?.cancel()
+        imageLoadTask = nil
+        imageLoadToken &+= 1
         flushTimer = nil
         healthTimer = nil
         zoomTimer = nil
         playbackTimer = nil
+        isLoadingImage = false
     }
 
     /// Rebind an already-mounted native timeline to the API configuration the
@@ -386,13 +405,24 @@ final class TimelineViewModel: ObservableObject {
         flushTimer = timer
     }
 
-    /// Smooth zoom runs at display cadence, matching the webview's rAF chase.
-    private func startZoomTimer() {
-        zoomTimer?.invalidate()
+    /// Smooth zoom runs at display cadence only while the target is moving.
+    /// A permanent 60 Hz timer made an idle or hidden Timeline wake the main
+    /// thread continuously and rebuild SwiftUI bodies for no visible change.
+    private func startZoomTimerIfNeeded() {
+        guard zoomTimer == nil, zoom.zoom != zoom.target else { return }
         let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
-                if self.zoom.zoom != self.zoom.target { self.zoom.step() }
+                guard self.zoom.zoom != self.zoom.target else {
+                    self.zoomTimer?.invalidate()
+                    self.zoomTimer = nil
+                    return
+                }
+                self.zoom.step()
+                if self.zoom.zoom == self.zoom.target {
+                    self.zoomTimer?.invalidate()
+                    self.zoomTimer = nil
+                }
             }
         }
         RunLoop.main.add(timer, forMode: .common)
@@ -735,9 +765,22 @@ final class TimelineViewModel: ObservableObject {
         return Set(meeting.frameIndexRange)
     }
 
-    var hasAudioNearby: Bool {
-        !nearbyAudioSegments.isEmpty
+    private var nearbyAudioSnapshot: TimelineNearbyAudioSnapshot {
+        let key = "\(framesGeneration)|\(currentIndex)"
+        if key != cachedNearbyAudioKey {
+            cachedNearbyAudio = TimelineNearbyAudioSnapshot.build(
+                frames: frames,
+                currentIndex: currentIndex
+            )
+            cachedNearbyAudioKey = key
+        }
+        return cachedNearbyAudio
     }
+
+    var hasAudioNearby: Bool { nearbyAudioSnapshot.hasAudio }
+    var nearbyAudioSegments: [AudioSegment] { nearbyAudioSnapshot.segments }
+    var nearbyAudioDevices: [String] { nearbyAudioSnapshot.devices }
+    var nearbyAudioInputByDevice: [String: Bool] { nearbyAudioSnapshot.inputByDevice }
 
     /// Distinct facet values inside the current viewport, which is what the
     /// left rail lists.
@@ -887,6 +930,7 @@ final class TimelineViewModel: ObservableObject {
             return
         }
         let targetFrameId = frame.devices[deviceIndex].frameId
+        imageLoadTask?.cancel()
         imageLoadToken += 1
         let token = imageLoadToken
         isLoadingImage = true
@@ -894,10 +938,19 @@ final class TimelineViewModel: ObservableObject {
         // The previous pixels may stay cached, but they are no longer allowed
         // to render as if they belonged to this playhead position.
         currentImageFrameId = nil
-        Task { [images] in
+        let task = Task { [weak self, images] in
+            // Coalesce bursts from held arrow keys and repeated clicks. Search
+            // and single-step navigation still begin within one display frame.
+            do {
+                try await Task.sleep(nanoseconds: 16_000_000)
+            } catch {
+                return
+            }
+            guard !Task.isCancelled else { return }
             let image = await images.image(for: frame, deviceIndex: deviceIndex)
+            guard !Task.isCancelled else { return }
             await MainActor.run {
-                guard token == self.imageLoadToken else { return }
+                guard let self, token == self.imageLoadToken else { return }
                 if let image {
                     self.currentImage = image
                     self.currentImageFrameId = targetFrameId
@@ -911,8 +964,10 @@ final class TimelineViewModel: ObservableObject {
                 if externalNavigationGeneration == self.externalNavigationGeneration {
                     self.finishExternalNavigation()
                 }
+                self.imageLoadTask = nil
             }
         }
+        imageLoadTask = task
     }
 
     private func finishExternalNavigation(reloadCurrentFrame: Bool = false) {
@@ -1296,6 +1351,9 @@ final class TimelineViewModel: ObservableObject {
         connectionError = message
         isLoading = false
     }
+
+    var isRunningForTesting: Bool { isStarted }
+    var hasActiveZoomTimerForTesting: Bool { zoomTimer != nil }
 }
 
 // MARK: - Stream delegate

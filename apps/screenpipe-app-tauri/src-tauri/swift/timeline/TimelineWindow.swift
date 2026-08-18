@@ -401,7 +401,7 @@ final class TimelineWindowController: NSObject, NSWindowDelegate {
     }
 
     static func releaseController(forHost pointer: Int) {
-        attachedControllers.removeValue(forKey: pointer)?.detach()
+        attachedControllers.removeValue(forKey: pointer)?.close()
     }
 
     /// Route native actions back to the webview that owns the key timeline.
@@ -654,6 +654,7 @@ final class TimelineWindowController: NSObject, NSWindowDelegate {
     func show(config: TimelineAPIConfig = .fromEnvironment(), embedded: Bool = false) -> Bool {
         if let window {
             model?.updateAPIConfig(config)
+            model?.start()
             window.makeKeyAndOrderFront(nil)
             return true
         }
@@ -667,6 +668,7 @@ final class TimelineWindowController: NSObject, NSWindowDelegate {
             frame: defaultFrame(),
             borderless: false
         )
+        model?.start()
         window?.makeKeyAndOrderFront(nil)
         return true
     }
@@ -772,6 +774,7 @@ final class TimelineWindowController: NSObject, NSWindowDelegate {
             model?.updateAPIConfig(config)
         }
         guard let window, let model else { return false }
+        model.start()
         model.setActionWindowLabel(hostWindowLabel)
         Self.deliverPendingSearchNavigation(to: model, windowLabel: hostWindowLabel)
         originChrome.setActivityReturnVisible(showActivityReturn)
@@ -875,6 +878,7 @@ final class TimelineWindowController: NSObject, NSWindowDelegate {
     /// standalone without leaving a detached child behind.
     func detach() {
         focusLossGeneration &+= 1
+        model?.stop()
         removeParentObservers()
         hostWindowNumber = nil
         hostPointer = nil
@@ -887,6 +891,7 @@ final class TimelineWindowController: NSObject, NSWindowDelegate {
     }
 
     func hide() {
+        model?.stop()
         if hostWindowNumber != nil {
             detach()
             return
@@ -903,7 +908,10 @@ final class TimelineWindowController: NSObject, NSWindowDelegate {
         attachedUnderlay = false
         removeKeyMonitor()
         model?.stop()
-        window?.close()
+        if let window {
+            window.parent?.removeChildWindow(window)
+            window.close()
+        }
         window = nil
         model = nil
     }

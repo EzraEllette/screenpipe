@@ -495,7 +495,7 @@ struct TimelineControlBar: View {
                 ForEach(devices, id: \.self) { device in
                     TimelineMuteButton(
                         device: device,
-                        isInput: model.nearbyAudioSegments.first { $0.deviceName == device }?.isInput ?? true,
+                        isInput: model.nearbyAudioInputByDevice[device] ?? true,
                         isMuted: model.mutedDevices.contains(device)
                     ) {
                         model.toggleMute(device: device)
