@@ -585,11 +585,17 @@ private func testDateNavigation() {
     let model = populatedModel()
     let today = Calendar.current.startOfDay(for: Date())
     expect(model.isAtToday, "starts on today")
+    model.requestDay(today)
+    expect(model.hasRequestedDayForTesting(today), "today starts in the loaded-day window")
 
     model.jumpDay(-1)
     expect(!model.isAtToday, "previous day leaves today")
     expect(model.frames.isEmpty, "changing date clears the previous day's frames")
     expect(model.isNavigating, "day navigation stays guarded while its batch is pending")
+    expect(
+        !model.hasRequestedDayForTesting(today),
+        "explicit previous-day navigation forgets today's stale request marker"
+    )
 
     // A slow or empty older day has no batch to acknowledge the request. The
     // forward arrow must still return to today instead of staying disabled for
@@ -605,7 +611,12 @@ private func testDateNavigation() {
     expect(!model.isNavigating, "the requested day batch acknowledges navigation")
 
     model.jumpDay(-1)
-    model.injectForTesting(frames: fixtureFrames(count: 4, base: model.currentDate))
+    model.injectForTesting(frames: fixtureFrames(count: 1_000, base: model.currentDate))
+    model.loadAdjacentDayIfNeeded()
+    expect(
+        model.hasRequestedDayForTesting(today),
+        "scrolling at yesterday's newest edge requests today again"
+    )
     model.jumpDay(1)
     expect(model.isAtToday, "next day also works after the previous day loads")
 

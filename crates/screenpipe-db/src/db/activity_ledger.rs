@@ -787,6 +787,17 @@ mod tests {
         value.parse().unwrap()
     }
 
+    async fn explain(db: &DatabaseManager, sql: &str) -> Vec<String> {
+        let statement = format!("EXPLAIN QUERY PLAN {sql}");
+        sqlx::query_as::<_, (i64, i64, i64, String)>(sqlx::AssertSqlSafe(statement))
+            .fetch_all(&db.pool)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|row| row.3)
+            .collect()
+    }
+
     fn drafts(source_id: i64) -> (Vec<ActivityTaskDraft>, Vec<ActivityIntervalDraft>) {
         let parent = ActivityTaskDraft {
             task_key: "parent".to_string(),
@@ -939,6 +950,55 @@ mod tests {
         assert_eq!(rows[1].event_type.as_deref(), Some("click"));
         assert_eq!(rows[2].source_type, "audio");
         assert_eq!(rows[2].is_input_device, Some(true));
+    }
+
+    #[tokio::test]
+    async fn activity_ledger_hot_ranges_seek_timestamp_indexes() {
+        let (db, _dir) = test_db().await;
+        let cases = [
+            (
+                "frames",
+                "SELECT MIN(id) FROM frames \
+                 WHERE timestamp >= '2026-08-17T09:00:00+00:00' \
+                   AND timestamp < '2026-08-17T10:00:00+00:00' \
+                 GROUP BY CAST(((julianday(timestamp) - 2440587.5) * 86400.0) / 10 AS INTEGER)",
+            ),
+            (
+                "ui_events",
+                "SELECT id FROM ui_events \
+                 WHERE timestamp >= '2026-08-17T09:00:00+00:00' \
+                   AND timestamp < '2026-08-17T10:00:00+00:00'",
+            ),
+            (
+                "audio_transcriptions",
+                "SELECT id FROM audio_transcriptions \
+                 WHERE timestamp >= '2026-08-17T09:00:00+00:00' \
+                   AND timestamp < '2026-08-17T10:00:00+00:00'",
+            ),
+            (
+                "activity_intervals",
+                "SELECT id FROM activity_intervals \
+                 WHERE producer = 'deterministic-v1' \
+                   AND start_at >= '2026-08-17T09:00:00+00:00'",
+            ),
+        ];
+
+        for (table, sql) in cases {
+            let plan = explain(&db, sql).await;
+            assert!(
+                plan.iter()
+                    .any(|line| line.contains(&format!("SEARCH {table}"))),
+                "{table} range did not use an index:\n{}",
+                plan.join("\n")
+            );
+            assert!(
+                !plan
+                    .iter()
+                    .any(|line| line.contains(&format!("SCAN {table}"))),
+                "{table} range performed a full scan:\n{}",
+                plan.join("\n")
+            );
+        }
     }
 
     #[tokio::test]

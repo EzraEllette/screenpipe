@@ -45,6 +45,42 @@ private func fixtureFrames(count: Int = 2_500) -> [StreamTimeSeriesResponse] {
     }
 }
 
+/// Worst-case shape for the old meeting detector: every transcript is unique,
+/// so each near-duplicate lookup walked the entire prefix, while the growing
+/// cluster was reduced again for every entry.
+private func meetingFixtureFrames(count: Int = 2_500) -> [StreamTimeSeriesResponse] {
+    let base = Date(timeIntervalSince1970: 1_776_000_000)
+    return (0..<count).map { index in
+        var metadata = DeviceMetadata()
+        metadata.appName = "Synthetic Meeting"
+        metadata.windowName = "CPU benchmark"
+        let input = index.isMultiple(of: 2)
+        let audio = AudioData(
+            deviceName: input ? "Microphone" : "System Audio",
+            isInput: input,
+            transcription: "unique-transcript-\(index)",
+            audioFilePath: "",
+            durationSecs: 1,
+            startOffset: 0,
+            audioChunkId: Int64(index + 1),
+            speakerId: Int64(input ? 1 : 2),
+            speakerName: input ? "You" : "Ada"
+        )
+        return StreamTimeSeriesResponse(
+            timestamp: TimelineTime.iso(base.addingTimeInterval(Double(index))),
+            devices: [DeviceFrameResponse(
+                deviceId: "monitor_1",
+                frameId: "meeting-\(index)",
+                frame: "",
+                offsetIndex: index,
+                fps: 1,
+                metadata: metadata,
+                audio: [audio]
+            )]
+        )
+    }
+}
+
 private func elapsedMilliseconds(_ work: () -> Void) -> Double {
     let start = DispatchTime.now().uptimeNanoseconds
     work()
@@ -111,6 +147,43 @@ struct TimelinePerformanceTests {
         guard repeatedMs < 100 else {
             FileHandle.standardError.write(
                 "FAIL cached audio controls exceeded 100 ms\n".data(using: .utf8)!
+            )
+            exit(1)
+        }
+
+        let meetingFrames = meetingFixtureFrames()
+        var meetingCount = 0
+        let meetingMs = elapsedMilliseconds {
+            meetingCount = TimelineMeetingDetection.detect(frames: meetingFrames).count
+        }
+        print(
+            String(
+                format: "timeline performance: meeting_detection_ms=%.3f frames=%d meetings=%d",
+                meetingMs,
+                meetingFrames.count,
+                meetingCount
+            )
+        )
+        guard meetingCount == 1, meetingMs < 250 else {
+            FileHandle.standardError.write(
+                "FAIL linear meeting detection exceeded 250 ms\n".data(using: .utf8)!
+            )
+            exit(1)
+        }
+
+        // Ten rapid stream flushes must collapse into one derived meeting
+        // pass. The shipped regression ran a full-history pass after every
+        // 500 ms paint flush even when several batches were still arriving.
+        for offset in stride(from: 0, to: 250, by: 25) {
+            model.injectForTesting(frames: Array(meetingFrames[offset..<(offset + 25)]))
+        }
+        RunLoop.main.run(until: Date().addingTimeInterval(1))
+        print(
+            "timeline performance: meeting_detection_passes=\(model.meetingDetectionPasses) stream_flushes=10"
+        )
+        guard model.meetingDetectionPasses == 1 else {
+            FileHandle.standardError.write(
+                "FAIL rapid stream flushes were not coalesced\n".data(using: .utf8)!
             )
             exit(1)
         }

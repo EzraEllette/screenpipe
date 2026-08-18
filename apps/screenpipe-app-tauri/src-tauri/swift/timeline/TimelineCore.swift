@@ -1108,22 +1108,36 @@ enum TimelineMeetingDetection {
         entries.sort { $0.date < $1.date }
 
         // Exact chunk+text duplicates, then near-duplicate cross-device pairs.
+        // `entries` is chronological, so only the trailing `dedupeWindow` can
+        // possibly match. The old `last(where:)` searched the entire history
+        // for every entry and then searched it again to replace the winner,
+        // turning a full day of transcripts into quadratic work.
         var seenExact = Set<String>()
         var deduped: [Entry] = []
         for entry in entries {
             let key = "\(entry.audio.audioChunkId):\(entry.audio.transcription)"
             if seenExact.contains(key) { continue }
             seenExact.insert(key)
-            if let last = deduped.last(where: {
-                abs($0.date.timeIntervalSince(entry.date)) <= dedupeWindow
-                    && $0.audio.isInput != entry.audio.isInput
-                    && textSimilarity($0.audio.transcription, entry.audio.transcription) >= dedupeSimilarity
-            }) {
+            var duplicateIndex: Int?
+            if !deduped.isEmpty {
+                for index in stride(from: deduped.count - 1, through: 0, by: -1) {
+                    let candidate = deduped[index]
+                    if entry.date.timeIntervalSince(candidate.date) > dedupeWindow { break }
+                    if candidate.audio.isInput != entry.audio.isInput
+                        && textSimilarity(
+                            candidate.audio.transcription,
+                            entry.audio.transcription
+                        ) >= dedupeSimilarity {
+                        duplicateIndex = index
+                        break
+                    }
+                }
+            }
+            if let duplicateIndex {
+                let last = deduped[duplicateIndex]
                 // Prefer the input-device copy.
                 if last.audio.isInput { continue }
-                if let idx = deduped.firstIndex(where: { $0.audio.audioChunkId == last.audio.audioChunkId }) {
-                    deduped[idx] = entry
-                }
+                deduped[duplicateIndex] = entry
                 continue
             }
             deduped.append(entry)
@@ -1131,12 +1145,15 @@ enum TimelineMeetingDetection {
 
         var meetings: [TimelineMeeting] = []
         var cluster: [Entry] = []
+        var clusterSpeech = 0.0
 
         func flush() {
-            defer { cluster = [] }
+            defer {
+                cluster = []
+                clusterSpeech = 0
+            }
             guard cluster.count >= minEntries else { return }
-            let speech = cluster.reduce(0.0) { $0 + $1.audio.durationSecs }
-            guard speech >= minSpeechSeconds else { return }
+            guard clusterSpeech >= minSpeechSeconds else { return }
             let speakerKeys = Set(cluster.map { $0.speakerKey })
             guard speakerKeys.count >= minSpeakers else { return }
 
@@ -1157,7 +1174,7 @@ enum TimelineMeetingDetection {
                 end: end,
                 speakers: names,
                 entryCount: cluster.count,
-                totalSpeechSeconds: speech,
+                totalSpeechSeconds: clusterSpeech,
                 frameIndexRange: lower...upper
             ))
         }
@@ -1165,15 +1182,17 @@ enum TimelineMeetingDetection {
         for entry in deduped {
             guard let last = cluster.last else {
                 cluster = [entry]
+                clusterSpeech = entry.audio.durationSecs
                 continue
             }
-            let speech = cluster.reduce(0.0) { $0 + $1.audio.durationSecs }
-            let threshold = (cluster.count >= 5 || speech >= 120) ? extendedGap : baseGap
+            let threshold = (cluster.count >= 5 || clusterSpeech >= 120) ? extendedGap : baseGap
             if entry.date.timeIntervalSince(last.date) > threshold {
                 flush()
                 cluster = [entry]
+                clusterSpeech = entry.audio.durationSecs
             } else {
                 cluster.append(entry)
+                clusterSpeech += entry.audio.durationSecs
             }
         }
         flush()

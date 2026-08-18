@@ -244,12 +244,23 @@ final class TimelineViewModel: ObservableObject {
     private var healthTimer: Timer?
     private var zoomTimer: Timer?
     private var playbackTimer: Timer?
+    /// Meeting detection is derived from transcript-bearing frames and can be
+    /// coalesced independently of the 500 ms frame-paint flush. Initial day
+    /// loading arrives in many batches; recomputing the whole day for every
+    /// batch was the largest remaining Timeline CPU consumer.
+    private var meetingDetectionWorkItem: DispatchWorkItem?
+    private var meetingDetectionDirtySince: Date?
+    private(set) var meetingDetectionPasses = 0
     private var playbackStart: Date?
     private var playbackWallStart: Date?
     private let audioPlayer = TimelineAudioPlayer()
     private var actionWindowLabel: String?
     private var imageLoadToken = 0
     private var imageLoadTask: Task<Void, Never>?
+    /// Days represented by the current merged frame window, including an
+    /// adjacent request that is still in flight. This is deliberately reset
+    /// for an explicit day change: treating it as a session-long history made
+    /// scrolling from yesterday back into an already visited today a no-op.
     private var requestedDays = Set<String>()
     private var tagFetchInFlight = Set<String>()
     private var navigationGeneration = 0
@@ -327,6 +338,7 @@ final class TimelineViewModel: ObservableObject {
         healthTimer?.invalidate()
         zoomTimer?.invalidate()
         playbackTimer?.invalidate()
+        meetingDetectionWorkItem?.cancel()
         imageLoadTask?.cancel()
         imageLoadTask = nil
         imageLoadToken &+= 1
@@ -334,6 +346,8 @@ final class TimelineViewModel: ObservableObject {
         healthTimer = nil
         zoomTimer = nil
         playbackTimer = nil
+        meetingDetectionWorkItem = nil
+        meetingDetectionDirtySince = nil
         isLoadingImage = false
     }
 
@@ -429,6 +443,28 @@ final class TimelineViewModel: ObservableObject {
         zoomTimer = timer
     }
 
+    /// Coalesce transcript batches while guaranteeing that a continuously
+    /// recording timeline refreshes its meeting bands at least every 5 s.
+    private func scheduleMeetingDetection() {
+        let now = Date()
+        let dirtySince = meetingDetectionDirtySince ?? now
+        meetingDetectionDirtySince = dirtySince
+        meetingDetectionWorkItem?.cancel()
+
+        let debounceDeadline = now.addingTimeInterval(0.75)
+        let maximumDeadline = dirtySince.addingTimeInterval(5)
+        let delay = max(0, min(debounceDeadline, maximumDeadline).timeIntervalSince(now))
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.meetingDetectionWorkItem = nil
+            self.meetingDetectionDirtySince = nil
+            self.meetingDetectionPasses &+= 1
+            self.meetings = TimelineMeetingDetection.detect(frames: self.frames)
+        }
+        meetingDetectionWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
     // MARK: Requests
 
     func requestDay(_ date: Date) {
@@ -506,7 +542,9 @@ final class TimelineViewModel: ObservableObject {
                 resolvedPendingSearch = true
             }
         }
-        meetings = TimelineMeetingDetection.detect(frames: frames)
+        if incoming.contains(where: TimelineFrames.hasAudio) {
+            scheduleMeetingDetection()
+        }
         isLoading = false
         // A completed day batch is the navigation acknowledgement. Without
         // clearing this flag here, both day arrows stay disabled until the
@@ -842,7 +880,7 @@ final class TimelineViewModel: ObservableObject {
             }
         }
         frames = updated
-        meetings = TimelineMeetingDetection.detect(frames: frames)
+        scheduleMeetingDetection()
     }
 
     // MARK: Playhead
@@ -1023,6 +1061,7 @@ final class TimelineViewModel: ObservableObject {
         isNavigating = false
         currentDate = Date()
         currentIndex = 0
+        requestedDays.removeAll()
         requestDay(currentDate)
         loadCurrentImage()
     }
@@ -1041,9 +1080,11 @@ final class TimelineViewModel: ObservableObject {
         resetFilters()
         currentDate = date
         currentIndex = 0
+        requestedDays.removeAll()
         frames = []
-        currentImage = nil
-        currentImageFrameId = nil
+        // Retain the last decoded pixels as a non-interactive transition
+        // surface while the target day arrives. `frames` is empty, so those
+        // pixels cannot be mistaken for the new playhead or copied as its text.
         preferredFrameId = nil
         isLoading = true
         requestDay(date)
@@ -1354,6 +1395,9 @@ final class TimelineViewModel: ObservableObject {
 
     var isRunningForTesting: Bool { isStarted }
     var hasActiveZoomTimerForTesting: Bool { zoomTimer != nil }
+    func hasRequestedDayForTesting(_ date: Date) -> Bool {
+        requestedDays.contains(TimelineDateNavigation.dayKey(date))
+    }
 }
 
 // MARK: - Stream delegate
@@ -1369,7 +1413,7 @@ extension TimelineViewModel: FrameStreamClientDelegate {
     nonisolated func frameStream(didReceive audioUpdate: AudioUpdate) {
         Task { @MainActor in
             self.frames = TimelineMerge.applyAudioUpdate(audioUpdate, to: self.frames)
-            self.meetings = TimelineMeetingDetection.detect(frames: self.frames)
+            self.scheduleMeetingDetection()
         }
     }
 
