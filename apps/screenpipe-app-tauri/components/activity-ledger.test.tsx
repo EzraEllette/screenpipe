@@ -92,6 +92,7 @@ import {
   buildActivityLedgerArtifactsPath,
   buildActivityMeetingsPath,
   buildActivitySummaryPath,
+  canAddRecentActivity,
   minimumHistoryEntryCount,
   rangeForPreset,
 } from "@/components/activity-ledger";
@@ -350,6 +351,27 @@ describe("activity history helpers", () => {
     expect(artifacts.pathname).toBe("/activity-ledger");
     expect(artifacts.searchParams.get("depth")).toBe("task");
     expect(artifacts.searchParams.get("include_artifacts")).toBe("true");
+  });
+
+  it("requires more than 10 uncovered minutes before appending", () => {
+    const range = {
+      start: new Date("2026-08-17T07:00:00Z"),
+      end: new Date("2026-08-17T20:10:00Z"),
+    };
+    const coverage = [
+      {
+        start: range.start.toISOString(),
+        end: "2026-08-17T20:00:00.000Z",
+      },
+    ];
+
+    expect(canAddRecentActivity(range, coverage)).toBe(false);
+    expect(
+      canAddRecentActivity(
+        { ...range, end: new Date("2026-08-17T20:10:00.001Z") },
+        coverage,
+      ),
+    ).toBe(true);
   });
 
   it("requires enough entries to account for a full day", () => {
@@ -693,7 +715,7 @@ describe("ActivityLedger", () => {
         coverage: [
           {
             start: range.start.toISOString(),
-            end: range.end.toISOString(),
+            end: new Date(range.end.getTime() - 11 * 60_000).toISOString(),
           },
         ],
       }),
@@ -720,6 +742,81 @@ describe("ActivityLedger", () => {
         }),
       ),
     );
+  });
+
+  it("restores the bottom append control without a rolling page clock", async () => {
+    mocks.loadPersistedActivityHistory.mockImplementation(
+      async (_producer: string, range: { start: Date; end: Date }) => ({
+        entries: parseActivityHistoryResponse(HISTORY_RESPONSE, range).entries,
+        coverage: [
+          {
+            start: range.start.toISOString(),
+            end: range.end.toISOString(),
+          },
+        ],
+      }),
+    );
+
+    render(<ActivityLedger />);
+
+    await screen.findByText("Fixed a capture reliability regression");
+    const addRecent = screen.getByRole("button", {
+      name: "Add recent activities",
+    });
+    expect(addRecent).toBeVisible();
+    expect(addRecent).toBeDisabled();
+    expect(
+      screen.getByText("More activity can be added every 10 minutes."),
+    ).toBeVisible();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10 * 60_000 + 1_002);
+    });
+
+    await waitFor(() => expect(addRecent).toBeEnabled());
+    fireEvent.click(addRecent);
+
+    await waitFor(() =>
+      expect(mocks.runDailySummaryWithPi).toHaveBeenCalledWith(
+        expect.objectContaining({
+          range: {
+            start: expect.stringMatching(/^2026-08-17T19:50:00\.\d{3}Z$/),
+            end: expect.stringMatching(/^2026-08-17T20:10:01\.\d{3}Z$/),
+          },
+        }),
+      ),
+    );
+  });
+
+  it("shows the append control only for Today and Last 24 hours", async () => {
+    mocks.loadPersistedActivityHistory.mockImplementation(
+      async (_producer: string, range: { start: Date; end: Date }) => ({
+        entries: parseActivityHistoryResponse(HISTORY_RESPONSE, range).entries,
+        coverage: [
+          {
+            start: range.start.toISOString(),
+            end: range.end.toISOString(),
+          },
+        ],
+      }),
+    );
+
+    for (const [preset, expected] of [
+      ["today", true],
+      ["24h", true],
+      ["7d", false],
+      ["custom", false],
+    ] as const) {
+      window.localStorage.setItem("screenpipe:activity-history:range", preset);
+      render(<ActivityLedger />);
+      await screen.findByText("Fixed a capture reliability regression");
+      const addRecent = screen.queryByRole("button", {
+        name: "Add recent activities",
+      });
+      if (expected) expect(addRecent).toBeVisible();
+      else expect(addRecent).toBeNull();
+      cleanup();
+    }
   });
 
   it("shows the exhausted AI preset instead of a generic failure", async () => {
