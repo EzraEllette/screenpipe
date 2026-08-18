@@ -16,7 +16,6 @@ import {
   AppWindow,
   AudioLines,
   Loader2,
-  MessageCircleMore,
   RefreshCw,
   Users,
 } from "lucide-react";
@@ -984,23 +983,6 @@ export function ActivityLedger({
     if (preset === "custom") setCustomEnd(toLocalInputValue(new Date()));
   };
 
-  const askAboutHistory = () => {
-    if (!range) return;
-    const context = [
-      `Computer history range: ${range.start.toISOString()} to ${range.end.toISOString()}`,
-      history
-        ? `Activities:\n${history.entries.map(compactEntryContext).join("\n\n")}`
-        : "",
-    ]
-      .filter(Boolean)
-      .join("\n\n");
-    void showChatWithPrefill({
-      context,
-      prompt: "What was I working on, and what should I pick up next?",
-      source: "activity-history",
-    });
-  };
-
   const makeSkill = (entry: ActivityHistoryEntry) => {
     void showChatWithPrefill({
       context: compactEntryContext(entry),
@@ -1054,8 +1036,8 @@ Re-query Screenpipe only inside the cited time range and use the cited frames an
         <div className="mx-auto max-w-4xl">
           <div className="flex flex-wrap items-end justify-between gap-4">
             <div>
-              <h1 className="font-sans text-3xl font-medium tracking-tight">
-                history
+              <h1 className="font-sans text-2xl font-medium tracking-tight">
+                Activity
               </h1>
               <p className="mt-1 text-sm text-muted-foreground">
                 A clear record of what you worked on.
@@ -1083,10 +1065,6 @@ Re-query Screenpipe only inside the cited time range and use the cited frames an
                   ))}
                 </SelectContent>
               </Select>
-              <Button variant="outline" size="sm" onClick={askAboutHistory}>
-                <MessageCircleMore className="mr-2 h-3.5 w-3.5" />
-                Ask
-              </Button>
               <Button
                 variant="ghost"
                 size="icon"

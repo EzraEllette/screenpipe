@@ -20,7 +20,6 @@ import {
 import { INTERNAL_TITLE_PREFIX } from "@/lib/utils/internal-session";
 import { applyResolvedModelLimits } from "@/lib/model-metadata";
 
-const DAILY_SUMMARY_TIMEOUT_MS = 120_000;
 const DAILY_SUMMARY_PROJECT_DIR = "pi-daily-summary";
 
 export type RunDailySummaryOptions = {
@@ -104,7 +103,6 @@ export async function runDailySummaryWithPi(
 
   let settled = false;
   let lastAssistant = "";
-  let timeoutId: ReturnType<typeof setTimeout> | null = null;
   let resolveResponse!: (value: string) => void;
   let rejectResponse!: (error: Error) => void;
   const response = new Promise<string>((resolve, reject) => {
@@ -115,7 +113,6 @@ export async function runDailySummaryWithPi(
   const settle = (value: string) => {
     if (settled) return;
     settled = true;
-    if (timeoutId) clearTimeout(timeoutId);
     const summary = value.trim();
     if (summary) resolveResponse(summary);
     else rejectResponse(new Error("AI returned an empty daily summary"));
@@ -123,7 +120,6 @@ export async function runDailySummaryWithPi(
   const fail = (error: Error) => {
     if (settled) return;
     settled = true;
-    if (timeoutId) clearTimeout(timeoutId);
     rejectResponse(error);
   };
 
@@ -179,13 +175,8 @@ export async function runDailySummaryWithPi(
     );
     if (prompted.status !== "ok") throw new Error(prompted.error);
 
-    timeoutId = setTimeout(
-      () => fail(new Error("Daily summary generation timed out")),
-      DAILY_SUMMARY_TIMEOUT_MS,
-    );
     return await response;
   } finally {
-    if (timeoutId) clearTimeout(timeoutId);
     options.signal?.removeEventListener("abort", handleAbort);
     unregister();
     void commands.piStop(sessionId);

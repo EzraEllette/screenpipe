@@ -699,22 +699,15 @@ describe("ActivityLedger", () => {
     );
   });
 
-  it("opens chat over the interpreted history", async () => {
+  it("does not offer a header chat action", async () => {
     render(<ActivityLedger />);
     await screen.findByText("Fixed a capture reliability regression");
 
-    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
-
-    await waitFor(() =>
-      expect(mocks.showChatWithPrefill).toHaveBeenCalledWith(
-        expect.objectContaining({
-          source: "activity-history",
-          context: expect.stringContaining(
-            "Fixed a capture reliability regression",
-          ),
-        }),
-      ),
-    );
+    expect(screen.queryByRole("button", { name: "Ask" })).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Refresh history" }),
+    ).toBeVisible();
+    expect(screen.getByLabelText("Time range")).toBeVisible();
   });
 
   it("opens app and transcript artifacts at their exact timeline moments", async () => {
