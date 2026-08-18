@@ -5,7 +5,7 @@
 
 import React from "react";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
-import { FileText } from "lucide-react";
+import { Check, FileText, Loader2, Play } from "lucide-react";
 
 export type MeetingSummaryTransitionPhase = "finalizing" | "writing" | null;
 
@@ -13,6 +13,7 @@ interface MeetingSummaryTransitionProps {
   phase: MeetingSummaryTransitionPhase;
   transcriptOpen: boolean;
   onTranscriptToggle: () => void;
+  onResume?: () => void;
 }
 
 const SUMMARY_BLOCKS = [
@@ -30,43 +31,53 @@ export function MeetingSummaryTransition({
   phase,
   transcriptOpen,
   onTranscriptToggle,
+  onResume,
 }: MeetingSummaryTransitionProps) {
   const reduceMotion = useReducedMotion();
-  const label =
-    phase === "finalizing" ? "finalizing transcript" : "writing summary";
+  const label = phase === "finalizing" ? "meeting saved" : "writing summary";
+  const finalizingDetail =
+    "your notes are saved · finishing the transcript before summary · you can safely leave";
+
+  // Capture and resume replace the summary transition immediately. Letting
+  // AnimatePresence hold the old card for its exit frame briefly recreates
+  // the exact contradiction this component exists to prevent.
+  if (!phase) return null;
 
   return (
     <AnimatePresence initial={false} mode="wait">
-      {phase && (
-        <motion.section
-          key={phase}
-          role="status"
-          aria-live="polite"
-          aria-label={label}
-          data-testid="meeting-summary-transition"
-          initial={reduceMotion ? false : { opacity: 0, y: 10 }}
-          animate={{ opacity: 1, y: 0 }}
-          exit={reduceMotion ? undefined : { opacity: 0, y: -6 }}
-          transition={{ duration: reduceMotion ? 0 : 0.15 }}
-          className="relative mt-9 overflow-hidden border-l border-foreground/45 py-1 pl-5 pr-1"
-        >
-          <div className="mb-6 flex items-center justify-between gap-4">
-            <div className="flex min-w-0 items-center gap-2 font-mono text-[10px] uppercase tracking-[0.16em] text-muted-foreground">
-              <motion.span
-                aria-hidden="true"
-                className="block h-2 w-2 shrink-0 bg-foreground"
-                animate={
-                  reduceMotion ? undefined : { opacity: [0.65, 1, 0.65] }
-                }
-                transition={{
-                  duration: 1.4,
-                  repeat: reduceMotion ? 0 : Infinity,
-                  ease: "easeInOut",
-                }}
-              />
-              <span>{label}</span>
-            </div>
+      <motion.section
+        key={phase}
+        role="status"
+        aria-live="polite"
+        aria-label={label}
+        data-testid="meeting-summary-transition"
+        initial={reduceMotion ? false : { opacity: 0, y: 10 }}
+        animate={{ opacity: 1, y: 0 }}
+        exit={reduceMotion ? undefined : { opacity: 0, y: -6 }}
+        transition={{ duration: reduceMotion ? 0 : 0.15 }}
+        className="relative mt-9 overflow-hidden border-l border-foreground/45 py-1 pl-5 pr-1"
+      >
+        <div className="mb-6 flex flex-wrap items-center justify-between gap-4">
+          <div className="flex min-w-0 items-center gap-2 font-mono text-[10px] uppercase tracking-[0.16em] text-muted-foreground">
+            {phase === "finalizing" ? (
+              <Check className="h-3 w-3" aria-hidden="true" />
+            ) : (
+              <Loader2 className="h-3 w-3 animate-spin" aria-hidden="true" />
+            )}
+            <span>{label}</span>
+          </div>
 
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            {phase === "finalizing" && onResume ? (
+              <button
+                type="button"
+                onClick={onResume}
+                className="inline-flex h-8 shrink-0 items-center gap-2 border border-foreground bg-foreground px-3 font-mono text-[10px] uppercase tracking-[0.12em] text-background transition-colors duration-150 hover:bg-background hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-foreground focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+              >
+                <Play className="h-3 w-3" aria-hidden="true" />
+                resume recording
+              </button>
+            ) : null}
             <button
               type="button"
               onClick={onTranscriptToggle}
@@ -77,7 +88,13 @@ export function MeetingSummaryTransition({
               {transcriptOpen ? "hide transcript" : "show transcript"}
             </button>
           </div>
+        </div>
 
+        {phase === "finalizing" ? (
+          <p className="max-w-xl pb-2 text-sm leading-6 text-muted-foreground">
+            {finalizingDetail}
+          </p>
+        ) : (
           <div aria-hidden="true" className="relative max-w-2xl space-y-6 pb-2">
             {SUMMARY_BLOCKS.map((block, blockIndex) => (
               <motion.div
@@ -102,7 +119,10 @@ export function MeetingSummaryTransition({
                     animate={
                       reduceMotion
                         ? undefined
-                        : { scaleX: [0.86, 1, 0.86], opacity: [0.55, 1, 0.55] }
+                        : {
+                            scaleX: [0.86, 1, 0.86],
+                            opacity: [0.55, 1, 0.55],
+                          }
                     }
                     transition={{
                       duration: 2.2,
@@ -125,8 +145,8 @@ export function MeetingSummaryTransition({
               }}
             />
           </div>
-        </motion.section>
-      )}
+        )}
+      </motion.section>
     </AnimatePresence>
   );
 }

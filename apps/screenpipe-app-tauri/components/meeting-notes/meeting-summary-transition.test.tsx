@@ -13,19 +13,29 @@ afterEach(cleanup);
 describe("MeetingSummaryTransition", () => {
   it("keeps the transcript reachable while the last words are finalized", () => {
     const onTranscriptToggle = vi.fn();
+    const onResume = vi.fn();
     render(
       <MeetingSummaryTransition
         phase="finalizing"
         transcriptOpen={false}
         onTranscriptToggle={onTranscriptToggle}
+        onResume={onResume}
       />,
     );
 
-    expect(screen.getByRole("status")).toHaveAccessibleName(
-      "finalizing transcript",
-    );
+    expect(screen.getByRole("status")).toHaveAccessibleName("meeting saved");
+    expect(
+      screen.getByText(
+        "your notes are saved · finishing the transcript before summary · you can safely leave",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByTestId("meeting-summary-draft-block"),
+    ).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "show transcript" }));
     expect(onTranscriptToggle).toHaveBeenCalledOnce();
+    fireEvent.click(screen.getByRole("button", { name: "resume recording" }));
+    expect(onResume).toHaveBeenCalledOnce();
   });
 
   it("draws the summary in blocks without replacing transcript access", () => {
@@ -44,6 +54,9 @@ describe("MeetingSummaryTransition", () => {
     expect(
       screen.getByRole("button", { name: "hide transcript" }),
     ).toHaveAttribute("aria-pressed", "true");
+    expect(
+      screen.queryByRole("button", { name: "resume recording" }),
+    ).not.toBeInTheDocument();
   });
 
   it("leaves no placeholder behind outside an active transition", () => {
