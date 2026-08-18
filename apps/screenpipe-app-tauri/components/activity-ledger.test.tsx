@@ -17,6 +17,7 @@ Element.prototype.scrollIntoView ||= () => {};
 
 const mocks = vi.hoisted(() => ({
   emit: vi.fn(),
+  getAppServerBaseUrl: vi.fn(),
   loadPersistedActivityHistory: vi.fn(),
   localFetch: vi.fn(),
   posthogCapture: vi.fn(),
@@ -61,6 +62,9 @@ vi.mock("next/navigation", () => ({
 vi.mock("@/lib/api", () => ({ localFetch: mocks.localFetch }));
 vi.mock("@/lib/chat-utils", () => ({
   showChatWithPrefill: mocks.showChatWithPrefill,
+}));
+vi.mock("@/lib/notifications/app-server", () => ({
+  getAppServerBaseUrl: mocks.getAppServerBaseUrl,
 }));
 vi.mock("@/lib/daily-summary-pi", () => ({
   runDailySummaryWithPi: mocks.runDailySummaryWithPi,
@@ -243,6 +247,7 @@ const LEDGER_ARTIFACTS_RESPONSE = {
 beforeEach(() => {
   vi.useFakeTimers({ shouldAdvanceTime: true });
   vi.setSystemTime(new Date("2026-08-17T20:00:00Z"));
+  mocks.getAppServerBaseUrl.mockResolvedValue("http://localhost:11535");
   mocks.settings.enhancedAI = true;
   const values = new Map<string, string>();
   Object.defineProperty(window, "localStorage", {
@@ -975,9 +980,11 @@ describe("ActivityLedger", () => {
       name: /Open github.com at .* in Timeline/,
     });
     expect(appArtifact).toHaveAttribute("href", "screenpipe://frame/12345");
-    expect(appArtifact.querySelector("img")).toHaveAttribute(
-      "src",
-      "http://localhost:11435/app-icon?name=Arc",
+    await waitFor(() =>
+      expect(appArtifact.querySelector("img")).toHaveAttribute(
+        "src",
+        "http://localhost:11535/app-icon?name=Arc",
+      ),
     );
     expect(transcriptArtifact).toHaveAttribute(
       "href",
