@@ -12,6 +12,7 @@ use tracing::{error, info, warn};
 
 /// Global app handle stored so native action callbacks can emit events.
 static GLOBAL_APP_HANDLE: std::sync::OnceLock<tauri::AppHandle> = std::sync::OnceLock::new();
+static NATIVE_TIMELINE_PLACEMENT_INSTALLED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
 
 fn handle_shortcut_overlay_hour_snooze(app: &tauri::AppHandle) {
     let app = app.clone();
@@ -86,6 +87,14 @@ pub(super) fn install_shortcut_action_callback(app_handle: &tauri::AppHandle) {
 /// knows where its content area is, so it has to be the one to say.
 fn install_native_timeline_placement(app_handle: &tauri::AppHandle) {
     use tauri::{Emitter, Listener};
+
+    // `install_shortcut_action_callback` is also called when the reminder is
+    // shown again. Event listeners are permanent for the app lifetime, so
+    // registering another pair would make one attach request create several
+    // native timelines and several competing acknowledgements.
+    if NATIVE_TIMELINE_PLACEMENT_INSTALLED.set(()).is_err() {
+        return;
+    }
 
     let attach_handle = app_handle.clone();
     app_handle.listen("native-timeline-attach", move |event| {

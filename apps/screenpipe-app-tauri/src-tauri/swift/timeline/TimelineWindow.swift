@@ -294,6 +294,28 @@ struct TimelineHostView: View {
     }
 }
 
+/// A Search click reduced to the values the native timeline needs. Keeping the
+/// request independent of the window lets it survive the short interval where
+/// Search has restored a host but that host has not reattached its Swift child.
+struct TimelineSearchNavigationRequest: Equatable {
+    var timestamp: Date
+    var frameId: String?
+    var query: String?
+    var frameIds: [String]
+    var terms: [String]
+
+    @MainActor
+    func apply(to model: TimelineViewModel) {
+        model.navigateToSearchResult(
+            timestamp: timestamp,
+            frameId: frameId,
+            query: query,
+            frameIds: frameIds,
+            terms: terms
+        )
+    }
+}
+
 // MARK: - Window controller
 
 /// A borderless `NSWindow` answers `canBecomeKey` with false, and a window that
@@ -316,6 +338,10 @@ final class TimelineWindowController: NSObject, NSWindowDelegate {
     /// single shared window meant whichever attached last stole it and the
     /// other was left with an empty hole.
     private static var attachedControllers: [Int: TimelineWindowController] = [:]
+    /// Search is a separate webview. Restoring its source host and reattaching
+    /// the native child are asynchronous, so a click can arrive before the
+    /// addressed model exists. Keep the newest click per host until attach.
+    private static var pendingSearchNavigation: [String: TimelineSearchNavigationRequest] = [:]
 
     static func controller(forHost pointer: Int) -> TimelineWindowController {
         if let existing = attachedControllers[pointer] { return existing }
@@ -344,6 +370,58 @@ final class TimelineWindowController: NSObject, NSWindowDelegate {
         return attachedControllers.values
             .first { $0.hostWindowLabel == label }?
             .currentModel
+    }
+
+    /// Deliver immediately when the addressed host is mounted; otherwise queue
+    /// the request for `attach`. This is the acknowledgement boundary the old
+    /// fire-and-forget FFI lacked: a successful call can no longer mean the
+    /// user's click was silently discarded.
+    @discardableResult
+    static func routeSearchNavigation(
+        _ request: TimelineSearchNavigationRequest,
+        windowLabel: String?
+    ) -> Bool {
+        if let model = model(forWindowLabel: windowLabel) {
+            request.apply(to: model)
+            return true
+        }
+        guard let windowLabel, !windowLabel.isEmpty else { return false }
+        pendingSearchNavigation[windowLabel] = request
+        return false
+    }
+
+    private static func deliverPendingSearchNavigation(
+        to model: TimelineViewModel,
+        windowLabel: String?
+    ) {
+        guard let windowLabel,
+              let request = pendingSearchNavigation.removeValue(forKey: windowLabel) else { return }
+        request.apply(to: model)
+    }
+
+    /// Feature-gated Rust E2E exposes this state to WebDriver so a real Search
+    /// thumbnail click can assert on the native playhead rather than a hidden
+    /// React fallback.
+    static func searchState(forWindowLabel label: String) -> [String: Any] {
+        guard let model = model(forWindowLabel: label) else {
+            return [
+                "attached": false,
+                "queued": pendingSearchNavigation[label] != nil
+            ]
+        }
+        var state: [String: Any] = [
+            "attached": true,
+            "queued": pendingSearchNavigation[label] != nil,
+            "searchFrameIds": model.searchReview?.frameIds ?? []
+        ]
+        if let frameId = model.currentFrame?.devices.first?.frameId {
+            state["currentFrameId"] = frameId
+        }
+        if let review = model.searchReview {
+            state["searchQuery"] = review.query
+            state["activeResultIndex"] = review.activeIndex
+        }
+        return state
     }
 
     private var window: NSWindow?
@@ -517,6 +595,7 @@ final class TimelineWindowController: NSObject, NSWindowDelegate {
         }
         guard let window, let model else { return false }
         model.setActionWindowLabel(hostWindowLabel)
+        Self.deliverPendingSearchNavigation(to: model, windowLabel: hostWindowLabel)
         // Placement events repeat on resize. Refreshing the handler is cheap
         // and keeps an existing controller correct if its host mode changes.
         installKeyMonitor(model: model, embedded: true, closeOnEscape: closeOnEscape)
@@ -860,27 +939,57 @@ public func timeline_navigate(_ json: UnsafePointer<CChar>?) -> Int32 {
           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
         return -1
     }
-    DispatchQueue.main.async {
-        MainActor.assumeIsolated {
-            let windowLabel = obj["windowLabel"] as? String
-            guard let model = TimelineWindowController.model(forWindowLabel: windowLabel) else { return }
-            let frameId = obj["frameId"] as? String
-            let rawTimestamp = obj["timestamp"] as? String
-            if let rawTimestamp, let timestamp = TimelineTime.parse(rawTimestamp) {
-                model.navigateToSearchResult(
+    @MainActor func run() {
+        let windowLabel = obj["windowLabel"] as? String
+        let frameId = obj["frameId"] as? String
+        let rawTimestamp = obj["timestamp"] as? String
+        if let rawTimestamp, let timestamp = TimelineTime.parse(rawTimestamp) {
+            TimelineWindowController.routeSearchNavigation(
+                TimelineSearchNavigationRequest(
                     timestamp: timestamp,
                     frameId: frameId,
                     query: obj["searchQuery"] as? String,
                     frameIds: obj["searchFrameIds"] as? [String] ?? [],
                     terms: obj["searchTerms"] as? [String] ?? []
-                )
-            } else if let frameId,
-                      let index = TimelineNavigation.index(ofFrameId: frameId, in: model.frames) {
-                model.setIndex(index)
-            }
+                ),
+                windowLabel: windowLabel
+            )
+        } else if let frameId,
+                  let model = TimelineWindowController.model(forWindowLabel: windowLabel),
+                  let index = TimelineNavigation.index(ofFrameId: frameId, in: model.frames) {
+            model.setIndex(index)
         }
     }
+    // Return only after the native model has accepted or queued the click. The
+    // old async dispatch returned success first, so Rust's retries could all
+    // finish while Swift silently had no addressed model yet.
+    if Thread.isMainThread {
+        MainActor.assumeIsolated { run() }
+    } else {
+        DispatchQueue.main.sync { MainActor.assumeIsolated { run() } }
+    }
     return 0
+}
+
+/// Read-only native state used only through the feature-gated Rust E2E plugin.
+/// The symbol remains tiny and inert in production; no production webview has
+/// a command that can call it.
+@_cdecl("timeline_search_state")
+public func timeline_search_state(_ label: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>? {
+    guard #available(macOS 13.0, *), let label,
+          let windowLabel = String(validatingUTF8: label) else { return nil }
+    var json: String?
+    @MainActor func read() {
+        let state = TimelineWindowController.searchState(forWindowLabel: windowLabel)
+        guard let data = try? JSONSerialization.data(withJSONObject: state) else { return }
+        json = String(data: data, encoding: .utf8)
+    }
+    if Thread.isMainThread {
+        MainActor.assumeIsolated { read() }
+    } else {
+        DispatchQueue.main.sync { MainActor.assumeIsolated { read() } }
+    }
+    return json.flatMap { value in value.withCString { strdup($0) } }
 }
 
 @_cdecl("timeline_free_string")

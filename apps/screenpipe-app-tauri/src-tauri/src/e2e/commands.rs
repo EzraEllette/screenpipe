@@ -254,6 +254,14 @@ fn native_meeting_overlay_state() -> Option<crate::native_shortcut_reminder::Mee
     crate::native_shortcut_reminder::meeting_overlay_state()
 }
 
+/// E2E-only readback for native Search navigation. WebDriver cannot inspect an
+/// AppKit child window's SwiftUI tree, so the test asks the addressed model
+/// which exact frame its playhead reached after clicking a real Search card.
+#[command]
+fn native_timeline_search_state(window_label: String) -> Option<serde_json::Value> {
+    crate::native_timeline::search_state(&window_label)
+}
+
 /// E2E helper: enter or leave the native chip. AppKit does not deliver a
 /// synthetic hover to a nonactivating panel, so this calls the same controller
 /// entry point the `.activeAlways` tracking area uses.
@@ -711,6 +719,7 @@ pub(super) fn plugin() -> TauriPlugin<Wry> {
             open_auto_meeting,
             active_meeting_id,
             native_meeting_overlay_state,
+            native_timeline_search_state,
             native_shortcut_set_hovering,
             native_toggle_meeting_pin,
             emit_meeting_overlay_transcript,

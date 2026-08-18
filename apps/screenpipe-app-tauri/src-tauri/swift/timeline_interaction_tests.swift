@@ -745,6 +745,71 @@ private func testSearchNavigationTargetsHostLabel() {
     pump(0.2)
 }
 
+/// This is the production race behind Search cards that appeared clickable but
+/// did nothing: the separate Search webview can send its FFI hand-off before
+/// the restored host has reattached its Swift child. Exercise the actual JSON
+/// C entry point, then attach the host and prove the exact frame is retained.
+@MainActor
+private func testSearchClickQueuedUntilHostAttaches() {
+    let label = "queued-search-host"
+    let targetDate = Date().addingTimeInterval(-3 * 24 * 60 * 60)
+    var targetFrames = fixtureFrames(count: 4, base: targetDate)
+    for index in targetFrames.indices {
+        targetFrames[index].devices[0].frameId = String(910_000 + index)
+    }
+    let payload: [String: Any] = [
+        "timestamp": ISO8601DateFormatter().string(from: targetDate),
+        "frameId": "910002",
+        "windowLabel": label,
+        "searchQuery": "queued exact frame",
+        "searchFrameIds": ["910000", "910001", "910002", "910003"],
+        "searchTerms": ["queued", "exact", "frame"]
+    ]
+    let data = try! JSONSerialization.data(withJSONObject: payload)
+    let json = String(data: data, encoding: .utf8)!
+    let result = json.withCString { timeline_navigate($0) }
+    expectEqual(result, 0, "Search click FFI accepts the routed payload")
+    pump(0.1)
+    expectEqual(
+        TimelineWindowController.searchState(forWindowLabel: label)["queued"] as? Bool,
+        true,
+        "Search click remains queued while its native host is absent"
+    )
+
+    let host = NSWindow(
+        contentRect: NSRect(x: 180, y: 180, width: 720, height: 520),
+        styleMask: [.titled], backing: .buffered, defer: false
+    )
+    host.makeKeyAndOrderFront(nil)
+    let pointer = Int(bitPattern: Unmanaged.passUnretained(host).toOpaque())
+    let controller = TimelineWindowController.controller(forHost: pointer)
+    let attached = controller.attach(
+        config: TimelineAPIConfig(host: "127.0.0.1", port: 0, apiKey: nil),
+        hostWindowNumber: host.windowNumber,
+        rect: NSRect(x: 0, y: 0, width: 720, height: 520),
+        hostPointer: pointer,
+        hostWindowLabel: label
+    )
+    expect(attached, "queued Search host attaches")
+    guard let model = controller.currentModel else {
+        failures.append("queued Search host has no model")
+        return
+    }
+    expectEqual(model.searchReview?.query, "queued exact frame", "attach consumes queued Search query")
+    expectEqual(model.searchReview?.activeIndex, 2, "attach keeps the clicked result index")
+
+    model.injectForTesting(frames: targetFrames)
+    expectEqual(
+        model.currentFrame?.devices.first?.frameId,
+        "910002",
+        "queued Search click reaches its exact native frame after attach"
+    )
+
+    TimelineWindowController.releaseController(forHost: pointer)
+    host.close()
+    pump(0.2)
+}
+
 // MARK: - Runner
 
 /// The tests run from inside `NSApp.run()`. A bare `RunLoop.main.run(until:)`
@@ -780,6 +845,7 @@ private func runTests() {
         ("search navigation waits for exact frame",
          { testSearchNavigationWaitsForExactFrame(model: model) }),
         ("search navigation targets host label", testSearchNavigationTargetsHostLabel),
+        ("search click queues until host attaches", testSearchClickQueuedUntilHostAttaches),
         ("icons", testIcons),
         ("icon chip renders", { testIconChipRenders(shots: shots) }),
         // Last: it re-parents and re-styles the shared window.

@@ -36,6 +36,59 @@ import {
   postJson,
 } from "../../helpers/api-utils.js";
 
+interface NativeTimelineSearchState {
+  attached: boolean;
+  queued: boolean;
+  currentFrameId?: string;
+  searchQuery?: string;
+  activeResultIndex?: number;
+  searchFrameIds: string[];
+}
+
+async function nativeTimelineSearchState(
+  windowLabel: string,
+): Promise<NativeTimelineSearchState | null> {
+  // The overlay is a non-activating panel. WebDriver can observe it before its
+  // Tauri bridge is ready, so invoking from that webview intermittently reports
+  // "Tauri invoke not available" even though the native timeline is attached.
+  // IPC is app-global: use the persistent Home webview as the probe host, then
+  // restore the caller's window so the test still drives the real surface.
+  const caller = await browser.getWindowHandle();
+  const handles = await browser.getWindowHandles();
+  const probeHost = handles.includes("home") ? "home" : caller;
+  if (caller !== probeHost) await browser.switchToWindow(probeHost);
+  try {
+    return await invokeOrThrow<NativeTimelineSearchState | null>(
+      "plugin:e2e|native_timeline_search_state",
+      { windowLabel },
+    );
+  } finally {
+    if (caller !== probeHost && (await browser.getWindowHandles()).includes(caller)) {
+      await browser.switchToWindow(caller);
+    }
+  }
+}
+
+async function clickFirstReadySearchThumbnail(query: string): Promise<string> {
+  const input = await $('input[placeholder*="search memory"]');
+  await input.waitForExist({ timeout: t(20_000) });
+  await input.setValue(query);
+  const first = await $("[data-index='0']");
+  await first.waitForExist({ timeout: t(20_000) });
+  await browser.waitUntil(
+    async () => (await first.getAttribute("data-thumbnail-ready")) === "true",
+    {
+      timeout: t(20_000),
+      interval: 100,
+      timeoutMsg: "first exact Search thumbnail never became clickable",
+    },
+  );
+  const frameId = await first.getAttribute("data-frame-id");
+  if (!frameId) throw new Error("Search card did not expose its exact frame id");
+  await first.click();
+  return frameId;
+}
+
 describe("Search bugs over seeded data (reproduces #4645)", function () {
   this.timeout(180_000);
 
@@ -473,6 +526,120 @@ describe("Search bugs over seeded data (reproduces #4645)", function () {
       "search-4645-embedded-filtered-navigation",
     );
     console.log("embedded filtered navigation screenshot:", screenshot);
+  });
+
+  it("clicks a real Search thumbnail and moves the embedded native Timeline to that exact frame", async function () {
+    const nativeAvailable = await invokeOrThrow<boolean>("native_timeline_is_available");
+    if (!nativeAvailable) this.skip();
+
+    await openHomeWindow();
+    const timelineNav = await $('[data-testid="nav-timeline"]');
+    await timelineNav.waitForExist({ timeout: t(15_000) });
+    await timelineNav.click();
+    await browser.waitUntil(
+      async () => new URL(await browser.getUrl()).searchParams.get("section") === "timeline",
+      {
+        timeout: t(20_000),
+        interval: 200,
+        timeoutMsg: "Home did not enter its embedded Timeline section",
+      },
+    );
+    await browser.waitUntil(
+      async () => (await nativeTimelineSearchState("home"))?.attached === true,
+      {
+        timeout: t(20_000),
+        interval: 200,
+        timeoutMsg: "Home native Timeline never attached",
+      },
+    );
+
+    await invokeOrThrow("open_search_window", {
+      query: null,
+      timelineOrigin: "home",
+    });
+    await browser.waitUntil(
+      async () => (await browser.getWindowHandles()).includes("search"),
+      { timeout: t(20_000), timeoutMsg: "Search window did not open from Home" },
+    );
+    await browser.switchToWindow("search");
+    const expectedFrameId = await clickFirstReadySearchThumbnail("vector");
+
+    await browser.switchToWindow("home");
+    await browser.waitUntil(
+      async () => {
+        const state = await nativeTimelineSearchState("home");
+        return state?.currentFrameId === expectedFrameId &&
+          state.searchQuery === "vector" &&
+          state.searchFrameIds.includes(expectedFrameId);
+      },
+      {
+        timeout: t(30_000),
+        interval: 200,
+        timeoutMsg: `Home native Timeline did not jump to frame ${expectedFrameId}`,
+      },
+    );
+  });
+
+  it("clicks a real Search thumbnail and restores the overlay native Timeline at that exact frame", async function () {
+    const nativeAvailable = await invokeOrThrow<boolean>("native_timeline_is_available");
+    if (!nativeAvailable) this.skip();
+
+    await openHomeWindow();
+    await invokeOrThrow("show_main_window");
+    const overlayLabel = await browser.waitUntil(
+      async () => {
+        const handles = await browser.getWindowHandles();
+        return handles.find((handle) => handle === "main" || handle === "main-window") ?? false;
+      },
+      {
+        timeout: t(20_000),
+        interval: 200,
+        timeoutMsg: "overlay Timeline window did not open",
+      },
+    );
+    await browser.switchToWindow(overlayLabel as string);
+    await browser.waitUntil(
+      async () => new URL(await browser.getUrl()).pathname === "/overlay",
+      {
+        timeout: t(20_000),
+        interval: 200,
+        timeoutMsg: "overlay webview did not finish loading",
+      },
+    );
+    await browser.waitUntil(
+      async () => (await nativeTimelineSearchState(overlayLabel as string))?.attached === true,
+      {
+        timeout: t(20_000),
+        interval: 200,
+        timeoutMsg: "overlay native Timeline never attached",
+      },
+    );
+
+    await invokeOrThrow("open_search_window", {
+      query: null,
+      timelineOrigin: overlayLabel,
+    });
+    await browser.waitUntil(
+      async () => (await browser.getWindowHandles()).includes("search"),
+      { timeout: t(20_000), timeoutMsg: "Search window did not open from overlay" },
+    );
+    await browser.switchToWindow("search");
+    const expectedFrameId = await clickFirstReadySearchThumbnail("vector");
+
+    await browser.switchToWindow(overlayLabel as string);
+    await browser.waitUntil(
+      async () => {
+        const state = await nativeTimelineSearchState(overlayLabel as string);
+        return state?.currentFrameId === expectedFrameId &&
+          state.searchQuery === "vector" &&
+          state.searchFrameIds.includes(expectedFrameId);
+      },
+      {
+        timeout: t(30_000),
+        interval: 200,
+        timeoutMsg: `overlay native Timeline did not jump to frame ${expectedFrameId}`,
+      },
+    );
   });
 
   it("removes a search result when its exact thumbnail is unavailable", async () => {

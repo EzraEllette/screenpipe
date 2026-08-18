@@ -1154,6 +1154,12 @@ async fn main() {
             }
             let app_handle = app.handle();
 
+            // The embedded and overlay native timelines can mount before the
+            // optional shortcut reminder. Install their event bridge eagerly
+            // so attachment never depends on reminder timing or preferences.
+            #[cfg(target_os = "macos")]
+            commands::install_native_timeline_bridge(app_handle);
+
             // Go non-activating before the first window exists. Tauri defaults to
             // `Regular`, and a launching Regular app is activated by macOS — which
             // swaps a developer out of their fullscreen Space every time an agent

@@ -14,7 +14,7 @@
 
 #[cfg(target_os = "macos")]
 mod ffi {
-    use std::ffi::CString;
+    use std::ffi::{CStr, CString};
     use std::os::raw::{c_char, c_int};
 
     extern "C" {
@@ -24,6 +24,8 @@ mod ffi {
         pub fn timeline_detach(json: *const c_char) -> c_int;
         pub fn timeline_close() -> c_int;
         pub fn timeline_navigate(json: *const c_char) -> c_int;
+        pub fn timeline_search_state(label: *const c_char) -> *mut c_char;
+        pub fn timeline_free_string(value: *mut c_char);
         pub fn timeline_set_action_callback(cb: Option<extern "C" fn(*const c_char)>);
     }
 
@@ -64,6 +66,19 @@ mod ffi {
         }
     }
 
+    pub fn search_state(window_label: &str) -> Option<serde_json::Value> {
+        let label = CString::new(window_label).ok()?;
+        let pointer = unsafe { timeline_search_state(label.as_ptr()) };
+        if pointer.is_null() {
+            return None;
+        }
+        let raw = unsafe { CStr::from_ptr(pointer) }
+            .to_string_lossy()
+            .into_owned();
+        unsafe { timeline_free_string(pointer) };
+        serde_json::from_str(&raw).ok()
+    }
+
     pub fn set_action_callback(cb: extern "C" fn(*const c_char)) {
         unsafe { timeline_set_action_callback(Some(cb)) }
     }
@@ -90,6 +105,9 @@ mod ffi {
     }
     pub fn navigate(_json: &str) -> bool {
         false
+    }
+    pub fn search_state(_window_label: &str) -> Option<serde_json::Value> {
+        None
     }
     pub fn set_action_callback(_cb: extern "C" fn(*const std::os::raw::c_char)) {}
 }
@@ -322,6 +340,12 @@ pub fn navigate_to_search_result(
         search_results_json,
         search_query,
     ))
+}
+
+/// Read-only state for the feature-gated WebDriver harness. Production
+/// webviews do not expose a command that calls this function.
+pub fn search_state(window_label: &str) -> Option<serde_json::Value> {
+    ffi::search_state(window_label)
 }
 
 pub fn set_action_callback(cb: extern "C" fn(*const std::os::raw::c_char)) {

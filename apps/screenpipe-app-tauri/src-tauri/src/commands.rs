@@ -24,6 +24,14 @@ use tauri::{Emitter, Manager};
 use tauri_plugin_opener::OpenerExt;
 use tracing::{debug, error, info, warn};
 
+/// Install the native timeline's action trampoline and placement listeners at
+/// app startup. Timeline attachment must not depend on whether the optional
+/// shortcut reminder happened to be shown first.
+#[cfg(target_os = "macos")]
+pub(crate) fn install_native_timeline_bridge(app_handle: &tauri::AppHandle) {
+    native_actions::install_shortcut_action_callback(app_handle);
+}
+
 /// Log a `WebviewWindowBuilder::build()` failure with structured context.
 ///
 /// Why: Sentry events for webview build failures currently say only
