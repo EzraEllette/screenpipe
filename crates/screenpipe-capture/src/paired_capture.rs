@@ -16,7 +16,9 @@ use chrono::{DateTime, Utc};
 use image::{DynamicImage, GenericImageView};
 use once_cell::sync::Lazy;
 use regex::Regex;
-use screenpipe_a11y::tree::{create_tree_walker, TreeSnapshot, TreeWalkerConfig};
+use screenpipe_a11y::tree::{
+    create_tree_walker, TreeSnapshot, TreeWalkerConfig, TreeWalkerPlatform,
+};
 use screenpipe_core::pii_removal::remove_pii;
 use screenpipe_db::DatabaseManager;
 use screenpipe_screen::snapshot_writer::SnapshotWriter;
@@ -26,6 +28,8 @@ use screenpipe_screen::text_regions::{
 use screenpipe_screen::OcrGateDecision;
 
 use crate::ocr_gate::{OcrDecision, OcrGate};
+#[cfg(target_os = "windows")]
+use std::cell::RefCell;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Instant;
@@ -749,8 +753,35 @@ pub async fn paired_capture(
 ///
 /// This is a blocking operation that should be spawned on a blocking thread.
 pub fn walk_accessibility_tree(config: &TreeWalkerConfig) -> screenpipe_a11y::tree::TreeWalkResult {
+    #[cfg(target_os = "windows")]
+    {
+        thread_local! {
+            static CACHED_TREE_WALKER: RefCell<Option<Box<dyn TreeWalkerPlatform>>> =
+                RefCell::new(None);
+        }
+
+        return CACHED_TREE_WALKER.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            if slot.is_none() {
+                *slot = Some(create_tree_walker(config.clone()));
+            }
+            let walker = slot.as_mut().expect("cached walker initialized");
+            walker.update_config(config.clone());
+            run_accessibility_tree_walk(walker.as_ref())
+        });
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let walker = create_tree_walker(config.clone());
+        run_accessibility_tree_walk(walker.as_ref())
+    }
+}
+
+pub(crate) fn run_accessibility_tree_walk(
+    walker: &dyn TreeWalkerPlatform,
+) -> screenpipe_a11y::tree::TreeWalkResult {
     use screenpipe_a11y::tree::TreeWalkResult;
-    let walker = create_tree_walker(config.clone());
     match walker.walk_focused_window() {
         Ok(TreeWalkResult::Found(snapshot)) => {
             debug!(

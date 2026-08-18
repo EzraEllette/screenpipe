@@ -19,6 +19,7 @@ use screenpipe_a11y::tree::TreeWalkerConfig;
 use screenpipe_a11y::ActivityFeed;
 use screenpipe_capture::ocr_gate::OcrGate;
 use screenpipe_capture::paired_capture::{paired_capture, CaptureContext, PairedCaptureResult};
+use screenpipe_capture::TreeWalkerWorker;
 use screenpipe_core::window_pattern::{self, WindowPattern};
 use screenpipe_db::DatabaseManager;
 use screenpipe_screen::capture_screenshot_by_window::WindowFilters;
@@ -43,6 +44,7 @@ use tracing::{debug, error, info, warn};
 const CAPTURE_OPERATION_TIMEOUT: Duration = Duration::from_secs(20);
 #[cfg(not(target_os = "macos"))]
 const CAPTURE_OPERATION_TIMEOUT: Duration = Duration::from_secs(15);
+const TREE_WALK_WORKER_TIMEOUT: Duration = Duration::from_secs(12);
 const WARM_VISUAL_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 const WARM_FOCUS_BACKSTOP_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -249,6 +251,7 @@ pub(crate) struct CaptureParams<'a> {
     pub device_name: &'a str,
     pub snapshot_writer: &'a SnapshotWriter,
     pub tree_walker_config: &'a TreeWalkerConfig,
+    pub tree_walker: &'a TreeWalkerWorker,
     pub window_filters: WindowFilters,
     pub ignored_patterns: Vec<WindowPattern>,
     pub use_pii_removal: bool,
@@ -1080,6 +1083,8 @@ pub(crate) async fn event_driven_capture_loop(
     // (slides, screen-share, demos) bypass AX-hash dedup during meetings even
     // when no HD session is running. Stays false when no controller is wired.
     let mut in_meeting = false;
+    let tree_walker =
+        TreeWalkerWorker::spawn(format!("monitor-{monitor_id}"), tree_walker_config.clone())?;
 
     let capture_params = CaptureParams {
         db: &db,
@@ -1088,6 +1093,7 @@ pub(crate) async fn event_driven_capture_loop(
         device_name: &device_name,
         snapshot_writer: &snapshot_writer,
         tree_walker_config: &tree_walker_config,
+        tree_walker: &tree_walker,
         window_filters: WindowFilters::new(
             &tree_walker_config.ignored_windows,
             &tree_walker_config.included_windows,
@@ -2949,10 +2955,10 @@ async fn do_capture(
     // the screenshot/OCR path below instead.
     let tree_walk_result = if monitor_hosts_focus {
         Some(
-            tokio::task::spawn_blocking(move || {
-                screenpipe_capture::paired_capture::walk_accessibility_tree(&config)
-            })
-            .await?,
+            params
+                .tree_walker
+                .walk_with_timeout(config, TREE_WALK_WORKER_TIMEOUT)
+                .await?,
         )
     } else {
         None
