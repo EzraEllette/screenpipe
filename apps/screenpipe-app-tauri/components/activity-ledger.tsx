@@ -12,6 +12,7 @@ import React, {
 } from "react";
 import { emit } from "@tauri-apps/api/event";
 import { useRouter } from "next/navigation";
+import posthog from "posthog-js";
 import {
   AppWindow,
   AudioLines,
@@ -59,6 +60,7 @@ import { cn } from "@/lib/utils";
 import type { AIPreset } from "@/lib/utils/tauri";
 
 type RangePreset = "today" | "24h" | "7d" | "custom";
+type GenerationSource = "empty_state" | "refresh";
 type ActivitySummaryResponse = {
   data_status: string;
   total_active_minutes: number;
@@ -570,6 +572,7 @@ export function ActivityLedger({
   const initialNow = useMemo(() => new Date(), []);
   const anchor = initialNow;
   const [preset, setPreset] = useState<RangePreset>(readStoredRangePreset);
+  const initialPresetRef = useRef(preset);
   const [customStart, setCustomStart] = useState(() =>
     readStoredDateInput(
       ACTIVITY_CUSTOM_START_STORAGE_KEY,
@@ -637,6 +640,10 @@ export function ActivityLedger({
     () => (range ? nextActivityHistoryRange(range, historyCoverage) : null),
     [historyCoverage, range],
   );
+
+  useEffect(() => {
+    posthog.capture("activity_viewed", { range: initialPresetRef.current });
+  }, []);
 
   useEffect(() => {
     window.localStorage.setItem(ACTIVITY_RANGE_STORAGE_KEY, preset);
@@ -794,8 +801,15 @@ export function ActivityLedger({
     };
   }, [preset, range]);
 
-  const generateHistory = useCallback(async (generationRange: TimeRange) => {
+  const generateHistory = useCallback(async (
+    generationRange: TimeRange,
+    source: GenerationSource,
+  ) => {
     if (!range || historyLoadingRef.current) return;
+    posthog.capture("activity_generation_started", {
+      range: preset,
+      source,
+    });
     historyAbortRef.current?.abort();
     const controller = new AbortController();
     historyAbortRef.current = controller;
@@ -842,6 +856,12 @@ export function ActivityLedger({
           persisted.entries.length > 0 ? { entries: persisted.entries } : null,
         );
         setHistoryCoverage(persisted.coverage);
+        posthog.capture("activity_generation_completed", {
+          range: preset,
+          source,
+          outcome: "no_activity",
+          activity_count: 0,
+        });
         return;
       }
       const raw = await runDailySummaryWithPi({
@@ -932,9 +952,19 @@ export function ActivityLedger({
         persisted.entries.length > 0 ? { entries: persisted.entries } : null,
       );
       setHistoryCoverage(persisted.coverage);
+      posthog.capture("activity_generation_completed", {
+        range: preset,
+        source,
+        outcome: "generated",
+        activity_count: next.entries.length,
+      });
     } catch {
       if (controller.signal.aborted) return;
       setHistoryError("History could not be updated. Try again.");
+      posthog.capture("activity_generation_failed", {
+        range: preset,
+        source,
+      });
     } finally {
       if (!controller.signal.aborted) {
         historyLoadingRef.current = false;
@@ -953,6 +983,7 @@ export function ActivityLedger({
   ]);
 
   const makeSkill = (entry: ActivityHistoryEntry) => {
+    posthog.capture("activity_skill_clicked");
     void showChatWithPrefill({
       context: compactEntryContext(entry),
       displayLabel: `Make a skill from “${entry.title}”`,
@@ -964,6 +995,7 @@ Re-query Screenpipe only inside the cited time range and use the cited frames an
   };
 
   const askAboutActivity = (entry: ActivityHistoryEntry) => {
+    posthog.capture("activity_chat_clicked");
     void showChatWithPrefill({
       context: compactEntryContext(entry),
       displayLabel: `Ask about “${entry.title}”`,
@@ -975,6 +1007,13 @@ Re-query Screenpipe only inside the cited time range and use the cited frames an
   const openEvidence = useCallback(
     (evidence: ActivityArtifact) => {
       onOpenArtifact?.();
+      posthog.capture("activity_evidence_opened", {
+        evidence_kind: evidence.kind,
+        destination:
+          evidence.kind === "meeting" && evidence.meeting_id
+            ? "meetings"
+            : "timeline",
+      });
       if (
         evidence.kind === "meeting" &&
         evidence.meeting_id &&
@@ -1024,7 +1063,13 @@ Re-query Screenpipe only inside the cited time range and use the cited frames an
             <div className="flex items-center gap-2">
               <Select
                 value={preset}
-                onValueChange={(value) => setPreset(value as RangePreset)}
+                onValueChange={(value) => {
+                  const nextPreset = value as RangePreset;
+                  setPreset(nextPreset);
+                  posthog.capture("activity_range_changed", {
+                    range: nextPreset,
+                  });
+                }}
               >
                 <SelectTrigger
                   className="h-9 w-[150px] rounded-none text-xs"
@@ -1065,7 +1110,7 @@ Re-query Screenpipe only inside the cited time range and use the cited frames an
                 variant="ghost"
                 size="icon"
                 onClick={() => {
-                  if (range) void generateHistory(range);
+                  if (range) void generateHistory(range, "refresh");
                 }}
                 disabled={
                   loading || historyLoading || !cacheReady || invalidRange
@@ -1261,7 +1306,7 @@ Re-query Screenpipe only inside the cited time range and use the cited frames an
                   size="sm"
                   className="mt-5 h-10 px-5 uppercase tracking-wide"
                   onClick={() => {
-                    if (range) void generateHistory(range);
+                    if (range) void generateHistory(range, "empty_state");
                   }}
                 >
                   Generate activities

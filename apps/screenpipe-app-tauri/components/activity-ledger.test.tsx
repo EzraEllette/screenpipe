@@ -18,6 +18,7 @@ const mocks = vi.hoisted(() => ({
   emit: vi.fn(),
   loadPersistedActivityHistory: vi.fn(),
   localFetch: vi.fn(),
+  posthogCapture: vi.fn(),
   reconcilePersistedActivityHistory: vi.fn(),
   routerPush: vi.fn(),
   runDailySummaryWithPi: vi.fn(),
@@ -50,6 +51,9 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({ emit: mocks.emit }));
+vi.mock("posthog-js", () => ({
+  default: { capture: mocks.posthogCapture },
+}));
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: mocks.routerPush }),
 }));
@@ -663,6 +667,34 @@ describe("ActivityLedger", () => {
     expect(
       screen.queryByText(/Turn on Enhanced AI|Choose an AI model/i),
     ).toBeNull();
+    expect(mocks.posthogCapture).toHaveBeenCalledWith(
+      "activity_generation_failed",
+      { range: "today", source: "empty_state" },
+    );
+  });
+
+  it("tracks page reach and the activity generation funnel", async () => {
+    render(<ActivityLedger />);
+
+    await generateActivities();
+    await screen.findByText("Fixed a capture reliability regression");
+
+    expect(mocks.posthogCapture).toHaveBeenCalledWith("activity_viewed", {
+      range: "today",
+    });
+    expect(mocks.posthogCapture).toHaveBeenCalledWith(
+      "activity_generation_started",
+      { range: "today", source: "empty_state" },
+    );
+    expect(mocks.posthogCapture).toHaveBeenCalledWith(
+      "activity_generation_completed",
+      {
+        range: "today",
+        source: "empty_state",
+        outcome: "generated",
+        activity_count: 2,
+      },
+    );
   });
 
   it("loads a completed encrypted ledger without regenerating it", async () => {
@@ -885,6 +917,10 @@ describe("ActivityLedger", () => {
     await waitFor(() =>
       expect(mocks.emit).toHaveBeenCalledWith("navigate-to-frame", "12345"),
     );
+    expect(mocks.posthogCapture).toHaveBeenCalledWith(
+      "activity_evidence_opened",
+      { evidence_kind: "screen", destination: "timeline" },
+    );
 
     fireEvent.click(transcriptArtifact);
     expect(mocks.setPendingNavigation).toHaveBeenLastCalledWith({
@@ -939,6 +975,10 @@ describe("ActivityLedger", () => {
     );
     expect(mocks.setPendingNavigation).not.toHaveBeenCalled();
     expect(mocks.emit).not.toHaveBeenCalled();
+    expect(mocks.posthogCapture).toHaveBeenCalledWith(
+      "activity_evidence_opened",
+      { evidence_kind: "meeting", destination: "meetings" },
+    );
   });
 
   it("can draft a skill from every activity interval", async () => {
@@ -960,6 +1000,9 @@ describe("ActivityLedger", () => {
           prompt: expect.stringContaining("Draft a focused SKILL.md"),
         }),
       ),
+    );
+    expect(mocks.posthogCapture).toHaveBeenCalledWith(
+      "activity_skill_clicked",
     );
   });
 
@@ -983,6 +1026,9 @@ describe("ActivityLedger", () => {
           prompt: "Tell me more about this activity.",
         }),
       ),
+    );
+    expect(mocks.posthogCapture).toHaveBeenCalledWith(
+      "activity_chat_clicked",
     );
   });
 });
