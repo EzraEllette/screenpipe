@@ -315,6 +315,10 @@ function buildGenericProviderErrorMessage(
     return "The AI provider usage limit has been reached. Wait for it to reset, or switch your AI preset or provider.";
   }
 
+  if (provider === "custom" && errorStr === "400 status code (no body)") {
+    return "The custom AI provider rejected the request. Verify the endpoint, model, and API key in Settings → AI.";
+  }
+
   if (
     provider === "custom" &&
     (normalized.includes("401") ||
