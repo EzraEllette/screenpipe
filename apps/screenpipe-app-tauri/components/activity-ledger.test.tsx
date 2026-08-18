@@ -5,6 +5,7 @@
 import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -87,6 +88,7 @@ import {
   buildActivityLedgerArtifactsPath,
   buildActivityMeetingsPath,
   buildActivitySummaryPath,
+  canAddRecentActivity,
   minimumHistoryEntryCount,
   rangeForPreset,
 } from "@/components/activity-ledger";
@@ -352,6 +354,29 @@ describe("activity history helpers", () => {
     expect(minimumHistoryEntryCount(45, { start, end })).toBe(2);
     expect(minimumHistoryEntryCount(180, { start, end })).toBe(5);
     expect(minimumHistoryEntryCount(480, { start, end })).toBe(7);
+  });
+
+  it("offers recent activity only after more than ten uncovered minutes", () => {
+    const start = new Date("2026-08-17T07:00:00Z");
+    const coverage = [
+      {
+        start: start.toISOString(),
+        end: "2026-08-17T20:00:00.000Z",
+      },
+    ];
+
+    expect(
+      canAddRecentActivity(
+        { start, end: new Date("2026-08-17T20:10:00.000Z") },
+        coverage,
+      ),
+    ).toBe(false);
+    expect(
+      canAddRecentActivity(
+        { start, end: new Date("2026-08-17T20:10:00.001Z") },
+        coverage,
+      ),
+    ).toBe(true);
   });
 
   it("ranks a compact artifact set while preserving a real website", () => {
@@ -632,6 +657,10 @@ describe("ActivityLedger", () => {
       }),
     );
     const refresh = screen.getByRole("button", { name: "Refresh history" });
+    expect(refresh).toBeDisabled();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10 * 60_000 + 30_000);
+    });
     await waitFor(() => expect(refresh).toBeEnabled());
     fireEvent.click(refresh);
 
@@ -640,6 +669,61 @@ describe("ActivityLedger", () => {
         expect.objectContaining({
           preset: expect.objectContaining({ id: "pipes" }),
           sessionPrefix: "activity-history",
+        }),
+      ),
+    );
+  });
+
+  it("shows a bottom action that unlocks with the header refresh", async () => {
+    mocks.loadPersistedActivityHistory.mockImplementation(
+      async (_producer: string, range: { start: Date; end: Date }) => ({
+        entries: parseActivityHistoryResponse(HISTORY_RESPONSE, range).entries,
+        coverage: [
+          {
+            start: range.start.toISOString(),
+            end: range.end.toISOString(),
+          },
+        ],
+      }),
+    );
+
+    render(<ActivityLedger />);
+
+    await screen.findByText("Fixed a capture reliability regression");
+    const addRecent = screen.getByRole("button", {
+      name: "Add recent activities",
+    });
+    const refresh = screen.getByRole("button", { name: "Refresh history" });
+    expect(addRecent).toBeVisible();
+    expect(addRecent).toBeDisabled();
+    expect(refresh).toBeDisabled();
+    expect(
+      screen.getByText("More activity can be added every 10 minutes."),
+    ).toBeVisible();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10 * 60_000 + 30_000);
+    });
+
+    await waitFor(() => {
+      expect(addRecent).toBeEnabled();
+      expect(refresh).toBeEnabled();
+    });
+    expect(
+      screen.getByText("Include work recorded since your last update."),
+    ).toBeVisible();
+
+    fireEvent.click(addRecent);
+
+    await waitFor(() =>
+      expect(mocks.runDailySummaryWithPi).toHaveBeenCalledWith(
+        expect.objectContaining({
+          range: expect.objectContaining({
+            start: "2026-08-17T19:50:00.000Z",
+            end: expect.stringMatching(
+              /^2026-08-17T20:10:30\.\d{3}Z$/,
+            ),
+          }),
         }),
       ),
     );
