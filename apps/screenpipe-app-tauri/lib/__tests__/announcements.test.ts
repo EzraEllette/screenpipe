@@ -37,7 +37,24 @@ describe("areRemoteAnnouncementsDisabled", () => {
     vi.stubEnv("NEXT_PUBLIC_SCREENPIPE_E2E", "false");
     vi.stubEnv("NEXT_PUBLIC_SCREENPIPE_DISABLE_REMOTE_ANNOUNCEMENTS", "false");
 
-    expect(areRemoteAnnouncementsDisabled(process.env, "tauri.localhost")).toBe(false);
+    expect(
+      areRemoteAnnouncementsDisabled(
+        process.env,
+        "tauri.localhost",
+        "http:",
+      ),
+    ).toBe(false);
+  });
+
+  it("allows remote announcements on the production macOS Tauri origin", () => {
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("TAURI_ENV_DEBUG", "false");
+    vi.stubEnv("NEXT_PUBLIC_SCREENPIPE_E2E", "false");
+    vi.stubEnv("NEXT_PUBLIC_SCREENPIPE_DISABLE_REMOTE_ANNOUNCEMENTS", "false");
+
+    expect(
+      areRemoteAnnouncementsDisabled(process.env, "localhost", "tauri:"),
+    ).toBe(false);
   });
 
   it("disables remote announcements in development", () => {
@@ -70,6 +87,7 @@ describe("areRemoteAnnouncementsDisabled", () => {
           NEXT_PUBLIC_SCREENPIPE_DISABLE_REMOTE_ANNOUNCEMENTS: "false",
         },
         "localhost",
+        "http:",
       ),
     ).toBe(true);
   });
