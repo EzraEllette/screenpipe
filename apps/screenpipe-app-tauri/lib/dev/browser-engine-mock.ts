@@ -16,8 +16,7 @@ export function createMockHealth(scenario: BrowserDevScenario = "ready") {
     audio_status: "ok",
     ui_status: "ok",
     message: "browser development mock is ready",
-    monitors:
-      scenario === "empty" ? [] : ["Browser dev display (1440x900)"],
+    monitors: scenario === "empty" ? [] : ["Browser dev display (1440x900)"],
   };
 }
 
@@ -47,28 +46,31 @@ function mockAppFrames(appName: string, limit: number, offset: number) {
   const roster = MOCK_APP_ROSTER.find((app) => app.name === appName);
   if (!roster) return [];
   const total = Math.min(roster.count, 72);
-  return Array.from({ length: Math.max(0, Math.min(limit, total - offset)) }, (_, i) => {
-    const index = offset + i;
-    return {
-      type: "OCR",
-      content: {
-        frame_id: 90_000 + index,
-        text: `${appName} window capture ${index + 1}`,
-        timestamp: new Date(Date.now() - index * 1_800_000).toISOString(),
-        file_path: "",
-        offset_index: index,
-        app_name: appName,
-        window_name: `${appName} — mock window`,
-        tags: [],
-        frame: null,
-        frame_name: null,
-        browser_url: null,
-        focused: true,
-        device_name: "browser dev",
-        text_source: "accessibility",
-      },
-    };
-  });
+  return Array.from(
+    { length: Math.max(0, Math.min(limit, total - offset)) },
+    (_, i) => {
+      const index = offset + i;
+      return {
+        type: "OCR",
+        content: {
+          frame_id: 90_000 + index,
+          text: `${appName} window capture ${index + 1}`,
+          timestamp: new Date(Date.now() - index * 1_800_000).toISOString(),
+          file_path: "",
+          offset_index: index,
+          app_name: appName,
+          window_name: `${appName} — mock window`,
+          tags: [],
+          frame: null,
+          frame_name: null,
+          browser_url: null,
+          focused: true,
+          device_name: "browser dev",
+          text_source: "accessibility",
+        },
+      };
+    },
+  );
 }
 
 export function mockLocalApiResponse(
@@ -110,6 +112,9 @@ export function mockLocalApiResponse(
       return Response.json({ windows: [], total_active_seconds: 0 });
     }
     return Response.json(mockActivitySummary());
+  }
+  if (url.pathname === "/activity-ledger") {
+    return Response.json(mockActivityLedger(url, scenario));
   }
   if (url.pathname === "/meetings/status") {
     return Response.json({ active: false, manualActive: false });
@@ -176,13 +181,48 @@ const MOCK_MEETING_TURNS: ReadonlyArray<{
   speaker: string;
   text: string;
 }> = [
-  { at: 0.04, device: "output", speaker: "sample person", text: "Let's start with where the rollout actually stands." },
-  { at: 0.18, device: "input", speaker: "me", text: "Capture is stable on the two machines we watched all week." },
-  { at: 0.33, device: "output", speaker: "another person", text: "What happens when someone reopens the meeting a day later?" },
-  { at: 0.47, device: "input", speaker: "me", text: "They get the saved summary, and the transcript stays intact underneath it." },
-  { at: 0.61, device: "output", speaker: "sample person", text: "Good. Put the evidence next to the summary so nobody has to trust it blind." },
-  { at: 0.76, device: "input", speaker: "me", text: "Agreed — the replay strip and the open tabs belong on that tab." },
-  { at: 0.91, device: "output", speaker: "another person", text: "Then we can send the summary out without a second pass." },
+  {
+    at: 0.04,
+    device: "output",
+    speaker: "sample person",
+    text: "Let's start with where the rollout actually stands.",
+  },
+  {
+    at: 0.18,
+    device: "input",
+    speaker: "me",
+    text: "Capture is stable on the two machines we watched all week.",
+  },
+  {
+    at: 0.33,
+    device: "output",
+    speaker: "another person",
+    text: "What happens when someone reopens the meeting a day later?",
+  },
+  {
+    at: 0.47,
+    device: "input",
+    speaker: "me",
+    text: "They get the saved summary, and the transcript stays intact underneath it.",
+  },
+  {
+    at: 0.61,
+    device: "output",
+    speaker: "sample person",
+    text: "Good. Put the evidence next to the summary so nobody has to trust it blind.",
+  },
+  {
+    at: 0.76,
+    device: "input",
+    speaker: "me",
+    text: "Agreed — the replay strip and the open tabs belong on that tab.",
+  },
+  {
+    at: 0.91,
+    device: "output",
+    speaker: "another person",
+    text: "Then we can send the summary out without a second pass.",
+  },
 ];
 
 function mockMeetingAudioRows() {
@@ -213,17 +253,56 @@ function mockActivitySummary() {
   const span = end.getTime() - start.getTime();
   return {
     apps: [
-      { name: "Google Chrome", frame_count: 412, minutes: 12, first_seen: start.toISOString(), last_seen: end.toISOString() },
-      { name: "Cursor", frame_count: 188, minutes: 6, first_seen: start.toISOString(), last_seen: end.toISOString() },
+      {
+        name: "Google Chrome",
+        frame_count: 412,
+        minutes: 12,
+        first_seen: start.toISOString(),
+        last_seen: end.toISOString(),
+      },
+      {
+        name: "Cursor",
+        frame_count: 188,
+        minutes: 6,
+        first_seen: start.toISOString(),
+        last_seen: end.toISOString(),
+      },
     ],
     windows: [
-      { app_name: "Google Chrome", window_name: "Rollout plan — sample doc", browser_url: "https://example.com/docs/rollout-plan", minutes: 8, frame_count: 240 },
-      { app_name: "Google Chrome", window_name: "Sample tracker — board", browser_url: "https://example.com/board/sample", minutes: 4, frame_count: 120 },
-      { app_name: "Cursor", window_name: "meeting-workspace.tsx", browser_url: "", minutes: 6, frame_count: 188 },
-      { app_name: "Slack", window_name: "#sample-channel", browser_url: "", minutes: 2, frame_count: 44 },
+      {
+        app_name: "Google Chrome",
+        window_name: "Rollout plan — sample doc",
+        browser_url: "https://example.com/docs/rollout-plan",
+        minutes: 8,
+        frame_count: 240,
+      },
+      {
+        app_name: "Google Chrome",
+        window_name: "Sample tracker — board",
+        browser_url: "https://example.com/board/sample",
+        minutes: 4,
+        frame_count: 120,
+      },
+      {
+        app_name: "Cursor",
+        window_name: "meeting-workspace.tsx",
+        browser_url: "",
+        minutes: 6,
+        frame_count: 188,
+      },
+      {
+        app_name: "Slack",
+        window_name: "#sample-channel",
+        browser_url: "",
+        minutes: 2,
+        frame_count: 44,
+      },
     ],
     edited_files: [
-      { path: "/sample/project/components/meeting-notes/note-view.tsx", frame_count: 96 },
+      {
+        path: "/sample/project/components/meeting-notes/note-view.tsx",
+        frame_count: 96,
+      },
       { path: "/sample/notes/rollout-plan.md", frame_count: 31 },
     ],
     audio_summary: {
@@ -242,6 +321,216 @@ function mockActivitySummary() {
     total_frames: 600,
     time_range: { start: start.toISOString(), end: end.toISOString() },
   };
+}
+
+/** Invented intervals for the browser-only ledger surface. The fixture follows
+ * the requested depth so browser QA exercises the real response contract. */
+function mockActivityLedger(url: URL, scenario: BrowserDevScenario) {
+  const requestedEnd = new Date(url.searchParams.get("end_time") ?? "");
+  const end = Number.isFinite(requestedEnd.getTime())
+    ? requestedEnd
+    : new Date();
+  const requestedStart = new Date(url.searchParams.get("start_time") ?? "");
+  const start = Number.isFinite(requestedStart.getTime())
+    ? requestedStart
+    : new Date(end.getTime() - 4 * 60 * 60 * 1000);
+  const depth = url.searchParams.get("depth") ?? "task";
+  const includeArtifacts = url.searchParams.get("include_artifacts") === "true";
+  const envelope = (intervals: unknown[]) => ({
+    intervals,
+    depth,
+    data_status: intervals.length ? "ok" : "empty",
+    time_range: { start: start.toISOString(), end: end.toISOString() },
+    generated_at: new Date().toISOString(),
+  });
+  if (scenario === "empty") return envelope([]);
+
+  const at = (minutesAgo: number) =>
+    new Date(end.getTime() - minutesAgo * 60_000).toISOString();
+  const base = [
+    {
+      id: 101,
+      task_id: 11,
+      parent_task_id: 1,
+      kind: "task",
+      title: "review sample onboarding issue",
+      category: "Slack",
+      app_name: "Slack",
+      start_at: at(170),
+      end_at: at(132),
+      state: "final",
+      confidence: 0.82,
+      producer: "deterministic-v1",
+      evidence_count: 12,
+      actions: [
+        {
+          id: 1001,
+          occurred_at: at(162),
+          action_type: "window_focus",
+          summary: "focused Slack conversation",
+          app_name: "Slack",
+          confidence: 0.8,
+          source_type: "ui_event",
+          source_id: 7101,
+        },
+        {
+          id: 1002,
+          occurred_at: at(141),
+          action_type: "text",
+          summary: "typed in message field",
+          app_name: "Slack",
+          confidence: 0.85,
+          source_type: "ui_event",
+          source_id: 7102,
+        },
+      ],
+      evidence: [
+        {
+          source_type: "frame",
+          source_id: 90101,
+          occurred_at: at(169),
+          frame_id: 90101,
+          app_name: "Slack",
+          window_title: "sample onboarding issue",
+          browser_url: null,
+        },
+        {
+          source_type: "ui_event",
+          source_id: 7102,
+          occurred_at: at(141),
+          frame_id: 90102,
+          app_name: "Slack",
+          window_title: "sample onboarding issue",
+          browser_url: null,
+        },
+      ],
+    },
+    {
+      id: 102,
+      task_id: 12,
+      parent_task_id: 2,
+      kind: "document",
+      title: "activity-ledger.tsx",
+      category: "Cursor",
+      app_name: "Cursor",
+      start_at: at(124),
+      end_at: at(48),
+      state: "final",
+      confidence: 0.9,
+      producer: "deterministic-v1",
+      evidence_count: 24,
+      actions: [
+        {
+          id: 1003,
+          occurred_at: at(97),
+          action_type: "text",
+          summary: "typed in editor",
+          app_name: "Cursor",
+          confidence: 0.88,
+          source_type: "ui_event",
+          source_id: 7103,
+        },
+      ],
+      evidence: [
+        {
+          source_type: "frame",
+          source_id: 90103,
+          occurred_at: at(122),
+          frame_id: 90103,
+          app_name: "Cursor",
+          window_title: "activity-ledger.tsx",
+          browser_url: null,
+        },
+        {
+          source_type: "frame",
+          source_id: 90104,
+          occurred_at: at(49),
+          frame_id: 90104,
+          app_name: "Cursor",
+          window_title: "activity-ledger.tsx",
+          browser_url: null,
+        },
+      ],
+    },
+    {
+      id: 103,
+      task_id: 13,
+      parent_task_id: 3,
+      kind: "task",
+      title: "inspect sample pull request",
+      category: "Arc",
+      app_name: "Arc",
+      start_at: at(39),
+      end_at: at(4),
+      state: "provisional",
+      confidence: 0.75,
+      producer: "deterministic-v1",
+      evidence_count: 9,
+      actions: [
+        {
+          id: 1004,
+          occurred_at: at(24),
+          action_type: "click",
+          summary: "clicked review control",
+          app_name: "Arc",
+          confidence: 0.8,
+          source_type: "ui_event",
+          source_id: 7104,
+        },
+      ],
+      evidence: [
+        {
+          source_type: "frame",
+          source_id: 90105,
+          occurred_at: at(38),
+          frame_id: 90105,
+          app_name: "Arc",
+          window_title: "sample pull request",
+          browser_url: "https://github.com/example/sample/pull/1",
+        },
+        {
+          source_type: "frame",
+          source_id: 90106,
+          occurred_at: at(5),
+          frame_id: 90106,
+          app_name: "Arc",
+          window_title: "sample pull request",
+          browser_url: "https://github.com/example/sample/pull/1",
+        },
+      ],
+    },
+  ];
+
+  return envelope(
+    base.map((interval, index) => {
+      const evidence = interval.evidence.map((item) =>
+        includeArtifacts
+          ? item
+          : {
+              source_type: item.source_type,
+              source_id: item.source_id,
+              occurred_at: item.occurred_at,
+            },
+      );
+      if (depth === "category") {
+        return {
+          ...interval,
+          task_id: 200 + index,
+          parent_task_id: null,
+          kind: "category",
+          title: interval.category,
+          actions: undefined,
+          evidence: includeArtifacts ? evidence : undefined,
+        };
+      }
+      if (depth === "action") return { ...interval, evidence };
+      return {
+        ...interval,
+        actions: undefined,
+        evidence: includeArtifacts ? evidence : undefined,
+      };
+    }),
+  );
 }
 
 // Invented content only. This exists so the meeting note surface renders in
@@ -293,10 +582,7 @@ function installMockFetch(apiPort: number, scenario: BrowserDevScenario) {
   };
 }
 
-function installMockWebSocket(
-  apiPort: number,
-  scenario: BrowserDevScenario,
-) {
+function installMockWebSocket(apiPort: number, scenario: BrowserDevScenario) {
   const NativeWebSocket = window.WebSocket;
 
   class BrowserDevWebSocket extends EventTarget {

@@ -16,6 +16,8 @@ import {
   Search,
   Plug,
   CalendarClock,
+  ListTree,
+  ArrowLeft,
 } from "lucide-react";
 import { emit } from "@tauri-apps/api/event";
 import {
@@ -106,8 +108,12 @@ import {
 import { PlanExpirationNotice } from "@/components/plan-expiration-notice";
 import type { AppUser } from "@/lib/app-entitlement";
 import { ONBOARDING_BRAIN_HANDOFF_EVENT } from "@/lib/live-views/onboarding-activation";
+import {
+  ActivityLedger,
+  preloadActivityHistory,
+} from "@/components/activity-ledger";
 
-type MainSection = "home" | "timeline" | "brain" | "pipes" | "connections" | "meetings" | "help";
+type MainSection = "home" | "timeline" | "activity" | "brain" | "pipes" | "connections" | "meetings" | "help";
 type ConnectionFocusRequest = {
   id: string | null;
   category: string | null;
@@ -117,7 +123,7 @@ type ConnectionFocusRequest = {
 
 // All valid URL sections for the home page
 const ALL_SECTIONS = [
-  "home", "timeline", "pipes", "help", "brain", "connections", "meetings", "history",
+  "home", "timeline", "activity", "pipes", "help", "brain", "connections", "meetings", "history",
   "feedback", // backwards compat → maps to "help"
   "memories", // backwards compat → maps to "brain"
   "artifacts", // backwards compat → maps to "brain"
@@ -149,6 +155,34 @@ function HomeContent() {
     },
     serialize: (value) => value,
   });
+  const [activityReturnVisible, setActivityReturnVisible] = useState(false);
+  const activityReturnButtonRef = useRef<HTMLButtonElement | null>(null);
+  const returnToActivity = useCallback(() => {
+    setActivityReturnVisible(false);
+    router.push("/home?section=activity");
+  }, [router]);
+  const dismissActivityReturn = useCallback(() => {
+    setActivityReturnVisible(false);
+  }, []);
+
+  useEffect(() => {
+    if (
+      !activityReturnVisible ||
+      (activeSection !== "meetings" && activeSection !== "timeline")
+    ) {
+      return;
+    }
+    const dismiss = (event: PointerEvent) => {
+      if (
+        activityReturnButtonRef.current?.contains(event.target as Node)
+      ) {
+        return;
+      }
+      setActivityReturnVisible(false);
+    };
+    document.addEventListener("pointerdown", dismiss, true);
+    return () => document.removeEventListener("pointerdown", dismiss, true);
+  }, [activeSection, activityReturnVisible]);
   const [connectionFocusRequest, setConnectionFocusRequest] = useState<ConnectionFocusRequest | null>(null);
 
   const { settings, updateSettings, isSettingsLoaded } = useSettings();
@@ -941,7 +975,18 @@ function HomeContent() {
         if (settings.disableTimeline) return null;
         // The native window replaces the React timeline where it can run; the
         // webview one stays as the fallback for hosts without it.
-        return <NativeTimeline fallback={<Timeline embedded />} />;
+        return (
+          <NativeTimeline
+            fallback={<Timeline embedded />}
+            showActivityReturn={activityReturnVisible}
+          />
+        );
+      case "activity":
+        return (
+          <ActivityLedger
+            onOpenArtifact={() => setActivityReturnVisible(true)}
+          />
+        );
       case "brain":
         return <BrainSection />;
       case "pipes":
@@ -999,6 +1044,7 @@ function HomeContent() {
     home: { label: "Chat", icon: <Plus className="h-3.5 w-3.5" /> },
     meetings: { label: "Meetings", icon: <CalendarClock className="h-3.5 w-3.5" /> },
     timeline: { label: "Timeline", icon: <MonitorPlay className="h-3.5 w-3.5" /> },
+    activity: { label: "Activity", icon: <ListTree className="h-3.5 w-3.5" /> },
     brain: { label: "Brain", icon: <Brain className="h-3.5 w-3.5" /> },
     pipes: { label: "Scheduled", icon: <TimerReset className="h-3.5 w-3.5" /> },
     connections: { label: "Connections", icon: <Plug className="h-3.5 w-3.5" /> },
@@ -1099,6 +1145,7 @@ function HomeContent() {
   const isFullHeight =
     activeSection === "home" ||
     activeSection === "timeline" ||
+    activeSection === "activity" ||
     activeSection === "meetings" ||
     activeSection === "history" ||
     activeSection === "brain";
@@ -1117,7 +1164,10 @@ function HomeContent() {
           palette use teaches the direct key. Home window only: the settings
           page binds its own ⌘K for search focus while mounted. */}
       {/* Routes actions the native timeline window cannot perform itself. */}
-      <NativeTimelineBridge />
+      <NativeTimelineBridge
+        onReturnToActivity={returnToActivity}
+        onDismissActivityReturn={dismissActivityReturn}
+      />
 
       <CommandPalette
         deps={{
@@ -1307,6 +1357,14 @@ function HomeContent() {
                   // (from any view) always spawns a new chat session.
                   if (id === "home") startNewChat();
                 }}
+                onIntent={(id) => {
+                  if (id === "activity") {
+                    void preloadActivityHistory().catch(() => {
+                      // Activity performs the same read and surfaces its own
+                      // fallback if the encrypted store is unavailable.
+                    });
+                  }
+                }}
                 onMove={(id, toIndex) =>
                   persistSidebarLayout(
                     moveSidebarNavItem(sidebarLayout, availableSidebarIds, id, toIndex),
@@ -1469,6 +1527,20 @@ function HomeContent() {
                 </div>
               )
             )}
+
+            {activityReturnVisible &&
+              (activeSection === "meetings" || activeSection === "timeline") && (
+                <button
+                  ref={activityReturnButtonRef}
+                  type="button"
+                  onClick={returnToActivity}
+                  aria-label="back to activity"
+                  title="back to activity"
+                  className="absolute left-4 top-11 z-40 flex h-10 w-10 items-center justify-center rounded-full border border-border/80 bg-background/90 text-foreground shadow-lg shadow-black/10 backdrop-blur-sm transition-colors hover:border-foreground hover:bg-foreground hover:text-background focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-foreground focus-visible:ring-offset-2"
+                >
+                  <ArrowLeft className="h-4 w-4" />
+                </button>
+              )}
 
           </div>
 
