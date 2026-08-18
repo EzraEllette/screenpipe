@@ -465,7 +465,10 @@ describe("meeting summary recovery controls", function () {
       state: "pending",
       auto_summary_enabled: true,
     });
-    await waitForVisibleCopy("you can safely leave", 20_000);
+    await waitForVisibleCopy(
+      "Finishing the transcript before the summary starts",
+      20_000,
+    );
     await saveScreenshot("meeting-summary-01-saved-finalizing");
 
     const showTranscript = await $("button=show transcript");
@@ -544,7 +547,20 @@ describe("meeting summary recovery controls", function () {
     );
     await refreshedNotesTab.click();
     await waitForVisibleCopy("writing summary", 20_000);
-    await saveScreenshot("meeting-summary-06-writing");
+    await waitForVisibleCopy("The draft appears in Summary");
+    await saveScreenshot("meeting-summary-06-writing-notes");
+
+    await $("button=view summary").click();
+    const writingSummarySurface = await $(
+      "[data-testid=meeting-summary-surface]",
+    );
+    await writingSummarySurface.waitForDisplayed({ timeout: t(10_000) });
+    await waitForVisibleCopy("writing summary");
+    // This fixture starts with a partial summary. Keep the real draft visible
+    // while the replacement is written; the empty placeholder is covered by
+    // the focused workspace test.
+    await waitForVisibleCopy("Earlier partial summary.");
+    await saveScreenshot("meeting-summary-07-writing-summary");
 
     await setSummaryStatusFixture({
       state: "ready",
@@ -557,7 +573,7 @@ describe("meeting summary recovery controls", function () {
     );
     await summaryTab.click();
     await waitForVisibleCopy("saved to this meeting note");
-    await saveScreenshot("meeting-summary-07-ready");
+    await saveScreenshot("meeting-summary-08-ready");
 
     await setSummaryStatusFixture({
       state: "failed",
@@ -567,7 +583,10 @@ describe("meeting summary recovery controls", function () {
       error_type: "unknown",
       error_message: "summary service unavailable",
     });
-    await waitForVisibleCopy("summary needs attention", 20_000);
-    await saveScreenshot("meeting-summary-08-failed");
+    await waitForVisibleCopy(
+      "Your meeting and transcript are safe. Retry when you're ready.",
+      20_000,
+    );
+    await saveScreenshot("meeting-summary-09-failed");
   });
 });

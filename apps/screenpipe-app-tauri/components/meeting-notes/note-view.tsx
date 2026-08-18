@@ -1531,16 +1531,20 @@ export function NoteView({
     visibleSummaryLifecycle.kind === "failed"
       ? meetingSummaryFailure(visibleSummaryLifecycle.execution).upgrade
       : null;
-  // Whether the footer has anything to report. A finished meeting that is not
-  // recording, summarizing or failing has no news, and the badge plus detail
-  // line collapse to a single quiet caption.
-  // summaryWorking already covers finalizing, queued and running.
+  // Notes and Summary now own their summary lifecycle in the reading area.
+  // Repeating the same state in the footer made the page look like two jobs
+  // were running. Transcript still gets the global footer because it has no
+  // local summary surface of its own.
+  const summaryLifecycleInActivePanel =
+    (summaryWorking && activeTab !== "transcript") ||
+    (visibleSummaryLifecycle.kind === "failed" && activeTab === "summary");
   const footerHasNews =
-    isLive ||
-    resuming ||
-    summaryWorking ||
-    hasSaveStatus ||
-    visibleSummaryLifecycle.kind === "failed";
+    !summaryLifecycleInActivePanel &&
+    (isLive ||
+      resuming ||
+      summaryWorking ||
+      hasSaveStatus ||
+      visibleSummaryLifecycle.kind === "failed");
   // The footer exists to report something. A finished meeting that is not
   // recording, summarizing, failing or saving has nothing to report, and its
   // resting caption ("meeting saved") was pure reassurance, so the whole bar
@@ -1870,6 +1874,13 @@ export function NoteView({
           )}
         >
           <div className={cn(MEETING_SHELL_CLASS, "pb-16 pt-8 sm:pt-10")}>
+            <MeetingSummaryTransition
+              phase={summaryTransitionPhase}
+              transcriptOpen={transcriptOpen}
+              onTranscriptToggle={() => setTranscriptOpen((open) => !open)}
+              onResume={() => void onResume()}
+              onOpenSummary={() => setActiveTab("summary")}
+            />
             <NoteEditor
               ref={noteEditorRef}
               key={meeting.id}
@@ -1885,12 +1896,6 @@ export function NoteView({
                   ? "[&_.ProseMirror]:!min-h-0"
                   : "[&_.ProseMirror]:min-h-[45vh]",
               )}
-            />
-            <MeetingSummaryTransition
-              phase={summaryTransitionPhase}
-              transcriptOpen={transcriptOpen}
-              onTranscriptToggle={() => setTranscriptOpen((open) => !open)}
-              onResume={() => void onResume()}
             />
           </div>
         </section>
