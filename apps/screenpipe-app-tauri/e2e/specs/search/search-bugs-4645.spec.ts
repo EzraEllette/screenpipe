@@ -636,6 +636,64 @@ describe("Search bugs over seeded data (reproduces #4645)", function () {
     );
   });
 
+  it("clicks a standalone Search thumbnail and opens the overlay native Timeline at that exact frame", async function () {
+    const nativeAvailable = await invokeOrThrow<boolean>("native_timeline_is_available");
+    if (!nativeAvailable) this.skip();
+
+    await openHomeWindow();
+    await invokeOrThrow("open_search_window", {
+      query: null,
+      timelineOrigin: null,
+    });
+    await browser.waitUntil(
+      async () => (await browser.getWindowHandles()).includes("search"),
+      { timeout: t(20_000), timeoutMsg: "standalone Search window did not open" },
+    );
+    await browser.switchToWindow("search");
+
+    // This is the production path used by the global Search button: unlike a
+    // Search launched from inside Timeline, it has no timelineOrigin. The old
+    // fallback opened the overlay at its live edge and sent only a React event,
+    // which the native AppKit Timeline never receives.
+    const searchQuery = "vector search result number 5";
+    const searchResult = await readySearchThumbnail(searchQuery);
+    await $(searchResult.selector).click();
+    const expectedFrameId = searchResult.frameId;
+
+    const overlayLabel = await browser.waitUntil(
+      async () => {
+        const handles = await browser.getWindowHandles();
+        return handles.find((handle) => handle === "main" || handle === "main-window") ?? false;
+      },
+      {
+        timeout: t(20_000),
+        interval: 200,
+        timeoutMsg: "standalone Search did not open the overlay Timeline",
+      },
+    );
+    await browser.switchToWindow(overlayLabel as string);
+    await browser.waitUntil(
+      async () => {
+        const state = await nativeTimelineSearchState(overlayLabel as string);
+        return state?.attached === true &&
+          state.currentFrameId === expectedFrameId &&
+          state.displayedFrameId === expectedFrameId &&
+          state.loadedImageFrameId === expectedFrameId &&
+          Math.abs(
+            new Date(state.currentTimestamp ?? 0).getTime() -
+              new Date(searchResult.timestamp).getTime(),
+          ) < 2 &&
+          state.searchQuery === searchQuery &&
+          state.searchFrameIds.includes(expectedFrameId);
+      },
+      {
+        timeout: t(30_000),
+        interval: 200,
+        timeoutMsg: `standalone Search did not move the native Timeline to frame ${expectedFrameId}`,
+      },
+    );
+  });
+
   it("clicks a real Search thumbnail and restores the overlay native Timeline at that exact frame", async function () {
     const nativeAvailable = await invokeOrThrow<boolean>("native_timeline_is_available");
     if (!nativeAvailable) this.skip();

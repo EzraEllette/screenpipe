@@ -308,6 +308,14 @@ final class FrameStreamClient: NSObject {
             switch result {
             case .failure(let error):
                 guard !self.stopped else { return }
+                let nsError = error as NSError
+                NSLog(
+                    "[native-timeline] frame stream receive failed domain=%@ code=%ld description=%@ reason=%@",
+                    nsError.domain,
+                    nsError.code,
+                    nsError.localizedDescription,
+                    nsError.localizedFailureReason ?? "none"
+                )
                 self.delegate?.frameStream(didFail: error.localizedDescription)
                 self.scheduleReconnect()
             case .success(let message):
@@ -336,8 +344,13 @@ final class FrameStreamClient: NSObject {
             delegate?.frameStream(didReceive: update)
         case .some(.serverError(let message)):
             delegate?.frameStream(didFail: message)
-        case .some(.keepAlive), .none:
+        case .some(.keepAlive):
             break
+        case .none:
+            NSLog(
+                "[native-timeline] ignored undecodable frame stream message bytes=%ld",
+                text.utf8.count
+            )
         }
     }
 
