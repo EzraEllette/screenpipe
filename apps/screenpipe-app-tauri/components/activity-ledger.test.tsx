@@ -717,7 +717,7 @@ describe("ActivityLedger", () => {
     );
   });
 
-  it("keeps rows concise while exposing artifact icons and skill creation", async () => {
+  it("keeps rows concise while exposing artifact icons and episode actions", async () => {
     render(<ActivityLedger />);
     await generateActivities();
 
@@ -755,6 +755,11 @@ describe("ActivityLedger", () => {
     expect(
       screen.getByRole("button", {
         name: "Make skill from Fixed a capture reliability regression",
+      }),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("button", {
+        name: "Chat about Fixed a capture reliability regression",
       }),
     ).toBeVisible();
 
@@ -953,6 +958,29 @@ describe("ActivityLedger", () => {
           source: "activity-history-skill",
           context: expect.stringContaining("frame 67890"),
           prompt: expect.stringContaining("Draft a focused SKILL.md"),
+        }),
+      ),
+    );
+  });
+
+  it("can ask about every activity interval in chat", async () => {
+    render(<ActivityLedger />);
+    await generateActivities();
+    await screen.findByText("Unblocked a customer's onboarding");
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Chat about Unblocked a customer's onboarding",
+      }),
+    );
+
+    await waitFor(() =>
+      expect(mocks.showChatWithPrefill).toHaveBeenCalledWith(
+        expect.objectContaining({
+          source: "activity-history-chat",
+          context: expect.stringContaining("frame 67890"),
+          displayLabel: "Ask about “Unblocked a customer's onboarding”",
+          prompt: "Tell me more about this activity.",
         }),
       ),
     );
