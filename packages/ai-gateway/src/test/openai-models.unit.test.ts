@@ -412,32 +412,33 @@ describe('OpenAI API accounting and routing', () => {
 		expect(marked).toEqual([true, false, true, false, false, true, false, true, false, false, true]);
 	});
 
-	it('marks the last supported multipart image or file block without changing it', async () => {
+	it('marks preceding multipart text without adding cache fields to media blocks', async () => {
 		const imagePart = {
 			type: 'image_url',
 			image_url: { url: 'data:image/png;base64,AA', detail: 'high' },
 		};
 		const filePart = { type: 'file', file: { file_id: 'file_123' } };
+		const audioPart = { type: 'input_audio', input_audio: { data: 'AA', format: 'wav' } };
 		const params: any = {
 			model: 'gpt-5.6-luna',
 			messages: [
 				{ role: 'system', content: 'stable' },
 				{ role: 'user', content: [{ type: 'text', text: 'look' }, imagePart, { type: 'text', text: '' }] },
 				{ role: 'assistant', content: 'seen' },
-				{ role: 'user', content: [filePart, { type: 'text', text: '' }] },
+				{ role: 'user', content: [{ type: 'text', text: 'read' }, filePart, { type: 'text', text: '' }] },
+				{ role: 'assistant', content: 'read' },
+				{ role: 'user', content: [{ type: 'text', text: 'listen' }, audioPart, { type: 'text', text: '' }] },
 			],
 		};
 
 		await applyGpt56PromptCaching(params, true);
 
-		expect(params.messages[1].content[1]).toEqual({
-			...imagePart,
-			prompt_cache_breakpoint: { mode: 'explicit' },
-		});
-		expect(params.messages[3].content[0]).toEqual({
-			...filePart,
-			prompt_cache_breakpoint: { mode: 'explicit' },
-		});
+		expect(params.messages[1].content[0].prompt_cache_breakpoint).toEqual({ mode: 'explicit' });
+		expect(params.messages[1].content[1]).toEqual(imagePart);
+		expect(params.messages[3].content[0].prompt_cache_breakpoint).toEqual({ mode: 'explicit' });
+		expect(params.messages[3].content[1]).toEqual(filePart);
+		expect(params.messages[5].content[0].prompt_cache_breakpoint).toEqual({ mode: 'explicit' });
+		expect(params.messages[5].content[1]).toEqual(audioPart);
 	});
 
 	it('recomputes GPT-5.6 breakpoints idempotently after rewritten history', async () => {
