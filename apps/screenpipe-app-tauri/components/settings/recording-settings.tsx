@@ -39,7 +39,6 @@ export const audioSearchIndex: SettingsField[] = [
   { label: "Live meeting notes", keywords: ["captions", "meeting", "live"], conditional: true },
   { label: "Append typed text to note", keywords: ["note", "append"], conditional: true },
   { label: "Automatic meeting detection", keywords: ["zoom", "teams", "meet"], conditional: true },
-  { label: "Hide screenpipe from screen capture", keywords: ["screen share", "zoom", "screenshot", "privacy"] },
   { label: "Auto-select audio devices", keywords: ["devices", "bluetooth"], conditional: true },
   { label: "Languages", keywords: ["transcript language", "language"], conditional: true },
   { label: "Custom Vocabulary", keywords: ["vocabulary", "names", "jargon", "replacement"], conditional: true },
@@ -103,7 +102,6 @@ import {
   RefreshCw,
   Loader2,
   Globe,
-  Shield,
   Zap,
   FileAudio,
   FileText,
@@ -2570,23 +2568,6 @@ export function RecordingSettings({ section }: { section: RecordingSettingsSecti
     handleSettingsChange({ disableAudio: checked }, true);
   };
 
-  const handleScreenSharePrivacyChange = async (hidden: boolean) => {
-    try {
-      await updateSettings({ hideAppInScreenShare: hidden });
-      const result = await commands.setAppScreenCaptureProtection(hidden);
-      if (result.status === "error") {
-        throw new Error(result.error);
-      }
-    } catch (error) {
-      await updateSettings({ hideAppInScreenShare: !hidden });
-      toast({
-        title: "could not update screen-share privacy",
-        description: error instanceof Error ? error.message : String(error),
-        variant: "destructive",
-      });
-    }
-  };
-
   const handleAnalyticsToggle = (checked: boolean) => {
     const newValue = checked;
     handleSettingsChange({ analyticsEnabled: newValue }, true);
@@ -2788,32 +2769,6 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
       {/* Audio */}
       <div className="space-y-2 pt-2">
         <h2 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider px-1">Audio &amp; meetings</h2>
-
-        <Card className="border-border bg-card">
-          <CardContent className="px-3 py-2.5">
-            <div className="flex items-center justify-between gap-3">
-              <div className="flex min-w-0 items-center space-x-2.5">
-                <Shield className="h-4 w-4 shrink-0 text-muted-foreground" />
-                <div className="min-w-0">
-                  <h3 className="text-sm font-medium text-foreground">
-                    Hide screenpipe from screen capture
-                  </h3>
-                  <p className="text-xs text-muted-foreground">
-                    You&apos;ll still see screenpipe, but it stays hidden from screenshots and anyone watching your shared screen.
-                  </p>
-                </div>
-              </div>
-              <Switch
-                id="hideAppInScreenShare"
-                data-testid="hide-app-in-screen-share-toggle"
-                checked={settings.hideAppInScreenShare ?? true}
-                onCheckedChange={(checked) => {
-                  void handleScreenSharePrivacyChange(checked);
-                }}
-              />
-            </div>
-          </CardContent>
-        </Card>
 
         <LockedSetting settingKey="audio_recording">
         <div className="space-y-2">

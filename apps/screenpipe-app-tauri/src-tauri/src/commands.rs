@@ -3347,7 +3347,7 @@ pub(crate) async fn show_shortcut_reminder_impl(
 
             // Clone window to pass into main thread closure
             let window_clone = window.clone();
-            let capturable = crate::window::app_windows_are_capturable(&app_handle);
+            let capturable = crate::window::native_overlay_is_capturable(&app_handle);
             let _ = app_handle.run_on_main_thread(move || {
                 use tauri_nspanel::cocoa::appkit::NSWindowCollectionBehavior;
 
@@ -3945,7 +3945,9 @@ pub(crate) async fn deliver_notification_panel(
             // steals focus. orderFront: in the main thread block handles visibility.
 
             let window_clone = window.clone();
-            let capturable = crate::window::app_windows_are_capturable(&app_handle);
+            // Notifications are ordinary user-facing app UI, not the recording
+            // overlay controlled by Settings > Display.
+            let capturable = true;
             let _ = app_handle.run_on_main_thread(move || {
                 use tauri_nspanel::cocoa::appkit::NSWindowCollectionBehavior;
 

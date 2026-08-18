@@ -1033,8 +1033,9 @@ pub struct SettingsStore {
     #[serde(rename = "showOverlayInScreenRecording", default)]
     pub show_overlay_in_screen_recording: bool,
 
-    /// Hide screenpipe windows from screenshots and screen-sharing viewers
-    /// while keeping them visible and interactive on the user's own display.
+    /// Legacy global capture-protection preference. Retained for settings-file
+    /// compatibility; capture protection is now controlled only by the overlay
+    /// preference above.
     #[serde(rename = "hideAppInScreenShare", default = "default_true")]
     pub hide_app_in_screen_share: bool,
 
