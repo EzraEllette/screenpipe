@@ -77,20 +77,23 @@ describe("areRemoteAnnouncementsDisabled", () => {
     expect(areRemoteAnnouncementsDisabled()).toBe(true);
   });
 
-  it("disables remote announcements on localhost dev hosts outside tests", () => {
-    expect(
-      areRemoteAnnouncementsDisabled(
-        {
-          NODE_ENV: "production",
-          TAURI_ENV_DEBUG: "false",
-          NEXT_PUBLIC_SCREENPIPE_E2E: "false",
-          NEXT_PUBLIC_SCREENPIPE_DISABLE_REMOTE_ANNOUNCEMENTS: "false",
-        },
-        "localhost",
-        "http:",
-      ),
-    ).toBe(true);
-  });
+  it.each(["localhost", "127.0.0.1", "::1"])(
+    "disables remote announcements on browser dev host %s outside tests",
+    (hostname) => {
+      expect(
+        areRemoteAnnouncementsDisabled(
+          {
+            NODE_ENV: "production",
+            TAURI_ENV_DEBUG: "false",
+            NEXT_PUBLIC_SCREENPIPE_E2E: "false",
+            NEXT_PUBLIC_SCREENPIPE_DISABLE_REMOTE_ANNOUNCEMENTS: "false",
+          },
+          hostname,
+          "http:",
+        ),
+      ).toBe(true);
+    },
+  );
 });
 
 describe("isDevOrE2EAppIdentity", () => {
