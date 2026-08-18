@@ -963,6 +963,15 @@ Re-query Screenpipe only inside the cited time range and use the cited frames an
     });
   };
 
+  const askAboutActivity = (entry: ActivityHistoryEntry) => {
+    void showChatWithPrefill({
+      context: compactEntryContext(entry),
+      displayLabel: `Ask about “${entry.title}”`,
+      prompt: "Tell me more about this activity.",
+      source: "activity-history-chat",
+    });
+  };
+
   const openEvidence = useCallback(
     (evidence: ActivityArtifact) => {
       onOpenArtifact?.();
@@ -1194,6 +1203,15 @@ Re-query Screenpipe only inside the cited time range and use the cited frames an
                             aria-label={`Make skill from ${entry.title}`}
                           >
                             Make skill
+                          </button>
+                          <span aria-hidden="true">·</span>
+                          <button
+                            type="button"
+                            onClick={() => askAboutActivity(entry)}
+                            className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground transition-colors hover:text-foreground"
+                            aria-label={`Chat about ${entry.title}`}
+                          >
+                            Chat
                           </button>
                         </div>
                       </div>
