@@ -280,7 +280,7 @@ export async function startApp(port = WEBDRIVER_PORT): Promise<ReturnType<typeof
   const appPath = getAppPath();
   if (!existsSync(appPath)) {
     throw new Error(
-      `Screenpipe debug binary not found at ${appPath}. Build with e2e feature: cd apps/screenpipe-app-tauri && bun tauri build --verbose --no-bundle -- --profile debug-dev --features e2e`
+      `Screenpipe debug binary not found at ${appPath}. Build with e2e feature: cd apps/screenpipe-app-tauri && bun run build:tauri:e2e`
     );
   }
 

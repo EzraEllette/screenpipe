@@ -7,6 +7,10 @@ set -e
 APP_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$APP_ROOT"
 
+if [ "${1:-}" != "--queue-held" ]; then
+  exec bun scripts/native-build-queue.ts signed
+fi
+
 # Clean up any existing bundle
 rm -rf src-tauri/target/debug-dev/bundle
 

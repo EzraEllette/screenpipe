@@ -46,10 +46,11 @@ build also rewrites tracked `src-tauri/gen/schemas/`; `git checkout --` it.
 For native app development, use only the scripts in
 `apps/screenpipe-app-tauri`: `bun run dev:tauri` for the normal live loop and
 `bun run build:tauri:dev` for a one-shot test binary. Both select the
-`debug-dev` Cargo profile through Tauri. Do not add `--debug`, `--no-sign`,
-`cargo clean`, target-directory overrides, or Cargo profile/cache environment
-variables. See `docs/macos-dev-builds.md` for why and for the separate signed
-`.app` path used only when persistent macOS TCC identity is required.
+`debug-dev` Cargo profile through Tauri and use the machine-wide native build
+queue/cache automatically. Do not bypass them with raw Tauri/Cargo commands,
+`cargo clean`, target-directory overrides, or ad hoc profile/cache settings.
+See `docs/macos-dev-builds.md` for the exact commands and for the separate
+signed `.app` path used only when persistent macOS TCC identity is required.
 
 ## Hot paths
 

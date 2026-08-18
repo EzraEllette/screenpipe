@@ -47,7 +47,9 @@ bundle, so do not use or share a production credential.
 Use `bun run dev:tauri` for the full native loop. Browser mode cannot validate
 native windows, menus, tray behavior, permissions, updater flows, filesystem
 access, or WebKit-only layout/focus behavior. Check those changes in Tauri
-before considering them complete.
+before considering them complete. This command queues its initial native
+compile across all local Screenpipe worktrees, then releases the queue slot for
+the live app; see [`docs/macos-dev-builds.md`](../../docs/macos-dev-builds.md).
 
 ## dev builds are isolated from your installed app
 

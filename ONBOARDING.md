@@ -72,7 +72,11 @@ This is the boring part that stops people, so don't rush it. On macOS (see `CONT
 
 If that build finishes, you've built screenpipe from source and your machine is ready. If it fails, stop and fix it before going further. A half-working toolchain is where the lost days happen.
 
-The engine builds with `cargo`. The desktop app builds with `bun tauri build` from `apps/screenpipe-app-tauri/`. You usually only need the one you're changing.
+The engine builds with `cargo`. For desktop app development, run
+`bun run build:tauri:dev` or `bun run dev:tauri` from
+`apps/screenpipe-app-tauri/`; these use the repository's fast profile and
+machine-wide build queue. You usually only need to build the part you're
+changing.
 
 ---
 

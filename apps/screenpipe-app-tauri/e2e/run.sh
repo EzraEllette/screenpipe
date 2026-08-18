@@ -10,6 +10,6 @@ cd "$APP_ROOT"
 echo "Building Screenpipe (debug, no bundle, with e2e webdriver)..."
 # NEXT_PUBLIC_SCREENPIPE_E2E bypasses the billing gate by default so the suite
 # exercises real features; the dedicated entitlement-gate spec re-enables it.
-NEXT_PUBLIC_SCREENPIPE_E2E=true bun tauri build --verbose --no-bundle -- --profile debug-dev --features e2e
+bun run build:tauri:e2e
 echo "Running E2E..."
 bun run test:e2e
