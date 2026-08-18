@@ -32,6 +32,8 @@ import { normalizeOs } from "@/lib/card-ask/os";
 import { onCardAskTrigger } from "@/lib/card-ask/trigger-bus";
 
 export type CardAskState = {
+  /** True once persisted state is loaded and trigger listeners are attached. */
+  ready: boolean;
   /** Non-null while the modal should be visible. */
   activeTrigger: CardAskTrigger | null;
   arm: CardAskArm | null;
@@ -68,7 +70,11 @@ function writeStorage(key: string, value: string): void {
  *     relationship.
  *  3. Show each trigger at most once per install, ever.
  */
-export function useCardAsk(): CardAskState {
+export function useCardAsk({
+  businessTrialReminderEnabled = false,
+}: {
+  businessTrialReminderEnabled?: boolean;
+} = {}): CardAskState {
   const liveFlag = useFeatureFlagVariantKey(CARD_ASK_FLAG);
   const enabled = isCardAskEnabled(useFeatureFlagEnabled(CARD_ASK_ENABLED_FLAG));
   const triggerOverride = parseTriggerOverride(
@@ -138,20 +144,32 @@ export function useCardAsk(): CardAskState {
       setActiveTrigger((current) => {
         // Never stack a second modal over a visible one.
         if (current !== null) return current;
-        const allowed = shouldShowCardAsk({
-          arm,
-          trigger,
-          eligible,
-          enabled,
-          triggerOverride,
-          alreadyShownTriggers: shownRef.current,
-        });
+        const allowed =
+          trigger === "grant_expiry"
+            ? businessTrialReminderEnabled &&
+              eligible &&
+              !shownRef.current.includes(trigger)
+            : shouldShowCardAsk({
+                arm,
+                trigger,
+                eligible,
+                enabled,
+                triggerOverride,
+                alreadyShownTriggers: shownRef.current,
+              });
         if (!allowed) return current;
         markShown(trigger);
         return trigger;
       });
     },
-    [arm, eligible, enabled, triggerOverride, markShown],
+    [
+      arm,
+      businessTrialReminderEnabled,
+      eligible,
+      enabled,
+      triggerOverride,
+      markShown,
+    ],
   );
 
   // Subscribe to trigger sites, and remember every trigger that fires.
@@ -194,7 +212,14 @@ export function useCardAsk(): CardAskState {
   const dismiss = useCallback(() => setActiveTrigger(null), []);
   const consume = useCallback(() => setActiveTrigger(null), []);
 
-  return { activeTrigger, arm, isFirstAsk, dismiss, consume };
+  return {
+    ready: hydrated,
+    activeTrigger,
+    arm,
+    isFirstAsk,
+    dismiss,
+    consume,
+  };
 }
 
 export type CardAskPlacement = {

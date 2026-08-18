@@ -20,12 +20,16 @@ let flagVariant: string | undefined = "at_login";
 // The kill switch is read live on every decision, so it has to be mocked or
 // every ask is (correctly) suppressed.
 let flagEnabled: boolean | undefined = true;
+let businessTrialReminderEnabled: boolean | undefined = false;
 let flagPayload: unknown = undefined;
 let settingsState: { settings: any; isSettingsLoaded: boolean };
 
 vi.mock("posthog-js/react", () => ({
   useFeatureFlagVariantKey: () => flagVariant,
-  useFeatureFlagEnabled: () => flagEnabled,
+  useFeatureFlagEnabled: (key: string) =>
+    key === "business-trial-card-reminder"
+      ? businessTrialReminderEnabled
+      : flagEnabled,
   useFeatureFlagPayload: () => flagPayload,
 }));
 
@@ -35,7 +39,13 @@ vi.mock("@/lib/hooks/use-settings", () => ({
 
 vi.mock("@tauri-apps/plugin-os", () => ({ platform: () => "macos" }));
 
-vi.mock("posthog-js", () => ({ default: { capture: vi.fn() } }));
+let posthogDistinctId = "user_123";
+vi.mock("posthog-js", () => ({
+  default: {
+    capture: vi.fn(),
+    get_distinct_id: () => posthogDistinctId,
+  },
+}));
 
 vi.mock("@/lib/open-external-url", () => ({
   openExternalUrl: vi.fn(async () => {}),
@@ -62,6 +72,7 @@ const localStorageMock = {
 /** An eligible account: signed in, no card on file. */
 const cardlessUser = {
   id: "u1",
+  clerk_id: "user_123",
   email: "a@b.com",
   has_payment_method: false,
 };
@@ -74,6 +85,8 @@ function reset() {
   });
   resetCardAskTriggerBus();
   flagVariant = "at_login";
+  businessTrialReminderEnabled = false;
+  posthogDistinctId = "user_123";
   settingsState = { settings: { user: cardlessUser }, isSettingsLoaded: true };
 }
 
@@ -179,6 +192,7 @@ describe("CardAskProvider grant expiry trigger", () => {
 
   beforeEach(() => {
     flagVariant = "at_onboarding";
+    businessTrialReminderEnabled = true;
     localStorageValues.set(CARD_ASK_ARM_STORAGE_KEY, "at_onboarding");
   });
 
@@ -193,6 +207,27 @@ describe("CardAskProvider grant expiry trigger", () => {
     };
     render(<CardAskProvider />);
     expect(modal()).not.toBeNull();
+  });
+
+  it("uses only the dedicated reminder flag when the old arm is unresolved", () => {
+    flagVariant = undefined;
+    localStorageValues.delete(CARD_ASK_ARM_STORAGE_KEY);
+    settingsState = {
+      settings: { user: grantExpiringIn(3 * DAY) },
+      isSettingsLoaded: true,
+    };
+    render(<CardAskProvider />);
+    expect(modal()).not.toBeNull();
+  });
+
+  it("fails closed until PostHog is identified as the signed-in account", () => {
+    posthogDistinctId = "anonymous-install-id";
+    settingsState = {
+      settings: { user: grantExpiringIn(3 * DAY) },
+      isSettingsLoaded: true,
+    };
+    render(<CardAskProvider />);
+    expect(modal()).toBeNull();
   });
 
   it("stays silent while the grant is still far out", () => {

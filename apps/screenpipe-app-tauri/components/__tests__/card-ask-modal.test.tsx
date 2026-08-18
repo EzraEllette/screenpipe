@@ -44,6 +44,7 @@ function checkoutBody(fetchMock: ReturnType<typeof vi.fn>) {
 
 beforeEach(() => {
   captured.length = 0;
+  vi.clearAllMocks();
   stubCheckout();
 });
 
@@ -152,16 +153,38 @@ describe("CardAskModal", () => {
     );
   });
 
-  it("preserves the grant expiry framing for an expiring trial", async () => {
-    const fetchMock = stubCheckout();
-    render(<CardAskModal {...base} trigger="grant_expiry" />);
+  it("keeps the expiring-trial payment form inside the app modal", async () => {
+    render(
+      <CardAskModal
+        {...base}
+        trigger="grant_expiry"
+        trialExpiresAt={new Date(Date.now() + 2 * 24 * 60 * 60 * 1000).toISOString()}
+      />,
+    );
+    expect(screen.getByText(/you will lose your trial in 2 days/i)).toBeTruthy();
     fireEvent.click(screen.getByTestId("card-ask-start"));
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
-    const body = checkoutBody(fetchMock);
-    // The server ends the Stripe trial when the existing grant ends, which is
-    // exactly what this trigger's copy promises the user.
-    expect(body.business_trial_mode).toBe("new");
-    expect(body.cta_location).toBe("desktop_card_ask_grant_expiry");
+    const frame = await screen.findByTestId("business-trial-checkout-frame");
+    expect(frame.getAttribute("src")).toBe(
+      "https://example.test/business-trial/checkout?embedded=1",
+    );
+    const postMessage = vi.spyOn(frame.contentWindow!, "postMessage");
+    fireEvent.load(frame);
+    expect(postMessage).toHaveBeenCalledWith(
+      { type: "screenpipe-business-trial:init", token: "tok_test" },
+      "https://example.test",
+    );
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        origin: "https://example.test",
+        source: frame.contentWindow,
+        data: { type: "screenpipe-business-trial:loaded" },
+      }),
+    );
+    expect(base.openUrl).not.toHaveBeenCalled();
+    expect(names()).toContain("card_ask_checkout_opened");
+    expect(propsFor("card_ask_checkout_opened").destination_type).toBe(
+      "stripe_payment_element",
+    );
   });
 
   it("reports a bounded failure reason and does not consume when opening fails", async () => {

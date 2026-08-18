@@ -97,6 +97,32 @@ describe("useCardAsk", () => {
     expect(result.current.activeTrigger).toBeNull();
   });
 
+  it("lets the dedicated reminder flag reach an expiring grant in control", () => {
+    flagVariant = "control";
+    const { result } = renderHook(() =>
+      useCardAsk({ businessTrialReminderEnabled: true }),
+    );
+    act(() => emitCardAskTrigger("grant_expiry"));
+    expect(result.current.activeTrigger).toBe("grant_expiry");
+    expect(result.current.arm).toBe("control");
+  });
+
+  it("does not wait on the old timing experiment to show the reminder", () => {
+    flagVariant = undefined;
+    const { result } = renderHook(() =>
+      useCardAsk({ businessTrialReminderEnabled: true }),
+    );
+    act(() => emitCardAskTrigger("grant_expiry"));
+    expect(result.current.activeTrigger).toBe("grant_expiry");
+    expect(result.current.arm).toBeNull();
+  });
+
+  it("fails closed for an expiry trigger until its dedicated flag is on", () => {
+    const { result } = renderHook(() => useCardAsk());
+    act(() => emitCardAskTrigger("grant_expiry"));
+    expect(result.current.activeTrigger).toBeNull();
+  });
+
   it("never shows while the flag is unresolved", () => {
     flagVariant = undefined;
     const { result } = renderHook(() => useCardAsk());
