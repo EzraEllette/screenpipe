@@ -43,6 +43,7 @@ interface NativeTimelineSearchState {
   searchQuery?: string;
   activeResultIndex?: number;
   searchFrameIds: string[];
+  loadedFrameIds: string[];
 }
 
 async function nativeTimelineSearchState(
@@ -69,24 +70,55 @@ async function nativeTimelineSearchState(
   }
 }
 
-async function clickFirstReadySearchThumbnail(query: string): Promise<string> {
+async function nativeTimelineSearchStateFromSearch(
+  windowLabel: string,
+): Promise<NativeTimelineSearchState | null> {
+  return await browser.waitUntil(
+    async () => {
+      try {
+        return await invokeOrThrow<NativeTimelineSearchState | null>(
+          "plugin:e2e|native_timeline_search_state",
+          { windowLabel },
+        );
+      } catch {
+        return false;
+      }
+    },
+    {
+      timeout: t(10_000),
+      interval: 100,
+      timeoutMsg: "Search webview never exposed native Timeline state",
+    },
+  );
+}
+
+async function readySearchThumbnail(
+  query: string,
+  index = 0,
+): Promise<{ frameId: string; selector: string }> {
   const input = await $('input[placeholder*="search memory"]');
   await input.waitForExist({ timeout: t(20_000) });
   await input.setValue(query);
-  const first = await $("[data-index='0']");
-  await first.waitForExist({ timeout: t(20_000) });
+  const selector = `[data-index='${index}']`;
+  const result = await $(selector);
+  await result.waitForExist({ timeout: t(20_000) });
   await browser.waitUntil(
-    async () => (await first.getAttribute("data-thumbnail-ready")) === "true",
+    async () => (await result.getAttribute("data-thumbnail-ready")) === "true",
     {
       timeout: t(20_000),
       interval: 100,
-      timeoutMsg: "first exact Search thumbnail never became clickable",
+      timeoutMsg: `Search thumbnail ${index} never became clickable`,
     },
   );
-  const frameId = await first.getAttribute("data-frame-id");
+  const frameId = await result.getAttribute("data-frame-id");
   if (!frameId) throw new Error("Search card did not expose its exact frame id");
-  await first.click();
-  return frameId;
+  return { frameId, selector };
+}
+
+async function clickReadySearchThumbnail(query: string, index = 0): Promise<string> {
+  const result = await readySearchThumbnail(query, index);
+  await $(result.selector).click();
+  return result.frameId;
 }
 
 describe("Search bugs over seeded data (reproduces #4645)", function () {
@@ -562,14 +594,23 @@ describe("Search bugs over seeded data (reproduces #4645)", function () {
       { timeout: t(20_000), timeoutMsg: "Search window did not open from Home" },
     );
     await browser.switchToWindow("search");
-    const expectedFrameId = await clickFirstReadySearchThumbnail("vector");
+    // Address one stored-OCR frame uniquely. It sits between the native
+    // stream's two boundary frames, and the pre-click assertion below proves
+    // the timeline has not loaded it yet.
+    const searchQuery = "vector search result number 5";
+    const searchResult = await readySearchThumbnail(searchQuery);
+    const beforeClick = await nativeTimelineSearchStateFromSearch("home");
+    expect(beforeClick?.attached).toBe(true);
+    expect(beforeClick?.loadedFrameIds ?? []).not.toContain(searchResult.frameId);
+    await $(searchResult.selector).click();
+    const expectedFrameId = searchResult.frameId;
 
     await browser.switchToWindow("home");
     await browser.waitUntil(
       async () => {
         const state = await nativeTimelineSearchState("home");
         return state?.currentFrameId === expectedFrameId &&
-          state.searchQuery === "vector" &&
+          state.searchQuery === searchQuery &&
           state.searchFrameIds.includes(expectedFrameId);
       },
       {
@@ -624,7 +665,7 @@ describe("Search bugs over seeded data (reproduces #4645)", function () {
       { timeout: t(20_000), timeoutMsg: "Search window did not open from overlay" },
     );
     await browser.switchToWindow("search");
-    const expectedFrameId = await clickFirstReadySearchThumbnail("vector");
+    const expectedFrameId = await clickReadySearchThumbnail("vector");
 
     await browser.switchToWindow(overlayLabel as string);
     await browser.waitUntil(

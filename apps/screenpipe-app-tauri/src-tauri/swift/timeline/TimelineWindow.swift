@@ -412,7 +412,8 @@ final class TimelineWindowController: NSObject, NSWindowDelegate {
         var state: [String: Any] = [
             "attached": true,
             "queued": pendingSearchNavigation[label] != nil,
-            "searchFrameIds": model.searchReview?.frameIds ?? []
+            "searchFrameIds": model.searchReview?.frameIds ?? [],
+            "loadedFrameIds": model.frames.compactMap { $0.devices.first?.frameId }
         ]
         if let frameId = model.currentFrame?.devices.first?.frameId {
             state["currentFrameId"] = frameId

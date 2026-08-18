@@ -56,7 +56,7 @@
     "test:e2e:capture-stall-recovery:macos": "SCREENPIPE_E2E_SEED=onboarding,no-audio,ignore-disk-pressure,sck-capture-hang-once,capture-loop-silent-once,sck-lookup-hang-once SCREENPIPE_PORT=3041 bun run wdio run e2e/wdio.conf.ts --spec e2e/specs/capture-stall-recovery.spec.ts",
     "test:e2e:recording-health-focus-cold:macos": "SCREENPIPE_E2E_SEED=onboarding,no-audio,ignore-disk-pressure,focus-cold-heartbeat SCREENPIPE_PORT=3047 bun run wdio run e2e/wdio.conf.ts --spec e2e/specs/recording-health-focus-cold.spec.ts",
     "test:e2e:recording-health-return-race": "SCREENPIPE_E2E_SEED=onboarding,no-recording,recording-health-return-race SCREENPIPE_PORT=3044 bun run wdio run e2e/wdio.conf.ts --spec e2e/specs/recording-health-return-race.spec.ts",
-    "test:e2e:search-bugs": "SCREENPIPE_E2E_SEED=onboarding,no-recording,search-fixture SCREENPIPE_PORT=3041 bun run wdio run e2e/wdio.conf.ts --spec e2e/specs/search/search-bugs-4645.spec.ts",
+    "test:e2e:search-bugs": "SCREENPIPE_E2E_SEED=onboarding,no-recording,search-fixture SCREENPIPE_E2E_TIMELINE_FRAME_LIMIT=2 SCREENPIPE_PORT=3041 bun run wdio run e2e/wdio.conf.ts --spec e2e/specs/search/search-bugs-4645.spec.ts",
     "typecheck": "bun x tsc --noEmit",
     "bindings:check": "cargo test -p screenpipe-app tauri_bindings_are_current --manifest-path src-tauri/Cargo.toml -- --nocapture",
     "bindings:generate": "UPDATE_TAURI_BINDINGS=1 cargo test -p screenpipe-app export_typescript_bindings --manifest-path src-tauri/Cargo.toml -- --nocapture",

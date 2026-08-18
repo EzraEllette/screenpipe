@@ -64,11 +64,17 @@ struct FrameStreamRequest: Codable, Equatable {
         case limit
     }
 
-    init(start: Date, end: Date, order: String = "descending", limit: Int = 2500) {
+    init(start: Date, end: Date, order: String = "descending", limit: Int? = nil) {
         self.startTime = TimelineTime.iso(start)
         self.endTime = TimelineTime.iso(end)
         self.order = order
-        self.limit = limit
+        let environment = ProcessInfo.processInfo.environment
+        let e2eLimit = environment["SCREENPIPE_E2E_SEED"] == nil
+            ? nil
+            : environment["SCREENPIPE_E2E_TIMELINE_FRAME_LIMIT"]
+                .flatMap(Int.init)
+                .flatMap { $0 > 0 ? $0 : nil }
+        self.limit = limit ?? e2eLimit ?? 2500
     }
 }
 

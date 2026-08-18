@@ -332,6 +332,19 @@ final class TimelineViewModel: ObservableObject {
         stream.request(FrameStreamRequest(start: range.start, end: range.end))
     }
 
+    /// Search can return an exact frame that falls outside the day's capped
+    /// 2,500-frame stream. Fetch a tiny range around the hit first; once the
+    /// frame arrives, `flushPending` backfills the normal day without losing
+    /// the selected frame from the merged stream.
+    private func requestSearchWindow(around timestamp: Date) {
+        let radius: TimeInterval = 2
+        stream.request(FrameStreamRequest(
+            start: timestamp.addingTimeInterval(-radius),
+            end: timestamp.addingTimeInterval(radius),
+            limit: 2500
+        ))
+    }
+
     private func refreshHealth() {
         Task { [weak self] in
             guard let self else { return }
@@ -360,15 +373,18 @@ final class TimelineViewModel: ObservableObject {
         let previousFrameId = currentFrame?.devices.first?.frameId
         frames = result.frames
         currentIndex = TimelineLiveEdge.shiftIndex(currentIndex, newFramesAtFront: result.newAtFront)
+        var resolvedPendingSearch = false
         if let pending = pendingSearchNavigation {
             if let frameId = pending.frameId,
                let index = TimelineNavigation.index(ofFrameId: frameId, in: frames) {
                 currentIndex = index
                 pendingSearchNavigation = nil
+                resolvedPendingSearch = true
             } else if pending.frameId == nil,
                       let index = TimelineNavigation.indexNearest(pending.timestamp, in: frames) {
                 currentIndex = index
                 pendingSearchNavigation = nil
+                resolvedPendingSearch = true
             }
         }
         meetings = TimelineMeetingDetection.detect(frames: frames)
@@ -385,6 +401,9 @@ final class TimelineViewModel: ObservableObject {
         }
 
         fetchTagsForViewport()
+        if resolvedPendingSearch {
+            requestDay(currentDate)
+        }
     }
 
     // MARK: Tags
@@ -1021,6 +1040,7 @@ final class TimelineViewModel: ObservableObject {
             supersedePendingNavigation: true,
             preservePendingSearchNavigation: true
         )
+        requestSearchWindow(around: timestamp)
     }
 
     func stepSearchResult(_ delta: Int) {
