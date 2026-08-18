@@ -804,8 +804,6 @@ export function ActivityLedger({
     historyLoadingRef.current = false;
     setHistoryLoading(false);
     setHistoryError("");
-    setHistory(null);
-    setHistoryCoverage([]);
     setCacheReady(false);
     if (!range) return;
     let cancelled = false;
@@ -942,36 +940,40 @@ export function ActivityLedger({
       );
       let missingMeetings = missingRequiredMeetingIds(next, generationMeetings);
       if (next.entries.length < minimumEntries || missingMeetings.length > 0) {
-        const repairedRaw = await runDailySummaryWithPi({
-          date: generationRange.start,
-          range: {
-            start: generationRange.start.toISOString(),
-            end: generationRange.end.toISOString(),
-          },
-          preset: reviewPreset,
-          userToken: settings.user?.token ?? null,
-          signal: controller.signal,
-          sessionPrefix: "activity-history-repair",
-          systemPrompt: ACTIVITY_REVIEW_AGENT_SYSTEM_PROMPT,
-          prompt: buildActivityReviewRepairPrompt(
-            reviewRange,
+        try {
+          const repairedRaw = await runDailySummaryWithPi({
+            date: generationRange.start,
+            range: {
+              start: generationRange.start.toISOString(),
+              end: generationRange.end.toISOString(),
+            },
+            preset: reviewPreset,
+            userToken: settings.user?.token ?? null,
+            signal: controller.signal,
+            sessionPrefix: "activity-history-repair",
+            systemPrompt: ACTIVITY_REVIEW_AGENT_SYSTEM_PROMPT,
+            prompt: buildActivityReviewRepairPrompt(
+              reviewRange,
+              generationMeetings,
+              next,
+              minimumEntries,
+              missingMeetings,
+            ),
+          });
+          const repaired = parseActivityHistoryResponse(
+            repairedRaw,
+            generationRange,
             generationMeetings,
-            next,
-            minimumEntries,
-            missingMeetings,
-          ),
-        });
-        next = parseActivityHistoryResponse(
-          repairedRaw,
-          generationRange,
-          generationMeetings,
-        );
-        missingMeetings = missingRequiredMeetingIds(next, generationMeetings);
-      }
-      if (next.entries.length < minimumEntries) {
-        throw new Error(
-          "History is still resolving this range. Try again in a moment.",
-        );
+          );
+          // Never discard a valid, source-backed first pass merely because a
+          // best-effort repair returned fewer usable rows.
+          if (repaired.entries.length >= next.entries.length) next = repaired;
+          missingMeetings = missingRequiredMeetingIds(next, generationMeetings);
+        } catch (reason) {
+          if (controller.signal.aborted) throw reason;
+          // The first pass is already structurally validated and cited. Keep
+          // it instead of turning a coverage-quality miss into a blank page.
+        }
       }
       if (missingMeetings.length > 0) {
         throw new Error(
