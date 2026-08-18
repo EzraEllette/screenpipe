@@ -5,6 +5,8 @@
 import posthog from "posthog-js";
 import type { CardAskArm, CardAskTrigger } from "@/lib/card-ask/gating";
 
+export type CardAskAnalyticsArm = CardAskArm | "business_trial_reminder";
+
 /**
  * Content-free analytics for the card-ask experiment.
  *
@@ -17,7 +19,7 @@ import type { CardAskArm, CardAskTrigger } from "@/lib/card-ask/gating";
 export type CardAskMethod = "apple_pay" | "google_pay" | "link" | "card";
 
 type BaseProps = {
-  arm: CardAskArm;
+  arm: CardAskAnalyticsArm;
   trigger: CardAskTrigger;
   os: string;
 };

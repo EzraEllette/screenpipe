@@ -12,8 +12,11 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { cardAskEvents } from "@/lib/card-ask/events";
-import type { CardAskArm, CardAskTrigger } from "@/lib/card-ask/gating";
+import {
+  cardAskEvents,
+  type CardAskAnalyticsArm,
+} from "@/lib/card-ask/events";
+import type { CardAskTrigger } from "@/lib/card-ask/gating";
 import { openExternalUrl } from "@/lib/open-external-url";
 import { screenpipeWebBase } from "@/lib/web-url";
 
@@ -72,7 +75,7 @@ const COPY: Record<
 
 type Props = {
   trigger: CardAskTrigger | null;
-  arm: CardAskArm | null;
+  arm: CardAskAnalyticsArm | null;
   isFirstAsk: boolean;
   os: string;
   /**
@@ -83,12 +86,22 @@ type Props = {
    * the account.
    */
   token?: string;
+  trialExpiresAt?: string | null;
   onDismiss: () => void;
   onConsume: () => void;
+  onPaymentComplete?: () => void;
   /** Injected in tests. */
   openUrl?: (url: string) => Promise<void>;
   checkoutBaseUrl?: string;
 };
+
+function trialDaysRemaining(expiresAt?: string | null): number | null {
+  if (!expiresAt) return null;
+  const remaining = Date.parse(expiresAt) - Date.now();
+  return Number.isFinite(remaining) && remaining > 0
+    ? Math.ceil(remaining / (24 * 60 * 60 * 1000))
+    : null;
+}
 
 export function CardAskModal({
   trigger,
@@ -96,8 +109,10 @@ export function CardAskModal({
   isFirstAsk,
   os,
   token = "",
+  trialExpiresAt = null,
   onDismiss,
   onConsume,
+  onPaymentComplete,
   openUrl = openExternalUrl,
   // Routed through the helper so NEXT_PUBLIC_SCREENPIPE_WEB_URL can repoint
   // checkout at staging; a bare literal is blocked by lib/web-url.guard.test.
@@ -106,7 +121,21 @@ export function CardAskModal({
   const shownAtRef = useRef<number | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(false);
+  const [embeddedStarted, setEmbeddedStarted] = useState(false);
+  const [embeddedComplete, setEmbeddedComplete] = useState(false);
+  const checkoutFrameRef = useRef<HTMLIFrameElement | null>(null);
   const open = trigger !== null && arm !== null;
+  const sendCheckoutToken = useCallback(() => {
+    if (!token) return;
+    try {
+      checkoutFrameRef.current?.contentWindow?.postMessage(
+        { type: "screenpipe-business-trial:init", token },
+        new URL(checkoutBaseUrl).origin,
+      );
+    } catch {
+      // The effect below reports an invalid configured origin.
+    }
+  }, [checkoutBaseUrl, token]);
 
   // Which opening has already been reported. `isFirstAsk` is derived from a
   // mutable ref in useCardAsk, so it can flip true -> false on a later render
@@ -128,6 +157,97 @@ export function CardAskModal({
     cardAskEvents.shown({ arm, trigger, os, isFirstAsk });
   }, [open, trigger, arm, os, isFirstAsk]);
 
+  useEffect(() => {
+    if (!open || trigger !== "grant_expiry" || !embeddedStarted) return;
+    const embeddedTrigger = trigger;
+    if (!token) {
+      setError(true);
+      setEmbeddedStarted(false);
+      cardAskEvents.checkoutFailed({
+        arm: arm!,
+        trigger,
+        os,
+        reason: "signed_out",
+      });
+      return;
+    }
+
+    let checkoutOrigin: string;
+    try {
+      checkoutOrigin = new URL(checkoutBaseUrl).origin;
+    } catch {
+      setError(true);
+      setEmbeddedStarted(false);
+      cardAskEvents.checkoutFailed({
+        arm: arm!,
+        trigger,
+        os,
+        reason: "checkout_unavailable",
+      });
+      return;
+    }
+
+    function receive(event: MessageEvent) {
+      if (
+        event.origin !== checkoutOrigin ||
+        event.source !== checkoutFrameRef.current?.contentWindow
+      ) {
+        return;
+      }
+      const type = (event.data as { type?: unknown } | null)?.type;
+      if (type === "screenpipe-business-trial:ready") {
+        sendCheckoutToken();
+        return;
+      }
+      if (type === "screenpipe-business-trial:loaded") {
+        setBusy(false);
+        setError(false);
+        cardAskEvents.checkoutOpened({
+          arm: arm!,
+          trigger: embeddedTrigger,
+          os,
+          destinationType: "stripe_payment_element",
+        });
+        return;
+      }
+      if (type === "screenpipe-business-trial:complete") {
+        setBusy(false);
+        setError(false);
+        setEmbeddedComplete(true);
+        onPaymentComplete?.();
+        return;
+      }
+      if (type === "screenpipe-business-trial:fatal") {
+        cardAskEvents.checkoutFailed({
+          arm: arm!,
+          trigger: embeddedTrigger,
+          os,
+          reason: "checkout_unavailable",
+        });
+        setBusy(false);
+        setError(true);
+        setEmbeddedStarted(false);
+      }
+    }
+
+    setBusy(true);
+    setError(false);
+    window.addEventListener("message", receive);
+    return () => {
+      window.removeEventListener("message", receive);
+    };
+  }, [
+    arm,
+    checkoutBaseUrl,
+    embeddedStarted,
+    open,
+    onPaymentComplete,
+    os,
+    sendCheckoutToken,
+    token,
+    trigger,
+  ]);
+
   const secondsVisible = useCallback(() => {
     const startedAt = shownAtRef.current;
     return startedAt === null ? 0 : (Date.now() - startedAt) / 1000;
@@ -147,8 +267,15 @@ export function CardAskModal({
 
   const handleStart = useCallback(async () => {
     if (!trigger || !arm || busy) return;
-    setBusy(true);
     cardAskEvents.clicked({ arm, trigger, os });
+
+    if (trigger === "grant_expiry") {
+      setError(false);
+      setEmbeddedStarted(true);
+      return;
+    }
+
+    setBusy(true);
 
     // Ask the server to mint a Stripe Checkout Session against this account,
     // then open Stripe's own page — the same shape Settings uses, which is the
@@ -231,7 +358,15 @@ export function CardAskModal({
   }, [trigger, arm, os, busy, checkoutBaseUrl, openUrl, onConsume, token]);
 
   if (!open || !trigger) return null;
-  const copy = COPY[trigger];
+  const daysRemaining = trialDaysRemaining(trialExpiresAt);
+  const copy =
+    trigger === "grant_expiry" && daysRemaining !== null
+      ? {
+          title: "keep Business access",
+          body: `you will lose your trial in ${daysRemaining} ${daysRemaining === 1 ? "day" : "days"}. add your card to keep access.`,
+          cta: "add card & keep access",
+        }
+      : COPY[trigger];
 
   return (
     <Dialog
@@ -240,45 +375,64 @@ export function CardAskModal({
         if (!next) handleSkip();
       }}
     >
-      <DialogContent className="sm:max-w-[440px]" data-testid="card-ask-modal">
-        <DialogHeader>
-          <DialogTitle>{copy.title}</DialogTitle>
-          <DialogDescription>{copy.body}</DialogDescription>
-        </DialogHeader>
-        <div className="flex flex-col gap-2 pt-2">
-          <Button
-            onClick={handleStart}
-            disabled={busy}
-            data-testid="card-ask-start"
-          >
-            {busy ? "opening checkout" : error ? "try again" : copy.cta}
-          </Button>
-          {/*
-            A failed mint has to say so. The button returning to its resting
-            label looks identical to never having been pressed, which reads as
-            a dead control and costs the sale twice.
-          */}
-          {error && (
-            <p
-              className="text-center text-[11px] text-muted-foreground"
-              data-testid="card-ask-error"
+      <DialogContent
+        className="max-h-[90vh] overflow-y-auto sm:max-w-[520px]"
+        data-testid="card-ask-modal"
+      >
+        {embeddedComplete ? (
+          <>
+            <DialogHeader>
+              <DialogTitle>your access is set</DialogTitle>
+              <DialogDescription>
+                no charge today. your Business subscription starts when your
+                current trial ends.
+              </DialogDescription>
+            </DialogHeader>
+            <Button onClick={onConsume}>done</Button>
+          </>
+        ) : (
+          <>
+            <DialogHeader>
+              <DialogTitle>{copy.title}</DialogTitle>
+              <DialogDescription>{copy.body}</DialogDescription>
+            </DialogHeader>
+            {trigger === "grant_expiry" && embeddedStarted ? (
+              <iframe
+                ref={checkoutFrameRef}
+                src={`${checkoutBaseUrl}/business-trial/checkout?embedded=1`}
+                title="secure Business trial card form"
+                allow="payment"
+                className="h-[420px] w-full border-0 bg-background"
+                data-testid="business-trial-checkout-frame"
+                onLoad={sendCheckoutToken}
+              />
+            ) : (
+              <Button
+                onClick={handleStart}
+                disabled={busy}
+                data-testid="card-ask-start"
+              >
+                {busy ? "opening checkout" : error ? "try again" : copy.cta}
+              </Button>
+            )}
+            {error && (
+              <p
+                className="text-center text-[11px] text-muted-foreground"
+                data-testid="card-ask-error"
+              >
+                checkout could not be opened. check your connection and try
+                again.
+              </p>
+            )}
+            <Button
+              variant="ghost"
+              onClick={handleSkip}
+              data-testid="card-ask-skip"
             >
-              checkout could not be opened. check your connection and try again.
-            </p>
-          )}
-          {/*
-            Immediately clickable, always. A timed or disabled skip is a dark
-            pattern and it targets day-0 activation, the one metric this
-            experiment must not damage.
-          */}
-          <Button
-            variant="ghost"
-            onClick={handleSkip}
-            data-testid="card-ask-skip"
-          >
-            Not now
-          </Button>
-        </div>
+              Not now
+            </Button>
+          </>
+        )}
       </DialogContent>
     </Dialog>
   );

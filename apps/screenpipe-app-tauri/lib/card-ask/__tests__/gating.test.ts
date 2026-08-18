@@ -38,13 +38,10 @@ describe("parseCardAskArm", () => {
 });
 
 describe("triggersForArm", () => {
-  it("maps each arm to its own trigger plus the shared expiry trigger", () => {
-    expect(triggersForArm("at_login")).toEqual(["login", "grant_expiry"]);
-    expect(triggersForArm("at_first_value")).toEqual([
-      "first_value",
-      "grant_expiry",
-    ]);
-    expect(triggersForArm("at_limit")).toEqual(["limit", "grant_expiry"]);
+  it("keeps the signup experiment to its own placement", () => {
+    expect(triggersForArm("at_login")).toEqual(["login"]);
+    expect(triggersForArm("at_first_value")).toEqual(["first_value"]);
+    expect(triggersForArm("at_limit")).toEqual(["limit"]);
   });
 
   it("keeps control silent even at grant expiry", () => {

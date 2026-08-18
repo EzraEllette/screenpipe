@@ -33,6 +33,14 @@ export const CARD_ASK_FLAG = "card-ask-timing";
  */
 export const CARD_ASK_ENABLED_FLAG = "card-ask-enabled";
 
+/**
+ * Dedicated, fail-closed rollout for the expiring cardless Business grant.
+ * It is deliberately not part of the signup timing experiment: shipping the
+ * payment surface must not expose anyone until this separate flag is targeted.
+ */
+export const BUSINESS_TRIAL_CARD_REMINDER_FLAG =
+  "business-trial-card-reminder";
+
 export const CARD_ASK_ARMS = [
   "control",
   "at_onboarding",
@@ -104,10 +112,10 @@ export function isCardAskEnabled(flag: unknown): boolean {
  * arm may own several placements; control owns none.
  */
 const DEFAULT_ARM_TRIGGERS: Record<CardAskArm, readonly CardAskTrigger[]> = {
-  at_onboarding: ["onboarding", "grant_expiry"],
-  at_login: ["login", "grant_expiry"],
-  at_first_value: ["first_value", "grant_expiry"],
-  at_limit: ["limit", "grant_expiry"],
+  at_onboarding: ["onboarding"],
+  at_login: ["login"],
+  at_first_value: ["first_value"],
+  at_limit: ["limit"],
   // Control stays silent even at expiry. It is the counterfactual: what
   // conversion looks like when we never ask. Nothing else in the app may ask
   // either, or this stops being a counterfactual — see `useCardAskPlacement`.
