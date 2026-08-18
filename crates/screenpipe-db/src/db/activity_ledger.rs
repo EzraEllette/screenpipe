@@ -224,8 +224,8 @@ impl DatabaseManager {
             r#"WITH sampled AS (
                    SELECT MIN(id) AS id
                    FROM frames
-                   WHERE julianday(timestamp) >= julianday(?1)
-                     AND julianday(timestamp) < julianday(?2)
+                   WHERE timestamp >= ?1
+                     AND timestamp < ?2
                      AND COALESCE(focused, 1) = 1
                      AND (COALESCE(app_name, '') != '' OR COALESCE(window_name, '') != '')
                    GROUP BY
@@ -289,8 +289,8 @@ impl DatabaseManager {
                       4 AS attention_rank
                FROM ui_events u
                LEFT JOIN frames f ON f.id = u.frame_id
-               WHERE julianday(u.timestamp) >= julianday(?1)
-                 AND julianday(u.timestamp) < julianday(?2)
+               WHERE u.timestamp >= ?1
+                 AND u.timestamp < ?2
                  AND u.event_type IN ('click', 'text', 'clipboard', 'app_switch', 'window_focus')
                ORDER BY u.timestamp, u.id"#,
         )
@@ -311,8 +311,8 @@ impl DatabaseManager {
                       a.is_input_device, 1 AS attention_rank
                FROM audio_transcriptions a
                LEFT JOIN speakers s ON s.id = a.speaker_id
-               WHERE julianday(a.timestamp) >= julianday(?1)
-                 AND julianday(a.timestamp) < julianday(?2)
+               WHERE a.timestamp >= ?1
+                 AND a.timestamp < ?2
                  AND length(trim(a.transcription)) >= 8
                ORDER BY a.timestamp, a.id"#,
         )
@@ -376,9 +376,9 @@ impl DatabaseManager {
         sqlx::query(
             "DELETE FROM activity_actions WHERE interval_id IN (\
                  SELECT id FROM activity_intervals \
-                 WHERE producer = ?1 AND julianday(start_at) < julianday(?2) \
-                   AND julianday(end_at) > julianday(?2)) \
-             AND julianday(occurred_at) >= julianday(?2)",
+                 WHERE producer = ?1 AND start_at < ?2 \
+                   AND end_at > ?2) \
+             AND occurred_at >= ?2",
         )
         .bind(producer)
         .bind(&range_start_text)
@@ -387,9 +387,9 @@ impl DatabaseManager {
         sqlx::query(
             "DELETE FROM activity_evidence WHERE interval_id IN (\
                  SELECT id FROM activity_intervals \
-                 WHERE producer = ?1 AND julianday(start_at) < julianday(?2) \
-                   AND julianday(end_at) > julianday(?2)) \
-             AND julianday(occurred_at) >= julianday(?2)",
+                 WHERE producer = ?1 AND start_at < ?2 \
+                   AND end_at > ?2) \
+             AND occurred_at >= ?2",
         )
         .bind(producer)
         .bind(&range_start_text)
@@ -398,8 +398,8 @@ impl DatabaseManager {
         sqlx::query(
             "UPDATE activity_intervals SET end_at = ?2, state = 'final', \
                     updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
-             WHERE producer = ?1 AND julianday(start_at) < julianday(?2) \
-               AND julianday(end_at) > julianday(?2)",
+             WHERE producer = ?1 AND start_at < ?2 \
+               AND end_at > ?2",
         )
         .bind(producer)
         .bind(&range_start_text)
@@ -407,7 +407,7 @@ impl DatabaseManager {
         .await?;
         sqlx::query(
             "DELETE FROM activity_intervals \
-             WHERE producer = ?1 AND julianday(start_at) >= julianday(?2)",
+             WHERE producer = ?1 AND start_at >= ?2",
         )
         .bind(producer)
         .bind(&range_start_text)
@@ -453,8 +453,8 @@ impl DatabaseManager {
                 sqlx::query_scalar::<_, i64>(
                     "SELECT id FROM activity_intervals \
                      WHERE producer = ?1 AND task_id = ?2 \
-                       AND julianday(end_at) = julianday(?3) \
-                       AND julianday(start_at) < julianday(?3) \
+                       AND end_at = ?3 \
+                       AND start_at < ?3 \
                      ORDER BY start_at DESC, id DESC LIMIT 1",
                 )
                 .bind(producer)
@@ -592,8 +592,8 @@ impl DatabaseManager {
                FROM activity_intervals i
                JOIN activity_tasks t ON t.id = i.task_id
                LEFT JOIN activity_tasks parent ON parent.id = t.parent_task_id
-               WHERE julianday(i.end_at) > julianday(?1)
-                 AND julianday(i.start_at) < julianday(?2)
+               WHERE i.end_at > ?1
+                 AND i.start_at < ?2
                ORDER BY i.start_at, i.end_at, i.id"#,
         )
         .bind(&start)
@@ -612,8 +612,8 @@ impl DatabaseManager {
                           a.summary, a.app_name, a.confidence, a.source_type, a.source_id
                    FROM activity_actions a
                    JOIN activity_intervals i ON i.id = a.interval_id
-                   WHERE julianday(i.end_at) > julianday(?1)
-                     AND julianday(i.start_at) < julianday(?2)
+                   WHERE i.end_at > ?1
+                     AND i.start_at < ?2
                    ORDER BY a.occurred_at, a.id"#,
             )
             .bind(&start)
@@ -660,8 +660,8 @@ impl DatabaseManager {
                    LEFT JOIN ui_events event
                      ON e.source_type = 'ui_event' AND event.id = e.source_id
                    LEFT JOIN frames event_frame ON event_frame.id = event.frame_id
-                   WHERE julianday(i.end_at) > julianday(?1)
-                     AND julianday(i.start_at) < julianday(?2)
+                   WHERE i.end_at > ?1
+                     AND i.start_at < ?2
                    ORDER BY e.occurred_at, e.id"#,
             )
             .bind(&start)
