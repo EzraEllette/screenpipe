@@ -201,6 +201,7 @@ final class TimelineViewModel: ObservableObject {
     @Published var showSubtitles = true
     @Published var activePopoverGroupIndex: Int?
     @Published var hoveredIndex: Int?
+    @Published var hoveredScrubberX: CGFloat?
 
     // Playback
     @Published private(set) var isPlaying = false
@@ -229,6 +230,7 @@ final class TimelineViewModel: ObservableObject {
     private var requestedDays = Set<String>()
     private var tagFetchInFlight = Set<String>()
     private var navigationGeneration = 0
+    private var pendingSearchNavigation: (frameId: String?, timestamp: Date)?
 
     /// Native actions must return to the webview that owns this model. Looking
     /// up the current key window is racy because the fullscreen overlay is a
@@ -358,6 +360,17 @@ final class TimelineViewModel: ObservableObject {
         let previousFrameId = currentFrame?.devices.first?.frameId
         frames = result.frames
         currentIndex = TimelineLiveEdge.shiftIndex(currentIndex, newFramesAtFront: result.newAtFront)
+        if let pending = pendingSearchNavigation {
+            if let frameId = pending.frameId,
+               let index = TimelineNavigation.index(ofFrameId: frameId, in: frames) {
+                currentIndex = index
+                pendingSearchNavigation = nil
+            } else if pending.frameId == nil,
+                      let index = TimelineNavigation.indexNearest(pending.timestamp, in: frames) {
+                currentIndex = index
+                pendingSearchNavigation = nil
+            }
+        }
         meetings = TimelineMeetingDetection.detect(frames: frames)
         isLoading = false
         // A completed day batch is the navigation acknowledgement. Without
@@ -759,6 +772,7 @@ final class TimelineViewModel: ObservableObject {
         // Invalidate any pending historical navigation timeout so it cannot
         // later clear loading state for this current-day request.
         navigationGeneration += 1
+        pendingSearchNavigation = nil
         isNavigating = false
         currentDate = Date()
         currentIndex = 0
@@ -766,9 +780,14 @@ final class TimelineViewModel: ObservableObject {
         loadCurrentImage()
     }
 
-    func changeDate(to date: Date, supersedePendingNavigation: Bool = false) {
+    func changeDate(
+        to date: Date,
+        supersedePendingNavigation: Bool = false,
+        preservePendingSearchNavigation: Bool = false
+    ) {
         guard !isNavigating || supersedePendingNavigation else { return }
         navigationGeneration += 1
+        if !preservePendingSearchNavigation { pendingSearchNavigation = nil }
         let generation = navigationGeneration
         isNavigating = true
         pause()
@@ -941,9 +960,67 @@ final class TimelineViewModel: ObservableObject {
 
     // MARK: Search review
 
-    func enterSearchReview(query: String, frameIds: [String], terms: [String]) {
-        searchReview = TimelineSearchReview(query: query, frameIds: frameIds, activeIndex: 0, terms: terms)
-        jumpToSearchResult(0)
+    func enterSearchReview(
+        query: String,
+        frameIds: [String],
+        terms: [String],
+        activeFrameId: String? = nil
+    ) {
+        let activeIndex = activeFrameId.flatMap { frameIds.firstIndex(of: $0) } ?? 0
+        searchReview = TimelineSearchReview(
+            query: query,
+            frameIds: frameIds,
+            activeIndex: activeIndex,
+            terms: terms
+        )
+        jumpToSearchResult(activeIndex)
+    }
+
+    /// Search may target a frame that belongs to another day or is not in the
+    /// current stream batch yet. Keep the exact id pending across the day
+    /// request and resolve it as soon as that frame arrives.
+    func navigateToSearchResult(
+        timestamp: Date,
+        frameId: String?,
+        query: String?,
+        frameIds: [String],
+        terms: [String]
+    ) {
+        if let query, !query.isEmpty, !frameIds.isEmpty {
+            enterSearchReview(
+                query: query,
+                frameIds: frameIds,
+                terms: terms,
+                activeFrameId: frameId
+            )
+        }
+
+        if let frameId,
+           let index = TimelineNavigation.index(ofFrameId: frameId, in: frames) {
+            pendingSearchNavigation = nil
+            setIndex(index)
+            return
+        }
+        if frameId == nil,
+           Calendar.current.isDate(timestamp, inSameDayAs: currentDate),
+           let index = TimelineNavigation.indexNearest(timestamp, in: frames) {
+            pendingSearchNavigation = nil
+            setIndex(index)
+            return
+        }
+
+        if let pending = pendingSearchNavigation,
+           pending.frameId == frameId,
+           abs(pending.timestamp.timeIntervalSince(timestamp)) < 0.001 {
+            return
+        }
+
+        pendingSearchNavigation = (frameId: frameId, timestamp: timestamp)
+        changeDate(
+            to: timestamp,
+            supersedePendingNavigation: true,
+            preservePendingSearchNavigation: true
+        )
     }
 
     func stepSearchResult(_ delta: Int) {
@@ -965,6 +1042,7 @@ final class TimelineViewModel: ObservableObject {
 
     func exitSearchReview() {
         searchReview = nil
+        pendingSearchNavigation = nil
     }
 
     // MARK: Test seam

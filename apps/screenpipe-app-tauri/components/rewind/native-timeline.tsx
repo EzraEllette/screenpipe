@@ -46,6 +46,11 @@ export interface NativeTimelineExportSelection {
   end: string;
 }
 
+export interface NativeTimelineDailySummaryRequest {
+  date: string;
+  windowLabel?: string;
+}
+
 export type NativeTimelineOcclusionMode = "above" | "underlay" | "detached";
 
 export function nativeTimelineOcclusionMode(
@@ -108,6 +113,17 @@ export function parseTimelineDay(day: string): Date | null {
   return parsed;
 }
 
+export function parseTimelineDailySummaryRequest(
+  payload: string | NativeTimelineDailySummaryRequest,
+  currentWindowLabel: string
+): Date | null {
+  if (typeof payload === "string") return parseTimelineDay(payload);
+  if (payload.windowLabel && payload.windowLabel !== currentWindowLabel) {
+    return null;
+  }
+  return parseTimelineDay(payload.date);
+}
+
 /**
  * Routes the actions the Swift window cannot perform on its own. Mount once,
  * high enough that it outlives navigation.
@@ -123,15 +139,19 @@ export function NativeTimelineBridge() {
   } | null>(null);
 
   useEffect(() => {
+    const currentWindowLabel = getCurrentWindow().label;
     const subscriptions = [
       listen("timeline-open-search", () => {
-        void commands.showWindow({ Search: { query: null } });
+        void commands.openSearchWindow(null, getCurrentWindow().label);
       }),
       listen("timeline-open-chat", () => {
         void commands.showWindow("Chat");
       }),
-      listen<string>("timeline-open-daily-summary", (event) => {
-        const date = parseTimelineDay(event.payload);
+      listen<string | NativeTimelineDailySummaryRequest>("timeline-open-daily-summary", (event) => {
+        const date = parseTimelineDailySummaryRequest(
+          event.payload,
+          currentWindowLabel
+        );
         if (!date) return;
         setDailySummaryRequest((request) => ({
           date,

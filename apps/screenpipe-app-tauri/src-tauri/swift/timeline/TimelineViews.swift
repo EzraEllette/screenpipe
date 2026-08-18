@@ -105,7 +105,14 @@ struct TimelineRootView: View {
                     }?.topDomains.first,
                     loader: thumbnailLoader
                 )
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                .padding(
+                    .leading,
+                    TimelineHoverLayout.previewLeadingX(
+                        cursorX: model.hoveredScrubberX ?? model.containerWidth / 2,
+                        containerWidth: model.containerWidth
+                    )
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
                 .padding(.bottom, 120)
                 .allowsHitTesting(false)
                 .onAppear { loadHoverThumbnail(hovered) }

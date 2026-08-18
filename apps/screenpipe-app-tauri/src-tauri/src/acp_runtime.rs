@@ -9,6 +9,7 @@
 //! hidden mode of the signed Screenpipe executable so no second sidecar or
 //! handwritten protocol implementation is shipped.
 
+use crate::acp_extensions::AcpExtensionMiddleware;
 use agent_client_protocol::schema::v1::{
     AuthCapabilities, AuthMethod, AuthenticateRequest, BooleanConfigOptionCapabilities,
     CancelNotification, ClientCapabilities,
@@ -175,6 +176,9 @@ struct RuntimeConfig {
     preferred_auth_method: Option<String>,
     system_context: Option<String>,
     session_defaults: SessionDefaults,
+    /// Provider-neutral capabilities contributed by installed Pi packages
+    /// which explicitly expose a portable MCP entrypoint.
+    extension_middleware: AcpExtensionMiddleware,
     /// The user's own registered MCP servers, resolved (with secret header
     /// values) by the desktop before launch and forwarded to the adapter in
     /// session/new alongside the screenpipe server.
@@ -280,6 +284,7 @@ impl RuntimeConfig {
                 "SCREENPIPE_ACP_SESSION_CONFIG_JSON",
             )?
             .unwrap_or_default(),
+            extension_middleware: AcpExtensionMiddleware::discover(),
             user_mcp_servers: parse_json_env::<Vec<UserMcpServer>>(
                 "SCREENPIPE_ACP_USER_MCP_JSON",
             )?
@@ -1408,23 +1413,76 @@ unsafe extern "system" {
 
 struct RuntimeState {
     output: ParentOutput,
+    agent_id: String,
     project_dir: PathBuf,
     turn: Mutex<TurnState>,
     ui_waiters: Mutex<HashMap<String, oneshot::Sender<Option<String>>>>,
     terminals: Mutex<HashMap<String, Arc<TerminalRecord>>>,
     system_context: Mutex<Option<String>>,
+    provider_session_id: Mutex<Option<String>>,
 }
 
 impl RuntimeState {
     fn new(output: ParentOutput, config: &RuntimeConfig) -> Self {
         Self {
             output,
+            agent_id: config.agent_id.clone(),
             project_dir: config.project_dir.clone(),
             turn: Mutex::new(TurnState::default()),
             ui_waiters: Mutex::new(HashMap::new()),
             terminals: Mutex::new(HashMap::new()),
             system_context: Mutex::new(config.system_context.clone()),
+            provider_session_id: Mutex::new(None),
         }
+    }
+
+    /// Keep provider-owned schedules attached to exactly one live ACP session.
+    /// Reclaiming a resumed session preserves its projection; replacing the
+    /// session drops session-only tasks immediately.
+    fn replace_provider_session(&self, session_id: &str) {
+        let Ok(mut current) = self.provider_session_id.lock() else {
+            return;
+        };
+        if current.as_deref() == Some(session_id) {
+            crate::provider_automations::begin_provider_session(
+                &self.agent_id,
+                session_id,
+                &self.project_dir,
+            );
+            return;
+        }
+        if let Some(previous) = current.take() {
+            crate::provider_automations::end_provider_session(&self.agent_id, &previous);
+        }
+        crate::provider_automations::begin_provider_session(
+            &self.agent_id,
+            session_id,
+            &self.project_dir,
+        );
+        *current = Some(session_id.to_owned());
+    }
+
+    fn observe_provider_schedule(&self, update: &Value) {
+        let name = tool_name(update);
+        if !matches!(name.as_str(), "CronCreate" | "CronDelete" | "CronList") {
+            return;
+        }
+        let session_id = self
+            .provider_session_id
+            .lock()
+            .ok()
+            .and_then(|session| session.clone());
+        let Some(session_id) = session_id else {
+            return;
+        };
+        crate::provider_automations::observe_provider_schedule_tool(
+            &self.agent_id,
+            &session_id,
+            &name,
+            &tool_args(update),
+            &tool_result_text(update),
+            update.get("status").and_then(Value::as_str) == Some("failed"),
+        );
     }
 
     fn ensure_turn_locked(&self, turn: &mut TurnState) {
@@ -1638,6 +1696,7 @@ impl RuntimeState {
                 }
                 self.output.send(start);
                 if update_status_finished(&update) {
+                    self.observe_provider_schedule(&update);
                     finish_tool(&self.output, &id, &update);
                     turn.active_tools.remove(&id);
                 }
@@ -1676,6 +1735,7 @@ impl RuntimeState {
                     self.output.send(start);
                 }
                 if update_status_finished(&merged) {
+                    self.observe_provider_schedule(&merged);
                     finish_tool(&self.output, &id, &merged);
                     turn.active_tools.remove(&id);
                 } else if let Some(progress) = tool_progress(&update) {
@@ -1827,6 +1887,16 @@ impl RuntimeState {
     /// Remove and return a terminal by id (release drops it from the map).
     fn take_terminal(&self, id: &str) -> Option<Arc<TerminalRecord>> {
         self.terminals.lock().ok().and_then(|mut map| map.remove(id))
+    }
+}
+
+impl Drop for RuntimeState {
+    fn drop(&mut self) {
+        if let Ok(session) = self.provider_session_id.get_mut() {
+            if let Some(session_id) = session.take() {
+                crate::provider_automations::end_provider_session(&self.agent_id, &session_id);
+            }
+        }
     }
 }
 
@@ -2090,14 +2160,18 @@ fn update_status_finished(update: &Value) -> bool {
     )
 }
 
-fn finish_tool(output: &ParentOutput, id: &str, update: &Value) {
-    let is_error = update.get("status").and_then(Value::as_str) == Some("failed");
-    let mut result = update
+fn tool_result_text(update: &Value) -> String {
+    update
         .get("content")
         .filter(|value| value.as_array().is_some_and(|items| !items.is_empty()))
         .or_else(|| update.get("rawOutput"))
         .and_then(|value| content_text(Some(value)))
-        .unwrap_or_default();
+        .unwrap_or_default()
+}
+
+fn finish_tool(output: &ParentOutput, id: &str, update: &Value) {
+    let is_error = update.get("status").and_then(Value::as_str) == Some("failed");
+    let mut result = tool_result_text(update);
     if result.trim().is_empty() {
         // Some adapters report completion with neither content nor rawOutput; a
         // minimal summary reads better than an empty result card.
@@ -2427,6 +2501,40 @@ fn engine_api_url() -> Option<String> {
     })
 }
 
+/// Deliberately narrow environment for third-party portable extension
+/// processes. Provider credentials and the Screenpipe cloud JWT stay in the
+/// ACP runtime/agent; an installed extension receives only local Screenpipe
+/// access plus the process basics Bun needs on each platform.
+fn extension_mcp_env() -> Vec<(String, String)> {
+    let mut env = Vec::new();
+    for name in [
+        "HOME",
+        "USERPROFILE",
+        "PATH",
+        "SHELL",
+        "TMPDIR",
+        "TEMP",
+        "TMP",
+        "LANG",
+        "LC_ALL",
+    ] {
+        if let Ok(value) = std::env::var(name) {
+            env.push((name.to_string(), value));
+        }
+    }
+    env.push(("NO_COLOR".into(), "1".into()));
+    if let Some(url) = engine_api_url() {
+        env.push(("SCREENPIPE_API_URL".into(), url));
+    }
+    if let Some(key) = env_nonempty("SCREENPIPE_LOCAL_API_KEY") {
+        env.push(("SCREENPIPE_LOCAL_API_KEY".into(), key));
+    }
+    if let Some(chat_id) = env_nonempty("SCREENPIPE_CHAT_SESSION_ID") {
+        env.push(("SCREENPIPE_CHAT_SESSION_ID".into(), chat_id));
+    }
+    env
+}
+
 fn mcp_servers(config: &RuntimeConfig) -> Vec<McpServer> {
     let mut servers: Vec<McpServer> = Vec::new();
 
@@ -2473,6 +2581,20 @@ fn mcp_servers(config: &RuntimeConfig) -> Vec<McpServer> {
                     .args(vec![tools_server.to_string_lossy().into_owned()])
                     .env(tools_env),
             ));
+        }
+        // Installed Pi packages may opt into the portable ACP subset by
+        // declaring a Screenpipe MCP entrypoint. A native launcher clears the
+        // inherited environment before Bun imports package code, then exposes
+        // one stdio server per package; arbitrary Pi hooks remain native to Pi.
+        // pi-acp runs the same isolated Pi installation and loads the package
+        // natively, so mounting its portable surface again would duplicate
+        // tools. Every non-Pi ACP agent receives the middleware form.
+        if config.agent_id != "pi-acp" {
+            servers.extend(
+                config
+                    .extension_middleware
+                    .stdio_servers(&config.bun_path, &extension_mcp_env()),
+            );
         }
     }
     // Forward the user's own registered MCP servers so every harness sees
@@ -2601,6 +2723,18 @@ fn spawn_http_mcp_servers(config: &RuntimeConfig) -> Vec<std::process::Child> {
             }
             Err(error) => eprintln!("[acp-runtime] core http mcp server failed to start: {error}"),
         }
+    }
+
+    // Cursor and Copilot reject client stdio MCP declarations. Portable
+    // package entrypoints use the same manifest but switch transports through
+    // the documented SCREENPIPE_MCP_* environment contract.
+    for (child, name, url) in config.extension_middleware.spawn_http_servers(
+        &config.bun_path,
+        &extension_mcp_env(),
+        free_loopback_port,
+    ) {
+        children.push(child);
+        urls.push((name, url));
     }
 
     let _ = HTTP_MCP_URLS.set(urls);
@@ -3435,6 +3569,7 @@ async fn run_protocol(
             );
             let (mut session, resumed) =
                 open_or_resume_session(&connection, &state, &init, &config).await?;
+            state.replace_provider_session(&session.session_id.to_string());
             // The agent is up (any first-run download finished) — clear the
             // "downloading" hint before announcing readiness.
             state.output.send(json!({
@@ -3559,6 +3694,7 @@ async fn run_protocol(
                                     match create_session_with_auth(&connection, &state, &init, &config).await {
                                         Ok(new_session) => {
                                             session = new_session;
+                                            state.replace_provider_session(&session.session_id.to_string());
                                             state.reset_system_context(config.system_context.clone());
                                             apply_session_defaults(&connection, &config, &mut session).await;
                                             send_session_config(&state.output, &config.agent_id, &session);
@@ -4094,6 +4230,7 @@ mod tests {
             preferred_auth_method: None,
             system_context: None,
             session_defaults: SessionDefaults::default(),
+            extension_middleware: AcpExtensionMiddleware::default(),
             user_mcp_servers: Vec::new(),
             resume_session_id: None,
         }
@@ -4180,6 +4317,19 @@ mod tests {
         assert!(is_forbidden_acp_env("screenpipe_api_key"));
         assert!(!is_forbidden_acp_env("SCREENPIPE_LOCAL_API_KEY"));
         assert!(!is_forbidden_acp_env("ANTHROPIC_API_KEY"));
+    }
+
+    #[test]
+    fn portable_extensions_receive_only_local_screenpipe_access() {
+        let names = extension_mcp_env()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect::<std::collections::HashSet<_>>();
+
+        assert!(!names.contains("SCREENPIPE_API_KEY"));
+        assert!(!names.contains("OPENAI_API_KEY"));
+        assert!(!names.contains("ANTHROPIC_API_KEY"));
+        assert!(names.contains("NO_COLOR"));
     }
 
     #[test]
@@ -4475,6 +4625,46 @@ mod tests {
     }
 
     #[test]
+    fn portable_package_middleware_mounts_everywhere_except_native_pi() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let package = dir.path().join("npm/node_modules/portable-pi");
+        std::fs::create_dir_all(package.join("dist")).expect("package dir");
+        std::fs::write(package.join("dist/mcp.mjs"), "// MCP server").expect("entrypoint");
+        std::fs::write(
+            package.join("package.json"),
+            r#"{"screenpipe":{"acp":{"mcpServer":"./dist/mcp.mjs"}}}"#,
+        )
+        .expect("package manifest");
+        std::fs::write(
+            dir.path().join("settings.json"),
+            r#"{"packages":["npm:portable-pi"]}"#,
+        )
+        .expect("Pi settings");
+
+        let mut config = runtime_config("claude-acp");
+        config.project_dir = dir.path().join("project");
+        config.extension_middleware = AcpExtensionMiddleware::discover_in(dir.path());
+        let names = |config: &RuntimeConfig| {
+            mcp_servers(config)
+                .into_iter()
+                .filter_map(|server| match server {
+                    McpServer::Stdio(stdio) => Some(stdio.name),
+                    McpServer::Http(_) => None,
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+
+        assert!(names(&config)
+            .iter()
+            .any(|name| name == "pi-extension-portable-pi"));
+        config.agent_id = "pi-acp".into();
+        assert!(!names(&config)
+            .iter()
+            .any(|name| name == "pi-extension-portable-pi"));
+    }
+
+    #[test]
     fn first_turn_context_always_includes_the_tools_hint() {
         // With no user system prompt, the first-turn context is just the hint.
         let none = build_first_turn_context(None, None);
@@ -4635,6 +4825,7 @@ mod tests {
     fn test_state(output: &ParentOutput) -> RuntimeState {
         RuntimeState {
             output: output.clone(),
+            agent_id: "test-agent".to_owned(),
             project_dir: PathBuf::from("/tmp"),
             turn: Mutex::new(TurnState {
                 prompt_in_flight: true,
@@ -4643,6 +4834,7 @@ mod tests {
             ui_waiters: Mutex::new(HashMap::new()),
             terminals: Mutex::new(HashMap::new()),
             system_context: Mutex::new(None),
+            provider_session_id: Mutex::new(None),
         }
     }
 

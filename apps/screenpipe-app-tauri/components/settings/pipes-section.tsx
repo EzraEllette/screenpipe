@@ -53,6 +53,7 @@ import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { PipeTriggerPicker } from "./pipe-trigger-picker";
+import { ProviderAutomationsPanel } from "./provider-automations-panel";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import {
   Select,
@@ -1165,6 +1166,7 @@ export function PipesSection() {
     Record<string, "clearing" | "cleared" | "error">
   >({});
   const [refreshing, setRefreshing] = useState(false);
+  const [providerRefreshToken, setProviderRefreshToken] = useState(0);
   const debounceTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const pendingSaves = useRef<Record<string, string>>({});
   // Track in-flight config saves so runPipe can await them
@@ -1242,6 +1244,7 @@ export function PipesSection() {
 
   const apiBase = selectedDevice ? `http://${selectedDevice}` : getApiBaseUrl();
   const isRemote = !!selectedDevice;
+  const composioToken = isRemote ? undefined : settings.user?.token;
   currentApiBase.current = apiBase;
   const displayedPipes = pipesForApi(pipes, pipesApiBase, apiBase);
   const displayedLogs = pipesForApi(logs, logsApiBase, apiBase);
@@ -1412,10 +1415,14 @@ export function PipesSection() {
 
   const fetchConnections = useCallback(async () => {
     try {
-      const next = await fetchAvailablePipeConnections(apiBase, availableConnections);
+      const next = await fetchAvailablePipeConnections(
+        apiBase,
+        availableConnections,
+        composioToken
+      );
       setAvailableConnections(next);
     } catch { /* server may not be running */ }
-  }, [apiBase, availableConnections]);
+  }, [apiBase, availableConnections, composioToken]);
 
   const checkForUpdates = useCallback(async () => {
     try {
@@ -2526,6 +2533,7 @@ export function PipesSection() {
           <Button variant="outline" size="icon" className={`h-8 w-8 ${refreshing ? "pointer-events-none opacity-70" : ""}`} onClick={async () => {
             if (refreshing) return;
             setRefreshing(true);
+            setProviderRefreshToken((value) => value + 1);
             await Promise.all([
               fetchPipes(),
               new Promise((r) => setTimeout(r, 2000)),
@@ -2549,6 +2557,13 @@ export function PipesSection() {
             </Button>
           )}
         </div>
+      )}
+
+      {pipeTypeFilter === "local" && !selectMode && (
+        <ProviderAutomationsPanel
+          searchQuery={searchQuery}
+          refreshToken={providerRefreshToken}
+        />
       )}
 
       {pipeTypeFilter === "cloud" ? (
@@ -3352,7 +3367,11 @@ export function PipesSection() {
                             .map((p) => ({ name: p.config.name }))}
                           availableConnections={availableConnections}
                           refreshConnections={async () => {
-                            const next = await fetchAvailablePipeConnections(apiBase, availableConnections);
+                            const next = await fetchAvailablePipeConnections(
+                              apiBase,
+                              availableConnections,
+                              composioToken
+                            );
                             setAvailableConnections(next);
                             return next;
                           }}
@@ -4155,7 +4174,8 @@ export function PipesSection() {
               try {
                 latestConnections = await fetchAvailablePipeConnections(
                   apiBase,
-                  availableConnections
+                  availableConnections,
+                  composioToken
                 );
               } catch {
                 // Fall back to current in-memory state if fetch fails.

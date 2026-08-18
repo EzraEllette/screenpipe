@@ -19,6 +19,7 @@ use screenpipe_a11y::tree::TreeWalkerConfig;
 use screenpipe_a11y::ActivityFeed;
 use screenpipe_capture::ocr_gate::OcrGate;
 use screenpipe_capture::paired_capture::{paired_capture, CaptureContext, PairedCaptureResult};
+use screenpipe_capture::TreeWalkerWorker;
 use screenpipe_core::window_pattern::{self, WindowPattern};
 use screenpipe_db::DatabaseManager;
 use screenpipe_screen::capture_screenshot_by_window::WindowFilters;
@@ -43,6 +44,7 @@ use tracing::{debug, error, info, warn};
 const CAPTURE_OPERATION_TIMEOUT: Duration = Duration::from_secs(20);
 #[cfg(not(target_os = "macos"))]
 const CAPTURE_OPERATION_TIMEOUT: Duration = Duration::from_secs(15);
+const TREE_WALK_WORKER_TIMEOUT: Duration = Duration::from_secs(12);
 const WARM_VISUAL_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 const WARM_FOCUS_BACKSTOP_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -249,6 +251,7 @@ pub(crate) struct CaptureParams<'a> {
     pub device_name: &'a str,
     pub snapshot_writer: &'a SnapshotWriter,
     pub tree_walker_config: &'a TreeWalkerConfig,
+    pub tree_walker: &'a TreeWalkerWorker,
     pub window_filters: WindowFilters,
     pub ignored_patterns: Vec<WindowPattern>,
     pub use_pii_removal: bool,
@@ -897,6 +900,32 @@ fn record_persisted_capture(
     monitor.record_db_write(duration);
 }
 
+/// Record the mutually exclusive live OCR cache outcomes carried by a
+/// successfully persisted capture result.
+fn record_ocr_result_metrics(
+    vision_metrics: &screenpipe_screen::PipelineMetrics,
+    result: &PairedCaptureResult,
+) {
+    debug_assert!(
+        !(result.ocr_cache_hit && result.ocr_duration_ms.is_some()),
+        "a capture cannot both reuse cached OCR and execute OCR"
+    );
+
+    if result.ocr_cache_hit {
+        vision_metrics.record_ocr_cache_hit();
+    }
+    match (result.ocr_duration_ms, result.ocr_was_empty) {
+        (Some(ocr_ms), true) => {
+            vision_metrics.record_ocr(Duration::from_millis(ocr_ms));
+            vision_metrics.record_ocr_empty();
+        }
+        (Some(ocr_ms), false) => {
+            vision_metrics.record_ocr(Duration::from_millis(ocr_ms));
+        }
+        (None, _) => {}
+    }
+}
+
 fn record_capture_skip(
     aggregate: &screenpipe_screen::PipelineMetrics,
     monitor: &screenpipe_screen::PipelineMetrics,
@@ -1054,6 +1083,8 @@ pub(crate) async fn event_driven_capture_loop(
     // (slides, screen-share, demos) bypass AX-hash dedup during meetings even
     // when no HD session is running. Stays false when no controller is wired.
     let mut in_meeting = false;
+    let tree_walker =
+        TreeWalkerWorker::spawn(format!("monitor-{monitor_id}"), tree_walker_config.clone())?;
 
     let capture_params = CaptureParams {
         db: &db,
@@ -1062,6 +1093,7 @@ pub(crate) async fn event_driven_capture_loop(
         device_name: &device_name,
         snapshot_writer: &snapshot_writer,
         tree_walker_config: &tree_walker_config,
+        tree_walker: &tree_walker,
         window_filters: WindowFilters::new(
             &tree_walker_config.ignored_windows,
             &tree_walker_config.included_windows,
@@ -1128,13 +1160,7 @@ pub(crate) async fn event_driven_capture_loop(
                         &monitor_liveness,
                         Duration::from_millis(result.duration_ms),
                     );
-                    // OCR metrics: record once per OCR run (each run = cache miss).
-                    if let Some(ocr_ms) = result.ocr_duration_ms {
-                        vision_metrics.record_ocr(Duration::from_millis(ocr_ms), 0, 1);
-                        if result.ocr_was_empty {
-                            vision_metrics.record_ocr_empty();
-                        }
-                    }
+                    record_ocr_result_metrics(&vision_metrics, result);
                     if let Some(ref cache) = hot_frame_cache {
                         push_to_hot_cache(cache, result, &device_name, &CaptureTrigger::Manual)
                             .await;
@@ -2001,15 +2027,7 @@ pub(crate) async fn event_driven_capture_loop(
                                 &monitor_liveness,
                                 Duration::from_millis(result.duration_ms),
                             );
-                            // OCR metrics: record once per OCR run. Each run is a
-                            // cache miss (no OCR result cache exists). `ocr_duration_ms`
-                            // is Some only when OCR actually ran for this frame.
-                            if let Some(ocr_ms) = result.ocr_duration_ms {
-                                vision_metrics.record_ocr(Duration::from_millis(ocr_ms), 0, 1);
-                                if result.ocr_was_empty {
-                                    vision_metrics.record_ocr_empty();
-                                }
-                            }
+                            record_ocr_result_metrics(&vision_metrics, result);
                             // OCR-gate telemetry (#5054/#5060): decision counters
                             // (skip / crop_ocr — the fast-path ratio) plus the
                             // per-capture detect+hash latency.
@@ -2937,10 +2955,10 @@ async fn do_capture(
     // the screenshot/OCR path below instead.
     let tree_walk_result = if monitor_hosts_focus {
         Some(
-            tokio::task::spawn_blocking(move || {
-                screenpipe_capture::paired_capture::walk_accessibility_tree(&config)
-            })
-            .await?,
+            params
+                .tree_walker
+                .walk_with_timeout(config, TREE_WALK_WORKER_TIMEOUT)
+                .await?,
         )
     } else {
         None
@@ -3599,6 +3617,48 @@ fn is_frame_corrupt(image: &image::DynamicImage) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ocr_metrics_result(
+        ocr_cache_hit: bool,
+        ocr_duration_ms: Option<u64>,
+        ocr_was_empty: bool,
+    ) -> PairedCaptureResult {
+        PairedCaptureResult {
+            frame_id: 1,
+            snapshot_path: String::new(),
+            accessibility_text: None,
+            text_source: None,
+            capture_trigger: "test".to_string(),
+            captured_at: Utc::now(),
+            duration_ms: 1,
+            ocr_duration_ms,
+            ocr_was_empty,
+            ocr_cache_hit,
+            ocr_gate_decision: None,
+            ocr_gate_detect_duration: None,
+            app_name: None,
+            window_name: None,
+            browser_url: None,
+            content_hash: None,
+        }
+    }
+
+    #[test]
+    fn capture_result_metrics_distinguish_hits_runs_and_noops() {
+        let metrics = screenpipe_screen::PipelineMetrics::new();
+
+        record_ocr_result_metrics(&metrics, &ocr_metrics_result(true, None, false));
+        record_ocr_result_metrics(&metrics, &ocr_metrics_result(false, Some(10), false));
+        record_ocr_result_metrics(&metrics, &ocr_metrics_result(false, Some(30), true));
+        record_ocr_result_metrics(&metrics, &ocr_metrics_result(false, None, false));
+
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.ocr_cache_hits, 1);
+        assert_eq!(snapshot.ocr_cache_misses, 2);
+        assert_eq!(snapshot.ocr_completed, 2);
+        assert_eq!(snapshot.ocr_empty, 1);
+        assert!((snapshot.avg_ocr_latency_ms - 20.0).abs() < 1e-6);
+    }
 
     #[test]
     fn capture_loop_silent_seed_requires_exact_token() {

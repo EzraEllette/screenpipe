@@ -336,6 +336,16 @@ final class TimelineWindowController: NSObject, NSWindowDelegate {
         return attachedControllers.values.first { $0.window === keyWindow }?.hostWindowLabel
     }
 
+    /// Return the model owned by a specific Tauri host window. Search results
+    /// must not use `shared`: Home and the overlay each have their own attached
+    /// controller, and whichever attached last is not necessarily the source.
+    static func model(forWindowLabel label: String?) -> TimelineViewModel? {
+        guard let label else { return shared.currentModel }
+        return attachedControllers.values
+            .first { $0.hostWindowLabel == label }?
+            .currentModel
+    }
+
     private var window: NSWindow?
     private var model: TimelineViewModel?
     private var keyMonitor: Any?
@@ -840,7 +850,8 @@ public func timeline_close() -> Int32 {
     return 0
 }
 
-/// Deep links and search hand-off: `{"timestamp":"...","frameId":"..."}`.
+/// Deep links and search hand-off. `windowLabel` addresses an attached Home or
+/// overlay timeline; absent labels retain the standalone/deep-link behavior.
 @_cdecl("timeline_navigate")
 public func timeline_navigate(_ json: UnsafePointer<CChar>?) -> Int32 {
     guard #available(macOS 13.0, *), let json,
@@ -851,18 +862,21 @@ public func timeline_navigate(_ json: UnsafePointer<CChar>?) -> Int32 {
     }
     DispatchQueue.main.async {
         MainActor.assumeIsolated {
-            guard let model = TimelineWindowController.shared.currentModel else { return }
-            if let frameId = obj["frameId"] as? String,
-               let index = TimelineNavigation.index(ofFrameId: frameId, in: model.frames) {
+            let windowLabel = obj["windowLabel"] as? String
+            guard let model = TimelineWindowController.model(forWindowLabel: windowLabel) else { return }
+            let frameId = obj["frameId"] as? String
+            let rawTimestamp = obj["timestamp"] as? String
+            if let rawTimestamp, let timestamp = TimelineTime.parse(rawTimestamp) {
+                model.navigateToSearchResult(
+                    timestamp: timestamp,
+                    frameId: frameId,
+                    query: obj["searchQuery"] as? String,
+                    frameIds: obj["searchFrameIds"] as? [String] ?? [],
+                    terms: obj["searchTerms"] as? [String] ?? []
+                )
+            } else if let frameId,
+                      let index = TimelineNavigation.index(ofFrameId: frameId, in: model.frames) {
                 model.setIndex(index)
-                return
-            }
-            if let raw = obj["timestamp"] as? String, let date = TimelineTime.parse(raw) {
-                if let index = TimelineNavigation.indexNearest(date, in: model.frames) {
-                    model.setIndex(index)
-                } else {
-                    model.changeDate(to: date)
-                }
             }
         }
     }
