@@ -3166,6 +3166,9 @@ pub(crate) async fn show_shortcut_reminder_impl(
 
         if native_shortcut_reminder::is_available() {
             info!("using the native shortcut reminder");
+            native_shortcut_reminder::set_capture_protected(!crate::window::overlay_is_capturable(
+                &store,
+            ));
             use crate::recording::RecordingState;
             use std::time::Duration;
 
