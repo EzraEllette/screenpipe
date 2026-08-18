@@ -42,12 +42,10 @@ import {
   type ActivityReviewMeeting,
 } from "@/lib/activity-review-prompt";
 import {
-  clearPersistedActivityHistory,
   loadPersistedActivityHistory,
   mergeActivityHistoryCoverage,
   mergeActivityHistoryDocuments,
   nextActivityHistoryRange,
-  preloadPersistedActivityHistory,
   reconcilePersistedActivityHistory,
   type ActivityHistoryCoverage,
 } from "@/lib/activity-history-persistence";
@@ -58,7 +56,6 @@ import { appIconUrl } from "@/lib/first-run/recent-activity";
 import { useSettings } from "@/lib/hooks/use-settings";
 import { useTimelineStore } from "@/lib/hooks/use-timeline-store";
 import { cn } from "@/lib/utils";
-import { pickPipePreset } from "@/lib/utils/pick-pipe-preset";
 import type { AIPreset } from "@/lib/utils/tauri";
 
 type RangePreset = "today" | "24h" | "7d" | "custom";
@@ -140,10 +137,6 @@ function readStoredDateInput(key: string, fallback: string): string {
   return stored && Number.isFinite(new Date(stored).getTime())
     ? stored
     : fallback;
-}
-
-export function preloadActivityHistory(): Promise<unknown> {
-  return preloadPersistedActivityHistory(ACTIVITY_REVIEW_PROMPT_VERSION);
 }
 
 function startOfLocalDay(value: Date): Date {
@@ -575,7 +568,7 @@ export function ActivityLedger({
     (state) => state.setPendingNavigation,
   );
   const initialNow = useMemo(() => new Date(), []);
-  const [anchor, setAnchor] = useState(initialNow);
+  const anchor = initialNow;
   const [preset, setPreset] = useState<RangePreset>(readStoredRangePreset);
   const [customStart, setCustomStart] = useState(() =>
     readStoredDateInput(
@@ -607,6 +600,9 @@ export function ActivityLedger({
   const [historyError, setHistoryError] = useState("");
   const historyAbortRef = useRef<AbortController | null>(null);
   const historyLoadingRef = useRef(false);
+  const [selectedReviewPresetId, setSelectedReviewPresetId] = useState<
+    string | null
+  >(null);
   const { settings } = useSettings();
 
   const range = useMemo(
@@ -614,11 +610,28 @@ export function ActivityLedger({
     [anchor, customEnd, customStart, preset],
   );
   const invalidRange = !range || range.start >= range.end;
+  const reviewPresets = useMemo(
+    () =>
+      ((settings?.aiPresets ?? []) as AIPreset[]).filter(
+        (candidate) => candidate.provider !== "acp",
+      ),
+    [settings?.aiPresets],
+  );
+  const selectableReviewPresets = useMemo(
+    () =>
+      reviewPresets.length > 0
+        ? reviewPresets
+        : [DEFAULT_ACTIVITY_REVIEW_PRESET],
+    [reviewPresets],
+  );
   const reviewPreset = useMemo(
     () =>
-      pickPipePreset((settings?.aiPresets ?? []) as AIPreset[]) ??
-      DEFAULT_ACTIVITY_REVIEW_PRESET,
-    [settings?.aiPresets],
+      selectableReviewPresets.find(
+        (candidate) => candidate.id === selectedReviewPresetId,
+      ) ??
+      selectableReviewPresets.find((candidate) => candidate.defaultPreset) ??
+      selectableReviewPresets[0],
+    [selectableReviewPresets, selectedReviewPresetId],
   );
   const pendingHistoryRange = useMemo(
     () => (range ? nextActivityHistoryRange(range, historyCoverage) : null),
@@ -781,10 +794,8 @@ export function ActivityLedger({
     };
   }, [preset, range]);
 
-  const generateHistory = useCallback(async () => {
+  const generateHistory = useCallback(async (generationRange: TimeRange) => {
     if (!range || historyLoadingRef.current) return;
-    const generationRange = nextActivityHistoryRange(range, historyCoverage);
-    if (!generationRange) return;
     historyAbortRef.current?.abort();
     const controller = new AbortController();
     historyAbortRef.current = controller;
@@ -941,49 +952,6 @@ export function ActivityLedger({
     historyCoverage,
   ]);
 
-  useEffect(() => {
-    if (
-      !cacheReady ||
-      loading ||
-      error ||
-      summary?.data_status !== "ok" ||
-      !pendingHistoryRange ||
-      historyError
-    ) {
-      return;
-    }
-    void generateHistory();
-  }, [
-    cacheReady,
-    error,
-    generateHistory,
-    history,
-    historyError,
-    loading,
-    summary?.data_status,
-    pendingHistoryRange,
-  ]);
-
-  const refresh = async () => {
-    historyAbortRef.current?.abort();
-    if (range) {
-      try {
-        await clearPersistedActivityHistory(
-          ACTIVITY_REVIEW_PROMPT_VERSION,
-          range,
-        );
-        window.localStorage.removeItem(historyCacheKey(range, preset));
-      } catch {
-        // Regeneration still works in memory without store access.
-      }
-    }
-    setHistory(null);
-    setHistoryCoverage([]);
-    setHistoryError("");
-    setAnchor(new Date());
-    if (preset === "custom") setCustomEnd(toLocalInputValue(new Date()));
-  };
-
   const makeSkill = (entry: ActivityHistoryEntry) => {
     void showChatWithPrefill({
       context: compactEntryContext(entry),
@@ -1041,7 +1009,7 @@ Re-query Screenpipe only inside the cited time range and use the cited frames an
                 Activity
               </h1>
               <p className="mt-1 text-sm text-muted-foreground">
-                A clear record of what you worked on.
+            An encrypted record of what you worked on.
               </p>
             </div>
             <div className="flex items-center gap-2">
@@ -1066,11 +1034,33 @@ Re-query Screenpipe only inside the cited time range and use the cited frames an
                   ))}
                 </SelectContent>
               </Select>
+              <Select
+                value={reviewPreset.id}
+                onValueChange={setSelectedReviewPresetId}
+              >
+                <SelectTrigger
+                  className="h-9 w-[190px] max-w-[36vw] text-xs"
+                  aria-label="AI preset"
+                >
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent align="end">
+                  {selectableReviewPresets.map((candidate) => (
+                    <SelectItem key={candidate.id} value={candidate.id}>
+                      {candidate.id} · {candidate.model || "default"}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
               <Button
                 variant="ghost"
                 size="icon"
-                onClick={() => void refresh()}
-                disabled={loading || historyLoading}
+                onClick={() => {
+                  if (range) void generateHistory(range);
+                }}
+                disabled={
+                  loading || historyLoading || !cacheReady || invalidRange
+                }
                 aria-label="Refresh history"
               >
                 <RefreshCw
@@ -1223,24 +1213,42 @@ Re-query Screenpipe only inside the cited time range and use the cited frames an
             <p className="text-sm text-muted-foreground">
               There is not enough captured activity in this range yet.
             </p>
+          ) : !cacheReady ? (
+            <div className="flex h-48 items-center justify-center gap-2 text-sm text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              Loading generated activities…
+            </div>
           ) : historyLoading && !history ? (
             <div className="flex h-48 items-center justify-center gap-2 text-sm text-muted-foreground">
               <Loader2 className="h-4 w-4 animate-spin" />
               Understanding what you worked on…
             </div>
-          ) : (
+          ) : cacheReady && !pendingHistoryRange ? (
             <div className="py-12 text-center">
               <p className="text-sm text-muted-foreground">
-                {historyError || "Your history is ready to be understood."}
+                No generated activities in this range.
               </p>
-              <Button
-                variant="outline"
-                size="sm"
-                className="mt-4"
-                onClick={() => void generateHistory()}
-              >
-                Build history
-              </Button>
+            </div>
+          ) : (
+            <div className="flex min-h-[320px] items-center justify-center py-12 text-center">
+              <div className="max-w-sm">
+                <h2 className="font-sans text-xl font-medium tracking-tight">
+                  Generate activities
+                </h2>
+                <p className="mt-2 text-sm leading-6 text-muted-foreground">
+                  {historyError ||
+                    "Turn this range into a private activity history when you’re ready."}
+                </p>
+                <Button
+                  size="sm"
+                  className="mt-5 h-10 px-5 uppercase tracking-wide"
+                  onClick={() => {
+                    if (range) void generateHistory(range);
+                  }}
+                >
+                  Generate activities
+                </Button>
+              </div>
             </div>
           )}
         </div>

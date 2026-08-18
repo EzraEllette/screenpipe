@@ -12,9 +12,10 @@ import {
   waitFor,
 } from "@testing-library/react";
 
+Element.prototype.scrollIntoView ||= () => {};
+
 const mocks = vi.hoisted(() => ({
   emit: vi.fn(),
-  clearPersistedActivityHistory: vi.fn(),
   loadPersistedActivityHistory: vi.fn(),
   localFetch: vi.fn(),
   reconcilePersistedActivityHistory: vi.fn(),
@@ -27,9 +28,18 @@ const mocks = vi.hoisted(() => ({
     user: { token: "test-token" },
     aiPresets: [
       {
+        id: "chat",
+        provider: "screenpipe-cloud" as const,
+        model: "gpt-5.6-terra",
+        url: "",
+        maxContextChars: 200_000,
+        defaultPreset: true,
+        prompt: "",
+      },
+      {
         id: "pipes",
         provider: "screenpipe-cloud" as const,
-        model: "auto",
+        model: "claude-sonnet-5",
         url: "",
         maxContextChars: 200_000,
         defaultPreset: false,
@@ -55,7 +65,6 @@ vi.mock("@/lib/activity-history-persistence", async (importOriginal) => {
     await importOriginal<typeof import("@/lib/activity-history-persistence")>();
   return {
     ...actual,
-    clearPersistedActivityHistory: mocks.clearPersistedActivityHistory,
     loadPersistedActivityHistory: mocks.loadPersistedActivityHistory,
     reconcilePersistedActivityHistory: mocks.reconcilePersistedActivityHistory,
   };
@@ -272,7 +281,6 @@ beforeEach(() => {
       ],
     }),
   );
-  mocks.clearPersistedActivityHistory.mockResolvedValue(undefined);
   mocks.showChatWithPrefill.mockResolvedValue(undefined);
 });
 
@@ -281,6 +289,12 @@ afterEach(() => {
   vi.useRealTimers();
   vi.clearAllMocks();
 });
+
+async function generateActivities(): Promise<void> {
+  fireEvent.click(
+    await screen.findByRole("button", { name: "Generate activities" }),
+  );
+}
 
 describe("activity history helpers", () => {
   it("keeps the last 24 hours rolling across midnight", () => {
@@ -542,6 +556,91 @@ describe("activity history helpers", () => {
 });
 
 describe("ActivityLedger", () => {
+  it("waits for the encrypted cache lookup before offering generation", async () => {
+    let resolveCache!: (value: { entries: []; coverage: [] }) => void;
+    mocks.loadPersistedActivityHistory.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveCache = resolve;
+        }),
+    );
+
+    render(<ActivityLedger />);
+
+    expect(
+      await screen.findByText("Loading generated activities…"),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: "Generate activities" }),
+    ).toBeNull();
+    expect(mocks.runDailySummaryWithPi).not.toHaveBeenCalled();
+
+    resolveCache({ entries: [], coverage: [] });
+
+    expect(
+      await screen.findByRole("button", { name: "Generate activities" }),
+    ).toBeVisible();
+  });
+
+  it("waits for explicit generation and starts with the default preset", async () => {
+    render(<ActivityLedger />);
+
+    const generate = await screen.findByRole("button", {
+      name: "Generate activities",
+    });
+    expect(screen.getByLabelText("AI preset")).toHaveTextContent(
+      "chat · gpt-5.6-terra",
+    );
+    expect(mocks.runDailySummaryWithPi).not.toHaveBeenCalled();
+
+    fireEvent.click(generate);
+
+    await waitFor(() =>
+      expect(mocks.runDailySummaryWithPi).toHaveBeenCalledWith(
+        expect.objectContaining({
+          preset: expect.objectContaining({ id: "chat" }),
+          sessionPrefix: "activity-history",
+        }),
+      ),
+    );
+  });
+
+  it("uses the selected preset for an explicit refresh", async () => {
+    mocks.loadPersistedActivityHistory.mockImplementation(
+      async (_producer: string, range: { start: Date; end: Date }) => ({
+        entries: parseActivityHistoryResponse(HISTORY_RESPONSE, range).entries,
+        coverage: [
+          {
+            start: range.start.toISOString(),
+            end: range.end.toISOString(),
+          },
+        ],
+      }),
+    );
+
+    render(<ActivityLedger />);
+
+    await screen.findByText("Fixed a capture reliability regression");
+    fireEvent.click(screen.getByLabelText("AI preset"));
+    fireEvent.click(
+      await screen.findByRole("option", {
+        name: "pipes · claude-sonnet-5",
+      }),
+    );
+    const refresh = screen.getByRole("button", { name: "Refresh history" });
+    await waitFor(() => expect(refresh).toBeEnabled());
+    fireEvent.click(refresh);
+
+    await waitFor(() =>
+      expect(mocks.runDailySummaryWithPi).toHaveBeenCalledWith(
+        expect.objectContaining({
+          preset: expect.objectContaining({ id: "pipes" }),
+          sessionPrefix: "activity-history",
+        }),
+      ),
+    );
+  });
+
   it("bypasses Enhanced AI without exposing ledger rows on AI failure", async () => {
     mocks.settings.enhancedAI = false;
     mocks.runDailySummaryWithPi.mockRejectedValue(
@@ -549,6 +648,8 @@ describe("ActivityLedger", () => {
     );
 
     render(<ActivityLedger />);
+
+    await generateActivities();
 
     expect(
       await screen.findByText("History could not be updated. Try again."),
@@ -602,9 +703,8 @@ describe("ActivityLedger", () => {
 
     const view = render(<ActivityLedger />);
 
-    await waitFor(() =>
-      expect(mocks.runDailySummaryWithPi).toHaveBeenCalledOnce(),
-    );
+    await generateActivities();
+    expect(mocks.runDailySummaryWithPi).toHaveBeenCalledOnce();
     const generationSignal = mocks.runDailySummaryWithPi.mock.calls[0][0]
       .signal as AbortSignal;
 
@@ -619,6 +719,7 @@ describe("ActivityLedger", () => {
 
   it("keeps rows concise while exposing artifact icons and skill creation", async () => {
     render(<ActivityLedger />);
+    await generateActivities();
 
     expect(
       await screen.findByRole("heading", {
@@ -712,6 +813,7 @@ describe("ActivityLedger", () => {
       .mockResolvedValueOnce(REPAIRED_HISTORY_RESPONSE);
 
     render(<ActivityLedger />);
+    await generateActivities();
 
     expect(
       await screen.findByRole("heading", { name: "Recovered task 1" }),
@@ -727,6 +829,7 @@ describe("ActivityLedger", () => {
 
   it("does not offer a header chat action", async () => {
     render(<ActivityLedger />);
+    await generateActivities();
     await screen.findByText("Fixed a capture reliability regression");
 
     expect(screen.queryByRole("button", { name: "Ask" })).toBeNull();
@@ -738,6 +841,7 @@ describe("ActivityLedger", () => {
 
   it("opens app and transcript artifacts at their exact timeline moments", async () => {
     render(<ActivityLedger />);
+    await generateActivities();
     await screen.findByText("Fixed a capture reliability regression");
 
     const appArtifact = screen.getByRole("link", {
@@ -812,6 +916,7 @@ describe("ActivityLedger", () => {
     mocks.runDailySummaryWithPi.mockResolvedValue(MEETING_HISTORY_RESPONSE);
 
     render(<ActivityLedger />);
+    await generateActivities();
     await screen.findByText("Aligned on Workflow Studio");
 
     const meetingArtifact = screen.getByRole("link", {
@@ -833,6 +938,7 @@ describe("ActivityLedger", () => {
 
   it("can draft a skill from every activity interval", async () => {
     render(<ActivityLedger />);
+    await generateActivities();
     await screen.findByText("Unblocked a customer's onboarding");
 
     fireEvent.click(
