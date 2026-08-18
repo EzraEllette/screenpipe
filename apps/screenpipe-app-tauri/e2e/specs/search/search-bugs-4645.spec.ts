@@ -40,6 +40,9 @@ interface NativeTimelineSearchState {
   attached: boolean;
   queued: boolean;
   currentFrameId?: string;
+  displayedFrameId?: string;
+  loadedImageFrameId?: string;
+  currentTimestamp?: string;
   searchQuery?: string;
   activeResultIndex?: number;
   searchFrameIds: string[];
@@ -95,24 +98,30 @@ async function nativeTimelineSearchStateFromSearch(
 async function readySearchThumbnail(
   query: string,
   index = 0,
-): Promise<{ frameId: string; selector: string }> {
+): Promise<{ frameId: string; timestamp: string; selector: string }> {
   const input = await $('input[placeholder*="search memory"]');
   await input.waitForExist({ timeout: t(20_000) });
   await input.setValue(query);
   const selector = `[data-index='${index}']`;
-  const result = await $(selector);
-  await result.waitForExist({ timeout: t(20_000) });
+  await $(selector).waitForExist({ timeout: t(20_000) });
   await browser.waitUntil(
-    async () => (await result.getAttribute("data-thumbnail-ready")) === "true",
+    // Search cards are intentionally replaced as exact-thumbnail verification
+    // settles. Reacquire the element on every poll so a valid rerender cannot
+    // turn this user-click test into a stale-WebDriver-element failure.
+    async () =>
+      (await $(selector).getAttribute("data-thumbnail-ready")) === "true",
     {
       timeout: t(20_000),
       interval: 100,
       timeoutMsg: `Search thumbnail ${index} never became clickable`,
     },
   );
+  const result = await $(selector);
   const frameId = await result.getAttribute("data-frame-id");
   if (!frameId) throw new Error("Search card did not expose its exact frame id");
-  return { frameId, selector };
+  const timestamp = await result.getAttribute("data-timestamp");
+  if (!timestamp) throw new Error("Search card did not expose its exact timestamp");
+  return { frameId, timestamp, selector };
 }
 
 async function clickReadySearchThumbnail(query: string, index = 0): Promise<string> {
@@ -610,6 +619,12 @@ describe("Search bugs over seeded data (reproduces #4645)", function () {
       async () => {
         const state = await nativeTimelineSearchState("home");
         return state?.currentFrameId === expectedFrameId &&
+          state.displayedFrameId === expectedFrameId &&
+          state.loadedImageFrameId === expectedFrameId &&
+          Math.abs(
+            new Date(state.currentTimestamp ?? 0).getTime() -
+              new Date(searchResult.timestamp).getTime(),
+          ) < 2 &&
           state.searchQuery === searchQuery &&
           state.searchFrameIds.includes(expectedFrameId);
       },
@@ -665,13 +680,21 @@ describe("Search bugs over seeded data (reproduces #4645)", function () {
       { timeout: t(20_000), timeoutMsg: "Search window did not open from overlay" },
     );
     await browser.switchToWindow("search");
-    const expectedFrameId = await clickReadySearchThumbnail("vector");
+    const searchResult = await readySearchThumbnail("vector");
+    await $(searchResult.selector).click();
+    const expectedFrameId = searchResult.frameId;
 
     await browser.switchToWindow(overlayLabel as string);
     await browser.waitUntil(
       async () => {
         const state = await nativeTimelineSearchState(overlayLabel as string);
         return state?.currentFrameId === expectedFrameId &&
+          state.displayedFrameId === expectedFrameId &&
+          state.loadedImageFrameId === expectedFrameId &&
+          Math.abs(
+            new Date(state.currentTimestamp ?? 0).getTime() -
+              new Date(searchResult.timestamp).getTime(),
+          ) < 2 &&
           state.searchQuery === "vector" &&
           state.searchFrameIds.includes(expectedFrameId);
       },

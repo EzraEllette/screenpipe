@@ -205,6 +205,11 @@ private func testRequestEncoding() {
     let req = FrameStreamRequest(start: start, end: start.addingTimeInterval(3600))
     expectEqual(req.order, "descending", "default order")
     expectEqual(req.limit, 2500, "default limit matches the webview")
+    expectEqual(
+        FrameStreamClient.maximumMessageSize,
+        64 * 1024 * 1024,
+        "native websocket accepts production-sized frame batches"
+    )
 
     guard let data = try? JSONEncoder().encode(req),
           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {

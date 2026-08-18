@@ -692,6 +692,14 @@ private func testSearchNavigationWaitsForExactFrame(model: TimelineViewModel) {
     for index in targetFrames.indices {
         targetFrames[index].devices[0].frameId = String(900_000 + index)
     }
+    // A time-series row can contain several monitors. Put the clicked result
+    // on the second device so this test fails if the canvas merely changes the
+    // row index while continuing to render device 0.
+    var clickedDevice = targetFrames[2].devices[0]
+    targetFrames[2].devices[0].frameId = "900102"
+    clickedDevice.deviceId = "second-monitor"
+    clickedDevice.frameId = "900002"
+    targetFrames[2].devices.append(clickedDevice)
 
     model.navigateToSearchResult(
         timestamp: targetDate.addingTimeInterval(-60),
@@ -703,11 +711,12 @@ private func testSearchNavigationWaitsForExactFrame(model: TimelineViewModel) {
     expect(model.frames.isEmpty, "a result on another day must request that day")
 
     model.injectForTesting(frames: targetFrames)
-    expectEqual(
-        model.currentFrame?.devices.first?.frameId,
-        "900002",
-        "search navigation resolves the exact pending frame"
+    expect(
+        model.currentFrame?.devices.contains(where: { $0.frameId == "900002" }) == true,
+        "search navigation resolves the exact pending time-series row"
     )
+    expectEqual(model.displayFrameId, "900002", "search renders the clicked monitor frame")
+    expectEqual(model.displayDeviceIndex, 1, "search renders the clicked device within the row")
     expectEqual(model.searchReview?.activeIndex, 2, "search review starts on the clicked result")
 }
 

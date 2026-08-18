@@ -183,6 +183,11 @@ final class TimelineViewModel: ObservableObject {
     // Playhead
     @Published var currentIndex: Int = 0
     @Published private(set) var currentImage: NSImage?
+    /// The exact device frame represented by `currentImage`. A time-series row
+    /// can contain several monitors, so the row index alone is not enough to
+    /// prove the canvas is showing the thumbnail the user clicked.
+    @Published private(set) var currentImageFrameId: String?
+    @Published private(set) var preferredFrameId: String?
     @Published private(set) var isLoadingImage = false
     /// Set when every tier failed for the current frame. Without this the
     /// canvas spins forever on an unreadable capture instead of saying so.
@@ -341,7 +346,10 @@ final class TimelineViewModel: ObservableObject {
         stream.request(FrameStreamRequest(
             start: timestamp.addingTimeInterval(-radius),
             end: timestamp.addingTimeInterval(radius),
-            limit: 2500
+            // Four seconds cannot legitimately need a day-sized response.
+            // Keeping this small also makes the exact hit win promptly over a
+            // large day backfill on the same websocket.
+            limit: 64
         ))
     }
 
@@ -370,18 +378,20 @@ final class TimelineViewModel: ObservableObject {
         pendingBatch = []
 
         let result = TimelineMerge.merge(existing: frames, incoming: incoming)
-        let previousFrameId = currentFrame?.devices.first?.frameId
+        let previousDisplayFrameId = displayFrameId
         frames = result.frames
         currentIndex = TimelineLiveEdge.shiftIndex(currentIndex, newFramesAtFront: result.newAtFront)
         var resolvedPendingSearch = false
         if let pending = pendingSearchNavigation {
             if let frameId = pending.frameId,
                let index = TimelineNavigation.index(ofFrameId: frameId, in: frames) {
+                preferredFrameId = frameId
                 currentIndex = index
                 pendingSearchNavigation = nil
                 resolvedPendingSearch = true
             } else if pending.frameId == nil,
                       let index = TimelineNavigation.indexNearest(pending.timestamp, in: frames) {
+                preferredFrameId = nil
                 currentIndex = index
                 pendingSearchNavigation = nil
                 resolvedPendingSearch = true
@@ -396,7 +406,9 @@ final class TimelineViewModel: ObservableObject {
         connectionError = nil
 
         // Only reload pixels when the frame under the playhead actually changed.
-        if currentFrame?.devices.first?.frameId != previousFrameId || currentImage == nil {
+        if displayFrameId != previousDisplayFrameId
+            || currentImageFrameId != displayFrameId
+            || currentImage == nil {
             loadCurrentImage()
         }
 
@@ -576,6 +588,25 @@ final class TimelineViewModel: ObservableObject {
         return frames.indices.contains(index) ? frames[index] : nil
     }
 
+    /// Device within the displayed time-series row. Search supplies an exact
+    /// frame id; without retaining it, multi-monitor hits silently rendered
+    /// device 0 even when the clicked thumbnail belonged to device 1.
+    var displayDeviceIndex: Int? {
+        guard let frame = displayFrame else { return nil }
+        if let preferredFrameId,
+           let index = frame.devices.firstIndex(where: { $0.frameId == preferredFrameId }) {
+            return index
+        }
+        return frame.devices.indices.first
+    }
+
+    var displayFrameId: String? {
+        guard let frame = displayFrame,
+              let index = displayDeviceIndex,
+              frame.devices.indices.contains(index) else { return nil }
+        return frame.devices[index].frameId
+    }
+
     var currentTimestamp: Date? {
         currentFrame.flatMap { TimelineFrames.date(of: $0) }
     }
@@ -693,6 +724,11 @@ final class TimelineViewModel: ObservableObject {
 
     func setIndex(_ index: Int, pausePlayback: Bool = true) {
         let clamped = min(max(0, index), max(0, frames.count - 1))
+        if let preferredFrameId,
+           frames.indices.contains(clamped),
+           !frames[clamped].devices.contains(where: { $0.frameId == preferredFrameId }) {
+            self.preferredFrameId = nil
+        }
         guard clamped != currentIndex else { return }
         if pausePlayback, isPlaying { pause() }
         currentIndex = clamped
@@ -724,26 +760,33 @@ final class TimelineViewModel: ObservableObject {
     }
 
     private func loadCurrentImage() {
-        guard let frame = displayFrame else {
+        guard let frame = displayFrame,
+              let deviceIndex = displayDeviceIndex,
+              frame.devices.indices.contains(deviceIndex) else {
             currentImage = nil
+            currentImageFrameId = nil
             imageUnavailable = false
             return
         }
+        let targetFrameId = frame.devices[deviceIndex].frameId
         imageLoadToken += 1
         let token = imageLoadToken
         isLoadingImage = true
         imageUnavailable = false
+        // The previous pixels may stay cached, but they are no longer allowed
+        // to render as if they belonged to this playhead position.
+        currentImageFrameId = nil
         Task { [images] in
-            let image = await images.image(for: frame)
+            let image = await images.image(for: frame, deviceIndex: deviceIndex)
             await MainActor.run {
                 guard token == self.imageLoadToken else { return }
-                // Keep the previous image when a load fails so the canvas does
-                // not flash empty mid-scrub, but record the failure so the view
-                // can stop pretending it is still loading.
                 if let image {
                     self.currentImage = image
+                    self.currentImageFrameId = targetFrameId
                     self.imageUnavailable = false
                 } else {
+                    self.currentImage = nil
+                    self.currentImageFrameId = nil
                     self.imageUnavailable = true
                 }
                 self.isLoadingImage = false
@@ -792,6 +835,7 @@ final class TimelineViewModel: ObservableObject {
         // later clear loading state for this current-day request.
         navigationGeneration += 1
         pendingSearchNavigation = nil
+        preferredFrameId = nil
         isNavigating = false
         currentDate = Date()
         currentIndex = 0
@@ -815,6 +859,8 @@ final class TimelineViewModel: ObservableObject {
         currentIndex = 0
         frames = []
         currentImage = nil
+        currentImageFrameId = nil
+        preferredFrameId = nil
         isLoading = true
         requestDay(date)
         // Never leave the spinner up forever if the day query stalls.
@@ -1017,13 +1063,14 @@ final class TimelineViewModel: ObservableObject {
         if let frameId,
            let index = TimelineNavigation.index(ofFrameId: frameId, in: frames) {
             pendingSearchNavigation = nil
-            setIndex(index)
+            selectSearchFrame(frameId, at: index)
             return
         }
         if frameId == nil,
            Calendar.current.isDate(timestamp, inSameDayAs: currentDate),
            let index = TimelineNavigation.indexNearest(timestamp, in: frames) {
             pendingSearchNavigation = nil
+            preferredFrameId = nil
             setIndex(index)
             return
         }
@@ -1055,8 +1102,20 @@ final class TimelineViewModel: ObservableObject {
         var updated = review
         updated.activeIndex = index
         searchReview = updated
-        if let frameIndex = TimelineNavigation.index(ofFrameId: review.frameIds[index], in: frames) {
-            setIndex(frameIndex)
+        let frameId = review.frameIds[index]
+        if let frameIndex = TimelineNavigation.index(ofFrameId: frameId, in: frames) {
+            selectSearchFrame(frameId, at: frameIndex)
+        }
+    }
+
+    private func selectSearchFrame(_ frameId: String, at index: Int) {
+        let previousDisplayFrameId = displayFrameId
+        preferredFrameId = frameId
+        setIndex(index)
+        // `setIndex` intentionally no-ops for the same time-series row. Device
+        // selection can still change within that row, so reload explicitly.
+        if displayFrameId != previousDisplayFrameId || currentImageFrameId != displayFrameId {
+            loadCurrentImage()
         }
     }
 

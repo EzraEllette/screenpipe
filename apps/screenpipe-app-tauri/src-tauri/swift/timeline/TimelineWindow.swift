@@ -413,10 +413,19 @@ final class TimelineWindowController: NSObject, NSWindowDelegate {
             "attached": true,
             "queued": pendingSearchNavigation[label] != nil,
             "searchFrameIds": model.searchReview?.frameIds ?? [],
-            "loadedFrameIds": model.frames.compactMap { $0.devices.first?.frameId }
+            "loadedFrameIds": model.frames.flatMap { $0.devices.map(\.frameId) }
         ]
-        if let frameId = model.currentFrame?.devices.first?.frameId {
+        if let frameId = model.preferredFrameId ?? model.currentFrame?.devices.first?.frameId {
             state["currentFrameId"] = frameId
+        }
+        if let frameId = model.displayFrameId {
+            state["displayedFrameId"] = frameId
+        }
+        if let frameId = model.currentImageFrameId {
+            state["loadedImageFrameId"] = frameId
+        }
+        if let timestamp = model.currentTimestamp {
+            state["currentTimestamp"] = TimelineTime.iso(timestamp)
         }
         if let review = model.searchReview {
             state["searchQuery"] = review.query

@@ -208,6 +208,12 @@ protocol FrameStreamClientDelegate: AnyObject {
 
 /// Owns one `/stream/frames` socket, reconnecting forever with backoff.
 final class FrameStreamClient: NSObject {
+    /// A production batch can exceed URLSessionWebSocketTask's 1 MiB default
+    /// once OCR, accessibility text and multiple monitors are present. The web
+    /// timeline accepts those batches; Swift must do the same instead of
+    /// disconnecting mid-response and leaving the playhead on stale data.
+    static let maximumMessageSize = 64 * 1024 * 1024
+
     enum State: Equatable {
         case idle
         case connecting
@@ -285,6 +291,7 @@ final class FrameStreamClient: NSObject {
         }
 
         let socket = session.webSocketTask(with: urlRequest)
+        socket.maximumMessageSize = Self.maximumMessageSize
         task = socket
         socket.resume()
         // The task reports "running" immediately; the first successful receive
