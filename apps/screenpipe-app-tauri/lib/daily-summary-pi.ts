@@ -21,6 +21,8 @@ import { INTERNAL_TITLE_PREFIX } from "@/lib/utils/internal-session";
 import { applyResolvedModelLimits } from "@/lib/model-metadata";
 
 const DAILY_SUMMARY_PROJECT_DIR = "pi-daily-summary";
+const EMPTY_COMPLETION_PROMPT =
+  "Your previous turn ended after tool execution without a final response. Using the tool results already in this session, return the requested final response now. Do not call tools again.";
 
 export type RunDailySummaryOptions = {
   date: Date;
@@ -103,6 +105,7 @@ export async function runDailySummaryWithPi(
 
   let settled = false;
   let lastAssistant = "";
+  let emptyCompletionRetries = 0;
   let resolveResponse!: (value: string) => void;
   let rejectResponse!: (error: Error) => void;
   const response = new Promise<string>((resolve, reject) => {
@@ -130,7 +133,22 @@ export async function runDailySummaryWithPi(
       if (candidate) lastAssistant = candidate;
     }
     if (event.type === "agent_end") {
-      settle(finalAssistantText(envelope) || lastAssistant);
+      const finalText = finalAssistantText(envelope) || lastAssistant;
+      if (finalText) {
+        settle(finalText);
+      } else if (emptyCompletionRetries === 0) {
+        emptyCompletionRetries += 1;
+        void commands
+          .piPrompt(sessionId, EMPTY_COMPLETION_PROMPT, null, null)
+          .then((result) => {
+            if (result.status === "error") fail(new Error(result.error));
+          })
+          .catch((reason: unknown) => {
+            fail(reason instanceof Error ? reason : new Error(String(reason)));
+          });
+      } else {
+        settle("");
+      }
     } else if (event.type === "error") {
       // Keep the provider error intact — the UI classifies quota/rate-limit
       // codes out of it to offer the right recovery (upgrade vs retry).

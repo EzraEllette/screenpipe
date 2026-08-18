@@ -953,6 +953,36 @@ describe("ActivityLedger", () => {
     );
   });
 
+  it("keeps a valid first pass when the coverage repair fails", async () => {
+    mocks.localFetch.mockImplementation((path: string) =>
+      Promise.resolve({
+        ok: true,
+        status: 200,
+        json: async () =>
+          path.startsWith("/meetings?")
+            ? []
+            : { data_status: "ok", total_active_minutes: 300 },
+      }),
+    );
+    mocks.runDailySummaryWithPi
+      .mockResolvedValueOnce(HISTORY_RESPONSE)
+      .mockRejectedValueOnce(new Error("repair failed"));
+
+    render(<ActivityLedger />);
+    await generateActivities();
+
+    expect(
+      await screen.findByRole("heading", {
+        name: "Fixed a capture reliability regression",
+      }),
+    ).toBeVisible();
+    expect(mocks.runDailySummaryWithPi).toHaveBeenCalledTimes(2);
+    expect(mocks.reconcilePersistedActivityHistory).toHaveBeenCalled();
+    expect(
+      screen.queryByText("History could not be updated. Try again."),
+    ).toBeNull();
+  });
+
   it("does not offer a header chat action", async () => {
     render(<ActivityLedger />);
     await generateActivities();
