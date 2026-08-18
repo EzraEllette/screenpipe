@@ -52,6 +52,14 @@ export function formatDuration(milliseconds: number): string {
   return minutes > 0 ? `${minutes}m ${remainingSeconds}s` : `${seconds}s`;
 }
 
+export function sccacheHasBaseDirectories(output: string, worktrees: string[]): boolean {
+  const line = output
+    .split("\n")
+    .find((candidate) => candidate.startsWith("Base directories"));
+  if (!line) return false;
+  return worktrees.every((worktree) => line.includes(`${worktree}/`));
+}
+
 function decode(value: Uint8Array): string {
   return new TextDecoder().decode(value).trim();
 }
@@ -120,7 +128,15 @@ function localSccacheEnvironment(): Record<string, string> {
     ? readFileSync(SCCACHE_STATE_FILE, "utf8")
     : "";
   const next = `${JSON.stringify({ port: SCCACHE_PORT, worktrees }, null, 2)}\n`;
-  if (previous !== next) {
+  const stats = Bun.spawnSync([sccache, "--show-stats"], {
+    cwd: APP_ROOT,
+    env,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const serverMatches = stats.exitCode === 0
+    && sccacheHasBaseDirectories(decode(stats.stdout), worktrees);
+  if (previous !== next || !serverMatches) {
     Bun.spawnSync([sccache, "--stop-server"], {
       cwd: APP_ROOT,
       env,
