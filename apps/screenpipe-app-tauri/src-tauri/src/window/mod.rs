@@ -473,7 +473,7 @@ pub fn enforce_enterprise_ui_visibility(app: &tauri::AppHandle) {
 // callers (commands.rs, space_monitor.rs, etc.) may also reference them.
 #[allow(unused_imports)]
 pub use util::screen_aware_size;
-pub(crate) use capture_protection::{app_windows_are_capturable, overlay_is_capturable};
+pub(crate) use capture_protection::{native_overlay_is_capturable, overlay_is_capturable};
 pub use capture_protection::{
     get_app_screen_capture_protection, set_app_screen_capture_protection,
 };

@@ -328,27 +328,20 @@ export function DisplaySection() {
                 <div>
                   <h3 className="text-sm font-medium text-foreground flex items-center gap-1.5">
                     Show Overlay in Screen Recording
-                    <HelpTooltip text="When enabled, the screenpipe overlay can appear in OBS or Screen Studio. The broader 'Hide screenpipe from screen capture' preference in Audio & meetings takes priority." />
+                    <HelpTooltip text="When enabled, the screenpipe overlay can appear in OBS or Screen Studio. Other screenpipe windows are always capturable." />
                   </h3>
                   <p className="text-xs text-muted-foreground">
-                    {(settings?.hideAppInScreenShare ?? true)
-                      ? "Global screen-share privacy is on in Audio & meetings"
-                      : "Let OBS or Screen Studio capture the overlay"}
+                    Let OBS or Screen Studio capture the overlay
                   </p>
                 </div>
               </div>
               <Switch
-                checked={
-                  !(settings?.hideAppInScreenShare ?? true) &&
-                  (settings?.showOverlayInScreenRecording ?? false)
-                }
-                disabled={settings?.hideAppInScreenShare ?? true}
+                data-testid="show-overlay-in-screen-recording-toggle"
+                checked={settings?.showOverlayInScreenRecording ?? false}
                 onCheckedChange={async (checked) => {
                   try {
                     await updateSettings({ showOverlayInScreenRecording: checked });
-                    const result = await commands.setAppScreenCaptureProtection(
-                      settings?.hideAppInScreenShare ?? true,
-                    );
+                    const result = await commands.setAppScreenCaptureProtection(!checked);
                     if (result.status === "error") {
                       throw new Error(result.error);
                     }

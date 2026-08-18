@@ -6,7 +6,7 @@ use crate::store::SettingsStore;
 use serde::Serialize;
 use tauri::{AppHandle, Manager, WebviewWindow};
 
-const OVERLAY_WINDOW_LABELS: [&str; 3] = ["main", "main-window", "chat"];
+const OVERLAY_WINDOW_LABELS: [&str; 4] = ["main", "main-window", "chat", "shortcut-reminder"];
 
 #[derive(Debug, Clone, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
@@ -27,9 +27,9 @@ fn is_overlay_window(label: &str) -> bool {
 }
 
 /// Resolve whether one screenpipe window should be excluded from screenshots
-/// and screen sharing. The global privacy preference wins over the narrower
-/// overlay preference. E2E builds stay capturable so WebDriver screenshots and
-/// visual assertions remain possible; the E2E API reports that bypass plainly.
+/// and screen sharing. Capture protection is deliberately limited to overlay
+/// windows; Home, Settings, and other regular app windows remain capturable.
+/// E2E builds stay capturable so visual assertions remain possible.
 pub(crate) fn should_protect_window(
     settings: &SettingsStore,
     label: &str,
@@ -38,24 +38,22 @@ pub(crate) fn should_protect_window(
     if e2e_mode {
         return false;
     }
-    settings.hide_app_in_screen_share
-        || (is_overlay_window(label) && !settings.show_overlay_in_screen_recording)
+    is_overlay_window(label) && !settings.show_overlay_in_screen_recording
 }
 
 pub(crate) fn overlay_is_capturable(settings: &SettingsStore) -> bool {
     !should_protect_window(settings, "main", crate::config::is_e2e_mode())
 }
 
-/// Read only by the macOS NSPanel setup in `commands.rs`, which mirrors the
-/// preference onto `NSWindowSharingType`. Other platforms apply the same
-/// preference through `set_content_protected` in `apply_to_window_with_settings`.
+/// Read by native overlay panels in `commands.rs`, which cannot use the webview
+/// label helper but must follow the same overlay-only preference.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-pub(crate) fn app_windows_are_capturable(app: &AppHandle) -> bool {
+pub(crate) fn native_overlay_is_capturable(app: &AppHandle) -> bool {
     let settings = SettingsStore::get(app)
         .ok()
         .flatten()
         .unwrap_or_default();
-    !settings.hide_app_in_screen_share || crate::config::is_e2e_mode()
+    overlay_is_capturable(&settings)
 }
 
 fn apply_to_window_with_settings(
@@ -114,7 +112,7 @@ pub fn set_app_screen_capture_protection(
         .ok()
         .flatten()
         .unwrap_or_default();
-    settings.hide_app_in_screen_share = hidden;
+    settings.show_overlay_in_screen_recording = !hidden;
 
     let mut errors = Vec::new();
     for window in app_handle.webview_windows().values() {
@@ -134,11 +132,11 @@ pub fn set_app_screen_capture_protection(
 pub fn get_app_screen_capture_protection(
     app_handle: AppHandle,
 ) -> ScreenCaptureProtectionStatus {
-    let requested_hidden = SettingsStore::get(&app_handle)
+    let requested_hidden = !SettingsStore::get(&app_handle)
         .ok()
         .flatten()
         .unwrap_or_default()
-        .hide_app_in_screen_share;
+        .show_overlay_in_screen_recording;
     status(&app_handle, requested_hidden)
 }
 
@@ -148,21 +146,17 @@ mod tests {
     use crate::store::SettingsStore;
 
     #[test]
-    fn new_install_hides_all_windows_from_capture() {
+    fn capture_protection_is_limited_to_overlays() {
         let settings = SettingsStore::default();
         assert!(settings.hide_app_in_screen_share);
-        assert!(should_protect_window(&settings, "home", false));
-        assert!(should_protect_window(&settings, "main", false));
-    }
-
-    #[test]
-    fn global_opt_out_preserves_the_narrow_overlay_preference() {
-        let mut settings = SettingsStore::default();
-        settings.hide_app_in_screen_share = false;
-        settings.show_overlay_in_screen_recording = false;
         assert!(!should_protect_window(&settings, "home", false));
+        assert!(!should_protect_window(&settings, "settings", false));
+        assert!(should_protect_window(&settings, "main", false));
         assert!(should_protect_window(&settings, "chat", false));
+        assert!(should_protect_window(&settings, "shortcut-reminder", false));
+        assert!(!should_protect_window(&settings, "notification-panel", false));
 
+        let mut settings = settings;
         settings.show_overlay_in_screen_recording = true;
         assert!(!should_protect_window(&settings, "main-window", false));
     }

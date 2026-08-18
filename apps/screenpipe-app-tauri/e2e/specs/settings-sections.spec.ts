@@ -139,7 +139,7 @@ describe('Settings sections', () => {
     expect(existsSync(filepath)).toBe(true);
   });
 
-  it('keeps audio and meeting notes separate and applies screen-share privacy live', async () => {
+  it('keeps audio and meeting notes separate from screen capture visibility', async () => {
     const navAudio = await $('[data-testid="settings-nav-audio"]');
     await navAudio.waitForExist({ timeout: 8_000 });
     expect((await navAudio.getText()).toLowerCase()).toContain('audio & meetings');
@@ -153,12 +153,19 @@ describe('Settings sections', () => {
       )) as string
     ).toLowerCase();
     expect(sectionText).toContain('audio recording');
-    expect(sectionText).toContain('hide screenpipe from screen capture');
+    expect(sectionText).not.toContain('hide screenpipe from screen capture');
     expect(sectionText).not.toContain('screen context capture');
     expect(sectionText).not.toContain('screenshot images');
+  });
 
-    const toggle = await $('[data-testid="hide-app-in-screen-share-toggle"]');
+  it('applies screen capture protection only to the overlay', async () => {
+    const navDisplay = await $('[data-testid="settings-nav-display"]');
+    await navDisplay.waitForExist({ timeout: 8_000 });
+    await navDisplay.click();
+
+    const toggle = await $('[data-testid="show-overlay-in-screen-recording-toggle"]');
     await toggle.waitForExist({ timeout: 5_000 });
+
     const initial = await invokeOrThrow<{
       requestedHidden: boolean;
       effectiveHidden: boolean;
@@ -180,7 +187,7 @@ describe('Settings sections', () => {
     // the supported platforms, and Linux cannot hide them at all.
     expect(initial.effectiveHidden).toBe(false);
     expect(initial.windowLabels).toContain('home');
-    expect(await toggle.getAttribute('data-state')).toBe('checked');
+    expect(await toggle.getAttribute('data-state')).toBe('unchecked');
 
     try {
       await toggle.click();
@@ -192,10 +199,10 @@ describe('Settings sections', () => {
         {
           timeout: t(8_000),
           interval: 100,
-          timeoutMsg: 'screen-share privacy opt-out did not persist',
+          timeoutMsg: 'overlay capture opt-in did not persist',
         },
       );
-      expect(await toggle.getAttribute('data-state')).toBe('unchecked');
+      expect(await toggle.getAttribute('data-state')).toBe('checked');
 
       await toggle.click();
       await browser.waitUntil(
@@ -206,12 +213,12 @@ describe('Settings sections', () => {
         {
           timeout: t(8_000),
           interval: 100,
-          timeoutMsg: 'screen-share privacy opt-in did not persist',
+          timeoutMsg: 'overlay capture opt-out did not persist',
         },
       );
-      expect(await toggle.getAttribute('data-state')).toBe('checked');
+      expect(await toggle.getAttribute('data-state')).toBe('unchecked');
 
-      const filepath = await saveScreenshot('settings-audio-meetings-privacy');
+      const filepath = await saveScreenshot('settings-display-overlay-capture');
       expect(existsSync(filepath)).toBe(true);
     } finally {
       const status = await invokeOrThrow<{ requestedHidden: boolean }>(
