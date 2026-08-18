@@ -535,8 +535,6 @@ impl PersistentCapture {
             return Err(anyhow!("StartCapture failed: {}", e));
         }
 
-        tracing::info!("persistent WGC capture started for monitor {}", monitor_id);
-
         Ok(Self {
             d3d,
             item,
