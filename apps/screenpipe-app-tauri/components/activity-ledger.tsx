@@ -54,9 +54,9 @@ import {
 import { localFetch } from "@/lib/api";
 import { showChatWithPrefill } from "@/lib/chat-utils";
 import { runDailySummaryWithPi } from "@/lib/daily-summary-pi";
-import { appIconUrl } from "@/lib/first-run/recent-activity";
 import { useSettings } from "@/lib/hooks/use-settings";
 import { useTimelineStore } from "@/lib/hooks/use-timeline-store";
+import { getAppServerBaseUrl } from "@/lib/notifications/app-server";
 import { cn } from "@/lib/utils";
 import type { AIPreset } from "@/lib/utils/tauri";
 
@@ -495,7 +495,20 @@ export function artifactsForHistoryEntry(
 
 function EvidenceArtifactIcon({ evidence }: { evidence: ActivityArtifact }) {
   const [iconFailed, setIconFailed] = useState(false);
+  const [appServerBaseUrl, setAppServerBaseUrl] = useState<string | null>(null);
   const domain = siteDomain(evidence.browser_url);
+
+  useEffect(() => {
+    if (!evidence.app_name || domain) return;
+    let active = true;
+    void getAppServerBaseUrl().then((baseUrl) => {
+      if (active) setAppServerBaseUrl(baseUrl);
+    });
+    return () => {
+      active = false;
+    };
+  }, [domain, evidence.app_name]);
+
   if (evidence.kind === "meeting") {
     return <Users className="h-4 w-4" aria-hidden="true" />;
   }
@@ -509,10 +522,10 @@ function EvidenceArtifactIcon({ evidence }: { evidence: ActivityArtifact }) {
       />
     );
   }
-  if (evidence.app_name && !iconFailed) {
+  if (evidence.app_name && appServerBaseUrl && !iconFailed) {
     return (
       <img
-        src={appIconUrl(evidence.app_name)}
+        src={`${appServerBaseUrl}/app-icon?name=${encodeURIComponent(evidence.app_name)}`}
         alt=""
         className="h-full w-full object-contain"
         onError={() => setIconFailed(true)}
