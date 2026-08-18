@@ -58,6 +58,30 @@ function formatMessageFullTime(timestamp: number): string | null {
   });
 }
 
+const messageEditControlSelector = [
+  "a[href]",
+  "button",
+  "input",
+  "select",
+  "textarea",
+  "label",
+  "summary",
+  "audio[controls]",
+  "video[controls]",
+  '[role="button"]',
+  '[role="link"]',
+  '[contenteditable]:not([contenteditable="false"])',
+].join(",");
+
+function isMessageEditControl(
+  target: EventTarget | null,
+  wrapper: HTMLElement,
+): boolean {
+  if (!(target instanceof Element)) return false;
+  const control = target.closest(messageEditControlSelector);
+  return control !== null && control !== wrapper && wrapper.contains(control);
+}
+
 export interface ChatMessageListProps {
   messages: Message[];
   isLoading: boolean;
@@ -308,14 +332,29 @@ export function ChatMessageList({
                   {hideSupersededSteerBody ? null : (
                     <div
                       onMouseDown={(e) => {
-                        if (!canEditMessage || editingMessageId === message.id) return;
+                        if (
+                          !canEditMessage ||
+                          editingMessageId === message.id ||
+                          isMessageEditControl(e.target, e.currentTarget)
+                        ) {
+                          pendingCaretRef.current = null;
+                          pendingEditDownXYRef.current = null;
+                          return;
+                        }
                         pendingCaretRef.current = caretOffsetFromClick(e, message.content);
                         pendingEditDownXYRef.current = { x: e.clientX, y: e.clientY };
                       }}
                       onMouseUp={(e) => {
-                        if (!canEditMessage || editingMessageId === message.id) return;
                         const down = pendingEditDownXYRef.current;
                         pendingEditDownXYRef.current = null;
+                        if (
+                          !canEditMessage ||
+                          editingMessageId === message.id ||
+                          isMessageEditControl(e.target, e.currentTarget)
+                        ) {
+                          pendingCaretRef.current = null;
+                          return;
+                        }
                         if (!down) return;
                         const moved = Math.hypot(e.clientX - down.x, e.clientY - down.y);
                         if (moved > 3) {
