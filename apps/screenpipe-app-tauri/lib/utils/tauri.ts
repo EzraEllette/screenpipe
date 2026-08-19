@@ -987,6 +987,14 @@ async listImportedSkills() : Promise<Result<ImportedSkill[], string>> {
     else return { status: "error", error: e  as any };
 }
 },
+async listManagedTeamSkills() : Promise<Result<ManagedTeamSkillLocal[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_managed_team_skills") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 /**
  * List schedules owned by native agent harnesses without mutating them.
  */
@@ -2607,6 +2615,19 @@ async suspendGlobalShortcuts() : Promise<Result<null, string>> {
 }
 },
 /**
+ * Apply the exact organization-managed skill desired state. Only directories
+ * written by this command (namespaced + marker-checked) can be refreshed or
+ * pruned; personal skills and unrelated agent configuration are untouched.
+ */
+async syncManagedTeamSkills(skills: ManagedTeamSkill[], pruneUnlisted: boolean) : Promise<Result<ManagedTeamSkillReceipt[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("sync_managed_team_skills", { skills, pruneUnlisted }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Verifies an OpenAI-compatible endpoint with the exact request path and
  * audio encoding used by the recording engine. A successful response is
  * required before the settings UI can activate this engine, so recordings
@@ -3008,6 +3029,40 @@ export type LoginMode = "sign-in" | "sign-up"
  * from drifting away from the values enforced by the capture engine.
  */
 export type LowDiskGuardConfig = { thresholdBytes: number; checkIntervalSeconds: number }
+/**
+ * A reviewed organization skill delivered by the Enterprise policy endpoint.
+ * Package files contain no credentials or device-specific filesystem paths.
+ */
+export type ManagedTeamSkill = { artifact_id: string;
+/**
+ * Desired-state revision. Assignment changes bump this value.
+ */
+version: number;
+/**
+ * Immutable package release.
+ */
+release_version: number; name: string; description?: string; package: ManagedTeamSkillPackage; destinations?: string[] }
+/**
+ * Read-only summary rendered in Settings. Organization-managed skills are
+ * deliberately separate from user-imported skills and cannot be removed there.
+ */
+export type ManagedTeamSkillLocal = { artifact_id: string; version: number; release_version: number; digest: string; name: string; description: string; file_count: number; discovery_chars: number; activation_chars: number; has_scripts: boolean; destinations: string[] }
+/**
+ * A portable Agent Skills directory. The server freezes the exact text files;
+ * each device verifies the per-file and aggregate digests before installation.
+ */
+export type ManagedTeamSkillPackage = { format: string; package_version: number; entrypoint: string; digest: string; name: string; description: string; files: ManagedTeamSkillPackageFile[]; context: ManagedTeamSkillPackageContext; risk: ManagedTeamSkillPackageRisk }
+export type ManagedTeamSkillPackageContext = { discovery_chars: number; activation_chars: number }
+export type ManagedTeamSkillPackageFile = { path: string; content: string; sha256: string; bytes: number }
+export type ManagedTeamSkillPackageRisk = { has_scripts: boolean }
+/**
+ * Per-destination receipt from the most recent managed sync attempt.
+ */
+export type ManagedTeamSkillReceipt = { artifact_id: string; version: number; release_version: number; digest: string; destination: string;
+/**
+ * `installed` or `error`. Errors never prevent the other destinations.
+ */
+status: string; detail?: string | null }
 export type MeetingExportSummary = { job_id: string; output_path: string; frame_count: number; audio_chunk_count: number; duration_secs: number; file_size_bytes: number }
 export type MonitorDevice = { id: number; stableId: string; name: string; isDefault: boolean; width: number; height: number }
 export type NotificationActionEvent = { actionType: string | null; rawJson: string; payload: JsonValue }

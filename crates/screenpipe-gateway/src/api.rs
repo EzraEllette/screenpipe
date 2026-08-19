@@ -21,7 +21,7 @@
 //!   plus `frames.snapshot_path`, served via `/frames/{device}/{frame}`
 //!   (which falls back to the ingested thumbnail when the org never
 //!   uploads full frames — true for every write-only org).
-//! - `workflows/generated` and `pipes` are not served: Workflow Studio
+//! - `workflows/generated`, `skills`, and `pipes` are not served: Workflow Studio
 //!   surfaces are hard-disabled for write-only bindings and pipe
 //!   management is a control-plane concern that stays hosted. They answer a
 //!   typed `501 {error, code:"not_served_by_gateway"}` (SCR-288) rather than
@@ -123,6 +123,7 @@ fn routes() -> Vec<(&'static str, MethodRouter<ApiState>)> {
             "/api/enterprise/v1/workflows/generated",
             any(not_served_here),
         ),
+        ("/api/enterprise/v1/skills", any(not_served_here)),
         ("/api/enterprise/v1/pipes", any(not_served_here)),
     ]
 }
@@ -2074,7 +2075,12 @@ mod tests {
                     valid_until: now + Duration::minutes(30),
                     token_grants: vec![TokenGrant {
                         digest: crate::policy::token_digest("sk_ent_every_scope_1234"),
-                        scopes: vec!["read:workflows".to_string(), "write:pipes".to_string()],
+                        scopes: vec![
+                            "read:workflows".to_string(),
+                            "read:skills".to_string(),
+                            "write:skill-proposals".to_string(),
+                            "write:pipes".to_string(),
+                        ],
                         expires_at: None,
                     }],
                 },
@@ -2087,6 +2093,8 @@ mod tests {
             let router = router(db.clone(), src.clone(), "lic-1".to_string(), policy);
             for (method, uri) in [
                 ("GET", "/api/enterprise/v1/workflows/generated?kind=sop"),
+                ("GET", "/api/enterprise/v1/skills"),
+                ("POST", "/api/enterprise/v1/skills"),
                 ("POST", "/api/enterprise/v1/pipes"),
                 ("GET", "/api/enterprise/v1/pipes"),
             ] {

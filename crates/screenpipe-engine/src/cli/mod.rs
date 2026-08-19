@@ -25,6 +25,7 @@ pub mod survey;
 pub mod sync;
 pub mod team;
 pub mod team_pipes;
+pub mod team_skills;
 pub mod vault;
 pub mod view;
 pub mod vision;
@@ -2110,6 +2111,57 @@ pub enum TeamCommand {
         #[command(subcommand)]
         subcommand: TeamPipeCommand,
     },
+    /// Discover approved skills or propose a local Agent Skills folder
+    Skills {
+        #[command(subcommand)]
+        subcommand: TeamSkillCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum TeamSkillCommand {
+    /// List compact approved-skill metadata (no package bodies)
+    List(TeamSkillListArgs),
+    /// Fetch one approved skill, including its exact package manifest
+    Show(TeamSkillShowArgs),
+    /// Propose a local Agent Skills folder for private admin review
+    Propose(TeamSkillProposeArgs),
+}
+
+#[derive(Parser, Clone, Debug)]
+pub struct TeamSkillListArgs {
+    /// Emit the complete API response as JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Parser, Clone, Debug)]
+pub struct TeamSkillShowArgs {
+    /// Approved skill id from `screenpipe team skills list`
+    pub id: String,
+
+    /// Emit the complete API response as JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Parser, Clone, Debug)]
+pub struct TeamSkillProposeArgs {
+    /// Skill directory, or its root SKILL.md
+    #[arg(value_hint = ValueHint::DirPath)]
+    pub source: PathBuf,
+
+    /// Optional review title; defaults to the skill name
+    #[arg(long)]
+    pub title: Option<String>,
+
+    /// Submit after preview without an interactive confirmation
+    #[arg(long)]
+    pub yes: bool,
+
+    /// Emit the complete API receipt as JSON
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Subcommand, Debug)]

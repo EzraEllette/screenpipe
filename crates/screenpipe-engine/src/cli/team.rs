@@ -58,6 +58,9 @@ pub async fn handle_team_command(cmd: &TeamCommand) -> anyhow::Result<()> {
     if let TeamCommand::Pipes { subcommand } = cmd {
         return super::team_pipes::handle_team_pipe_command(subcommand).await;
     }
+    if let TeamCommand::Skills { subcommand } = cmd {
+        return super::team_skills::handle_team_skill_command(subcommand).await;
+    }
 
     let env = TeamEnv::resolve()?;
     let client = reqwest::Client::builder()
@@ -70,6 +73,7 @@ pub async fn handle_team_command(cmd: &TeamCommand) -> anyhow::Result<()> {
         TeamCommand::Search(args) => search(&client, &env, args).await,
         TeamCommand::Records(args) => records(&client, &env, args).await,
         TeamCommand::Pipes { .. } => unreachable!("handled before read-only team commands"),
+        TeamCommand::Skills { .. } => unreachable!("handled before read-only team commands"),
     }
 }
 
@@ -464,6 +468,31 @@ mod tests {
                 assert_eq!(args.limit, 30);
             }
             _ => panic!("expected Team::Search"),
+        }
+    }
+
+    #[test]
+    fn parses_team_skill_proposal() {
+        let cli = Cli::try_parse_from([
+            "screenpipe",
+            "team",
+            "skills",
+            "propose",
+            "./incident-follow-up",
+            "--yes",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Team {
+                subcommand: TeamCommand::Skills { subcommand },
+            } => match subcommand {
+                crate::cli::TeamSkillCommand::Propose(args) => {
+                    assert_eq!(args.source, PathBuf::from("./incident-follow-up"));
+                    assert!(args.yes);
+                }
+                _ => panic!("expected TeamSkillCommand::Propose"),
+            },
+            _ => panic!("expected Team::Skills"),
         }
     }
 

@@ -274,10 +274,11 @@ pub const PUBLIC_ROUTES: &[&str] = &["/health", "/version", "/access-log"];
 /// Hosted v1 routes this gateway deliberately does NOT serve, answered with a
 /// typed 501 instead.
 ///
-/// Both are real parts of the hosted contract that a gateway cannot honour:
+/// These are real parts of the hosted contract that a gateway cannot honour:
 /// `workflows/generated` reads Workflow Studio artifacts, which are
-/// hard-disabled for a write-only binding, and `pipes` is fleet management,
-/// which stays on the control plane. Before SCR-288 neither had a scope arm, so
+/// hard-disabled for a write-only binding; `skills` is immutable registry and
+/// proposal state; and `pipes` is fleet management. The latter two stay on the
+/// control plane. Before SCR-288 these had no scope arm, so
 /// the answer depended on the deployment posture: 403 "route has no scope
 /// mapping" with a policy loaded, and a bare 404 with an EMPTY body and no
 /// content-type without one. `packages/screenpipe-mcp`'s `team-records` tool
@@ -290,6 +291,7 @@ pub const PUBLIC_ROUTES: &[&str] = &["/health", "/version", "/access-log"];
 /// that most needs it.
 pub const NOT_SERVED_ROUTES: &[&str] = &[
     "/api/enterprise/v1/workflows/generated",
+    "/api/enterprise/v1/skills",
     "/api/enterprise/v1/pipes",
 ];
 

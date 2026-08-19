@@ -4,7 +4,7 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useEnterpriseBuildStatus } from "./use-is-enterprise-build";
-import { commands } from "@/lib/utils/tauri";
+import { commands, type ManagedTeamSkill } from "@/lib/utils/tauri";
 import { isLocalControlPlaneBase, tauriFetchWithDeadline } from "@/lib/http/tauri-fetch";
 import { getStore, useSettings } from "./use-settings";
 import {
@@ -51,6 +51,7 @@ interface EnterprisePolicy {
   aiPresetPolicy: EnterpriseAiPresetPolicy;
   appUpdatePolicy: EnterpriseAppUpdatePolicy;
   managedPipes: ManagedPipe[];
+  managedSkills: ManagedTeamSkill[];
   orgName: string;
   /** Admin requires employees to sign in with their screenpipe account —
    *  the enterprise license key alone must not authenticate this device. */
@@ -64,6 +65,7 @@ const EMPTY_POLICY: EnterprisePolicy = {
   aiPresetPolicy: DEFAULT_ENTERPRISE_AI_PRESET_POLICY,
   appUpdatePolicy: DEFAULT_ENTERPRISE_APP_UPDATE_POLICY,
   managedPipes: [],
+  managedSkills: [],
   orgName: "",
   requireAccountLogin: false,
 };
@@ -173,6 +175,7 @@ function readE2ePolicyMock(licenseKey: string): E2ePolicyMockResult {
         aiPresetPolicy: DEFAULT_ENTERPRISE_AI_PRESET_POLICY,
         appUpdatePolicy: DEFAULT_ENTERPRISE_APP_UPDATE_POLICY,
         managedPipes: [],
+        managedSkills: [],
         orgName: "E2E Enterprise",
         requireAccountLogin: false,
         ...policy,
@@ -549,6 +552,7 @@ function loadCachedPolicy(): EnterprisePolicy | null {
         ),
         appUpdatePolicy: normalizeEnterpriseAppUpdatePolicy(policy.appUpdatePolicy),
         managedPipes: Array.isArray(policy.managedPipes) ? policy.managedPipes : [],
+        managedSkills: Array.isArray(policy.managedSkills) ? policy.managedSkills : [],
         orgName: typeof policy.orgName === "string" ? policy.orgName : "",
         requireAccountLogin: policy.requireAccountLogin === true,
       };
@@ -761,6 +765,7 @@ export function useEnterprisePolicyRuntime() {
         aiPresetPolicy,
         appUpdatePolicy,
         managedPipes: data.managedPipes || [],
+        managedSkills: Array.isArray(data.managedSkills) ? data.managedSkills : [],
         orgName: data.orgName || "",
         requireAccountLogin: data.requireAccountLogin === true,
       };
@@ -820,6 +825,26 @@ export function useEnterprisePolicyRuntime() {
       }).catch((e) =>
         console.warn("[enterprise] failed to sync managed pipes:", e)
       );
+
+      // Organization skills are a separate, explicit desired state. Omission
+      // means the control plane is older or could not read the registry, so we
+      // preserve the last valid local install. A returned empty array is the
+      // only signal that authorizes pruning screenpipe-owned managed folders.
+      if (Array.isArray(data.managedSkills)) {
+        commands
+          .syncManagedTeamSkills(result.managedSkills, true)
+          .then((response) => {
+            if (response.status === "error") {
+              console.warn(
+                "[enterprise] failed to sync managed skills:",
+                response.error,
+              );
+            }
+          })
+          .catch((e) =>
+            console.warn("[enterprise] failed to sync managed skills:", e),
+          );
+      }
 
       // Push hidden sections to Rust so tray menu can use them
       try {
