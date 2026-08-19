@@ -236,8 +236,8 @@ export function usePiForegroundEvents({
       }
 
       if (data.type === "acp_external_auth_required") {
-        // The agent (Kimi, OpenCode) can't sign in over ACP — its login is a
-        // CLI step. Treat this like an intentional stop so the crash-recovery
+        // The agent (Cursor, Kimi, OpenCode) can't sign in over ACP — its login
+        // is a CLI step. Treat this like an intentional stop so crash recovery
         // loop does NOT silently restart into the default provider (that was
         // the "fell back to pi" bug); instead tell the user how to sign in.
         useAcpBootState.getState().finish(stringValue(data.agentId));

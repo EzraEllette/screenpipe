@@ -4426,10 +4426,11 @@ pub async fn pi_acp_probe_agent(agent: AcpAgentConfig) -> Result<String, String>
                         .unwrap_or("the agent failed to start")
                         .to_string())
                 }
-                // External-CLI-login agents (Kimi, OpenCode): the runtime can't
-                // complete their sign-in over ACP and emits this with the CLI
-                // command. Surface it (with the command) so the editor shows a
-                // sign-in hint instead of spinning until the probe times out.
+                // External-CLI-login agents (Cursor, Kimi, OpenCode): the
+                // runtime can't complete their sign-in over ACP and emits this
+                // with the CLI command. Surface it (with the command) so the
+                // editor shows a sign-in hint instead of spinning until the
+                // probe times out.
                 Some("acp_external_auth_required") => {
                     let name = event
                         .get("agentName")

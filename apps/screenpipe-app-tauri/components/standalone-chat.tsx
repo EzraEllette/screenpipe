@@ -283,7 +283,7 @@ export function StandaloneChat({
   // their messages from the chat store instead — see the `messages` derivation
   // below, after `conversationId` is known.
   const [localMessages, setMessages] = useState<Message[]>([]);
-  // One dialog for every ACP sign-in — CLI login (Kimi, OpenCode) and
+  // One dialog for every ACP sign-in — CLI login (Cursor, Kimi, OpenCode) and
   // in-protocol auth-method selection alike. Single piece of state → deduped.
   const [acpSignIn, setAcpSignIn] = useState<AcpSignInRequest | null>(null);
   // A CLI retry is in flight: we re-attempted the connection and are waiting to

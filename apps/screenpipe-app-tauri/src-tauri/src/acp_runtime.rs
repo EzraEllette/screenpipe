@@ -2939,10 +2939,12 @@ fn allow_option_id(options: &Value) -> Option<String> {
 
 fn external_auth_command(agent_id: &str) -> Option<&'static str> {
     // These agents advertise an ACP auth method but their `authenticate` just
-    // re-errors "Authentication required" — login can't complete over ACP. It
-    // must be done via their own CLI, which persists credentials the ACP server
-    // then reuses. We show the command instead of a card that would loop.
+    // re-errors or never responds while signed out — login can't complete over
+    // ACP. It must be done via their own CLI, which persists credentials the
+    // ACP server then reuses. We show the command instead of a card that would
+    // loop or hang.
     match agent_id {
+        "cursor" => Some("cursor-agent login"),
         "opencode" => Some("opencode auth login"),
         "kimi" => Some("kimi login"),
         _ => None,
@@ -3014,10 +3016,10 @@ async fn authenticate(
             "{agent_name} needs a one-time CLI login: run `{command}`, then retry."
         ));
     }
-    // Emit the sign-in card when the agent offers any way in. Every agent's
-    // methods now come from what it advertised at `initialize`: ChatGPT for
-    // Codex, Cursor Login for Cursor, and — because we declare the terminal-auth
-    // capability — Claude Subscription / Anthropic Console for Claude.
+    // Emit the sign-in card when the agent offers an in-protocol way in. The
+    // methods come from what it advertised at `initialize`: ChatGPT for Codex
+    // and — because we declare the terminal-auth capability — Anthropic
+    // Console for Claude. External-CLI agents returned above never reach this.
     let methods = available_auth_methods(init);
     if methods.is_empty() {
         return Err("ACP agent requires authentication but offered no auth methods".into());
@@ -4355,6 +4357,10 @@ mod tests {
     #[test]
     fn external_auth_agents_use_their_cli_login() {
         // Agents whose ACP authenticate doesn't work log in via their own CLI.
+        assert_eq!(
+            external_auth_command("cursor"),
+            Some("cursor-agent login")
+        );
         assert_eq!(
             external_auth_command("opencode"),
             Some("opencode auth login")

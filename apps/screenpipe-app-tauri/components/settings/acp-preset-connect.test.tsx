@@ -114,16 +114,16 @@ describe("an agent that needs signing in", () => {
     expect(card).toHaveTextContent(/never sees or stores an API key/i);
   });
 
-  it("keeps a runnable command as the instruction when there is one", async () => {
+  it("shows Cursor's required CLI login instead of claiming chat can sign in", async () => {
     probeAgent.mockResolvedValue({
       status: "error",
-      error: "not logged in: run `opencode auth login` first",
+      error: "Cursor needs a one-time sign in: run `cursor-agent login` first",
     });
 
-    renderCard("opencode");
+    renderCard("cursor");
 
     const card = await screen.findByTestId("acp-preset-signin");
-    expect(card).toHaveTextContent("opencode auth login");
+    expect(card).toHaveTextContent("cursor-agent login");
     expect(screen.getByRole("button", { name: /check again/i })).toBeInTheDocument();
   });
 
