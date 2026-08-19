@@ -38,7 +38,11 @@ export function prefillContextPresentation(
   }
 
   return {
-    label: source === "timeline" ? "timeline selection" : "search",
+    label: source?.startsWith("activity-history-")
+      ? "activity episode"
+      : source === "timeline"
+        ? "timeline selection"
+        : "search",
     preview: `${context.slice(0, 150)}${context.length > 150 ? "..." : ""}`,
   };
 }

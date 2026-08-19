@@ -397,7 +397,7 @@ const TOOLS: Tool[] = [
       properties: {
         q: {
           type: "string",
-          description: "Full-text search query. Omit to return all content in time range. Avoid for audio — transcriptions are noisy, q filters too aggressively.",
+          description: "Full-text search query. Omit to return all content in time range. Avoid for audio — transcriptions are noisy, q filters too aggressively. For an attached activity episode, its generated title/summary are labels, not query terms: use the exact time range and artifact anchors with q omitted.",
         },
         content_type: {
           type: "string",

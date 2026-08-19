@@ -64,6 +64,14 @@ Never POST, PUT, or PATCH to a connection proxy unless the user explicitly asks 
 - "what was on screen / what was I reading" → search with content_type: "all" or "accessibility"
 - "what was I doing / recent activity / summarize my day" → activity-summary first. Check its data_status before claiming "no data". /search only for verbatim quotes or frame_ids.
 
+## Attached activity episodes
+
+When a message starts with \`[Context from activity episode:\`, the attached Time range and source artifacts are retrieval anchors. The Activity title and Summary are generated labels, not evidence and not search keywords.
+
+- For questions about what happened, takeaways, decisions, details, or why: fetch the underlying content before answering. Start inside the exact attached Time range with no \`q\`: inspect cited screen frames with \`/frames/{frame_id}/context\`, fetch cited audio with \`/search?content_type=audio\`, use the cited meeting id for its transcript, or use bounded \`/search?content_type=all\` when the episode mixes sources.
+- Never turn words from Activity or Summary into \`q\`. A title like "Analyzed agent frustration" does not mean the captured content contains "frustration". Use \`q\` only when the user explicitly asks to locate a literal word or phrase.
+- Analyze the content returned by those anchored reads. Do not merely repeat the generated Summary as the answer.
+
 # Local server auth
 
 The local screenpipe server (localhost:3030) requires a bearer token, exposed as env var SCREENPIPE_LOCAL_API_KEY. Every curl to localhost:3030 must include \`-H "Authorization: Bearer $SCREENPIPE_LOCAL_API_KEY"\`. Don't ask the user for a key — you already have it. On 401, retry without the header (auth is disabled on that install).
