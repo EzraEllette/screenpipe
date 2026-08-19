@@ -753,11 +753,15 @@ export function ActivityLedger({
   const [recentEligibilityTick, setRecentEligibilityTick] = useState(0);
   const historyAbortRef = useRef<AbortController | null>(null);
   const historyLoadingRef = useRef(false);
+  const legacyActivitiesActivationStartedRef = useRef(false);
   const [selectedReviewPresetId, setSelectedReviewPresetId] = useState<
     string | null
   >(null);
   const { settings, updateSettings } = useSettings();
-  const activitiesEnabled = settings.activitiesEnabled ?? false;
+  const legacyActivitiesEnabled =
+    settings.activitiesEnabled === undefined && historyCoverage.length > 0;
+  const activitiesEnabled =
+    settings.activitiesEnabled ?? legacyActivitiesEnabled;
 
   const range = useMemo(
     () => rangeForPreset(preset, anchor, customStart, customEnd),
@@ -980,6 +984,31 @@ export function ActivityLedger({
       // even when the user navigates elsewhere while Pi is still working.
     };
   }, [preset, range]);
+
+  useEffect(() => {
+    if (
+      !cacheReady ||
+      !legacyActivitiesEnabled ||
+      legacyActivitiesActivationStartedRef.current
+    ) {
+      return;
+    }
+    legacyActivitiesActivationStartedRef.current = true;
+    const intervalMinutes = settings.activitiesIntervalMinutes ?? 15;
+    void updateSettings({
+      activitiesEnabled: true,
+      activitiesNextRunAt: new Date(
+        Date.now() + intervalMinutes * 60_000,
+      ).toISOString(),
+    }).catch(() => {
+      legacyActivitiesActivationStartedRef.current = false;
+    });
+  }, [
+    cacheReady,
+    legacyActivitiesEnabled,
+    settings.activitiesIntervalMinutes,
+    updateSettings,
+  ]);
 
   const generateHistory = useCallback(async (
     generationRange: TimeRange,

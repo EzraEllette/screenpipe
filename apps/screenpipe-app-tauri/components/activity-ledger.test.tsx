@@ -653,6 +653,63 @@ describe("activity history helpers", () => {
 });
 
 describe("ActivityLedger", () => {
+  it("enables legacy users with prior generation without regenerating", async () => {
+    delete (mocks.settings as { activitiesEnabled?: boolean })
+      .activitiesEnabled;
+    const range = {
+      start: new Date("2026-08-17T07:00:00Z"),
+      end: new Date("2026-08-17T20:00:00Z"),
+    };
+    mocks.loadPersistedActivityHistory.mockResolvedValue({
+      entries: parseActivityHistoryResponse(HISTORY_RESPONSE, range).entries,
+      coverage: [
+        {
+          start: range.start.toISOString(),
+          end: range.end.toISOString(),
+        },
+      ],
+    });
+
+    render(<ActivityLedger />);
+
+    expect(
+      await screen.findByText("Fixed a capture reliability regression"),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: "Enable activities" }),
+    ).toBeNull();
+    await waitFor(() =>
+      expect(mocks.updateSettings).toHaveBeenCalledWith({
+        activitiesEnabled: true,
+        activitiesNextRunAt: expect.stringMatching(
+          /^2026-08-17T20:15:00\.\d{3}Z$/,
+        ),
+      }),
+    );
+    expect(mocks.runDailySummaryWithPi).not.toHaveBeenCalled();
+  });
+
+  it("keeps an explicitly disabled legacy user disabled", async () => {
+    mocks.settings.activitiesEnabled = false;
+    mocks.loadPersistedActivityHistory.mockResolvedValue({
+      entries: [],
+      coverage: [
+        {
+          start: "2026-08-17T07:00:00.000Z",
+          end: "2026-08-17T20:00:00.000Z",
+        },
+      ],
+    });
+
+    render(<ActivityLedger />);
+
+    expect(
+      await screen.findByRole("button", { name: "Enable activities" }),
+    ).toBeVisible();
+    expect(mocks.updateSettings).not.toHaveBeenCalled();
+    expect(mocks.runDailySummaryWithPi).not.toHaveBeenCalled();
+  });
+
   it("registers the first interval before generating the selected range", async () => {
     mocks.settings.activitiesEnabled = false;
     render(<ActivityLedger />);
