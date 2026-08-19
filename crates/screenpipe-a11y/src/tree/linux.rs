@@ -25,6 +25,7 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use screenpipe_core::window_pattern::{self, WindowPattern};
 use std::cell::UnsafeCell;
+use std::collections::HashMap;
 use std::time::Instant;
 use tracing::{debug, warn};
 use zbus::blocking::Connection;
@@ -72,6 +73,33 @@ fn is_automation_structure_role(role: u32) -> bool {
         | 79 // ROLE_ENTRY
         | 88 // ROLE_LINK
         | 91 // ROLE_TREE_ITEM
+    )
+}
+
+/// AT-SPI containers that preserve parser-relevant hierarchy while semantic
+/// context is enabled. These nodes remain transient and are not added to the
+/// historical raw accessibility payload.
+fn is_document_role(role: u32) -> bool {
+    matches!(role, 82 | 94 | 95)
+}
+
+fn is_semantic_structure_role(role: u32) -> bool {
+    matches!(
+        role,
+        16  // ROLE_DIALOG
+        | 23 // ROLE_FRAME
+        | 69 // ROLE_WINDOW
+        | 75 // ROLE_APPLICATION
+        | 20 // ROLE_FILLER
+        | 30 // ROLE_LIST
+        | 34 // ROLE_MENU_BAR
+        | 39 // ROLE_PANEL
+        | 55 // ROLE_TABLE
+        | 63 // ROLE_TOOL_BAR
+        | 85 // ROLE_SECTION
+        | 82 // ROLE_DOCUMENT_FRAME
+        | 94 // ROLE_DOCUMENT_TEXT
+        | 95 // ROLE_DOCUMENT_WEB
     )
 }
 
@@ -324,6 +352,24 @@ fn get_accessible_state(conn: &Connection, aref: &AccessibleRef) -> Vec<u32> {
     .unwrap_or_default()
 }
 
+/// Get implementation-specific AT-SPI attributes such as Chromium's HTML id
+/// and class hints. Unsupported toolkits return an empty map.
+fn get_accessible_attributes(conn: &Connection, aref: &AccessibleRef) -> HashMap<String, String> {
+    dbus_call(
+        conn,
+        &aref.bus_name,
+        &aref.path,
+        ATSPI_ACCESSIBLE,
+        "GetAttributes",
+        &(),
+    )
+    .and_then(|reply| {
+        let attributes: HashMap<String, String> = reply.body().deserialize()?;
+        Ok(attributes)
+    })
+    .unwrap_or_default()
+}
+
 /// Get children of an accessible object.
 /// Returns a list of (bus_name, object_path) pairs.
 fn get_accessible_children(conn: &Connection, aref: &AccessibleRef) -> Vec<AccessibleRef> {
@@ -522,6 +568,8 @@ struct WalkState {
     line_budget: Option<LineBudget>,
     line_max_calls_per_node: usize,
     line_min_height_ratio: f32,
+    /// Retain parser-relevant containers and DOM hints in memory only.
+    capture_semantic_structure: bool,
     /// Retain unnamed interactive controls in the same bounded tree walk.
     capture_automation_structure: bool,
 }
@@ -565,6 +613,7 @@ impl WalkState {
             },
             line_max_calls_per_node: config.line_bounds_max_calls_per_node,
             line_min_height_ratio: config.line_bounds_min_height_ratio,
+            capture_semantic_structure: config.capture_semantic_structure,
             capture_automation_structure: config.capture_automation_structure,
         }
     }
@@ -603,7 +652,13 @@ impl WalkState {
 }
 
 /// Recursively walk the AT-SPI2 tree of a given accessible object.
-fn walk_accessible(conn: &Connection, aref: &AccessibleRef, depth: usize, state: &mut WalkState) {
+fn walk_accessible(
+    conn: &Connection,
+    aref: &AccessibleRef,
+    depth: usize,
+    inside_document: bool,
+    state: &mut WalkState,
+) {
     if state.should_stop() || depth >= state.max_depth {
         return;
     }
@@ -618,6 +673,7 @@ fn walk_accessible(conn: &Connection, aref: &AccessibleRef, depth: usize, state:
         Ok(r) => r,
         Err(_) => return,
     };
+    let inside_document = inside_document || is_document_role(role);
 
     // Skip decorative roles
     if should_skip_role(role)
@@ -640,11 +696,14 @@ fn walk_accessible(conn: &Connection, aref: &AccessibleRef, depth: usize, state:
         }
     }
 
-    // Extract text from text-bearing elements
+    // Extract text from text-bearing elements. When semantic context is on,
+    // retain otherwise-omitted containers so the flat adapter can rebuild the
+    // actual web hierarchy instead of attaching content to stale controls.
+    let emitted_before = state.nodes.len();
     if should_extract_text(role)
         || (state.capture_automation_structure && is_automation_structure_role(role))
     {
-        extract_text(conn, aref, role, depth, state);
+        extract_text(conn, aref, role, depth, inside_document, state);
     } else if role == 39 /* Panel */ || role == 85 /* Section */ || role == 23
     /* Frame */
     {
@@ -653,6 +712,12 @@ fn walk_accessible(conn: &Connection, aref: &AccessibleRef, depth: usize, state:
         if !name.is_empty() && name.len() < 200 {
             // Only add short names for containers (long ones are usually content)
         }
+    }
+    if state.capture_semantic_structure
+        && state.nodes.len() == emitted_before
+        && is_semantic_structure_role(role)
+    {
+        capture_semantic_structure(conn, aref, role, depth, inside_document, state);
     }
 
     if state.should_stop() {
@@ -665,7 +730,7 @@ fn walk_accessible(conn: &Connection, aref: &AccessibleRef, depth: usize, state:
         if state.should_stop() {
             break;
         }
-        walk_accessible(conn, child, depth + 1, state);
+        walk_accessible(conn, child, depth + 1, inside_document, state);
     }
 }
 
@@ -680,14 +745,94 @@ fn fill_atspi_state_from_set(node: &mut AccessibilityTreeNode, state_set: &[u32]
     }
 }
 
-fn fill_atspi_state(node: &mut AccessibilityTreeNode, conn: &Connection, aref: &AccessibleRef) {
+fn first_nonempty_attribute(
+    attributes: &HashMap<String, String>,
+    names: &[&str],
+) -> Option<String> {
+    names.iter().find_map(|name| {
+        attributes
+            .get(*name)
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    })
+}
+
+fn apply_atspi_attributes(
+    node: &mut AccessibilityTreeNode,
+    attributes: &HashMap<String, String>,
+    persist_automation_fields: bool,
+) {
+    let dom_identifier = first_nonempty_attribute(attributes, &["html-id", "id", "dom-id"]);
+    let dom_classes = first_nonempty_attribute(attributes, &["class", "class-name", "html-class"]);
+    node.semantic_dom_identifier = dom_identifier.clone();
+    node.semantic_dom_classes = dom_classes.clone();
+    node.placeholder = first_nonempty_attribute(
+        attributes,
+        &["placeholder-text", "placeholder", "html-placeholder"],
+    );
+    node.role_description =
+        first_nonempty_attribute(attributes, &["xml-roles", "role-description"]);
+    if persist_automation_fields {
+        node.class_name = dom_classes;
+        if node.automation_id.is_none() {
+            node.automation_id = dom_identifier;
+        }
+    }
+}
+
+fn finish_atspi_node(
+    node: &mut AccessibilityTreeNode,
+    conn: &Connection,
+    aref: &AccessibleRef,
+    role: u32,
+    inside_document: bool,
+    state: &WalkState,
+) {
     let state_set = get_accessible_state(conn, aref);
     fill_atspi_state_from_set(node, &state_set);
     // Description doubles as help_text on Linux
     let desc = get_accessible_description(conn, aref);
     if !desc.is_empty() {
+        node.semantic_description = Some(desc.clone());
         node.help_text = Some(desc);
     }
+    node.walk_index = state.node_count.min(u32::MAX as usize) as u32;
+    node.automation_relevant =
+        state.capture_automation_structure && is_automation_structure_role(role);
+    if (state.capture_semantic_structure && inside_document) || state.capture_automation_structure {
+        let attributes = get_accessible_attributes(conn, aref);
+        apply_atspi_attributes(node, &attributes, state.capture_automation_structure);
+    }
+    if state.capture_automation_structure && node.automation_id.is_none() {
+        node.automation_id = Some(aref.path.clone());
+    }
+}
+
+fn capture_semantic_structure(
+    conn: &Connection,
+    aref: &AccessibleRef,
+    role: u32,
+    depth: usize,
+    inside_document: bool,
+    state: &mut WalkState,
+) {
+    let extents = get_component_extents(conn, aref);
+    let bounds = extents
+        .and_then(|(x, y, w, h)| normalize_bounds(x as f64, y as f64, w as f64, h as f64, state));
+    let on_screen = extents
+        .and_then(|(x, y, w, h)| is_on_screen(x as f64, y as f64, w as f64, h as f64, state));
+    let text = get_accessible_name(conn, aref);
+    let mut node = AccessibilityTreeNode::new(
+        role_name(role).to_owned(),
+        text.trim().to_owned(),
+        depth.min(255) as u8,
+        bounds,
+    );
+    node.on_screen = on_screen;
+    node.semantic_only = true;
+    finish_atspi_node(&mut node, conn, aref, role, inside_document, state);
+    state.nodes.push(node);
 }
 
 /// Extract text from a text-bearing accessible element.
@@ -696,6 +841,7 @@ fn extract_text(
     aref: &AccessibleRef,
     role: u32,
     depth: usize,
+    inside_document: bool,
     state: &mut WalkState,
 ) {
     // Element extents in screen-absolute coords; bounds are normalized
@@ -723,8 +869,7 @@ fn extract_text(
                 );
                 node.on_screen = on_screen;
                 node.is_password = Some(true);
-                node.automation_relevant = true;
-                fill_atspi_state_from_set(&mut node, &state_set);
+                finish_atspi_node(&mut node, conn, aref, role, inside_document, state);
                 state.nodes.push(node);
             }
             return;
@@ -739,7 +884,7 @@ fn extract_text(
                 bounds.clone(),
             );
             node.on_screen = on_screen;
-            fill_atspi_state(&mut node, conn, aref);
+            finish_atspi_node(&mut node, conn, aref, role, inside_document, state);
             // Multi-line Entry / Text widgets (textareas, code editors) get
             // per-line bounds so search highlights pinpoint the matched word.
             // ROLE_TEXT (61) is the typical multi-line case; ROLE_ENTRY (79)
@@ -762,7 +907,7 @@ fn extract_text(
                 bounds.clone(),
             );
             node.on_screen = on_screen;
-            fill_atspi_state(&mut node, conn, aref);
+            finish_atspi_node(&mut node, conn, aref, role, inside_document, state);
             node.lines = capture_lines_for_node(conn, aref, &trimmed, &bounds, on_screen, state);
             state.nodes.push(node);
             return;
@@ -780,7 +925,7 @@ fn extract_text(
             bounds,
         );
         node.on_screen = on_screen;
-        fill_atspi_state(&mut node, conn, aref);
+        finish_atspi_node(&mut node, conn, aref, role, inside_document, state);
         state.nodes.push(node);
         return;
     }
@@ -796,7 +941,7 @@ fn extract_text(
             bounds,
         );
         node.on_screen = on_screen;
-        fill_atspi_state(&mut node, conn, aref);
+        finish_atspi_node(&mut node, conn, aref, role, inside_document, state);
         state.nodes.push(node);
         return;
     }
@@ -809,9 +954,7 @@ fn extract_text(
             bounds,
         );
         node.on_screen = on_screen;
-        node.automation_relevant = true;
-        let state_set = get_accessible_state(conn, aref);
-        fill_atspi_state_from_set(&mut node, &state_set);
+        finish_atspi_node(&mut node, conn, aref, role, inside_document, state);
         state.nodes.push(node);
     }
 }
@@ -1182,7 +1325,7 @@ impl TreeWalkerPlatform for LinuxTreeWalker {
         }
 
         // Walk the accessibility tree
-        walk_accessible(conn, &window_ref, 0, &mut state);
+        walk_accessible(conn, &window_ref, 0, false, &mut state);
 
         if state.hit_ignored_extension {
             debug!(
@@ -1236,6 +1379,11 @@ impl TreeWalkerPlatform for LinuxTreeWalker {
             .then(|| crate::platform::linux::get_process_name(pid))
             .flatten()
             .or_else(|| self.config.capture_app_identity.then(|| app_name.clone()));
+        let (nodes, semantic_nodes) = split_structural_nodes(
+            std::mem::take(&mut state.nodes),
+            state.capture_semantic_structure,
+            state.capture_automation_structure,
+        );
         Ok(TreeWalkResult::Found(TreeSnapshot {
             app_name,
             app_id: None,
@@ -1243,8 +1391,8 @@ impl TreeWalkerPlatform for LinuxTreeWalker {
             app_version: None,
             window_name: window_title,
             text_content,
-            nodes: state.nodes,
-            semantic_nodes: Vec::new(),
+            nodes,
+            semantic_nodes,
             browser_url,
             document_path,
             timestamp: Utc::now(),
@@ -1257,6 +1405,26 @@ impl TreeWalkerPlatform for LinuxTreeWalker {
             max_depth_reached: state.max_depth_reached,
             window_bounds: None,
         }))
+    }
+}
+
+fn split_structural_nodes(
+    nodes: Vec<AccessibilityTreeNode>,
+    capture_semantic_structure: bool,
+    persist_automation_structure: bool,
+) -> (Vec<AccessibilityTreeNode>, Vec<AccessibilityTreeNode>) {
+    if persist_automation_structure {
+        if capture_semantic_structure {
+            nodes
+                .into_iter()
+                .partition(|node| !node.semantic_only || node.automation_relevant)
+        } else {
+            (nodes, Vec::new())
+        }
+    } else if capture_semantic_structure {
+        nodes.into_iter().partition(|node| !node.semantic_only)
+    } else {
+        (nodes, Vec::new())
     }
 }
 
@@ -1294,6 +1462,51 @@ mod tests {
         assert!(!is_automation_structure_role(29)); // LABEL
         assert!(!is_automation_structure_role(39)); // PANEL
         assert!(!is_automation_structure_role(55)); // TABLE
+    }
+
+    #[test]
+    fn test_semantic_structure_roles_preserve_cross_document_topology() {
+        assert!(is_semantic_structure_role(95)); // DOCUMENT_WEB
+        assert!(is_semantic_structure_role(85)); // SECTION
+        assert!(is_semantic_structure_role(39)); // PANEL
+        assert!(!is_semantic_structure_role(43)); // PUSH_BUTTON
+        assert!(!is_semantic_structure_role(61)); // TEXT
+    }
+
+    #[test]
+    fn test_atspi_dom_hints_stay_transient_without_automation_mode() {
+        let mut attributes = HashMap::new();
+        attributes.insert("html-id".to_owned(), "message-42".to_owned());
+        attributes.insert("class".to_owned(), "font-user-message active".to_owned());
+        attributes.insert("placeholder-text".to_owned(), "Message".to_owned());
+        attributes.insert("xml-roles".to_owned(), "article".to_owned());
+        let mut node = AccessibilityTreeNode::new("Section".into(), String::new(), 1, None);
+
+        apply_atspi_attributes(&mut node, &attributes, false);
+
+        assert_eq!(node.semantic_dom_identifier.as_deref(), Some("message-42"));
+        assert_eq!(
+            node.semantic_dom_classes.as_deref(),
+            Some("font-user-message active")
+        );
+        assert_eq!(node.placeholder.as_deref(), Some("Message"));
+        assert_eq!(node.role_description.as_deref(), Some("article"));
+        assert_eq!(node.automation_id, None);
+        assert_eq!(node.class_name, None);
+    }
+
+    #[test]
+    fn test_split_structural_nodes_keeps_memory_only_shape_out_of_raw_tree() {
+        let raw = AccessibilityTreeNode::new("Static".into(), "visible".into(), 2, None);
+        let mut structural = AccessibilityTreeNode::new("Section".into(), String::new(), 1, None);
+        structural.semantic_only = true;
+
+        let (nodes, semantic_nodes) = split_structural_nodes(vec![structural, raw], true, false);
+
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].text, "visible");
+        assert_eq!(semantic_nodes.len(), 1);
+        assert_eq!(semantic_nodes[0].role, "Section");
     }
 
     #[test]

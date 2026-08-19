@@ -1157,10 +1157,20 @@ async fn main() {
             // reason parameter) is still the current Apple event.
             let from_autostart = launched_from_autostart();
 
-            #[cfg(any(windows, target_os = "linux"))]
+            #[cfg(windows)]
             {
                 use tauri_plugin_deep_link::DeepLinkExt;
                 app.deep_link().register_all()?;
+            }
+            #[cfg(target_os = "linux")]
+            {
+                use tauri_plugin_deep_link::DeepLinkExt;
+                // Minimal Linux installs may not provide
+                // `update-desktop-database`. Deep-link registration is useful
+                // integration, but it must not make the recorder fail startup.
+                if let Err(error) = app.deep_link().register_all() {
+                    eprintln!("deep-link registration skipped: {error}");
+                }
             }
             let app_handle = app.handle();
 

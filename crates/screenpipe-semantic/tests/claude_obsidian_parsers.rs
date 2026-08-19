@@ -182,6 +182,26 @@ fn obsidian_extracts_the_active_codemirror_note() {
 }
 
 #[test]
+fn obsidian_extracts_linux_codemirror_lines() {
+    let items = handled(
+        include_str!("fixtures/apps/obsidian_linux_codemirror.json"),
+        "app.obsidian.active_note",
+    );
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].title.as_deref(), Some("Linux Parser Note"));
+    assert_eq!(
+        items[0].body.as_deref(),
+        Some(
+            "# Linux Parser Note\n\nSynthetic Obsidian content for the screenpipe Linux parser VM.\n\n- accessibility hierarchy\n- active note body\n- safe local fixture"
+        )
+    );
+    assert_eq!(
+        items[0].metadata.get("surface").map(String::as_str),
+        Some("codemirror_lines")
+    );
+}
+
+#[test]
 fn obsidian_extracts_the_rendered_preview() {
     let items = handled(
         include_str!("fixtures/apps/obsidian_preview_note.json"),

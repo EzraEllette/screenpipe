@@ -25,7 +25,7 @@ impl ChatGptParser {
         Self {
             manifest: ParserManifest {
                 id: "app.chatgpt.turn_markers".into(),
-                parser_version: "2".into(),
+                parser_version: "3".into(),
                 schema_version: 1,
                 scope: ParserScope::App,
                 platforms: vec![Platform::Macos, Platform::Windows, Platform::Linux],
@@ -158,6 +158,7 @@ struct Turn {
 struct PendingTurn {
     marker: NodeId,
     actor: &'static str,
+    document_scope: Option<NodeId>,
     body: String,
     last_line: Option<String>,
 }
@@ -177,6 +178,7 @@ fn actor_delimited_turns(tree: &SemanticTree) -> Vec<Turn> {
                 pending = Some(PendingTurn {
                     marker: node,
                     actor,
+                    document_scope: document_scope(tree, node),
                     body: String::new(),
                     last_line: None,
                 });
@@ -186,6 +188,9 @@ fn actor_delimited_turns(tree: &SemanticTree) -> Vec<Turn> {
             let Some(turn) = pending.as_mut() else {
                 continue;
             };
+            if turn.document_scope.is_some() && document_scope(tree, node) != turn.document_scope {
+                continue;
+            }
             if is_actor_label(node_content(tree, node))
                 || !is_message_text_role(tree.role(node))
                 || inside_ignored_control(tree, node)
@@ -226,6 +231,7 @@ fn windows_actor_delimited_turns(tree: &SemanticTree) -> Vec<Turn> {
                 pending = Some(PendingTurn {
                     marker: node,
                     actor,
+                    document_scope: None,
                     body: String::new(),
                     last_line: None,
                 });
@@ -429,6 +435,9 @@ fn is_message_text_role(role: Option<&str>) -> bool {
 fn inside_ignored_control(tree: &SemanticTree, node: NodeId) -> bool {
     let mut current = Some(node);
     while let Some(candidate) = current {
+        if is_document_role(tree.role(candidate)) {
+            return false;
+        }
         if tree.role(candidate).is_some_and(|role| {
             [
                 "AXButton",
@@ -447,6 +456,25 @@ fn inside_ignored_control(tree: &SemanticTree, node: NodeId) -> bool {
         current = tree.parent(candidate);
     }
     false
+}
+
+fn is_document_role(role: Option<&str>) -> bool {
+    role.is_some_and(|role| {
+        ["AXWebArea", "Document", "DocumentFrame", "DocumentWeb"]
+            .iter()
+            .any(|document| document.eq_ignore_ascii_case(role))
+    })
+}
+
+fn document_scope(tree: &SemanticTree, node: NodeId) -> Option<NodeId> {
+    let mut current = Some(node);
+    while let Some(candidate) = current {
+        if is_document_role(tree.role(candidate)) {
+            return Some(candidate);
+        }
+        current = tree.parent(candidate);
+    }
+    None
 }
 
 fn node_content(tree: &SemanticTree, node: NodeId) -> Option<&str> {
@@ -605,6 +633,90 @@ mod tests {
         assert_eq!(items[1].body.as_deref(), Some("Measure parser coverage."));
         assert_eq!(items[2].actor.as_deref(), Some("ChatGPT"));
         assert_eq!(items[2].body.as_deref(), Some("Use a bounded replay eval."));
+    }
+
+    #[test]
+    fn linux_document_scope_drops_browser_chrome_after_last_turn() {
+        let mut builder = SemanticTreeBuilder::new(TreeBudget::default());
+        let window = builder
+            .push(None, input("Frame", Some("Linux Chat Parser Lab")))
+            .unwrap();
+        // Retained flat captures can still attach the web document to the
+        // nearest browser-chrome control when intermediate panels are omitted.
+        let browser_button = builder
+            .push(Some(window), input("Button", Some("Browser chrome")))
+            .unwrap();
+        let document = builder
+            .push(
+                Some(browser_button),
+                input("DocumentWeb", Some("Linux Chat Parser Lab")),
+            )
+            .unwrap();
+        let user_section = builder
+            .push(Some(document), input("Section", None))
+            .unwrap();
+        builder
+            .push(Some(user_section), input("Heading", Some("You said")))
+            .unwrap();
+        builder
+            .push(
+                Some(user_section),
+                input("Static", Some("hello from synthetic Ubuntu")),
+            )
+            .unwrap();
+        let assistant_section = builder
+            .push(Some(document), input("Section", None))
+            .unwrap();
+        builder
+            .push(
+                Some(assistant_section),
+                input("Heading", Some("ChatGPT said")),
+            )
+            .unwrap();
+        builder
+            .push(
+                Some(assistant_section),
+                input("Static", Some("safe assistant reply")),
+            )
+            .unwrap();
+        builder
+            .push(
+                Some(window),
+                input("Static", Some("data:text/html,<browser chrome>")),
+            )
+            .unwrap();
+        builder
+            .push(Some(window), input("Static", Some("Create split view")))
+            .unwrap();
+
+        let tree = builder.finish();
+        let app = AppIdentity {
+            platform: Platform::Linux,
+            app_id: None,
+            executable: Some("google-chrome".into()),
+            display_name: "Google Chrome".into(),
+            version: None,
+            browser_url: Some("https://chatgpt.com/c/synthetic".into()),
+        };
+        let context = ParseContext {
+            frame_id: 1,
+            captured_at_unix_ms: 2,
+            utc_offset_minutes: None,
+            locale_hint: None,
+            app: &app,
+            input_content_hash: 3,
+        };
+        let ParseOutcome::Handled(items) = ChatGptParser::new().parse(&context, &tree).unwrap()
+        else {
+            panic!("expected handled projection");
+        };
+
+        assert_eq!(items.len(), 3);
+        assert_eq!(
+            items[1].body.as_deref(),
+            Some("hello from synthetic Ubuntu")
+        );
+        assert_eq!(items[2].body.as_deref(), Some("safe assistant reply"));
     }
 
     #[test]
