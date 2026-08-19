@@ -41,6 +41,7 @@ use window::ShowRewindWindow;
 
 mod acp_extensions;
 mod acp_runtime;
+mod acp_schedule_extension;
 mod analytics;
 mod auth_session;
 #[allow(deprecated)]

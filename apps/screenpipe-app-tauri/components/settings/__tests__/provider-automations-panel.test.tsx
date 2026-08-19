@@ -4,15 +4,19 @@
 
 import React from "react";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   ProviderAutomationsPanel,
+  providerManagementUrl,
   providerScheduleLabel,
 } from "@/components/settings/provider-automations-panel";
 import { commands, type ProviderAutomation } from "@/lib/utils/tauri";
 
 vi.mock("@/lib/utils/tauri", () => ({
-  commands: { listProviderAutomations: vi.fn() },
+  commands: {
+    listProviderAutomations: vi.fn(),
+    manageProviderAutomation: vi.fn(),
+  },
 }));
 
 const TASKS: ProviderAutomation[] = [
@@ -25,8 +29,10 @@ const TASKS: ProviderAutomation[] = [
     scheduleLabel: null,
     status: "paused",
     executionScope: "local",
-    manageability: "read_only",
-    lifecycleNote: "owned by Codex; edit or pause it in Codex",
+    manageability: "in_app",
+    availableActions: ["resume", "delete"],
+    lifecycleNote: "managed through a live codex ACP session",
+    revision: "1234",
     updatedAtMs: 1234,
   },
   {
@@ -39,10 +45,16 @@ const TASKS: ProviderAutomation[] = [
     status: "active",
     executionScope: "session",
     manageability: "read_only",
+    availableActions: [],
     lifecycleNote: "runs only while this Claude session is alive",
+    revision: "5678",
     updatedAtMs: 5678,
   },
 ];
+
+beforeAll(() => {
+  globalThis.PointerEvent ||= MouseEvent as typeof PointerEvent;
+});
 
 describe("ProviderAutomationsPanel", () => {
   beforeEach(() => {
@@ -52,15 +64,33 @@ describe("ProviderAutomationsPanel", () => {
     });
   });
 
-  it("shows provider ownership and lifecycle without offering a second scheduler", async () => {
+  it("separates agent-owned schedules into branded provider tabs", async () => {
     render(<ProviderAutomationsPanel />);
 
-    expect(await screen.findByText("Daily review")).toBeInTheDocument();
+    expect(await screen.findByText("external agent tasks")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "schedules created in Codex, Claude, and other agent apps",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: /Codex 1/i })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(screen.getByText("Daily review")).toBeInTheDocument();
+    expect(screen.queryByText("Say hi")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("tab", { name: /Claude 1/i }));
+
     expect(screen.getByText("Say hi")).toBeInTheDocument();
-    expect(screen.getByText("daily at 17:00")).toBeInTheDocument();
+    expect(screen.getByText("Every hour at :07")).toBeInTheDocument();
+    expect(screen.getByText("active")).toBeInTheDocument();
     expect(screen.getByText("session only")).toBeInTheDocument();
-    expect(screen.getAllByText("read only")).toHaveLength(2);
-    expect(screen.getByText(/without copying them/)).toBeInTheDocument();
+    expect(
+      screen.getByText("view only here · manage these tasks in Claude"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("managed in Claude")).toBeInTheDocument();
+    expect(screen.queryByText("read only")).not.toBeInTheDocument();
   });
 
   it("uses the scheduled-task search for native provider rows", async () => {
@@ -76,7 +106,57 @@ describe("ProviderAutomationsPanel", () => {
     );
   });
 
-  it("keeps large native inventories behind progressive disclosure", async () => {
+  it("opens the provider's own lifecycle UI instead of faking a local toggle", async () => {
+    const onOpenProvider = vi.fn().mockResolvedValue(undefined);
+    render(<ProviderAutomationsPanel onOpenProvider={onOpenProvider} />);
+
+    expect(await screen.findByText("external agent tasks")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "open Codex" }));
+
+    expect(onOpenProvider).toHaveBeenCalledWith("codex://automations");
+    expect(providerManagementUrl("claude")).toBeNull();
+  });
+
+  it("uses inline controls only when the live ACP adapter advertised them", async () => {
+    const onManageTask = vi.fn().mockResolvedValue(undefined);
+    render(<ProviderAutomationsPanel onManageTask={onManageTask} />);
+
+    expect(await screen.findByText("external agent tasks")).toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("switch", { name: "Turn on Daily review" }),
+    );
+
+    await waitFor(() =>
+      expect(onManageTask).toHaveBeenCalledWith("codex:daily-review", "resume"),
+    );
+    fireEvent.click(screen.getByRole("tab", { name: /Claude 1/i }));
+    expect(screen.queryByRole("switch", { name: /Say hi/i })).toBeNull();
+  });
+
+  it("exposes destructive ACP actions behind an explicit confirmation", async () => {
+    const onManageTask = vi.fn().mockResolvedValue(undefined);
+    render(<ProviderAutomationsPanel onManageTask={onManageTask} />);
+
+    expect(await screen.findByText("external agent tasks")).toBeInTheDocument();
+    fireEvent.pointerDown(
+      screen.getByRole("button", { name: "actions for Daily review" }),
+      { button: 0, ctrlKey: false, pointerType: "mouse" },
+    );
+    fireEvent.click(
+      await screen.findByRole("menuitem", { name: "delete schedule" }),
+    );
+
+    expect(
+      screen.getByRole("heading", { name: "delete Daily review?" }),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "delete schedule" }));
+
+    await waitFor(() =>
+      expect(onManageTask).toHaveBeenCalledWith("codex:daily-review", "delete"),
+    );
+  });
+
+  it("limits a large provider inventory until the user asks for more", async () => {
     const manyTasks = Array.from({ length: 6 }, (_, index) => ({
       ...TASKS[0],
       key: `codex:task-${index}`,
@@ -89,9 +169,15 @@ describe("ProviderAutomationsPanel", () => {
     });
 
     render(<ProviderAutomationsPanel />);
-    expect(await screen.findByText("Task 0")).toBeInTheDocument();
+    expect(
+      await screen.findByRole("tab", { name: /Codex 6/i }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Task 0")).toBeInTheDocument();
     expect(screen.queryByText("Task 5")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "show 2 more" }));
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "show 1 more Codex schedule" }),
+    );
     expect(screen.getByText("Task 5")).toBeInTheDocument();
   });
 

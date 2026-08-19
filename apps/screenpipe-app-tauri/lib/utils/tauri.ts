@@ -1105,6 +1105,20 @@ async lockSync() : Promise<Result<null, string>> {
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * Apply one provider-owned schedule mutation through a live ACP adapter that
+ * negotiated the Screenpipe schedule extension. This fails closed when the
+ * task, capability, owning session, or provider confirmation disappeared
+ * since the UI's last refresh.
+ */
+async manageProviderAutomation(key: string, action: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("manage_provider_automation", { key, action }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async nativeTimelineClose() : Promise<boolean> {
     return await TAURI_INVOKE("native_timeline_close");
 },
@@ -3143,9 +3157,17 @@ schedule: string; scheduleLabel: string | null; status: string;
  */
 executionScope: string;
 /**
- * Read-only until the provider exposes a supported lifecycle API.
+ * `read_only` or `in_app` after a live ACP capability negotiation.
  */
-manageability: string; lifecycleNote: string; updatedAtMs: number | null }
+manageability: string;
+/**
+ * Mutations currently supported by a live, capability-negotiated adapter.
+ */
+availableActions?: string[]; lifecycleNote: string;
+/**
+ * Opaque provider revision returned on the next mutation for conflict checks.
+ */
+revision?: string | null; updatedAtMs: number | null }
 /**
  * A skill offered by the curated registry. Installing one downloads its folder
  * (the directory containing `SKILL.md`) from a public GitHub repo into the

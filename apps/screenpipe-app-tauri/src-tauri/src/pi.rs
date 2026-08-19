@@ -4548,6 +4548,44 @@ pub async fn pi_acp_set_mode(
     queue.send_immediate_awaited("set_mode", cmd).await
 }
 
+/// Route a provider-owned schedule mutation through the live ACP session that
+/// advertised Screenpipe's schedule extension. The caller resolves the exact
+/// chat session from the process-validated control registry; this function
+/// never falls back to a different agent or to provider file edits.
+pub(crate) async fn pi_acp_manage_provider_schedule(
+    state: &PiState,
+    chat_session_id: &str,
+    task_id: &str,
+    operation: &str,
+    expected_revision: Option<&str>,
+) -> Result<(), String> {
+    let queue = {
+        let mut pool = state.0.lock().await;
+        let manager = pool
+            .sessions
+            .get_mut(chat_session_id)
+            .ok_or("the agent session that owns this schedule is not running")?;
+        if !manager.is_running() || !manager.is_acp {
+            return Err("the agent session that owns this schedule is not running".into());
+        }
+        manager.last_activity = std::time::Instant::now();
+        manager
+            .queue_handle
+            .clone()
+            .ok_or("agent command queue is not initialized")?
+    };
+
+    let cmd = json!({
+        "type": "provider_schedule_mutation",
+        "taskId": task_id,
+        "operation": operation,
+        "expectedRevision": expected_revision,
+    });
+    queue
+        .send_immediate_awaited("provider_schedule_mutation", cmd)
+        .await
+}
+
 /// Re-show the agent's sign-in methods without signing out: the runtime re-runs
 /// its auth flow, which re-emits the sign-in card. Picking a method re-runs that
 /// method's login (Claude's `--cli auth login`, Codex's ACP ChatGPT flow), which

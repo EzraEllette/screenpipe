@@ -92,6 +92,9 @@
         },
         {
           "url": "^codex://threads/new\\?prompt=.*$"
+        },
+        {
+          "url": "^codex://automations(?:\\?.*)?$"
         }
       ]
     },

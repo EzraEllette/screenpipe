@@ -7,10 +7,7 @@ import type {
   BrainViewCanvasDocument,
   BrainViewDefinition,
 } from "@/lib/utils/tauri";
-import {
-  mockLocalApiResponse,
-  createMockHealth,
-} from "./browser-engine-mock";
+import { mockLocalApiResponse, createMockHealth } from "./browser-engine-mock";
 import { createBrowserIpcMock } from "./browser-tauri-mock";
 
 describe("browser development runtime", () => {
@@ -116,6 +113,23 @@ describe("browser development runtime", () => {
     expect(invoke("list_brain_views")).toEqual([savedView]);
   });
 
+  it("provides external schedules for browser design review", () => {
+    const invoke = createBrowserIpcMock({ mode: "mock", apiPort: 3030 });
+    const tasks = invoke("list_provider_automations") as Array<{
+      provider: string;
+      executionScope: string;
+      availableActions: string[];
+    }>;
+
+    expect(tasks.map((task) => task.provider)).toEqual([
+      "codex",
+      "codex",
+      "claude",
+    ]);
+    expect(tasks[0].availableActions).toContain("pause");
+    expect(tasks[2].executionScope).toBe("session");
+  });
+
   it("returns useful empty engine responses", async () => {
     const health = mockLocalApiResponse(
       new URL("http://localhost:3030/health"),
@@ -153,7 +167,9 @@ describe("browser development runtime", () => {
     );
 
     expect(response.status).toBe(503);
-    expect(await response.json()).toEqual({ error: "mock backend unavailable" });
+    expect(await response.json()).toEqual({
+      error: "mock backend unavailable",
+    });
   });
 
   it("can render a healthy empty-device state", () => {

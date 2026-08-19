@@ -10,6 +10,9 @@
 //! handwritten protocol implementation is shipped.
 
 use crate::acp_extensions::AcpExtensionMiddleware;
+use crate::acp_schedule_extension::{
+    advertised_capability, ScheduleMutationRequest, ScheduleOperation,
+};
 use agent_client_protocol::schema::v1::{
     AuthCapabilities, AuthMethod, AuthenticateRequest, BooleanConfigOptionCapabilities,
     CancelNotification, ClientCapabilities,
@@ -168,6 +171,7 @@ pub fn is_runtime_mode() -> bool {
 #[derive(Debug, Clone)]
 struct RuntimeConfig {
     agent_id: String,
+    chat_session_id: String,
     command: String,
     args: Vec<String>,
     env: HashMap<String, String>,
@@ -270,6 +274,8 @@ impl RuntimeConfig {
 
         Ok(Self {
             agent_id,
+            chat_session_id: env_nonempty("SCREENPIPE_CHAT_SESSION_ID")
+                .unwrap_or_else(|| "chat".into()),
             command,
             args,
             env,
@@ -1414,6 +1420,7 @@ unsafe extern "system" {
 struct RuntimeState {
     output: ParentOutput,
     agent_id: String,
+    chat_session_id: String,
     project_dir: PathBuf,
     turn: Mutex<TurnState>,
     ui_waiters: Mutex<HashMap<String, oneshot::Sender<Option<String>>>>,
@@ -1427,6 +1434,7 @@ impl RuntimeState {
         Self {
             output,
             agent_id: config.agent_id.clone(),
+            chat_session_id: config.chat_session_id.clone(),
             project_dir: config.project_dir.clone(),
             turn: Mutex::new(TurnState::default()),
             ui_waiters: Mutex::new(HashMap::new()),
@@ -1439,7 +1447,7 @@ impl RuntimeState {
     /// Keep provider-owned schedules attached to exactly one live ACP session.
     /// Reclaiming a resumed session preserves its projection; replacing the
     /// session drops session-only tasks immediately.
-    fn replace_provider_session(&self, session_id: &str) {
+    fn replace_provider_session(&self, session_id: &str, actions: &[String]) {
         let Ok(mut current) = self.provider_session_id.lock() else {
             return;
         };
@@ -1447,7 +1455,9 @@ impl RuntimeState {
             crate::provider_automations::begin_provider_session(
                 &self.agent_id,
                 session_id,
+                &self.chat_session_id,
                 &self.project_dir,
+                actions,
             );
             return;
         }
@@ -1457,7 +1467,9 @@ impl RuntimeState {
         crate::provider_automations::begin_provider_session(
             &self.agent_id,
             session_id,
+            &self.chat_session_id,
             &self.project_dir,
+            actions,
         );
         *current = Some(session_id.to_owned());
     }
@@ -1970,6 +1982,7 @@ fn tool_content_item_text(item: &Value) -> Option<String> {
 fn subagent_transcript_capability() -> serde_json::Map<String, Value> {
     let mut meta = serde_json::Map::new();
     meta.insert("subagent-transcript".to_owned(), Value::Bool(true));
+    crate::acp_schedule_extension::add_client_capability(&mut meta);
     meta
 }
 
@@ -3569,9 +3582,14 @@ async fn run_protocol(
                 serde_json::to_string(&init.agent_capabilities)
                     .unwrap_or_else(|_| "<unserializable>".to_owned())
             );
+            let schedule_capability = advertised_capability(&init);
+            let schedule_actions = schedule_capability
+                .as_ref()
+                .map(|capability| capability.operation_names())
+                .unwrap_or_default();
             let (mut session, resumed) =
                 open_or_resume_session(&connection, &state, &init, &config).await?;
-            state.replace_provider_session(&session.session_id.to_string());
+            state.replace_provider_session(&session.session_id.to_string(), &schedule_actions);
             // The agent is up (any first-run download finished) — clear the
             // "downloading" hint before announcing readiness.
             state.output.send(json!({
@@ -3696,7 +3714,10 @@ async fn run_protocol(
                                     match create_session_with_auth(&connection, &state, &init, &config).await {
                                         Ok(new_session) => {
                                             session = new_session;
-                                            state.replace_provider_session(&session.session_id.to_string());
+                                            state.replace_provider_session(
+                                                &session.session_id.to_string(),
+                                                &schedule_actions,
+                                            );
                                             state.reset_system_context(config.system_context.clone());
                                             apply_session_defaults(&connection, &config, &mut session).await;
                                             send_session_config(&state.output, &config.agent_id, &session);
@@ -3819,6 +3840,79 @@ async fn run_protocol(
                                         }
                                         Ok(())
                                     })?;
+                            }
+                            "provider_schedule_mutation" => {
+                                let task_id = command
+                                    .get("taskId")
+                                    .and_then(Value::as_str)
+                                    .map(str::trim)
+                                    .filter(|value| !value.is_empty())
+                                    .map(str::to_owned);
+                                let operation = command
+                                    .get("operation")
+                                    .and_then(Value::as_str)
+                                    .and_then(ScheduleOperation::parse);
+                                let (Some(task_id), Some(operation)) = (task_id, operation) else {
+                                    parent_response(
+                                        &state.output,
+                                        "provider_schedule_mutation",
+                                        &id,
+                                        Some("schedule mutation requires a taskId and supported operation"),
+                                    );
+                                    continue;
+                                };
+                                let Some(capability) = schedule_capability.as_ref() else {
+                                    parent_response(
+                                        &state.output,
+                                        "provider_schedule_mutation",
+                                        &id,
+                                        Some("this ACP adapter does not advertise schedule management"),
+                                    );
+                                    continue;
+                                };
+                                if !capability.supports(operation) {
+                                    parent_response(
+                                        &state.output,
+                                        "provider_schedule_mutation",
+                                        &id,
+                                        Some("this ACP adapter does not support that schedule operation"),
+                                    );
+                                    continue;
+                                }
+                                let request = ScheduleMutationRequest {
+                                    task_id,
+                                    operation,
+                                    mutation_id: id.clone(),
+                                    session_id: Some(session.session_id.to_string()),
+                                    expected_revision: command
+                                        .get("expectedRevision")
+                                        .and_then(Value::as_str)
+                                        .map(str::to_owned),
+                                    patch: None,
+                                };
+                                match connection.send_request(request).block_task().await {
+                                    Ok(response) if response.applied => parent_response(
+                                        &state.output,
+                                        "provider_schedule_mutation",
+                                        &id,
+                                        None,
+                                    ),
+                                    Ok(_) => parent_response(
+                                        &state.output,
+                                        "provider_schedule_mutation",
+                                        &id,
+                                        Some("the provider did not confirm the schedule change"),
+                                    ),
+                                    Err(error) => {
+                                        let message = error.to_string();
+                                        parent_response(
+                                            &state.output,
+                                            "provider_schedule_mutation",
+                                            &id,
+                                            Some(&message),
+                                        );
+                                    }
+                                }
                             }
                             "reauthenticate" => {
                                 // Re-show the sign-in card without signing out.
@@ -4224,6 +4318,7 @@ mod tests {
     fn runtime_config(agent_id: &str) -> RuntimeConfig {
         RuntimeConfig {
             agent_id: agent_id.into(),
+            chat_session_id: "chat".into(),
             command: "/agent".into(),
             args: Vec::new(),
             env: HashMap::new(),
@@ -4832,6 +4927,7 @@ mod tests {
         RuntimeState {
             output: output.clone(),
             agent_id: "test-agent".to_owned(),
+            chat_session_id: "chat".to_owned(),
             project_dir: PathBuf::from("/tmp"),
             turn: Mutex::new(TurnState {
                 prompt_in_flight: true,

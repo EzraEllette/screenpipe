@@ -2605,6 +2605,15 @@ export function PipesSection() {
         />
       )}
 
+      {pipeTypeFilter === "local" && !selectMode && (
+        <div className="flex items-baseline gap-2 px-1 pt-1">
+          <h3 className="text-sm font-medium">screenpipe tasks</h3>
+          <span className="text-xs tabular-nums text-muted-foreground">
+            {filteredPipes.length} total
+          </span>
+        </div>
+      )}
+
       {pipeTypeFilter === "cloud" ? (
         // Cloud pipes: the team's shared pipes running on screenpipe-managed
         // infra against centralized data — different data source from the
@@ -2689,9 +2698,9 @@ export function PipesSection() {
             ) : (
               <div className="space-y-4">
                 <div>
-                  <p className="text-foreground font-medium text-base">no scheduled tasks installed yet</p>
+                  <p className="text-foreground font-medium text-base">no screenpipe tasks yet</p>
                   <p className="text-sm mt-1">
-                    scheduled tasks are AI agents that run over your screen data — they summarize your day, track your time, sync your notes, and more.
+                    screenpipe tasks run locally over your screen data — they can summarize your day, track your time, sync your notes, and more.
                   </p>
                 </div>
                 <div className="space-y-2 max-w-md mx-auto text-left">
