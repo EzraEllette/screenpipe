@@ -70,11 +70,42 @@ pub(crate) fn ensure_global_ax_timeout() {
     });
 }
 
-/// Return the PID that owns the frontmost normal window using WindowServer's
-/// current front-to-back ordering. This is a fresh identity read: unlike
-/// NSWorkspace/AX focus notifications it does not depend on an AppKit run loop
-/// having processed an activation event.
+#[repr(C)]
+struct ProcessSerialNumber {
+    high_long_of_psn: u32,
+    low_long_of_psn: u32,
+}
+
+#[link(name = "ApplicationServices", kind = "framework")]
+unsafe extern "C" {
+    fn GetFrontProcess(psn: *mut ProcessSerialNumber) -> i16;
+    fn GetProcessPID(psn: *const ProcessSerialNumber, pid: *mut i32) -> i32;
+}
+
+/// Return the currently frontmost process with two scalar Process Manager
+/// calls. Unlike NSWorkspace notifications, this is synchronous and does not
+/// require an AppKit run loop to have processed an activation event.
 pub fn get_focused_pid_fresh() -> Option<i32> {
+    let mut psn = ProcessSerialNumber {
+        high_long_of_psn: 0,
+        low_long_of_psn: 0,
+    };
+    let mut pid = 0i32;
+    let status = unsafe { GetFrontProcess(&mut psn) };
+    if status == 0 {
+        let status = unsafe { GetProcessPID(&psn, &mut pid) };
+        if status == 0 && pid > 0 {
+            return Some(pid);
+        }
+    }
+
+    // Failure-only fallback for systems where the deprecated Process Manager
+    // symbols stop resolving correctly. This allocates a WindowServer list,
+    // so it must not be the normal capture path.
+    get_focused_pid_via_window_server()
+}
+
+fn get_focused_pid_via_window_server() -> Option<i32> {
     use core_foundation::array::{CFArrayGetCount, CFArrayGetValueAtIndex};
     use core_foundation::base::TCFType;
     use core_foundation::dictionary::{CFDictionaryGetValueIfPresent, CFDictionaryRef};
