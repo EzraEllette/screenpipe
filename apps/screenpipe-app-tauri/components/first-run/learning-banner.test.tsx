@@ -121,7 +121,9 @@ describe("first-run learning banner", () => {
     });
     render(<FirstRunLearningBanner />);
     expect(screen.getByText("Reading from")).toBeInTheDocument();
-    expect(screen.getByTestId("first-run-captured-app-Arc")).toBeInTheDocument();
+    expect(
+      screen.getByTestId("first-run-captured-app-Arc"),
+    ).toBeInTheDocument();
     expect(
       screen.getByTestId("first-run-captured-app-Cursor"),
     ).toBeInTheDocument();
@@ -169,7 +171,9 @@ describe("first-run learning banner", () => {
     expect(
       screen.queryByText("screenpipe learned enough to help"),
     ).not.toBeInTheDocument();
-    expect(screen.queryByTestId("first-run-next-steps")).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId("first-run-next-steps"),
+    ).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByTestId("first-run-toggle-setup"));
     expect(screen.getByTestId("first-run-next-steps")).toBeInTheDocument();
@@ -260,13 +264,14 @@ describe("first-run learning banner", () => {
 const CLAUDE = {
   id: "claude",
   label: "Claude",
-  deeplink: "claude://claude",
-  hint: "Claude opens with the question copied. Paste it to run.",
+  deeplink: "claude://claude.ai/new?q=test",
+  hint: "Question ready in Claude. Review and send it.",
 };
 const CODEX = {
   id: "codex",
-  label: "Codex",
-  hint: "Question copied. Paste it into your Codex terminal session.",
+  label: "ChatGPT",
+  deeplink: "codex://threads/new?prompt=test",
+  hint: "Question ready in ChatGPT. Review and send it.",
 };
 
 describe("agent handoff on the ready summary", () => {
@@ -293,11 +298,11 @@ describe("agent handoff on the ready summary", () => {
     expect(screen.getByTestId("first-run-open-summary")).toBeInTheDocument();
   });
 
-  it("says copy, not ask, for an agent it cannot bring forward", () => {
+  it("offers the verified prompt handoff for ChatGPT", () => {
     mocks.handoff.targets = [CODEX];
     render(<FirstRunLearningBanner />);
     expect(screen.getByTestId("first-run-ask-agent")).toHaveTextContent(
-      "Copy for Codex",
+      "Ask ChatGPT",
     );
   });
 
@@ -316,7 +321,9 @@ describe("agent handoff on the ready summary", () => {
     mocks.handoff.targets = [CLAUDE, CODEX];
     render(<FirstRunLearningBanner />);
 
-    expect(screen.getByTestId("first-run-ask-agent-picker")).toBeInTheDocument();
+    expect(
+      screen.getByTestId("first-run-ask-agent-picker"),
+    ).toBeInTheDocument();
     const asks = screen.getAllByTestId("first-run-ask-agent");
     expect(asks.map((el) => el.getAttribute("data-agent"))).toEqual([
       "claude",
@@ -324,7 +331,7 @@ describe("agent handoff on the ready summary", () => {
     ]);
     // Logos carry no text, so the accessible name is the only affordance a
     // screen reader or keyboard user gets.
-    expect(asks[1]).toHaveAccessibleName("Copy for Codex");
+    expect(asks[1]).toHaveAccessibleName("Ask ChatGPT");
 
     fireEvent.click(asks[1]);
     expect(mocks.handoff.askAgent).toHaveBeenCalledWith(
@@ -332,17 +339,17 @@ describe("agent handoff on the ready summary", () => {
     );
   });
 
-  it("shows the paste instruction only once there is one", () => {
+  it("shows the review instruction only once there is one", () => {
     mocks.handoff.targets = [CLAUDE];
     const { rerender } = render(<FirstRunLearningBanner />);
     expect(
       screen.queryByTestId("first-run-ask-agent-hint"),
     ).not.toBeInTheDocument();
 
-    mocks.handoff.hint = "Claude opens with the question copied. Paste it to run.";
+    mocks.handoff.hint = "Question ready in Claude. Review and send it.";
     rerender(<FirstRunLearningBanner />);
     expect(screen.getByTestId("first-run-ask-agent-hint")).toHaveTextContent(
-      /paste it to run/i,
+      /review and send it/i,
     );
   });
 });
