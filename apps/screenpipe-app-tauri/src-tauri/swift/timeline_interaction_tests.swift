@@ -273,6 +273,28 @@ private func testNoOverlaySwallowsHitTests(window: NSWindow) {
     }
 }
 
+/// The click that activates the timeline has to do its job too.
+///
+/// An attached timeline is a child window: the host webview keeps key focus, so
+/// the first click over the timeline is AppKit's "first mouse". A view that
+/// declines it spends that event on activation alone, and the user's first drag
+/// over a frame or a transcript selects nothing — they have to click something
+/// else first and try again. Asserted structurally, because a test binary is
+/// never the active app and so cannot be clicked (see the note at the top).
+@MainActor
+private func testFirstMouseReachesContent(window: NSWindow) {
+    expect(window is TimelineWindow,
+           "the timeline must use TimelineWindow, got \(type(of: window))")
+    guard let content = window.contentView else {
+        failures.append("the window has no content view")
+        return
+    }
+    expect(content.acceptsFirstMouse(for: nil),
+           "the SwiftUI host must accept first mouse, or the activating click is swallowed")
+    expect(TimelineLiveTextContainer().acceptsFirstMouse(for: nil),
+           "the frame canvas must accept first mouse")
+}
+
 /// Buttons have to actually run their action. Found through accessibility, then
 /// pressed the way an assistive client presses them.
 @MainActor
@@ -1117,6 +1139,7 @@ private func runTests() {
     let groups: [(String, () -> Void)] = [
         ("idle and hidden lifecycle", { testIdleAndHiddenLifecycle(model: model) }),
         ("no overlay swallows hit tests", { testNoOverlaySwallowsHitTests(window: window) }),
+        ("first mouse reaches content", { testFirstMouseReachesContent(window: window) }),
         ("control bar buttons respond",
          { testControlBarButtonsRespond(window: window, model: model) }),
         ("scrubber is reachable", { testScrubberIsReachable(window: window, model: model) }),
