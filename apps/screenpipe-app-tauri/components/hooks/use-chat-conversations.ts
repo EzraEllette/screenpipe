@@ -1368,16 +1368,30 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
         }
       }
     }
-    let messagesForPanel: any[];
-    if (existing?.messages && existing.messages.length > 0) {
-      messagesForPanel = existing.messages as any[];
+    // Re-read after the disk await so a router or sibling-window update that
+    // advanced this session during I/O participates in transcript selection.
+    const currentSession = useChatStore.getState().sessions[conv.id];
+    const persistedMessages = persisted
+      ? toRuntimeMessages(persisted.messages as Message[])
+      : [];
+    let messagesForPanel: Message[];
+    if (currentSession?.messages && currentSession.messages.length > 0) {
+      const currentMessages = currentSession.messages as Message[];
+      const adoptPersisted = shouldAdoptPersistedTranscript(
+        currentMessages,
+        persistedMessages,
+      );
+      messagesForPanel = adoptPersisted ? persistedMessages : currentMessages;
+      if (adoptPersisted) {
+        store.actions.setMessages(conv.id, messagesForPanel);
+      }
       // Restore in-flight streaming markers so the panel resumes
       // exactly where the user left it. The router has been keeping
       // these up-to-date for any tokens that arrived while the user
       // was elsewhere.
-      piStreamingTextRef.current = existing.streamingText ?? "";
-      piMessageIdRef.current = existing.streamingMessageId ?? null;
-      piContentBlocksRef.current = (existing.contentBlocks as any[]) ?? [];
+      piStreamingTextRef.current = currentSession.streamingText ?? "";
+      piMessageIdRef.current = currentSession.streamingMessageId ?? null;
+      piContentBlocksRef.current = (currentSession.contentBlocks as any[]) ?? [];
       // Self-heal a stuck `isStreaming` flag. The router bumps
       // `updatedAt` on every token via patchMessage, so silence past
       // STALE_MS means the stream is dead (Pi process died without
@@ -1386,15 +1400,16 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
       // the typing-cursor / loading dots forever.
       const STALE_MS = 30_000;
       const isStale =
-        !!existing.isStreaming && Date.now() - existing.updatedAt > STALE_MS;
+        !!currentSession.isStreaming &&
+        Date.now() - currentSession.updatedAt > STALE_MS;
       if (isStale) {
         store.actions.endTurn(conv.id);
         piStreamingTextRef.current = "";
         piMessageIdRef.current = null;
         piContentBlocksRef.current = [];
       } else {
-        if (existing.isLoading) setIsLoading(true);
-        if (existing.isStreaming) setIsStreaming(true);
+        if (currentSession.isLoading) setIsLoading(true);
+        if (currentSession.isStreaming) setIsStreaming(true);
       }
       store.actions.markHydrated(conv.id);
     } else {
