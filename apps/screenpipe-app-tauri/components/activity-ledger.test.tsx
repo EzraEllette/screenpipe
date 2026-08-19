@@ -628,6 +628,23 @@ describe("ActivityLedger", () => {
     expect(screen.getByLabelText("AI preset")).toBeVisible();
   });
 
+  it("uses one popover trigger instead of two native custom-date inputs", async () => {
+    render(<ActivityLedger />);
+
+    await screen.findByRole("button", { name: "Generate activities" });
+    fireEvent.click(screen.getByLabelText("Time range"));
+    fireEvent.click(
+      await screen.findByRole("option", { name: "Custom range" }),
+    );
+
+    expect(
+      document.querySelectorAll('input[type="datetime-local"]'),
+    ).toHaveLength(0);
+    expect(
+      screen.getByRole("button", { name: "Choose custom date range" }),
+    ).toHaveAttribute("aria-haspopup", "dialog");
+  });
+
   it("generates through click time when capture starts after Activity opens", async () => {
     let summaryCalls = 0;
     mocks.localFetch.mockImplementation((path: string) =>
