@@ -131,6 +131,18 @@ fn clamp_window_crop(b: FocusedWindowBounds, frame_w: u32, frame_h: u32) -> Opti
     })
 }
 
+fn mark_tree_not_pixel_aligned(snapshot: &TreeSnapshot) -> TreeSnapshot {
+    let mut snapshot = snapshot.clone();
+    for node in snapshot
+        .nodes
+        .iter_mut()
+        .chain(snapshot.semantic_nodes.iter_mut())
+    {
+        node.on_screen = Some(false);
+    }
+    snapshot
+}
+
 /// Context for a paired capture operation — replaces positional arguments.
 pub struct CaptureContext<'a> {
     pub db: &'a DatabaseManager,
@@ -169,6 +181,11 @@ pub struct CaptureContext<'a> {
     /// metadata. Callers without per-monitor focus knowledge should pass
     /// `true` only when capturing a single monitor.
     pub monitor_hosts_focus: bool,
+    /// Whether the focused accessibility snapshot was collected under the
+    /// same stable process identity as these pixels. When false, the AX data
+    /// is still persisted, but it cannot supply pixel text, bounds, identity,
+    /// dedup, or element references for this screenshot.
+    pub ax_screenshot_coherent: bool,
     /// Screen bounds of the focused window in this frame's pixel space, when
     /// the platform exposes them (macOS AX frame, Windows GetWindowRect).
     /// While meeting-gated, the text-region detect and any escalated OCR are
@@ -249,6 +266,15 @@ pub async fn paired_capture(
     // ownership so callers cannot attach the focused app's tree or identity
     // to unrelated pixels from another monitor.
     let tree_snapshot = tree_snapshot.filter(|_| ctx.monitor_hosts_focus);
+    // The AX observation remains durable, but none of its rectangles were
+    // observed in this screenshot. Reusing the existing visibility bit keeps
+    // visual keyword search and element queries from projecting these bounds
+    // onto unrelated pixels without a second shadow copy of the tree.
+    let incoherent_tree_snapshot = tree_snapshot
+        .filter(|_| !ctx.ax_screenshot_coherent)
+        .map(mark_tree_not_pixel_aligned);
+    let stored_tree_snapshot = incoherent_tree_snapshot.as_ref().or(tree_snapshot);
+    let pixel_tree_snapshot = stored_tree_snapshot.filter(|_| ctx.ax_screenshot_coherent);
     let (app_name, window_name, browser_url, document_path) = if ctx.monitor_hosts_focus {
         (
             ctx.app_name,
@@ -306,7 +332,7 @@ pub async fn paired_capture(
                 || n.contains("warp")
         });
     let has_accessibility_text = !app_prefers_ocr
-        && tree_snapshot
+        && pixel_tree_snapshot
             .map(|s| !s.text_content.is_empty())
             .unwrap_or(false);
 
@@ -317,7 +343,7 @@ pub async fn paired_capture(
     // Meeting apps/URLs are deliberately no longer part of this check —
     // their forced OCR is gated on an actual detected meeting below (#5054).
     let a11y_is_thin_generic = has_accessibility_text
-        && tree_snapshot
+        && pixel_tree_snapshot
             .map(|s| a11y_content_is_thin(s, window_name, browser_url))
             .unwrap_or(false);
 
@@ -594,7 +620,7 @@ pub async fn paired_capture(
             (None, None, None, None)
         }
     } else {
-        match tree_snapshot {
+        match stored_tree_snapshot {
             Some(snap) if !snap.text_content.is_empty() => {
                 let json = serde_json::to_string(&snap.nodes).ok();
                 (
@@ -620,9 +646,13 @@ pub async fn paired_capture(
         }
     };
 
-    // Determine text source: "accessibility" when tree nodes were available,
-    // "ocr" for fallback, "hybrid" when both ran (thin a11y supplemented by OCR)
-    let (final_text, text_source) = if let Some(ref text) = accessibility_text {
+    // An incoherent tree is retained as raw evidence, but must not enter the
+    // screenshot's FTS text. Otherwise a search for AX-only text would still
+    // return unrelated pixels even though every AX node is marked off-screen.
+    // OCR remains independently searchable for the screenshot.
+    let (final_text, text_source) = if !ctx.ax_screenshot_coherent {
+        (None, (!ocr_text.trim().is_empty()).then_some("ocr"))
+    } else if let Some(ref text) = accessibility_text {
         if text.is_empty() {
             (None, None)
         } else if tree_json.is_some() && a11y_is_thin && !ocr_text.is_empty() {
@@ -636,6 +666,14 @@ pub async fn paired_capture(
             // Text came from OCR fallback (no tree_json means no accessibility nodes)
             (Some(text.as_str()), Some("ocr"))
         }
+    } else {
+        (None, None)
+    };
+
+    // Never let a later coherent AX frame deduplicate against this detached
+    // tree and inherit its element reference or pixel identity.
+    let (content_hash, simhash) = if ctx.ax_screenshot_coherent {
+        (content_hash, simhash)
     } else {
         (None, None)
     };
@@ -695,7 +733,7 @@ pub async fn paired_capture(
             content_hash,
             simhash,
             ocr_data,
-            ctx.monitor_hosts_focus
+            (ctx.monitor_hosts_focus && ctx.ax_screenshot_coherent)
                 .then_some(ctx.elements_ref_frame_id)
                 .flatten(),
         )
@@ -1107,6 +1145,7 @@ mod tests {
             screenshot_disabled: false,
             in_meeting: false,
             monitor_hosts_focus: true,
+            ax_screenshot_coherent: true,
             focused_window_bounds: None,
         };
 
@@ -1146,6 +1185,7 @@ mod tests {
             screenshot_disabled: true,
             in_meeting: false,
             monitor_hosts_focus: true,
+            ax_screenshot_coherent: true,
             focused_window_bounds: None,
         };
 
@@ -1189,6 +1229,7 @@ mod tests {
             screenshot_disabled: false,
             in_meeting: false,
             monitor_hosts_focus: true,
+            ax_screenshot_coherent: true,
             focused_window_bounds: None,
         };
 
@@ -1260,6 +1301,7 @@ mod tests {
             screenshot_disabled: false,
             in_meeting: false,
             monitor_hosts_focus: true,
+            ax_screenshot_coherent: true,
             focused_window_bounds: None,
         };
 
@@ -1403,6 +1445,71 @@ mod tests {
             max_depth_reached: 0,
             window_bounds: None,
         }
+    }
+
+    #[test]
+    fn mismatched_ax_tree_is_preserved_but_no_longer_claims_pixel_visibility() {
+        let original = make_snap(vec![AccessibilityTreeNode {
+            role: "AXButton".into(),
+            text: "semantic label".into(),
+            on_screen: Some(true),
+            ..Default::default()
+        }]);
+
+        let stored = mark_tree_not_pixel_aligned(&original);
+
+        assert_eq!(stored.text_content, original.text_content);
+        assert_eq!(stored.nodes[0].text, original.nodes[0].text);
+        assert_eq!(stored.nodes[0].on_screen, Some(false));
+        assert_eq!(original.nodes[0].on_screen, Some(true));
+    }
+
+    #[tokio::test]
+    async fn mismatched_ax_tree_is_durable_but_not_indexed_as_screenshot_text() {
+        let tmp = TempDir::new().unwrap();
+        let snapshot_writer = SnapshotWriter::new(tmp.path(), 80, 1920);
+        let db = DatabaseManager::new("sqlite::memory:", Default::default())
+            .await
+            .unwrap();
+        let snapshot = make_snap(vec![AccessibilityTreeNode {
+            role: "AXStaticText".into(),
+            text: "fried chicken".into(),
+            on_screen: Some(true),
+            ..Default::default()
+        }]);
+        let ctx = CaptureContext {
+            db: &db,
+            snapshot_writer: &snapshot_writer,
+            image: test_image(),
+            captured_at: Utc::now(),
+            monitor_id: 0,
+            device_name: "test_monitor",
+            app_name: Some("Codex"),
+            window_name: None,
+            browser_url: None,
+            document_path: None,
+            focused: true,
+            capture_trigger: "focus_change",
+            use_pii_removal: false,
+            languages: vec![],
+            elements_ref_frame_id: None,
+            screenshot_disabled: true,
+            in_meeting: false,
+            monitor_hosts_focus: true,
+            ax_screenshot_coherent: false,
+            focused_window_bounds: None,
+        };
+
+        let result = paired_capture(&ctx, Some(&snapshot), None).await.unwrap();
+        let (indexed_text, tree_json) = db
+            .get_frame_accessibility_data(result.frame_id)
+            .await
+            .unwrap();
+
+        assert!(indexed_text.is_none());
+        let tree_json = tree_json.expect("raw AX tree should remain durable");
+        assert!(tree_json.contains("fried chicken"));
+        assert!(tree_json.contains("\"on_screen\":false"));
     }
 
     #[test]
@@ -1719,6 +1826,7 @@ mod tests {
             screenshot_disabled: false,
             in_meeting: false,
             monitor_hosts_focus: true,
+            ax_screenshot_coherent: true,
             focused_window_bounds: None,
         };
         let snap = rich_meeting_snap();
@@ -1763,6 +1871,7 @@ mod tests {
             screenshot_disabled: false,
             in_meeting: true,
             monitor_hosts_focus: true,
+            ax_screenshot_coherent: true,
             focused_window_bounds: None,
         };
         let snap = rich_meeting_snap();
@@ -1808,6 +1917,7 @@ mod tests {
             screenshot_disabled: false,
             in_meeting: true,
             monitor_hosts_focus: true,
+            ax_screenshot_coherent: true,
             focused_window_bounds: None,
         };
         let snap = rich_meeting_snap();
@@ -1858,6 +1968,7 @@ mod tests {
             screenshot_disabled: false,
             in_meeting: true,
             monitor_hosts_focus: false,
+            ax_screenshot_coherent: true,
             focused_window_bounds: None,
         };
         let mut gate = OcrGate::new();
@@ -1926,6 +2037,7 @@ mod tests {
             screenshot_disabled: false,
             in_meeting: true,
             monitor_hosts_focus: true,
+            ax_screenshot_coherent: true,
             focused_window_bounds: None,
         };
         let mut gate = OcrGate::new();
@@ -2025,6 +2137,7 @@ mod tests {
             screenshot_disabled: false,
             in_meeting: true,
             monitor_hosts_focus: true,
+            ax_screenshot_coherent: true,
             focused_window_bounds: bounds,
         };
 
@@ -2083,6 +2196,7 @@ mod tests {
             screenshot_disabled: false,
             in_meeting: true,
             monitor_hosts_focus: true,
+            ax_screenshot_coherent: true,
             focused_window_bounds: Some(bounds),
         };
 
@@ -2158,6 +2272,7 @@ mod tests {
             screenshot_disabled: false,
             in_meeting: true,
             monitor_hosts_focus: true,
+            ax_screenshot_coherent: true,
             focused_window_bounds: None,
         };
 

@@ -2427,58 +2427,6 @@ fn get_bool_attr(elem: &ax::UiElement, attr: &ax::Attr) -> Option<bool> {
     })
 }
 
-/// Frontmost app pid straight from the window server: owner of the first
-/// layer-0 window in CGWindowList's front-to-back z-order. Unlike
-/// NSWorkspace's `isActive`/`frontmostApplication` (KVO/notification-driven
-/// — silently stale in processes without a pumping AppKit run loop: CLI
-/// tools, plain worker threads), the window server answers fresh on every
-/// query, and pids/layers need no extra TCC permission.
-fn frontmost_pid_via_window_server() -> Option<i32> {
-    use core_foundation::array::{CFArrayGetCount, CFArrayGetValueAtIndex};
-    use core_foundation::base::TCFType;
-    use core_foundation::dictionary::{CFDictionaryGetValueIfPresent, CFDictionaryRef};
-    use core_foundation::number::{CFNumber, CFNumberRef};
-    use core_foundation::string::CFString;
-    use core_graphics::window::{
-        copy_window_info, kCGNullWindowID, kCGWindowListExcludeDesktopElements,
-        kCGWindowListOptionOnScreenOnly,
-    };
-
-    let options = kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements;
-    let list = copy_window_info(options, kCGNullWindowID)?;
-    let count = unsafe { CFArrayGetCount(list.as_concrete_TypeRef()) };
-    for i in 0..count {
-        unsafe {
-            let dict_ref = CFArrayGetValueAtIndex(list.as_concrete_TypeRef(), i);
-            if dict_ref.is_null() {
-                continue;
-            }
-            let dict = dict_ref as CFDictionaryRef;
-            let get_i64 = |key: &str| -> Option<i64> {
-                let k = CFString::new(key);
-                let mut v = std::ptr::null();
-                if CFDictionaryGetValueIfPresent(dict, k.as_concrete_TypeRef() as *const _, &mut v)
-                    != 0
-                    && !v.is_null()
-                {
-                    CFNumber::wrap_under_get_rule(v as CFNumberRef).to_i64()
-                } else {
-                    None
-                }
-            };
-            // Layer 0 = normal app windows; menus/overlays/status items sit
-            // on higher layers and must not win "frontmost".
-            if get_i64("kCGWindowLayer") != Some(0) {
-                continue;
-            }
-            if let Some(pid) = get_i64("kCGWindowOwnerPID") {
-                return Some(pid as i32);
-            }
-        }
-    }
-    None
-}
-
 fn resolve_focused_ax_app(
     capture_app_identity: bool,
 ) -> Option<(Retained<ax::UiElement>, i32, String, Option<String>)> {
@@ -2515,8 +2463,8 @@ fn resolve_focused_ax_app(
         }
         None
     });
-    let front_pid =
-        frontmost_pid_via_window_server().or_else(|| ws_active.as_ref().map(|(pid, _, _)| *pid));
+    let front_pid = crate::platform::macos::get_focused_pid_fresh()
+        .or_else(|| ws_active.as_ref().map(|(pid, _, _)| *pid));
 
     let sys = ax::UiElement::sys_wide();
     if let Ok(focused_app) = sys.focused_app() {
