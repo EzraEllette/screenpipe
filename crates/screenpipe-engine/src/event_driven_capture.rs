@@ -2320,7 +2320,12 @@ fn get_focused_pid_fresh() -> Option<i32> {
     screenpipe_a11y::platform::macos::get_focused_pid_fresh()
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+fn get_focused_pid_fresh() -> Option<i32> {
+    screenpipe_a11y::platform::windows::get_focused_pid_fresh()
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn get_focused_pid_fresh() -> Option<i32> {
     None
 }
@@ -2336,7 +2341,12 @@ fn app_name_for_pid(pid: i32) -> Option<String> {
     })
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+fn app_name_for_pid(pid: i32) -> Option<String> {
+    screenpipe_a11y::platform::windows::app_name_for_pid(pid)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn app_name_for_pid(_pid: i32) -> Option<String> {
     None
 }
