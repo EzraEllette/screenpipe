@@ -112,6 +112,7 @@ pub enum Health {
     #[default]
     Normal,
     Failure,
+    Recovering,
     Fixing,
     Recovered,
 }
@@ -120,6 +121,7 @@ impl Health {
     pub fn from_str_lossy(s: &str) -> Health {
         match s {
             "failure" => Health::Failure,
+            "recovering" => Health::Recovering,
             "fixing" => Health::Fixing,
             "recovered" => Health::Recovered,
             _ => Health::Normal,
@@ -319,6 +321,11 @@ mod tests {
         assert!(s.shows_dock());
         s.health = Health::Failure;
         assert!(!s.shows_dock());
+    }
+
+    #[test]
+    fn health_wire_state_parses_recovering() {
+        assert_eq!(Health::from_str_lossy("recovering"), Health::Recovering);
     }
 
     #[test]

@@ -359,6 +359,7 @@ impl Renderer {
 
         match state.health {
             Health::Failure => self.draw_failure(rt, state, layout, s),
+            Health::Recovering => self.draw_recovering(rt, layout.primary, s),
             Health::Fixing => self.draw_fixing(rt, state, layout.primary, s),
             Health::Recovered => self.draw_recovered(rt, layout.primary, s),
             Health::Normal => {
@@ -610,6 +611,19 @@ impl Renderer {
     }
 
     fn draw_fixing(&self, rt: &ID2D1RenderTarget, state: &OverlayState, r: Rect, s: f32) {
+        let label = if state.health_detail.is_empty() {
+            "fixing recording...".to_string()
+        } else {
+            format!("fixing — {}...", state.health_detail)
+        };
+        self.draw_health_progress(rt, r, s, &label);
+    }
+
+    fn draw_recovering(&self, rt: &ID2D1RenderTarget, r: Rect, s: f32) {
+        self.draw_health_progress(rt, r, s, "checking recovery...");
+    }
+
+    fn draw_health_progress(&self, rt: &ID2D1RenderTarget, r: Rect, s: f32, label: &str) {
         let radius = crate::layout::BASE_CORNER * s;
         self.shadow(rt, r, radius, 0.8);
         self.fill_round(rt, r, radius, black(0.85));
@@ -628,14 +642,9 @@ impl Renderer {
             );
         }
 
-        let label = if state.health_detail.is_empty() {
-            "fixing recording...".to_string()
-        } else {
-            format!("fixing — {}...", state.health_detail)
-        };
         self.mono_text(
             rt,
-            &label,
+            label,
             8.0 * s,
             DWRITE_FONT_WEIGHT_NORMAL,
             Align::Leading,

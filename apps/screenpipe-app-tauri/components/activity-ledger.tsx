@@ -16,12 +16,21 @@ import posthog from "posthog-js";
 import {
   AppWindow,
   AudioLines,
-  Loader2,
+  CalendarDays,
   RefreshCw,
   Users,
 } from "lucide-react";
+import { format } from "date-fns";
+import type { DateRange } from "react-day-picker";
 
 import { Button } from "@/components/ui/button";
+import { Calendar } from "@/components/ui/calendar";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
+import { Skeleton } from "@/components/ui/skeleton";
 import { faviconUrl } from "@/components/settings/capture-filters/icon-urls";
 import {
   Select,
@@ -63,7 +72,6 @@ import type { AIPreset } from "@/lib/utils/tauri";
 
 type RangePreset = "today" | "24h" | "7d" | "custom";
 type GenerationSource = "empty_state" | "refresh";
-const ACTIVITY_GENERATION_TIMEOUT_MS = 120_000;
 type ActivitySummaryResponse = {
   data_status: string;
   total_active_minutes: number;
@@ -169,6 +177,28 @@ function startOfLocalDay(value: Date): Date {
 function toLocalInputValue(value: Date): string {
   const local = new Date(value.getTime() - value.getTimezoneOffset() * 60_000);
   return local.toISOString().slice(0, 16);
+}
+
+function selectedDateRange(startValue: string, endValue: string): DateRange {
+  return {
+    from: startOfLocalDay(new Date(startValue)),
+    to: startOfLocalDay(new Date(endValue)),
+  };
+}
+
+function endOfSelectedDay(value: Date, now: Date): Date {
+  if (startOfLocalDay(value).getTime() === startOfLocalDay(now).getTime()) {
+    return now;
+  }
+  const end = new Date(value);
+  end.setHours(23, 59, 59, 999);
+  return end;
+}
+
+function customRangeLabel(range: DateRange | undefined): string {
+  if (!range?.from) return "Choose dates";
+  if (!range.to) return `${format(range.from, "MMM d, yyyy")} – …`;
+  return `${format(range.from, "MMM d, yyyy")} – ${format(range.to, "MMM d, yyyy")}`;
 }
 
 export function rangeForPreset(
@@ -607,6 +637,57 @@ function groupByDay(entries: ActivityHistoryEntry[]) {
   return [...groups.entries()];
 }
 
+function ActivityLedgerSkeleton({ label }: { label: string }) {
+  return (
+    <section
+      aria-label={label}
+      aria-live="polite"
+      data-testid="activity-ledger-skeleton"
+    >
+      <span className="sr-only">{label}</span>
+      <div className="border-b border-foreground/20 pb-3">
+        <Skeleton className="h-7 w-40 rounded-none" />
+      </div>
+
+      {["first", "second", "third"].map((row, index) => (
+        <div
+          key={row}
+          className="grid gap-3 border-b border-border py-6 last:border-b-0 sm:grid-cols-[112px_1fr]"
+          data-testid="activity-ledger-skeleton-row"
+        >
+          <Skeleton className="h-3 w-16 rounded-none" />
+          <div className="min-w-0">
+            <Skeleton
+              className={cn(
+                "h-5 rounded-none",
+                index === 1 ? "w-1/2" : "w-2/3",
+              )}
+            />
+            <div className="mt-2 space-y-2">
+              <Skeleton className="h-3.5 w-full max-w-2xl rounded-none" />
+              <Skeleton
+                className={cn(
+                  "h-3.5 max-w-2xl rounded-none",
+                  index === 2 ? "w-3/5" : "w-4/5",
+                )}
+              />
+            </div>
+            <div className="mt-4 flex items-center gap-3">
+              <div className="flex items-center gap-1.5">
+                {[0, 1, 2].map((artifact) => (
+                  <Skeleton key={artifact} className="h-7 w-7 rounded-none" />
+                ))}
+              </div>
+              <Skeleton className="h-2.5 w-14 rounded-none" />
+              <Skeleton className="h-2.5 w-9 rounded-none" />
+            </div>
+          </div>
+        </div>
+      ))}
+    </section>
+  );
+}
+
 function compactEntryContext(entry: ActivityHistoryEntry): string {
   return [
     `Time: ${entry.start_at} to ${entry.end_at}`,
@@ -649,6 +730,10 @@ export function ActivityLedger({
       toLocalInputValue(initialNow),
     ),
   );
+  const [customDateRange, setCustomDateRange] = useState<
+    DateRange | undefined
+  >(() => selectedDateRange(customStart, customEnd));
+  const [customCalendarOpen, setCustomCalendarOpen] = useState(false);
   const [summary, setSummary] = useState<ActivitySummaryResponse | null>(null);
   const [meetings, setMeetings] = useState<ActivityReviewMeeting[]>([]);
   const meetingsRef = useRef(meetings);
@@ -904,11 +989,6 @@ export function ActivityLedger({
     historyLoadingRef.current = true;
     setHistoryLoading(true);
     setHistoryError("");
-    let timedOut = false;
-    const timeout = window.setTimeout(() => {
-      timedOut = true;
-      controller.abort();
-    }, ACTIVITY_GENERATION_TIMEOUT_MS);
     try {
       const [summaryResponse, meetingsResponse] = await Promise.all([
         localFetch(buildActivitySummaryPath(generationRange), {
@@ -1062,24 +1142,23 @@ export function ActivityLedger({
         activity_count: next.entries.length,
       });
     } catch (reason) {
-      if (controller.signal.aborted && !timedOut) return;
+      if (controller.signal.aborted) return;
       const rawError = reason instanceof Error ? reason.message : String(reason);
       const quota = presentQuotaError(rawError);
-      const friendlyError = timedOut
-        ? "Activity generation took too long and was stopped. Try again."
-        : rawError.toLowerCase().includes("hosted_ai_allowance_exceeded")
-          ? "This AI preset has no usage left. Choose a different AI preset, then try again."
-          : quota.kind !== "none"
-            ? quota.message
-            : "History could not be updated. Try again.";
+      const friendlyError = rawError
+        .toLowerCase()
+        .includes("hosted_ai_allowance_exceeded")
+        ? "This AI preset has no usage left. Choose a different AI preset, then try again."
+        : quota.kind !== "none"
+          ? quota.message
+          : "History could not be updated. Try again.";
       setHistoryError(friendlyError);
       posthog.capture("activity_generation_failed", {
         range: preset,
         source,
-        error_kind: timedOut ? "timeout" : quota.kind,
+        error_kind: quota.kind,
       });
     } finally {
-      window.clearTimeout(timeout);
       if (historyAbortRef.current === controller) {
         historyLoadingRef.current = false;
         setHistoryLoading(false);
@@ -1290,25 +1369,54 @@ Re-query Screenpipe only inside the cited time range and use the cited frames an
           </div>
 
           {preset === "custom" ? (
-            <div className="mt-4 flex flex-wrap justify-end gap-2">
-              <label className="flex items-center gap-2 text-xs text-muted-foreground">
-                From
-                <input
-                  type="datetime-local"
-                  value={customStart}
-                  onChange={(event) => setCustomStart(event.target.value)}
-                  className="h-9 border border-border bg-background px-3 font-mono text-xs text-foreground outline-none focus:border-foreground"
-                />
-              </label>
-              <label className="flex items-center gap-2 text-xs text-muted-foreground">
-                To
-                <input
-                  type="datetime-local"
-                  value={customEnd}
-                  onChange={(event) => setCustomEnd(event.target.value)}
-                  className="h-9 border border-border bg-background px-3 font-mono text-xs text-foreground outline-none focus:border-foreground"
-                />
-              </label>
+            <div className="mt-4 flex justify-end">
+              <Popover
+                open={customCalendarOpen}
+                onOpenChange={setCustomCalendarOpen}
+              >
+                <PopoverTrigger asChild>
+                  <Button
+                    variant="outline"
+                    className="h-9 justify-start rounded-none border-border bg-background px-3 font-mono text-xs font-normal normal-case tracking-normal"
+                    aria-label="Choose custom date range"
+                  >
+                    <CalendarDays className="mr-2 h-3.5 w-3.5" />
+                    {customRangeLabel(customDateRange)}
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent
+                  align="end"
+                  className="w-auto rounded-none border-border p-0 shadow-lg shadow-black/5"
+                >
+                  <Calendar
+                    mode="range"
+                    selected={customDateRange}
+                    onSelect={(nextRange) => {
+                      setCustomDateRange(nextRange);
+                      if (!nextRange?.from || !nextRange.to) return;
+                      const now = new Date();
+                      setCustomStart(
+                        toLocalInputValue(startOfLocalDay(nextRange.from)),
+                      );
+                      setCustomEnd(
+                        toLocalInputValue(endOfSelectedDay(nextRange.to, now)),
+                      );
+                    }}
+                    defaultMonth={customDateRange?.from}
+                    disabled={{ after: new Date() }}
+                    numberOfMonths={1}
+                    className="p-3"
+                    classNames={{
+                      cell: "h-9 w-9 p-0 text-center text-sm relative [&:has([aria-selected])]:bg-accent focus-within:relative focus-within:z-20",
+                      day: "h-9 w-9 rounded-none p-0 font-normal aria-selected:opacity-100",
+                      day_selected:
+                        "bg-foreground text-background hover:bg-foreground hover:text-background focus:bg-foreground focus:text-background",
+                      day_range_middle:
+                        "aria-selected:bg-accent aria-selected:text-accent-foreground",
+                    }}
+                  />
+                </PopoverContent>
+              </Popover>
             </div>
           ) : null}
         </div>
@@ -1453,22 +1561,13 @@ Re-query Screenpipe only inside the cited time range and use the cited frames an
               ) : null}
             </section>
           ) : loading && !summary ? (
-            <div className="flex h-48 items-center justify-center gap-2 text-sm text-muted-foreground">
-              <Loader2 className="h-4 w-4 animate-spin" />
-              Reading your day…
-            </div>
+            <ActivityLedgerSkeleton label="Reading your day…" />
           ) : error ? (
             <p className="text-sm text-muted-foreground">{error}</p>
           ) : !cacheReady ? (
-            <div className="flex h-48 items-center justify-center gap-2 text-sm text-muted-foreground">
-              <Loader2 className="h-4 w-4 animate-spin" />
-              Loading generated activities…
-            </div>
+            <ActivityLedgerSkeleton label="Loading generated activities…" />
           ) : historyLoading && !history ? (
-            <div className="flex h-48 items-center justify-center gap-2 text-sm text-muted-foreground">
-              <Loader2 className="h-4 w-4 animate-spin" />
-              Understanding what you worked on…
-            </div>
+            <ActivityLedgerSkeleton label="Understanding what you worked on…" />
           ) : (
             <div className="flex min-h-[320px] items-center justify-center py-12 text-center">
               <div className="max-w-sm">

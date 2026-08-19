@@ -18,6 +18,7 @@ export function buildSteerPrompt(batch: PendingSteerBatchItem[]) {
     "Treat them as live steering for that turn: they may refine the original request, replace it, or redirect to a new request.",
     "Infer the user's intent from the original request and the steering messages. If a steering message is a complete request, answer that request directly.",
     "Apply steering messages in order. If they conflict, the final steering message has highest priority.",
+    "Only supersede conflicting parts; preserve non-conflicting constraints from the original request and earlier steering messages.",
     "Do not explain the steering mechanism unless the user asks about it.",
     "",
     "Original user request:",

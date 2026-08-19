@@ -3466,10 +3466,11 @@ pub async fn hide_shortcut_reminder(app_handle: tauri::AppHandle) -> Result<(), 
     Ok(())
 }
 
-/// Current recording-health overlay state: "normal" | "failure" | "fixing" |
-/// "recovered", optionally suffixed "|<detail>" (a concise failure reason or
-/// boot-phase label while fixing). The shortcut-reminder webview pulls this on
-/// mount, then stays current via the "recording-health-state" event.
+/// Current recording-health overlay state: "normal" | "failure" |
+/// "recovering" | "fixing" | "recovered", optionally suffixed "|<detail>" (a
+/// concise failure reason or boot-phase label while fixing). The
+/// shortcut-reminder webview pulls this on mount, then stays current via the
+/// "recording-health-state" event.
 #[tauri::command]
 #[specta::specta]
 pub async fn get_recording_health_state() -> String {

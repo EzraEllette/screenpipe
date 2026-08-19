@@ -47,7 +47,12 @@ type ReminderSettings = {
   searchShortcut?: string;
 };
 
-type RecordingHealthState = "normal" | "failure" | "fixing" | "recovered";
+type RecordingHealthState =
+  | "normal"
+  | "failure"
+  | "recovering"
+  | "fixing"
+  | "recovered";
 
 // Mirrors the Rust store defaults (`store.rs`). A settings object written
 // before one of these keys existed reads back blank, and a blank chord used to
@@ -548,7 +553,7 @@ export default function ShortcutReminderPage() {
     );
   }
 
-  if (healthState === "fixing") {
+  if (healthState === "fixing" || healthState === "recovering") {
     return (
       <div
         className="w-full h-full flex items-center justify-center"
@@ -571,7 +576,11 @@ export default function ShortcutReminderPage() {
             className="font-mono text-white/90 whitespace-nowrap truncate"
             style={{ fontSize: `${fontPx}px` }}
           >
-            {healthDetail ? `fixing — ${healthDetail}...` : "fixing recording..."}
+            {healthState === "recovering"
+              ? "checking recovery..."
+              : healthDetail
+                ? `fixing — ${healthDetail}...`
+                : "fixing recording..."}
           </span>
         </div>
       </div>

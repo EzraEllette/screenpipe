@@ -602,6 +602,10 @@ describe("ActivityLedger", () => {
     expect(
       await screen.findByText("Loading generated activities…"),
     ).toBeVisible();
+    expect(screen.getByTestId("activity-ledger-skeleton")).toBeVisible();
+    expect(screen.getAllByTestId("activity-ledger-skeleton-row")).toHaveLength(
+      3,
+    );
     expect(
       screen.queryByRole("button", { name: "Generate activities" }),
     ).toBeNull();
@@ -644,6 +648,23 @@ describe("ActivityLedger", () => {
     expect(screen.queryByRole("heading", { name: "Activity" })).toBeNull();
     expect(screen.getByLabelText("Time range")).toBeVisible();
     expect(screen.getByLabelText("AI preset")).toBeVisible();
+  });
+
+  it("uses one popover trigger instead of two native custom-date inputs", async () => {
+    render(<ActivityLedger />);
+
+    await screen.findByRole("button", { name: "Generate activities" });
+    fireEvent.click(screen.getByLabelText("Time range"));
+    fireEvent.click(
+      await screen.findByRole("option", { name: "Custom range" }),
+    );
+
+    expect(
+      document.querySelectorAll('input[type="datetime-local"]'),
+    ).toHaveLength(0);
+    expect(
+      screen.getByRole("button", { name: "Choose custom date range" }),
+    ).toHaveAttribute("aria-haspopup", "dialog");
   });
 
   it("generates through click time when capture starts after Activity opens", async () => {
@@ -882,20 +903,16 @@ describe("ActivityLedger", () => {
     expect(screen.getByRole("button", { name: "Try again" })).toBeVisible();
   });
 
-  it("stops a stalled generation and replaces the spinner with an error", async () => {
+  it("keeps a slow generation running past two minutes", async () => {
+    let finishGeneration!: (value: string) => void;
+    let generationSignal: AbortSignal | undefined;
     mocks.runDailySummaryWithPi.mockImplementation(
-      ({ signal }: { signal?: AbortSignal }) =>
-        new Promise((_resolve, reject) => {
-          signal?.addEventListener(
-            "abort",
-            () => {
-              const error = new Error("aborted");
-              error.name = "AbortError";
-              reject(error);
-            },
-            { once: true },
-          );
-        }),
+      ({ signal }: { signal?: AbortSignal }) => {
+        generationSignal = signal;
+        return new Promise((resolve) => {
+          finishGeneration = resolve;
+        });
+      },
     );
 
     render(<ActivityLedger />);
@@ -908,13 +925,18 @@ describe("ActivityLedger", () => {
       await vi.advanceTimersByTimeAsync(120_000);
     });
 
-    expect(await screen.findByRole("alert")).toHaveTextContent(
-      "Activity generation took too long and was stopped.",
-    );
+    expect(generationSignal?.aborted).toBe(false);
     expect(
-      screen.queryByText("Understanding what you worked on…"),
-    ).toBeNull();
-    expect(screen.getByRole("button", { name: "Try again" })).toBeVisible();
+      await screen.findByText("Understanding what you worked on…"),
+    ).toBeVisible();
+
+    await act(async () => {
+      finishGeneration(HISTORY_RESPONSE);
+    });
+
+    expect(
+      await screen.findByText("Fixed a capture reliability regression"),
+    ).toBeVisible();
   });
 
   it("tracks page reach and the activity generation funnel", async () => {

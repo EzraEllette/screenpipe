@@ -10,7 +10,7 @@
 
 use crate::capture_session::CaptureSession;
 use crate::config;
-use crate::permissions::do_permissions_check;
+use crate::permissions::{do_permissions_check, OSPermissionStatus};
 use crate::server_core::ServerCore;
 use crate::store::{LocalPlanPolicy, SettingsStore};
 use screenpipe_engine::RecordingConfig;
@@ -1128,13 +1128,22 @@ async fn spawn_screenpipe_inner(
         }
     }
 
-    // Permissions check
+    // Permissions check. The UI-facing status includes the engine's sticky
+    // display-enumeration verdict, but startup must not: the VisionManager
+    // watcher created below is the only component that can clear or reconfirm
+    // that verdict after a transient ScreenCaptureKit failure.
     let permissions_check = do_permissions_check(false);
     let disable_audio = store.recording.disable_audio;
 
-    if state.capture_intended() && !permissions_check.screen_recording.permitted() {
+    #[cfg(target_os = "macos")]
+    let screen_recording_start_permitted =
+        screenpipe_core::permissions::check_screen_recording_tauri().is_granted();
+    #[cfg(not(target_os = "macos"))]
+    let screen_recording_start_permitted = true;
+
+    if state.capture_intended() && !screen_recording_start_permitted {
         warn!(
-            "Screen recording permission not granted: {:?}. Cannot start server.",
+            "Screen recording permission is not usable in this process: {:?}. Cannot start server.",
             permissions_check.screen_recording
         );
         state.is_starting.store(false, Ordering::SeqCst);
@@ -1143,10 +1152,15 @@ async fn spawn_screenpipe_inner(
         // recording status indicator stops showing "Starting…" forever
         // when the user has clicked "click to record" with TCC denied.
         crate::health::set_recording_status(crate::health::RecordingStatus::Error);
-        return Err(
-            "Screen recording permission required. Please grant permission and restart the app."
-                .to_string(),
-        );
+        let error = match &permissions_check.screen_recording {
+            OSPermissionStatus::RestartRequired => {
+                "Screen recording permission was granted, but Screenpipe must restart before it can be used."
+            }
+            _ => {
+                "Screen recording permission required. Please grant permission and restart the app."
+            }
+        };
+        return Err(error.to_string());
     }
 
     if state.capture_intended() && !disable_audio && !permissions_check.microphone.permitted() {

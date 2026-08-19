@@ -56,6 +56,7 @@ on:
     paths: &paths
       - "crates/screenpipe-screen/**"
       - "crates/screenpipe-audio/src/meeting_processes.rs"
+      - "crates/screenpipe-engine/src/meeting_watcher/ui_scan/**"
       - "crates/screenpipe-engine/src/event_driven_capture.rs"
       - "crates/screenpipe-engine/src/hd_recorder.rs"
       - "crates/screenpipe-engine/src/vision_manager/**"
@@ -175,7 +176,7 @@ jobs:
         env:
           NEXT_PUBLIC_SCREENPIPE_E2E: "true"
         with:
-          args: "--no-sign --debug --no-bundle -- --features e2e"
+          args: "--no-bundle -- --profile debug-dev --features e2e"
           projectPath: "./apps/screenpipe-app-tauri"
           tauriScript: bunx tauri -v
 
@@ -190,12 +191,33 @@ jobs:
             meeting_processes::platform::runtime_smoke::repeated_input_process_snapshots_do_not_crash \
             -- --exact --nocapture
 
+      - name: Smoke-test meeting UI app discovery under process churn
+        shell: bash
+        env:
+          # Reuse the artifacts produced by the Tauri build above instead of
+          # compiling screenpipe-engine's native dependency graph again.
+          CARGO_TARGET_DIR: apps/screenpipe-app-tauri/src-tauri/target
+        run: |
+          set -euo pipefail
+
+          # This API is forbidden in the meeting scanner. On Intel it can
+          # return an invalid CFString while a process exits, which crashes in
+          # CFStringGetLength before Rust can recover.
+          if rg -n 'localized_name\s*\(' crates/screenpipe-engine/src/meeting_watcher/ui_scan/macos.rs; then
+            echo "::error::Meeting UI scanner must use checked libproc names, not NSRunningApplication.localizedName"
+            exit 1
+          fi
+
+          cargo test -p screenpipe-engine --lib --no-default-features \
+            meeting_watcher::ui_scan::macos::runtime_smoke \
+            -- --nocapture
+
       - name: Wrap binary as .app bundle for tcc-grant
         id: wrap_bundle
         shell: bash
         run: |
           set -euo pipefail
-          RAW_BIN="$(realpath apps/screenpipe-app-tauri/src-tauri/target/debug/screenpipe-app)"
+          RAW_BIN="$(realpath apps/screenpipe-app-tauri/src-tauri/target/debug-dev/screenpipe-app)"
           BUNDLE_ID="$(python3 -c "import json; print(json.load(open('apps/screenpipe-app-tauri/src-tauri/tauri.conf.json'))['identifier'])")"
           APP_BUNDLE="$RUNNER_TEMP/screenpipe-intel-smoke.app"
           .github/scripts/macos/wrap-binary-as-app-bundle.sh "$RAW_BIN" "$BUNDLE_ID" "screenpipe-app" "$APP_BUNDLE"
@@ -206,7 +228,7 @@ jobs:
         shell: bash
         env:
           APP_BUNDLE: ${{ steps.wrap_bundle.outputs.app_bundle }}
-        # --adhoc-sign: this is an unsigned --no-sign dev build, so
+        # --adhoc-sign: this is an unbundled raw dev binary, so
         # tcc-grant.sh needs to sign it itself before it can compute a csreq.
         # Whether this actually took effect is confirmed later from the
         # app's own log line, not from this command's own success/failure —
