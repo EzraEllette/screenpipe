@@ -70,6 +70,85 @@ pub(crate) fn ensure_global_ax_timeout() {
     });
 }
 
+#[repr(C)]
+struct ProcessSerialNumber {
+    high_long_of_psn: u32,
+    low_long_of_psn: u32,
+}
+
+#[link(name = "ApplicationServices", kind = "framework")]
+unsafe extern "C" {
+    fn GetFrontProcess(psn: *mut ProcessSerialNumber) -> i16;
+    fn GetProcessPID(psn: *const ProcessSerialNumber, pid: *mut i32) -> i32;
+}
+
+/// Return the currently frontmost process with two scalar Process Manager
+/// calls. Unlike NSWorkspace notifications, this is synchronous and does not
+/// require an AppKit run loop to have processed an activation event.
+pub fn get_focused_pid_fresh() -> Option<i32> {
+    let mut psn = ProcessSerialNumber {
+        high_long_of_psn: 0,
+        low_long_of_psn: 0,
+    };
+    let mut pid = 0i32;
+    let status = unsafe { GetFrontProcess(&mut psn) };
+    if status == 0 {
+        let status = unsafe { GetProcessPID(&psn, &mut pid) };
+        if status == 0 && pid > 0 {
+            return Some(pid);
+        }
+    }
+
+    // Failure-only fallback for systems where the deprecated Process Manager
+    // symbols stop resolving correctly. This allocates a WindowServer list,
+    // so it must not be the normal capture path.
+    get_focused_pid_via_window_server()
+}
+
+fn get_focused_pid_via_window_server() -> Option<i32> {
+    use core_foundation::array::{CFArrayGetCount, CFArrayGetValueAtIndex};
+    use core_foundation::base::TCFType;
+    use core_foundation::dictionary::{CFDictionaryGetValueIfPresent, CFDictionaryRef};
+    use core_foundation::number::{CFNumber, CFNumberRef};
+    use core_graphics::window::{
+        copy_window_info, kCGNullWindowID, kCGWindowLayer, kCGWindowListExcludeDesktopElements,
+        kCGWindowListOptionOnScreenOnly, kCGWindowOwnerPID,
+    };
+
+    let options = kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements;
+    let list = copy_window_info(options, kCGNullWindowID)?;
+    let count = unsafe { CFArrayGetCount(list.as_concrete_TypeRef()) };
+    for i in 0..count {
+        unsafe {
+            let dict_ref = CFArrayGetValueAtIndex(list.as_concrete_TypeRef(), i);
+            if dict_ref.is_null() {
+                continue;
+            }
+            let dict = dict_ref as CFDictionaryRef;
+            let get_i64 = |key| -> Option<i64> {
+                let mut value = std::ptr::null();
+                if CFDictionaryGetValueIfPresent(dict, key as *const _, &mut value) != 0
+                    && !value.is_null()
+                {
+                    CFNumber::wrap_under_get_rule(value as CFNumberRef).to_i64()
+                } else {
+                    None
+                }
+            };
+
+            // Layer 0 = normal application windows. Menus, overlays, and
+            // status items live on higher layers and must not own focus.
+            if get_i64(kCGWindowLayer) != Some(0) {
+                continue;
+            }
+            if let Some(pid) = get_i64(kCGWindowOwnerPID) {
+                return Some(pid as i32);
+            }
+        }
+    }
+    None
+}
+
 /// Process-wide ground truth for macOS Input Monitoring, learned from the ONE
 /// real CGEventTap we create in `run_event_tap` / `run_activity_only_tap`.
 ///

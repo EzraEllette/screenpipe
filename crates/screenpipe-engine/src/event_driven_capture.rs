@@ -18,7 +18,9 @@ use chrono::Utc;
 use screenpipe_a11y::tree::TreeWalkerConfig;
 use screenpipe_a11y::ActivityFeed;
 use screenpipe_capture::ocr_gate::OcrGate;
-use screenpipe_capture::paired_capture::{paired_capture, CaptureContext, PairedCaptureResult};
+use screenpipe_capture::paired_capture::{
+    detach_tree_from_pixels, paired_capture, CaptureContext, PairedCaptureResult,
+};
 use screenpipe_capture::TreeWalkerWorker;
 use screenpipe_core::window_pattern::{self, WindowPattern};
 use screenpipe_db::DatabaseManager;
@@ -2313,6 +2315,42 @@ struct LightweightFocusedMetadata {
     window_name: Option<String>,
 }
 
+#[cfg(target_os = "macos")]
+fn get_focused_pid_fresh() -> Option<i32> {
+    screenpipe_a11y::platform::macos::get_focused_pid_fresh()
+}
+
+#[cfg(target_os = "windows")]
+fn get_focused_pid_fresh() -> Option<i32> {
+    screenpipe_a11y::platform::windows::get_focused_pid_fresh()
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn get_focused_pid_fresh() -> Option<i32> {
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn app_name_for_pid(pid: i32) -> Option<String> {
+    use cidre::{ns, objc};
+
+    objc::ar_pool(|| {
+        ns::RunningApp::with_pid(pid)
+            .and_then(|app| app.localized_name())
+            .map(|name| name.to_string())
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn app_name_for_pid(pid: i32) -> Option<String> {
+    screenpipe_a11y::platform::windows::app_name_for_pid(pid)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn app_name_for_pid(_pid: i32) -> Option<String> {
+    None
+}
+
 fn normalize_metadata_value(value: Option<&str>) -> Option<String> {
     value
         .map(str::trim)
@@ -2814,6 +2852,13 @@ async fn do_capture(
         );
         image
     };
+    // This scalar is the screenshot's app identity. Read it immediately after
+    // ScreenCaptureKit returns so no process object travels with the pixels.
+    let screenshot_focus_pid = if monitor_hosts_focus && !screenshot_disabled {
+        get_focused_pid_fresh()
+    } else {
+        None
+    };
 
     // Skip frames that are unusable for indexing.  Two cases:
     //   1. Near-all-black — an ignored window covering the monitor; SCK fills
@@ -3040,7 +3085,7 @@ async fn do_capture(
         Some(TreeWalkResult::Skipped(_)) | None => {}
     }
 
-    let tree_snapshot = match tree_walk_result {
+    let mut tree_snapshot = match tree_walk_result {
         Some(TreeWalkResult::Found(snap)) => Some(snap),
         Some(TreeWalkResult::Skipped(reason)) => {
             debug!(
@@ -3056,6 +3101,25 @@ async fn do_capture(
         }
         Some(TreeWalkResult::NotFound) | None => None,
     };
+    let ax_focus_pid = if tree_snapshot.is_some() && !screenshot_disabled {
+        get_focused_pid_fresh()
+    } else {
+        None
+    };
+    let ax_screenshot_coherent = match (screenshot_focus_pid, ax_focus_pid) {
+        (Some(screenshot_pid), Some(ax_pid)) => screenshot_pid == ax_pid,
+        _ => true,
+    };
+    if tree_snapshot.is_some() && !ax_screenshot_coherent {
+        debug!(
+            screenshot_pid = screenshot_focus_pid,
+            ax_pid = ax_focus_pid,
+            "focused process changed across screenshot/AX capture; preserving AX as non-pixel-aligned"
+        );
+        if let Some(snapshot) = tree_snapshot.as_mut() {
+            detach_tree_from_pixels(snapshot);
+        }
+    }
 
     // Safety net: when the tree walk returned NotFound (AX failure, budget skip,
     // etc.) the Skipped(UserIgnored) path didn't fire.  If the focused app still
@@ -3088,7 +3152,7 @@ async fn do_capture(
     // Never dedup Idle/Manual triggers, bypass entirely during HD sessions, and
     // force a write every 30s even if the hash matches — see `dedup_applies`.
     let dedup_eligible = dedup_applies(trigger, hd_active, in_meeting, last_db_write.elapsed());
-    if dedup_eligible {
+    if dedup_eligible && ax_screenshot_coherent {
         if let Some(ref snap) = tree_snapshot {
             if !snap.text_content.is_empty() {
                 let new_hash = snap.content_hash as i64;
@@ -3115,11 +3179,20 @@ async fn do_capture(
     // Use tree metadata by default, but for focus-change triggers prefer the
     // event payload when the tree lags or reports the wrong frontmost target.
     let (app_name_owned, window_name_owned, browser_url_owned, document_path_owned) =
-        resolve_capture_metadata(
-            tree_snapshot.as_ref(),
-            trigger,
-            lightweight_focused_metadata.as_ref(),
-        );
+        if ax_screenshot_coherent {
+            resolve_capture_metadata(
+                tree_snapshot.as_ref(),
+                trigger,
+                lightweight_focused_metadata.as_ref(),
+            )
+        } else {
+            (
+                screenshot_focus_pid.and_then(app_name_for_pid),
+                None,
+                None,
+                None,
+            )
+        };
 
     // Skip lock screen / screensaver — these waste disk and pollute timeline.
     // Also update the global SCREEN_IS_LOCKED flag so subsequent loop iterations
@@ -3220,6 +3293,7 @@ async fn do_capture(
         let (frame_w, frame_h) = image.dimensions();
         tree_snapshot
             .as_ref()
+            .filter(|_| ax_screenshot_coherent)
             .filter(|snap| {
                 app_name_owned
                     .as_deref()
@@ -3258,19 +3332,22 @@ async fn do_capture(
         screenshot_disabled: screenshot_disabled || skip_pixels_for_unknown_exclusions,
         in_meeting,
         monitor_hosts_focus,
+        ax_screenshot_coherent,
         focused_window_bounds,
     };
 
     let result = paired_capture(&ctx, tree_snapshot.as_ref(), Some(ocr_gate)).await?;
-    if let (Some(sender), Some(snapshot)) = (params.semantic_tx, tree_snapshot) {
-        sender.submit(SemanticProjectionJob::from_capture(
-            result.frame_id,
-            result.captured_at,
-            result.app_name.clone(),
-            result.browser_url.clone(),
-            snapshot,
-            params.use_pii_removal,
-        ));
+    if ax_screenshot_coherent {
+        if let (Some(sender), Some(snapshot)) = (params.semantic_tx, tree_snapshot) {
+            sender.submit(SemanticProjectionJob::from_capture(
+                result.frame_id,
+                result.captured_at,
+                result.app_name.clone(),
+                result.browser_url.clone(),
+                snapshot,
+                params.use_pii_removal,
+            ));
+        }
     }
     let deduped = elements_ref_frame_id.is_some();
     // Extract image from Arc for comparer reuse. Arc::try_unwrap succeeds
