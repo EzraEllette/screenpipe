@@ -553,6 +553,16 @@ final class TimelineViewModel: ObservableObject {
                 currentIndex = anchoredIndex
                 pendingDayAnchor = nil
             }
+        } else if let preferredFrameId,
+                  let anchoredIndex = TimelineNavigation.index(
+                    ofFrameId: preferredFrameId,
+                    in: frames
+                  ) {
+            // A narrow Search window often resolves the clicked frame at
+            // index zero before the full-day backfill arrives. Index zero is
+            // normally the live edge, but an exact frame id is a stronger
+            // anchor: keep following it as newer day frames are prepended.
+            currentIndex = anchoredIndex
         } else {
             currentIndex = TimelineLiveEdge.shiftIndex(
                 currentIndex,
