@@ -16,11 +16,20 @@ import posthog from "posthog-js";
 import {
   AppWindow,
   AudioLines,
+  CalendarDays,
   RefreshCw,
   Users,
 } from "lucide-react";
+import { format } from "date-fns";
+import type { DateRange } from "react-day-picker";
 
 import { Button } from "@/components/ui/button";
+import { Calendar } from "@/components/ui/calendar";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 import { Skeleton } from "@/components/ui/skeleton";
 import { faviconUrl } from "@/components/settings/capture-filters/icon-urls";
 import {
@@ -165,6 +174,28 @@ function startOfLocalDay(value: Date): Date {
 function toLocalInputValue(value: Date): string {
   const local = new Date(value.getTime() - value.getTimezoneOffset() * 60_000);
   return local.toISOString().slice(0, 16);
+}
+
+function selectedDateRange(startValue: string, endValue: string): DateRange {
+  return {
+    from: startOfLocalDay(new Date(startValue)),
+    to: startOfLocalDay(new Date(endValue)),
+  };
+}
+
+function endOfSelectedDay(value: Date, now: Date): Date {
+  if (startOfLocalDay(value).getTime() === startOfLocalDay(now).getTime()) {
+    return now;
+  }
+  const end = new Date(value);
+  end.setHours(23, 59, 59, 999);
+  return end;
+}
+
+function customRangeLabel(range: DateRange | undefined): string {
+  if (!range?.from) return "Choose dates";
+  if (!range.to) return `${format(range.from, "MMM d, yyyy")} – …`;
+  return `${format(range.from, "MMM d, yyyy")} – ${format(range.to, "MMM d, yyyy")}`;
 }
 
 export function rangeForPreset(
@@ -664,6 +695,10 @@ export function ActivityLedger({
       toLocalInputValue(initialNow),
     ),
   );
+  const [customDateRange, setCustomDateRange] = useState<
+    DateRange | undefined
+  >(() => selectedDateRange(customStart, customEnd));
+  const [customCalendarOpen, setCustomCalendarOpen] = useState(false);
   const [summary, setSummary] = useState<ActivitySummaryResponse | null>(null);
   const [meetings, setMeetings] = useState<ActivityReviewMeeting[]>([]);
   const meetingsRef = useRef(meetings);
@@ -1220,25 +1255,54 @@ Re-query Screenpipe only inside the cited time range and use the cited frames an
           </div>
 
           {preset === "custom" ? (
-            <div className="mt-4 flex flex-wrap justify-end gap-2">
-              <label className="flex items-center gap-2 text-xs text-muted-foreground">
-                From
-                <input
-                  type="datetime-local"
-                  value={customStart}
-                  onChange={(event) => setCustomStart(event.target.value)}
-                  className="h-9 border border-border bg-background px-3 font-mono text-xs text-foreground outline-none focus:border-foreground"
-                />
-              </label>
-              <label className="flex items-center gap-2 text-xs text-muted-foreground">
-                To
-                <input
-                  type="datetime-local"
-                  value={customEnd}
-                  onChange={(event) => setCustomEnd(event.target.value)}
-                  className="h-9 border border-border bg-background px-3 font-mono text-xs text-foreground outline-none focus:border-foreground"
-                />
-              </label>
+            <div className="mt-4 flex justify-end">
+              <Popover
+                open={customCalendarOpen}
+                onOpenChange={setCustomCalendarOpen}
+              >
+                <PopoverTrigger asChild>
+                  <Button
+                    variant="outline"
+                    className="h-9 justify-start rounded-none border-border bg-background px-3 font-mono text-xs font-normal normal-case tracking-normal"
+                    aria-label="Choose custom date range"
+                  >
+                    <CalendarDays className="mr-2 h-3.5 w-3.5" />
+                    {customRangeLabel(customDateRange)}
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent
+                  align="end"
+                  className="w-auto rounded-none border-border p-0 shadow-lg shadow-black/5"
+                >
+                  <Calendar
+                    mode="range"
+                    selected={customDateRange}
+                    onSelect={(nextRange) => {
+                      setCustomDateRange(nextRange);
+                      if (!nextRange?.from || !nextRange.to) return;
+                      const now = new Date();
+                      setCustomStart(
+                        toLocalInputValue(startOfLocalDay(nextRange.from)),
+                      );
+                      setCustomEnd(
+                        toLocalInputValue(endOfSelectedDay(nextRange.to, now)),
+                      );
+                    }}
+                    defaultMonth={customDateRange?.from}
+                    disabled={{ after: new Date() }}
+                    numberOfMonths={1}
+                    className="p-3"
+                    classNames={{
+                      cell: "h-9 w-9 p-0 text-center text-sm relative [&:has([aria-selected])]:bg-accent focus-within:relative focus-within:z-20",
+                      day: "h-9 w-9 rounded-none p-0 font-normal aria-selected:opacity-100",
+                      day_selected:
+                        "bg-foreground text-background hover:bg-foreground hover:text-background focus:bg-foreground focus:text-background",
+                      day_range_middle:
+                        "aria-selected:bg-accent aria-selected:text-accent-foreground",
+                    }}
+                  />
+                </PopoverContent>
+              </Popover>
             </div>
           ) : null}
         </div>
