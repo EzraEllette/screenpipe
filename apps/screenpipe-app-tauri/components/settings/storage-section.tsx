@@ -22,6 +22,7 @@ import { useSettings } from "@/lib/hooks/use-settings";
 import { useToast } from "@/components/ui/use-toast";
 import { open } from "@tauri-apps/plugin-dialog";
 import { commands, CacheFile } from "@/lib/utils/tauri";
+import { clearTimelineCache, hasCachedData } from "@/lib/hooks/use-timeline-cache";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -194,13 +195,18 @@ export function StorageSection() {
                   const result = await commands.listCacheFiles();
                   if (result.status === "error") throw new Error(result.error);
                   if (result.data.length === 0) {
-                    toast({ title: "nothing to clean up" });
+                    if (await hasCachedData()) {
+                      await clearTimelineCache();
+                      toast({ title: "cache cleared" });
+                    } else {
+                      toast({ title: "nothing to clean up" });
+                    }
                     return;
                   }
                   setCacheFiles(result.data);
                   setShowCacheDialog(true);
                 } catch (e: any) {
-                  toast({ title: "failed to scan cache", description: e?.toString(), variant: "destructive" });
+                  toast({ title: "failed to clear cache", description: e?.toString(), variant: "destructive" });
                 }
               }}
             >
@@ -241,6 +247,7 @@ export function StorageSection() {
                   const paths = cacheFiles.map((f) => f.path);
                   const result = await commands.deleteCacheFiles(paths);
                   if (result.status === "error") throw new Error(result.error);
+                  await clearTimelineCache();
                   toast({
                     title: "cache cleared",
                     description: `freed ${formatBytes(Number(result.data))}`,
