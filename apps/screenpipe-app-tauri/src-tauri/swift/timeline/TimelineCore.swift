@@ -16,6 +16,19 @@
 import Foundation
 import CoreGraphics
 
+// MARK: - Screen-safe chrome
+
+/// Keeps top chrome below the part of a display macOS reserves for its menu
+/// bar and camera housing. `NSScreen.visibleFrame` is the same authoritative
+/// work area used by the shortcut overlay; comparing it with the actual
+/// timeline window means ordinary windows keep their existing spacing while a
+/// fullscreen child gets only the inset it needs.
+enum TimelineTopChromeLayout {
+    static func safeInset(windowMaxY: CGFloat, visibleFrameMaxY: CGFloat) -> CGFloat {
+        max(0, windowMaxY - visibleFrameMaxY)
+    }
+}
+
 // MARK: - JS number semantics
 
 /// `ToInt32` from the ECMAScript spec. The colour hashes rely on `<<` and `^`

@@ -20,6 +20,10 @@ struct TimelineRootView: View {
     /// Embedded inside the main window rather than the fullscreen overlay: the
     /// webview varies its insets and hides window-level actions the same way.
     var embedded: Bool = false
+    /// Distance from the top of this child window to the display's visible
+    /// work area. Nonzero only when fullscreen content reaches into macOS's
+    /// menu-bar/camera-housing band.
+    var topSafeInset: CGFloat = 0
 
     @StateObject private var thumbnailLoader = ThumbnailLoader()
 
@@ -59,7 +63,7 @@ struct TimelineRootView: View {
 
             VStack(spacing: 0) {
                 TimelineControlBar(model: model, embedded: embedded)
-                    .padding(.top, embedded ? 8 : 24)
+                    .padding(.top, topSafeInset + (embedded ? 8 : 24))
                 if let url = model.displayFrame.flatMap(TimelineFrames.browserURL) {
                     TimelineURLPill(url: url)
                         .padding(.top, 6)
@@ -79,7 +83,7 @@ struct TimelineRootView: View {
 
             TimelineFilterRail(model: model)
                 .padding(.leading, 12)
-                .padding(.top, 72)
+                .padding(.top, topSafeInset + 72)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
 
             if let selection = model.selection, selection.isMultiFrame {
@@ -129,7 +133,7 @@ struct TimelineRootView: View {
             if model.showAudioTranscript {
                 TimelineTranscriptPanel(model: model)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
-                    .padding(.top, 72)
+                    .padding(.top, topSafeInset + 72)
                     .padding(.trailing, 20)
             }
         }
