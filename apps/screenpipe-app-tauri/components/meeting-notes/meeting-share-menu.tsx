@@ -19,7 +19,13 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuLabel,
+  DropdownMenuPortal,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
   DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
@@ -100,16 +106,39 @@ const ACTION_ICON: Record<
   resend: Send,
 };
 
-/** One entry in the single overflow menu. */
-export type MeetingMenuItem = {
+type MeetingMenuItemBase = {
   key: string;
   label: string;
   icon: React.ComponentType<{ className?: string }>;
-  onSelect: () => void;
   disabled?: boolean;
   /** Renders above a separator, at the bottom. Only `delete` uses this. */
   destructive?: boolean;
 };
+
+export type MeetingMenuSubmenuOption = {
+  key: string;
+  label: string;
+  detail?: string;
+  onSelect: () => void;
+  disabled?: boolean;
+};
+
+/** One action or nested choice in the single overflow menu. */
+export type MeetingMenuItem = MeetingMenuItemBase &
+  (
+    | {
+        onSelect: () => void;
+        submenu?: never;
+      }
+    | {
+        onSelect?: never;
+        submenu: {
+          selectedKey: string | null;
+          selectedLabel: string;
+          options: MeetingMenuSubmenuOption[];
+        };
+      }
+  );
 
 /**
  * A labelled section of the overflow menu.
@@ -180,7 +209,7 @@ export function MeetingShareMenu({
   const confirmed = copiedAction === primary;
   const PrimaryIcon = confirmed ? Check : ACTION_ICON[primary];
 
-  const toItems = (actions: MeetingShareAction[]) =>
+  const toItems = (actions: MeetingShareAction[]): MeetingMenuItem[] =>
     actions.map((action) => ({
       key: action,
       label: ACTION_LABEL[action],
@@ -312,20 +341,70 @@ export function MeetingShareMenu({
                 <DropdownMenuLabel className="font-mono text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
                   {group.label}
                 </DropdownMenuLabel>
-                {ordinary.map((item) => (
-                  <DropdownMenuItem
-                    key={item.key}
-                    onSelect={item.onSelect}
-                    disabled={item.disabled}
-                    className="text-xs"
-                  >
-                    <item.icon className="mr-2 h-3.5 w-3.5" />
-                    {item.label}
-                    {copiedAction === item.key && (
-                      <Check className="ml-auto h-3.5 w-3.5" />
-                    )}
-                  </DropdownMenuItem>
-                ))}
+                {ordinary.map((item) =>
+                  item.submenu ? (
+                    <DropdownMenuSub key={item.key}>
+                      <DropdownMenuSubTrigger
+                        disabled={item.disabled}
+                        className="text-xs [&>svg:last-child]:ml-1"
+                      >
+                        <item.icon className="mr-2 h-3.5 w-3.5" />
+                        <span>{item.label}</span>
+                        <span
+                          className="ml-auto max-w-20 truncate text-[10px] text-muted-foreground"
+                          title={item.submenu.selectedLabel}
+                        >
+                          {item.submenu.selectedLabel}
+                        </span>
+                      </DropdownMenuSubTrigger>
+                      <DropdownMenuPortal>
+                        <DropdownMenuSubContent className="w-72">
+                          <DropdownMenuRadioGroup
+                            value={item.submenu.selectedKey ?? ""}
+                          >
+                            {item.submenu.options.map((option) => (
+                              <DropdownMenuRadioItem
+                                key={option.key}
+                                value={option.key}
+                                onSelect={option.onSelect}
+                                disabled={option.disabled}
+                                className="gap-2 text-xs"
+                              >
+                                <span
+                                  className="min-w-0 flex-1 truncate"
+                                  title={option.label}
+                                >
+                                  {option.label}
+                                </span>
+                                {option.detail && (
+                                  <span
+                                    className="max-w-28 truncate text-[10px] text-muted-foreground"
+                                    title={option.detail}
+                                  >
+                                    {option.detail}
+                                  </span>
+                                )}
+                              </DropdownMenuRadioItem>
+                            ))}
+                          </DropdownMenuRadioGroup>
+                        </DropdownMenuSubContent>
+                      </DropdownMenuPortal>
+                    </DropdownMenuSub>
+                  ) : (
+                    <DropdownMenuItem
+                      key={item.key}
+                      onSelect={item.onSelect}
+                      disabled={item.disabled}
+                      className="text-xs"
+                    >
+                      <item.icon className="mr-2 h-3.5 w-3.5" />
+                      {item.label}
+                      {copiedAction === item.key && (
+                        <Check className="ml-auto h-3.5 w-3.5" />
+                      )}
+                    </DropdownMenuItem>
+                  ),
+                )}
                 {destructive.length > 0 && <DropdownMenuSeparator />}
                 {destructive.map((item) => (
                   <DropdownMenuItem

@@ -35,7 +35,7 @@ import {
   Volume2,
   X,
 } from "lucide-react";
-import { commands } from "@/lib/utils/tauri";
+import { commands, type AIPreset } from "@/lib/utils/tauri";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open as openExternal } from "@tauri-apps/plugin-shell";
@@ -109,7 +109,15 @@ import {
   resizeImageDataUrl,
 } from "./image-utils";
 import { TranscriptPanel } from "./transcript-panel";
-import { useSettings, type Settings } from "@/lib/hooks/use-settings";
+import {
+  useSettings,
+  type Settings,
+} from "@/lib/hooks/use-settings";
+import { useManagedPolicy } from "@/lib/hooks/use-managed-policy";
+import {
+  DEFAULT_ENTERPRISE_AI_PRESET_POLICY,
+  filterPresetsForEnterprisePolicy,
+} from "@/lib/enterprise-ai-preset-policy";
 import {
   MeetingNoteSaveQueue,
   sameMeetingNoteDraft,
@@ -168,7 +176,11 @@ import {
   type MeetingWorkspaceTab,
 } from "./meeting-workspace";
 import { meetingRetranscribeSuccessCopy } from "./transcript-recovery-copy";
-import { startMeetingSummaryRun } from "./meeting-summary-run";
+import {
+  loadMeetingSummaryPipeConfig,
+  startMeetingSummaryRun,
+  updateMeetingSummaryPrimaryPreset,
+} from "./meeting-summary-run";
 
 const AUTOSAVE_DEBOUNCE_MS = 800;
 // How long a successful save stays on screen before the footer goes quiet.
@@ -269,6 +281,9 @@ export function NoteView({
     useState<MeetingSummaryLifecycle>({ kind: "idle" });
   const [summaryStatusRefreshKey, setSummaryStatusRefreshKey] = useState(0);
   const [summaryRevealKey, setSummaryRevealKey] = useState(0);
+  const [summaryPresetIds, setSummaryPresetIds] = useState<string[]>([]);
+  const [summaryPresetReady, setSummaryPresetReady] = useState(false);
+  const [summaryPresetSaving, setSummaryPresetSaving] = useState(false);
   const [meetingCtx, setMeetingCtx] = useState<MeetingContext | null>(null);
   const [activeTab, setActiveTab] = useState<MeetingWorkspaceTab>(() =>
     initialWorkspaceTab ??
@@ -308,6 +323,8 @@ export function NoteView({
     "retranscribe" | "delete" | null
   >(null);
   const { settings, updateSettings } = useSettings();
+  const { isManagedDeployment, policy: enterprisePolicy } =
+    useManagedPolicy();
   const noteEditorRef = useRef<NoteEditorHandle>(null);
   const rootRef = useRef<HTMLDivElement>(null);
   const [isDraggingImage, setIsDraggingImage] = useState(false);
@@ -351,6 +368,97 @@ export function NoteView({
   }, [oneTapSend, toast]);
 
   const summaryPipeSlug = settings.meetingSummaryPipeSlug || "meeting-summary";
+  const summaryPresets = useMemo(() => {
+    const nonAgentPresets = settings.aiPresets.filter(
+      (preset) => preset.provider !== "acp",
+    );
+    if (!isManagedDeployment) return nonAgentPresets;
+    return filterPresetsForEnterprisePolicy(
+      nonAgentPresets,
+      enterprisePolicy.aiPresetPolicy ??
+        DEFAULT_ENTERPRISE_AI_PRESET_POLICY,
+    );
+  }, [
+    enterprisePolicy.aiPresetPolicy,
+    isManagedDeployment,
+    settings.aiPresets,
+  ]);
+  const defaultSummaryPresetId = useMemo(
+    () =>
+      summaryPresets.find((preset) => preset.defaultPreset)?.id ??
+      summaryPresets[0]?.id ??
+      null,
+    [summaryPresets],
+  );
+  const summaryPresetId = summaryPresetReady
+    ? summaryPresetIds[0] ?? defaultSummaryPresetId
+    : null;
+  const summaryPreset = summaryPresets.find(
+    (preset) => preset.id === summaryPresetId,
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    setSummaryPresetReady(false);
+    void loadMeetingSummaryPipeConfig(summaryPipeSlug)
+      .then(({ presetIds }) => {
+        if (cancelled) return;
+        setSummaryPresetIds(presetIds);
+        setSummaryPresetReady(true);
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        console.warn("failed to read meeting summary model", error);
+        setSummaryPresetIds([]);
+        setSummaryPresetReady(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [summaryPipeSlug]);
+
+  const handleSummaryPresetSelect = useCallback(
+    async (preset: AIPreset | null) => {
+      if (!preset || summaryPresetSaving) return;
+      const previousPresetIds = summaryPresetIds;
+      const optimisticPresetIds = [
+        preset.id,
+        ...previousPresetIds
+          .slice(1)
+          .filter((presetId) => presetId !== preset.id),
+      ];
+      setSummaryPresetIds(optimisticPresetIds);
+      setSummaryPresetSaving(true);
+      try {
+        const saved = await updateMeetingSummaryPrimaryPreset({
+          pipeSlug: summaryPipeSlug,
+          presetId: preset.id,
+          currentPresetIds: previousPresetIds,
+        });
+        setSummaryPresetIds(saved.presetIds);
+        posthog.capture("meeting_summary_model_changed", {
+          pipe_slug: summaryPipeSlug,
+          provider: preset.provider,
+        });
+      } catch (error) {
+        setSummaryPresetIds(previousPresetIds);
+        console.error("failed to save meeting summary model", error);
+        toast({
+          title: "couldn't change summary model",
+          description: "your previous model is still selected.",
+          variant: "destructive",
+        });
+      } finally {
+        setSummaryPresetSaving(false);
+      }
+    },
+    [
+      summaryPipeSlug,
+      summaryPresetIds,
+      summaryPresetSaving,
+      toast,
+    ],
+  );
   const summaryPresentation = meetingSummaryPresentation({
     isLive,
     resuming,
@@ -1613,62 +1721,86 @@ export function NoteView({
   // neither trigger says what it holds, so finding anything meant opening both.
   // One menu with labelled groups means "it is in the menu" is a complete
   // instruction. Summarize loses its square here but keeps the prominent
-  // button inside the summary tab, next to the output it produces.
-  const meetingMenuGroups: MeetingMenuGroup[] = isLive || resuming
-    ? []
-    : [
-        {
-          label: "summary",
-          items: [
-            {
-              key: "summarize",
-              label: summaryActionLabel,
-              icon: summaryWorking
-                ? Loader2
-                : visibleSummaryLifecycle.kind === "completed" ||
-                    visibleSummaryLifecycle.kind === "failed"
-                  ? RefreshCw
-                  : Sparkles,
-              onSelect: () => handleSummaryAction(),
-              disabled:
-                summaryWorking || retranscribing || !canSummarizeMeeting,
-            },
-          ],
-        },
-        {
-          label: "meeting",
-          items: [
-            {
-              key: "resume",
-              label: resuming ? "resuming meeting" : "resume meeting",
-              icon: resuming ? Loader2 : Play,
-              onSelect: () => void onResume(),
-              disabled: resuming,
-            },
-            {
-              key: "retranscribe",
-              label: "retranscribe saved audio",
-              icon: retranscribing ? Loader2 : AudioLines,
-              onSelect: () => setConfirmingAction("retranscribe"),
-              disabled: retranscribing || summaryWorking,
-            },
-            {
-              key: "export",
-              label: "export to mp4",
-              icon: exporting ? Loader2 : Download,
-              onSelect: () => void handleExport(),
-              disabled: exporting,
-            },
-            {
-              key: "delete",
-              label: "delete meeting",
-              icon: Trash2,
-              onSelect: () => setConfirmingAction("delete"),
-              destructive: true,
-            },
-          ],
-        },
-      ];
+  // button inside the summary tab, next to the output it produces. Model
+  // choice stays reachable during a live meeting so the post-stop automatic
+  // summary uses the intended model.
+  const summaryMenuItems: MeetingMenuGroup["items"] = [
+    {
+      key: "summary-model",
+      label: "summary model",
+      icon: Sparkles,
+      disabled:
+        !summaryPresetReady ||
+        summaryPresetSaving ||
+        summaryPresets.length === 0,
+      submenu: {
+        selectedKey: summaryPresetId,
+        selectedLabel: summaryPresetReady
+          ? summaryPreset?.model ?? "select"
+          : "loading…",
+        options: summaryPresets.map((preset) => ({
+          key: preset.id,
+          label: preset.id,
+          detail: preset.model,
+          onSelect: () => void handleSummaryPresetSelect(preset),
+        })),
+      },
+    },
+  ];
+  if (!isLive && !resuming) {
+    summaryMenuItems.push({
+      key: "summarize",
+      label: summaryActionLabel,
+      icon: summaryWorking
+        ? Loader2
+        : visibleSummaryLifecycle.kind === "completed" ||
+            visibleSummaryLifecycle.kind === "failed"
+          ? RefreshCw
+          : Sparkles,
+      onSelect: () => handleSummaryAction(),
+      disabled: summaryWorking || retranscribing || !canSummarizeMeeting,
+    });
+  }
+  const meetingMenuGroups: MeetingMenuGroup[] = [
+    { label: "summary", items: summaryMenuItems },
+    ...(isLive || resuming
+      ? []
+      : [
+          {
+            label: "meeting",
+            items: [
+              {
+                key: "resume",
+                label: resuming ? "resuming meeting" : "resume meeting",
+                icon: resuming ? Loader2 : Play,
+                onSelect: () => void onResume(),
+                disabled: resuming,
+              },
+              {
+                key: "retranscribe",
+                label: "retranscribe saved audio",
+                icon: retranscribing ? Loader2 : AudioLines,
+                onSelect: () => setConfirmingAction("retranscribe"),
+                disabled: retranscribing || summaryWorking,
+              },
+              {
+                key: "export",
+                label: "export to mp4",
+                icon: exporting ? Loader2 : Download,
+                onSelect: () => void handleExport(),
+                disabled: exporting,
+              },
+              {
+                key: "delete",
+                label: "delete meeting",
+                icon: Trash2,
+                onSelect: () => setConfirmingAction("delete"),
+                destructive: true,
+              },
+            ],
+          },
+        ]),
+  ];
 
   // The confirmations are controlled by `confirmingAction`, so they no longer
   // need to wrap the trigger that opens them.
@@ -1927,7 +2059,10 @@ export function NoteView({
             streamedSummary={streamedSummary}
             onGenerate={handleSummaryAction}
             canGenerate={
-              canSummarizeMeeting && !summaryWorking && !retranscribing
+              canSummarizeMeeting &&
+              !summaryWorking &&
+              !retranscribing &&
+              !summaryPresetSaving
             }
             // Mounted with the tab rather than always: the strip pulls the
             // meeting's transcript rows and frame samples, and opening a

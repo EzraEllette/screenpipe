@@ -269,6 +269,64 @@ describe("meeting share control", () => {
     expect(onSelect).toHaveBeenCalled();
   });
 
+  it("chooses the summary model from a submenu in the one overflow", async () => {
+    const chooseLocal = vi.fn();
+    render(
+      <MeetingShareMenu
+        canShareSummary
+        moreGroups={[
+          {
+            label: "summary",
+            items: [
+              {
+                key: "summary-model",
+                label: "summary model",
+                icon: Play,
+                submenu: {
+                  selectedKey: "screenpipe",
+                  selectedLabel: "auto",
+                  options: [
+                    {
+                      key: "screenpipe",
+                      label: "screenpipe",
+                      detail: "auto",
+                      onSelect: vi.fn(),
+                    },
+                    {
+                      key: "local",
+                      label: "local",
+                      detail: "llama 3.2",
+                      onSelect: chooseLocal,
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+        ]}
+        onShare={vi.fn()}
+      />,
+    );
+
+    openMenu();
+    const modelMenu = await screen.findByRole("menuitem", {
+      name: /summary model auto/,
+    });
+    fireEvent.keyDown(modelMenu, { key: "ArrowRight" });
+
+    expect(
+      await screen.findByRole("menuitemradio", {
+        name: /screenpipe auto/,
+      }),
+    ).toHaveAttribute("aria-checked", "true");
+    fireEvent.click(
+      await screen.findByRole("menuitemradio", {
+        name: /local llama 3\.2/,
+      }),
+    );
+    expect(chooseLocal).toHaveBeenCalledOnce();
+  });
+
   it("keeps a destructive action out of the group it would be misclicked in", async () => {
     render(
       <MeetingShareMenu
