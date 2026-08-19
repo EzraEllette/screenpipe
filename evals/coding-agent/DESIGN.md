@@ -24,6 +24,8 @@ current guidance instead of copying that older repository's execution model.
 - `--verify` must observe the parent fail and the known fix pass.
 - The agent gets a depth-one detached checkout of the broken commit, with no
   future history, oracle patch, or hidden grader available during its trial.
+- Build caches that could contain future artifacts are linked only after the
+  agent stops; build tools still validate their content hashes before reuse.
 - Prompts specify observable behavior and safety boundaries, not an expected
   implementation trajectory.
 - Existing behavior is retained through positive and negative grader examples.

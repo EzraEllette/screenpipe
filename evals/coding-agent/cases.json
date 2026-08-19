@@ -75,6 +75,12 @@
       "tags": ["regression", "escaped-failure", "timeline", "websocket", "native"],
       "prompt": "Native Timeline search becomes unreliable on large days: serialized WebSocket batches can exceed the native receiver ceiling, and navigation/search races can surface stale or incomplete frames. Fix the stream path so payloads are bounded by encoded bytes without dropping or duplicating rows, cancellation is respected, and the native search contract remains compatible. Do not solve this by imposing a small arbitrary row limit.",
       "agent_timeout_seconds": 1200,
+      "grader_dependency_links": [
+        {
+          "source_path": "target",
+          "destination_path": "target"
+        }
+      ],
       "grader": {
         "timeout_seconds": 1200,
         "fixtures": [

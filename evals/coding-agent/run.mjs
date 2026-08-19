@@ -145,8 +145,8 @@ function extractBase(evalCase, workspace) {
   mustRun("git", ["config", "user.name", "screenpipe eval harness"], { cwd: workspace });
 }
 
-function linkDependencies(evalCase, workspace) {
-  for (const link of evalCase.dependency_links ?? []) {
+function linkDependencies(evalCase, workspace, field = "dependency_links") {
+  for (const link of evalCase[field] ?? []) {
     const source = join(REPO, link.source_path);
     const destination = join(workspace, link.destination_path);
     if (!existsSync(source) || existsSync(destination)) continue;
@@ -317,6 +317,9 @@ function runTrial(evalCase, mode, trial, options, runDir) {
     writeFileSync(join(trialDir, "agent.stderr.log"), agent.stderr);
     copyFileSync(promptFile, join(trialDir, "prompt.md"));
 
+    // Grader-only caches are withheld until the agent trajectory is complete,
+    // so future build artifacts cannot leak information into the trial.
+    linkDependencies(evalCase, workspace, "grader_dependency_links");
     materializeGraders(evalCase, workspace);
     const grader = command("/bin/bash", ["-lc", evalCase.grader.command], {
       cwd: workspace,
