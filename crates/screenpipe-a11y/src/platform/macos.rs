@@ -79,10 +79,9 @@ pub fn get_focused_pid_fresh() -> Option<i32> {
     use core_foundation::base::TCFType;
     use core_foundation::dictionary::{CFDictionaryGetValueIfPresent, CFDictionaryRef};
     use core_foundation::number::{CFNumber, CFNumberRef};
-    use core_foundation::string::CFString;
     use core_graphics::window::{
-        copy_window_info, kCGNullWindowID, kCGWindowListExcludeDesktopElements,
-        kCGWindowListOptionOnScreenOnly,
+        copy_window_info, kCGNullWindowID, kCGWindowLayer, kCGWindowListExcludeDesktopElements,
+        kCGWindowListOptionOnScreenOnly, kCGWindowOwnerPID,
     };
 
     let options = kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements;
@@ -95,14 +94,9 @@ pub fn get_focused_pid_fresh() -> Option<i32> {
                 continue;
             }
             let dict = dict_ref as CFDictionaryRef;
-            let get_i64 = |key: &str| -> Option<i64> {
-                let key = CFString::new(key);
+            let get_i64 = |key| -> Option<i64> {
                 let mut value = std::ptr::null();
-                if CFDictionaryGetValueIfPresent(
-                    dict,
-                    key.as_concrete_TypeRef() as *const _,
-                    &mut value,
-                ) != 0
+                if CFDictionaryGetValueIfPresent(dict, key as *const _, &mut value) != 0
                     && !value.is_null()
                 {
                     CFNumber::wrap_under_get_rule(value as CFNumberRef).to_i64()
@@ -113,10 +107,10 @@ pub fn get_focused_pid_fresh() -> Option<i32> {
 
             // Layer 0 = normal application windows. Menus, overlays, and
             // status items live on higher layers and must not own focus.
-            if get_i64("kCGWindowLayer") != Some(0) {
+            if get_i64(kCGWindowLayer) != Some(0) {
                 continue;
             }
-            if let Some(pid) = get_i64("kCGWindowOwnerPID") {
+            if let Some(pid) = get_i64(kCGWindowOwnerPID) {
                 return Some(pid as i32);
             }
         }

@@ -18,7 +18,9 @@ use chrono::Utc;
 use screenpipe_a11y::tree::TreeWalkerConfig;
 use screenpipe_a11y::ActivityFeed;
 use screenpipe_capture::ocr_gate::OcrGate;
-use screenpipe_capture::paired_capture::{paired_capture, CaptureContext, PairedCaptureResult};
+use screenpipe_capture::paired_capture::{
+    detach_tree_from_pixels, paired_capture, CaptureContext, PairedCaptureResult,
+};
 use screenpipe_capture::TreeWalkerWorker;
 use screenpipe_core::window_pattern::{self, WindowPattern};
 use screenpipe_db::DatabaseManager;
@@ -2313,61 +2315,29 @@ struct LightweightFocusedMetadata {
     window_name: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct FocusIdentity {
-    pid: i32,
-    app_name: Option<String>,
+#[cfg(target_os = "macos")]
+fn get_focused_pid_fresh() -> Option<i32> {
+    screenpipe_a11y::platform::macos::get_focused_pid_fresh()
 }
 
-fn focus_identity_is_coherent(identities: &[Option<&FocusIdentity>]) -> bool {
-    let mut known_pids = identities.iter().flatten().map(|identity| identity.pid);
-    let Some(first) = known_pids.next() else {
-        return true;
-    };
-    known_pids.all(|pid| pid == first)
-}
-
-fn stable_pixel_focus_identity(
-    before: Option<&FocusIdentity>,
-    after: Option<&FocusIdentity>,
-) -> Option<FocusIdentity> {
-    match (before, after) {
-        (Some(before), Some(after)) if before.pid == after.pid => Some(before.clone()),
-        _ => None,
-    }
+#[cfg(not(target_os = "macos"))]
+fn get_focused_pid_fresh() -> Option<i32> {
+    None
 }
 
 #[cfg(target_os = "macos")]
-fn get_focused_identity_fresh(capture_app_name: bool) -> Option<FocusIdentity> {
+fn app_name_for_pid(pid: i32) -> Option<String> {
     use cidre::{ns, objc};
 
-    let pid = screenpipe_a11y::platform::macos::get_focused_pid_fresh()?;
-    let app_name = if capture_app_name {
-        objc::ar_pool(|| {
-            ns::RunningApp::with_pid(pid)
-                .and_then(|app| app.localized_name())
-                .map(|name| name.to_string())
-        })
-    } else {
-        None
-    };
-    Some(FocusIdentity { pid, app_name })
+    objc::ar_pool(|| {
+        ns::RunningApp::with_pid(pid)
+            .and_then(|app| app.localized_name())
+            .map(|name| name.to_string())
+    })
 }
 
-#[cfg(target_os = "windows")]
-fn get_focused_identity_fresh(capture_app_name: bool) -> Option<FocusIdentity> {
-    let pid = screenpipe_a11y::platform::windows::get_focused_pid_fresh()?;
-    let app_name = capture_app_name
-        .then(|| {
-            screenpipe_a11y::platform::windows::get_focused_app_window_lightweight()
-                .map(|(app_name, _)| app_name)
-        })
-        .flatten();
-    Some(FocusIdentity { pid, app_name })
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn get_focused_identity_fresh(_capture_app_name: bool) -> Option<FocusIdentity> {
+#[cfg(not(target_os = "macos"))]
+fn app_name_for_pid(_pid: i32) -> Option<String> {
     None
 }
 
@@ -2818,6 +2788,7 @@ async fn do_capture(
     in_meeting: bool,
     monitor_hosts_focus: bool,
 ) -> Result<CaptureOutput> {
+    let captured_at = Utc::now();
     let bypass_capture_throttles = bypasses_capture_throttles(trigger);
 
     // Resolve ignored windows to SCK window IDs so ScreenCaptureKit excludes
@@ -2853,14 +2824,6 @@ async fn do_capture(
         }
     }
 
-    let focus_before_pixels = if monitor_hosts_focus && !screenshot_disabled {
-        get_focused_identity_fresh(true)
-    } else {
-        None
-    };
-    // Timestamp the frame at the pixel boundary, after exclusion and focus
-    // bookkeeping rather than before potentially blocking setup work.
-    let captured_at = Utc::now();
     let image = if screenshot_disabled || skip_pixels_for_unknown_exclusions {
         debug!(
             "screenshot capture skipped for monitor {} (trigger={})",
@@ -2879,8 +2842,10 @@ async fn do_capture(
         );
         image
     };
-    let focus_after_pixels = if monitor_hosts_focus && !screenshot_disabled {
-        get_focused_identity_fresh(false)
+    // This scalar is the screenshot's app identity. Read it immediately after
+    // ScreenCaptureKit returns so no process object travels with the pixels.
+    let screenshot_focus_pid = if monitor_hosts_focus && !screenshot_disabled {
+        get_focused_pid_fresh()
     } else {
         None
     };
@@ -3110,7 +3075,7 @@ async fn do_capture(
         Some(TreeWalkResult::Skipped(_)) | None => {}
     }
 
-    let tree_snapshot = match tree_walk_result {
+    let mut tree_snapshot = match tree_walk_result {
         Some(TreeWalkResult::Found(snap)) => Some(snap),
         Some(TreeWalkResult::Skipped(reason)) => {
             debug!(
@@ -3126,25 +3091,24 @@ async fn do_capture(
         }
         Some(TreeWalkResult::NotFound) | None => None,
     };
-    let focus_after_ax = if tree_snapshot.is_some() && !screenshot_disabled {
-        get_focused_identity_fresh(false)
+    let ax_focus_pid = if tree_snapshot.is_some() && !screenshot_disabled {
+        get_focused_pid_fresh()
     } else {
         None
     };
-    let ax_screenshot_coherent = focus_identity_is_coherent(&[
-        focus_before_pixels.as_ref(),
-        focus_after_pixels.as_ref(),
-        focus_after_ax.as_ref(),
-    ]);
-    let pixel_focus_identity =
-        stable_pixel_focus_identity(focus_before_pixels.as_ref(), focus_after_pixels.as_ref());
+    let ax_screenshot_coherent = match (screenshot_focus_pid, ax_focus_pid) {
+        (Some(screenshot_pid), Some(ax_pid)) => screenshot_pid == ax_pid,
+        _ => true,
+    };
     if tree_snapshot.is_some() && !ax_screenshot_coherent {
         debug!(
-            before_pid = focus_before_pixels.as_ref().map(|identity| identity.pid),
-            after_pixels_pid = focus_after_pixels.as_ref().map(|identity| identity.pid),
-            after_ax_pid = focus_after_ax.as_ref().map(|identity| identity.pid),
+            screenshot_pid = screenshot_focus_pid,
+            ax_pid = ax_focus_pid,
             "focused process changed across screenshot/AX capture; preserving AX as non-pixel-aligned"
         );
+        if let Some(snapshot) = tree_snapshot.as_mut() {
+            detach_tree_from_pixels(snapshot);
+        }
     }
 
     // Safety net: when the tree walk returned NotFound (AX failure, budget skip,
@@ -3213,7 +3177,7 @@ async fn do_capture(
             )
         } else {
             (
-                pixel_focus_identity.and_then(|identity| identity.app_name),
+                screenshot_focus_pid.and_then(app_name_for_pid),
                 None,
                 None,
                 None,
@@ -3880,52 +3844,6 @@ mod tests {
         assert_eq!(CaptureTrigger::VisualChange.as_str(), "visual_change");
         assert_eq!(CaptureTrigger::Idle.as_str(), "idle");
         assert_eq!(CaptureTrigger::Manual.as_str(), "manual");
-    }
-
-    fn focus(pid: i32, app_name: &str) -> Option<FocusIdentity> {
-        Some(FocusIdentity {
-            pid,
-            app_name: Some(app_name.to_string()),
-        })
-    }
-
-    #[test]
-    fn focus_identity_requires_all_known_capture_boundaries_to_agree() {
-        let codex_before = focus(10, "Codex");
-        let codex_after = focus(10, "Codex");
-        let codex_after_ax = focus(10, "Codex");
-        assert!(focus_identity_is_coherent(&[
-            codex_before.as_ref(),
-            codex_after.as_ref(),
-            codex_after_ax.as_ref(),
-        ]));
-        let safari = focus(20, "Safari");
-        assert!(!focus_identity_is_coherent(&[
-            codex_before.as_ref(),
-            codex_after.as_ref(),
-            safari.as_ref(),
-        ]));
-        assert!(!focus_identity_is_coherent(&[
-            codex_before.as_ref(),
-            safari.as_ref(),
-            safari.as_ref(),
-        ]));
-        // A failed platform identity read must not disable AX by itself.
-        assert!(focus_identity_is_coherent(&[codex_before.as_ref(), None]));
-    }
-
-    #[test]
-    fn pixel_identity_is_available_only_when_the_screenshot_was_stable() {
-        assert_eq!(
-            stable_pixel_focus_identity(focus(10, "Codex").as_ref(), focus(10, "Codex").as_ref())
-                .and_then(|identity| identity.app_name),
-            Some("Codex".to_string())
-        );
-        assert!(stable_pixel_focus_identity(
-            focus(10, "Codex").as_ref(),
-            focus(20, "Safari").as_ref()
-        )
-        .is_none());
     }
 
     #[test]

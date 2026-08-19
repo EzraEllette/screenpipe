@@ -131,8 +131,10 @@ fn clamp_window_crop(b: FocusedWindowBounds, frame_w: u32, frame_h: u32) -> Opti
     })
 }
 
-fn mark_tree_not_pixel_aligned(snapshot: &TreeSnapshot) -> TreeSnapshot {
-    let mut snapshot = snapshot.clone();
+/// Mark a retained AX observation as detached from screenshot pixels in place.
+/// This is intentionally allocation-free because focus races occur on the
+/// capture hot path.
+pub fn detach_tree_from_pixels(snapshot: &mut TreeSnapshot) {
     for node in snapshot
         .nodes
         .iter_mut()
@@ -140,7 +142,6 @@ fn mark_tree_not_pixel_aligned(snapshot: &TreeSnapshot) -> TreeSnapshot {
     {
         node.on_screen = Some(false);
     }
-    snapshot
 }
 
 /// Context for a paired capture operation — replaces positional arguments.
@@ -266,15 +267,22 @@ pub async fn paired_capture(
     // ownership so callers cannot attach the focused app's tree or identity
     // to unrelated pixels from another monitor.
     let tree_snapshot = tree_snapshot.filter(|_| ctx.monitor_hosts_focus);
-    // The AX observation remains durable, but none of its rectangles were
-    // observed in this screenshot. Reusing the existing visibility bit keeps
-    // visual keyword search and element queries from projecting these bounds
-    // onto unrelated pixels without a second shadow copy of the tree.
-    let incoherent_tree_snapshot = tree_snapshot
-        .filter(|_| !ctx.ax_screenshot_coherent)
-        .map(mark_tree_not_pixel_aligned);
-    let stored_tree_snapshot = incoherent_tree_snapshot.as_ref().or(tree_snapshot);
-    let pixel_tree_snapshot = stored_tree_snapshot.filter(|_| ctx.ax_screenshot_coherent);
+    // A caller detecting an app switch marks the retained AX observation
+    // off-screen in place. Reusing the existing visibility bit keeps visual
+    // search from projecting those bounds onto unrelated pixels without a
+    // second allocation-heavy shadow copy of the tree.
+    debug_assert!(
+        ctx.ax_screenshot_coherent
+            || tree_snapshot.is_none_or(|snapshot| {
+                snapshot
+                    .nodes
+                    .iter()
+                    .chain(snapshot.semantic_nodes.iter())
+                    .all(|node| node.on_screen == Some(false))
+            })
+    );
+    let stored_tree_snapshot = tree_snapshot;
+    let pixel_tree_snapshot = tree_snapshot.filter(|_| ctx.ax_screenshot_coherent);
     let (app_name, window_name, browser_url, document_path) = if ctx.monitor_hosts_focus {
         (
             ctx.app_name,
@@ -1449,19 +1457,19 @@ mod tests {
 
     #[test]
     fn mismatched_ax_tree_is_preserved_but_no_longer_claims_pixel_visibility() {
-        let original = make_snap(vec![AccessibilityTreeNode {
+        let mut snapshot = make_snap(vec![AccessibilityTreeNode {
             role: "AXButton".into(),
             text: "semantic label".into(),
             on_screen: Some(true),
             ..Default::default()
         }]);
+        let original_text = snapshot.text_content.clone();
 
-        let stored = mark_tree_not_pixel_aligned(&original);
+        detach_tree_from_pixels(&mut snapshot);
 
-        assert_eq!(stored.text_content, original.text_content);
-        assert_eq!(stored.nodes[0].text, original.nodes[0].text);
-        assert_eq!(stored.nodes[0].on_screen, Some(false));
-        assert_eq!(original.nodes[0].on_screen, Some(true));
+        assert_eq!(snapshot.text_content, original_text);
+        assert_eq!(snapshot.nodes[0].text, "semantic label");
+        assert_eq!(snapshot.nodes[0].on_screen, Some(false));
     }
 
     #[tokio::test]
@@ -1471,12 +1479,13 @@ mod tests {
         let db = DatabaseManager::new("sqlite::memory:", Default::default())
             .await
             .unwrap();
-        let snapshot = make_snap(vec![AccessibilityTreeNode {
+        let mut snapshot = make_snap(vec![AccessibilityTreeNode {
             role: "AXStaticText".into(),
             text: "fried chicken".into(),
             on_screen: Some(true),
             ..Default::default()
         }]);
+        detach_tree_from_pixels(&mut snapshot);
         let ctx = CaptureContext {
             db: &db,
             snapshot_writer: &snapshot_writer,
