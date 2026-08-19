@@ -46,9 +46,11 @@ function view(over: Partial<LearningWindowView> = {}): LearningWindowView {
     showProgress: true,
     seededAt: null,
     chatId: null,
+    summaryOpenedAt: null,
     emptyReason: null,
     capturedApps: [],
     remainingMs: 5 * 60 * 1_000,
+    markSummaryOpened: vi.fn(),
     dismiss: vi.fn(),
     ...over,
   } as LearningWindowView;
@@ -131,9 +133,15 @@ describe("first-run learning banner", () => {
     expect(screen.queryByText("Reading from")).not.toBeInTheDocument();
   });
 
-  it("opens the seeded chat and settles the window", async () => {
+  it("opens the seeded chat without retiring setup", async () => {
     const dismiss = vi.fn();
-    mocks.view = view({ phase: "ready", chatId: "first-run-1", dismiss });
+    const markSummaryOpened = vi.fn();
+    mocks.view = view({
+      phase: "ready",
+      chatId: "first-run-1",
+      dismiss,
+      markSummaryOpened,
+    });
     render(<FirstRunLearningBanner />);
 
     fireEvent.click(screen.getByTestId("first-run-open-summary"));
@@ -143,7 +151,31 @@ describe("first-run learning banner", () => {
         conversationId: "first-run-1",
       }),
     );
-    expect(dismiss).toHaveBeenCalled();
+    expect(markSummaryOpened).toHaveBeenCalledTimes(1);
+    expect(dismiss).not.toHaveBeenCalled();
+  });
+
+  it("keeps a compact expandable setup dock over the opened summary", () => {
+    const dismiss = vi.fn();
+    mocks.view = view({
+      phase: "ready",
+      chatId: "first-run-1",
+      summaryOpenedAt: "2026-08-19T17:00:00.000Z",
+      dismiss,
+    });
+    render(<FirstRunLearningBanner />);
+
+    expect(screen.getByTestId("first-run-setup-dock")).toBeInTheDocument();
+    expect(
+      screen.queryByText("screenpipe learned enough to help"),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByTestId("first-run-next-steps")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("first-run-toggle-setup"));
+    expect(screen.getByTestId("first-run-next-steps")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("first-run-hide-setup"));
+    expect(dismiss).toHaveBeenCalledTimes(1);
   });
 
   it("offers the state-aware daily setup after learning resolves", () => {

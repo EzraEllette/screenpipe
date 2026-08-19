@@ -7,7 +7,7 @@
 import React from "react";
 import { emit } from "@tauri-apps/api/event";
 import posthog from "posthog-js";
-import { Clock, Loader2 } from "lucide-react";
+import { ChevronDown, Clock, ListChecks, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   formatCountdown,
@@ -167,6 +167,66 @@ export function FirstRunSetupReadyPanel({
   );
 }
 
+export function FirstRunSetupDock({
+  onDismiss,
+  nextSteps,
+}: {
+  onDismiss: () => void;
+  nextSteps: React.ReactNode;
+}) {
+  const [expanded, setExpanded] = React.useState(false);
+
+  return (
+    <div data-testid="first-run-setup-dock">
+      <div className="flex flex-col gap-3 px-4 py-3 sm:flex-row sm:items-center">
+        <span className="flex h-8 w-8 shrink-0 items-center justify-center border border-phosphor-strong text-phosphor-strong">
+          <ListChecks className="h-4 w-4" aria-hidden="true" />
+        </span>
+        <div className="min-w-0 flex-1">
+          <p className="font-mono text-[9px] uppercase tracking-[0.2em] text-phosphor-strong">
+            getting started
+          </p>
+          <p className="mt-0.5 text-[11px] leading-relaxed text-muted-foreground">
+            your summary is open. daily summary, digital clone, and calendar
+            setup stay available here while you chat.
+          </p>
+        </div>
+        <div className="flex shrink-0 items-center gap-1">
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            className="h-7 gap-1.5 px-2 text-[9px]"
+            data-testid="first-run-toggle-setup"
+            aria-expanded={expanded}
+            onClick={() => setExpanded((current) => !current)}
+          >
+            {expanded ? "close setup" : "open setup"}
+            <ChevronDown
+              className={`h-3 w-3 transition-transform duration-150 ${
+                expanded ? "rotate-180" : ""
+              }`}
+              aria-hidden="true"
+            />
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            className="h-7 px-2 text-[9px]"
+            data-testid="first-run-hide-setup"
+            onClick={onDismiss}
+          >
+            hide
+          </Button>
+        </div>
+      </div>
+
+      {expanded && nextSteps}
+    </div>
+  );
+}
+
 /**
  * First-run learning window.
  *
@@ -177,10 +237,18 @@ export function FirstRunLearningBanner(
   props: LearningWindowOptions & { fallback?: React.ReactNode } = {},
 ) {
   const { fallback, ...learningOptions } = props;
-  const { phase, capturedApps, remainingMs, chatId, showProgress, dismiss } =
-    useLearningWindow(learningOptions);
+  const {
+    phase,
+    capturedApps,
+    remainingMs,
+    chatId,
+    summaryOpenedAt,
+    showProgress,
+    markSummaryOpened,
+    dismiss,
+  } = useLearningWindow(learningOptions);
   const { targets: handoffTargets, hint: handoffHint, askAgent } =
-    useAgentHandoff(phase === "ready");
+    useAgentHandoff(phase === "ready" && !summaryOpenedAt);
 
   // Only show progress when setup just caused it. A foreground empty result is
   // still a terminal onboarding state: hiding it also hid the daily-summary
@@ -198,18 +266,40 @@ export function FirstRunLearningBanner(
 
   const openSummary = async () => {
     if (!chatId) return;
-    // Distinct from dismiss(). Opening the summary and clicking "Later" both
-    // close the banner, so without this they collapse into one event and the
-    // activation question this whole flow exists to answer — did the user read
-    // what we found? — becomes unmeasurable.
+    // Distinct from dismiss(). Opening the result keeps optional setup alive,
+    // while hiding the dock explicitly retires it.
     posthog.capture("first_run_summary_opened");
     try {
       await emit("chat-load-conversation", { conversationId: chatId });
+      markSummaryOpened();
     } catch {
-      // The chat is still in the sidebar even if the focus hint does not land.
+      // Keep the full result card so the user can retry instead of collapsing
+      // setup around a summary that did not open.
     }
-    dismiss({ opened: true });
   };
+
+  // Once the result opens, keep setup as a compact workspace-level control
+  // instead of destroying it or leaving the large onboarding card above every
+  // chat. A blank chat can still render its normal starter beneath the dock.
+  if (phase === "ready" && summaryOpenedAt) {
+    return (
+      <>
+        <section
+          data-testid="first-run-learning-banner"
+          data-phase="ready"
+          className="mx-auto mb-4 w-full max-w-3xl overflow-hidden border border-border bg-background"
+        >
+          <FirstRunSetupDock
+            onDismiss={() => dismiss()}
+            nextSteps={
+              <FirstRunNextSteps userToken={learningOptions.userToken} />
+            }
+          />
+        </section>
+        {fallback ? <>{fallback}</> : null}
+      </>
+    );
+  }
 
   return (
     <section

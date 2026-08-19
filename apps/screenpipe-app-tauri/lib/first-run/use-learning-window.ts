@@ -25,6 +25,7 @@ import {
   markLearningDone,
   markLearningEmpty,
   markLearningReady,
+  markLearningSummaryOpened,
   markLearningWriting,
   releaseLearningSeed,
   resetLearningWindow,
@@ -44,7 +45,8 @@ import type { AIPreset } from "@/lib/utils/tauri";
 
 export type LearningWindowView = FirstRunLearningState & {
   remainingMs: number;
-  dismiss: (options?: { opened?: boolean }) => void;
+  markSummaryOpened: () => void;
+  dismiss: () => void;
 };
 
 export type LearningWindowOptions = {
@@ -390,19 +392,29 @@ export function useLearningWindow(
     };
   }, [pendingEmptyReport, pendingStartedAt]);
 
+  const markSummaryOpened = useCallback(() => {
+    setState(markLearningSummaryOpened());
+  }, []);
+
   const dismiss = useCallback(
-    (options: { opened?: boolean } = {}) => {
+    () => {
       posthog.capture("first_run_learning_dismissed", {
         phase: state.phase,
-        // Opening the summary also closes the banner. Without this the two
-        // exits are indistinguishable and "reached ready but never looked" —
-        // the failure worth knowing about — cannot be counted.
-        opened: Boolean(options.opened),
+        // Opening the summary no longer destroys setup. This persisted fact
+        // keeps the analytics distinction when the user eventually finishes
+        // or hides the optional setup dock.
+        opened: Boolean(state.summaryOpenedAt),
       });
       setState(markLearningDone());
     },
-    [state.phase],
+    [state.phase, state.summaryOpenedAt],
   );
 
-  return { ...state, capturedApps, remainingMs, dismiss };
+  return {
+    ...state,
+    capturedApps,
+    remainingMs,
+    markSummaryOpened,
+    dismiss,
+  };
 }

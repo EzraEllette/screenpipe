@@ -21,6 +21,7 @@ import {
   markLearningDone,
   markLearningEmpty,
   markLearningReady,
+  markLearningSummaryOpened,
   markLearningWriting,
   normalizeEmptyReason,
   readLearningWindow,
@@ -376,6 +377,28 @@ describe("window lifecycle", () => {
     claimLearningSeed();
     expect(markLearningReady("chat-1").chatId).toBe("chat-1");
     expect(readLearningWindow().chatId).toBe("chat-1");
+  });
+
+  it("keeps setup alive after the summary opens", () => {
+    beginLearningWindow();
+    markLearningReady("chat-1");
+    const opened = markLearningSummaryOpened("2026-08-19T17:00:00.000Z");
+
+    expect(opened.phase).toBe("ready");
+    expect(opened.chatId).toBe("chat-1");
+    expect(opened.summaryOpenedAt).toBe("2026-08-19T17:00:00.000Z");
+    expect(readLearningWindow().summaryOpenedAt).toBe(
+      "2026-08-19T17:00:00.000Z",
+    );
+  });
+
+  it("does not revive setup when a stale open arrives after dismissal", () => {
+    beginLearningWindow();
+    markLearningReady("chat-1");
+    markLearningDone();
+
+    expect(markLearningSummaryOpened().phase).toBe("done");
+    expect(readLearningWindow().summaryOpenedAt).toBeNull();
   });
 
   it("clears in-progress state when dismissed", () => {
