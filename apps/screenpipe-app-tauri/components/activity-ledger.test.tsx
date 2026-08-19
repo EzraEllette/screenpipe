@@ -580,6 +580,10 @@ describe("ActivityLedger", () => {
     expect(
       await screen.findByText("Loading generated activities…"),
     ).toBeVisible();
+    expect(screen.getByTestId("activity-ledger-skeleton")).toBeVisible();
+    expect(screen.getAllByTestId("activity-ledger-skeleton-row")).toHaveLength(
+      3,
+    );
     expect(
       screen.queryByRole("button", { name: "Generate activities" }),
     ).toBeNull();
