@@ -73,10 +73,11 @@ public func shortcutSetMeetingStopResult(_ succeeded: Int32) {
 }
 
 /// Recording-health state pushed from the Rust health loop (issue #5127):
-/// "normal" | "failure" | "fixing" | "recovered", optionally "state|detail"
-/// or "state|detail|subsystem" where detail is a concise failure reason (or a
-/// boot-phase label while fixing) and subsystem is "audio" or "screen" when
-/// the engine could attribute the failure to one (#6126).
+/// "normal" | "failure" | "recovering" | "fixing" | "recovered", optionally
+/// "state|detail" or "state|detail|subsystem" where detail is a concise
+/// failure reason (or a boot-phase label while fixing) and subsystem is
+/// "audio" or "screen" when the engine could attribute the failure to one
+/// (#6126).
 /// Swift only renders it — all detection/debounce/recovery logic lives in Rust.
 @_cdecl("shortcut_set_health_state")
 public func shortcutSetHealthState(_ statePtr: UnsafePointer<CChar>?) -> Int32 {
@@ -109,8 +110,8 @@ final class OverlayMetrics: ObservableObject {
     /// Scoped to one meeting: cleared whenever the meeting goes inactive, so the
     /// next meeting never inherits a card the user pinned for the previous one.
     @Published var meetingPinned: Bool = false
-    /// "normal" | "failure" | "fixing" | "recovered" — set only via
-    /// ShortcutReminderController.setHealthState (pushed from Rust).
+    /// "normal" | "failure" | "recovering" | "fixing" | "recovered" — set
+    /// only via ShortcutReminderController.setHealthState (pushed from Rust).
     @Published var healthState: String = "normal"
     /// Concise failure reason, or boot-phase label while fixing.
     @Published var healthDetail: String = ""
@@ -914,6 +915,8 @@ struct ShortcutReminderView: View {
         ZStack {
             if metrics.healthState == "failure" {
                 failureView
+            } else if metrics.healthState == "recovering" {
+                recoveringView
             } else if metrics.healthState == "fixing" {
                 fixingView
             } else if metrics.healthState == "recovered" {
@@ -1039,17 +1042,25 @@ struct ShortcutReminderView: View {
     }
 
     private var fixingView: some View {
+        healthProgressView(
+            label: metrics.healthDetail.isEmpty
+                ? "fixing recording..."
+                : "fixing — \(metrics.healthDetail)..."
+        )
+    }
+
+    private var recoveringView: some View {
+        healthProgressView(label: "checking recovery...")
+    }
+
+    private func healthProgressView(label: String) -> some View {
         HStack(spacing: s(4)) {
             ProgressView()
                 .scaleEffect(0.45)
                 .frame(width: s(12), height: s(12))
                 .padding(.leading, s(8))
 
-            Text(
-                metrics.healthDetail.isEmpty
-                    ? "fixing recording..."
-                    : "fixing — \(metrics.healthDetail)..."
-            )
+            Text(label)
                 .font(Brand.swiftUIMonoFont(size: 8 * scale, weight: .regular))
                 .foregroundColor(.white.opacity(0.85))
                 .padding(.trailing, s(8))
