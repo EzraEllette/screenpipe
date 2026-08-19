@@ -340,13 +340,35 @@ final class TimelineOriginChrome: ObservableObject {
     }
 }
 
+@MainActor
+final class TimelineWindowGeometry: ObservableObject {
+    @Published private(set) var topSafeInset: CGFloat = 0
+
+    func update(windowFrame: NSRect, visibleFrame: NSRect?) {
+        let inset = visibleFrame.map {
+            TimelineTopChromeLayout.safeInset(
+                windowMaxY: windowFrame.maxY,
+                visibleFrameMaxY: $0.maxY
+            )
+        } ?? 0
+        if abs(topSafeInset - inset) > 0.5 {
+            topSafeInset = inset
+        }
+    }
+}
+
 struct TimelineHostView: View {
     @ObservedObject var model: TimelineViewModel
     @ObservedObject var originChrome: TimelineOriginChrome
+    @ObservedObject var geometry: TimelineWindowGeometry
     var embedded: Bool
 
     var body: some View {
-        TimelineRootView(model: model, embedded: embedded)
+        TimelineRootView(
+            model: model,
+            embedded: embedded,
+            topSafeInset: geometry.topSafeInset
+        )
             .overlay(alignment: .topLeading) {
                 if originChrome.showsActivityReturn {
                     Button(action: originChrome.returnToActivity) {
@@ -618,6 +640,7 @@ final class TimelineWindowController: NSObject, NSWindowDelegate {
     private var window: NSWindow?
     private var model: TimelineViewModel?
     private let originChrome = TimelineOriginChrome()
+    private let geometry = TimelineWindowGeometry()
     private var keyMonitor: Any?
     private var scrollMonitor: Any?
     private var scrollHandler: TimelineScrollHandler?
@@ -667,6 +690,16 @@ final class TimelineWindowController: NSObject, NSWindowDelegate {
                   !self.attachedHierarchyHasKeyWindow() else { return }
             TimelineActionBridge.shared.emit("close_window", windowLabel: hostWindowLabel)
         }
+    }
+
+    func windowDidResize(_ notification: Notification) {
+        guard notification.object as? NSWindow === window else { return }
+        updateTopSafeInset()
+    }
+
+    func windowDidMove(_ notification: Notification) {
+        guard notification.object as? NSWindow === window else { return }
+        updateTopSafeInset()
     }
 
     /// Focus may move into a native child such as a Live Text surface or back
@@ -730,6 +763,7 @@ final class TimelineWindowController: NSObject, NSWindowDelegate {
             rootView: TimelineHostView(
                 model: model,
                 originChrome: originChrome,
+                geometry: geometry,
                 embedded: embedded
             )
         )
@@ -762,6 +796,7 @@ final class TimelineWindowController: NSObject, NSWindowDelegate {
         window.contentView = hosting
         window.delegate = self
         self.window = window
+        updateTopSafeInset()
 
         installKeyMonitor(model: model, embedded: embedded, closeOnEscape: closeOnEscape)
         installScrollMonitor(model: model)
@@ -888,6 +923,18 @@ final class TimelineWindowController: NSObject, NSWindowDelegate {
 
     private func applyAttachedFrame(host: NSWindow, rect: NSRect) {
         window?.setFrame(attachedFrame(host: host, rect: rect), display: true)
+        updateTopSafeInset()
+    }
+
+    private func updateTopSafeInset() {
+        guard let window else {
+            geometry.update(windowFrame: .zero, visibleFrame: nil)
+            return
+        }
+        let center = NSPoint(x: window.frame.midX, y: window.frame.midY)
+        let screen = window.screen
+            ?? NSScreen.screens.first { NSMouseInRect(center, $0.frame, false) }
+        geometry.update(windowFrame: window.frame, visibleFrame: screen?.visibleFrame)
     }
 
     private func observeParent(_ host: NSWindow) {
