@@ -16,12 +16,12 @@ import posthog from "posthog-js";
 import {
   AppWindow,
   AudioLines,
-  Loader2,
   RefreshCw,
   Users,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
 import { faviconUrl } from "@/components/settings/capture-filters/icon-urls";
 import {
   Select,
@@ -569,6 +569,57 @@ function groupByDay(entries: ActivityHistoryEntry[]) {
     groups.set(key, [...(groups.get(key) ?? []), entry]);
   }
   return [...groups.entries()];
+}
+
+function ActivityLedgerSkeleton({ label }: { label: string }) {
+  return (
+    <section
+      aria-label={label}
+      aria-live="polite"
+      data-testid="activity-ledger-skeleton"
+    >
+      <span className="sr-only">{label}</span>
+      <div className="border-b border-foreground/20 pb-3">
+        <Skeleton className="h-7 w-40 rounded-none" />
+      </div>
+
+      {["first", "second", "third"].map((row, index) => (
+        <div
+          key={row}
+          className="grid gap-3 border-b border-border py-6 last:border-b-0 sm:grid-cols-[112px_1fr]"
+          data-testid="activity-ledger-skeleton-row"
+        >
+          <Skeleton className="h-3 w-16 rounded-none" />
+          <div className="min-w-0">
+            <Skeleton
+              className={cn(
+                "h-5 rounded-none",
+                index === 1 ? "w-1/2" : "w-2/3",
+              )}
+            />
+            <div className="mt-2 space-y-2">
+              <Skeleton className="h-3.5 w-full max-w-2xl rounded-none" />
+              <Skeleton
+                className={cn(
+                  "h-3.5 max-w-2xl rounded-none",
+                  index === 2 ? "w-3/5" : "w-4/5",
+                )}
+              />
+            </div>
+            <div className="mt-4 flex items-center gap-3">
+              <div className="flex items-center gap-1.5">
+                {[0, 1, 2].map((artifact) => (
+                  <Skeleton key={artifact} className="h-7 w-7 rounded-none" />
+                ))}
+              </div>
+              <Skeleton className="h-2.5 w-14 rounded-none" />
+              <Skeleton className="h-2.5 w-9 rounded-none" />
+            </div>
+          </div>
+        </div>
+      ))}
+    </section>
+  );
 }
 
 function compactEntryContext(entry: ActivityHistoryEntry): string {
@@ -1307,22 +1358,13 @@ Re-query Screenpipe only inside the cited time range and use the cited frames an
               ))}
             </section>
           ) : loading && !summary ? (
-            <div className="flex h-48 items-center justify-center gap-2 text-sm text-muted-foreground">
-              <Loader2 className="h-4 w-4 animate-spin" />
-              Reading your day…
-            </div>
+            <ActivityLedgerSkeleton label="Reading your day…" />
           ) : error ? (
             <p className="text-sm text-muted-foreground">{error}</p>
           ) : !cacheReady ? (
-            <div className="flex h-48 items-center justify-center gap-2 text-sm text-muted-foreground">
-              <Loader2 className="h-4 w-4 animate-spin" />
-              Loading generated activities…
-            </div>
+            <ActivityLedgerSkeleton label="Loading generated activities…" />
           ) : historyLoading && !history ? (
-            <div className="flex h-48 items-center justify-center gap-2 text-sm text-muted-foreground">
-              <Loader2 className="h-4 w-4 animate-spin" />
-              Understanding what you worked on…
-            </div>
+            <ActivityLedgerSkeleton label="Understanding what you worked on…" />
           ) : (
             <div className="flex min-h-[320px] items-center justify-center py-12 text-center">
               <div className="max-w-sm">
