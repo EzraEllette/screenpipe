@@ -20,6 +20,23 @@ use std::io::{BufRead, BufReader, Write};
 use tauri::Manager;
 use tokio::sync::oneshot;
 
+#[derive(Clone, Debug)]
+pub(crate) struct InternalAgentEvent {
+    pub session_id: String,
+    pub event: Value,
+}
+
+static INTERNAL_AGENT_EVENTS: std::sync::OnceLock<
+    tokio::sync::broadcast::Sender<InternalAgentEvent>,
+> = std::sync::OnceLock::new();
+
+pub(crate) fn subscribe_internal_agent_events(
+) -> tokio::sync::broadcast::Receiver<InternalAgentEvent> {
+    INTERNAL_AGENT_EVENTS
+        .get_or_init(|| tokio::sync::broadcast::channel(256).0)
+        .subscribe()
+}
+
 /// Read lines from a byte stream using lossy UTF-8 conversion.
 /// Unlike `BufReader::lines()`, this never fails on invalid UTF-8 —
 /// invalid bytes are replaced with U+FFFD instead of crashing the reader.
@@ -143,6 +160,14 @@ fn emit_agent_event(
     session_id: &str,
     event: Value,
 ) -> Result<(), tauri::Error> {
+    let internal_events =
+        INTERNAL_AGENT_EVENTS.get_or_init(|| tokio::sync::broadcast::channel(256).0);
+    if internal_events.receiver_count() > 0 {
+        let _ = internal_events.send(InternalAgentEvent {
+            session_id: session_id.to_string(),
+            event: event.clone(),
+        });
+    }
     app.emit(
         "agent_event",
         json!({
@@ -3915,7 +3940,7 @@ pub async fn pi_prompt(
     .await
 }
 
-async fn pi_prompt_inner(
+pub(crate) async fn pi_prompt_inner(
     app: &AppHandle,
     state: &PiState,
     sid: &str,

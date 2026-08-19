@@ -18,7 +18,9 @@ Element.prototype.scrollIntoView ||= () => {};
 
 const mocks = vi.hoisted(() => ({
   emit: vi.fn(),
+  generateActivityHistory: vi.fn(),
   getAppServerBaseUrl: vi.fn(),
+  getActivityHistory: vi.fn(),
   loadPersistedActivityHistory: vi.fn(),
   localFetch: vi.fn(),
   posthogCapture: vi.fn(),
@@ -63,6 +65,17 @@ vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: mocks.routerPush }),
 }));
 vi.mock("@/lib/api", () => ({ localFetch: mocks.localFetch }));
+vi.mock("@/lib/utils/tauri", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/utils/tauri")>();
+  return {
+    ...actual,
+    commands: {
+      ...actual.commands,
+      generateActivityHistory: mocks.generateActivityHistory,
+      getActivityHistory: mocks.getActivityHistory,
+    },
+  };
+});
 vi.mock("@/lib/chat-utils", () => ({
   showChatWithPrefill: mocks.showChatWithPrefill,
 }));
@@ -293,7 +306,11 @@ beforeEach(() => {
   mocks.getAppServerBaseUrl.mockResolvedValue("http://localhost:11535");
   mocks.settings.enhancedAI = true;
   mocks.settings.activitiesEnabled = true;
-  mocks.updateSettings.mockResolvedValue(undefined);
+  delete (mocks.settings as { activitiesAiPresetId?: string })
+    .activitiesAiPresetId;
+  mocks.updateSettings.mockImplementation(async (update: object) => {
+    Object.assign(mocks.settings, update);
+  });
   const values = new Map<string, string>();
   Object.defineProperty(window, "localStorage", {
     configurable: true,
@@ -336,6 +353,42 @@ beforeEach(() => {
         },
       ],
     }),
+  );
+  mocks.getActivityHistory.mockImplementation(
+    (start: string, end: string) =>
+      mocks.loadPersistedActivityHistory("activity-history-pi-v9", {
+        start: new Date(start),
+        end: new Date(end),
+      }),
+  );
+  mocks.generateActivityHistory.mockImplementation(
+    async (start: string, end: string) => {
+      const range = { start: new Date(start), end: new Date(end) };
+      const summaryResponse = await mocks.localFetch(
+        buildActivitySummaryPath(range),
+      );
+      const summary = await summaryResponse.json();
+      if (summary.data_status !== "ok" || summary.total_active_minutes <= 0) {
+        throw new Error(`activity_no_data:${summary.data_status}`);
+      }
+      const raw = await mocks.runDailySummaryWithPi({
+        preset:
+          mocks.settings.aiPresets.find(
+            (candidate) =>
+              candidate.id ===
+              (mocks.settings as { activitiesAiPresetId?: string })
+                .activitiesAiPresetId,
+          ) ?? mocks.settings.aiPresets[0],
+        range: { start, end },
+        sessionPrefix: "activity-history",
+      });
+      return mocks.reconcilePersistedActivityHistory(
+        "activity-history-pi-v9",
+        range,
+        parseActivityHistoryResponse(raw, range),
+        range,
+      );
+    },
   );
   mocks.showChatWithPrefill.mockResolvedValue(undefined);
 });
@@ -681,9 +734,6 @@ describe("ActivityLedger", () => {
     await waitFor(() =>
       expect(mocks.updateSettings).toHaveBeenCalledWith({
         activitiesEnabled: true,
-        activitiesNextRunAt: expect.stringMatching(
-          /^2026-08-17T20:15:00\.\d{3}Z$/,
-        ),
       }),
     );
     expect(mocks.runDailySummaryWithPi).not.toHaveBeenCalled();
@@ -726,9 +776,6 @@ describe("ActivityLedger", () => {
     await waitFor(() =>
       expect(mocks.updateSettings).toHaveBeenCalledWith({
         activitiesEnabled: true,
-        activitiesNextRunAt: expect.stringMatching(
-          /^2026-08-17T20:15:00\.\d{3}Z$/,
-        ),
       }),
     );
     expect(mocks.runDailySummaryWithPi).toHaveBeenCalled();
@@ -753,9 +800,6 @@ describe("ActivityLedger", () => {
     ).toBeVisible();
     expect(mocks.updateSettings).toHaveBeenCalledWith({
       activitiesEnabled: true,
-      activitiesNextRunAt: expect.stringMatching(
-        /^2026-08-17T20:15:00\.\d{3}Z$/,
-      ),
     });
     expect(
       mocks.updateSettings.mock.invocationCallOrder[0],
@@ -1077,16 +1121,13 @@ describe("ActivityLedger", () => {
     expect(screen.getByRole("button", { name: "Try again" })).toBeVisible();
   });
 
-  it("keeps a slow generation running past two minutes", async () => {
-    let finishGeneration!: (value: string) => void;
-    let generationSignal: AbortSignal | undefined;
-    mocks.runDailySummaryWithPi.mockImplementation(
-      ({ signal }: { signal?: AbortSignal }) => {
-        generationSignal = signal;
-        return new Promise((resolve) => {
+  it("keeps a slow backend generation running past two minutes", async () => {
+    let finishGeneration!: (value: { entries: []; coverage: [] }) => void;
+    mocks.generateActivityHistory.mockImplementation(
+      () =>
+        new Promise((resolve) => {
           finishGeneration = resolve;
-        });
-      },
+        }),
     );
 
     render(<ActivityLedger />);
@@ -1099,18 +1140,14 @@ describe("ActivityLedger", () => {
       await vi.advanceTimersByTimeAsync(120_000);
     });
 
-    expect(generationSignal?.aborted).toBe(false);
     expect(
       await screen.findByText("Understanding what you worked on…"),
     ).toBeVisible();
 
     await act(async () => {
-      finishGeneration(HISTORY_RESPONSE);
+      finishGeneration({ entries: [], coverage: [] });
     });
-
-    expect(
-      await screen.findByText("Fixed a capture reliability regression"),
-    ).toBeVisible();
+    await waitFor(() => expect(mocks.generateActivityHistory).toHaveBeenCalledOnce());
   });
 
   it("tracks page reach and the activity generation funnel", async () => {
@@ -1164,31 +1201,25 @@ describe("ActivityLedger", () => {
     expect(mocks.runDailySummaryWithPi).not.toHaveBeenCalled();
   });
 
-  it("finishes and persists history generation after leaving the page", async () => {
-    let resolveHistory!: (value: string) => void;
-    mocks.runDailySummaryWithPi.mockImplementation(
-      () =>
-        new Promise<string>((resolve) => {
-          resolveHistory = resolve;
-        }),
+  it("leaves an in-flight backend generation running after unmount", async () => {
+    let resolveHistory!: (value: { entries: []; coverage: [] }) => void;
+    mocks.generateActivityHistory.mockImplementation(
+      () => new Promise((resolve) => {
+        resolveHistory = resolve;
+      }),
     );
 
     const view = render(<ActivityLedger />);
 
     await generateActivities();
     await waitFor(() =>
-      expect(mocks.runDailySummaryWithPi).toHaveBeenCalledOnce(),
+      expect(mocks.generateActivityHistory).toHaveBeenCalledOnce(),
     );
-    const generationSignal = mocks.runDailySummaryWithPi.mock.calls[0][0]
-      .signal as AbortSignal;
 
     view.unmount();
 
-    expect(generationSignal.aborted).toBe(false);
-    resolveHistory(HISTORY_RESPONSE);
-    await waitFor(() =>
-      expect(mocks.reconcilePersistedActivityHistory).toHaveBeenCalled(),
-    );
+    resolveHistory({ entries: [], coverage: [] });
+    expect(mocks.generateActivityHistory).toHaveBeenCalledOnce();
   });
 
   it("lets the user leave while generation continues", async () => {
@@ -1280,43 +1311,21 @@ describe("ActivityLedger", () => {
       }
     }
 
-    await waitFor(() =>
-      expect(mocks.runDailySummaryWithPi).toHaveBeenCalledWith(
-        expect.objectContaining({
-          sessionPrefix: "activity-history",
-          prompt: expect.stringContaining("Coverage is non-negotiable"),
-          systemPrompt: expect.stringContaining("trusted assistant"),
-        }),
-      ),
-    );
-    expect(mocks.reconcilePersistedActivityHistory).toHaveBeenCalledWith(
-      "activity-history-pi-v9",
-      expect.objectContaining({
-        start: expect.any(Date),
-        end: expect.any(Date),
-      }),
-      expect.objectContaining({ entries: expect.any(Array) }),
-      expect.objectContaining({
-        start: expect.any(Date),
-        end: expect.any(Date),
-      }),
+    expect(mocks.generateActivityHistory).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.any(String),
     );
   });
 
-  it("repairs an under-covered draft before showing it", async () => {
-    mocks.localFetch.mockImplementation((path: string) =>
-      Promise.resolve({
-        ok: true,
-        status: 200,
-        json: async () =>
-          path.startsWith("/meetings?")
-            ? []
-            : { data_status: "ok", total_active_minutes: 300 },
-      }),
-    );
-    mocks.runDailySummaryWithPi
-      .mockResolvedValueOnce(HISTORY_RESPONSE)
-      .mockResolvedValueOnce(REPAIRED_HISTORY_RESPONSE);
+  it("renders a backend-repaired activity document", async () => {
+    const range = {
+      start: new Date("2026-08-17T07:00:00Z"),
+      end: new Date("2026-08-17T20:00:00Z"),
+    };
+    mocks.generateActivityHistory.mockResolvedValue({
+      entries: parseActivityHistoryResponse(REPAIRED_HISTORY_RESPONSE, range).entries,
+      coverage: [{ start: range.start.toISOString(), end: range.end.toISOString() }],
+    });
 
     render(<ActivityLedger />);
     await generateActivities();
@@ -1324,29 +1333,10 @@ describe("ActivityLedger", () => {
     expect(
       await screen.findByRole("heading", { name: "Recovered task 1" }),
     ).toBeVisible();
-    expect(mocks.runDailySummaryWithPi).toHaveBeenCalledTimes(2);
-    expect(mocks.runDailySummaryWithPi).toHaveBeenLastCalledWith(
-      expect.objectContaining({
-        sessionPrefix: "activity-history-repair",
-        prompt: expect.stringContaining("requires at least 7"),
-      }),
-    );
+    expect(mocks.generateActivityHistory).toHaveBeenCalledOnce();
   });
 
-  it("keeps a valid first pass when the coverage repair fails", async () => {
-    mocks.localFetch.mockImplementation((path: string) =>
-      Promise.resolve({
-        ok: true,
-        status: 200,
-        json: async () =>
-          path.startsWith("/meetings?")
-            ? []
-            : { data_status: "ok", total_active_minutes: 300 },
-      }),
-    );
-    mocks.runDailySummaryWithPi
-      .mockResolvedValueOnce(HISTORY_RESPONSE)
-      .mockRejectedValueOnce(new Error("repair failed"));
+  it("renders the valid document returned by the backend", async () => {
 
     render(<ActivityLedger />);
     await generateActivities();
@@ -1356,8 +1346,7 @@ describe("ActivityLedger", () => {
         name: "Fixed a capture reliability regression",
       }),
     ).toBeVisible();
-    expect(mocks.runDailySummaryWithPi).toHaveBeenCalledTimes(2);
-    expect(mocks.reconcilePersistedActivityHistory).toHaveBeenCalled();
+    expect(mocks.generateActivityHistory).toHaveBeenCalledOnce();
     expect(
       screen.queryByText("History could not be updated. Try again."),
     ).toBeNull();

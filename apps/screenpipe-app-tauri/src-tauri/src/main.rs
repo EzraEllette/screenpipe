@@ -42,6 +42,7 @@ use window::ShowRewindWindow;
 mod acp_extensions;
 mod acp_runtime;
 mod acp_schedule_extension;
+mod activity_history;
 mod analytics;
 mod auth_session;
 #[allow(deprecated)]
@@ -1150,6 +1151,7 @@ async fn main() {
     let sync_scheduler = screenpipe_connect::sync_scheduler::SyncScheduler::new();
 
     let app = app.manage(recording_state)
+        .manage(activity_history::ActivityHistoryState::default())
         .manage(disk_pressure_notifications::DiskPressureNotificationState::default())
         .manage(pi_state)
         .manage(suggestions_state)
@@ -2265,6 +2267,7 @@ async fn main() {
                 });
             }
             crate::disk_pressure_notifications::start(app_handle.clone());
+            activity_history::start(app_handle.clone());
 
             // Background ChatGPT OAuth token refresh — keeps access tokens
             // fresh so the lazy path in get_valid_token() rarely needs to

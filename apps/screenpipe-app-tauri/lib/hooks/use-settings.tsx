@@ -280,9 +280,11 @@ export interface ChatHistoryStore {
 export type Settings = SettingsStore & {
 	/** Enable automatic Activities generation. Default false. */
 	activitiesEnabled?: boolean;
-	/** Automatic cadence in minutes. Used to register the next run; scheduler wiring comes later. Default 15. */
+	/** Native Activity generation cadence in minutes. Default 15. */
 	activitiesIntervalMinutes?: number;
-	/** Next automatic Activities run as an ISO timestamp. Scheduler contract only; not consumed yet. */
+	/** AI preset used by native Activity generation. */
+	activitiesAiPresetId?: string;
+	/** Next native Activity generation run as an ISO timestamp. */
 	activitiesNextRunAt?: string;
 	/** Goal used to prioritize the Home cards. Persisted in store.bin. */
 	userGoalCategory?: UserGoalCategory;
