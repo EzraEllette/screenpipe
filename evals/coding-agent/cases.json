@@ -1,0 +1,112 @@
+{
+  "schema_version": 1,
+  "suite": "screenpipe-app-coding-agent-regressions",
+  "dataset_version": "2026-08-19.1",
+  "cases": [
+    {
+      "id": "app-chat-concurrent-save",
+      "name": "Preserve both writers during concurrent chat saves",
+      "base_ref": "1a74f9c68^",
+      "oracle_ref": "1a74f9c68",
+      "tags": ["regression", "escaped-failure", "chat", "concurrency", "data-loss"],
+      "prompt": "A user has the same chat open in two app windows. Both writers start from the same conversation. Writer A saves a new message, then writer B saves a different new message from its stale snapshot. The later save silently deletes writer A's message. Fix conversation persistence so concurrent saves preserve both suffixes, do not duplicate messages, retain the richer copy of a streaming message, and do not let stale scalar fields revert newer disk state. Keep the solution scoped to chat persistence and add or update tests as needed.",
+      "agent_timeout_seconds": 900,
+      "dependency_links": [
+        {
+          "source_path": "apps/screenpipe-app-tauri/node_modules",
+          "destination_path": "apps/screenpipe-app-tauri/node_modules"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 300,
+        "fixtures": [
+          {
+            "source_path": "apps/screenpipe-app-tauri/lib/__tests__/chat-merge.test.ts"
+          },
+          {
+            "source_path": "apps/screenpipe-app-tauri/lib/__tests__/chat-storage-concurrency.test.ts"
+          }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && bun x vitest run --config vitest.config.ts lib/__tests__/chat-merge.test.ts lib/__tests__/chat-storage-concurrency.test.ts"
+      }
+    },
+    {
+      "id": "app-terminal-quota-retry",
+      "name": "Stop retrying terminal Pi quota failures",
+      "base_ref": "58c6e837f^",
+      "oracle_ref": "58c6e837f",
+      "tags": ["regression", "escaped-failure", "chat", "quota", "retry"],
+      "prompt": "The Pi chat transport receives provider 429 responses that mean the account has exhausted a daily allowance or the selected model is not permitted. The app currently treats these as transient and keeps retrying, leaving the user in a loop. Make terminal quota/plan errors stop the retry path and surface the assistant error, while ordinary transient failures remain retryable. Preserve existing silent prompt-timeout and connection-card behavior.",
+      "agent_timeout_seconds": 720,
+      "dependency_links": [
+        {
+          "source_path": "apps/screenpipe-app-tauri/node_modules",
+          "destination_path": "apps/screenpipe-app-tauri/node_modules"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 300,
+        "fixtures": [
+          {
+            "local_path": "graders/app-terminal-quota.test.ts",
+            "destination_path": "apps/screenpipe-app-tauri/lib/chat/__tests__/eval-terminal-quota.test.ts"
+          },
+          {
+            "source_ref": "58c6e837f^",
+            "source_path": "apps/screenpipe-app-tauri/lib/chat/__tests__/quota-errors.test.ts"
+          },
+          {
+            "source_ref": "58c6e837f^",
+            "source_path": "apps/screenpipe-app-tauri/lib/chat/__tests__/provider-errors.test.ts"
+          }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && bun x vitest run --config vitest.config.ts lib/chat/__tests__/eval-terminal-quota.test.ts lib/chat/__tests__/quota-errors.test.ts lib/chat/__tests__/provider-errors.test.ts"
+      }
+    },
+    {
+      "id": "app-timeline-stream-reliability",
+      "name": "Keep native Timeline streams bounded and complete",
+      "base_ref": "a4c1161d2^",
+      "oracle_ref": "a4c1161d2",
+      "tags": ["regression", "escaped-failure", "timeline", "websocket", "native"],
+      "prompt": "Native Timeline search becomes unreliable on large days: serialized WebSocket batches can exceed the native receiver ceiling, and navigation/search races can surface stale or incomplete frames. Fix the stream path so payloads are bounded by encoded bytes without dropping or duplicating rows, cancellation is respected, and the native search contract remains compatible. Do not solve this by imposing a small arbitrary row limit.",
+      "agent_timeout_seconds": 1200,
+      "grader": {
+        "timeout_seconds": 1200,
+        "fixtures": [
+          {
+            "source_path": "crates/screenpipe-engine/tests/stream_frames_test.rs"
+          }
+        ],
+        "command": "cargo test -p screenpipe-engine --test stream_frames_test"
+      }
+    },
+    {
+      "id": "app-first-run-empty-summary",
+      "name": "Never render an empty first-run summary as success",
+      "base_ref": "91fa9bd1b^",
+      "oracle_ref": "91fa9bd1b",
+      "tags": ["regression", "escaped-failure", "onboarding", "truthfulness"],
+      "prompt": "The first-run learning flow can finish with an empty or unusable generated summary and then render that as if capture produced a meaningful result. Fix the state and UI boundary so empty summaries stay out of the content surface, capture diagnostics remain actionable, and resume/dismiss behavior remains stable. A valid non-empty summary must still render normally.",
+      "agent_timeout_seconds": 900,
+      "dependency_links": [
+        {
+          "source_path": "apps/screenpipe-app-tauri/node_modules",
+          "destination_path": "apps/screenpipe-app-tauri/node_modules"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 420,
+        "fixtures": [
+          {
+            "source_path": "apps/screenpipe-app-tauri/lib/first-run/learning-window.test.ts"
+          },
+          {
+            "source_path": "apps/screenpipe-app-tauri/components/first-run/learning-banner.test.tsx"
+          }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && bun x vitest run --config vitest.config.ts lib/first-run/learning-window.test.ts components/first-run/learning-banner.test.tsx"
+      }
+    }
+  ]
+}
