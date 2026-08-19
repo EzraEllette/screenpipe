@@ -52,9 +52,11 @@ import {
   type ActivityReviewMeeting,
 } from "@/lib/activity-review-prompt";
 import {
+  ACTIVITY_HISTORY_RECONCILE_OVERLAP_MS,
   loadPersistedActivityHistory,
   mergeActivityHistoryCoverage,
   mergeActivityHistoryDocuments,
+  nextActivityHistoryRange,
   reconcilePersistedActivityHistory,
   type ActivityHistoryCoverage,
 } from "@/lib/activity-history-persistence";
@@ -120,6 +122,7 @@ type ActivityArtifact = ActivityHistoryEvidence & {
 };
 
 const MAX_VISIBLE_ARTIFACTS = 6;
+const ACTIVITY_HISTORY_REFRESH_INTERVAL_MS = 10 * 60_000;
 const ACTIVITY_RANGE_STORAGE_KEY = "screenpipe:activity-history:range";
 const ACTIVITY_CUSTOM_START_STORAGE_KEY =
   "screenpipe:activity-history:custom-start";
@@ -306,6 +309,38 @@ export function minimumHistoryEntryCount(
   }
   const activeDays = Math.max(1, Math.ceil(wallHours / 24));
   return Math.min(activeDays * 18, Math.max(1, Math.ceil(activeMinutes / 60)));
+}
+
+export function canAddRecentActivity(
+  range: TimeRange,
+  coverage: ActivityHistoryCoverage[],
+): boolean {
+  const pending = nextActivityHistoryRange(range, coverage);
+  if (!pending) return false;
+  const overlap =
+    pending.start.getTime() > range.start.getTime()
+      ? ACTIVITY_HISTORY_RECONCILE_OVERLAP_MS
+      : 0;
+  return (
+    pending.end.getTime() - pending.start.getTime() - overlap >
+    ACTIVITY_HISTORY_REFRESH_INTERVAL_MS
+  );
+}
+
+function recentActivityUnlockDelay(
+  range: TimeRange,
+  coverage: ActivityHistoryCoverage[],
+): number | null {
+  const pending = nextActivityHistoryRange(range, coverage);
+  if (!pending) return ACTIVITY_HISTORY_REFRESH_INTERVAL_MS + 1_001;
+  const overlap =
+    pending.start.getTime() > range.start.getTime()
+      ? ACTIVITY_HISTORY_RECONCILE_OVERLAP_MS
+      : 0;
+  const uncoveredMs =
+    pending.end.getTime() - pending.start.getTime() - overlap;
+  if (uncoveredMs > ACTIVITY_HISTORY_REFRESH_INTERVAL_MS) return null;
+  return ACTIVITY_HISTORY_REFRESH_INTERVAL_MS - uncoveredMs + 1;
 }
 
 function formatEntryTime(entry: ActivityHistoryEntry): string {
@@ -715,6 +750,7 @@ export function ActivityLedger({
   const [historyLoading, setHistoryLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [historyError, setHistoryError] = useState("");
+  const [recentEligibilityTick, setRecentEligibilityTick] = useState(0);
   const historyAbortRef = useRef<AbortController | null>(null);
   const historyLoadingRef = useRef(false);
   const [selectedReviewPresetId, setSelectedReviewPresetId] = useState<
@@ -750,6 +786,35 @@ export function ActivityLedger({
       selectableReviewPresets[0],
     [selectableReviewPresets, selectedReviewPresetId],
   );
+  const supportsRecentActivity = preset === "today" || preset === "24h";
+  const recentRange = useMemo(
+    () =>
+      supportsRecentActivity
+        ? rangeForPreset(preset, new Date(), customStart, customEnd)
+        : null,
+    [
+      customEnd,
+      customStart,
+      preset,
+      recentEligibilityTick,
+      supportsRecentActivity,
+    ],
+  );
+  const recentActivityAvailable = Boolean(
+    recentRange && canAddRecentActivity(recentRange, historyCoverage),
+  );
+
+  useEffect(() => {
+    if (!recentRange || recentActivityAvailable || !cacheReady) return;
+    const delay = recentActivityUnlockDelay(recentRange, historyCoverage);
+    if (delay === null) return;
+    const timeout = window.setTimeout(
+      () => setRecentEligibilityTick((value) => value + 1),
+      delay,
+    );
+    return () => window.clearTimeout(timeout);
+  }, [cacheReady, historyCoverage, recentActivityAvailable, recentRange]);
+
   useEffect(() => {
     posthog.capture("activity_viewed", { range: initialPresetRef.current });
   }, []);
@@ -1119,6 +1184,49 @@ export function ActivityLedger({
     void generateHistory(clickedRange, source, clickedRange);
   }, [customEnd, customStart, generateHistory, preset]);
 
+  const addRecentActivity = useCallback(() => {
+    const clickedRange = rangeForPreset(
+      preset,
+      new Date(),
+      customStart,
+      customEnd,
+    );
+    const clickedHistoryRange = clickedRange
+      ? nextActivityHistoryRange(clickedRange, historyCoverage)
+      : null;
+    if (
+      !clickedRange ||
+      !clickedHistoryRange ||
+      !supportsRecentActivity ||
+      !canAddRecentActivity(clickedRange, historyCoverage) ||
+      loading ||
+      historyLoading ||
+      !cacheReady ||
+      invalidRange
+    ) {
+      return;
+    }
+    void generateHistory(clickedHistoryRange, "refresh", clickedRange);
+  }, [
+    cacheReady,
+    customEnd,
+    customStart,
+    generateHistory,
+    historyCoverage,
+    historyLoading,
+    invalidRange,
+    loading,
+    preset,
+    supportsRecentActivity,
+  ]);
+
+  const recentActivityDisabled =
+    loading ||
+    historyLoading ||
+    !cacheReady ||
+    invalidRange ||
+    !recentActivityAvailable;
+
   const makeSkill = (entry: ActivityHistoryEntry) => {
     posthog.capture("activity_skill_clicked");
     void showChatWithPrefill({
@@ -1238,9 +1346,15 @@ Re-query Screenpipe only inside the cited time range and use the cited frames an
               <Button
                 variant="ghost"
                 size="icon"
-                onClick={() => regenerateSelectedRange("refresh")}
+                onClick={() =>
+                  history && supportsRecentActivity
+                    ? addRecentActivity()
+                    : regenerateSelectedRange("refresh")
+                }
                 disabled={
-                  loading || historyLoading || !cacheReady || invalidRange
+                  history && supportsRecentActivity
+                    ? recentActivityDisabled
+                    : loading || historyLoading || !cacheReady || invalidRange
                 }
                 aria-label="Refresh history"
               >
@@ -1420,6 +1534,31 @@ Re-query Screenpipe only inside the cited time range and use the cited frames an
                   ))}
                 </div>
               ))}
+              {supportsRecentActivity ? (
+                <div className="flex flex-col items-center border-t border-border py-10 text-center">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="h-10 rounded-none px-5 uppercase tracking-wide"
+                    onClick={addRecentActivity}
+                    disabled={recentActivityDisabled}
+                  >
+                    <RefreshCw
+                      className={cn(
+                        "mr-2 h-3.5 w-3.5",
+                        historyLoading && "animate-spin",
+                      )}
+                      aria-hidden="true"
+                    />
+                    Generate more results
+                  </Button>
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    {recentActivityAvailable
+                      ? "Include activity recorded since your last update."
+                      : "More results can be generated every 10 minutes."}
+                  </p>
+                </div>
+              ) : null}
             </section>
           ) : loading && !summary ? (
             <ActivityLedgerSkeleton label="Reading your day…" />
