@@ -18,6 +18,7 @@ Element.prototype.scrollIntoView ||= () => {};
 
 const mocks = vi.hoisted(() => ({
   emit: vi.fn(),
+  eventListeners: new Map<string, (event: unknown) => void>(),
   generateActivityHistory: vi.fn(),
   getAppServerBaseUrl: vi.fn(),
   getActivityHistory: vi.fn(),
@@ -57,7 +58,15 @@ const mocks = vi.hoisted(() => ({
   },
 }));
 
-vi.mock("@tauri-apps/api/event", () => ({ emit: mocks.emit }));
+vi.mock("@tauri-apps/api/event", () => ({
+  emit: mocks.emit,
+  listen: vi.fn(
+    async (event: string, handler: (event: unknown) => void) => {
+      mocks.eventListeners.set(event, handler);
+      return () => mocks.eventListeners.delete(event);
+    },
+  ),
+}));
 vi.mock("posthog-js", () => ({
   default: { capture: mocks.posthogCapture },
 }));
@@ -304,6 +313,7 @@ beforeEach(() => {
   vi.useFakeTimers({ shouldAdvanceTime: true });
   vi.setSystemTime(new Date("2026-08-17T20:00:00Z"));
   mocks.getAppServerBaseUrl.mockResolvedValue("http://localhost:11535");
+  mocks.eventListeners.clear();
   mocks.settings.enhancedAI = true;
   mocks.settings.activitiesEnabled = true;
   delete (mocks.settings as { activitiesAiPresetId?: string })
@@ -355,11 +365,16 @@ beforeEach(() => {
     }),
   );
   mocks.getActivityHistory.mockImplementation(
-    (start: string, end: string) =>
-      mocks.loadPersistedActivityHistory("activity-history-pi-v9", {
-        start: new Date(start),
-        end: new Date(end),
-      }),
+    async (start: string, end: string) => ({
+      status: "ok",
+      data: await mocks.loadPersistedActivityHistory(
+        "activity-history-pi-v9",
+        {
+          start: new Date(start),
+          end: new Date(end),
+        },
+      ),
+    }),
   );
   mocks.generateActivityHistory.mockImplementation(
     async (start: string, end: string) => {
@@ -382,12 +397,15 @@ beforeEach(() => {
         range: { start, end },
         sessionPrefix: "activity-history",
       });
-      return mocks.reconcilePersistedActivityHistory(
-        "activity-history-pi-v9",
-        range,
-        parseActivityHistoryResponse(raw, range),
-        range,
-      );
+      return {
+        status: "ok",
+        data: await mocks.reconcilePersistedActivityHistory(
+          "activity-history-pi-v9",
+          range,
+          parseActivityHistoryResponse(raw, range),
+          range,
+        ),
+      };
     },
   );
   mocks.showChatWithPrefill.mockResolvedValue(undefined);
@@ -706,6 +724,39 @@ describe("activity history helpers", () => {
 });
 
 describe("ActivityLedger", () => {
+  it("shows a completed backend run without refreshing the page", async () => {
+    render(<ActivityLedger />);
+
+    await waitFor(() => expect(mocks.getActivityHistory).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(mocks.eventListeners.has("activity-history-updated")).toBe(true),
+    );
+    mocks.getActivityHistory.mockResolvedValueOnce({
+      status: "ok",
+      data: {
+        entries: JSON.parse(HISTORY_RESPONSE).entries,
+        coverage: [],
+      },
+    });
+
+    await act(async () => {
+      mocks.eventListeners.get("activity-history-updated")?.({
+        event: "activity-history-updated",
+        id: 1,
+        payload: {
+          start: "2026-08-17T16:00:00Z",
+          end: "2026-08-17T20:00:00Z",
+          activityCount: 2,
+          source: "automatic",
+        },
+      });
+    });
+
+    expect(
+      await screen.findByText("Fixed a capture reliability regression"),
+    ).toBeVisible();
+  });
+
   it("enables legacy users with prior generation without regenerating", async () => {
     delete (mocks.settings as { activitiesEnabled?: boolean })
       .activitiesEnabled;
@@ -1122,7 +1173,10 @@ describe("ActivityLedger", () => {
   });
 
   it("keeps a slow backend generation running past two minutes", async () => {
-    let finishGeneration!: (value: { entries: []; coverage: [] }) => void;
+    let finishGeneration!: (value: {
+      status: "ok";
+      data: { entries: []; coverage: [] };
+    }) => void;
     mocks.generateActivityHistory.mockImplementation(
       () =>
         new Promise((resolve) => {
@@ -1145,7 +1199,10 @@ describe("ActivityLedger", () => {
     ).toBeVisible();
 
     await act(async () => {
-      finishGeneration({ entries: [], coverage: [] });
+      finishGeneration({
+        status: "ok",
+        data: { entries: [], coverage: [] },
+      });
     });
     await waitFor(() => expect(mocks.generateActivityHistory).toHaveBeenCalledOnce());
   });
@@ -1202,7 +1259,10 @@ describe("ActivityLedger", () => {
   });
 
   it("leaves an in-flight backend generation running after unmount", async () => {
-    let resolveHistory!: (value: { entries: []; coverage: [] }) => void;
+    let resolveHistory!: (value: {
+      status: "ok";
+      data: { entries: []; coverage: [] };
+    }) => void;
     mocks.generateActivityHistory.mockImplementation(
       () => new Promise((resolve) => {
         resolveHistory = resolve;
@@ -1218,7 +1278,7 @@ describe("ActivityLedger", () => {
 
     view.unmount();
 
-    resolveHistory({ entries: [], coverage: [] });
+    resolveHistory({ status: "ok", data: { entries: [], coverage: [] } });
     expect(mocks.generateActivityHistory).toHaveBeenCalledOnce();
   });
 
@@ -1323,8 +1383,14 @@ describe("ActivityLedger", () => {
       end: new Date("2026-08-17T20:00:00Z"),
     };
     mocks.generateActivityHistory.mockResolvedValue({
-      entries: parseActivityHistoryResponse(REPAIRED_HISTORY_RESPONSE, range).entries,
-      coverage: [{ start: range.start.toISOString(), end: range.end.toISOString() }],
+      status: "ok",
+      data: {
+        entries: parseActivityHistoryResponse(REPAIRED_HISTORY_RESPONSE, range)
+          .entries,
+        coverage: [
+          { start: range.start.toISOString(), end: range.end.toISOString() },
+        ],
+      },
     });
 
     render(<ActivityLedger />);

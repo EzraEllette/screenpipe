@@ -55,6 +55,7 @@ import { localFetch } from "@/lib/api";
 import { presentQuotaError } from "@/lib/chat/quota-errors";
 import { showChatWithPrefill } from "@/lib/chat-utils";
 import { useSettings } from "@/lib/hooks/use-settings";
+import { useTauriEvent } from "@/lib/hooks/use-tauri-event";
 import { useTimelineStore } from "@/lib/hooks/use-timeline-store";
 import { getAppServerBaseUrl } from "@/lib/notifications/app-server";
 import { cn } from "@/lib/utils";
@@ -74,6 +75,17 @@ type MeetingResponse = {
   title: string | null;
 };
 type TimeRange = { start: Date; end: Date };
+
+function historyDocumentFromNative(
+  entries: unknown[],
+): ActivityHistoryDocument | null {
+  // The native parser rejects unknown entry/evidence kinds before persistence;
+  // Specta currently widens those validated Rust strings to `string`.
+  return entries.length > 0
+    ? { entries: entries as ActivityHistoryEntry[] }
+    : null;
+}
+
 type ActivityLedgerArtifactEvidence = {
   source_type: string;
   source_id: number;
@@ -937,15 +949,13 @@ export function ActivityLedger({
     setCacheReady(false);
     if (!range) return;
     let cancelled = false;
-    void commands.getActivityHistory(
-      range.start.toISOString(),
-      range.end.toISOString(),
-    )
-      .then((snapshot) => {
+    void commands
+      .getActivityHistory(range.start.toISOString(), range.end.toISOString())
+      .then((result) => {
         if (cancelled) return;
-        setHistory(
-          snapshot.entries.length > 0 ? { entries: snapshot.entries } : null,
-        );
+        if (result.status === "error") throw new Error(result.error);
+        const snapshot = result.data;
+        setHistory(historyDocumentFromNative(snapshot.entries));
         setHistoryCoverage(snapshot.coverage);
       })
       .catch(() => {
@@ -960,6 +970,22 @@ export function ActivityLedger({
       // even when the user navigates elsewhere while Pi is still working.
     };
   }, [preset, range]);
+
+  useTauriEvent("activity-history-updated", () => {
+    if (!range) return;
+    void commands
+      .getActivityHistory(range.start.toISOString(), range.end.toISOString())
+      .then((result) => {
+        if (result.status === "error") throw new Error(result.error);
+        const snapshot = result.data;
+        setHistory(historyDocumentFromNative(snapshot.entries));
+        setHistoryCoverage(snapshot.coverage);
+      })
+      .catch(() => {
+        // The completion notification still opens the persisted history if
+        // this window is closing while the update event arrives.
+      });
+  });
 
   useEffect(() => {
     if (
@@ -998,14 +1024,14 @@ export function ActivityLedger({
     setHistoryLoading(true);
     setHistoryError("");
     try {
-      const persisted = await commands.generateActivityHistory(
+      const result = await commands.generateActivityHistory(
         generationRange.start.toISOString(),
         generationRange.end.toISOString(),
       );
+      if (result.status === "error") throw new Error(result.error);
+      const persisted = result.data;
       if (controller.signal.aborted) return;
-      setHistory(
-        persisted.entries.length > 0 ? { entries: persisted.entries } : null,
-      );
+      setHistory(historyDocumentFromNative(persisted.entries));
       setHistoryCoverage(persisted.coverage);
       posthog.capture("activity_generation_completed", {
         range: preset,
