@@ -21,6 +21,7 @@ import {
   ChevronLeft,
   SlidersHorizontal,
   KeyRound,
+  ListChecks,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import * as PopoverPrimitive from "@radix-ui/react-popover";
@@ -51,6 +52,7 @@ import { StorageSection, searchIndex as storageSearchIndex } from "@/components/
 import { NotificationsSettings, searchIndex as notificationsSearchIndex } from "@/components/settings/notifications-settings";
 import { UsageSection, searchIndex as usageSearchIndex } from "@/components/settings/usage-section";
 import { SpeakersSection, searchIndex as speakersSearchIndex } from "@/components/settings/speakers-section";
+import { ActivitiesSettings, searchIndex as activitiesSearchIndex } from "@/components/settings/activities-settings";
 import { searchIndex as powerSearchIndex } from "@/components/settings/battery-saver-section";
 import { ReferralCard } from "@/components/settings/referral-card";
 import { SettingsSearchInput, SettingsSearchPopover, searchSettingsNav, scrollToSettingsField, type IndexedSettingsField, type SettingsField } from "@/components/settings/settings-search";
@@ -79,6 +81,7 @@ const ALL_SETTINGS_FIELDS: IndexedSettingsField[] = [
   ...generalSearchIndex.map((f) => ({ ...f, section: "general" })),
   ...aiSearchIndex.map((f) => ({ ...f, section: "ai" })),
   ...aiSettingsSearchIndex.map((f) => ({ ...f, section: "ai-settings" })),
+  ...activitiesSearchIndex.map((f) => ({ ...f, section: "activities" })),
   ...audioSearchIndex.map((f) => ({ ...f, section: "audio" })),
   ...screenSearchIndex.map((f) => ({ ...f, section: "recording" })),
   ...powerSearchIndex.map((f) => ({ ...f, section: "recording" })),
@@ -200,6 +203,7 @@ function SettingsContent() {
     {
       label: "AI",
       items: [
+        { id: "activities" as const, label: "Activities", icon: <ListChecks className="h-4 w-4" /> },
         { id: "ai-settings" as const, label: "AI features", icon: <SlidersHorizontal className="h-4 w-4" /> },
         { id: "ai" as const, label: "Models & keys", icon: <Brain className="h-4 w-4" /> },
         { id: "usage" as const, label: "AI credits", icon: <BarChart3 className="h-4 w-4" /> },
@@ -344,6 +348,7 @@ function SettingsContent() {
       case "display":       return <DisplaySection />;
       case "ai":            return <AIPresets />;
       case "ai-settings":   return <AISettings />;
+      case "activities":    return <ActivitiesSettings />;
       case "account":       return <AccountSection />;
       case "recording":     return <RecordingSettings section="screen" />;
       case "audio":         return <RecordingSettings section="audio" />;

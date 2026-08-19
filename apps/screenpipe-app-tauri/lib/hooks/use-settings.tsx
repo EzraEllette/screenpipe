@@ -272,6 +272,10 @@ export interface ChatHistoryStore {
 
 // Extend SettingsStore with fields added before Rust types are regenerated
 export type Settings = SettingsStore & {
+	/** Enable automatic Activities generation. Contract only; not consumed yet. Default false. */
+	activitiesEnabled?: boolean;
+	/** Automatic Activities generation cadence in minutes. Contract only; not consumed yet. Default 15. */
+	activitiesIntervalMinutes?: number;
 	/** Goal used to prioritize the Home cards. Persisted in store.bin. */
 	userGoalCategory?: UserGoalCategory;
 	/** Where the user says they found screenpipe, answered once during setup.
@@ -677,6 +681,8 @@ const applyProCloudAudioDefaults = (settings: Settings): Settings => {
 };
 
 let DEFAULT_SETTINGS: Settings = {
+			activitiesEnabled: false,
+			activitiesIntervalMinutes: 15,
 			aiPresets: makeDefaultPresets(false) as any,
 			userGoalCategory: DEFAULT_USER_GOAL_CATEGORY,
 			deviceId: crypto.randomUUID(),
