@@ -223,7 +223,17 @@ async fn transcribe_loop(
     loop {
         mailbox.notify.notified().await;
         while let Some(chunk) = mailbox.take() {
-            transcribe_chunk(chunk, &mut session, &config, meeting_id, &device_name, &device_type, model.clone(), &mut sequence).await?;
+            transcribe_chunk(
+                chunk,
+                &mut session,
+                &config,
+                meeting_id,
+                &device_name,
+                &device_type,
+                model.clone(),
+                &mut sequence,
+            )
+            .await?;
         }
         if mailbox.is_closed() {
             break;
@@ -231,7 +241,17 @@ async fn transcribe_loop(
     }
     // A chunk can land between the last take and the close check; drain it.
     while let Some(chunk) = mailbox.take() {
-        transcribe_chunk(chunk, &mut session, &config, meeting_id, &device_name, &device_type, model.clone(), &mut sequence).await?;
+        transcribe_chunk(
+            chunk,
+            &mut session,
+            &config,
+            meeting_id,
+            &device_name,
+            &device_type,
+            model.clone(),
+            &mut sequence,
+        )
+        .await?;
     }
     Ok(())
 }
