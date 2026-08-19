@@ -117,6 +117,25 @@ describe("persisted activity history", () => {
     ).toBeNull();
   });
 
+  it("stops at the next covered segment instead of replacing it", () => {
+    const next = nextActivityHistoryRange(
+      {
+        start: new Date("2026-08-17T07:00:00Z"),
+        end: new Date("2026-08-17T16:00:00Z"),
+      },
+      [
+        {
+          start: "2026-08-17T09:00:00Z",
+          end: "2026-08-17T16:00:00Z",
+        },
+      ],
+      0,
+    );
+
+    expect(next?.start.toISOString()).toBe("2026-08-17T07:00:00.000Z");
+    expect(next?.end.toISOString()).toBe("2026-08-17T09:00:00.000Z");
+  });
+
   it("replaces only the reconciled tail and preserves the finalized prefix", () => {
     const existing = [
       entry("morning", "2026-08-17T08:00:00Z", "2026-08-17T09:00:00Z"),

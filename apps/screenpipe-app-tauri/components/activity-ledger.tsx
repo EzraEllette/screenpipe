@@ -53,7 +53,6 @@ import {
   type ActivityReviewMeeting,
 } from "@/lib/activity-review-prompt";
 import {
-  ACTIVITY_HISTORY_RECONCILE_OVERLAP_MS,
   loadPersistedActivityHistory,
   mergeActivityHistoryCoverage,
   mergeActivityHistoryDocuments,
@@ -323,14 +322,11 @@ export function canAddRecentActivity(
   range: TimeRange,
   coverage: ActivityHistoryCoverage[],
 ): boolean {
-  const pending = nextActivityHistoryRange(range, coverage);
+  const pending = nextActivityHistoryRange(range, coverage, 0);
   if (!pending) return false;
-  const overlap =
-    pending.start.getTime() > range.start.getTime()
-      ? ACTIVITY_HISTORY_RECONCILE_OVERLAP_MS
-      : 0;
+  if (pending.end.getTime() < range.end.getTime() - 1_000) return true;
   return (
-    pending.end.getTime() - pending.start.getTime() - overlap >
+    pending.end.getTime() - pending.start.getTime() >
     ACTIVITY_HISTORY_REFRESH_INTERVAL_MS
   );
 }
@@ -339,14 +335,10 @@ function recentActivityUnlockDelay(
   range: TimeRange,
   coverage: ActivityHistoryCoverage[],
 ): number | null {
-  const pending = nextActivityHistoryRange(range, coverage);
+  const pending = nextActivityHistoryRange(range, coverage, 0);
   if (!pending) return ACTIVITY_HISTORY_REFRESH_INTERVAL_MS + 1_001;
-  const overlap =
-    pending.start.getTime() > range.start.getTime()
-      ? ACTIVITY_HISTORY_RECONCILE_OVERLAP_MS
-      : 0;
-  const uncoveredMs =
-    pending.end.getTime() - pending.start.getTime() - overlap;
+  if (pending.end.getTime() < range.end.getTime() - 1_000) return null;
+  const uncoveredMs = pending.end.getTime() - pending.start.getTime();
   if (uncoveredMs > ACTIVITY_HISTORY_REFRESH_INTERVAL_MS) return null;
   return ACTIVITY_HISTORY_REFRESH_INTERVAL_MS - uncoveredMs + 1;
 }
@@ -797,16 +789,12 @@ export function ActivityLedger({
   );
   const supportsRecentActivity = preset === "today" || preset === "24h";
   const recentRange = useMemo(
-    () =>
-      supportsRecentActivity
-        ? rangeForPreset(preset, new Date(), customStart, customEnd)
-        : null,
+    () => rangeForPreset(preset, new Date(), customStart, customEnd),
     [
       customEnd,
       customStart,
       preset,
       recentEligibilityTick,
-      supportsRecentActivity,
     ],
   );
   const recentActivityAvailable = Boolean(
@@ -814,7 +802,12 @@ export function ActivityLedger({
   );
 
   useEffect(() => {
-    if (!recentRange || recentActivityAvailable || !cacheReady) return;
+    if (
+      preset === "custom" ||
+      !recentRange ||
+      recentActivityAvailable ||
+      !cacheReady
+    ) return;
     const delay = recentActivityUnlockDelay(recentRange, historyCoverage);
     if (delay === null) return;
     const timeout = window.setTimeout(
@@ -822,7 +815,13 @@ export function ActivityLedger({
       delay,
     );
     return () => window.clearTimeout(timeout);
-  }, [cacheReady, historyCoverage, recentActivityAvailable, recentRange]);
+  }, [
+    cacheReady,
+    historyCoverage,
+    preset,
+    recentActivityAvailable,
+    recentRange,
+  ]);
 
   useEffect(() => {
     posthog.capture("activity_viewed", { range: initialPresetRef.current });
@@ -1201,15 +1200,29 @@ export function ActivityLedger({
       customEnd,
     );
     if (!clickedRange) return;
-    await generateHistory(clickedRange, "enable", clickedRange);
+    const intervalMinutes = settings.activitiesIntervalMinutes ?? 15;
     try {
-      await updateSettings({ activitiesEnabled: true });
+      await updateSettings({
+        activitiesEnabled: true,
+        activitiesNextRunAt: new Date(
+          Date.now() + intervalMinutes * 60_000,
+        ).toISOString(),
+      });
     } catch {
       setHistoryError(
         "Automatic activities could not be enabled. Try again.",
       );
+      return;
     }
-  }, [customEnd, customStart, generateHistory, preset, updateSettings]);
+    await generateHistory(clickedRange, "enable", clickedRange);
+  }, [
+    customEnd,
+    customStart,
+    generateHistory,
+    preset,
+    settings.activitiesIntervalMinutes,
+    updateSettings,
+  ]);
 
   const addRecentActivity = useCallback(() => {
     const clickedRange = rangeForPreset(
@@ -1219,12 +1232,11 @@ export function ActivityLedger({
       customEnd,
     );
     const clickedHistoryRange = clickedRange
-      ? nextActivityHistoryRange(clickedRange, historyCoverage)
+      ? nextActivityHistoryRange(clickedRange, historyCoverage, 0)
       : null;
     if (
       !clickedRange ||
       !clickedHistoryRange ||
-      !supportsRecentActivity ||
       !canAddRecentActivity(clickedRange, historyCoverage) ||
       loading ||
       historyLoading ||
@@ -1244,7 +1256,6 @@ export function ActivityLedger({
     invalidRange,
     loading,
     preset,
-    supportsRecentActivity,
   ]);
 
   const recentActivityDisabled =
@@ -1383,12 +1394,12 @@ Re-query Screenpipe only inside the cited time range and use the cited frames an
                 variant="ghost"
                 size="icon"
                 onClick={() =>
-                  history && supportsRecentActivity
+                  history
                     ? addRecentActivity()
                     : regenerateSelectedRange("refresh")
                 }
                 disabled={
-                  history && supportsRecentActivity
+                  history
                     ? recentActivityDisabled
                     : loading || historyLoading || !cacheReady || invalidRange
                 }
