@@ -990,7 +990,7 @@ describe("ActivityLedger", () => {
     );
   });
 
-  it("restores the bottom append control without a rolling page clock", async () => {
+  it("does not show a bottom append control", async () => {
     mocks.loadPersistedActivityHistory.mockImplementation(
       async (_producer: string, range: { start: Date; end: Date }) => ({
         entries: parseActivityHistoryResponse(HISTORY_RESPONSE, range).entries,
@@ -1006,63 +1006,12 @@ describe("ActivityLedger", () => {
     render(<ActivityLedger />);
 
     await screen.findByText("Fixed a capture reliability regression");
-    const addRecent = screen.getByRole("button", {
-      name: "Generate more results",
-    });
-    expect(addRecent).toBeVisible();
-    expect(addRecent).toBeDisabled();
     expect(
-      screen.getByText("More results can be generated every 10 minutes."),
-    ).toBeVisible();
-
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(10 * 60_000 + 1_002);
-    });
-
-    await waitFor(() => expect(addRecent).toBeEnabled());
-    fireEvent.click(addRecent);
-
-    await waitFor(() =>
-      expect(mocks.runDailySummaryWithPi).toHaveBeenCalledWith(
-        expect.objectContaining({
-          range: {
-            start: expect.stringMatching(/^2026-08-17T20:00:00\.\d{3}Z$/),
-            end: expect.stringMatching(/^2026-08-17T20:10:01\.\d{3}Z$/),
-          },
-        }),
-      ),
-    );
-  });
-
-  it("shows the append control only for Today and Last 24 hours", async () => {
-    mocks.loadPersistedActivityHistory.mockImplementation(
-      async (_producer: string, range: { start: Date; end: Date }) => ({
-        entries: parseActivityHistoryResponse(HISTORY_RESPONSE, range).entries,
-        coverage: [
-          {
-            start: range.start.toISOString(),
-            end: range.end.toISOString(),
-          },
-        ],
-      }),
-    );
-
-    for (const [preset, expected] of [
-      ["today", true],
-      ["24h", true],
-      ["7d", false],
-      ["custom", false],
-    ] as const) {
-      window.localStorage.setItem("screenpipe:activity-history:range", preset);
-      render(<ActivityLedger />);
-      await screen.findByText("Fixed a capture reliability regression");
-      const addRecent = screen.queryByRole("button", {
-        name: "Generate more results",
-      });
-      if (expected) expect(addRecent).toBeVisible();
-      else expect(addRecent).toBeNull();
-      cleanup();
-    }
+      screen.queryByRole("button", { name: "Generate more results" }),
+    ).toBeNull();
+    expect(
+      screen.queryByText("Include activity recorded since your last update."),
+    ).toBeNull();
   });
 
   it("shows the exhausted AI preset instead of a generic failure", async () => {

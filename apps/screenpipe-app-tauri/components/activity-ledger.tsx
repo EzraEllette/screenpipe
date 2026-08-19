@@ -804,7 +804,6 @@ export function ActivityLedger({
       selectableReviewPresets[0],
     [selectableReviewPresets, selectedReviewPresetId],
   );
-  const supportsRecentActivity = preset === "today" || preset === "24h";
   const recentRange = useMemo(
     () => rangeForPreset(preset, new Date(), customStart, customEnd),
     [
@@ -1653,31 +1652,6 @@ Re-query Screenpipe only inside the cited time range and use the cited frames an
                   ))}
                 </div>
               ))}
-              {supportsRecentActivity ? (
-                <div className="flex flex-col items-center border-t border-border py-10 text-center">
-                  <Button
-                    type="button"
-                    variant="outline"
-                    className="h-10 rounded-none px-5 uppercase tracking-wide"
-                    onClick={addRecentActivity}
-                    disabled={recentActivityDisabled}
-                  >
-                    <RefreshCw
-                      className={cn(
-                        "mr-2 h-3.5 w-3.5",
-                        historyLoading && "animate-spin",
-                      )}
-                      aria-hidden="true"
-                    />
-                    Generate more results
-                  </Button>
-                  <p className="mt-2 text-xs text-muted-foreground">
-                    {recentActivityAvailable
-                      ? "Include activity recorded since your last update."
-                      : "More results can be generated every 10 minutes."}
-                  </p>
-                </div>
-              ) : null}
             </section>
           ) : loading && !summary ? (
             <ActivityLedgerSkeleton label="Reading your day…" />
