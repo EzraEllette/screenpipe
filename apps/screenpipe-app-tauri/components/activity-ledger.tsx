@@ -34,6 +34,7 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { faviconUrl } from "@/components/settings/capture-filters/icon-urls";
 import { AIPresetsSelector } from "@/components/rewind/ai-presets-selector";
+import { getRootDomain } from "@/components/rewind/timeline/favicon-utils";
 import {
   Select,
   SelectContent,
@@ -557,9 +558,15 @@ export function artifactsForHistoryEntry(
 }
 
 function EvidenceArtifactIcon({ evidence }: { evidence: ActivityArtifact }) {
-  const [iconFailed, setIconFailed] = useState(false);
+  const [iconAttempt, setIconAttempt] = useState<{
+    domain: string | null;
+    stage: "exact" | "root" | "failed";
+  }>({ domain: null, stage: "exact" });
   const [appServerBaseUrl, setAppServerBaseUrl] = useState<string | null>(null);
   const domain = siteDomain(evidence.browser_url);
+  const iconStage = iconAttempt.domain === domain ? iconAttempt.stage : "exact";
+  const rootDomain = domain ? getRootDomain(domain) : null;
+  const faviconDomain = iconStage === "root" ? rootDomain : domain;
 
   useEffect(() => {
     if (!evidence.app_name || domain) return;
@@ -575,23 +582,29 @@ function EvidenceArtifactIcon({ evidence }: { evidence: ActivityArtifact }) {
   if (evidence.kind === "meeting") {
     return <Users className="h-4 w-4" aria-hidden="true" />;
   }
-  if (domain && !iconFailed) {
+  if (domain && faviconDomain && iconStage !== "failed") {
     return (
       <img
-        src={faviconUrl(domain)}
+        src={faviconUrl(faviconDomain)}
         alt=""
         className="h-full w-full object-contain"
-        onError={() => setIconFailed(true)}
+        onError={() => {
+          if (iconStage === "exact" && rootDomain !== domain) {
+            setIconAttempt({ domain, stage: "root" });
+            return;
+          }
+          setIconAttempt({ domain, stage: "failed" });
+        }}
       />
     );
   }
-  if (evidence.app_name && appServerBaseUrl && !iconFailed) {
+  if (evidence.app_name && appServerBaseUrl && iconStage !== "failed") {
     return (
       <img
         src={`${appServerBaseUrl}/app-icon?name=${encodeURIComponent(evidence.app_name)}`}
         alt=""
         className="h-full w-full object-contain"
-        onError={() => setIconFailed(true)}
+        onError={() => setIconAttempt({ domain: null, stage: "failed" })}
       />
     );
   }
