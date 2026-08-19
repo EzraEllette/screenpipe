@@ -13,7 +13,7 @@
 import React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { AcpConfigSelector } from "./acp-config-selector";
+import { AcpConfigSelector, AcpEffortSelector } from "./acp-config-selector";
 import { ThinkingLevelSelector } from "@/components/thinking-level-selector";
 import { useAcpSessionConfig } from "@/lib/stores/acp-session-config";
 
@@ -118,8 +118,11 @@ describe("composer settings control", () => {
       } as never,
       byAgent: {},
     });
-    render(<AcpConfigSelector sessionId={SESSION} agentId="codex-acp" />);
-    fireEvent.click(screen.getByTestId("acp-config-trigger"));
+    render(<AcpEffortSelector sessionId={SESSION} agentId="codex-acp" />);
+    expect(screen.getByTestId("acp-effort-trigger")).toHaveTextContent(
+      "Reasoning effort: High",
+    );
+    fireEvent.click(screen.getByTestId("acp-effort-trigger"));
     const acpSlider = screen.getByTestId("acp-effort-slider");
     expect(acpSlider).toHaveAttribute("role", "slider");
     expect(screen.getByTestId("acp-effort-slider-value")).toHaveTextContent("High");

@@ -13,7 +13,11 @@
 import React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { ComposerEffortSlider, isEffortOption } from "./composer-effort-slider";
+import {
+  ComposerEffortSlider,
+  isEffortAxis,
+  isEffortOption,
+} from "./composer-effort-slider";
 
 const STEPS = [
   { value: "low", name: "Low" },
@@ -145,6 +149,8 @@ describe("effort detection", () => {
   });
 
   it("claims the known effort axes", () => {
+    expect(isEffortAxis(opt("reasoning_effort", "Reasoning effort"))).toBe(true);
+    expect(isEffortAxis(opt("effort", "Effort", 2))).toBe(true);
     expect(isEffortOption(opt("reasoning_effort", "Reasoning effort"))).toBe(true);
     expect(isEffortOption(opt("effort", "Effort"))).toBe(true);
     expect(isEffortOption(opt("thinking", "Thinking level"))).toBe(true);

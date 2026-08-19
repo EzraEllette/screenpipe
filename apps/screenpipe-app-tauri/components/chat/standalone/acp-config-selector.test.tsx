@@ -11,12 +11,26 @@
 
 import React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { AcpConfigSelector } from "./acp-config-selector";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
+import { AcpConfigSelector, AcpEffortSelector } from "./acp-config-selector";
 import { useAcpSessionConfig } from "@/lib/stores/acp-session-config";
 import type { AIPreset } from "@/lib/utils/tauri";
 
-vi.mock("@/lib/utils/tauri", () => ({ commands: {} }));
+const mocks = vi.hoisted(() => ({
+  setConfigOption: vi.fn(),
+}));
+
+vi.mock("@/lib/utils/tauri", () => ({
+  commands: {
+    piAcpSetConfigOption: mocks.setConfigOption,
+  },
+}));
 
 const SESSION = "chat-1";
 
@@ -44,6 +58,7 @@ function presetWith(config: Record<string, string>): AIPreset {
 
 afterEach(() => {
   cleanup();
+  mocks.setConfigOption.mockReset();
   useAcpSessionConfig.setState({ sessions: {}, byAgent: {} });
 });
 
@@ -154,6 +169,102 @@ describe("ACP config trigger", () => {
     fireEvent.click(screen.getByTestId("acp-config-trigger"));
     expect(screen.getByLabelText("Model")).toBeInTheDocument();
     expect(screen.queryByLabelText("Mode")).not.toBeInTheDocument();
+  });
+
+  it("can move effort into its dedicated composer control", () => {
+    seedSession([
+      modelOption("sonnet"),
+      {
+        id: "effort",
+        name: "Effort",
+        type: "select",
+        currentValue: "high",
+        values: [
+          { value: "low", name: "Low" },
+          { value: "medium", name: "Medium" },
+          { value: "high", name: "High" },
+        ],
+      },
+    ]);
+
+    render(
+      <AcpConfigSelector
+        sessionId={SESSION}
+        agentId="claude-acp"
+        hideEffortControl
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId("acp-config-trigger"));
+    expect(screen.getByLabelText("Model")).toBeInTheDocument();
+    expect(screen.queryByTestId("acp-effort-slider")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Effort")).not.toBeInTheDocument();
+  });
+
+  it("surfaces and persists an adapter's live effort choice", async () => {
+    seedSession([
+      {
+        id: "reasoning_effort",
+        name: "Reasoning effort",
+        type: "select",
+        currentValue: "low",
+        values: [
+          { value: "low", name: "Low" },
+          { value: "medium", name: "Medium" },
+          { value: "high", name: "High" },
+        ],
+      },
+    ]);
+    mocks.setConfigOption.mockResolvedValue({ status: "ok", data: null });
+    const onPersistDefault = vi.fn();
+
+    render(
+      <AcpEffortSelector
+        sessionId={SESSION}
+        agentId="codex-acp"
+        onPersistDefault={onPersistDefault}
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId("acp-effort-trigger"));
+    fireEvent.click(document.querySelector('[data-effort-step="high"]') as HTMLElement);
+
+    expect(onPersistDefault).toHaveBeenCalledWith({
+      optionId: "reasoning_effort",
+      value: "high",
+    });
+    await waitFor(() =>
+      expect(mocks.setConfigOption).toHaveBeenCalledWith(
+        SESSION,
+        "reasoning_effort",
+        "high",
+        null,
+      ),
+    );
+  });
+
+  it("keeps a two-value effort axis visible as a select", () => {
+    seedSession([
+      {
+        id: "effort",
+        name: "Effort",
+        type: "select",
+        currentValue: "standard",
+        values: [
+          { value: "standard", name: "Standard" },
+          { value: "deep", name: "Deep" },
+        ],
+      },
+    ]);
+
+    render(<AcpEffortSelector sessionId={SESSION} agentId="custom" />);
+
+    expect(screen.getByTestId("acp-effort-trigger")).toHaveTextContent(
+      "Effort: Standard",
+    );
+    fireEvent.click(screen.getByTestId("acp-effort-trigger"));
+    expect(screen.getByLabelText("Effort").tagName).toBe("SELECT");
+    expect(screen.queryByTestId("acp-effort-slider")).not.toBeInTheDocument();
   });
 
   it("keeps a non-permission mode such as Pi thinking in general config", () => {

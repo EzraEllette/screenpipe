@@ -34,6 +34,9 @@ vi.mock("@/components/chat/standalone/composer-utility-menu", () => ({
 }));
 vi.mock("@/components/chat/standalone/acp-config-selector", () => ({
   AcpConfigSelector: () => null,
+  AcpEffortSelector: ({ agentId }: { agentId: string }) => (
+    <div data-testid="mock-acp-effort">{agentId}</div>
+  ),
 }));
 vi.mock("@/components/chat/standalone/acp-permission-selector", () => ({
   AcpPermissionSelector: ({ agentId }: { agentId: string }) => (
@@ -139,6 +142,9 @@ describe("ComposerControlsRow preset selection", () => {
     expect(screen.getByTestId("mock-acp-permission")).toHaveTextContent(
       "codex-acp",
     );
+    expect(screen.getByTestId("mock-acp-effort")).toHaveTextContent(
+      "codex-acp",
+    );
 
     rerender(
       <ComposerControlsRow
@@ -161,6 +167,9 @@ describe("ComposerControlsRow preset selection", () => {
     expect(screen.getByTestId("mock-acp-permission")).toHaveTextContent(
       "claude-acp",
     );
+    expect(screen.getByTestId("mock-acp-effort")).toHaveTextContent(
+      "claude-acp",
+    );
 
     rerender(
       <ComposerControlsRow
@@ -180,5 +189,6 @@ describe("ComposerControlsRow preset selection", () => {
     );
 
     expect(screen.queryByTestId("mock-acp-permission")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("mock-acp-effort")).not.toBeInTheDocument();
   });
 });

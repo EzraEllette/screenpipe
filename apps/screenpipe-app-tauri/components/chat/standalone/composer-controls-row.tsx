@@ -11,7 +11,10 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { AIPresetsSelector } from "@/components/rewind/ai-presets-selector";
-import { AcpConfigSelector } from "@/components/chat/standalone/acp-config-selector";
+import {
+  AcpConfigSelector,
+  AcpEffortSelector,
+} from "@/components/chat/standalone/acp-config-selector";
 import { AcpPermissionSelector } from "@/components/chat/standalone/acp-permission-selector";
 import { ThinkingLevelSelector } from "@/components/thinking-level-selector";
 import { ComposerUtilityMenu } from "@/components/chat/standalone/composer-utility-menu";
@@ -152,10 +155,10 @@ export function ComposerControlsRow({
           }
         }}
       />
-      {/* ACP presets get the "config" popover; raw pi gets the thinking-level
-          selector. Gated on the active preset (not on stale session config) so
-          switching to a non-ACP preset hides the config control immediately
-          instead of lingering until the old ACP session tears down. */}
+      {/* ACP presets get their advertised model/config plus a dedicated effort
+          control; raw pi gets its thinking-level control. Gated on the active
+          preset (not stale session config) so switching away from ACP hides its
+          controls immediately instead of waiting for session teardown. */}
       {isAcp ? (
         <AcpConfigSelector
           sessionId={modelControls.currentQueueSessionId}
@@ -164,11 +167,20 @@ export function ComposerControlsRow({
           onPersistDefault={modelControls.onAcpConfigDefault}
           onReauthenticate={modelControls.onReauthenticate}
           hideModeControl
+          hideEffortControl
         />
       ) : (
         <ThinkingLevelSelector
           streaming={isStreaming}
           sessionId={modelControls.currentQueueSessionId}
+        />
+      )}
+      {isAcp && (
+        <AcpEffortSelector
+          sessionId={modelControls.currentQueueSessionId}
+          agentId={acpAgentId}
+          activePreset={modelControls.activePreset}
+          onPersistDefault={modelControls.onAcpConfigDefault}
         />
       )}
       <UsagePopover />
