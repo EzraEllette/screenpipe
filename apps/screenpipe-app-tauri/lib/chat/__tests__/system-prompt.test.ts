@@ -39,6 +39,15 @@ describe("buildSystemPrompt", () => {
     expect(prompt).not.toContain("First search: time only — no q, no app_name, no content_type");
   });
 
+  it("routes attached activity questions to bounded content instead of title keywords", () => {
+    expect(prompt).toContain("[Context from activity episode:");
+    expect(prompt).toContain("generated labels, not evidence and not search keywords");
+    expect(prompt).toContain("Start inside the exact attached Time range with no `q`");
+    expect(prompt).toContain("inspect cited screen frames with `/frames/{frame_id}/context`");
+    expect(prompt).toContain("Never turn words from Activity or Summary into `q`");
+    expect(prompt).toContain("Analyze the content returned by those anchored reads");
+  });
+
   it("does not restate connection-gating guidance already carried by the tools", () => {
     // gating/connect instructions live on the screenpipe_connect_app tool
     // (promptGuidelines) — keep them out of the static prompt to avoid duplication.

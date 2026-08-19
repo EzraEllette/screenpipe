@@ -40,6 +40,20 @@ describe("attached context", () => {
     });
   });
 
+  it("marks activity history context as an episode rather than generic search", () => {
+    const content = attachContextToUserMessage({
+      message: "What were the takeaways?",
+      context: "Time: 2026-08-18T23:18:59Z to 2026-08-18T23:29:59Z\nActivity: Analyzed agent frustration",
+      source: "activity-history-chat",
+    });
+
+    expect(content).toContain("[Context from activity episode:");
+    expect(parseAttachedContext(content)).toMatchObject({
+      label: "context from activity episode",
+      message: "What were the takeaways?",
+    });
+  });
+
   it("leaves ordinary messages alone", () => {
     expect(parseAttachedContext("what did I work on today?")).toBeNull();
     // A bracketed sentence is not an envelope.

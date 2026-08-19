@@ -1173,6 +1173,26 @@ private func testHoverPreviewPlacement() {
     )
 }
 
+// MARK: - Screen-safe chrome
+
+private func testTopChromeSafeInset() {
+    expectClose(
+        TimelineTopChromeLayout.safeInset(windowMaxY: 982, visibleFrameMaxY: 982),
+        0,
+        "a window inside the visible frame keeps its existing top spacing"
+    )
+    expectClose(
+        TimelineTopChromeLayout.safeInset(windowMaxY: 1_116, visibleFrameMaxY: 1_082),
+        34,
+        "fullscreen chrome clears the menu bar and camera housing"
+    )
+    expectClose(
+        TimelineTopChromeLayout.safeInset(windowMaxY: 900, visibleFrameMaxY: 982),
+        0,
+        "a lower window never receives a negative inset"
+    )
+}
+
 // MARK: - Runner
 
 private let allTests: [(String, () -> Void)] = [
@@ -1209,6 +1229,7 @@ private let allTests: [(String, () -> Void)] = [
     ("date navigation", testDateNavigation),
     ("frame accessors", testFrameAccessors),
     ("hover preview placement", testHoverPreviewPlacement),
+    ("top chrome safe inset", testTopChromeSafeInset),
 ]
 
 @main
