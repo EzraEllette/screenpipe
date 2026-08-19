@@ -88,6 +88,11 @@ function useHarness() {
   const messagesRef = useRef<any[]>([]);
   const conversationIdRef = useRef<string | null>(null);
   const piSessionIdRef = useRef("");
+  const piStreamingTextRef = useRef("");
+  const piMessageIdRef = useRef<string | null>(null);
+  const piContentBlocksRef = useRef<any[]>([]);
+  const setIsLoading = vi.fn();
+  const setIsStreaming = vi.fn();
   const hook = useChatConversations({
     messages: messagesRef.current,
     setMessages: ((next: any) => {
@@ -102,19 +107,27 @@ function useHarness() {
     inputRef: useRef<HTMLTextAreaElement | null>(null),
     isLoading: false,
     isStreaming: false,
-    piStreamingTextRef: useRef(""),
-    piMessageIdRef: useRef<string | null>(null),
-    piContentBlocksRef: useRef<any[]>([]),
+    piStreamingTextRef,
+    piMessageIdRef,
+    piContentBlocksRef,
     piSessionSyncedRef: useRef(false),
     piSessionIdRef,
-    setIsLoading: vi.fn() as any,
-    setIsStreaming: vi.fn() as any,
+    setIsLoading: setIsLoading as any,
+    setIsStreaming: setIsStreaming as any,
     setPastedImages: vi.fn() as any,
     settings: { chatHistory: { historyEnabled: true } },
     inlineHistoryEnabled: false,
     selectedPreset: null,
   });
-  return { hook, messagesRef };
+  return {
+    hook,
+    messagesRef,
+    piStreamingTextRef,
+    piMessageIdRef,
+    piContentBlocksRef,
+    setIsLoading,
+    setIsStreaming,
+  };
 }
 
 beforeEach(() => {
@@ -161,6 +174,77 @@ describe("direct conversation hydration", () => {
       user,
       richer,
     ]);
+  });
+
+  it("preserves router activity that arrives while persisted state is loading", async () => {
+    const liveUpdatedAt = Date.now();
+    const richer = {
+      ...completed,
+      content: "newer live answer still streaming",
+      contentBlocks: [{ type: "text", text: "newer live answer still streaming" }],
+    };
+    const liveMessages = [user, richer];
+    const liveBlocks = [{ type: "text", text: "still streaming" }];
+    let resolveLoad!: (value: ReturnType<typeof conversation>) => void;
+    loadConversationFile.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveLoad = resolve;
+      }),
+    );
+    const { result } = renderHook(() => useHarness());
+    let loadPromise!: Promise<void>;
+
+    await act(async () => {
+      loadPromise = result.current.hook.loadConversation(conversation([]) as any);
+      await vi.waitFor(() => {
+        expect(loadConversationFile).toHaveBeenCalledWith("chat-target");
+      });
+    });
+
+    act(() => {
+      useChatStore.getState().actions.upsert({
+        id: "chat-target",
+        title: "question",
+        preview: "newer live answer still streaming",
+        status: "streaming",
+        messageCount: liveMessages.length,
+        createdAt: 1,
+        updatedAt: liveUpdatedAt,
+        pinned: false,
+        unread: false,
+        messages: liveMessages,
+        isLoading: true,
+        isStreaming: true,
+        streamingMessageId: richer.id,
+        streamingText: richer.content,
+        contentBlocks: liveBlocks,
+      });
+    });
+
+    await act(async () => {
+      resolveLoad({
+        ...conversation([user, completed]),
+        updatedAt: liveUpdatedAt - 60_000,
+      });
+      await loadPromise;
+    });
+
+    const selected = useChatStore.getState().sessions["chat-target"];
+    expect(result.current.messagesRef.current).toBe(selected.messages);
+    expect(selected.messages).toEqual(liveMessages);
+    expect(selected.updatedAt).toBe(liveUpdatedAt);
+    expect(selected.status).toBe("streaming");
+    expect(selected.messageCount).toBe(liveMessages.length);
+    expect(selected.isLoading).toBe(true);
+    expect(selected.isStreaming).toBe(true);
+    expect(selected.streamingMessageId).toBe(richer.id);
+    expect(selected.streamingText).toBe(richer.content);
+    expect(selected.contentBlocks).toEqual(liveBlocks);
+    expect(result.current.piMessageIdRef.current).toBe(richer.id);
+    expect(result.current.piStreamingTextRef.current).toBe(richer.content);
+    expect(result.current.piContentBlocksRef.current).toEqual(liveBlocks);
+    expect(result.current.setIsLoading).toHaveBeenLastCalledWith(true);
+    expect(result.current.setIsStreaming).toHaveBeenLastCalledWith(true);
   });
 
   it("reuses an already-hydrated store session without reading disk", async () => {

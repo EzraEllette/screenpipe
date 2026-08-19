@@ -1330,7 +1330,11 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
         useAcpSessionConfig.getState().seedSessionId(conv.id, priorAcpSessionId);
       }
       if (persisted) {
-        if (!store.sessions[conv.id]) {
+        // Disk I/O yields to the event router. Re-read before reconciling so a
+        // session created or advanced while the file was loading keeps its
+        // router-owned activity fields (status, counts, and freshness).
+        const sessionAfterLoad = useChatStore.getState().sessions[conv.id];
+        if (!sessionAfterLoad) {
           store.actions.upsert({
             id: conv.id,
             title: persisted.title || "untitled",
@@ -1353,11 +1357,14 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
           });
         } else {
           store.actions.patch(conv.id, {
-            title: persisted.title || existing?.title || "untitled",
+            title: persisted.title || sessionAfterLoad.title || "untitled",
             ...(persisted.titleSource ? { titleSource: persisted.titleSource } : {}),
             pinned: persisted.pinned === true,
             hidden: persisted.hidden === true,
-            updatedAt: Math.max(existing?.updatedAt ?? 0, persisted.updatedAt ?? 0),
+            updatedAt: Math.max(
+              sessionAfterLoad.updatedAt,
+              persisted.updatedAt ?? 0,
+            ),
             ...(persisted.kind ? { kind: persisted.kind } : {}),
             ...(persisted.pipeContext ? { pipeContext: persisted.pipeContext } : {}),
             ...(persisted.sidebarGroup ? { sidebarGroup: persisted.sidebarGroup } : {}),
@@ -1448,7 +1455,8 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
         ...((m as any).stoppedByUser ? { stoppedByUser: true } : {}),
       }));
       // Make sure a record exists, then seed messages and mark hydrated.
-      if (!store.sessions[conv.id]) {
+      const sessionBeforeSeed = useChatStore.getState().sessions[conv.id];
+      if (!sessionBeforeSeed) {
         store.actions.upsert({
           id: conv.id,
           title: full.title || "untitled",
@@ -1474,11 +1482,11 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
         });
       } else if (conv.kind || conv.pipeContext || conv.sidebarGroup || full.sidebarGroup) {
         store.actions.patch(conv.id, {
-          title: full.title || store.sessions[conv.id]?.title || "untitled",
+          title: full.title || sessionBeforeSeed.title || "untitled",
           ...(full.titleSource ? { titleSource: full.titleSource } : {}),
           pinned: full.pinned === true,
           hidden: full.hidden === true,
-          updatedAt: Math.max(store.sessions[conv.id]?.updatedAt ?? 0, full.updatedAt ?? 0),
+          updatedAt: Math.max(sessionBeforeSeed.updatedAt, full.updatedAt ?? 0),
           ...(conv.kind ? { kind: conv.kind } : {}),
           ...(conv.pipeContext ? { pipeContext: conv.pipeContext } : {}),
           ...(conv.sidebarGroup ? { sidebarGroup: conv.sidebarGroup } : full.sidebarGroup ? { sidebarGroup: full.sidebarGroup } : {}),
