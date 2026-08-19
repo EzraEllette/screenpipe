@@ -105,8 +105,8 @@ export function FirstRunReadyPanel({
 
       <div className="flex items-center justify-between gap-4 border-t border-border px-4 py-3">
         <p className="text-[10px] leading-relaxed text-muted-foreground">
-          these are optional. you can set them up later from scheduled tasks and
-          connections.
+          screenpipe is ready now. these optional setups remain available from
+          scheduled tasks and connections.
         </p>
         <Button
           size="sm"
@@ -114,7 +114,7 @@ export function FirstRunReadyPanel({
           className="h-7 shrink-0 px-2 text-[9px]"
           onClick={onDismiss}
         >
-          later
+          this is ready
         </Button>
       </div>
     </div>
@@ -127,9 +127,12 @@ export function FirstRunReadyPanel({
  * Renders nothing outside the window, so it is safe to mount unconditionally
  * on the surface the user lands on after onboarding.
  */
-export function FirstRunLearningBanner(props: LearningWindowOptions = {}) {
+export function FirstRunLearningBanner(
+  props: LearningWindowOptions & { fallback?: React.ReactNode } = {},
+) {
+  const { fallback, ...learningOptions } = props;
   const { phase, capturedApps, remainingMs, chatId, showProgress, dismiss } =
-    useLearningWindow(props);
+    useLearningWindow(learningOptions);
   const { targets: handoffTargets, hint: handoffHint, askAgent } =
     useAgentHandoff(phase === "ready");
 
@@ -143,7 +146,7 @@ export function FirstRunLearningBanner(props: LearningWindowOptions = {}) {
       (phase === "learning" || phase === "writing")
     )
   ) {
-    return null;
+    return fallback ? <>{fallback}</> : null;
   }
 
   const openSummary = async () => {
@@ -166,7 +169,7 @@ export function FirstRunLearningBanner(props: LearningWindowOptions = {}) {
       data-testid="first-run-learning-banner"
       data-phase={phase}
       className={`mx-auto mb-4 w-full border border-border bg-background ${
-        phase === "ready" ? "max-w-4xl overflow-hidden" : "max-w-3xl p-4"
+        phase === "ready" ? "max-w-3xl overflow-hidden" : "max-w-3xl p-4"
       }`}
     >
       {phase === "learning" && (
@@ -244,7 +247,7 @@ export function FirstRunLearningBanner(props: LearningWindowOptions = {}) {
           onOpenSummary={() => void openSummary()}
           onPickAgent={(target) => void askAgent(target)}
           onDismiss={() => dismiss()}
-          nextSteps={<FirstRunNextSteps userToken={props.userToken} />}
+          nextSteps={<FirstRunNextSteps userToken={learningOptions.userToken} />}
         />
       )}
     </section>

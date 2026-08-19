@@ -76,6 +76,27 @@ describe("first-run learning banner", () => {
     expect(done.container).toBeEmptyDOMElement();
   });
 
+  it("renders the normal Home surface only when the learning card is absent", () => {
+    mocks.view = view({ phase: "idle" });
+    const { rerender } = render(
+      <FirstRunLearningBanner
+        fallback={<div data-testid="normal-home">How can I help today?</div>}
+      />,
+    );
+    expect(screen.getByTestId("normal-home")).toBeInTheDocument();
+
+    mocks.view = view({ phase: "ready", chatId: "ready-summary" });
+    rerender(
+      <FirstRunLearningBanner
+        fallback={<div data-testid="normal-home">How can I help today?</div>}
+      />,
+    );
+    expect(screen.queryByTestId("normal-home")).not.toBeInTheDocument();
+    expect(
+      screen.getByText("screenpipe learned enough to help"),
+    ).toBeInTheDocument();
+  });
+
   it("shows the countdown while learning", () => {
     mocks.view = view({ remainingMs: 61_000 });
     render(<FirstRunLearningBanner />);
@@ -126,13 +147,20 @@ describe("first-run learning banner", () => {
   });
 
   it("offers the state-aware daily setup after learning resolves", () => {
-    mocks.view = view({ phase: "ready", chatId: "first-run-steps" });
+    const dismiss = vi.fn();
+    mocks.view = view({
+      phase: "ready",
+      chatId: "first-run-steps",
+      dismiss,
+    });
     render(<FirstRunLearningBanner />);
 
     expect(
       screen.getByText("screenpipe learned enough to help"),
     ).toBeInTheDocument();
     expect(screen.getByTestId("first-run-next-steps")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "this is ready" }));
+    expect(dismiss).toHaveBeenCalled();
   });
 
   it("keeps every empty result out of the interface", () => {
