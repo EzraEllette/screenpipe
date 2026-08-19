@@ -53,7 +53,6 @@ import {
   type ActivityReviewMeeting,
 } from "@/lib/activity-review-prompt";
 import {
-  ACTIVITY_HISTORY_RECONCILE_OVERLAP_MS,
   loadPersistedActivityHistory,
   mergeActivityHistoryCoverage,
   mergeActivityHistoryDocuments,
@@ -72,7 +71,7 @@ import { cn } from "@/lib/utils";
 import type { AIPreset } from "@/lib/utils/tauri";
 
 type RangePreset = "today" | "24h" | "7d" | "custom";
-type GenerationSource = "empty_state" | "refresh";
+type GenerationSource = "empty_state" | "refresh" | "enable";
 type ActivitySummaryResponse = {
   data_status: string;
   total_active_minutes: number;
@@ -323,14 +322,11 @@ export function canAddRecentActivity(
   range: TimeRange,
   coverage: ActivityHistoryCoverage[],
 ): boolean {
-  const pending = nextActivityHistoryRange(range, coverage);
+  const pending = nextActivityHistoryRange(range, coverage, 0);
   if (!pending) return false;
-  const overlap =
-    pending.start.getTime() > range.start.getTime()
-      ? ACTIVITY_HISTORY_RECONCILE_OVERLAP_MS
-      : 0;
+  if (pending.end.getTime() < range.end.getTime() - 1_000) return true;
   return (
-    pending.end.getTime() - pending.start.getTime() - overlap >
+    pending.end.getTime() - pending.start.getTime() >
     ACTIVITY_HISTORY_REFRESH_INTERVAL_MS
   );
 }
@@ -339,14 +335,10 @@ function recentActivityUnlockDelay(
   range: TimeRange,
   coverage: ActivityHistoryCoverage[],
 ): number | null {
-  const pending = nextActivityHistoryRange(range, coverage);
+  const pending = nextActivityHistoryRange(range, coverage, 0);
   if (!pending) return ACTIVITY_HISTORY_REFRESH_INTERVAL_MS + 1_001;
-  const overlap =
-    pending.start.getTime() > range.start.getTime()
-      ? ACTIVITY_HISTORY_RECONCILE_OVERLAP_MS
-      : 0;
-  const uncoveredMs =
-    pending.end.getTime() - pending.start.getTime() - overlap;
+  if (pending.end.getTime() < range.end.getTime() - 1_000) return null;
+  const uncoveredMs = pending.end.getTime() - pending.start.getTime();
   if (uncoveredMs > ACTIVITY_HISTORY_REFRESH_INTERVAL_MS) return null;
   return ACTIVITY_HISTORY_REFRESH_INTERVAL_MS - uncoveredMs + 1;
 }
@@ -761,10 +753,15 @@ export function ActivityLedger({
   const [recentEligibilityTick, setRecentEligibilityTick] = useState(0);
   const historyAbortRef = useRef<AbortController | null>(null);
   const historyLoadingRef = useRef(false);
+  const legacyActivitiesActivationStartedRef = useRef(false);
   const [selectedReviewPresetId, setSelectedReviewPresetId] = useState<
     string | null
   >(null);
-  const { settings } = useSettings();
+  const { settings, updateSettings } = useSettings();
+  const legacyActivitiesEnabled =
+    settings.activitiesEnabled === undefined && historyCoverage.length > 0;
+  const activitiesEnabled =
+    settings.activitiesEnabled ?? legacyActivitiesEnabled;
 
   const range = useMemo(
     () => rangeForPreset(preset, anchor, customStart, customEnd),
@@ -796,16 +793,12 @@ export function ActivityLedger({
   );
   const supportsRecentActivity = preset === "today" || preset === "24h";
   const recentRange = useMemo(
-    () =>
-      supportsRecentActivity
-        ? rangeForPreset(preset, new Date(), customStart, customEnd)
-        : null,
+    () => rangeForPreset(preset, new Date(), customStart, customEnd),
     [
       customEnd,
       customStart,
       preset,
       recentEligibilityTick,
-      supportsRecentActivity,
     ],
   );
   const recentActivityAvailable = Boolean(
@@ -813,7 +806,12 @@ export function ActivityLedger({
   );
 
   useEffect(() => {
-    if (!recentRange || recentActivityAvailable || !cacheReady) return;
+    if (
+      preset === "custom" ||
+      !recentRange ||
+      recentActivityAvailable ||
+      !cacheReady
+    ) return;
     const delay = recentActivityUnlockDelay(recentRange, historyCoverage);
     if (delay === null) return;
     const timeout = window.setTimeout(
@@ -821,7 +819,13 @@ export function ActivityLedger({
       delay,
     );
     return () => window.clearTimeout(timeout);
-  }, [cacheReady, historyCoverage, recentActivityAvailable, recentRange]);
+  }, [
+    cacheReady,
+    historyCoverage,
+    preset,
+    recentActivityAvailable,
+    recentRange,
+  ]);
 
   useEffect(() => {
     posthog.capture("activity_viewed", { range: initialPresetRef.current });
@@ -980,6 +984,31 @@ export function ActivityLedger({
       // even when the user navigates elsewhere while Pi is still working.
     };
   }, [preset, range]);
+
+  useEffect(() => {
+    if (
+      !cacheReady ||
+      !legacyActivitiesEnabled ||
+      legacyActivitiesActivationStartedRef.current
+    ) {
+      return;
+    }
+    legacyActivitiesActivationStartedRef.current = true;
+    const intervalMinutes = settings.activitiesIntervalMinutes ?? 15;
+    void updateSettings({
+      activitiesEnabled: true,
+      activitiesNextRunAt: new Date(
+        Date.now() + intervalMinutes * 60_000,
+      ).toISOString(),
+    }).catch(() => {
+      legacyActivitiesActivationStartedRef.current = false;
+    });
+  }, [
+    cacheReady,
+    legacyActivitiesEnabled,
+    settings.activitiesIntervalMinutes,
+    updateSettings,
+  ]);
 
   const generateHistory = useCallback(async (
     generationRange: TimeRange,
@@ -1192,6 +1221,38 @@ export function ActivityLedger({
     void generateHistory(clickedRange, source, clickedRange);
   }, [customEnd, customStart, generateHistory, preset]);
 
+  const enableActivities = useCallback(async () => {
+    const clickedRange = rangeForPreset(
+      preset,
+      new Date(),
+      customStart,
+      customEnd,
+    );
+    if (!clickedRange) return;
+    const intervalMinutes = settings.activitiesIntervalMinutes ?? 15;
+    try {
+      await updateSettings({
+        activitiesEnabled: true,
+        activitiesNextRunAt: new Date(
+          Date.now() + intervalMinutes * 60_000,
+        ).toISOString(),
+      });
+    } catch {
+      setHistoryError(
+        "Automatic activities could not be enabled. Try again.",
+      );
+      return;
+    }
+    await generateHistory(clickedRange, "enable", clickedRange);
+  }, [
+    customEnd,
+    customStart,
+    generateHistory,
+    preset,
+    settings.activitiesIntervalMinutes,
+    updateSettings,
+  ]);
+
   const addRecentActivity = useCallback(() => {
     const clickedRange = rangeForPreset(
       preset,
@@ -1200,12 +1261,11 @@ export function ActivityLedger({
       customEnd,
     );
     const clickedHistoryRange = clickedRange
-      ? nextActivityHistoryRange(clickedRange, historyCoverage)
+      ? nextActivityHistoryRange(clickedRange, historyCoverage, 0)
       : null;
     if (
       !clickedRange ||
       !clickedHistoryRange ||
-      !supportsRecentActivity ||
       !canAddRecentActivity(clickedRange, historyCoverage) ||
       loading ||
       historyLoading ||
@@ -1225,7 +1285,6 @@ export function ActivityLedger({
     invalidRange,
     loading,
     preset,
-    supportsRecentActivity,
   ]);
 
   const recentActivityDisabled =
@@ -1364,12 +1423,12 @@ Re-query Screenpipe only inside the cited time range and use the cited frames an
                 variant="ghost"
                 size="icon"
                 onClick={() =>
-                  history && supportsRecentActivity
+                  history
                     ? addRecentActivity()
                     : regenerateSelectedRange("refresh")
                 }
                 disabled={
-                  history && supportsRecentActivity
+                  history
                     ? recentActivityDisabled
                     : loading || historyLoading || !cacheReady || invalidRange
                 }
@@ -1446,6 +1505,35 @@ Re-query Screenpipe only inside the cited time range and use the cited frames an
             <p className="text-sm text-muted-foreground">
               Start time must be before end time.
             </p>
+          ) : !activitiesEnabled ? (
+            loading && !summary ? (
+              <ActivityLedgerSkeleton label="Reading your day…" />
+            ) : !cacheReady ? (
+              <ActivityLedgerSkeleton label="Loading generated activities…" />
+            ) : historyLoading ? (
+              <ActivityLedgerSkeleton label="Understanding what you worked on…" />
+            ) : (
+              <div className="flex min-h-[320px] items-center justify-center py-12 text-center">
+                <div className="max-w-sm">
+                  <h2 className="font-sans text-xl font-medium tracking-tight">
+                    Enable activities
+                  </h2>
+                  <p className="mt-2 text-sm leading-6 text-muted-foreground">
+                    <span role={historyError ? "alert" : undefined}>
+                      {historyError ||
+                        "Generate this time range now, then keep activities updated automatically."}
+                    </span>
+                  </p>
+                  <Button
+                    size="sm"
+                    className="mt-5 h-10 px-5 uppercase tracking-wide"
+                    onClick={() => void enableActivities()}
+                  >
+                    {historyError ? "Try again" : "Enable activities"}
+                  </Button>
+                </div>
+              </div>
+            )
           ) : history ? (
             <section aria-label="Activity history">
               {groupedEntries.map(([day, entries]) => (

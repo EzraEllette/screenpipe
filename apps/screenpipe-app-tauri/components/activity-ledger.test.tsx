@@ -27,7 +27,9 @@ const mocks = vi.hoisted(() => ({
   runDailySummaryWithPi: vi.fn(),
   setPendingNavigation: vi.fn(),
   showChatWithPrefill: vi.fn(),
+  updateSettings: vi.fn(),
   settings: {
+    activitiesEnabled: true,
     enhancedAI: true,
     user: { token: "test-token" },
     aiPresets: [
@@ -80,7 +82,10 @@ vi.mock("@/lib/activity-history-persistence", async (importOriginal) => {
   };
 });
 vi.mock("@/lib/hooks/use-settings", () => ({
-  useSettings: () => ({ settings: mocks.settings }),
+  useSettings: () => ({
+    settings: mocks.settings,
+    updateSettings: mocks.updateSettings,
+  }),
 }));
 vi.mock("@/lib/hooks/use-timeline-store", () => ({
   useTimelineStore: (selector: (state: unknown) => unknown) =>
@@ -287,6 +292,8 @@ beforeEach(() => {
   vi.setSystemTime(new Date("2026-08-17T20:00:00Z"));
   mocks.getAppServerBaseUrl.mockResolvedValue("http://localhost:11535");
   mocks.settings.enhancedAI = true;
+  mocks.settings.activitiesEnabled = true;
+  mocks.updateSettings.mockResolvedValue(undefined);
   const values = new Map<string, string>();
   Object.defineProperty(window, "localStorage", {
     configurable: true,
@@ -409,6 +416,26 @@ describe("activity history helpers", () => {
         { ...range, end: new Date("2026-08-17T20:10:00.001Z") },
         coverage,
       ),
+    ).toBe(true);
+  });
+
+  it("allows a bounded historical gap without touching later coverage", () => {
+    const range = {
+      start: new Date("2026-08-17T07:00:00Z"),
+      end: new Date("2026-08-17T20:00:00Z"),
+    };
+
+    expect(
+      canAddRecentActivity(range, [
+        {
+          start: "2026-08-17T07:00:00Z",
+          end: "2026-08-17T09:00:00Z",
+        },
+        {
+          start: "2026-08-17T09:05:00Z",
+          end: "2026-08-17T20:00:00Z",
+        },
+      ]),
     ).toBe(true);
   });
 
@@ -626,6 +653,115 @@ describe("activity history helpers", () => {
 });
 
 describe("ActivityLedger", () => {
+  it("enables legacy users with prior generation without regenerating", async () => {
+    delete (mocks.settings as { activitiesEnabled?: boolean })
+      .activitiesEnabled;
+    const range = {
+      start: new Date("2026-08-17T07:00:00Z"),
+      end: new Date("2026-08-17T20:00:00Z"),
+    };
+    mocks.loadPersistedActivityHistory.mockResolvedValue({
+      entries: parseActivityHistoryResponse(HISTORY_RESPONSE, range).entries,
+      coverage: [
+        {
+          start: range.start.toISOString(),
+          end: range.end.toISOString(),
+        },
+      ],
+    });
+
+    render(<ActivityLedger />);
+
+    expect(
+      await screen.findByText("Fixed a capture reliability regression"),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: "Enable activities" }),
+    ).toBeNull();
+    await waitFor(() =>
+      expect(mocks.updateSettings).toHaveBeenCalledWith({
+        activitiesEnabled: true,
+        activitiesNextRunAt: expect.stringMatching(
+          /^2026-08-17T20:15:00\.\d{3}Z$/,
+        ),
+      }),
+    );
+    expect(mocks.runDailySummaryWithPi).not.toHaveBeenCalled();
+  });
+
+  it("keeps an explicitly disabled legacy user disabled", async () => {
+    mocks.settings.activitiesEnabled = false;
+    mocks.loadPersistedActivityHistory.mockResolvedValue({
+      entries: [],
+      coverage: [
+        {
+          start: "2026-08-17T07:00:00.000Z",
+          end: "2026-08-17T20:00:00.000Z",
+        },
+      ],
+    });
+
+    render(<ActivityLedger />);
+
+    expect(
+      await screen.findByRole("button", { name: "Enable activities" }),
+    ).toBeVisible();
+    expect(mocks.updateSettings).not.toHaveBeenCalled();
+    expect(mocks.runDailySummaryWithPi).not.toHaveBeenCalled();
+  });
+
+  it("registers the first interval before generating the selected range", async () => {
+    mocks.settings.activitiesEnabled = false;
+    render(<ActivityLedger />);
+
+    expect(
+      await screen.findByRole("button", { name: "Enable activities" }),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: "Generate activities" }),
+    ).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Enable activities" }));
+
+    await waitFor(() =>
+      expect(mocks.updateSettings).toHaveBeenCalledWith({
+        activitiesEnabled: true,
+        activitiesNextRunAt: expect.stringMatching(
+          /^2026-08-17T20:15:00\.\d{3}Z$/,
+        ),
+      }),
+    );
+    expect(mocks.runDailySummaryWithPi).toHaveBeenCalled();
+    expect(
+      mocks.updateSettings.mock.invocationCallOrder[0],
+    ).toBeLessThan(mocks.runDailySummaryWithPi.mock.invocationCallOrder[0]);
+  });
+
+  it("enables activities after a failed first generation without overlapping it", async () => {
+    mocks.settings.activitiesEnabled = false;
+    mocks.runDailySummaryWithPi.mockRejectedValueOnce(new Error("network"));
+    render(<ActivityLedger />);
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Enable activities" }),
+    );
+
+    expect(
+      await screen.findByText(
+        "History could not be updated. Try again.",
+      ),
+    ).toBeVisible();
+    expect(mocks.updateSettings).toHaveBeenCalledWith({
+      activitiesEnabled: true,
+      activitiesNextRunAt: expect.stringMatching(
+        /^2026-08-17T20:15:00\.\d{3}Z$/,
+      ),
+    });
+    expect(
+      mocks.updateSettings.mock.invocationCallOrder[0],
+    ).toBeLessThan(mocks.runDailySummaryWithPi.mock.invocationCallOrder[0]);
+  });
+
   it("waits for the encrypted cache lookup before offering generation", async () => {
     let resolveCache!: (value: { entries: []; coverage: [] }) => void;
     mocks.loadPersistedActivityHistory.mockImplementation(
@@ -813,17 +949,24 @@ describe("ActivityLedger", () => {
     ).toBeVisible();
   });
 
-  it("uses the selected preset for an explicit refresh", async () => {
+  it("refreshes only uncovered time without overwriting stored activity", async () => {
+    window.localStorage.setItem("screenpipe:activity-history:range", "7d");
+    let coveredThrough = "";
     mocks.loadPersistedActivityHistory.mockImplementation(
-      async (_producer: string, range: { start: Date; end: Date }) => ({
-        entries: parseActivityHistoryResponse(HISTORY_RESPONSE, range).entries,
-        coverage: [
-          {
-            start: range.start.toISOString(),
-            end: new Date(range.end.getTime() - 11 * 60_000).toISOString(),
-          },
-        ],
-      }),
+      async (_producer: string, range: { start: Date; end: Date }) => {
+        coveredThrough = new Date(
+          range.end.getTime() - 11 * 60_000,
+        ).toISOString();
+        return {
+          entries: parseActivityHistoryResponse(HISTORY_RESPONSE, range).entries,
+          coverage: [
+            {
+              start: range.start.toISOString(),
+              end: coveredThrough,
+            },
+          ],
+        };
+      },
     );
 
     render(<ActivityLedger />);
@@ -841,6 +984,7 @@ describe("ActivityLedger", () => {
         expect.objectContaining({
           preset: expect.objectContaining({ id: "pipes" }),
           sessionPrefix: "activity-history",
+          range: expect.objectContaining({ start: coveredThrough }),
         }),
       ),
     );
@@ -882,7 +1026,7 @@ describe("ActivityLedger", () => {
       expect(mocks.runDailySummaryWithPi).toHaveBeenCalledWith(
         expect.objectContaining({
           range: {
-            start: expect.stringMatching(/^2026-08-17T19:50:00\.\d{3}Z$/),
+            start: expect.stringMatching(/^2026-08-17T20:00:00\.\d{3}Z$/),
             end: expect.stringMatching(/^2026-08-17T20:10:01\.\d{3}Z$/),
           },
         }),
