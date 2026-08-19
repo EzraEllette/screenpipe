@@ -1550,12 +1550,12 @@ Re-query Screenpipe only inside the cited time range and use the cited frames an
                       )}
                       aria-hidden="true"
                     />
-                    Add recent activities
+                    Generate more results
                   </Button>
                   <p className="mt-2 text-xs text-muted-foreground">
                     {recentActivityAvailable
-                      ? "Include work recorded since your last update."
-                      : "More activity can be added every 10 minutes."}
+                      ? "Include activity recorded since your last update."
+                      : "More results can be generated every 10 minutes."}
                   </p>
                 </div>
               ) : null}

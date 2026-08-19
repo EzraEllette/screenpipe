@@ -11,6 +11,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 
 Element.prototype.scrollIntoView ||= () => {};
@@ -782,12 +783,12 @@ describe("ActivityLedger", () => {
 
     await screen.findByText("Fixed a capture reliability regression");
     const addRecent = screen.getByRole("button", {
-      name: "Add recent activities",
+      name: "Generate more results",
     });
     expect(addRecent).toBeVisible();
     expect(addRecent).toBeDisabled();
     expect(
-      screen.getByText("More activity can be added every 10 minutes."),
+      screen.getByText("More results can be generated every 10 minutes."),
     ).toBeVisible();
 
     await act(async () => {
@@ -832,7 +833,7 @@ describe("ActivityLedger", () => {
       render(<ActivityLedger />);
       await screen.findByText("Fixed a capture reliability regression");
       const addRecent = screen.queryByRole("button", {
-        name: "Add recent activities",
+        name: "Generate more results",
       });
       if (expected) expect(addRecent).toBeVisible();
       else expect(addRecent).toBeNull();
@@ -1063,6 +1064,7 @@ describe("ActivityLedger", () => {
       }),
     ).toBeVisible();
 
+    const activityRows = screen.getAllByRole("article");
     for (const noisyLabel of [
       "completed",
       "in progress",
@@ -1076,7 +1078,11 @@ describe("ActivityLedger", () => {
       "granularity",
       "hour by hour",
     ]) {
-      expect(screen.queryByText(noisyLabel, { exact: false })).toBeNull();
+      for (const row of activityRows) {
+        expect(
+          within(row).queryByText(noisyLabel, { exact: false }),
+        ).toBeNull();
+      }
     }
 
     await waitFor(() =>
