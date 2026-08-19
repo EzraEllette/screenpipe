@@ -1191,6 +1191,28 @@ describe("ActivityLedger", () => {
     );
   });
 
+  it("lets the user leave while generation continues", async () => {
+    let resolveHistory!: (value: string) => void;
+    mocks.runDailySummaryWithPi.mockImplementation(
+      () =>
+        new Promise<string>((resolve) => {
+          resolveHistory = resolve;
+        }),
+    );
+
+    render(<ActivityLedger />);
+    await generateActivities();
+
+    expect(
+      await screen.findByText(
+        "You can leave this page. We’ll notify you when your activities are ready.",
+      ),
+    ).toBeVisible();
+
+    resolveHistory(HISTORY_RESPONSE);
+    await screen.findByText("Fixed a capture reliability regression");
+  });
+
   it("keeps rows concise while exposing artifact icons and episode actions", async () => {
     render(<ActivityLedger />);
     await generateActivities();

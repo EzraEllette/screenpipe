@@ -243,6 +243,13 @@ export function DeeplinkHandler() {
         await openSettingsWindow(settingsSectionFromDeepLink(parsedUrl));
       }
 
+      if (
+        parsedUrl.host === "activity" ||
+        parsedUrl.pathname === "/activity"
+      ) {
+        await commands.showWindowActivated({ Home: { page: "activity" } });
+      }
+
       // A Live View follow-up notification points directly at the dashboard
       // created during onboarding. Persisting the selection before opening
       // Home also covers a cold-started Settings window.

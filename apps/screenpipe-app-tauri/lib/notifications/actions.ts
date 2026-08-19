@@ -52,11 +52,16 @@ export interface NotificationAction {
   open_in_chat?: boolean;
 }
 
-// Route a screenpipe:// deeplink to the window that can handle it. Meeting
-// deeplinks belong to the Home window's meetings page; everything else to Main.
+// Route a screenpipe:// deeplink to the window that can handle it. Meeting and
+// Activity deeplinks belong to Home; timeline and other routes belong to Main.
 export function isMeetingDeeplink(url: string) {
   return url.startsWith("screenpipe://meeting/") ||
     url.startsWith("screenpipe://meeting?");
+}
+
+export function isActivityDeeplink(url: string) {
+  return url === "screenpipe://activity" ||
+    url.startsWith("screenpipe://activity?");
 }
 
 export function parseMeetingDeeplink(url: string): {
@@ -82,9 +87,9 @@ export function parseMeetingDeeplink(url: string): {
 }
 
 export function windowForDeeplink(url: string) {
-  return isMeetingDeeplink(url)
-    ? { Home: { page: "meetings" } }
-    : "Main";
+  if (isMeetingDeeplink(url)) return { Home: { page: "meetings" } };
+  if (isActivityDeeplink(url)) return { Home: { page: "activity" } };
+  return "Main";
 }
 
 function sleep(ms: number): Promise<void> {

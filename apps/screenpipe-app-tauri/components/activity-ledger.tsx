@@ -1513,6 +1513,15 @@ Re-query Screenpipe only inside the cited time range and use the cited frames an
 
       <main className="min-h-0 flex-1 overflow-y-auto">
         <div className="mx-auto max-w-4xl px-6 py-8">
+          {historyLoading ? (
+            <p
+              role="status"
+              className="mb-6 border-b border-border pb-4 text-sm text-muted-foreground"
+            >
+              You can leave this page. We’ll notify you when your activities
+              are ready.
+            </p>
+          ) : null}
           {invalidRange ? (
             <p className="text-sm text-muted-foreground">
               Start time must be before end time.
