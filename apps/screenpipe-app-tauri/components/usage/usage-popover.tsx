@@ -14,6 +14,7 @@ import {
 } from "@/components/ui/popover";
 import { UsageLimitsPanel } from "@/components/usage/usage-limits-panel";
 import { UsageRing } from "@/components/usage/usage-meter";
+import { presetUsesHostedAllowance } from "@/lib/chat/model-allowance-cost";
 import { quotaPlanLabel } from "@/lib/chat/quota-errors";
 import {
   formatUsagePercent,
@@ -23,8 +24,13 @@ import {
   useUsageStatusQuery,
 } from "@/lib/hooks/use-usage-status";
 import { cn } from "@/lib/utils";
+import type { AIPreset } from "@/lib/utils/tauri";
 
-export function UsagePopover() {
+export function UsagePopover({
+  activePreset,
+}: {
+  activePreset: AIPreset | null | undefined;
+}) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const query = useUsageStatusQuery();
@@ -32,7 +38,13 @@ export function UsagePopover() {
   const hosted = usage?.hosted_ai;
   const allowances = hosted?.allowances ?? [];
   const tightest = tightestHostedAiAllowance(allowances);
-  if (hosted?.allowance_managed_by !== "cloudflare") {
+  // This is contextual composer chrome, not an account-wide dashboard. Keep it
+  // absent for Ollama, BYOK, and ACP agents using their own provider account;
+  // their next message does not draw down Screenpipe's hosted allowance.
+  if (
+    !presetUsesHostedAllowance(activePreset)
+    || hosted?.allowance_managed_by !== "cloudflare"
+  ) {
     return null;
   }
 
@@ -62,8 +74,12 @@ export function UsagePopover() {
           )}
           // The arc is the glance; the exact number belongs to the panel it
           // opens, and to anyone who hovers or uses a screen reader.
-          title={percent ? `AI usage: ${percent} used` : "AI usage unavailable"}
-          aria-label={percent ? `AI usage, ${percent} used` : "AI usage unavailable"}
+          title={percent
+            ? `Screenpipe Cloud usage: ${percent} used`
+            : "Screenpipe Cloud usage unavailable"}
+          aria-label={percent
+            ? `Screenpipe Cloud usage, ${percent} used`
+            : "Screenpipe Cloud usage unavailable"}
           data-testid="usage-popover-trigger"
           data-state-usage={state}
         >

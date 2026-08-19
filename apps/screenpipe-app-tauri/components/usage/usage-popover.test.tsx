@@ -5,6 +5,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { UsagePopover } from "./usage-popover";
+import type { AIPreset } from "@/lib/utils/tauri";
 
 // Resets are expressed relative to now so the fixture keeps exercising the
 // live countdown/weekday phrasing instead of decaying into elapsed dates.
@@ -54,6 +55,14 @@ vi.mock("@/lib/hooks/use-usage-status", async (importOriginal) => ({
   useUsageStatusQuery: () => mocks.query,
 }));
 
+const screenpipeCloudPreset = {
+  id: "screenpipe-cloud",
+  provider: "screenpipe-cloud",
+} as AIPreset;
+
+const renderUsagePopover = (activePreset: AIPreset = screenpipeCloudPreset) =>
+  render(<UsagePopover activePreset={activePreset} />);
+
 describe("UsagePopover", () => {
   const originalAllowances = mocks.query.usage.hosted_ai.allowances;
 
@@ -62,9 +71,11 @@ describe("UsagePopover", () => {
   });
 
   it("opens on click and shows every Cloudflare window", async () => {
-    render(<UsagePopover />);
+    renderUsagePopover();
 
-    fireEvent.click(screen.getByRole("button", { name: "AI usage, 62% used" }));
+    fireEvent.click(screen.getByRole("button", {
+      name: "Screenpipe Cloud usage, 62% used",
+    }));
 
     expect(await screen.findByText("Frontier models")).toBeTruthy();
     expect(screen.getByText("Weekly AI allowance")).toBeTruthy();
@@ -72,24 +83,28 @@ describe("UsagePopover", () => {
     expect(document.body.textContent).not.toContain("$");
   });
 
-  it("names the plan in the header and keeps it lowercase", async () => {
-    render(<UsagePopover />);
-    fireEvent.click(screen.getByRole("button", { name: "AI usage, 62% used" }));
+  it("names Screenpipe Cloud and the plan in the header", async () => {
+    renderUsagePopover();
+    fireEvent.click(screen.getByRole("button", {
+      name: "Screenpipe Cloud usage, 62% used",
+    }));
 
     const header = await screen.findByRole("button", {
-      name: /plan usage limits · Business/i,
+      name: /screenpipe cloud usage · Business/i,
     });
-    expect(header.textContent).toContain("plan usage limits");
+    expect(header.textContent).toContain("screenpipe cloud usage");
     expect(header.querySelector(".lowercase")?.textContent).toBe(
-      "plan usage limits",
+      "screenpipe cloud usage",
     );
     // The plan is a product name and keeps its own casing.
     expect(header.textContent).toContain("Business");
   });
 
   it("puts each allowance's reset and percent on the row itself", async () => {
-    render(<UsagePopover />);
-    fireEvent.click(screen.getByRole("button", { name: "AI usage, 62% used" }));
+    renderUsagePopover();
+    fireEvent.click(screen.getByRole("button", {
+      name: "Screenpipe Cloud usage, 62% used",
+    }));
 
     const rows = await screen.findAllByTestId("usage-limit-row");
     expect(rows).toHaveLength(2);
@@ -102,19 +117,25 @@ describe("UsagePopover", () => {
   });
 
   it("opens the full usage settings page from the header", async () => {
-    render(<UsagePopover />);
-    fireEvent.click(screen.getByRole("button", { name: "AI usage, 62% used" }));
+    renderUsagePopover();
+    fireEvent.click(screen.getByRole("button", {
+      name: "Screenpipe Cloud usage, 62% used",
+    }));
     fireEvent.click(
-      await screen.findByRole("button", { name: /plan usage limits · Business/i }),
+      await screen.findByRole("button", {
+        name: /screenpipe cloud usage · Business/i,
+      }),
     );
     expect(mocks.push).toHaveBeenCalledWith("/settings?section=usage");
   });
 
   it("stays visible when Cloudflare usage is temporarily unavailable", async () => {
     mocks.query.usage.hosted_ai.allowances = null as never;
-    render(<UsagePopover />);
+    renderUsagePopover();
 
-    fireEvent.click(screen.getByRole("button", { name: "AI usage unavailable" }));
+    fireEvent.click(screen.getByRole("button", {
+      name: "Screenpipe Cloud usage unavailable",
+    }));
 
     expect(await screen.findByText("usage data is unavailable. try refreshing.")).toBeTruthy();
     expect(document.body.textContent).not.toContain("$");
@@ -123,8 +144,10 @@ describe("UsagePopover", () => {
   // Hovering the chip on the way to send must not open anything: the panel is
   // read deliberately, so only a click may summon or dismiss it.
   it("ignores hover and toggles on click", async () => {
-    render(<UsagePopover />);
-    const trigger = screen.getByRole("button", { name: "AI usage, 62% used" });
+    renderUsagePopover();
+    const trigger = screen.getByRole("button", {
+      name: "Screenpipe Cloud usage, 62% used",
+    });
 
     fireEvent.pointerEnter(trigger);
     fireEvent.mouseOver(trigger);
@@ -138,6 +161,36 @@ describe("UsagePopover", () => {
       expect(screen.queryByTestId("usage-popover-content")).toBeNull();
     });
   });
+
+  it("hides for local, BYOK, and ACP own-account routes", () => {
+    const presets = [
+      { provider: "native-ollama" },
+      { provider: "anthropic" },
+      {
+        provider: "acp",
+        acpAgent: { id: "claude-acp", useScreenpipeCloud: false },
+      },
+      {
+        provider: "acp",
+        acpAgent: { id: "codex-acp", useScreenpipeCloud: true },
+      },
+    ] as AIPreset[];
+
+    for (const preset of presets) {
+      const view = renderUsagePopover(preset);
+      expect(screen.queryByTestId("usage-popover-trigger")).toBeNull();
+      view.unmount();
+    }
+  });
+
+  it("shows when Claude Code routes model calls through Screenpipe Cloud", () => {
+    renderUsagePopover({
+      provider: "acp",
+      acpAgent: { id: "claude-acp", useScreenpipeCloud: true },
+    } as AIPreset);
+
+    expect(screen.getByTestId("usage-popover-trigger")).toBeTruthy();
+  });
 });
 
 describe("UsagePopover trigger ring", () => {
@@ -150,11 +203,15 @@ describe("UsagePopover trigger ring", () => {
   // The composer has one icon slot to spare, so the arc carries the glance and
   // the exact number lives in the panel, the tooltip and the accessible name.
   it("draws the tightest allowance as an arc and still names the number", () => {
-    render(<UsagePopover />);
+    renderUsagePopover();
 
     const trigger = screen.getByTestId("usage-popover-trigger");
-    expect(trigger.getAttribute("aria-label")).toBe("AI usage, 62% used");
-    expect(trigger.getAttribute("title")).toBe("AI usage: 62% used");
+    expect(trigger.getAttribute("aria-label")).toBe(
+      "Screenpipe Cloud usage, 62% used",
+    );
+    expect(trigger.getAttribute("title")).toBe(
+      "Screenpipe Cloud usage: 62% used",
+    );
 
     const ring = screen.getByTestId("usage-ring");
     const arc = ring.querySelectorAll("circle")[1];
@@ -172,7 +229,7 @@ describe("UsagePopover trigger ring", () => {
       mocks.query.usage.hosted_ai.allowances = [
         { ...originalAllowances[0], used_percent: used, remaining_percent: 100 - used },
       ];
-      const view = render(<UsagePopover />);
+      const view = renderUsagePopover();
       const state = screen.getByTestId("usage-ring").getAttribute("data-usage-state");
       view.unmount();
       return state;
@@ -187,7 +244,7 @@ describe("UsagePopover trigger ring", () => {
     mocks.query.usage.hosted_ai.allowances = [
       { ...originalAllowances[0], used_percent: 140, remaining_percent: 0 },
     ];
-    render(<UsagePopover />);
+    renderUsagePopover();
 
     const arc = screen.getByTestId("usage-ring").querySelectorAll("circle")[1];
     expect(Number(arc.getAttribute("stroke-dashoffset"))).toBe(0);

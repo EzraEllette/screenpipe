@@ -15,6 +15,9 @@
  * internal margin and must not be rendered in the client.
  */
 
+import type { AIPreset } from "@/lib/utils/tauri";
+import { acpAdapterInfo } from "@/lib/utils/preset-appearance";
+
 export type ModelAllowanceTier = "standard" | "higher" | "highest";
 
 /** Only Screenpipe-hosted requests draw on the allowance. */
@@ -61,6 +64,23 @@ export function usesHostedAllowance(
   provider: string | null | undefined,
 ): boolean {
   return String(provider ?? "").trim().toLowerCase() === HOSTED_PROVIDER;
+}
+
+/**
+ * Whether this preset's next chat request is configured to use Screenpipe's
+ * hosted allowance. ACP is a hybrid: the agent still runs locally, but an
+ * adapter that advertises cloud routing can send its model calls through
+ * Screenpipe Cloud when the preset explicitly opts in.
+ */
+export function presetUsesHostedAllowance(
+  preset: Pick<AIPreset, "provider" | "acpAgent"> | null | undefined,
+): boolean {
+  if (usesHostedAllowance(preset?.provider)) return true;
+  if (preset?.provider !== "acp") return false;
+
+  const agent = preset.acpAgent;
+  return agent?.useScreenpipeCloud === true
+    && acpAdapterInfo(agent.id).supportsCloudRouting === true;
 }
 
 export type ModelAllowanceNotice = {

@@ -25,6 +25,19 @@ describe("acpSpawnSignature", () => {
     expect(acpSpawnSignature({ id: "codex-acp", args: ["--acp"], env: { A: "1" } })).not.toBe(a);
   });
 
+  it("changes when the model-call billing route changes", () => {
+    const ownAccount = acpSpawnSignature({
+      id: "claude-acp",
+      useScreenpipeCloud: false,
+    });
+    const screenpipeCloud = acpSpawnSignature({
+      id: "claude-acp",
+      useScreenpipeCloud: true,
+    });
+
+    expect(screenpipeCloud).not.toBe(ownAccount);
+  });
+
   it("returns null for no agent", () => {
     expect(acpSpawnSignature(null)).toBeNull();
     expect(acpSpawnSignature(undefined)).toBeNull();

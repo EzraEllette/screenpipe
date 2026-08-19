@@ -2854,7 +2854,12 @@ config?: { [key in string]: string };
 /**
  * Default session mode id, applied after every session/new.
  */
-modeId?: string | null }
+modeId?: string | null;
+/**
+ * Send this agent's model calls through Screenpipe Cloud. `None` keeps
+ * presets saved before this choice on the agent's own provider account.
+ */
+useScreenpipeCloud?: boolean | null }
 export type AecMode = "off" | "screenpipe" | "macos" | "windows"
 export type AudioDeviceInfo = { name: string; isDefault: boolean;
 /**

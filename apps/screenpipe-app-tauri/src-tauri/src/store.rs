@@ -1166,6 +1166,10 @@ pub struct AcpAgentPresetConfig {
     /// Default session mode id, applied after every session/new.
     #[serde(default)]
     pub mode_id: Option<String>,
+    /// Send this agent's model calls through Screenpipe Cloud. `None` keeps
+    /// presets saved before this choice on the agent's own provider account.
+    #[serde(default)]
+    pub use_screenpipe_cloud: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Type, Clone)]
@@ -4076,6 +4080,26 @@ mod tests {
         let preset = &sanitized_acp["aiPresets"][0];
         assert_eq!(preset["provider"].as_str(), Some("acp"));
         assert_eq!(preset["acpAgent"]["id"].as_str(), Some("codex-acp"));
+    }
+
+    #[test]
+    fn acp_cloud_billing_route_survives_preset_persistence() {
+        let preset: AIPreset = serde_json::from_value(json!({
+            "id": "claude code",
+            "provider": "acp",
+            "model": "claude-acp",
+            "acpAgent": {
+                "id": "claude-acp",
+                "useScreenpipeCloud": true
+            }
+        }))
+        .expect("ACP preset should deserialize");
+
+        let persisted = serde_json::to_value(preset).expect("ACP preset should serialize");
+        assert_eq!(
+            persisted["acpAgent"]["useScreenpipeCloud"].as_bool(),
+            Some(true)
+        );
     }
 
     /// The exact shape an ACP-unaware build leaves behind: provider rewritten

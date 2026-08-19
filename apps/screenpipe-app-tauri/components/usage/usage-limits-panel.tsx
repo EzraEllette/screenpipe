@@ -48,7 +48,7 @@ export function UsageLimitsPanel({
       >
         <span className="flex min-w-0 items-baseline gap-1.5 text-xs">
           <span className="shrink-0 font-medium lowercase text-foreground">
-            plan usage limits
+            screenpipe cloud usage
           </span>
           {/* The plan is a product name, so it keeps its own casing while the
               heading around it stays lowercase like every other title. */}

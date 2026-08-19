@@ -78,6 +78,12 @@ export type AcpAgentPresetConfig = {
 	args?: string[];
 	/** Empty values mean "inherit this variable from the app environment". */
 	env?: Record<string, string>;
+	/** Session option defaults advertised by the selected adapter. */
+	config?: Record<string, string>;
+	/** Session mode default advertised by the selected adapter. */
+	modeId?: string | null;
+	/** True when this ACP agent's model calls use Screenpipe Cloud allowance. */
+	useScreenpipeCloud?: boolean | null;
 };
 
 export type EmbeddedLLMConfig = {

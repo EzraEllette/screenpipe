@@ -6,8 +6,10 @@ import { describe, expect, it } from "vitest";
 import {
   modelAllowanceNotice,
   modelAllowanceTier,
+  presetUsesHostedAllowance,
   usesHostedAllowance,
 } from "../model-allowance-cost";
+import type { AIPreset } from "@/lib/utils/tauri";
 
 describe("modelAllowanceTier", () => {
   it("classifies frontier models as highest", () => {
@@ -58,6 +60,42 @@ describe("usesHostedAllowance", () => {
     expect(usesHostedAllowance("openai")).toBe(false);
     expect(usesHostedAllowance("custom")).toBe(false);
     expect(usesHostedAllowance(null)).toBe(false);
+  });
+});
+
+describe("presetUsesHostedAllowance", () => {
+  it("is true for a direct Screenpipe Cloud preset", () => {
+    expect(presetUsesHostedAllowance({
+      provider: "screenpipe-cloud",
+    } as AIPreset)).toBe(true);
+  });
+
+  it("is false for local and BYOK presets", () => {
+    expect(presetUsesHostedAllowance({ provider: "native-ollama" } as AIPreset)).toBe(false);
+    expect(presetUsesHostedAllowance({ provider: "anthropic" } as AIPreset)).toBe(false);
+    expect(presetUsesHostedAllowance({ provider: "openai" } as AIPreset)).toBe(false);
+  });
+
+  it("follows the explicit billing route for a routeable ACP agent", () => {
+    expect(presetUsesHostedAllowance({
+      provider: "acp",
+      acpAgent: { id: "claude-acp", useScreenpipeCloud: true },
+    } as AIPreset)).toBe(true);
+    expect(presetUsesHostedAllowance({
+      provider: "acp",
+      acpAgent: { id: "claude-acp", useScreenpipeCloud: false },
+    } as AIPreset)).toBe(false);
+    expect(presetUsesHostedAllowance({
+      provider: "acp",
+      acpAgent: { id: "claude-acp" },
+    } as AIPreset)).toBe(false);
+  });
+
+  it("does not claim cloud usage for an ACP adapter that cannot route there", () => {
+    expect(presetUsesHostedAllowance({
+      provider: "acp",
+      acpAgent: { id: "codex-acp", useScreenpipeCloud: true },
+    } as AIPreset)).toBe(false);
   });
 });
 

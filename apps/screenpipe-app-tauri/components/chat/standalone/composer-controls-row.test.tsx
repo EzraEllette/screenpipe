@@ -47,7 +47,9 @@ vi.mock("@/components/thinking-level-selector", () => ({
   ThinkingLevelSelector: () => null,
 }));
 vi.mock("@/components/usage/usage-popover", () => ({
-  UsagePopover: () => null,
+  UsagePopover: ({ activePreset }: { activePreset?: AIPreset | null }) => (
+    <div data-testid="mock-usage-preset">{activePreset?.id ?? "none"}</div>
+  ),
 }));
 
 import { ComposerControlsRow } from "./composer-controls-row";
@@ -145,6 +147,7 @@ describe("ComposerControlsRow preset selection", () => {
     expect(screen.getByTestId("mock-acp-effort")).toHaveTextContent(
       "codex-acp",
     );
+    expect(screen.getByTestId("mock-usage-preset")).toHaveTextContent("codex");
 
     rerender(
       <ComposerControlsRow
@@ -170,6 +173,7 @@ describe("ComposerControlsRow preset selection", () => {
     expect(screen.getByTestId("mock-acp-effort")).toHaveTextContent(
       "claude-acp",
     );
+    expect(screen.getByTestId("mock-usage-preset")).toHaveTextContent("claude");
 
     rerender(
       <ComposerControlsRow
