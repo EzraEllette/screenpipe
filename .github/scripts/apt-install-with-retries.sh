@@ -14,6 +14,7 @@ rewrite_azure_mirror() {
   local source
   local -a sources=(
     /etc/apt/sources.list
+    /etc/apt/apt-mirrors.txt
     /etc/apt/sources.list.d/*.list
     /etc/apt/sources.list.d/*.sources
   )
