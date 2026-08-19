@@ -70,10 +70,12 @@ both markers.
 
 ## Testing
 
-Test your own work end to end before handing it over — review is the bottleneck,
-not writing code. Drive the real app when the change is user-visible. Put
-before/after visuals in every issue and PR body: screen recording, screenshots,
-HTML mockup screenshot, or ASCII.
+Test your work at the narrowest boundary that proves it — review is the
+bottleneck. For ordinary desktop React/layout changes, use the browser-mock loop
+documented in `apps/screenpipe-app-tauri/README.md`; do not build Tauri merely
+for UI validation. Drive the real app only when the change crosses a native
+boundary listed there. Put before/after visuals in every issue and PR body:
+screen recording, screenshots, HTML mockup screenshot, or ASCII.
 
 ## git
 
