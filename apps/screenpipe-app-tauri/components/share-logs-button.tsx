@@ -79,6 +79,7 @@ async function compressImageFile(file: File): Promise<string> {
 // Webview preparation must settle before Rust can own the background job.
 // Once `startFeedbackUpload` acknowledges, every network step is Rust-owned.
 const TIMEOUT_PREPARE_MS = 30_000;
+const MAX_INCLUDED_CHAT_CONVERSATIONS = 5;
 
 function timeoutError(label: string): Error {
   return new Error(`${label} timed out — check your connection and try again`);
@@ -494,12 +495,15 @@ export const ShareLogsButton = ({
       if (includeChatHistory) {
         try {
           const conversations = await withTimeout(
-            loadAllConversations(),
+            loadAllConversations({ limit: MAX_INCLUDED_CHAT_CONVERSATIONS }),
             TIMEOUT_PREPARE_MS,
             "chat history",
           );
           const MAX_CHAT_SIZE = 200 * 1024;
-          const recentConvs = conversations.slice(0, 5);
+          const recentConvs = conversations.slice(
+            0,
+            MAX_INCLUDED_CHAT_CONVERSATIONS,
+          );
           let chatData = "";
           for (const conv of recentConvs) {
             const convText = conv.messages

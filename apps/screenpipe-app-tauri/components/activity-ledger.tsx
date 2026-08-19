@@ -61,7 +61,6 @@ import type { AIPreset } from "@/lib/utils/tauri";
 
 type RangePreset = "today" | "24h" | "7d" | "custom";
 type GenerationSource = "empty_state" | "refresh";
-const ACTIVITY_GENERATION_TIMEOUT_MS = 120_000;
 type ActivitySummaryResponse = {
   data_status: string;
   total_active_minutes: number;
@@ -839,11 +838,6 @@ export function ActivityLedger({
     historyLoadingRef.current = true;
     setHistoryLoading(true);
     setHistoryError("");
-    let timedOut = false;
-    const timeout = window.setTimeout(() => {
-      timedOut = true;
-      controller.abort();
-    }, ACTIVITY_GENERATION_TIMEOUT_MS);
     try {
       const [summaryResponse, meetingsResponse] = await Promise.all([
         localFetch(buildActivitySummaryPath(generationRange), {
@@ -997,24 +991,23 @@ export function ActivityLedger({
         activity_count: next.entries.length,
       });
     } catch (reason) {
-      if (controller.signal.aborted && !timedOut) return;
+      if (controller.signal.aborted) return;
       const rawError = reason instanceof Error ? reason.message : String(reason);
       const quota = presentQuotaError(rawError);
-      const friendlyError = timedOut
-        ? "Activity generation took too long and was stopped. Try again."
-        : rawError.toLowerCase().includes("hosted_ai_allowance_exceeded")
-          ? "This AI preset has no usage left. Choose a different AI preset, then try again."
-          : quota.kind !== "none"
-            ? quota.message
-            : "History could not be updated. Try again.";
+      const friendlyError = rawError
+        .toLowerCase()
+        .includes("hosted_ai_allowance_exceeded")
+        ? "This AI preset has no usage left. Choose a different AI preset, then try again."
+        : quota.kind !== "none"
+          ? quota.message
+          : "History could not be updated. Try again.";
       setHistoryError(friendlyError);
       posthog.capture("activity_generation_failed", {
         range: preset,
         source,
-        error_kind: timedOut ? "timeout" : quota.kind,
+        error_kind: quota.kind,
       });
     } finally {
-      window.clearTimeout(timeout);
       if (historyAbortRef.current === controller) {
         historyLoadingRef.current = false;
         setHistoryLoading(false);

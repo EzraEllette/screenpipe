@@ -657,6 +657,16 @@ describe("ShareLogsButton attachments", () => {
     vi.useRealTimers();
   });
 
+  it("only loads the five conversations that can be attached", async () => {
+    render(<ShareLogsButton />);
+
+    fireEvent.click(sendButton());
+
+    await waitFor(() =>
+      expect(loadAllConversationsMock).toHaveBeenCalledWith({ limit: 5 }),
+    );
+  });
+
   it("keeps the dialog open when Rust rejects the handoff", async () => {
     commandsMock.startFeedbackUpload.mockResolvedValue({
       status: "error",

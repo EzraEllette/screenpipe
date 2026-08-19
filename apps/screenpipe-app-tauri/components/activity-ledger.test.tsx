@@ -785,20 +785,16 @@ describe("ActivityLedger", () => {
     expect(screen.getByRole("button", { name: "Try again" })).toBeVisible();
   });
 
-  it("stops a stalled generation and replaces the spinner with an error", async () => {
+  it("keeps a slow generation running past two minutes", async () => {
+    let finishGeneration!: (value: string) => void;
+    let generationSignal: AbortSignal | undefined;
     mocks.runDailySummaryWithPi.mockImplementation(
-      ({ signal }: { signal?: AbortSignal }) =>
-        new Promise((_resolve, reject) => {
-          signal?.addEventListener(
-            "abort",
-            () => {
-              const error = new Error("aborted");
-              error.name = "AbortError";
-              reject(error);
-            },
-            { once: true },
-          );
-        }),
+      ({ signal }: { signal?: AbortSignal }) => {
+        generationSignal = signal;
+        return new Promise((resolve) => {
+          finishGeneration = resolve;
+        });
+      },
     );
 
     render(<ActivityLedger />);
@@ -811,13 +807,18 @@ describe("ActivityLedger", () => {
       await vi.advanceTimersByTimeAsync(120_000);
     });
 
-    expect(await screen.findByRole("alert")).toHaveTextContent(
-      "Activity generation took too long and was stopped.",
-    );
+    expect(generationSignal?.aborted).toBe(false);
     expect(
-      screen.queryByText("Understanding what you worked on…"),
-    ).toBeNull();
-    expect(screen.getByRole("button", { name: "Try again" })).toBeVisible();
+      await screen.findByText("Understanding what you worked on…"),
+    ).toBeVisible();
+
+    await act(async () => {
+      finishGeneration(HISTORY_RESPONSE);
+    });
+
+    expect(
+      await screen.findByText("Fixed a capture reliability regression"),
+    ).toBeVisible();
   });
 
   it("tracks page reach and the activity generation funnel", async () => {
