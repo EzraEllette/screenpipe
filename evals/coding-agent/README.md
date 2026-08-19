@@ -9,9 +9,14 @@ This is an agent eval suite, not a unit-test suite. Every case contains:
 - saved prompt, transcript, candidate patch, grader output, runtime fingerprint, and result;
 - repeated-trial reporting with success rate, `pass@k`, and `pass^k`.
 
-The current app corpus contains 10 git-mined regressions. See
+The current app corpus contains 20 git-mined regressions. See
 [DESIGN.md](./DESIGN.md) for the Anthropic guidance, source contract, and
-history-mining workflow. The companion website manifest contributes 10 more.
+history-mining workflow. The companion website manifest contributes 20 more.
+
+The regression inventory has an explicit owner and advisory/blocking policy.
+New cases may declare trigger paths for later change-aware selection. Validation
+prints the dataset fingerprint, and scored reports retain both dataset and
+runtime fingerprints for exact-run comparison.
 
 The product tests referenced by the manifest are graders. Passing them directly is not the eval; the evaluated object is an agent trajectory and resulting patch from the historical broken state.
 

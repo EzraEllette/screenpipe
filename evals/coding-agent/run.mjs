@@ -16,6 +16,7 @@ import {
 import { arch, platform, release, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import process from "node:process";
 
 const HERE = dirname(new URL(import.meta.url).pathname);
@@ -84,10 +85,18 @@ function shellQuote(value) {
 }
 
 function loadManifest() {
-  const manifest = JSON.parse(readFileSync(MANIFEST, "utf8"));
+  const body = readFileSync(MANIFEST, "utf8");
+  const manifest = JSON.parse(body);
   if (manifest.schema_version !== 1 || !Array.isArray(manifest.cases)) {
     throw new Error("unsupported or malformed eval manifest");
   }
+  if (manifest.suite_type === "regression") {
+    if (!manifest.owner) throw new Error("regression manifest is missing owner");
+    if (!manifest.policy?.stage || !manifest.policy?.promotion_requirement) {
+      throw new Error("regression manifest is missing policy metadata");
+    }
+  }
+  manifest.dataset_fingerprint = createHash("sha256").update(body).digest("hex");
   return manifest;
 }
 
@@ -116,6 +125,17 @@ function validateCase(evalCase) {
   }
   const baseSha = mustRun("git", ["rev-parse", `${evalCase.base_ref}^{commit}`]).stdout.trim();
   if (baseSha === oracleSha) throw new Error(`${evalCase.id} base and oracle are identical`);
+  if (evalCase.gate && !["advisory", "blocking"].includes(evalCase.gate)) {
+    throw new Error(`${evalCase.id} has an invalid gate`);
+  }
+  if (
+    evalCase.trigger_paths &&
+    (!Array.isArray(evalCase.trigger_paths) ||
+      !evalCase.trigger_paths.length ||
+      evalCase.trigger_paths.some((path) => typeof path !== "string" || !path))
+  ) {
+    throw new Error(`${evalCase.id} has invalid trigger_paths`);
+  }
   for (const fixture of evalCase.grader.fixtures ?? []) {
     if (fixture.local_path) {
       const source = join(dirname(MANIFEST), fixture.local_path);
@@ -383,19 +403,24 @@ function summarize(manifest, mode, results, options, runDir) {
       observed_all_pass: scoredTrials ? passes === scoredTrials : null,
     };
   });
+  const runtime = {
+    platform: platform(),
+    release: release(),
+    arch: arch(),
+    node: process.version,
+    repo_head: mustRun("git", ["rev-parse", "HEAD"]).stdout.trim(),
+    agent_command: mode === "agent" ? options.agentCommand : undefined,
+    candidate_patch: mode === "regrade" ? options.candidatePatch : undefined,
+  };
   const report = {
     suite: manifest.suite,
     dataset_version: manifest.dataset_version,
+    dataset_fingerprint: manifest.dataset_fingerprint,
     mode,
     created_at: new Date().toISOString(),
     runtime: {
-      platform: platform(),
-      release: release(),
-      arch: arch(),
-      node: process.version,
-      repo_head: mustRun("git", ["rev-parse", "HEAD"]).stdout.trim(),
-      agent_command: mode === "agent" ? options.agentCommand : undefined,
-      candidate_patch: mode === "regrade" ? options.candidatePatch : undefined,
+      ...runtime,
+      fingerprint: createHash("sha256").update(JSON.stringify(runtime)).digest("hex"),
     },
     cases,
     trials: results,
@@ -426,7 +451,10 @@ function main() {
   }
   for (const evalCase of cases) validateCase(evalCase);
   if (options.validate) {
-    console.log(`validated ${cases.length} eval cases`);
+    console.log(
+      `validated ${cases.length} eval cases ` +
+        `(dataset sha256:${manifest.dataset_fingerprint.slice(0, 12)})`,
+    );
     return;
   }
 
