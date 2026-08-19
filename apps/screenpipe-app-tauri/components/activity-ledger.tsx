@@ -72,7 +72,7 @@ import { cn } from "@/lib/utils";
 import type { AIPreset } from "@/lib/utils/tauri";
 
 type RangePreset = "today" | "24h" | "7d" | "custom";
-type GenerationSource = "empty_state" | "refresh";
+type GenerationSource = "empty_state" | "refresh" | "enable";
 type ActivitySummaryResponse = {
   data_status: string;
   total_active_minutes: number;
@@ -764,7 +764,8 @@ export function ActivityLedger({
   const [selectedReviewPresetId, setSelectedReviewPresetId] = useState<
     string | null
   >(null);
-  const { settings } = useSettings();
+  const { settings, updateSettings } = useSettings();
+  const activitiesEnabled = settings.activitiesEnabled ?? false;
 
   const range = useMemo(
     () => rangeForPreset(preset, anchor, customStart, customEnd),
@@ -1192,6 +1193,24 @@ export function ActivityLedger({
     void generateHistory(clickedRange, source, clickedRange);
   }, [customEnd, customStart, generateHistory, preset]);
 
+  const enableActivities = useCallback(async () => {
+    const clickedRange = rangeForPreset(
+      preset,
+      new Date(),
+      customStart,
+      customEnd,
+    );
+    if (!clickedRange) return;
+    await generateHistory(clickedRange, "enable", clickedRange);
+    try {
+      await updateSettings({ activitiesEnabled: true });
+    } catch {
+      setHistoryError(
+        "Automatic activities could not be enabled. Try again.",
+      );
+    }
+  }, [customEnd, customStart, generateHistory, preset, updateSettings]);
+
   const addRecentActivity = useCallback(() => {
     const clickedRange = rangeForPreset(
       preset,
@@ -1446,6 +1465,35 @@ Re-query Screenpipe only inside the cited time range and use the cited frames an
             <p className="text-sm text-muted-foreground">
               Start time must be before end time.
             </p>
+          ) : !activitiesEnabled ? (
+            loading && !summary ? (
+              <ActivityLedgerSkeleton label="Reading your day…" />
+            ) : !cacheReady ? (
+              <ActivityLedgerSkeleton label="Loading generated activities…" />
+            ) : historyLoading ? (
+              <ActivityLedgerSkeleton label="Understanding what you worked on…" />
+            ) : (
+              <div className="flex min-h-[320px] items-center justify-center py-12 text-center">
+                <div className="max-w-sm">
+                  <h2 className="font-sans text-xl font-medium tracking-tight">
+                    Enable activities
+                  </h2>
+                  <p className="mt-2 text-sm leading-6 text-muted-foreground">
+                    <span role={historyError ? "alert" : undefined}>
+                      {historyError ||
+                        "Generate this time range now, then keep activities updated automatically."}
+                    </span>
+                  </p>
+                  <Button
+                    size="sm"
+                    className="mt-5 h-10 px-5 uppercase tracking-wide"
+                    onClick={() => void enableActivities()}
+                  >
+                    {historyError ? "Try again" : "Enable activities"}
+                  </Button>
+                </div>
+              </div>
+            )
           ) : history ? (
             <section aria-label="Activity history">
               {groupedEntries.map(([day, entries]) => (

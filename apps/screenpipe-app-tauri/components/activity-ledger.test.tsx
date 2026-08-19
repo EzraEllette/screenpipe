@@ -27,7 +27,9 @@ const mocks = vi.hoisted(() => ({
   runDailySummaryWithPi: vi.fn(),
   setPendingNavigation: vi.fn(),
   showChatWithPrefill: vi.fn(),
+  updateSettings: vi.fn(),
   settings: {
+    activitiesEnabled: true,
     enhancedAI: true,
     user: { token: "test-token" },
     aiPresets: [
@@ -80,7 +82,10 @@ vi.mock("@/lib/activity-history-persistence", async (importOriginal) => {
   };
 });
 vi.mock("@/lib/hooks/use-settings", () => ({
-  useSettings: () => ({ settings: mocks.settings }),
+  useSettings: () => ({
+    settings: mocks.settings,
+    updateSettings: mocks.updateSettings,
+  }),
 }));
 vi.mock("@/lib/hooks/use-timeline-store", () => ({
   useTimelineStore: (selector: (state: unknown) => unknown) =>
@@ -287,6 +292,8 @@ beforeEach(() => {
   vi.setSystemTime(new Date("2026-08-17T20:00:00Z"));
   mocks.getAppServerBaseUrl.mockResolvedValue("http://localhost:11535");
   mocks.settings.enhancedAI = true;
+  mocks.settings.activitiesEnabled = true;
+  mocks.updateSettings.mockResolvedValue(undefined);
   const values = new Map<string, string>();
   Object.defineProperty(window, "localStorage", {
     configurable: true,
@@ -626,6 +633,52 @@ describe("activity history helpers", () => {
 });
 
 describe("ActivityLedger", () => {
+  it("finishes the selected range before enabling activities", async () => {
+    mocks.settings.activitiesEnabled = false;
+    render(<ActivityLedger />);
+
+    expect(
+      await screen.findByRole("button", { name: "Enable activities" }),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: "Generate activities" }),
+    ).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Enable activities" }));
+
+    await waitFor(() =>
+      expect(mocks.updateSettings).toHaveBeenCalledWith({
+        activitiesEnabled: true,
+      }),
+    );
+    expect(mocks.runDailySummaryWithPi).toHaveBeenCalled();
+    expect(
+      mocks.runDailySummaryWithPi.mock.invocationCallOrder[0],
+    ).toBeLessThan(mocks.updateSettings.mock.invocationCallOrder[0]);
+  });
+
+  it("enables activities after a failed first generation without overlapping it", async () => {
+    mocks.settings.activitiesEnabled = false;
+    mocks.runDailySummaryWithPi.mockRejectedValueOnce(new Error("network"));
+    render(<ActivityLedger />);
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Enable activities" }),
+    );
+
+    expect(
+      await screen.findByText(
+        "History could not be updated. Try again.",
+      ),
+    ).toBeVisible();
+    expect(mocks.updateSettings).toHaveBeenCalledWith({
+      activitiesEnabled: true,
+    });
+    expect(
+      mocks.runDailySummaryWithPi.mock.invocationCallOrder[0],
+    ).toBeLessThan(mocks.updateSettings.mock.invocationCallOrder[0]);
+  });
+
   it("waits for the encrypted cache lookup before offering generation", async () => {
     let resolveCache!: (value: { entries: []; coverage: [] }) => void;
     mocks.loadPersistedActivityHistory.mockImplementation(
