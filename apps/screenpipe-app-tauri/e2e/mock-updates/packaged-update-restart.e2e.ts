@@ -26,9 +26,12 @@
  *      ("Installing update…") before the process exits.
  *   3. FAST INSTALL  — the exit-path install used the pre-extracted rename
  *      path (log-asserted) and the old→new process blackout stays bounded.
- *   4. POST-UPDATE   — marker consumed as applied; updater returns None;
+ *   4. POST-UPDATE CAPTURE — the replacement starts the real engine and
+ *      produces a ScreenCaptureKit frame instead of inheriting a stale
+ *      permission-denied state from the process it replaced.
+ *   5. POST-UPDATE   — marker consumed as applied; updater returns None;
  *      a click with nothing staged does NOT kill the app.
- *   5. FAILED-ATTEMPT DETECTION — a synthetic stale marker (from == running
+ *   6. FAILED-ATTEMPT DETECTION — a synthetic stale marker (from == running
  *      version) surfaces "Update didn't apply — click to retry" on boot.
  *
  * Run (builds two release-local bundles; slow the first time):
@@ -65,6 +68,8 @@ const UPDATE_SERVER_PORT = 8765;
 
 const STATE_URL = `http://127.0.0.1:${CONTROL_PORT}/e2e/updates/state`;
 const CLICK_URL = `http://127.0.0.1:${CONTROL_PORT}/e2e/updates/click`;
+const START_CAPTURE_URL = `http://127.0.0.1:${CONTROL_PORT}/e2e/updates/start-capture`;
+const HEALTH_URL = `http://127.0.0.1:${API_PORT}/health`;
 
 const SKIP_BUILD = process.env.SP_PACKAGED_UPDATER_SKIP_BUILD === '1';
 
@@ -107,11 +112,28 @@ interface UpdaterState {
   app_version: string;
 }
 
+interface HealthState {
+  frame_status?: string;
+  pipeline?: {
+    capture_attempts?: number;
+  };
+}
+
 async function fetchState(timeoutMs = 1500): Promise<UpdaterState | null> {
   try {
     const res = await fetch(STATE_URL, { signal: AbortSignal.timeout(timeoutMs) });
     if (!res.ok) return null;
     return (await res.json()) as UpdaterState;
+  } catch {
+    return null;
+  }
+}
+
+async function fetchHealth(timeoutMs = 1500): Promise<HealthState | null> {
+  try {
+    const res = await fetch(HEALTH_URL, { signal: AbortSignal.timeout(timeoutMs) });
+    const body = await res.json();
+    return body && typeof body === 'object' ? (body as HealthState) : null;
   } catch {
     return null;
   }
@@ -207,11 +229,11 @@ function launchApp(): ReturnType<typeof Bun.spawn> {
       SCREENPIPE_DATA_DIR: DATA_DIR,
       SCREENPIPE_PORT: String(API_PORT),
       SCREENPIPE_FOCUS_PORT: String(CONTROL_PORT),
-      // Marks the process as isolated (no prod-chat migration) without
-      // activating any behavior seed — unknown tokens are ignored, so the
-      // app boots exactly like a fresh signed-out install: entitlement gate
+      // The updater token marks the process as isolated (no prod-chat
+      // migration). Audio is disabled so the post-update phase isolates SCK;
+      // the app still boots like a fresh signed-out install: entitlement gate
       // → engine never starts → boot phase "idle" (the MacBook Air repro).
-      SCREENPIPE_E2E_SEED: 'packaged-updater',
+      SCREENPIPE_E2E_SEED: 'packaged-updater,no-audio,packaged-updater-sck-race',
       SCREENPIPE_DISABLE_TELEMETRY: '1',
     },
     stdout: 'ignore',
@@ -416,7 +438,32 @@ async function main(): Promise<void> {
     );
     check('log: no deferred-restart warnings', !logAfter.includes('deferring restart to avoid'));
 
-    // ── Scenario 4: post-update state + click-with-nothing-staged safety ─────
+    // Scenario 4: a successful app relaunch is not enough. Start the same real
+    // capture pipeline users get after entitlement resolves and require an SCK
+    // frame from the replacement process. The E2E-only race latch makes the
+    // old direct-spawn relaunch deterministically reproduce the field failure.
+    log('starting real post-update screen capture…');
+    const captureResponse = await fetch(START_CAPTURE_URL, {
+      method: 'POST',
+      signal: AbortSignal.timeout(60_000),
+    });
+    must('post-update capture start accepted', captureResponse.ok);
+    const captureResult = (await captureResponse.json()) as { started: boolean; error: string | null };
+    must('post-update capture session constructed', captureResult.started, captureResult.error ?? undefined);
+    const captureHealth = await waitFor('post-update ScreenCaptureKit frame', 45_000, async () => {
+      const health = await fetchHealth();
+      return health?.frame_status === 'ok' && (health.pipeline?.capture_attempts ?? 0) > 0
+        ? health
+        : null;
+    });
+    check('replacement produced a real screen frame', captureHealth.frame_status === 'ok');
+    check(
+      'replacement advanced capture attempts',
+      (captureHealth.pipeline?.capture_attempts ?? 0) > 0,
+      String(captureHealth.pipeline?.capture_attempts ?? 0),
+    );
+
+    // ── Scenario 5: post-update state + click-with-nothing-staged safety ─────
 
     const settled = await waitFor('post-update updater settled', 60_000, async () => {
       const s = await fetchState();
@@ -433,7 +480,7 @@ async function main(): Promise<void> {
     check('app survived a no-update click', afterNoopClick !== null && afterNoopClick.app_version === NEW_VERSION);
     check('no restart was started by the no-update click', afterNoopClick?.restart_started === false);
 
-    // ── Scenario 5: failed-install detection on next boot ────────────────────
+    // ── Scenario 6: failed-install detection on next boot ────────────────────
 
     log('simulating a failed install (marker from == running version)…');
     killWorkdirApp();

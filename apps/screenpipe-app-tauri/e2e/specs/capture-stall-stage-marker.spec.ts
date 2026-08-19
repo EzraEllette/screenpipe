@@ -75,7 +75,10 @@ const METRICS_RS = resolve(
  */
 function knownStagesFromRust(): string[] {
   const source = readFileSync(METRICS_RS, "utf8");
-  const asStr = source.match(
+  const implStart = source.indexOf("impl CaptureLoopStage {");
+  const captureLoopStageImpl =
+    implStart >= 0 ? source.slice(implStart) : "";
+  const asStr = captureLoopStageImpl.match(
     /pub fn as_str\(self\) -> &'static str \{([\s\S]*?)\n {4}\}/,
   );
   if (!asStr) {

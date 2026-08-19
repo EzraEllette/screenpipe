@@ -288,7 +288,7 @@ pulseaudio = ["screenpipe-audio/pulseaudio"]
 directml = ["screenpipe-engine/directml"]
 vulkan = ["screenpipe-audio/vulkan"]
 cargo-clippy = []
-e2e = ["tauri-plugin-webdriver", "dep:sqlx"]
+e2e = ["tauri-plugin-webdriver", "dep:sqlx", "screenpipe-screen/e2e"]
 
 # DO NOT REMOVE!!
 custom-protocol = ["tauri/custom-protocol"]

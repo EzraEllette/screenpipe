@@ -26,6 +26,114 @@ use std::time::Duration;
 use tauri::{AppHandle, Manager};
 use tracing::{info, warn};
 
+#[cfg(all(feature = "e2e", target_os = "macos"))]
+const E2E_SCK_RELAUNCH_RACE_SEED: &str = "packaged-updater-sck-race";
+#[cfg(all(feature = "e2e", target_os = "macos"))]
+const E2E_SCK_RELAUNCH_DEADLINE_FILE: &str = ".e2e-sck-relaunch-not-before";
+const MACOS_UPDATER_RELAUNCH_SETTLE: Duration = Duration::from_secs(3);
+#[cfg(any(target_os = "macos", test))]
+const MACOS_UPDATER_RELAUNCH_HELPER: &str = r#"
+old_pid=$1
+settle_seconds=$2
+shift 2
+checks=0
+while kill -0 "$old_pid" 2>/dev/null && [ "$checks" -lt 100 ]; do
+    /bin/sleep 0.05
+    checks=$((checks + 1))
+done
+/bin/sleep "$settle_seconds"
+exec "$@"
+"#;
+
+#[cfg(any(target_os = "macos", test))]
+fn macos_updater_relaunch_command<I, S>(
+    binary: &Path,
+    args: I,
+    old_pid: u32,
+    settle: Duration,
+) -> Command
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    let mut command = Command::new("/bin/sh");
+    command
+        .arg("-c")
+        .arg(MACOS_UPDATER_RELAUNCH_HELPER)
+        .arg("screenpipe-updater-relaunch-helper")
+        .arg(old_pid.to_string())
+        .arg(settle.as_secs().to_string())
+        .arg(binary)
+        .args(args);
+    command
+}
+
+#[cfg(all(feature = "e2e", target_os = "macos"))]
+fn e2e_seed_has_exact_token(token: &str) -> bool {
+    std::env::var("SCREENPIPE_E2E_SEED")
+        .ok()
+        .is_some_and(|seeds| seeds.split(',').any(|seed| seed.trim() == token))
+}
+
+#[cfg(all(feature = "e2e", target_os = "macos"))]
+fn e2e_sck_relaunch_deadline_path() -> PathBuf {
+    screenpipe_core::paths::default_screenpipe_data_dir()
+        .join(E2E_SCK_RELAUNCH_DEADLINE_FILE)
+}
+
+#[cfg(all(feature = "e2e", target_os = "macos"))]
+fn epoch_millis() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+}
+
+/// E2E-only model of replayd/TCC still releasing the dying app. The replacement
+/// process consumes this marker at the very beginning of `main`, before any
+/// ScreenCaptureKit call can happen.
+#[cfg(all(feature = "e2e", target_os = "macos"))]
+fn arm_e2e_sck_relaunch_race() {
+    if !e2e_seed_has_exact_token(E2E_SCK_RELAUNCH_RACE_SEED) {
+        return;
+    }
+    let deadline = epoch_millis() + MACOS_UPDATER_RELAUNCH_SETTLE.as_millis();
+    if let Err(error) = std::fs::write(e2e_sck_relaunch_deadline_path(), deadline.to_string()) {
+        warn!("e2e: failed to arm SCK updater-relaunch race: {error}");
+    } else {
+        info!("e2e: armed SCK updater-relaunch settle deadline");
+    }
+}
+
+#[cfg(not(all(feature = "e2e", target_os = "macos")))]
+fn arm_e2e_sck_relaunch_race() {}
+
+/// Latch whether this E2E replacement process started during the simulated
+/// replayd/TCC release window. The screen crate turns the latch into the same
+/// persistent permission-denied enumeration observed in the field incident.
+#[cfg(all(feature = "e2e", target_os = "macos"))]
+pub fn latch_e2e_sck_relaunch_race() {
+    if !e2e_seed_has_exact_token(E2E_SCK_RELAUNCH_RACE_SEED) {
+        return;
+    }
+    let path = e2e_sck_relaunch_deadline_path();
+    let deadline = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|value| value.trim().parse::<u128>().ok());
+    let _ = std::fs::remove_file(&path);
+    match deadline {
+        Some(deadline) if epoch_millis() < deadline => {
+            std::env::set_var("SCREENPIPE_E2E_SCK_RELAUNCH_POISONED", "1");
+            warn!("e2e: replacement launched before SCK settle deadline; latching permission denial");
+        }
+        Some(_) => info!("e2e: replacement launched after SCK settle deadline"),
+        None => {}
+    }
+}
+
+#[cfg(not(all(feature = "e2e", target_os = "macos")))]
+pub fn latch_e2e_sck_relaunch_race() {}
+
 /// Returns true when a panic payload is shutdown-time noise, not a real crash.
 pub(crate) fn is_orderly_shutdown_panic(payload: &str) -> bool {
     payload.contains("Tokio 1.x context was found, but it is being shutdown")
@@ -180,18 +288,47 @@ pub fn force_app_relaunch(app: AppHandle, status: i32) -> ! {
     // call. The relaunch binary path below was cached at process start, so
     // the spawn hits the freshly installed bundle.
     #[cfg(target_os = "macos")]
-    crate::staged_update::install_staged_if_any(&app);
+    let update_installed = crate::staged_update::install_staged_if_any(&app);
+    #[cfg(not(target_os = "macos"))]
+    let update_installed = false;
+
+    if update_installed {
+        arm_e2e_sck_relaunch_race();
+    }
 
     let env = app.env();
     if let Some(binary) = relaunch_binary(&app) {
-        let mut command = Command::new(&binary);
-        command.args(env.args_os.iter().skip(1));
+        #[cfg(target_os = "macos")]
+        let mut command = if update_installed {
+            macos_updater_relaunch_command(
+                &binary,
+                env.args_os.iter().skip(1),
+                std::process::id(),
+                MACOS_UPDATER_RELAUNCH_SETTLE,
+            )
+        } else {
+            let mut command = Command::new(&binary);
+            command.args(env.args_os.iter().skip(1));
+            command
+        };
+        #[cfg(not(target_os = "macos"))]
+        let mut command = {
+            let mut command = Command::new(&binary);
+            command.args(env.args_os.iter().skip(1));
+            command
+        };
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
             command.process_group(0);
         }
         match command.spawn() {
+            Ok(child) if update_installed => info!(
+                "safe relaunch: spawned delayed updater helper for {} (pid {}, settle {}s)",
+                binary.display(),
+                child.id(),
+                MACOS_UPDATER_RELAUNCH_SETTLE.as_secs()
+            ),
             Ok(child) => info!(
                 "safe relaunch: spawned replacement {} (pid {})",
                 binary.display(),
@@ -592,7 +729,7 @@ pub fn request_app_quit(app: AppHandle) {
 
 #[cfg(test)]
 mod tests {
-    use super::extract_cf_bundle_executable;
+    use super::{extract_cf_bundle_executable, macos_updater_relaunch_command};
 
     #[test]
     fn extracts_bundle_executable_from_xml_plist() {
@@ -610,6 +747,26 @@ mod tests {
         assert_eq!(
             extract_cf_bundle_executable(plist).as_deref(),
             Some("screenpipe-app")
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn updater_relaunch_helper_preserves_spaced_arguments_without_shell_interpolation() {
+        let args = ["%s|%s", "argument with spaces", "literal;$HOME"];
+        let output = macos_updater_relaunch_command(
+            std::path::Path::new("/usr/bin/printf"),
+            args,
+            u32::MAX,
+            std::time::Duration::ZERO,
+        )
+        .output()
+        .unwrap();
+
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "argument with spaces|literal;$HOME"
         );
     }
 }

@@ -150,6 +150,17 @@ pub struct MonitorData {
 }
 
 impl SafeMonitor {
+    /// Whether this macOS monitor handle came from ScreenCaptureKit rather
+    /// than the bounded CoreGraphics recovery path.
+    ///
+    /// The monitor watcher uses this to replace a temporary fallback handle
+    /// once a fresh SCK enumeration succeeds. Comparing display IDs alone is
+    /// insufficient because both backends describe the same display.
+    #[cfg(target_os = "macos")]
+    pub fn uses_sck_backend(&self) -> bool {
+        self.use_sck
+    }
+
     pub fn id(&self) -> u32 {
         self.monitor_id
     }

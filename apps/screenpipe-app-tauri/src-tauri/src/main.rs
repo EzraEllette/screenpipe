@@ -471,6 +471,10 @@ async fn main() {
         std::process::exit(exit_code);
     }
 
+    // The packaged updater E2E latches whether the replacement process began
+    // before macOS finished releasing the previous app's SCK/TCC state.
+    process_exit::latch_e2e_sck_relaunch_race();
+
     // Point debug builds at their own data dir and ports so `bun tauri dev`
     // can't hand off to (or kill) an installed production app. Must run before
     // the DB-recovery-lock check, the /focus single-instance handoff and the

@@ -1095,6 +1095,38 @@ pub async fn start_monitor_watcher(
                 }
             }
 
+            // A bounded SCK failure can start a monitor on the privacy-safe
+            // CoreGraphics fallback. Once a fresh enumeration returns an SCK
+            // handle, display IDs alone cannot reveal that the active task is
+            // still holding the fallback generation. Upgrade it immediately;
+            // otherwise excluded-window capture keeps failing closed forever.
+            #[cfg(target_os = "macos")]
+            for monitor in &current_monitors {
+                if monitor.uses_sck_backend()
+                    && vision_manager.active_monitor_uses_sck(monitor.id()) == Some(false)
+                {
+                    info!(
+                        "ScreenCaptureKit recovered for monitor {}; replacing temporary CoreGraphics fallback",
+                        monitor.id()
+                    );
+                    if let Err(e) = vision_manager.stop_monitor(monitor.id()).await {
+                        warn!(
+                            "failed to stop CoreGraphics fallback for monitor {}: {:?}",
+                            monitor.id(),
+                            e
+                        );
+                        continue;
+                    }
+                    if let Err(e) = vision_manager.start_monitor_handle(monitor.clone()).await {
+                        warn!(
+                            "failed to upgrade monitor {} back to ScreenCaptureKit: {:?}",
+                            monitor.id(),
+                            e
+                        );
+                    }
+                }
+            }
+
             // Get currently recording monitors
             let active_ids: HashSet<u32> =
                 vision_manager.active_monitors().await.into_iter().collect();

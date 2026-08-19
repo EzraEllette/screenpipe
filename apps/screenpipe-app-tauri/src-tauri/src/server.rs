@@ -415,7 +415,11 @@ pub async fn run_server(app_handle: tauri::AppHandle, port: u16) {
     #[cfg(feature = "e2e")]
     let app = app
         .route("/e2e/updates/state", axum::routing::get(e2e_updates_state))
-        .route("/e2e/updates/click", axum::routing::post(e2e_updates_click));
+        .route("/e2e/updates/click", axum::routing::post(e2e_updates_click))
+        .route(
+            "/e2e/updates/start-capture",
+            axum::routing::post(e2e_updates_start_capture),
+        );
 
     let app = with_control_server_boundary(app)
         .layer(
@@ -730,6 +734,52 @@ async fn e2e_updates_click(State(state): State<ServerState>) -> impl IntoRespons
     let app = state.app_handle.clone();
     tauri::async_runtime::spawn(crate::updates::trigger_update_now(app));
     Json(serde_json::json!({ "accepted": true }))
+}
+
+/// Start the real engine and capture pipeline after a packaged updater
+/// relaunch. This is intentionally separate from the signed-out boot scenario:
+/// the same E2E first proves the idle restart gate, then proves that the updated
+/// process can acquire ScreenCaptureKit and produce a frame.
+#[cfg(feature = "e2e")]
+async fn e2e_updates_start_capture(State(state): State<ServerState>) -> impl IntoResponse {
+    use tauri::Manager;
+
+    let mut settings = match crate::store::SettingsStore::get(&state.app_handle) {
+        Ok(Some(settings)) => settings,
+        Ok(None) => crate::store::SettingsStore::default(),
+        Err(error) => {
+            return Json(serde_json::json!({
+                "started": false,
+                "error": format!("failed to load E2E settings: {error}"),
+            }));
+        }
+    };
+    settings.user.id = Some("packaged_updater_e2e".to_string());
+    settings.user.subscription_plan = Some("none".to_string());
+    settings.user.entitlement = Some(serde_json::json!({
+        "active": true,
+        "plan": "none",
+        "source": "free",
+        "checked_at": chrono::Utc::now().to_rfc3339(),
+        "features": { "app": true, "cloud": false }
+    }));
+    if let Err(error) = settings.save(&state.app_handle) {
+        return Json(serde_json::json!({
+            "started": false,
+            "error": format!("failed to save E2E recording entitlement: {error}"),
+        }));
+    }
+
+    let result = crate::recording::spawn_screenpipe(
+        state.app_handle.state(),
+        state.app_handle.clone(),
+        None,
+    )
+    .await;
+    match result {
+        Ok(()) => Json(serde_json::json!({ "started": true, "error": null })),
+        Err(error) => Json(serde_json::json!({ "started": false, "error": error })),
+    }
 }
 
 async fn set_window_size(

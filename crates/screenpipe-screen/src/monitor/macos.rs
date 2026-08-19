@@ -536,6 +536,18 @@ where
 }
 
 fn enumerate_sck_monitors() -> std::result::Result<Vec<SafeMonitor>, MonitorListError> {
+    #[cfg(feature = "e2e")]
+    if std::env::var("SCREENPIPE_E2E_SCK_RELAUNCH_POISONED")
+        .ok()
+        .as_deref()
+        == Some("1")
+    {
+        tracing::warn!(
+            "e2e: simulating persistent ScreenCaptureKit permission denial after early updater relaunch"
+        );
+        return Err(MonitorListError::PermissionDenied);
+    }
+
     #[cfg(debug_assertions)]
     if std::env::var("SCREENPIPE_E2E_SEED")
         .ok()

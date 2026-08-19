@@ -12,6 +12,7 @@ edition = { workspace = true }
 
 [features]
 default = []
+e2e = []
 
 [dependencies]
 screenpipe-a11y = { path = "../screenpipe-a11y" }
