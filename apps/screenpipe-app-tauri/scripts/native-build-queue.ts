@@ -24,7 +24,8 @@ const QUEUE_ROOT = join(USER_CACHE_ROOT, "screenpipe", "native-build-queue");
 const LOCK_FILE = join(QUEUE_ROOT, "build.lock");
 const OWNER_FILE = join(QUEUE_ROOT, "owner.json");
 const SCCACHE_STATE_FILE = join(QUEUE_ROOT, "sccache-worktrees.json");
-const SCCACHE_PORT = "4227";
+const SCCACHE_DEFAULT_PORT = "4226";
+const LEGACY_SCCACHE_PORT = "4227";
 const WAIT_UPDATE_MS = 10_000;
 
 type BuildMode = "build" | "e2e" | "signed" | "warmup" | "test-hold";
@@ -79,6 +80,14 @@ function findExecutable(name: string): string | undefined {
   return Bun.which(name) ?? undefined;
 }
 
+function sccacheServerIsRunning(port: string): boolean {
+  if (process.platform !== "darwin" || !existsSync("/usr/bin/nc")) return true;
+  return Bun.spawnSync(["/usr/bin/nc", "-z", "127.0.0.1", port], {
+    stdout: "ignore",
+    stderr: "ignore",
+  }).exitCode === 0;
+}
+
 function activeScreenpipeWorktrees(): string[] {
   const result = runSync(["git", "worktree", "list", "--porcelain"], REPO_ROOT);
   const candidates = result.exitCode === 0
@@ -107,59 +116,83 @@ function localSccacheEnvironment(): Record<string, string> {
   }
 
   const worktrees = activeScreenpipeWorktrees();
-  env.RUSTC_WRAPPER = sccache;
-  env.SCCACHE_SERVER_PORT = SCCACHE_PORT;
+  env.RUSTC_WRAPPER = process.env.RUSTC_WRAPPER
+    ?? findExecutable("screenpipe-rustc-wrapper")
+    ?? sccache;
   env.SCCACHE_BASEDIRS = worktrees.join(delimiter);
+  const serverPort = env.SCCACHE_SERVER_PORT ?? SCCACHE_DEFAULT_PORT;
 
-  // This dedicated server is deliberately local-only: it is deterministic,
-  // cannot stall a build on credentials/network, and shares the existing disk cache.
-  for (const key of [
-    "SCCACHE_BUCKET",
-    "SCCACHE_ENDPOINT",
-    "SCCACHE_REGION",
-    "SCCACHE_S3_KEY_PREFIX",
-    "AWS_ACCESS_KEY_ID",
-    "AWS_SECRET_ACCESS_KEY",
-  ]) {
-    delete env[key];
+  // PR #6410 briefly used a second daemon against the machine-wide local
+  // cache. Retire it before reusing the configured server: sccache local
+  // storage supports only one server at a time.
+  if (serverPort !== LEGACY_SCCACHE_PORT && sccacheServerIsRunning(LEGACY_SCCACHE_PORT)) {
+    Bun.spawnSync([sccache, "--stop-server"], {
+      cwd: APP_ROOT,
+      env: { ...env, SCCACHE_SERVER_PORT: LEGACY_SCCACHE_PORT },
+      stdout: "ignore",
+      stderr: "ignore",
+    });
   }
 
   const previous = existsSync(SCCACHE_STATE_FILE)
     ? readFileSync(SCCACHE_STATE_FILE, "utf8")
     : "";
-  const next = `${JSON.stringify({ port: SCCACHE_PORT, worktrees }, null, 2)}\n`;
-  const stats = Bun.spawnSync([sccache, "--show-stats"], {
-    cwd: APP_ROOT,
-    env,
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const serverMatches = stats.exitCode === 0
-    && sccacheHasBaseDirectories(decode(stats.stdout), worktrees);
-  if (previous !== next || !serverMatches) {
-    Bun.spawnSync([sccache, "--stop-server"], {
+  const next = `${JSON.stringify({ port: serverPort, worktrees }, null, 2)}\n`;
+  const serverRunning = sccacheServerIsRunning(serverPort);
+  const stats = serverRunning
+    ? Bun.spawnSync([sccache, "--show-stats"], {
       cwd: APP_ROOT,
       env,
-      stdout: "ignore",
-      stderr: "ignore",
-    });
+      stdout: "pipe",
+      stderr: "pipe",
+    })
+    : undefined;
+  const serverMatches = stats?.exitCode === 0
+    && sccacheHasBaseDirectories(decode(stats.stdout), worktrees);
+  if (previous !== next || !serverMatches) {
+    if (serverRunning) {
+      Bun.spawnSync([sccache, "--stop-server"], {
+        cwd: APP_ROOT,
+        env,
+        stdout: "ignore",
+        stderr: "ignore",
+      });
+    }
     writeFileSync(SCCACHE_STATE_FILE, next);
-  }
 
-  const start = Bun.spawnSync([sccache, "--start-server"], {
-    cwd: APP_ROOT,
-    env,
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  if (start.exitCode !== 0) {
-    const message = `${decode(start.stdout)} ${decode(start.stderr)}`;
-    if (!message.includes("Address in use")) {
-      console.warn("[native-build-queue] sccache failed to start; continuing without it");
-      env.RUSTC_WRAPPER = "";
+    const wrapper = env.RUSTC_WRAPPER;
+    Bun.spawnSync(
+      wrapper === sccache
+        ? [sccache, "--start-server"]
+        : [wrapper, "/usr/bin/true"],
+      {
+        cwd: APP_ROOT,
+        env,
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+    const verify = sccacheServerIsRunning(serverPort)
+      ? Bun.spawnSync([sccache, "--show-stats"], {
+        cwd: APP_ROOT,
+        env,
+        stdout: "pipe",
+        stderr: "pipe",
+      })
+      : undefined;
+    if (
+      verify === undefined
+      || verify.exitCode !== 0
+      || !sccacheHasBaseDirectories(decode(verify.stdout), worktrees)
+    ) {
+      console.warn(
+        "[native-build-queue] machine-wide sccache did not start with all worktree bases; compile-cache reuse may be reduced",
+      );
     }
   }
 
+  // Starting through the configured wrapper preserves the machine-wide
+  // backend, cache size, and fallback policy.
   return env;
 }
 
