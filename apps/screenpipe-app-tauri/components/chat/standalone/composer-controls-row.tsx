@@ -43,8 +43,9 @@ export function ComposerControlsRow({
   sendButton,
 }: ComposerControlsRowProps) {
   const aiPresets = modelControls.settings.aiPresets;
-  // ACP presets drive their own model/mode/toggle selectors (AcpConfigSelector);
-  // the pi thinking-level control belongs to raw screenpipe pi only.
+  // ACP presets drive their adapter-advertised model/effort settings. Every
+  // other provider runs through Pi and embeds its thinking level in the native
+  // preset/model popover below.
   const isAcp = modelControls.activePreset?.provider === "acp";
   const acpAgentId = modelControls.activePreset?.acpAgent?.id ?? null;
 
@@ -158,12 +159,22 @@ export function ComposerControlsRow({
             void modelControls.onPresetSaved(preset);
           }
         }}
+        popoverFooter={
+          !isAcp ? (
+            <ThinkingLevelSelector
+              embedded
+              streaming={isStreaming}
+              sessionId={modelControls.currentQueueSessionId}
+            />
+          ) : undefined
+        }
       />
       {/* ACP presets keep their advertised model and effort in one config
-          popover; raw pi gets its thinking-level control. Gated on the active
-          preset (not stale session config) so switching away from ACP hides its
-          controls immediately instead of waiting for session teardown. */}
-      {isAcp ? (
+          popover. Native providers already render effort inside the preset
+          popover above, so neither path needs a second gauge trigger. Gated on
+          the active preset (not stale session config) so switching away from
+          ACP hides its controls immediately instead of waiting for teardown. */}
+      {isAcp && (
         <AcpConfigSelector
           sessionId={modelControls.currentQueueSessionId}
           agentId={acpAgentId}
@@ -171,11 +182,6 @@ export function ComposerControlsRow({
           onPersistDefault={modelControls.onAcpConfigDefault}
           onReauthenticate={modelControls.onReauthenticate}
           hideModeControl
-        />
-      ) : (
-        <ThinkingLevelSelector
-          streaming={isStreaming}
-          sessionId={modelControls.currentQueueSessionId}
         />
       )}
       <UsagePopover

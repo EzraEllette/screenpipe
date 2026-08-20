@@ -72,6 +72,14 @@ describe("composer settings control", () => {
     expect(pi).toHaveAccessibleName("Thinking level: Medium");
   });
 
+  it("can embed Pi effort without rendering a second trigger", () => {
+    render(<ThinkingLevelSelector embedded sessionId={SESSION} />);
+
+    expect(screen.getByTestId("thinking-level-inline")).toBeInTheDocument();
+    expect(screen.getByTestId("thinking-level-slider")).toBeInTheDocument();
+    expect(screen.queryByTestId("thinking-level-trigger")).not.toBeInTheDocument();
+  });
+
   it("names the active value on both triggers", () => {
     renderAcp();
     expect(screen.getByTestId("acp-config-trigger")).toHaveTextContent("Sonnet 4.6");

@@ -26,6 +26,7 @@ import {
   type AcpConfigOption,
 } from "@/lib/stores/acp-session-config";
 import { cn } from "@/lib/utils";
+import { compactModelLabel } from "@/lib/utils/model-label";
 
 // A live-session command fails this way before the first prompt spawns the ACP
 // runtime. That's expected on a fresh chat — the choice is persisted to the
@@ -86,15 +87,6 @@ function resolvedModelFromDescription(description: string): string | null {
     .trim();
   const balanced = trimUnbalancedClosingParens(candidate);
   return balanced || null;
-}
-
-/** Context size is useful inside model details, but it makes the always-visible
- *  composer label noisy. Keep the concrete model name and trim only a trailing
- *  adapter-advertised context annotation. */
-function compactModelLabel(value: string): string {
-  return value
-    .replace(/\s*\(\s*\d+(?:\.\d+)?\s*[kmgt]?\s+context(?:\s+window)?\s*\)\s*$/i, "")
-    .trim();
 }
 
 export function acpConfigValueLabel(

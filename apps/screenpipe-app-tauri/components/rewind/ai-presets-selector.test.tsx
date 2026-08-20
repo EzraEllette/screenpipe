@@ -330,4 +330,33 @@ describe("AIPresetsSelector controlled preset creation", () => {
       screen.getByRole("combobox", { name: "AI preset" }),
     ).toHaveTextContent("old-model");
   });
+
+  it("keeps native effort in the model popover and trims context from its trigger", () => {
+    mocks.settings.current = {
+      aiPresets: [
+        {
+          ...originalPreset,
+          model: "Opus 5 (1M context)",
+        },
+      ],
+      user: { token: "test-token" },
+    };
+
+    render(
+      <AIPresetsSelector
+        compact
+        showModelOnly
+        popoverFooter={<div>effort control</div>}
+      />,
+    );
+
+    const trigger = screen.getByRole("combobox");
+    expect(trigger).toHaveTextContent("Opus 5");
+    expect(trigger).not.toHaveTextContent("1M context");
+
+    fireEvent.click(trigger);
+    expect(screen.getByTestId("ai-preset-popover-footer")).toHaveTextContent(
+      "effort control",
+    );
+  });
 });

@@ -16,7 +16,14 @@ import { useSettings } from "@/lib/hooks/use-settings";
 import { useModelUpsellGating } from "@/lib/hooks/use-model-upsell-gating";
 import { usePiModels } from "@/lib/hooks/use-pi-models";
 import { modelAllowanceNotice } from "@/lib/chat/model-allowance-cost";
-import { useMemo, useState, useEffect, useCallback, useRef } from "react";
+import {
+  useMemo,
+  useState,
+  useEffect,
+  useCallback,
+  useRef,
+  type ReactNode,
+} from "react";
 import {
   acpAdapterInfo,
   generatePresetName,
@@ -100,6 +107,7 @@ import {
   ollamaContextWindowFromShow,
   resolveModelLimits,
 } from "@/lib/model-metadata";
+import { compactModelLabel } from "@/lib/utils/model-label";
 
 // Helper to detect UUID-like strings and format preset names nicely
 const formatPresetName = (name: string): string => {
@@ -1338,6 +1346,8 @@ interface AIPresetsSelectorProps {
   providerIconOnly?: boolean;
   /** Notify parent surfaces when the preset popover opens or closes. */
   onOpenChange?: (open: boolean) => void;
+  /** Optional controls that belong with model selection in the same popover. */
+  popoverFooter?: ReactNode;
   /** Scheduled pipes still run through raw Pi and cannot execute ACP adapters. */
   includeAgentPresets?: boolean;
 }
@@ -1438,6 +1448,7 @@ export const AIPresetsSelector = ({
   showModelOnly = false,
   providerIconOnly = false,
   onOpenChange,
+  popoverFooter,
   includeAgentPresets = true,
 }: AIPresetsSelectorProps) => {
   const { settings, updateSettings } = useSettings();
@@ -1907,7 +1918,7 @@ export const AIPresetsSelector = ({
                                 names the model the agent is running. */}
                             {selectedPresetData?.provider === "acp"
                               ? acpAdapterInfo(selectedPresetData.acpAgent?.id).name
-                              : selectedPresetData?.model ||
+                              : compactModelLabel(selectedPresetData?.model || "") ||
                                 formatPresetName(selectedPreset)}
                           </span>
                         )}
@@ -2251,6 +2262,14 @@ export const AIPresetsSelector = ({
                 )}
               </CommandList>
             </Command>
+            {popoverFooter && (
+              <div
+                className="border-t border-border p-3"
+                data-testid="ai-preset-popover-footer"
+              >
+                {popoverFooter}
+              </div>
+            )}
           </PopoverContent>
         </Popover>
         </div>
