@@ -6,10 +6,12 @@ import type { InvokeArgs } from "@tauri-apps/api/core";
 import type {
   BrainViewCanvasDocument,
   BrainViewDefinition,
+  BrainViewTemplateKit,
   ProviderAutomation,
   SaveBrainViewCanvasRequest,
   SaveBrainViewRequest,
 } from "@/lib/utils/tauri";
+import type { BrowserDevScenario } from "./browser-engine-mock";
 
 export type BrowserDevMode = "mock" | "live";
 
@@ -22,11 +24,131 @@ type StoreChange = {
 
 export interface BrowserIpcMockOptions {
   mode: BrowserDevMode;
+  scenario?: BrowserDevScenario;
   apiPort: number;
   apiKey?: string;
   onStoreChange?: (change: StoreChange) => void;
   warn?: (message: string) => void;
 }
+
+const BROWSER_DEV_TEMPLATE_KITS: BrainViewTemplateKit[] = [
+  {
+    id: "daily-memory",
+    title: "Daily memory",
+    description: "Remember what changed today and exactly where to resume.",
+    version: 1,
+    timeRange: "today",
+    periodPolicy: { type: "fixed.v1", value: "today" },
+    pipes: [
+      { name: "day-recap", distribution: "bundled" },
+      { name: "missed-todos", distribution: "bundled" },
+    ],
+    slots: [
+      {
+        id: "today-in-brief",
+        title: "Today in brief",
+        component: "markdown.v1",
+        width: 12,
+        order: 0,
+        intent: "Summarize today's source-backed work.",
+        binding: { pipeName: "day-recap" },
+      },
+      {
+        id: "unfinished-work",
+        title: "Unfinished work",
+        component: "list.v1",
+        width: 12,
+        order: 1,
+        intent: "Find work that needs a next step.",
+        binding: { pipeName: "missed-todos" },
+      },
+    ],
+  },
+  {
+    id: "meeting-follow-ups",
+    title: "Meeting follow-ups",
+    description: "Keep decisions, promises, and unanswered questions visible.",
+    version: 1,
+    timeRange: "7d",
+    periodPolicy: {
+      type: "selectable.v1",
+      values: ["today", "7d", "30d"],
+    },
+    pipes: [{ name: "meeting-follow-ups", distribution: "bundled" }],
+    slots: [
+      {
+        id: "commitments",
+        title: "Open commitments",
+        component: "list.v1",
+        width: 12,
+        order: 0,
+        intent: "Find source-backed commitments from recent meetings.",
+        binding: { pipeName: "meeting-follow-ups" },
+      },
+    ],
+  },
+  {
+    id: "work-patterns",
+    title: "Work patterns",
+    description: "See where time goes and which habits are changing.",
+    version: 1,
+    timeRange: "7d",
+    periodPolicy: {
+      type: "selectable.v1",
+      values: ["7d", "30d"],
+    },
+    pipes: [{ name: "activity-summary", distribution: "bundled" }],
+    slots: [
+      {
+        id: "time-by-app",
+        title: "Time by app",
+        component: "bar-chart.v1",
+        width: 6,
+        order: 0,
+        intent: "Summarize measured app activity without judging productivity.",
+        binding: { pipeName: "activity-summary" },
+      },
+      {
+        id: "focus-trend",
+        title: "Focus trend",
+        component: "line-chart.v1",
+        width: 6,
+        order: 1,
+        intent: "Show how uninterrupted work time changed.",
+        binding: { pipeName: "activity-summary" },
+      },
+    ],
+  },
+  {
+    id: "process-map",
+    title: "Process map",
+    description: "Map a repeated workflow from trigger to improvement.",
+    version: 1,
+    timeRange: "30d",
+    periodPolicy: { type: "fixed.v1", value: "30d" },
+    pipes: [{ name: "automate-my-work", distribution: "bundled" }],
+    slots: [
+      {
+        id: "observed-steps",
+        title: "Observed steps",
+        component: "timeline.v1",
+        width: 12,
+        order: 0,
+        intent: "Map evidence-backed steps in the repeated workflow.",
+        binding: { pipeName: "automate-my-work" },
+      },
+      {
+        id: "improvement-path",
+        title: "Improvement path",
+        component: "markdown.v1",
+        width: 12,
+        order: 1,
+        intent: "Propose a traceable improvement path.",
+        binding: { pipeName: "automate-my-work" },
+      },
+    ],
+  },
+];
 
 const NOOP_COMMANDS = new Set([
   "close_window",
@@ -62,9 +184,12 @@ const GRANTED_PERMISSION_COMMANDS = new Set([
 ]);
 
 function createBrowserDevLiveView(now: string): BrainViewDefinition {
+  const dataTimestamp = new Date(
+    Date.parse(now) - 6 * 24 * 60 * 60 * 1_000,
+  ).toISOString();
   return {
     id: "browser-dev-live-view",
-    title: "How I worked today",
+    title: "How I spend my time today",
     revision: 1,
     timeRange: "today",
     periodPolicy: {
@@ -73,16 +198,33 @@ function createBrowserDevLiveView(now: string): BrainViewDefinition {
     },
     slots: [
       {
-        id: "focus-time",
-        title: "Focus time",
-        component: "metric.v1",
-        width: 6,
+        id: "activity-timeline",
+        title: "Today's activity timeline",
+        component: "timeline.v1",
+        width: 12,
         order: 0,
-        intent: "Calculate focused work time",
+        intent: "Summarize today's source-backed activity",
         binding: { pipeName: "daily-summary" },
         value: {
-          payload: { value: 4.5, unit: "hours", delta: "+45m" },
-          evidence: [],
+          payload: {
+            items: [
+              {
+                timestamp: dataTimestamp,
+                title: "Recorded activity begins",
+                description:
+                  "The newest available activity is older than today.",
+              },
+            ],
+          },
+          evidence: [
+            {
+              eventId: null,
+              frameId: 88,
+              transcriptionId: null,
+              ts: dataTimestamp,
+              deviceId: null,
+            },
+          ],
           sourcePipe: "daily-summary",
           artifactOutputId: 88,
           artifactVersion: 2,
@@ -109,7 +251,7 @@ function createBrowserDevLiveViewCanvas(
     viewport: { x: 24, y: 24, zoom: 1 },
     blocks: [
       {
-        slotId: "focus-time",
+        slotId: "activity-timeline",
         x: 64,
         y: 64,
         width: 440,
@@ -271,9 +413,12 @@ export function createBrowserIpcMock(options: BrowserIpcMockOptions) {
   const warned = new Set<string>();
   let nextResourceId = 1;
   const initialTimestamp = new Date().toISOString();
-  let liveViews = [createBrowserDevLiveView(initialTimestamp)];
+  let liveViews =
+    options.scenario === "empty"
+      ? []
+      : [createBrowserDevLiveView(initialTimestamp)];
   let liveViewCanvas = createBrowserDevLiveViewCanvas(
-    liveViews[0].id,
+    liveViews[0]?.id ?? "browser-dev-live-view",
     initialTimestamp,
   );
 
@@ -420,7 +565,7 @@ export function createBrowserIpcMock(options: BrowserIpcMockOptions) {
       case "list_brain_views":
         return liveViews;
       case "list_brain_view_template_kits":
-        return [];
+        return BROWSER_DEV_TEMPLATE_KITS;
       case "list_provider_automations":
         return browserDevProviderAutomations.map((task) => ({
           ...task,

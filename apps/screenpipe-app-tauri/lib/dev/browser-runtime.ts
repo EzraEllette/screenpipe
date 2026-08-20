@@ -37,7 +37,8 @@ export function installBrowserRuntime() {
   if (window.__SCREENPIPE_BROWSER_RUNTIME_INSTALLED__) return;
   window.__SCREENPIPE_BROWSER_RUNTIME_INSTALLED__ = true;
 
-  const apiPort = Number(process.env.NEXT_PUBLIC_SCREENPIPE_WEB_API_PORT) || 3030;
+  const apiPort =
+    Number(process.env.NEXT_PUBLIC_SCREENPIPE_WEB_API_PORT) || 3030;
   const scenario = parseScenario(
     process.env.NEXT_PUBLIC_SCREENPIPE_WEB_SCENARIO,
   );
@@ -56,6 +57,7 @@ export function installBrowserRuntime() {
   mockIPC(
     createBrowserIpcMock({
       mode,
+      scenario,
       apiPort,
       apiKey: process.env.NEXT_PUBLIC_SCREENPIPE_WEB_API_KEY,
       onStoreChange: (change) => {

@@ -66,7 +66,7 @@ describe("browser development runtime", () => {
       viewId: view.id,
     }) as BrainViewCanvasDocument;
 
-    expect(view.title).toBe("How I worked today");
+    expect(view.title).toBe("How I spend my time today");
     expect(view.slots[0].value).not.toBeNull();
     expect(canvas).toMatchObject({
       viewId: view.id,
@@ -175,5 +175,18 @@ describe("browser development runtime", () => {
   it("can render a healthy empty-device state", () => {
     expect(createMockHealth("empty").monitors).toEqual([]);
     expect(createMockHealth("ready").monitors).toHaveLength(1);
+
+    const invoke = createBrowserIpcMock({
+      mode: "mock",
+      scenario: "empty",
+      apiPort: 3030,
+    });
+    expect(invoke("list_brain_views")).toEqual([]);
+    expect(invoke("list_brain_view_template_kits")).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: "daily-memory" }),
+        expect.objectContaining({ id: "meeting-follow-ups" }),
+      ]),
+    );
   });
 });

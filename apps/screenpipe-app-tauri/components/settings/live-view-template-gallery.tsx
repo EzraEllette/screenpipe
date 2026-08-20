@@ -100,8 +100,8 @@ export function LiveViewTemplateGallery({
                   </p>
                 </div>
                 <span className="shrink-0 text-[10px] uppercase tracking-wide text-muted-foreground">
-                  {kit.slots.length} sections ·{" "}
-                  {getLiveViewTimeRangeOption(kit.timeRange).label}
+                  {kit.slots.length} section{kit.slots.length === 1 ? "" : "s"}{" "}
+                  · {getLiveViewTimeRangeOption(kit.timeRange).label}
                 </span>
               </div>
               <div

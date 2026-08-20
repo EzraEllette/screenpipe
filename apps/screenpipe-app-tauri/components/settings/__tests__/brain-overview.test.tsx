@@ -591,7 +591,7 @@ describe("BrainOverview", () => {
       expect(mocks.capture).toHaveBeenCalledWith(
         "live_view_viewed",
         expect.objectContaining({
-          analytics_schema_version: 2,
+          analytics_schema_version: 3,
           entry_method: "initial",
           dashboard_count: 1,
           block_count: 1,
@@ -627,7 +627,7 @@ describe("BrainOverview", () => {
       expect(mocks.capture).toHaveBeenCalledWith(
         "live_view_result_viewed",
         expect.objectContaining({
-          analytics_schema_version: 2,
+          analytics_schema_version: 3,
           entry_method: "initial",
           result_block_count: 1,
           all_bound_blocks_have_results: true,
@@ -865,13 +865,14 @@ describe("BrainOverview", () => {
       expect(mocks.capture).toHaveBeenCalledWith(
         "live_view_refresh_completed",
         expect.objectContaining({
-          analytics_schema_version: 2,
+          analytics_schema_version: 3,
           trigger: "manual",
           status: "error",
           requested_block_count: 1,
           requested_pipe_count: 1,
           refreshed_block_count: 0,
           pipe_start_failure_count: 1,
+          blocked_reason: "pipe_start_failed",
           produced_result: false,
           all_requested_blocks_refreshed: false,
         }),
@@ -884,6 +885,38 @@ describe("BrainOverview", () => {
     )?.[1];
     expect(JSON.stringify(properties)).not.toContain("daily-summary");
     expect(JSON.stringify(properties)).not.toContain("private failure detail");
+    expect(screen.getByTestId("live-view-data-status")).toHaveTextContent(
+      "The data refresh could not start",
+    );
+  });
+
+  it("explains when refresh is blocked by the AI usage limit", async () => {
+    mocks.listBrainViews.mockResolvedValue({
+      status: "ok",
+      data: [populatedView],
+    });
+    mocks.localFetch.mockResolvedValue({
+      ok: false,
+      status: 429,
+      json: async () => ({ error: "daily_cost_limit_exceeded" }),
+    });
+    render(<BrainOverview />);
+
+    fireEvent.click(await screen.findByTestId("overview-refresh-data"));
+
+    expect(
+      await screen.findByTestId("live-view-data-status"),
+    ).toHaveTextContent("AI usage limit");
+    await waitFor(() =>
+      expect(mocks.capture).toHaveBeenCalledWith(
+        "live_view_refresh_completed",
+        expect.objectContaining({
+          status: "error",
+          blocked_reason: "usage_limit",
+          produced_result: false,
+        }),
+      ),
+    );
   });
 
   it("keeps primary controls visible and moves setup actions into More", async () => {
@@ -904,7 +937,7 @@ describe("BrainOverview", () => {
     );
     expect(screen.getByTestId("overview-time-range")).toHaveAttribute(
       "title",
-      expect.stringMatching(/^Updated /),
+      expect.stringMatching(/^Sources checked /),
     );
     expect(screen.getByTestId("overview-refresh-data").className).toContain(
       "w-9",
@@ -1128,8 +1161,8 @@ describe("BrainOverview", () => {
     // timestamp alone made a dashboard with much older and still-empty Blocks
     // read as current.
     const freshness = await screen.findByTestId("overview-freshness");
-    expect(freshness.textContent).toMatch(/^Updated /);
-    expect(freshness.textContent).toContain("oldest");
+    expect(freshness.textContent).toMatch(/^Sources checked /);
+    expect(freshness.textContent).toContain("oldest check");
     expect(freshness.textContent).toContain("1 waiting");
     expect(screen.getByTestId("overview-time-range")).toHaveAttribute(
       "title",
@@ -1137,41 +1170,102 @@ describe("BrainOverview", () => {
     );
   });
 
+  it("warns when a recent source check only found older evidence", async () => {
+    const checkedAt = new Date().toISOString();
+    const evidenceAt = new Date(
+      Date.now() - 6 * 24 * 60 * 60 * 1_000,
+    ).toISOString();
+    mocks.listBrainViews.mockResolvedValue({
+      status: "ok",
+      data: [
+        {
+          ...populatedView,
+          slots: [
+            {
+              ...populatedView.slots[0],
+              value: {
+                ...populatedView.slots[0].value!,
+                updatedAt: checkedAt,
+                evidence: [
+                  {
+                    eventId: null,
+                    frameId: 42,
+                    transcriptionId: null,
+                    ts: evidenceAt,
+                    deviceId: null,
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      ],
+    });
+    render(<BrainOverview />);
+
+    expect(
+      await screen.findByTestId("overview-data-warning"),
+    ).toHaveTextContent("showing data older than today");
+    expect(screen.getByTestId("overview-freshness")).toHaveTextContent(
+      "Data through",
+    );
+    expect(screen.getByTestId("overview-freshness")).toHaveTextContent(
+      "Sources checked just now",
+    );
+    await waitFor(() =>
+      expect(mocks.capture).toHaveBeenCalledWith(
+        "live_view_result_viewed",
+        expect.objectContaining({
+          result_data_status: "outside_requested_range",
+          data_age_seconds: expect.any(Number),
+        }),
+      ),
+    );
+    const resultProperties = mocks.capture.mock.calls.find(
+      ([event, properties]) =>
+        event === "live_view_result_viewed" &&
+        properties?.result_data_status === "outside_requested_range",
+    )?.[1];
+    expect(JSON.stringify(resultProperties)).not.toContain(evidenceAt);
+  });
+
   it("gives a paused manual source a schedule before refreshing it", async () => {
     const calls: Array<{ path: string; body: unknown }> = [];
     let enabled = false;
-    mocks.localFetch.mockImplementation(async (path: string, init?: RequestInit) => {
-      const body = init?.body ? JSON.parse(String(init.body)) : null;
-      calls.push({ path, body });
-      if (path === "/pipes") {
-        return {
-          ok: true,
-          status: 200,
-          json: async () => ({
-            data: [
-              {
-                config: {
-                  name: "daily-summary",
-                  enabled,
-                  schedule: enabled ? "every 1h" : "manual",
+    mocks.localFetch.mockImplementation(
+      async (path: string, init?: RequestInit) => {
+        const body = init?.body ? JSON.parse(String(init.body)) : null;
+        calls.push({ path, body });
+        if (path === "/pipes") {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              data: [
+                {
+                  config: {
+                    name: "daily-summary",
+                    enabled,
+                    schedule: enabled ? "every 1h" : "manual",
+                  },
                 },
-              },
-            ],
-          }),
-        };
-      }
-      if (path.endsWith("/config")) enabled = true;
-      return { ok: true, status: 200, json: async () => ({ success: true }) };
-    });
+              ],
+            }),
+          };
+        }
+        if (path.endsWith("/config")) enabled = true;
+        return { ok: true, status: 200, json: async () => ({ success: true }) };
+      },
+    );
 
     render(<BrainOverview />);
 
     // A disabled source never runs on schedule, so the Block is frozen at the
     // last click even though it shows a normal-looking value.
     await waitFor(() =>
-      expect(screen.getByTestId("overview-stalled-sources").textContent).toContain(
-        "1 source",
-      ),
+      expect(
+        screen.getByTestId("overview-stalled-sources").textContent,
+      ).toContain("1 source"),
     );
 
     fireEvent.click(await screen.findByTestId("overview-refresh-data"));
@@ -1203,7 +1297,9 @@ describe("BrainOverview", () => {
         (call) => !(call.body as { config?: unknown } | null)?.config,
       ),
     ).toBe(true);
-    const configIndex = calls.findIndex((call) => call.path.endsWith("/config"));
+    const configIndex = calls.findIndex((call) =>
+      call.path.endsWith("/config"),
+    );
     const runIndex = calls.findIndex((call) => call.path.endsWith("/run"));
     expect(configIndex).toBeGreaterThanOrEqual(0);
     expect(runIndex).toBeGreaterThan(configIndex);
@@ -1359,6 +1455,10 @@ describe("BrainOverview", () => {
 
   it("creates a usable starter dashboard on first open", async () => {
     mocks.listBrainViews.mockResolvedValue({ status: "ok", data: [] });
+    mocks.listBrainViewTemplateKits.mockResolvedValue({
+      status: "ok",
+      data: [dailyMemoryTemplate],
+    });
     mocks.saveBrainView.mockImplementation(async (request) => ({
       status: "ok",
       data: {
@@ -1390,10 +1490,36 @@ describe("BrainOverview", () => {
       },
       slots: [],
     });
+    expect(await screen.findByTestId("overview-zero-state")).toBeTruthy();
+    expect(screen.getByText("choose an outcome")).toBeTruthy();
+    expect(screen.getByTestId("live-view-template-daily-memory")).toBeTruthy();
     expect(
-      screen.getByPlaceholderText(/Ask AI to change this Live View/),
+      screen.getByPlaceholderText(/show how I spend my time/),
     ).toBeTruthy();
-    fireEvent.click(screen.getByText("add your first Block"));
+    expect(mocks.capture).toHaveBeenCalledWith(
+      "live_view_empty_state_initialized",
+      expect.objectContaining({
+        analytics_schema_version: 3,
+        empty_state_reason: "first_live_view",
+      }),
+    );
+    expect(mocks.capture).not.toHaveBeenCalledWith(
+      "live_view_dashboard_saved",
+      expect.objectContaining({ source: "starter" }),
+    );
+    fireEvent.click(
+      screen.getByTestId("preview-live-view-template-daily-memory"),
+    );
+    expect(
+      await screen.findByTestId("overview-destination-replace"),
+    ).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByText("use this dashboard")).toBeTruthy();
+    expect(screen.getByTestId("overview-apply-template")).toHaveTextContent(
+      "build with agent",
+    );
+    fireEvent.click(screen.getByText("discard"));
+    expect(await screen.findByTestId("overview-zero-state")).toBeTruthy();
+    fireEvent.click(screen.getByTestId("overview-start-blank"));
     fireEvent.click(screen.getByTestId("overview-add-card"));
     expect(screen.getByText("Live View name")).toBeTruthy();
     expect(screen.getByText("Block title")).toBeTruthy();
@@ -1451,6 +1577,12 @@ describe("BrainOverview", () => {
     ).toContain("min-h-full");
     expect(screen.getByTestId("live-view-template-daily-memory")).toBeTruthy();
     expect(screen.getByTestId("live-view-template-process-map")).toBeTruthy();
+    const gallery = screen.getByTestId("live-view-template-gallery");
+    const composer = screen.getByTestId("live-view-ai-composer");
+    expect(
+      gallery.compareDocumentPosition(composer) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
   });
 
   it("keeps a template-generated new dashboard in review until it is saved", async () => {
@@ -1740,7 +1872,7 @@ describe("BrainOverview", () => {
     expect(mocks.capture).toHaveBeenCalledWith(
       "live_view_card_feedback",
       expect.objectContaining({
-        analytics_schema_version: 2,
+        analytics_schema_version: 3,
         action: "up",
         previous_action: "none",
         is_first_feedback: true,
@@ -2113,7 +2245,7 @@ describe("BrainOverview", () => {
     });
     render(<BrainOverview />);
 
-    expect(await screen.findByText("add your first Block")).toBeTruthy();
+    expect(await screen.findByTestId("overview-zero-state")).toBeTruthy();
     fireEvent.change(screen.getByTestId("live-view-ai-prompt"), {
       target: { value: "add four useful Blocks" },
     });
@@ -2122,8 +2254,8 @@ describe("BrainOverview", () => {
     expect(await screen.findByTestId("live-view-ai-review")).toHaveTextContent(
       "Review 4 proposed Blocks",
     );
-    expect(screen.queryByText("add your first Block")).toBeNull();
-    expect(screen.getByTestId("live-view-canvas")).toBeTruthy();
+    expect(screen.queryByTestId("overview-zero-state")).toBeNull();
+    expect(await screen.findByTestId("live-view-canvas")).toBeTruthy();
     for (const [id] of proposedBlocks) {
       expect(screen.getByTestId(`canvas-block-${id}`)).toBeTruthy();
     }
