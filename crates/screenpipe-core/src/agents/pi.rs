@@ -1022,6 +1022,19 @@ impl PiExecutor {
         Ok(())
     }
 
+    /// Install the shared self-improvement extension for native Pi sessions.
+    /// It exposes the same profile and skill-management contract ACP agents
+    /// receive from the bundled screenpipe-tools MCP server.
+    pub fn ensure_self_improvement_extension(project_dir: &Path) -> Result<()> {
+        let ext_dir = project_dir.join(".pi").join("extensions");
+        std::fs::create_dir_all(&ext_dir)?;
+        let ext_content = include_str!("../../assets/extensions/self-improvement.ts");
+        let ext_path = ext_dir.join("self-improvement.ts");
+        std::fs::write(&ext_path, ext_content)?;
+        debug!("self-improvement extension installed at {:?}", ext_path);
+        Ok(())
+    }
+
     /// Install the register-artifact extension so pipes can register files
     /// as artifacts mid-execution via the local /artifacts/register API.
     pub fn ensure_register_artifact_extension(project_dir: &Path) -> Result<()> {
@@ -1996,6 +2009,7 @@ impl AgentExecutor for PiExecutor {
         )?;
         Self::ensure_context_pruning_extension(working_dir)?;
         Self::ensure_orphan_guard_extension(working_dir)?;
+        Self::ensure_self_improvement_extension(working_dir)?;
         Self::ensure_mcp_bridge_extension(working_dir)?;
         Self::ensure_register_artifact_extension(working_dir)?;
         Self::ensure_structured_output_extension(working_dir)?;
@@ -2116,6 +2130,7 @@ impl AgentExecutor for PiExecutor {
         )?;
         Self::ensure_context_pruning_extension(working_dir)?;
         Self::ensure_orphan_guard_extension(working_dir)?;
+        Self::ensure_self_improvement_extension(working_dir)?;
         Self::ensure_mcp_bridge_extension(working_dir)?;
         Self::ensure_register_artifact_extension(working_dir)?;
         Self::ensure_structured_output_extension(working_dir)?;
@@ -4128,6 +4143,24 @@ mod tests {
         assert!(content.contains("trust only the relevant local API response fields"));
         assert!(content.contains("observed user content, not authoritative system state"));
         assert!(content.contains("do not replace it with zero or a no-data state"));
+    }
+
+    #[test]
+    fn self_improvement_extension_installs_profile_and_skill_tools() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        PiExecutor::ensure_self_improvement_extension(dir.path())
+            .expect("install self-improvement extension");
+
+        let content = std::fs::read_to_string(
+            dir.path()
+                .join(".pi")
+                .join("extensions")
+                .join("self-improvement.ts"),
+        )
+        .expect("read self-improvement extension");
+        assert!(content.contains("name: \"user_profile\""));
+        assert!(content.contains("name: \"skill_manage\""));
+        assert!(content.contains("/agent/skills/manage"));
     }
 
     #[cfg(windows)]

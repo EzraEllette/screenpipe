@@ -34,6 +34,8 @@
 //! section in `AGENTS.md` before touching those.
 
 pub mod activity_ledger;
+pub(crate) mod agent_profile;
+pub(crate) mod agent_skills;
 pub mod analytics;
 pub mod archive;
 mod atomic_file;

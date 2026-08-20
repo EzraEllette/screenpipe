@@ -1616,6 +1616,14 @@ fn ensure_screenpipe_skill(project_dir: &str) -> Result<(), String> {
         .map_err(|e| format!("Failed to install screenpipe skills: {}", e))
 }
 
+/// Install the profile + skill tools used by native Pi and pi-acp. Other ACP
+/// agents receive the same contract from the bundled screenpipe-tools MCP.
+fn ensure_self_improvement_extension(project_dir: &str) -> Result<(), String> {
+    use screenpipe_core::agents::pi::PiExecutor;
+    PiExecutor::ensure_self_improvement_extension(std::path::Path::new(project_dir))
+        .map_err(|e| format!("Failed to install self-improvement extension: {}", e))
+}
+
 /// Stage the Enterprise-only team skill outside Pi's auto-discovery tree.
 /// Consumer builds return `None` without touching this path; the Enterprise
 /// app passes the returned file explicitly with `--skill` for this process.
@@ -2579,6 +2587,8 @@ pub async fn pi_start_inner(
     // extensions and packages must not be installed or required there — except
     // pi-acp, which is pi and can't consume the MCP servers.
     if !use_acp {
+        ensure_self_improvement_extension(&project_dir)?;
+
         // Install web-search extension only for screenpipe-cloud presets
         ensure_web_search_extension(&project_dir, provider_config.as_ref())?;
 
@@ -2601,6 +2611,8 @@ pub async fn pi_start_inner(
             ensure_required_pi_extension_package().await?;
         }
     } else if is_pi_acp {
+        ensure_self_improvement_extension(&project_dir)?;
+
         // Same pi as native — seed the project-local extensions so its tools
         // reach the model. web-search uses the LOCAL-proxy variant: the cloud
         // extension needs the screenpipe-cloud JWT (which ACP sessions never
@@ -7459,7 +7471,8 @@ error: InstallFailed extracting tarball"#;
     }
 
     /// Fresh-profile parity (review item F): from an EMPTY profile, the pi-acp
-    /// baseline seeds Screenpipe skills, the Live Views extension, and registers
+    /// baseline seeds Screenpipe skills, self-improvement and Live Views
+    /// extensions, and registers
     /// the required pi-subagents package — the exact pieces the pi-acp path now
     /// calls ensure_screenpipe_skill / ensure_live_views_extension /
     /// ensure_pi_config (which registers the setting) + ensure_required_pi_-
@@ -7482,6 +7495,18 @@ error: InstallFailed extracting tarball"#;
                 .filter_map(Result::ok)
                 .any(|e| e.file_name().to_string_lossy().starts_with("screenpipe")),
             "at least one screenpipe skill must be seeded on a fresh profile"
+        );
+
+        super::ensure_self_improvement_extension(project_dir)
+            .expect("seed self-improvement extension");
+        assert!(
+            project
+                .path()
+                .join(".pi")
+                .join("extensions")
+                .join("self-improvement.ts")
+                .is_file(),
+            "self-improvement extension must be seeded on a fresh profile"
         );
 
         // The Live Views extension (the pi-acp parity fix) materializes too.
