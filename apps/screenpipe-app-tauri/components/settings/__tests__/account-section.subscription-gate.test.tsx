@@ -29,6 +29,8 @@ import {
 
 const mocks = vi.hoisted(() => ({
   state: { user: null as any },
+  managed: false,
+  managedAuthenticated: true,
   updateSettings: vi.fn().mockResolvedValue(undefined),
   loadUser: vi.fn().mockResolvedValue(undefined),
   openLoginWindow: vi.fn().mockResolvedValue(undefined),
@@ -63,7 +65,11 @@ vi.mock("@/lib/hooks/use-health-check", () => ({
 }));
 
 vi.mock("@/lib/hooks/use-managed-policy", () => ({
-  useManagedPolicy: () => ({ isManagedDeployment: false }),
+  useManagedPolicy: () => ({
+    isManagedDeployment: mocks.managed,
+    isManagedAuthenticated: mocks.managedAuthenticated,
+    policy: { orgName: mocks.managed ? "Rialto Distribution" : "" },
+  }),
 }));
 
 vi.mock("@/lib/utils/tauri", () => ({
@@ -132,6 +138,8 @@ describe("AccountSection subscription/login gating", () => {
     vi.unstubAllEnvs();
     mocks.eventHandlers.clear();
     mocks.state.user = null;
+    mocks.managed = false;
+    mocks.managedAuthenticated = true;
   });
 
   it("hides the active plan card for a tokenless stale shell (the bug)", () => {
@@ -187,6 +195,46 @@ describe("AccountSection subscription/login gating", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /web account/i }));
     expect(mocks.openUrl).toHaveBeenCalledWith("https://screenpipe.com/account");
+  });
+
+  it.each([
+    { user: null, status: "enterprise device access active" },
+    {
+      user: {
+        id: "enterprise-member",
+        email: "member@rialto.test",
+        token: "enterprise-token",
+        cloud_subscribed: false,
+        subscription_plan: "none",
+      },
+      status: "logged in as member@rialto.test",
+    },
+  ])("shows managed Enterprise status instead of consumer Free", ({ user, status }) => {
+    mocks.managed = true;
+    mocks.state.user = user;
+
+    render(<AccountSection />);
+
+    expect(loginStatus()).toContain(status);
+    expect(screen.getByTestId("account-enterprise-managed-card")).toHaveTextContent(
+      "Screenpipe Enterprise",
+    );
+    expect(screen.getByText(/Rialto Distribution manages this deployment/i)).toBeInTheDocument();
+    expect(screen.queryByText("Screenpipe Free")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /upgrade to business/i })).not.toBeInTheDocument();
+  });
+
+  it("does not label an unverified managed session active", () => {
+    mocks.managed = true;
+    mocks.managedAuthenticated = false;
+
+    render(<AccountSection />);
+
+    expect(loginStatus()).toContain("enterprise access verification required");
+    expect(screen.getByTestId("account-enterprise-managed-card")).toHaveTextContent(
+      "verification required",
+    );
+    expect(screen.queryByText("Screenpipe Free")).not.toBeInTheDocument();
   });
 
   it("shows Max and Ultra as plans and opens the exact Max billing target", () => {

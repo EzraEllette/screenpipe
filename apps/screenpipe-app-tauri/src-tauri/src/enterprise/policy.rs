@@ -16,6 +16,11 @@ use std::sync::{Mutex, RwLock};
 
 static HIDDEN_SECTIONS: Lazy<RwLock<HashSet<String>>> = Lazy::new(|| RwLock::new(HashSet::new()));
 static SERVER_POLICY_RECEIVED: AtomicBool = AtomicBool::new(false);
+// A process-local grant set only after the control plane accepts an enterprise
+// credential. It is deliberately not restored from disk: the presence of an
+// `enterprise.json` or registry key proves enrollment intent, not that the key
+// is still valid or that the account remains a member.
+static RECORDING_AUTHORIZED: AtomicBool = AtomicBool::new(false);
 static IMMUTABLE_DEPLOYMENT_APP_UI_HIDDEN: Lazy<bool> =
     Lazy::new(|| env_hides_app_ui() || bundled_enterprise_config_hides_app_ui());
 static PERSISTED_APP_UI_HIDDEN: Lazy<bool> = Lazy::new(user_enterprise_config_hides_app_ui);
@@ -340,6 +345,24 @@ pub fn set_enterprise_policy(hidden_sections: Vec<String>, enforce_auto_start: b
             }
         );
     }
+}
+
+/// Update the process-local Enterprise recording grant. This is intentionally
+/// not a Tauri command: webview callers must pass through the native
+/// control-plane verification in `enterprise_recording_access`.
+pub(crate) fn update_recording_authorized(authorized: bool) {
+    let previous = RECORDING_AUTHORIZED.swap(authorized, Ordering::SeqCst);
+    if previous != authorized {
+        tracing::info!(
+            "enterprise: recording authorization {}",
+            if authorized { "granted" } else { "revoked" }
+        );
+    }
+}
+
+/// Current process-local Enterprise recording grant.
+pub fn recording_authorized() -> bool {
+    RECORDING_AUTHORIZED.load(Ordering::SeqCst)
 }
 
 /// Current startup enrollment policy. The first read restores the last

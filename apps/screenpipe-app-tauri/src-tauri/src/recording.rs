@@ -125,7 +125,7 @@ fn recording_access_policy(
     is_enterprise_build: bool,
     dev_bypass: bool,
     has_verified_local_plan: bool,
-    app_entitled: bool,
+    enterprise_authorized: bool,
     consumer_requires_enterprise_app: bool,
 ) -> bool {
     if dev_bypass {
@@ -135,7 +135,10 @@ fn recording_access_policy(
         return false;
     }
     if is_enterprise_build {
-        return app_entitled;
+        // Consumer billing entitlement is not an Enterprise credential. Both
+        // account and key deployments use the same process-local grant, set
+        // only after policy and seat enrollment succeed for the organization.
+        return enterprise_authorized;
     }
     has_verified_local_plan
 }
@@ -148,7 +151,7 @@ pub(crate) fn recording_access_allowed(store: &SettingsStore) -> bool {
         cfg!(feature = "enterprise-build"),
         cfg!(debug_assertions),
         store.local_plan_policy() != LocalPlanPolicy::Unknown,
-        store.app_entitled_or_dev(),
+        crate::enterprise_policy::recording_authorized(),
         !cfg!(debug_assertions) && store.requires_enterprise_app_for_consumer(),
     )
 }
@@ -1626,28 +1629,36 @@ mod recording_access_tests {
 
     #[test]
     fn verified_free_consumer_can_record_without_a_paid_entitlement() {
-        assert!(recording_access_policy(false, false, true, false, false));
+        assert!(recording_access_policy(
+            false, false, true, false, false
+        ));
     }
 
     #[test]
     fn consumer_with_unknown_plan_cannot_record() {
-        assert!(!recording_access_policy(false, false, false, false, false));
+        assert!(!recording_access_policy(
+            false, false, false, false, false
+        ));
     }
 
     #[test]
     fn signed_out_consumer_cannot_start_recording() {
-        assert!(!recording_access_policy(false, false, false, false, false));
+        assert!(!recording_access_policy(
+            false, false, false, false, false
+        ));
     }
 
     #[test]
-    fn enterprise_build_still_requires_entitlement() {
+    fn enterprise_build_requires_verified_enterprise_session() {
         assert!(!recording_access_policy(true, false, true, false, false));
-        assert!(recording_access_policy(true, false, true, true, false));
+        assert!(recording_access_policy(true, false, false, true, false));
     }
 
     #[test]
     fn mandatory_enterprise_org_cannot_record_from_consumer_binary() {
-        assert!(!recording_access_policy(false, false, true, true, true));
+        assert!(!recording_access_policy(
+            false, false, true, true, true
+        ));
     }
 }
 

@@ -621,8 +621,9 @@ async getEnterpriseInstallMetadata() : Promise<EnterpriseInstallMetadata> {
     return await TAURI_INVOKE("get_enterprise_install_metadata");
 },
 /**
- * Read the enterprise license key from `enterprise.json`.
- * Returns None if no file is found or is invalid.
+ * Read the enterprise license key from deployment config (`enterprise.json`
+ * or the documented Windows registry value) and the user recovery config.
+ * Returns None if no valid key is found.
  */
 async getEnterpriseLicenseKey() : Promise<string | null> {
     return await TAURI_INVOKE("get_enterprise_license_key");
@@ -2375,6 +2376,23 @@ async setEnhancedAiSuggestions(enabled: boolean, token: string) : Promise<Result
  */
 async setEnterprisePolicy(hiddenSections: string[], enforceAutoStart: boolean) : Promise<void> {
     await TAURI_INVOKE("set_enterprise_policy", { hiddenSections, enforceAutoStart });
+},
+/**
+ * Request or revoke Enterprise recording access. A webview may always revoke
+ * its current session, but it cannot grant itself access: native code verifies
+ * the supplied key/account credential against both the Enterprise policy and
+ * seat-bearing heartbeat endpoints before setting the process-local grant.
+ *
+ * The grant is never persisted. Every launch must revalidate against the
+ * control plane, and an explicit credential rejection revokes it immediately.
+ */
+async setEnterpriseRecordingAuthorized(authorized: boolean, credentialType: string | null, credential: string | null) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_enterprise_recording_authorized", { authorized, credentialType, credential }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
 },
 async setKeepAwake(enabled: boolean) : Promise<Result<null, string>> {
     try {

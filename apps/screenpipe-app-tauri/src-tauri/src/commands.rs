@@ -61,7 +61,8 @@ fn log_webview_build_failure(label: &str, url_hint: &str, err: &(impl std::fmt::
 mod tests {
     use super::{
         enterprise_license_key_sha256, fallback_local_api_config, is_login_callback_scheme,
-        merge_enterprise_file_configs, persist_enterprise_device_config,
+        merge_enterprise_file_configs, normalize_enterprise_config_value,
+        persist_enterprise_device_config,
         persist_recovered_enterprise_device_config, read_enterprise_config_from_path,
         notification_belongs_to_overlay, recovery_anchor_license_key, save_enterprise_team_config,
         scan_chat_entries_by_mtime, shortcut_overlay_hidden_by_choice,
@@ -304,6 +305,19 @@ mod tests {
         std::fs::write(&path, r#"{"license_key":"  ","ingest_url":""}"#).unwrap();
         let cfg = read_enterprise_config_from_path(&path).unwrap();
         assert!(cfg.is_empty());
+    }
+
+    #[test]
+    fn registry_enterprise_key_ignores_blank_values() {
+        assert_eq!(
+            normalize_enterprise_config_value(Some("  ENT-REGISTRY-KEY  ".to_string())),
+            Some("ENT-REGISTRY-KEY".to_string())
+        );
+        assert_eq!(
+            normalize_enterprise_config_value(Some("   ".to_string())),
+            None
+        );
+        assert_eq!(normalize_enterprise_config_value(None), None);
     }
 
     #[test]
@@ -691,6 +705,13 @@ fn recovery_anchor_license_key<'a>(
     bundled_license_key.unwrap_or(rejected_license_key)
 }
 
+#[cfg(any(test, target_os = "windows"))]
+fn normalize_enterprise_config_value(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
 /// Preserve bundled/MDM precedence except for a recovery record tied to the
 /// exact bundled key it replaces. A later MDM key automatically wins because
 /// its fingerprint no longer matches.
@@ -719,10 +740,57 @@ fn merge_enterprise_file_configs(
     bundled
 }
 
+#[cfg(target_os = "windows")]
+fn read_enterprise_config_from_windows_registry() -> Option<EnterpriseFileConfig> {
+    use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_32KEY, KEY_WOW64_64KEY};
+    use winreg::RegKey;
+
+    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+    // Intune runs 64-bit PowerShell by default, but older deployment scripts
+    // may have written through a 32-bit host. Prefer the documented 64-bit view
+    // and fall back to the 32-bit view so upgrades do not strand those fleets.
+    for view in [KEY_WOW64_64KEY, KEY_WOW64_32KEY] {
+        let Ok(key) = hklm.open_subkey_with_flags("SOFTWARE\\screenpipe", KEY_READ | view) else {
+            continue;
+        };
+        let license_key = normalize_enterprise_config_value(
+            key.get_value::<String, _>("EnterpriseLicenseKey").ok(),
+        );
+        if license_key.is_some() {
+            info!(
+                "enterprise: license key loaded from HKLM\\SOFTWARE\\screenpipe ({})",
+                if view == KEY_WOW64_64KEY {
+                    "64-bit view"
+                } else {
+                    "32-bit view"
+                }
+            );
+            return Some(EnterpriseFileConfig {
+                license_key,
+                ..EnterpriseFileConfig::default()
+            });
+        }
+    }
+    None
+}
+
+#[cfg(not(target_os = "windows"))]
+fn read_enterprise_config_from_windows_registry() -> Option<EnterpriseFileConfig> {
+    None
+}
+
+/// Read an administrator-deployed config. An executable-adjacent file is the
+/// explicit cross-platform contract and therefore wins as a complete config;
+/// the Windows registry is the documented Intune fallback when no such file is
+/// bundled.
+fn read_enterprise_config_from_deployment() -> Option<EnterpriseFileConfig> {
+    read_enterprise_config_from_exe_dir().or_else(read_enterprise_config_from_windows_registry)
+}
+
 /// Read enterprise device config. Bundled/MDM config is authoritative unless
-/// the user file carries a validated recovery for that exact bundled key.
+/// the user file carries a validated recovery for that exact deployed key.
 pub fn get_enterprise_file_config() -> EnterpriseFileConfig {
-    let bundled = read_enterprise_config_from_exe_dir();
+    let bundled = read_enterprise_config_from_deployment();
     let user_path = screenpipe_core::paths::default_screenpipe_data_dir().join("enterprise.json");
     let user = if user_path.exists() {
         info!(
@@ -734,13 +802,14 @@ pub fn get_enterprise_file_config() -> EnterpriseFileConfig {
         None
     };
     if bundled.is_none() && user.is_none() {
-        info!("enterprise: no enterprise.json found in any location");
+        info!("enterprise: no deployed or user enterprise config found");
     }
     merge_enterprise_file_configs(bundled, user)
 }
 
-/// Read the enterprise license key from `enterprise.json`.
-/// Returns None if no file is found or is invalid.
+/// Read the enterprise license key from deployment config (`enterprise.json`
+/// or the documented Windows registry value) and the user recovery config.
+/// Returns None if no valid key is found.
 #[tauri::command]
 #[specta::specta]
 pub fn get_enterprise_license_key() -> Option<String> {
@@ -896,7 +965,8 @@ pub fn persist_recovered_enterprise_device_config(
     // A user recovery overlays the executable-adjacent file. Keep every
     // subsequent rotation tied to that immutable source key so recovery B can
     // replace recovery A without making the overlay disappear on restart.
-    let bundled_license_key = read_enterprise_config_from_exe_dir().and_then(|cfg| cfg.license_key);
+    let bundled_license_key =
+        read_enterprise_config_from_deployment().and_then(|cfg| cfg.license_key);
     let recovery_anchor =
         recovery_anchor_license_key(bundled_license_key.as_deref(), replaced_license_key);
     persist_enterprise_device_config_inner(Some(license_key), ingest_url, Some(recovery_anchor))
@@ -907,7 +977,7 @@ pub fn persist_recovered_enterprise_device_config(
 #[tauri::command]
 #[specta::specta]
 pub fn save_enterprise_license_key(license_key: String) -> Result<(), String> {
-    let bundled_key = read_enterprise_config_from_exe_dir().and_then(|cfg| cfg.license_key);
+    let bundled_key = read_enterprise_config_from_deployment().and_then(|cfg| cfg.license_key);
     match bundled_key
         .as_deref()
         .filter(|key| *key != license_key.as_str())

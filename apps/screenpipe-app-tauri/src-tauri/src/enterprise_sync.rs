@@ -681,6 +681,55 @@ mod imp {
     fn default_policy_url() -> String {
         crate::web_base::screenpipe_web_url("/api/enterprise/policy")
     }
+
+    fn default_heartbeat_url() -> String {
+        crate::web_base::screenpipe_web_url("/api/enterprise/heartbeat")
+    }
+
+    fn sibling_heartbeat_url(policy_url: &str) -> Option<String> {
+        let mut url = reqwest::Url::parse(policy_url).ok()?;
+        if !matches!(url.scheme(), "http" | "https")
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+            || !url.path().ends_with("/api/enterprise/policy")
+        {
+            return None;
+        }
+        let path = url.path().strip_suffix("/policy")?.to_string() + "/heartbeat";
+        url.set_path(&path);
+        Some(url.to_string())
+    }
+
+    fn authorization_endpoint_urls() -> (String, String) {
+        let file_ingest_url = crate::commands::get_enterprise_file_config().ingest_url;
+        let ingest_url = std::env::var("SCREENPIPE_ENTERPRISE_INGEST_URL")
+            .ok()
+            .filter(|url| !url.trim().is_empty())
+            .or(file_ingest_url);
+        let control_plane_base = ingest_url.as_deref().and_then(ee_sync::control_plane_base);
+        let policy_url = std::env::var("SCREENPIPE_ENTERPRISE_POLICY_URL")
+            .ok()
+            .filter(|url| !url.trim().is_empty())
+            .or_else(|| {
+                control_plane_base
+                    .as_deref()
+                    .map(|base| format!("{base}/api/enterprise/policy"))
+            })
+            .unwrap_or_else(default_policy_url);
+        let heartbeat_url = std::env::var("SCREENPIPE_ENTERPRISE_HEARTBEAT_URL")
+            .ok()
+            .filter(|url| !url.trim().is_empty())
+            .or_else(|| sibling_heartbeat_url(&policy_url))
+            .or_else(|| {
+                control_plane_base
+                    .as_deref()
+                    .map(|base| format!("{base}/api/enterprise/heartbeat"))
+            })
+            .unwrap_or_else(default_heartbeat_url);
+        (policy_url, heartbeat_url)
+    }
     const HIDDEN_UI_POLICY_POLL_INTERVAL: std::time::Duration =
         std::time::Duration::from_secs(5 * 60);
 
@@ -690,12 +739,15 @@ mod imp {
         hidden_sections: Vec<String>,
         #[serde(rename = "lockedSettings", default)]
         locked_settings: HashMap<String, serde_json::Value>,
+        #[serde(rename = "requireAccountLogin", default)]
+        require_account_login: bool,
     }
 
     #[derive(Debug, PartialEq, Eq)]
     struct NativeEnterprisePolicy {
         hidden_sections: Vec<String>,
         enforce_auto_start: bool,
+        require_account_login: bool,
     }
 
     fn locked_setting_enforces_auto_start(value: Option<&serde_json::Value>) -> bool {
@@ -716,8 +768,15 @@ mod imp {
             NativeEnterprisePolicy {
                 hidden_sections: self.hidden_sections,
                 enforce_auto_start,
+                require_account_login: self.require_account_login,
             }
         }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum EnterprisePolicyCredentialKind {
+        LicenseKey,
+        AccountToken,
     }
 
     enum EnterprisePolicyCredential {
@@ -725,47 +784,318 @@ mod imp {
         AccountToken(String),
     }
 
-    fn current_policy_credential() -> Option<EnterprisePolicyCredential> {
-        license_key_from_env_or_config()
-            .map(EnterprisePolicyCredential::LicenseKey)
-            .or_else(|| {
-                crate::commands::get_cloud_token().map(EnterprisePolicyCredential::AccountToken)
-            })
+    impl EnterprisePolicyCredential {
+        fn kind(&self) -> EnterprisePolicyCredentialKind {
+            match self {
+                Self::LicenseKey(_) => EnterprisePolicyCredentialKind::LicenseKey,
+                Self::AccountToken(_) => EnterprisePolicyCredentialKind::AccountToken,
+            }
+        }
+    }
+
+    fn apply_enterprise_credential(
+        request: reqwest::RequestBuilder,
+        credential: &EnterprisePolicyCredential,
+    ) -> reqwest::RequestBuilder {
+        match credential {
+            EnterprisePolicyCredential::LicenseKey(key) => request.header("X-License-Key", key),
+            EnterprisePolicyCredential::AccountToken(token) => {
+                let request = request.bearer_auth(token);
+                // When MDM also supplied a key, send both credentials so the
+                // control plane can reject an account belonging to a different
+                // Enterprise organization. Account-only deployments have no
+                // key and continue to use bearer auth by itself.
+                match license_key_from_env_or_config() {
+                    Some(key) => request.header("X-License-Key", key),
+                    None => request,
+                }
+            }
+        }
+    }
+
+    fn credential_authorizes_policy(
+        credential: EnterprisePolicyCredentialKind,
+        require_account_login: bool,
+    ) -> bool {
+        credential == EnterprisePolicyCredentialKind::AccountToken || !require_account_login
+    }
+
+    fn explicitly_rejects_authorization(status: reqwest::StatusCode) -> bool {
+        matches!(status.as_u16(), 401 | 402 | 403)
+    }
+
+    fn current_policy_credentials() -> Vec<EnterprisePolicyCredential> {
+        let mut credentials = Vec::with_capacity(2);
+        if let Some(key) = license_key_from_env_or_config() {
+            credentials.push(EnterprisePolicyCredential::LicenseKey(key));
+        }
+        if let Some(token) = crate::commands::get_cloud_token() {
+            credentials.push(EnterprisePolicyCredential::AccountToken(token));
+        }
+        credentials
+    }
+
+    #[derive(Debug)]
+    enum NativePolicyFetchError {
+        CredentialRejected(String),
+        Unavailable(String),
+    }
+
+    enum NativeAuthorizationResult {
+        Authorized(NativeEnterprisePolicy),
+        RequiresAccount,
+        Rejected,
+        Unavailable(String),
+        NoCredential,
     }
 
     async fn fetch_hidden_ui_policy(
         http: &reqwest::Client,
         policy_url: &str,
         device_id: &str,
-        credential: EnterprisePolicyCredential,
-    ) -> Result<NativeEnterprisePolicy, String> {
+        credential: &EnterprisePolicyCredential,
+    ) -> Result<NativeEnterprisePolicy, NativePolicyFetchError> {
         let request = http.get(policy_url).header("X-Device-Id", device_id);
-        let request = match credential {
-            EnterprisePolicyCredential::LicenseKey(key) => request.header("X-License-Key", key),
-            EnterprisePolicyCredential::AccountToken(token) => request.bearer_auth(token),
-        };
-        let response = request.send().await.map_err(|error| error.to_string())?;
+        let request = apply_enterprise_credential(request, credential);
+        let response = request
+            .send()
+            .await
+            .map_err(|error| NativePolicyFetchError::Unavailable(error.to_string()))?;
         if !response.status().is_success() {
-            return Err(format!("HTTP {}", response.status()));
+            let error = format!("HTTP {}", response.status());
+            return Err(if explicitly_rejects_authorization(response.status()) {
+                NativePolicyFetchError::CredentialRejected(error)
+            } else {
+                NativePolicyFetchError::Unavailable(error)
+            });
         }
         response
             .json::<HiddenUiPolicyResponse>()
             .await
             .map(HiddenUiPolicyResponse::into_native_policy)
-            .map_err(|error| error.to_string())
+            .map_err(|error| NativePolicyFetchError::Unavailable(error.to_string()))
     }
 
-    /// The normal enterprise policy poll lives in the Home webview. Hidden UI
-    /// mode destroys that webview, so a tiny native watcher must remain alive
-    /// to observe the one policy change that can bring the UI back. Once Home
-    /// is restored, its full policy fetch applies managed settings and pipes.
-    fn spawn_hidden_ui_policy_watcher(app: &tauri::AppHandle) {
+    async fn send_enrollment_heartbeat(
+        http: &reqwest::Client,
+        heartbeat_url: &str,
+        device_id: &str,
+        credential: &EnterprisePolicyCredential,
+    ) -> Result<(), NativePolicyFetchError> {
+        let request = http.post(heartbeat_url).json(&serde_json::json!({
+            "device_id": device_id,
+            "hostname": hostname::get().ok().and_then(|value| value.into_string().ok()),
+            "platform": std::env::consts::OS,
+            "app_version": env!("CARGO_PKG_VERSION"),
+            "recording_status": {
+                "frame_status": "unknown",
+                "audio_status": "unknown",
+            },
+        }));
+        let request = apply_enterprise_credential(request, credential);
+        let response = request
+            .send()
+            .await
+            .map_err(|error| NativePolicyFetchError::Unavailable(error.to_string()))?;
+        if response.status().is_success() {
+            return Ok(());
+        }
+
+        let error = format!("heartbeat HTTP {}", response.status());
+        Err(if explicitly_rejects_authorization(response.status()) {
+            // 403 includes seat exhaustion. Policy validity alone must never
+            // bypass the enrollment limit that the heartbeat enforces.
+            NativePolicyFetchError::CredentialRejected(error)
+        } else {
+            NativePolicyFetchError::Unavailable(error)
+        })
+    }
+
+    async fn resolve_native_authorization(
+        http: &reqwest::Client,
+        policy_url: &str,
+        heartbeat_url: &str,
+        device_id: &str,
+    ) -> NativeAuthorizationResult {
+        let credentials = current_policy_credentials();
+        if credentials.is_empty() {
+            return NativeAuthorizationResult::NoCredential;
+        }
+
+        let mut rejected = 0;
+        let mut unavailable = Vec::new();
+        let mut account_required = false;
+
+        for credential in credentials {
+            match fetch_hidden_ui_policy(http, policy_url, device_id, &credential).await {
+                Ok(policy)
+                    if credential_authorizes_policy(
+                        credential.kind(),
+                        policy.require_account_login,
+                    ) =>
+                {
+                    match send_enrollment_heartbeat(http, heartbeat_url, device_id, &credential)
+                        .await
+                    {
+                        Ok(()) => return NativeAuthorizationResult::Authorized(policy),
+                        Err(NativePolicyFetchError::CredentialRejected(error)) => {
+                            rejected += 1;
+                            warn!(
+                                "enterprise: native enrollment credential rejected ({}): {}",
+                                match credential.kind() {
+                                    EnterprisePolicyCredentialKind::LicenseKey => "license key",
+                                    EnterprisePolicyCredentialKind::AccountToken => "account token",
+                                },
+                                error
+                            );
+                        }
+                        Err(NativePolicyFetchError::Unavailable(error)) => unavailable.push(error),
+                    }
+                }
+                Ok(_) => {
+                    // A valid device key can load policy but cannot authorize a
+                    // company that mandates user sign-in. Keep trying the saved
+                    // account token before revoking the running session.
+                    account_required = true;
+                }
+                Err(NativePolicyFetchError::CredentialRejected(error)) => {
+                    rejected += 1;
+                    warn!(
+                        "enterprise: native policy credential rejected ({}): {}",
+                        match credential.kind() {
+                            EnterprisePolicyCredentialKind::LicenseKey => "license key",
+                            EnterprisePolicyCredentialKind::AccountToken => "account token",
+                        },
+                        error
+                    );
+                }
+                Err(NativePolicyFetchError::Unavailable(error)) => unavailable.push(error),
+            }
+        }
+
+        // A failed request is not evidence that any credential is invalid. In
+        // particular, a valid device key may say "account required" while the
+        // saved account request times out; preserve an already-verified account
+        // session until that request returns an explicit rejection.
+        if !unavailable.is_empty() {
+            return NativeAuthorizationResult::Unavailable(unavailable.join("; "));
+        }
+        if account_required && rejected == 0 {
+            return NativeAuthorizationResult::RequiresAccount;
+        }
+        // If a key required account auth and the saved account was then
+        // explicitly rejected (including by seat enrollment), report a real
+        // rejection rather than pretending no account credential was tried.
+        if rejected > 0 {
+            return NativeAuthorizationResult::Rejected;
+        }
+        NativeAuthorizationResult::Unavailable("enterprise policy could not be verified".into())
+    }
+
+    pub(crate) async fn verify_recording_authorization(
+        app: &tauri::AppHandle,
+        credential_type: Option<&str>,
+        credential: Option<&str>,
+    ) -> Result<(), String> {
+        let Some(credential_value) = credential.map(str::trim).filter(|value| !value.is_empty())
+        else {
+            crate::enterprise_policy::update_recording_authorized(false);
+            return Err("no enterprise credential was provided".to_string());
+        };
+        let credential = match credential_type {
+            Some("license_key") => {
+                EnterprisePolicyCredential::LicenseKey(credential_value.to_string())
+            }
+            Some("account") => {
+                EnterprisePolicyCredential::AccountToken(credential_value.to_string())
+            }
+            _ => {
+                crate::enterprise_policy::update_recording_authorized(false);
+                return Err("unsupported enterprise credential type".to_string());
+            }
+        };
+        let (policy_url, heartbeat_url) = authorization_endpoint_urls();
+        let http = reqwest::Client::builder()
+            // The caller's IPC deadline is twenty seconds. Finish first so a
+            // timed-out webview request cannot grant access later in the
+            // background after the UI has already reported failure.
+            .timeout(std::time::Duration::from_secs(9))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|error| format!("enterprise policy client: {error}"))?;
+        let device_id = settings_device_id(app).unwrap_or_else(|| "unknown".to_string());
+
+        match fetch_hidden_ui_policy(&http, &policy_url, &device_id, &credential).await {
+            Ok(policy)
+                if credential_authorizes_policy(
+                    credential.kind(),
+                    policy.require_account_login,
+                ) =>
+            {
+                match send_enrollment_heartbeat(&http, &heartbeat_url, &device_id, &credential)
+                    .await
+                {
+                    Ok(()) => {
+                        crate::enterprise_policy::update_recording_authorized(true);
+                        crate::enterprise_policy::set_enterprise_policy(
+                            policy.hidden_sections,
+                            policy.enforce_auto_start,
+                        );
+                        Ok(())
+                    }
+                    Err(NativePolicyFetchError::CredentialRejected(_)) => {
+                        crate::enterprise_policy::update_recording_authorized(false);
+                        Err("enterprise enrollment was rejected".to_string())
+                    }
+                    Err(NativePolicyFetchError::Unavailable(error)) => {
+                        Err(format!("enterprise heartbeat is unavailable: {error}"))
+                    }
+                }
+            }
+            Ok(_) => {
+                crate::enterprise_policy::update_recording_authorized(false);
+                Err("organization requires account sign-in".to_string())
+            }
+            Err(NativePolicyFetchError::CredentialRejected(_)) => {
+                crate::enterprise_policy::update_recording_authorized(false);
+                Err("enterprise credential was rejected".to_string())
+            }
+            Err(NativePolicyFetchError::Unavailable(error)) => {
+                Err(format!("enterprise policy is unavailable: {error}"))
+            }
+        }
+    }
+
+    fn show_enterprise_auth_recovery(app: &tauri::AppHandle) {
+        // Do not steal focus from an existing authentication or onboarding
+        // surface. This helper exists for autostart/headless launches where no
+        // webview is alive to present recovery on its own.
+        if app.get_webview_window("home").is_some()
+            || app.get_webview_window("onboarding").is_some()
+        {
+            return;
+        }
+
+        let app_for_show = app.clone();
+        if let Err(error) = app.run_on_main_thread(move || {
+            if let Err(error) =
+                (crate::window::ShowRewindWindow::Home { page: None }).show(&app_for_show)
+            {
+                warn!("enterprise: failed to show authentication recovery: {error}");
+            }
+        }) {
+            warn!("enterprise: failed to schedule authentication recovery: {error}");
+        }
+    }
+
+    /// The normal enterprise policy poll lives in the Home webview, but login
+    /// autostart and hidden-UI deployments may have no webview at all. Keep one
+    /// native credential/policy watcher alive so both key and account modes can
+    /// authorize recording, observe revocation, and surface recovery UI.
+    fn spawn_native_policy_watcher(app: &tauri::AppHandle) {
         let app = app.clone();
         tauri::async_runtime::spawn(async move {
-            let policy_url = std::env::var("SCREENPIPE_ENTERPRISE_POLICY_URL")
-                .ok()
-                .filter(|url| !url.trim().is_empty())
-                .unwrap_or_else(default_policy_url);
+            let (policy_url, heartbeat_url) = authorization_endpoint_urls();
             let http = reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
                 .redirect(reqwest::redirect::Policy::none())
@@ -777,34 +1107,76 @@ mod imp {
             // five-minute frontend polling cadence.
             tokio::time::sleep(std::time::Duration::from_secs(15)).await;
             loop {
-                if crate::enterprise_policy::is_app_ui_hidden() {
-                    match current_policy_credential() {
-                        Some(credential) => {
-                            let device_id =
-                                settings_device_id(&app).unwrap_or_else(|| "unknown".to_string());
-                            match fetch_hidden_ui_policy(&http, &policy_url, &device_id, credential)
-                                .await
+                let was_hidden = crate::enterprise_policy::is_app_ui_hidden();
+                let device_id = settings_device_id(&app).unwrap_or_else(|| "unknown".to_string());
+                match resolve_native_authorization(&http, &policy_url, &heartbeat_url, &device_id)
+                    .await
+                {
+                    NativeAuthorizationResult::Authorized(policy) => {
+                        let was_authorized = crate::enterprise_policy::recording_authorized();
+                        crate::enterprise_policy::update_recording_authorized(true);
+                        crate::enterprise_policy::set_enterprise_policy(
+                            policy.hidden_sections,
+                            policy.enforce_auto_start,
+                        );
+                        if was_hidden
+                            && !crate::commands::apply_enterprise_ui_visibility(app.clone())
+                        {
+                            info!("enterprise: native policy watcher restored visible UI");
+                        } else if !was_hidden {
+                            let _ = crate::commands::apply_enterprise_ui_visibility(app.clone());
+                        }
+
+                        // Autostart and hidden-UI launches can have no webview,
+                        // so AppEntitlementGate cannot perform the usual resume.
+                        if !was_authorized {
+                            let state = app.state::<crate::recording::RecordingState>();
+                            if let Err(error) =
+                                crate::recording::spawn_screenpipe(state, app.clone(), None).await
                             {
-                                Ok(policy) => {
-                                    crate::enterprise_policy::set_enterprise_policy(
-                                        policy.hidden_sections,
-                                        policy.enforce_auto_start,
-                                    );
-                                    if !crate::commands::apply_enterprise_ui_visibility(app.clone())
-                                    {
-                                        info!(
-                                            "enterprise: native policy watcher restored visible UI"
-                                        );
-                                    }
-                                }
-                                Err(error) => {
-                                    warn!("enterprise: hidden-UI policy refresh failed: {error}")
-                                }
+                                warn!(
+                                    "enterprise: failed to resume recording after native authorization: {error}"
+                                );
                             }
                         }
-                        None => warn!(
-                            "enterprise: hidden UI is active but no policy credential is available"
-                        ),
+                    }
+                    NativeAuthorizationResult::RequiresAccount => {
+                        let was_authorized = crate::enterprise_policy::recording_authorized();
+                        crate::enterprise_policy::update_recording_authorized(false);
+                        warn!(
+                            "enterprise: organization requires account sign-in; device key cannot authorize recording"
+                        );
+                        if was_hidden {
+                            // Authentication recovery must be visible. The Home
+                            // webview will fetch and reapply the complete policy
+                            // after the employee signs in.
+                            crate::enterprise_policy::set_enterprise_policy(Vec::new(), false);
+                            let _ = crate::commands::apply_enterprise_ui_visibility(app.clone());
+                        }
+                        if was_authorized {
+                            let state = app.state::<crate::recording::RecordingState>();
+                            let _ = crate::recording::stop_screenpipe(state, app.clone()).await;
+                        }
+                        show_enterprise_auth_recovery(&app);
+                    }
+                    NativeAuthorizationResult::Rejected
+                    | NativeAuthorizationResult::NoCredential => {
+                        let was_authorized = crate::enterprise_policy::recording_authorized();
+                        crate::enterprise_policy::update_recording_authorized(false);
+                        if was_hidden {
+                            crate::enterprise_policy::set_enterprise_policy(Vec::new(), false);
+                            let _ = crate::commands::apply_enterprise_ui_visibility(app.clone());
+                        }
+                        if was_authorized {
+                            let state = app.state::<crate::recording::RecordingState>();
+                            let _ = crate::recording::stop_screenpipe(state, app.clone()).await;
+                        }
+                        show_enterprise_auth_recovery(&app);
+                    }
+                    NativeAuthorizationResult::Unavailable(error) => {
+                        // A network/control-plane outage must not revoke a grant
+                        // that was verified earlier in this process.
+                        warn!("enterprise: native policy refresh unavailable: {error}");
                     }
                 }
 
@@ -882,7 +1254,7 @@ mod imp {
         // This watcher is independent of telemetry upload configuration. An
         // account-authenticated enterprise build may have no license key, but
         // it still needs to recover when the server turns hidden UI off.
-        spawn_hidden_ui_policy_watcher(app);
+        spawn_native_policy_watcher(app);
 
         let app_data_dir = app.path().app_data_dir().ok()?;
         // Use the same device id the heartbeat reports under (settings `deviceId`)
@@ -1076,8 +1448,10 @@ mod imp {
     #[cfg(test)]
     mod device_id_tests {
         use super::{
-            choose_device_id, enterprise_license_hash, exact_frame_url, image_uploads_allowed,
-            locked_setting_enforces_auto_start, HiddenUiPolicyResponse,
+            choose_device_id, credential_authorizes_policy, enterprise_license_hash,
+            exact_frame_url, explicitly_rejects_authorization, image_uploads_allowed,
+            locked_setting_enforces_auto_start, sibling_heartbeat_url,
+            EnterprisePolicyCredentialKind, HiddenUiPolicyResponse,
         };
         use std::collections::HashMap;
 
@@ -1146,6 +1520,7 @@ mod imp {
                         serde_json::Value::String("true".to_string()),
                     ),
                 ]),
+                require_account_login: true,
             };
 
             let policy = response.into_native_policy();
@@ -1158,6 +1533,60 @@ mod imp {
                 ]
             );
             assert!(policy.enforce_auto_start);
+            assert!(policy.require_account_login);
+        }
+
+        #[test]
+        fn native_authorization_matches_key_and_account_policy_modes() {
+            assert!(credential_authorizes_policy(
+                EnterprisePolicyCredentialKind::LicenseKey,
+                false,
+            ));
+            assert!(!credential_authorizes_policy(
+                EnterprisePolicyCredentialKind::LicenseKey,
+                true,
+            ));
+            assert!(credential_authorizes_policy(
+                EnterprisePolicyCredentialKind::AccountToken,
+                false,
+            ));
+            assert!(credential_authorizes_policy(
+                EnterprisePolicyCredentialKind::AccountToken,
+                true,
+            ));
+        }
+
+        #[test]
+        fn only_explicit_credential_and_seat_failures_revoke_authorization() {
+            for status in [401, 402, 403] {
+                assert!(explicitly_rejects_authorization(
+                    reqwest::StatusCode::from_u16(status).unwrap()
+                ));
+            }
+            for status in [400, 408, 429, 500, 503] {
+                assert!(!explicitly_rejects_authorization(
+                    reqwest::StatusCode::from_u16(status).unwrap()
+                ));
+            }
+        }
+
+        #[test]
+        fn heartbeat_follows_custom_and_on_prem_policy_origins() {
+            assert_eq!(
+                sibling_heartbeat_url("https://control.example:8443/api/enterprise/policy")
+                    .as_deref(),
+                Some("https://control.example:8443/api/enterprise/heartbeat")
+            );
+            assert_eq!(
+                sibling_heartbeat_url("https://control.example/prefix/api/enterprise/policy")
+                    .as_deref(),
+                Some("https://control.example/prefix/api/enterprise/heartbeat")
+            );
+            assert!(sibling_heartbeat_url("ftp://control.example/api/enterprise/policy").is_none());
+            assert!(sibling_heartbeat_url(
+                "https://user:secret@control.example/api/enterprise/policy"
+            )
+            .is_none());
         }
 
         #[test]
@@ -1184,8 +1613,20 @@ mod imp {
 #[cfg(feature = "enterprise-build")]
 pub use imp::{configure_telemetry_context, spawn};
 
+#[cfg(feature = "enterprise-build")]
+pub(crate) use imp::verify_recording_authorization;
+
 #[cfg(not(feature = "enterprise-build"))]
 pub fn configure_telemetry_context(_app: &tauri::AppHandle) {}
+
+#[cfg(not(feature = "enterprise-build"))]
+pub(crate) async fn verify_recording_authorization(
+    _app: &tauri::AppHandle,
+    _credential_type: Option<&str>,
+    _credential: Option<&str>,
+) -> Result<(), String> {
+    Err("enterprise recording authorization requires an Enterprise build".to_string())
+}
 
 /// No-op stub for non-enterprise builds. Returns None so callers can ignore.
 #[cfg(not(feature = "enterprise-build"))]
