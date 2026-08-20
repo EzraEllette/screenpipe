@@ -83,6 +83,15 @@ Cargo.toml leaves the other locks stale and breaks `cargo test --locked` on main
 Commit the regenerated locks together with the bump. `style.yml` runs
 `./scripts/regenerate-locks.sh --check` on every push and fails if any lock is stale.
 
+Before dispatching a desktop release, compile the actual app binary from its
+own Cargo workspace. Lock freshness and frontend builds do not catch stale
+`screenpipe-app` calls into changed core APIs:
+
+```bash
+cd apps/screenpipe-app-tauri/src-tauri
+cargo check --locked --bin screenpipe-app
+```
+
 ### 4. Commit, Push, and Dispatch Exact SHA
 ```bash
 git add -A && git commit -m "Bump app to vX.Y.Z" && git pull --rebase && git push
