@@ -24,7 +24,12 @@ import {
 import { conversationDedupIdentity } from "../chat-dedup";
 
 function reset() {
-  useChatStore.setState({ sessions: {}, currentId: null, panelSessionId: null });
+  useChatStore.setState({
+    sessions: {},
+    openChatIds: [],
+    currentId: null,
+    panelSessionId: null,
+  });
 }
 
 function baseRecord(overrides: Partial<SessionRecord> = {}): SessionRecord {
@@ -357,6 +362,83 @@ describe("chat-store: setCurrent clears unread atomically", () => {
     expect(state.sessions.A.unread).toBe(false);
     expect(typeof state.sessions.A.lastViewedAt).toBe("number");
     expect(state.sessions.A.lastViewedAt).toBeGreaterThanOrEqual(100);
+  });
+});
+
+describe("chat-store: open chat working set", () => {
+  beforeEach(reset);
+
+  it("opens focused chats once and preserves their order", () => {
+    const actions = useChatStore.getState().actions;
+    actions.setCurrent("A");
+    actions.setCurrent("B");
+    actions.setCurrent("A");
+
+    expect(useChatStore.getState().openChatIds).toEqual(["A", "B"]);
+  });
+
+  it("closing a tab never removes or stops its conversation state", () => {
+    const actions = useChatStore.getState().actions;
+    const messages = [{ id: "u1", role: "user", content: "draft proof" }];
+    actions.upsert(baseRecord({
+      id: "A",
+      status: "streaming",
+      messages,
+      composerDraft: {
+        input: "keep this",
+        pastedImages: [],
+        attachedDocs: [],
+        pendingDocs: [],
+      },
+    }));
+    actions.setCurrent("A");
+    actions.closeChat("A");
+
+    expect(useChatStore.getState().openChatIds).toEqual([]);
+    expect(useChatStore.getState().sessions.A.status).toBe("streaming");
+    expect(useChatStore.getState().sessions.A.messages).toEqual(messages);
+    expect(useChatStore.getState().sessions.A.composerDraft?.input).toBe("keep this");
+  });
+
+  it("can stage an unknown deep-link id and reveal it after hydration", () => {
+    const actions = useChatStore.getState().actions;
+    actions.setCurrent("late-chat");
+    expect(useChatStore.getState().openChatIds).toEqual(["late-chat"]);
+
+    actions.upsert(baseRecord({ id: "late-chat", title: "hydrated later" }));
+    expect(useChatStore.getState().openChatIds).toEqual(["late-chat"]);
+    expect(useChatStore.getState().sessions["late-chat"].title).toBe("hydrated later");
+  });
+
+  it("ignores close-set commands when their anchor is not open", () => {
+    const actions = useChatStore.getState().actions;
+    for (const id of ["A", "B", "C"]) actions.openChat(id);
+
+    actions.closeOtherChats("missing");
+    actions.closeChatsToRight("missing");
+
+    expect(useChatStore.getState().openChatIds).toEqual(["A", "B", "C"]);
+  });
+
+  it("supports closing other tabs and tabs to the right", () => {
+    const actions = useChatStore.getState().actions;
+    for (const id of ["A", "B", "C", "D"]) actions.openChat(id);
+
+    actions.closeChatsToRight("B");
+    expect(useChatStore.getState().openChatIds).toEqual(["A", "B"]);
+
+    actions.openChat("C");
+    actions.closeOtherChats("B");
+    expect(useChatStore.getState().openChatIds).toEqual(["B"]);
+  });
+
+  it("drops deleted conversations from the working set", () => {
+    const actions = useChatStore.getState().actions;
+    actions.upsert(baseRecord({ id: "A" }));
+    actions.setCurrent("A");
+    actions.drop("A");
+
+    expect(useChatStore.getState().openChatIds).toEqual([]);
   });
 });
 

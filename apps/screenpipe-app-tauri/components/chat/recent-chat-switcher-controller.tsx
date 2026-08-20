@@ -16,6 +16,10 @@ import {
   type RecentChatSearchHandoffPayload,
 } from "@/lib/chat-utils";
 import { RecentChatSwitcher } from "@/components/chat/recent-chat-switcher";
+import {
+  CHAT_SHORTCUT_ACTION_EVENT,
+  type ChatShortcutAction,
+} from "@/lib/shortcuts";
 
 interface RecentChatSwitcherControllerProps {
   onActivateConversation: (id: string) => void | Promise<void>;
@@ -122,15 +126,31 @@ export function RecentChatSwitcherController({
       if (openRef.current) closeSwitcher();
     };
 
+    const handleCommand = (event: Event) => {
+      const action = (event as CustomEvent<ChatShortcutAction>).detail;
+      if (action !== "next_recent_chat" && action !== "previous_recent_chat") {
+        return;
+      }
+      moveSelection(action === "next_recent_chat" ? 1 : -1);
+      // A command-menu selection has no held Control key to release. Commit
+      // after moveSelection synchronously updates selectedIdRef, while the
+      // physical Ctrl+Tab path keeps its preview-until-release behavior.
+      queueMicrotask(() => {
+        void commitConversationById(selectedIdRef.current);
+      });
+    };
+
     window.addEventListener("keydown", handleEscape, true);
     window.addEventListener("keydown", handleKeyDown, true);
     window.addEventListener("keyup", handleKeyUp, true);
     window.addEventListener("blur", handleBlur);
+    window.addEventListener(CHAT_SHORTCUT_ACTION_EVENT, handleCommand);
     return () => {
       window.removeEventListener("keydown", handleEscape, true);
       window.removeEventListener("keydown", handleKeyDown, true);
       window.removeEventListener("keyup", handleKeyUp, true);
       window.removeEventListener("blur", handleBlur);
+      window.removeEventListener(CHAT_SHORTCUT_ACTION_EVENT, handleCommand);
     };
   }, [closeSwitcher, commitConversationById, moveSelection]);
 

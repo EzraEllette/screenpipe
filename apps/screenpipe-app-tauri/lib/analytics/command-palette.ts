@@ -14,6 +14,10 @@ export const COMMAND_PALETTE_ACTION_IDS = [
   "new_chat",
   "pause_recording",
   "resume_recording",
+  "next_recent_chat",
+  "previous_recent_chat",
+  "next_open_chat",
+  "previous_open_chat",
   "go_chat",
   "go_brain",
   "go_meetings",
@@ -23,6 +27,7 @@ export const COMMAND_PALETTE_ACTION_IDS = [
   "go_connections",
   "toggle_sidebar",
   "open_settings",
+  "open_shortcut_guide",
   "open_shortcut_settings",
 ] as const;
 

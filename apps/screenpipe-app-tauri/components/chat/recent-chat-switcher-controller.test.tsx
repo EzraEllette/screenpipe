@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RecentChatSwitcherController } from "./recent-chat-switcher-controller";
 import { useChatStore, type SessionRecord } from "@/lib/stores/chat-store";
 import { RECENT_CHAT_SEARCH_HANDOFF_EVENT } from "@/lib/chat-utils";
+import { CHAT_SHORTCUT_ACTION_EVENT } from "@/lib/shortcuts";
 
 const {
   eventHandlers,
@@ -168,6 +169,26 @@ describe("RecentChatSwitcherController", () => {
     });
 
     expect(onActivateConversation).toHaveBeenCalledWith("chat-b");
+  });
+
+  it("commits a command-menu recent-chat action without waiting for Control", async () => {
+    seed({ id: "chat-a", lastViewedAt: 300, createdAt: 300, updatedAt: 300 });
+    seed({ id: "chat-b", lastViewedAt: 200, createdAt: 200, updatedAt: 200 });
+    useChatStore.setState({ currentId: "chat-a" });
+    const onActivateConversation = vi.fn(async () => {});
+
+    render(<RecentChatSwitcherController onActivateConversation={onActivateConversation} />);
+
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent(CHAT_SHORTCUT_ACTION_EVENT, {
+          detail: "next_recent_chat",
+        }),
+      );
+      await Promise.resolve();
+    });
+    expect(onActivateConversation).toHaveBeenCalledWith("chat-b");
+    expect(screen.queryByText("Recently viewed")).not.toBeInTheDocument();
   });
 
   it("opens an empty state when no sessions are available", () => {

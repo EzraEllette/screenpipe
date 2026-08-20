@@ -16,6 +16,7 @@ import {
   Search,
   Plug,
   CalendarClock,
+  Keyboard,
   ListTree,
   ArrowLeft,
 } from "lucide-react";
@@ -110,6 +111,14 @@ import { PlanExpirationNotice } from "@/components/plan-expiration-notice";
 import type { AppUser } from "@/lib/app-entitlement";
 import { ONBOARDING_BRAIN_HANDOFF_EVENT } from "@/lib/live-views/onboarding-activation";
 import { ActivityLedger } from "@/components/activity-ledger";
+import { ShortcutKeycap } from "@/components/shortcut-keycap";
+import { ShortcutGuide } from "@/components/shortcut-guide";
+import { commandPalette as commandPaletteAnalytics } from "@/lib/analytics/command-palette";
+import {
+  dispatchChatShortcutAction,
+  inAppShortcutLabel,
+  matchesInAppShortcut,
+} from "@/lib/shortcuts";
 
 type MainSection = "home" | "timeline" | "activity" | "brain" | "pipes" | "connections" | "meetings" | "help";
 type ConnectionFocusRequest = {
@@ -137,6 +146,8 @@ const isSettingsRoute = (value: string) => resolveSettingsSection(value) !== nul
 function HomeContent() {
   const router = useRouter();
   const { isMac } = usePlatform();
+  const [shortcutGuideOpen, setShortcutGuideOpen] = useState(false);
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   // In fullscreen, macOS hides the traffic lights — collapse the
   // reservation that keeps the top-left action icons clear of them.
   const isFullscreen = useIsFullscreen();
@@ -506,31 +517,49 @@ function HomeContent() {
   // Cmd+B / Ctrl+B to toggle sidebar
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === "b") {
-        e.preventDefault();
-        toggleSidebar();
-      }
+      if (!matchesInAppShortcut(e, "toggle_sidebar", isMac)) return;
+      e.preventDefault();
+      toggleSidebar();
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [toggleSidebar]);
+  }, [isMac, toggleSidebar]);
 
   // Cmd+N / Ctrl+N to start a new chat (matches the "New chat" sidebar button)
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "n") {
-        e.preventDefault();
-        setActiveSection("home");
-        startNewChat();
-        // Focus the chat input. When standalone-chat is already mounted (home→home)
-        // it catches this; when mounting fresh from another section, its on-mount
-        // auto-focus handles it instead.
-        void emit("chat-focus-input", {});
+      if (!matchesInAppShortcut(e, "new_chat", isMac)) return;
+      e.preventDefault();
+      setActiveSection("home");
+      startNewChat();
+      // Focus the chat input. When standalone-chat is already mounted (home→home)
+      // it catches this; when mounting fresh from another section, its on-mount
+      // auto-focus handles it instead.
+      void emit("chat-focus-input", {});
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [isMac, setActiveSection, startNewChat]);
+
+  // Own portal-only shortcut surfaces in the hydrated Home shell. Static
+  // WKWebView exports can otherwise defer a closed dialog subtree long enough
+  // for its first keyboard event to be missed.
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      if (matchesInAppShortcut(event, "command_menu", isMac)) {
+        event.preventDefault();
+        if (!commandPaletteOpen) commandPaletteAnalytics.opened("keyboard");
+        setCommandPaletteOpen(!commandPaletteOpen);
+        return;
+      }
+      if (matchesInAppShortcut(event, "shortcut_guide", isMac)) {
+        event.preventDefault();
+        setShortcutGuideOpen((open) => !open);
       }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [setActiveSection, startNewChat]);
+  }, [commandPaletteOpen, isMac]);
   // Fetch actual recording devices. Audio comes from /audio/device/status so
   // user-paused devices stay visible and can be resumed from the same control.
   interface AudioDeviceStatus {
@@ -1156,6 +1185,10 @@ function HomeContent() {
   // content (portaled into the shell by AppSidebar) and the content column.
   return (
     <>
+      <ShortcutGuide
+        open={shortcutGuideOpen}
+        onOpenChange={setShortcutGuideOpen}
+      />
       {/* Drag region — always absolute so it works with full-bleed translucent layout */}
       <div className="absolute top-0 left-0 right-0 h-8 z-10" data-tauri-drag-region />
 
@@ -1170,6 +1203,8 @@ function HomeContent() {
       />
 
       <CommandPalette
+        open={commandPaletteOpen}
+        onOpenChange={setCommandPaletteOpen}
         deps={{
           openSearch: () => {
             void commands.showWindow({ Search: { query: null } });
@@ -1188,10 +1223,37 @@ function HomeContent() {
           resumeRecording: () => {
             void resumeRecording();
           },
+          switchRecentChat: (direction) => {
+            const dispatch = () =>
+              dispatchChatShortcutAction(
+                direction === 1 ? "next_recent_chat" : "previous_recent_chat",
+              );
+            if (activeSection === "home") {
+              dispatch();
+              return;
+            }
+            void setActiveSection("home").then(() =>
+              window.requestAnimationFrame(dispatch),
+            );
+          },
+          moveOpenChat: (direction) => {
+            const dispatch = () =>
+              dispatchChatShortcutAction(
+                direction === 1 ? "next_open_chat" : "previous_open_chat",
+              );
+            if (activeSection === "home") {
+              dispatch();
+              return;
+            }
+            void setActiveSection("home").then(() =>
+              window.requestAnimationFrame(dispatch),
+            );
+          },
           goToSection: (id) => {
             void setActiveSection(id);
           },
           toggleSidebar,
+          openShortcutGuide: () => setShortcutGuideOpen(true),
           openSettings,
           sections: availableSidebarIds.map((id) => ({
             id,
@@ -1202,7 +1264,7 @@ function HomeContent() {
       />
 
           {/* Sidebar */}
-          <TooltipProvider delayDuration={0}>
+          <TooltipProvider delayDuration={400}>
           {/* Top-left chrome strip — pinned next to the macOS traffic
               lights: sidebar toggle, search, meetings and recording-status dot.
               No wordmark, no header row (Claude / Codex style). When
@@ -1242,7 +1304,12 @@ function HomeContent() {
                 </button>
               </TooltipTrigger>
               <TooltipContent side="bottom" className="text-xs">
-                {sidebarCollapsed ? "expand sidebar" : "collapse sidebar"} <kbd className="ml-1 px-1 py-0.5 bg-muted rounded text-[10px]" suppressHydrationWarning>{isMac ? "⌘B" : "Ctrl+B"}</kbd>
+                <span className="flex items-center gap-2">
+                  {sidebarCollapsed ? "expand sidebar" : "collapse sidebar"}
+                  <ShortcutKeycap>
+                    {inAppShortcutLabel("toggle_sidebar", isMac)}
+                  </ShortcutKeycap>
+                </span>
               </TooltipContent>
             </Tooltip>
 
@@ -1264,13 +1331,48 @@ function HomeContent() {
                   </button>
                 </TooltipTrigger>
                 <TooltipContent side="bottom" className="text-xs">
-                  search
-                  {!settings.disabledShortcuts.includes("searchShortcut") &&
-                  settings.searchShortcut ? (
-                    <kbd className="ml-1 px-1 py-0.5 bg-muted rounded text-[10px]">
+                  <span className="flex items-center gap-2">
+                    search
+                    {!settings.disabledShortcuts.includes("searchShortcut") &&
+                    settings.searchShortcut ? (
+                    <ShortcutKeycap>
                       {formatShortcutDisplay(settings.searchShortcut, isMac)}
-                    </kbd>
-                  ) : null}
+                    </ShortcutKeycap>
+                    ) : null}
+                  </span>
+                </TooltipContent>
+              </Tooltip>
+            )}
+
+            {!sidebarCollapsed && (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    type="button"
+                    onClick={() => setShortcutGuideOpen(true)}
+                    aria-label="keyboard shortcuts"
+                    data-testid="shortcut-guide-button"
+                    className={cn(
+                      "rounded-md p-1 transition-colors",
+                      isTranslucent
+                        ? "vibrant-nav-item"
+                        : "text-muted-foreground hover:bg-muted/50 hover:text-foreground",
+                    )}
+                  >
+                    <Keyboard className="h-3.5 w-3.5" />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent
+                  side="bottom"
+                  className="text-xs"
+                  data-testid="shortcut-guide-button-tooltip"
+                >
+                  <span className="flex items-center gap-2">
+                    keyboard shortcuts
+                    <ShortcutKeycap>
+                      {inAppShortcutLabel("shortcut_guide", isMac)}
+                    </ShortcutKeycap>
+                  </span>
                 </TooltipContent>
               </Tooltip>
             )}
@@ -1500,6 +1602,7 @@ function HomeContent() {
               <StandaloneChat
                 className="h-full"
                 hideInlineHistory
+                chatShortcutsEnabled={activeSection === "home"}
                 sidebarCollapsed={sidebarCollapsed}
                 firstRunLearningEnabled
               />

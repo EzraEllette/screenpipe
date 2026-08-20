@@ -35,6 +35,7 @@ import { useIsFullscreen } from "@/lib/hooks/use-is-fullscreen";
 import { useChatFilePreview } from "@/lib/hooks/use-chat-file-preview";
 import { useChatInspector } from "@/lib/hooks/use-chat-inspector";
 import { ChatInspectorPopover } from "@/components/chat/chat-inspector";
+import { ChatTabStrip } from "@/components/chat/chat-tab-strip";
 import { useSqlAutocomplete, useTagAutocomplete } from "@/lib/hooks/use-sql-autocomplete";
 import { loadConversationFile } from "@/lib/chat-storage";
 import {
@@ -138,6 +139,7 @@ const STATIC_MENTION_SUGGESTIONS: MentionSuggestion[] = [
 export function StandaloneChat({
   className,
   hideInlineHistory,
+  chatShortcutsEnabled = true,
   sidebarCollapsed,
   firstRunLearningEnabled = false,
 }: {
@@ -153,6 +155,10 @@ export function StandaloneChat({
    *  chat at `/chat` leaves it false so users still have a history
    *  affordance in the floating window — that window has no AppSidebar. */
   hideInlineHistory?: boolean;
+  /** Main-window tabs stay mounted behind Timeline, Meetings, and other
+   * sections so background work can continue. This flag keeps tab-only
+   * shortcuts scoped to the visible chat surface while that layer is hidden. */
+  chatShortcutsEnabled?: boolean;
   /** When true, the app sidebar is collapsed — used to apply traffic-light
    *  padding on the chat header since the sidebar no longer covers them. */
   sidebarCollapsed?: boolean;
@@ -1962,6 +1968,26 @@ export function StandaloneChat({
     <div ref={dropRootRef} className={cn("flex flex-col bg-background", className ?? "h-screen")} data-testid="section-home">
       <StandaloneChatHeader
         className={className}
+        tabStrip={
+          hideInlineHistory ? (
+            <ChatTabStrip
+              activeId={conversationId}
+              isMac={isMac}
+              shortcutsEnabled={chatShortcutsEnabled}
+              onActivate={async (id) => {
+                useChatStore.getState().actions.setCurrent(id);
+                await emit("chat-load-conversation", {
+                  conversationId: id,
+                  targetWindow: "home",
+                });
+              }}
+              onNewChat={async () => {
+                piStoppedIntentionallyRef.current = true;
+                await startNewConversation();
+              }}
+            />
+          ) : undefined
+        }
         conversationId={conversationId}
         messages={messages}
         pendingUserText={pendingSend?.text ?? null}

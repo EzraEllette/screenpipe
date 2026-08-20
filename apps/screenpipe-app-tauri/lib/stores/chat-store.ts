@@ -188,6 +188,10 @@ export interface SessionRecord {
 interface ChatStoreState {
   /** All known sessions, keyed by id. Includes both alive and on-disk-only. */
   sessions: Record<string, SessionRecord>;
+  /** Small, in-memory working set rendered as chat tabs. The sidebar remains
+   *  the durable index of every conversation; closing a tab only removes its
+   *  id from this list and never archives, deletes, or stops the session. */
+  openChatIds: string[];
   /** True once the initial `~/.screenpipe/chats` scan has finished. */
   diskHydrated: boolean;
   /** Currently FOCUSED session — i.e. the chat the user is actively
@@ -221,6 +225,16 @@ interface ChatStoreActions {
    *  switches; used to re-highlight the sidebar row when the user
    *  navigates back to home. */
   setPanelSession: (id: string | null) => void;
+  /** Add a conversation to the visible tab working set. Existing tabs keep
+   *  their position. */
+  openChat: (id: string) => void;
+  /** Remove one conversation from the tab working set. This deliberately
+   *  does not mutate the conversation or its Pi process. */
+  closeChat: (id: string) => void;
+  /** Keep only the named tab in the working set. */
+  closeOtherChats: (id: string) => void;
+  /** Close every tab after the named tab. */
+  closeChatsToRight: (id: string) => void;
   /** Toggle the pinned state. */
   togglePinned: (id: string) => void;
 
@@ -406,6 +420,7 @@ export function getPersistedViewedAt(
 
 export const useChatStore = create<ChatStore>((set) => ({
   sessions: {},
+  openChatIds: [],
   diskHydrated: false,
   currentId: null,
   panelSessionId: null,
@@ -494,11 +509,12 @@ export const useChatStore = create<ChatStore>((set) => ({
 
     drop: (id) =>
       set((s) => {
-        if (!(id in s.sessions)) return {};
+        if (!(id in s.sessions) && !s.openChatIds.includes(id)) return {};
         const next = { ...s.sessions };
         delete next[id];
         return {
           sessions: next,
+          openChatIds: s.openChatIds.filter((openId) => openId !== id),
           currentId: s.currentId === id ? null : s.currentId,
         };
       }),
@@ -506,6 +522,10 @@ export const useChatStore = create<ChatStore>((set) => ({
     setCurrent: (id) =>
       set((s) => {
         const viewedAt = Date.now();
+        const openChatIds =
+          id && !s.openChatIds.includes(id)
+            ? [...s.openChatIds, id]
+            : s.openChatIds;
         // Viewing a session counts as reading it — lastViewedAt >= any
         // lastContentAt means isUnread() returns false. Same atomic update
         // so the row's unread state can't transiently flicker.
@@ -513,16 +533,42 @@ export const useChatStore = create<ChatStore>((set) => ({
           return {
             currentId: id,
             panelSessionId: id,
+            openChatIds,
             sessions: {
               ...s.sessions,
               [id]: { ...s.sessions[id], unread: false, lastViewedAt: viewedAt },
             },
           };
         }
-        return { currentId: id };
+        return { currentId: id, openChatIds };
       }),
 
     setPanelSession: (id) => set({ panelSessionId: id }),
+
+    openChat: (id) =>
+      set((s) =>
+        s.openChatIds.includes(id)
+          ? {}
+          : { openChatIds: [...s.openChatIds, id] }
+      ),
+
+    closeChat: (id) =>
+      set((s) => ({
+        openChatIds: s.openChatIds.filter((openId) => openId !== id),
+      })),
+
+    closeOtherChats: (id) =>
+      set((s) => ({
+        openChatIds: s.openChatIds.includes(id) ? [id] : s.openChatIds,
+      })),
+
+    closeChatsToRight: (id) =>
+      set((s) => {
+        const index = s.openChatIds.indexOf(id);
+        return index === -1
+          ? {}
+          : { openChatIds: s.openChatIds.slice(0, index + 1) };
+      }),
 
     togglePinned: (id) =>
       set((s) => {

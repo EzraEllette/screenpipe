@@ -1199,6 +1199,27 @@
       "notes": "Switching conversations during streaming must not corrupt state."
     },
     {
+      "spec": "chat-tabs.spec.ts",
+      "platforms": [
+        "windows",
+        "macos",
+        "linux"
+      ],
+      "layers": [
+        "chat-ai",
+        "real-ui-e2e"
+      ],
+      "features": [
+        "chat",
+        "chat-tabs",
+        "chat-sidebar"
+      ],
+      "criticality": "high",
+      "confidence": "strong",
+      "ux": "real-user-flow",
+      "notes": "Native Home WebView coverage for ordered chat tabs, roving keyboard focus, scoped adjacent/direct tab shortcuts, shortcut-guide and tooltip discovery, inactive and active close fallback, non-destructive sidebar reopen, close-other-tabs, and last-tab recovery."
+    },
+    {
       "spec": "chat-tool-activity.spec.ts",
       "platforms": [
         "windows",

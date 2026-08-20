@@ -5,13 +5,14 @@
 
 import * as React from "react";
 import { useRef, useState } from "react";
-import { ChevronDown, Pencil, Pin, Trash2 } from "lucide-react";
+import { ChevronDown, MoreHorizontal, Pencil, Pin, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import type { Message } from "@/lib/chat/types";
 import { useChatStore } from "@/lib/stores/chat-store";
 import { resolveVisibleChatTitle } from "@/lib/chat/conversation-title";
+import { cn } from "@/lib/utils";
 
 interface ChatTitleMenuProps {
   conversationId: string | null;
@@ -25,6 +26,9 @@ interface ChatTitleMenuProps {
   renameConversation: (id: string, title: string) => Promise<void> | void;
   deleteConversation: (id: string) => Promise<void> | void;
   startNewConversation: (id?: string) => Promise<void> | void;
+  /** Render only an options icon when the visible title already lives in a
+   *  chat tab. The menu actions remain available without repeating the title. */
+  compact?: boolean;
 }
 
 export function ChatTitleMenu({
@@ -34,6 +38,7 @@ export function ChatTitleMenu({
   renameConversation,
   deleteConversation,
   startNewConversation,
+  compact = false,
 }: ChatTitleMenuProps) {
   const [open, setOpen] = useState(false);
   const [renaming, setRenaming] = useState(false);
@@ -151,11 +156,21 @@ export function ChatTitleMenu({
             e.stopPropagation();
             setOpen((o) => !o);
           }}
-          className="relative z-10 inline-flex items-center gap-1 max-w-[260px] h-7 px-2 rounded-md text-xs font-medium text-foreground hover:bg-muted/50 transition-colors"
-          title="Chat options"
+          className={cn(
+            "relative z-10 inline-flex h-7 items-center rounded-md text-xs font-medium text-foreground transition-colors hover:bg-muted/50",
+            compact ? "w-7 justify-center" : "max-w-[260px] gap-1 px-2",
+          )}
+          title={compact ? `Chat options for ${title}` : "Chat options"}
+          aria-label={compact ? `Chat options for ${title}` : undefined}
         >
-          <span data-testid="chat-title" className="truncate">{title}</span>
-          <ChevronDown className="h-3 w-3 shrink-0 text-muted-foreground/70" />
+          {compact ? (
+            <MoreHorizontal className="h-3.5 w-3.5 text-muted-foreground" />
+          ) : (
+            <>
+              <span data-testid="chat-title" className="truncate">{title}</span>
+              <ChevronDown className="h-3 w-3 shrink-0 text-muted-foreground/70" />
+            </>
+          )}
         </button>
       </PopoverTrigger>
       <PopoverContent

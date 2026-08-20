@@ -1758,7 +1758,30 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
     // Reuse an existing empty chat when the caller didn't pin an id (#4719),
     // so a header "+ new chat" (or an agent-evicted / post-delete restart)
     // doesn't mint a throwaway uuid when a blank chat is already available.
-    const newSid = explicitId ?? getOrCreateEmptyChatId().id;
+    const nextSession = explicitId
+      ? { id: explicitId, isNew: !store.sessions[explicitId] }
+      : getOrCreateEmptyChatId();
+    const newSid = nextSession.id;
+    // The Home-level new-chat shortcut already creates this draft record,
+    // but the inline chat header (including last-tab recovery) calls this hook
+    // directly. Without an immediate record, currentId/openChatIds contain the
+    // new id while selectors have nothing to render, leaving the tab strip
+    // visually empty until the first message is sent.
+    if (nextSession.isNew) {
+      const now = Date.now();
+      store.actions.upsert({
+        id: newSid,
+        title: "untitled",
+        preview: "",
+        status: "idle",
+        messageCount: 0,
+        createdAt: now,
+        updatedAt: now,
+        pinned: false,
+        unread: false,
+        draft: true,
+      });
+    }
     piSessionIdRef.current = newSid;
     piSessionSyncedRef.current = true;
     store.actions.setCurrent(newSid);

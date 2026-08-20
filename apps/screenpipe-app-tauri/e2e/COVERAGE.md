@@ -6,9 +6,9 @@ and layer declared in the manifest, weighted by confidence and criticality.
 
 - Manifest: `e2e/coverage-map.json`
 - Specs directory: `e2e/specs`
-- Mapped specs: 118
-- Declared test blocks: 339
-- Weighted coverage points: 265.2
+- Mapped specs: 119
+- Declared test blocks: 344
+- Weighted coverage points: 270.2
 
 Confidence weights: strong=1.0, partial=0.7, conditional=0.4, smoke=0.3.
 Criticality weights: high=1.0, medium=0.7, low=0.4.
@@ -19,9 +19,9 @@ can execute more runtime cases than this number shows.
 
 | Platform | Specs | Declared tests | Weighted points | Layers | Features | Critical score |
 | --- | --- | --- | --- | --- | --- | --- |
-| windows | 90 | 293 | 239.3 | 15 | 94 | 92% |
-| macos | 114 | 301 | 235.0 | 17 | 100 | 90% |
-| linux | 79 | 251 | 208.5 | 14 | 90 | 88% |
+| windows | 91 | 298 | 244.3 | 15 | 96 | 92% |
+| macos | 115 | 306 | 240.0 | 17 | 102 | 90% |
+| linux | 80 | 256 | 213.5 | 14 | 92 | 88% |
 
 ## Runtime Results
 
@@ -37,7 +37,7 @@ pass/fail/skip counts.
 | auth | - | 1 specs / 1 tests / 1.0 pts | - |
 | billing | 4 specs / 6 tests / 5.7 pts | 4 specs / 6 tests / 5.7 pts | 4 specs / 6 tests / 5.7 pts |
 | capture-ocr | 2 specs / 16 tests / 6.4 pts | 8 specs / 12 tests / 4.8 pts | 1 specs / 3 tests / 1.2 pts |
-| chat-ai | 25 specs / 53 tests / 39.1 pts | 37 specs / 75 tests / 53.2 pts | 24 specs / 52 tests / 38.6 pts |
+| chat-ai | 26 specs / 58 tests / 44.1 pts | 38 specs / 80 tests / 58.2 pts | 25 specs / 57 tests / 43.6 pts |
 | entitlement | - | 1 specs / 1 tests / 1.0 pts | - |
 | local-api | 25 specs / 114 tests / 95.0 pts | 32 specs / 101 tests / 84.5 pts | 20 specs / 82 tests / 73.2 pts |
 | notifications | 4 specs / 26 tests / 17.3 pts | 3 specs / 5 tests / 3.4 pts | 2 specs / 4 tests / 3.1 pts |
@@ -45,7 +45,7 @@ pass/fail/skip counts.
 | os-integration | 7 specs / 30 tests / 25.5 pts | 14 specs / 27 tests / 16.0 pts | 2 specs / 13 tests / 9.4 pts |
 | performance | 2 specs / 44 tests / 44.0 pts | 4 specs / 34 tests / 30.5 pts | 1 specs / 29 tests / 29.0 pts |
 | pipes | 6 specs / 19 tests / 19.0 pts | 8 specs / 25 tests / 25.0 pts | 6 specs / 19 tests / 19.0 pts |
-| real-ui-e2e | 64 specs / 194 tests / 160.0 pts | 77 specs / 198 tests / 162.2 pts | 59 specs / 170 tests / 145.8 pts |
+| real-ui-e2e | 65 specs / 199 tests / 165.0 pts | 78 specs / 203 tests / 167.2 pts | 60 specs / 175 tests / 150.8 pts |
 | settings | 14 specs / 40 tests / 37.0 pts | 16 specs / 34 tests / 29.7 pts | 13 specs / 31 tests / 28.0 pts |
 | storage-privacy | 9 specs / 42 tests / 33.3 pts | 9 specs / 27 tests / 26.1 pts | 6 specs / 20 tests / 19.1 pts |
 | tauri-command | 19 specs / 51 tests / 39.6 pts | 27 specs / 62 tests / 47.1 pts | 18 specs / 52 tests / 40.2 pts |
@@ -144,6 +144,7 @@ pass/fail/skip counts.
 | chat-stuck-queue-guard.spec.ts | windows, macos, linux | chat-ai | chat | high | partial | synthetic | 1 | A turn that ends while the panel does not own the session on the agent-event bus must still release the composer dispatch guards and must not duplicate the user message; regression for the stuck 'analyzing…' chat whose later messages all piled into QUEUED. |
 | chat-subagent-async-completion.spec.ts | windows, macos, linux | chat-ai, real-ui-e2e, tauri-command | chat, chat-streaming, async-subagents | high | strong | real-user-flow | 1 | Verifies an asynchronous subagent completion appears as a distinct second assistant turn after the original answer settles, without another user prompt. |
 | chat-switch-context-loss.spec.ts | windows, macos, linux | chat-ai | chat, chat-context | medium | partial | synthetic | 1 | Switching conversations during streaming must not corrupt state. |
+| chat-tabs.spec.ts | windows, macos, linux | chat-ai, real-ui-e2e | chat, chat-tabs, chat-sidebar | high | strong | real-user-flow | 5 | Native Home WebView coverage for ordered chat tabs, roving keyboard focus, scoped adjacent/direct tab shortcuts, shortcut-guide and tooltip discovery, inactive and active close fallback, non-destructive sidebar reopen, close-other-tabs, and last-tab recovery. |
 | chat-tool-activity.spec.ts | windows, macos, linux | chat-ai, real-ui-e2e | chat, chat-tools, mcp-startup-status, pi-tool-activity, progressive-disclosure | high | strong | mixed | 5 | Mixed Python, JavaScript, Screenpipe API, file, test, recovered-error, and optional live Pi tool flows stay collapsed by default, expose only friendly activity on first expansion, and keep completed tools active while the shared Pi turn is still streaming. Synthetic MCP startup events render as a separate connection card with captured connecting, connected, sign-in-required, generic-error, and mixed-state screenshots; they never inflate the command rail's failure count. |
 | chat-window.spec.ts | windows, macos, linux | chat-ai, window-lifecycle, real-ui-e2e | chat, window-lifecycle | high | strong | real-user-flow | 1 | Opens Chat and focuses the composer for typing. |
 | chat-within-session-context-loss.spec.ts | macos | chat-ai | chat, chat-context | medium | conditional | synthetic | 5 | macOS-only within-chat context retention regression. |
