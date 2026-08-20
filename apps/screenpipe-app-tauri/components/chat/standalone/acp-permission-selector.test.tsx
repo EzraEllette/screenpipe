@@ -279,6 +279,71 @@ describe("AcpPermissionSelector", () => {
     );
   });
 
+  it("maps Copilot's boolean Allow All capability into the shared permission control", async () => {
+    useAcpSessionConfig.setState({
+      sessions: {
+        [SESSION]: {
+          options: [
+            {
+              id: "mode",
+              name: "Mode",
+              category: "mode",
+              type: "select",
+              currentValue: "agent",
+              values: [
+                { value: "ask", name: "Ask" },
+                { value: "agent", name: "Agent" },
+              ],
+            },
+            {
+              id: "allow_all",
+              name: "Allow All",
+              description: "Allow all tools without confirmation",
+              type: "boolean",
+              currentValue: false,
+              values: [],
+            },
+          ],
+          modes: null,
+        },
+      } as never,
+      byAgent: {},
+    });
+    mocks.setConfigOption.mockResolvedValue({ status: "ok", data: null });
+    const onPersistDefault = vi.fn();
+
+    render(
+      <AcpPermissionSelector
+        sessionId={SESSION}
+        agentId="github-copilot-cli"
+        onPersistDefault={onPersistDefault}
+      />,
+    );
+
+    const trigger = screen.getByTestId("acp-permission-trigger");
+    expect(trigger).toHaveTextContent("Ask for approval");
+    expect(trigger).toHaveAttribute(
+      "aria-label",
+      "GitHub Copilot permissions: Ask for approval",
+    );
+    fireEvent.click(trigger);
+    fireEvent.click(screen.getByTestId("acp-permission-option-true"));
+
+    expect(onPersistDefault).toHaveBeenCalledWith({
+      optionId: "allow_all",
+      value: "true",
+    });
+    await waitFor(() =>
+      expect(mocks.setConfigOption).toHaveBeenCalledWith(
+        SESSION,
+        "allow_all",
+        "true",
+        true,
+      ),
+    );
+    expect(mocks.setMode).not.toHaveBeenCalled();
+  });
+
   it.each([
     ["pi-acp", "Pi"],
     ["cursor", "Cursor"],

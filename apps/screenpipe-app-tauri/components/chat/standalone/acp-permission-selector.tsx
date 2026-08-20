@@ -23,6 +23,7 @@ import {
 import { commands, type AIPreset } from "@/lib/utils/tauri";
 import {
   findAcpModeOption,
+  findAcpPermissionBooleanOption,
   findAcpPermissionModeOption,
   hasAcpPermissionModes,
   useAcpSessionConfig,
@@ -33,11 +34,13 @@ import type { AcpConfigDefaultChange } from "@/components/chat/standalone/acp-co
 import { acpAdapterInfo } from "@/lib/utils/preset-appearance";
 import { cn } from "@/lib/utils";
 
-type ModeSource =
-  { kind: "option"; optionId: string } | { kind: "session-mode" };
+type PermissionSource =
+  | { kind: "select"; optionId: string }
+  | { kind: "boolean"; optionId: string }
+  | { kind: "session-mode" };
 
 interface PermissionControl {
-  source: ModeSource;
+  source: PermissionSource;
   currentValue: string;
   values: AcpConfigValue[];
 }
@@ -60,12 +63,38 @@ function permissionControl(
         : (config?.modes?.currentModeId ?? option.values[0]?.value);
     if (!currentValue) return null;
     return {
-      source: { kind: "option", optionId: option.id },
+      source: { kind: "select", optionId: option.id },
       currentValue,
       values: option.values,
     };
   }
-  if (findAcpModeOption(config) || !config?.modes || !hasAcpPermissionModes(config))
+  const booleanOption = findAcpPermissionBooleanOption(config);
+  if (booleanOption) {
+    const enabled =
+      booleanOption.currentValue === true ||
+      booleanOption.currentValue === "true";
+    return {
+      source: { kind: "boolean", optionId: booleanOption.id },
+      currentValue: String(enabled),
+      values: [
+        {
+          value: "false",
+          name: "Ask for approval",
+          description: "Ask before running tools that need approval.",
+        },
+        {
+          value: "true",
+          name: "Full access",
+          description: "Run every requested tool without asking for approval.",
+        },
+      ],
+    };
+  }
+  if (
+    findAcpModeOption(config) ||
+    !config?.modes ||
+    !hasAcpPermissionModes(config)
+  )
     return null;
   return {
     source: { kind: "session-mode" },
@@ -88,6 +117,22 @@ function isUnrestrictedMode(mode: AcpConfigValue): boolean {
 
 function permissionPresentation(mode: AcpConfigValue): PermissionPresentation {
   switch (mode.value) {
+    case "false":
+      return {
+        label: "Ask for approval",
+        description:
+          mode.description || "Ask before running tools that need approval.",
+        icon: Hand,
+      };
+    case "true":
+      return {
+        label: "Full access",
+        description:
+          mode.description ||
+          "Run every requested tool without asking for approval.",
+        icon: ShieldAlert,
+        warning: true,
+      };
     case "read-only":
     case "default":
       return {
@@ -192,7 +237,7 @@ export function AcpPermissionSelector({
   const presetModeId = activePreset?.acpAgent?.modeId ?? null;
   const selectedValue = liveControl
     ? liveControl.currentValue
-    : control.source.kind === "option"
+    : control.source.kind !== "session-mode"
       ? (presetConfig[control.source.optionId] ?? control.currentValue)
       : (presetModeId ?? control.currentValue);
   const selectedMode =
@@ -205,18 +250,18 @@ export function AcpPermissionSelector({
   const apply = async (mode: AcpConfigValue) => {
     setPendingValue(mode.value);
     const change: AcpConfigDefaultChange =
-      control.source.kind === "option"
+      control.source.kind !== "session-mode"
         ? { optionId: control.source.optionId, value: mode.value }
         : { modeId: mode.value };
     onPersistDefault?.(change);
     try {
       const result =
-        control.source.kind === "option"
+        control.source.kind !== "session-mode"
           ? await commands.piAcpSetConfigOption(
               sessionId,
               control.source.optionId,
               mode.value,
-              null,
+              control.source.kind === "boolean" ? true : null,
             )
           : await commands.piAcpSetMode(sessionId, mode.value);
       if (

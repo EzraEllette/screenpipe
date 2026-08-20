@@ -5,6 +5,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import {
   dedupedModes,
+  findAcpPermissionBooleanOption,
   useAcpSessionConfig,
   type AcpSessionConfig,
 } from "./acp-session-config";
@@ -160,5 +161,36 @@ describe("acp-session-config boolean options", () => {
     expect(fast?.type).toBe("boolean");
     expect(fast?.currentValue).toBe(true);
     expect(fast?.values).toEqual([]);
+  });
+
+  it("recognizes a boolean approval capability without an adapter-id special case", () => {
+    const config: AcpSessionConfig = {
+      options: [
+        {
+          id: "allow_all",
+          name: "Allow All",
+          description: "Allow all tools without confirmation",
+          type: "boolean",
+          currentValue: false,
+          values: [],
+        },
+        {
+          id: "fast",
+          name: "Fast mode",
+          type: "boolean",
+          currentValue: true,
+          values: [],
+        },
+      ],
+      modes: null,
+    };
+
+    expect(findAcpPermissionBooleanOption(config)?.id).toBe("allow_all");
+    expect(
+      findAcpPermissionBooleanOption({
+        ...config,
+        options: config.options.filter((option) => option.id === "fast"),
+      }),
+    ).toBeNull();
   });
 });

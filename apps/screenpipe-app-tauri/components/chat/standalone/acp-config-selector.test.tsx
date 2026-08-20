@@ -204,6 +204,45 @@ describe("ACP config trigger", () => {
     expect(screen.queryByLabelText("Mode")).not.toBeInTheDocument();
   });
 
+  it("keeps Copilot's mode visible while moving Allow All into permissions", () => {
+    seedSession([
+      {
+        id: "mode",
+        name: "Mode",
+        category: "mode",
+        type: "select",
+        currentValue: "agent",
+        values: [
+          { value: "ask", name: "Ask" },
+          { value: "agent", name: "Agent" },
+        ],
+      },
+      {
+        id: "allow_all",
+        name: "Allow All",
+        description: "Allow all tools without confirmation",
+        type: "boolean",
+        currentValue: false,
+        values: [],
+      },
+    ]);
+
+    render(
+      <AcpConfigSelector
+        sessionId={SESSION}
+        agentId="github-copilot-cli"
+        hideModeControl
+      />,
+    );
+
+    const trigger = screen.getByTestId("acp-config-trigger");
+    expect(trigger).toHaveTextContent("Agent");
+    expect(trigger).not.toHaveTextContent("config");
+    fireEvent.click(trigger);
+    expect(screen.getByLabelText("Mode")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Allow All")).not.toBeInTheDocument();
+  });
+
   it("can move effort into its dedicated composer control", () => {
     seedSession([
       modelOption("sonnet"),

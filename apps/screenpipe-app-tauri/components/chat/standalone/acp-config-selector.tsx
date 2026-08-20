@@ -20,6 +20,7 @@ import { commands, type AIPreset } from "@/lib/utils/tauri";
 import {
   dedupedModes,
   findAcpModeOption,
+  findAcpPermissionBooleanOption,
   findAcpPermissionModeOption,
   hasAcpPermissionModes,
   useAcpSessionConfig,
@@ -139,8 +140,8 @@ export function AcpConfigSelector({
   /** Sign the agent out and respawn so the sign-in card returns. */
   onReauthenticate?: () => void;
   /** A client can promote an agent's permission/mode axis into a dedicated
-   *  composer control. Hide that duplicated select from this general config
-   *  popover. */
+   *  composer control. Hide that duplicated select or boolean toggle from
+   *  this general config popover. */
   hideModeControl?: boolean;
   /** The composer promotes effort into its own visible control beside model.
    *  Hide the duplicate from this general configuration popover. */
@@ -169,18 +170,24 @@ export function AcpConfigSelector({
   const allSelects = (config?.options ?? []).filter(
     (option) => option.type === "select" && option.values.length > 0,
   );
-  const modeOption = hideModeControl
+  const permissionModeOption = hideModeControl
     ? findAcpPermissionModeOption(config)
-    : findAcpModeOption(config);
+    : null;
+  const permissionBooleanOption = hideModeControl
+    ? findAcpPermissionBooleanOption(config)
+    : null;
   const modeFilteredSelects = hideModeControl
-    ? allSelects.filter((option) => option.id !== modeOption?.id)
+    ? allSelects.filter((option) => option.id !== permissionModeOption?.id)
     : allSelects;
   const selects = hideEffortControl
     ? modeFilteredSelects.filter((option) => !isEffortAxis(option))
     : modeFilteredSelects;
   // Boolean options (e.g. Codex "fast mode") advertise no value list; render
   // them as toggles rather than dropping them.
-  const toggles = (config?.options ?? []).filter((option) => option.type === "boolean");
+  const toggles = (config?.options ?? []).filter(
+    (option) =>
+      option.type === "boolean" && option.id !== permissionBooleanOption?.id,
+  );
   const modes =
     hideModeControl && hasAcpPermissionModes(config)
       ? null
@@ -203,8 +210,17 @@ export function AcpConfigSelector({
   const advertisedModelValue = modelOption?.values.find(
     (value) => value.value === modelValue,
   );
+  const advertisedModeOption = findAcpModeOption(config);
+  const visibleModeOption = selects.find(
+    (option) => option.id === advertisedModeOption?.id,
+  );
+  const visibleModeValue = visibleModeOption
+    ? selectedValue(visibleModeOption)
+    : "";
   const triggerLabel =
     (modelOption && acpConfigValueLabel(modelOption, modelValue)) ||
+    visibleModeOption?.values.find((value) => value.value === visibleModeValue)
+      ?.name ||
     modes?.availableModes.find((mode) => mode.value === selectedModeId)?.name ||
     "config";
   const resolvedAliasHint =

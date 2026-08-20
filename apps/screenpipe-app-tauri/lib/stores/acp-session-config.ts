@@ -12,8 +12,7 @@ export interface AcpConfigValue {
 }
 
 /** An ACP session configuration option (model, ...) as advertised by the
- *  adapter in acp_session_config events. Only select options are surfaced
- *  in the UI for now. */
+ *  adapter in acp_session_config events. */
 export interface AcpConfigOption {
   id: string;
   name: string;
@@ -54,7 +53,7 @@ export function findAcpModeOption(
 }
 
 const PERMISSION_MODE_SIGNAL =
-  /permission|approval|sandbox|read.?only|full.?access|accept.?edit|dont.?ask|bypass|unrestricted/;
+  /permission|approval|sandbox|read.?only|full.?access|allow.?all|accept.?edit|dont.?ask|bypass|unrestricted/;
 
 function looksLikePermissionModes(
   values: AcpConfigValue[],
@@ -84,6 +83,24 @@ export function findAcpPermissionModeOption(
   )
     ? option
     : null;
+}
+
+/** Some adapters expose the approval boundary as one boolean instead of a
+ *  list of modes. GitHub Copilot's `Allow All` is the canonical example. Keep
+ *  the detection capability-driven so another ACP adapter with the same
+ *  contract gets the shared permission control without an agent-id matrix. */
+export function findAcpPermissionBooleanOption(
+  config: AcpSessionConfig | null | undefined,
+): AcpConfigOption | null {
+  return (
+    (config?.options ?? []).find(
+      (option) =>
+        option.type === "boolean" &&
+        PERMISSION_MODE_SIGNAL.test(
+          `${option.id} ${option.name} ${option.description ?? ""}`.toLowerCase(),
+        ),
+    ) ?? null
+  );
 }
 
 export function hasAcpPermissionModes(
