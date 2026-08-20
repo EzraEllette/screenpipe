@@ -32,6 +32,15 @@ fn should_enable_history_swipe_navigation(window_label: &str) -> bool {
     window_label == "home"
 }
 
+/// `NSScrollElasticityNone` blocks the WebKit edge interaction even when
+/// `allowsBackForwardNavigationGestures` reads back as true. Automatic and
+/// allowed elasticity both leave the native animation path available.
+#[cfg(any(target_os = "macos", test))]
+fn horizontal_elasticity_allows_history_swipe(elasticity: i64) -> bool {
+    const NS_SCROLL_ELASTICITY_NONE: i64 = 1;
+    elasticity != NS_SCROLL_ELASTICITY_NONE
+}
+
 #[cfg(target_os = "macos")]
 unsafe fn macos_history_swipe_navigation_enabled(
     window: &tauri::WebviewWindow,
@@ -49,7 +58,12 @@ unsafe fn macos_history_swipe_navigation_enabled(
     }
 
     let enabled: bool = msg_send![wk_webview, allowsBackForwardNavigationGestures];
-    Ok(enabled)
+    let scroll_view: id = msg_send![wk_webview, enclosingScrollView];
+    if scroll_view == nil {
+        return Err("WKWebView enclosing NSScrollView not found".to_string());
+    }
+    let horizontal_elasticity: i64 = msg_send![scroll_view, horizontalScrollElasticity];
+    Ok(enabled && horizontal_elasticity_allows_history_swipe(horizontal_elasticity))
 }
 
 /// Configure WebKit's native, interactive two-finger back/forward gesture.
@@ -415,7 +429,9 @@ pub(crate) unsafe fn attach_magnify_gesture_to_view(view: tauri_nspanel::cocoa::
 
 #[cfg(test)]
 mod tests {
-    use super::should_enable_history_swipe_navigation;
+    use super::{
+        horizontal_elasticity_allows_history_swipe, should_enable_history_swipe_navigation,
+    };
 
     #[test]
     fn enables_history_swipes_only_for_home() {
@@ -424,5 +440,12 @@ mod tests {
         assert!(!should_enable_history_swipe_navigation("main-window"));
         assert!(!should_enable_history_swipe_navigation("search"));
         assert!(!should_enable_history_swipe_navigation("chat"));
+    }
+
+    #[test]
+    fn requires_horizontal_elasticity_for_native_history_animation() {
+        assert!(horizontal_elasticity_allows_history_swipe(0));
+        assert!(!horizontal_elasticity_allows_history_swipe(1));
+        assert!(horizontal_elasticity_allows_history_swipe(2));
     }
 }
