@@ -614,6 +614,38 @@ pub fn observe_provider_schedule_tool(
     observe_claude_cron_in(&claude_session_root(), session_id, tool_name, args, result);
 }
 
+/// Desktop-only projection hooks for the core ACP runtime.
+pub struct ProviderAutomationObserver;
+
+impl screenpipe_core::agents::acp::ProviderSessionObserver for ProviderAutomationObserver {
+    fn begin_session(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+        chat_session_id: &str,
+        project_dir: &Path,
+        actions: &[String],
+    ) {
+        begin_provider_session(agent_id, session_id, chat_session_id, project_dir, actions);
+    }
+
+    fn end_session(&self, agent_id: &str, session_id: &str) {
+        end_provider_session(agent_id, session_id);
+    }
+
+    fn observe_schedule_tool(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+        tool_name: &str,
+        args: &Value,
+        result: &str,
+        failed: bool,
+    ) {
+        observe_provider_schedule_tool(agent_id, session_id, tool_name, args, result, failed);
+    }
+}
+
 fn process_start_time(process_id: u32) -> Option<u64> {
     use sysinfo::System;
     let mut system = System::new();
@@ -769,9 +801,10 @@ pub async fn manage_provider_automation(
     key: String,
     action: String,
 ) -> Result<(), String> {
-    let operation = crate::acp_schedule_extension::ScheduleOperation::parse(&action)
-        .ok_or("unsupported schedule operation")?;
-    if operation == crate::acp_schedule_extension::ScheduleOperation::Update {
+    let operation =
+        screenpipe_core::agents::acp::schedule_extension::ScheduleOperation::parse(&action)
+            .ok_or("unsupported schedule operation")?;
+    if operation == screenpipe_core::agents::acp::schedule_extension::ScheduleOperation::Update {
         return Err("schedule editing is not available in this view yet".into());
     }
 

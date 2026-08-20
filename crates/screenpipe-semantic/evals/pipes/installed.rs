@@ -273,6 +273,7 @@ impl AgentExecutor for SandboxedPiExecutor {
         pipe_system_prompt: Option<&str>,
         _mcp_server_allowlist: Option<&[String]>,
         _session_owner: Option<&str>,
+        _executor_config: Option<&serde_json::Value>,
     ) -> Result<AgentOutput> {
         let output = self
             .execute(prompt, working_dir, shared_pid, pipe_system_prompt)

@@ -642,7 +642,8 @@ describe("BrainOverview", () => {
     expect(JSON.stringify(properties)).not.toContain("my-overview");
     expect(JSON.stringify(properties)).not.toContain("How I worked today");
     expect(JSON.stringify(properties)).not.toContain("daily-summary");
-    expect(JSON.stringify(properties)).not.toContain("88");
+    expect(properties).not.toHaveProperty("artifactOutputId");
+    expect(properties).not.toHaveProperty("artifact_output_id");
   });
 
   it("does not count a result as viewed until the app is visible", async () => {

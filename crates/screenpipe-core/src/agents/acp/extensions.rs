@@ -35,7 +35,7 @@ const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
 const PORTABLE_MCP_ARG: &str = "--screenpipe-portable-mcp";
 
 #[derive(Debug, Clone, Default)]
-pub(crate) struct AcpExtensionMiddleware {
+pub(super) struct AcpExtensionMiddleware {
     extensions: Vec<PortableAcpExtension>,
 }
 
@@ -63,14 +63,14 @@ struct ScreenpipeAcpManifest {
 }
 
 impl AcpExtensionMiddleware {
-    pub(crate) fn discover() -> Self {
-        let Ok(config_dir) = screenpipe_core::agents::pi::pi_config_dir() else {
+    pub(super) fn discover() -> Self {
+        let Ok(config_dir) = crate::agents::pi::pi_config_dir() else {
             return Self::default();
         };
         Self::discover_in(&config_dir)
     }
 
-    pub(crate) fn discover_in(config_dir: &Path) -> Self {
+    pub(super) fn discover_in(config_dir: &Path) -> Self {
         let settings = read_json_file(&config_dir.join("settings.json"));
         let Some(packages) = settings
             .as_ref()
@@ -89,7 +89,7 @@ impl AcpExtensionMiddleware {
             else {
                 continue;
             };
-            let Some(package_name) = crate::pi::npm_package_name_from_source(source) else {
+            let Some(package_name) = npm_package_name_from_source(source) else {
                 continue;
             };
             let package_key = package_name.to_ascii_lowercase();
@@ -111,7 +111,7 @@ impl AcpExtensionMiddleware {
 
     /// MCP declarations appended to ACP session/new for agents that honor the
     /// protocol's standard stdio transport.
-    pub(crate) fn stdio_servers(
+    pub(super) fn stdio_servers(
         &self,
         bun_path: &str,
         inherited_env: &[(String, String)],
@@ -143,7 +143,7 @@ impl AcpExtensionMiddleware {
     /// Launch the same package entrypoints over loopback HTTP for ACP agents
     /// that reject client-provided stdio MCP servers. The package contract owns
     /// the transport switch; Screenpipe owns process containment and the port.
-    pub(crate) fn spawn_http_servers<F>(
+    pub(super) fn spawn_http_servers<F>(
         &self,
         bun_path: &str,
         inherited_env: &[(String, String)],
@@ -191,11 +191,11 @@ impl AcpExtensionMiddleware {
     }
 }
 
-pub(crate) fn package_source_is_portable(source: &str) -> bool {
-    let Some(package_name) = crate::pi::npm_package_name_from_source(source) else {
+pub fn package_source_is_portable(source: &str) -> bool {
+    let Some(package_name) = npm_package_name_from_source(source) else {
         return false;
     };
-    let Ok(config_dir) = screenpipe_core::agents::pi::pi_config_dir() else {
+    let Ok(config_dir) = crate::agents::pi::pi_config_dir() else {
         return false;
     };
     let Some(package_root) = installed_package_root(&config_dir, &package_name) else {
@@ -257,6 +257,84 @@ pub fn run_portable_mcp_mode() -> Result<i32, String> {
         .status()
         .map_err(|error| format!("portable MCP server failed to start: {error}"))?;
     Ok(status.code().unwrap_or(1))
+}
+
+/// Parse the npm package name from a `npm:<package>[@version]` Pi package
+/// source. Local paths and malformed names are rejected before resolution.
+pub fn npm_package_name_from_source(source: &str) -> Option<String> {
+    let spec = source.strip_prefix("npm:")?.trim();
+    if spec.is_empty() {
+        return None;
+    }
+
+    let without_version = if spec.starts_with('@') {
+        let slash = spec.find('/')?;
+        let after_scope = &spec[slash + 1..];
+        match after_scope.find('@') {
+            Some(version_index) => {
+                let version = &after_scope[version_index + 1..];
+                if version_index == 0 || !valid_npm_version_spec(version) {
+                    return None;
+                }
+                &spec[..slash + 1 + version_index]
+            }
+            None => spec,
+        }
+    } else {
+        let mut parts = spec.splitn(2, '@');
+        let name = parts.next().unwrap_or(spec);
+        if parts
+            .next()
+            .is_some_and(|version| !valid_npm_version_spec(version))
+        {
+            return None;
+        }
+        name
+    };
+
+    valid_npm_package_name(without_version).then(|| without_version.to_string())
+}
+
+fn valid_npm_package_name(name: &str) -> bool {
+    if name.is_empty()
+        || name.len() > 214
+        || name.contains('\\')
+        || name.contains("..")
+        || name.starts_with('.')
+        || name.starts_with('/')
+    {
+        return false;
+    }
+
+    if let Some(scoped) = name.strip_prefix('@') {
+        let mut parts = scoped.split('/');
+        let (Some(scope), Some(package), None) = (parts.next(), parts.next(), parts.next()) else {
+            return false;
+        };
+        return valid_npm_package_part(scope) && valid_npm_package_part(package);
+    }
+
+    !name.contains('/') && valid_npm_package_part(name)
+}
+
+fn valid_npm_package_part(part: &str) -> bool {
+    !part.is_empty()
+        && !part.starts_with('.')
+        && part.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
+        })
+}
+
+fn valid_npm_version_spec(version: &str) -> bool {
+    !version.is_empty()
+        && version.len() <= 128
+        && version.chars().all(|character| {
+            character.is_ascii_alphanumeric()
+                || matches!(
+                    character,
+                    '.' | '-' | '_' | '+' | '~' | '^' | '>' | '<' | '=' | '*'
+                )
+        })
 }
 
 fn portable_child_env() -> Vec<(String, String)> {

@@ -347,11 +347,16 @@ pub fn build_jsonl_with_parsed(
         );
     }
     for p in parsed {
+        let mut parsed = p.clone();
+        // Dynamic parser payloads must remain byte-stable even when another
+        // dependency enables serde_json's insertion-order map feature.
+        parsed.items = parsed.items.iter().map(canonical_json_value).collect();
+        parsed.actors = parsed.actors.iter().map(canonical_json_value).collect();
         push(
             &TelemetryRecord::Parsed {
                 device_id: device_id.to_string(),
                 device_label: device_label.to_string(),
-                parsed: p.clone(),
+                parsed,
             },
             p.frame_id,
         );
@@ -397,6 +402,22 @@ pub fn build_jsonl_with_parsed(
         );
     }
     out
+}
+
+fn canonical_json_value(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let mut keys = map.keys().collect::<Vec<_>>();
+            keys.sort_unstable();
+            let mut canonical = serde_json::Map::new();
+            for key in keys {
+                canonical.insert(key.clone(), canonical_json_value(&map[key]));
+            }
+            Value::Object(canonical)
+        }
+        Value::Array(values) => Value::Array(values.iter().map(canonical_json_value).collect()),
+        _ => value.clone(),
+    }
 }
 
 /// Result of tolerantly parsing a JSONL batch body.
@@ -525,7 +546,11 @@ mod tests {
             app_version: None,
             parse_duration_us: 400,
             text_bytes: 24,
-            items: vec![serde_json::json!({"kind": "message", "body": "ship Acme"})],
+            items: vec![serde_json::json!({
+                "kind": "message",
+                "body": "ship Acme",
+                "actor": "Ada Lovelace",
+            })],
             actors: vec![serde_json::json!({"name": "Ada Lovelace"})],
         };
         let body = build_jsonl_with_parsed(
@@ -538,6 +563,9 @@ mod tests {
             &[],
             &[],
         );
+        let text = String::from_utf8_lossy(&body);
+        assert!(text
+            .contains(r#""items":[{"actor":"Ada Lovelace","body":"ship Acme","kind":"message"}]"#));
         let batch = parse_jsonl(&body);
         assert_eq!(batch.skipped_lines, 0);
         match &batch.records[0] {

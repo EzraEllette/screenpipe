@@ -2094,6 +2094,7 @@ impl AgentExecutor for PiExecutor {
         pipe_system_prompt: Option<&str>,
         mcp_server_allowlist: Option<&[String]>,
         session_owner: Option<&str>,
+        _executor_config: Option<&serde_json::Value>,
     ) -> Result<AgentOutput> {
         let resolved_provider = provider.unwrap_or("screenpipe").to_string();
         let (resolved_model, fell_back_from) = self

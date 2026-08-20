@@ -297,6 +297,8 @@
       "crate": "screenpipe-engine",
       "files": [
         "src/activity_ledger.rs",
+        "src/agent_profile.rs",
+        "src/agent_skills.rs",
         "src/auth_key.rs",
         "src/local_chat.rs",
         "src/pipe_stream.rs",
@@ -433,8 +435,6 @@
       "label": "Engine meetings, privacy, pipes, and sync units",
       "crate": "screenpipe-engine",
       "files": [
-        "src/agent_profile.rs",
-        "src/agent_skills.rs",
         "src/calendar_speaker_id.rs",
         "src/capture_exclusions.rs",
         "src/cli/agent.rs",

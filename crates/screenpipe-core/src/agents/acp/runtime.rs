@@ -9,18 +9,17 @@
 //! hidden mode of the signed Screenpipe executable so no second sidecar or
 //! handwritten protocol implementation is shipped.
 
-use crate::acp_extensions::AcpExtensionMiddleware;
-use crate::acp_schedule_extension::{
+use super::extensions::AcpExtensionMiddleware;
+use super::schedule_extension::{
     advertised_capability, ScheduleMutationRequest, ScheduleOperation,
 };
 use agent_client_protocol::schema::v1::{
     AuthCapabilities, AuthMethod, AuthenticateRequest, BooleanConfigOptionCapabilities,
-    CancelNotification, ClientCapabilities,
-    ClientSessionCapabilities, CloseSessionRequest, ContentBlock, CreateTerminalRequest,
-    CreateTerminalResponse, EnvVariable, FileSystemCapabilities, HttpHeader, ImageContent,
-    Implementation, InitializeRequest, InitializeResponse, KillTerminalRequest,
-    KillTerminalResponse, McpServer, McpServerHttp, McpServerStdio, NewSessionRequest,
-    NewSessionResponse, PromptRequest, ReadTextFileRequest,
+    CancelNotification, ClientCapabilities, ClientSessionCapabilities, CloseSessionRequest,
+    ContentBlock, CreateTerminalRequest, CreateTerminalResponse, EnvVariable,
+    FileSystemCapabilities, HttpHeader, ImageContent, Implementation, InitializeRequest,
+    InitializeResponse, KillTerminalRequest, KillTerminalResponse, McpServer, McpServerHttp,
+    McpServerStdio, NewSessionRequest, NewSessionResponse, PromptRequest, ReadTextFileRequest,
     ReadTextFileResponse, ReleaseTerminalRequest, ReleaseTerminalResponse,
     RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
     ResumeSessionRequest, SelectedPermissionOutcome, SessionConfigKind, SessionConfigOptionValue,
@@ -33,17 +32,17 @@ use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::{Agent, Client, ConnectionTo, Error, ErrorCode, Lines};
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::io::{BufRead, Read, Write};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::{Arc, Condvar, Mutex};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot};
 
 pub const RUNTIME_ARG: &str = "--screenpipe-acp-runtime";
 const PROCESS_GUARD_ARG: &str = "--screenpipe-acp-process-guard";
-pub(crate) const CLOUD_API_KEY_ENV: &str = "SCREENPIPE_API_KEY";
+pub const CLOUD_API_KEY_ENV: &str = "SCREENPIPE_API_KEY";
 
 /// The core screenpipe MCP server (activity-summary, search-content,
 /// update-memory). Pinned rather than `@latest` so `bun x` resolves it from
@@ -51,7 +50,7 @@ pub(crate) const CLOUD_API_KEY_ENV: &str = "SCREENPIPE_API_KEY";
 /// why these tools sometimes never registered and the agent fell back to raw
 /// SQL. `pi::prewarm_screenpipe_mcp` seeds the cache at install. Bump alongside
 /// packages/screenpipe-mcp.
-pub(crate) const SCREENPIPE_MCP_PKG: &str = "screenpipe-mcp@0.19.2";
+pub const SCREENPIPE_MCP_PKG: &str = "screenpipe-mcp@0.19.2";
 
 /// Environment carried into the runtime process by `pi.rs` that belongs to the
 /// runtime alone and must never be inherited by any child it spawns — neither
@@ -75,6 +74,7 @@ const RUNTIME_ONLY_ENV: &[&str] = &[
     "SCREENPIPE_ACP_CWD",
     "SCREENPIPE_ACP_ID",
     "SCREENPIPE_ACP_RESUME_SESSION_ID",
+    "SCREENPIPE_ACP_UNATTENDED",
 ];
 
 /// Strip every [`RUNTIME_ONLY_ENV`] var from a child command's inherited
@@ -190,6 +190,10 @@ struct RuntimeConfig {
     /// A prior ACP session id to resume on startup instead of creating a
     /// fresh one, when the chat is reopened after the process was gone.
     resume_session_id: Option<String>,
+    /// Scheduled tasks have no foreground UI to answer auth or permission
+    /// cards. In this mode permissions use the task's preconfigured sandbox and
+    /// authentication failures return immediately with recovery instructions.
+    unattended: bool,
 }
 
 /// A user-configured MCP server forwarded to the adapter. Header values and
@@ -246,20 +250,17 @@ impl RuntimeConfig {
         // inbound `SCREENPIPE_ACP_ENV_JSON` entry, and inherited from here by
         // the adapter's own terminals (ACP never calls `env_clear`, and
         // `SCREENPIPE_CLI` is not on the `RUNTIME_ONLY_ENV` scrub list).
-        let data_dir = screenpipe_core::paths::default_screenpipe_data_dir();
-        if let Some(cli) = screenpipe_core::agents::cli_runtime::resolved_cli_binary(&data_dir) {
+        let data_dir = crate::paths::default_screenpipe_data_dir();
+        if let Some(cli) = crate::agents::cli_runtime::resolved_cli_binary(&data_dir) {
             env.insert(
-                screenpipe_core::agents::cli_runtime::CLI_ENV_VAR.to_string(),
+                crate::agents::cli_runtime::CLI_ENV_VAR.to_string(),
                 cli.to_string_lossy().to_string(),
             );
         }
         // An ACP-only user never runs a pipe, so nothing else would ever
         // publish a launcher for them. Best-effort, single-flighted, and off
         // the critical path.
-        screenpipe_core::agents::cli_runtime::maybe_refresh_in_background(
-            &data_dir,
-            Path::new(&bun_path),
-        );
+        crate::agents::cli_runtime::maybe_refresh_in_background(&data_dir, Path::new(&bun_path));
         let configured_command = env_nonempty("SCREENPIPE_ACP_COMMAND");
         let (command, args) = if let Some(command) = configured_command {
             (command, configured_args)
@@ -300,11 +301,11 @@ impl RuntimeConfig {
             )?
             .unwrap_or_default(),
             extension_middleware: AcpExtensionMiddleware::discover(),
-            user_mcp_servers: parse_json_env::<Vec<UserMcpServer>>(
-                "SCREENPIPE_ACP_USER_MCP_JSON",
-            )?
-            .unwrap_or_default(),
+            user_mcp_servers: parse_json_env::<Vec<UserMcpServer>>("SCREENPIPE_ACP_USER_MCP_JSON")?
+                .unwrap_or_default(),
             resume_session_id: env_nonempty("SCREENPIPE_ACP_RESUME_SESSION_ID"),
+            unattended: env_nonempty("SCREENPIPE_ACP_UNATTENDED")
+                .is_some_and(|value| value != "0" && !value.eq_ignore_ascii_case("false")),
         })
     }
 }
@@ -454,7 +455,7 @@ fn is_process_guard_env(name: &str) -> bool {
     }
 }
 
-pub(crate) fn is_forbidden_acp_env(name: &str) -> bool {
+pub fn is_forbidden_acp_env(name: &str) -> bool {
     // This is the signed-in user's Screenpipe cloud JWT, not the local API
     // key. ACP adapters and client-created terminals never need it. Compare
     // case-insensitively because Windows environment keys are case-insensitive.
@@ -517,7 +518,7 @@ enum AgentInstaller {
 /// and Copilot talk to their own service and simply declare nothing here.
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct CloudRouting {
+pub struct CloudRouting {
     /// Env var carrying the provider base URL, e.g. `ANTHROPIC_BASE_URL`.
     pub base_url_env: String,
     /// Env var carrying the bearer token, e.g. `ANTHROPIC_AUTH_TOKEN`.
@@ -536,6 +537,7 @@ pub(crate) struct CloudRouting {
 #[serde(rename_all = "camelCase")]
 struct CatalogAgent {
     id: String,
+    name: String,
     launch: AgentLaunch,
     /// Optional one-click login run with the launch command but without its ACP
     /// server args (for example, `cursor-agent login`, not `cursor-agent acp login`).
@@ -561,7 +563,7 @@ struct CatalogAgent {
 }
 
 /// The catalog's cloud-routing declaration for an agent, if it has one.
-pub(crate) fn agent_cloud_routing(agent_id: &str) -> Option<CloudRouting> {
+pub fn agent_cloud_routing(agent_id: &str) -> Option<CloudRouting> {
     agent_catalog()
         .into_iter()
         .find(|agent| agent.id == agent_id)
@@ -576,7 +578,7 @@ pub(crate) fn agent_cloud_routing(agent_id: &str) -> Option<CloudRouting> {
 /// and the provider dialect prefix appended. Returns None for a URL that is not
 /// usable, so a malformed override can never silently point an agent somewhere
 /// unintended — the caller then leaves the agent on its own account.
-pub(crate) fn cloud_provider_base_url(gateway_url: &str, path_prefix: &str) -> Option<String> {
+pub fn cloud_provider_base_url(gateway_url: &str, path_prefix: &str) -> Option<String> {
     let trimmed = gateway_url.trim().trim_end_matches('/');
     if trimmed.is_empty() {
         return None;
@@ -595,7 +597,7 @@ pub(crate) fn cloud_provider_base_url(gateway_url: &str, path_prefix: &str) -> O
 /// The env that routes an agent through Screenpipe Cloud, plus the names to
 /// remove. Empty when anything required is missing, which leaves the agent on
 /// its own account rather than half-configured.
-pub(crate) fn cloud_routing_env(
+pub fn cloud_routing_env(
     routing: &CloudRouting,
     gateway_url: &str,
     token: &str,
@@ -654,7 +656,7 @@ async fn run_terminal_login(
     // No-window: the agent CLI is a console program, and sign-in already has
     // the user's attention in the app — a terminal blinking beside it for up to
     // five minutes reads as a crash.
-    let mut command = screenpipe_core::no_window_command_async(program);
+    let mut command = crate::no_window_command_async(program);
     command
         .args(args)
         .stdin(std::process::Stdio::null())
@@ -681,10 +683,7 @@ async fn run_terminal_login(
 /// Run a catalog-declared external login after the user clicks Sign in. The
 /// agent opens its own browser OAuth and stores its own credential; screenpipe
 /// never receives either the browser callback or the resulting token.
-pub(crate) async fn run_external_auth_login(
-    agent_id: &str,
-    bun_path: Option<&str>,
-) -> Result<(), String> {
+pub async fn run_external_auth_login(agent_id: &str, bun_path: Option<&str>) -> Result<(), String> {
     let login = agent_catalog()
         .into_iter()
         .find(|agent| agent.id == agent_id)
@@ -694,7 +693,15 @@ pub(crate) async fn run_external_auth_login(
 }
 
 fn agent_catalog() -> Vec<CatalogAgent> {
-    serde_json::from_str(include_str!("../../lib/acp/agents.json")).unwrap_or_default()
+    serde_json::from_str(include_str!("../../../assets/acp/agents.json")).unwrap_or_default()
+}
+
+fn agent_display_name(agent_id: &str) -> String {
+    agent_catalog()
+        .into_iter()
+        .find(|agent| agent.id == agent_id)
+        .map(|agent| agent.name)
+        .unwrap_or_else(|| agent_id.to_owned())
 }
 
 /// Whether a binary agent's CLI is resolvable on PATH. npx agents (run via the
@@ -1091,7 +1098,7 @@ fn windows_target_command(program: &str, args: &[String]) -> Result<Command, Str
     // it holds no console — which is precisely why Windows would allocate a
     // fresh one for a console-subsystem agent here. The flag does not disturb
     // the inherited stdio the guard relays.
-    let mut command = screenpipe_core::no_window_command(resolved);
+    let mut command = crate::no_window_command(resolved);
     command.args(args);
     Ok(command)
 }
@@ -1195,6 +1202,7 @@ struct TurnState {
     message_open: bool,
     thought_open: bool,
     prompt_in_flight: bool,
+    assistant_text: String,
     active_tools: HashMap<String, Value>,
 }
 
@@ -1254,7 +1262,9 @@ impl UnixProcessGroupGuard {
             let mut command = Command::new("/bin/sh");
             command.args([
                 "-c",
-                "trap '' TERM INT; while IFS= read -r _; do :; done; kill -TERM -- -$$; sleep 0.15; kill -KILL -- -$$",
+                // POSIX `kill ... 0` targets the caller's process group. Unlike
+                // `-- -$$`, it also works with Ubuntu's dash builtin.
+                "trap '' TERM INT; while IFS= read -r _; do :; done; kill -TERM 0; sleep 0.15; kill -KILL 0",
             ]);
             command
         };
@@ -1500,8 +1510,64 @@ unsafe extern "system" {
     fn CloseHandle(handle: *mut std::ffi::c_void) -> i32;
 }
 
+/// Optional host integration for provider-owned scheduled tasks.
+///
+/// ACP execution itself has no dependency on desktop state. The desktop uses
+/// this observer to project provider schedules; CLI hosts use the no-op
+/// implementation below.
+pub trait ProviderSessionObserver: Send + Sync {
+    fn begin_session(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+        chat_session_id: &str,
+        project_dir: &Path,
+        actions: &[String],
+    );
+
+    fn end_session(&self, agent_id: &str, session_id: &str);
+
+    fn observe_schedule_tool(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+        tool_name: &str,
+        args: &Value,
+        result: &str,
+        failed: bool,
+    );
+}
+
+pub(super) struct NoopProviderSessionObserver;
+
+impl ProviderSessionObserver for NoopProviderSessionObserver {
+    fn begin_session(
+        &self,
+        _agent_id: &str,
+        _session_id: &str,
+        _chat_session_id: &str,
+        _project_dir: &Path,
+        _actions: &[String],
+    ) {
+    }
+
+    fn end_session(&self, _agent_id: &str, _session_id: &str) {}
+
+    fn observe_schedule_tool(
+        &self,
+        _agent_id: &str,
+        _session_id: &str,
+        _tool_name: &str,
+        _args: &Value,
+        _result: &str,
+        _failed: bool,
+    ) {
+    }
+}
+
 struct RuntimeState {
     output: ParentOutput,
+    observer: Arc<dyn ProviderSessionObserver>,
     agent_id: String,
     chat_session_id: String,
     project_dir: PathBuf,
@@ -1513,9 +1579,14 @@ struct RuntimeState {
 }
 
 impl RuntimeState {
-    fn new(output: ParentOutput, config: &RuntimeConfig) -> Self {
+    fn new(
+        output: ParentOutput,
+        config: &RuntimeConfig,
+        observer: Arc<dyn ProviderSessionObserver>,
+    ) -> Self {
         Self {
             output,
+            observer,
             agent_id: config.agent_id.clone(),
             chat_session_id: config.chat_session_id.clone(),
             project_dir: config.project_dir.clone(),
@@ -1535,7 +1606,7 @@ impl RuntimeState {
             return;
         };
         if current.as_deref() == Some(session_id) {
-            crate::provider_automations::begin_provider_session(
+            self.observer.begin_session(
                 &self.agent_id,
                 session_id,
                 &self.chat_session_id,
@@ -1545,9 +1616,9 @@ impl RuntimeState {
             return;
         }
         if let Some(previous) = current.take() {
-            crate::provider_automations::end_provider_session(&self.agent_id, &previous);
+            self.observer.end_session(&self.agent_id, &previous);
         }
-        crate::provider_automations::begin_provider_session(
+        self.observer.begin_session(
             &self.agent_id,
             session_id,
             &self.chat_session_id,
@@ -1570,7 +1641,7 @@ impl RuntimeState {
         let Some(session_id) = session_id else {
             return;
         };
-        crate::provider_automations::observe_provider_schedule_tool(
+        self.observer.observe_schedule_tool(
             &self.agent_id,
             &session_id,
             &name,
@@ -1597,6 +1668,7 @@ impl RuntimeState {
     fn begin_prompt(&self, user_display: Option<&str>) {
         if let Ok(mut turn) = self.turn.lock() {
             turn.prompt_in_flight = true;
+            turn.assistant_text.clear();
             // Emit the user bubble before opening the assistant turn, mirroring
             // raw Pi. Without it a turn that runs entirely while the chat is
             // backgrounded persists an assistant-only transcript (the desktop
@@ -1661,13 +1733,28 @@ impl RuntimeState {
             }));
         }
         if turn.message_open {
+            if let Some(guidance) = model_access_guidance(&turn.assistant_text, &self.agent_id) {
+                self.output.send(json!({
+                    "type": "message_update",
+                    "assistantMessageEvent": {
+                        "type": "text_delta",
+                        "delta": format!("\n\n{guidance}")
+                    }
+                }));
+                self.output.send(json!({
+                    "type": "acp_model_access_required",
+                    "agentId": self.agent_id,
+                    "guidance": guidance
+                }));
+            }
             self.output.send(json!({
                 "type": "message_end",
                 "message": { "role": "assistant", "stopReason": stop_reason }
             }));
         }
         if turn.turn_open {
-            self.output.send(json!({ "type": "agent_end", "authPending": auth_pending }));
+            self.output
+                .send(json!({ "type": "agent_end", "authPending": auth_pending }));
         }
         turn.turn_open = false;
         turn.message_open = false;
@@ -1706,6 +1793,7 @@ impl RuntimeState {
                     self.close_thought_locked(&mut turn);
                     self.ensure_turn_locked(&mut turn);
                     if let Some(delta) = content_text(update.get("content")) {
+                        turn.assistant_text.push_str(&delta);
                         self.output.send(json!({
                             "type": "message_update",
                             "assistantMessageEvent": { "type": "text_delta", "delta": delta }
@@ -1976,12 +2064,18 @@ impl RuntimeState {
     /// Look up a live terminal by id, cloning the Arc. None if the id is unknown
     /// or the lock is poisoned. Shared by the output/wait/kill request handlers.
     fn get_terminal(&self, id: &str) -> Option<Arc<TerminalRecord>> {
-        self.terminals.lock().ok().and_then(|map| map.get(id).cloned())
+        self.terminals
+            .lock()
+            .ok()
+            .and_then(|map| map.get(id).cloned())
     }
 
     /// Remove and return a terminal by id (release drops it from the map).
     fn take_terminal(&self, id: &str) -> Option<Arc<TerminalRecord>> {
-        self.terminals.lock().ok().and_then(|mut map| map.remove(id))
+        self.terminals
+            .lock()
+            .ok()
+            .and_then(|mut map| map.remove(id))
     }
 }
 
@@ -1989,7 +2083,7 @@ impl Drop for RuntimeState {
     fn drop(&mut self) {
         if let Ok(session) = self.provider_session_id.get_mut() {
             if let Some(session_id) = session.take() {
-                crate::provider_automations::end_provider_session(&self.agent_id, &session_id);
+                self.observer.end_session(&self.agent_id, &session_id);
             }
         }
     }
@@ -2065,7 +2159,7 @@ fn tool_content_item_text(item: &Value) -> Option<String> {
 fn subagent_transcript_capability() -> serde_json::Map<String, Value> {
     let mut meta = serde_json::Map::new();
     meta.insert("subagent-transcript".to_owned(), Value::Bool(true));
-    crate::acp_schedule_extension::add_client_capability(&mut meta);
+    super::schedule_extension::add_client_capability(&mut meta);
     meta
 }
 
@@ -2556,7 +2650,7 @@ fn spawn_terminal(state: &RuntimeState, request: CreateTerminalRequest) -> Resul
 /// extensions are staged. Returns None if it can't be written, so registration
 /// is simply skipped rather than failing the session.
 fn ensure_tools_mcp_server(config: &RuntimeConfig) -> Option<PathBuf> {
-    const SOURCE: &str = include_str!("../assets/mcp/screenpipe-tools.mjs");
+    const SOURCE: &str = include_str!("../../../assets/acp/screenpipe-tools.mjs");
     let dir = config.project_dir.join(".screenpipe");
     if let Err(error) = std::fs::create_dir_all(&dir) {
         eprintln!("[acp-runtime] could not create MCP tools dir: {error}");
@@ -2738,7 +2832,8 @@ fn wait_port_ready(port: u16, timeout: std::time::Duration) {
     let deadline = std::time::Instant::now() + timeout;
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
     while std::time::Instant::now() < deadline {
-        if std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(200)).is_ok()
+        if std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(200))
+            .is_ok()
         {
             return;
         }
@@ -2780,7 +2875,10 @@ fn spawn_http_mcp_servers(config: &RuntimeConfig) -> Vec<std::process::Child> {
         match cmd.spawn() {
             Ok(child) => {
                 children.push(child);
-                urls.push(("screenpipe-tools".into(), format!("http://127.0.0.1:{port}/mcp")));
+                urls.push((
+                    "screenpipe-tools".into(),
+                    format!("http://127.0.0.1:{port}/mcp"),
+                ));
                 wait_port_ready(port, std::time::Duration::from_secs(3));
             }
             Err(error) => eprintln!("[acp-runtime] tools http server failed to start: {error}"),
@@ -2904,10 +3002,12 @@ async fn apply_session_defaults(
     let Some(mode_id) = defaults.mode_id.as_deref().filter(|id| !id.is_empty()) else {
         return;
     };
-    let advertised = session
-        .modes
-        .as_ref()
-        .is_some_and(|modes| modes.available_modes.iter().any(|mode| mode.id.to_string() == mode_id));
+    let advertised = session.modes.as_ref().is_some_and(|modes| {
+        modes
+            .available_modes
+            .iter()
+            .any(|mode| mode.id.to_string() == mode_id)
+    });
     if !advertised {
         return;
     }
@@ -2924,9 +3024,9 @@ async fn apply_session_defaults(
                 modes.current_mode_id = mode_id.to_owned().into();
             }
         }
-        Err(error) => eprintln!(
-            "[acp-runtime] preset default mode '{mode_id}' was not applied: {error}"
-        ),
+        Err(error) => {
+            eprintln!("[acp-runtime] preset default mode '{mode_id}' was not applied: {error}")
+        }
     }
 }
 
@@ -2944,6 +3044,43 @@ fn auth_error(error: &Error) -> bool {
         ]
         .iter()
         .any(|needle| error.to_string().to_ascii_lowercase().contains(needle))
+}
+
+/// ACP has no portable entitlement-preflight method. Detect only short,
+/// provider-authored denial responses; longer assistant answers may discuss
+/// plans or access as ordinary content and must not be rewritten.
+fn model_access_denied(text: &str) -> bool {
+    let normalized = text.trim().to_ascii_lowercase();
+    if normalized.is_empty() || normalized.len() > 512 || normalized.lines().count() > 4 {
+        return false;
+    }
+
+    normalized == "upgrade your plan to continue"
+        || normalized == "upgrade your plan to continue."
+        || normalized.starts_with("you don't have access to this model")
+        || normalized.starts_with("you do not have access to this model")
+        || normalized.contains("model is not available on your plan")
+        || normalized.contains("model isn't available on your plan")
+        || normalized.contains("model is not included in your plan")
+        || normalized.contains("plan does not include this model")
+        || normalized.contains("subscription is required to use this model")
+}
+
+fn model_access_guidance(text: &str, agent_id: &str) -> Option<String> {
+    if !model_access_denied(text) {
+        return None;
+    }
+
+    let agent_name = agent_display_name(agent_id);
+    if agent_cloud_routing(agent_id).is_some() {
+        return Some(format!(
+            "The selected model is not included in this {agent_name} account. Choose a different model, sign in with an account that includes it, or turn on Screenpipe Cloud for this preset."
+        ));
+    }
+
+    Some(format!(
+        "The selected model is not included in this {agent_name} account. Choose a different {agent_name} model or update the account's plan. Screenpipe Cloud cannot provide models to {agent_name} because this agent manages its own model access."
+    ))
 }
 
 /// Screenpipe's own local, read-only screen-data tools (the `screenpipe` MCP
@@ -3033,6 +3170,16 @@ fn allow_option_id(options: &Value) -> Option<String> {
     by_kind("allow_always").or_else(|| by_kind("allow_once"))
 }
 
+fn automatic_permission_option_id(
+    options: &Value,
+    unattended: bool,
+    title: Option<&str>,
+) -> Option<String> {
+    (unattended || title.is_some_and(is_screenpipe_read_tool))
+        .then(|| allow_option_id(options))
+        .flatten()
+}
+
 fn external_auth_command(agent_id: &str) -> Option<String> {
     // These agents advertise an ACP auth method but their `authenticate` just
     // re-errors or never responds while signed out. The catalog provides the
@@ -3063,8 +3210,17 @@ fn external_auth_command(agent_id: &str) -> Option<String> {
 /// arrive as the `AuthMethod::Terminal` variant instead and carry their args
 /// directly.)
 fn terminal_auth_args(method: &Value) -> Option<Vec<String>> {
-    let args = method.get("_meta")?.get("terminal-auth")?.get("args")?.as_array()?;
-    Some(args.iter().filter_map(Value::as_str).map(str::to_owned).collect())
+    let args = method
+        .get("_meta")?
+        .get("terminal-auth")?
+        .get("args")?
+        .as_array()?;
+    Some(
+        args.iter()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect(),
+    )
 }
 
 /// Consumer Claude subscription sign-in, which Screenpipe must never offer.
@@ -3100,6 +3256,12 @@ async fn authenticate(
     init: &InitializeResponse,
     config: &RuntimeConfig,
 ) -> Result<(), String> {
+    if config.unattended {
+        return Err(format!(
+            "authentication required: {} is not signed in. Open Chat, select this coding-agent preset, and sign in before using it in a scheduled task.",
+            config.agent_id
+        ));
+    }
     if let Some(command) = external_auth_command(&config.agent_id) {
         let agent_name = init
             .agent_info
@@ -3172,7 +3334,11 @@ async fn authenticate(
                     state.output.send(json!({ "type": "acp_auth_cancelled" }));
                     return Err("ACP authentication cancelled".into());
                 };
-                match methods.iter().find(|m| m.id().to_string() == selection).copied() {
+                match methods
+                    .iter()
+                    .find(|m| m.id().to_string() == selection)
+                    .copied()
+                {
                     Some(method) => method,
                     None => return Err("Selected ACP authentication method is unavailable".into()),
                 }
@@ -3187,7 +3353,10 @@ async fn authenticate(
         let method_id = method.id().to_string();
         let terminal_args = match method {
             AuthMethod::Terminal(terminal) => Some(terminal.args.clone()),
-            _ => serde_json::to_value(method).ok().as_ref().and_then(terminal_auth_args),
+            _ => serde_json::to_value(method)
+                .ok()
+                .as_ref()
+                .and_then(terminal_auth_args),
         };
         if let Some(args) = terminal_args {
             if let Err(error) =
@@ -3195,7 +3364,9 @@ async fn authenticate(
             {
                 // Show why it failed and loop back to re-emit the card so the
                 // user can retry or cancel instead of it hanging.
-                state.output.send(json!({ "type": "acp_auth_error", "message": error }));
+                state
+                    .output
+                    .send(json!({ "type": "acp_auth_error", "message": error }));
                 continue;
             }
         } else {
@@ -3249,7 +3420,12 @@ async fn open_or_resume_session(
         .as_deref()
         .filter(|id| !id.is_empty())
     {
-        if init.agent_capabilities.session_capabilities.resume.is_some() {
+        if init
+            .agent_capabilities
+            .session_capabilities
+            .resume
+            .is_some()
+        {
             match connection
                 .send_request(
                     ResumeSessionRequest::new(resume_id.to_owned(), &config.project_dir)
@@ -3287,11 +3463,14 @@ struct PromptDispatch<'a> {
     completed: &'a mpsc::UnboundedSender<(String, String, Result<StopReason, Error>)>,
 }
 
-fn start_prompt(
-    dispatch: &PromptDispatch<'_>,
-    command: Value,
-) -> Result<(), String> {
-    let &PromptDispatch { connection, state, session_id, image_supported, completed } = dispatch;
+fn start_prompt(dispatch: &PromptDispatch<'_>, command: Value) -> Result<(), String> {
+    let &PromptDispatch {
+        connection,
+        state,
+        session_id,
+        image_supported,
+        completed,
+    } = dispatch;
     let command_type = command
         .get("type")
         .and_then(Value::as_str)
@@ -3400,6 +3579,7 @@ async fn run_protocol(
     let wait_terminal_state = state.clone();
     let kill_terminal_state = state.clone();
     let release_terminal_state = state.clone();
+    let unattended = config.unattended;
 
     Client
         .builder()
@@ -3426,20 +3606,23 @@ async fn run_protocol(
                         .filter(|value| !value.is_empty());
                     let kind = tool.get("kind").and_then(Value::as_str);
                     let options = serialized.get("options").cloned().unwrap_or_else(|| json!([]));
-                    // Auto-approve screenpipe's own read-only screen-data tools
-                    // so the agent isn't gated on every search and the user
-                    // isn't buried in identical approval cards. Everything else
-                    // still prompts.
-                    if let Some(title) = title {
-                        if is_screenpipe_read_tool(title) {
-                            if let Some(option_id) = allow_option_id(&options) {
-                                return responder.respond(RequestPermissionResponse::new(
-                                    RequestPermissionOutcome::Selected(
-                                        SelectedPermissionOutcome::new(option_id),
-                                    ),
-                                ));
-                            }
-                        }
+                    // Chat auto-approves only screenpipe's read tools. A scheduled
+                    // task has no foreground UI, so its unattended mode
+                    // accepts the adapter's allow option and relies on the task's
+                    // scoped API token + filesystem policy for enforcement.
+                    if let Some(option_id) =
+                        automatic_permission_option_id(&options, unattended, title)
+                    {
+                        return responder.respond(RequestPermissionResponse::new(
+                            RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(
+                                option_id,
+                            )),
+                        ));
+                    }
+                    if unattended {
+                        return responder.respond(RequestPermissionResponse::new(
+                            RequestPermissionOutcome::Cancelled,
+                        ));
                     }
                     // Short heading by kind; the raw command/target rides along
                     // as `detail` and is shown verbatim. Codex sends a shell
@@ -4119,7 +4302,10 @@ async fn read_capped_line<R: tokio::io::AsyncBufRead + Unpin>(
             if !saw_any {
                 return Ok(None);
             }
-            return Ok(Some((String::from_utf8_lossy(&buf).into_owned(), truncated)));
+            return Ok(Some((
+                String::from_utf8_lossy(&buf).into_owned(),
+                truncated,
+            )));
         }
         saw_any = true;
         match available.iter().position(|&b| b == b'\n') {
@@ -4131,7 +4317,10 @@ async fn read_capped_line<R: tokio::io::AsyncBufRead + Unpin>(
                     truncated = true;
                 }
                 reader.consume(pos + 1);
-                return Ok(Some((String::from_utf8_lossy(&buf).into_owned(), truncated)));
+                return Ok(Some((
+                    String::from_utf8_lossy(&buf).into_owned(),
+                    truncated,
+                )));
             }
             None => {
                 let len = available.len();
@@ -4147,7 +4336,9 @@ async fn read_capped_line<R: tokio::io::AsyncBufRead + Unpin>(
     }
 }
 
-pub async fn run_from_env() -> Result<(), String> {
+pub(super) async fn run_from_env_with_observer(
+    observer: Arc<dyn ProviderSessionObserver>,
+) -> Result<(), String> {
     #[cfg(windows)]
     let _runtime_job = std::mem::ManuallyDrop::new(
         WindowsJob::assign_current()
@@ -4160,7 +4351,7 @@ pub async fn run_from_env() -> Result<(), String> {
     // OS closes the handle immediately when the hidden runtime exits.
     let config = RuntimeConfig::from_env()?;
     let output = ParentOutput::new();
-    let state = Arc::new(RuntimeState::new(output.clone(), &config));
+    let state = Arc::new(RuntimeState::new(output.clone(), &config, observer));
     // Agents that ignore client stdio MCP servers (Cursor) get screenpipe's
     // tools over loopback http instead — stand those servers up before the
     // first session/new so mcp_servers() can advertise their urls.
@@ -4260,10 +4451,7 @@ pub async fn run_from_env() -> Result<(), String> {
     // exiting would hang every in-flight request forever without this.
     let (stdout_eof_tx, mut stdout_eof_rx) = oneshot::channel::<()>();
     let incoming = futures::stream::unfold(
-        (
-            tokio::io::BufReader::new(stdout),
-            Some(stdout_eof_tx),
-        ),
+        (tokio::io::BufReader::new(stdout), Some(stdout_eof_tx)),
         |(mut reader, mut eof_tx)| async move {
             loop {
                 match read_capped_line(&mut reader, ACP_STDOUT_LINE_CAP).await {
@@ -4401,7 +4589,10 @@ mod tests {
         assert_eq!(terminal_auth_args(&round), Some(vec!["login".to_string()]));
         // A plain method (Codex ChatGPT) declares no such meta and authenticates
         // over the protocol.
-        assert_eq!(terminal_auth_args(&json!({ "id": "chat-gpt", "name": "ChatGPT" })), None);
+        assert_eq!(
+            terminal_auth_args(&json!({ "id": "chat-gpt", "name": "ChatGPT" })),
+            None
+        );
     }
 
     fn runtime_config(agent_id: &str) -> RuntimeConfig {
@@ -4419,13 +4610,14 @@ mod tests {
             extension_middleware: AcpExtensionMiddleware::default(),
             user_mcp_servers: Vec::new(),
             resume_session_id: None,
+            unattended: false,
         }
     }
 
     #[test]
     fn screenpipe_mcp_pin_matches_workspace_package_version() {
         let package: Value = serde_json::from_str(include_str!(
-            "../../../../packages/screenpipe-mcp/package.json"
+            "../../../../../packages/screenpipe-mcp/package.json"
         ))
         .expect("parse screenpipe-mcp package.json");
         let version = package["version"]
@@ -4441,7 +4633,9 @@ mod tests {
         let (cmd, codex) = builtin_agent("codex-acp", "/bun").expect("codex");
         assert_eq!(cmd, "/bun");
         assert_eq!(codex.first().map(String::as_str), Some("x"));
-        assert!(codex.iter().any(|arg| arg.starts_with("@agentclientprotocol/codex-acp@")));
+        assert!(codex
+            .iter()
+            .any(|arg| arg.starts_with("@agentclientprotocol/codex-acp@")));
 
         // Binary agents launch their CLI by name on PATH.
         let (cmd, opencode) = builtin_agent("opencode", "/bun").expect("opencode");
@@ -4536,7 +4730,6 @@ mod tests {
             );
         }
     }
-
 
     #[test]
     fn external_auth_agents_use_their_cli_login() {
@@ -4696,7 +4889,10 @@ mod tests {
         // Anything not a usable http(s) URL routes nowhere.
         assert_eq!(cloud_provider_base_url("", "/anthropic"), None);
         assert_eq!(cloud_provider_base_url("   ", "/anthropic"), None);
-        assert_eq!(cloud_provider_base_url("ai.example.com/v1", "/anthropic"), None);
+        assert_eq!(
+            cloud_provider_base_url("ai.example.com/v1", "/anthropic"),
+            None
+        );
     }
 
     #[test]
@@ -4712,7 +4908,10 @@ mod tests {
         assert_eq!(
             set,
             vec![
-                ("ANTHROPIC_BASE_URL".to_string(), "https://ai.example.com/anthropic".to_string()),
+                (
+                    "ANTHROPIC_BASE_URL".to_string(),
+                    "https://ai.example.com/anthropic".to_string()
+                ),
                 ("ANTHROPIC_AUTH_TOKEN".to_string(), "tok".to_string()),
             ]
         );
@@ -4723,8 +4922,14 @@ mod tests {
         // Signed out, or a gateway URL we cannot trust: emit nothing, so the
         // caller leaves the agent on its own account instead of starting it
         // with a base URL and no credential.
-        assert!(cloud_routing_env(&routing, "https://ai.example.com/v1", "").0.is_empty());
-        assert!(cloud_routing_env(&routing, "https://ai.example.com/v1", "  ").0.is_empty());
+        assert!(cloud_routing_env(&routing, "https://ai.example.com/v1", "")
+            .0
+            .is_empty());
+        assert!(
+            cloud_routing_env(&routing, "https://ai.example.com/v1", "  ")
+                .0
+                .is_empty()
+        );
         assert!(cloud_routing_env(&routing, "", "tok").0.is_empty());
     }
 
@@ -4733,7 +4938,10 @@ mod tests {
         let claude = agent_cloud_routing("claude-acp").expect("claude routes to cloud");
         assert_eq!(claude.base_url_env, "ANTHROPIC_BASE_URL");
         assert_eq!(claude.token_env, "ANTHROPIC_AUTH_TOKEN");
-        assert!(claude.clear_env.iter().any(|name| name == "ANTHROPIC_API_KEY"));
+        assert!(claude
+            .clear_env
+            .iter()
+            .any(|name| name == "ANTHROPIC_API_KEY"));
 
         // Closed services: sign-in and billing are their own account, and there
         // is no base URL to point anywhere. Claiming otherwise would sell a
@@ -4875,18 +5083,13 @@ mod tests {
         // explicit preset prompt remains last.
         let combined = build_first_turn_context(
             Some("# screenpipe user instructions\n\nUse the weekly-report skill.".to_string()),
-            Some(
-                "# screenpipe self-improvement\n\nUser prefers short reports.".to_string(),
-            ),
+            Some("# screenpipe self-improvement\n\nUser prefers short reports.".to_string()),
             Some("Be terse.".to_string()),
         );
         assert!(combined.contains("sp_web_search"));
         assert!(combined.contains("Use the weekly-report skill."));
         assert!(combined.contains("User prefers short reports."));
-        assert!(
-            combined.find("sp_web_search")
-                < combined.find("Use the weekly-report skill.")
-        );
+        assert!(combined.find("sp_web_search") < combined.find("Use the weekly-report skill."));
         assert!(combined.trim_end().ends_with("Be terse."));
     }
 
@@ -4905,7 +5108,7 @@ mod tests {
 
     #[test]
     fn bundled_acp_tools_expose_self_improvement_contract() {
-        let source = include_str!("../assets/mcp/screenpipe-tools.mjs");
+        let source = include_str!("../../../assets/acp/screenpipe-tools.mjs");
         assert!(source.contains("name: \"user_profile\""));
         assert!(source.contains("name: \"skill_manage\""));
         assert!(source.contains("/agent/profile/manage"));
@@ -4934,8 +5137,7 @@ mod tests {
         assert!(!overridden.contains("Use normal guidance."));
 
         // An empty temporary override must not hide the durable file.
-        std::fs::write(data_dir.path().join("AGENTS.override.md"), "\n")
-            .expect("empty override");
+        std::fs::write(data_dir.path().join("AGENTS.override.md"), "\n").expect("empty override");
         let fallback = load_screenpipe_agents_context(data_dir.path()).expect("fallback guidance");
         assert!(fallback.contains("AGENTS.md"));
         assert!(fallback.contains("Use normal guidance."));
@@ -5003,7 +5205,10 @@ mod tests {
         assert_eq!(local_fs.command.to_str(), Some("uvx"));
         assert!(local_fs.env.iter().any(|e| e.name == "FS_ROOT"));
         assert!(
-            !local_fs.env.iter().any(|e| e.name.eq_ignore_ascii_case(CLOUD_API_KEY_ENV)),
+            !local_fs
+                .env
+                .iter()
+                .any(|e| e.name.eq_ignore_ascii_case(CLOUD_API_KEY_ENV)),
             "cloud JWT must be scrubbed from forwarded stdio env"
         );
     }
@@ -5046,6 +5251,7 @@ mod tests {
     fn test_state(output: &ParentOutput) -> RuntimeState {
         RuntimeState {
             output: output.clone(),
+            observer: Arc::new(NoopProviderSessionObserver),
             agent_id: "test-agent".to_owned(),
             chat_session_id: "chat".to_owned(),
             project_dir: PathBuf::from("/tmp"),
@@ -5091,8 +5297,10 @@ mod tests {
         {
             let mut turn = state.turn.lock().unwrap();
             turn.turn_open = true;
-            turn.active_tools
-                .insert("bg2".into(), json!({ "toolCallId": "bg2", "title": "Bash" }));
+            turn.active_tools.insert(
+                "bg2".into(),
+                json!({ "toolCallId": "bg2", "title": "Bash" }),
+            );
         }
         state.close_turn_ex("cancelled", false);
         let ends = output.drain();
@@ -5123,7 +5331,11 @@ mod tests {
         let events = output.drain();
 
         let starts = events_of_type(&events, "tool_execution_start");
-        assert_eq!(starts.len(), 1, "a start should be synthesized for the unseen child");
+        assert_eq!(
+            starts.len(),
+            1,
+            "a start should be synthesized for the unseen child"
+        );
         assert_eq!(starts[0]["toolCallId"], json!("child1"));
         assert_eq!(starts[0]["parentToolCallId"], json!("task_parent"));
 
@@ -5279,7 +5491,10 @@ mod tests {
             })),
             "Grep 'foo'"
         );
-        assert_eq!(tool_name(&json!({ "kind": "execute", "title": "" })), "execute");
+        assert_eq!(
+            tool_name(&json!({ "kind": "execute", "title": "" })),
+            "execute"
+        );
         assert_eq!(tool_name(&json!({})), "tool");
     }
 
@@ -5364,11 +5579,23 @@ mod tests {
 
     #[test]
     fn tool_args_falls_back_past_missing_raw_input() {
-        assert_eq!(tool_args(&json!({ "rawInput": { "q": "x" } })), json!({ "q": "x" }));
-        assert_eq!(tool_args(&json!({ "input": { "q": "y" } })), json!({ "q": "y" }));
-        assert_eq!(tool_args(&json!({ "arguments": { "q": "z" } })), json!({ "q": "z" }));
+        assert_eq!(
+            tool_args(&json!({ "rawInput": { "q": "x" } })),
+            json!({ "q": "x" })
+        );
+        assert_eq!(
+            tool_args(&json!({ "input": { "q": "y" } })),
+            json!({ "q": "y" })
+        );
+        assert_eq!(
+            tool_args(&json!({ "arguments": { "q": "z" } })),
+            json!({ "q": "z" })
+        );
         // Nothing input-bearing → empty object, never a non-object value.
-        assert_eq!(tool_args(&json!({ "title": "T", "rawInput": "nope" })), json!({}));
+        assert_eq!(
+            tool_args(&json!({ "title": "T", "rawInput": "nope" })),
+            json!({})
+        );
     }
 
     #[test]
@@ -5386,15 +5613,31 @@ mod tests {
         // Only the read-only screen-data server auto-approves; writes/bridge
         // (screenpipe-tools) and everything else still prompt.
         assert!(is_screenpipe_read_tool("mcp__screenpipe__search-content"));
-        assert!(is_screenpipe_read_tool("mcp__screenpipe-tools__query_recordings"));
-        assert!(is_screenpipe_read_tool("mcp__screenpipe-tools__list_connections"));
+        assert!(is_screenpipe_read_tool(
+            "mcp__screenpipe-tools__query_recordings"
+        ));
+        assert!(is_screenpipe_read_tool(
+            "mcp__screenpipe-tools__list_connections"
+        ));
         // Core read tools mirrored on screenpipe-tools for http-only agents.
-        assert!(is_screenpipe_read_tool("mcp__screenpipe-tools__activity_summary"));
-        assert!(is_screenpipe_read_tool("mcp__screenpipe-tools__keyword_search"));
-        assert!(is_screenpipe_read_tool("mcp__screenpipe-tools__get_meeting"));
-        assert!(is_screenpipe_read_tool("mcp__screenpipe-tools__health_check"));
-        assert!(!is_screenpipe_read_tool("mcp__screenpipe-tools__sp_mcp_call"));
-        assert!(!is_screenpipe_read_tool("mcp__screenpipe-tools__save_artifact"));
+        assert!(is_screenpipe_read_tool(
+            "mcp__screenpipe-tools__activity_summary"
+        ));
+        assert!(is_screenpipe_read_tool(
+            "mcp__screenpipe-tools__keyword_search"
+        ));
+        assert!(is_screenpipe_read_tool(
+            "mcp__screenpipe-tools__get_meeting"
+        ));
+        assert!(is_screenpipe_read_tool(
+            "mcp__screenpipe-tools__health_check"
+        ));
+        assert!(!is_screenpipe_read_tool(
+            "mcp__screenpipe-tools__sp_mcp_call"
+        ));
+        assert!(!is_screenpipe_read_tool(
+            "mcp__screenpipe-tools__save_artifact"
+        ));
         assert!(!is_screenpipe_read_tool("bash"));
 
         let options = json!([
@@ -5410,6 +5653,29 @@ mod tests {
         assert_eq!(allow_option_id(&once_only).as_deref(), Some("a1"));
         let reject_only = json!([{ "optionId": "r1", "name": "Reject", "kind": "reject_once" }]);
         assert_eq!(allow_option_id(&reject_only), None);
+        assert_eq!(
+            automatic_permission_option_id(&options, false, Some("bash")),
+            None
+        );
+        assert_eq!(
+            automatic_permission_option_id(&options, true, Some("bash")).as_deref(),
+            Some("a2")
+        );
+    }
+
+    #[test]
+    fn model_plan_denials_get_agent_specific_recovery_without_rewriting_discussion() {
+        let cursor = model_access_guidance("Upgrade your plan to continue", "cursor")
+            .expect("cursor access guidance");
+        assert!(cursor.contains("different Cursor model"));
+        assert!(cursor.contains("Screenpipe Cloud cannot provide models to Cursor"));
+
+        let claude = model_access_guidance("You don't have access to this model.", "claude-acp")
+            .expect("claude access guidance");
+        assert!(claude.contains("turn on Screenpipe Cloud"));
+
+        let ordinary_answer = "Here is a detailed comparison of plans and why a user might say \"upgrade your plan to continue\" in product copy. This is normal assistant content, not a provider denial.";
+        assert_eq!(model_access_guidance(ordinary_answer, "cursor"), None);
     }
 
     #[cfg(windows)]

@@ -1099,7 +1099,6 @@ function PipePresetSelector({
         <AIPresetsSelector
           compact
           allowNone
-          includeAgentPresets={false}
           controlledPresetId={primaryPreset}
           onControlledSelect={(preset) =>
             savePresets(preset?.id ?? null, fallbackPreset)
@@ -1124,7 +1123,6 @@ function PipePresetSelector({
           <AIPresetsSelector
             compact
             allowNone
-            includeAgentPresets={false}
             controlledPresetId={fallbackPreset}
             onControlledSelect={(preset) =>
               savePresets(primaryPreset, preset?.id ?? null)
@@ -1143,7 +1141,7 @@ function PipePresetSelector({
         </button>
       )}
       <p className="text-[10px] text-muted-foreground">
-        coding-agent presets are available in chat; scheduled pipes currently use raw Pi presets
+        coding-agent presets run unattended and use this scheduled task&apos;s permissions
       </p>
     </div>
   );
@@ -1438,7 +1436,7 @@ export function PipesSection() {
         ? `timed out connecting to ${apiBase}`
         : e instanceof Error
           ? e.message
-          : "failed to fetch pipes";
+          : "failed to fetch scheduled tasks";
       if (isCurrentRequest()) setLoadError(message);
       return false;
     } finally {
@@ -2154,7 +2152,7 @@ export function PipesSection() {
       if (!res.ok || data?.error || data?.success === false) {
         throw new Error(
           data?.error ||
-          `failed to ${enabled ? "enable" : "disable"} pipe "${name}"`
+          `failed to ${enabled ? "enable" : "disable"} scheduled task "${name}"`
         );
       }
     } catch {
@@ -2639,7 +2637,7 @@ export function PipesSection() {
 
       {pipeTypeFilter === "local" && !selectMode && (
         <div className="flex items-baseline gap-2 px-1 pt-1">
-          <h3 className="text-sm font-medium">screenpipe tasks</h3>
+          <h3 className="text-sm font-medium">scheduled tasks</h3>
           <span className="text-xs tabular-nums text-muted-foreground">
             {filteredPipes.length} total
           </span>
@@ -2730,9 +2728,9 @@ export function PipesSection() {
             ) : (
               <div className="space-y-4">
                 <div>
-                  <p className="text-foreground font-medium text-base">no screenpipe tasks yet</p>
+                  <p className="text-foreground font-medium text-base">no scheduled tasks yet</p>
                   <p className="text-sm mt-1">
-                    screenpipe tasks run locally over your screen data — they can summarize your day, track your time, sync your notes, and more.
+                    scheduled tasks run locally over your screen data — they can summarize your day, track your time, sync your notes, and more.
                   </p>
                 </div>
                 <div className="space-y-2 max-w-md mx-auto text-left">
@@ -3959,7 +3957,7 @@ export function PipesSection() {
                       <section className="border border-border">
                       <div className="flex items-center gap-2 border-b border-border px-4 py-3">
                         <Label className="text-sm font-medium">task definition</Label>
-                        <span className="font-mono text-[11px] text-muted-foreground">pipe.md</span>
+                        <span className="text-[11px] text-muted-foreground">task configuration</span>
                         <div className="ml-auto flex items-center gap-2">
                         {saveStatus[pipe.config.name] === "saving" && (
                           <span className="text-[11px] text-muted-foreground flex items-center gap-1">
@@ -4379,7 +4377,7 @@ export function PipesSection() {
             <AlertCircle className="h-4 w-4 text-destructive mt-0.5 shrink-0" />
             <p className="text-sm text-muted-foreground">
               you have local edits to this scheduled task. updating will overwrite your prompt changes.
-              a backup will be saved as <code className="text-xs">pipe.md.bak</code>.
+              a local backup will be saved before updating.
               your schedule, model, and enabled state will be preserved.
             </p>
           </div>

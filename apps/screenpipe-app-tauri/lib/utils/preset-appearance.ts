@@ -6,7 +6,7 @@
  *  catalog, provider/adapter icons, and auto-generated preset names, used by
  *  both the settings preset editor and the quick ai-provider dialog. */
 
-import acpAgentCatalog from "@/lib/acp/agents.json";
+import acpAgentCatalog from "../../../../crates/screenpipe-core/assets/acp/agents.json";
 
 export interface AcpAdapterInfo {
   id: string;
@@ -34,7 +34,8 @@ export interface AcpAdapterInfo {
 }
 
 // The whole agent catalog — name, icon, copy, and launch — lives in one static
-// file (lib/acp/agents.json). Edit that to add or change an agent; both the
+// core catalog (crates/screenpipe-core/assets/acp/agents.json). Edit that to
+// add or change an agent; both the
 // picker (here) and the Rust runtime read it. `launch` is ignored here.
 const CATALOG_ACP_ADAPTERS: readonly AcpAdapterInfo[] = (
   acpAgentCatalog as Array<{

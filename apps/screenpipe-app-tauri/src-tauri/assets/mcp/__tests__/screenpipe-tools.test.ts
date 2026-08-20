@@ -13,7 +13,10 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
-const SERVER = join(dirname(fileURLToPath(import.meta.url)), "..", "screenpipe-tools.mjs");
+const SERVER = join(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../../../../../crates/screenpipe-core/assets/acp/screenpipe-tools.mjs",
+);
 const FIXED_DATE = join(dirname(fileURLToPath(import.meta.url)), "fixed-date.cjs");
 
 async function listenOnLoopback(server: ReturnType<typeof createServer>): Promise<number> {
@@ -119,9 +122,11 @@ describe("screenpipe-tools MCP server", () => {
         "live_view",
         "save_artifact",
         "screenpipe_connect_app",
+        "skill_manage",
         "sp_mcp_call",
         "sp_mcp_list_tools",
         "sp_web_search",
+        "user_profile",
       ].sort(),
     );
     // save_artifact advertises the base64 encoding option (image/binary support).

@@ -674,6 +674,7 @@ impl ServerCore {
         // so a fresh sign-in or sign-out takes effect on the very next pipe
         // run without restarting the engine.
         let cloud_token_handle = server.cloud_token.clone();
+        let acp_gateway_url = ai_gateway_url.clone();
         let pi_executor = Arc::new(
             screenpipe_core::agents::pi::PiExecutor::with_shared_user_token(
                 cloud_token_handle.clone(),
@@ -686,6 +687,17 @@ impl ServerCore {
             Arc<dyn screenpipe_core::agents::AgentExecutor>,
         > = std::collections::HashMap::new();
         agent_executors.insert("pi".to_string(), pi_executor.clone());
+        agent_executors.insert(
+            "acp".to_string(),
+            Arc::new(
+                screenpipe_core::agents::acp::AcpExecutor::with_shared_user_token(
+                    cloud_token_handle,
+                    acp_gateway_url,
+                    config.port,
+                    config.api_auth_key.clone(),
+                ),
+            ),
+        );
 
         let pipe_store: Option<Arc<dyn screenpipe_core::pipes::PipeStore>> = Some(Arc::new(
             screenpipe_engine::pipe_store::SqlitePipeStore::new(db.clone()),

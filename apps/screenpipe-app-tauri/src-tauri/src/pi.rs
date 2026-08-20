@@ -2567,7 +2567,7 @@ pub async fn pi_start_inner(
             return Err("Custom ACP agents require a command".to_string());
         }
         if acp.id != "custom"
-            && !crate::acp_runtime::is_known_agent(&acp.id)
+            && !screenpipe_core::agents::acp::is_known_agent(&acp.id)
             && !has_custom_command
         {
             return Err(format!(
@@ -2835,7 +2835,7 @@ pub async fn pi_start_inner(
         let executable = std::env::current_exe()
             .map_err(|error| format!("Failed to locate Screenpipe ACP runtime: {error}"))?;
         let mut command = Command::new(executable);
-        command.arg(crate::acp_runtime::RUNTIME_ARG);
+        command.arg(screenpipe_core::agents::acp::RUNTIME_ARG);
         command
     } else {
         let mut command = build_command_for_path(&pi_path);
@@ -2903,7 +2903,7 @@ pub async fn pi_start_inner(
         let mut resolved_env = acp
             .env
             .iter()
-            .filter(|(name, _)| !crate::acp_runtime::is_forbidden_acp_env(name))
+            .filter(|(name, _)| !screenpipe_core::agents::acp::is_forbidden_acp_env(name))
             .filter_map(|(name, value)| {
                 let resolved = if value.is_empty() {
                     std::env::var(name).ok()?
@@ -2936,12 +2936,12 @@ pub async fn pi_start_inner(
         let routing = acp
             .use_screenpipe_cloud
             .unwrap_or(false)
-            .then(|| crate::acp_runtime::agent_cloud_routing(agent_id))
+            .then(|| screenpipe_core::agents::acp::agent_cloud_routing(agent_id))
             .flatten();
         let mut routed_to_cloud = false;
         if let Some(routing) = routing {
             let gateway = crate::config::screenpipe_ai_gateway_url().unwrap_or_default();
-            let (set, clear) = crate::acp_runtime::cloud_routing_env(
+            let (set, clear) = screenpipe_core::agents::acp::cloud_routing_env(
                 &routing,
                 &gateway,
                 user_token.as_deref().unwrap_or_default(),
@@ -3246,7 +3246,7 @@ pub async fn pi_start_inner(
     // login state. Never expose the signed-in user's Screenpipe cloud JWT to a
     // third-party adapter (or to the hidden runtime it can ask to run tools).
     if use_acp {
-        cmd.env_remove(crate::acp_runtime::CLOUD_API_KEY_ENV);
+        cmd.env_remove(screenpipe_core::agents::acp::CLOUD_API_KEY_ENV);
     }
 
     // Spawn process
@@ -4429,7 +4429,7 @@ pub async fn pi_acp_probe_agent(agent: AcpAgentConfig) -> Result<String, String>
         std_cmd.process_group(0);
     }
     let mut cmd = tokio::process::Command::from(std_cmd);
-    cmd.arg(crate::acp_runtime::RUNTIME_ARG)
+    cmd.arg(screenpipe_core::agents::acp::RUNTIME_ARG)
         .env("SCREENPIPE_ACP_ID", &agent.id)
         .env("SCREENPIPE_BUN_PATH", &bun_path)
         .env("SCREENPIPE_ACP_CWD", &project_dir)
@@ -4445,7 +4445,7 @@ pub async fn pi_acp_probe_agent(agent: AcpAgentConfig) -> Result<String, String>
         .env_remove("SCREENPIPE_ACP_AUTH_METHOD")
         .env_remove("SCREENPIPE_ACP_SYSTEM_PROMPT")
         .env_remove("SCREENPIPE_ACP_SESSION_CONFIG_JSON")
-        .env_remove(crate::acp_runtime::CLOUD_API_KEY_ENV)
+        .env_remove(screenpipe_core::agents::acp::CLOUD_API_KEY_ENV)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
@@ -4537,7 +4537,7 @@ pub struct AcpAgentInstallStatus {
 #[specta::specta]
 pub fn pi_acp_agent_install_status(agent_id: String) -> AcpAgentInstallStatus {
     let (requires_install, installed, command, install_url, can_install_automatically) =
-        crate::acp_runtime::agent_install_status(&agent_id);
+        screenpipe_core::agents::acp::agent_install_status(&agent_id);
     AcpAgentInstallStatus {
         requires_install,
         installed,
@@ -4552,7 +4552,7 @@ pub fn pi_acp_agent_install_status(agent_id: String) -> AcpAgentInstallStatus {
 #[tauri::command]
 #[specta::specta]
 pub async fn pi_acp_agent_install(agent_id: String) -> Result<AcpAgentInstallStatus, String> {
-    crate::acp_runtime::install_agent(&agent_id).await?;
+    screenpipe_core::agents::acp::install_agent(&agent_id).await?;
     Ok(pi_acp_agent_install_status(agent_id))
 }
 
@@ -4563,7 +4563,7 @@ pub async fn pi_acp_agent_install(agent_id: String) -> Result<AcpAgentInstallSta
 #[specta::specta]
 pub async fn pi_acp_external_login(agent_id: String) -> Result<(), String> {
     let bun_path = find_bun_executable();
-    crate::acp_runtime::run_external_auth_login(&agent_id, bun_path.as_deref()).await
+    screenpipe_core::agents::acp::run_external_auth_login(&agent_id, bun_path.as_deref()).await
 }
 
 /// Whether launching this agent will trigger a first-run package install (a
@@ -4573,7 +4573,7 @@ pub async fn pi_acp_external_login(agent_id: String) -> Result<(), String> {
 #[tauri::command]
 #[specta::specta]
 pub fn pi_acp_agent_download_pending(agent_id: String) -> bool {
-    crate::acp_runtime::agent_download_pending(&agent_id)
+    screenpipe_core::agents::acp::agent_download_pending(&agent_id)
 }
 
 /// Switch the ACP session mode (e.g. a permission mode) advertised through
@@ -4782,7 +4782,7 @@ fn pi_settings_packages(settings: &serde_json::Value) -> Vec<PiExtensionPackage>
 
             Some(PiExtensionPackage {
                 installed: pi_package_source_looks_installed(&source),
-                acp_compatible: crate::acp_extensions::package_source_is_portable(&source),
+                acp_compatible: screenpipe_core::agents::acp::package_source_is_portable(&source),
                 source,
                 scope: "user".to_string(),
                 filtered,
@@ -4823,84 +4823,7 @@ fn validate_pi_extension_package_source(source: &str) -> Result<String, String> 
 }
 
 pub(crate) fn npm_package_name_from_source(source: &str) -> Option<String> {
-    let spec = source.strip_prefix("npm:")?.trim();
-    if spec.is_empty() {
-        return None;
-    }
-
-    let without_version = if spec.starts_with('@') {
-        let slash = spec.find('/')?;
-        let after_scope = &spec[slash + 1..];
-        match after_scope.find('@') {
-            Some(version_index) => {
-                let version = &after_scope[version_index + 1..];
-                if version_index == 0 || !valid_npm_version_spec(version) {
-                    return None;
-                }
-                &spec[..slash + 1 + version_index]
-            }
-            None => spec,
-        }
-    } else {
-        let mut parts = spec.splitn(2, '@');
-        let name = parts.next().unwrap_or(spec);
-        if let Some(version) = parts.next() {
-            if !valid_npm_version_spec(version) {
-                return None;
-            }
-        }
-        name
-    };
-
-    if without_version.is_empty() || !valid_npm_package_name(without_version) {
-        None
-    } else {
-        Some(without_version.to_string())
-    }
-}
-
-fn valid_npm_package_name(name: &str) -> bool {
-    if name.is_empty()
-        || name.len() > 214
-        || name.contains('\\')
-        || name.contains("..")
-        || name.starts_with('.')
-        || name.starts_with('/')
-    {
-        return false;
-    }
-
-    if let Some(scoped) = name.strip_prefix('@') {
-        let mut parts = scoped.split('/');
-        let Some(scope) = parts.next() else {
-            return false;
-        };
-        let Some(package) = parts.next() else {
-            return false;
-        };
-        return parts.next().is_none()
-            && valid_npm_package_part(scope)
-            && valid_npm_package_part(package);
-    }
-
-    !name.contains('/') && valid_npm_package_part(name)
-}
-
-fn valid_npm_package_part(part: &str) -> bool {
-    !part.is_empty()
-        && !part.starts_with('.')
-        && part
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
-}
-
-fn valid_npm_version_spec(version: &str) -> bool {
-    !version.is_empty()
-        && version.len() <= 128
-        && version.chars().all(|c| {
-            c.is_ascii_alphanumeric()
-                || matches!(c, '.' | '-' | '_' | '+' | '~' | '^' | '>' | '<' | '=' | '*')
-        })
+    screenpipe_core::agents::acp::npm_package_name_from_source(source)
 }
 
 fn github_package_source_is_allowed(source: &str) -> bool {
@@ -5416,7 +5339,7 @@ fn prewarm_screenpipe_mcp(bun: &str) {
     use std::process::Stdio;
     let mut cmd = bun_command(bun);
     cmd.arg("x")
-        .arg(crate::acp_runtime::SCREENPIPE_MCP_PKG)
+        .arg(screenpipe_core::agents::acp::SCREENPIPE_MCP_PKG)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -5436,7 +5359,10 @@ fn prewarm_screenpipe_mcp(bun: &str) {
                     Err(_) => break,
                 }
             }
-            info!("screenpipe-mcp prewarm complete ({})", crate::acp_runtime::SCREENPIPE_MCP_PKG);
+            info!(
+                "screenpipe-mcp prewarm complete ({})",
+                screenpipe_core::agents::acp::SCREENPIPE_MCP_PKG
+            );
         }
         Err(e) => warn!("screenpipe-mcp prewarm could not spawn bun: {}", e),
     }

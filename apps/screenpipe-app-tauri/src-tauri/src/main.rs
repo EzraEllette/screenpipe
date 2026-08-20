@@ -39,9 +39,6 @@ use tracing_oslog::OsLogger;
 use updates::start_update_check;
 use window::ShowRewindWindow;
 
-mod acp_extensions;
-mod acp_runtime;
-mod acp_schedule_extension;
 mod activity_history;
 mod analytics;
 mod auth_session;
@@ -429,47 +426,13 @@ macro_rules! define_specta_builder {
 
 #[tokio::main]
 async fn main() {
-    if acp_extensions::is_portable_mcp_mode() {
-        let exit_code = match acp_extensions::run_portable_mcp_mode() {
-            Ok(exit_code) => exit_code,
-            Err(error) => {
-                eprintln!("[acp-extension] {error}");
-                1
-            }
-        };
-        std::process::exit(exit_code);
-    }
-
-    if acp_runtime::is_process_guard_mode() {
-        let exit_code = match acp_runtime::run_process_guard() {
-            Ok(exit_code) => exit_code,
-            Err(error) => {
-                eprintln!("[acp-process-guard] {error}");
-                1
-            }
-        };
-        std::process::exit(exit_code);
-    }
-
-    // ACP runs in a hidden mode of this same executable. Keeping the protocol
-    // runtime in Rust avoids shipping a second sidecar while ensuring this path
-    // exits before any Tauri, database, or recording initialization.
-    if acp_runtime::is_runtime_mode() {
-        let exit_code = match acp_runtime::run_from_env().await {
-            Ok(()) => 0,
-            Err(error) => {
-                use std::io::Write as _;
-                let mut stdout = std::io::stdout().lock();
-                let _ = writeln!(
-                    stdout,
-                    "{}",
-                    serde_json::json!({ "type": "acp_fatal", "error": error })
-                );
-                let _ = stdout.flush();
-                eprintln!("[acp-runtime] {error}");
-                1
-            }
-        };
+    // Handle private ACP subprocess modes before Tauri initializes. The
+    // protocol host lives in core; desktop contributes only schedule projection.
+    if let Some(exit_code) = screenpipe_core::agents::acp::run_hidden_mode(Arc::new(
+        provider_automations::ProviderAutomationObserver,
+    ))
+    .await
+    {
         std::process::exit(exit_code);
     }
 

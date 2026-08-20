@@ -215,6 +215,10 @@ fn columns(data: &[Value], fields: &Option<Vec<String>>) -> Vec<String> {
     for row in data {
         let mut flat: Vec<(String, Value)> = Vec::new();
         flatten_into("", row, &mut flat);
+        // `serde_json::Map` may preserve insertion order when another crate
+        // enables that feature. Normalize each row so table columns remain
+        // deterministic across dependency feature sets and platforms.
+        flat.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
         for (k, _) in flat {
             if set.insert(k.clone()) {
                 seen.push(k);
@@ -321,10 +325,10 @@ mod tests {
     #[test]
     fn default_columns_are_union_of_flattened_leaves() {
         // With no explicit `fields`, columns are the union of every row's
-        // flattened leaf paths. serde_json::Value sorts object keys (no
-        // preserve_order feature), so within a row keys come out alphabetical;
-        // the union is first-seen across rows, so `on_screen` (only on row 2)
-        // lands last. An explicit `fields=` keeps the caller's order instead.
+        // flattened leaf paths. Each row's leaves are sorted explicitly so the
+        // result does not depend on serde_json's `preserve_order` feature. The
+        // union is first-seen across rows, so `on_screen` (only on row 2) lands
+        // last. An explicit `fields=` keeps the caller's order instead.
         let cols = columns(&rows(), &None);
         assert_eq!(
             cols,

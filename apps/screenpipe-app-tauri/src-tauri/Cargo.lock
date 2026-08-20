@@ -11144,7 +11144,6 @@ version = "2.6.70"
 dependencies = [
  "aes 0.8.4",
  "aes-gcm 0.10.3",
- "agent-client-protocol",
  "anyhow",
  "arboard",
  "arc-swap",
@@ -11418,6 +11417,7 @@ version = "0.4.41"
 dependencies = [
  "accessibility",
  "accessibility-sys",
+ "agent-client-protocol",
  "anyhow",
  "arc-swap",
  "argon2 0.5.3",

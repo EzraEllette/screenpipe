@@ -16,12 +16,12 @@ use agent_client_protocol::{JsonRpcRequest, JsonRpcResponse};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
-pub(crate) const CAPABILITY_KEY: &str = "screenpipe.dev/schedules";
-pub(crate) const EXTENSION_VERSION: u16 = 1;
+pub const CAPABILITY_KEY: &str = "screenpipe.dev/schedules";
+pub const EXTENSION_VERSION: u16 = 1;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum ScheduleOperation {
+pub enum ScheduleOperation {
     Pause,
     Resume,
     Update,
@@ -29,7 +29,7 @@ pub(crate) enum ScheduleOperation {
 }
 
 impl ScheduleOperation {
-    pub(crate) fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Pause => "pause",
             Self::Resume => "resume",
@@ -38,7 +38,7 @@ impl ScheduleOperation {
         }
     }
 
-    pub(crate) fn parse(value: &str) -> Option<Self> {
+    pub fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
             "pause" => Some(Self::Pause),
             "resume" => Some(Self::Resume),
@@ -51,18 +51,18 @@ impl ScheduleOperation {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct ScheduleExtensionCapability {
+pub struct ScheduleExtensionCapability {
     pub version: u16,
     #[serde(default)]
     pub operations: Vec<ScheduleOperation>,
 }
 
 impl ScheduleExtensionCapability {
-    pub(crate) fn supports(&self, operation: ScheduleOperation) -> bool {
+    pub fn supports(&self, operation: ScheduleOperation) -> bool {
         self.version == EXTENSION_VERSION && self.operations.contains(&operation)
     }
 
-    pub(crate) fn operation_names(&self) -> Vec<String> {
+    pub fn operation_names(&self) -> Vec<String> {
         self.operations
             .iter()
             .copied()
@@ -74,7 +74,7 @@ impl ScheduleExtensionCapability {
 
 /// Add the client half of the extension negotiation without disturbing other
 /// `_meta` entries (for example Claude's nested-subagent transcript opt-in).
-pub(crate) fn add_client_capability(meta: &mut Map<String, Value>) {
+pub fn add_client_capability(meta: &mut Map<String, Value>) {
     meta.insert(
         CAPABILITY_KEY.to_owned(),
         json!({
@@ -84,9 +84,7 @@ pub(crate) fn add_client_capability(meta: &mut Map<String, Value>) {
     );
 }
 
-pub(crate) fn advertised_capability(
-    response: &InitializeResponse,
-) -> Option<ScheduleExtensionCapability> {
+pub fn advertised_capability(response: &InitializeResponse) -> Option<ScheduleExtensionCapability> {
     let value = response
         .agent_capabilities
         .meta
@@ -98,7 +96,7 @@ pub(crate) fn advertised_capability(
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct SchedulePatch {
+pub struct SchedulePatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -113,7 +111,7 @@ pub(crate) struct SchedulePatch {
     method = "_screenpipe/schedules/mutate",
     response = ScheduleMutationResponse
 )]
-pub(crate) struct ScheduleMutationRequest {
+pub struct ScheduleMutationRequest {
     pub task_id: String,
     pub operation: ScheduleOperation,
     pub mutation_id: String,
@@ -127,7 +125,7 @@ pub(crate) struct ScheduleMutationRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonRpcResponse)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct ScheduleMutationResponse {
+pub struct ScheduleMutationResponse {
     /// The adapter's authoritative revision after the mutation. Providers may
     /// use an opaque token; Screenpipe only returns it on a later mutation.
     pub revision: String,

@@ -1214,7 +1214,7 @@ components:
     TeamSkillProposalReceipt:
       type: object
       additionalProperties: false
-      required: [ok, proposal, receipt]
+      required: [ok, unchanged, proposal, receipt]
       properties:
         ok: { type: boolean, const: true }
         unchanged: { type: boolean }

@@ -258,6 +258,13 @@ fn setup_logging(
 #[tokio::main]
 #[tracing::instrument]
 async fn main() -> anyhow::Result<()> {
+    // ACP re-enters the same signed binary in private subprocess modes. Handle
+    // those before clap sees the private arguments or the recorder initializes.
+    if let Some(exit_code) = screenpipe_core::agents::acp::run_hidden_mode_without_observer().await
+    {
+        std::process::exit(exit_code);
+    }
+
     // dhat heap profiler — must be the first thing in main.
     // Writes dhat-heap.json on drop (Ctrl+C / graceful exit).
     #[cfg(feature = "heap-prof")]
@@ -1442,6 +1449,15 @@ async fn main() -> anyhow::Result<()> {
         std::sync::Arc<dyn screenpipe_core::agents::AgentExecutor>,
     > = std::collections::HashMap::new();
     agent_executors.insert("pi".to_string(), pi_executor.clone());
+    agent_executors.insert(
+        "acp".to_string(),
+        std::sync::Arc::new(screenpipe_core::agents::acp::AcpExecutor::new(
+            user_token,
+            screenpipe_core::agents::pi::SCREENPIPE_API_URL.to_string(),
+            config.port,
+            config.api_auth_key.clone(),
+        )),
+    );
 
     // Create pipe store backed by the main SQLite DB
     let pipe_store: Option<std::sync::Arc<dyn screenpipe_core::pipes::PipeStore>> =

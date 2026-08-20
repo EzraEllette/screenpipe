@@ -773,6 +773,7 @@ mod tests {
             _pipe_system_prompt: Option<&str>,
             _mcp_server_allowlist: Option<&[String]>,
             _session_owner: Option<&str>,
+            _executor_config: Option<&serde_json::Value>,
         ) -> anyhow::Result<AgentOutput> {
             self.run_impl(shared_pid).await
         }
