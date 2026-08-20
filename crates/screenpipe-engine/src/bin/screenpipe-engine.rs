@@ -1486,20 +1486,6 @@ async fn main() -> anyhow::Result<()> {
             analytics::capture_event_nonblocking("pipe_scheduled_run", props);
         },
     ));
-    // Gate scheduled pipe runs on connection readiness — same predicate the
-    // manual /pipes/:id/run endpoint uses (pipes_api.rs). Avoids running
-    // pipes that are still in "setup mode" (declared connections not paired).
-    {
-        let secret_store_for_check = server.secret_store.clone();
-        let screenpipe_dir_for_check = local_data_dir.clone();
-        pipe_manager.set_connection_check(std::sync::Arc::new(move |required| {
-            let ss = secret_store_for_check.clone();
-            let dir = screenpipe_dir_for_check.clone();
-            Box::pin(async move {
-                screenpipe_connect::missing_pipe_connections(ss.as_deref(), &dir, &required).await
-            })
-        }));
-    }
     // Give scheduled runs the same Live View target authority the foreground
     // refresh button sends, so a Pipe feeding several dashboards refreshes all
     // of them instead of leaving the ones it skipped stale until a manual click.

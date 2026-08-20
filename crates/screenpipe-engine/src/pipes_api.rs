@@ -300,36 +300,6 @@ pub async fn run_pipe_now(
             .map(format_run_context)
     };
 
-    // Validate required connections are configured before running the pipe
-    let required_connections = mgr
-        .get_pipe(&id)
-        .await
-        .map(|pipe_status| pipe_status.config.connections)
-        .unwrap_or_default();
-    if !required_connections.is_empty() {
-        let screenpipe_dir = mgr
-            .pipes_dir()
-            .parent()
-            .unwrap_or(mgr.pipes_dir())
-            .to_path_buf();
-        let ss = secret_store.as_ref().map(|e| e.0.as_ref());
-        let missing = screenpipe_connect::missing_pipe_connections(
-            ss,
-            &screenpipe_dir,
-            &required_connections,
-        )
-        .await;
-        if !missing.is_empty() {
-            return Json(json!({
-                "error": format!(
-                    "pipe '{}' requires unconfigured connections: {} — set them up from the Connections page in the desktop app",
-                    id,
-                    missing.join(", ")
-                )
-            }));
-        }
-    }
-
     // Refresh connections context so the pipe system prompt includes currently
     // connected integrations (Google Calendar, Google Docs, MCP servers, etc.).
     let screenpipe_dir = mgr

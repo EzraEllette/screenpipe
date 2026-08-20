@@ -2305,19 +2305,6 @@ fn emit_pipe_start(
     callback(pipe_name, execution_id, continues_chat, &event);
 }
 
-/// Async predicate: given a pipe's required connections, return the
-/// subset that is NOT yet configured (`enabled && credentials present`).
-/// Returning an empty vec means "all connections are ready, pipe may run".
-///
-/// Injected from the engine layer (which owns the SecretStore + screenpipe
-/// dir) to keep the scheduler in `screenpipe-core` free of a
-/// `screenpipe-connect` dep — that crate already depends on us.
-pub type ConnectionCheck = Arc<
-    dyn Fn(Vec<String>) -> std::pin::Pin<Box<dyn std::future::Future<Output = Vec<String>> + Send>>
-        + Send
-        + Sync,
->;
-
 /// Default execution timeout: 10 minutes.
 pub(crate) const DEFAULT_TIMEOUT_SECS: u64 = 600;
 
@@ -2450,10 +2437,6 @@ pub struct PipeManager {
     on_run_complete: Option<OnPipeRunComplete>,
     /// Optional callback fired for each stdout line from a running pipe.
     on_output_line: Option<OnPipeOutputLine>,
-    /// Optional async predicate that returns the missing connections for a
-    /// pipe. If set, the scheduler skips any enabled pipe whose required
-    /// connections aren't all configured ("setup mode").
-    connection_check: Option<ConnectionCheck>,
     /// Optional persistence store (None in CLI mode).
     store: Option<Arc<dyn PipeStore>>,
     /// API port for prompt rendering (default 3030).
@@ -2509,7 +2492,6 @@ impl PipeManager {
             scheduler_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             on_run_complete: None,
             on_output_line: None,
-            connection_check: None,
             store,
             api_port,
             max_non_template_pipes: None,
@@ -2621,14 +2603,6 @@ impl PipeManager {
     /// Set a callback to be invoked after each scheduled pipe run.
     pub fn set_on_run_complete(&mut self, cb: OnPipeRunComplete) {
         self.on_run_complete = Some(cb);
-    }
-
-    /// Set the async predicate used to gate scheduled runs on connection
-    /// readiness. Without this, pipes "in setup mode" (enabled but missing
-    /// required integrations) would still tick on their cron / event
-    /// trigger and run with broken credentials.
-    pub fn set_connection_check(&mut self, cb: ConnectionCheck) {
-        self.connection_check = Some(cb);
     }
 
     /// Set a callback to be invoked for each stdout line from a running pipe.
@@ -5172,7 +5146,6 @@ impl PipeManager {
         let pipes_dir = self.pipes_dir.clone();
         let on_run_complete = self.on_run_complete.clone();
         let on_output_line = self.on_output_line.clone();
-        let connection_check = self.connection_check.clone();
         let store = self.store.clone();
         let api_port = self.api_port;
         let token_registry = self.token_registry.clone();
@@ -5556,91 +5529,6 @@ impl PipeManager {
                                 }
                             }
                             continue;
-                        }
-                    }
-
-                    // Setup-mode gate: pipes whose declared `connections` aren't
-                    // all configured (credentials or OAuth token present) must not
-                    // run on schedule or event. Mirrors the manual-run gate in
-                    // pipes_api::run_pipe_now. Placed after the schedule/queue
-                    // checks so we only hit the SecretStore when the pipe would
-                    // otherwise be about to start.
-                    if !config.connections.is_empty() {
-                        if let Some(check) = &connection_check {
-                            let missing = check(config.connections.clone()).await;
-                            if !missing.is_empty() {
-                                let skipped_at = Utc::now();
-                                let message = format!(
-                                    "pipe '{}' skipped: missing required connections: {}",
-                                    name,
-                                    missing.join(", ")
-                                );
-                                warn!(
-                                    "scheduler: pipe '{}' in setup mode (missing connections: {:?}), skipping",
-                                    name, missing
-                                );
-                                last_run.insert(name.clone(), skipped_at);
-                                let mut execution_id = None;
-                                if let Some(ref store) = store {
-                                    match store
-                                        .create_execution(
-                                            name,
-                                            trigger,
-                                            &config.model,
-                                            config.provider.as_deref(),
-                                        )
-                                        .await
-                                    {
-                                        Ok(id) => {
-                                            execution_id = Some(id);
-                                            let _ = store
-                                                .finish_execution(
-                                                    id,
-                                                    "failed",
-                                                    "",
-                                                    &message,
-                                                    None,
-                                                    Some("missing_connections"),
-                                                    Some(&message),
-                                                    None,
-                                                )
-                                                .await;
-                                        }
-                                        Err(e) => {
-                                            warn!("failed to create skipped execution row: {}", e);
-                                        }
-                                    }
-                                    let _ = store.upsert_scheduler_state(name, false).await;
-                                }
-                                {
-                                    let mut logs_guard = logs.lock().await;
-                                    let entry = logs_guard
-                                        .entry(name.clone())
-                                        .or_insert_with(VecDeque::new);
-                                    entry.push_front(PipeRunLog {
-                                        pipe_name: name.clone(),
-                                        started_at: skipped_at,
-                                        finished_at: skipped_at,
-                                        success: false,
-                                        stdout: String::new(),
-                                        stderr: message.clone(),
-                                    });
-                                    if entry.len() > PIPE_LOG_ACTIVE_KEEP_PER_PIPE {
-                                        entry.pop_back();
-                                    }
-                                }
-                                if let Some(ref cb) = on_run_complete {
-                                    cb(
-                                        name,
-                                        execution_id,
-                                        trigger,
-                                        false,
-                                        0.0,
-                                        Some("missing_connections"),
-                                    );
-                                }
-                                continue;
-                            }
                         }
                     }
 
