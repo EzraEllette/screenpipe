@@ -718,14 +718,19 @@ describe("activity history helpers", () => {
 
     fireEvent.pointerMove(link, { pointerType: "mouse" });
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(299);
+      await vi.advanceTimersByTimeAsync(100);
     });
     expect(previewCalls()).toHaveLength(0);
 
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(1);
+      await vi.advanceTimersByTimeAsync(200);
     });
-    await waitFor(() => expect(previewCalls()).toHaveLength(1));
+    await waitFor(() => expect(previewCalls().length).toBeGreaterThanOrEqual(1));
+    expect(
+      new URL(String(previewCalls()[0][0]), "http://localhost").searchParams.get(
+        "app_name",
+      ),
+    ).toBe("Cursor");
     const preview = await screen.findByTestId("activity-artifact-preview");
     expect(within(preview).getAllByText("20 min")[0]).toBeVisible();
     expect(preview.querySelector("img")).toHaveAttribute(
@@ -748,6 +753,7 @@ describe("activity history helpers", () => {
       "src",
       expect.stringContaining("/frames/802/thumbnail"),
     );
+    await waitFor(() => expect(previewCalls()).toHaveLength(3));
 
     fireEvent.keyDown(document, { key: "Escape" });
     await act(async () => {
@@ -924,7 +930,7 @@ describe("activity history helpers", () => {
     expect(within(previews[0]).getByText("github.com")).toBeVisible();
   });
 
-  it("shows loading and prioritizes hover while exact artifacts finish loading", async () => {
+  it("shows the complete icon set together before preview loading starts", async () => {
     const persisted = parseActivityHistoryResponse(HISTORY_RESPONSE, {
       start: new Date("2026-08-17T16:00:00Z"),
       end: new Date("2026-08-17T20:00:00Z"),
@@ -943,23 +949,10 @@ describe("activity history helpers", () => {
       status: number;
       json: () => Promise<typeof LEDGER_ARTIFACTS_RESPONSE>;
     }) => void;
-    type PreviewResponse = {
-      ok: boolean;
-      status: number;
-      json: () => Promise<{
-        frames: Array<{ frame_id: number; timestamp: string }>;
-      }>;
-    };
-    const previewResolvers: Array<(response: PreviewResponse) => void> = [];
     mocks.localFetch.mockImplementation((path: string) => {
       if (path.startsWith("/activity-ledger?")) {
         return new Promise((resolve) => {
           resolveArtifacts = resolve;
-        });
-      }
-      if (path.startsWith("/frames/preview-samples?")) {
-        return new Promise((resolve) => {
-          previewResolvers.push(resolve);
         });
       }
       return Promise.resolve({
@@ -973,46 +966,15 @@ describe("activity history helpers", () => {
     });
 
     render(<ActivityLedger />);
-    const initialArtifact = await screen.findByRole("link", {
-      name: /Open Arc .* in Timeline/,
-    });
-    expect(initialArtifact).toHaveAttribute("href", "screenpipe://frame/12345");
-
-    fireEvent.pointerMove(initialArtifact, { pointerType: "mouse" });
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(300);
-    });
     const previewCalls = () =>
       mocks.localFetch.mock.calls.filter(([path]) =>
         String(path).startsWith("/frames/preview-samples?"),
       );
-    await waitFor(() => expect(previewCalls()).toHaveLength(1));
-    expect(mocks.refreshApiConfig).toHaveBeenCalledOnce();
-    const preview = await screen.findByTestId("activity-artifact-preview");
-    expect(preview.querySelector(".animate-pulse")).toBeVisible();
-    expect(within(preview).getAllByText("loading preview")[0]).toBeVisible();
-    expect(within(preview).queryByText("preview unavailable")).toBeNull();
-    const previewUrl = new URL(
-      String(previewCalls()[0][0]),
-      "http://localhost",
+    await waitFor(() =>
+      expect(screen.getByTestId("activity-ledger-skeleton")).toBeVisible(),
     );
-    expect(previewUrl.searchParams.get("app_name")).toBe("Arc");
-    expect(previewUrl.searchParams.get("start_time")).toBe(
-      "2026-08-17T16:00:00.000Z",
-    );
-    expect(previewUrl.searchParams.get("end_time")).toBe(
-      "2026-08-17T17:05:00.000Z",
-    );
-
-    await act(async () => {
-      previewResolvers[0]({
-        ok: false,
-        status: 503,
-        json: async () => ({ frames: [] }),
-      });
-    });
-    expect(within(preview).getAllByText("loading preview")[0]).toBeVisible();
-    expect(within(preview).queryByText("preview unavailable")).toBeNull();
+    expect(screen.queryByRole("link", { name: /Open Arc/ })).toBeNull();
+    expect(previewCalls()).toHaveLength(0);
 
     await act(async () => {
       resolveArtifacts({
@@ -1022,38 +984,19 @@ describe("activity history helpers", () => {
       });
     });
 
-    await waitFor(() => expect(previewCalls()).toHaveLength(2));
-    const loadedArtifact = screen.getByRole("link", {
-      name: /Open Arc .* in Timeline/,
-    });
-    expect(loadedArtifact).toBe(initialArtifact);
-    const exactPreviewUrl = new URL(
-      String(previewCalls()[1][0]),
-      "http://localhost",
-    );
-    expect(exactPreviewUrl.searchParams.get("start_time")).toBe(
-      "2026-08-17T16:20:00.000Z",
-    );
-    expect(exactPreviewUrl.searchParams.get("end_time")).toBe(
-      "2026-08-17T16:45:00.000Z",
-    );
-    await act(async () => {
-      previewResolvers[1]({
-        ok: true,
-        status: 200,
-        json: async () => ({
-          frames: [{ frame_id: 831, timestamp: "2026-08-17T16:20:00Z" }],
-        }),
-      });
-    });
-    await waitFor(() =>
-      expect(
-        screen.getByTestId("activity-artifact-preview").querySelector("img"),
-      ).toHaveAttribute(
-        "src",
-        expect.stringContaining("/frames/831/thumbnail"),
-      ),
-    );
+    expect(
+      await screen.findByRole("link", { name: /Open Arc .* in Timeline/ }),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("link", { name: /Open Cursor .* in Timeline/ }),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("link", { name: /Open github.com .* in Timeline/ }),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("link", { name: /Open Transcript .* in Timeline/ }),
+    ).toBeVisible();
+    expect(previewCalls()).toHaveLength(0);
   });
 
   it("keeps the first preview frame when reduced motion is requested", async () => {
@@ -1811,7 +1754,15 @@ describe("ActivityLedger", () => {
   });
 
   it("loads a completed encrypted ledger without regenerating it", async () => {
-    mocks.localFetch.mockImplementation(() => new Promise(() => undefined));
+    mocks.localFetch.mockImplementation((path: string) =>
+      path.startsWith("/activity-ledger?")
+        ? Promise.resolve({
+            ok: true,
+            status: 200,
+            json: async () => LEDGER_ARTIFACTS_RESPONSE,
+          })
+        : new Promise(() => undefined),
+    );
     mocks.loadPersistedActivityHistory.mockImplementation(
       async (_producer: string, range: { start: Date; end: Date }) => ({
         entries: parseActivityHistoryResponse(HISTORY_RESPONSE, range).entries,

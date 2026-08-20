@@ -759,6 +759,36 @@ export function buildFramePreviewSamplesPath(
   return `/frames/preview-samples?${params.toString()}`;
 }
 
+function validPreviewFrames(payload: FramePreviewSamplesResponse) {
+  return (payload.frames ?? [])
+    .filter(
+      (frame) =>
+        Number.isSafeInteger(frame.frame_id) &&
+        frame.frame_id > 0 &&
+        Number.isFinite(new Date(frame.timestamp).getTime()) &&
+        (frame.source !== "video" ||
+          (Number.isSafeInteger(frame.video_chunk_id) &&
+            Number.isFinite(Number(frame.video_offset_seconds)) &&
+            Number(frame.video_offset_seconds) >= 0)),
+    )
+    .slice(0, MAX_PREVIEW_FRAMES);
+}
+
+async function fetchFramePreviewSamples(
+  preview: ActivityArtifactPreview,
+  signal: AbortSignal,
+): Promise<FramePreviewSample[]> {
+  await refreshApiConfig();
+  if (signal.aborted) throw new DOMException("Aborted", "AbortError");
+  const response = await localFetch(buildFramePreviewSamplesPath(preview), {
+    signal,
+  });
+  if (!response.ok) throw new Error(`preview failed (${response.status})`);
+  return validPreviewFrames(
+    (await response.json()) as FramePreviewSamplesResponse,
+  );
+}
+
 function formatPreviewDuration(preview: ActivityArtifactPreview): string {
   const durationMs =
     new Date(preview.end_at).getTime() - new Date(preview.start_at).getTime();
@@ -784,11 +814,18 @@ function ArtifactPreviewTooltip({
   evidence,
   artifactName,
   artifactsLoading,
+  loadPreviewFrames,
+  onPreviewLoaded,
   children,
 }: {
   evidence: ActivityArtifact;
   artifactName: string;
   artifactsLoading: boolean;
+  loadPreviewFrames: (
+    preview: ActivityArtifactPreview,
+    signal: AbortSignal,
+  ) => Promise<FramePreviewSample[]>;
+  onPreviewLoaded: (preview: ActivityArtifactPreview) => void;
   children: React.ReactElement;
 }) {
   const preview = evidence.preview;
@@ -848,35 +885,12 @@ function ArtifactPreviewTooltip({
 
     const controller = new AbortController();
     setStatus("loading");
-    void refreshApiConfig()
-      .then(() => {
-        if (controller.signal.aborted)
-          throw new DOMException("Aborted", "AbortError");
-        return localFetch(buildFramePreviewSamplesPath(requestedPreview), {
-          signal: controller.signal,
-        });
-      })
-      .then(async (response) => {
-        if (!response.ok)
-          throw new Error(`preview failed (${response.status})`);
-        return (await response.json()) as FramePreviewSamplesResponse;
-      })
-      .then((payload) => {
+    void loadPreviewFrames(requestedPreview, controller.signal)
+      .then((nextFrames) => {
         if (controller.signal.aborted) return;
-        const nextFrames = (payload.frames ?? [])
-          .filter(
-            (frame) =>
-              Number.isSafeInteger(frame.frame_id) &&
-              frame.frame_id > 0 &&
-              Number.isFinite(new Date(frame.timestamp).getTime()) &&
-              (frame.source !== "video" ||
-                (Number.isSafeInteger(frame.video_chunk_id) &&
-                  Number.isFinite(Number(frame.video_offset_seconds)) &&
-                  Number(frame.video_offset_seconds) >= 0)),
-          )
-          .slice(0, MAX_PREVIEW_FRAMES);
         setFrames(nextFrames);
         setFrameReady(false);
+        onPreviewLoaded(requestedPreview);
         setStatus(
           nextFrames.length > 0
             ? "ready"
@@ -900,6 +914,8 @@ function ArtifactPreviewTooltip({
     requestedPreview?.start_at,
     requestGeneration,
     requestWasProvisional,
+    loadPreviewFrames,
+    onPreviewLoaded,
   ]);
 
   useEffect(() => {
@@ -1090,6 +1106,115 @@ function ArtifactPreviewTooltip({
   );
 }
 
+function ActivityEntryArtifacts({
+  entry,
+  intervals,
+  openEvidence,
+}: {
+  entry: ActivityHistoryEntry;
+  intervals: ActivityLedgerArtifactInterval[];
+  openEvidence: (evidence: ActivityArtifact) => void;
+}) {
+  const artifacts = useMemo(
+    () => artifactsForHistoryEntry(entry, intervals),
+    [entry, intervals],
+  );
+  const previewCacheRef = useRef(new Map<string, FramePreviewSample[]>());
+  const warmAbortRef = useRef<AbortController | null>(null);
+  const [warmAfterPreview, setWarmAfterPreview] = useState<string | null>(null);
+
+  const loadPreviewFrames = useCallback(
+    async (preview: ActivityArtifactPreview, signal: AbortSignal) => {
+      const key = buildFramePreviewSamplesPath(preview);
+      const cached = previewCacheRef.current.get(key);
+      if (cached) return cached;
+      const frames = await fetchFramePreviewSamples(preview, signal);
+      if (!signal.aborted) previewCacheRef.current.set(key, frames);
+      return frames;
+    },
+    [],
+  );
+  const onPreviewLoaded = useCallback((preview: ActivityArtifactPreview) => {
+    setWarmAfterPreview(buildFramePreviewSamplesPath(preview));
+  }, []);
+
+  useEffect(() => {
+    if (!warmAfterPreview) return;
+    warmAbortRef.current?.abort();
+    const controller = new AbortController();
+    warmAbortRef.current = controller;
+    void (async () => {
+      for (const artifact of artifacts) {
+        if (!artifact.preview || controller.signal.aborted) continue;
+        const key = buildFramePreviewSamplesPath(artifact.preview);
+        if (key === warmAfterPreview || previewCacheRef.current.has(key)) {
+          continue;
+        }
+        try {
+          await loadPreviewFrames(artifact.preview, controller.signal);
+        } catch {
+          if (controller.signal.aborted) return;
+        }
+      }
+    })();
+    return () => controller.abort();
+  }, [artifacts, loadPreviewFrames, warmAfterPreview]);
+
+  useEffect(
+    () => () => {
+      warmAbortRef.current?.abort();
+      previewCacheRef.current.clear();
+    },
+    [],
+  );
+
+  return (
+    <TooltipProvider delayDuration={300} skipDelayDuration={300}>
+      <div
+        className="flex items-center gap-1.5"
+        aria-label={`Source artifacts for ${entry.title}`}
+      >
+        {artifacts.map((evidence) => {
+          const artifactName =
+            evidence.kind === "meeting"
+              ? "Meeting"
+              : siteDomain(evidence.browser_url) ||
+                evidence.app_name ||
+                (evidence.kind === "audio" ? "Transcript" : "Screen capture");
+          const destination =
+            evidence.kind === "meeting" && evidence.meeting_id
+              ? "Meetings"
+              : "Timeline";
+          const accessibleLabel = `Open ${artifactName} at ${formatEvidenceTime(evidence.at)} in ${destination}`;
+          return (
+            <ArtifactPreviewTooltip
+              key={artifactKey(evidence)}
+              evidence={evidence}
+              artifactName={artifactName}
+              artifactsLoading={false}
+              loadPreviewFrames={loadPreviewFrames}
+              onPreviewLoaded={onPreviewLoaded}
+            >
+              <a
+                href={evidenceHref(evidence)}
+                onClick={(event) => {
+                  event.preventDefault();
+                  openEvidence(evidence);
+                }}
+                className="flex h-7 w-7 items-center justify-center rounded-md border border-border bg-background p-1 text-muted-foreground shadow-sm transition hover:border-foreground/40 hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                aria-label={accessibleLabel}
+                title={evidence.preview ? undefined : accessibleLabel}
+              >
+                <EvidenceArtifactIcon evidence={evidence} />
+              </a>
+            </ArtifactPreviewTooltip>
+          );
+        })}
+      </div>
+    </TooltipProvider>
+  );
+}
+
 function localDayKey(value: string): string {
   const date = new Date(value);
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(
@@ -1222,6 +1347,7 @@ export function ActivityLedger({
   const [ledgerIntervals, setLedgerIntervals] = useState<
     ActivityLedgerArtifactInterval[]
   >([]);
+  const [ledgerArtifactsReady, setLedgerArtifactsReady] = useState(false);
   const [history, setHistory] = useState<ActivityHistoryDocument | null>(null);
   const [historyCoverage, setHistoryCoverage] = useState<
     ActivityHistoryCoverage[]
@@ -1329,7 +1455,26 @@ export function ActivityLedger({
     setSummary(null);
     setMeetings([]);
     setLedgerIntervals([]);
+    setLedgerArtifactsReady(false);
     setError(null);
+    void localFetch(buildActivityLedgerArtifactsPath(range), {
+      signal: controller.signal,
+    })
+      .then(async (response) =>
+        response.ok
+          ? ((await response.json()) as ActivityLedgerArtifactsResponse)
+          : { intervals: [] },
+      )
+      .catch(() => ({ intervals: [] }))
+      .then((artifactRecords) => {
+        if (controller.signal.aborted) return;
+        setLedgerIntervals(
+          Array.isArray(artifactRecords.intervals)
+            ? artifactRecords.intervals
+            : [],
+        );
+        setLedgerArtifactsReady(true);
+      });
     const fetchSnapshot = async () => {
       let lastError: unknown;
       for (let attempt = 0; attempt < 6; attempt += 1) {
@@ -1348,19 +1493,15 @@ export function ActivityLedger({
         }
         if (controller.signal.aborted) return null;
         try {
-          const [summaryResponse, meetingsResponse, artifactsResponse] =
-            await Promise.all([
-              localFetch(buildActivitySummaryPath(range), {
-                signal: controller.signal,
-              }),
-              localFetch(buildActivityMeetingsPath(range), {
-                signal: controller.signal,
-              }),
-              localFetch(buildActivityLedgerArtifactsPath(range), {
-                signal: controller.signal,
-              }).catch(() => null),
-            ]);
-          return { summaryResponse, meetingsResponse, artifactsResponse };
+          const [summaryResponse, meetingsResponse] = await Promise.all([
+            localFetch(buildActivitySummaryPath(range), {
+              signal: controller.signal,
+            }),
+            localFetch(buildActivityMeetingsPath(range), {
+              signal: controller.signal,
+            }),
+          ]);
+          return { summaryResponse, meetingsResponse };
         } catch (reason) {
           lastError = reason;
         }
@@ -1381,34 +1522,28 @@ export function ActivityLedger({
             `Meeting request failed (${responses.meetingsResponse.status}).`,
           );
         }
-        const [nextSummary, meetingRecords, artifactRecords] =
-          await Promise.all([
-            responses.summaryResponse.json() as Promise<ActivitySummaryResponse>,
-            responses.meetingsResponse.json() as Promise<MeetingResponse[]>,
-            responses.artifactsResponse?.ok
-              ? (responses.artifactsResponse.json() as Promise<ActivityLedgerArtifactsResponse>)
-              : Promise.resolve({ intervals: [] }),
-          ]);
+        const [nextSummary, meetingRecords] = await Promise.all([
+          responses.summaryResponse.json() as Promise<ActivitySummaryResponse>,
+          responses.meetingsResponse.json() as Promise<MeetingResponse[]>,
+        ]);
         return {
           summary: nextSummary,
           meetings: meetingAnchors(meetingRecords, range),
-          ledgerIntervals: Array.isArray(artifactRecords.intervals)
-            ? artifactRecords.intervals
-            : [],
         };
       })
       .then((snapshot) => {
         if (!snapshot) return;
         setSummary(snapshot.summary);
         setMeetings(snapshot.meetings);
-        setLedgerIntervals(snapshot.ledgerIntervals);
       })
       .catch((reason: unknown) => {
         if (controller.signal.aborted) return;
         setError(reason instanceof Error ? reason.message : String(reason));
       })
       .finally(() => {
-        if (!controller.signal.aborted) setLoading(false);
+        if (!controller.signal.aborted) {
+          setLoading(false);
+        }
       });
     return () => controller.abort();
   }, [range]);
@@ -1865,7 +2000,7 @@ Re-query Screenpipe only inside the cited time range and use the cited frames an
                 </div>
               </div>
             )
-          ) : history ? (
+          ) : history && ledgerArtifactsReady ? (
             <section aria-label="Activity history">
               {groupedEntries.map(([day, entries]) => (
                 <div key={day} className="mb-12 last:mb-0">
@@ -1908,62 +2043,11 @@ Re-query Screenpipe only inside the cited time range and use the cited frames an
                         </p>
 
                         <div className="mt-4 flex items-center gap-3">
-                          <TooltipProvider
-                            delayDuration={300}
-                            skipDelayDuration={300}
-                          >
-                            <div
-                              className="flex items-center gap-1.5"
-                              aria-label={`Source artifacts for ${entry.title}`}
-                            >
-                              {artifactsForHistoryEntry(
-                                entry,
-                                ledgerIntervals,
-                              ).map((evidence) => {
-                                const artifactName =
-                                  evidence.kind === "meeting"
-                                    ? "Meeting"
-                                    : siteDomain(evidence.browser_url) ||
-                                      evidence.app_name ||
-                                      (evidence.kind === "audio"
-                                        ? "Transcript"
-                                        : "Screen capture");
-                                const destination =
-                                  evidence.kind === "meeting" &&
-                                  evidence.meeting_id
-                                    ? "Meetings"
-                                    : "Timeline";
-                                const accessibleLabel = `Open ${artifactName} at ${formatEvidenceTime(evidence.at)} in ${destination}`;
-                                return (
-                                  <ArtifactPreviewTooltip
-                                    key={artifactKey(evidence)}
-                                    evidence={evidence}
-                                    artifactName={artifactName}
-                                    artifactsLoading={loading}
-                                  >
-                                    <a
-                                      href={evidenceHref(evidence)}
-                                      onClick={(event) => {
-                                        event.preventDefault();
-                                        openEvidence(evidence);
-                                      }}
-                                      className="flex h-7 w-7 items-center justify-center rounded-md border border-border bg-background p-1 text-muted-foreground shadow-sm transition hover:border-foreground/40 hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                                      aria-label={accessibleLabel}
-                                      title={
-                                        evidence.preview
-                                          ? undefined
-                                          : accessibleLabel
-                                      }
-                                    >
-                                      <EvidenceArtifactIcon
-                                        evidence={evidence}
-                                      />
-                                    </a>
-                                  </ArtifactPreviewTooltip>
-                                );
-                              })}
-                            </div>
-                          </TooltipProvider>
+                          <ActivityEntryArtifacts
+                            entry={entry}
+                            intervals={ledgerIntervals}
+                            openEvidence={openEvidence}
+                          />
                           <span aria-hidden="true">·</span>
                           <button
                             type="button"
@@ -1989,7 +2073,7 @@ Re-query Screenpipe only inside the cited time range and use the cited frames an
                 </div>
               ))}
             </section>
-          ) : loading && !summary ? (
+          ) : !ledgerArtifactsReady || (loading && !summary) ? (
             <ActivityLedgerSkeleton label="Reading your day…" />
           ) : error ? (
             <p className="text-sm text-muted-foreground">{error}</p>
