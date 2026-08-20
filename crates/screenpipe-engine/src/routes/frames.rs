@@ -5,7 +5,7 @@
 use axum::{
     body::{Body, Bytes},
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{header, HeaderMap, StatusCode},
     response::{Json as JsonResponse, Response},
 };
 use image::{codecs::jpeg::JpegEncoder, DynamicImage, GenericImageView};
@@ -27,7 +27,10 @@ use std::{
     },
     time::{Duration, Instant, UNIX_EPOCH},
 };
-use tokio::fs::File;
+use tokio::{
+    fs::File,
+    io::{AsyncReadExt, AsyncSeekExt},
+};
 use tokio_util::io::ReaderStream;
 use tracing::{debug, error};
 
@@ -186,6 +189,18 @@ pub struct FramePreviewSamplesQuery {
 pub struct FramePreviewSample {
     pub frame_id: i64,
     pub timestamp: DateTime<Utc>,
+    pub source: FramePreviewSource,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub video_chunk_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub video_offset_seconds: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, OaSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FramePreviewSource {
+    Snapshot,
+    Video,
 }
 
 #[derive(Debug, Serialize, OaSchema)]
@@ -227,10 +242,7 @@ fn browser_url_matches_domain(value: Option<&str>, domain: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn evenly_sample_preview_frames(
-    candidates: Vec<FramePreviewSample>,
-    limit: usize,
-) -> Vec<FramePreviewSample> {
+fn evenly_sample_preview_frames<T: Clone>(candidates: Vec<T>, limit: usize) -> Vec<T> {
     if candidates.len() <= limit {
         return candidates;
     }
@@ -299,9 +311,10 @@ fn validate_frame_preview_query(
     Ok((app_name.to_string(), browser_domain))
 }
 
-/// Return a bounded set of direct snapshot frame IDs for a short UI preview.
-/// Video-backed frames are intentionally excluded so this route can never
-/// cause FFmpeg extraction when its results are loaded with `fallback=false`.
+/// Return a bounded set of frame references for a short UI preview. Snapshot
+/// references use the existing thumbnail path. Compacted references point at
+/// the existing MP4 and an offset so the browser can decode them directly;
+/// this route never extracts frames or generates preview media.
 #[oasgen]
 pub async fn get_frame_preview_samples(
     State(state): State<Arc<AppState>>,
@@ -312,7 +325,7 @@ pub async fn get_frame_preview_samples(
 
     let candidates = state
         .db
-        .get_snapshot_preview_candidates(
+        .get_frame_preview_candidates(
             query.start_time,
             query.end_time,
             &app_name,
@@ -326,23 +339,159 @@ pub async fn get_frame_preview_samples(
                 JsonResponse(json!({ "error": "frame preview sample query failed" })),
             )
         })?;
-    let frames = candidates
+    let candidates: Vec<_> = candidates
         .into_iter()
-        .filter(|(_, _, browser_url)| {
+        .filter(|(_, _, browser_url, _, _, _)| {
             browser_domain
                 .as_deref()
                 .is_none_or(|domain| browser_url_matches_domain(browser_url.as_deref(), domain))
         })
-        .map(|(frame_id, timestamp, _)| FramePreviewSample {
+        .collect();
+    // Bound filesystem validation even for a 24-hour range. Sampling extra
+    // candidates lets a missing/stale source be skipped without turning hover
+    // into thousands of metadata calls.
+    let candidates = evenly_sample_preview_frames(candidates, (query.limit * 4).min(32));
+    let mut frames = Vec::with_capacity(query.limit);
+    for (frame_id, timestamp, _, source_path, video_chunk_id, video_offset_seconds) in candidates {
+        if !tokio::fs::metadata(&source_path)
+            .await
+            .is_ok_and(|metadata| metadata.is_file())
+        {
+            continue;
+        }
+        frames.push(FramePreviewSample {
             frame_id,
             timestamp,
-        })
-        .collect();
+            source: if video_chunk_id.is_some() {
+                FramePreviewSource::Video
+            } else {
+                FramePreviewSource::Snapshot
+            },
+            video_chunk_id,
+            video_offset_seconds: video_offset_seconds.map(|offset| format!("{offset:.6}")),
+        });
+    }
     let frames = first_preview_frame_per_bucket(frames);
 
     Ok(JsonResponse(FramePreviewSamplesResponse {
         frames: evenly_sample_preview_frames(frames, query.limit),
     }))
+}
+
+fn parse_single_byte_range(value: &str, file_len: u64) -> Option<(u64, u64)> {
+    let value = value.strip_prefix("bytes=")?;
+    if value.contains(',') || file_len == 0 {
+        return None;
+    }
+    let (start, end) = value.split_once('-')?;
+    if start.is_empty() {
+        let suffix_len = end.parse::<u64>().ok()?.min(file_len);
+        return Some((file_len - suffix_len, file_len - 1));
+    }
+    let start = start.parse::<u64>().ok()?;
+    if start >= file_len {
+        return None;
+    }
+    let end = if end.is_empty() {
+        file_len - 1
+    } else {
+        end.parse::<u64>().ok()?.min(file_len - 1)
+    };
+    (start <= end).then_some((start, end))
+}
+
+/// Serve an already-compacted MP4 with byte-range support for browser-native
+/// preview decoding. No frame extraction or transcoding occurs on this path.
+#[oasgen]
+pub async fn get_frame_preview_media(
+    State(state): State<Arc<AppState>>,
+    Path(video_chunk_id): Path<i64>,
+    headers: HeaderMap,
+) -> Result<Response<Body>, (StatusCode, JsonResponse<Value>)> {
+    let Some(file_path) = state
+        .db
+        .get_video_chunk_path(video_chunk_id)
+        .await
+        .map_err(|error| {
+            error!(%error, "preview media lookup failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                JsonResponse(json!({ "error": "preview media lookup failed" })),
+            )
+        })?
+    else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            JsonResponse(json!({ "error": "preview media not found" })),
+        ));
+    };
+
+    let mut file = File::open(&file_path).await.map_err(|_| {
+        (
+            StatusCode::NOT_FOUND,
+            JsonResponse(json!({ "error": "preview media not found" })),
+        )
+    })?;
+    let file_len = file
+        .metadata()
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::NOT_FOUND,
+                JsonResponse(json!({ "error": "preview media not found" })),
+            )
+        })?
+        .len();
+
+    let requested_range = headers
+        .get(header::RANGE)
+        .and_then(|value| value.to_str().ok());
+    let (status, start, end) = match requested_range {
+        Some(value) => match parse_single_byte_range(value, file_len) {
+            Some((start, end)) => (StatusCode::PARTIAL_CONTENT, start, end),
+            None => {
+                return Response::builder()
+                    .status(StatusCode::RANGE_NOT_SATISFIABLE)
+                    .header(header::CONTENT_RANGE, format!("bytes */{file_len}"))
+                    .body(Body::empty())
+                    .map_err(|error| {
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            JsonResponse(json!({ "error": error.to_string() })),
+                        )
+                    });
+            }
+        },
+        None => (StatusCode::OK, 0, file_len.saturating_sub(1)),
+    };
+    file.seek(std::io::SeekFrom::Start(start))
+        .await
+        .map_err(|error| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                JsonResponse(json!({ "error": error.to_string() })),
+            )
+        })?;
+    let content_len = end.saturating_sub(start) + 1;
+    let body = Body::from_stream(ReaderStream::new(file.take(content_len)));
+    let mut builder = Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, "video/mp4")
+        .header(header::ACCEPT_RANGES, "bytes")
+        .header(header::CONTENT_LENGTH, content_len)
+        .header(header::CACHE_CONTROL, "no-store");
+    if status == StatusCode::PARTIAL_CONTENT {
+        builder = builder.header(
+            header::CONTENT_RANGE,
+            format!("bytes {start}-{end}/{file_len}"),
+        );
+    }
+    builder.body(body).map_err(|error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            JsonResponse(json!({ "error": error.to_string() })),
+        )
+    })
 }
 
 fn default_frame_fallback() -> bool {
@@ -2013,6 +2162,9 @@ mod thumbnail_tests {
             .map(|index| FramePreviewSample {
                 frame_id: index,
                 timestamp: Utc::now() + chrono::Duration::seconds(index),
+                source: FramePreviewSource::Snapshot,
+                video_chunk_id: None,
+                video_offset_seconds: None,
             })
             .collect();
         let sampled = evenly_sample_preview_frames(candidates, 3);
@@ -2034,6 +2186,9 @@ mod thumbnail_tests {
             .map(|(frame_id, seconds)| FramePreviewSample {
                 frame_id: frame_id as i64,
                 timestamp: start + chrono::Duration::seconds(seconds),
+                source: FramePreviewSource::Snapshot,
+                video_chunk_id: None,
+                video_offset_seconds: None,
             })
             .collect();
 
@@ -2044,6 +2199,21 @@ mod thumbnail_tests {
                 .collect::<Vec<_>>(),
             vec![0, 2]
         );
+    }
+
+    #[test]
+    fn preview_media_range_parser_is_bounded() {
+        assert_eq!(parse_single_byte_range("bytes=0-99", 1_000), Some((0, 99)));
+        assert_eq!(
+            parse_single_byte_range("bytes=900-", 1_000),
+            Some((900, 999))
+        );
+        assert_eq!(
+            parse_single_byte_range("bytes=-100", 1_000),
+            Some((900, 999))
+        );
+        assert_eq!(parse_single_byte_range("bytes=1000-", 1_000), None);
+        assert_eq!(parse_single_byte_range("bytes=0-1,4-5", 1_000), None);
     }
 
     #[test]

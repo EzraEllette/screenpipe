@@ -1554,43 +1554,72 @@ impl DatabaseManager {
         Ok(ids)
     }
 
-    /// Return direct snapshot candidates reduced into ten-second buckets for
-    /// an app period. Domain-filtered queries retain one candidate per URL so
-    /// exact host validation cannot discard another URL from the same bucket;
-    /// the HTTP layer then collapses each bucket and evenly samples the result.
-    /// This query can never select a video-backed frame.
-    pub async fn get_snapshot_preview_candidates(
+    /// Return existing-media candidates reduced into ten-second buckets for an
+    /// app period. A candidate points at either a direct JPEG snapshot or the
+    /// already-compacted MP4 plus its frame time. The HTTP layer never decodes
+    /// video; clients can let the platform media stack seek the existing file.
+    ///
+    /// Domain-filtered queries retain one candidate per URL so exact host
+    /// validation cannot discard another URL from the same bucket.
+    pub async fn get_frame_preview_candidates(
         &self,
         start: DateTime<Utc>,
         end: DateTime<Utc>,
         app_name: &str,
         browser_domain: Option<&str>,
-    ) -> Result<Vec<(i64, DateTime<Utc>, Option<String>)>, SqlxError> {
+    ) -> Result<
+        Vec<(
+            i64,
+            DateTime<Utc>,
+            Option<String>,
+            String,
+            Option<i64>,
+            Option<f64>,
+        )>,
+        SqlxError,
+    > {
         let mut connection = self.acquire_search_read().await?;
         let rows = if let Some(domain) = browser_domain {
-            sqlx::query_as::<_, (i64, DateTime<Utc>, Option<String>)>(
+            sqlx::query_as::<
+                _,
+                (
+                    i64,
+                    DateTime<Utc>,
+                    Option<String>,
+                    String,
+                    Option<i64>,
+                    Option<f64>,
+                ),
+            >(
                 r#"
                 WITH bucketed AS (
                     SELECT
-                        id,
-                        timestamp,
-                        browser_url,
+                        f.id,
+                        f.timestamp,
+                        f.browser_url,
+                        COALESCE(NULLIF(f.snapshot_path, ''), vc.file_path) AS source_path,
+                        CASE WHEN NULLIF(f.snapshot_path, '') IS NULL THEN vc.id END AS video_chunk_id,
+                        CASE
+                            WHEN NULLIF(f.snapshot_path, '') IS NULL
+                            THEN CAST(f.offset_index AS REAL) / MAX(COALESCE(vc.fps, 0.5), 0.001)
+                        END AS video_offset_seconds,
                         ROW_NUMBER() OVER (
                             PARTITION BY
-                                CAST(unixepoch(timestamp) / 10 AS INTEGER),
-                                COALESCE(browser_url, '')
-                            ORDER BY timestamp, id
+                                CAST(unixepoch(f.timestamp) / 10 AS INTEGER),
+                                COALESCE(f.browser_url, '')
+                            ORDER BY f.timestamp, f.id
                         ) AS bucket_rank
-                    FROM frames
-                    WHERE app_name = ?1
-                      AND timestamp >= ?2
-                      AND timestamp <= ?3
-                      AND focused = 1
-                      AND snapshot_path IS NOT NULL
-                      AND snapshot_path != ''
-                      AND instr(lower(COALESCE(browser_url, '')), lower(?4)) > 0
+                    FROM frames f
+                    LEFT JOIN video_chunks vc ON f.video_chunk_id = vc.id
+                    WHERE f.app_name = ?1
+                      AND f.timestamp >= ?2
+                      AND f.timestamp <= ?3
+                      AND f.focused = 1
+                      AND COALESCE(NULLIF(f.snapshot_path, ''), vc.file_path) IS NOT NULL
+                      AND COALESCE(NULLIF(f.snapshot_path, ''), vc.file_path) NOT LIKE 'cloud://%'
+                      AND instr(lower(COALESCE(f.browser_url, '')), lower(?4)) > 0
                 )
-                SELECT id, timestamp, browser_url
+                SELECT id, timestamp, browser_url, source_path, video_chunk_id, video_offset_seconds
                 FROM bucketed
                 WHERE bucket_rank = 1
                 ORDER BY timestamp, id
@@ -1603,26 +1632,43 @@ impl DatabaseManager {
             .fetch_all(&mut *connection)
             .await?
         } else {
-            sqlx::query_as::<_, (i64, DateTime<Utc>, Option<String>)>(
+            sqlx::query_as::<
+                _,
+                (
+                    i64,
+                    DateTime<Utc>,
+                    Option<String>,
+                    String,
+                    Option<i64>,
+                    Option<f64>,
+                ),
+            >(
                 r#"
                 WITH bucketed AS (
                     SELECT
-                        id,
-                        timestamp,
-                        browser_url,
+                        f.id,
+                        f.timestamp,
+                        f.browser_url,
+                        COALESCE(NULLIF(f.snapshot_path, ''), vc.file_path) AS source_path,
+                        CASE WHEN NULLIF(f.snapshot_path, '') IS NULL THEN vc.id END AS video_chunk_id,
+                        CASE
+                            WHEN NULLIF(f.snapshot_path, '') IS NULL
+                            THEN CAST(f.offset_index AS REAL) / MAX(COALESCE(vc.fps, 0.5), 0.001)
+                        END AS video_offset_seconds,
                         ROW_NUMBER() OVER (
-                            PARTITION BY CAST(unixepoch(timestamp) / 10 AS INTEGER)
-                            ORDER BY timestamp, id
+                            PARTITION BY CAST(unixepoch(f.timestamp) / 10 AS INTEGER)
+                            ORDER BY f.timestamp, f.id
                         ) AS bucket_rank
-                    FROM frames
-                    WHERE app_name = ?1
-                      AND timestamp >= ?2
-                      AND timestamp <= ?3
-                      AND focused = 1
-                      AND snapshot_path IS NOT NULL
-                      AND snapshot_path != ''
+                    FROM frames f
+                    LEFT JOIN video_chunks vc ON f.video_chunk_id = vc.id
+                    WHERE f.app_name = ?1
+                      AND f.timestamp >= ?2
+                      AND f.timestamp <= ?3
+                      AND f.focused = 1
+                      AND COALESCE(NULLIF(f.snapshot_path, ''), vc.file_path) IS NOT NULL
+                      AND COALESCE(NULLIF(f.snapshot_path, ''), vc.file_path) NOT LIKE 'cloud://%'
                 )
-                SELECT id, timestamp, browser_url
+                SELECT id, timestamp, browser_url, source_path, video_chunk_id, video_offset_seconds
                 FROM bucketed
                 WHERE bucket_rank = 1
                 ORDER BY timestamp, id
@@ -1636,6 +1682,15 @@ impl DatabaseManager {
         };
         drop(connection);
         Ok(rows)
+    }
+
+    pub async fn get_video_chunk_path(&self, chunk_id: i64) -> Result<Option<String>, SqlxError> {
+        sqlx::query_scalar(
+            "SELECT file_path FROM video_chunks WHERE id = ?1 AND file_path NOT LIKE 'cloud://%'",
+        )
+        .bind(chunk_id)
+        .fetch_optional(&self.pool)
+        .await
     }
 
     /// Get all frames within a time range for meeting/video export.

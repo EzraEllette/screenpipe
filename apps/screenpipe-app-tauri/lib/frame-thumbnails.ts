@@ -64,3 +64,9 @@ export function getFramePreviewThumbnailUrl(frameId: number | string): string {
     `${getApiBaseUrl()}/frames/${frameId}/thumbnail?${params.toString()}`,
   );
 }
+
+export function getFramePreviewMediaUrl(videoChunkId: number | string): string {
+  return appendAuthToken(
+    `${getApiBaseUrl()}/frames/preview-media/${videoChunkId}`,
+  );
+}

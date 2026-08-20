@@ -162,6 +162,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn activity_preview_reuses_compacted_media_without_extraction() {
+        let (app, db) = setup_test_app().await;
+        let temp_dir = tempfile::tempdir().unwrap();
+        let media_path = temp_dir.path().join("preview.mp4");
+        let media_bytes = b"existing-compacted-media";
+        std::fs::write(&media_path, media_bytes).unwrap();
+        let chunk_id = db
+            .insert_video_chunk_with_fps(
+                media_path.to_string_lossy().as_ref(),
+                "preview-monitor",
+                2.0,
+            )
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO frames \
+             (timestamp, app_name, browser_url, video_chunk_id, offset_index, focused) \
+             VALUES ('2026-08-20T10:00:10Z', 'Arc', 'https://example.com/work', ?1, 4, 1)",
+        )
+        .bind(chunk_id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+        let samples = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/frames/preview-samples?start_time=2026-08-20T10%3A00%3A00Z&end_time=2026-08-20T10%3A01%3A00Z&app_name=Arc&limit=6")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(samples.status(), StatusCode::OK);
+        let payload: serde_json::Value =
+            serde_json::from_slice(&to_bytes(samples.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(payload["frames"][0]["source"], "video");
+        assert_eq!(payload["frames"][0]["video_chunk_id"], chunk_id);
+        assert_eq!(payload["frames"][0]["video_offset_seconds"], "2.000000");
+
+        let media = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/frames/preview-media/{chunk_id}"))
+                    .header("range", "bytes=2-8")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(media.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(media.headers()["content-type"], "video/mp4");
+        assert_eq!(
+            media.headers()["content-range"],
+            format!("bytes 2-8/{}", media_bytes.len())
+        );
+        assert_eq!(
+            &to_bytes(media.into_body(), usize::MAX).await.unwrap()[..],
+            &media_bytes[2..=8]
+        );
+    }
+
+    #[tokio::test]
     async fn frame_thumbnail_endpoint_can_disable_nearby_fallback() {
         let (app, db) = setup_test_app().await;
         let temp_dir = tempfile::tempdir().unwrap();

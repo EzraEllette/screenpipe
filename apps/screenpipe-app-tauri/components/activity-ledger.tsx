@@ -57,8 +57,11 @@ import {
   nextActivityHistoryRange,
   type ActivityHistoryCoverage,
 } from "@/lib/activity-history-persistence";
-import { localFetch } from "@/lib/api";
-import { getFramePreviewThumbnailUrl } from "@/lib/frame-thumbnails";
+import { localFetch, refreshApiConfig } from "@/lib/api";
+import {
+  getFramePreviewMediaUrl,
+  getFramePreviewThumbnailUrl,
+} from "@/lib/frame-thumbnails";
 import { presentQuotaError } from "@/lib/chat/quota-errors";
 import { showChatWithPrefill } from "@/lib/chat-utils";
 import { useSettings } from "@/lib/hooks/use-settings";
@@ -142,6 +145,9 @@ type ActivityArtifactPreview = {
 type FramePreviewSample = {
   frame_id: number;
   timestamp: string;
+  source?: "snapshot" | "video";
+  video_chunk_id?: number;
+  video_offset_seconds?: string;
 };
 
 type FramePreviewSamplesResponse = {
@@ -597,10 +603,20 @@ export function artifactsForHistoryEntry(
         item.kind === "screen" &&
         (!item.app_name || Boolean(usefulAppName(item.app_name))),
     )
-    .map((item) => ({
-      ...item,
-      app_name: usefulAppName(item.app_name),
-    }));
+    .map((item) => {
+      const appName = usefulAppName(item.app_name);
+      return {
+        ...item,
+        app_name: appName,
+        preview: appName
+          ? {
+              start_at: entry.start_at,
+              end_at: entry.end_at,
+              app_name: appName,
+            }
+          : undefined,
+      };
+    });
   return artifactEvidence([
     ...meetings,
     ...selected.map(({ artifact }) => artifact),
@@ -767,27 +783,39 @@ function formatPreviewRange(preview: ActivityArtifactPreview): string {
 function ArtifactPreviewTooltip({
   evidence,
   artifactName,
+  artifactsLoading,
   children,
 }: {
   evidence: ActivityArtifact;
   artifactName: string;
+  artifactsLoading: boolean;
   children: React.ReactElement;
 }) {
   const preview = evidence.preview;
   const [open, setOpen] = useState(false);
   const [status, setStatus] = useState<
-    "idle" | "loading" | "ready" | "unavailable"
+    "idle" | "loading" | "waiting" | "ready" | "unavailable"
   >("idle");
   const [frames, setFrames] = useState<FramePreviewSample[]>([]);
   const [frameIndex, setFrameIndex] = useState(0);
   const [reduceMotion, setReduceMotion] = useState(false);
+  const [requestedPreview, setRequestedPreview] =
+    useState<ActivityArtifactPreview | null>(null);
+  const [requestWasProvisional, setRequestWasProvisional] = useState(false);
+  const [requestGeneration, setRequestGeneration] = useState(0);
+  const [frameReady, setFrameReady] = useState(false);
+  const videoRef = useRef<HTMLVideoElement>(null);
   const currentFrame = frames[frameIndex];
+  const displayPreview = requestedPreview ?? preview;
 
   const handleOpenChange = (nextOpen: boolean) => {
     setOpen(nextOpen);
     setFrames([]);
     setFrameIndex(0);
-    setStatus(nextOpen ? "loading" : "idle");
+    setFrameReady(false);
+    setStatus(nextOpen ? (preview ? "loading" : "unavailable") : "idle");
+    setRequestedPreview(nextOpen ? (preview ?? null) : null);
+    setRequestWasProvisional(nextOpen && artifactsLoading);
     if (nextOpen) {
       setReduceMotion(
         window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ??
@@ -797,12 +825,37 @@ function ArtifactPreviewTooltip({
   };
 
   useEffect(() => {
-    if (!open || !preview) return;
+    if (!open || requestedPreview || !preview) return;
+    setRequestedPreview(preview);
+    setRequestWasProvisional(artifactsLoading);
+    setStatus("loading");
+  }, [artifactsLoading, open, preview, requestedPreview]);
+
+  useEffect(() => {
+    if (!open || status !== "waiting") return;
+    if (!artifactsLoading && preview) {
+      setRequestedPreview(preview);
+      setRequestWasProvisional(false);
+      setStatus("loading");
+      setRequestGeneration((generation) => generation + 1);
+      return;
+    }
+    if (!artifactsLoading) setStatus("unavailable");
+  }, [artifactsLoading, open, preview, requestedPreview, status]);
+
+  useEffect(() => {
+    if (!open || !requestedPreview) return;
 
     const controller = new AbortController();
-    void localFetch(buildFramePreviewSamplesPath(preview), {
-      signal: controller.signal,
-    })
+    setStatus("loading");
+    void refreshApiConfig()
+      .then(() => {
+        if (controller.signal.aborted)
+          throw new DOMException("Aborted", "AbortError");
+        return localFetch(buildFramePreviewSamplesPath(requestedPreview), {
+          signal: controller.signal,
+        });
+      })
       .then(async (response) => {
         if (!response.ok)
           throw new Error(`preview failed (${response.status})`);
@@ -815,58 +868,130 @@ function ArtifactPreviewTooltip({
             (frame) =>
               Number.isSafeInteger(frame.frame_id) &&
               frame.frame_id > 0 &&
-              Number.isFinite(new Date(frame.timestamp).getTime()),
+              Number.isFinite(new Date(frame.timestamp).getTime()) &&
+              (frame.source !== "video" ||
+                (Number.isSafeInteger(frame.video_chunk_id) &&
+                  Number.isFinite(Number(frame.video_offset_seconds)) &&
+                  Number(frame.video_offset_seconds) >= 0)),
           )
           .slice(0, MAX_PREVIEW_FRAMES);
         setFrames(nextFrames);
-        setStatus(nextFrames.length > 0 ? "ready" : "unavailable");
+        setFrameReady(false);
+        setStatus(
+          nextFrames.length > 0
+            ? "ready"
+            : requestWasProvisional
+              ? "waiting"
+              : "unavailable",
+        );
       })
       .catch(() => {
-        if (!controller.signal.aborted) setStatus("unavailable");
+        if (!controller.signal.aborted) {
+          setStatus(requestWasProvisional ? "waiting" : "unavailable");
+        }
       });
 
     return () => controller.abort();
   }, [
     open,
-    preview?.app_name,
-    preview?.browser_domain,
-    preview?.end_at,
-    preview?.start_at,
+    requestedPreview?.app_name,
+    requestedPreview?.browser_domain,
+    requestedPreview?.end_at,
+    requestedPreview?.start_at,
+    requestGeneration,
+    requestWasProvisional,
   ]);
 
   useEffect(() => {
     if (
       !open ||
       status !== "ready" ||
+      !frameReady ||
       reduceMotion ||
       frameIndex >= frames.length - 1
     ) {
       return;
     }
-    const timeout = window.setTimeout(
-      () => setFrameIndex((index) => Math.min(index + 1, frames.length - 1)),
-      PREVIEW_FRAME_INTERVAL_MS,
-    );
+    const timeout = window.setTimeout(() => {
+      setFrameReady(false);
+      setFrameIndex((index) => Math.min(index + 1, frames.length - 1));
+    }, PREVIEW_FRAME_INTERVAL_MS);
     return () => window.clearTimeout(timeout);
-  }, [frameIndex, frames.length, open, reduceMotion, status]);
+  }, [frameIndex, frameReady, frames.length, open, reduceMotion, status]);
+
+  useEffect(() => {
+    setFrameReady(false);
+    if (!open || status !== "ready" || currentFrame?.source !== "video") {
+      return;
+    }
+    const video = videoRef.current;
+    const offset = Number(currentFrame.video_offset_seconds);
+    if (!video || !Number.isFinite(offset)) return;
+    const seek = () => {
+      if (Math.abs(video.currentTime - offset) < 0.001) {
+        setFrameReady(true);
+      } else {
+        video.currentTime = offset;
+      }
+    };
+    if (video.readyState >= HTMLMediaElement.HAVE_METADATA) {
+      seek();
+      return;
+    }
+    video.addEventListener("loadedmetadata", seek, { once: true });
+    return () => video.removeEventListener("loadedmetadata", seek);
+  }, [currentFrame, open, status]);
 
   useEffect(() => {
     if (!open || status !== "ready" || reduceMotion) return;
     const nextFrame = frames[frameIndex + 1];
     if (!nextFrame) return;
+    if (nextFrame.source === "video") {
+      if (nextFrame.video_chunk_id === currentFrame?.video_chunk_id) return;
+      const video = document.createElement("video");
+      video.preload = "metadata";
+      video.muted = true;
+      video.src = getFramePreviewMediaUrl(nextFrame.video_chunk_id!);
+      return () => {
+        video.removeAttribute("src");
+        video.load();
+      };
+    }
     const image = new window.Image();
     image.decoding = "async";
     image.src = getFramePreviewThumbnailUrl(nextFrame.frame_id);
     return () => {
       image.src = "";
     };
-  }, [frameIndex, frames, open, reduceMotion, status]);
+  }, [
+    currentFrame?.video_chunk_id,
+    frameIndex,
+    frames,
+    open,
+    reduceMotion,
+    status,
+  ]);
 
-  if (!preview) return children;
+  useEffect(() => {
+    if (open) return;
+    const video = videoRef.current;
+    if (!video) return;
+    video.pause();
+    video.removeAttribute("src");
+    video.load();
+  }, [open]);
+
+  if (!preview && evidence.kind !== "screen") return children;
 
   const removeUnavailableFrame = (frameId: number) => {
-    const nextFrames = frames.filter((frame) => frame.frame_id !== frameId);
+    const unavailable = frames.find((frame) => frame.frame_id === frameId);
+    const nextFrames = frames.filter((frame) =>
+      unavailable?.source === "video"
+        ? frame.video_chunk_id !== unavailable.video_chunk_id
+        : frame.frame_id !== frameId,
+    );
     setFrames(nextFrames);
+    setFrameReady(false);
     setFrameIndex((index) =>
       Math.min(index, Math.max(0, nextFrames.length - 1)),
     );
@@ -874,16 +999,49 @@ function ArtifactPreviewTooltip({
   };
 
   return (
-    <Tooltip delayDuration={300} open={open} onOpenChange={handleOpenChange}>
+    <Tooltip
+      delayDuration={300}
+      disableHoverableContent
+      open={open}
+      onOpenChange={handleOpenChange}
+    >
       <TooltipTrigger asChild>{children}</TooltipTrigger>
       <TooltipContent
         side="top"
         collisionPadding={16}
+        aria-label={`${artifactName} activity preview`}
         className="w-80 rounded-none border-border bg-popover p-0 shadow-lg shadow-black/10"
         data-testid="activity-artifact-preview"
       >
         <div className="relative aspect-video w-full overflow-hidden border-b border-border bg-muted">
-          {status === "ready" && currentFrame ? (
+          {status === "ready" && currentFrame?.source === "video" ? (
+            <>
+              <video
+                key={currentFrame.video_chunk_id}
+                ref={videoRef}
+                src={getFramePreviewMediaUrl(currentFrame.video_chunk_id!)}
+                muted
+                playsInline
+                preload="metadata"
+                aria-hidden="true"
+                className={cn(
+                  "h-full w-full select-none object-cover",
+                  frameReady ? "opacity-100" : "opacity-0",
+                )}
+                onLoadedMetadata={(event) => {
+                  const offset = Number(currentFrame.video_offset_seconds);
+                  if (Number.isFinite(offset)) {
+                    event.currentTarget.currentTime = offset;
+                  }
+                }}
+                onSeeked={() => setFrameReady(true)}
+                onError={() => removeUnavailableFrame(currentFrame.frame_id)}
+              />
+              {!frameReady ? (
+                <Skeleton className="absolute inset-0 h-full w-full rounded-none" />
+              ) : null}
+            </>
+          ) : status === "ready" && currentFrame ? (
             // eslint-disable-next-line @next/next/no-img-element
             <img
               key={currentFrame.frame_id}
@@ -894,6 +1052,7 @@ function ArtifactPreviewTooltip({
               decoding="async"
               draggable={false}
               data-lm-disable="true"
+              onLoad={() => setFrameReady(true)}
               onError={() => removeUnavailableFrame(currentFrame.frame_id)}
             />
           ) : status === "unavailable" ? (
@@ -901,7 +1060,12 @@ function ArtifactPreviewTooltip({
               preview unavailable
             </div>
           ) : (
-            <Skeleton className="h-full w-full rounded-none" />
+            <div className="relative h-full w-full">
+              <Skeleton className="h-full w-full rounded-none" />
+              <span className="absolute inset-0 flex items-center justify-center font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
+                loading preview
+              </span>
+            </div>
           )}
         </div>
         <div className="flex items-start justify-between gap-4 px-3 py-2.5">
@@ -909,13 +1073,17 @@ function ArtifactPreviewTooltip({
             <p className="truncate font-sans text-sm font-medium">
               {artifactName}
             </p>
-            <p className="mt-0.5 font-mono text-[10px] text-muted-foreground">
-              {formatPreviewRange(preview)}
-            </p>
+            {displayPreview ? (
+              <p className="mt-0.5 font-mono text-[10px] text-muted-foreground">
+                {formatPreviewRange(displayPreview)}
+              </p>
+            ) : null}
           </div>
-          <span className="shrink-0 font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
-            {formatPreviewDuration(preview)}
-          </span>
+          {displayPreview ? (
+            <span className="shrink-0 font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
+              {formatPreviewDuration(displayPreview)}
+            </span>
+          ) : null}
         </div>
       </TooltipContent>
     </Tooltip>
@@ -1725,7 +1893,7 @@ Re-query Screenpipe only inside the cited time range and use the cited frames an
                             label: entry.title,
                           });
                         }}
-                        className="font-mono text-xs text-muted-foreground transition-colors hover:text-foreground"
+                        className="self-start justify-self-start font-mono text-xs text-muted-foreground transition-colors hover:text-foreground"
                         aria-label={`Open ${entry.title} in timeline`}
                       >
                         {formatEntryTime(entry)}
@@ -1768,9 +1936,10 @@ Re-query Screenpipe only inside the cited time range and use the cited frames an
                                 const accessibleLabel = `Open ${artifactName} at ${formatEvidenceTime(evidence.at)} in ${destination}`;
                                 return (
                                   <ArtifactPreviewTooltip
-                                    key={`${artifactKey(evidence)}-${evidence.at}-${evidence.frame_id ?? evidence.meeting_id ?? "timeline"}`}
+                                    key={artifactKey(evidence)}
                                     evidence={evidence}
                                     artifactName={artifactName}
+                                    artifactsLoading={loading}
                                   >
                                     <a
                                       href={evidenceHref(evidence)}

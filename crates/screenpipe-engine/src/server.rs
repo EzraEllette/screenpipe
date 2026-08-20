@@ -38,9 +38,9 @@ use crate::{
         },
         elements::{get_frame_elements, search_elements},
         frames::{
-            get_frame_context, get_frame_data, get_frame_metadata, get_frame_preview_samples,
-            get_frame_text_data, get_frame_thumbnail, get_next_valid_frame, run_frame_ocr,
-            FrameThumbnailCache,
+            get_frame_context, get_frame_data, get_frame_metadata, get_frame_preview_media,
+            get_frame_preview_samples, get_frame_text_data, get_frame_thumbnail,
+            get_next_valid_frame, run_frame_ocr, FrameThumbnailCache,
         },
         health::{
             api_list_monitors, api_vision_status, audio_metrics_handler, health_check,
@@ -890,6 +890,10 @@ impl SCServer {
             .post("/tags/:content_type/:id", add_tags)
             .delete("/tags/:content_type/:id", remove_tags)
             .get("/frames/preview-samples", get_frame_preview_samples)
+            .get(
+                "/frames/preview-media/:video_chunk_id",
+                get_frame_preview_media,
+            )
             .get("/frames/:frame_id", get_frame_data)
             .get("/frames/:frame_id/thumbnail", get_frame_thumbnail)
             .get("/frames/:frame_id/text", get_frame_text_data)
