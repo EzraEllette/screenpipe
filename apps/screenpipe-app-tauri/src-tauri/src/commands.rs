@@ -4475,16 +4475,12 @@ pub async fn open_note_path(path: String) -> Result<(), String> {
     }
     #[cfg(target_os = "windows")]
     {
-        use std::os::windows::process::CommandExt;
-        use std::process::Command;
         let obsidian_uri = format!("obsidian://open?path={}", urlencoding::encode(&path));
-        let mut a = Command::new("cmd");
-        a.args(["/C", "start", "", &obsidian_uri]);
-        a.creation_flags(0x08000000); // CREATE_NO_WINDOW
-        let mut b = Command::new("cmd");
-        b.args(["/C", "start", "", &path]);
-        b.creation_flags(0x08000000); // CREATE_NO_WINDOW
-        if a.spawn().is_ok() || b.spawn().is_ok() {
+        if open_windows_shell_target(obsidian_uri).is_ok() {
+            return Ok(());
+        }
+
+        if open_windows_shell_target(path.clone()).is_ok() {
             Ok(())
         } else {
             Err(format!("failed to open note path: {}", path))
@@ -4506,23 +4502,43 @@ pub async fn open_note_path(path: String) -> Result<(), String> {
 pub fn open_windows_shell_target(target: String) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
-        use std::os::windows::process::CommandExt;
-        use std::process::Command;
+        use windows::core::PCWSTR;
+        use windows::Win32::UI::Shell::ShellExecuteW;
+        use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
-        let mut cmd = Command::new("cmd");
-        cmd.args(["/C", "start", "", &target])
-            .creation_flags(0x08000000); // CREATE_NO_WINDOW
+        let target = target.trim().to_string();
+        if target.is_empty() {
+            return Err("failed to open Windows shell target: target is empty".to_string());
+        }
 
-        match cmd.status() {
-            Ok(status) if status.success() => Ok(()),
-            Ok(status) => Err(format!(
-                "failed to open Windows shell target {}: {}",
-                target, status
-            )),
-            Err(e) => Err(format!(
-                "failed to open Windows shell target {}: {}",
-                target, e
-            )),
+        let operation = "open"
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect::<Vec<u16>>();
+        let target_wide = target
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect::<Vec<u16>>();
+
+        let result = unsafe {
+            ShellExecuteW(
+                None,
+                PCWSTR(operation.as_ptr()),
+                PCWSTR(target_wide.as_ptr()),
+                PCWSTR::null(),
+                PCWSTR::null(),
+                SW_SHOWNORMAL,
+            )
+        };
+
+        let result_code = result.0 as isize;
+        if result_code > 32 {
+            Ok(())
+        } else {
+            Err(format!(
+                "failed to open Windows shell target {}: ShellExecuteW returned {}",
+                target, result_code
+            ))
         }
     }
 

@@ -153,6 +153,7 @@ async function findCursorExeOnWindows(): Promise<string | null> {
     const localAppData = await join(home, "AppData", "Local");
     const candidates = [
       await join(localAppData, "Programs", "Cursor", "Cursor.exe"),
+      await join(localAppData, "Programs", "cursor", "Cursor.exe"),
       await join(localAppData, "cursor", "Cursor.exe"),
       await join(localAppData, "Microsoft", "WindowsApps", "Cursor.exe"),
     ];
@@ -1248,7 +1249,11 @@ function CursorPanel({ onConnected, onDisconnected }: { onConnected?: () => void
     try {
       const os = platform();
       if (os === "macos") await Command.create("open", ["-a", "Cursor"]).execute();
-      else if (os === "windows") await openWindowsShellTarget("cursor");
+      else if (os === "windows") {
+        const exe = await findCursorExeOnWindows();
+        if (exe) await openWindowsShellTarget(exe);
+        else await openUrl("https://cursor.com/download");
+      }
       else await openUrl("https://cursor.com");
     } catch { await openUrl("https://cursor.com"); }
   };
@@ -1327,7 +1332,6 @@ function CodexPanel({ onConnected, onDisconnected }: { onConnected?: () => void;
     try {
       const os = platform();
       if (os === "macos") await Command.create("open", ["-a", "Codex"]).execute();
-      else if (os === "windows") await openWindowsShellTarget("Codex");
       else await openUrl("https://chatgpt.com/codex");
     } catch { await openUrl("https://chatgpt.com/codex"); }
   };
