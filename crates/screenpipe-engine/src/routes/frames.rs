@@ -41,6 +41,9 @@ const MIN_THUMBNAIL_WIDTH: u32 = 64;
 const MAX_THUMBNAIL_WIDTH: u32 = 1920;
 const MIN_THUMBNAIL_QUALITY: u8 = 20;
 const MAX_THUMBNAIL_QUALITY: u8 = 95;
+const DEFAULT_PREVIEW_SAMPLE_LIMIT: usize = 6;
+const MAX_PREVIEW_SAMPLE_LIMIT: usize = 8;
+const MAX_PREVIEW_RANGE: Duration = Duration::from_secs(24 * 60 * 60);
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 enum ThumbnailFormat {
@@ -165,6 +168,181 @@ pub struct FrameDataQuery {
     /// such as enterprise export and search can opt out with `fallback=false`.
     #[serde(default = "default_frame_fallback")]
     pub fallback: bool,
+}
+
+#[derive(Debug, Deserialize, OaSchema)]
+pub struct FramePreviewSamplesQuery {
+    #[serde(deserialize_with = "super::time::deserialize_flexible_datetime")]
+    pub start_time: DateTime<Utc>,
+    #[serde(deserialize_with = "super::time::deserialize_flexible_datetime")]
+    pub end_time: DateTime<Utc>,
+    pub app_name: String,
+    pub browser_domain: Option<String>,
+    #[serde(default = "default_preview_sample_limit")]
+    pub limit: usize,
+}
+
+#[derive(Clone, Debug, Serialize, OaSchema, PartialEq, Eq)]
+pub struct FramePreviewSample {
+    pub frame_id: i64,
+    pub timestamp: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, OaSchema)]
+pub struct FramePreviewSamplesResponse {
+    pub frames: Vec<FramePreviewSample>,
+}
+
+fn default_preview_sample_limit() -> usize {
+    DEFAULT_PREVIEW_SAMPLE_LIMIT
+}
+
+fn normalize_browser_domain(value: &str) -> Option<String> {
+    let trimmed = value.trim().trim_end_matches('.');
+    if trimmed.is_empty() || trimmed.len() > 253 || trimmed.contains('/') {
+        return None;
+    }
+    let parsed = url::Url::parse(&format!("https://{trimmed}")).ok()?;
+    if !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.port().is_some()
+        || parsed.path() != "/"
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return None;
+    }
+    parsed
+        .host_str()
+        .map(str::to_lowercase)
+        .map(|host| host.strip_prefix("www.").unwrap_or(&host).to_string())
+        .filter(|host| !host.is_empty())
+}
+
+fn browser_url_matches_domain(value: Option<&str>, domain: &str) -> bool {
+    value
+        .and_then(|value| url::Url::parse(value).ok())
+        .and_then(|url| url.host_str().map(str::to_lowercase))
+        .map(|host| host.strip_prefix("www.").unwrap_or(&host) == domain)
+        .unwrap_or(false)
+}
+
+fn evenly_sample_preview_frames(
+    candidates: Vec<FramePreviewSample>,
+    limit: usize,
+) -> Vec<FramePreviewSample> {
+    if candidates.len() <= limit {
+        return candidates;
+    }
+    if limit == 1 {
+        return candidates.into_iter().take(1).collect();
+    }
+
+    let last = candidates.len() - 1;
+    (0..limit)
+        .map(|index| candidates[index * last / (limit - 1)].clone())
+        .collect()
+}
+
+fn first_preview_frame_per_bucket(candidates: Vec<FramePreviewSample>) -> Vec<FramePreviewSample> {
+    let mut last_bucket = None;
+    candidates
+        .into_iter()
+        .filter(|candidate| {
+            let bucket = candidate.timestamp.timestamp().div_euclid(10);
+            if last_bucket == Some(bucket) {
+                false
+            } else {
+                last_bucket = Some(bucket);
+                true
+            }
+        })
+        .collect()
+}
+
+fn preview_bad_request(message: impl Into<String>) -> (StatusCode, JsonResponse<Value>) {
+    (
+        StatusCode::BAD_REQUEST,
+        JsonResponse(json!({ "error": message.into() })),
+    )
+}
+
+fn validate_frame_preview_query(
+    query: &FramePreviewSamplesQuery,
+) -> Result<(String, Option<String>), String> {
+    if query.start_time >= query.end_time {
+        return Err("start_time must be before end_time".to_string());
+    }
+    let range = query.end_time - query.start_time;
+    if range
+        .to_std()
+        .map_or(true, |range| range > MAX_PREVIEW_RANGE)
+    {
+        return Err("preview sample ranges are limited to 24 hours".to_string());
+    }
+    if !(1..=MAX_PREVIEW_SAMPLE_LIMIT).contains(&query.limit) {
+        return Err(format!(
+            "limit must be between 1 and {MAX_PREVIEW_SAMPLE_LIMIT}"
+        ));
+    }
+    let app_name = query.app_name.trim();
+    if app_name.is_empty() || app_name.len() > 256 {
+        return Err("app_name must be 1 to 256 characters".to_string());
+    }
+    let browser_domain = match query.browser_domain.as_deref() {
+        Some(value) => Some(
+            normalize_browser_domain(value)
+                .ok_or_else(|| "browser_domain must be a valid host".to_string())?,
+        ),
+        None => None,
+    };
+    Ok((app_name.to_string(), browser_domain))
+}
+
+/// Return a bounded set of direct snapshot frame IDs for a short UI preview.
+/// Video-backed frames are intentionally excluded so this route can never
+/// cause FFmpeg extraction when its results are loaded with `fallback=false`.
+#[oasgen]
+pub async fn get_frame_preview_samples(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<FramePreviewSamplesQuery>,
+) -> Result<JsonResponse<FramePreviewSamplesResponse>, (StatusCode, JsonResponse<Value>)> {
+    let (app_name, browser_domain) =
+        validate_frame_preview_query(&query).map_err(preview_bad_request)?;
+
+    let candidates = state
+        .db
+        .get_snapshot_preview_candidates(
+            query.start_time,
+            query.end_time,
+            &app_name,
+            browser_domain.as_deref(),
+        )
+        .await
+        .map_err(|error| {
+            error!(%error, "frame preview sample query failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                JsonResponse(json!({ "error": "frame preview sample query failed" })),
+            )
+        })?;
+    let frames = candidates
+        .into_iter()
+        .filter(|(_, _, browser_url)| {
+            browser_domain
+                .as_deref()
+                .is_none_or(|domain| browser_url_matches_domain(browser_url.as_deref(), domain))
+        })
+        .map(|(frame_id, timestamp, _)| FramePreviewSample {
+            frame_id,
+            timestamp,
+        })
+        .collect();
+    let frames = first_preview_frame_per_bucket(frames);
+
+    Ok(JsonResponse(FramePreviewSamplesResponse {
+        frames: evenly_sample_preview_frames(frames, query.limit),
+    }))
 }
 
 fn default_frame_fallback() -> bool {
@@ -1773,6 +1951,99 @@ mod thumbnail_tests {
             height: 1,
             cached_at: Instant::now(),
         }
+    }
+
+    fn preview_query() -> FramePreviewSamplesQuery {
+        FramePreviewSamplesQuery {
+            start_time: "2026-08-20T10:00:00Z".parse().unwrap(),
+            end_time: "2026-08-20T11:00:00Z".parse().unwrap(),
+            app_name: "Arc".to_string(),
+            browser_domain: Some("www.GitHub.com".to_string()),
+            limit: 6,
+        }
+    }
+
+    #[test]
+    fn preview_sample_query_is_bounded_and_normalizes_domains() {
+        let (app_name, domain) = validate_frame_preview_query(&preview_query()).unwrap();
+        assert_eq!(app_name, "Arc");
+        assert_eq!(domain.as_deref(), Some("github.com"));
+
+        let mut invalid = preview_query();
+        invalid.limit = 9;
+        assert!(validate_frame_preview_query(&invalid)
+            .unwrap_err()
+            .contains("limit"));
+        invalid = preview_query();
+        invalid.end_time = invalid.start_time + chrono::Duration::hours(25);
+        assert!(validate_frame_preview_query(&invalid)
+            .unwrap_err()
+            .contains("24 hours"));
+        invalid = preview_query();
+        invalid.browser_domain = Some("github.com/path".to_string());
+        assert!(validate_frame_preview_query(&invalid)
+            .unwrap_err()
+            .contains("valid host"));
+        invalid = preview_query();
+        invalid.browser_domain = Some("github.com@evil.test".to_string());
+        assert!(validate_frame_preview_query(&invalid)
+            .unwrap_err()
+            .contains("valid host"));
+    }
+
+    #[test]
+    fn preview_domain_matching_is_exact() {
+        assert!(browser_url_matches_domain(
+            Some("https://www.github.com/screenpipe/screenpipe"),
+            "github.com"
+        ));
+        assert!(!browser_url_matches_domain(
+            Some("https://github.com.evil.test/github.com"),
+            "github.com"
+        ));
+        assert!(!browser_url_matches_domain(
+            Some("not a url with github.com"),
+            "github.com"
+        ));
+    }
+
+    #[test]
+    fn preview_sampling_preserves_first_and_last_frames() {
+        let candidates = (0..10)
+            .map(|index| FramePreviewSample {
+                frame_id: index,
+                timestamp: Utc::now() + chrono::Duration::seconds(index),
+            })
+            .collect();
+        let sampled = evenly_sample_preview_frames(candidates, 3);
+        assert_eq!(
+            sampled
+                .into_iter()
+                .map(|frame| frame.frame_id)
+                .collect::<Vec<_>>(),
+            vec![0, 4, 9]
+        );
+    }
+
+    #[test]
+    fn preview_candidates_keep_only_one_frame_per_ten_seconds() {
+        let start = "2026-08-20T10:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let candidates = [0, 5, 10, 19]
+            .into_iter()
+            .enumerate()
+            .map(|(frame_id, seconds)| FramePreviewSample {
+                frame_id: frame_id as i64,
+                timestamp: start + chrono::Duration::seconds(seconds),
+            })
+            .collect();
+
+        assert_eq!(
+            first_preview_frame_per_bucket(candidates)
+                .into_iter()
+                .map(|frame| frame.frame_id)
+                .collect::<Vec<_>>(),
+            vec![0, 2]
+        );
     }
 
     #[test]

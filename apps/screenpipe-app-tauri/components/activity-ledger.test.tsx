@@ -60,12 +60,10 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("@tauri-apps/api/event", () => ({
   emit: mocks.emit,
-  listen: vi.fn(
-    async (event: string, handler: (event: unknown) => void) => {
-      mocks.eventListeners.set(event, handler);
-      return () => mocks.eventListeners.delete(event);
-    },
-  ),
+  listen: vi.fn(async (event: string, handler: (event: unknown) => void) => {
+    mocks.eventListeners.set(event, handler);
+    return () => mocks.eventListeners.delete(event);
+  }),
 }));
 vi.mock("posthog-js", () => ({
   default: { capture: mocks.posthogCapture },
@@ -73,7 +71,10 @@ vi.mock("posthog-js", () => ({
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: mocks.routerPush }),
 }));
-vi.mock("@/lib/api", () => ({ localFetch: mocks.localFetch }));
+vi.mock("@/lib/api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/api")>();
+  return { ...actual, localFetch: mocks.localFetch };
+});
 vi.mock("@/lib/utils/tauri", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/utils/tauri")>();
   return {
@@ -156,6 +157,7 @@ import {
   artifactsForHistoryEntry,
   buildActivityLedgerArtifactsPath,
   buildActivityMeetingsPath,
+  buildFramePreviewSamplesPath,
   buildActivitySummaryPath,
   canAddRecentActivity,
   minimumHistoryEntryCount,
@@ -331,6 +333,19 @@ beforeEach(() => {
       clear: () => values.clear(),
     },
   });
+  Object.defineProperty(window, "matchMedia", {
+    configurable: true,
+    value: vi.fn(() => ({
+      matches: false,
+      media: "(prefers-reduced-motion: reduce)",
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    })),
+  });
   mocks.localFetch.mockImplementation((path: string) =>
     Promise.resolve({
       ok: true,
@@ -367,13 +382,10 @@ beforeEach(() => {
   mocks.getActivityHistory.mockImplementation(
     async (start: string, end: string) => ({
       status: "ok",
-      data: await mocks.loadPersistedActivityHistory(
-        "activity-history-pi-v9",
-        {
-          start: new Date(start),
-          end: new Date(end),
-        },
-      ),
+      data: await mocks.loadPersistedActivityHistory("activity-history-pi-v9", {
+        start: new Date(start),
+        end: new Date(end),
+      }),
     }),
   );
   mocks.generateActivityHistory.mockImplementation(
@@ -585,6 +597,271 @@ describe("activity history helpers", () => {
         [],
       ),
     ).toEqual([]);
+  });
+
+  it("previews the longest separated app run and links to its start", () => {
+    const entry = {
+      id: "review",
+      kind: "work",
+      meeting_id: null,
+      start_at: "2026-08-20T10:00:00Z",
+      end_at: "2026-08-20T11:00:00Z",
+      title: "Reviewed a change",
+      summary: "Reviewed and verified the change.",
+      evidence: [],
+    };
+    const artifacts = artifactsForHistoryEntry(entry, [
+      {
+        start_at: "2026-08-20T10:05:00Z",
+        end_at: "2026-08-20T10:10:00Z",
+        app_name: "Arc",
+        evidence: [
+          {
+            source_type: "frame",
+            source_id: 1,
+            occurred_at: "2026-08-20T10:06:00Z",
+            frame_id: 1,
+            app_name: "Arc",
+            browser_url: "https://github.com/screenpipe/screenpipe",
+          },
+        ],
+      },
+      {
+        start_at: "2026-08-20T10:20:00Z",
+        end_at: "2026-08-20T10:38:00Z",
+        app_name: "Arc",
+        evidence: [
+          {
+            source_type: "frame",
+            source_id: 2,
+            occurred_at: "2026-08-20T10:25:00Z",
+            frame_id: 2,
+            app_name: "Arc",
+            browser_url: "https://github.com/screenpipe/screenpipe/pull/1",
+          },
+        ],
+      },
+    ]);
+
+    const app = artifacts.find((artifact) => artifact.app_name === "Arc");
+    const site = artifacts.find((artifact) => artifact.browser_url);
+    expect(app).toMatchObject({
+      at: "2026-08-20T10:20:00.000Z",
+      frame_id: null,
+      preview: {
+        start_at: "2026-08-20T10:20:00.000Z",
+        end_at: "2026-08-20T10:38:00.000Z",
+        app_name: "Arc",
+      },
+    });
+    expect(site?.preview?.browser_domain).toBe("github.com");
+
+    const previewUrl = new URL(
+      buildFramePreviewSamplesPath(site!.preview!),
+      "http://localhost",
+    );
+    expect(previewUrl.pathname).toBe("/frames/preview-samples");
+    expect(previewUrl.searchParams.get("limit")).toBe("6");
+    expect(previewUrl.searchParams.get("browser_domain")).toBe("github.com");
+  });
+
+  it("does no preview work before hover intent and stops after one pass", async () => {
+    const persisted = parseActivityHistoryResponse(HISTORY_RESPONSE, {
+      start: new Date("2026-08-17T16:00:00Z"),
+      end: new Date("2026-08-17T20:00:00Z"),
+    });
+    mocks.loadPersistedActivityHistory.mockResolvedValue({
+      entries: persisted.entries,
+      coverage: [
+        {
+          start: "2026-08-17T16:00:00Z",
+          end: "2026-08-17T20:00:00Z",
+        },
+      ],
+    });
+    mocks.localFetch.mockImplementation((path: string) =>
+      Promise.resolve({
+        ok: true,
+        status: 200,
+        json: async () => {
+          if (path.startsWith("/frames/preview-samples?")) {
+            return {
+              frames: [
+                { frame_id: 801, timestamp: "2026-08-17T16:00:00Z" },
+                { frame_id: 802, timestamp: "2026-08-17T16:20:00Z" },
+              ],
+            };
+          }
+          if (path.startsWith("/meetings?")) return [];
+          if (path.startsWith("/activity-ledger?")) {
+            return LEDGER_ARTIFACTS_RESPONSE;
+          }
+          return { data_status: "ok", total_active_minutes: 60 };
+        },
+      }),
+    );
+
+    render(<ActivityLedger />);
+    const link = await screen.findByRole("link", {
+      name: /Open Cursor .* in Timeline/,
+    });
+    const previewCalls = () =>
+      mocks.localFetch.mock.calls.filter(([path]) =>
+        String(path).startsWith("/frames/preview-samples?"),
+      );
+
+    fireEvent.pointerMove(link, { pointerType: "mouse" });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(299);
+    });
+    expect(previewCalls()).toHaveLength(0);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    await waitFor(() => expect(previewCalls()).toHaveLength(1));
+    const preview = await screen.findByTestId("activity-artifact-preview");
+    expect(within(preview).getAllByText("20 min")[0]).toBeVisible();
+    expect(preview.querySelector("img")).toHaveAttribute(
+      "src",
+      expect.stringContaining("/frames/801/thumbnail"),
+    );
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(600);
+    });
+    expect(preview.querySelector("img")).toHaveAttribute(
+      "src",
+      expect.stringContaining("/frames/802/thumbnail"),
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_200);
+    });
+    expect(preview.querySelector("img")).toHaveAttribute(
+      "src",
+      expect.stringContaining("/frames/802/thumbnail"),
+    );
+
+    fireEvent.keyDown(document, { key: "Escape" });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(screen.queryByTestId("activity-artifact-preview")).toBeNull();
+    const signal = previewCalls()[0][1]?.signal as AbortSignal;
+    expect(signal.aborted).toBe(true);
+  });
+
+  it("keeps the first preview frame when reduced motion is requested", async () => {
+    const persisted = parseActivityHistoryResponse(HISTORY_RESPONSE, {
+      start: new Date("2026-08-17T16:00:00Z"),
+      end: new Date("2026-08-17T20:00:00Z"),
+    });
+    mocks.loadPersistedActivityHistory.mockResolvedValue({
+      entries: persisted.entries,
+      coverage: [
+        {
+          start: "2026-08-17T16:00:00Z",
+          end: "2026-08-17T20:00:00Z",
+        },
+      ],
+    });
+    vi.mocked(window.matchMedia).mockReturnValue({
+      matches: true,
+    } as MediaQueryList);
+    mocks.localFetch.mockImplementation((path: string) =>
+      Promise.resolve({
+        ok: true,
+        status: 200,
+        json: async () => {
+          if (path.startsWith("/frames/preview-samples?")) {
+            return {
+              frames: [
+                { frame_id: 811, timestamp: "2026-08-17T16:00:00Z" },
+                { frame_id: 812, timestamp: "2026-08-17T16:20:00Z" },
+              ],
+            };
+          }
+          if (path.startsWith("/meetings?")) return [];
+          if (path.startsWith("/activity-ledger?")) {
+            return LEDGER_ARTIFACTS_RESPONSE;
+          }
+          return { data_status: "ok", total_active_minutes: 60 };
+        },
+      }),
+    );
+
+    render(<ActivityLedger />);
+    const link = await screen.findByRole("link", {
+      name: /Open Cursor .* in Timeline/,
+    });
+    fireEvent.pointerMove(link, { pointerType: "mouse" });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300);
+    });
+    const preview = await screen.findByTestId("activity-artifact-preview");
+    await waitFor(() =>
+      expect(preview.querySelector("img")).toHaveAttribute(
+        "src",
+        expect.stringContaining("/frames/811/thumbnail"),
+      ),
+    );
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_800);
+    });
+    expect(preview.querySelector("img")).toHaveAttribute(
+      "src",
+      expect.stringContaining("/frames/811/thumbnail"),
+    );
+  });
+
+  it("shows preview unavailable when the run has no direct snapshots", async () => {
+    const persisted = parseActivityHistoryResponse(HISTORY_RESPONSE, {
+      start: new Date("2026-08-17T16:00:00Z"),
+      end: new Date("2026-08-17T20:00:00Z"),
+    });
+    mocks.loadPersistedActivityHistory.mockResolvedValue({
+      entries: persisted.entries,
+      coverage: [
+        {
+          start: "2026-08-17T16:00:00Z",
+          end: "2026-08-17T20:00:00Z",
+        },
+      ],
+    });
+    mocks.localFetch.mockImplementation((path: string) =>
+      Promise.resolve({
+        ok: true,
+        status: 200,
+        json: async () => {
+          if (path.startsWith("/frames/preview-samples?")) {
+            return {
+              frames: [{ frame_id: 821, timestamp: "2026-08-17T16:00:00Z" }],
+            };
+          }
+          if (path.startsWith("/meetings?")) return [];
+          if (path.startsWith("/activity-ledger?")) {
+            return LEDGER_ARTIFACTS_RESPONSE;
+          }
+          return { data_status: "ok", total_active_minutes: 60 };
+        },
+      }),
+    );
+
+    render(<ActivityLedger />);
+    const link = await screen.findByRole("link", {
+      name: /Open Cursor .* in Timeline/,
+    });
+    fireEvent.pointerMove(link, { pointerType: "mouse" });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300);
+    });
+
+    const preview = await screen.findByTestId("activity-artifact-preview");
+    fireEvent.error(preview.querySelector("img")!);
+    expect(
+      within(preview).getAllByText("preview unavailable")[0],
+    ).toBeVisible();
   });
 
   it("rejects prose logs, clamps episodes, and removes credentials", () => {
@@ -830,9 +1107,9 @@ describe("ActivityLedger", () => {
       }),
     );
     expect(mocks.runDailySummaryWithPi).toHaveBeenCalled();
-    expect(
-      mocks.updateSettings.mock.invocationCallOrder[0],
-    ).toBeLessThan(mocks.runDailySummaryWithPi.mock.invocationCallOrder[0]);
+    expect(mocks.updateSettings.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.runDailySummaryWithPi.mock.invocationCallOrder[0],
+    );
   });
 
   it("enables activities after a failed first generation without overlapping it", async () => {
@@ -845,16 +1122,14 @@ describe("ActivityLedger", () => {
     );
 
     expect(
-      await screen.findByText(
-        "History could not be updated. Try again.",
-      ),
+      await screen.findByText("History could not be updated. Try again."),
     ).toBeVisible();
     expect(mocks.updateSettings).toHaveBeenCalledWith({
       activitiesEnabled: true,
     });
-    expect(
-      mocks.updateSettings.mock.invocationCallOrder[0],
-    ).toBeLessThan(mocks.runDailySummaryWithPi.mock.invocationCallOrder[0]);
+    expect(mocks.updateSettings.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.runDailySummaryWithPi.mock.invocationCallOrder[0],
+    );
   });
 
   it("waits for the encrypted cache lookup before offering generation", async () => {
@@ -960,9 +1235,7 @@ describe("ActivityLedger", () => {
     expect(
       screen.getByRole("button", { name: "Choose custom date range" }),
     ).toHaveAttribute("aria-expanded", "true");
-    fireEvent.click(
-      screen.getByRole("gridcell", { name: "16", exact: true }),
-    );
+    fireEvent.click(screen.getByRole("gridcell", { name: "16", exact: true }));
     await waitFor(() =>
       expect(
         screen.getByRole("button", { name: "Choose custom date range" }),
@@ -1015,9 +1288,7 @@ describe("ActivityLedger", () => {
       expect(mocks.runDailySummaryWithPi).toHaveBeenCalledWith(
         expect.objectContaining({
           range: expect.objectContaining({
-            end: expect.stringMatching(
-              /^2026-08-17T20:00:30\.\d{3}Z$/,
-            ),
+            end: expect.stringMatching(/^2026-08-17T20:00:30\.\d{3}Z$/),
           }),
         }),
       ),
@@ -1053,7 +1324,8 @@ describe("ActivityLedger", () => {
           range.end.getTime() - 11 * 60_000,
         ).toISOString();
         return {
-          entries: parseActivityHistoryResponse(HISTORY_RESPONSE, range).entries,
+          entries: parseActivityHistoryResponse(HISTORY_RESPONSE, range)
+            .entries,
           coverage: [
             {
               start: range.start.toISOString(),
@@ -1204,7 +1476,9 @@ describe("ActivityLedger", () => {
         data: { entries: [], coverage: [] },
       });
     });
-    await waitFor(() => expect(mocks.generateActivityHistory).toHaveBeenCalledOnce());
+    await waitFor(() =>
+      expect(mocks.generateActivityHistory).toHaveBeenCalledOnce(),
+    );
   });
 
   it("tracks page reach and the activity generation funnel", async () => {
@@ -1264,9 +1538,10 @@ describe("ActivityLedger", () => {
       data: { entries: []; coverage: [] };
     }) => void;
     mocks.generateActivityHistory.mockImplementation(
-      () => new Promise((resolve) => {
-        resolveHistory = resolve;
-      }),
+      () =>
+        new Promise((resolve) => {
+          resolveHistory = resolve;
+        }),
     );
 
     const view = render(<ActivityLedger />);
@@ -1403,7 +1678,6 @@ describe("ActivityLedger", () => {
   });
 
   it("renders the valid document returned by the backend", async () => {
-
     render(<ActivityLedger />);
     await generateActivities();
 
@@ -1432,7 +1706,7 @@ describe("ActivityLedger", () => {
     ).toBeVisible();
   });
 
-  it("opens app and transcript artifacts at their exact timeline moments", async () => {
+  it("opens app runs at their start and transcripts at their exact moments", async () => {
     render(<ActivityLedger />);
     await generateActivities();
     await screen.findByText("Fixed a capture reliability regression");
@@ -1446,7 +1720,10 @@ describe("ActivityLedger", () => {
     const siteArtifact = screen.getByRole("link", {
       name: /Open github.com at .* in Timeline/,
     });
-    expect(appArtifact).toHaveAttribute("href", "screenpipe://frame/12345");
+    expect(appArtifact).toHaveAttribute(
+      "href",
+      "screenpipe://timeline?timestamp=2026-08-17T16%3A20%3A00.000Z",
+    );
     await waitFor(() =>
       expect(appArtifact.querySelector("img")).toHaveAttribute(
         "src",
@@ -1457,7 +1734,10 @@ describe("ActivityLedger", () => {
       "href",
       "screenpipe://timeline?timestamp=2026-08-17T16%3A50%3A00.000Z",
     );
-    expect(siteArtifact).toHaveAttribute("href", "screenpipe://frame/12345");
+    expect(siteArtifact).toHaveAttribute(
+      "href",
+      "screenpipe://timeline?timestamp=2026-08-17T16%3A20%3A00.000Z",
+    );
     expect(siteArtifact.querySelector("img")).toHaveAttribute(
       "src",
       "https://www.google.com/s2/favicons?domain=github.com&sz=32",
@@ -1468,12 +1748,15 @@ describe("ActivityLedger", () => {
 
     fireEvent.click(appArtifact);
     expect(mocks.setPendingNavigation).toHaveBeenCalledWith({
-      timestamp: "2026-08-17T16:35:00.000Z",
-      frameId: "12345",
+      timestamp: "2026-08-17T16:20:00.000Z",
+      frameId: undefined,
     });
     expect(mocks.routerPush).toHaveBeenCalledWith("/home?section=timeline");
     await waitFor(() =>
-      expect(mocks.emit).toHaveBeenCalledWith("navigate-to-frame", "12345"),
+      expect(mocks.emit).toHaveBeenCalledWith(
+        "navigate-to-timestamp",
+        "2026-08-17T16:20:00.000Z",
+      ),
     );
     expect(mocks.posthogCapture).toHaveBeenCalledWith(
       "activity_evidence_opened",
@@ -1608,9 +1891,7 @@ describe("ActivityLedger", () => {
         }),
       ),
     );
-    expect(mocks.posthogCapture).toHaveBeenCalledWith(
-      "activity_skill_clicked",
-    );
+    expect(mocks.posthogCapture).toHaveBeenCalledWith("activity_skill_clicked");
   });
 
   it("can ask about every activity interval in chat", async () => {
@@ -1634,8 +1915,6 @@ describe("ActivityLedger", () => {
         }),
       ),
     );
-    expect(mocks.posthogCapture).toHaveBeenCalledWith(
-      "activity_chat_clicked",
-    );
+    expect(mocks.posthogCapture).toHaveBeenCalledWith("activity_chat_clicked");
   });
 });

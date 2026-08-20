@@ -1554,6 +1554,90 @@ impl DatabaseManager {
         Ok(ids)
     }
 
+    /// Return direct snapshot candidates reduced into ten-second buckets for
+    /// an app period. Domain-filtered queries retain one candidate per URL so
+    /// exact host validation cannot discard another URL from the same bucket;
+    /// the HTTP layer then collapses each bucket and evenly samples the result.
+    /// This query can never select a video-backed frame.
+    pub async fn get_snapshot_preview_candidates(
+        &self,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+        app_name: &str,
+        browser_domain: Option<&str>,
+    ) -> Result<Vec<(i64, DateTime<Utc>, Option<String>)>, SqlxError> {
+        let mut connection = self.acquire_search_read().await?;
+        let rows = if let Some(domain) = browser_domain {
+            sqlx::query_as::<_, (i64, DateTime<Utc>, Option<String>)>(
+                r#"
+                WITH bucketed AS (
+                    SELECT
+                        id,
+                        timestamp,
+                        browser_url,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY
+                                CAST(unixepoch(timestamp) / 10 AS INTEGER),
+                                COALESCE(browser_url, '')
+                            ORDER BY timestamp, id
+                        ) AS bucket_rank
+                    FROM frames
+                    WHERE app_name = ?1
+                      AND timestamp >= ?2
+                      AND timestamp <= ?3
+                      AND focused = 1
+                      AND snapshot_path IS NOT NULL
+                      AND snapshot_path != ''
+                      AND instr(lower(COALESCE(browser_url, '')), lower(?4)) > 0
+                )
+                SELECT id, timestamp, browser_url
+                FROM bucketed
+                WHERE bucket_rank = 1
+                ORDER BY timestamp, id
+                "#,
+            )
+            .bind(app_name)
+            .bind(start)
+            .bind(end)
+            .bind(domain)
+            .fetch_all(&mut *connection)
+            .await?
+        } else {
+            sqlx::query_as::<_, (i64, DateTime<Utc>, Option<String>)>(
+                r#"
+                WITH bucketed AS (
+                    SELECT
+                        id,
+                        timestamp,
+                        browser_url,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY CAST(unixepoch(timestamp) / 10 AS INTEGER)
+                            ORDER BY timestamp, id
+                        ) AS bucket_rank
+                    FROM frames
+                    WHERE app_name = ?1
+                      AND timestamp >= ?2
+                      AND timestamp <= ?3
+                      AND focused = 1
+                      AND snapshot_path IS NOT NULL
+                      AND snapshot_path != ''
+                )
+                SELECT id, timestamp, browser_url
+                FROM bucketed
+                WHERE bucket_rank = 1
+                ORDER BY timestamp, id
+                "#,
+            )
+            .bind(app_name)
+            .bind(start)
+            .bind(end)
+            .fetch_all(&mut *connection)
+            .await?
+        };
+        drop(connection);
+        Ok(rows)
+    }
+
     /// Get all frames within a time range for meeting/video export.
     ///
     /// Returns `(frame_id, file_path, offset_index, timestamp, is_snapshot)` ordered by

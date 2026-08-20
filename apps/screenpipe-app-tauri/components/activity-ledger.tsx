@@ -31,6 +31,12 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { Skeleton } from "@/components/ui/skeleton";
 import { faviconUrl } from "@/components/settings/capture-filters/icon-urls";
 import { AIPresetsSelector } from "@/components/rewind/ai-presets-selector";
@@ -52,6 +58,7 @@ import {
   type ActivityHistoryCoverage,
 } from "@/lib/activity-history-persistence";
 import { localFetch } from "@/lib/api";
+import { getFramePreviewThumbnailUrl } from "@/lib/frame-thumbnails";
 import { presentQuotaError } from "@/lib/chat/quota-errors";
 import { showChatWithPrefill } from "@/lib/chat-utils";
 import { useSettings } from "@/lib/hooks/use-settings";
@@ -122,9 +129,28 @@ function noActivityMessage(dataStatus: string): string {
 
 type ActivityArtifact = ActivityHistoryEvidence & {
   browser_url?: string | null;
+  preview?: ActivityArtifactPreview;
+};
+
+type ActivityArtifactPreview = {
+  start_at: string;
+  end_at: string;
+  app_name: string;
+  browser_domain?: string;
+};
+
+type FramePreviewSample = {
+  frame_id: number;
+  timestamp: string;
+};
+
+type FramePreviewSamplesResponse = {
+  frames?: FramePreviewSample[];
 };
 
 const MAX_VISIBLE_ARTIFACTS = 6;
+const MAX_PREVIEW_FRAMES = 6;
+const PREVIEW_FRAME_INTERVAL_MS = 600;
 const ACTIVITY_HISTORY_REFRESH_INTERVAL_MS = 10 * 60_000;
 const ACTIVITY_RANGE_STORAGE_KEY = "screenpipe:activity-history:range";
 const ACTIVITY_CUSTOM_START_STORAGE_KEY =
@@ -438,7 +464,7 @@ export function artifactsForHistoryEntry(
   const entryEnd = new Date(entry.end_at).getTime();
   const ranked = new Map<
     string,
-    { artifact: ActivityArtifact; activeMs: number }
+    { artifact: ActivityArtifact; activeMs: number; longestRunMs: number }
   >();
 
   for (const interval of intervals) {
@@ -455,39 +481,54 @@ export function artifactsForHistoryEntry(
 
     const overlapMs =
       Math.min(entryEnd, intervalEnd) - Math.max(entryStart, intervalStart);
+    const previewStart = Math.max(entryStart, intervalStart);
+    const previewEnd = Math.min(entryEnd, intervalEnd);
+    const intervalApp = usefulAppName(interval.app_name);
     const intervalArtifacts = new Map<string, ActivityArtifact>();
     for (const evidence of interval.evidence ?? []) {
       const at = new Date(evidence.occurred_at).getTime();
       if (!Number.isFinite(at) || at < entryStart || at > entryEnd) continue;
       const app = usefulAppName(evidence.app_name);
+      const previewApp = app ?? intervalApp;
       const domain = siteDomain(evidence.browser_url);
-      const frameId =
-        evidence.frame_id ??
-        (evidence.source_type === "frame" ? evidence.source_id : null);
       const common = {
         kind: "screen" as const,
-        at: new Date(at).toISOString(),
-        frame_id: frameId,
+        at: new Date(previewStart).toISOString(),
+        frame_id: null,
         meeting_id: null,
         label:
           evidence.window_title?.trim() || app || domain || "Screen capture",
       };
       if (app) {
-        const artifact = { ...common, app_name: app, browser_url: null };
+        const artifact = {
+          ...common,
+          app_name: app,
+          browser_url: null,
+          preview: {
+            start_at: new Date(previewStart).toISOString(),
+            end_at: new Date(previewEnd).toISOString(),
+            app_name: app,
+          },
+        };
         intervalArtifacts.set(artifactKey(artifact), artifact);
       }
-      if (domain) {
+      if (domain && previewApp) {
         const artifact = {
           ...common,
           app_name: null,
           browser_url: evidence.browser_url,
           label: domain,
+          preview: {
+            start_at: new Date(previewStart).toISOString(),
+            end_at: new Date(previewEnd).toISOString(),
+            app_name: previewApp,
+            browser_domain: domain,
+          },
         };
         intervalArtifacts.set(artifactKey(artifact), artifact);
       }
     }
 
-    const intervalApp = usefulAppName(interval.app_name);
     if (intervalArtifacts.size === 0 && intervalApp) {
       const artifact = {
         kind: "screen",
@@ -497,18 +538,27 @@ export function artifactsForHistoryEntry(
         app_name: intervalApp,
         label: intervalApp,
         browser_url: null,
+        preview: {
+          start_at: new Date(previewStart).toISOString(),
+          end_at: new Date(previewEnd).toISOString(),
+          app_name: intervalApp,
+        },
       } satisfies ActivityArtifact;
       intervalArtifacts.set(artifactKey(artifact), artifact);
     }
 
     for (const [key, artifact] of intervalArtifacts) {
       const existing = ranked.get(key);
+      const shouldUseRun =
+        !existing ||
+        overlapMs > existing.longestRunMs ||
+        (overlapMs === existing.longestRunMs &&
+          new Date(artifact.at).getTime() <
+            new Date(existing.artifact.at).getTime());
       ranked.set(key, {
-        artifact:
-          existing?.artifact.frame_id && !artifact.frame_id
-            ? existing.artifact
-            : artifact,
+        artifact: shouldUseRun ? artifact : existing.artifact,
         activeMs: (existing?.activeMs ?? 0) + overlapMs,
+        longestRunMs: Math.max(existing?.longestRunMs ?? 0, overlapMs),
       });
     }
   }
@@ -678,6 +728,200 @@ function EvidenceArtifactIcon({ evidence }: { evidence: ActivityArtifact }) {
   return <AppWindow className="h-4 w-4" aria-hidden="true" />;
 }
 
+export function buildFramePreviewSamplesPath(
+  preview: ActivityArtifactPreview,
+): string {
+  const params = new URLSearchParams({
+    start_time: preview.start_at,
+    end_time: preview.end_at,
+    app_name: preview.app_name,
+    limit: String(MAX_PREVIEW_FRAMES),
+  });
+  if (preview.browser_domain) {
+    params.set("browser_domain", preview.browser_domain);
+  }
+  return `/frames/preview-samples?${params.toString()}`;
+}
+
+function formatPreviewDuration(preview: ActivityArtifactPreview): string {
+  const durationMs =
+    new Date(preview.end_at).getTime() - new Date(preview.start_at).getTime();
+  if (durationMs < 60_000) return "<1 min";
+  const minutes = Math.max(1, Math.round(durationMs / 60_000));
+  if (minutes < 60) return `${minutes} min`;
+  const hours = Math.floor(minutes / 60);
+  const remainder = minutes % 60;
+  return remainder ? `${hours}h ${remainder}m` : `${hours}h`;
+}
+
+function formatPreviewRange(preview: ActivityArtifactPreview): string {
+  const formatter = new Intl.DateTimeFormat(undefined, {
+    hour: "numeric",
+    minute: "2-digit",
+  });
+  return `${formatter.format(new Date(preview.start_at))}–${formatter.format(
+    new Date(preview.end_at),
+  )}`;
+}
+
+function ArtifactPreviewTooltip({
+  evidence,
+  artifactName,
+  children,
+}: {
+  evidence: ActivityArtifact;
+  artifactName: string;
+  children: React.ReactElement;
+}) {
+  const preview = evidence.preview;
+  const [open, setOpen] = useState(false);
+  const [status, setStatus] = useState<
+    "idle" | "loading" | "ready" | "unavailable"
+  >("idle");
+  const [frames, setFrames] = useState<FramePreviewSample[]>([]);
+  const [frameIndex, setFrameIndex] = useState(0);
+  const [reduceMotion, setReduceMotion] = useState(false);
+  const currentFrame = frames[frameIndex];
+
+  const handleOpenChange = (nextOpen: boolean) => {
+    setOpen(nextOpen);
+    setFrames([]);
+    setFrameIndex(0);
+    setStatus(nextOpen ? "loading" : "idle");
+    if (nextOpen) {
+      setReduceMotion(
+        window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ??
+          false,
+      );
+    }
+  };
+
+  useEffect(() => {
+    if (!open || !preview) return;
+
+    const controller = new AbortController();
+    void localFetch(buildFramePreviewSamplesPath(preview), {
+      signal: controller.signal,
+    })
+      .then(async (response) => {
+        if (!response.ok)
+          throw new Error(`preview failed (${response.status})`);
+        return (await response.json()) as FramePreviewSamplesResponse;
+      })
+      .then((payload) => {
+        if (controller.signal.aborted) return;
+        const nextFrames = (payload.frames ?? [])
+          .filter(
+            (frame) =>
+              Number.isSafeInteger(frame.frame_id) &&
+              frame.frame_id > 0 &&
+              Number.isFinite(new Date(frame.timestamp).getTime()),
+          )
+          .slice(0, MAX_PREVIEW_FRAMES);
+        setFrames(nextFrames);
+        setStatus(nextFrames.length > 0 ? "ready" : "unavailable");
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) setStatus("unavailable");
+      });
+
+    return () => controller.abort();
+  }, [
+    open,
+    preview?.app_name,
+    preview?.browser_domain,
+    preview?.end_at,
+    preview?.start_at,
+  ]);
+
+  useEffect(() => {
+    if (
+      !open ||
+      status !== "ready" ||
+      reduceMotion ||
+      frameIndex >= frames.length - 1
+    ) {
+      return;
+    }
+    const timeout = window.setTimeout(
+      () => setFrameIndex((index) => Math.min(index + 1, frames.length - 1)),
+      PREVIEW_FRAME_INTERVAL_MS,
+    );
+    return () => window.clearTimeout(timeout);
+  }, [frameIndex, frames.length, open, reduceMotion, status]);
+
+  useEffect(() => {
+    if (!open || status !== "ready" || reduceMotion) return;
+    const nextFrame = frames[frameIndex + 1];
+    if (!nextFrame) return;
+    const image = new window.Image();
+    image.decoding = "async";
+    image.src = getFramePreviewThumbnailUrl(nextFrame.frame_id);
+    return () => {
+      image.src = "";
+    };
+  }, [frameIndex, frames, open, reduceMotion, status]);
+
+  if (!preview) return children;
+
+  const removeUnavailableFrame = (frameId: number) => {
+    const nextFrames = frames.filter((frame) => frame.frame_id !== frameId);
+    setFrames(nextFrames);
+    setFrameIndex((index) =>
+      Math.min(index, Math.max(0, nextFrames.length - 1)),
+    );
+    if (nextFrames.length === 0) setStatus("unavailable");
+  };
+
+  return (
+    <Tooltip delayDuration={300} open={open} onOpenChange={handleOpenChange}>
+      <TooltipTrigger asChild>{children}</TooltipTrigger>
+      <TooltipContent
+        side="top"
+        collisionPadding={16}
+        className="w-80 rounded-none border-border bg-popover p-0 shadow-lg shadow-black/10"
+        data-testid="activity-artifact-preview"
+      >
+        <div className="relative aspect-video w-full overflow-hidden border-b border-border bg-muted">
+          {status === "ready" && currentFrame ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              key={currentFrame.frame_id}
+              src={getFramePreviewThumbnailUrl(currentFrame.frame_id)}
+              alt=""
+              aria-hidden="true"
+              className="h-full w-full select-none object-cover"
+              decoding="async"
+              draggable={false}
+              data-lm-disable="true"
+              onError={() => removeUnavailableFrame(currentFrame.frame_id)}
+            />
+          ) : status === "unavailable" ? (
+            <div className="flex h-full items-center justify-center font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
+              preview unavailable
+            </div>
+          ) : (
+            <Skeleton className="h-full w-full rounded-none" />
+          )}
+        </div>
+        <div className="flex items-start justify-between gap-4 px-3 py-2.5">
+          <div className="min-w-0">
+            <p className="truncate font-sans text-sm font-medium">
+              {artifactName}
+            </p>
+            <p className="mt-0.5 font-mono text-[10px] text-muted-foreground">
+              {formatPreviewRange(preview)}
+            </p>
+          </div>
+          <span className="shrink-0 font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
+            {formatPreviewDuration(preview)}
+          </span>
+        </div>
+      </TooltipContent>
+    </Tooltip>
+  );
+}
+
 function localDayKey(value: string): string {
   const date = new Date(value);
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(
@@ -801,9 +1045,9 @@ export function ActivityLedger({
       toLocalInputValue(initialNow),
     ),
   );
-  const [customDateRange, setCustomDateRange] = useState<
-    DateRange | undefined
-  >(() => selectedDateRange(customStart, customEnd));
+  const [customDateRange, setCustomDateRange] = useState<DateRange | undefined>(
+    () => selectedDateRange(customStart, customEnd),
+  );
   const [customCalendarOpen, setCustomCalendarOpen] = useState(false);
   const [summary, setSummary] = useState<ActivitySummaryResponse | null>(null);
   const [meetings, setMeetings] = useState<ActivityReviewMeeting[]>([]);
@@ -867,12 +1111,7 @@ export function ActivityLedger({
   );
   const recentRange = useMemo(
     () => rangeForPreset(preset, new Date(), customStart, customEnd),
-    [
-      customEnd,
-      customStart,
-      preset,
-      recentEligibilityTick,
-    ],
+    [customEnd, customStart, preset, recentEligibilityTick],
   );
   const recentActivityAvailable = Boolean(
     recentRange && canAddRecentActivity(recentRange, historyCoverage),
@@ -884,7 +1123,8 @@ export function ActivityLedger({
       !recentRange ||
       recentActivityAvailable ||
       !cacheReady
-    ) return;
+    )
+      return;
     const delay = recentActivityUnlockDelay(recentRange, historyCoverage);
     if (delay === null) return;
     const timeout = window.setTimeout(
@@ -1065,81 +1305,84 @@ export function ActivityLedger({
     }).catch(() => {
       legacyActivitiesActivationStartedRef.current = false;
     });
-  }, [
-    cacheReady,
-    legacyActivitiesEnabled,
-    updateSettings,
-  ]);
+  }, [cacheReady, legacyActivitiesEnabled, updateSettings]);
 
-  const generateHistory = useCallback(async (
-    generationRange: TimeRange,
-    source: GenerationSource,
-    viewRange: TimeRange = range!,
-  ) => {
-    if (!range || historyLoadingRef.current) return;
-    posthog.capture("activity_generation_started", {
-      range: preset,
-      source,
-    });
-    historyAbortRef.current?.abort();
-    const controller = new AbortController();
-    historyAbortRef.current = controller;
-    historyLoadingRef.current = true;
-    setHistoryLoading(true);
-    setHistoryError("");
-    try {
-      const result = await commands.generateActivityHistory(
-        generationRange.start.toISOString(),
-        generationRange.end.toISOString(),
-      );
-      if (result.status === "error") throw new Error(result.error);
-      const persisted = result.data;
-      if (controller.signal.aborted) return;
-      setHistory(historyDocumentFromNative(persisted.entries));
-      setHistoryCoverage(persisted.coverage);
-      posthog.capture("activity_generation_completed", {
+  const generateHistory = useCallback(
+    async (
+      generationRange: TimeRange,
+      source: GenerationSource,
+      viewRange: TimeRange = range!,
+    ) => {
+      if (!range || historyLoadingRef.current) return;
+      posthog.capture("activity_generation_started", {
         range: preset,
         source,
-        outcome: "generated",
-        activity_count: persisted.entries.length,
       });
-    } catch (reason) {
-      if (controller.signal.aborted) return;
-      const rawError = reason instanceof Error ? reason.message : String(reason);
-      const noDataStatus = rawError.match(/activity_no_data:([a-z_]+)/)?.[1];
-      const quota = presentQuotaError(rawError);
-      setHistoryError(
-        noDataStatus
-          ? noActivityMessage(noDataStatus)
-          : rawError.toLowerCase().includes("hosted_ai_allowance_exceeded")
-            ? "This AI preset has no usage left. Choose a different AI preset, then try again."
-            : quota.kind !== "none"
-              ? quota.message
-              : "History could not be updated. Try again.",
-      );
-      posthog.capture("activity_generation_failed", {
-        range: preset,
-        source,
-        error_kind: quota.kind,
-      });
-    } finally {
-      if (historyAbortRef.current === controller) {
-        historyLoadingRef.current = false;
-        setHistoryLoading(false);
+      historyAbortRef.current?.abort();
+      const controller = new AbortController();
+      historyAbortRef.current = controller;
+      historyLoadingRef.current = true;
+      setHistoryLoading(true);
+      setHistoryError("");
+      try {
+        const result = await commands.generateActivityHistory(
+          generationRange.start.toISOString(),
+          generationRange.end.toISOString(),
+        );
+        if (result.status === "error") throw new Error(result.error);
+        const persisted = result.data;
+        if (controller.signal.aborted) return;
+        setHistory(historyDocumentFromNative(persisted.entries));
+        setHistoryCoverage(persisted.coverage);
+        posthog.capture("activity_generation_completed", {
+          range: preset,
+          source,
+          outcome: "generated",
+          activity_count: persisted.entries.length,
+        });
+      } catch (reason) {
+        if (controller.signal.aborted) return;
+        const rawError =
+          reason instanceof Error ? reason.message : String(reason);
+        const noDataStatus = rawError.match(/activity_no_data:([a-z_]+)/)?.[1];
+        const quota = presentQuotaError(rawError);
+        setHistoryError(
+          noDataStatus
+            ? noActivityMessage(noDataStatus)
+            : rawError.toLowerCase().includes("hosted_ai_allowance_exceeded")
+              ? "This AI preset has no usage left. Choose a different AI preset, then try again."
+              : quota.kind !== "none"
+                ? quota.message
+                : "History could not be updated. Try again.",
+        );
+        posthog.capture("activity_generation_failed", {
+          range: preset,
+          source,
+          error_kind: quota.kind,
+        });
+      } finally {
+        if (historyAbortRef.current === controller) {
+          historyLoadingRef.current = false;
+          setHistoryLoading(false);
+        }
       }
-    }
-  }, [preset, range]);
+    },
+    [preset, range],
+  );
 
-  const regenerateSelectedRange = useCallback((source: GenerationSource) => {
-    const clickedRange = rangeForPreset(
-      preset,
-      new Date(),
-      customStart,
-      customEnd,
-    );
-    if (!clickedRange) return;
-    void generateHistory(clickedRange, source, clickedRange);
-  }, [customEnd, customStart, generateHistory, preset]);
+  const regenerateSelectedRange = useCallback(
+    (source: GenerationSource) => {
+      const clickedRange = rangeForPreset(
+        preset,
+        new Date(),
+        customStart,
+        customEnd,
+      );
+      if (!clickedRange) return;
+      void generateHistory(clickedRange, source, clickedRange);
+    },
+    [customEnd, customStart, generateHistory, preset],
+  );
 
   const enableActivities = useCallback(async () => {
     const clickedRange = rangeForPreset(
@@ -1154,19 +1397,11 @@ export function ActivityLedger({
         activitiesEnabled: true,
       });
     } catch {
-      setHistoryError(
-        "Automatic activities could not be enabled. Try again.",
-      );
+      setHistoryError("Automatic activities could not be enabled. Try again.");
       return;
     }
     await generateHistory(clickedRange, "enable", clickedRange);
-  }, [
-    customEnd,
-    customStart,
-    generateHistory,
-    preset,
-    updateSettings,
-  ]);
+  }, [customEnd, customStart, generateHistory, preset, updateSettings]);
 
   const addRecentActivity = useCallback(() => {
     const clickedRange = rangeForPreset(
@@ -1425,8 +1660,8 @@ Re-query Screenpipe only inside the cited time range and use the cited frames an
               role="status"
               className="mb-6 border-b border-border pb-4 text-sm text-muted-foreground"
             >
-              You can leave this page. We’ll notify you when your activities
-              are ready.
+              You can leave this page. We’ll notify you when your activities are
+              ready.
             </p>
           ) : null}
           {invalidRange ? (
@@ -1505,45 +1740,61 @@ Re-query Screenpipe only inside the cited time range and use the cited frames an
                         </p>
 
                         <div className="mt-4 flex items-center gap-3">
-                          <div
-                            className="flex items-center gap-1.5"
-                            aria-label={`Source artifacts for ${entry.title}`}
+                          <TooltipProvider
+                            delayDuration={300}
+                            skipDelayDuration={300}
                           >
-                            {artifactsForHistoryEntry(
-                              entry,
-                              ledgerIntervals,
-                            ).map((evidence) => {
-                              const artifactName =
-                                evidence.kind === "meeting"
-                                  ? "Meeting"
-                                  : siteDomain(evidence.browser_url) ||
-                                    evidence.app_name ||
-                                    (evidence.kind === "audio"
-                                      ? "Transcript"
-                                      : "Screen capture");
-                              const destination =
-                                evidence.kind === "meeting" &&
-                                evidence.meeting_id
-                                  ? "Meetings"
-                                  : "Timeline";
-                              const accessibleLabel = `Open ${artifactName} at ${formatEvidenceTime(evidence.at)} in ${destination}`;
-                              return (
-                                <a
-                                  key={`${artifactKey(evidence)}-${evidence.at}-${evidence.frame_id ?? evidence.meeting_id ?? "timeline"}`}
-                                  href={evidenceHref(evidence)}
-                                  onClick={(event) => {
-                                    event.preventDefault();
-                                    openEvidence(evidence);
-                                  }}
-                                  className="flex h-7 w-7 items-center justify-center rounded-md border border-border bg-background p-1 text-muted-foreground shadow-sm transition hover:border-foreground/40 hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                                  aria-label={accessibleLabel}
-                                  title={accessibleLabel}
-                                >
-                                  <EvidenceArtifactIcon evidence={evidence} />
-                                </a>
-                              );
-                            })}
-                          </div>
+                            <div
+                              className="flex items-center gap-1.5"
+                              aria-label={`Source artifacts for ${entry.title}`}
+                            >
+                              {artifactsForHistoryEntry(
+                                entry,
+                                ledgerIntervals,
+                              ).map((evidence) => {
+                                const artifactName =
+                                  evidence.kind === "meeting"
+                                    ? "Meeting"
+                                    : siteDomain(evidence.browser_url) ||
+                                      evidence.app_name ||
+                                      (evidence.kind === "audio"
+                                        ? "Transcript"
+                                        : "Screen capture");
+                                const destination =
+                                  evidence.kind === "meeting" &&
+                                  evidence.meeting_id
+                                    ? "Meetings"
+                                    : "Timeline";
+                                const accessibleLabel = `Open ${artifactName} at ${formatEvidenceTime(evidence.at)} in ${destination}`;
+                                return (
+                                  <ArtifactPreviewTooltip
+                                    key={`${artifactKey(evidence)}-${evidence.at}-${evidence.frame_id ?? evidence.meeting_id ?? "timeline"}`}
+                                    evidence={evidence}
+                                    artifactName={artifactName}
+                                  >
+                                    <a
+                                      href={evidenceHref(evidence)}
+                                      onClick={(event) => {
+                                        event.preventDefault();
+                                        openEvidence(evidence);
+                                      }}
+                                      className="flex h-7 w-7 items-center justify-center rounded-md border border-border bg-background p-1 text-muted-foreground shadow-sm transition hover:border-foreground/40 hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                                      aria-label={accessibleLabel}
+                                      title={
+                                        evidence.preview
+                                          ? undefined
+                                          : accessibleLabel
+                                      }
+                                    >
+                                      <EvidenceArtifactIcon
+                                        evidence={evidence}
+                                      />
+                                    </a>
+                                  </ArtifactPreviewTooltip>
+                                );
+                              })}
+                            </div>
+                          </TooltipProvider>
                           <span aria-hidden="true">·</span>
                           <button
                             type="button"

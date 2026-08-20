@@ -5,7 +5,10 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { configureApi } from "@/lib/api";
 import {
+  FRAME_PREVIEW_THUMBNAIL_QUALITY,
+  FRAME_PREVIEW_THUMBNAIL_WIDTH,
   FRAME_THUMBNAIL_QUALITY,
+  getFramePreviewThumbnailUrl,
   getFrameThumbnailSources,
 } from "@/lib/frame-thumbnails";
 
@@ -43,5 +46,14 @@ describe("getFrameThumbnailSources", () => {
 
     expect(sources.src).toContain("fallback=false");
     expect(sources.srcSet.match(/fallback=false/g)).toHaveLength(2);
+  });
+
+  it("builds one small exact thumbnail URL for activity previews", () => {
+    const url = getFramePreviewThumbnailUrl(42);
+
+    expect(url).toBe(
+      `http://localhost:3030/frames/42/thumbnail?width=${FRAME_PREVIEW_THUMBNAIL_WIDTH}&quality=${FRAME_PREVIEW_THUMBNAIL_QUALITY}&fallback=false`,
+    );
+    expect(url).not.toContain("768");
   });
 });

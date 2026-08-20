@@ -431,6 +431,84 @@ export function createBrowserIpcMock(options: BrowserIpcMockOptions) {
     return store;
   };
 
+  const mockActivityHistory = (startValue: unknown, endValue: unknown) => {
+    const start = new Date(String(startValue));
+    const requestedEnd = new Date(String(endValue));
+    const end = Number.isFinite(requestedEnd.getTime())
+      ? requestedEnd
+      : new Date();
+    const at = (minutesAgo: number) =>
+      new Date(end.getTime() - minutesAgo * 60_000).toISOString();
+    const entry = (
+      id: string,
+      title: string,
+      summary: string,
+      appName: string,
+      startMinutesAgo: number,
+      endMinutesAgo: number,
+    ) => ({
+      id,
+      kind: "work",
+      meeting_id: null,
+      start_at: at(startMinutesAgo),
+      end_at: at(endMinutesAgo),
+      title,
+      summary,
+      evidence: [
+        {
+          kind: "screen",
+          at: at(startMinutesAgo - 1),
+          frame_id: null,
+          meeting_id: null,
+          app_name: appName,
+          label: title,
+        },
+      ],
+    });
+    return {
+      entries:
+        options.scenario === "empty"
+          ? []
+          : [
+              entry(
+                "browser-dev-slack",
+                "Review sample onboarding issue",
+                "Reviewed the synthetic onboarding discussion and drafted a response.",
+                "Slack",
+                170,
+                132,
+              ),
+              entry(
+                "browser-dev-cursor",
+                "Refine the activity ledger",
+                "Worked through the synthetic Activity ledger implementation.",
+                "Cursor",
+                124,
+                48,
+              ),
+              entry(
+                "browser-dev-arc",
+                "Inspect sample pull request",
+                "Reviewed a synthetic pull request and its supporting context.",
+                "Arc",
+                39,
+                4,
+              ),
+            ],
+      coverage:
+        options.scenario === "empty"
+          ? []
+          : [
+              {
+                start: Number.isFinite(start.getTime())
+                  ? start.toISOString()
+                  : at(180),
+                end: end.toISOString(),
+              },
+            ],
+    };
+  };
+
   const notifyStoreChange = (
     resourceId: number,
     key: string,
@@ -661,6 +739,9 @@ export function createBrowserIpcMock(options: BrowserIpcMockOptions) {
         };
       case "get_screenpipe_ai_gateway_url":
         return "https://api.screenpipe.com/v1";
+      case "generate_activity_history":
+      case "get_activity_history":
+        return mockActivityHistory(input.start, input.end);
       case "is_enterprise_build_cmd":
       case "is_capture_paused":
         return false;
