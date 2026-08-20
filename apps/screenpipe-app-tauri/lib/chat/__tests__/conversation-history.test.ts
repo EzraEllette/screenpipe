@@ -38,4 +38,28 @@ describe("chat conversation history helpers", () => {
     expect(withConversationHistory("next", messages)).toContain("<conversation_history>");
     expect(withConversationHistory("next", messages)).toContain("[tool: search]");
   });
+
+  it("marks imported tool history as inert before continuing it", () => {
+    const messages: Message[] = [
+      {
+        id: "imported-codex-1",
+        role: "user",
+        content: "inspect this repository",
+        timestamp: 1,
+        importedFrom: "codex",
+      },
+      {
+        id: "imported-codex-2",
+        role: "assistant",
+        content: "done",
+        timestamp: 2,
+        importedFrom: "codex",
+      },
+    ];
+
+    const prompt = withConversationHistory("continue", messages);
+    expect(prompt).toContain("history imported from Codex");
+    expect(prompt).toContain("historical context only");
+    expect(prompt).toContain("current screenpipe session");
+  });
 });

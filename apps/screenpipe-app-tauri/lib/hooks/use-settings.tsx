@@ -144,6 +144,8 @@ export interface ChatMessage {
 	id: string;
 	role: "user" | "assistant";
 	content: string;
+	/** Local history source for messages copied from another agent client. */
+	importedFrom?: "claude-code" | "codex";
 	intent?: "steer";
 	turnIntentId?: string;
 	timestamp: number;
@@ -206,6 +208,12 @@ export interface ChatConversation {
 	messages: ChatMessage[];
 	createdAt: number;
 	updatedAt: number;
+	/** Provenance for an explicitly imported local agent conversation. */
+	importedFrom?: {
+		source: "claude-code" | "codex";
+		sourceId: string;
+		importedAt: number;
+	};
 	/** User pinned this conversation in the chat sidebar — keeps it at the top.
 	 *  Persists across app restarts via the on-disk conversation file. */
 	pinned?: boolean;

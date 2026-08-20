@@ -890,6 +890,7 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
           id: m.id,
           role: m.role,
           content,
+          ...(m.importedFrom ? { importedFrom: m.importedFrom } : {}),
           ...(m.intent ? { intent: m.intent } : {}),
           ...(m.turnIntentId ? { turnIntentId: m.turnIntentId } : {}),
           timestamp: m.timestamp,
@@ -916,6 +917,7 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
       // Same for the branch marker: dropping it on the first typed reply would
       // let the sidebar dedup collapse the fork back into its parent.
       ...(existing?.branchedFrom ? { branchedFrom: existing.branchedFrom } : {}),
+      ...(existing?.importedFrom ? { importedFrom: existing.importedFrom } : {}),
       ...(browserState ? { browserState } : {}),
       ...(existing?.pinned ? { pinned: existing.pinned } : {}),
       ...(existing?.hidden ? { hidden: existing.hidden } : {}),
@@ -1412,6 +1414,7 @@ export function useChatConversations(opts: UseChatConversationsOpts) {
         id: m.id,
         role: m.role,
         content: m.content,
+        ...(m.importedFrom ? { importedFrom: m.importedFrom } : {}),
         ...((m as any).intent ? { intent: (m as any).intent } : {}),
         ...((m as any).turnIntentId ? { turnIntentId: (m as any).turnIntentId } : {}),
         timestamp: m.timestamp,

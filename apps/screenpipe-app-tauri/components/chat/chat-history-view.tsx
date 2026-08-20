@@ -5,7 +5,7 @@
 
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { emit, listen } from "@tauri-apps/api/event";
-import { Archive, CheckSquare, FolderOpen, Loader2, MessageSquare, MoreVertical, Pin, Plus, Search, Timer, Trash2, Undo2, X } from "lucide-react";
+import { Archive, CheckSquare, Download, FolderOpen, Loader2, MessageSquare, MoreVertical, Pin, Plus, Search, Timer, Trash2, Undo2, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { usePlatform } from "@/lib/hooks/use-platform";
 import { isInjectedTitle } from "@/lib/chat-utils";
@@ -41,6 +41,7 @@ import {
 } from "@/lib/chat-storage";
 import { useChatStore } from "@/lib/stores/chat-store";
 import { pipeConversationDeletionKey } from "@/lib/pipe-execution-status";
+import { ImportChatsDialog } from "@/components/chat/import-chats-dialog";
 import {
   listMoveTargetGroups,
   validateSidebarGroupName,
@@ -77,6 +78,7 @@ export function ChatHistoryView({
   const migratedRef = React.useRef(false);
   const [showBulkBar, setShowBulkBar] = useState(false);
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
+  const [importDialogOpen, setImportDialogOpen] = useState(false);
   const [bulkPending, setBulkPending] = useState<null | "archiving" | "restoring" | "deleting">(null);
   const [rowPendingIds, setRowPendingIds] = useState<Set<string>>(() => new Set());
   const searchInputRef = React.useRef<HTMLInputElement | null>(null);
@@ -879,6 +881,15 @@ export function ChatHistoryView({
                   )}
                 </div>
                 <Button
+                  variant="outline"
+                  className="h-9 px-3 gap-2 shrink-0 rounded-none"
+                  onClick={() => setImportDialogOpen(true)}
+                  title="Import chats"
+                >
+                  <Download className="h-4 w-4" />
+                  Import
+                </Button>
+                <Button
                   variant="default"
                   className="h-9 px-4 gap-2 shrink-0"
                   onClick={() => {
@@ -1074,6 +1085,16 @@ export function ChatHistoryView({
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <ImportChatsDialog
+        open={importDialogOpen}
+        onOpenChange={setImportDialogOpen}
+        onImported={() => {
+          setTab("chats");
+          setQuery("");
+          void load("reset");
+        }}
+      />
     </div>
   );
 }
