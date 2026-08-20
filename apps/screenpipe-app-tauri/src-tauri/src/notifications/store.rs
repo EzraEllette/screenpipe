@@ -14,11 +14,10 @@ static STORE_WRITE_LOCK: Mutex<()> = Mutex::new(());
 
 /// How much of the user's attention an alert may take, and how long it lives.
 ///
-/// - `High` interrupts now **and** stays in the inbox.
-/// - `Normal` stays in the inbox without interrupting.
+/// - `High` appears now **and** stays in the focused inbox.
+/// - `Normal` appears now and stays in the full inbox.
 /// - `Low` is ambient status (a display was plugged in, power mode changed):
-///   true while it is on screen, worthless afterwards. It never enters the
-///   inbox — see [`is_transient`].
+///   it appears now but never enters the inbox — see [`is_transient`].
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum NotificationPriority {

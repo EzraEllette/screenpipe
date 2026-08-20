@@ -957,8 +957,8 @@ mod tests {
     /// callers, which pass through once, kept working.
     ///
     /// The fix is one recorder per alert, not a longer cooldown: this asserts
-    /// the double-ask really does suppress, so the single-ask contract in
-    /// `deliver_notification_panel(.., apply_repeat_gate: false)` stays load-bearing.
+    /// the double-ask really does suppress, so `/notify` must only peek before
+    /// handing the alert to `deliver_notification_panel` for check-and-record.
     #[test]
     fn asking_the_same_gate_twice_suppresses_a_first_time_alert() {
         let mut ledger = empty_ledger();

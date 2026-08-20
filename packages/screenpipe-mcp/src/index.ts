@@ -646,7 +646,7 @@ const TOOLS: Tool[] = [
         priority: {
           type: "string",
           enum: ["high", "normal", "low"],
-          description: "High interrupts and appears in the focused Priority view. Normal (default) and low remain available in All without interrupting.",
+          description: "Every priority appears in the top-right panel. High also appears in the focused Priority view, normal (default) stays in All, and low is toast-only by default.",
           default: "normal",
         },
         timeout_secs: { type: "integer", description: "Auto-dismiss after N seconds (default 20). Use 0 for persistent.", default: 20 },

@@ -3709,23 +3709,18 @@ pub async fn show_notification_panel(
     app_handle: tauri::AppHandle,
     payload: String,
 ) -> Result<(), String> {
-    deliver_notification_panel(app_handle, payload, true)
+    deliver_notification_panel(app_handle, payload)
         .await
         .map(|_| ())
 }
 
 /// Render an alert, returning what actually happened to it.
 ///
-/// `apply_repeat_gate` exists because the repeat gate is check-and-record, so
-/// running it twice for one alert makes the second call collide with the
-/// record the first call just wrote. `/notify` already gates before it
-/// persists, so it passes `false` and stays the single recorder for that path;
-/// the direct callers (capture-stall, audio device/health) come straight here
-/// and pass `true`.
+/// This is the single check-and-record owner for repeat suppression. `/notify`
+/// only peeks before persisting, while direct callers come straight here.
 pub(crate) async fn deliver_notification_panel(
     app_handle: tauri::AppHandle,
     payload: String,
-    apply_repeat_gate: bool,
 ) -> Result<NotificationDelivery, String> {
     use tauri::{Emitter, WebviewWindowBuilder};
 
@@ -3760,14 +3755,12 @@ pub(crate) async fn deliver_notification_panel(
         crate::notifications::gate::title_from_payload(&payload).unwrap_or_default();
     let notification_body =
         crate::notifications::gate::body_from_payload(&payload).unwrap_or_default();
-    if apply_repeat_gate
-        && crate::notifications::gate::repeat_suppressed_now(
-            notification_type.as_deref(),
-            notification_pipe.as_deref(),
-            &notification_title,
-            &notification_body,
-        )
-    {
+    if crate::notifications::gate::repeat_suppressed_now(
+        notification_type.as_deref(),
+        notification_pipe.as_deref(),
+        &notification_title,
+        &notification_body,
+    ) {
         info!(
             "show_notification_panel: suppressed (repeat within cooldown, type={:?})",
             notification_type

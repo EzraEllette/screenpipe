@@ -554,7 +554,7 @@ Send a notification to the screenpipe desktop UI. This uses the Tauri sidecar se
 
 The notification body supports **markdown**: `**bold**`, `` `inline code` ``, and `[link text](url)`. Links can be web URLs, file paths, or screenpipe deeplinks.
 
-Set `priority` to `high`, `normal` (default), or `low`. Reserve `high` for a time-sensitive failure or a decision that genuinely needs the human now: it triggers the toast and appears in the focused Priority inbox. `normal` and `low` are stored in All without interrupting. Completion logs and routine syncs should never be high.
+Set `priority` to `high`, `normal` (default), or `low`. Every priority appears in the top-right notification panel. Reserve `high` for a time-sensitive failure or a decision that genuinely needs the human now; it also appears in the focused Priority inbox. `normal` stays in All, while `low` is toast-only by default. Completion logs and routine syncs should never be high.
 
 ```bash
 # Simple notification
@@ -621,7 +621,7 @@ curl -X POST http://localhost:11435/notify \
 | `title` | string | **Yes** | Notification title |
 | `body` | string | **Yes** | Markdown body (`**bold**`, `` `code` ``, `[text](url)`) |
 | `type` | string | No | Category (default "pipe") |
-| `priority` | `high` \| `normal` \| `low` | No | Default `normal`; only `high` interrupts and enters the focused Priority view |
+| `priority` | `high` \| `normal` \| `low` | No | Default `normal`; all priorities appear top-right, while only `high` enters the focused Priority view |
 | `timeout` | integer | No | Auto-dismiss in ms (default 20000) |
 | `autoDismissMs` | integer | No | Alias for timeout |
 | `actions` | array | No | Action buttons (up to 5; each needs `id`, `label`, `type`) |

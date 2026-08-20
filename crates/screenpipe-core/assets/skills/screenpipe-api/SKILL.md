@@ -375,7 +375,7 @@ curl -X DELETE http://localhost:3030/memories/1                                 
 
 Notify the desktop UI. This is the Tauri sidecar (port **11435**), not the main API. `body` supports markdown (`**bold**`, `` `code` ``, `[text](url)`).
 
-`priority` is `high`, `normal` (default), or `low`. Only use `high` for a time-sensitive failure or a decision needing the human now; it interrupts and enters the focused Priority view. Routine results and completions belong in normal/low and stay available in All.
+`priority` is `high`, `normal` (default), or `low`. Every priority appears in the top-right notification panel. Only use `high` for a time-sensitive failure or a decision needing the human now; it also enters the focused Priority view. Normal stays available in All, while low is toast-only by default.
 
 ```bash
 curl -X POST http://localhost:11435/notify -H "Content-Type: application/json" \
