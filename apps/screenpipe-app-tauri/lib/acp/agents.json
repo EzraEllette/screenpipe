@@ -41,6 +41,7 @@
     "presetName": "opencode",
     "description": "Use your installed OpenCode agent.",
     "launch": { "kind": "binary", "command": "opencode", "args": ["acp"] },
+    "login": { "args": ["auth", "login"] },
     "installUrl": "https://opencode.ai",
     "disabled": true
   },
@@ -51,6 +52,7 @@
     "presetName": "cursor",
     "description": "Use Cursor for this connection.",
     "launch": { "kind": "binary", "command": "cursor-agent", "args": ["acp"] },
+    "login": { "args": ["login"] },
     "installUrl": "https://cursor.com/cli",
     "installer": { "kind": "shellScript", "url": "https://cursor.com/install" },
     "httpMcp": true,
@@ -74,6 +76,7 @@
     "presetName": "kimi",
     "description": "Use Moonshot's Kimi CLI agent installed on this computer.",
     "launch": { "kind": "binary", "command": "kimi", "args": ["acp"] },
+    "login": { "args": ["login"] },
     "installUrl": "https://www.kimi.com/code",
     "disabled": true
   }

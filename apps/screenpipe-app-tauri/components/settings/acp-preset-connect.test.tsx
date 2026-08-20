@@ -16,24 +16,26 @@
 
 import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { AcpPresetDefaults } from "./acp-preset-defaults";
 import { useAcpSessionConfig } from "@/lib/stores/acp-session-config";
 
 const probeAgent = vi.fn();
 const downloadPending = vi.fn();
+const externalLogin = vi.fn();
 
 vi.mock("@/lib/utils/tauri", () => ({
   commands: {
     piAcpProbeAgent: (...args: unknown[]) => probeAgent(...args),
     piAcpAgentDownloadPending: (...args: unknown[]) => downloadPending(...args),
-    copyTextToClipboard: () => Promise.resolve(),
+    piAcpExternalLogin: (...args: unknown[]) => externalLogin(...args),
   },
 }));
 
 beforeEach(() => {
   probeAgent.mockReset();
   downloadPending.mockReset();
+  externalLogin.mockReset();
   useAcpSessionConfig.setState({ sessions: {}, byAgent: {} });
 });
 
@@ -114,17 +116,21 @@ describe("an agent that needs signing in", () => {
     expect(card).toHaveTextContent(/never sees or stores an API key/i);
   });
 
-  it("shows Cursor's required CLI login instead of claiming chat can sign in", async () => {
+  it("runs Cursor's browser login directly and rechecks automatically", async () => {
     probeAgent.mockResolvedValue({
       status: "error",
       error: "Cursor needs a one-time sign in: run `cursor-agent login` first",
     });
+    externalLogin.mockResolvedValue({ status: "ok", data: null });
 
     renderCard("cursor");
 
     const card = await screen.findByTestId("acp-preset-signin");
-    expect(card).toHaveTextContent("cursor-agent login");
-    expect(screen.getByRole("button", { name: /check again/i })).toBeInTheDocument();
+    expect(card).not.toHaveTextContent("cursor-agent login");
+    fireEvent.click(screen.getByRole("button", { name: /sign in with cursor/i }));
+
+    await waitFor(() => expect(externalLogin).toHaveBeenCalledWith("cursor"));
+    await waitFor(() => expect(probeAgent).toHaveBeenCalledTimes(2));
   });
 
   it("reports not-connected so the parent can hold back advanced settings", async () => {

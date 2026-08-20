@@ -1631,7 +1631,7 @@ export function StandaloneChat({
       setAcpSignIn({ kind: "cli", ...info });
       setAcpSignInError(
         wasChecking
-          ? `still not signed in to ${info.agentName}. run the command below in a terminal, then retry.`
+          ? `still not signed in to ${info.agentName}. try signing in again.`
           : null,
       );
     },
@@ -1806,13 +1806,11 @@ export function StandaloneChat({
     }
     setAcpSignInBusy(false);
   }, []);
-  // "i've signed in, retry": re-attempt the connection and report the outcome
-  // in the dialog. First a hard check that the CLI is even installed (a clear,
-  // actionable error if not). Then reconnect: acp_ready closes the dialog and
-  // resends the pending message; acp_external_auth_required re-fires as a red
-  // "still not signed in" error; a timeout guards the case where neither comes
-  // back. The dialog stays open throughout, so the user always sees what
-  // happened instead of it silently closing or spinning forever.
+  // Re-attempt the connection after the agent-owned login exits. First a hard
+  // check that the CLI is installed, then reconnect: acp_ready closes the
+  // dialog and resends the pending message; acp_external_auth_required re-fires
+  // as a red "still not signed in" error; a timeout guards the case where
+  // neither comes back.
   const handleAcpRetry = useCallback(() => {
     // Works for both the CLI-login card and the "use my login" row of the
     // method picker: re-attempt the connection after the user signed in.
@@ -1845,7 +1843,7 @@ export function StandaloneChat({
       acpSignInTimeoutRef.current = window.setTimeout(() => {
         if (!acpSignInBusyRef.current) return;
         clearAcpSignInProbe();
-        setAcpSignInError(`couldn't reach ${agentName}. make sure you ran the command, then retry.`);
+        setAcpSignInError(`couldn't reach ${agentName}. try signing in again.`);
       }, 25_000);
 
       // Trigger a fresh connection. A pending message rides along on success;
@@ -1860,6 +1858,31 @@ export function StandaloneChat({
       }
     })();
   }, [acpSignIn, clearAcpSignInProbe, lastUserMessageRef, piMessageIdRef, sendMessage, buildProviderConfig, restartCurrentPiSession]);
+  // External-login agents such as Cursor own their OAuth flow. Launch the
+  // reviewed catalog command hidden as the desktop user; the CLI opens the
+  // browser, stores its own credential, and exits. Then reconnect automatically
+  // instead of asking the user to copy a command and click retry.
+  const handleAcpCliSignIn = useCallback(() => {
+    if (acpSignIn?.kind !== "cli") return;
+    const { agentId, agentName } = acpSignIn;
+    setAcpSignInError(null);
+    setAcpSignInBusy(true);
+    acpSignInBusyRef.current = true;
+    void (async () => {
+      try {
+        const result = await commands.piAcpExternalLogin(agentId);
+        if (result.status === "error") throw new Error(result.error);
+        // The dialog may have been dismissed while the browser was open.
+        if (!acpSignInBusyRef.current) return;
+        handleAcpRetry();
+      } catch (error) {
+        if (!acpSignInBusyRef.current) return;
+        clearAcpSignInProbe();
+        const detail = error instanceof Error ? error.message : String(error);
+        setAcpSignInError(`couldn't open ${agentName}'s login: ${detail}`);
+      }
+    })();
+  }, [acpSignIn, clearAcpSignInProbe, handleAcpRetry]);
   // "switch to default": fall back to the default preset and resend there.
   // Safe to close immediately — the default provider won't re-trigger the
   // agent's CLI-login prompt, so there's no reopen to flicker against.
@@ -2249,7 +2272,7 @@ export function StandaloneChat({
         error={acpSignInError}
         defaultPresetLabel={acpDefaultPresetLabel}
         onSwitchToDefault={handleAcpSwitchToDefault}
-        onRetry={handleAcpRetry}
+        onCliSignIn={handleAcpCliSignIn}
         onSelectMethod={handleAcpSignInMethod}
         onDismiss={handleAcpDismiss}
       />

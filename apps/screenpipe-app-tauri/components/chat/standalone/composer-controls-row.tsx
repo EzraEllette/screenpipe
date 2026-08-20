@@ -138,8 +138,15 @@ export function ComposerControlsRow({
       <AIPresetsSelector
         compact
         showModelOnly
-        containerClassName="w-[180px] max-w-[42vw] min-w-[120px] shrink-0 gap-0"
-        triggerClassName="h-7 border-0 bg-transparent px-1.5 text-xs text-muted-foreground shadow-none hover:bg-muted/50 hover:text-foreground"
+        providerIconOnly={isAcp}
+        containerClassName={cn(
+          "shrink-0 gap-0",
+          isAcp ? "w-7" : "w-[180px] max-w-[42vw] min-w-[120px]",
+        )}
+        triggerClassName={cn(
+          "h-7 border-0 bg-transparent text-xs text-muted-foreground shadow-none hover:bg-muted/50 hover:text-foreground",
+          isAcp ? "w-7 justify-center p-0" : "px-1.5",
+        )}
         onPresetSaved={modelControls.onPresetSaved}
         controlledPresetId={
           modelControls.activePreset?.id ??

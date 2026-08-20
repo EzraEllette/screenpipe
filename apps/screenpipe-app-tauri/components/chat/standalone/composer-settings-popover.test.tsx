@@ -58,31 +58,18 @@ function renderAcp() {
 }
 
 describe("composer settings control", () => {
-  it("gives the coding agent and raw Pi the same trigger shape", () => {
+  it("keeps the model readable and collapses the secondary effort axis", () => {
     renderAcp();
     const acp = screen.getByTestId("acp-config-trigger");
-    const acpClass = acp.className;
+    expect(acp).toHaveTextContent("Sonnet 4.6");
+    expect(acp.className).toContain("max-w-[190px]");
     cleanup();
 
     render(<ThinkingLevelSelector sessionId={SESSION} />);
     const pi = screen.getByTestId("thinking-level-trigger");
-
-    // Same shell, so identical layout classes: height, padding, the width cap
-    // that keeps a long model name from pushing the send button around.
-    expect(pi.className).toBe(acpClass);
-    expect(acpClass).toContain("max-w-[190px]");
-  });
-
-  // Claude and Codex both name the model in plain text. A glyph in front of a
-  // value that already names itself is a second thing to parse in a row that
-  // already holds four controls.
-  it("names the value with no leading glyph on either trigger", () => {
-    renderAcp();
-    expect(screen.getByTestId("acp-config-trigger").querySelector("svg")).toBeNull();
-    cleanup();
-
-    render(<ThinkingLevelSelector sessionId={SESSION} />);
-    expect(screen.getByTestId("thinking-level-trigger").querySelector("svg")).toBeNull();
+    expect(pi).toHaveClass("w-7");
+    expect(pi.querySelector("svg")).not.toBeNull();
+    expect(pi).toHaveAccessibleName("Thinking level: Medium");
   });
 
   it("names the active value on both triggers", () => {
@@ -122,6 +109,7 @@ describe("composer settings control", () => {
     expect(screen.getByTestId("acp-effort-trigger")).toHaveTextContent(
       "Reasoning effort: High",
     );
+    expect(screen.getByTestId("acp-effort-trigger")).toHaveClass("w-7");
     fireEvent.click(screen.getByTestId("acp-effort-trigger"));
     const acpSlider = screen.getByTestId("acp-effort-slider");
     expect(acpSlider).toHaveAttribute("role", "slider");

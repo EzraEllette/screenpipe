@@ -4,7 +4,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Check, Copy, Download, Loader2, RefreshCw } from "lucide-react";
+import { Download, Loader2, LogIn, RefreshCw } from "lucide-react";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { commands } from "@/lib/utils/tauri";
@@ -66,7 +66,8 @@ export function AcpPresetDefaults({
   const [probing, setProbing] = useState(false);
   const [probeError, setProbeError] = useState<string | null>(null);
   const [probeNonce, setProbeNonce] = useState(0);
-  const [copied, setCopied] = useState(false);
+  const [signInPending, setSignInPending] = useState(false);
+  const [signInError, setSignInError] = useState<string | null>(null);
   // Whether this agent still has to be downloaded. Asked BEFORE probing, not
   // during: starting a background download because someone clicked an agent in
   // a list is a surprise, and "Installing Codex…" appearing unbidden reads like
@@ -94,6 +95,19 @@ export function AcpPresetDefaults({
     if (retryTimerRef.current != null) window.clearTimeout(retryTimerRef.current);
     retryTimerRef.current = window.setTimeout(() => setRetryPending(false), 900);
   };
+  const beginExternalLogin = async () => {
+    setSignInPending(true);
+    setSignInError(null);
+    try {
+      const result = await commands.piAcpExternalLogin(agentId);
+      if (result.status === "error") throw new Error(result.error);
+      setSignInPending(false);
+      beginRetry();
+    } catch (error) {
+      setSignInPending(false);
+      setSignInError(error instanceof Error ? error.message : String(error));
+    }
+  };
   useEffect(
     () => () => {
       if (retryTimerRef.current != null) window.clearTimeout(retryTimerRef.current);
@@ -113,6 +127,8 @@ export function AcpPresetDefaults({
     setInstallApproved(false);
     setRetryPending(false);
     setRetryFailed(false);
+    setSignInPending(false);
+    setSignInError(null);
     wasRetryRef.current = false;
     if (retryTimerRef.current != null) window.clearTimeout(retryTimerRef.current);
   }, [agentId]);
@@ -248,7 +264,7 @@ export function AcpPresetDefaults({
       );
     // Retry keeps its "checking…" spinner up for a visible beat (retryPending)
     // even when the re-probe returns instantly, so it never feels dead.
-    const busy = probing || retryPending;
+    const busy = probing || retryPending || signInPending;
     // First probe (no card yet): show a loading line, or a pulsing install
     // label for a not-yet-cached npx agent (Zed's pattern: no spinner, no %).
     // Needs downloading and nobody asked for it yet: offer the download as an
@@ -304,13 +320,13 @@ export function AcpPresetDefaults({
             <p className={cn("font-medium", compact ? "text-xs" : "text-sm")}>Sign in to {info.name}</p>
             <p className={cn("text-muted-foreground", compact ? "text-[11px]" : "text-xs")}>
               {signInCommand
-                ? `Run this in a terminal. It opens ${info.name}'s own login, which stores the credential itself.`
+                ? `${info.name} opens its secure login in your browser and keeps the credential.`
                 : `${info.name} signs in when you open a chat with this preset: it runs its own login and stores the credential itself. Screenpipe never sees or stores an API key for it.`}
             </p>
           </div>
           {/* A retry that still failed: say so plainly, kept visible, like the
               chat sign-in dialog does, so the user knows to redo the step. */}
-          {retryFailed && (
+          {(retryFailed || signInError) && (
             <div
               role="alert"
               data-testid="acp-preset-signin-error"
@@ -319,46 +335,32 @@ export function AcpPresetDefaults({
                 compact ? "text-[11px]" : "text-xs",
               )}
             >
-              {signInCommand
-                ? "Still not signed in. Run the command above, then check again."
+              {signInError
+                ? `Couldn't open ${info.name}'s login: ${signInError}`
+                : signInCommand
+                ? `Still not signed in to ${info.name}. Try signing in again.`
                 : `Still not signed in. ${info.name} signs in from a chat, not from here.`}
             </div>
           )}
-          {signInCommand && (
-            <div className="relative">
-              <pre className={cn("overflow-x-auto rounded-md bg-muted py-2 pl-3 pr-10 font-mono text-foreground", compact ? "text-[11px]" : "text-xs")}>
+          {signInCommand && signInError && (
+            <div>
+              <p className={cn("mb-1 text-muted-foreground", compact ? "text-[10px]" : "text-xs")}>
+                You can still run this manually:
+              </p>
+              <pre className={cn("overflow-x-auto rounded-md bg-muted px-3 py-2 font-mono text-foreground", compact ? "text-[11px]" : "text-xs")}>
                 <code>{signInCommand}</code>
               </pre>
-              <button
-                type="button"
-                aria-label={copied ? "Copied" : "Copy command"}
-                title={copied ? "Copied" : "Copy"}
-                onClick={async () => {
-                  try {
-                    await commands.copyTextToClipboard(signInCommand);
-                    setCopied(true);
-                    window.setTimeout(() => setCopied(false), 1500);
-                  } catch {
-                    /* clipboard best-effort */
-                  }
-                }}
-                className="absolute right-1.5 top-1/2 inline-flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-background hover:text-foreground"
-              >
-                {copied ? <Check className="h-3.5 w-3.5" aria-hidden /> : <Copy className="h-3.5 w-3.5" aria-hidden />}
-              </button>
             </div>
           )}
-          {/* This button re-checks; it cannot perform the sign-in itself, so it
-              must not be labelled as if it could. "I've signed in" invited a
-              click before signing in, which then looked broken. Agents whose
-              login is in-protocol have nothing to run here at all, so they get
-              no button and an honest sentence instead. */}
+          {/* External-login agents open their own browser flow directly.
+              In-protocol agents still sign in from chat, where their methods
+              are available on the live ACP connection. */}
           {signInCommand ? (
-            <Button type="button" size="sm" disabled={busy} onClick={beginRetry}>
-              {busy ? (
-                <><Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> Checking…</>
+            <Button type="button" size="sm" disabled={busy} onClick={() => void beginExternalLogin()}>
+              {signInPending || retryPending || probing ? (
+                <><Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> {signInPending ? "Signing in…" : "Connecting…"}</>
               ) : (
-                <><RefreshCw className="mr-1.5 h-3.5 w-3.5" /> Check again</>
+                <><LogIn className="mr-1.5 h-3.5 w-3.5" /> Sign in with {info.name}</>
               )}
             </Button>
           ) : (

@@ -161,7 +161,7 @@ describe("AIPresetsSelector controlled preset creation", () => {
     mocks.acpEnabled.current = false;
   });
 
-  it("shows agents directly and keeps model connections advanced", async () => {
+  it("shows agents and preset naming directly while keeping model connections advanced", async () => {
     mocks.acpEnabled.current = true;
     render(<AIPresetsSelector compact showModelOnly />);
 
@@ -215,6 +215,12 @@ describe("AIPresetsSelector controlled preset creation", () => {
       "GitHub Copilot",
       "Pi",
     ]);
+
+    fireEvent.click(screen.getByRole("button", { name: "screenpipe" }));
+    const nameInput = screen.getByLabelText("name");
+    expect(nameInput).toBeEnabled();
+    fireEvent.change(nameInput, { target: { value: "my claude preset" } });
+    expect(nameInput).toHaveValue("my claude preset");
 
     fireEvent.click(screen.getByRole("button", { name: /advanced/ }));
 
@@ -281,6 +287,33 @@ describe("AIPresetsSelector controlled preset creation", () => {
     expect(screen.getByTestId("active-model-provider-icon")).toHaveAttribute(
       "src",
       "/images/gemini.svg",
+    );
+  });
+
+  it("can collapse an ACP preset to its provider icon", () => {
+    mocks.settings.current = {
+      aiPresets: [
+        {
+          ...originalPreset,
+          id: "claude code",
+          provider: "acp",
+          model: "claude-acp",
+          acpAgent: { id: "claude-acp" },
+        },
+      ],
+      user: { token: "test-token" },
+    };
+
+    render(<AIPresetsSelector compact showModelOnly providerIconOnly />);
+
+    const trigger = screen.getByRole("combobox", {
+      name: "AI provider: Claude Code. Change provider",
+    });
+    expect(trigger).not.toHaveTextContent("Claude Code");
+    expect(trigger).not.toHaveTextContent("claude-acp");
+    expect(screen.getByTestId("active-model-provider-icon")).toHaveAttribute(
+      "src",
+      "/images/claude-ai.svg",
     );
   });
 

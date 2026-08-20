@@ -4,7 +4,7 @@
 "use client";
 
 import { useState } from "react";
-import { Loader2 } from "lucide-react";
+import { Gauge, Loader2, SlidersHorizontal } from "lucide-react";
 import { toast } from "sonner";
 import { Switch } from "@/components/ui/switch";
 import {
@@ -57,6 +57,54 @@ function pickModelOption(selects: AcpConfigOption[]): AcpConfigOption | null {
     ) ??
     selects.find((option) => option.name.toLowerCase().includes("model")) ??
     null
+  );
+}
+
+function trimUnbalancedClosingParens(value: string): string {
+  let result = value.trim();
+  while (result.endsWith(")")) {
+    const opens = (result.match(/\(/g) ?? []).length;
+    const closes = (result.match(/\)/g) ?? []).length;
+    if (closes <= opens) break;
+    result = result.slice(0, -1).trimEnd();
+  }
+  return result;
+}
+
+/** Some adapters intentionally expose a stable alias such as `default`, then
+ *  name its live resolution in the option description. Prefer that
+ *  adapter-owned resolution over a hardcoded provider matrix, which would be
+ *  stale as soon as Claude, Codex, or another harness changes its default. */
+function resolvedModelFromDescription(description: string): string | null {
+  const match = description.match(
+    /\b(?:currently(?:\s+(?:uses?|running))?|resolves?\s+to|maps?\s+to)\s*:?\s*(.+)$/i,
+  );
+  if (!match?.[1]) return null;
+
+  const candidate = match[1]
+    .split(/\s+[\u00b7•]\s+|\s+[\u2014–]\s+|;\s+/)[0]
+    .trim();
+  const balanced = trimUnbalancedClosingParens(candidate);
+  return balanced || null;
+}
+
+export function acpConfigValueLabel(
+  option: AcpConfigOption,
+  selectedValue: string,
+): string {
+  const selected = option.values.find((value) => value.value === selectedValue);
+  const advertisedName = selected?.name || selectedValue || option.name;
+  const isGenericAlias =
+    /^(?:default|auto|recommended)$/i.test(selectedValue.trim()) ||
+    /^(?:default|auto)(?:\s*\(recommended\))?$/i.test(
+      advertisedName.trim(),
+    );
+  if (!isGenericAlias) return advertisedName;
+
+  const resolved = resolvedModelFromDescription(selected?.description ?? "");
+  return (
+    resolved ||
+    advertisedName.replace(/\s*\(recommended\)\s*$/i, "").trim()
   );
 }
 
@@ -152,12 +200,19 @@ export function AcpConfigSelector({
   // advertises no selects at all.
   const modelOption = pickModelOption(selects);
   const modelValue = modelOption ? selectedValue(modelOption) : "";
+  const advertisedModelValue = modelOption?.values.find(
+    (value) => value.value === modelValue,
+  );
   const triggerLabel =
-    (modelOption &&
-      (modelOption.values.find((value) => value.value === modelValue)?.name ||
-        modelValue)) ||
+    (modelOption && acpConfigValueLabel(modelOption, modelValue)) ||
     modes?.availableModes.find((mode) => mode.value === selectedModeId)?.name ||
     "config";
+  const resolvedAliasHint =
+    modelOption &&
+    advertisedModelValue &&
+    advertisedModelValue.name !== triggerLabel
+      ? `${advertisedModelValue.name} currently resolves to ${triggerLabel}.`
+      : undefined;
   // Re-authenticate is offered for every ACP agent (as Zed does): it re-runs the
   // agent's own auth flow, which re-shows whatever sign-in methods it has.
   const canReauth = !!onReauthenticate;
@@ -203,10 +258,16 @@ export function AcpConfigSelector({
   return (
     <ComposerSettingsPopover
       label={triggerLabel}
-      title={`Agent configuration${triggerLabel === "config" ? "" : `: ${triggerLabel}`}`}
-      ariaLabel="Agent configuration"
+      title={
+        modelOption
+          ? `Model: ${triggerLabel}${advertisedModelValue?.name && advertisedModelValue.name !== triggerLabel ? ` · ${advertisedModelValue.name}` : ""}`
+          : `Agent configuration${triggerLabel === "config" ? "" : `: ${triggerLabel}`}`
+      }
+      ariaLabel={modelOption ? `Model: ${triggerLabel}` : "Agent configuration"}
       triggerTestId="acp-config-trigger"
       contentTestId="acp-config-popover"
+      triggerIcon={triggerLabel === "config" ? SlidersHorizontal : undefined}
+      iconOnly={triggerLabel === "config"}
       open={open}
       onOpenChange={setOpen}
     >
@@ -254,6 +315,7 @@ export function AcpConfigSelector({
             value={selectedValue(option)}
             disabled={pendingId === option.id}
             title={option.description || option.name}
+            hint={option === modelOption ? resolvedAliasHint : undefined}
             options={option.values}
             onValueChange={apply}
           />
@@ -397,6 +459,8 @@ export function AcpEffortSelector({
       ariaLabel={`${option.name}: ${selectedLabel}`}
       triggerTestId="acp-effort-trigger"
       contentTestId="acp-effort-popover"
+      triggerIcon={Gauge}
+      iconOnly
       open={open}
       onOpenChange={setOpen}
       disabled={pending}

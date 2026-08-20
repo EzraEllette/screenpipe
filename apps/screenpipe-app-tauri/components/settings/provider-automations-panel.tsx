@@ -9,9 +9,12 @@ import {
   Bot,
   Clock3,
   ExternalLink,
+  Laptop,
   MoreHorizontal,
   Pause,
   Play,
+  RefreshCw,
+  Timer,
   Trash2,
 } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -42,6 +45,80 @@ function rruleParts(schedule: string): Record<string, string> {
       .map((part) => part.split("=", 2))
       .filter((part): part is [string, string] => part.length === 2),
   );
+}
+
+const RRULE_MONTHS = [
+  "Jan",
+  "Feb",
+  "Mar",
+  "Apr",
+  "May",
+  "Jun",
+  "Jul",
+  "Aug",
+  "Sep",
+  "Oct",
+  "Nov",
+  "Dec",
+] as const;
+
+function readableList(values: string[]): string {
+  if (values.length <= 1) return String(values[0] ?? "");
+  return `${values.slice(0, -1).join(", ")} & ${values.at(-1)}`;
+}
+
+function rruleNumberList(
+  value: string | undefined,
+  min: number,
+  max: number,
+): number[] {
+  if (!value) return [];
+  return value
+    .split(",")
+    .map(Number)
+    .filter((number) => Number.isInteger(number) && number >= min && number <= max);
+}
+
+function yearlyRruleLabel(
+  parts: Record<string, string>,
+  interval: number,
+): string {
+  const months = rruleNumberList(parts.BYMONTH, 1, 12).map(
+    (month) => RRULE_MONTHS[month - 1],
+  );
+  const days = rruleNumberList(parts.BYMONTHDAY, 1, 31).map(String);
+  const dates =
+    months.length === 1 && days.length > 0
+      ? `${months[0]} ${readableList(days)}`
+      : [
+          months.length > 0 ? readableList(months) : null,
+          days.length > 0 ? `day ${readableList(days)}` : null,
+        ]
+          .filter(Boolean)
+          .join(" · ");
+  const hours = rruleNumberList(parts.BYHOUR, 0, 23);
+  const minutes = rruleNumberList(parts.BYMINUTE || "0", 0, 59);
+  const hour = hours[0];
+  const minute = minutes[0];
+  const suffix = hour < 12 ? "AM" : "PM";
+  const hour12 = hour % 12 || 12;
+  const time =
+    hours.length !== 1 || minutes.length !== 1
+      ? null
+      : minute === 0
+        ? `${hour12} ${suffix}`
+        : `${hour12}:${String(minute).padStart(2, "0")} ${suffix}`;
+  const count = Number(parts.COUNT);
+  return [
+    interval === 1 ? "yearly" : `every ${interval} years`,
+    dates || null,
+    time,
+    Number.isInteger(count) && count > 0
+      ? `${count} ${count === 1 ? "run" : "runs"}`
+      : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
 }
 
 function cronLabel(schedule: string): string | null {
@@ -111,6 +188,9 @@ export function providerScheduleLabel(task: ProviderAutomation): string {
   if (parts.FREQ === "WEEKLY") {
     return parts.BYDAY ? `weekly · ${parts.BYDAY.toLowerCase()}` : "weekly";
   }
+  if (parts.FREQ === "YEARLY") {
+    return yearlyRruleLabel(parts, interval);
+  }
   return task.schedule;
 }
 
@@ -142,6 +222,25 @@ function ProviderIcon({ provider }: { provider: string }) {
     return <img src="/images/claude-ai.svg" alt="" className={className} />;
   }
   return <Bot className={className} aria-hidden="true" />;
+}
+
+function TaskScopeIcon({ task }: { task: ProviderAutomation }) {
+  const label = scopeLabel(task);
+  const Icon =
+    task.executionScope === "session"
+      ? Timer
+      : task.executionScope === "provider_durable"
+        ? RefreshCw
+        : Laptop;
+  return (
+    <span
+      aria-label={label}
+      title={label}
+      className="inline-flex h-7 w-7 items-center justify-center text-muted-foreground"
+    >
+      <Icon className="h-3.5 w-3.5" aria-hidden="true" />
+    </span>
+  );
 }
 
 export interface ProviderAutomationsPanelProps {
@@ -368,7 +467,7 @@ export function ProviderAutomationsPanel({
               return (
                 <article
                   key={task.key}
-                  className="grid items-center gap-3 bg-background/40 px-4 py-3 transition-colors hover:bg-background/80 md:grid-cols-[minmax(0,1fr)_8rem_10rem_auto]"
+                  className="grid items-center gap-3 bg-background/40 px-4 py-3 transition-colors hover:bg-background/80 md:grid-cols-[minmax(0,1fr)_auto_auto]"
                   title={task.lifecycleNote}
                 >
                   <div className="min-w-0">
@@ -386,21 +485,24 @@ export function ProviderAutomationsPanel({
                     </span>
                   </div>
 
-                  <span className="inline-flex min-w-0 items-center gap-2 font-mono text-[10px] uppercase tracking-wide text-muted-foreground">
-                    <span
-                      className={cn(
-                        "h-2 w-2 shrink-0 border border-current",
-                        isOn && "bg-foreground text-foreground",
-                      )}
-                    />
-                    <span className="truncate">
-                      {isOn ? "active" : "paused"}
-                    </span>
-                  </span>
-
-                  <span className="truncate text-xs text-muted-foreground">
-                    {scopeLabel(task)}
-                  </span>
+                  <div className="flex items-center justify-end gap-0.5">
+                    {!primaryAction && (
+                      <span
+                        aria-label={isOn ? "active" : "paused"}
+                        title={isOn ? "active" : "paused"}
+                        className="inline-flex h-7 w-7 items-center justify-center text-muted-foreground"
+                      >
+                        <span
+                          aria-hidden="true"
+                          className={cn(
+                            "h-2 w-2 shrink-0 border border-current",
+                            isOn && "bg-foreground text-foreground",
+                          )}
+                        />
+                      </span>
+                    )}
+                    <TaskScopeIcon task={task} />
+                  </div>
 
                   <div className="flex items-center justify-end gap-1.5">
                     {primaryAction ? (

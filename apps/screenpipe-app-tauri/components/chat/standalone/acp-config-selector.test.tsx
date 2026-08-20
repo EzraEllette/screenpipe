@@ -72,6 +72,39 @@ describe("ACP config trigger", () => {
     expect(screen.getByTestId("acp-config-trigger")).not.toHaveTextContent("config");
   });
 
+  it("replaces a generic default alias with the adapter's resolved model", () => {
+    seedSession([
+      {
+        id: "model",
+        name: "Model",
+        type: "select",
+        currentValue: "default",
+        values: [
+          {
+            value: "default",
+            name: "Default (recommended)",
+            description:
+              "Use the default model (currently Opus 5 (1M context)) · $5/$25 per Mtok",
+          },
+          { value: "sonnet", name: "Sonnet 5" },
+        ],
+      },
+    ]);
+
+    render(<AcpConfigSelector sessionId={SESSION} agentId="claude-acp" />);
+
+    const trigger = screen.getByTestId("acp-config-trigger");
+    expect(trigger).toHaveTextContent("Opus 5 (1M context)");
+    expect(trigger).not.toHaveTextContent("Default (recommended)");
+    expect(trigger).toHaveAttribute(
+      "title",
+      expect.stringContaining("Default (recommended)"),
+    );
+
+    fireEvent.click(trigger);
+    expect(screen.getByText(/currently resolves to Opus 5/)).toBeInTheDocument();
+  });
+
   it("shows the saved preset default before a live session advertises", () => {
     // No live advertisement yet (fresh chat): the cached adapter config carries
     // the choices, and the user's saved preset default is the chosen value.
@@ -262,6 +295,10 @@ describe("ACP config trigger", () => {
     expect(screen.getByTestId("acp-effort-trigger")).toHaveTextContent(
       "Effort: Standard",
     );
+    expect(screen.getByTestId("acp-effort-trigger")).toHaveClass("w-7");
+    expect(
+      screen.getByTestId("acp-effort-trigger").querySelector("svg"),
+    ).not.toBeNull();
     fireEvent.click(screen.getByTestId("acp-effort-trigger"));
     expect(screen.getByLabelText("Effort").tagName).toBe("SELECT");
     expect(screen.queryByTestId("acp-effort-slider")).not.toBeInTheDocument();

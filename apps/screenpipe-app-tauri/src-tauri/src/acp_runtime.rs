@@ -471,7 +471,7 @@ fn parse_json_env<T: serde::de::DeserializeOwned>(name: &str) -> Result<Option<T
 }
 
 /// How to launch a catalog agent, from our static catalog (lib/acp/agents.json).
-#[derive(serde::Deserialize)]
+#[derive(Clone, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 enum AgentLaunch {
     /// Run via the bundled bun: `bun x <package> <args>`.
@@ -487,6 +487,15 @@ enum AgentLaunch {
         #[serde(default)]
         args: Vec<String>,
     },
+}
+
+/// A browser/terminal login owned by the agent's CLI. The args are deliberately
+/// catalog data rather than frontend-provided shell text: clicking Sign in can
+/// only launch a reviewed built-in command, never an arbitrary command string.
+#[derive(Clone, serde::Deserialize)]
+struct AgentLogin {
+    #[serde(default)]
+    args: Vec<String>,
 }
 
 /// An explicit, user-triggered installer for a binary ACP agent.
@@ -528,6 +537,10 @@ pub(crate) struct CloudRouting {
 struct CatalogAgent {
     id: String,
     launch: AgentLaunch,
+    /// Optional one-click login run with the launch command but without its ACP
+    /// server args (for example, `cursor-agent login`, not `cursor-agent acp login`).
+    #[serde(default)]
+    login: Option<AgentLogin>,
     /// Where to install a binary agent's CLI (shown when it's missing).
     /// JSON key is `installUrl`.
     #[serde(default)]
@@ -610,29 +623,47 @@ pub(crate) fn cloud_routing_env(
 /// login args come straight from the agent's advertised method, so we never
 /// hardcode them. Bounded so an abandoned login can't hang the session.
 async fn run_terminal_login(
-    bun_path: &str,
+    bun_path: Option<&str>,
     agent_id: &str,
     method_args: &[String],
 ) -> Result<(), String> {
-    let agent =
-        agent_catalog().into_iter().find(|a| a.id == agent_id).ok_or("unknown agent")?;
+    let agent = agent_catalog()
+        .into_iter()
+        .find(|a| a.id == agent_id)
+        .ok_or("unknown agent")?;
     // Invoke the agent's package with the login args only. The launch args are
     // the ACP-server mode (e.g. Copilot's `--acp`) and must not ride along on a
     // login command (`copilot login`, not `copilot --acp login`).
     let (program, mut args) = match agent.launch {
-        AgentLaunch::Npx { package, .. } => (bun_path.to_string(), vec!["x".to_string(), package]),
-        AgentLaunch::Binary { command, .. } => (command, Vec::new()),
+        AgentLaunch::Npx { package, .. } => (
+            bun_path
+                .filter(|path| !path.trim().is_empty())
+                .ok_or("bun executable not found")?
+                .to_string(),
+            vec!["x".to_string(), package],
+        ),
+        AgentLaunch::Binary { command, .. } => {
+            if !command_on_path(&command) {
+                return Err(format!("{command} is not installed or is not on PATH"));
+            }
+            (command, Vec::new())
+        }
     };
     args.extend(method_args.iter().cloned());
 
     // No-window: the agent CLI is a console program, and sign-in already has
     // the user's attention in the app — a terminal blinking beside it for up to
     // five minutes reads as a crash.
-    let mut child = screenpipe_core::no_window_command_async(program)
+    let mut command = screenpipe_core::no_window_command_async(program);
+    command
         .args(args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    for key in RUNTIME_ONLY_ENV {
+        command.env_remove(key);
+    }
+    let mut child = command
         .spawn()
         .map_err(|e| format!("failed to start login: {e}"))?;
     let status = tokio::time::timeout(std::time::Duration::from_secs(300), child.wait()).await;
@@ -645,6 +676,21 @@ async fn run_terminal_login(
             Err("sign-in timed out. try again.".to_owned())
         }
     }
+}
+
+/// Run a catalog-declared external login after the user clicks Sign in. The
+/// agent opens its own browser OAuth and stores its own credential; screenpipe
+/// never receives either the browser callback or the resulting token.
+pub(crate) async fn run_external_auth_login(
+    agent_id: &str,
+    bun_path: Option<&str>,
+) -> Result<(), String> {
+    let login = agent_catalog()
+        .into_iter()
+        .find(|agent| agent.id == agent_id)
+        .and_then(|agent| agent.login)
+        .ok_or_else(|| format!("{agent_id} does not provide an external login"))?;
+    run_terminal_login(bun_path, agent_id, &login.args).await
 }
 
 fn agent_catalog() -> Vec<CatalogAgent> {
@@ -2987,18 +3033,25 @@ fn allow_option_id(options: &Value) -> Option<String> {
     by_kind("allow_always").or_else(|| by_kind("allow_once"))
 }
 
-fn external_auth_command(agent_id: &str) -> Option<&'static str> {
+fn external_auth_command(agent_id: &str) -> Option<String> {
     // These agents advertise an ACP auth method but their `authenticate` just
-    // re-errors or never responds while signed out — login can't complete over
-    // ACP. It must be done via their own CLI, which persists credentials the
-    // ACP server then reuses. We show the command instead of a card that would
-    // loop or hang.
-    match agent_id {
-        "cursor" => Some("cursor-agent login"),
-        "opencode" => Some("opencode auth login"),
-        "kimi" => Some("kimi login"),
-        _ => None,
-    }
+    // re-errors or never responds while signed out. The catalog provides the
+    // reviewed login argv used by both this display string and the one-click
+    // launcher, so the two paths cannot drift.
+    let agent = agent_catalog()
+        .into_iter()
+        .find(|agent| agent.id == agent_id)?;
+    let login = agent.login?;
+    let program = match agent.launch {
+        AgentLaunch::Npx { package, .. } => package,
+        AgentLaunch::Binary { command, .. } => command,
+    };
+    Some(
+        std::iter::once(program)
+            .chain(login.args)
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
 }
 
 /// Login args a method declares under the `_meta["terminal-auth"]` convention,
@@ -3138,7 +3191,7 @@ async fn authenticate(
         };
         if let Some(args) = terminal_args {
             if let Err(error) =
-                run_terminal_login(&config.bun_path, &config.agent_id, &args).await
+                run_terminal_login(Some(&config.bun_path), &config.agent_id, &args).await
             {
                 // Show why it failed and loop back to re-emit the card so the
                 // user can retry or cancel instead of it hanging.
@@ -4331,7 +4384,6 @@ pub async fn run_from_env() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
     fn terminal_auth_meta_drives_a_cli_login() {
         // A standard advertised method (not the Terminal variant) that carries
@@ -4491,13 +4543,16 @@ mod tests {
         // Agents whose ACP authenticate doesn't work log in via their own CLI.
         assert_eq!(
             external_auth_command("cursor"),
-            Some("cursor-agent login")
+            Some("cursor-agent login".to_string())
         );
         assert_eq!(
             external_auth_command("opencode"),
-            Some("opencode auth login")
+            Some("opencode auth login".to_string())
         );
-        assert_eq!(external_auth_command("kimi"), Some("kimi login"));
+        assert_eq!(
+            external_auth_command("kimi"),
+            Some("kimi login".to_string())
+        );
         // Agents that authenticate over ACP have no external command.
         assert_eq!(external_auth_command("codex-acp"), None);
     }

@@ -1047,6 +1047,39 @@ export function AIProviderConfig({
           </div>
         )}
 
+        {selectedProvider && (
+          <div className="space-y-1">
+            <Label htmlFor="name" className="flex items-center gap-2 text-xs">
+              name
+              {idError && (
+                <span className="text-xs text-destructive font-normal">
+                  {idError}
+                </span>
+              )}
+            </Label>
+            <Input
+              id="name"
+              type="text"
+              placeholder="generated automatically"
+              value={formData.id ?? ""}
+              onChange={(e) => handleIdChange(e.target.value)}
+              onBlur={refillEmptyName}
+              className={cn(
+                "font-mono h-8 text-sm",
+                idError && "border-destructive focus-visible:ring-destructive",
+              )}
+              autoComplete="off"
+              autoCorrect="off"
+              autoCapitalize="off"
+              spellCheck={false}
+              disabled={
+                Boolean(defaultPreset?.id) &&
+                settings.aiPresets.some((p) => p.id === defaultPreset?.id)
+              }
+            />
+          </div>
+        )}
+
         <button
           type="button"
           className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
@@ -1176,36 +1209,6 @@ export function AIProviderConfig({
             )}
             {selectedProvider && (
               <>
-            <div className="space-y-1">
-              <Label htmlFor="name" className="flex items-center gap-2 text-xs">
-                name
-                {idError && (
-                  <span className="text-xs text-destructive font-normal">
-                    {idError}
-                  </span>
-                )}
-              </Label>
-              <Input
-                id="name"
-                type="text"
-                placeholder="generated automatically"
-                value={formData.id ?? ""}
-                onChange={(e) => handleIdChange(e.target.value)}
-                onBlur={refillEmptyName}
-                className={cn(
-                  "font-mono h-8 text-sm",
-                  idError && "border-destructive focus-visible:ring-destructive",
-                )}
-                autoComplete="off"
-                autoCorrect="off"
-                autoCapitalize="off"
-                spellCheck={false}
-                disabled={
-                  Boolean(defaultPreset?.id) &&
-                  settings.aiPresets.some((p) => p.id === defaultPreset?.id)
-                }
-              />
-            </div>
             {resolvedModelLimits && (
               <p className="text-[10px] text-muted-foreground">
                 known model limits are configured automatically
@@ -1330,6 +1333,9 @@ interface AIPresetsSelectorProps {
   triggerAriaLabel?: string;
   /** For tight composer UIs, show the active model instead of preset details. */
   showModelOnly?: boolean;
+  /** ACP composers expose the live model in a separate control, so the preset
+   *  switcher can collapse to the provider mark instead of repeating its name. */
+  providerIconOnly?: boolean;
   /** Notify parent surfaces when the preset popover opens or closes. */
   onOpenChange?: (open: boolean) => void;
   /** Scheduled pipes still run through raw Pi and cannot execute ACP adapters. */
@@ -1430,6 +1436,7 @@ export const AIPresetsSelector = ({
   triggerClassName,
   triggerAriaLabel,
   showModelOnly = false,
+  providerIconOnly = false,
   onOpenChange,
   includeAgentPresets = true,
 }: AIPresetsSelectorProps) => {
@@ -1800,6 +1807,10 @@ export const AIPresetsSelector = ({
   );
   const isLastCloudPreset = (preset: AIPreset) =>
     preset.provider === "screenpipe-cloud" && settings.user?.cloud_subscribed && cloudPresetCount <= 1;
+  const selectedProviderName =
+    selectedPresetData?.provider === "acp"
+      ? acpAdapterInfo(selectedPresetData.acpAgent?.id).name
+      : selectedPresetData?.provider || "AI";
 
   return (
     <>
@@ -1834,7 +1845,12 @@ export const AIPresetsSelector = ({
                   type="button"
                   variant="outline"
                   role="combobox"
-                  aria-label={triggerAriaLabel}
+                  aria-label={
+                    triggerAriaLabel ??
+                    (providerIconOnly
+                      ? `AI provider: ${selectedProviderName}. Change provider`
+                      : undefined)
+                  }
                   aria-expanded={open}
                   className={cn(
                     "w-full justify-between hover:bg-accent hover:text-accent-foreground",
@@ -1845,7 +1861,10 @@ export const AIPresetsSelector = ({
                 >
                   {selectedPreset ? (
                     showModelOnly ? (
-                      <div className="flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden">
+                      <div className={cn(
+                        "flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden",
+                        providerIconOnly && "justify-center",
+                      )}>
                         {selectedPresetRequiresLogin && (
                           <AlertTriangle className="h-4 w-4 text-amber-500 shrink-0" />
                         )}
@@ -1873,24 +1892,26 @@ export const AIPresetsSelector = ({
                             ),
                           )}
                         />
-                        <span
-                          className="truncate text-left font-medium"
-                          title={
-                            selectedPresetData
-                              ? `${selectedPresetData.id} (${selectedPresetData.model})`
-                              : undefined
-                          }
-                        >
-                          {/* ACP presets store the adapter id in `model`, so the
-                              raw slug ("claude-acp") is what showed here. Name
-                              the agent instead; the config control beside it
-                              names the model the agent is running. */}
-                          {selectedPresetData?.provider === "acp"
-                            ? acpAdapterInfo(selectedPresetData.acpAgent?.id).name
-                            : selectedPresetData?.model ||
-                              formatPresetName(selectedPreset)}
-                        </span>
-                        {selectedModelAllowanceNotice && (
+                        {!providerIconOnly && (
+                          <span
+                            className="truncate text-left font-medium"
+                            title={
+                              selectedPresetData
+                                ? `${selectedPresetData.id} (${selectedPresetData.model})`
+                                : undefined
+                            }
+                          >
+                            {/* ACP presets store the adapter id in `model`, so the
+                                raw slug ("claude-acp") is what showed here. Name
+                                the agent instead; the config control beside it
+                                names the model the agent is running. */}
+                            {selectedPresetData?.provider === "acp"
+                              ? acpAdapterInfo(selectedPresetData.acpAgent?.id).name
+                              : selectedPresetData?.model ||
+                                formatPresetName(selectedPreset)}
+                          </span>
+                        )}
+                        {!providerIconOnly && selectedModelAllowanceNotice && (
                           <TooltipProvider>
                             <Tooltip>
                               <TooltipTrigger asChild>
@@ -1941,11 +1962,15 @@ export const AIPresetsSelector = ({
                   ) : (
                     "select ai preset..."
                   )}
-                  <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                  {!providerIconOnly && (
+                    <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                  )}
                 </Button>
               </PopoverTrigger>
               <TooltipContent>
-                {selectedPresetRequiresLogin ? (
+                {providerIconOnly ? (
+                  <p>{selectedProviderName} · switch provider</p>
+                ) : selectedPresetRequiresLogin ? (
                   <p className="text-muted-foreground">
                     Login required to use this preset
                   </p>

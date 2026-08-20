@@ -5,6 +5,7 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
+import { Gauge } from "lucide-react";
 import { commands } from "@/lib/utils/tauri";
 import { usePiThinkingLevel } from "@/lib/hooks/use-pi-thinking-level";
 import { ComposerSettingsPopover } from "@/components/chat/standalone/composer-settings-popover";
@@ -126,9 +127,11 @@ export function ThinkingLevelSelector({ streaming = false, sessionId = null }: T
     <ComposerSettingsPopover
       label={currentLabel}
       title={disabledReason || "Thinking level: controls reasoning depth"}
-      ariaLabel="Thinking level"
+      ariaLabel={`Thinking level: ${currentLabel}`}
       triggerTestId="thinking-level-trigger"
       contentTestId="thinking-level-popover"
+      triggerIcon={Gauge}
+      iconOnly
       open={isOpen}
       onOpenChange={setIsOpen}
       disabled={isRpcLoading || piThinkingUnsupported}

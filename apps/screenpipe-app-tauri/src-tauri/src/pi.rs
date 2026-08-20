@@ -4542,6 +4542,16 @@ pub async fn pi_acp_agent_install(agent_id: String) -> Result<AcpAgentInstallSta
     Ok(pi_acp_agent_install_status(agent_id))
 }
 
+/// Launch a built-in agent's own browser login after an explicit user click.
+/// The catalog supplies the argv, the process runs hidden as the desktop user,
+/// and the agent keeps the resulting credential in its own local store.
+#[tauri::command]
+#[specta::specta]
+pub async fn pi_acp_external_login(agent_id: String) -> Result<(), String> {
+    let bun_path = find_bun_executable();
+    crate::acp_runtime::run_external_auth_login(&agent_id, bun_path.as_deref()).await
+}
+
 /// Whether launching this agent will trigger a first-run package install (a
 /// slow, silent-looking wait). The preset editor uses this to show an
 /// "Installing <agent>…" hint instead of a bare "loading…" label. Cheap cache

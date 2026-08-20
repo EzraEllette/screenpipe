@@ -1464,6 +1464,19 @@ async piAcpAgentInstallStatus(agentId: string) : Promise<AcpAgentInstallStatus> 
     return await TAURI_INVOKE("pi_acp_agent_install_status", { agentId });
 },
 /**
+ * Launch a built-in agent's own browser login after an explicit user click.
+ * The catalog supplies the argv, the process runs hidden as the desktop user,
+ * and the agent keeps the resulting credential in its own local store.
+ */
+async piAcpExternalLogin(agentId: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("pi_acp_external_login", { agentId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Probe an ACP adapter for its advertised model/mode selectors without a
  * chat: spawn the hidden runtime, let it initialize and create a session,
  * capture the acp_session_config event, and tear everything down. Returns

@@ -84,8 +84,8 @@ describe("ProviderAutomationsPanel", () => {
 
     expect(screen.getByText("Say hi")).toBeInTheDocument();
     expect(screen.getByText("Every hour at :07")).toBeInTheDocument();
-    expect(screen.getByText("active")).toBeInTheDocument();
-    expect(screen.getByText("session only")).toBeInTheDocument();
+    expect(screen.getByLabelText("active")).toBeInTheDocument();
+    expect(screen.getByLabelText("session only")).toBeInTheDocument();
     expect(
       screen.getByText("view only here · manage these tasks in Claude"),
     ).toBeInTheDocument();
@@ -196,5 +196,12 @@ describe("ProviderAutomationsPanel", () => {
         schedule: "0 9 * * 1-5",
       }),
     ).toBe("weekdays at 09:00");
+    expect(
+      providerScheduleLabel({
+        ...TASKS[0],
+        schedule:
+          "FREQ=YEARLY;COUNT=2;BYMONTH=8;BYMONTHDAY=25,30;BYHOUR=9;BYMINUTE=0",
+      }),
+    ).toBe("yearly · Aug 25 & 30 · 9 AM · 2 runs");
   });
 });
