@@ -38,11 +38,12 @@ bun run build:tauri:status
 ```
 
 The coordinator keeps each worktree's own `src-tauri/target` directory so
-concurrent checkouts cannot corrupt one another. It separately configures a
-dedicated local sccache server with every live Screenpipe worktree as a base
+concurrent checkouts cannot corrupt one another. It configures the existing
+machine-wide sccache server with every live Screenpipe worktree as a base
 directory. Eligible dependency objects can therefore be reused across
-worktrees without sharing target directories or relying on network
-credentials. The worktree list is refreshed before every queued native build.
+worktrees without sharing target directories. The worktree list is refreshed
+before every queued native build. Do not point a second sccache server at the
+same local cache directory; sccache local storage supports only one server.
 
 `bun run dev:tauri` queues only its initial Cargo warm-up. It releases the build
 slot before starting the long-running Tauri dev process, so an open app does not
