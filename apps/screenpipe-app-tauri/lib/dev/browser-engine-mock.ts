@@ -116,6 +116,24 @@ export function mockLocalApiResponse(
   if (url.pathname === "/activity-ledger") {
     return Response.json(mockActivityLedger(url, scenario));
   }
+  if (url.pathname === "/frames/preview-samples") {
+    const start = new Date(url.searchParams.get("start_time") ?? "");
+    const end = new Date(url.searchParams.get("end_time") ?? "");
+    const validRange =
+      Number.isFinite(start.getTime()) && Number.isFinite(end.getTime());
+    const span = validRange ? end.getTime() - start.getTime() : 0;
+    return Response.json({
+      frames:
+        scenario === "empty" || !validRange
+          ? []
+          : Array.from({ length: 6 }, (_, index) => ({
+              frame_id: 98_000 + index,
+              timestamp: new Date(
+                start.getTime() + (span * index) / 5,
+              ).toISOString(),
+            })),
+    });
+  }
   if (url.pathname === "/meetings/status") {
     return Response.json({ active: false, manualActive: false });
   }
