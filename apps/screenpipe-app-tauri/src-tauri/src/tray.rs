@@ -1280,6 +1280,88 @@ fn setup_tray_click_handlers(main_tray: &TrayIcon) -> Result<()> {
     Ok(())
 }
 
+/// Return fixed analytics values for actionable tray items. Dynamic native menu
+/// ids can contain monitor ids or audio-device names, so they must never be
+/// forwarded to analytics verbatim.
+fn tray_telemetry_item(menu_id: &str) -> Option<(&'static str, &'static str)> {
+    if menu_id.starts_with("toggle_vision_device_") {
+        return Some(("monitor_toggle", "recording"));
+    }
+    if menu_id.starts_with("toggle_audio_device_") {
+        return Some(("audio_device_toggle", "recording"));
+    }
+
+    match menu_id {
+        "show" => Some(("timeline", "navigation")),
+        "show_search" => Some(("search", "navigation")),
+        "show_chat" => Some(("chat", "navigation")),
+        "open_app" => Some(("open_app", "navigation")),
+        "settings" => Some(("settings", "navigation")),
+        "feedback" => Some(("feedback", "navigation")),
+        "onboarding" => Some(("onboarding", "navigation")),
+        "fix_permissions" | "check_permissions" => Some(("fix_permissions", "navigation")),
+        "start_recording" | "stop_recording" | "toggle_recording" => {
+            Some(("recording_toggle", "recording"))
+        }
+        "pause_5" => Some(("pause_5m", "recording")),
+        "pause_15" => Some(("pause_15m", "recording")),
+        "pause_30" => Some(("pause_30m", "recording")),
+        "pause_60" => Some(("pause_60m", "recording")),
+        "hd_timer_15" => Some(("hd_start_15m", "recording")),
+        "hd_timer_30" => Some(("hd_start_30m", "recording")),
+        "hd_timer_60" => Some(("hd_start_60m", "recording")),
+        "hd_timer_120" => Some(("hd_start_120m", "recording")),
+        "stop_hd_recording" => Some(("hd_stop", "recording")),
+        "extend_hd_30" => Some(("hd_extend_30m", "recording")),
+        "lock_vault" => Some(("lock_vault", "privacy")),
+        "upgrade" => Some(("upgrade", "commercial")),
+        "releases" => Some(("releases", "app")),
+        "update_now" => Some(("update_now", "app")),
+        "book_call" => Some(("book_call", "commercial")),
+        "quit" => Some(("quit", "app")),
+        _ => None,
+    }
+}
+
+fn recording_state_telemetry_value(status: RecordingStatus) -> &'static str {
+    match status {
+        RecordingStatus::Starting => "starting",
+        RecordingStatus::Recording => "recording",
+        RecordingStatus::Paused => "paused",
+        RecordingStatus::ScheduledPause => "scheduled_pause",
+        RecordingStatus::Stopped => "stopped",
+        RecordingStatus::Error => "error",
+    }
+}
+
+/// Track directly from the native handler so clicks are still observed while
+/// headless mode has no mounted webview. Analytics opt-out is enforced by the
+/// shared AnalyticsManager.
+fn track_tray_menu_item_clicked(app: &AppHandle, menu_id: &str) {
+    let Some((item_id, action_group)) = tray_telemetry_item(menu_id) else {
+        return;
+    };
+    let recording_state = recording_state_telemetry_value(get_effective_recording_status());
+
+    if let Some(analytics) = app.try_state::<std::sync::Arc<crate::analytics::AnalyticsManager>>() {
+        let analytics = std::sync::Arc::clone(&analytics);
+        tauri::async_runtime::spawn(async move {
+            let _ = analytics
+                .send_event(
+                    "tray_menu_item_clicked",
+                    Some(serde_json::json!({
+                        "item_id": item_id,
+                        "action_group": action_group,
+                        "recording_state": recording_state,
+                        "source": "tray_menu",
+                        "telemetry_schema_version": 1,
+                    })),
+                )
+                .await;
+        });
+    }
+}
+
 /// Tray menu handler runs inside tao::send_event (Obj-C FFI, nounwind). We must not
 /// do any heavy or panicking work here — defer all window/show/open work to
 /// run_on_main_thread so the sync path is minimal and panic-free.
@@ -1302,6 +1384,8 @@ fn handle_menu_event(app_handle: &AppHandle, event: tauri::menu::MenuEvent) {
         );
         return;
     }
+
+    track_tray_menu_item_clicked(app_handle, event.id().as_ref());
 
     match event.id().as_ref() {
         "show" => {
@@ -1941,6 +2025,33 @@ mod tests {
             recording_status_text(RecordingStatus::Recording, false, None),
             "● Recording"
         );
+    }
+
+    #[test]
+    fn tray_telemetry_uses_fixed_values_for_dynamic_device_items() {
+        assert_eq!(
+            tray_telemetry_item("toggle_vision_device_42"),
+            Some(("monitor_toggle", "recording"))
+        );
+        assert_eq!(
+            tray_telemetry_item("toggle_audio_device_Private headset (input)"),
+            Some(("audio_device_toggle", "recording"))
+        );
+    }
+
+    #[test]
+    fn tray_telemetry_only_tracks_allowlisted_actions() {
+        assert_eq!(
+            tray_telemetry_item("show_chat"),
+            Some(("chat", "navigation"))
+        );
+        assert_eq!(
+            tray_telemetry_item("pause_30"),
+            Some(("pause_30m", "recording"))
+        );
+        assert_eq!(tray_telemetry_item("monitor_Private display name"), None);
+        assert_eq!(tray_telemetry_item("pause_user_supplied_value"), None);
+        assert_eq!(tray_telemetry_item("future_action"), None);
     }
 
     #[test]
