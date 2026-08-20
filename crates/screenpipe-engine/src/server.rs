@@ -968,6 +968,26 @@ impl SCServer {
             .get("/frames/:frame_id/elements", get_frame_elements)
             .get("/activity-summary", get_activity_summary)
             .get("/activity-ledger", get_activity_ledger)
+            .get(
+                "/cloud-agents/status",
+                crate::routes::cloud_agents::cloud_agent_status,
+            )
+            .post(
+                "/cloud-agents/:provider/connect",
+                crate::routes::cloud_agents::connect_cloud_agent,
+            )
+            .get(
+                "/cloud-agents/cursor-agents",
+                crate::routes::cloud_agents::list_cursor_cloud_agents,
+            )
+            .get(
+                "/cloud-agents/:provider/codebases",
+                crate::routes::cloud_agents::list_cloud_agent_codebases,
+            )
+            .put(
+                "/cloud-agents/cursor-key",
+                crate::routes::cloud_agents::set_cursor_cloud_key,
+            )
             // Vault routes
             .get("/vault/status", crate::routes::vault::vault_status)
             .post("/vault/lock", crate::routes::vault::vault_lock)

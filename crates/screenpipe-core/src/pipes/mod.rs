@@ -21,6 +21,7 @@ pub mod sync;
 pub(crate) mod trajectory;
 
 use crate::agents::{
+    cloud::CloudAgentConfig,
     pi::{pi_event_protocol_error, pi_package_enabled, PiExecutor},
     AgentExecutor, ExecutionHandle, SharedPid, STOP_REQUESTED_PID,
 };
@@ -268,6 +269,10 @@ pub struct PipeConfig {
     /// LLM provider override.  Default: none (uses screenpipe cloud).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
+    /// Run this pipe in a user-owned provider cloud instead of a local Pi
+    /// process. Context leaves the device only when the nested opt-in is true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud_agent: Option<CloudAgentConfig>,
     /// Reasoning effort used for every run. Background automation defaults to
     /// low so recurring work does not inherit Pi's more expensive chat default.
     #[serde(default, skip_serializing_if = "is_default_effort")]
@@ -382,6 +387,30 @@ pub struct PipeConfig {
     /// Catches any extra fields from front-matter (backwards compat).
     #[serde(default, flatten, skip_serializing_if = "HashMap::is_empty")]
     pub config: HashMap<String, serde_json::Value>,
+}
+
+struct CloudAgentRunSettings {
+    model: String,
+    provider: String,
+    executor_config: serde_json::Value,
+}
+
+fn cloud_agent_run_settings(
+    config: &PipeConfig,
+    task_instructions: &str,
+) -> Result<CloudAgentRunSettings> {
+    let cloud = config
+        .cloud_agent
+        .as_ref()
+        .ok_or_else(|| anyhow!("cloud_agent config is missing"))?;
+    Ok(CloudAgentRunSettings {
+        model: cloud
+            .model
+            .clone()
+            .unwrap_or_else(|| "provider-default".into()),
+        provider: cloud.provider.as_str().to_string(),
+        executor_config: cloud.executor_config(task_instructions),
+    })
 }
 
 /// Cross-provider reasoning effort exposed by Pipes.
@@ -3477,7 +3506,7 @@ impl PipeManager {
         // and a self-PID file would make the next startup SIGKILL the app.
         write_pid_file(&self.pipes_dir, name, 0);
 
-        // Resolve preset
+        // Resolve the selected runner and its provider-specific configuration.
         let (
             run_model,
             run_provider,
@@ -3486,7 +3515,19 @@ impl PipeManager {
             preset_prompt,
             run_agent,
             run_executor_config,
-        ) = if let Some(preset_id) = config.preset.first() {
+        ) = if config.agent == "cloud-agent" {
+            let cloud = cloud_agent_run_settings(&config, &body)
+                .map_err(|error| anyhow!("pipe '{}': {error}", name))?;
+            (
+                cloud.model,
+                Some(cloud.provider),
+                None,
+                None,
+                None,
+                "cloud-agent".to_string(),
+                Some(cloud.executor_config),
+            )
+        } else if let Some(preset_id) = config.preset.first() {
             match resolve_preset(&self.pipes_dir, preset_id) {
                 Some(resolved) => (
                     resolved.model,
@@ -4066,7 +4107,21 @@ impl PipeManager {
                 active_preset_idx,
                 run_agent,
                 run_executor_config,
-            ) = if !config.preset.is_empty() {
+            ) = if config.agent == "cloud-agent" {
+                let cloud = cloud_agent_run_settings(&config, &body)
+                    .map_err(|error| anyhow!("pipe '{}': {error}", name))?;
+                (
+                    cloud.model,
+                    Some(cloud.provider),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    "cloud-agent".to_string(),
+                    Some(cloud.executor_config),
+                )
+            } else if !config.preset.is_empty() {
                 // Pick the best available preset using the circuit breaker, but
                 // start at `retry_depth` so an in-run fallback retry advances to
                 // the next preset even when the failed one's breaker never
@@ -4216,7 +4271,6 @@ impl PipeManager {
                 run_agent == "pi" && pi_package_enabled("pi-subagents"),
             );
             let prompt = self.render_prompt(&config, &body, preset_prompt.as_deref());
-
             let shared_pid_for_kill = shared_pid.clone();
 
             // Mark as running in DB
@@ -4707,6 +4761,17 @@ impl PipeManager {
                 "provider" => {
                     if let Some(s) = v.as_str() {
                         config.provider = Some(s.to_string());
+                    }
+                }
+                "cloud_agent" => {
+                    if v.is_null() {
+                        config.cloud_agent = None;
+                    } else {
+                        config.cloud_agent = Some(
+                            serde_json::from_value::<CloudAgentConfig>(v.clone()).map_err(|e| {
+                                anyhow!("invalid cloud_agent config for '{}': {}", name, e)
+                            })?,
+                        );
                     }
                 }
                 "effort" => {
@@ -5666,7 +5731,7 @@ impl PipeManager {
                         qr.insert(name.clone());
                     }
 
-                    // Resolve preset → model/provider overrides (same as run_pipe)
+                    // Resolve runner configuration using the same path as manual runs.
                     let (
                         model,
                         provider,
@@ -5675,7 +5740,26 @@ impl PipeManager {
                         preset_prompt,
                         run_agent,
                         executor_config,
-                    ) = if let Some(preset_id) = config.preset.first() {
+                    ) = if config.agent == "cloud-agent" {
+                        let cloud = match cloud_agent_run_settings(config, body) {
+                            Ok(cloud) => cloud,
+                            Err(error) => {
+                                warn!("scheduler: pipe '{}': {error}", name);
+                                let mut qr = queued_or_running.lock().await;
+                                qr.remove(name);
+                                continue;
+                            }
+                        };
+                        (
+                            cloud.model,
+                            Some(cloud.provider),
+                            None,
+                            None,
+                            None,
+                            "cloud-agent".to_string(),
+                            Some(cloud.executor_config),
+                        )
+                    } else if let Some(preset_id) = config.preset.first() {
                         match resolve_preset(&pipes_dir, preset_id) {
                             Some(resolved) => {
                                 info!("scheduler: pipe '{}' using preset '{}' → model={}, provider={:?}",
@@ -6710,6 +6794,7 @@ pub fn serialize_pipe(config: &PipeConfig, body: &str) -> Result<String> {
         "agent",
         "model",
         "provider",
+        "cloud_agent",
         "preset",
         "connections",
         "permissions",
@@ -8037,6 +8122,43 @@ mod tests {
     use super::*;
     use chrono::{TimeZone, Timelike};
     use std::sync::atomic::Ordering;
+
+    #[test]
+    fn cloud_scheduler_settings_preserve_task_and_provider_for_every_runner() {
+        for provider in ["codex", "claude", "cursor"] {
+            let source = format!(
+                "---\nschedule: daily\ncloud_agent:\n  provider: {provider}\n  send_screenpipe_context: false\n---\nSummarize my day"
+            );
+            let (config, task) = parse_frontmatter(&source).unwrap();
+            let settings = cloud_agent_run_settings(&config, &task).unwrap();
+
+            assert_eq!(settings.provider, provider);
+            assert_eq!(settings.model, "provider-default");
+            assert_eq!(settings.executor_config["task_instructions"], task);
+            assert_eq!(
+                settings.executor_config["cloud_agent"]["provider"],
+                provider
+            );
+            assert_eq!(
+                settings.executor_config["cloud_agent"]["send_screenpipe_context"],
+                false
+            );
+        }
+    }
+
+    #[test]
+    fn cloud_scheduler_rejects_missing_runner_configuration() {
+        let (config, task) =
+            parse_frontmatter("---\nschedule: daily\n---\nSummarize my day").unwrap();
+
+        assert_eq!(
+            cloud_agent_run_settings(&config, &task)
+                .err()
+                .unwrap()
+                .to_string(),
+            "cloud_agent config is missing"
+        );
+    }
 
     // -- scheduler lifecycle tests ------------------------------------------
 
@@ -9465,6 +9587,7 @@ mod tests {
             agent: "pi".to_string(),
             model: "claude-haiku-4-5".to_string(),
             provider: None,
+            cloud_agent: None,
             effort: PipeEffort::Low,
             preset: vec!["default".to_string()],
             permissions: PipePermissionsConfig::default(),
@@ -10201,6 +10324,7 @@ mod tests {
             agent: "pi".to_string(),
             model: "claude-haiku-4-5".to_string(),
             provider: None,
+            cloud_agent: None,
             effort: PipeEffort::Low,
             preset: vec!["default".to_string()],
             permissions: PipePermissionsConfig::default(),
@@ -10361,6 +10485,7 @@ mod tests {
             agent: "pi".to_string(),
             model: "test-model".to_string(),
             provider: None,
+            cloud_agent: None,
             effort: PipeEffort::Low,
             preset: vec![],
             permissions: PipePermissionsConfig::default(),
@@ -10400,6 +10525,7 @@ mod tests {
             agent: "pi".to_string(),
             model: "test-model".to_string(),
             provider: None,
+            cloud_agent: None,
             effort: PipeEffort::Low,
             preset: vec![],
             permissions: PipePermissionsConfig::default(),
@@ -10429,6 +10555,7 @@ mod tests {
             agent: "pi".to_string(),
             model: "test-model".to_string(),
             provider: None,
+            cloud_agent: None,
             effort: PipeEffort::Low,
             preset: vec![],
             permissions: PipePermissionsConfig::default(),
@@ -10467,6 +10594,7 @@ mod tests {
             agent: "pi".to_string(),
             model: "test-model".to_string(),
             provider: None,
+            cloud_agent: None,
             effort: PipeEffort::Low,
             preset: vec![],
             permissions: PipePermissionsConfig::default(),
@@ -10593,6 +10721,7 @@ mod tests {
                 agent: "pi".to_string(),
                 model: "test".to_string(),
                 provider: None,
+                cloud_agent: None,
                 effort: PipeEffort::Low,
                 preset: vec![],
                 permissions: PipePermissionsConfig::default(),
