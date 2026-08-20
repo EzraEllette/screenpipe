@@ -133,6 +133,38 @@ fn valid_evidence(
         && (evidence.kind != "meeting" || evidence.meeting_id.is_some())
 }
 
+fn repair_evidence_timezone(
+    evidence: &mut ActivityHistoryEvidence,
+    entry_start: DateTime<Utc>,
+    entry_end: DateTime<Utc>,
+) {
+    if valid_evidence(evidence, entry_start, entry_end) {
+        return;
+    }
+    let Ok(parsed) = DateTime::parse_from_rfc3339(&evidence.at) else {
+        return;
+    };
+    if parsed.offset().local_minus_utc() == 0 {
+        return;
+    }
+
+    // Models occasionally preserve a UTC clock value but attach the user's
+    // local offset, shifting otherwise exact source evidence by several hours.
+    // Repair only when treating that unchanged clock value as UTC puts the
+    // evidence back inside its entry; valid offset timestamps stay untouched.
+    let repaired = parsed.naive_local().and_utc();
+    if repaired < entry_start || repaired > entry_end {
+        return;
+    }
+    let original = std::mem::replace(
+        &mut evidence.at,
+        repaired.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true),
+    );
+    if !valid_evidence(evidence, entry_start, entry_end) {
+        evidence.at = original;
+    }
+}
+
 fn overlaps(entry: &ActivityHistoryEntry, start: DateTime<Utc>, end: DateTime<Utc>) -> bool {
     match (parse_time(&entry.start_at), parse_time(&entry.end_at)) {
         (Some(entry_start), Some(entry_end)) => entry_end > start && entry_start < end,
@@ -307,7 +339,7 @@ Resolve the local API from SCREENPIPE_LOCAL_API_URL. Query /meetings, /activity-
 Return one JSON object and no Markdown:
 {{"entries":[{{"id":"stable-short-slug","kind":"work","meeting_id":null,"start_at":"ISO timestamp","end_at":"ISO timestamp","title":"3-8 words, past tense","summary":"one specific plain-language sentence","evidence":[{{"kind":"screen","at":"exact source timestamp","frame_id":123,"meeting_id":null,"app_name":"exact app name","label":"short paraphrase of what this proves"}}]}}]}}
 
-Rules: preserve meaningful short work and resumed work as separate intervals; gaps over 15 minutes end an interval; do not span unrelated work; include every recorded meeting of at least two minutes exactly once as kind=meeting with its real meeting_id and a first kind=meeting evidence item; use 1-3 direct evidence items per entry; omit anything you cannot cite directly; do not expose quotes, raw captures, or API mechanics."#,
+Rules: return every start_at, end_at, and evidence.at in UTC ending in Z; when a source timestamp has an offset, convert the instant to UTC and never replace its offset without adjusting its clock value; preserve meaningful short work and resumed work as separate intervals; gaps over 15 minutes end an interval; do not span unrelated work; include every recorded meeting of at least two minutes exactly once as kind=meeting with its real meeting_id and a first kind=meeting evidence item; use 1-3 direct evidence items per entry; omit anything you cannot cite directly; do not expose quotes, raw captures, or API mechanics."#,
         start = start.to_rfc3339(),
         end = end.to_rfc3339(),
     )
@@ -374,6 +406,9 @@ fn parse_document(
             if let (Some(entry_start), Some(entry_end)) =
                 (parse_time(&entry.start_at), parse_time(&entry.end_at))
             {
+                entry.evidence.iter_mut().for_each(|evidence| {
+                    repair_evidence_timezone(evidence, entry_start, entry_end)
+                });
                 entry
                     .evidence
                     .retain(|evidence| valid_evidence(evidence, entry_start, entry_end));
@@ -732,6 +767,38 @@ mod tests {
         let entries = parse_document(&raw, start, end).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].id, "kept");
+    }
+
+    #[test]
+    fn parser_repairs_local_offset_attached_to_a_utc_clock_value() {
+        let start = parse_time("2026-08-19T22:24:12Z").unwrap();
+        let end = parse_time("2026-08-20T02:50:32Z").unwrap();
+        let raw = json!({
+            "entries": [{
+                "id": "built-activity-notifications",
+                "kind": "work",
+                "meeting_id": null,
+                "start_at": "2026-08-19T23:40:00Z",
+                "end_at": "2026-08-20T00:15:00Z",
+                "title": "Built activity notifications",
+                "summary": "Built and tested activity-generation notifications.",
+                "evidence": [{
+                    "kind": "screen",
+                    "at": "2026-08-19T23:54:05.705800-07:00",
+                    "frame_id": 34235,
+                    "meeting_id": null,
+                    "app_name": "ChatGPT",
+                    "label": "Displayed the activity notification worktree"
+                }]
+            }]
+        })
+        .to_string();
+
+        let entries = parse_document(&raw, start, end).unwrap();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].evidence.len(), 1);
+        assert_eq!(entries[0].evidence[0].at, "2026-08-19T23:54:05.705800Z");
     }
 
     #[test]
