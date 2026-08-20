@@ -33,9 +33,8 @@ vi.mock("@/components/chat/standalone/composer-utility-menu", () => ({
   ComposerUtilityMenu: () => null,
 }));
 vi.mock("@/components/chat/standalone/acp-config-selector", () => ({
-  AcpConfigSelector: () => null,
-  AcpEffortSelector: ({ agentId }: { agentId: string }) => (
-    <div data-testid="mock-acp-effort">{agentId}</div>
+  AcpConfigSelector: ({ agentId }: { agentId: string }) => (
+    <div data-testid="mock-acp-config">{agentId}</div>
   ),
 }));
 vi.mock("@/components/chat/standalone/acp-permission-selector", () => ({
@@ -115,7 +114,7 @@ describe("ComposerControlsRow preset selection", () => {
     expect(onPresetSaved).toHaveBeenCalledWith(newPreset);
   });
 
-  it("shares the permission control across ACP presets only", () => {
+  it("shares permission and combined model controls across ACP presets only", () => {
     const commonProps = {
       canChat: true,
       filters: {
@@ -156,7 +155,7 @@ describe("ComposerControlsRow preset selection", () => {
     expect(screen.getByTestId("mock-acp-permission")).toHaveTextContent(
       "codex-acp",
     );
-    expect(screen.getByTestId("mock-acp-effort")).toHaveTextContent(
+    expect(screen.getByTestId("mock-acp-config")).toHaveTextContent(
       "codex-acp",
     );
     expect(screen.getByTestId("mock-usage-preset")).toHaveTextContent(
@@ -184,7 +183,7 @@ describe("ComposerControlsRow preset selection", () => {
     expect(screen.getByTestId("mock-acp-permission")).toHaveTextContent(
       "claude-acp",
     );
-    expect(screen.getByTestId("mock-acp-effort")).toHaveTextContent(
+    expect(screen.getByTestId("mock-acp-config")).toHaveTextContent(
       "claude-acp",
     );
     expect(screen.getByTestId("mock-usage-preset")).toHaveTextContent(
@@ -209,7 +208,7 @@ describe("ComposerControlsRow preset selection", () => {
     );
 
     expect(screen.queryByTestId("mock-acp-permission")).not.toBeInTheDocument();
-    expect(screen.queryByTestId("mock-acp-effort")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("mock-acp-config")).not.toBeInTheDocument();
     expect(screen.getByTestId("mock-usage-preset")).toHaveTextContent(
       "cloud|chat-1",
     );

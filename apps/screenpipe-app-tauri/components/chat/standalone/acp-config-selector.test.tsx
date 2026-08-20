@@ -18,7 +18,7 @@ import {
   screen,
   waitFor,
 } from "@testing-library/react";
-import { AcpConfigSelector, AcpEffortSelector } from "./acp-config-selector";
+import { AcpConfigSelector } from "./acp-config-selector";
 import { useAcpSessionConfig } from "@/lib/stores/acp-session-config";
 import type { AIPreset } from "@/lib/utils/tauri";
 
@@ -94,7 +94,8 @@ describe("ACP config trigger", () => {
     render(<AcpConfigSelector sessionId={SESSION} agentId="claude-acp" />);
 
     const trigger = screen.getByTestId("acp-config-trigger");
-    expect(trigger).toHaveTextContent("Opus 5 (1M context)");
+    expect(trigger).toHaveTextContent("Opus 5");
+    expect(trigger).not.toHaveTextContent("1M context");
     expect(trigger).not.toHaveTextContent("Default (recommended)");
     expect(trigger).toHaveAttribute(
       "title",
@@ -103,6 +104,25 @@ describe("ACP config trigger", () => {
 
     fireEvent.click(trigger);
     expect(screen.getByText(/currently resolves to Opus 5/)).toBeInTheDocument();
+  });
+
+  it("trims a context suffix from a directly advertised model name", () => {
+    seedSession([
+      {
+        id: "model",
+        name: "Model",
+        type: "select",
+        currentValue: "opus",
+        values: [{ value: "opus", name: "Opus 5 (1M context)" }],
+      },
+    ]);
+
+    render(<AcpConfigSelector sessionId={SESSION} agentId="claude-acp" />);
+
+    expect(screen.getByTestId("acp-config-trigger")).toHaveTextContent("Opus 5");
+    expect(screen.getByTestId("acp-config-trigger")).not.toHaveTextContent(
+      "context",
+    );
   });
 
   it("shows the saved preset default before a live session advertises", () => {
@@ -243,7 +263,7 @@ describe("ACP config trigger", () => {
     expect(screen.queryByLabelText("Allow All")).not.toBeInTheDocument();
   });
 
-  it("can move effort into its dedicated composer control", () => {
+  it("keeps model and effort in one popover", () => {
     seedSession([
       modelOption("sonnet"),
       {
@@ -259,22 +279,20 @@ describe("ACP config trigger", () => {
       },
     ]);
 
-    render(
-      <AcpConfigSelector
-        sessionId={SESSION}
-        agentId="claude-acp"
-        hideEffortControl
-      />,
-    );
+    render(<AcpConfigSelector sessionId={SESSION} agentId="claude-acp" />);
 
     fireEvent.click(screen.getByTestId("acp-config-trigger"));
     expect(screen.getByLabelText("Model")).toBeInTheDocument();
-    expect(screen.queryByTestId("acp-effort-slider")).not.toBeInTheDocument();
-    expect(screen.queryByLabelText("Effort")).not.toBeInTheDocument();
+    expect(screen.getByTestId("acp-effort-slider")).toBeInTheDocument();
+    expect(screen.getByTestId("acp-config-popover")).toContainElement(
+      screen.getByTestId("acp-effort-slider"),
+    );
+    expect(screen.queryByTestId("acp-effort-trigger")).not.toBeInTheDocument();
   });
 
   it("surfaces and persists an adapter's live effort choice", async () => {
     seedSession([
+      modelOption("sonnet"),
       {
         id: "reasoning_effort",
         name: "Reasoning effort",
@@ -291,14 +309,14 @@ describe("ACP config trigger", () => {
     const onPersistDefault = vi.fn();
 
     render(
-      <AcpEffortSelector
+      <AcpConfigSelector
         sessionId={SESSION}
         agentId="codex-acp"
         onPersistDefault={onPersistDefault}
       />,
     );
 
-    fireEvent.click(screen.getByTestId("acp-effort-trigger"));
+    fireEvent.click(screen.getByTestId("acp-config-trigger"));
     fireEvent.click(document.querySelector('[data-effort-step="high"]') as HTMLElement);
 
     expect(onPersistDefault).toHaveBeenCalledWith({
@@ -317,6 +335,7 @@ describe("ACP config trigger", () => {
 
   it("keeps a two-value effort axis visible as a select", () => {
     seedSession([
+      modelOption("sonnet"),
       {
         id: "effort",
         name: "Effort",
@@ -329,16 +348,13 @@ describe("ACP config trigger", () => {
       },
     ]);
 
-    render(<AcpEffortSelector sessionId={SESSION} agentId="custom" />);
+    render(<AcpConfigSelector sessionId={SESSION} agentId="custom" />);
 
-    expect(screen.getByTestId("acp-effort-trigger")).toHaveTextContent(
-      "Effort: Standard",
+    expect(screen.getByTestId("acp-config-trigger")).toHaveTextContent(
+      "Sonnet 4.6",
     );
-    expect(screen.getByTestId("acp-effort-trigger")).toHaveClass("w-7");
-    expect(
-      screen.getByTestId("acp-effort-trigger").querySelector("svg"),
-    ).not.toBeNull();
-    fireEvent.click(screen.getByTestId("acp-effort-trigger"));
+    expect(screen.queryByTestId("acp-effort-trigger")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("acp-config-trigger"));
     expect(screen.getByLabelText("Effort").tagName).toBe("SELECT");
     expect(screen.queryByTestId("acp-effort-slider")).not.toBeInTheDocument();
   });

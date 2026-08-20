@@ -13,7 +13,7 @@
 import React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { AcpConfigSelector, AcpEffortSelector } from "./acp-config-selector";
+import { AcpConfigSelector } from "./acp-config-selector";
 import { ThinkingLevelSelector } from "@/components/thinking-level-selector";
 import { useAcpSessionConfig } from "@/lib/stores/acp-session-config";
 
@@ -81,13 +81,20 @@ describe("composer settings control", () => {
     expect(screen.getByTestId("thinking-level-trigger")).toHaveTextContent("Medium");
   });
 
-  it("gives effort the same dial on both providers", () => {
+  it("keeps ACP effort with its model and gives both providers the same dial", () => {
     // The point of the shared control: an adapter's reasoning effort and Pi's
     // thinking level are the same decision, so they must not look like two.
     useAcpSessionConfig.setState({
       sessions: {
         [SESSION]: {
           options: [
+            {
+              id: "model",
+              name: "Model",
+              type: "select",
+              currentValue: "sonnet",
+              values: [{ value: "sonnet", name: "Sonnet 4.6" }],
+            },
             {
               id: "reasoning_effort",
               name: "Reasoning effort",
@@ -105,12 +112,12 @@ describe("composer settings control", () => {
       } as never,
       byAgent: {},
     });
-    render(<AcpEffortSelector sessionId={SESSION} agentId="codex-acp" />);
-    expect(screen.getByTestId("acp-effort-trigger")).toHaveTextContent(
-      "Reasoning effort: High",
+    render(<AcpConfigSelector sessionId={SESSION} agentId="codex-acp" />);
+    expect(screen.getByTestId("acp-config-trigger")).toHaveTextContent(
+      "Sonnet 4.6",
     );
-    expect(screen.getByTestId("acp-effort-trigger")).toHaveClass("w-7");
-    fireEvent.click(screen.getByTestId("acp-effort-trigger"));
+    expect(screen.queryByTestId("acp-effort-trigger")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("acp-config-trigger"));
     const acpSlider = screen.getByTestId("acp-effort-slider");
     expect(acpSlider).toHaveAttribute("role", "slider");
     expect(screen.getByTestId("acp-effort-slider-value")).toHaveTextContent("High");

@@ -4,7 +4,7 @@
 "use client";
 
 import { useState } from "react";
-import { Gauge, Loader2, SlidersHorizontal } from "lucide-react";
+import { Loader2, SlidersHorizontal } from "lucide-react";
 import { toast } from "sonner";
 import { Switch } from "@/components/ui/switch";
 import {
@@ -13,7 +13,6 @@ import {
 } from "@/components/chat/standalone/composer-settings-popover";
 import {
   ComposerEffortSlider,
-  isEffortAxis,
   isEffortOption,
 } from "@/components/chat/standalone/composer-effort-slider";
 import { commands, type AIPreset } from "@/lib/utils/tauri";
@@ -89,6 +88,15 @@ function resolvedModelFromDescription(description: string): string | null {
   return balanced || null;
 }
 
+/** Context size is useful inside model details, but it makes the always-visible
+ *  composer label noisy. Keep the concrete model name and trim only a trailing
+ *  adapter-advertised context annotation. */
+function compactModelLabel(value: string): string {
+  return value
+    .replace(/\s*\(\s*\d+(?:\.\d+)?\s*[kmgt]?\s+context(?:\s+window)?\s*\)\s*$/i, "")
+    .trim();
+}
+
 export function acpConfigValueLabel(
   option: AcpConfigOption,
   selectedValue: string,
@@ -100,22 +108,20 @@ export function acpConfigValueLabel(
     /^(?:default|auto)(?:\s*\(recommended\))?$/i.test(
       advertisedName.trim(),
     );
-  if (!isGenericAlias) return advertisedName;
+  if (!isGenericAlias) return compactModelLabel(advertisedName);
 
   const resolved = resolvedModelFromDescription(selected?.description ?? "");
-  return (
-    resolved ||
-    advertisedName.replace(/\s*\(recommended\)\s*$/i, "").trim()
+  return compactModelLabel(
+    resolved || advertisedName.replace(/\s*\(recommended\)\s*$/i, "").trim(),
   );
 }
 
 /** One general config control for what the ACP adapter advertised for the
- *  active session. Composer clients can promote high-signal axes such as
- *  permissions and effort into dedicated controls, leaving models, secondary
- *  selects, toggles, and re-authentication here. Renders nothing for raw Pi
- *  sessions or adapters that advertised neither. Native selects on purpose:
- *  the OS renders their menu above the webview (Radix menus get painted over on
- *  Windows). */
+ *  active session. Model and effort stay together because both tune how the
+ *  selected model answers; permission remains a separate safety boundary.
+ *  Renders nothing for raw Pi sessions or adapters that advertised neither.
+ *  Native selects on purpose: the OS renders their menu above the webview
+ *  (Radix menus get painted over on Windows). */
 export function AcpConfigSelector({
   sessionId,
   agentId,
@@ -123,7 +129,6 @@ export function AcpConfigSelector({
   onPersistDefault,
   onReauthenticate,
   hideModeControl = false,
-  hideEffortControl = false,
 }: {
   sessionId: string | null | undefined;
   /** The preset's ACP adapter id, used to fall back to the session-agnostic
@@ -143,9 +148,6 @@ export function AcpConfigSelector({
    *  composer control. Hide that duplicated select or boolean toggle from
    *  this general config popover. */
   hideModeControl?: boolean;
-  /** The composer promotes effort into its own visible control beside model.
-   *  Hide the duplicate from this general configuration popover. */
-  hideEffortControl?: boolean;
 }) {
   const live = useAcpSessionConfig((state) =>
     sessionId ? state.sessions[sessionId] : undefined,
@@ -179,9 +181,7 @@ export function AcpConfigSelector({
   const modeFilteredSelects = hideModeControl
     ? allSelects.filter((option) => option.id !== permissionModeOption?.id)
     : allSelects;
-  const selects = hideEffortControl
-    ? modeFilteredSelects.filter((option) => !isEffortAxis(option))
-    : modeFilteredSelects;
+  const selects = modeFilteredSelects;
   // Boolean options (e.g. Codex "fast mode") advertise no value list; render
   // them as toggles rather than dropping them.
   const toggles = (config?.options ?? []).filter(
@@ -397,109 +397,6 @@ export function AcpConfigSelector({
             {reauthPending ? "signing out…" : "re-authenticate"}
           </button>
         )}
-    </ComposerSettingsPopover>
-  );
-}
-
-/** The ACP adapter's effort axis as a first-class composer control. Model,
- *  permissions and effort are separate decisions in Claude Code, Codex, Pi,
- *  and compatible agents; hiding effort inside the model popover made ACP look
- *  less capable than raw Pi even though the adapter advertised it. Values stay
- *  adapter-owned and session-scoped—there is no hardcoded provider matrix. */
-export function AcpEffortSelector({
-  sessionId,
-  agentId,
-  activePreset,
-  onPersistDefault,
-}: {
-  sessionId: string | null | undefined;
-  agentId?: string | null;
-  activePreset?: AIPreset | null;
-  onPersistDefault?: (change: AcpConfigDefaultChange) => void;
-}) {
-  const live = useAcpSessionConfig((state) =>
-    sessionId ? state.sessions[sessionId] : undefined,
-  );
-  const cached = useAcpSessionConfig((state) =>
-    agentId ? state.byAgent[agentId] : undefined,
-  );
-  const liveHasChoices =
-    !!live && ((live.options?.length ?? 0) > 0 || !!live.modes);
-  const config = liveHasChoices ? live : (cached ?? live);
-  const option = (config?.options ?? []).find(
-    (candidate) =>
-      candidate.type === "select" &&
-      candidate.values.length > 0 &&
-      isEffortAxis(candidate),
-  );
-  const [open, setOpen] = useState(false);
-  const [pending, setPending] = useState(false);
-
-  if (!sessionId || !option) return null;
-
-  const presetConfig = activePreset?.acpAgent?.config ?? {};
-  const selectedValue = liveHasChoices
-    ? String(option.currentValue ?? "")
-    : (presetConfig[option.id] ?? String(option.currentValue ?? ""));
-  const selectedLabel =
-    option.values.find((value) => value.value === selectedValue)?.name ||
-    selectedValue ||
-    option.name;
-
-  const apply = (value: string) => {
-    onPersistDefault?.({ optionId: option.id, value });
-    setPending(true);
-    void commands
-      .piAcpSetConfigOption(sessionId, option.id, value, null)
-      .then((result) => {
-        if (
-          result.status === "error" &&
-          result.error &&
-          !isAgentNotRunning(result.error)
-        ) {
-          throw new Error(result.error);
-        }
-      })
-      .catch((error) => {
-        toast.error(`could not change ${option.name.toLowerCase()}`, {
-          description: String(error),
-        });
-      })
-      .finally(() => setPending(false));
-  };
-
-  return (
-    <ComposerSettingsPopover
-      label={`${option.name}: ${selectedLabel}`}
-      title={`${option.name}: ${selectedLabel}`}
-      ariaLabel={`${option.name}: ${selectedLabel}`}
-      triggerTestId="acp-effort-trigger"
-      contentTestId="acp-effort-popover"
-      triggerIcon={Gauge}
-      iconOnly
-      open={open}
-      onOpenChange={setOpen}
-      disabled={pending}
-    >
-      {isEffortOption(option) ? (
-        <ComposerEffortSlider
-          label={option.name}
-          testId="acp-effort-slider"
-          value={selectedValue}
-          disabled={pending}
-          steps={option.values}
-          onValueChange={apply}
-        />
-      ) : (
-        <ComposerSettingsSelect
-          label={option.name}
-          value={selectedValue}
-          disabled={pending}
-          title={option.description || option.name}
-          options={option.values}
-          onValueChange={apply}
-        />
-      )}
     </ComposerSettingsPopover>
   );
 }
