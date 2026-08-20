@@ -579,13 +579,7 @@ pub(crate) fn dispatch_notification_action(json: String) {
         let app_clone = app.clone();
         std::thread::spawn(move || {
             if is_in_app {
-                let target = if is_meeting_deeplink(&url) {
-                    ShowRewindWindow::Home {
-                        page: Some(meeting_page_with_id(&url)),
-                    }
-                } else {
-                    ShowRewindWindow::Main
-                };
+                let target = notification_deeplink_target(&url);
                 let app_for_show = app_clone.clone();
                 let _ = app_clone.run_on_main_thread(move || {
                     if let Err(e) = target.show(&app_for_show) {
@@ -697,15 +691,9 @@ pub(crate) fn dispatch_notification_action(json: String) {
         let app_clone = app.clone();
         std::thread::spawn(move || {
             if is_in_app {
-                let target = if is_meeting_deeplink(&url) {
-                    ShowRewindWindow::Home {
-                        page: Some(meeting_page_with_id(&url)),
-                    }
-                } else {
-                    ShowRewindWindow::Main
-                };
-                // Show the target surface first. Meeting links should not flash
-                // Main/timeline before routing into Home -> Meeting notes.
+                let target = notification_deeplink_target(&url);
+                // Show the target surface first. Meeting and Activity links
+                // must not flash or leave the user on Main/timeline.
                 let app_for_show = app_clone.clone();
                 let _ = app_clone.run_on_main_thread(move || {
                     if let Err(e) = target.show(&app_for_show) {
@@ -819,6 +807,24 @@ pub(crate) fn dispatch_notification_action(json: String) {
 
 fn is_meeting_deeplink(url: &str) -> bool {
     url.starts_with("screenpipe://meeting/") || url.starts_with("screenpipe://meeting?")
+}
+
+fn is_activity_deeplink(url: &str) -> bool {
+    url == "screenpipe://activity" || url.starts_with("screenpipe://activity?")
+}
+
+fn notification_deeplink_target(url: &str) -> ShowRewindWindow {
+    if is_meeting_deeplink(url) {
+        ShowRewindWindow::Home {
+            page: Some(meeting_page_with_id(url)),
+        }
+    } else if is_activity_deeplink(url) {
+        ShowRewindWindow::Home {
+            page: Some("activity".to_string()),
+        }
+    } else {
+        ShowRewindWindow::Main
+    }
 }
 
 fn native_overlay_meeting_note_id(action: &str) -> Option<u64> {
@@ -1154,8 +1160,8 @@ fn native_shortcut_action_callback_inner(action_ptr: *const std::os::raw::c_char
 mod tests {
     use super::{
         native_overlay_meeting_note_id, notification_copy_value, notification_source_url,
-        parse_meeting_deeplink, parse_overlay_anchor, resolve_timeline_event_target,
-        SHORTCUT_OVERLAY_ANCHORS,
+        notification_deeplink_target, parse_meeting_deeplink, parse_overlay_anchor,
+        resolve_timeline_event_target, SHORTCUT_OVERLAY_ANCHORS,
     };
     use serde_json::json;
 
@@ -1243,6 +1249,20 @@ mod tests {
             None
         );
         assert_eq!(parse_meeting_deeplink("screenpipe://settings"), None);
+    }
+
+    #[test]
+    fn activity_notification_deeplink_only_targets_activity_home() {
+        assert!(matches!(
+            notification_deeplink_target("screenpipe://activity"),
+            crate::window::ShowRewindWindow::Home { page: Some(page) }
+                if page == "activity"
+        ));
+        assert!(matches!(
+            notification_deeplink_target("screenpipe://activity?range=today"),
+            crate::window::ShowRewindWindow::Home { page: Some(page) }
+                if page == "activity"
+        ));
     }
 
     #[test]
