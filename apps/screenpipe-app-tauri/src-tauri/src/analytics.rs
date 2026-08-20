@@ -51,6 +51,22 @@ fn pipeline_ocr_cache_hit_rate(health: &serde_json::Value) -> Option<f64> {
     health["pipeline"]["ocr_cache_hit_rate"].as_f64()
 }
 
+fn health_audio_capture_mode(health: &serde_json::Value) -> &str {
+    health["audio_capture_mode"].as_str().unwrap_or("unknown")
+}
+
+fn audio_capture_mode_setting(settings: &serde_json::Value) -> &'static str {
+    match settings
+        .get("audioCaptureMode")
+        .and_then(|value| value.as_str())
+    {
+        Some("meetings-only") => "meetings-only",
+        Some("disabled") => "disabled",
+        // Missing and malformed values follow the engine's historical default.
+        _ => "always",
+    }
+}
+
 impl AnalyticsManager {
     pub fn new(
         posthog_api_key: String,
@@ -370,6 +386,7 @@ impl AnalyticsManager {
 
             // Audio
             "setting_disable_audio": get_bool("disableAudio").unwrap_or(false),
+            "setting_audio_capture_mode": audio_capture_mode_setting(settings),
             "setting_audio_device_count": get_arr_len("audioDevices"),
             "setting_audio_transcription_engine": get_str("audioTranscriptionEngine").unwrap_or("unknown"),
             "setting_audio_chunk_duration": get_f64("audioChunkDuration").unwrap_or(30.0),
@@ -412,6 +429,7 @@ impl AnalyticsManager {
         // Extract relevant status fields
         let frame_status = health["frame_status"].as_str().unwrap_or("unknown");
         let audio_status = health["audio_status"].as_str().unwrap_or("unknown");
+        let audio_capture_mode = health_audio_capture_mode(&health);
         let ui_status = health["ui_status"].as_str().unwrap_or("unknown");
 
         // Consider healthy if all enabled systems are "ok"
@@ -429,6 +447,7 @@ impl AnalyticsManager {
             "is_healthy": is_healthy,
             "frame_status": frame_status,
             "audio_status": audio_status,
+            "audio_capture_mode": audio_capture_mode,
             "ui_status": ui_status,
             // Vision pipeline quality
             "pipeline_uptime_secs": pipeline["uptime_secs"].as_f64(),
@@ -584,5 +603,43 @@ mod tests {
         let health = json!({"pipeline": {"ocr_cache_hit_rate": 0.4}});
 
         assert_eq!(pipeline_ocr_cache_hit_rate(&health), Some(0.4));
+    }
+
+    #[test]
+    fn health_properties_forward_effective_audio_capture_mode() {
+        assert_eq!(
+            health_audio_capture_mode(&json!({"audio_capture_mode": "meetings-only"})),
+            "meetings-only"
+        );
+        assert_eq!(health_audio_capture_mode(&json!({})), "unknown");
+    }
+
+    #[test]
+    fn audio_capture_mode_setting_tracks_supported_modes() {
+        assert_eq!(
+            audio_capture_mode_setting(&json!({"audioCaptureMode": "always"})),
+            "always"
+        );
+        assert_eq!(
+            audio_capture_mode_setting(&json!({"audioCaptureMode": "meetings-only"})),
+            "meetings-only"
+        );
+        assert_eq!(
+            audio_capture_mode_setting(&json!({"audioCaptureMode": "disabled"})),
+            "disabled"
+        );
+    }
+
+    #[test]
+    fn audio_capture_mode_setting_uses_engine_default_for_missing_or_malformed_values() {
+        assert_eq!(audio_capture_mode_setting(&json!({})), "always");
+        assert_eq!(
+            audio_capture_mode_setting(&json!({"audioCaptureMode": "unexpected"})),
+            "always"
+        );
+        assert_eq!(
+            audio_capture_mode_setting(&json!({"audioCaptureMode": false})),
+            "always"
+        );
     }
 }

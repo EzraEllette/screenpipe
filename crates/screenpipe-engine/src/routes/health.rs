@@ -417,6 +417,22 @@ struct MeetingsOnlyAudioIdleState {
     detector_unavailable: bool,
 }
 
+fn effective_audio_capture_mode(
+    audio_disabled: bool,
+    configured_mode: Option<&AudioCaptureMode>,
+    meetings_only_supported: bool,
+) -> &'static str {
+    if audio_disabled {
+        "disabled"
+    } else if meetings_only_supported
+        && matches!(configured_mode, Some(AudioCaptureMode::MeetingsOnly))
+    {
+        "meetings-only"
+    } else {
+        "always"
+    }
+}
+
 fn meetings_only_audio_idle_state(
     configured: bool,
     meeting_detected: Option<bool>,
@@ -631,6 +647,10 @@ pub struct HealthCheckResponse {
     /// are what turn "stale" into a locatable freeze point.
     pub loop_stage: String,
     pub loop_stage_age_secs: Option<u64>,
+    /// Effective runtime audio capture mode: `always`, `meetings-only`, or
+    /// `disabled`. This can differ from the saved preference when policy or
+    /// platform support changes the mode used by the recorder.
+    pub audio_capture_mode: String,
     pub audio_status: String,
     pub message: String,
     pub verbose_instructions: Option<String>,
@@ -950,6 +970,7 @@ fn degraded_response() -> HealthCheckResponse {
         vision_reason: "unknown".to_string(),
         loop_stage: "unknown".to_string(),
         loop_stage_age_secs: None,
+        audio_capture_mode: "unknown".to_string(),
         audio_status: "unknown".to_string(),
         message: "health check timed out before producing a snapshot".to_string(),
         verbose_instructions: None,
@@ -1207,11 +1228,13 @@ async fn health_check_inner(state: &Arc<AppState>) -> HealthCheckResponse {
     // Report intentional meetings-only idleness only after every configured
     // stream has actually been released. During teardown, health continues to
     // describe the observed active streams instead of claiming an early pause.
-    let meetings_only_configured = cfg!(any(target_os = "macos", target_os = "windows"))
-        && matches!(
-            state.audio_manager.configured_audio_capture_mode(),
-            Some(AudioCaptureMode::MeetingsOnly)
-        );
+    let configured_audio_capture_mode = state.audio_manager.configured_audio_capture_mode();
+    let audio_capture_mode = effective_audio_capture_mode(
+        state.audio_disabled,
+        configured_audio_capture_mode.as_ref(),
+        cfg!(any(target_os = "macos", target_os = "windows")),
+    );
+    let meetings_only_configured = audio_capture_mode == "meetings-only";
     // Detector absence is not ordinary idle: the device gate fails closed, and
     // health must make the missing prerequisite visible. A timed-out health
     // probe is kept as unknown so lock contention cannot manufacture an error.
@@ -1819,6 +1842,7 @@ async fn health_check_inner(state: &Arc<AppState>) -> HealthCheckResponse {
         loop_stage: vision_loop_stage.as_str().to_string(),
         loop_stage_age_secs: vision_loop_stage_entered_ts
             .and_then(|ts| (ts > 0).then(|| now_ts.saturating_sub(ts))),
+        audio_capture_mode: audio_capture_mode.to_string(),
         audio_status,
         message,
         verbose_instructions,
@@ -2468,6 +2492,7 @@ mod tests {
             vision_reason: "ok".to_string(),
             loop_stage: "unknown".to_string(),
             loop_stage_age_secs: None,
+            audio_capture_mode: "always".to_string(),
             audio_status: "ok".to_string(),
             message: "test".to_string(),
             verbose_instructions: None,
@@ -2571,6 +2596,24 @@ mod tests {
         assert_eq!(
             state.reason,
             "audio capture is paused while the screen is locked"
+        );
+    }
+
+    #[test]
+    fn effective_audio_capture_mode_reports_the_mode_the_recorder_can_run() {
+        assert_eq!(effective_audio_capture_mode(true, None, true), "disabled");
+        assert_eq!(effective_audio_capture_mode(false, None, true), "always");
+        assert_eq!(
+            effective_audio_capture_mode(false, Some(&AudioCaptureMode::Always), true),
+            "always"
+        );
+        assert_eq!(
+            effective_audio_capture_mode(false, Some(&AudioCaptureMode::MeetingsOnly), true),
+            "meetings-only"
+        );
+        assert_eq!(
+            effective_audio_capture_mode(false, Some(&AudioCaptureMode::MeetingsOnly), false),
+            "always"
         );
     }
 
