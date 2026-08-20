@@ -88,9 +88,11 @@ Commit the regenerated locks together with the bump. `style.yml` runs
 git add -A && git commit -m "Bump app to vX.Y.Z" && git pull --rebase && git push
 ```
 
-Pushing a commit whose message starts with `Bump app` or `release-app` to `main` triggers `release-app.yml` automatically (`check_commit` job gates on the prefix). The build is a **draft only** — does NOT auto-publish. Use the `release-app-publish` prefix to auto-publish instead.
+Pushing a commit whose message starts with `Bump app` or `release-app` to `main` triggers `release-app.yml` automatically (`check_commit` job gates on the prefix). The workflow only builds, signs, notarizes, and uploads immutable versioned artifacts. It does not publish updater pointers or create the public GitHub release.
 
 **Do NOT also run `gh workflow run release-app.yml`** — it fires a second `workflow_dispatch` run on the same SHA, doubling the build. The push handles it.
+
+Enterprise is separate and manual. After the bump commit is on `main`, dispatch `release-enterprise.yml` once and verify that its run is pinned to the bump commit before treating Enterprise artifacts as prepared.
 
 ### 5. Monitor Build Status
 ```bash
@@ -106,11 +108,8 @@ gh run view <RUN_ID> --json status,conclusion,jobs --jq '{status: .status, concl
 - Test on macOS and Windows
 - Verify updater artifacts exist (.tar.gz, .sig files)
 
-### 7. Publish Release
-After testing, publish via the Cloudflare R2 / backend dashboard, OR commit with magic words:
-```bash
-git commit --allow-empty -m "release-app-publish" && git push
-```
+### 7. Hand Off Public Publication
+After testing and artifact verification, stop at the authenticated releases control in the website admin UI. Public updater pointers, Enterprise publication state, GitHub tags/releases, and subscriber notification are human-only actions. AI agents must not operate the admin UI, call its publication endpoint, approve the protected environment, or attempt publication with a commit-message prefix.
 
 ## Quick Release (App Only)
 
@@ -173,10 +172,11 @@ The CI copies `tauri.prod.conf.json` to `tauri.conf.json` before building. If ar
 
 CI automatically uses prod config for releases by copying it before build.
 
-### Trigger & Publish Behavior
-- Commit prefix `Bump app` or `release-app` pushed to main → Draft release
-- Commit prefix `release-app-publish` pushed to main → Auto-publish after successful build
-- `workflow_dispatch` (manual `gh workflow run`) → Draft release (redundant with the push trigger; avoid using both)
+### Trigger & Publication Behavior
+- Commit prefix `Bump app` or `release-app` pushed to main → consumer artifact build/upload
+- `release-enterprise.yml` is `workflow_dispatch` only → Enterprise artifact build/upload
+- Public consumer and Enterprise publication remains a human-only admin-dashboard action after artifact verification
+- Manual `release-app.yml` dispatch is redundant with the bump push; avoid running both
 
 ## Notes
 
