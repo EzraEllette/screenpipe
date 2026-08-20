@@ -514,27 +514,33 @@ async fn generate(
         .map_err(|error| {
             format!("Activity history was saved but its update event failed: {error}")
         })?;
-    crate::notifications::client::send_typed_with_actions_and_priority(
-        "activities updated",
-        if updated.activity_count == 1 {
-            "1 new activity is ready."
-        } else {
-            "Your latest activities are ready."
-        },
-        "activity_history",
-        Some(20_000),
-        vec![json!({
-            "id": "open-activity-history",
-            "action": "open-activity-history",
-            "label": "view activities",
-            "type": "deeplink",
-            "url": "screenpipe://activity",
-            "primary": true,
-            "sourceUrl": "screenpipe://activity",
-        })],
-        crate::notifications::store::NotificationPriority::Normal,
-    );
+    if should_notify_completion(source) {
+        crate::notifications::client::send_typed_with_actions_and_priority(
+            "activities updated",
+            if updated.activity_count == 1 {
+                "1 new activity is ready."
+            } else {
+                "Your latest activities are ready."
+            },
+            "activity_history",
+            Some(20_000),
+            vec![json!({
+                "id": "open-activity-history",
+                "action": "open-activity-history",
+                "label": "view activities",
+                "type": "deeplink",
+                "url": "screenpipe://activity",
+                "primary": true,
+                "sourceUrl": "screenpipe://activity",
+            })],
+            crate::notifications::store::NotificationPriority::High,
+        );
+    }
     Ok(result)
+}
+
+fn should_notify_completion(source: &str) -> bool {
+    source == "manual"
 }
 
 fn requested_range(start: String, end: String) -> Result<(DateTime<Utc>, DateTime<Utc>), String> {
@@ -742,5 +748,11 @@ mod tests {
             .extra
             .insert("activitiesIntervalMinutes".to_string(), json!(30));
         assert_eq!(configured_interval_minutes(&settings), 30);
+    }
+
+    #[test]
+    fn only_manual_generation_notifies_on_completion() {
+        assert!(should_notify_completion("manual"));
+        assert!(!should_notify_completion("automatic"));
     }
 }
