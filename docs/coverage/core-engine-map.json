@@ -433,6 +433,8 @@
       "label": "Engine meetings, privacy, pipes, and sync units",
       "crate": "screenpipe-engine",
       "files": [
+        "src/agent_profile.rs",
+        "src/agent_skills.rs",
         "src/calendar_speaker_id.rs",
         "src/capture_exclusions.rs",
         "src/cli/agent.rs",
@@ -446,6 +448,7 @@
         "src/cli/store_file.rs",
         "src/cli/team.rs",
         "src/cli/team_pipes.rs",
+        "src/cli/team_skills.rs",
         "src/cli/view.rs",
         "src/cloud_search.rs",
         "src/connections_api.rs",

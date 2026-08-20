@@ -58,6 +58,25 @@ pub use tesseract::{perform_ocr_tesseract, tesseract_available};
 pub mod browser_utils;
 pub mod snapshot_writer;
 
+/// True when the native ScreenCaptureKit sync-worker containment layer has
+/// reached its hard parked-worker ceiling.
+///
+/// Read the typed state directly from `sck-rs`: error wording can change and a
+/// CoreGraphics fallback frame can still look fresh while primary capture is
+/// refusing new work. The app treats this as advisory and never exits itself.
+#[cfg(target_os = "macos")]
+pub fn screencapturekit_process_exhausted() -> bool {
+    matches!(
+        sck_rs::process_status(),
+        sck_rs::ProcessStatus::Exhausted { .. }
+    )
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn screencapturekit_process_exhausted() -> bool {
+    false
+}
+
 /// Flag to request invalidation of persistent SCStream handles after screen
 /// unlock or wake. Set by `sleep_monitor` (CFNotification callback thread),
 /// consumed by the event-driven capture loop (tokio thread) so that the actual

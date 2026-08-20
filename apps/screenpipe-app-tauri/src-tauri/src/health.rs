@@ -578,6 +578,10 @@ struct CaptureFailureSignals {
     audio: bool,
     vision: bool,
     persistence: bool,
+    /// ScreenCaptureKit exhausted its process-wide native worker budget.
+    /// Fallback frames may still arrive, but a recorder-only restart cannot
+    /// release workers whose native callbacks remain blocked.
+    vision_process_exhausted: bool,
 }
 
 fn capture_failure_signals(
@@ -621,6 +625,7 @@ fn capture_failure_signals(
         persistence: health.write_queue_degraded
             && (health.write_queue_consecutive_fatal >= WRITE_QUEUE_FAILURE_THRESHOLD
                 || health.write_queue_consecutive_contention >= WRITE_QUEUE_FAILURE_THRESHOLD),
+        vision_process_exhausted: false,
     }
 }
 
@@ -737,6 +742,9 @@ fn overlay_failure_detail(
     if simulated_break {
         return "simulated recording failure";
     }
+    if failures.vision_process_exhausted {
+        return crate::overlay_health::MANUAL_SCREEN_CAPTURE_RECOVERY_DETAIL;
+    }
 
     match (failures.audio, failures.vision, failures.persistence) {
         (true, true, false) => "audio and screen capture are not updating",
@@ -766,6 +774,8 @@ pub(crate) fn overlay_failure_subsystem(detail: &str) -> &'static str {
     match detail {
         "audio capture is not updating" => "audio",
         "screen capture is not updating" => "screen",
+        crate::overlay_health::MANUAL_SCREEN_CAPTURE_RECOVERY_DETAIL
+        | crate::overlay_health::MANUAL_PERMISSION_RECOVERY_DETAIL => "screen",
         // "audio and screen capture are not updating", "multiple recording
         // errors detected", persistence, engine start/stop, simulated breaks,
         // and anything unrecognized stay generic on purpose.
@@ -791,7 +801,10 @@ fn overlay_tick_decision(
         && !recently_woke
         && (status == RecordingStatus::Error
             || (status == RecordingStatus::Stopped && ever_connected));
-    let confirmed_failure = failures.audio || failures.vision || failures.persistence;
+    let confirmed_failure = failures.audio
+        || failures.vision
+        || failures.persistence
+        || failures.vision_process_exhausted;
     let failure_suppressed = start_in_progress || recently_woke || intentionally_paused;
     let broken = simulated_break || (!failure_suppressed && (engine_down || confirmed_failure));
     let healthy = !intentionally_paused
@@ -1754,13 +1767,17 @@ pub async fn start_health_check(app: tauri::AppHandle) -> Result<()> {
             let in_restart_grace = last_restart_triggered
                 .map(|t| t.elapsed() < NOTIFICATION_COOLDOWN)
                 .unwrap_or(false);
-            let failure_signals = match &health_result {
+            let mut failure_signals = match &health_result {
                 Ok(health) => capture_failure_signals(health, &mut vision_progress),
                 Err(_) => {
                     vision_progress.observe(None);
                     CaptureFailureSignals::default()
                 }
             };
+            // Native SCK process state is authoritative even when `/health`
+            // is unavailable or a CoreGraphics fallback makes it look green.
+            failure_signals.vision_process_exhausted =
+                screenpipe_screen::screencapturekit_process_exhausted();
             let capture_health_confirmed = match &health_result {
                 Ok(health) => health_confirms_recording(health),
                 Err(_) => false,
@@ -1989,6 +2006,7 @@ pub async fn start_health_check(app: tauri::AppHandle) -> Result<()> {
                     audio: stall_confirmed(consecutive_audio_stall),
                     vision: stall_confirmed(consecutive_vision_stall) || stale_tier.confirmed(),
                     persistence: failure_signals.persistence,
+                    vision_process_exhausted: failure_signals.vision_process_exhausted,
                 },
                 sim_break,
             );
@@ -2893,6 +2911,39 @@ mod tests {
         );
     }
 
+    /// Escaped regression: the native SCK breaker hit its hard 32-worker
+    /// ceiling, then CoreGraphics returned a fallback frame and `/health`
+    /// looked green long enough for the overlay to claim recovery. Native
+    /// process state must outrank fresh fallback data.
+    #[test]
+    fn terminal_sck_worker_leak_cannot_be_masked_by_green_health() {
+        let decision = overlay_tick_decision(
+            RecordingStatus::Recording,
+            true,
+            true,
+            true,
+            false,
+            true,
+            false,
+            false,
+            CaptureFailureSignals {
+                vision_process_exhausted: true,
+                ..CaptureFailureSignals::default()
+            },
+            false,
+        );
+
+        assert_eq!(
+            decision,
+            OverlayTickDecision {
+                broken: true,
+                healthy: false,
+                failure_detail: crate::overlay_health::MANUAL_SCREEN_CAPTURE_RECOVERY_DETAIL,
+            }
+        );
+        assert_eq!(overlay_failure_subsystem(decision.failure_detail), "screen");
+    }
+
     #[test]
     fn overlay_preserves_real_failure_and_transient_guards() {
         let failures = CaptureFailureSignals {
@@ -2980,6 +3031,15 @@ mod tests {
                 },
                 false,
                 "screen capture is not updating",
+            ),
+            (
+                RecordingStatus::Recording,
+                CaptureFailureSignals {
+                    vision_process_exhausted: true,
+                    ..CaptureFailureSignals::default()
+                },
+                false,
+                crate::overlay_health::MANUAL_SCREEN_CAPTURE_RECOVERY_DETAIL,
             ),
             (
                 RecordingStatus::Recording,
@@ -3098,6 +3158,7 @@ mod tests {
                                     audio,
                                     vision,
                                     persistence,
+                                    vision_process_exhausted: false,
                                 },
                                 simulated,
                             );
@@ -3129,7 +3190,7 @@ mod tests {
     }
 
     #[test]
-    fn overlay_decision_exhaustively_checks_12288_state_combinations() {
+    fn overlay_decision_exhaustively_checks_24576_state_combinations() {
         let statuses = [
             RecordingStatus::Starting,
             RecordingStatus::Recording,
@@ -3140,11 +3201,11 @@ mod tests {
         ];
         let mut checked = 0usize;
 
-        // Eleven independent booleans x six recording states. This covers
-        // 12,288 combinations of response quality, capture intent, lifecycle
-        // guards, three failure classes, and the QA simulation path.
+        // Twelve independent booleans x six recording states. This covers
+        // 24,576 combinations of response quality, capture intent, lifecycle
+        // guards, four failure classes, and the QA simulation path.
         for status in statuses {
-            for bits in 0u16..(1 << 11) {
+            for bits in 0u16..(1 << 12) {
                 let health_response_received = bits & (1 << 0) != 0;
                 let health_confirmed = bits & (1 << 1) != 0;
                 let capture_intended = bits & (1 << 2) != 0;
@@ -3157,8 +3218,9 @@ mod tests {
                     audio: bits & (1 << 7) != 0,
                     vision: bits & (1 << 8) != 0,
                     persistence: bits & (1 << 9) != 0,
+                    vision_process_exhausted: bits & (1 << 10) != 0,
                 };
-                let simulated_break = bits & (1 << 10) != 0;
+                let simulated_break = bits & (1 << 11) != 0;
 
                 let decision = overlay_tick_decision(
                     status,
@@ -3174,7 +3236,10 @@ mod tests {
                 );
 
                 let failure_suppressed = start_in_progress || recently_woke || intentionally_paused;
-                let confirmed_failure = failures.audio || failures.vision || failures.persistence;
+                let confirmed_failure = failures.audio
+                    || failures.vision
+                    || failures.persistence
+                    || failures.vision_process_exhausted;
                 let engine_down = capture_intended
                     && !start_in_progress
                     && !recently_woke
@@ -3198,7 +3263,7 @@ mod tests {
                     },
                 };
 
-                assert_eq!(decision, expected, "status={status:?}, bits={bits:011b}");
+                assert_eq!(decision, expected, "status={status:?}, bits={bits:012b}");
                 assert!(
                     !(decision.broken && decision.healthy),
                     "failure and recovery must be mutually exclusive"
@@ -3216,7 +3281,7 @@ mod tests {
             }
         }
 
-        assert_eq!(checked, 12_288);
+        assert_eq!(checked, 24_576);
     }
 
     // Helper: call decide_status with thresholds exceeded (no debouncing active)

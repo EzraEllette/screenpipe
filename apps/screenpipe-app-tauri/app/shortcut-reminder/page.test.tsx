@@ -16,6 +16,7 @@ import { formatShortcut } from "./format-shortcut";
 
 const mocks = vi.hoisted(() => ({
   getRecordingHealthState: vi.fn(),
+  overlayRestartRecording: vi.fn(),
   listen: vi.fn(),
   storeGet: vi.fn(),
   storeSet: vi.fn(),
@@ -116,7 +117,7 @@ vi.mock("@/lib/hooks/use-settings", () => ({
 vi.mock("@/lib/utils/tauri", () => ({
   commands: {
     getRecordingHealthState: mocks.getRecordingHealthState,
-    overlayRestartRecording: vi.fn(),
+    overlayRestartRecording: mocks.overlayRestartRecording,
     overlayDismissIncident: vi.fn(),
     hideShortcutReminder: mocks.hideShortcutReminder,
     snoozeShortcutReminderForHour: mocks.snoozeShortcutReminderForHour,
@@ -155,6 +156,7 @@ describe("recording health hover detail", () => {
     mocks.meetingOverlayState.stopping = false;
     mocks.meetingOverlayState.stopError = null;
     mocks.stopMeeting.mockReset();
+    mocks.overlayRestartRecording.mockReset();
     mocks.storeSet.mockReset();
     mocks.hideShortcutReminder.mockReset();
     mocks.snoozeShortcutReminderForHour.mockReset();
@@ -179,6 +181,39 @@ describe("recording health hover detail", () => {
       "title",
       "screen capture is not updating",
     );
+  });
+
+  it("keeps terminal native recovery advisory and never invokes a restart action", async () => {
+    mocks.getRecordingHealthState.mockResolvedValue(
+      "failure|quit and reopen screenpipe to restore screen capture|screen|manual-reopen",
+    );
+
+    render(<ShortcutReminderPage />);
+
+    const failureButton = await screen.findByRole("button", {
+      name: "Screen capture needs help: quit and reopen screenpipe to restore screen capture",
+    });
+    expect(failureButton).toBeDisabled();
+    expect(screen.getByText("quit & reopen")).toBeVisible();
+
+    fireEvent.click(failureButton);
+    expect(mocks.overlayRestartRecording).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: /restart recording/i })).toBeNull();
+  });
+
+  it("does not infer recovery behavior from user-facing wording", async () => {
+    mocks.getRecordingHealthState.mockResolvedValue(
+      "failure|quit and reopen screenpipe wording without an action|screen",
+    );
+
+    render(<ShortcutReminderPage />);
+
+    const failureButton = await screen.findByRole("button", {
+      name: /restart recording/i,
+    });
+    expect(failureButton).toBeEnabled();
+    fireEvent.click(failureButton);
+    await waitFor(() => expect(mocks.overlayRestartRecording).toHaveBeenCalledTimes(1));
   });
 
   it("shows recovery confirmation instead of a broken or restart state", async () => {
