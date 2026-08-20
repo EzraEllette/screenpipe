@@ -73,7 +73,7 @@ function makeDeps(overrides: Partial<CommandPaletteDeps> = {}): CommandPaletteDe
     openSettings: vi.fn(),
     sections: [
       { id: "home", label: "Chat" },
-      { id: "brain", label: "Brain" },
+      { id: "brain", label: "Library" },
       { id: "meetings", label: "Meetings" },
     ],
     timelineDisabled: false,
@@ -140,7 +140,7 @@ describe("buildPaletteEntries", () => {
     const entries = buildPaletteEntries(makeDeps(), mocks.settings, true);
     const goTo = entries.filter((e) => e.group === "go to");
     expect(goTo.map((e) => e.id)).toEqual(["go_chat", "go_brain", "go_meetings"]);
-    expect(goTo.map((e) => e.label)).toEqual(["Chat", "Brain", "Meetings"]);
+    expect(goTo.map((e) => e.label)).toEqual(["Chat", "Library", "Meetings"]);
   });
 
   it("uses word-form hints for in-app chords off macOS", () => {
