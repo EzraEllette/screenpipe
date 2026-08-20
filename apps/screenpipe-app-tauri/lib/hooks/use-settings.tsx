@@ -82,6 +82,8 @@ export type AcpAgentPresetConfig = {
 	config?: Record<string, string>;
 	/** Session mode default advertised by the selected adapter. */
 	modeId?: string | null;
+	/** Screenpipe-owned ACP permission response policy. */
+	approvalMode?: "ask" | "allow-all" | null;
 	/** True when this ACP agent's model calls use Screenpipe Cloud allowance. */
 	useScreenpipeCloud?: boolean | null;
 };

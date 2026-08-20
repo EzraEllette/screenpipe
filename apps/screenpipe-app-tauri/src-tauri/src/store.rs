@@ -1166,6 +1166,9 @@ pub struct AcpAgentPresetConfig {
     /// Default session mode id, applied after every session/new.
     #[serde(default)]
     pub mode_id: Option<String>,
+    /// Screenpipe-owned ACP permission response policy (`ask` or `allow-all`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_mode: Option<String>,
     /// Send this agent's model calls through Screenpipe Cloud. `None` keeps
     /// presets saved before this choice on the agent's own provider account.
     #[serde(default)]

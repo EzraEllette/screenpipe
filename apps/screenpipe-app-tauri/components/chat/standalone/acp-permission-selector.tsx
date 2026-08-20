@@ -43,6 +43,7 @@ interface PermissionControl {
   source: PermissionSource;
   currentValue: string;
   values: AcpConfigValue[];
+  hasClientFullAccess: boolean;
 }
 
 interface PermissionPresentation {
@@ -50,6 +51,26 @@ interface PermissionPresentation {
   description: string;
   icon: ComponentType<LucideProps>;
   warning?: boolean;
+}
+
+const CLIENT_FULL_ACCESS_VALUE = "screenpipe-full-access";
+const CLIENT_FULL_ACCESS_OPTION: AcpConfigValue = {
+  value: CLIENT_FULL_ACCESS_VALUE,
+  name: "Full access",
+  description: "Run every requested tool without asking for approval.",
+};
+
+function withClientFullAccess(values: AcpConfigValue[]): {
+  values: AcpConfigValue[];
+  hasClientFullAccess: boolean;
+} {
+  if (values.some(isUnrestrictedMode)) {
+    return { values, hasClientFullAccess: false };
+  }
+  return {
+    values: [...values, CLIENT_FULL_ACCESS_OPTION],
+    hasClientFullAccess: true,
+  };
 }
 
 function permissionControl(
@@ -65,7 +86,7 @@ function permissionControl(
     return {
       source: { kind: "select", optionId: option.id },
       currentValue,
-      values: option.values,
+      ...withClientFullAccess(option.values),
     };
   }
   const booleanOption = findAcpPermissionBooleanOption(config);
@@ -88,6 +109,7 @@ function permissionControl(
           description: "Run every requested tool without asking for approval.",
         },
       ],
+      hasClientFullAccess: false,
     };
   }
   if (
@@ -99,7 +121,7 @@ function permissionControl(
   return {
     source: { kind: "session-mode" },
     currentValue: config.modes.currentModeId,
-    values: config.modes.availableModes,
+    ...withClientFullAccess(config.modes.availableModes),
   };
 }
 
@@ -117,6 +139,14 @@ function isUnrestrictedMode(mode: AcpConfigValue): boolean {
 
 function permissionPresentation(mode: AcpConfigValue): PermissionPresentation {
   switch (mode.value) {
+    case CLIENT_FULL_ACCESS_VALUE:
+      return {
+        label: "Full access",
+        description:
+          mode.description || "Run every requested tool without asking.",
+        icon: ShieldAlert,
+        warning: true,
+      };
     case "false":
       return {
         label: "Ask for approval",
@@ -202,10 +232,10 @@ function isAgentNotRunning(message: string): boolean {
   );
 }
 
-/** An ACP adapter's approval/sandbox modes as a first-class composer control.
- *  The adapter remains authoritative for the available values; shared labels
- *  make equivalent modes consistent across Codex, Claude Code, Pi, Cursor,
- *  and future ACP harnesses. */
+/** ACP approval/sandbox modes as a first-class composer control. Adapter-owned
+ *  values remain authoritative; when an adapter asks the client to approve
+ *  tools but exposes no unrestricted mode, Screenpipe adds its own Full access
+ *  response policy instead of inventing an ACP session mode. */
 export function AcpPermissionSelector({
   sessionId,
   agentId,
@@ -235,11 +265,17 @@ export function AcpPermissionSelector({
 
   const presetConfig = activePreset?.acpAgent?.config ?? {};
   const presetModeId = activePreset?.acpAgent?.modeId ?? null;
-  const selectedValue = liveControl
+  const approvalMode =
+    live?.approvalMode ?? activePreset?.acpAgent?.approvalMode ?? "ask";
+  const adapterSelectedValue = liveControl
     ? liveControl.currentValue
     : control.source.kind !== "session-mode"
       ? (presetConfig[control.source.optionId] ?? control.currentValue)
       : (presetModeId ?? control.currentValue);
+  const selectedValue =
+    approvalMode === "allow-all" && control.hasClientFullAccess
+      ? CLIENT_FULL_ACCESS_VALUE
+      : adapterSelectedValue;
   const selectedMode =
     control.values.find((mode) => mode.value === selectedValue) ??
     control.values[0];
@@ -249,27 +285,60 @@ export function AcpPermissionSelector({
 
   const apply = async (mode: AcpConfigValue) => {
     setPendingValue(mode.value);
-    const change: AcpConfigDefaultChange =
-      control.source.kind !== "session-mode"
-        ? { optionId: control.source.optionId, value: mode.value }
-        : { modeId: mode.value };
+    const isClientFullAccess = mode.value === CLIENT_FULL_ACCESS_VALUE;
+    const executionMode = isClientFullAccess
+      ? control.values.find((value) => value.value === "agent")
+      : null;
+    const adapterMode = executionMode ?? (isClientFullAccess ? null : mode);
+    const approvalChange = control.hasClientFullAccess
+      ? ({ approvalMode: isClientFullAccess ? "allow-all" : "ask" } as const)
+      : {};
+    const change: AcpConfigDefaultChange = adapterMode
+      ? control.source.kind !== "session-mode"
+        ? {
+            optionId: control.source.optionId,
+            value: adapterMode.value,
+            ...approvalChange,
+          }
+        : { modeId: adapterMode.value, ...approvalChange }
+      : { approvalMode: "allow-all" };
     onPersistDefault?.(change);
     try {
-      const result =
-        control.source.kind !== "session-mode"
-          ? await commands.piAcpSetConfigOption(
-              sessionId,
-              control.source.optionId,
-              mode.value,
-              control.source.kind === "boolean" ? true : null,
-            )
-          : await commands.piAcpSetMode(sessionId, mode.value);
-      if (
-        result.status === "error" &&
-        result.error &&
-        !isAgentNotRunning(result.error)
-      ) {
-        throw new Error(result.error);
+      const checkResult = (result: { status: string; error?: string }) => {
+        if (
+          result.status === "error" &&
+          result.error &&
+          !isAgentNotRunning(result.error)
+        ) {
+          throw new Error(result.error);
+        }
+      };
+      const setAdapterMode = async () => {
+        if (!adapterMode || adapterMode.value === control.currentValue) return;
+        const result =
+          control.source.kind !== "session-mode"
+            ? await commands.piAcpSetConfigOption(
+                sessionId,
+                control.source.optionId,
+                adapterMode.value,
+                control.source.kind === "boolean" ? true : null,
+              )
+            : await commands.piAcpSetMode(sessionId, adapterMode.value);
+        checkResult(result);
+      };
+      const setApprovalMode = async (value: "ask" | "allow-all") => {
+        const result = await commands.piAcpSetApprovalMode(sessionId, value);
+        checkResult(result);
+      };
+
+      if (isClientFullAccess) {
+        // Cursor's plan/ask modes disable tools entirely, so restore its
+        // advertised agent mode before enabling client-side auto-approval.
+        await setAdapterMode();
+        await setApprovalMode("allow-all");
+      } else {
+        if (control.hasClientFullAccess) await setApprovalMode("ask");
+        await setAdapterMode();
       }
       setOpen(false);
     } catch (error) {

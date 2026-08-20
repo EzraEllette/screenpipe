@@ -225,6 +225,34 @@ struct SessionDefaults {
     options: HashMap<String, String>,
     #[serde(default)]
     mode_id: Option<String>,
+    /// Screenpipe-owned approval policy. This is separate from ACP session
+    /// modes because adapters such as Cursor advertise agent/plan/ask but keep
+    /// their "run everything" choice in the client permission responder.
+    #[serde(default)]
+    approval_mode: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum ApprovalMode {
+    #[default]
+    Ask,
+    AllowAll,
+}
+
+impl ApprovalMode {
+    fn parse(value: Option<&str>) -> Self {
+        match value {
+            Some("allow-all") => Self::AllowAll,
+            _ => Self::Ask,
+        }
+    }
+
+    fn id(self) -> &'static str {
+        match self {
+            Self::Ask => "ask",
+            Self::AllowAll => "allow-all",
+        }
+    }
 }
 
 impl RuntimeConfig {
@@ -1576,6 +1604,7 @@ struct RuntimeState {
     terminals: Mutex<HashMap<String, Arc<TerminalRecord>>>,
     system_context: Mutex<Option<String>>,
     provider_session_id: Mutex<Option<String>>,
+    approval_mode: Mutex<ApprovalMode>,
 }
 
 impl RuntimeState {
@@ -1595,7 +1624,30 @@ impl RuntimeState {
             terminals: Mutex::new(HashMap::new()),
             system_context: Mutex::new(config.system_context.clone()),
             provider_session_id: Mutex::new(None),
+            approval_mode: Mutex::new(ApprovalMode::parse(
+                config.session_defaults.approval_mode.as_deref(),
+            )),
         }
+    }
+
+    fn approval_mode(&self) -> ApprovalMode {
+        self.approval_mode
+            .lock()
+            .map(|mode| *mode)
+            .unwrap_or_default()
+    }
+
+    fn set_approval_mode(&self, value: &str) -> Result<ApprovalMode, String> {
+        let next = match value {
+            "ask" => ApprovalMode::Ask,
+            "allow-all" => ApprovalMode::AllowAll,
+            _ => return Err("approvalMode must be 'ask' or 'allow-all'".into()),
+        };
+        *self
+            .approval_mode
+            .lock()
+            .map_err(|_| "ACP approval mode lock is unavailable")? = next;
+        Ok(next)
     }
 
     /// Keep provider-owned schedules attached to exactly one live ACP session.
@@ -2385,13 +2437,19 @@ fn finish_tool(output: &ParentOutput, id: &str, update: &Value) {
 /// selectors) to the desktop so the UI can render pickers for them. The
 /// agent id lets the desktop cache advertisements per adapter for the
 /// preset editors.
-fn send_session_config(output: &ParentOutput, agent_id: &str, session: &NewSessionResponse) {
+fn send_session_config(
+    output: &ParentOutput,
+    agent_id: &str,
+    session: &NewSessionResponse,
+    approval_mode: ApprovalMode,
+) {
     output.send(json!({
         "type": "acp_session_config",
         "agentId": agent_id,
         "sessionId": session.session_id,
         "modes": session.modes,
         "configOptions": session.config_options,
+        "approvalMode": approval_mode.id(),
     }));
 }
 
@@ -3173,9 +3231,10 @@ fn allow_option_id(options: &Value) -> Option<String> {
 fn automatic_permission_option_id(
     options: &Value,
     unattended: bool,
+    allow_all: bool,
     title: Option<&str>,
 ) -> Option<String> {
-    (unattended || title.is_some_and(is_screenpipe_read_tool))
+    (unattended || allow_all || title.is_some_and(is_screenpipe_read_tool))
         .then(|| allow_option_id(options))
         .flatten()
 }
@@ -3606,12 +3665,18 @@ async fn run_protocol(
                         .filter(|value| !value.is_empty());
                     let kind = tool.get("kind").and_then(Value::as_str);
                     let options = serialized.get("options").cloned().unwrap_or_else(|| json!([]));
-                    // Chat auto-approves only screenpipe's read tools. A scheduled
-                    // task has no foreground UI, so its unattended mode
-                    // accepts the adapter's allow option and relies on the task's
-                    // scoped API token + filesystem policy for enforcement.
+                    // Chat auto-approves screenpipe's read tools plus every
+                    // requested tool when the user explicitly selected Full
+                    // access. A scheduled task has no foreground UI, so its
+                    // unattended mode accepts the adapter's allow option and
+                    // relies on the task's scoped API token + filesystem policy.
                     if let Some(option_id) =
-                        automatic_permission_option_id(&options, unattended, title)
+                        automatic_permission_option_id(
+                            &options,
+                            unattended,
+                            state.approval_mode() == ApprovalMode::AllowAll,
+                            title,
+                        )
                     {
                         return responder.respond(RequestPermissionResponse::new(
                             RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(
@@ -3881,7 +3946,12 @@ async fn run_protocol(
                 "resumed": resumed,
             }));
             apply_session_defaults(&connection, &config, &mut session).await;
-            send_session_config(&state.output, &config.agent_id, &session);
+            send_session_config(
+                &state.output,
+                &config.agent_id,
+                &session,
+                state.approval_mode(),
+            );
 
             let image_supported = init.agent_capabilities.prompt_capabilities.image;
             let close_supported = init.agent_capabilities.session_capabilities.close.is_some();
@@ -3993,7 +4063,12 @@ async fn run_protocol(
                                             );
                                             state.reset_system_context(config.system_context.clone());
                                             apply_session_defaults(&connection, &config, &mut session).await;
-                                            send_session_config(&state.output, &config.agent_id, &session);
+                                            send_session_config(
+                                                &state.output,
+                                                &config.agent_id,
+                                                &session,
+                                                state.approval_mode(),
+                                            );
                                         }
                                         Err(e) => error = Some(e.to_string()),
                                     }
@@ -4113,6 +4188,36 @@ async fn run_protocol(
                                         }
                                         Ok(())
                                     })?;
+                            }
+                            // The approval policy belongs to this ACP client,
+                            // not the adapter's advertised session modes. It
+                            // can therefore change live without respawning or
+                            // sending a non-standard request to the adapter.
+                            "set_approval_mode" => {
+                                let approval_mode = command
+                                    .get("approvalMode")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or_default();
+                                match state.set_approval_mode(approval_mode) {
+                                    Ok(mode) => {
+                                        state.output.send(json!({
+                                            "type": "acp_session_config",
+                                            "approvalMode": mode.id(),
+                                        }));
+                                        parent_response(
+                                            &state.output,
+                                            "set_approval_mode",
+                                            &id,
+                                            None,
+                                        );
+                                    }
+                                    Err(message) => parent_response(
+                                        &state.output,
+                                        "set_approval_mode",
+                                        &id,
+                                        Some(&message),
+                                    ),
+                                }
                             }
                             "provider_schedule_mutation" => {
                                 let task_id = command
@@ -5263,6 +5368,7 @@ mod tests {
             terminals: Mutex::new(HashMap::new()),
             system_context: Mutex::new(None),
             provider_session_id: Mutex::new(None),
+            approval_mode: Mutex::new(ApprovalMode::Ask),
         }
     }
 
@@ -5654,13 +5760,38 @@ mod tests {
         let reject_only = json!([{ "optionId": "r1", "name": "Reject", "kind": "reject_once" }]);
         assert_eq!(allow_option_id(&reject_only), None);
         assert_eq!(
-            automatic_permission_option_id(&options, false, Some("bash")),
+            automatic_permission_option_id(&options, false, false, Some("bash")),
             None
         );
         assert_eq!(
-            automatic_permission_option_id(&options, true, Some("bash")).as_deref(),
+            automatic_permission_option_id(&options, true, false, Some("bash")).as_deref(),
             Some("a2")
         );
+        assert_eq!(
+            automatic_permission_option_id(&options, false, true, Some("bash")).as_deref(),
+            Some("a2")
+        );
+    }
+
+    #[test]
+    fn approval_mode_defaults_safe_and_accepts_only_known_values() {
+        assert_eq!(ApprovalMode::parse(None), ApprovalMode::Ask);
+        assert_eq!(ApprovalMode::parse(Some("unknown")), ApprovalMode::Ask);
+        assert_eq!(
+            ApprovalMode::parse(Some("allow-all")),
+            ApprovalMode::AllowAll
+        );
+
+        let output = ParentOutput::buffer();
+        let state = test_state(&output);
+        assert_eq!(state.approval_mode(), ApprovalMode::Ask);
+        assert_eq!(
+            state.set_approval_mode("allow-all"),
+            Ok(ApprovalMode::AllowAll)
+        );
+        assert_eq!(state.approval_mode(), ApprovalMode::AllowAll);
+        assert!(state.set_approval_mode("yolo").is_err());
+        assert_eq!(state.approval_mode(), ApprovalMode::AllowAll);
     }
 
     #[test]

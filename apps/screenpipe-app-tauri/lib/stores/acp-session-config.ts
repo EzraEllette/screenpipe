@@ -31,6 +31,8 @@ export interface AcpSessionModes {
 export interface AcpSessionConfig {
   options: AcpConfigOption[];
   modes: AcpSessionModes | null;
+  /** Screenpipe's client-side response policy for ACP permission requests. */
+  approvalMode?: "ask" | "allow-all";
   /** The live ACP session id for this chat, for reopen-time resume. */
   sessionId?: string;
 }
@@ -234,6 +236,10 @@ export const useAcpSessionConfig = create<AcpSessionConfigState>()((set) => ({
           ? parseOptions(raw.configOptions)
           : (prior?.options ?? []),
         modes: raw?.modes !== undefined ? parseModes(raw.modes) : (prior?.modes ?? null),
+        approvalMode:
+          raw?.approvalMode === "allow-all" || raw?.approvalMode === "ask"
+            ? raw.approvalMode
+            : (prior?.approvalMode ?? "ask"),
         sessionId:
           typeof raw?.sessionId === "string" ? raw.sessionId : prior?.sessionId,
       };
@@ -266,6 +272,7 @@ export const useAcpSessionConfig = create<AcpSessionConfigState>()((set) => ({
           [sessionId]: {
             options: prior?.options ?? [],
             modes: prior?.modes ?? null,
+            approvalMode: prior?.approvalMode ?? "ask",
             sessionId: acpSessionId,
           },
         },

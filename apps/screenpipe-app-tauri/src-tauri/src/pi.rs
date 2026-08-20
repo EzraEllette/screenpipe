@@ -1835,6 +1835,10 @@ pub struct AcpAgentConfig {
     /// Default session mode id, applied after every session/new.
     #[serde(default)]
     pub mode_id: Option<String>,
+    /// Screenpipe-owned permission response policy. `allow-all` approves each
+    /// adapter request; omitted or `ask` keeps the normal approval cards.
+    #[serde(default)]
+    pub approval_mode: Option<String>,
     /// Send the agent's model calls through Screenpipe Cloud instead of the
     /// user's own provider account. Only honoured for agents whose catalog
     /// entry declares `cloudRouting`; a closed agent (Cursor, Copilot) talks to
@@ -2984,6 +2988,7 @@ pub async fn pi_start_inner(
                 serde_json::to_string(&serde_json::json!({
                     "options": acp.config,
                     "modeId": acp.mode_id,
+                    "approvalMode": acp.approval_mode,
                 }))
                 .map_err(|e| e.to_string())?,
             )
@@ -4607,6 +4612,40 @@ pub async fn pi_acp_set_mode(
     // Permission-mode switches apply at any point in a session; deliver
     // immediately so the composer selector works while a reply streams.
     queue.send_immediate_awaited("set_mode", cmd).await
+}
+
+/// Change Screenpipe's response policy for ACP permission requests without
+/// pretending it is an adapter-owned session mode.
+#[tauri::command]
+#[specta::specta]
+pub async fn pi_acp_set_approval_mode(
+    state: State<'_, PiState>,
+    session_id: Option<String>,
+    approval_mode: String,
+) -> Result<(), String> {
+    let sid = session_id.unwrap_or_else(|| "chat".to_string());
+    if !matches!(approval_mode.as_str(), "ask" | "allow-all") {
+        return Err("approval mode must be 'ask' or 'allow-all'".to_string());
+    }
+
+    let queue = {
+        let mut pool = state.0.lock().await;
+        let manager = pool.sessions.get_mut(&sid).ok_or("Pi not initialized")?;
+        if !manager.is_running() {
+            return Err("agent is not running".to_string());
+        }
+        manager.last_activity = std::time::Instant::now();
+        manager
+            .queue_handle
+            .clone()
+            .ok_or("Pi command queue not initialized")?
+    };
+
+    let cmd = json!({
+        "type": "set_approval_mode",
+        "approvalMode": approval_mode,
+    });
+    queue.send_immediate_awaited("set_approval_mode", cmd).await
 }
 
 /// Route a provider-owned schedule mutation through the live ACP session that

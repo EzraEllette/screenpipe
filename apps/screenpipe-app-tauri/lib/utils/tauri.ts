@@ -1508,6 +1508,18 @@ async piAcpReauthenticate(sessionId: string | null) : Promise<Result<null, strin
 }
 },
 /**
+ * Change Screenpipe's response policy for ACP permission requests without
+ * pretending it is an adapter-owned session mode.
+ */
+async piAcpSetApprovalMode(sessionId: string | null, approvalMode: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("pi_acp_set_approval_mode", { sessionId, approvalMode }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Change one ACP session configuration option (model, mode, or any other
  * selector the adapter advertised through `acp_session_config`). Select
  * options take the value id string; boolean options take "true"/"false".
@@ -2873,6 +2885,11 @@ config?: { [key in string]: string };
  */
 modeId?: string | null;
 /**
+ * Screenpipe-owned permission response policy. `allow-all` approves each
+ * adapter request; omitted or `ask` keeps the normal approval cards.
+ */
+approvalMode?: string | null;
+/**
  * Send the agent's model calls through Screenpipe Cloud instead of the
  * user's own provider account. Only honoured for agents whose catalog
  * entry declares `cloudRouting`; a closed agent (Cursor, Copilot) talks to
@@ -2902,6 +2919,10 @@ config?: { [key in string]: string };
  * Default session mode id, applied after every session/new.
  */
 modeId?: string | null;
+/**
+ * Screenpipe-owned ACP permission response policy (`ask` or `allow-all`).
+ */
+approvalMode?: string | null;
 /**
  * Send this agent's model calls through Screenpipe Cloud. `None` keeps
  * presets saved before this choice on the agent's own provider account.

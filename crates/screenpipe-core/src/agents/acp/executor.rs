@@ -34,6 +34,8 @@ pub struct AcpAgentConfig {
     #[serde(default)]
     pub mode_id: Option<String>,
     #[serde(default)]
+    pub approval_mode: Option<String>,
+    #[serde(default)]
     pub use_screenpipe_cloud: Option<bool>,
 }
 
@@ -219,6 +221,7 @@ impl AcpExecutor {
                 serde_json::to_string(&json!({
                     "options": agent.config,
                     "modeId": agent.mode_id,
+                    "approvalMode": agent.approval_mode,
                 }))?,
             )
             .env("SCREENPIPE_LOCAL_API_PORT", self.local_api_port.to_string())

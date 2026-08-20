@@ -4,7 +4,7 @@
 
 // Signature of the ACP adapter fields that require a fresh adapter PROCESS:
 // id, command, args, env, and the model-call billing route. Session-level
-// fields — config (option values), modeId, and authMethod — are applied after spawn
+// fields — config (option values), modeId, approvalMode, and authMethod — are applied after spawn
 // (SetSessionMode / SetSessionConfigOption / apply_session_defaults), so changing
 // them must NOT trigger a respawn. Excluding them here lets the composer config
 // popover tweak model/mode/effort on a live session without restarting it (and

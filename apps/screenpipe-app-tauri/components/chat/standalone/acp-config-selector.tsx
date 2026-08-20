@@ -44,8 +44,9 @@ function isAgentNotRunning(message: string): boolean {
 /** A single config change to persist onto the active preset's ACP defaults, so
  *  it is applied on the next session/new (apply_session_defaults). */
 export type AcpConfigDefaultChange =
-  | { optionId: string; value: string }
-  | { modeId: string };
+  | { optionId: string; value: string; approvalMode?: "ask" | "allow-all" }
+  | { modeId: string; approvalMode?: "ask" | "allow-all" }
+  | { approvalMode: "ask" | "allow-all" };
 
 /** The select an adapter uses for its model choice. Adapters name it "model"
  *  (Claude, Codex) or categorise it as one. Deliberately no "first select"

@@ -41,6 +41,7 @@ export function acpAgentForSelection(
     // agent; drop them on a real switch so a stale override can't apply.
     config: isSwitch ? {} : agent?.config,
     modeId: isSwitch ? null : agent?.modeId ?? null,
+    approvalMode: isSwitch ? null : agent?.approvalMode ?? null,
   };
 }
 

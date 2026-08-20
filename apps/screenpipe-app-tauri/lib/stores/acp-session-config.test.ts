@@ -62,7 +62,9 @@ describe("acp-session-config byAgent cache", () => {
 
     expect(useAcpSessionConfig.getState().byAgent).toEqual({});
     // The per-session state still updates for the composer.
-    expect(useAcpSessionConfig.getState().sessions["chat"].options).toHaveLength(0);
+    expect(
+      useAcpSessionConfig.getState().sessions["chat"].options,
+    ).toHaveLength(0);
   });
 
   it("session clear keeps the per-agent cache for the preset editors", () => {
@@ -75,6 +77,32 @@ describe("acp-session-config byAgent cache", () => {
 
     expect(useAcpSessionConfig.getState().sessions["chat"]).toBeUndefined();
     expect(useAcpSessionConfig.getState().byAgent["claude-acp"]).toBeDefined();
+  });
+
+  it("tracks the live client approval policy without caching it per adapter", () => {
+    useAcpSessionConfig.getState().setFromEvent("chat", {
+      type: "acp_session_config",
+      agentId: "cursor",
+      approvalMode: "allow-all",
+      configOptions: [MODEL_OPTION],
+    });
+    expect(useAcpSessionConfig.getState().sessions.chat.approvalMode).toBe(
+      "allow-all",
+    );
+    expect(
+      useAcpSessionConfig.getState().byAgent.cursor.approvalMode,
+    ).toBeUndefined();
+
+    useAcpSessionConfig.getState().setFromEvent("chat", {
+      type: "acp_session_config",
+      approvalMode: "ask",
+    });
+    expect(useAcpSessionConfig.getState().sessions.chat.approvalMode).toBe(
+      "ask",
+    );
+    expect(useAcpSessionConfig.getState().sessions.chat.options[0].id).toBe(
+      "model",
+    );
   });
 });
 

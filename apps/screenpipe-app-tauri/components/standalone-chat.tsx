@@ -335,13 +335,21 @@ export function StandaloneChat({
   // chat before any message: the live session (if one exists) is updated by the
   // selector separately, and a not-yet-started session reads these defaults.
   const handleAcpConfigDefault = useCallback(
-    (change: { optionId?: string; value?: string; modeId?: string }) => {
+    (change: {
+      optionId?: string;
+      value?: string;
+      modeId?: string;
+      approvalMode?: "ask" | "allow-all";
+    }) => {
       const preset = activePresetRef.current;
       const agent = preset?.acpAgent;
       if (!preset || !agent) return;
       const nextAgent = { ...agent };
       if (change.modeId !== undefined) {
         nextAgent.modeId = change.modeId;
+      }
+      if (change.approvalMode !== undefined) {
+        nextAgent.approvalMode = change.approvalMode;
       }
       if (change.optionId !== undefined && change.value !== undefined) {
         nextAgent.config = { ...(agent.config ?? {}), [change.optionId]: change.value };
