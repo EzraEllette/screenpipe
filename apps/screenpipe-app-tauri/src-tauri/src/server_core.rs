@@ -735,18 +735,6 @@ impl ServerCore {
         if config.api_auth {
             pipe_manager.set_local_api_key(config.api_auth_key.clone());
         }
-        {
-            let secret_store_for_check = server.secret_store.clone();
-            let screenpipe_dir_for_check = config.data_dir.clone();
-            pipe_manager.set_connection_check(Arc::new(move |required| {
-                let ss = secret_store_for_check.clone();
-                let dir = screenpipe_dir_for_check.clone();
-                Box::pin(async move {
-                    screenpipe_connect::missing_pipe_connections(ss.as_deref(), &dir, &required)
-                        .await
-                })
-            }));
-        }
         pipe_manager.install_builtin_pipes().ok();
         if let Err(e) = pipe_manager.load_pipes().await {
             warn!("failed to load pipes: {}", e);
