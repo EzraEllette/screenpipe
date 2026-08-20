@@ -15,6 +15,7 @@ import {
   shouldWarnLowHostedAiAllowance,
   usageAllowanceState,
   useUsageStatus,
+  useUsageStatusQuery,
 } from "../use-usage-status";
 
 let settingsState: any;
@@ -97,6 +98,25 @@ describe("useUsageStatus", () => {
   it("does not make an anonymous startup request before settings hydrate", () => {
     renderHook(() => useUsageStatus(), { wrapper });
     expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("does not poll cloud usage when the consumer disables the query", () => {
+    settingsState = {
+      settings: { user: { token: "byok.jwt" } },
+      isSettingsLoaded: true,
+    };
+
+    const { result } = renderHook(() => useUsageStatusQuery(false), {
+      wrapper,
+    });
+
+    expect(fetch).not.toHaveBeenCalled();
+    expect(result.current).toMatchObject({
+      usage: null,
+      isLoading: false,
+      isRefreshing: false,
+      isUnavailable: false,
+    });
   });
 
   it("keeps the gateway eligibility signal with the authenticated snapshot", async () => {

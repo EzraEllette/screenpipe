@@ -186,21 +186,21 @@ async function fetchUsageStatus(token: string | undefined): Promise<UsageStatus>
 /** One app-wide query per authenticated account. TanStack Query de-duplicates
  * the composer, settings, model-picker, and limit-banner consumers instead of
  * starting a separate 30-second poll for each mounted surface. */
-export function useUsageStatusQuery(): UsageStatusQuery {
+export function useUsageStatusQuery(enabled = true): UsageStatusQuery {
   const { settings, isSettingsLoaded } = useSettings();
   const token = settings.user?.token;
   const requestKey = isSettingsLoaded ? token ?? "" : null;
   const query = useQuery({
     queryKey: ["hosted-ai-usage", requestKey],
     queryFn: () => fetchUsageStatus(token ?? undefined),
-    enabled: requestKey !== null,
+    enabled: enabled && requestKey !== null,
     refetchInterval: POLL_INTERVAL_MS,
     retry: false,
   });
 
   return {
     usage: query.data ?? null,
-    isLoading: requestKey !== null && query.isLoading,
+    isLoading: enabled && requestKey !== null && query.isLoading,
     isRefreshing: query.isFetching && query.data !== undefined,
     isUnavailable: query.isError && query.data === undefined,
     refresh: async () => {

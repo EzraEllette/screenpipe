@@ -4,7 +4,6 @@
 "use client";
 
 import { useState } from "react";
-import { Activity } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import {
@@ -25,35 +24,64 @@ import {
 } from "@/lib/hooks/use-usage-status";
 import { cn } from "@/lib/utils";
 import type { AIPreset } from "@/lib/utils/tauri";
+import { useContextUsage } from "@/components/chat/standalone/hooks/use-context-usage";
+import {
+  ContextUsagePanel,
+  contextUsagePercent,
+  contextUsageState,
+} from "@/components/usage/context-usage-panel";
 
 export function UsagePopover({
   activePreset,
+  sessionId,
 }: {
   activePreset: AIPreset | null | undefined;
+  sessionId: string | null;
 }) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
-  const query = useUsageStatusQuery();
+  const usesCloudAllowance = presetUsesHostedAllowance(activePreset);
+  // BYOK, local, and own-account ACP chats never start a composer-only cloud
+  // usage poll. Other mounted account surfaces still share their own query.
+  const query = useUsageStatusQuery(usesCloudAllowance);
+  const context = useContextUsage(sessionId);
+  const contextPercent = contextUsagePercent(context);
   const { usage } = query;
   const hosted = usage?.hosted_ai;
   const allowances = hosted?.allowances ?? [];
   const tightest = tightestHostedAiAllowance(allowances);
-  // This is contextual composer chrome, not an account-wide dashboard. Keep it
-  // absent for Ollama, BYOK, and ACP agents using their own provider account;
-  // their next message does not draw down Screenpipe's hosted allowance.
-  if (
-    !presetUsesHostedAllowance(activePreset)
-    || hosted?.allowance_managed_by !== "cloudflare"
-  ) {
-    return null;
-  }
-
-  const plan = quotaPlanLabel(hosted.plan);
-  const percent = tightest ? formatUsagePercent(tightest.used_percent) : null;
-  const state = tightest ? usageAllowanceState(tightest.used_percent) : "ok";
-  const unavailableMessage = hosted.plan === "unknown"
-    ? "sign in to view your usage limits."
-    : "usage data is unavailable. try refreshing.";
+  const cloudManaged =
+    usesCloudAllowance && hosted?.allowance_managed_by === "cloudflare";
+  const plan = hosted ? quotaPlanLabel(hosted.plan) : null;
+  const cloudPercent = tightest
+    ? formatUsagePercent(tightest.used_percent)
+    : null;
+  // Context is the primary composer reading. Before the harness reports it,
+  // Screenpipe Cloud allowance remains the useful fallback for hosted chats.
+  const ringPercent =
+    contextPercent ?? (cloudManaged ? (tightest?.used_percent ?? null) : null);
+  const state =
+    contextPercent !== null
+      ? contextUsageState(contextPercent)
+      : cloudManaged && tightest
+        ? usageAllowanceState(tightest.used_percent)
+        : "ok";
+  const readings = [
+    contextPercent !== null
+      ? `Context usage, ${Math.round(contextPercent)}% full`
+      : null,
+    cloudManaged
+      ? cloudPercent
+        ? `Screenpipe Cloud usage, ${cloudPercent} used`
+        : "Screenpipe Cloud usage unavailable"
+      : null,
+  ].filter((reading): reading is string => reading !== null);
+  const accessibleLabel =
+    readings.length > 0 ? readings.join("; ") : "Usage details";
+  const unavailableMessage =
+    hosted?.plan === "unknown"
+      ? "sign in to view your usage limits."
+      : "usage data is unavailable. try refreshing.";
 
   return (
     // Click, not hover: this panel is something you go and read, and a chip
@@ -66,49 +94,50 @@ export function UsagePopover({
           size="icon"
           className={cn(
             "h-7 w-7 hover:bg-muted/50 hover:text-foreground",
-            // The ring only earns full contrast once the tightest allowance is
-            // actually worth acting on; otherwise it stays background noise.
-            state === "ok"
-              ? "text-muted-foreground"
-              : "text-foreground",
+            // The ring only earns full contrast once either reading is worth
+            // acting on; otherwise it stays background chrome.
+            state === "ok" ? "text-muted-foreground" : "text-foreground",
           )}
-          // The arc is the glance; the exact number belongs to the panel it
-          // opens, and to anyone who hovers or uses a screen reader.
-          title={percent
-            ? `Screenpipe Cloud usage: ${percent} used`
-            : "Screenpipe Cloud usage unavailable"}
-          aria-label={percent
-            ? `Screenpipe Cloud usage, ${percent} used`
-            : "Screenpipe Cloud usage unavailable"}
+          title={accessibleLabel}
+          aria-label={accessibleLabel}
           data-testid="usage-popover-trigger"
           data-state-usage={state}
         >
-          {tightest ? (
-            <UsageRing percent={tightest.used_percent} state={state} />
-          ) : (
-            <Activity className="h-3.5 w-3.5" aria-hidden />
-          )}
+          <UsageRing
+            percent={ringPercent ?? 0}
+            state={state}
+            measured={ringPercent !== null}
+          />
         </Button>
       </PopoverTrigger>
       <PopoverContent
         align="end"
         side="top"
         sideOffset={6}
-        className="w-[min(360px,calc(100vw-24px))] rounded-none border-border p-3.5 shadow-lg shadow-black/5"
+        className="w-[min(420px,calc(100vw-24px))] rounded-xl border-border p-3.5 shadow-lg shadow-black/5"
         data-testid="usage-popover-content"
       >
-        <UsageLimitsPanel
-          planLabel={plan}
-          allowances={allowances}
-          updatedLabel={formatUsageUpdatedAt(hosted.usage_as_of)}
-          unavailableMessage={unavailableMessage}
-          isRefreshing={query.isRefreshing}
-          onRefresh={hosted.plan === "unknown" ? undefined : query.refresh}
-          onOpenSettings={() => {
-            setOpen(false);
-            router.push("/settings?section=usage");
-          }}
-        />
+        <div className="space-y-3.5">
+          <ContextUsagePanel snapshot={context} />
+          {cloudManaged && (
+            <div className="border-t border-border pt-3.5">
+              <UsageLimitsPanel
+                planLabel={plan}
+                allowances={allowances}
+                updatedLabel={formatUsageUpdatedAt(hosted.usage_as_of)}
+                unavailableMessage={unavailableMessage}
+                isRefreshing={query.isRefreshing}
+                onRefresh={
+                  hosted.plan === "unknown" ? undefined : query.refresh
+                }
+                onOpenSettings={() => {
+                  setOpen(false);
+                  router.push("/settings?section=usage");
+                }}
+              />
+            </div>
+          )}
+        </div>
       </PopoverContent>
     </Popover>
   );

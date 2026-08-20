@@ -1624,6 +1624,19 @@ fn ensure_self_improvement_extension(project_dir: &str) -> Result<(), String> {
         .map_err(|e| format!("Failed to install self-improvement extension: {}", e))
 }
 
+/// Emit privacy-safe context-usage counts from native Pi's exact model payload.
+/// Other ACP agents own their prompt assembly and do not load Pi extensions.
+fn ensure_context_usage_extension(project_dir: &str) -> Result<(), String> {
+    let ext_dir = std::path::Path::new(project_dir)
+        .join(".pi")
+        .join("extensions");
+    std::fs::create_dir_all(&ext_dir)
+        .map_err(|e| format!("Failed to create Pi extensions directory: {}", e))?;
+    let ext_content = include_str!("../assets/extensions/context-usage.ts");
+    std::fs::write(ext_dir.join("context-usage.ts"), ext_content)
+        .map_err(|e| format!("Failed to install context-usage extension: {}", e))
+}
+
 /// Stage the Enterprise-only team skill outside Pi's auto-discovery tree.
 /// Consumer builds return `None` without touching this path; the Enterprise
 /// app passes the returned file explicitly with `--skill` for this process.
@@ -2588,6 +2601,7 @@ pub async fn pi_start_inner(
     // pi-acp, which is pi and can't consume the MCP servers.
     if !use_acp {
         ensure_self_improvement_extension(&project_dir)?;
+        ensure_context_usage_extension(&project_dir)?;
 
         // Install web-search extension only for screenpipe-cloud presets
         ensure_web_search_extension(&project_dir, provider_config.as_ref())?;
@@ -7517,6 +7531,18 @@ error: InstallFailed extracting tarball"#;
                 .join("self-improvement.ts")
                 .is_file(),
             "self-improvement extension must be seeded on a fresh profile"
+        );
+
+        super::ensure_context_usage_extension(project_dir)
+            .expect("seed context-usage extension");
+        assert!(
+            project
+                .path()
+                .join(".pi")
+                .join("extensions")
+                .join("context-usage.ts")
+                .is_file(),
+            "context-usage extension must be seeded for native Pi"
         );
 
         // The Live Views extension (the pi-acp parity fix) materializes too.

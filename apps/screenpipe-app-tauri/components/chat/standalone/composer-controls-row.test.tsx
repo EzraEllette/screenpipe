@@ -47,8 +47,16 @@ vi.mock("@/components/thinking-level-selector", () => ({
   ThinkingLevelSelector: () => null,
 }));
 vi.mock("@/components/usage/usage-popover", () => ({
-  UsagePopover: ({ activePreset }: { activePreset?: AIPreset | null }) => (
-    <div data-testid="mock-usage-preset">{activePreset?.id ?? "none"}</div>
+  UsagePopover: ({
+    activePreset,
+    sessionId,
+  }: {
+    activePreset?: AIPreset | null;
+    sessionId: string | null;
+  }) => (
+    <div data-testid="mock-usage-preset">
+      {activePreset?.id ?? "none"}|{sessionId ?? "none"}
+    </div>
   ),
 }));
 
@@ -62,14 +70,16 @@ describe("ComposerControlsRow preset selection", () => {
     render(
       <ComposerControlsRow
         canChat
-        filters={{
+        filters={
+          {
             activeFilterCount: 0,
             activeFilters: [],
             activeFilterLabels: [],
             hasActiveFilters: false,
             appFilterOpen: false,
             onFilterMenuOpenChange: vi.fn(),
-        } as any}
+          } as any
+        }
         modelControls={{
           settings: {
             aiPresets: [
@@ -97,7 +107,9 @@ describe("ComposerControlsRow preset selection", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "finish creating preset" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "finish creating preset" }),
+    );
 
     expect(onSelectPreset).toHaveBeenCalledWith(newPreset);
     expect(onPresetSaved).toHaveBeenCalledWith(newPreset);
@@ -147,7 +159,9 @@ describe("ComposerControlsRow preset selection", () => {
     expect(screen.getByTestId("mock-acp-effort")).toHaveTextContent(
       "codex-acp",
     );
-    expect(screen.getByTestId("mock-usage-preset")).toHaveTextContent("codex");
+    expect(screen.getByTestId("mock-usage-preset")).toHaveTextContent(
+      "codex|chat-1",
+    );
 
     rerender(
       <ComposerControlsRow
@@ -173,7 +187,9 @@ describe("ComposerControlsRow preset selection", () => {
     expect(screen.getByTestId("mock-acp-effort")).toHaveTextContent(
       "claude-acp",
     );
-    expect(screen.getByTestId("mock-usage-preset")).toHaveTextContent("claude");
+    expect(screen.getByTestId("mock-usage-preset")).toHaveTextContent(
+      "claude|chat-1",
+    );
 
     rerender(
       <ComposerControlsRow
@@ -194,5 +210,8 @@ describe("ComposerControlsRow preset selection", () => {
 
     expect(screen.queryByTestId("mock-acp-permission")).not.toBeInTheDocument();
     expect(screen.queryByTestId("mock-acp-effort")).not.toBeInTheDocument();
+    expect(screen.getByTestId("mock-usage-preset")).toHaveTextContent(
+      "cloud|chat-1",
+    );
   });
 });
