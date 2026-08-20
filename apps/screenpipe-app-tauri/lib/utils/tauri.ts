@@ -477,6 +477,14 @@ async forceRegenerateSuggestions() : Promise<Result<CachedSuggestions, string>> 
     else return { status: "error", error: e  as any };
 }
 },
+async generateActivityHistory(start: string, end: string) : Promise<Result<PersistedActivityHistory, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("generate_activity_history", { start, end }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 /**
  * Absolute path of the data directory used by the running engine. This is
  * distinct from the app base directory when the user selected a custom
@@ -485,6 +493,14 @@ async forceRegenerateSuggestions() : Promise<Result<CachedSuggestions, string>> 
 async getActiveDataDir() : Promise<Result<string, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_active_data_dir") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async getActivityHistory(start: string, end: string) : Promise<Result<PersistedActivityHistory, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_activity_history", { start, end }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2860,6 +2876,9 @@ modeId?: string | null;
  * presets saved before this choice on the agent's own provider account.
  */
 useScreenpipeCloud?: boolean | null }
+export type ActivityHistoryCoverage = { start: string; end: string }
+export type ActivityHistoryEntry = { id: string; kind: string; meeting_id: number | null; start_at: string; end_at: string; title: string; summary: string; evidence: ActivityHistoryEvidence[] }
+export type ActivityHistoryEvidence = { kind: string; at: string; frame_id: number | null; meeting_id: number | null; app_name: string | null; label: string }
 export type AecMode = "off" | "screenpipe" | "macos" | "windows"
 export type AudioDeviceInfo = { name: string; isDefault: boolean;
 /**
@@ -3103,6 +3122,7 @@ downloaded: boolean;
  * True when download failed with 401/403 — user must sign in.
  */
 auth_required: boolean }
+export type PersistedActivityHistory = { entries: ActivityHistoryEntry[]; coverage: ActivityHistoryCoverage[] }
 export type PiBackend = "acp"
 export type PiCheckResult = { available: boolean; path: string | null }
 export type PiExtensionPackage = { source: string; scope: string; filtered: boolean; installed: boolean;

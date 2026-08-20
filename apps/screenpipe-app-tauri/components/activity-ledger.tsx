@@ -42,34 +42,24 @@ import {
   SelectTrigger,
 } from "@/components/ui/select";
 import {
-  ACTIVITY_REVIEW_AGENT_SYSTEM_PROMPT,
-  ACTIVITY_REVIEW_PROMPT_VERSION,
-  buildActivityReviewAgentPrompt,
-  buildActivityReviewRepairPrompt,
-  missingRequiredMeetingIds,
-  parseActivityHistoryResponse,
   type ActivityHistoryDocument,
   type ActivityHistoryEvidence,
   type ActivityHistoryEntry,
   type ActivityReviewMeeting,
 } from "@/lib/activity-review-prompt";
 import {
-  loadPersistedActivityHistory,
-  mergeActivityHistoryCoverage,
-  mergeActivityHistoryDocuments,
   nextActivityHistoryRange,
-  reconcilePersistedActivityHistory,
   type ActivityHistoryCoverage,
 } from "@/lib/activity-history-persistence";
 import { localFetch } from "@/lib/api";
 import { presentQuotaError } from "@/lib/chat/quota-errors";
 import { showChatWithPrefill } from "@/lib/chat-utils";
-import { runDailySummaryWithPi } from "@/lib/daily-summary-pi";
 import { useSettings } from "@/lib/hooks/use-settings";
+import { useTauriEvent } from "@/lib/hooks/use-tauri-event";
 import { useTimelineStore } from "@/lib/hooks/use-timeline-store";
 import { getAppServerBaseUrl } from "@/lib/notifications/app-server";
 import { cn } from "@/lib/utils";
-import type { AIPreset } from "@/lib/utils/tauri";
+import { commands, type AIPreset } from "@/lib/utils/tauri";
 
 type RangePreset = "today" | "24h" | "7d" | "custom";
 type GenerationSource = "empty_state" | "refresh" | "enable";
@@ -85,6 +75,17 @@ type MeetingResponse = {
   title: string | null;
 };
 type TimeRange = { start: Date; end: Date };
+
+function historyDocumentFromNative(
+  entries: unknown[],
+): ActivityHistoryDocument | null {
+  // The native parser rejects unknown entry/evidence kinds before persistence;
+  // Specta currently widens those validated Rust strings to `string`.
+  return entries.length > 0
+    ? { entries: entries as ActivityHistoryEntry[] }
+    : null;
+}
+
 type ActivityLedgerArtifactEvidence = {
   source_type: string;
   source_id: number;
@@ -112,12 +113,11 @@ function noActivityMessage(dataStatus: string): string {
       return "No recorded activity was found in this range. Choose another range and try again.";
     case "empty_but_recording":
       return "Recording is active, but this range does not have enough activity yet. Keep working for a moment, then try again.";
-    case "unknown":
-      return "Activity data is not ready yet. Check recording status, then try again.";
     default:
       return "There is not enough recorded activity in this range to generate a history yet.";
   }
 }
+
 type ActivityArtifact = ActivityHistoryEvidence & {
   browser_url?: string | null;
 };
@@ -635,12 +635,6 @@ function formatDay(value: string): string {
   }).format(date);
 }
 
-function historyCacheKey(range: TimeRange, preset: RangePreset): string {
-  const start = range.start.toISOString().slice(0, 13);
-  const end = range.end.toISOString().slice(0, 13);
-  return `screenpipe:${ACTIVITY_REVIEW_PROMPT_VERSION}:${preset}:${start}:${end}`;
-}
-
 function groupByDay(entries: ActivityHistoryEntry[]) {
   const groups = new Map<string, ActivityHistoryEntry[]>();
   for (const entry of entries) {
@@ -749,8 +743,6 @@ export function ActivityLedger({
   const [customCalendarOpen, setCustomCalendarOpen] = useState(false);
   const [summary, setSummary] = useState<ActivitySummaryResponse | null>(null);
   const [meetings, setMeetings] = useState<ActivityReviewMeeting[]>([]);
-  const meetingsRef = useRef(meetings);
-  meetingsRef.current = meetings;
   const [ledgerIntervals, setLedgerIntervals] = useState<
     ActivityLedgerArtifactInterval[]
   >([]);
@@ -771,6 +763,11 @@ export function ActivityLedger({
     string | null
   >(null);
   const { settings, updateSettings } = useSettings();
+  useEffect(() => {
+    if (!selectedReviewPresetId && settings.activitiesAiPresetId) {
+      setSelectedReviewPresetId(settings.activitiesAiPresetId);
+    }
+  }, [selectedReviewPresetId, settings.activitiesAiPresetId]);
   const legacyActivitiesEnabled =
     settings.activitiesEnabled === undefined && historyCoverage.length > 0;
   const activitiesEnabled =
@@ -952,36 +949,13 @@ export function ActivityLedger({
     setCacheReady(false);
     if (!range) return;
     let cancelled = false;
-    void loadPersistedActivityHistory(ACTIVITY_REVIEW_PROMPT_VERSION, range)
-      .then(async (stored) => {
-        let snapshot = stored;
-        if (stored.entries.length === 0 && stored.coverage.length === 0) {
-          try {
-            const cached = window.localStorage.getItem(
-              historyCacheKey(range, preset),
-            );
-            if (cached) {
-              const legacy = parseActivityHistoryResponse(
-                cached,
-                range,
-                meetingsRef.current,
-              );
-              snapshot = await reconcilePersistedActivityHistory(
-                ACTIVITY_REVIEW_PROMPT_VERSION,
-                range,
-                legacy,
-                range,
-              );
-              window.localStorage.removeItem(historyCacheKey(range, preset));
-            }
-          } catch {
-            // Ignore a malformed legacy cache and build from source evidence.
-          }
-        }
+    void commands
+      .getActivityHistory(range.start.toISOString(), range.end.toISOString())
+      .then((result) => {
         if (cancelled) return;
-        setHistory(
-          snapshot.entries.length > 0 ? { entries: snapshot.entries } : null,
-        );
+        if (result.status === "error") throw new Error(result.error);
+        const snapshot = result.data;
+        setHistory(historyDocumentFromNative(snapshot.entries));
         setHistoryCoverage(snapshot.coverage);
       })
       .catch(() => {
@@ -997,6 +971,22 @@ export function ActivityLedger({
     };
   }, [preset, range]);
 
+  useTauriEvent("activity-history-updated", () => {
+    if (!range) return;
+    void commands
+      .getActivityHistory(range.start.toISOString(), range.end.toISOString())
+      .then((result) => {
+        if (result.status === "error") throw new Error(result.error);
+        const snapshot = result.data;
+        setHistory(historyDocumentFromNative(snapshot.entries));
+        setHistoryCoverage(snapshot.coverage);
+      })
+      .catch(() => {
+        // The completion notification still opens the persisted history if
+        // this window is closing while the update event arrives.
+      });
+  });
+
   useEffect(() => {
     if (
       !cacheReady ||
@@ -1006,19 +996,14 @@ export function ActivityLedger({
       return;
     }
     legacyActivitiesActivationStartedRef.current = true;
-    const intervalMinutes = settings.activitiesIntervalMinutes ?? 15;
     void updateSettings({
       activitiesEnabled: true,
-      activitiesNextRunAt: new Date(
-        Date.now() + intervalMinutes * 60_000,
-      ).toISOString(),
     }).catch(() => {
       legacyActivitiesActivationStartedRef.current = false;
     });
   }, [
     cacheReady,
     legacyActivitiesEnabled,
-    settings.activitiesIntervalMinutes,
     updateSettings,
   ]);
 
@@ -1039,169 +1024,35 @@ export function ActivityLedger({
     setHistoryLoading(true);
     setHistoryError("");
     try {
-      const [summaryResponse, meetingsResponse] = await Promise.all([
-        localFetch(buildActivitySummaryPath(generationRange), {
-          signal: controller.signal,
-        }),
-        localFetch(buildActivityMeetingsPath(generationRange), {
-          signal: controller.signal,
-        }),
-      ]);
-      if (!summaryResponse.ok) {
-        throw new Error(`Activity request failed (${summaryResponse.status}).`);
-      }
-      if (!meetingsResponse.ok) {
-        throw new Error(`Meeting request failed (${meetingsResponse.status}).`);
-      }
-      const [generationSummary, meetingRecords] = await Promise.all([
-        summaryResponse.json() as Promise<ActivitySummaryResponse>,
-        meetingsResponse.json() as Promise<MeetingResponse[]>,
-      ]);
-      const generationMeetings = meetingAnchors(
-        meetingRecords,
-        generationRange,
+      const result = await commands.generateActivityHistory(
+        generationRange.start.toISOString(),
+        generationRange.end.toISOString(),
       );
-      const reviewRange = {
-        start: generationRange.start.toISOString(),
-        end: generationRange.end.toISOString(),
-        label: `${RANGE_COPY[preset].toLowerCase()} continuation`,
-      };
-      if (
-        generationSummary?.data_status !== "ok" ||
-        generationSummary.total_active_minutes <= 0
-      ) {
-        const persisted = await reconcilePersistedActivityHistory(
-          ACTIVITY_REVIEW_PROMPT_VERSION,
-          generationRange,
-          { entries: [] },
-          viewRange,
-        );
-        setHistory(
-          persisted.entries.length > 0 ? { entries: persisted.entries } : null,
-        );
-        setHistoryCoverage(persisted.coverage);
-        setHistoryError(
-          noActivityMessage(generationSummary?.data_status ?? "unknown"),
-        );
-        posthog.capture("activity_generation_completed", {
-          range: preset,
-          source,
-          outcome: "no_activity",
-          activity_count: 0,
-          data_status: generationSummary?.data_status ?? "unknown",
-        });
-        return;
-      }
-      const raw = await runDailySummaryWithPi({
-        date: generationRange.start,
-        range: {
-          start: generationRange.start.toISOString(),
-          end: generationRange.end.toISOString(),
-        },
-        preset: reviewPreset,
-        userToken: settings.user?.token ?? null,
-        signal: controller.signal,
-        sessionPrefix: "activity-history",
-        systemPrompt: ACTIVITY_REVIEW_AGENT_SYSTEM_PROMPT,
-        prompt: buildActivityReviewAgentPrompt(reviewRange, generationMeetings),
-      });
-      const minimumEntries = minimumHistoryEntryCount(
-        generationSummary.total_active_minutes,
-        generationRange,
-      );
-      let next = parseActivityHistoryResponse(
-        raw,
-        generationRange,
-        generationMeetings,
-      );
-      let missingMeetings = missingRequiredMeetingIds(next, generationMeetings);
-      if (next.entries.length < minimumEntries || missingMeetings.length > 0) {
-        try {
-          const repairedRaw = await runDailySummaryWithPi({
-            date: generationRange.start,
-            range: {
-              start: generationRange.start.toISOString(),
-              end: generationRange.end.toISOString(),
-            },
-            preset: reviewPreset,
-            userToken: settings.user?.token ?? null,
-            signal: controller.signal,
-            sessionPrefix: "activity-history-repair",
-            systemPrompt: ACTIVITY_REVIEW_AGENT_SYSTEM_PROMPT,
-            prompt: buildActivityReviewRepairPrompt(
-              reviewRange,
-              generationMeetings,
-              next,
-              minimumEntries,
-              missingMeetings,
-            ),
-          });
-          const repaired = parseActivityHistoryResponse(
-            repairedRaw,
-            generationRange,
-            generationMeetings,
-          );
-          // Never discard a valid, source-backed first pass merely because a
-          // best-effort repair returned fewer usable rows.
-          if (repaired.entries.length >= next.entries.length) next = repaired;
-          missingMeetings = missingRequiredMeetingIds(next, generationMeetings);
-        } catch (reason) {
-          if (controller.signal.aborted) throw reason;
-          // The first pass is already structurally validated and cited. Keep
-          // it instead of turning a coverage-quality miss into a blank page.
-        }
-      }
-      if (missingMeetings.length > 0) {
-        throw new Error(
-          "History is still resolving a recorded meeting. Try again in a moment.",
-        );
-      }
-      let persisted;
-      try {
-        persisted = await reconcilePersistedActivityHistory(
-          ACTIVITY_REVIEW_PROMPT_VERSION,
-          generationRange,
-          next,
-          viewRange,
-        );
-      } catch {
-        persisted = {
-          entries: mergeActivityHistoryDocuments(
-            history?.entries ?? [],
-            next,
-            generationRange,
-          ),
-          coverage: mergeActivityHistoryCoverage([
-            ...historyCoverage,
-            {
-              start: generationRange.start.toISOString(),
-              end: generationRange.end.toISOString(),
-            },
-          ]),
-        };
-      }
-      setHistory(
-        persisted.entries.length > 0 ? { entries: persisted.entries } : null,
-      );
+      if (result.status === "error") throw new Error(result.error);
+      const persisted = result.data;
+      if (controller.signal.aborted) return;
+      setHistory(historyDocumentFromNative(persisted.entries));
       setHistoryCoverage(persisted.coverage);
       posthog.capture("activity_generation_completed", {
         range: preset,
         source,
         outcome: "generated",
-        activity_count: next.entries.length,
+        activity_count: persisted.entries.length,
       });
     } catch (reason) {
       if (controller.signal.aborted) return;
       const rawError = reason instanceof Error ? reason.message : String(reason);
+      const noDataStatus = rawError.match(/activity_no_data:([a-z_]+)/)?.[1];
       const quota = presentQuotaError(rawError);
-      const friendlyError = rawError
-        .toLowerCase()
-        .includes("hosted_ai_allowance_exceeded")
-        ? "This AI preset has no usage left. Choose a different AI preset, then try again."
-        : quota.kind !== "none"
-          ? quota.message
-          : "History could not be updated. Try again.";
-      setHistoryError(friendlyError);
+      setHistoryError(
+        noDataStatus
+          ? noActivityMessage(noDataStatus)
+          : rawError.toLowerCase().includes("hosted_ai_allowance_exceeded")
+            ? "This AI preset has no usage left. Choose a different AI preset, then try again."
+            : quota.kind !== "none"
+              ? quota.message
+              : "History could not be updated. Try again.",
+      );
       posthog.capture("activity_generation_failed", {
         range: preset,
         source,
@@ -1213,14 +1064,7 @@ export function ActivityLedger({
         setHistoryLoading(false);
       }
     }
-  }, [
-    preset,
-    range,
-    reviewPreset,
-    settings,
-    history,
-    historyCoverage,
-  ]);
+  }, [preset, range]);
 
   const regenerateSelectedRange = useCallback((source: GenerationSource) => {
     const clickedRange = rangeForPreset(
@@ -1241,13 +1085,9 @@ export function ActivityLedger({
       customEnd,
     );
     if (!clickedRange) return;
-    const intervalMinutes = settings.activitiesIntervalMinutes ?? 15;
     try {
       await updateSettings({
         activitiesEnabled: true,
-        activitiesNextRunAt: new Date(
-          Date.now() + intervalMinutes * 60_000,
-        ).toISOString(),
       });
     } catch {
       setHistoryError(
@@ -1261,7 +1101,6 @@ export function ActivityLedger({
     customStart,
     generateHistory,
     preset,
-    settings.activitiesIntervalMinutes,
     updateSettings,
   ]);
 
@@ -1417,7 +1256,11 @@ Re-query Screenpipe only inside the cited time range and use the cited frames an
                   triggerClassName="h-9 rounded-none text-xs"
                   controlledPresetId={reviewPreset.id}
                   onControlledSelect={(nextPreset) => {
-                    if (nextPreset) setSelectedReviewPresetId(nextPreset.id);
+                    if (!nextPreset) return;
+                    setSelectedReviewPresetId(nextPreset.id);
+                    void updateSettings({
+                      activitiesAiPresetId: nextPreset.id,
+                    });
                   }}
                 />
               ) : (
@@ -1513,6 +1356,15 @@ Re-query Screenpipe only inside the cited time range and use the cited frames an
 
       <main className="min-h-0 flex-1 overflow-y-auto">
         <div className="mx-auto max-w-4xl px-6 py-8">
+          {historyLoading ? (
+            <p
+              role="status"
+              className="mb-6 border-b border-border pb-4 text-sm text-muted-foreground"
+            >
+              You can leave this page. We’ll notify you when your activities
+              are ready.
+            </p>
+          ) : null}
           {invalidRange ? (
             <p className="text-sm text-muted-foreground">
               Start time must be before end time.
