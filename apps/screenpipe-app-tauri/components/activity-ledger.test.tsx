@@ -1493,6 +1493,55 @@ describe("ActivityLedger", () => {
     );
   });
 
+  it("retries app icons with bounded exponential backoff", async () => {
+    render(<ActivityLedger />);
+    await generateActivities();
+    await screen.findByText("Fixed a capture reliability regression");
+
+    const appArtifact = screen.getByRole("link", {
+      name: /Open Arc at .* in Timeline/,
+    });
+    await waitFor(() =>
+      expect(appArtifact.querySelector("img")).not.toBeNull(),
+    );
+
+    fireEvent.error(appArtifact.querySelector("img")!);
+    expect(appArtifact.querySelector("img")).toBeNull();
+
+    await act(async () => vi.advanceTimersByTime(499));
+    expect(appArtifact.querySelector("img")).toBeNull();
+    await act(async () => vi.advanceTimersByTime(1));
+    expect(appArtifact.querySelector("img")).toHaveAttribute(
+      "src",
+      "http://localhost:11535/app-icon?name=Arc&retry=1",
+    );
+
+    fireEvent.error(appArtifact.querySelector("img")!);
+    await act(async () => vi.advanceTimersByTime(999));
+    expect(appArtifact.querySelector("img")).toBeNull();
+    await act(async () => vi.advanceTimersByTime(1));
+    expect(appArtifact.querySelector("img")).toHaveAttribute(
+      "src",
+      "http://localhost:11535/app-icon?name=Arc&retry=2",
+    );
+
+    for (const [delay, attempt] of [
+      [2_000, 3],
+      [4_000, 4],
+    ] as const) {
+      fireEvent.error(appArtifact.querySelector("img")!);
+      await act(async () => vi.advanceTimersByTime(delay));
+      expect(appArtifact.querySelector("img")).toHaveAttribute(
+        "src",
+        `http://localhost:11535/app-icon?name=Arc&retry=${attempt}`,
+      );
+    }
+
+    fireEvent.error(appArtifact.querySelector("img")!);
+    await act(async () => vi.advanceTimersByTime(10_000));
+    expect(appArtifact.querySelector("img")).toBeNull();
+  });
+
   it("opens meeting artifacts in the matching meeting's best view", async () => {
     mocks.localFetch.mockImplementation((path: string) =>
       Promise.resolve({
