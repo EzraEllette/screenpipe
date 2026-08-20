@@ -6,6 +6,7 @@ import React from "react";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  openProviderUrl,
   ProviderAutomationsPanel,
   providerManagementUrl,
   providerScheduleLabel,
@@ -67,12 +68,8 @@ describe("ProviderAutomationsPanel", () => {
   it("separates agent-owned schedules into branded provider tabs", async () => {
     render(<ProviderAutomationsPanel />);
 
-    expect(await screen.findByText("external agent tasks")).toBeInTheDocument();
-    expect(
-      screen.getByText(
-        "schedules created in Codex, Claude, and other agent apps",
-      ),
-    ).toBeInTheDocument();
+    expect(await screen.findByText("Daily review")).toBeInTheDocument();
+    expect(screen.queryByText("agent schedules")).not.toBeInTheDocument();
     expect(screen.getByRole("tab", { name: /Codex 1/i })).toHaveAttribute(
       "aria-selected",
       "true",
@@ -80,16 +77,15 @@ describe("ProviderAutomationsPanel", () => {
     expect(screen.getByText("Daily review")).toBeInTheDocument();
     expect(screen.queryByText("Say hi")).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("tab", { name: /Claude 1/i }));
+    fireEvent.click(screen.getByRole("tab", { name: /Claude Code 1/i }));
 
     expect(screen.getByText("Say hi")).toBeInTheDocument();
     expect(screen.getByText("Every hour at :07")).toBeInTheDocument();
-    expect(screen.getByLabelText("active")).toBeInTheDocument();
-    expect(screen.getByLabelText("session only")).toBeInTheDocument();
-    expect(
-      screen.getByText("view only here · manage these tasks in Claude"),
-    ).toBeInTheDocument();
-    expect(screen.getByText("managed in Claude")).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "active" })).toBeInTheDocument();
+    expect(screen.queryByText("active")).not.toBeInTheDocument();
+    expect(screen.queryByText("session only")).not.toBeInTheDocument();
+    expect(screen.queryByText(/view only here/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/managed in Claude/i)).not.toBeInTheDocument();
     expect(screen.queryByText("read only")).not.toBeInTheDocument();
   });
 
@@ -110,26 +106,60 @@ describe("ProviderAutomationsPanel", () => {
     const onOpenProvider = vi.fn().mockResolvedValue(undefined);
     render(<ProviderAutomationsPanel onOpenProvider={onOpenProvider} />);
 
-    expect(await screen.findByText("external agent tasks")).toBeInTheDocument();
+    expect(await screen.findByText("Daily review")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "open Codex" }));
 
     expect(onOpenProvider).toHaveBeenCalledWith("codex://automations");
     expect(providerManagementUrl("claude")).toBeNull();
   });
 
+  it("keeps Claude cloud schedules visible as a provider boundary", async () => {
+    const onOpenProvider = vi.fn().mockResolvedValue(undefined);
+    vi.mocked(commands.listProviderAutomations).mockResolvedValue({
+      status: "ok",
+      data: [TASKS[0]],
+    });
+
+    render(<ProviderAutomationsPanel onOpenProvider={onOpenProvider} />);
+
+    expect(await screen.findByText("Daily review")).toBeInTheDocument();
+    expect(screen.getByTestId("provider-heading")).toHaveTextContent("Codex1");
+    expect(screen.getByText("Claude cloud")).toBeInTheDocument();
+    expect(screen.queryByText("stay in Claude")).not.toBeInTheDocument();
+
+    const openClaude = screen.getByRole("button", { name: "open Claude" });
+    expect(openClaude).toHaveTextContent("Claude cloud");
+    fireEvent.click(openClaude);
+    expect(onOpenProvider).toHaveBeenCalledWith("https://claude.ai");
+  });
+
+  it("shows the Claude cloud boundary when no local agent tasks exist", async () => {
+    vi.mocked(commands.listProviderAutomations).mockResolvedValue({
+      status: "ok",
+      data: [],
+    });
+
+    render(<ProviderAutomationsPanel />);
+
+    expect(await screen.findByText("Claude cloud")).toBeInTheDocument();
+    expect(screen.queryByText("agent schedules")).not.toBeInTheDocument();
+  });
+
   it("uses inline controls only when the live ACP adapter advertised them", async () => {
     const onManageTask = vi.fn().mockResolvedValue(undefined);
     render(<ProviderAutomationsPanel onManageTask={onManageTask} />);
 
-    expect(await screen.findByText("external agent tasks")).toBeInTheDocument();
-    fireEvent.click(
-      screen.getByRole("switch", { name: "Turn on Daily review" }),
-    );
+    expect(await screen.findByText("Daily review")).toBeInTheDocument();
+    const toggle = screen.getByRole("switch", {
+      name: "Turn on Daily review",
+    });
+    expect(toggle).toHaveTextContent("");
+    fireEvent.click(toggle);
 
     await waitFor(() =>
       expect(onManageTask).toHaveBeenCalledWith("codex:daily-review", "resume"),
     );
-    fireEvent.click(screen.getByRole("tab", { name: /Claude 1/i }));
+    fireEvent.click(screen.getByRole("tab", { name: /Claude Code 1/i }));
     expect(screen.queryByRole("switch", { name: /Say hi/i })).toBeNull();
   });
 
@@ -137,7 +167,7 @@ describe("ProviderAutomationsPanel", () => {
     const onManageTask = vi.fn().mockResolvedValue(undefined);
     render(<ProviderAutomationsPanel onManageTask={onManageTask} />);
 
-    expect(await screen.findByText("external agent tasks")).toBeInTheDocument();
+    expect(await screen.findByText("Daily review")).toBeInTheDocument();
     fireEvent.pointerDown(
       screen.getByRole("button", { name: "actions for Daily review" }),
       { button: 0, ctrlKey: false, pointerType: "mouse" },
@@ -162,6 +192,8 @@ describe("ProviderAutomationsPanel", () => {
       key: `codex:task-${index}`,
       nativeId: `task-${index}`,
       name: `Task ${index}`,
+      manageability: "read_only" as const,
+      availableActions: [],
     }));
     vi.mocked(commands.listProviderAutomations).mockResolvedValue({
       status: "ok",
@@ -169,16 +201,46 @@ describe("ProviderAutomationsPanel", () => {
     });
 
     render(<ProviderAutomationsPanel />);
-    expect(
-      await screen.findByRole("tab", { name: /Codex 6/i }),
-    ).toBeInTheDocument();
+    expect(await screen.findByTestId("provider-heading")).toHaveTextContent(
+      "Codex6",
+    );
+    expect(screen.queryByRole("tablist")).not.toBeInTheDocument();
+    expect(screen.queryByText("runs locally")).not.toBeInTheDocument();
+    expect(screen.queryByText(/managed in Codex/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /actions for/i })).toBeNull();
     expect(screen.getByText("Task 0")).toBeInTheDocument();
     expect(screen.queryByText("Task 5")).not.toBeInTheDocument();
 
     fireEvent.click(
-      screen.getByRole("button", { name: "show 1 more Codex schedule" }),
+      screen.getByRole("button", { name: "show 1 more" }),
     );
     expect(screen.getByText("Task 5")).toBeInTheDocument();
+  });
+
+  it("falls back to the native Codex launcher when Tauri rejects the deep link", async () => {
+    const openDeepLink = vi.fn().mockRejectedValue(new Error("not allowed"));
+    const openMacUrl = vi.fn().mockResolvedValue(undefined);
+
+    await openProviderUrl("codex://automations", {
+      openUrl: openDeepLink,
+      getPlatform: () => "macos",
+      openMacUrl,
+    });
+
+    expect(openDeepLink).toHaveBeenCalledTimes(1);
+    expect(openMacUrl).toHaveBeenCalledWith("codex://automations");
+  });
+
+  it("keeps the launch error compact when every recovery path fails", async () => {
+    const onOpenProvider = vi.fn().mockRejectedValue(new Error("missing"));
+    render(<ProviderAutomationsPanel onOpenProvider={onOpenProvider} />);
+
+    expect(await screen.findByText("Daily review")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "open Codex" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "couldn't open Codex",
+    );
   });
 
   it("formats common Codex recurrence rules", () => {

@@ -179,6 +179,38 @@ export function shouldFetchPipesForApi(
   return requestApiBase === currentApiBase;
 }
 
+export function ScheduledTasksRefreshButton({
+  refreshing,
+  onRefresh,
+}: {
+  refreshing: boolean;
+  onRefresh: () => void;
+}) {
+  return (
+    <Button
+      variant="outline"
+      size="icon"
+      className={cn(
+        "h-8 w-8",
+        refreshing &&
+          "hover:bg-background hover:text-foreground disabled:bg-background disabled:text-foreground disabled:opacity-100",
+      )}
+      onClick={onRefresh}
+      disabled={refreshing}
+      aria-busy={refreshing}
+      aria-label={
+        refreshing ? "refreshing scheduled tasks" : "refresh scheduled tasks"
+      }
+    >
+      {refreshing ? (
+        <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+      ) : (
+        <RefreshCw className="h-3.5 w-3.5" aria-hidden="true" />
+      )}
+    </Button>
+  );
+}
+
 export class ApiRequestSequence {
   private latestRequestId = 0;
 
@@ -2569,18 +2601,18 @@ export function PipesSection() {
               )}
             />
           </Button>
-          <Button variant="outline" size="icon" className={`h-8 w-8 ${refreshing ? "pointer-events-none opacity-70" : ""}`} onClick={async () => {
-            if (refreshing) return;
-            setRefreshing(true);
-            setProviderRefreshToken((value) => value + 1);
-            await Promise.all([
-              fetchPipes(),
-              new Promise((r) => setTimeout(r, 2000)),
-            ]);
-            setRefreshing(false);
-          }}>
-            {refreshing ? <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" /> : <RefreshCw className="h-3.5 w-3.5" />}
-          </Button>
+          <ScheduledTasksRefreshButton
+            refreshing={refreshing}
+            onRefresh={async () => {
+              setRefreshing(true);
+              setProviderRefreshToken((value) => value + 1);
+              await Promise.all([
+                fetchPipes(),
+                new Promise((resolve) => setTimeout(resolve, 2000)),
+              ]);
+              setRefreshing(false);
+            }}
+          />
           {/* Creating is an action you take, not a form that sits on the page.
               Only offered when the two-pane list exists to open it into. */}
           {filteredPipes.length > 0 && (

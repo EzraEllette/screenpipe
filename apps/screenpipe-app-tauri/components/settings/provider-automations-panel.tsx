@@ -9,15 +9,12 @@ import {
   Bot,
   Clock3,
   ExternalLink,
-  Laptop,
   MoreHorizontal,
-  Pause,
-  Play,
-  RefreshCw,
-  Timer,
   Trash2,
 } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { platform } from "@tauri-apps/plugin-os";
+import { Command } from "@tauri-apps/plugin-shell";
 import { commands, type ProviderAutomation } from "@/lib/utils/tauri";
 import { cn } from "@/lib/utils";
 import {
@@ -34,9 +31,12 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+
+// Cowork schedules are account-backed, not part of the local Claude Code
+// projection. Keep that boundary visible without pretending we can list them.
+const CLAUDE_CLOUD_URL = "https://claude.ai";
 
 function rruleParts(schedule: string): Record<string, string> {
   return Object.fromEntries(
@@ -194,20 +194,72 @@ export function providerScheduleLabel(task: ProviderAutomation): string {
   return task.schedule;
 }
 
-function scopeLabel(task: ProviderAutomation): string {
-  if (task.executionScope === "session") return "session only";
-  if (task.executionScope === "provider_durable") return "survives restarts";
-  return "runs locally";
-}
-
 export function providerManagementUrl(provider: string): string | null {
   if (provider.toLowerCase() === "codex") return "codex://automations";
   return null;
 }
 
+type ProviderOpenDependencies = {
+  openUrl: (url: string) => Promise<void>;
+  getPlatform: () => string;
+  openMacUrl: (url: string) => Promise<void>;
+  openWindowsUrl: (url: string) => Promise<void>;
+};
+
+const defaultProviderOpenDependencies: ProviderOpenDependencies = {
+  openUrl,
+  getPlatform: platform,
+  openMacUrl: async (url) => {
+    const output = await Command.create("open", [
+      "-b",
+      "com.openai.codex",
+      url,
+    ]).execute();
+    if (output.code !== 0) throw new Error("native Codex launch failed");
+  },
+  openWindowsUrl: async (url) => {
+    const result = await commands.openWindowsShellTarget(url);
+    if (result.status === "error") throw new Error(result.error);
+  },
+};
+
+export async function openProviderUrl(
+  url: string,
+  dependencies: Partial<ProviderOpenDependencies> = {},
+): Promise<void> {
+  const opener = { ...defaultProviderOpenDependencies, ...dependencies };
+  try {
+    await opener.openUrl(url);
+    return;
+  } catch {
+    // Tauri's URL allowlist and OS protocol registration can disagree. Fall
+    // back to the platform launcher so a rejected deep link still opens Codex.
+  }
+
+  try {
+    const os = opener.getPlatform();
+    if (os === "macos") {
+      await opener.openMacUrl(url);
+      return;
+    }
+    if (os === "windows") {
+      await opener.openWindowsUrl(url);
+      return;
+    }
+  } catch {
+    // The web app is the last recovery path when the desktop app is missing.
+  }
+
+  if (url.startsWith("codex://")) {
+    await opener.openUrl("https://chatgpt.com/codex");
+    return;
+  }
+  throw new Error("provider launch failed");
+}
+
 function providerLabel(provider: string): string {
   if (provider.toLowerCase() === "codex") return "Codex";
-  if (provider.toLowerCase() === "claude") return "Claude";
+  if (provider.toLowerCase() === "claude") return "Claude Code";
   return provider.charAt(0).toUpperCase() + provider.slice(1);
 }
 
@@ -224,25 +276,6 @@ function ProviderIcon({ provider }: { provider: string }) {
   return <Bot className={className} aria-hidden="true" />;
 }
 
-function TaskScopeIcon({ task }: { task: ProviderAutomation }) {
-  const label = scopeLabel(task);
-  const Icon =
-    task.executionScope === "session"
-      ? Timer
-      : task.executionScope === "provider_durable"
-        ? RefreshCw
-        : Laptop;
-  return (
-    <span
-      aria-label={label}
-      title={label}
-      className="inline-flex h-7 w-7 items-center justify-center text-muted-foreground"
-    >
-      <Icon className="h-3.5 w-3.5" aria-hidden="true" />
-    </span>
-  );
-}
-
 export interface ProviderAutomationsPanelProps {
   searchQuery?: string;
   refreshToken?: number;
@@ -253,7 +286,7 @@ export interface ProviderAutomationsPanelProps {
 export function ProviderAutomationsPanel({
   searchQuery = "",
   refreshToken = 0,
-  onOpenProvider = openUrl,
+  onOpenProvider = openProviderUrl,
   onManageTask = async (key, action) => {
     const result = await commands.manageProviderAutomation(key, action);
     if (result.status === "error") throw new Error(result.error);
@@ -330,11 +363,20 @@ export function ProviderAutomationsPanel({
       try {
         await onOpenProvider(url);
       } catch {
-        setOpenError(`couldn't open ${provider}; manage these schedules there`);
+        setOpenError(`couldn't open ${providerLabel(provider)}`);
       }
     },
     [onOpenProvider],
   );
+
+  const openClaudeCloud = React.useCallback(async () => {
+    setOpenError(null);
+    try {
+      await onOpenProvider(CLAUDE_CLOUD_URL);
+    } catch {
+      setOpenError("couldn't open Claude");
+    }
+  }, [onOpenProvider]);
 
   const mutateTask = React.useCallback(
     async (task: ProviderAutomation, action: "pause" | "resume" | "delete") => {
@@ -356,102 +398,127 @@ export function ProviderAutomationsPanel({
     [load, onManageTask],
   );
 
-  if (visible.length === 0) return null;
+  const claudeCloudBoundary = (
+    <button
+      type="button"
+      aria-label="open Claude"
+      title="open Claude cloud schedules"
+      className="flex min-h-10 w-full items-center gap-2 border-t border-border px-3 py-2 text-left transition-colors first:border-t-0 hover:bg-background/70"
+      onClick={() => void openClaudeCloud()}
+    >
+      <ProviderIcon provider="claude" />
+      <span className="text-xs font-medium">Claude cloud</span>
+      <div className="flex-1" />
+      <ExternalLink className="h-3.5 w-3.5 text-muted-foreground" />
+    </button>
+  );
+
+  if (visible.length === 0) {
+    if (query) return null;
+    return (
+      <section
+        className="overflow-hidden border border-border bg-muted/10"
+        data-testid="provider-automations-panel"
+      >
+        {claudeCloudBoundary}
+        {openError && (
+          <p
+            className="border-t border-border px-4 py-2 text-xs text-destructive"
+            role="alert"
+          >
+            {openError}
+          </p>
+        )}
+      </section>
+    );
+  }
 
   const activeProviderLabel = providerLabel(activeProvider ?? "agent");
   const activeManagementUrl = activeProvider
     ? providerManagementUrl(activeProvider)
     : null;
-  const activeHasInlineControls = activeTasks.some(
-    (task) => (task.availableActions?.length ?? 0) > 0,
-  );
   const displayedActiveTasks =
     expandedProvider === activeProvider ? activeTasks : activeTasks.slice(0, 5);
   const hiddenTaskCount = activeTasks.length - displayedActiveTasks.length;
+  const hasMultipleProviders = providers.length > 1;
 
   return (
     <section
       className="overflow-hidden border border-border bg-muted/10"
       data-testid="provider-automations-panel"
     >
-      <div className="flex items-start justify-between gap-4 px-4 pb-3 pt-3.5">
-        <div>
-          <div className="flex items-baseline gap-2">
-            <h3 className="text-sm font-medium">external agent tasks</h3>
-            <span className="text-xs tabular-nums text-muted-foreground">
-              {visible.length} total
+      <div className="flex min-h-10 items-stretch border-b border-border">
+        {hasMultipleProviders ? (
+          <div
+            role="tablist"
+            aria-label="schedule owner"
+            className="flex min-w-0 flex-1 overflow-x-auto bg-muted/20 px-2"
+          >
+            {providers.map((provider) => {
+              const isActive = provider === activeProvider;
+              const count = grouped.get(provider)?.length ?? 0;
+              return (
+                <button
+                  key={provider}
+                  id={`provider-tab-${provider}`}
+                  type="button"
+                  role="tab"
+                  aria-selected={isActive}
+                  aria-controls={`provider-panel-${provider}`}
+                  className={cn(
+                    "inline-flex h-10 shrink-0 items-center gap-2 border-b-2 px-2.5 text-xs transition-colors",
+                    isActive
+                      ? "border-foreground bg-background text-foreground"
+                      : "border-transparent text-muted-foreground hover:bg-background/70 hover:text-foreground",
+                  )}
+                  onClick={() => setSelectedProvider(provider)}
+                >
+                  <ProviderIcon provider={provider} />
+                  <span>{providerLabel(provider)}</span>
+                  <span className="text-[10px] tabular-nums text-muted-foreground">
+                    {count}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        ) : (
+          <div
+            className="flex min-w-0 flex-1 items-center gap-2 px-3"
+            data-testid="provider-heading"
+          >
+            {activeProvider && <ProviderIcon provider={activeProvider} />}
+            <span className="truncate text-xs font-medium">
+              {activeProviderLabel}
+            </span>
+            <span className="text-[10px] tabular-nums text-muted-foreground">
+              {activeTasks.length}
             </span>
           </div>
-          <p className="mt-0.5 text-xs text-muted-foreground">
-            schedules created in Codex, Claude, and other agent apps
-          </p>
-        </div>
-      </div>
-
-      <div
-        role="tablist"
-        aria-label="schedule owner"
-        className="flex overflow-x-auto border-y border-border bg-muted/20 px-3"
-      >
-        {providers.map((provider) => {
-          const isActive = provider === activeProvider;
-          const count = grouped.get(provider)?.length ?? 0;
-          return (
-            <button
-              key={provider}
-              id={`provider-tab-${provider}`}
-              type="button"
-              role="tab"
-              aria-selected={isActive}
-              aria-controls={`provider-panel-${provider}`}
-              className={cn(
-                "inline-flex h-11 shrink-0 items-center gap-2 border-b-2 px-3 text-xs transition-colors",
-                isActive
-                  ? "border-foreground bg-background text-foreground"
-                  : "border-transparent text-muted-foreground hover:bg-background/70 hover:text-foreground",
-              )}
-              onClick={() => setSelectedProvider(provider)}
-            >
-              <ProviderIcon provider={provider} />
-              <span>{providerLabel(provider)}</span>
-              <span
-                className={cn(
-                  "border px-1.5 py-0.5 text-[10px] tabular-nums",
-                  isActive ? "border-border bg-muted" : "border-transparent",
-                )}
-              >
-                {count}
-              </span>
-            </button>
-          );
-        })}
+        )}
+        {activeManagementUrl && (
+          <button
+            type="button"
+            aria-label={`open ${activeProviderLabel}`}
+            title={`open ${activeProviderLabel}`}
+            className="inline-flex h-10 w-10 shrink-0 items-center justify-center border-l border-border text-muted-foreground transition-colors hover:bg-foreground hover:text-background"
+            onClick={() => void manageProvider(activeProvider!)}
+          >
+            <ExternalLink className="h-3.5 w-3.5" />
+          </button>
+        )}
       </div>
 
       {activeProvider && (
         <div
           id={`provider-panel-${activeProvider}`}
-          role="tabpanel"
-          aria-labelledby={`provider-tab-${activeProvider}`}
+          {...(hasMultipleProviders
+            ? {
+                role: "tabpanel",
+                "aria-labelledby": `provider-tab-${activeProvider}`,
+              }
+            : {})}
         >
-          <div className="flex min-h-10 items-center gap-2 border-b border-border px-4 py-2 text-xs text-muted-foreground">
-            <span>
-              {activeHasInlineControls
-                ? `${activeTasks.filter((task) => (task.availableActions?.length ?? 0) > 0).length} of ${activeTasks.length} can be managed here · changes sync to ${activeProviderLabel}`
-                : `view only here · manage these tasks in ${activeProviderLabel}`}
-            </span>
-            <div className="flex-1" />
-            {activeManagementUrl && (
-              <button
-                type="button"
-                className="inline-flex items-center gap-1.5 border border-border px-2 py-1 font-mono text-[10px] uppercase tracking-wide text-foreground transition-colors hover:bg-foreground hover:text-background"
-                onClick={() => void manageProvider(activeProvider)}
-              >
-                open {activeProviderLabel}
-                <ExternalLink className="h-3 w-3" />
-              </button>
-            )}
-          </div>
-
           <div className="divide-y divide-border">
             {displayedActiveTasks.map((task) => {
               const actions = task.availableActions ?? [];
@@ -467,45 +534,35 @@ export function ProviderAutomationsPanel({
               return (
                 <article
                   key={task.key}
-                  className="grid items-center gap-3 bg-background/40 px-4 py-3 transition-colors hover:bg-background/80 md:grid-cols-[minmax(0,1fr)_auto_auto]"
+                  className="flex items-center gap-2.5 bg-background/40 px-3 py-2 transition-colors hover:bg-background/80"
                   title={task.lifecycleNote}
                 >
-                  <div className="min-w-0">
+                  <span
+                    role="img"
+                    aria-label={isOn ? "active" : "paused"}
+                    title={isOn ? "active" : "paused"}
+                    className={cn(
+                      "h-2 w-2 shrink-0 border border-current text-muted-foreground",
+                      isOn && "bg-foreground text-foreground",
+                    )}
+                  />
+                  <div className="min-w-0 flex-1">
                     <div
                       className="truncate text-sm font-medium"
                       title={task.name}
                     >
                       {task.name}
                     </div>
-                    <span className="mt-1 inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+                    <div className="mt-0.5 flex min-w-0 items-center gap-1 text-xs text-muted-foreground">
                       <Clock3 className="h-3 w-3 shrink-0" />
                       <span className="truncate">
                         {providerScheduleLabel(task)}
                       </span>
-                    </span>
-                  </div>
-
-                  <div className="flex items-center justify-end gap-0.5">
-                    {!primaryAction && (
-                      <span
-                        aria-label={isOn ? "active" : "paused"}
-                        title={isOn ? "active" : "paused"}
-                        className="inline-flex h-7 w-7 items-center justify-center text-muted-foreground"
-                      >
-                        <span
-                          aria-hidden="true"
-                          className={cn(
-                            "h-2 w-2 shrink-0 border border-current",
-                            isOn && "bg-foreground text-foreground",
-                          )}
-                        />
-                      </span>
-                    )}
-                    <TaskScopeIcon task={task} />
+                    </div>
                   </div>
 
                   <div className="flex items-center justify-end gap-1.5">
-                    {primaryAction ? (
+                    {primaryAction && (
                       <button
                         type="button"
                         role="switch"
@@ -513,12 +570,9 @@ export function ProviderAutomationsPanel({
                         aria-busy={isPending}
                         aria-label={`${isOn ? "Turn off" : "Turn on"} ${task.name}`}
                         disabled={isPending}
-                        className="inline-flex h-8 items-center gap-2 border border-border px-2 font-mono text-[10px] uppercase tracking-wide transition-colors hover:bg-muted disabled:cursor-wait disabled:opacity-50"
+                        className="inline-flex h-7 w-9 items-center justify-center border border-border transition-colors hover:bg-muted disabled:cursor-wait disabled:opacity-50"
                         onClick={() => void mutateTask(task, primaryAction)}
                       >
-                        <span aria-hidden="true">
-                          {isPending ? "saving" : isOn ? "on" : "off"}
-                        </span>
                         <span
                           aria-hidden="true"
                           className={cn(
@@ -526,6 +580,7 @@ export function ProviderAutomationsPanel({
                             isOn
                               ? "border-foreground bg-foreground"
                               : "border-border bg-muted",
+                            isPending && "animate-pulse",
                           )}
                         >
                           <span
@@ -536,22 +591,16 @@ export function ProviderAutomationsPanel({
                           />
                         </span>
                       </button>
-                    ) : (
-                      <span className="px-2 py-1 font-mono text-[10px] uppercase tracking-wide text-muted-foreground">
-                        managed in {activeProviderLabel}
-                      </span>
                     )}
 
-                    {(primaryAction ||
-                      actions.includes("delete") ||
-                      activeManagementUrl) && (
+                    {actions.includes("delete") && (
                       <DropdownMenu>
                         <DropdownMenuTrigger asChild>
                           <button
                             type="button"
                             aria-label={`actions for ${task.name}`}
                             disabled={isPending}
-                            className="inline-flex h-8 w-8 items-center justify-center border border-border transition-colors hover:bg-foreground hover:text-background disabled:opacity-50"
+                            className="inline-flex h-7 w-7 items-center justify-center border border-border transition-colors hover:bg-foreground hover:text-background disabled:opacity-50"
                           >
                             <MoreHorizontal className="h-4 w-4" />
                           </button>
@@ -560,42 +609,13 @@ export function ProviderAutomationsPanel({
                           align="end"
                           className="w-48 rounded-none"
                         >
-                          {primaryAction && (
-                            <DropdownMenuItem
-                              onSelect={() =>
-                                void mutateTask(task, primaryAction)
-                              }
-                            >
-                              {primaryAction === "pause" ? (
-                                <Pause className="mr-2 h-4 w-4" />
-                              ) : (
-                                <Play className="mr-2 h-4 w-4" />
-                              )}
-                              {primaryAction} schedule
-                            </DropdownMenuItem>
-                          )}
-                          {activeManagementUrl && (
-                            <DropdownMenuItem
-                              onSelect={() =>
-                                void manageProvider(activeProvider)
-                              }
-                            >
-                              <ExternalLink className="mr-2 h-4 w-4" />
-                              manage in {activeProviderLabel}
-                            </DropdownMenuItem>
-                          )}
-                          {actions.includes("delete") && (
-                            <>
-                              <DropdownMenuSeparator />
-                              <DropdownMenuItem
-                                className="text-destructive focus:text-destructive"
-                                onSelect={() => setTaskToDelete(task)}
-                              >
-                                <Trash2 className="mr-2 h-4 w-4" />
-                                delete schedule
-                              </DropdownMenuItem>
-                            </>
-                          )}
+                          <DropdownMenuItem
+                            className="text-destructive focus:text-destructive"
+                            onSelect={() => setTaskToDelete(task)}
+                          >
+                            <Trash2 className="mr-2 h-4 w-4" />
+                            delete schedule
+                          </DropdownMenuItem>
                         </DropdownMenuContent>
                       </DropdownMenu>
                     )}
@@ -608,15 +628,17 @@ export function ProviderAutomationsPanel({
           {hiddenTaskCount > 0 && (
             <button
               type="button"
-              className="w-full border-t border-border px-4 py-2.5 text-left text-xs text-muted-foreground transition-colors hover:bg-background/70 hover:text-foreground"
+              aria-label={`show ${hiddenTaskCount} more`}
+              className="w-full border-t border-border px-3 py-2 text-left font-mono text-[10px] text-muted-foreground transition-colors hover:bg-background/70 hover:text-foreground"
               onClick={() => setExpandedProvider(activeProvider)}
             >
-              show {hiddenTaskCount} more {activeProviderLabel} schedule
-              {hiddenTaskCount === 1 ? "" : "s"}
+              +{hiddenTaskCount}
             </button>
           )}
         </div>
       )}
+
+      {!query && claudeCloudBoundary}
 
       {openError && (
         <p
