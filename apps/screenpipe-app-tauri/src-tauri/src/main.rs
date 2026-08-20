@@ -576,6 +576,9 @@ async fn main() {
     {
         let args: Vec<String> = std::env::args().collect();
         let deep_link_url = deep_link::url_from_args(&args);
+        let launch_exe = std::env::current_exe()
+            .ok()
+            .map(|path| path.to_string_lossy().to_string());
 
         let focus_port: u16 = std::env::var("SCREENPIPE_FOCUS_PORT")
             .ok()
@@ -587,6 +590,7 @@ async fn main() {
             .json(&serde_json::json!({
                 "args": args,
                 "deep_link_url": deep_link_url,
+                "launch_exe": launch_exe,
             }))
             .send()
             .await

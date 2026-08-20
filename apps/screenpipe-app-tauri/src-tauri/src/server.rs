@@ -14,6 +14,7 @@ use axum::{
 use http::header::{HeaderValue, CONTENT_TYPE, HOST, ORIGIN};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use tauri::Emitter;
 use tauri::Manager;
 use tokio::sync::mpsc;
@@ -92,6 +93,32 @@ struct FocusPayload {
     deep_link_url: Option<String>,
     #[serde(default)]
     target: Option<String>,
+    #[serde(default)]
+    launch_exe: Option<String>,
+}
+
+fn normalize_exe_path(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+#[cfg(target_os = "windows")]
+fn same_exe_path(left: &Path, right: &Path) -> bool {
+    let left = normalize_exe_path(left).to_string_lossy().to_string();
+    let right = normalize_exe_path(right).to_string_lossy().to_string();
+    left.eq_ignore_ascii_case(&right)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn same_exe_path(left: &Path, right: &Path) -> bool {
+    normalize_exe_path(left) == normalize_exe_path(right)
+}
+
+fn focus_handoff_matches_current_exe(launch_exe: Option<&str>, current_exe: &Path) -> bool {
+    let Some(launch_exe) = launch_exe.map(str::trim).filter(|path| !path.is_empty()) else {
+        return true;
+    };
+
+    same_exe_path(Path::new(launch_exe), current_exe)
 }
 
 async fn handle_focus(
@@ -104,6 +131,26 @@ async fn handle_focus(
         payload.deep_link_url.is_some(),
         payload.target
     );
+
+    if let Some(launch_exe) = payload.launch_exe.as_deref() {
+        match std::env::current_exe() {
+            Ok(current_exe)
+                if !focus_handoff_matches_current_exe(Some(launch_exe), &current_exe) =>
+            {
+                tracing::warn!(
+                    "rejected focus handoff from a different screenpipe executable: launch_exe={}, current_exe={}",
+                    launch_exe,
+                    current_exe.display()
+                );
+                return Err((
+                    StatusCode::CONFLICT,
+                    "focus handoff belongs to another screenpipe install".to_string(),
+                ));
+            }
+            Ok(_) => {}
+            Err(error) => tracing::warn!("could not verify focus handoff executable: {error}"),
+        }
+    }
 
     if let Some(url) = payload.deep_link_url.as_deref() {
         if !crate::deep_link::is_for_current_build(url) {
@@ -863,8 +910,8 @@ curl -X POST http://localhost:11435/notify \
 #[cfg(test)]
 mod tests {
     use super::{
-        is_allowed_browser_extension_origin, is_allowed_local_host, is_allowed_local_origin,
-        with_control_server_boundary,
+        focus_handoff_matches_current_exe, is_allowed_browser_extension_origin,
+        is_allowed_local_host, is_allowed_local_origin, with_control_server_boundary,
     };
     use axum::{
         body::Body,
@@ -873,6 +920,7 @@ mod tests {
         Router,
     };
     use http::header::{HeaderValue, ACCESS_CONTROL_REQUEST_METHOD, HOST, ORIGIN};
+    use std::path::Path;
     use tower::ServiceExt;
 
     fn origin(v: &str) -> HeaderValue {
@@ -949,6 +997,43 @@ mod tests {
         for h in ["evil.com", "evil.com:11435", "attacker.example"] {
             assert!(!is_allowed_local_host(&origin(h)), "should reject {h}");
         }
+    }
+
+    #[test]
+    fn focus_handoff_accepts_same_executable_or_legacy_payload() {
+        let current = Path::new(r"C:\Users\louis\AppData\Local\screenpipe\screenpipe-app.exe");
+
+        assert!(focus_handoff_matches_current_exe(None, current));
+        assert!(focus_handoff_matches_current_exe(Some(""), current));
+        assert!(focus_handoff_matches_current_exe(
+            Some(r"C:\Users\louis\AppData\Local\screenpipe\screenpipe-app.exe"),
+            current
+        ));
+    }
+
+    #[test]
+    fn focus_handoff_rejects_other_install_channels() {
+        let current = Path::new(r"C:\Users\louis\AppData\Local\screenpipe\screenpipe-app.exe");
+
+        assert!(!focus_handoff_matches_current_exe(
+            Some(r"C:\Program Files\screenpipe enterprise\screenpipe-app.exe"),
+            current
+        ));
+        assert!(!focus_handoff_matches_current_exe(
+            Some(r"C:\Users\louis\AppData\Local\screenpipe beta\screenpipe-app.exe"),
+            current
+        ));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn focus_handoff_is_case_insensitive_on_windows() {
+        let current = Path::new(r"C:\Users\louis\AppData\Local\screenpipe\screenpipe-app.exe");
+
+        assert!(focus_handoff_matches_current_exe(
+            Some(r"c:\users\LOUIS\appdata\local\SCREENPIPE\screenpipe-app.exe"),
+            current
+        ));
     }
 
     fn guarded_router() -> Router {
