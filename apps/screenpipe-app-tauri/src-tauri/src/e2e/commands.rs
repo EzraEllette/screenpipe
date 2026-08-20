@@ -39,6 +39,20 @@ fn main_overlay_visible(app_handle: tauri::AppHandle) -> bool {
     }
 }
 
+/// E2E helper: read the real native browser-history gesture setting from the
+/// addressed platform webview. This proves the shipped webview configuration;
+/// WebDriver cannot synthesize an operating-system trackpad gesture.
+#[command]
+async fn history_swipe_navigation_enabled(
+    app_handle: tauri::AppHandle,
+    label: String,
+) -> Result<bool, String> {
+    let window = app_handle
+        .get_webview_window(&label)
+        .ok_or_else(|| format!("webview window not found: {label}"))?;
+    crate::window::history_swipe_navigation_enabled(&window).await
+}
+
 /// E2E helper: backdate the recorded setup completion.
 ///
 /// The first-run window keys off how long ago setup finished, and the two
@@ -711,6 +725,7 @@ pub(super) fn plugin() -> TauriPlugin<Wry> {
         // build.rs verifies this inventory matches the feature-only plugin ACL.
         .invoke_handler(tauri::generate_handler![
             main_overlay_visible,
+            history_swipe_navigation_enabled,
             mark_capture_intended,
             emit_disk_space_low,
             emit_disk_space_recovered,

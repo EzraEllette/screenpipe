@@ -1451,6 +1451,26 @@
       "notes": "Help section Discord invite link."
     },
     {
+      "spec": "history-swipe-navigation.spec.ts",
+      "platforms": [
+        "windows",
+        "macos"
+      ],
+      "layers": [
+        "real-ui-e2e",
+        "window-lifecycle",
+        "tauri-command"
+      ],
+      "features": [
+        "home-navigation",
+        "window-lifecycle"
+      ],
+      "criticality": "medium",
+      "confidence": "partial",
+      "ux": "real-user-flow",
+      "notes": "Reads back the real WKWebView/WebView2 history-swipe setting, then verifies Home to Settings browser history in both directions. Physical OS trackpad input remains manual."
+    },
+    {
       "spec": "home-window.spec.ts",
       "platforms": [
         "windows",
