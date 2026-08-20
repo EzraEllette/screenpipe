@@ -1640,6 +1640,7 @@ export function MessageContent({
   onDismissConnectionAction,
   onAnswerAgentAction,
   onAskUserReply,
+  onSendPrompt,
 }: {
   message: Message;
   isGenerating?: boolean;
@@ -1657,8 +1658,10 @@ export function MessageContent({
   onDismissConnectionAction?: (messageId: string, connectionId: string) => void;
   onAnswerAgentAction?: (block: Extract<ContentBlock, { type: "agent_action" }>, selectedOptionId?: string) => Promise<boolean> | boolean;
   onAskUserReply?: (reply: string, displayLabel: string) => void | Promise<void>;
+  onSendPrompt?: (prompt: string, displayLabel: string) => void | Promise<void>;
 }) {
   const isUser = message.role === "user";
+  const chartPromptSender = !isUser && !isGenerating ? onSendPrompt : undefined;
   const sourceCitations = isUser ? [] : sourceCitationsFromMessage(message);
   const sourceFooter = !deferSourceFooter && sourceCitations.length > 0 ? (
     <SourceCitationFooter citations={sourceCitations} onOpenFile={onOpenViewerPath} />
@@ -1839,7 +1842,7 @@ export function MessageContent({
                   if (language === "app-stats") {
                     return <AppStatsBlock content={content} />;
                   }
-                  return renderChartFence(language, content);
+                  return renderChartFence(language, content, chartPromptSender);
                 }}
               />
             );
@@ -1963,7 +1966,7 @@ export function MessageContent({
             if (language === "app-stats") {
               return <AppStatsBlock content={content} />;
             }
-            return renderChartFence(language, content);
+            return renderChartFence(language, content, chartPromptSender);
           }}
         />
       ) : null}

@@ -414,6 +414,9 @@ export function ChatMessageList({
                           onDismissConnectionAction={onDismissConnectionAction}
                           onAnswerAgentAction={onAnswerAgentAction}
                           onAskUserReply={onAskUserReply}
+                          onSendPrompt={(prompt, displayLabel) =>
+                            sendMessage(prompt, displayLabel)
+                          }
                         />
                       )}
                     </div>
