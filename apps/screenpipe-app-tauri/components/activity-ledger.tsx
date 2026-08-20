@@ -76,6 +76,8 @@ type MeetingResponse = {
 };
 type TimeRange = { start: Date; end: Date };
 
+const APP_ICON_RETRY_DELAYS_MS = [500, 1_000, 2_000, 4_000] as const;
+
 function historyDocumentFromNative(
   entries: unknown[],
 ): ActivityHistoryDocument | null {
@@ -563,8 +565,23 @@ function EvidenceArtifactIcon({ evidence }: { evidence: ActivityArtifact }) {
     stage: "exact" | "root" | "failed";
   }>({ domain: null, stage: "exact" });
   const [appServerBaseUrl, setAppServerBaseUrl] = useState<string | null>(null);
+  const [appIconAttempt, setAppIconAttempt] = useState<{
+    appName: string | null;
+    attempt: number;
+    waiting: boolean;
+    failed: boolean;
+  }>({ appName: null, attempt: 0, waiting: false, failed: false });
   const domain = siteDomain(evidence.browser_url);
   const iconStage = iconAttempt.domain === domain ? iconAttempt.stage : "exact";
+  const currentAppIconAttempt =
+    appIconAttempt.appName === evidence.app_name
+      ? appIconAttempt
+      : {
+          appName: evidence.app_name,
+          attempt: 0,
+          waiting: false,
+          failed: false,
+        };
   const rootDomain = domain ? getRootDomain(domain) : null;
   const faviconDomain = iconStage === "root" ? rootDomain : domain;
 
@@ -578,6 +595,25 @@ function EvidenceArtifactIcon({ evidence }: { evidence: ActivityArtifact }) {
       active = false;
     };
   }, [domain, evidence.app_name]);
+
+  useEffect(() => {
+    if (!currentAppIconAttempt.waiting) return;
+    const retryDelay = APP_ICON_RETRY_DELAYS_MS[currentAppIconAttempt.attempt];
+    if (retryDelay === undefined) return;
+    const timeout = window.setTimeout(() => {
+      setAppIconAttempt({
+        appName: evidence.app_name,
+        attempt: currentAppIconAttempt.attempt + 1,
+        waiting: false,
+        failed: false,
+      });
+    }, retryDelay);
+    return () => window.clearTimeout(timeout);
+  }, [
+    currentAppIconAttempt.attempt,
+    currentAppIconAttempt.waiting,
+    evidence.app_name,
+  ]);
 
   if (evidence.kind === "meeting") {
     return <Users className="h-4 w-4" aria-hidden="true" />;
@@ -598,13 +634,41 @@ function EvidenceArtifactIcon({ evidence }: { evidence: ActivityArtifact }) {
       />
     );
   }
-  if (evidence.app_name && appServerBaseUrl && iconStage !== "failed") {
+  if (
+    evidence.app_name &&
+    appServerBaseUrl &&
+    iconStage !== "failed" &&
+    !currentAppIconAttempt.waiting &&
+    !currentAppIconAttempt.failed
+  ) {
+    const retrySuffix =
+      currentAppIconAttempt.attempt > 0
+        ? `&retry=${currentAppIconAttempt.attempt}`
+        : "";
     return (
       <img
-        src={`${appServerBaseUrl}/app-icon?name=${encodeURIComponent(evidence.app_name)}`}
+        src={`${appServerBaseUrl}/app-icon?name=${encodeURIComponent(
+          evidence.app_name,
+        )}${retrySuffix}`}
         alt=""
         className="h-full w-full object-contain"
-        onError={() => setIconAttempt({ domain: null, stage: "failed" })}
+        onError={() => {
+          if (currentAppIconAttempt.attempt < APP_ICON_RETRY_DELAYS_MS.length) {
+            setAppIconAttempt({
+              appName: evidence.app_name,
+              attempt: currentAppIconAttempt.attempt,
+              waiting: true,
+              failed: false,
+            });
+            return;
+          }
+          setAppIconAttempt({
+            appName: evidence.app_name,
+            attempt: currentAppIconAttempt.attempt,
+            waiting: false,
+            failed: true,
+          });
+        }}
       />
     );
   }
