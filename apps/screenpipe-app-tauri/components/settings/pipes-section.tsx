@@ -88,6 +88,7 @@ import {
   shouldShowInMyPipes,
 } from "@/lib/utils/pipe-visibility";
 import { CloudPipesTab } from "./cloud-pipes-tab";
+import { useCloudAgentRunnerRolloutEnabled } from "@/lib/cloud-agent-rollout";
 import {
   writeTextFile,
   readTextFile,
@@ -1231,6 +1232,9 @@ export function PipesSection() {
   const [pipeTypeFilter, setPipeTypeFilter] = useState<"local" | "cloud">("local");
   // "cloud" (the org's cloud runner) is a managed-deployment-only surface.
   const { isManagedDeployment } = useManagedPolicy();
+  // The user-owned cloud-agent runner is an early rollout. Fail closed while
+  // PostHog is unresolved so the normal on-device runner remains the default.
+  const cloudAgentRunnerEnabled = useCloudAgentRunnerRolloutEnabled();
   // Favorites — per-machine preference persisted via /pipes/favorites.
   // `showOnly` toggles a filter that hides non-starred pipes.
   const pipeFavorites = usePipeFavorites();
@@ -3578,32 +3582,36 @@ export function PipesSection() {
 
                         <div className="p-4">
                           <div className="divide-y divide-border border border-border">
-                            <CloudAgentRunner
-                              pipeName={pipe.config.name}
-                              agent={pipe.config.agent}
-                              cloudAgent={pipe.config.cloud_agent}
-                              apiBase={apiBase}
-                              onSaved={(agent, cloudAgent) => {
-                                setPipes((previous) =>
-                                  previous.map((candidate) =>
-                                    candidate.config.name === pipe.config.name
-                                      ? {
-                                          ...candidate,
-                                          is_bundled_builtin: false,
-                                          config: {
-                                            ...candidate.config,
-                                            agent,
-                                            cloud_agent: cloudAgent,
-                                          },
-                                        }
-                                      : candidate,
-                                  ),
-                                );
-                              }}
-                            />
+                            {cloudAgentRunnerEnabled && (
+                              <CloudAgentRunner
+                                pipeName={pipe.config.name}
+                                agent={pipe.config.agent}
+                                cloudAgent={pipe.config.cloud_agent}
+                                apiBase={apiBase}
+                                onSaved={(agent, cloudAgent) => {
+                                  setPipes((previous) =>
+                                    previous.map((candidate) =>
+                                      candidate.config.name === pipe.config.name
+                                        ? {
+                                            ...candidate,
+                                            is_bundled_builtin: false,
+                                            config: {
+                                              ...candidate.config,
+                                              agent,
+                                              cloud_agent: cloudAgent,
+                                            },
+                                          }
+                                        : candidate,
+                                    ),
+                                  );
+                                }}
+                              />
+                            )}
 
-                            {/* Only the on-device runner consumes model presets. */}
-                            {pipe.config.agent !== "cloud-agent" && (
+                            {/* Keep the normal on-device controls available when
+                                the cloud-agent rollout is disabled. */}
+                            {(!cloudAgentRunnerEnabled ||
+                              pipe.config.agent !== "cloud-agent") && (
                               <PipePresetSelector
                                 pipe={pipe}
                                 setPipes={setPipes}
