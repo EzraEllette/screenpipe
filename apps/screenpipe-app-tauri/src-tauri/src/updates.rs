@@ -537,7 +537,7 @@ pub async fn trigger_update_now(app: tauri::AppHandle) {
     let manager = app.state::<Arc<UpdatesManager>>().inner().clone();
     if manager.has_update_installed().await {
         // Immediate feedback in the menu itself: the install + relaunch can
-        // take a few seconds even on the rename fast path.
+        // take several seconds while the verified installer extracts the update.
         manager.set_menu_installing();
         match restart_for_update(app.clone(), None).await {
             Ok(outcome) if outcome == "proceed" => {
@@ -1152,8 +1152,8 @@ impl UpdatesManager {
                     // the running bundle into a temp dir, which breaks TCC
                     // attribution for the live process (ScreenCaptureKit -3801)
                     // until relaunch. Download + stage only; the install runs
-                    // on the exit path (see staged_update.rs). stage() now also
-                    // pre-extracts the ~160 MB archive (seconds of gunzip), so
+                    // on the exit path (see staged_update.rs). Persisting the
+                    // ~160 MB archive includes blocking file I/O and fsync, so
                     // it runs on the blocking pool, not an async worker.
                     #[cfg(target_os = "macos")]
                     let result = match update.download(on_chunk, || {}).await {

@@ -11,10 +11,10 @@
  * drives two REAL release-profile builds through the full production path:
  *
  *   real updater check (signed manifest, local server)
- *     → real download → signature verify → stage + PRE-EXTRACT
+ *     → real download → signature verify → stage
  *     → tray click (exact production handler, via the e2e driver route)
  *     → restart gate (boot phase = idle: the signed-out MacBook Air repro)
- *     → teardown → rename fast-path install → relaunch
+ *     → teardown → verified updater install → relaunch
  *     → new version boots, update-attempt marker classified as applied
  *
  * Scenarios asserted, in order:
@@ -24,8 +24,8 @@
  *      silently does nothing").
  *   2. FEEDBACK      — the menu item visibly acknowledges the click
  *      ("Installing update…") before the process exits.
- *   3. FAST INSTALL  — the exit-path install used the pre-extracted rename
- *      path (log-asserted) and the old→new process blackout stays bounded.
+ *   3. TCC-SAFE INSTALL — the exit-path install does not park the authorized
+ *      bundle at `staged-update/replaced/previous.app`.
  *   4. POST-UPDATE CAPTURE — the replacement starts the real engine and
  *      produces a ScreenCaptureKit frame instead of inheriting a stale
  *      permission-denied state from the process it replaced.
@@ -352,19 +352,16 @@ async function main(): Promise<void> {
     });
     check('engine idle (signed-out install repro)', idleState.boot_phase === 'idle');
 
-    // Real check → download → verify → stage → PRE-EXTRACT.
-    const staged = await waitFor('update staged + pre-extracted', 300_000, async () => {
+    // Real check → download → verify → stage.
+    const staged = await waitFor('update staged', 300_000, async () => {
       const s = await fetchState();
-      return s && s.update_installed && s.staged_pre_extracted ? s : null;
+      return s && s.update_installed && s.staged_version === NEW_VERSION ? s : null;
     });
     check('staged version is the served update', staged.staged_version === NEW_VERSION, String(staged.staged_version));
-    check('archive was pre-extracted at stage time', staged.staged_pre_extracted);
+    check('custom pre-extraction is disabled', !staged.staged_pre_extracted);
     check('menu offers restart', staged.menu_text === 'Restart to update', staged.menu_text);
     check('menu item enabled', staged.menu_enabled);
     check('still idle while staged', staged.boot_phase === 'idle', staged.boot_phase);
-
-    const logBefore = await todayLog();
-    check('log: pre-extraction recorded', logBefore.includes('pre-extracted to'));
 
     // THE CLICK — exact production tray handler.
     log('clicking "Restart to update" (production path via driver)…');
@@ -404,29 +401,18 @@ async function main(): Promise<void> {
     const blackoutSecs = (upAt - exitAt) / 1000;
     const clickToUpSecs = (upAt - clickAt) / 1000;
     check('relaunched as updated version', relaunched.app_version === NEW_VERSION, relaunched.app_version);
-    // The pre-fix exit path did a 400 MB extract in the dying process; the
-    // rename fast path plus boot must comfortably beat 30s wall-clock even on
-    // slow hardware (measured ~3–6s on M4 Max, release-local profile).
-    check('blackout bounded (< 30s exit→driver-up)', blackoutSecs < 30, `${blackoutSecs.toFixed(1)}s`);
+    check('blackout bounded (< 60s exit→driver-up)', blackoutSecs < 60, `${blackoutSecs.toFixed(1)}s`);
     log(`click→up total ${clickToUpSecs.toFixed(1)}s, exit→up blackout ${blackoutSecs.toFixed(1)}s`);
 
     // The swap really happened on disk, not just in process state.
     check('installed bundle Info.plist is new version', installedBundleVersion() === NEW_VERSION, installedBundleVersion());
 
-    // Scenario 3 log assertions: fast path used; marker written + consumed.
-    const logAfter = await waitFor('log contains fast-path install', 30_000, async () => {
+    // Scenario 3 log assertions: verified installer used; marker written + consumed.
+    const logAfter = await waitFor('log contains verified install', 30_000, async () => {
       const l = await todayLog();
-      return l.includes('installed via pre-extracted fast path') ? l : null;
+      return /staged update v[^\n]+ installed in /.test(l) ? l : null;
     });
-    check('log: install used the rename fast path', true);
-    // Rust Duration debug formatting: "123.456µs" | "12.345ms" | "1.234s".
-    const fastMs = logAfter.match(/installed via pre-extracted fast path in ([\d.]+)(µs|ms|s)/);
-    check('fast-path duration parseable from log', fastMs !== null);
-    if (fastMs) {
-      const unit = fastMs[2];
-      const ms = parseFloat(fastMs[1]) * (unit === 's' ? 1000 : unit === 'ms' ? 1 : 0.001);
-      check('fast-path swap under 2s', ms < 2000, `${ms.toFixed(1)}ms`);
-    }
+    check('log: custom rename fast path was not used', !logAfter.includes('pre-extracted fast path'));
     check('log: idle gate proceeded (not deferred)', /engine idle \(never started\)[^\n]*proceeding/.test(logAfter));
     check(
       'log: update attempt recorded',
