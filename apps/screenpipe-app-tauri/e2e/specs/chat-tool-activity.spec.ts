@@ -341,7 +341,7 @@ describe("Chat tool activity progressive disclosure", function () {
     expect(existsSync(filepath)).toBe(true);
   });
 
-  it("renders every MCP startup state outside the command rail", async () => {
+  it("keeps MCP startup health out of the chat transcript", async () => {
     const startup = (
       server: string,
       state: "connecting" | "connected" | "auth" | "error",
@@ -362,65 +362,33 @@ describe("Chat tool activity progressive disclosure", function () {
       },
     });
 
-    const captureState = async (
-      name: string,
-      blocks: unknown[],
-      expectedText: string,
-      expand = false,
-    ) => {
-      await seedConversation(randomUUID(), "Check my MCP connections.", {
-        content: "",
-        contentBlocks: blocks,
-      });
-      const card = await $('[data-testid="mcp-startup-status"]');
-      await card.waitForDisplayed({ timeout: t(5_000) });
-      expect(await card.getText()).toContain(expectedText);
-      expect((await $$('[data-testid="tool-activity-summary"]')).length).toBe(0);
-      if (expand) {
-        const toggle = await card.$('[data-testid="mcp-startup-toggle"]');
-        if ((await toggle.getAttribute("aria-expanded")) !== "true") await toggle.click();
-      }
-      await browser.execute(() => {
-        if (document.activeElement instanceof HTMLElement) {
-          document.activeElement.blur();
-        }
-      });
-      await browser.pause(250);
-      const filepath = await saveScreenshot(name);
-      expect(existsSync(filepath)).toBe(true);
-    };
-
-    await captureState(
-      "chat-mcp-startup-connecting",
-      [startup("linear", "connecting")],
-      "1 connecting",
-    );
-    await captureState(
-      "chat-mcp-startup-connected",
-      [startup("screenpipe", "connected")],
-      "1 connected",
-      true,
-    );
-    await captureState(
-      "chat-mcp-startup-auth-required",
-      [startup("notion", "auth")],
-      "Sign in required",
-    );
-    await captureState(
-      "chat-mcp-startup-error",
-      [startup("n8n", "error")],
-      "Needs attention",
-    );
-    await captureState(
-      "chat-mcp-startup-mixed",
-      [
+    await seedConversation(randomUUID(), "Configure my fallback order.", {
+      content: "I configured the fallback order.",
+      contentBlocks: [
         startup("screenpipe", "connected"),
         startup("linear", "connecting"),
         startup("notion", "auth"),
         startup("n8n", "error"),
+        { type: "text", text: "I configured the fallback order." },
       ],
-      "2 need attention · 1 connecting · 1 connected",
+    });
+
+    await browser.waitUntil(
+      async () => (await visibleBodyText()).includes("I configured the fallback order."),
+      { timeout: t(5_000), timeoutMsg: "assistant answer never appeared" },
     );
+
+    expect((await $$('[data-testid="mcp-startup-status"]')).length).toBe(0);
+    expect((await $$('[data-testid="tool-activity-summary"]')).length).toBe(0);
+    const body = await visibleBodyText();
+    expect(body).toContain("I configured the fallback order.");
+    expect(body).not.toContain("MCP connections");
+    expect(body).not.toContain("Sign in required");
+    expect(body).not.toContain("Needs attention");
+    expect(body).not.toContain("No workspace here");
+
+    const filepath = await saveScreenshot("chat-mcp-startup-hidden");
+    expect(existsSync(filepath)).toBe(true);
   });
 
 });
