@@ -1,6 +1,6 @@
 ---
 name: screenpipe-api
-description: Query the user's local and synced-device Screenpipe data via the REST API at localhost:3030. Use for screen activity, meetings, apps, productivity, other-device or cross-device history, media export, retranscription, or connected services.
+description: Query the user's local and synced-device Screenpipe data via the REST API at localhost:3030, including interpreted Activities, recordings, audio, UI, meetings, and connected services. Use for work history, screen activity, productivity, other-device or cross-device history, media export, or retranscription.
 ---
 
 # Screenpipe API
@@ -31,6 +31,35 @@ For the list endpoints (`/search`, `/elements`, `/frames/{id}/elements`) you can
 
 ---
 
+## Activities — first check for interpreted work
+
+Activities are Screenpipe's validated, evidence-backed interpretation of what
+the user worked on. Each result is a coherent work or meeting interval with a
+title, summary, exact time range, and cited screen/audio/meeting evidence. Query
+them first for work-history questions: what the user did or accomplished,
+period recaps, where they left off, and recurring workflows worth automating.
+
+```bash
+curl -H "Authorization: Bearer $SCREENPIPE_LOCAL_API_KEY" \
+  -H "X-Screenpipe-Client: api" \
+  -o /tmp/sp-activities.json \
+  "http://localhost:3030/search?content_type=activity&start_time=today&end_time=now&limit=20&fields=type,content.id,content.kind,content.start_at,content.end_at,content.title,content.summary,content.evidence"
+head -c 5000 /tmp/sp-activities.json
+```
+
+Use `q=` for a named project or topic; omit it for a broad recap. Ordinary
+`content_type=all` searches include Activities, but request
+`content_type=activity` when interpreted work is the best first source so raw
+frame and audio rows do not crowd it out.
+
+Activities are an interpreted index, not verbatim proof. Follow their evidence
+anchors with raw `/search` or `/frames/{id}` for exact wording, fine-grained
+actions, or visual confirmation. An empty Activity result does not prove that
+no work happened: Activities may be disabled or not generated for that range.
+Fall back to `/activity-summary`, inspect `data_status`, then use raw `/search`.
+
+---
+
 ## 1. Search — `GET /search`
 
 ```bash
@@ -44,7 +73,7 @@ curl -H "Authorization: Bearer $SCREENPIPE_LOCAL_API_KEY" \
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `q` | string | No | Keywords. Do NOT use for audio searches — transcriptions are noisy, q filters too aggressively. |
-| `content_type` | string | No | `all` (default), `accessibility`, `audio`, `input`, `ocr`, `memory`, `parsed`. Use `parsed` for compact app-specific messages, emails, tasks, documents, and code review. Parsed capture is experimental, may be empty when disabled/unsupported, and is not included in `all`. Screen text is primarily captured via the OS accessibility tree (`accessibility`); OCR is a fallback for apps without accessibility support. |
+| `content_type` | string | No | `all` (default), `activity`, `accessibility`, `audio`, `input`, `ocr`, `memory`, `parsed`. Use `activity` for validated interpreted work intervals and `parsed` for compact app-specific messages, emails, tasks, documents, and code review. `all` includes Activities alongside raw screen/audio/input results; parsed capture and memories remain explicit. Screen text is primarily captured via the OS accessibility tree (`accessibility`); OCR is a fallback for apps without accessibility support. |
 | `limit` | integer | No | Max 1-20. Default: 10 |
 | `offset` | integer | No | Pagination. Default: 0 |
 | `start_time` | ISO 8601, relative, or local calendar | **Yes** | Accepts `2024-01-15T10:00:00Z`, `16h ago`, `today`, `yesterday`, or `YYYY-MM-DD` |
@@ -67,14 +96,15 @@ Don't jump to heavy `/search` calls. Escalate:
 
 | Step | Endpoint | When |
 |------|----------|------|
-| 0 | `GET /memories?q=...` | **Always query first/in parallel** — highest signal, lowest cost |
-| 1 | `GET /activity-summary?start_time=...&end_time=...` | Broad questions ("what was I doing?", "which apps?") |
+| 0 | `GET /memories?q=...` | Query first/in parallel for preferences, decisions, and durable project context |
+| 0 | `GET /search?content_type=activity&...` | Query first for interpreted work history, recaps, resume state, and automation candidates |
+| 1 | `GET /activity-summary?start_time=...&end_time=...` | Time math, app/window usage, or fallback when Activities are empty |
 | 2 | `GET /search?...` | Need specific content |
 | 3 | `GET /elements?...` or `GET /frames/{id}/context` | UI structure, buttons, links |
 | 4 | `GET /frames/{frame_id}` (PNG) | Visual context needed |
 
 Decision tree:
-- "What was I doing?" → Step 1 only
+- "What was I doing?" → Activities first; use Step 1 if Activities are empty or exact usage minutes are needed
 - "Summarize my meeting" → Step 2 with `content_type=audio`, NO q param. Add `content_type=all` for screen context.
 - "How long on X?" → Step 1 (`/activity-summary` → `total_active_minutes` for the whole range, plus per-app/window `minutes`)
 - "Which apps today?" → Step 1 (do NOT use frame counts or raw SQLite)
@@ -131,6 +161,7 @@ curl -H "Authorization: Bearer $SCREENPIPE_LOCAL_API_KEY" \
 ```json
 {
   "data": [
+    {"type": "Activity", "content": {"id": "...", "kind": "work", "start_at": "...", "end_at": "...", "title": "...", "summary": "...", "evidence": []}},
     {"type": "OCR", "content": {"frame_id": 12345, "text": "...", "timestamp": "...", "app_name": "Chrome", "window_name": "..."}},
     {"type": "Audio", "content": {"chunk_id": 678, "transcription": "...", "timestamp": "...", "speaker": {"name": "John"}}},
     {"type": "UI", "content": {"id": 999, "text": "Clicked 'Submit'", "timestamp": "...", "app_name": "Safari"}},
@@ -182,7 +213,9 @@ Returns a rich overview with:
 - **key_texts**: one representative text snippet per window context (user input fields prioritized over static page text)
 - **audio_summary.top_transcriptions**: actual transcription text with speaker and timestamp (not just counts)
 
-This is usually enough to answer "what was I doing?" without further searches. Only drill into `/search` if you need verbatim quotes or specific content.
+Use this endpoint for exact usage math or when Activity search has no coverage.
+For coherent work-history answers, query `content_type=activity` first. Drill into
+raw `/search` when you need verbatim quotes or specific captured content.
 
 > **Building a pipe/automation?** Same rule: call this endpoint for time math. The numbers are computed server-side from frame timestamps — never recompute durations from raw frames, and never ask an LLM to sum minutes (it will drift). Let the model label activities; let this endpoint own the durations.
 

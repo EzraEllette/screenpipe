@@ -10,6 +10,7 @@ use crate::pi::{self, AcpAgentConfig, PiBackend, PiProviderConfig, PiState};
 use crate::recording::{local_api_context_from_app, RecordingState};
 use crate::store::{self, AIProviderType, SettingsStore};
 use chrono::{DateTime, Local, Utc};
+use screenpipe_db::ActivityHistoryRecord;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -417,7 +418,53 @@ fn read_all(app: &AppHandle) -> Result<PersistedActivityHistory, String> {
         .unwrap_or_default())
 }
 
-fn write_all(app: &AppHandle, history: &PersistedActivityHistory) -> Result<(), String> {
+fn activity_history_producer() -> &'static str {
+    STORE_KEY
+        .strip_prefix("activityHistory:")
+        .expect("Activity History store key must include its producer")
+}
+
+async fn sync_search_projection(
+    app: &AppHandle,
+    history: &PersistedActivityHistory,
+) -> Result<(), String> {
+    let updated_at = Utc::now();
+    let entries = history
+        .entries
+        .iter()
+        .map(|entry| {
+            Ok(ActivityHistoryRecord {
+                id: entry.id.clone(),
+                producer: activity_history_producer().to_string(),
+                kind: entry.kind.clone(),
+                meeting_id: entry.meeting_id,
+                start_at: parse_time(&entry.start_at)
+                    .ok_or_else(|| format!("Invalid stored activity start: {}", entry.id))?,
+                end_at: parse_time(&entry.end_at)
+                    .ok_or_else(|| format!("Invalid stored activity end: {}", entry.id))?,
+                title: entry.title.clone(),
+                summary: entry.summary.clone(),
+                evidence_json: serde_json::to_string(&entry.evidence)
+                    .map_err(|error| format!("Could not serialize activity evidence: {error}"))?,
+                updated_at,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+
+    let db = {
+        let recording = app.state::<RecordingState>();
+        let server = recording.server.lock().await;
+        server
+            .as_ref()
+            .map(|server| server.db.clone())
+            .ok_or("Activity search database is not available")?
+    };
+    db.replace_activity_history(activity_history_producer(), &entries)
+        .await
+        .map_err(|error| format!("Could not update Activity search: {error}"))
+}
+
+async fn write_all(app: &AppHandle, history: &PersistedActivityHistory) -> Result<(), String> {
     let store = store::get_store(app, None).map_err(|error| error.to_string())?;
     store.set(
         STORE_KEY,
@@ -430,7 +477,9 @@ fn write_all(app: &AppHandle, history: &PersistedActivityHistory) -> Result<(), 
     );
     store.save().map_err(|error| error.to_string())?;
     store::reencrypt_store_file(app);
-    Ok(())
+    sync_search_projection(app, history)
+        .await
+        .map_err(|error| format!("Activity history was saved but its search index failed: {error}"))
 }
 
 fn history_in_range(
@@ -1769,7 +1818,7 @@ async fn generate_inner(
         });
     }
     stored.coverage = merge_coverage(stored.coverage);
-    write_all(app, &stored)?;
+    write_all(app, &stored).await?;
     crate::activity_opportunities::schedule_analysis(app.clone(), stored.clone());
     if source == "manual" {
         let settings = SettingsStore::get(app)?.ok_or("Settings are not available")?;
@@ -1957,6 +2006,16 @@ fn set_next_run(app: &AppHandle, at: DateTime<Utc>) -> Result<(), String> {
 pub fn start(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+        match read_all(&app) {
+            Ok(history) => {
+                if let Err(error) = sync_search_projection(&app, &history).await {
+                    warn!(%error, "activity history: startup search sync failed");
+                }
+            }
+            Err(error) => {
+                warn!(%error, "activity history: startup search sync could not read history")
+            }
+        }
         let state = app.state::<ActivityHistoryState>();
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
