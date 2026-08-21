@@ -6,6 +6,26 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Older desktop builds persisted a single selected monitor as a string, while
+/// current builds persist an array. Accept both shapes so an upgrade preserves
+/// the user's selection instead of rejecting the entire settings store.
+fn deserialize_monitor_ids<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StringOrVec {
+        Vec(Vec<String>),
+        String(String),
+    }
+
+    Ok(match StringOrVec::deserialize(deserializer)? {
+        StringOrVec::Vec(ids) => ids,
+        StringOrVec::String(id) => vec![id],
+    })
+}
+
 /// Custom vocabulary entry for transcription biasing and word replacement.
 #[derive(Clone, Debug, Default, Serialize, PartialEq)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
@@ -292,7 +312,7 @@ pub struct RecordingSettings {
     pub disable_timeline: bool,
 
     /// Specific monitor IDs to capture.
-    #[serde(rename = "monitorIds")]
+    #[serde(rename = "monitorIds", deserialize_with = "deserialize_monitor_ids")]
     pub monitor_ids: Vec<String>,
 
     /// Capture from all connected monitors.
@@ -1017,6 +1037,27 @@ mod tests {
         let json = r#"{"unknownFutureField": true, "port": 4040}"#;
         let settings: RecordingSettings = serde_json::from_str(json).unwrap();
         assert_eq!(settings.port, 4040);
+    }
+
+    #[test]
+    fn legacy_scalar_monitor_id_deserializes_as_single_selection() {
+        let mut json = serde_json::to_value(RecordingSettings::default()).unwrap();
+        json["monitorIds"] = serde_json::json!(r"\\.\DISPLAY1_3840x2160_0,0");
+
+        let settings: RecordingSettings = serde_json::from_value(json).unwrap();
+
+        assert_eq!(
+            settings.monitor_ids,
+            vec![r"\\.\DISPLAY1_3840x2160_0,0".to_string()]
+        );
+    }
+
+    #[test]
+    fn malformed_monitor_id_shape_still_fails_deserialization() {
+        let mut json = serde_json::to_value(RecordingSettings::default()).unwrap();
+        json["monitorIds"] = serde_json::json!({"id": "DISPLAY1"});
+
+        assert!(serde_json::from_value::<RecordingSettings>(json).is_err());
     }
 
     #[test]
