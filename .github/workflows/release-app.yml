@@ -1289,6 +1289,7 @@ jobs:
           # 10.13 to the Metal compiler. This breaks both MSL 3.0+ and std::filesystem.
           # Fix: wrap cc/c++/xcrun to replace all -mmacosx-version-min flags with 14.0.
           if [[ "${{ matrix.target }}" == "aarch64-apple-darwin" ]]; then
+            xcrun metal --version
             WRAPPER_DIR="$(pwd)/.compiler-wrapper"
             mkdir -p "$WRAPPER_DIR"
             for tool in cc c++ xcrun; do
@@ -1318,7 +1319,11 @@ jobs:
             fi
 
             cd apps/screenpipe-app-tauri
-            if bunx tauri build -v $TAURI_ARGS 2>&1 | tee /tmp/tauri-build-$attempt.log; then
+            BUNDLE_ARGS=()
+            if [[ "${{ runner.environment }}" == "self-hosted" ]]; then
+              BUNDLE_ARGS=(--bundles app)
+            fi
+            if bunx tauri build -v $TAURI_ARGS "${BUNDLE_ARGS[@]}" 2>&1 | tee /tmp/tauri-build-$attempt.log; then
               echo "✅ Build succeeded on attempt $attempt"
               cd ../..
               break
@@ -1370,6 +1375,23 @@ jobs:
             codesign --verify --deep --strict --verbose=2 "$APP"
           done
           echo "all .app bundles pass codesign --verify --deep --strict"
+
+      - name: Create headless DMG (macOS)
+        if: matrix.os_type == 'macos' && runner.environment == 'self-hosted'
+        shell: bash
+        run: |
+          set -euo pipefail
+          TARGET="${{ matrix.target }}"
+          BUNDLE_DIR="apps/screenpipe-app-tauri/src-tauri/target/${TARGET}/release/bundle"
+          VERSION=$(sed -n 's/^version = "\([^"]*\)"/\1/p' apps/screenpipe-app-tauri/src-tauri/Cargo.toml | head -1)
+          case "$TARGET" in
+            aarch64-apple-darwin) PACKAGE_ARCH=arm64 ;;
+            x86_64-apple-darwin) PACKAGE_ARCH=x64 ;;
+            *) echo "unsupported macOS target: $TARGET" >&2; exit 1 ;;
+          esac
+          APP_PATH="${BUNDLE_DIR}/macos/screenpipe.app"
+          DMG_PATH="${BUNDLE_DIR}/dmg/screenpipe_${VERSION}_${PACKAGE_ARCH}.dmg"
+          .github/scripts/create-headless-dmg.sh "$APP_PATH" "$DMG_PATH" "screenpipe"
 
       - name: Clean up signing cert from login keychain (macOS)
         if: matrix.os_type == 'macos' && always()
