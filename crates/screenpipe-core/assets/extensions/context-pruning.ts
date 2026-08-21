@@ -71,6 +71,16 @@ const CHARS_PER_TOKEN = 4;
 const HISTORY_OPEN = "<conversation_history>";
 const HISTORY_CLOSE = "</conversation_history>";
 
+function safeHead(text: string, end: number): string {
+  const last = text.charCodeAt(end - 1);
+  return text.slice(0, last >= 0xD800 && last <= 0xDBFF ? end - 1 : end);
+}
+
+function safeTail(text: string, start: number): string {
+  const first = text.charCodeAt(start);
+  return text.slice(first >= 0xDC00 && first <= 0xDFFF ? start + 1 : start);
+}
+
 /** Resolve the model's context window (tokens) from the extension context. */
 export function resolveContextWindowTokens(ctx: any): number {
   const fromModel = ctx?.model?.contextWindow;
@@ -112,7 +122,7 @@ export function clampMessageText(text: string, maxChars: number): string {
     const bodyBudget = maxChars - before.length - after.length - marker.length;
     if (bodyBudget > 0) {
       // Keep the TAIL of the history body (the most recent turns).
-      return before + marker + body.slice(body.length - bodyBudget) + after;
+      return before + marker + safeTail(body, body.length - bodyBudget) + after;
     }
     // The wrapper + real message already fills the budget: drop the whole
     // history body but keep the user's actual message intact.
@@ -122,7 +132,7 @@ export function clampMessageText(text: string, maxChars: number): string {
   // Generic oversized payload: keep head + tail so both ends survive.
   const marker = "\n…[trimmed]\n";
   const half = Math.max(0, Math.floor((maxChars - marker.length) / 2));
-  return text.slice(0, half) + marker + text.slice(text.length - half);
+  return safeHead(text, half) + marker + safeTail(text, text.length - half);
 }
 
 /**
