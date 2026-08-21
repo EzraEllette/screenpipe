@@ -407,6 +407,170 @@ static PENDING_TRAY_MENU: Lazy<Mutex<Option<(MenuState, TrayMenuData)>>> =
 #[cfg(target_os = "macos")]
 static TRAY_MENU_DIRTY: AtomicBool = AtomicBool::new(false);
 
+/// Keep the native status-item menu above Screenpipe's fullscreen-capable
+/// panels. Window mode deliberately lives at level 1001 so it works over a
+/// fullscreen Space; AppKit's popup-menu level is only 101, which otherwise
+/// leaves the tray menu behind the overlay and its attached Timeline child.
+///
+/// This raises only a menu whose delegate is an `NSStatusItem`. The overlay is
+/// never lowered, and ordinary in-app/context menus retain their native level.
+#[cfg(target_os = "macos")]
+mod tray_menu_level {
+    use core_foundation_sys::runloop::{
+        kCFRunLoopBeforeWaiting, kCFRunLoopCommonModes, CFRunLoopActivity, CFRunLoopAddObserver,
+        CFRunLoopGetMain, CFRunLoopObserverContext, CFRunLoopObserverCreate, CFRunLoopObserverRef,
+    };
+    use objc::declare::ClassDecl;
+    use objc::runtime::{Class, Object, Sel};
+    use objc::{class, msg_send, sel, sel_impl};
+    use std::os::raw::c_void;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Once;
+    use tauri_nspanel::cocoa::base::{id, nil};
+    use tracing::{debug, error};
+
+    const OVERLAY_LEVEL: i64 = 1001;
+    const TRAY_MENU_LEVEL: i64 = OVERLAY_LEVEL + 1;
+    const NS_POPUP_MENU_LEVEL: i64 = 101;
+
+    static TRAY_MENU_TRACKING: AtomicBool = AtomicBool::new(false);
+
+    unsafe fn notification_belongs_to_status_item(notification: id) -> bool {
+        if notification == nil {
+            return false;
+        }
+        let menu: id = msg_send![notification, object];
+        if menu == nil {
+            return false;
+        }
+        let delegate: id = msg_send![menu, delegate];
+        delegate != nil && msg_send![delegate, isKindOfClass: class!(NSStatusItem)]
+    }
+
+    extern "C" fn menu_did_begin(_this: &Object, _selector: Sel, notification: id) {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+            if notification_belongs_to_status_item(notification) {
+                TRAY_MENU_TRACKING.store(true, Ordering::Release);
+                // Usually the menu window already exists by this notification.
+                // The common-mode observer below catches the later case.
+                raise_visible_popup_menu_windows();
+            }
+        }));
+    }
+
+    extern "C" fn menu_did_end(_this: &Object, _selector: Sel, notification: id) {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+            if notification_belongs_to_status_item(notification) {
+                TRAY_MENU_TRACKING.store(false, Ordering::Release);
+            }
+        }));
+    }
+
+    unsafe fn raise_visible_popup_menu_windows() {
+        let app: id = msg_send![class!(NSApplication), sharedApplication];
+        let windows: id = msg_send![app, orderedWindows];
+        if windows == nil {
+            return;
+        }
+        let count: usize = msg_send![windows, count];
+        for index in 0..count {
+            let window: id = msg_send![windows, objectAtIndex: index];
+            let level: i64 = msg_send![window, level];
+            let visible: bool = msg_send![window, isVisible];
+            if visible && level == NS_POPUP_MENU_LEVEL {
+                let _: () = msg_send![window, setLevel: TRAY_MENU_LEVEL];
+                debug!("raised tray menu above Screenpipe overlay");
+            }
+        }
+    }
+
+    extern "C" fn on_menu_tracking_idle(
+        _observer: CFRunLoopObserverRef,
+        _activity: CFRunLoopActivity,
+        _info: *mut c_void,
+    ) {
+        if !TRAY_MENU_TRACKING.load(Ordering::Acquire) {
+            return;
+        }
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+            raise_visible_popup_menu_windows();
+        }));
+    }
+
+    pub fn install() {
+        static INSTALLED: Once = Once::new();
+        INSTALLED.call_once(|| unsafe {
+            let superclass = Class::get("NSObject").expect("NSObject must exist");
+            let observer_class = if let Some(existing) = Class::get("ScreenpipeTrayMenuObserver") {
+                existing
+            } else {
+                let Some(mut declaration) =
+                    ClassDecl::new("ScreenpipeTrayMenuObserver", superclass)
+                else {
+                    error!("failed to declare tray-menu observer");
+                    return;
+                };
+                declaration.add_method(
+                    sel!(trayMenuDidBegin:),
+                    menu_did_begin as extern "C" fn(&Object, Sel, id),
+                );
+                declaration.add_method(
+                    sel!(trayMenuDidEnd:),
+                    menu_did_end as extern "C" fn(&Object, Sel, id),
+                );
+                declaration.register()
+            };
+
+            let notification_observer: id = msg_send![observer_class, new];
+            let center: id = msg_send![class!(NSNotificationCenter), defaultCenter];
+            let begin_name: id = msg_send![
+                class!(NSString),
+                stringWithUTF8String: b"NSMenuDidBeginTrackingNotification\0".as_ptr()
+            ];
+            let end_name: id = msg_send![
+                class!(NSString),
+                stringWithUTF8String: b"NSMenuDidEndTrackingNotification\0".as_ptr()
+            ];
+            let _: () = msg_send![
+                center,
+                addObserver: notification_observer
+                selector: sel!(trayMenuDidBegin:)
+                name: begin_name
+                object: nil
+            ];
+            let _: () = msg_send![
+                center,
+                addObserver: notification_observer
+                selector: sel!(trayMenuDidEnd:)
+                name: end_name
+                object: nil
+            ];
+
+            let mut context = CFRunLoopObserverContext {
+                version: 0,
+                info: std::ptr::null_mut(),
+                retain: None,
+                release: None,
+                copyDescription: None,
+            };
+            let run_loop_observer = CFRunLoopObserverCreate(
+                std::ptr::null(),
+                kCFRunLoopBeforeWaiting,
+                1,
+                0,
+                on_menu_tracking_idle,
+                &mut context,
+            );
+            if run_loop_observer.is_null() {
+                error!("failed to create tray-menu level observer");
+                return;
+            }
+            CFRunLoopAddObserver(CFRunLoopGetMain(), run_loop_observer, kCFRunLoopCommonModes);
+            // Both observers intentionally live for the app lifetime.
+        });
+    }
+}
+
 fn install_tray_menu(tray: &TrayIcon, menu: tauri::menu::Menu<Wry>) -> Result<()> {
     // `ACTIVE_TRAY_MENU` is our record of what Windows/macOS actually owns.
     // Only publish the replacement after the native tray accepted it. If
@@ -686,6 +850,9 @@ pub fn setup_tray(app: &AppHandle, update_item: Option<&tauri::menu::MenuItem<Wr
         // open (flash-free, crash-free). Once-guarded, so recreate_tray is fine.
         #[cfg(target_os = "macos")]
         menu_refresh_observer::install(app);
+
+        #[cfg(target_os = "macos")]
+        tray_menu_level::install();
 
         #[cfg(target_os = "macos")]
         crate::tray_monitor_preview::install(app);

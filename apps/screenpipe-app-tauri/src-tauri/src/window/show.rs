@@ -918,12 +918,26 @@ impl ShowRewindWindow {
 
                     // Auto-hide on focus loss (debounced to survive workspace swipe animations)
                     let app_clone = app.clone();
+                    let window_clone = window.clone();
                     let focus_cancel =
                         std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
                     window.on_window_event(move |event| {
                         match event {
                             tauri::WindowEvent::Focused(is_focused) => {
                                 if !is_focused {
+                                    #[cfg(target_os = "macos")]
+                                    if appkit_focus_is_descendant_of(&window_clone) {
+                                        info!(
+                                            "Window-mode focus moved to an attached child; keeping overlay visible"
+                                        );
+                                        focus_cancel
+                                            .store(true, std::sync::atomic::Ordering::SeqCst);
+                                        MAIN_PANEL_SHOWN.store(
+                                            true,
+                                            std::sync::atomic::Ordering::SeqCst,
+                                        );
+                                        return;
+                                    }
                                     // Synchronous alpha=0 — no order_out (which
                                     // causes focus-fight loops when restored).
                                     #[cfg(target_os = "macos")]
@@ -939,10 +953,56 @@ impl ShowRewindWindow {
                                     focus_cancel.store(false, std::sync::atomic::Ordering::SeqCst);
                                     let cancel = focus_cancel.clone();
                                     let app = app_clone.clone();
+                                    #[cfg(target_os = "macos")]
+                                    let window = window_clone.clone();
                                     std::thread::spawn(move || {
                                         std::thread::sleep(std::time::Duration::from_millis(300));
                                         if cancel.load(std::sync::atomic::Ordering::SeqCst) {
                                             return;
+                                        }
+                                        // AppKit may deliver the parent's blur before
+                                        // keyWindow points at the attached Timeline. Re-check
+                                        // after the debounce and treat the two native windows
+                                        // as one logical overlay.
+                                        #[cfg(target_os = "macos")]
+                                        {
+                                            let (sender, receiver) =
+                                                std::sync::mpsc::sync_channel(1);
+                                            let app2 = app.clone();
+                                            let window2 = window.clone();
+                                            if app
+                                                .run_on_main_thread(move || {
+                                                    let keep_visible =
+                                                        appkit_focus_is_descendant_of(&window2);
+                                                    if keep_visible {
+                                                        if let Ok(panel) =
+                                                            app2.get_webview_panel("main-window")
+                                                        {
+                                                            unsafe {
+                                                                use objc::{msg_send, sel, sel_impl};
+                                                                let _: () = msg_send![
+                                                                    &*panel,
+                                                                    setAlphaValue: 1.0f64
+                                                                ];
+                                                            }
+                                                        }
+                                                        MAIN_PANEL_SHOWN.store(
+                                                            true,
+                                                            std::sync::atomic::Ordering::SeqCst,
+                                                        );
+                                                    }
+                                                    let _ = sender.send(keep_visible);
+                                                })
+                                                .is_ok()
+                                                && receiver
+                                                    .recv_timeout(std::time::Duration::from_secs(1))
+                                                    .unwrap_or(false)
+                                            {
+                                                info!(
+                                                    "Window-mode focus settled on an attached child; keeping overlay visible"
+                                                );
+                                                return;
+                                            }
                                         }
                                         // Dispatch all AppKit work to main thread — this
                                         // closure runs on a spawned background thread.
