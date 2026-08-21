@@ -43,6 +43,7 @@
 import {
   mountAgentEventBus,
   registerDefault,
+  hasForegroundHandler,
   onTerminated,
   onEvicted,
   type Unregister,
@@ -90,6 +91,7 @@ import {
 import { connectionActionFromToolResult } from "@/components/chat/standalone/hooks/pi-event-handlers";
 import { normalizePlanEntries, upsertPlanBlock } from "@/lib/chat/acp-plan";
 import type { ContentBlock } from "@/lib/chat/types";
+import { commands } from "@/lib/utils/tauri";
 
 // Module-level state — the router is a singleton process-wide.
 let mounted = false;
@@ -893,7 +895,18 @@ function applyEventToSessionContent(sid: string, payload: PiInnerEvent) {
   // ends up on disk and survives a restart.
   if (t === "agent_end") {
     store.actions.endTurn(sid);
-    void persistBackgroundSession(sid);
+    const willRetry = (payload as { willRetry?: boolean }).willRetry === true;
+    void persistBackgroundSession(sid).finally(() => {
+      // A hidden conversation may finish after its panel's unmount cleanup saw
+      // it as busy. Re-check atomically once its transcript is durable, then
+      // reap the heavyweight agent tree. Foreground chats stay warm for the
+      // next prompt, and automatic retries keep their live process.
+      if (!willRetry && !hasForegroundHandler(sid)) {
+        void commands.piStopIfIdle(sid).catch((error) => {
+          console.warn("[router] failed to release idle background session:", error);
+        });
+      }
+    });
     return;
   }
 }

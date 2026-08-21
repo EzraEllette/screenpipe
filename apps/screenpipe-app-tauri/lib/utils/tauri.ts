@@ -1783,6 +1783,22 @@ async piStop(sessionId: string | null) : Promise<Result<PiInfo, string>> {
 }
 },
 /**
+ * Stop and forget an idle Pi session without interrupting in-flight work.
+ *
+ * Chat panels call this when they give up foreground ownership. Keeping every
+ * completed ACP conversation resident leaves a full Bun/Node/agent process
+ * tree behind for each chat. The busy check and removal happen under the pool
+ * lock, so a prompt cannot race between the check and teardown.
+ */
+async piStopIfIdle(sessionId: string | null) : Promise<Result<PiInfo, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("pi_stop_if_idle", { sessionId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Update Pi config and restart the chat session so the new model takes effect.
  * Without restart, Pi keeps using the provider/model from its original CLI args.
  *

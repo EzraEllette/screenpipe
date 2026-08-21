@@ -20,6 +20,17 @@ import {
   setCachedBrowserState,
 } from "../browser-state-cache";
 
+const routerCommandMocks = vi.hoisted(() => ({
+  piStopIfIdle: vi.fn(async () => ({
+    status: "ok" as const,
+    data: { running: false, busy: false },
+  })),
+}));
+
+vi.mock("@/lib/utils/tauri", () => ({
+  commands: { piStopIfIdle: routerCommandMocks.piStopIfIdle },
+}));
+
 vi.mock("@/lib/chat-storage", () => ({
   listConversations: vi.fn(async () => []),
   loadConversationFile: vi.fn(async () => null),
@@ -172,12 +183,17 @@ describe("pi-event-router: status mirroring for backgrounded sessions", () => {
     useChatStore.setState({ currentId: "B" });
     await handlePiEvent(piEvt("A", { type: "agent_end" }));
     expect(useChatStore.getState().sessions.A.status).toBe("idle");
+    await vi.waitFor(() => {
+      expect(routerCommandMocks.piStopIfIdle).toHaveBeenCalledWith("A");
+    });
   });
 
   it("stays streaming while agent_end is followed by an automatic retry", async () => {
     seed("A", { status: "streaming" });
     useChatStore.setState({ currentId: "B" });
     await handlePiEvent(piEvt("A", { type: "agent_end", willRetry: true }));
+    await Promise.resolve();
+    expect(routerCommandMocks.piStopIfIdle).not.toHaveBeenCalled();
     expect(useChatStore.getState().sessions.A.status).toBe("streaming");
 
     await handlePiEvent(piEvt("A", {
