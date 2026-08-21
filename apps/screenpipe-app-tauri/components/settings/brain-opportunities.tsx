@@ -9,7 +9,6 @@ import {
   Check,
   ChevronRight,
   ExternalLink,
-  FilePlus2,
   ListTodo,
   MessageSquarePlus,
   RotateCcw,
@@ -107,7 +106,7 @@ function ProcessStep({
   state: "complete" | "active" | "queued";
 }) {
   return (
-    <div className="grid grid-cols-[16px_minmax(0,1fr)_auto] items-center gap-3 py-2">
+    <div className="grid grid-cols-[16px_minmax(0,1fr)] items-center gap-3 py-2">
       <span
         aria-hidden="true"
         className={cn(
@@ -123,18 +122,7 @@ function ProcessStep({
         )}
       >
         {label}
-      </span>
-      <span
-        className={cn(
-          "font-mono text-[9px] uppercase tracking-[0.16em] text-muted-foreground",
-          state === "active" && "text-foreground",
-        )}
-      >
-        {state === "active"
-          ? "working"
-          : state === "complete"
-            ? "done"
-            : "queued"}
+        <span className="sr-only"> · {state}</span>
       </span>
     </div>
   );
@@ -154,24 +142,21 @@ function SourceReceipt({
   );
 
   return (
-    <div className="border border-border">
-      <div className="flex items-center justify-between border-b border-border px-3 py-2">
+    <div className="border-y border-border">
+      <div className="flex items-center justify-between py-3">
         <span className="font-mono text-[9px] uppercase tracking-[0.18em] text-muted-foreground">
-          source receipt
+          source activities
         </span>
         <span className="font-mono text-[9px] uppercase tracking-wide text-muted-foreground">
           {included.length} attached
         </span>
       </div>
-      {included.map((item, index) => (
+      {included.map((item) => (
         <a
           key={item.id}
           href="?section=activity"
-          className="grid grid-cols-[24px_minmax(0,1fr)_auto] items-center gap-3 border-b border-border px-3 py-2.5 transition-colors last:border-b-0 hover:bg-muted/30 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-foreground"
+          className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 border-t border-border py-2.5 transition-colors hover:bg-muted/30 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-foreground"
         >
-          <span className="font-mono text-[9px] text-muted-foreground">
-            {String(index + 1).padStart(2, "0")}
-          </span>
           <span className="min-w-0">
             <span className="block truncate text-xs font-medium text-foreground">
               {item.activityTitle}
@@ -873,16 +858,13 @@ export function BrainOpportunities({
       data-testid="brain-opportunities"
       className="flex min-h-0 flex-1 flex-col overflow-hidden"
     >
-      <div className="mx-auto flex w-full max-w-4xl flex-wrap items-start justify-between gap-4 border-b border-border pb-4">
+      <div className="mx-auto flex w-full max-w-3xl flex-wrap items-start justify-between gap-4 border-b border-border pb-4">
         <div className="flex min-w-0 items-start gap-3">
           {navigation}
           <div className="min-w-0">
             <h2 className="text-xl font-medium lowercase tracking-tight text-foreground">
               opportunities
             </h2>
-            <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
-              Repeat what works. Finish what matters.
-            </p>
           </div>
         </div>
         <div className="flex items-center gap-2 text-muted-foreground">
@@ -919,7 +901,7 @@ export function BrainOpportunities({
       <div
         role="tablist"
         aria-label="opportunity groups"
-        className="mx-auto mt-4 flex w-full max-w-4xl border-b border-border"
+        className="mx-auto mt-4 flex w-full max-w-3xl border-b border-border"
       >
         <button
           type="button"
@@ -938,7 +920,6 @@ export function BrainOpportunities({
             group === "skills" && "text-foreground",
           )}
         >
-          <FilePlus2 className="h-3.5 w-3.5" />
           skill ideas
           <span className="tabular-nums text-muted-foreground">
             {pendingSkillCount}
@@ -966,7 +947,6 @@ export function BrainOpportunities({
             group === "unfinished" && "text-foreground",
           )}
         >
-          <ListTodo className="h-3.5 w-3.5" />
           unfinished work
           <span className="tabular-nums text-muted-foreground">
             {pendingTaskCount}
@@ -983,7 +963,7 @@ export function BrainOpportunities({
             role="tabpanel"
             id="opportunities-panel-skills"
             aria-labelledby="opportunities-tab-skills"
-            className="mx-auto mt-4 flex min-h-0 w-full max-w-4xl flex-1"
+            className="mx-auto mt-4 flex min-h-0 w-full max-w-3xl flex-1"
           >
             <EmptyGroup group="skills" hasAnyData={hasAnyData} />
           </div>
@@ -993,7 +973,7 @@ export function BrainOpportunities({
             id="opportunities-panel-skills"
             aria-labelledby="opportunities-tab-skills"
             data-testid="skill-opportunities-panel"
-            className="mx-auto mt-4 grid min-h-0 w-full max-w-4xl flex-1 grid-rows-[minmax(0,1fr)] overflow-hidden border border-border bg-background"
+            className="mx-auto mt-4 grid min-h-0 w-full max-w-3xl flex-1 grid-rows-[minmax(0,1fr)] overflow-hidden border-t border-border bg-background"
           >
             <aside
               className={cn(
@@ -1001,9 +981,6 @@ export function BrainOpportunities({
                 compactSkillDetailOpen ? "hidden" : "block",
               )}
             >
-              <div className="border-b border-border px-4 py-3 text-xs text-muted-foreground">
-                Patterns found across your recent activity
-              </div>
               {skills.map((skill) => {
                 const railDraft = skillDrafts[skill.id] ?? skill;
                 const flow = skillFlows[skill.id] ?? "review";
@@ -1021,7 +998,7 @@ export function BrainOpportunities({
                     data-testid={`skill-opportunity-${skill.id}`}
                     onClick={() => openSkillDetail(skill.id)}
                     className={cn(
-                      "block w-full border-b border-border bg-background px-4 py-4 text-left text-foreground transition-colors duration-150 hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-foreground",
+                      "block w-full border-b border-border bg-background px-4 py-3 text-left text-foreground transition-colors duration-150 hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-foreground",
                     )}
                   >
                     <div className="flex items-start justify-between gap-4">
@@ -1029,9 +1006,6 @@ export function BrainOpportunities({
                         <h3 className="text-sm font-medium lowercase leading-snug">
                           {railDraft.name}
                         </h3>
-                        <p className="mt-1 line-clamp-1 text-xs text-muted-foreground">
-                          {railDraft.description}
-                        </p>
                       </div>
                       {building && (
                         <span
@@ -1040,7 +1014,7 @@ export function BrainOpportunities({
                         />
                       )}
                     </div>
-                    <div className="mt-3 flex items-center justify-between font-mono text-[9px] uppercase tracking-wide text-muted-foreground">
+                    <div className="mt-2 flex items-center justify-between font-mono text-[9px] uppercase tracking-wide text-muted-foreground">
                       <span>
                         {building
                           ? `building ${String(buildingStep).padStart(2, "0")}/03`
@@ -1065,7 +1039,7 @@ export function BrainOpportunities({
                 type="button"
                 id="skill-opportunity-back"
                 onClick={closeSkillDetail}
-                className="flex h-10 shrink-0 items-center gap-2 border-b border-border px-3 font-mono text-[9px] uppercase tracking-[0.16em] text-muted-foreground transition-colors hover:bg-muted/30 hover:text-foreground"
+                className="inline-flex h-9 shrink-0 self-start items-center gap-2 px-1 font-mono text-[9px] uppercase tracking-[0.16em] text-muted-foreground transition-colors hover:text-foreground"
               >
                 <ChevronRight className="h-3 w-3 rotate-180" /> all skill ideas
               </button>
@@ -1194,7 +1168,7 @@ export function BrainOpportunities({
                               SKILL.md
                             </h3>
                           </div>
-                          <span className="border border-border px-2 py-1 font-mono text-[9px] uppercase tracking-wide text-muted-foreground">
+                          <span className="font-mono text-[9px] uppercase tracking-wide text-muted-foreground">
                             ready
                           </span>
                         </div>
@@ -1266,18 +1240,9 @@ export function BrainOpportunities({
                 return (
                   <>
                     <div className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-6">
-                      <div>
-                        <p className="font-mono text-[9px] uppercase tracking-[0.18em] text-muted-foreground">
-                          {alreadyCreated
-                            ? "edit created skill"
-                            : "review skill idea"}
-                        </p>
-                        <h3 className="mt-1 text-lg font-medium lowercase text-foreground">
-                          {alreadyCreated
-                            ? "refine the reusable workflow"
-                            : "define what should repeat"}
-                        </h3>
-                      </div>
+                      <h3 className="text-lg font-medium lowercase text-foreground">
+                        {draft.name}
+                      </h3>
 
                       <p className="mt-3 max-w-2xl text-sm leading-relaxed text-muted-foreground">
                         {selectedSkill.rationale}
@@ -1332,9 +1297,6 @@ export function BrainOpportunities({
                             hide
                           </span>
                         </summary>
-                        <p className="pb-2 text-xs text-muted-foreground">
-                          Exclude anything that does not belong in this skill.
-                        </p>
                         {selectedSkill.evidence.map((evidence) => {
                           const excluded = excludedEvidence.has(
                             `${selectedSkill.id}:${evidence.id}`,
@@ -1395,7 +1357,7 @@ export function BrainOpportunities({
           role="tabpanel"
           id="opportunities-panel-unfinished"
           aria-labelledby="opportunities-tab-unfinished"
-          className="mx-auto mt-4 flex min-h-0 w-full max-w-4xl flex-1 flex-col"
+          className="mx-auto mt-4 flex min-h-0 w-full max-w-3xl flex-1 flex-col"
         >
           {dismissedTasks.size > 0 && (
             <div className="mb-3 flex items-center justify-between border border-border px-3 py-2 text-xs text-muted-foreground">
@@ -1435,7 +1397,7 @@ export function BrainOpportunities({
           id="opportunities-panel-unfinished"
           aria-labelledby="opportunities-tab-unfinished"
           data-testid="unfinished-opportunities-panel"
-          className="mx-auto mt-4 grid min-h-0 w-full max-w-4xl flex-1 grid-rows-[minmax(0,1fr)] overflow-hidden border border-border bg-background"
+          className="mx-auto mt-4 grid min-h-0 w-full max-w-3xl flex-1 grid-rows-[minmax(0,1fr)] overflow-hidden border-t border-border bg-background"
         >
           <aside
             className={cn(
@@ -1443,9 +1405,6 @@ export function BrainOpportunities({
               compactTaskDetailOpen ? "hidden" : "block",
             )}
           >
-            <div className="border-b border-border px-4 py-3 text-xs text-muted-foreground">
-              Work that may still need an ending
-            </div>
             {visibleTasks.map((task) => {
               const flow = taskFlows[task.id] ?? "review";
               const working = [
@@ -1476,7 +1435,7 @@ export function BrainOpportunities({
                   data-testid={`unfinished-opportunity-${task.id}`}
                   onClick={() => openTaskDetail(task.id)}
                   className={cn(
-                    "block w-full border-b border-border bg-background px-4 py-4 text-left text-foreground transition-colors duration-150 hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-foreground",
+                    "block w-full border-b border-border bg-background px-4 py-3 text-left text-foreground transition-colors duration-150 hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-foreground",
                   )}
                 >
                   <div className="flex items-start justify-between gap-4">
@@ -1484,9 +1443,6 @@ export function BrainOpportunities({
                       <h3 className="text-sm font-medium lowercase leading-snug">
                         {task.title}
                       </h3>
-                      <p className="mt-1 line-clamp-1 text-xs text-muted-foreground">
-                        {task.description}
-                      </p>
                     </div>
                     {working && (
                       <span
@@ -1495,7 +1451,7 @@ export function BrainOpportunities({
                       />
                     )}
                   </div>
-                  <div className="mt-3 flex items-center justify-between font-mono text-[9px] uppercase tracking-wide text-muted-foreground">
+                  <div className="mt-2 flex items-center justify-between font-mono text-[9px] uppercase tracking-wide text-muted-foreground">
                     {working
                       ? `working · step ${step} of 3`
                       : paused
@@ -1550,7 +1506,7 @@ export function BrainOpportunities({
               type="button"
               id="unfinished-opportunity-back"
               onClick={closeTaskDetail}
-              className="flex h-10 shrink-0 items-center gap-2 border-b border-border px-3 font-mono text-[9px] uppercase tracking-[0.16em] text-muted-foreground transition-colors hover:bg-muted/30 hover:text-foreground"
+              className="inline-flex h-9 shrink-0 self-start items-center gap-2 px-1 font-mono text-[9px] uppercase tracking-[0.16em] text-muted-foreground transition-colors hover:text-foreground"
             >
               <ChevronRight className="h-3 w-3 rotate-180" /> all unfinished
               work
@@ -1816,7 +1772,7 @@ export function BrainOpportunities({
                             {taskResult.title}
                           </h3>
                         </div>
-                        <span className="border border-border px-2 py-1 font-mono text-[9px] uppercase tracking-wide text-muted-foreground">
+                        <span className="font-mono text-[9px] uppercase tracking-wide text-muted-foreground">
                           {includedCount} source{includedCount === 1 ? "" : "s"}
                         </span>
                       </div>
@@ -1868,14 +1824,9 @@ export function BrainOpportunities({
                 <>
                   <div className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-6">
                     <div className="flex flex-wrap items-start justify-between gap-3">
-                      <div>
-                        <p className="font-mono text-[9px] uppercase tracking-[0.18em] text-muted-foreground">
-                          review before starting an agent
-                        </p>
-                        <h3 className="mt-1 text-lg font-medium lowercase text-foreground">
-                          {selectedTask.title}
-                        </h3>
-                      </div>
+                      <h3 className="text-lg font-medium lowercase text-foreground">
+                        {selectedTask.title}
+                      </h3>
                       <button
                         type="button"
                         onClick={() => dismissTask(selectedTask.id)}
@@ -1951,9 +1902,6 @@ export function BrainOpportunities({
                           hide
                         </span>
                       </summary>
-                      <p className="pb-2 text-xs text-muted-foreground">
-                        Review or remove the context the agent will receive.
-                      </p>
                       {selectedTask.evidence.map((evidence) => {
                         const excluded = excludedEvidence.has(
                           `${selectedTask.id}:${evidence.id}`,

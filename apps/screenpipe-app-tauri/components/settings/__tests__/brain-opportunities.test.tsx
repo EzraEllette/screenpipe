@@ -81,7 +81,9 @@ describe("BrainOpportunities", () => {
     );
 
     fireEvent.click(screen.getByRole("button", { name: /edit skill/i }));
-    expect(screen.getByText("edit created skill")).toBeTruthy();
+    expect(screen.getByTestId("skill-draft-name")).toHaveValue(
+      "turn product feedback into a focused fix",
+    );
     expect(screen.getByRole("button", { name: /save changes/i })).toBeTruthy();
     expect(screen.getByTestId("opportunities-tab-skills")).toHaveTextContent(
       "2",
