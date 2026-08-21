@@ -165,7 +165,6 @@ import {
   buildFramePreviewSamplesPath,
   buildActivitySummaryPath,
   canAddRecentActivity,
-  minimumHistoryEntryCount,
   rangeForPreset,
 } from "@/components/activity-ledger";
 import {
@@ -526,14 +525,6 @@ describe("activity history helpers", () => {
         },
       ]),
     ).toBe(true);
-  });
-
-  it("requires enough entries to account for a full day", () => {
-    const start = new Date("2026-08-17T07:00:00Z");
-    const end = new Date("2026-08-18T00:00:00Z");
-    expect(minimumHistoryEntryCount(45, { start, end })).toBe(2);
-    expect(minimumHistoryEntryCount(180, { start, end })).toBe(5);
-    expect(minimumHistoryEntryCount(480, { start, end })).toBe(7);
   });
 
   it("ranks a compact artifact set while preserving a real website", () => {
@@ -1925,6 +1916,30 @@ describe("ActivityLedger", () => {
       await screen.findByRole("heading", { name: "Recovered task 1" }),
     ).toBeVisible();
     expect(mocks.generateActivityHistory).toHaveBeenCalledOnce();
+  });
+
+  it("surfaces and tracks an unrecoverable backend quality failure", async () => {
+    mocks.generateActivityHistory.mockResolvedValue({
+      status: "error",
+      error:
+        "activity_quality_failed:parse_error=false, rejected_entries=1, rejected_evidence=0, entries=4/7, missing_observed_windows=3, missing_meetings=0",
+    });
+
+    render(<ActivityLedger />);
+    await generateActivities();
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Some recorded activity could not be validated. Your existing history was preserved; try again.",
+    );
+    expect(mocks.posthogCapture).toHaveBeenCalledWith(
+      "activity_generation_failed",
+      {
+        range: "today",
+        source: "empty_state",
+        error_kind: "quality_validation",
+      },
+    );
+    expect(mocks.reconcilePersistedActivityHistory).not.toHaveBeenCalled();
   });
 
   it("renders the valid document returned by the backend", async () => {

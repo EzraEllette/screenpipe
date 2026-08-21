@@ -334,25 +334,6 @@ function meetingAnchors(
   });
 }
 
-export function minimumHistoryEntryCount(
-  totalActiveMinutes: number,
-  range: TimeRange,
-): number {
-  const activeMinutes = Math.max(0, totalActiveMinutes);
-  if (activeMinutes === 0) return 0;
-  const wallHours = Math.max(
-    0,
-    (range.end.getTime() - range.start.getTime()) / 3_600_000,
-  );
-  if (wallHours <= 26) {
-    if (activeMinutes > 240) return 7;
-    if (activeMinutes >= 90) return 5;
-    return activeMinutes > 30 ? 2 : 1;
-  }
-  const activeDays = Math.max(1, Math.ceil(wallHours / 24));
-  return Math.min(activeDays * 18, Math.max(1, Math.ceil(activeMinutes / 60)));
-}
-
 export function canAddRecentActivity(
   range: TimeRange,
   coverage: ActivityHistoryCoverage[],
@@ -1647,10 +1628,13 @@ export function ActivityLedger({
         const rawError =
           reason instanceof Error ? reason.message : String(reason);
         const noDataStatus = rawError.match(/activity_no_data:([a-z_]+)/)?.[1];
+        const qualityFailure = rawError.includes("activity_quality_failed:");
         const quota = presentQuotaError(rawError);
         setHistoryError(
           noDataStatus
             ? noActivityMessage(noDataStatus)
+            : qualityFailure
+              ? "Some recorded activity could not be validated. Your existing history was preserved; try again."
             : rawError.toLowerCase().includes("hosted_ai_allowance_exceeded")
               ? "This AI preset has no usage left. Choose a different AI preset, then try again."
               : quota.kind !== "none"
@@ -1660,7 +1644,7 @@ export function ActivityLedger({
         posthog.capture("activity_generation_failed", {
           range: preset,
           source,
-          error_kind: quota.kind,
+          error_kind: qualityFailure ? "quality_validation" : quota.kind,
         });
       } finally {
         if (historyAbortRef.current === controller) {
