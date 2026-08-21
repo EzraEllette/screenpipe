@@ -26,7 +26,7 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   GIT_LFS_SKIP_SMUDGE: 1
@@ -885,6 +885,9 @@ jobs:
 
   publish-npm:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     # smoke-windows: nothing ships unless the package launches + inits ONNX
     # on non-AVX2 CPUs (#3125 regression guard).
     needs: [build-macos, build-windows, build-linux, smoke-windows]
@@ -895,7 +898,8 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          # npm trusted publishing requires Node >=22.14 and npm >=11.5.1.
+          node-version: "24"
           registry-url: "https://registry.npmjs.org"
 
       - name: Setup Bun
@@ -982,8 +986,6 @@ jobs:
       # every error — versions 0.3.290..0.3.295 all "succeeded" without ever
       # publishing because the npm token had expired and nobody noticed.
       - name: Publish platform packages
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           for pkg in screenpipe-darwin-arm64 screenpipe-darwin-x64 screenpipe-linux-x64 screenpipe-win32-x64; do
             cd packages/cli/$pkg
@@ -1043,8 +1045,6 @@ jobs:
           done
 
       - name: Publish main package
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           cd packages/cli/screenpipe
           err=$(mktemp)
@@ -1061,6 +1061,8 @@ jobs:
 
   release:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     # smoke-windows: nothing ships unless the package launches + inits ONNX
     # on non-AVX2 CPUs (#3125 regression guard).
     needs: [build-macos, build-windows, build-linux, smoke-windows]
