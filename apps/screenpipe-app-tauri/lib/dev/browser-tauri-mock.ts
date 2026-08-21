@@ -7,6 +7,7 @@ import type {
   BrainViewCanvasDocument,
   BrainViewDefinition,
   BrainViewTemplateKit,
+  ImportedSkill,
   ProviderAutomation,
   SaveBrainViewCanvasRequest,
   SaveBrainViewRequest,
@@ -173,6 +174,24 @@ const NOOP_COMMANDS = new Set([
   "write_browser_log",
   "write_browser_logs",
 ]);
+
+const BROWSER_DEV_IMPORTED_SKILLS: ImportedSkill[] = [
+  {
+    name: "PDF tools",
+    description: "read, create, and edit PDF documents",
+    path: "/Users/screenpipe/.screenpipe/skills/pdf-tools",
+  },
+  {
+    name: "Meeting follow-up",
+    description: "turn a meeting into decisions and next steps",
+    path: "/Users/screenpipe/.screenpipe/skills/meeting-follow-up",
+  },
+  {
+    name: "Customer discovery",
+    description: "prepare and synthesize customer interviews",
+    path: "/Users/screenpipe/.screenpipe/skills/customer-discovery",
+  },
+];
 
 const GRANTED_PERMISSION_COMMANDS = new Set([
   "check_accessibility_permission_cmd",
@@ -649,6 +668,8 @@ export function createBrowserIpcMock(options: BrowserIpcMockOptions) {
           ...task,
           availableActions: [...(task.availableActions ?? [])],
         }));
+      case "list_imported_skills":
+        return BROWSER_DEV_IMPORTED_SKILLS.map((skill) => ({ ...skill }));
       case "manage_provider_automation": {
         const key = String(input.key ?? "");
         const action = String(input.action ?? "");

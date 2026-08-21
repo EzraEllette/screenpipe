@@ -10,6 +10,12 @@ import { emit, listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { commands } from "@/lib/utils/tauri";
 import { useChatStore } from "@/lib/stores/chat-store";
+import {
+  BUILTIN_COMPOSER_COMMANDS,
+  type ComposerCommandId,
+} from "@/lib/composer-commands";
+
+export type { ComposerCommandId } from "@/lib/composer-commands";
 
 /**
  * Detect if content is app-injected metadata (not real user content).
@@ -948,6 +954,8 @@ export interface MentionSuggestion {
   conversationId?: string;
   /** Present only on `/` entries. Picking one runs an action instead of inserting text. */
   commandId?: ComposerCommandId;
+  /** Extra registry terms, such as aliases and groups, used only for filtering. */
+  searchTerms?: readonly string[];
 }
 
 export function mentionSuggestionIdentity(suggestion: MentionSuggestion): string {
@@ -1104,42 +1112,19 @@ function formatTagAutocompleteDescription(item: AppAutocompleteItem) {
   return pluralize(item.count, "use");
 }
 
-export type ComposerCommandId = "new-chat" | "stop" | "inspector" | "pipes";
-
 /**
  * `/` entries run an action rather than inserting a token. Ordered the way they
  * are offered, so the first row is the one a bare `/` most likely wants.
  */
-export const COMPOSER_COMMAND_SUGGESTIONS: MentionSuggestion[] = [
-  {
-    tag: "/new",
-    label: "/new",
-    description: "start a new chat",
-    category: "command",
-    commandId: "new-chat",
-  },
-  {
-    tag: "/stop",
-    label: "/stop",
-    description: "stop the current response",
-    category: "command",
-    commandId: "stop",
-  },
-  {
-    tag: "/inspector",
-    label: "/inspector",
-    description: "toggle the inspector panel",
-    category: "command",
-    commandId: "inspector",
-  },
-  {
-    tag: "/pipes",
-    label: "/pipes",
-    description: "open scheduled tasks",
-    category: "command",
-    commandId: "pipes",
-  },
-];
+export const COMPOSER_COMMAND_SUGGESTIONS: MentionSuggestion[] =
+  BUILTIN_COMPOSER_COMMANDS.map((command) => ({
+    tag: command.invocation,
+    label: command.invocation,
+    description: command.description,
+    category: "command" as const,
+    commandId: command.id,
+    searchTerms: [command.title, command.group, ...command.aliases],
+  }));
 
 export type MentionTrigger = "@" | "#" | "$" | "~" | "/";
 
@@ -1149,7 +1134,7 @@ export function findComposerMention(
   // Anchored to position 0 on purpose: a slash only opens the palette when the
   // message starts with it. Otherwise `03/04` and `src/lib` would open a menu
   // mid-sentence.
-  const commandMatch = textBeforeCursor.match(/^\/([\w-]*)$/);
+  const commandMatch = textBeforeCursor.match(/^\/([\w.-]*)$/);
   if (commandMatch) {
     return { trigger: "/", filter: commandMatch[1] };
   }
@@ -1162,6 +1147,33 @@ export function findComposerMention(
     trigger: match[1] as MentionTrigger,
     filter: match[2],
   };
+}
+
+export function replaceComposerMentionAtCursor({
+  input,
+  cursorPos,
+  trigger,
+  replacement,
+}: {
+  input: string;
+  cursorPos: number;
+  trigger: MentionTrigger;
+  replacement: string;
+}): string {
+  const safeCursorPos = Math.max(0, Math.min(cursorPos, input.length));
+  const textBeforeCursor = input.slice(0, safeCursorPos);
+  const textAfterCursor = input.slice(safeCursorPos);
+  const mentionIndex =
+    trigger === "/"
+      ? 0
+      : Math.max(
+          textBeforeCursor.lastIndexOf("@"),
+          textBeforeCursor.lastIndexOf("#"),
+          textBeforeCursor.lastIndexOf("$"),
+          textBeforeCursor.lastIndexOf("~"),
+        );
+  if (mentionIndex === -1) return input;
+  return `${textBeforeCursor.slice(0, mentionIndex)}${replacement} ${textAfterCursor}`;
 }
 
 export interface FilterMentionSuggestionsOptions {
@@ -1195,10 +1207,14 @@ export function filterMentionSuggestions({
   const matchesFilter = (suggestion: MentionSuggestion) =>
     suggestion.tag.toLowerCase().includes(filter) ||
     suggestion.label?.toLowerCase().includes(filter) ||
-    suggestion.description.toLowerCase().includes(filter);
+    suggestion.description.toLowerCase().includes(filter) ||
+    suggestion.searchTerms?.some((term) => term.toLowerCase().includes(filter));
 
   if (mentionTrigger === "/") {
-    return COMPOSER_COMMAND_SUGGESTIONS.filter(matchesFilter);
+    return [
+      ...COMPOSER_COMMAND_SUGGESTIONS,
+      ...skillMentionSuggestions,
+    ].filter(matchesFilter);
   }
 
   if (mentionTrigger === "#") {

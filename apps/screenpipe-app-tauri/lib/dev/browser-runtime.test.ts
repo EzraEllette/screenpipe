@@ -59,6 +59,19 @@ describe("browser development runtime", () => {
     });
   });
 
+  it("provides imported skills for composer design review", () => {
+    const invoke = createBrowserIpcMock({ mode: "mock", apiPort: 3030 });
+
+    expect(invoke("list_imported_skills")).toEqual([
+      expect.objectContaining({
+        name: "PDF tools",
+        path: "/Users/screenpipe/.screenpipe/skills/pdf-tools",
+      }),
+      expect.objectContaining({ name: "Meeting follow-up" }),
+      expect.objectContaining({ name: "Customer discovery" }),
+    ]);
+  });
+
   it("provides stateful Live View fixtures", () => {
     const invoke = createBrowserIpcMock({ mode: "mock", apiPort: 3030 });
     const [view] = invoke("list_brain_views") as BrainViewDefinition[];

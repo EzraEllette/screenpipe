@@ -44,9 +44,12 @@ import {
   isConversationHistorySyncPrompt,
   isInjectedTitleSourcePrompt,
   normalizeComposerMentionsForModel,
-  type ComposerCommandId,
   type ComposerSkillReference,
 } from "@/lib/chat-utils";
+import {
+  runComposerCommand,
+  type ComposerCommandId,
+} from "@/lib/composer-commands";
 import {
   useAutoSuggestions,
   type Suggestion,
@@ -1209,23 +1212,15 @@ export function StandaloneChat({
 
   // Render assignment, matching openMentionConversationRef above: every handler
   // a `/` command needs is defined by this point.
-  runComposerCommandRef.current = async (commandId: ComposerCommandId) => {
-    switch (commandId) {
-      case "new-chat":
-        await startNewConversationRef.current?.();
-        return;
-      case "stop":
-        await handleStop();
-        return;
-      case "inspector":
-        toggleInspector();
-        return;
-      case "pipes":
+  runComposerCommandRef.current = (commandId: ComposerCommandId) =>
+    runComposerCommand(commandId, {
+      startNewChat: () => startNewConversationRef.current?.(),
+      stopResponse: handleStop,
+      toggleInspector,
+      openScheduledTasks: async () => {
         await commands.showWindow({ Home: { page: "pipes" } });
-        return;
-    }
-  };
-
+      },
+    });
 
   const answerPiExtensionUiRequest = useCallback(async (
     requestId: string | undefined,
