@@ -50,6 +50,17 @@ if ($launcherErrors.Count -ne 0) {
   throw "with-openai-key.ps1 has PowerShell parse errors"
 }
 
+$recorderTokens = $null
+$recorderErrors = $null
+[System.Management.Automation.Language.Parser]::ParseFile(
+  "C:\Users\Public\Desktop\screenpipe-evidence.ps1",
+  [ref]$recorderTokens,
+  [ref]$recorderErrors
+) | Out-Null
+if ($recorderErrors.Count -ne 0) {
+  throw "screenpipe-evidence.ps1 has PowerShell parse errors"
+}
+
 [PSCustomObject]@{
   computerName = $marker.computerName
   provisionedAt = $marker.provisionedAt
@@ -61,4 +72,5 @@ if ($launcherErrors.Count -ne 0) {
   managedIdentity = "ready"
   openAiKey = "available"
   openAiLauncher = "ready"
+  evidenceRecorder = "ready"
 } | ConvertTo-Json -Compress

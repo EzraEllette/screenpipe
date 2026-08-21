@@ -12,7 +12,9 @@ empty stack, so it cannot delete another run or the shared test infrastructure.
 
 The VM is intended for native Windows acceptance: RDP into a real Windows 11
 desktop, install the exact Screenpipe artifact under test, exercise the visible
-user journey, save evidence, then delete the run.
+user journey while the VM-local evidence recorder is running, download and
+inspect that video, attach its expiring read-only link to the PR report, then
+delete the run.
 
 The VM's test-worker managed identity can read the existing
 `chatgpt-codex-api-key` secret at runtime. The key is never baked into the image,
@@ -92,6 +94,25 @@ printf '%s' 'retry after fixing the task input' | \
 
 # Download the durable status, final report, log, and binary-safe patch.
 ./scripts/windows-vm/agent-result.sh audio-follow-01 /tmp/audio-follow-result
+```
+
+In an elevated PowerShell window inside the RDP desktop, record the exact clean
+guest checkout while exercising the acceptance steps. Press `q` in that
+PowerShell window to stop, verify, and upload the MP4:
+
+```powershell
+& C:\Users\Public\Desktop\screenpipe-evidence.ps1 `
+  -EvidenceId audio-follow-01 `
+  -Acceptance "follow-system-audio survives a device switch"
+```
+
+Back on the trusted host, download and checksum-verify the video. Watch the
+complete MP4 before posting it to the PR report:
+
+```bash
+./scripts/windows-vm/evidence-result.sh audio-follow-01 /tmp/audio-follow-evidence
+open /tmp/audio-follow-evidence/acceptance.mp4
+./scripts/windows-vm/evidence-pr-report.sh 1234 audio-follow-01 /tmp/audio-follow-evidence
 
 # After the local result is verified, remove its remote blob copies.
 ./scripts/windows-vm/agent-clear.sh audio-follow-01
@@ -120,4 +141,18 @@ SYSTEM in a non-interactive session. It cannot prove desktop behavior. Use the
 RDP session for onboarding, capture, audio, overlays, startup behavior, and any
 other user-visible acceptance check. A guest agent result is an untrusted input:
 inspect `status.json`, `final.md`, and `result.patch`, run `git apply --check`,
-and review the exact diff before applying it to a host branch.
+and review the exact diff before applying it to a host branch. The recorder
+refuses Session 0 and dirty checkouts, records the RDP virtual desktop with the
+mouse cursor, and stores the tested Git commit/tree plus the MP4 checksum in
+`evidence.json`. A video file is not proof by itself: watch it end to end and
+confirm the requested acceptance behavior is actually visible before running
+`evidence-pr-report.sh`.
+
+PR evidence uses a separate `windows-pr-evidence/<evidence-id>/` prefix and is
+not removed by `agent-clear.sh`. The report helper creates a read-only SAS link
+for 14 days by default. Once review is complete and the link is no longer
+needed, delete only that evidence prefix:
+
+```bash
+./scripts/windows-vm/evidence-clear.sh audio-follow-01
+```

@@ -53,6 +53,17 @@ try {
 '@
 $openAiLauncher | Set-Content -Encoding UTF8 "C:\screenpipe-test\with-openai-key.ps1"
 
+$evidenceRecorder = [Text.Encoding]::UTF8.GetString(
+  [Convert]::FromBase64String("__SCREENPIPE_EVIDENCE_RECORDER_BASE64__")
+)
+$evidenceRecorderPath = "C:\Users\Public\Desktop\screenpipe-evidence.ps1"
+[IO.File]::WriteAllText(
+  $evidenceRecorderPath,
+  $evidenceRecorder,
+  (New-Object Text.UTF8Encoding($false))
+)
+Unblock-File $evidenceRecorderPath
+
 Set-Service -Name Audiosrv -StartupType Automatic
 Set-Service -Name AudioEndpointBuilder -StartupType Automatic
 Start-Service -Name AudioEndpointBuilder

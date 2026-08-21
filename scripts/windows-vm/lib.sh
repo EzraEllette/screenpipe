@@ -18,6 +18,7 @@ WINDOWS_VM_GITHUB_REPOSITORY="${AZURE_WINDOWS_GITHUB_REPOSITORY:-screenpipe/scre
 WINDOWS_VM_STORAGE_ACCOUNT="${AZURE_WINDOWS_STORAGE_ACCOUNT:-stscpwinrun975ec0}"
 WINDOWS_VM_STORAGE_CONTAINER="${AZURE_WINDOWS_STORAGE_CONTAINER:-evidence}"
 WINDOWS_VM_AGENT_BLOB_ROOT="${AZURE_WINDOWS_AGENT_BLOB_ROOT:-windows-agent}"
+WINDOWS_VM_EVIDENCE_BLOB_ROOT="${AZURE_WINDOWS_EVIDENCE_BLOB_ROOT:-windows-pr-evidence}"
 WINDOWS_VM_STORAGE_AUTH_MODE="${AZURE_WINDOWS_STORAGE_AUTH_MODE:-key}"
 
 windows_vm_log() {
@@ -40,6 +41,14 @@ windows_vm_validate_run_id() {
   local run_id="$1"
   if [[ ! "$run_id" =~ ^[a-z0-9][a-z0-9-]{2,19}$ ]]; then
     printf 'run ID must be 3-20 lowercase letters, digits, or hyphens: %s\n' "$run_id" >&2
+    exit 1
+  fi
+}
+
+windows_vm_validate_evidence_id() {
+  local evidence_id="$1"
+  if [[ ! "$evidence_id" =~ ^[a-z0-9][a-z0-9-]{2,39}$ ]]; then
+    printf 'evidence ID must be 3-40 lowercase letters, digits, or hyphens: %s\n' "$evidence_id" >&2
     exit 1
   fi
 }

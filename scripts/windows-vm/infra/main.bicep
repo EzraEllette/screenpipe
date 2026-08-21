@@ -28,7 +28,8 @@ var commonTags = {
   'run-id': runId
   'expires-at': shutdownAtUtc
 }
-var provisionScript = loadTextContent('../provision.ps1')
+var recorderScript = loadTextContent('../evidence-recorder.ps1')
+var provisionScript = replace(loadTextContent('../provision.ps1'), '__SCREENPIPE_EVIDENCE_RECORDER_BASE64__', base64(recorderScript))
 var provisionCommand = 'powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -Command "$h=@{Metadata=\'true\'};$u=Invoke-RestMethod -Headers $h -Method GET -Uri \'http://169.254.169.254/metadata/instance/compute/userData?api-version=2021-02-01&format=text\';$s=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($u));&([ScriptBlock]::Create($s))"'
 
 resource networkSecurityGroup 'Microsoft.Network/networkSecurityGroups@2024-05-01' = {
