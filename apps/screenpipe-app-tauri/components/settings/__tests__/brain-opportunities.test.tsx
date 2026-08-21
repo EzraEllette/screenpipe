@@ -197,7 +197,7 @@ describe("BrainOpportunities", () => {
     expect(screen.getByText(/reviewing 10 source activities/i)).toBeTruthy();
 
     act(() => vi.advanceTimersByTime(1800));
-    expect(screen.getByText(/10 sources · reviewed just now/i)).toBeTruthy();
+    expect(screen.getByText(/10 activities · updated now/i)).toBeTruthy();
   });
 
   it("shows an honest empty state when no analyzer data exists", () => {
