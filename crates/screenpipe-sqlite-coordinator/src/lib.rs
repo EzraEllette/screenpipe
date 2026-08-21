@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 use std::ffi::CStr;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
@@ -23,6 +24,8 @@ pub use quarantine::{
 pub const FIRST_WAL_RESET_SAFE_SQLITE: i32 = 3_051_003;
 
 static SQLITE_WRITE_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Weak<Semaphore>>>> = OnceLock::new();
+static SQLITE_MANAGER_OWNERS: OnceLock<Mutex<HashMap<PathBuf, u64>>> = OnceLock::new();
+static NEXT_SQLITE_MANAGER_OWNER: AtomicU64 = AtomicU64::new(1);
 /// Process-lifetime path tombstones. These deliberately outlive individual
 /// DatabaseManager generations so an in-process respawn cannot reopen a path
 /// after SQLite reported IOERR, CORRUPT, FULL, or NOTADB.
@@ -91,6 +94,63 @@ pub struct SqliteRuntimeIdentity {
 
 fn lock_key(path: &Path) -> PathBuf {
     quarantine::canonical_database_path(path)
+}
+
+/// Process-wide ownership of one live database-manager generation.
+///
+/// macOS `unix-excl` stores one POSIX process lock per SQLite inode. A second
+/// independently managed pool set can unlock that inode while the first set's
+/// handles still believe the process lock is held. Keep exactly one manager
+/// generation alive per physical path; separate databases remain independent.
+pub struct SqliteManagerLease {
+    key: PathBuf,
+    owner: u64,
+    released: AtomicBool,
+}
+
+impl SqliteManagerLease {
+    pub fn release(&self) {
+        if self.released.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let owners = SQLITE_MANAGER_OWNERS.get_or_init(|| Mutex::new(HashMap::new()));
+        let mut owners = owners
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if owners.get(&self.key) == Some(&self.owner) {
+            owners.remove(&self.key);
+        }
+    }
+}
+
+impl Drop for SqliteManagerLease {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+/// Claim the only live `DatabaseManager` generation for a physical path.
+pub fn acquire_sqlite_manager_lease(
+    db_path: impl AsRef<Path>,
+) -> Result<SqliteManagerLease, String> {
+    let key = lock_key(db_path.as_ref());
+    let owners = SQLITE_MANAGER_OWNERS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut owners = owners
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if owners.contains_key(&key) {
+        return Err(format!(
+            "this process already owns a live DatabaseManager for {}",
+            key.display()
+        ));
+    }
+    let owner = NEXT_SQLITE_MANAGER_OWNER.fetch_add(1, Ordering::Relaxed);
+    owners.insert(key.clone(), owner);
+    Ok(SqliteManagerLease {
+        key,
+        owner,
+        released: AtomicBool::new(false),
+    })
 }
 
 pub fn is_sqlite_hard_fault_code(code: i32) -> bool {
@@ -358,6 +418,23 @@ mod tests {
         let alias = sqlite_write_lock(db.parent().unwrap().join(".").join("db.sqlite"));
 
         assert!(Arc::ptr_eq(&canonical, &alias));
+    }
+
+    #[test]
+    fn manager_lease_rejects_aliases_until_release() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("manager.sqlite");
+        std::fs::File::create(&db).expect("create db placeholder");
+
+        let first = acquire_sqlite_manager_lease(&db).expect("first manager lease");
+        let alias = dir.path().join(".").join("manager.sqlite");
+        let duplicate = acquire_sqlite_manager_lease(&alias)
+            .err()
+            .expect("alias must not create a second manager generation");
+        assert!(duplicate.contains("already owns a live DatabaseManager"));
+
+        first.release();
+        acquire_sqlite_manager_lease(&alias).expect("released path can be reopened");
     }
 
     #[test]

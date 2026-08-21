@@ -1282,7 +1282,7 @@ mod tests {
             .unwrap();
         let ingestor = Ingestor::new(
             src as Arc<dyn BlobSource>,
-            db,
+            db.clone(),
             "lic-1".to_string(),
             dir.path().join("snapshots"),
         )
@@ -1332,7 +1332,7 @@ mod tests {
         .unwrap();
         let clean = Ingestor::new(
             src2 as Arc<dyn BlobSource>,
-            test_db(&dir).await,
+            db,
             "lic-1".to_string(),
             dir.path().join("snapshots2"),
         )

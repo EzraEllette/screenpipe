@@ -19,7 +19,6 @@
 //! to ~5ms amortized over the entire batch.
 
 use chrono::{DateTime, Utc};
-use sqlx::migrate::MigrateDatabase;
 use sqlx::{Pool, Sqlite};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -2614,16 +2613,31 @@ async fn ensure_db_openable(db_path: &str) -> bool {
         Some(p) if !p.as_os_str().is_empty() && !p.exists() => return false,
         _ => {}
     }
-    let connection_string = format!("sqlite:{}", db_path);
-    // create_database opens with create_if_missing(true) then closes; it is a
-    // no-op (does not truncate) if the file already exists.
-    match sqlx::Sqlite::create_database(&connection_string).await {
+    let path = std::path::Path::new(db_path);
+    if path.exists() {
+        return true;
+    }
+
+    // Opening an existing live database through SQLite's default VFS can
+    // release macOS unix-excl's process-wide POSIX lock while its pooled
+    // handles still believe the lock is held. Only create a genuinely missing
+    // file here; the rebuilt capture pool performs the first SQLite open with
+    // the recorder's configured VFS.
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
         Ok(_) => {
             warn!("db: recreated empty database file {}", db_path);
             true
         }
-        Err(e) => {
-            warn!("db: failed to recreate database file {}: {}", db_path, e);
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => true,
+        Err(error) => {
+            warn!(
+                "db: failed to recreate database file {}: {}",
+                db_path, error
+            );
             false
         }
     }
@@ -2634,6 +2648,7 @@ async fn ensure_db_openable(db_path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sqlx::migrate::MigrateDatabase;
 
     #[test]
     fn capture_pool_connections_live_until_authoritative_shutdown() {

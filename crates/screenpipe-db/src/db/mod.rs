@@ -7,7 +7,6 @@ use image::DynamicImage;
 use libsqlite3_sys::sqlite3_auto_extension;
 use screenpipe_config::DbConfig;
 use sqlite_vec::sqlite3_vec_init;
-use sqlx::migrate::MigrateDatabase;
 use sqlx::pool::PoolConnection;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool};
 use sqlx::Column;
@@ -319,6 +318,9 @@ pub struct DatabaseManager {
     /// Slot for the persistent-failure hook, wired by the app after construction.
     /// Shared with the drain loop so a late `set_persistent_failure_hook` takes effect.
     persistent_failure_hook: crate::write_queue::PersistentFailureSlot,
+    /// Prevents a second independently managed pool generation from opening
+    /// this physical path and invalidating macOS unix-excl's process lock.
+    manager_lease: Option<screenpipe_sqlite_coordinator::SqliteManagerLease>,
     /// Cancelled by [`DatabaseManager::close`]. Stops the WAL-maintenance task and
     /// the write-queue drain loop so no background task keeps a SQLite connection
     /// (and the shared `-shm` WAL-index mapping) alive after teardown — a leaked
