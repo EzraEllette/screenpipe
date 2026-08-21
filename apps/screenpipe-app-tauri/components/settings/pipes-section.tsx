@@ -1699,7 +1699,7 @@ export function PipesSection() {
         title: existing ? `update pushed (v${version})` : "shared with team",
         description: existing
           ? "teammates' copies will update automatically"
-          : "teammates can turn it on from their Scheduled page",
+          : "teammates can turn it on from their Automations page",
       });
     } catch (err: any) {
       toast({

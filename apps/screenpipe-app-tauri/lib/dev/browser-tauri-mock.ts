@@ -10,6 +10,7 @@ import type {
   ImportedSkill,
   PiExtensionPackage,
   ProviderAutomation,
+  RegistrySkill,
   SaveBrainViewCanvasRequest,
   SaveBrainViewRequest,
 } from "@/lib/utils/tauri";
@@ -191,6 +192,47 @@ const BROWSER_DEV_IMPORTED_SKILLS: ImportedSkill[] = [
     name: "Customer discovery",
     description: "prepare and synthesize customer interviews",
     path: "/Users/screenpipe/.screenpipe/skills/customer-discovery",
+  },
+];
+
+const BROWSER_DEV_PROVIDER_SKILLS: RegistrySkill[] = [
+  {
+    name: "PDF",
+    description: "Fill, merge, split, and extract text or tables from PDF files.",
+    repo: "anthropics/skills",
+    git_ref: "main",
+    path: "skills/pdf",
+    source: "anthropic",
+    featured: true,
+    imported: false,
+  },
+  {
+    name: "MCP Builder",
+    description: "Scaffold MCP servers that expose tools to AI agents.",
+    repo: "anthropics/skills",
+    git_ref: "main",
+    path: "skills/mcp-builder",
+    source: "anthropic",
+    imported: false,
+  },
+  {
+    name: "Transcribe",
+    description: "Transcribe audio with optional diarization and speaker hints.",
+    repo: "openai/skills",
+    git_ref: "main",
+    path: "skills/.curated/transcribe",
+    source: "openai",
+    featured: true,
+    imported: false,
+  },
+  {
+    name: "Playwright",
+    description: "Automate browsers for navigation, forms, and screenshots.",
+    repo: "openai/skills",
+    git_ref: "main",
+    path: "skills/.curated/playwright",
+    source: "openai",
+    imported: false,
   },
 ];
 
@@ -433,6 +475,10 @@ export function createBrowserIpcMock(options: BrowserIpcMockOptions) {
   const warned = new Set<string>();
   let nextResourceId = 1;
   let piExtensionPackages: PiExtensionPackage[] = [];
+  let importedSkills = BROWSER_DEV_IMPORTED_SKILLS.map((skill) => ({ ...skill }));
+  const providerSkills = BROWSER_DEV_PROVIDER_SKILLS.map((skill) => ({
+    ...skill,
+  }));
   const initialTimestamp = new Date().toISOString();
   let liveViews =
     options.scenario === "empty"
@@ -696,7 +742,28 @@ export function createBrowserIpcMock(options: BrowserIpcMockOptions) {
           availableActions: [...(task.availableActions ?? [])],
         }));
       case "list_imported_skills":
-        return BROWSER_DEV_IMPORTED_SKILLS.map((skill) => ({ ...skill }));
+        return importedSkills.map((skill) => ({ ...skill }));
+      case "fetch_skills_registry":
+        return providerSkills.map((skill) => ({ ...skill }));
+      case "install_registry_skill": {
+        const name = String(input.name ?? "");
+        const skill = providerSkills.find((candidate) => candidate.name === name);
+        if (!skill) throw new Error("skill is no longer available");
+        skill.imported = true;
+        const installed = {
+          name: skill.name,
+          description: skill.description ?? "",
+          path: `/Users/screenpipe/.screenpipe/skills/${skill.path.split("/").at(-1)}`,
+        };
+        importedSkills = [
+          ...importedSkills.filter((candidate) => candidate.name !== skill.name),
+          installed,
+        ];
+        return { ...installed };
+      }
+      case "scan_device_skills":
+      case "list_managed_team_skills":
+        return [];
       case "manage_provider_automation": {
         const key = String(input.key ?? "");
         const action = String(input.action ?? "");

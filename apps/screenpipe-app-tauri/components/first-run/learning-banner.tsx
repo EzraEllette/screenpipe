@@ -106,7 +106,7 @@ export function FirstRunReadyPanel({
       <div className="flex items-center justify-between gap-4 border-t border-border px-4 py-3">
         <p className="text-[10px] leading-relaxed text-muted-foreground">
           screenpipe is ready now. these optional setups remain available from
-          scheduled tasks and connections.
+          Automations and Connections.
         </p>
         <Button
           size="sm"
@@ -150,8 +150,7 @@ export function FirstRunSetupReadyPanel({
 
       <div className="flex items-center justify-between gap-4 border-t border-border px-4 py-3">
         <p className="text-[10px] leading-relaxed text-muted-foreground">
-          these optional setups remain available from scheduled tasks and
-          connections.
+          these optional setups remain available from Automations and Connections.
         </p>
         <Button
           size="sm"

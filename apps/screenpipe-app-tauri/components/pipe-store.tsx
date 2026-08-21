@@ -379,7 +379,7 @@ export function PipeStoreView() {
     <div className="space-y-4">
       <p className="text-sm text-muted-foreground">
         {activeTab === "discover"
-          ? "browse, install, and review community scheduled tasks"
+          ? "browse, install, and review community automations"
           : "Run tasks on a schedule, after meetings, or when events happen."}
       </p>
 

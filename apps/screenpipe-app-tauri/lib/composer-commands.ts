@@ -81,8 +81,8 @@ export const BUILTIN_COMPOSER_COMMANDS = [
   {
     id: "pipes",
     invocation: "/pipes",
-    title: "scheduled tasks",
-    description: "open scheduled tasks",
+    title: "automations",
+    description: "open automations",
     aliases: ["automations", "schedules", "tasks"],
     group: "automation",
     kind: "action",

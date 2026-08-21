@@ -10,7 +10,7 @@ import type { SidebarNavId } from "@/lib/utils/sidebar-nav-layout";
 const ITEMS: SidebarNavItem[] = [
   { id: "home", label: "Chat", icon: <span /> },
   { id: "brain", label: "Library", icon: <span /> },
-  { id: "pipes", label: "Scheduled", icon: <span /> },
+  { id: "pipes", label: "Automations", icon: <span /> },
 ];
 
 function renderList(overrides: Partial<React.ComponentProps<typeof SidebarNavList>> = {}) {

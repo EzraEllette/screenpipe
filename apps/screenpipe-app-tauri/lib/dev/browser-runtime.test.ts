@@ -70,6 +70,34 @@ describe("browser development runtime", () => {
       expect.objectContaining({ name: "Meeting follow-up" }),
       expect.objectContaining({ name: "Customer discovery" }),
     ]);
+    expect(invoke("scan_device_skills")).toEqual([]);
+    expect(invoke("list_managed_team_skills")).toEqual([]);
+  });
+
+  it("installs provider skills into the browser skills store", () => {
+    const invoke = createBrowserIpcMock({ mode: "mock", apiPort: 3030 });
+    const registry = invoke("fetch_skills_registry") as Array<{
+      name: string;
+      imported?: boolean;
+    }>;
+
+    expect(registry.map((skill) => skill.name)).toEqual([
+      "PDF",
+      "MCP Builder",
+      "Transcribe",
+      "Playwright",
+    ]);
+
+    invoke("install_registry_skill", { name: "PDF" });
+
+    expect(invoke("fetch_skills_registry")).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: "PDF", imported: true }),
+      ]),
+    );
+    expect(invoke("list_imported_skills")).toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: "PDF" })]),
+    );
   });
 
   it("provides stateful Live View fixtures", () => {

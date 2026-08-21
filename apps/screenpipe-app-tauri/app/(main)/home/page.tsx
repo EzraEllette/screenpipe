@@ -1080,7 +1080,7 @@ function HomeContent() {
     timeline: { label: "Timeline", icon: <MonitorPlay className="h-3.5 w-3.5" /> },
     activity: { label: "Activity", icon: <ListTree className="h-3.5 w-3.5" /> },
     brain: { label: "Library", icon: <Brain className="h-3.5 w-3.5" /> },
-    pipes: { label: "Scheduled", icon: <TimerReset className="h-3.5 w-3.5" /> },
+    pipes: { label: "Automations", icon: <TimerReset className="h-3.5 w-3.5" /> },
     connections: { label: "Connections", icon: <Plug className="h-3.5 w-3.5" /> },
   };
 

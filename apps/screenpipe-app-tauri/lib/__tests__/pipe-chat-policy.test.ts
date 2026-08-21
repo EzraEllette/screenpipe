@@ -48,7 +48,7 @@ describe("continuousPipeChatPolicy", () => {
       pipeName: "daily-brief",
       state: "off",
       replyDisabledReason:
-        "Continue in one chat is off. Turn it on in Scheduled settings to reply here.",
+        "Continue in one chat is off. Turn it on in Automations settings to reply here.",
     });
   });
 

@@ -1001,7 +1001,7 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
       !isTerminalPipeExecutionStatus(fullExecution.status)
     ) {
       toast({
-        title: "couldn't load scheduled run",
+        title: "couldn't load automation run",
         description: "the execution output is temporarily unavailable",
         variant: "destructive",
       });
@@ -1358,7 +1358,7 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
 
           <div className="group/pipes min-h-0 flex flex-col shrink-0">
               <Section
-                title="scheduled"
+                title="automations"
                 collapsed={pipesCollapsed}
                 onCollapsedChange={updatePipesCollapsed}
                 headerAction={
@@ -1374,7 +1374,7 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
                   </div>
                 ) : pipeItems.length === 0 ? (
                   <div className="px-2.5 py-2 text-xs sidebar-text-secondary italic">
-                    no scheduled runs yet
+                    no automation runs yet
                   </div>
                 ) : pipeItems.map((item) => (
                     <PipeGroupRow
@@ -1409,7 +1409,7 @@ export function ChatSidebar({ className, onViewAll }: ChatSidebarProps) {
                     onClick={() => void fetchPipeInventory(true)}
                     disabled={pipeInventoryLoadingMore}
                   >
-                    {pipeInventoryLoadingMore ? "loading…" : "show more scheduled tasks"}
+                    {pipeInventoryLoadingMore ? "loading…" : "show more automation runs"}
                   </button>
                 )}
               </Section>

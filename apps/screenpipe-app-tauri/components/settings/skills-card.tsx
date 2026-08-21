@@ -24,6 +24,7 @@ import {
   type ManagedTeamSkillLocal,
 } from "@/lib/utils/tauri";
 import { SkillsBrowser } from "./skills-browser";
+import { ProviderSkillCatalog } from "./provider-skill-catalog";
 
 const DESTINATION_LABELS: Record<string, string> = {
   screenpipe: "screenpipe",
@@ -121,6 +122,11 @@ export function SkillsCard({ onChanged }: { onChanged?: () => void }) {
     [refresh, onChanged],
   );
 
+  const handleRegistryInstalled = useCallback(() => {
+    void refresh();
+    onChanged?.();
+  }, [refresh, onChanged]);
+
   // Device skills the user hasn't imported yet.
   const importable = device.filter((d) => !d.imported);
 
@@ -133,6 +139,8 @@ export function SkillsCard({ onChanged }: { onChanged?: () => void }) {
         screenpipe&apos;s agent loads them in chat and in every scheduled task.
       </p>
 
+      <ProviderSkillCatalog onInstalled={handleRegistryInstalled} />
+
       <Button
         variant="outline"
         size="sm"
@@ -141,17 +149,14 @@ export function SkillsCard({ onChanged }: { onChanged?: () => void }) {
         disabled={!loaded}
       >
         <Sparkles className="h-3.5 w-3.5 mr-1.5" />
-        Browse skills
+        Browse all skills
       </Button>
 
       <SkillsBrowser
         open={browsing}
         onClose={() => setBrowsing(false)}
         installedNames={imported.map((s) => s.name)}
-        onInstalled={() => {
-          refresh();
-          onChanged?.();
-        }}
+        onInstalled={handleRegistryInstalled}
       />
 
       {error && (

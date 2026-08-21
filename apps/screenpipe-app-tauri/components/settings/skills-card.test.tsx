@@ -18,6 +18,11 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
 vi.mock("./skills-browser", () => ({
   SkillsBrowser: () => null,
 }));
+vi.mock("./provider-skill-catalog", () => ({
+  ProviderSkillCatalog: () => (
+    <div data-testid="provider-skill-catalog">Recommended provider skills</div>
+  ),
+}));
 
 import { SkillsCard } from "./skills-card";
 
@@ -79,6 +84,10 @@ describe("SkillsCard organization skills", () => {
     ).not.toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Remove Personal notes" }),
+    ).toBeInTheDocument();
+    expect(screen.getByTestId("provider-skill-catalog")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Browse all skills" }),
     ).toBeInTheDocument();
   });
 });
