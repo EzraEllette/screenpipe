@@ -172,6 +172,17 @@ Resources:
             mkdir -p "$CACHE_ROOT" "$RUNNER_ROOT"
             chown -R ec2-user:staff "$CACHE_ROOT" "$RUNNER_ROOT"
 
+            APPLE_CERT_DIR=/var/tmp/screenpipe-apple-certs
+            mkdir -p "$APPLE_CERT_DIR"
+            curl -fsSL -o "$APPLE_CERT_DIR/DeveloperIDCA.cer" \
+              https://www.apple.com/certificateauthority/DeveloperIDCA.cer
+            curl -fsSL -o "$APPLE_CERT_DIR/DeveloperIDG2CA.cer" \
+              https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer
+            security import "$APPLE_CERT_DIR/DeveloperIDCA.cer" \
+              -t cert -k /Library/Keychains/System.keychain || true
+            security import "$APPLE_CERT_DIR/DeveloperIDG2CA.cer" \
+              -t cert -k /Library/Keychains/System.keychain || true
+
             sudo -u ec2-user -H /bin/bash <<'BOOTSTRAP'
             set -euo pipefail
             eval "$(/opt/homebrew/bin/brew shellenv)"
