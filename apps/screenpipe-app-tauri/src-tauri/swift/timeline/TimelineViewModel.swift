@@ -43,6 +43,12 @@ enum FrameImageSource: Equatable {
 /// Failed video chunks are remembered so a broken file is not retried on every
 /// scrub tick.
 actor FrameImageLoader {
+    private enum VideoFrameResult {
+        case image(NSImage)
+        case mismatchedSample
+        case unavailable
+    }
+
     private let rest: TimelineRESTClient
     private var failedChunks: [String: Date] = [:]
     private var calibratedFPS: [String: Double] = [:]
@@ -72,8 +78,17 @@ actor FrameImageLoader {
             }
         case .videoChunk(let url, let offset, let fps):
             if !Task.isCancelled, !isChunkFailed(url.path) {
-                image = await videoFrame(url: url, offsetIndex: offset, fps: fps)
-                if image == nil, !Task.isCancelled { markChunkFailed(url.path) }
+                switch await videoFrame(url: url, offsetIndex: offset, fps: fps) {
+                case .image(let decoded):
+                    image = decoded
+                case .mismatchedSample:
+                    // The chunk is readable, but AVFoundation did not return
+                    // the requested sample. Fall back to the exact frame API
+                    // without quarantining all later seeks in this chunk.
+                    break
+                case .unavailable:
+                    if !Task.isCancelled { markChunkFailed(url.path) }
+                }
             }
             if image == nil, !Task.isCancelled, !device.frameId.isEmpty {
                 image = await httpImage(frameId: device.frameId)
@@ -102,11 +117,16 @@ actor FrameImageLoader {
     /// Native equivalent of the webview's `<video>` seek: decode one frame at
     /// `offset_index / fps`, calibrating fps against the real duration when the
     /// server's value would overshoot.
-    private func videoFrame(url: URL, offsetIndex: Int, fps: Double) async -> NSImage? {
+    private func videoFrame(url: URL, offsetIndex: Int, fps: Double) async -> VideoFrameResult {
         let asset = AVURLAsset(url: url)
-        guard let duration = try? await asset.load(.duration) else { return nil }
+        guard let duration = try? await asset.load(.duration) else { return .unavailable }
         let seconds = CMTimeGetSeconds(duration)
-        guard seconds.isFinite, seconds > 0 else { return nil }
+        guard seconds.isFinite, seconds > 0 else { return .unavailable }
+
+        guard let tracks = try? await asset.loadTracks(withMediaType: .video),
+              let track = tracks.first else { return .unavailable }
+        let naturalTimeScale = (try? await track.load(.naturalTimeScale)) ?? duration.timescale
+        guard naturalTimeScale > 0 else { return .unavailable }
 
         let effective = effectiveFPS(path: url.path, offsetIndex: offsetIndex, serverFPS: fps, duration: seconds)
         let target = min(Double(offsetIndex) / max(effective, 0.0001), seconds - 0.01)
@@ -115,12 +135,25 @@ actor FrameImageLoader {
         generator.appliesPreferredTrackTransform = true
         generator.requestedTimeToleranceBefore = .zero
         generator.requestedTimeToleranceAfter = .zero
-        let time = CMTime(seconds: max(0, target), preferredTimescale: 600)
+        // Compact captures use a source-specific timebase. Quantizing every
+        // seek to 1/600 s can put the request one tick before the target sample,
+        // making AVFoundation return the previous frame even at zero tolerance.
+        let targetTicks = (max(0, target) * Double(naturalTimeScale)).rounded()
+        let time = CMTime(value: Int64(targetTicks), timescale: naturalTimeScale)
         return await withTaskCancellationHandler {
             guard !Task.isCancelled,
-                  let cgImage = try? await generator.image(at: time).image,
-                  !Task.isCancelled else { return nil }
-            return NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+                  let result = try? await generator.image(at: time),
+                  !Task.isCancelled else { return .unavailable }
+            let actual = CMTimeGetSeconds(result.actualTime)
+            let requested = CMTimeGetSeconds(time)
+            let maximumDrift = 0.5 / max(effective, 0.0001)
+            guard actual.isFinite,
+                  requested.isFinite,
+                  abs(actual - requested) < maximumDrift else {
+                return .mismatchedSample
+            }
+            let image = result.image
+            return .image(NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height)))
         } onCancel: {
             generator.cancelAllCGImageGeneration()
         }
