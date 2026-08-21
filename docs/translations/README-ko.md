@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-   <a href="../../README.md">English</a> | <a href="README-zh_CN.md">简体中文</a> | <a href="README-ja.md">日本語</a> | <a href="README-fr.md">Français</a> | <a href="README-es.md">Español</a> | <a href="README-pt_BR.md">Português (BR)</a> | <a href="README-de.md">Deutsch</a> | <a href="README-uk.md">Українська</a> | <a href="README-ko.md">한국어</a>
+   <a href="../../README.md">English</a> | <a href="README-zh_CN.md">简体中文</a> | <a href="README-ja.md">日本語</a> | <a href="README-fr.md">Français</a> | <a href="README-es.md">Español</a> | <a href="README-pt_BR.md">Português (BR)</a> | <a href="README-de.md">Deutsch</a> | <a href="README-uk.md">Українська</a> | <a href="README-ko.md">한국어</a> | <a href="README-ru.md">Русский</a>
 </p>
 
 <h1 align="center">[ screenpipe | YC S26 ]</h1>
@@ -151,6 +151,7 @@ claude mcp add screenpipe -- npx -y screenpipe-mcp@latest
 - [Deutsch (독일어)](README-de.md)
 - [Українська (우크라이나어)](README-uk.md)
 - [한국어](README-ko.md)
+- [Русский (러시아어)](README-ru.md)
 
 screenpipe를 다른 언어로 번역하고 싶으신가요? [`docs/translations/`](README.md)를 참고하세요.
 
